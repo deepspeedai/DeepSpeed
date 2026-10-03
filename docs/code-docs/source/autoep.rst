@@ -318,6 +318,16 @@ installer that runs Hugging Face RMSNorm modules with fused Triton kernels:
 
     replaced = replace_rms_norm(model)
 
+The installer adds a process-wide class dispatcher, with a per-instance opt-in
+marker. Other instances of those classes keep their original eager forward
+until explicitly selected. Shallow copies and ``torch.nn.DataParallel``
+replicas use their own weights and epsilon rather than the original receiver.
+The HF module classes, Parameters and state-dict keys are unchanged.
+Full-model checkpoints saved with ``torch.save(model, ...)`` can be loaded
+with ``torch.load(..., weights_only=False)``. In a fresh process the loaded
+model runs eager until ``replace_rms_norm(model)`` is called again; no fused
+dispatcher needs to be serialized.
+
 The kernels reproduce the RMSNorm expression of Llama-style models: the
 variance and normalization are computed in FP32, the normalized value is cast
 back to the input dtype once, and only then multiplied by the weight (gamma).

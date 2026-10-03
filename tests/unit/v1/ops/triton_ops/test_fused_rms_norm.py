@@ -5,6 +5,10 @@
 import copy
 import functools
 import importlib
+import io
+from pathlib import Path
+import subprocess
+import sys
 import types
 
 import pytest
@@ -375,6 +379,149 @@ def test_replace_rms_norm_leaves_norms_wider_than_the_kernels_alone():
     assert fused_rms_norm.replace_rms_norm(rms_norm_class(2049)) == 0
 
 
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_replace_rms_norm_shallow_copy_uses_its_own_epsilon(device):
+    if device == "cuda":
+        if not _fused_engine_available():
+            pytest.skip("fused RMSNorm needs CUDA and Triton")
+        device = _device()
+    norm = _hf_class(QWEN3_MOE_RMS_NORM)(128).to(device=device, dtype=torch.bfloat16)
+    hidden = torch.full((4, 128), 0.25, device=device, dtype=torch.bfloat16)
+    with torch.no_grad():
+        original_output = norm(hidden)
+    assert fused_rms_norm.replace_rms_norm(norm) == 1
+
+    replica = copy.copy(norm)
+    replica.variance_epsilon = 0.25
+    with torch.no_grad():
+        expected = _hf_rms_norm(hidden, replica.weight, replica.variance_epsilon)
+        actual = replica(hidden)
+        original_after = norm(hidden)
+    assert not torch.equal(expected, original_output)
+    assert torch.equal(original_after, original_output)
+    if hidden.device.type == "cpu":
+        assert torch.equal(actual, expected)
+    else:
+        _assert_ulp_close(actual, expected, max_ulp=2, min_frac_within_1=0.99, label="shallow-copy forward")
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_replace_rms_norm_model_round_trip_preserves_outputs_and_gradients(device):
+    if device == "cuda":
+        if not _fused_engine_available():
+            pytest.skip("fused RMSNorm needs CUDA and Triton")
+        device = _device()
+    norm = _hf_class(QWEN3_MOE_RMS_NORM)(128, eps=0.25)
+    model = torch.nn.Sequential(norm).to(device=device, dtype=torch.bfloat16)
+    state_dict_keys = tuple(model.state_dict())
+    assert fused_rms_norm.replace_rms_norm(model) == 1
+
+    serialized = io.BytesIO()
+    torch.save(model, serialized)
+    serialized.seek(0)
+    loaded = torch.load(serialized, weights_only=False)
+    assert tuple(loaded.state_dict()) == state_dict_keys
+    assert torch.equal(loaded[0].weight, model[0].weight)
+    assert fused_rms_norm.replace_rms_norm(loaded) == 0
+
+    hidden = torch.full((4, 128), 0.5, device=device, dtype=torch.bfloat16)
+    eager_hidden = hidden.clone().requires_grad_(True)
+    eager_weight = model[0].weight.detach().clone().requires_grad_(True)
+    expected = _hf_rms_norm(eager_hidden, eager_weight, norm.variance_epsilon)
+    expected.float().sum().backward()
+    loaded_hidden = hidden.clone().requires_grad_(True)
+    actual = loaded(loaded_hidden)
+    actual.float().sum().backward()
+
+    if hidden.device.type == "cpu":
+        assert torch.equal(actual, expected)
+        assert torch.equal(loaded_hidden.grad, eager_hidden.grad)
+        assert torch.equal(loaded[0].weight.grad, eager_weight.grad)
+    else:
+        _assert_ulp_close(actual, expected, max_ulp=2, min_frac_within_1=0.99, label="loaded forward")
+        _assert_ulp_close(loaded_hidden.grad, eager_hidden.grad, max_ulp=8, min_frac_within_1=0.95, label="loaded dx")
+        _assert_ulp_close(loaded[0].weight.grad,
+                          eager_weight.grad,
+                          max_ulp=8,
+                          min_frac_within_1=0.95,
+                          label="loaded dgamma")
+    assert model[0].weight.grad is None
+
+
+def test_replace_rms_norm_checkpoint_loads_in_a_fresh_process(tmp_path):
+    norm = _hf_class(QWEN3_MOE_RMS_NORM)(128, eps=0.25).to(torch.bfloat16)
+    model = torch.nn.Sequential(norm)
+    hidden = torch.full((4, 128), 0.5, dtype=torch.bfloat16)
+    with torch.no_grad():
+        expected = _hf_rms_norm(hidden, norm.weight, norm.variance_epsilon)
+    assert fused_rms_norm.replace_rms_norm(model) == 1
+    checkpoint = tmp_path / "rms_norm.pt"
+    torch.save({"model": model, "hidden": hidden, "expected": expected}, checkpoint)
+
+    # Loading must not depend on a class dispatcher left installed in the saving process.
+    script = """
+import sys
+import torch
+
+checkpoint = torch.load(sys.argv[1], map_location="cpu", weights_only=False)
+model = checkpoint["model"]
+hidden = checkpoint["hidden"]
+expected = checkpoint["expected"]
+assert torch.equal(model(hidden), expected)
+
+from deepspeed.ops.triton_ops.fused_rms_norm import replace_rms_norm
+assert replace_rms_norm(model) == 1
+assert replace_rms_norm(model) == 0
+assert torch.equal(model(hidden), expected)
+"""
+    source_root = Path(fused_rms_norm.__file__).resolve().parents[3]
+    result = subprocess.run([sys.executable, "-c", script, str(checkpoint)],
+                            cwd=source_root,
+                            capture_output=True,
+                            text=True,
+                            timeout=120)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.skipif(not _fused_engine_available(), reason="fused RMSNorm needs CUDA and Triton")
+def test_replace_rms_norm_data_parallel_matches_eager_training():
+    if get_accelerator().device_count() < 2:
+        pytest.skip("DataParallel replication needs two CUDA devices")
+    device = get_accelerator().device_name(0)
+    model = torch.nn.Sequential(_hf_class(QWEN3_MOE_RMS_NORM)(128, eps=0.25))
+    model = model.to(device=device, dtype=torch.bfloat16)
+    eager_weight = torch.nn.Parameter(model[0].weight.detach().clone())
+    optimizer = torch.optim.SGD(model.parameters(), lr=1 / 32)
+    eager_optimizer = torch.optim.SGD([eager_weight], lr=1 / 32)
+    assert fused_rms_norm.replace_rms_norm(model) == 1
+    parallel = torch.nn.DataParallel(model, device_ids=[0, 1])
+    # Constant rows keep DataParallel's extra BF16 gradient reduction exact.
+    hidden = torch.full((8, 128), 0.5, device=device, dtype=torch.bfloat16)
+    for _ in range(2):
+        actual_hidden = hidden.clone().requires_grad_(True)
+        eager_hidden = hidden.clone().requires_grad_(True)
+        actual = parallel(actual_hidden)
+        expected = _hf_rms_norm(eager_hidden, eager_weight, model[0].variance_epsilon)
+        actual.float().sum().backward()
+        expected.float().sum().backward()
+        _assert_ulp_close(actual, expected, max_ulp=2, min_frac_within_1=0.99, label="DataParallel forward")
+        _assert_ulp_close(actual_hidden.grad,
+                          eager_hidden.grad,
+                          max_ulp=8,
+                          min_frac_within_1=0.95,
+                          label="DataParallel dx")
+        _assert_ulp_close(model[0].weight.grad,
+                          eager_weight.grad,
+                          max_ulp=8,
+                          min_frac_within_1=0.95,
+                          label="DataParallel dgamma")
+        optimizer.step()
+        eager_optimizer.step()
+        assert torch.equal(model[0].weight, eager_weight)
+        optimizer.zero_grad()
+        eager_optimizer.zero_grad()
+
+
 @pytest.mark.skipif(not _fused_engine_available(), reason="fused RMSNorm needs CUDA and Triton")
 @pytest.mark.parametrize("qualified_name", fused_rms_norm.SUPPORTED_RMS_NORM_CLASSES)
 def test_replace_rms_norm_fuses_supported_norms(qualified_name):
@@ -430,6 +577,7 @@ def test_replace_rms_norm_runs_the_kernels_only_where_they_apply():
     norm = _hf_class(QWEN3_MOE_RMS_NORM)(128).to(device=device, dtype=torch.bfloat16)
     with torch.no_grad():
         norm.weight.copy_(torch.randn(128, device=device, generator=generator))
+    untouched = copy.deepcopy(norm)
     # Head-major, as attention lays out q and k. Eager keeps that layout in its output while the kernels return a
     # contiguous one, so the output's layout shows which path a call took.
     heads = torch.randn((2, 4, 8, 128), device=device, dtype=torch.bfloat16, generator=generator).transpose(1, 2)
@@ -444,6 +592,13 @@ def test_replace_rms_norm_runs_the_kernels_only_where_they_apply():
         fused_out = norm(heads)
         # The kernels take no float32 input, so this one runs the class's eager forward and gets exactly its result.
         fallback_out = norm(heads.float())
+        untouched_out = untouched(heads)
     assert fused_out.is_contiguous()
     assert torch.equal(fused_out, kernel_out)
     assert torch.equal(fallback_out, eager_float_out)
+    assert torch.equal(untouched_out, eager_out)
+    assert not untouched_out.is_contiguous()
+    assert fused_rms_norm.replace_rms_norm(untouched) == 1
+    assert fused_rms_norm.replace_rms_norm(untouched) == 0
+    with torch.no_grad():
+        assert torch.equal(untouched(heads), kernel_out)

@@ -4,8 +4,6 @@
 
 from __future__ import annotations
 
-import types
-
 import torch
 from torch.autograd.function import once_differentiable
 
@@ -33,6 +31,9 @@ SUPPORTED_RMS_NORM_CLASSES = (
 _MAX_FORWARD_BLOCK = 2048
 _DWEIGHT_BLOCK_M = 16
 _DWEIGHT_BLOCK_N = 256
+_FUSED_INSTANCE_ATTRIBUTE = "_deepspeed_use_fused_rms_norm"
+# Class descriptors bind to the current receiver after copying or replication and are not stored in model pickles.
+_FUSED_CLASS_FORWARDS = {}
 
 if _TRITON_AVAILABLE:
 
@@ -275,28 +276,43 @@ def _runs_supported_rms_norm_forward(module: torch.nn.Module) -> bool:
     class_name = _qualified_name(module_class)
     if class_name not in SUPPORTED_RMS_NORM_CLASSES:
         return False
-    # Kernel installers, including an earlier call of this one, patch forward on the class or on the instance.
-    # Only the class's own forward is known to compute the expression the kernels reproduce.
-    class_forward_patched = _qualified_name(module_class.forward) != f"{class_name}.forward"
+    class_forward_is_ours = module_class.forward is _FUSED_CLASS_FORWARDS.get(module_class)
+    # Only the class's own forward, or our dispatcher around that exact forward, has the known expression.
+    class_forward_patched = (not class_forward_is_ours
+                             and _qualified_name(module_class.forward) != f"{class_name}.forward")
     # functools.wraps copies the original's module and qualified name onto a wrapper, so a wrapper passes the check
     # above; the __wrapped__ attribute that functools.wraps also sets gives it away.
-    class_forward_wrapped = hasattr(module_class.forward, "__wrapped__")
+    class_forward_wrapped = not class_forward_is_ours and hasattr(module_class.forward, "__wrapped__")
     instance_forward_patched = "forward" in vars(module)
     if class_forward_patched or class_forward_wrapped or instance_forward_patched:
+        return False
+    if class_forward_is_ours and getattr(module, _FUSED_INSTANCE_ATTRIBUTE, False):
         return False
     weight = getattr(module, "weight", None)
     eps = getattr(module, "variance_epsilon", None)
     return isinstance(weight, torch.nn.Parameter) and weight.dim() == 1 and isinstance(eps, float)
 
 
-def _fused_module_forward(self, hidden_states):
+def _fused_module_forward(self, hidden_states, eager_forward):
     try:
         assert_supported(hidden_states, self.weight, self.variance_epsilon)
     except RuntimeError as unsupported:
         # The class's own forward is the eager computation the kernels stand in for, so the result is exactly eager's.
         logger.warning_once(f"{unsupported} Running eager {type(self).__name__} instead.")
-        return type(self).forward(self, hidden_states)
+        return eager_forward(self, hidden_states)
     return _run_kernels(hidden_states, self.weight, self.variance_epsilon)
+
+
+def _install_fused_class_forward(module_class) -> None:
+    eager_forward = module_class.forward
+
+    def forward(self, hidden_states):
+        if not getattr(self, _FUSED_INSTANCE_ATTRIBUTE, False):
+            return eager_forward(self, hidden_states)
+        return _fused_module_forward(self, hidden_states, eager_forward)
+
+    _FUSED_CLASS_FORWARDS[module_class] = forward
+    module_class.forward = forward
 
 
 def replace_rms_norm(module: torch.nn.Module) -> int:
@@ -315,6 +331,12 @@ def replace_rms_norm(module: torch.nn.Module) -> int:
     forward, so the result is exactly eager's, and logs a warning once. Modules
     can therefore be replaced before the model moves to the GPU.
 
+    The class-level dispatcher is process-wide, but only explicitly replaced
+    instances opt in. Copies and DataParallel replicas use their own weights
+    and epsilon. Full-model checkpoints keep the original HF classes and
+    state-dict keys; after loading in a fresh process, call this installer
+    again to enable fusion there.
+
     Returns the number of modules replaced.
     """
     count = 0
@@ -324,7 +346,10 @@ def replace_rms_norm(module: torch.nn.Module) -> int:
         # The kernels hold a whole row in one block, so wider norms keep their eager forward.
         if child.weight.numel() > _MAX_FORWARD_BLOCK:
             continue
-        child.forward = types.MethodType(_fused_module_forward, child)
+        module_class = type(child)
+        if module_class.forward is not _FUSED_CLASS_FORWARDS.get(module_class):
+            _install_fused_class_forward(module_class)
+        setattr(child, _FUSED_INSTANCE_ATTRIBUTE, True)
         count += 1
     if count and not is_available():
         logger.warning(f"fused RMSNorm replaced {count} modules, but its kernels need Triton on CUDA, not ROCm, "
