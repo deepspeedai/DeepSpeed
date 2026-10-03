@@ -160,7 +160,10 @@ def parse_model_states(files):
             print("Found buffers:", buffer_names)
 
         # recover just the buffers while restoring them to fp32 if they were saved in fp16
-        buffers = {k: v.float() for k, v in state_dict["module"].items() if k in buffer_names}
+        buffers = {
+            k: v.float() if v.is_floating_point() else v
+            for k, v in state_dict["module"].items() if k in buffer_names
+        }
         param_shapes = state_dict[PARAM_SHAPES]
 
         # collect parameters that are included in param_shapes
@@ -596,11 +599,15 @@ def to_torch_tensor(state_dict, return_empty_tensor=False, dtype=None):
             torch_state_dict[name] = shared_tensor
         else:
             converted_tensors[tensor_id] = name
+            # Keep exact buffer values (such as integer indices and boolean masks) in
+            # both the shard-size estimate and the materialized checkpoint.
+            target_dtype = dtype if tensor.dtype.is_floating_point else None
             if return_empty_tensor:
-                torch_state_dict[name] = torch.empty(tensor.shape, dtype=dtype or tensor.dtype)
+                torch_state_dict[name] = torch.empty(tensor.shape, dtype=target_dtype or tensor.dtype)
             else:
                 contiguous_tensor = tensor.contiguous()
-                torch_state_dict[name] = contiguous_tensor.to(dtype=dtype) if dtype else contiguous_tensor
+                torch_state_dict[name] = contiguous_tensor.to(
+                    dtype=target_dtype) if target_dtype else contiguous_tensor
     return torch_state_dict
 
 
@@ -683,7 +690,8 @@ def convert_zero_checkpoint_to_state_dict(checkpoint_dir,
     Args:
         - ``checkpoint_dir``: path to the desired checkpoint folder. (one that contains the tag-folder, like ``global_step14``)
         - ``output_dir``: directory for the PyTorch state_dict output files
-        - ``dtype``: output tensor dtype. Supports float32, float16, and bfloat16 as strings or torch dtypes.
+        - ``dtype``: output floating-point tensor dtype. Supports float32, float16, and bfloat16 as strings or torch dtypes.
+          Non-floating-point buffers retain their dtype.
         - ``max_shard_size``: the maximum size for a checkpoint before being sharded, default value is 5GB
         - ``safe_serialization``:  whether to save the model using `safetensors` or the traditional PyTorch way (that uses `pickle`).
         - ``tag``: checkpoint tag used as a unique identifier for checkpoint. If not provided will attempt to load tag in the file named ``latest`` in the checkpoint folder, e.g., ``global_step14``
