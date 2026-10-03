@@ -61,7 +61,9 @@ class SynchronizedWallClockTimer:
             """Start the timer."""
             assert not self.started_, f"{self.name_} timer has already been started"
             if self.use_host_timer:
-                self.start_time = time.time()
+                # perf_counter is monotonic and higher-resolution than time.time(), which is
+                # coarse (~15ms) on Windows and can make short intervals measure as 0.
+                self.start_time = time.perf_counter()
             else:
                 event_class = get_accelerator().Event
                 self.start_event = event_class(enable_timing=True)
@@ -73,7 +75,7 @@ class SynchronizedWallClockTimer:
             assert self.started_, "timer is not started"
             event_class = get_accelerator().Event
             if self.use_host_timer:
-                self.end_time = time.time()
+                self.end_time = time.perf_counter()
                 self.event_timers.append(self.end_time - self.start_time)
             else:
                 event_class = get_accelerator().Event
@@ -236,7 +238,7 @@ class ThroughputTimer:
         if self.global_step_count >= self.start_step:
             if self.config.synchronized:
                 get_accelerator().synchronize()
-            self.start_time = time.time()
+            self.start_time = time.perf_counter()
 
     def _is_report_boundary(self):
         if self.steps_per_output is None:
@@ -254,7 +256,7 @@ class ThroughputTimer:
         if self.start_time > 0:
             if self.config.synchronized:
                 get_accelerator().synchronize()
-            self.end_time = time.time()
+            self.end_time = time.perf_counter()
             duration = self.end_time - self.start_time
             self.total_elapsed_time += duration
             self.step_elapsed_time += duration

@@ -17,6 +17,12 @@ class NotImplementedBuilder(CPUOpBuilder):
     def absolute_name(self):
         return f'deepspeed.ops.comm.{self.NAME}_op'
 
+    def is_compatible(self, verbose=False):
+        # Has no sources to build; only exists so callers get a clear error from
+        # load() instead of NoneType, so it must never be picked up for a real
+        # (pre-)compile -- an empty ext_modules entry crashes MSVC's linker.
+        return False
+
     def load(self, verbose=True):
         raise ValueError("This op had not been implemented on CPU backend.")
 

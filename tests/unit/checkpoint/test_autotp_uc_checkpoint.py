@@ -905,7 +905,8 @@ class TestRealCheckpointUniversalConversionTPxPP(DistributedTest):
         # CPU/gloo test: the number of processes is not bound to the accelerator's
         # device_count() (CPU sockets), so bypass the base class's per-device gate
         # that would otherwise skip a 4-process test on a single-socket CPU box.
-        torch.multiprocessing.set_start_method('forkserver', force=True)
+        start_method = 'forkserver' if 'forkserver' in torch.multiprocessing.get_all_start_methods() else 'spawn'
+        torch.multiprocessing.set_start_method(start_method, force=True)
         self._launch_daemonic_procs(num_procs, init_method)
 
     def test(self, tmpdir):

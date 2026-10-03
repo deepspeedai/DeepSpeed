@@ -76,6 +76,13 @@ def _resolve_zero3_guarded_value(builder, guard, value):
 
 
 def patch_fake_tensor():
+    # Idempotent: called both here (tests) and from init_z3.py on every ZeRO-3
+    # compile engine init. Without this guard, re-invoking within the same
+    # process (e.g. a later engine/test reusing a worker that already patched)
+    # would wrap the previous wrapper again, stacking layers with no teardown.
+    if getattr(FakeTensorMode.from_tensor, "_ds_zero3_patched", False):
+        return
+
     # dynamo tracer uses wrap_to_fake_tensor_and_record
     # Wrapping FakeTensorMode.from_tensor is not sufficient as dynamo generates SymbolicContext before calling from_tensor
     original_wrap_to_fake_tensor_and_record = wrap_to_fake_tensor_and_record
@@ -132,4 +139,5 @@ def patch_fake_tensor():
         with unset_fake_temporarily():
             return original_from_tensor(self, wrap_if_ds_param(t), *args, **kwargs)
 
+    from_tensor_wrapper._ds_zero3_patched = True
     FakeTensorMode.from_tensor = from_tensor_wrapper

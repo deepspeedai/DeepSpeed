@@ -6,15 +6,28 @@
 #include <torch/extension.h>
 
 #include <ATen/ATen.h>
-#include <fcntl.h>
-#include <semaphore.h>
-#include <sys/mman.h>
+#include <cerrno>
+#include <cstring>
+#include <string>
 #include "shm.h"
+
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
+#include <fcntl.h>
+#include <sys/mman.h>
+#endif
 
 #if defined(__riscv)
 #define TARGET_RISCV 1
 #include "riscv64/shm.h"
-#elif defined(__aarch64__)
+#elif defined(__aarch64__) || defined(_M_ARM64)
 #define TARGET_ARM 1
 #include "arm64/shm.h"
 #else
@@ -40,13 +53,69 @@ enum coll_state {
 };
 
 // SHM building blocks
+#ifdef _WIN32
+#define SHM_INVALID_DESCRIPTOR NULL
+#else
+#define SHM_INVALID_DESCRIPTOR (-1)
+#endif
+
 struct SharedData {
     const char* name;
+#ifdef _WIN32
+    HANDLE descriptor;
+#else
     int descriptor;
+#endif
     void* bytes;
     size_t nbytes;
 };
 
+#ifdef _WIN32
+void shared_open(SharedData* data, const char* name, size_t nbytes)
+{
+    HANDLE h = OpenFileMappingA(FILE_MAP_ALL_ACCESS, FALSE, name);
+    if (h != NULL) {
+        void* bytes = MapViewOfFile(h, FILE_MAP_ALL_ACCESS, 0, 0, nbytes);
+        data->name = name;
+        data->descriptor = h;
+        data->bytes = bytes;
+        data->nbytes = nbytes;
+    } else {
+        if (GetLastError() != ERROR_FILE_NOT_FOUND) {
+            // don't print if shm can not be found because we want to loop over from
+            // caller again until the other ranks created the shm
+            printf("shared_open %s failed, error=%lu\n", name, GetLastError());
+        }
+        errno = ENOENT;
+        data->descriptor = SHM_INVALID_DESCRIPTOR;
+    }
+}
+
+void shared_create(SharedData* data, const char* name, void* bytes, size_t nbytes)
+{
+    HANDLE h =
+        CreateFileMappingA(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0, (DWORD)nbytes, name);
+    if (h != NULL) {
+        void* mapped = MapViewOfFile(h, FILE_MAP_ALL_ACCESS, 0, 0, nbytes);
+        memcpy(mapped, bytes, nbytes);
+        data->name = name;
+        data->descriptor = h;
+        data->bytes = mapped;
+        data->nbytes = nbytes;
+    } else {
+        printf("shared_create %s failed\n", name);
+        data->descriptor = SHM_INVALID_DESCRIPTOR;
+    }
+}
+
+void shared_close(SharedData* data)
+{
+    if (data->descriptor != SHM_INVALID_DESCRIPTOR) {
+        UnmapViewOfFile(data->bytes);
+        CloseHandle(data->descriptor);
+    }
+}
+#else
 void shared_open(SharedData* data, const char* name, size_t nbytes)
 {
     int d = shm_open(name, O_RDWR, S_IRUSR | S_IWUSR);
@@ -62,7 +131,7 @@ void shared_open(SharedData* data, const char* name, size_t nbytes)
             // caller again until the other ranks created the shm
             printf("shared_open %s failed, errno=%d\n", name, errno);
         }
-        data->descriptor = -1;
+        data->descriptor = SHM_INVALID_DESCRIPTOR;
     }
 }
 
@@ -78,10 +147,25 @@ void shared_create(SharedData* data, const char* name, void* bytes, size_t nbyte
 
 void shared_close(SharedData* data)
 {
-    if (data->descriptor != -1) {
+    if (data->descriptor != SHM_INVALID_DESCRIPTOR) {
         munmap(data->bytes, data->nbytes);
         shm_unlink(data->name);
     }
+}
+#endif
+
+static std::string shm_owner_id()
+{
+#ifdef _WIN32
+    // USERNAME is queried instead of GetUserNameA() so this doesn't pull in an
+    // extra link dependency on Advapi32.lib just to namespace shm names by user.
+    char name[256];
+    DWORD len = GetEnvironmentVariableA("USERNAME", name, sizeof(name));
+    if (len == 0 || len >= sizeof(name)) { return "unknown"; }
+    return std::string(name, len);
+#else
+    return std::to_string(getuid());
+#endif
 }
 
 static int world_size;
@@ -347,11 +431,12 @@ void shm_initialize(int size, int rank, char* addr_string, char* port_string)
 
     char shm_name_prefix[NAME_BUF_SIZE];
     char shm_name[NAME_BUF_SIZE];
+    auto owner_id = shm_owner_id();
     snprintf(shm_name_prefix,
              NAME_BUF_SIZE,
-             "%s_%d_%s_%s",
+             "%s_%s_%s_%s",
              SHM_BUFFER_NAME,
-             getuid(),
+             owner_id.c_str(),
              addr_string,
              port_string);
     // create shared workspace for SHM based allreduce
@@ -397,7 +482,7 @@ void shm_initialize(int size, int rank, char* addr_string, char* port_string)
             // printf("open %s, %d\n", shm_name, rank);
             do {
                 shared_open(&allreduce_buffer, shm_name, sizeof(struct allreduce_workspace));
-            } while (allreduce_buffer.descriptor == -1 && errno == ENOENT);
+            } while (allreduce_buffer.descriptor == SHM_INVALID_DESCRIPTOR && errno == ENOENT);
             workspace_buf_other = (struct allreduce_workspace*)allreduce_buffer.bytes;
             workspace[i] = workspace_buf_other;
         } else {

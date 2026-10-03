@@ -28,6 +28,8 @@ from deepspeed.ops.op_builder import FusedAdamBuilder
 @pytest.mark.parametrize('method', ['spawn', 'fork', 'forkserver'])
 def test_start_method_safety(method):
     import torch.multiprocessing as mp
+    if method not in mp.get_all_start_methods():
+        pytest.skip(f"start method '{method}' is not available on this platform")
     mp.set_start_method(method, force=True)
 
 
