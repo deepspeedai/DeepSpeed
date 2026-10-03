@@ -513,6 +513,39 @@ Below is an example code snippet demonstrating how to offload FP32 parameters an
     # Load states back to device memory
     ds_engine.reload_states()
 
+ZeRO-3 inference engines initialized without an optimizer also support dynamic parameter
+offload. For these engines, ``lp_params`` selects the model's parameter partitions,
+including FP32 parameters when mixed precision is disabled. The default ``include=None``
+offloads these partitions; optimizer and gradient state selections have no effect.
+An empty selection (``include=[]``) is a no-op.
+
+Use the API between inference calls to release parameter memory while another model
+runs, then reload before the next forward. Parameters cached by ZeRO-3 are released
+when offloading, including persistent parameters. Module buffers are not moved.
+Repeated offload or reload calls are no-ops until the state changes.
+
+.. code-block:: python
+
+    ds_engine, _, _, _ = deepspeed.initialize(model=model, config={
+        "train_micro_batch_size_per_gpu": 1,
+        "zero_optimization": {"stage": 3},
+        "bf16": {"enabled": True},
+    })
+    ds_engine.eval()
+    with torch.no_grad():
+        output = ds_engine(inputs)
+        ds_engine.offload_states(pin_memory=True, non_blocking=True)
+        # Run another model while the parameter partitions reside in CPU memory.
+        ds_engine.reload_states(non_blocking=True)
+        output = ds_engine(inputs)
+
+Dynamic inference offload currently requires GPU-resident parameters without static
+CPU/NVMe parameter offload, hpZeRO secondary partitions, or stored quantized weights.
+``pin_memory`` uses the configured DeepSpeed pinning backend. With ``non_blocking=True``,
+copies are submitted without per-copy synchronization, but the inference offload and
+reload calls wait for completion before returning so storage can be safely released
+and reused. Reload restores each partition to its original device.
+
 ``deepspeed.runtime.zero.offload_states.get_state_devices`` returns devices of the specified state.
 
 .. code-block:: python
