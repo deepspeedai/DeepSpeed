@@ -795,3 +795,98 @@ def test_bigcode_weight_is_no_longer_refused_by_conversion():
 
     assert r"^c_attn\.weight$" in info.get(AFFINE_MAP, {}).get(AFFINE_MAP_PARAMS, {})
     assert r"^c_attn\.weight$" not in info.get(AUTOTP_UNSUPPORTED_PARAMETER_PATTERNS, {})
+
+
+# (rows, cols, mp_size, num_kv_heads)
+CODEGEN_CONFIGS = [(24, 8, 2, 8), (48, 16, 2, 8), (96, 32, 2, 8), (96, 8, 4, 32), (192, 8, 8, 64)]
+
+
+@pytest.mark.parametrize('rows, cols, mp_size, num_kv_heads',
+                         CODEGEN_CONFIGS,
+                         ids=[f'{r}x{c}_tp{m}' for r, c, m, _ in CODEGEN_CONFIGS])
+def test_codegen_layer_map_matches_the_real_partition(rows, cols, mp_size, num_kv_heads):
+    """CodeGen permutes the rows before splitting them, so the map selects scattered blocks.
+
+    The partition reaches that order through reshapes and never names a block, so the layer
+    derives the same order independently. Requiring the two to agree is what keeps them from
+    drifting -- the derived form is what ships, the partition is truth.
+    """
+    from deepspeed.checkpoint.affine import block_gather_map
+    from deepspeed.module_inject.fusedqkv_utils import codegen_block_layout
+
+    block_size, block_ids_by_rank = codegen_block_layout(rows, mp_size, num_kv_heads)
+    analytic = block_gather_map((rows, cols), block_ids_by_rank, block_size, 0)
+    analytic.validate_coverage()
+
+    meta = _meta(num_kv_heads, n_embd=cols, num_attention_heads=num_kv_heads)
+    shard_fn = _fused_qkv_shard_fn('CodeGenBlock', mp_size, meta)
+    torch.manual_seed(0)
+    full_param = torch.randn(rows, cols, dtype=torch.float64)
+    for rank in range(mp_size):
+        assert torch.equal(analytic.extract(full_param, rank), shard_fn(full_param.clone(), rank))
+
+    shards = {rank: shard_fn(full_param.clone(), rank) for rank in range(mp_size)}
+    assert torch.equal(analytic.rebuild(shards), full_param)
+
+
+def test_codegen_piece_count_follows_the_block_structure_not_the_model_size():
+    """The count must stay put as the parameter grows, or the description is not usable.
+
+    A compressor that missed the permutation would emit one piece per row, which still covers
+    the tensor and still round-trips -- so only the count reveals it. Here the rows grow 8x
+    while the count does not move.
+    """
+    from deepspeed.checkpoint.affine import block_gather_map
+    from deepspeed.module_inject.fusedqkv_utils import codegen_block_layout
+
+    counts = set()
+    for rows in (24, 48, 96, 192):
+        block_size, block_ids_by_rank = codegen_block_layout(rows, 2, 8)
+        affine_map = block_gather_map((rows, 8), block_ids_by_rank, block_size, 0)
+        counts.update(len(pieces) for pieces in affine_map.pieces_by_rank.values())
+    assert counts == {11}, f"piece count moved with model size: {sorted(counts)}"
+
+
+def test_codegen_refuses_every_case_the_partition_would_not_produce():
+    """Claiming a permutation the weight does not have is worse than leaving it undescribed.
+
+    Each case here is a layout `_codegen_type_transpose` never produces: it asserts a head count
+    it can divide, it is not reached below two ranks, and rows that do not split into equal
+    blocks have no block description at all.
+    """
+    from deepspeed.module_inject.fusedqkv_utils import codegen_block_layout
+
+    assert codegen_block_layout(24, 2, None) is None, 'no head count'
+    assert codegen_block_layout(24, 2, 6) is None, 'head count the partition cannot divide'
+    assert codegen_block_layout(24, 1, 8) is None, 'single rank is never partitioned'
+    assert codegen_block_layout(25, 2, 8) is None, 'rows do not divide into equal blocks'
+    assert codegen_block_layout(0, 2, 8) is None, 'no rows'
+    assert codegen_block_layout(24, 2, 8) is not None, 'the supported case must still be claimed'
+
+
+def test_codegen_weight_is_no_longer_refused_by_conversion():
+    """The layer must publish the map, not merely be able to build one.
+
+    The geometry tests above cover `block_gather_map`, so a hook that never fires -- a renamed
+    method, or a fused type that reads differently here -- would leave the layout refused with
+    every other test still green.
+    """
+    from deepspeed.checkpoint.constants import (AFFINE_MAP, AFFINE_MAP_PARAMS, AUTOTP_UNSUPPORTED_PARAMETER_PATTERNS)
+    from deepspeed.module_inject.layers import collect_autotp_universal_checkpoint_info, fused_LinearLayer
+
+    rows, cols, mp_size, num_kv_heads = 24, 8, 2, 8
+    meta = _meta(num_kv_heads, n_embd=cols, num_attention_heads=num_kv_heads)
+    layer = fused_LinearLayer(torch.nn.Linear(cols, rows, bias=False),
+                              mp_group=None,
+                              name='c_attn',
+                              fused_module=_NamedModule('CodeGenBlock'),
+                              tp_meta=meta)
+    layer.tp_world_size = mp_size
+    layer.tp_meta = meta
+
+    model = torch.nn.Module()
+    model.c_attn = layer
+    info = collect_autotp_universal_checkpoint_info(model)
+
+    assert r"^c_attn\.weight$" in info.get(AFFINE_MAP, {}).get(AFFINE_MAP_PARAMS, {})
+    assert r"^c_attn\.weight$" not in info.get(AUTOTP_UNSUPPORTED_PARAMETER_PATTERNS, {})
