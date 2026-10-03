@@ -896,7 +896,7 @@ class CUDAOpBuilder(OpBuilder):
                 if nvcc_threads <= 0:
                     raise ValueError("")
             except ValueError:
-                nvcc_threads = min(os.cpu_count(), 8)
+                nvcc_threads = min(os.cpu_count() or 1, 8)
 
             cuda_major, cuda_minor = installed_cuda_version()
             if cuda_major > 10:
