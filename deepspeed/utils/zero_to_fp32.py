@@ -516,12 +516,11 @@ def _zero3_merge_trainable_params(state_dict, world_size, fp32_flat_groups, zero
 
     if debug:
         for i in range(world_size):
-            print(f"{FP32_FLAT_GROUPS}[{i}].shape={fp32_flat_groups[i].shape}")
+            print(f"{FP32_FLAT_GROUPS}[{i}].shapes={[group.shape for group in fp32_flat_groups[i]]}")
 
         wanted_params = len(param_shapes)
         wanted_numel = sum(shape.numel() for shape in param_shapes.values())
         # not asserting if there is a mismatch due to possible padding
-        avail_numel = fp32_flat_groups[0].numel() * world_size
         print(f"Trainable params: Have {avail_numel} numels to process.")
         print(f"Trainable params: Need {wanted_numel} numels in {wanted_params} params.")
 
