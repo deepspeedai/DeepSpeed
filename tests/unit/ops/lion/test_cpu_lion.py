@@ -95,3 +95,28 @@ class TestCPULionGPUError(DistributedTest):
         param.grad = torch.randn(model_size, device=device)
         with pytest.raises(AssertionError):
             optimizer.step()
+
+
+@pytest.mark.skipif(not deepspeed.ops.__compatible_ops__[CPULionBuilder.NAME],
+                    reason="CPULionBuilder has not been implemented on this system.")
+def test_cpu_lion_updates_non_contiguous_param():
+    from deepspeed.ops.lion import DeepSpeedCPULion
+
+    initial = torch.randn(6, 5).t()
+    param = torch.nn.Parameter(initial.clone(memory_format=torch.preserve_format))
+    assert not param.is_contiguous()
+    lr, beta1, beta2 = 1e-2, 0.9, 0.99
+    optimizer = DeepSpeedCPULion([param], lr=lr, betas=(beta1, beta2))
+    ref_param = initial.clone()
+    ref_exp_avg = torch.zeros_like(ref_param)
+
+    for i in range(3):
+        grad = torch.randn_like(ref_param)
+        param.grad = grad
+        optimizer.step()
+        # Lion (arXiv:2302.06675): update with sign(beta1 * m + (1 - beta1) * g), then m = beta2 * m + (1 - beta2) * g
+        ref_param.add_(torch.sign(ref_exp_avg * beta1 + grad * (1 - beta1)), alpha=-lr)
+        ref_exp_avg.mul_(beta2).add_(grad, alpha=1 - beta2)
+
+    torch.testing.assert_close(param, ref_param)
+    torch.testing.assert_close(optimizer.state[param]['exp_avg'], ref_exp_avg)

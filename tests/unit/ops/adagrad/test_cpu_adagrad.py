@@ -55,6 +55,25 @@ class TestCPUAdagrad(DistributedTest):
 
         check_equal(param, param1, atol=1e-2, verbose=True)
 
+    def test_cpu_adagrad_non_contiguous_param(self):
+        initial = torch.randn(6, 5).t()
+        param = torch.nn.Parameter(initial.clone(memory_format=torch.preserve_format))
+        param1 = torch.nn.Parameter(initial.clone())
+        assert not param.is_contiguous()
+
+        optimizer = DeepSpeedCPUAdagrad([param])
+        optimizer1 = torch.optim.Adagrad([param1])
+
+        for i in range(3):
+            grad = torch.randn_like(param1)
+            param.grad = grad.clone()
+            param1.grad = grad.clone()
+            optimizer.step()
+            optimizer1.step()
+
+        torch.testing.assert_close(param, param1)
+        torch.testing.assert_close(optimizer.state[param]['exp_avg_sq'], optimizer1.state[param1]['sum'])
+
     def test_cpu_adagrad_opt_sparse_embedding(self, model_size=32, vocabulary_size=64, dim=16):
         device = 'cpu'
         rng_state = torch.get_rng_state()
