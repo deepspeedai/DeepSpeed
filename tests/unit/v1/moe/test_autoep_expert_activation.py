@@ -248,6 +248,32 @@ class TestGroupedExpertsActivation:
         for name in ("w1", "w2", "w3"):
             assert_same(getattr(grouped, name).grad, getattr(loop, name).grad)
 
+    @pytest.mark.parametrize("activation", [name for name, entry in EXPERT_ACTIVATIONS.items() if entry.fused_fn])
+    def test_fused_kernel_matches_plain_pytorch(self, activation):
+        # What the grouped-GEMM expert paths get on the accelerator (fused=True) must be the same
+        # function as the plain-PyTorch form, to within one rounding of the low-precision dtype: the
+        # reference is the plain form evaluated in float32 on the same inputs and rounded once.
+        if get_accelerator().device_name() == "cpu":
+            pytest.skip("needs an accelerator")
+        device = get_accelerator().current_device_name()
+        torch.manual_seed(0)
+        # scale 4 with limit 7 puts about 8 % of the values past a clamp
+        gate = (4 * torch.randn(256, 3072, device=device)).to(torch.bfloat16).requires_grad_(True)
+        up = (4 * torch.randn(256, 3072, device=device)).to(torch.bfloat16).requires_grad_(True)
+        grad_out = torch.randn_like(gate)
+        out = apply_expert_activation(gate, up, activation, 1.702, 7.0, fused=True)
+        out.backward(grad_out)
+
+        gate32 = gate.detach().float().requires_grad_(True)
+        up32 = up.detach().float().requires_grad_(True)
+        out32 = apply_expert_activation(gate32, up32, activation, 1.702, 7.0, fused=False)
+        out32.backward(grad_out.float())
+
+        close = dict(rtol=1.2e-2, atol=1e-3)  # about one bf16 ulp at the output magnitude
+        torch.testing.assert_close(out, out32.to(out.dtype), **close)
+        torch.testing.assert_close(gate.grad, gate32.grad.to(out.dtype), **close)
+        torch.testing.assert_close(up.grad, up32.grad.to(out.dtype), **close)
+
     def test_for_loop_path_does_not_need_the_triton_kernel(self, monkeypatch):
         # The for-loop path is the reference path and runs on CPU tensors. It must not reach the
         # Triton kernel, which exists whenever Triton is installed.
