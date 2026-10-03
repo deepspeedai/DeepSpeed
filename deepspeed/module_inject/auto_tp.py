@@ -150,6 +150,10 @@ class Loading():
 
     def load_buffer(module, state_dict, prefix):
         for name in module._buffers.keys():
+            if module._buffers[name] is None:
+                # unset buffers (e.g. InstanceNorm1d's running_mean/running_var when
+                # track_running_stats=False) have nothing to cast or load
+                continue
             if module._buffers[name].data.is_meta:
                 module._buffers[name] = torch.nn.parameter.Parameter(
                     data=torch.empty_like(module._buffers[name].data, device="cpu"),
