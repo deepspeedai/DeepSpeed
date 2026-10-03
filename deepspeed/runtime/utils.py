@@ -419,7 +419,7 @@ def clip_grad_norm_(parameters, max_norm, norm_type=2, mpu=None):
     return total_norm
 
 
-def get_flattened_grad_norm(parameters, norm_type=2, mpu=None, grad_norm_mask=None):
+def get_flattened_grad_norm(parameters, norm_type=2, mpu=None, grad_norm_mask=None, grad_norm_dtype=None):
     """Get grad norm of an iterable of parameters.
 
     This is adapted from torch.nn.utils.clip_grad.clip_grad_norm_ and
@@ -433,6 +433,8 @@ def get_flattened_grad_norm(parameters, norm_type=2, mpu=None, grad_norm_mask=No
             infinity norm.
         grad_norm_mask (List[Tensor]): A list of Tensor, where
             each Tensor is a 2D Tensor containing ranges of [start_index, end_index].
+        grad_norm_dtype (torch.dtype, optional): accumulation dtype for the norm. The default preserves the existing
+            behavior of converting gradients to FP32 first.
     Returns:
         Total norm of the parameters (viewed as a single vector).
     """
@@ -467,10 +469,14 @@ def get_flattened_grad_norm(parameters, norm_type=2, mpu=None, grad_norm_mask=No
                 mask_tensor = mask_tensor.scatter_(0, grad_norm_mask[idx].view(-1),
                                                    cum_sum_pairs.view(-1)).cumsum(0).bool()[:-1]
 
-                param_norm = torch.masked_fill(p.grad.data, mask_tensor, 0).float().norm(norm_type)
+                grad = torch.masked_fill(p.grad.data, mask_tensor, 0)
 
             else:
-                param_norm = p.grad.data.float().norm(norm_type)
+                grad = p.grad.data
+            if grad_norm_dtype is None:
+                param_norm = grad.float().norm(norm_type)
+            else:
+                param_norm = torch.linalg.vector_norm(grad, ord=norm_type, dtype=grad_norm_dtype)
             total_norm += param_norm.item()**norm_type
 
         # Sum across all model parallel GPUs.
