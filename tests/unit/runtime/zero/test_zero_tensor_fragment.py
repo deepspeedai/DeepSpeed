@@ -200,6 +200,72 @@ class TestTensorFragmentGet(DistributedTest):
         run_fragmented_model(model, config_dict, hidden_dim, torch.bfloat16, validate_after_bwd, validate_after_step)
 
 
+@pytest.mark.parametrize('offload_device', [OffloadDeviceEnum.none, OffloadDeviceEnum.cpu])
+@pytest.mark.parametrize('zero_stage', [1, 2, 3])
+class TestTensorFragmentOptimizerStatePerGroup(DistributedTest):
+    """Every param group's optimizer state is reachable, not only the first group's.
+
+    Two groups, as with weight decay on for the matrices and off for the rest. ZeRO-1/2 step the
+    groups one at a time, and linking all of them after the first group's step left the others
+    with no state to point at. A plain PyTorch AdamW with the same groups, fed the same batch, is
+    the reference.
+
+    One rank: with more, the getter raises only on the ranks that hold a piece of the parameter,
+    and the others wait in its all-reduce instead of failing.
+    """
+    world_size = 1
+
+    def test_full_optimizer_state(self, zero_stage, offload_device):
+
+        def build():
+            torch.manual_seed(0)
+            return torch.nn.Sequential(torch.nn.Linear(16, 32), torch.nn.LayerNorm(32), torch.nn.Linear(32, 8))
+
+        def param_groups(model):
+            return [{
+                "params": [p for p in model.parameters() if p.dim() == 2],
+                "weight_decay": 0.1
+            }, {
+                "params": [p for p in model.parameters() if p.dim() != 2],
+                "weight_decay": 0.0
+            }]
+
+        reference = build()
+        reference_optimizer = torch.optim.AdamW(param_groups(reference), lr=1e-3)
+        model = build()
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 2,
+            "optimizer": {
+                "type": "AdamW",
+                "params": {
+                    "lr": 1e-3
+                }
+            },
+            # Clipping is on by default, and the reference does not clip.
+            "gradient_clipping": 0.0,
+            "zero_optimization": {
+                "stage": zero_stage,
+                "offload_optimizer": {
+                    "device": offload_device
+                }
+            },
+        }
+        engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=param_groups(model), config=config_dict)
+
+        x = torch.randn(2, 16, generator=torch.Generator().manual_seed(1))
+        engine.backward(engine(x.to(engine.device)).square().mean())
+        engine.step()
+        reference(x).square().mean().backward()
+        reference_optimizer.step()
+
+        for (name, param), expected in zip(engine.module.named_parameters(), reference.parameters()):
+            for key in ("exp_avg", "exp_avg_sq"):
+                torch.testing.assert_close(safe_get_full_optimizer_state(param, key).cpu(),
+                                           reference_optimizer.state[expected][key],
+                                           msg=lambda detail: f"{name} {key}: {detail}")
+        engine.destroy()
+
+
 def create_random_values(model, key_list, group, grad_dtype):
     param_values = {}
     for n, lp in model.named_parameters():
