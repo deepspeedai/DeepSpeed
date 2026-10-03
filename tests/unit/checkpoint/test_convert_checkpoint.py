@@ -108,6 +108,18 @@ class ModelWithSharedWeights(nn.Module):
         self.layer1.weight = self.layer2.weight
 
 
+class ModelWithSharedSubmodule(nn.Module):
+
+    def __init__(self):
+        super().__init__()
+        self.layer0 = nn.Linear(100, 100)
+        self.layer1 = nn.Linear(200, 200)
+        # layer2 aliases the ENTIRE layer1 submodule instance (weight AND bias), not just
+        # a shared leaf Parameter -- e.g. architectures that reuse a whole child module
+        # under a second attribute name.
+        self.layer2 = self.layer1
+
+
 class TestCheckpointConvert(DistributedTest):
     world_size = 2
 
@@ -163,3 +175,73 @@ class TestCheckpointConvert(DistributedTest):
         fp32_size = (fp32_save_dir / 'pytorch_model.bin').stat().size
         bf16_size = (bf16_save_dir / 'pytorch_model.bin').stat().size
         assert bf16_size < fp32_size * 0.6
+
+    def test_convert_zero_checkpoint_with_shared_submodule(self, tmpdir):
+        config = {
+            "train_micro_batch_size_per_gpu": 2,
+            "zero_allow_untested_optimizer": True,
+            "zero_optimization": {
+                "stage": 2
+            },
+        }
+        model = ModelWithSharedSubmodule()
+        optimizer = torch.optim.Adam(model.parameters())
+
+        deepspeed_engine, _, _, _ = deepspeed.initialize(
+            config=config,
+            model=model,
+            optimizer=optimizer,
+        )
+        ds_save_dir = tmpdir / "checkpoint_ds"
+        deepspeed_engine.save_checkpoint(ds_save_dir, tag="checkpoint")
+
+        fp32_save_dir = tmpdir / "checkpoint_fp32"
+        convert_zero_checkpoint_to_fp32_state_dict(ds_save_dir, fp32_save_dir)
+        state_dict = torch.load(fp32_save_dir / 'pytorch_model.bin')
+
+        # both the weight AND the bias of the aliased submodule must survive reconstruction
+        assert 'layer2.weight' in state_dict
+        assert 'layer2.bias' in state_dict
+        assert id(state_dict['layer1.weight']) == id(state_dict['layer2.weight'])
+        assert id(state_dict['layer1.bias']) == id(state_dict['layer2.bias'])
+
+        model = ModelWithSharedSubmodule()
+        model.load_state_dict(state_dict, strict=True)
+
+
+class _SharedSubmoduleModel(nn.Module):
+    """A module that aliases an entire child under a second attribute name."""
+
+    def __init__(self):
+        super().__init__()
+        self.layer0 = nn.Linear(4, 4)
+        self.layer1 = nn.Linear(4, 4)
+        self.layer2 = self.layer1
+
+
+def test_get_shared_params_records_aliased_submodule(monkeypatch):
+    """The traversal itself must not drop an aliased submodule's params.
+
+    The end-to-end conversion test above needs an accelerator and is skipped in
+    most environments, so it cannot demonstrate this defect. `_get_shared_params`
+    only reads `self.module`, `zero_optimization_partition_weights()` and the
+    rank, so the tree walk can be exercised directly -- which is the level the
+    bug actually lives at.
+    """
+    from deepspeed.runtime.engine import DeepSpeedEngine
+    import deepspeed.comm as dist
+
+    monkeypatch.setattr(dist, "get_rank", lambda *a, **k: 0)
+
+    class _Engine:
+        module = _SharedSubmoduleModel()
+
+        def zero_optimization_partition_weights(self):
+            return False
+
+    shared = DeepSpeedEngine._get_shared_params(_Engine())
+
+    # layer2 aliases layer1 in full, so BOTH of its params must be recorded as
+    # shared -- otherwise they are absent from the reconstructed state dict.
+    assert shared.get("layer2.weight") == "layer1.weight"
+    assert shared.get("layer2.bias") == "layer1.bias"
