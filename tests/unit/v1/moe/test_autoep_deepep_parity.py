@@ -27,7 +27,7 @@ from torch.utils.checkpoint import checkpoint
 import deepspeed
 import deepspeed.comm as dist
 from deepspeed.module_inject import auto_ep_layer
-from deepspeed.module_inject.auto_ep_comm import destroy_exchanges
+from deepspeed.module_inject.auto_ep_comm import DeepEPExchange, destroy_exchanges
 from deepspeed.module_inject.auto_ep_layer import AutoEPMoELayer
 from deepspeed.ops.triton_ops import autoep_fused_token_ops as fused_ops
 from deepspeed.utils import safe_get_full_fp32_param
@@ -138,6 +138,20 @@ def _checkpoint_autoep_layers(engine, *, use_reentrant=False):
             module.forward = functools.partial(checkpoint, module.forward, use_reentrant=use_reentrant)
 
 
+@contextlib.contextmanager
+def _count_deepep_combines():
+    """Counts forward combines; the backward of a dispatch combines through combine_with_weight_grad."""
+    counts = {"combine": 0}
+    original = DeepEPExchange.combine
+
+    def counted(exchange, rows, handle):
+        counts["combine"] += 1
+        return original(exchange, rows, handle)
+
+    with mock.patch.object(DeepEPExchange, "combine", counted):
+        yield counts
+
+
 def _count_autoep_layer_forwards(engine):
     forward_counts = {}
     for name, module in engine.module.named_modules():
@@ -190,7 +204,8 @@ def _run_one_step(backend,
                   reentrant_checkpointing=False,
                   skewed_routing=False,
                   row_weighting_impl="auto",
-                  score_apply=None):
+                  score_apply=None,
+                  seq_len=SEQ_LEN):
     """Build a model on ``backend``, run one step, return its output and grads."""
     seed_everything(seed)
 
@@ -236,7 +251,7 @@ def _run_one_step(backend,
     # Reseeded so the input is identical on every rank and across backends: the
     # comparison is of the transport, so nothing else may differ.
     seed_everything(seed)
-    hidden = torch.randn(1, SEQ_LEN, HIDDEN_SIZE, device=engine.device,
+    hidden = torch.randn(1, seq_len, HIDDEN_SIZE, device=engine.device,
                          dtype=engine_input_dtype(engine)).requires_grad_(True)
     parameters_before = _snapshot_fp32_parameters(engine)
     routes = []
@@ -367,6 +382,23 @@ def _assert_cleanup_results_close(actual, expected, *, compare_score_gradients):
                                    rtol=5e-3,
                                    atol=5e-4,
                                    msg=_delta_failure_message(name, actual, expected))
+
+
+def _assert_gradients_match_relatively(actual, expected, *, tolerance):
+    """Relative L2 error of the input and every parameter gradient.
+
+    The absolute tolerances above are larger than these small gradients, so they cannot tell a reordered
+    reduction from gradients scattered onto the wrong rows; the relative error separates the two by orders of
+    magnitude.
+    """
+    pairs = [("input_gradient", actual["input_gradient"], expected["input_gradient"])]
+    pairs += [(name, actual["gradients"][name], expected["gradients"][name]) for name in expected["gradients"]]
+    for name, actual_grad, expected_grad in pairs:
+        reference = expected_grad.norm()
+        if reference == 0:
+            continue
+        error = ((actual_grad - expected_grad).norm() / reference).item()
+        assert error < tolerance, f"{name} relative L2 error {error:.3e} exceeds {tolerance:.0e}"
 
 
 def _assert_native_fused_gradient_close(actual, expected, *, name):
@@ -566,6 +598,49 @@ class TestDeepEPMatchesCollective(DistributedTest):
         all_routes = torch.cat([route.flatten() for _, route in fused["routes"]])
         assert torch.count_nonzero(all_routes == 3) == 0
         assert torch.count_nonzero(all_routes == 1) > torch.count_nonzero(all_routes == 2)
+
+    @pytest.mark.parametrize("skewed_routing", [False, True])
+    def test_non_reentrant_checkpointing_replays_the_forward_dispatch_layout(self, skewed_routing):
+        """A non-reentrant recompute keeps the forward's nodes and handle, so it must reuse that layout.
+
+        DeepEP's received order depends on arrival timing. A fresh recompute
+        dispatch feeds the experts rows in another order than combine's
+        backward scatters gradients into. Reentrant recompute rebuilds its own
+        graph and is the reference.
+        """
+        skip_unless_h100_tests_enabled("DeepEP checkpoint parity needs H100s and a DeepEP build")
+        seed = 2468
+        # Enough rows per rank for arrival order to vary between a forward and its recompute.
+        seq_len = 256
+
+        with _count_deepep_combines() as reentrant_combines:
+            reentrant = _run_one_step("deepep",
+                                      self.world_size,
+                                      seed,
+                                      activation_checkpointing=True,
+                                      reentrant_checkpointing=True,
+                                      skewed_routing=skewed_routing,
+                                      seq_len=seq_len)
+        with _count_deepep_combines() as non_reentrant_combines:
+            non_reentrant = _run_one_step("deepep",
+                                          self.world_size,
+                                          seed,
+                                          activation_checkpointing=True,
+                                          reentrant_checkpointing=False,
+                                          skewed_routing=skewed_routing,
+                                          seq_len=seq_len)
+
+        _assert_cleanup_results_close(non_reentrant, reentrant, compare_score_gradients=False)
+        # A consistent layout differs from the reference only by reduction order, below 1e-4 relative; gradients
+        # scattered onto another arrival order are off by order one.
+        _assert_gradients_match_relatively(non_reentrant, reentrant, tolerance=1e-2)
+        layers = len(non_reentrant["forward_counts"])
+        assert layers, "the test did not exercise any AutoEP layers"
+        assert all(count == 2 for count in non_reentrant["forward_counts"].values())
+        # Reentrant recompute repeats every forward combine; non-reentrant early stop skips them, since combine's
+        # backward needs no saved activation.
+        assert reentrant_combines["combine"] == 2 * layers
+        assert non_reentrant_combines["combine"] == layers
 
     @pytest.mark.parametrize(
         "activation_checkpointing, skewed_routing",
