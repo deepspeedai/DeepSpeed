@@ -103,7 +103,10 @@ void Adagrad_Optimizer::Step_AVX(size_t* rounded_size,
             AVX_Data param_4[span];
             simd_load<span>(param_4, _params + i);
 
-            if (_weight_decay > 0) { simd_fma<span>(grad_4, param_4, weight_decay4, grad_4); }
+            if (_weight_decay > 0) {
+                simd_fma<span>(grad_4, param_4, weight_decay4, grad_4);
+                simd_fma<span>(momentum_4, param_4, weight_decay4, momentum_4);
+            }
 
             simd_fma<span>(variance_4, grad_4, grad_4, variance_4);
             simd_sqrt<span>(grad_4, variance_4);
