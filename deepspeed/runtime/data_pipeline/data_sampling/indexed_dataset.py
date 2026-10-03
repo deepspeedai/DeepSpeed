@@ -177,8 +177,8 @@ class IndexedDataset(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         if not self.data_file:
             self.read_data(self.path)
-        if isinstance(idx, int):
-            i = idx
+        if isinstance(idx, (int, np.integer)):
+            i = int(idx)
             self.check_index(i)
             tensor_size = self.sizes[self.dim_offsets[i]:self.dim_offsets[i + 1]]
             a = np.empty(tensor_size, dtype=self.dtype)
@@ -253,8 +253,8 @@ class IndexedCachedDataset(IndexedDataset):
 
     # @lru_cache(maxsize=8)
     def __getitem__(self, idx):
-        if isinstance(idx, int):
-            i = idx
+        if isinstance(idx, (int, np.integer)):
+            i = int(idx)
             self.check_index(i)
             tensor_size = self.sizes[self.dim_offsets[i]:self.dim_offsets[i + 1]]
             a = np.empty(tensor_size, dtype=self.dtype)
@@ -513,8 +513,8 @@ class MMapIndexedDataset(torch.utils.data.Dataset):
 
     # @lru_cache(maxsize=8)
     def __getitem__(self, idx):
-        if isinstance(idx, int):
-            ptr, size = self._index[idx]
+        if isinstance(idx, (int, np.integer)):
+            ptr, size = self._index[int(idx)]
             np_array = np.frombuffer(self._bin_buffer, dtype=self._index.dtype, count=size, offset=ptr)
             return np_array
         elif isinstance(idx, slice):
