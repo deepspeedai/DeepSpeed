@@ -211,6 +211,8 @@ class ThroughputTimer:
         self.global_step_count = 0
         self.total_elapsed_time = 0
         self.step_elapsed_time = 0
+        if steps_per_output is not None and steps_per_output <= 0:
+            raise ValueError(f"steps_per_output must be a positive integer or None, got {steps_per_output}")
         self.steps_per_output = steps_per_output
         self.monitor_memory = monitor_memory
         self.logging = logging_fn
@@ -241,6 +243,9 @@ class ThroughputTimer:
     def _is_report_boundary(self):
         if self.steps_per_output is None:
             return False
+        # Guard against mutation to 0 after construction (see #7838).
+        if self.steps_per_output <= 0:
+            raise ValueError(f"steps_per_output must be a positive integer, got {self.steps_per_output}")
         return self.global_step_count % self.steps_per_output == 0
 
     def stop(self, global_step=False, report_speed=True):
