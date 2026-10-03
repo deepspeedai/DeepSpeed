@@ -78,6 +78,9 @@ class LossScaleConfig:
     scale_factor: Optional[float] = None
     scale_window: Optional[int] = None
     min_loss_scale: Optional[float] = None
+    delayed_shift: int = 1
+    cur_hysteresis: int = 1
+    consecutive_hysteresis: bool = False
 
     def __init__(self,
                  low_precision_dtype,
@@ -97,6 +100,9 @@ class LossScaleConfig:
         self.scale_factor = None
         self.scale_window = None
         self.min_loss_scale = None
+        self.delayed_shift = 1
+        self.cur_hysteresis = 1
+        self.consecutive_hysteresis = False
 
         if not use_grad_scaling:
             return
@@ -120,6 +126,8 @@ class LossScaleConfig:
         self.cur_scale = dynamic_loss_args[INITIAL_LOSS_SCALE]
         self.scale_window = dynamic_loss_args[SCALE_WINDOW]
         self.min_loss_scale = dynamic_loss_args[MIN_LOSS_SCALE]
+        self.delayed_shift = self.cur_hysteresis = dynamic_loss_args.get(DELAYED_SHIFT, 1)
+        self.consecutive_hysteresis = dynamic_loss_args.get(CONSECUTIVE_HYSTERESIS, False)
 
 
 # item() is a recent addition, so this helps with backward compatibility.

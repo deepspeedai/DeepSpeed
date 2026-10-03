@@ -11,6 +11,10 @@ import numpy as np
 from unit.common import DistributedTest
 from unit.simple_model import SimpleModel
 from deepspeed.ops.op_builder import FusedLambBuilder
+from deepspeed.runtime.fp16.fused_optimizer import FP16_Optimizer
+from deepspeed.runtime.fp16.loss_scaler import LossScaleConfig, LossScaleProfile
+from deepspeed.runtime.fp16.unfused_optimizer import FP16_UnfusedOptimizer
+from deepspeed.runtime.precision_config import DeepSpeedFP16Config
 
 
 def run_model_step(model, gradient_list):
@@ -78,7 +82,8 @@ class TestFused(DistributedTest):
                 "enabled": True,
                 "loss_scale": 0,
                 "initial_scale_power": 4,
-                "loss_scale_window": 2
+                "loss_scale_window": 2,
+                "hysteresis": 1
             }
         }
         hidden_dim = 1
@@ -113,7 +118,8 @@ class TestFused(DistributedTest):
                 "enabled": True,
                 "loss_scale": 0,
                 "initial_scale_power": 8,
-                "loss_scale_window": 2
+                "loss_scale_window": 2,
+                "hysteresis": 1
             }
         }
         hidden_dim = 1
@@ -214,7 +220,8 @@ class TestUnfused(DistributedTest):
                 "loss_scale": 0,
                 "initial_scale_power": 4,
                 "loss_scale_window": 2,
-                "min_loss_scale": min_loss_scale_value
+                "min_loss_scale": min_loss_scale_value,
+                "hysteresis": 1
             }
         }
         hidden_dim = 1
@@ -251,7 +258,8 @@ class TestUnfused(DistributedTest):
                 "enabled": True,
                 "loss_scale": 0,
                 "initial_scale_power": 8,
-                "loss_scale_window": 2
+                "loss_scale_window": 2,
+                "hysteresis": 1
             }
         }
         hidden_dim = 1
@@ -289,3 +297,83 @@ class TestUnfused(DistributedTest):
         expected_loss_scale /= (2**len(overflow_gradients))
         assert optim.loss_scale_config.cur_scale == expected_loss_scale
         assert optim.loss_scale_config.cur_iter == expected_iteration
+
+
+@pytest.mark.parametrize("optimizer_class", [FP16_Optimizer, FP16_UnfusedOptimizer])
+class TestZeroStage0Hysteresis(DistributedTest):
+    world_size = 1
+
+    def _optimizer(self, optimizer_class, **fp16_config):
+        fp16 = DeepSpeedFP16Config(enabled=True, loss_scale=0, initial_scale_power=8, **fp16_config)
+        profile = LossScaleProfile.FUSED if optimizer_class is FP16_Optimizer else LossScaleProfile.UNFUSED
+        loss_scale_config = LossScaleConfig(low_precision_dtype=torch.float16,
+                                            dynamic_loss_scale=True,
+                                            static_loss_scale=0,
+                                            dynamic_loss_args=fp16.dynamic_loss_scale_args(),
+                                            profile=profile)
+        param = torch.nn.Parameter(torch.zeros(4, dtype=torch.float16))
+        return optimizer_class(torch.optim.SGD([param], lr=0.1), loss_scale_config=loss_scale_config)
+
+    def test_hysteresis(self, optimizer_class):
+        optimizer = self._optimizer(optimizer_class, hysteresis=3)
+        scales = []
+        for _ in range(4):
+            optimizer._update_scale(True)
+            scales.append(optimizer.loss_scale_config.cur_scale)
+        # The first hysteresis - 1 overflows are absorbed, then each overflow halves the scale.
+        assert scales == [2**8, 2**8, 2**7, 2**6]
+
+    def test_consecutive_hysteresis(self, optimizer_class):
+        optimizer = self._optimizer(optimizer_class, hysteresis=2, consecutive_hysteresis=True)
+        for _ in range(4):
+            optimizer._update_scale(True)
+            optimizer._update_scale(False)
+        # A clean step refills the hysteresis, so isolated overflows never lower the scale.
+        assert optimizer.loss_scale_config.cur_scale == 2**8
+
+    def test_hysteresis_survives_a_checkpoint(self, optimizer_class):
+        optimizer = self._optimizer(optimizer_class, hysteresis=3)
+        optimizer._update_scale(True)
+        restored = self._optimizer(optimizer_class, hysteresis=3)
+        restored.load_state_dict(optimizer.state_dict())
+        # One overflow is already spent, so the next one is the last one absorbed.
+        assert restored.loss_scale_config.cur_hysteresis == 2
+
+    @pytest.mark.skipif(not get_accelerator().is_fp16_supported(), reason="fp16 is not supported")
+    def test_hysteresis_through_the_engine(self, optimizer_class):
+        # SGD gets FP16_UnfusedOptimizer from the engine, Adam gets FP16_Optimizer.
+        optimizer_type = "Adam" if optimizer_class is FP16_Optimizer else "SGD"
+        config_dict = {
+            "train_batch_size": 1,
+            "optimizer": {
+                "type": optimizer_type,
+                "params": {
+                    "lr": 0.00015
+                }
+            },
+            "fp16": {
+                "enabled": True,
+                "loss_scale": 0,
+                "initial_scale_power": 8,
+                "loss_scale_window": 100,
+                "hysteresis": 2
+            }
+        }
+
+        def engine():
+            model = SimpleModel(hidden_dim=1)
+            model, optim, _, _ = deepspeed.initialize(config=config_dict,
+                                                      model=model,
+                                                      model_parameters=model.parameters())
+            assert isinstance(optim, optimizer_class)
+            return model, optim
+
+        model, optim = engine()
+        run_model_step(model, [float('inf')])
+        assert optim.loss_scale_config.cur_scale == 2**8, "the first overflow is absorbed"
+
+        # Resume from the optimizer state an engine checkpoint stores: one overflow is already spent.
+        restored_model, restored_optim = engine()
+        restored_optim.load_state_dict(optim.state_dict())
+        run_model_step(restored_model, [float('inf')])
+        assert restored_optim.loss_scale_config.cur_scale == 2**7
