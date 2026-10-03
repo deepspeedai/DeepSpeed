@@ -380,12 +380,14 @@ def clip_grad_norm_(parameters, max_norm, norm_type=2, mpu=None):
             dist.all_reduce(total_norm, op=dist.ReduceOp.MAX, group=mpu.get_model_parallel_group())
     else:
         total_norm = 0
+        # Under pipeline parallelism mpu.get_model_parallel_rank() is the rank across the
+        # stages, so filtering on it would drop every stage but the first. Only tensor
+        # parallel replicas, and tied weights replicated across stages, are duplicates.
+        tensor_mp_rank = bwc_tensor_model_parallel_rank(mpu=mpu)
         for p in parameters:
-            if mpu is not None:
-                if (mpu.get_model_parallel_rank() == 0) or is_model_parallel_parameter(p):
-                    param_norm = p.grad.data.detach().float().norm(norm_type)
-                    all_norms.append(param_norm)
-            else:
+            if hasattr(p, PIPE_REPLICATED) and p.ds_pipe_replicated:
+                continue
+            if (tensor_mp_rank == 0) or is_model_parallel_parameter(p):
                 param_norm = p.grad.data.detach().float().norm(norm_type)
                 all_norms.append(param_norm)
         if len(all_norms) > 0:
