@@ -328,6 +328,12 @@ Example of <i>**scheduler**</i>
 |--------------------------------------------------------------------| ------- |
 | <i>**enabled**</i> indicates whether BFLOAT16 training is enabled. | `false` |
 
+<i>**bf16:immediate_grad_update**</i>: [boolean]
+
+| Description | Default |
+| ----------- | ------- |
+| When `BF16_Optimizer` is selected, accumulate each completed BF16 gradient in an autograd hook (in FP32 when `data_types.grad_accum_dtype="fp32"`). The consumed `param.grad` is released and may be `None` after backward. In that case, `deepspeed.utils.safe_get_full_grad(param)` reconstructs the accumulated gradient from the optimizer-owned fragments; all data-parallel ranks must call it before `engine.step()` in the same order. The default keeps the existing backward-epilogue accumulation. | `false` |
+
 <i>**bf16:bf16_master_weights_and_grads**</i>: [boolean]
 
 | Description | Default |
