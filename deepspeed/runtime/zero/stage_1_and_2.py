@@ -927,7 +927,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         # State initialization for the Adagrad optimizer occurs at construction as opposed to other optimizers
         # which do lazy initialization of the state at the first call to step.
         if isinstance(self.optimizer, torch.optim.Adagrad):
-            self.optimizer = torch.optim.Adagrad(self.single_partition_of_fp32_groups, **self.optimizer.defaults)
+            self.optimizer = torch.optim.Adagrad(self.optimizer.param_groups, **self.optimizer.defaults)
 
         if not self.cpu_offload:
             for group in self.single_partition_of_fp32_groups:
