@@ -1300,7 +1300,8 @@ class FPDT_LogitsLoss(torch.autograd.Function):
 
         dist.allgather_fn(loss_all, loss, group=spg)
 
-        return loss_all
+        # Match the batch-first loss mask produced by FPDT_InputConstruct.
+        return loss_all.t().contiguous()
 
     @staticmethod
     def backward(ctx, grad_output):
@@ -1314,7 +1315,7 @@ class FPDT_LogitsLoss(torch.autograd.Function):
         rank = ctx.rank
         local_seq_len = ctx.local_seq_len
 
-        grad_output = grad_output[rank * local_seq_len:(rank + 1) * local_seq_len]
+        grad_output = grad_output[:, rank * local_seq_len:(rank + 1) * local_seq_len].t().contiguous()
         grad_lm_output = [None for _ in range(num_chunk)]
         grad_logit_weights = torch.zeros(logit_weights.shape, device=grad_output.device, dtype=torch.float)
         for i in range(num_chunk):
