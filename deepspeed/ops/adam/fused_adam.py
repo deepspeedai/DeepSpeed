@@ -98,9 +98,12 @@ class FusedAdam(torch.optim.Optimizer):
         self.multi_tensor_adam = fused_adam_cuda.multi_tensor_adam
         self.multi_tensor_adam_mixed_precision = getattr(fused_adam_cuda, "multi_tensor_adam_mixed_precision", None)
 
+    def _has_mixed_precision_grad_kernel(self):
+        return callable(self.multi_tensor_adam_mixed_precision)
+
     def _can_step_with_mixed_precision_grads(self, grads, output_params):
         """Return whether the internal mixed-precision step can consume every group; callers must fall back if false."""
-        if not callable(self.multi_tensor_adam_mixed_precision):
+        if not self._has_mixed_precision_grad_kernel():
             return False
         if len(grads) != len(self.param_groups) or len(output_params) != len(self.param_groups):
             return False

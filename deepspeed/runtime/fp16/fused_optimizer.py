@@ -327,9 +327,11 @@ class FP16_Optimizer(DeepSpeedOptimizer):
                     self.timers.log(OVERFLOW_TIMERS)
                 return self.overflow
 
+        has_mixed_precision_grad_kernel = getattr(self.optimizer, '_has_mixed_precision_grad_kernel', None)
         can_step_with_mixed_precision_grads = getattr(self.optimizer, '_can_step_with_mixed_precision_grads', None)
         mixed_precision_step = getattr(self.optimizer, '_step_with_mixed_precision_grads', None)
-        if (not self.has_moe_layers and callable(can_step_with_mixed_precision_grads)
+        if (not self.has_moe_layers and callable(has_mixed_precision_grad_kernel)
+                and has_mixed_precision_grad_kernel() and callable(can_step_with_mixed_precision_grads)
                 and callable(mixed_precision_step)):
             mixed_precision_grads_groups_flat = []
             for group in self.fp16_groups:

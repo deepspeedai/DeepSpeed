@@ -16,6 +16,7 @@ This file is adapted from fused adam in NVIDIA/apex, commit a109f85
 // #include <torch/all.h>
 
 #include <assert.h>
+#include <climits>
 #include <cmath>
 
 #include "multi_tensor_apply.cuh"
@@ -30,6 +31,11 @@ typedef enum : int {
 } adamMode_t;
 
 using MATH_T = float;
+
+constexpr bool requires_64bit_tensor_indexing(int64_t numel) { return numel >= INT_MAX; }
+
+static_assert(!requires_64bit_tensor_indexing(INT_MAX - 1));
+static_assert(requires_64bit_tensor_indexing(INT_MAX));
 
 template <typename T, typename index_t>
 struct AdamFunctor {
@@ -270,7 +276,7 @@ void multi_tensor_adam_mixed_precision_cuda(int chunk_size,
 
     bool requires_64bit_indexing = false;
     for (const auto& tensor : tensor_lists[0]) {
-        if (tensor.numel() >= INT_MAX) {
+        if (requires_64bit_tensor_indexing(tensor.numel())) {
             requires_64bit_indexing = true;
             break;
         }

@@ -185,6 +185,11 @@ class TestMixedPrecisionFusedAdam(DistributedTest):
     world_size = 1
 
     @staticmethod
+    def _require_mixed_precision_kernel(optimizer):
+        if not callable(getattr(optimizer.optimizer, "multi_tensor_adam_mixed_precision", None)):
+            pytest.skip("mixed-precision FusedAdam kernel is unavailable")
+
+    @staticmethod
     def _initialize_engine(model, dtype, adam_w_mode=True, clip_grad=0.0):
         optimizer = FusedAdam(model.parameters(), lr=2e-3, weight_decay=0.01, adam_w_mode=adam_w_mode)
         precision_config = {"enabled": True}
@@ -237,6 +242,7 @@ class TestMixedPrecisionFusedAdam(DistributedTest):
         reference_model.load_state_dict(candidate_model.state_dict())
         candidate_engine, candidate_optimizer = self._initialize_engine(candidate_model, dtype, adam_w_mode, clip_grad)
         reference_engine, reference_optimizer = self._initialize_engine(reference_model, dtype, adam_w_mode, clip_grad)
+        self._require_mixed_precision_kernel(candidate_optimizer)
         reference_optimizer.optimizer.multi_tensor_adam_mixed_precision = None
 
         calls = 0
@@ -270,6 +276,7 @@ class TestMixedPrecisionFusedAdam(DistributedTest):
         reference_model.load_state_dict(candidate_model.state_dict())
         candidate_engine, candidate_optimizer = self._initialize_engine(candidate_model, dtype)
         reference_engine, reference_optimizer = self._initialize_engine(reference_model, dtype)
+        self._require_mixed_precision_kernel(candidate_optimizer)
         reference_optimizer.optimizer.multi_tensor_adam_mixed_precision = None
 
         torch.manual_seed(5678)
@@ -298,7 +305,7 @@ class TestMixedPrecisionFusedAdam(DistributedTest):
         torch.testing.assert_close(state["exp_avg"][missing_start:missing_end], exp_avg_before * beta1)
         torch.testing.assert_close(state["exp_avg_sq"][missing_start:missing_end], exp_avg_sq_before * beta2)
 
-    def test_missing_capability_uses_existing_path(self, monkeypatch):
+    def test_missing_capability_uses_existing_path_without_low_precision_flatten(self, monkeypatch):
         dtype = torch.float16
         hidden_dim = 8
         torch.manual_seed(1234)
@@ -315,6 +322,15 @@ class TestMixedPrecisionFusedAdam(DistributedTest):
 
         monkeypatch.setattr(candidate_optimizer.optimizer, "_step_with_mixed_precision_grads",
                             unexpected_mixed_precision_step)
+        from deepspeed.runtime.fp16 import fused_optimizer as fused_optimizer_module
+        original_flatten = fused_optimizer_module._flatten_dense_tensors
+
+        def reject_low_precision_flatten(tensors):
+            tensors = list(tensors)
+            assert all(tensor.dtype == torch.float32 for tensor in tensors)
+            return original_flatten(tensors)
+
+        monkeypatch.setattr(fused_optimizer_module, "_flatten_dense_tensors", reject_low_precision_flatten)
         torch.manual_seed(5678)
         inputs = torch.randn(2, hidden_dim, device=candidate_engine.device, dtype=dtype)
         labels = torch.randint(hidden_dim, (2, ), device=candidate_engine.device)
@@ -332,6 +348,7 @@ class TestMixedPrecisionFusedAdam(DistributedTest):
         fallback_model.load_state_dict(uninterrupted_model.state_dict())
         uninterrupted_engine, uninterrupted_optimizer = self._initialize_engine(uninterrupted_model, dtype)
         fallback_engine, fallback_optimizer = self._initialize_engine(fallback_model, dtype)
+        self._require_mixed_precision_kernel(uninterrupted_optimizer)
         fallback_optimizer.optimizer.multi_tensor_adam_mixed_precision = None
 
         torch.manual_seed(5678)

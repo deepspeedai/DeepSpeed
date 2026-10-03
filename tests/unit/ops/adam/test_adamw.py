@@ -132,6 +132,15 @@ def reference_mixed_precision_adam_step(master,
     master.add_(update, alpha=-lr)
 
 
+def load_mixed_precision_fused_adam_op_or_skip():
+    if not deepspeed.ops.__compatible_ops__[FusedAdamBuilder.NAME]:
+        pytest.skip("FusedAdam is not compatible")
+    mixed_precision_op = getattr(FusedAdamBuilder().load(), "multi_tensor_adam_mixed_precision", None)
+    if not callable(mixed_precision_op):
+        pytest.skip("mixed-precision FusedAdam kernel is unavailable")
+    return mixed_precision_op
+
+
 @pytest.mark.parametrize('adam_w_mode', [True, False], ids=["adamw", "adam"])
 @pytest.mark.parametrize('dtype', [torch.float, torch.bfloat16, torch.half], ids=["fp32", "bf16", "fp16"])
 def test_fused_adam_matches_reference(adam_w_mode, dtype):
@@ -174,8 +183,7 @@ def test_mixed_precision_fused_adam_op_matches_reference(dtype, adam_w_mode, bia
                                                          grad_scale):
     if dtype not in get_accelerator().supported_dtypes():
         pytest.skip(f"{dtype} not supported on {get_accelerator().device_name()}")
-    if not deepspeed.ops.__compatible_ops__[FusedAdamBuilder.NAME]:
-        pytest.skip("FusedAdam is not compatible")
+    mixed_precision_op = load_mixed_precision_fused_adam_op_or_skip()
 
     device = get_accelerator().device_name()
     torch.manual_seed(1234)
@@ -188,8 +196,6 @@ def test_mixed_precision_fused_adam_op_matches_reference(dtype, adam_w_mode, bia
     ref_master = master.clone()
     ref_exp_avg = exp_avg.clone()
     ref_exp_avg_sq = exp_avg_sq.clone()
-    fused_adam_op = FusedAdamBuilder().load()
-    mixed_precision_op = fused_adam_op.multi_tensor_adam_mixed_precision
     dummy_overflow_buf = get_accelerator().IntTensor([0])
 
     for step in range(1, 6):
@@ -231,8 +237,7 @@ def test_mixed_precision_fused_adam_op_matches_reference(dtype, adam_w_mode, bia
 def test_mixed_precision_fused_adam_op_rejects_invalid_inputs_without_mutation(invalid_case):
     if torch.float16 not in get_accelerator().supported_dtypes():
         pytest.skip(f"fp16 not supported on {get_accelerator().device_name()}")
-    if not deepspeed.ops.__compatible_ops__[FusedAdamBuilder.NAME]:
-        pytest.skip("FusedAdam is not compatible")
+    mixed_precision_op = load_mixed_precision_fused_adam_op_or_skip()
 
     device = get_accelerator().device_name()
     grad = torch.randn(1003, device=device, dtype=torch.float16)
@@ -279,12 +284,11 @@ def test_mixed_precision_fused_adam_op_rejects_invalid_inputs_without_mutation(i
 
     supplied_tensors = [tensor for tensor_list in tensor_lists for tensor in tensor_list]
     snapshots = [tensor.clone() for tensor in supplied_tensors]
-    fused_adam_op = FusedAdamBuilder().load()
     dummy_overflow_buf = get_accelerator().IntTensor([0])
 
     with pytest.raises(RuntimeError):
-        multi_tensor_applier(fused_adam_op.multi_tensor_adam_mixed_precision, dummy_overflow_buf, tensor_lists, 1e-2,
-                             0.9, 0.999, 1e-8, 1, 1, 1, 0.1, grad_scale)
+        multi_tensor_applier(mixed_precision_op, dummy_overflow_buf, tensor_lists, 1e-2, 0.9, 0.999, 1e-8, 1, 1, 1,
+                             0.1, grad_scale)
 
     for tensor, snapshot in zip(supplied_tensors, snapshots):
         torch.testing.assert_close(tensor, snapshot, rtol=0, atol=0, equal_nan=True)
@@ -293,8 +297,7 @@ def test_mixed_precision_fused_adam_op_rejects_invalid_inputs_without_mutation(i
 def test_fused_adam_mixed_precision_step_preserves_group_state():
     if not {torch.float16, torch.bfloat16}.issubset(get_accelerator().supported_dtypes()):
         pytest.skip(f"fp16 and bf16 not supported on {get_accelerator().device_name()}")
-    if not deepspeed.ops.__compatible_ops__[FusedAdamBuilder.NAME]:
-        pytest.skip("FusedAdam is not compatible")
+    load_mixed_precision_fused_adam_op_or_skip()
 
     device = get_accelerator().device_name()
     torch.manual_seed(5678)
@@ -372,8 +375,7 @@ def test_fused_adam_missing_mixed_precision_symbol_falls_back():
 def test_fused_adam_mixed_precision_rejects_invalid_scale_before_state_initialization():
     if torch.float16 not in get_accelerator().supported_dtypes():
         pytest.skip(f"fp16 not supported on {get_accelerator().device_name()}")
-    if not deepspeed.ops.__compatible_ops__[FusedAdamBuilder.NAME]:
-        pytest.skip("FusedAdam is not compatible")
+    load_mixed_precision_fused_adam_op_or_skip()
 
     device = get_accelerator().device_name()
     master = torch.nn.Parameter(torch.randn(1003, device=device, dtype=torch.float32))
@@ -395,8 +397,7 @@ def test_fused_adam_mixed_precision_rejects_invalid_scale_before_state_initializ
 def test_fused_adam_mixed_precision_capability_rejects_invalid_state(invalid_state):
     if torch.float16 not in get_accelerator().supported_dtypes():
         pytest.skip(f"fp16 not supported on {get_accelerator().device_name()}")
-    if not deepspeed.ops.__compatible_ops__[FusedAdamBuilder.NAME]:
-        pytest.skip("FusedAdam is not compatible")
+    load_mixed_precision_fused_adam_op_or_skip()
 
     device = get_accelerator().device_name()
     master = torch.nn.Parameter(torch.randn(1003, device=device, dtype=torch.float32))
