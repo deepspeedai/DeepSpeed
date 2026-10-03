@@ -11,6 +11,8 @@ import numpy as np
 from unit.common import DistributedTest
 from unit.simple_model import SimpleModel
 from deepspeed.ops.op_builder import FusedLambBuilder
+from deepspeed.runtime.fp16.fused_optimizer import FP16_Optimizer
+from deepspeed.runtime.fp16.unfused_optimizer import FP16_UnfusedOptimizer
 
 
 def run_model_step(model, gradient_list):
@@ -19,6 +21,67 @@ def run_model_step(model, gradient_list):
             p.grad = torch.empty_like(p, dtype=p.dtype)
             p.grad.fill_(value)
         model.step()
+
+
+class TestLossScaleGrowthUpdate(DistributedTest):
+    world_size = 1
+
+    @pytest.mark.parametrize("optimizer_type", ["fused", "unfused", 1, 2, 3])
+    @pytest.mark.parametrize("clip_grad", [0.0, 1.5, 0.5])
+    def test_parameter_updates(self, optimizer_type, clip_grad):
+        if not get_accelerator().is_fp16_supported():
+            pytest.skip("fp16 is not supported")
+
+        model = torch.nn.Linear(1, 1, bias=False).to(get_accelerator().current_device_name(), dtype=torch.float16)
+        with torch.no_grad():
+            model.weight.fill_(4.0)
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.25)
+        if isinstance(optimizer_type, str):
+            # Isolate the wrappers from the engine's separate ZeRO-0 backward scaling issue.
+            wrapper = FP16_Optimizer if optimizer_type == "fused" else FP16_UnfusedOptimizer
+            optimizer = wrapper(optimizer,
+                                dynamic_loss_scale=True,
+                                dynamic_loss_args={
+                                    "init_scale": 8,
+                                    "scale_window": 2,
+                                    "min_scale": 1
+                                },
+                                clip_grad=clip_grad)
+            runner = optimizer
+        else:
+            config = {
+                "train_micro_batch_size_per_gpu": 1,
+                "gradient_clipping": clip_grad,
+                "zero_allow_untested_optimizer": True,
+                "zero_optimization": {
+                    "stage": optimizer_type
+                },
+                "fp16": {
+                    "enabled": True,
+                    "initial_scale_power": 3,
+                    "loss_scale_window": 2,
+                    "hysteresis": 1
+                }
+            }
+            model, optimizer, _, _ = deepspeed.initialize(model=model, optimizer=optimizer, config=config)
+            runner = model
+
+        expected_weight = 4.0
+        expected_grad = min(2.0, clip_grad) if clip_grad else 2.0
+        # A constant derivative exposes undersized updates on growth steps; overflow must skip the update.
+        for value, expected_scale in zip([2.0, 2.0, 2.0, float("inf"), 2.0, 2.0, 2.0], [8, 8, 16, 8, 8, 8, 16]):
+            runner.zero_grad()
+            inputs = torch.tensor([[value]], device=get_accelerator().current_device_name(), dtype=torch.float16)
+            runner.backward(model(inputs).sum())
+            runner.step()
+            if value != float("inf"):
+                expected_weight -= 0.25 * expected_grad
+            assert optimizer.loss_scale == expected_scale
+            with deepspeed.zero.GatheredParameters(model.parameters()):
+                assert next(model.parameters()).item() == pytest.approx(expected_weight, abs=1e-3)
+
+        if not isinstance(optimizer_type, str):
+            model.destroy()
 
 
 class TestFused(DistributedTest):
