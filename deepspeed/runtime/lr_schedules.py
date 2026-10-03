@@ -633,7 +633,7 @@ class OneCycle(object):
 
         decay_interval = decay_batch_iteration / self.decay_step_size
         mom_decay_factor = (1 + self.decay_mom_rate * decay_interval)
-        momentums = [(beta0 * mom_decay_factor, beta1) for beta0, beta1 in self.max_moms]
+        momentums = [(beta0 / mom_decay_factor, beta1) for beta0, beta1 in self.max_moms]
 
         return momentums
 
