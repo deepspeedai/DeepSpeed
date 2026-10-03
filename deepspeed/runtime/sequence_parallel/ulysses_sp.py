@@ -444,19 +444,24 @@ class UlyssesSPAttentionHF(torch.nn.Module):
         mpu.initialize_sequence_parallel(sequence_parallel_size=sequence_parallel_size)
 
         from transformers import PreTrainedModel
-        if hasattr(model_name_or_path, "config") or isinstance(model_name_or_path, PreTrainedModel):
+        model_was_loaded = hasattr(model_name_or_path, "config") or isinstance(model_name_or_path, PreTrainedModel)
+        if model_was_loaded:
             # we already have the model (or a PEFT wrapper with config attribute)
             hf_model_config = model_name_or_path.config
         else:
             # if we don't have the model yet at this stage
             hf_model_config = AutoConfig.from_pretrained(model_name_or_path)
 
-        model_attn_implementation = getattr(hf_model_config, "_attn_implementation", None)
-        if model_attn_implementation is not None and model_attn_implementation != core_attn_implementation:
-            raise ValueError(
-                f"core_attn_implementation='{core_attn_implementation}' does not match "
-                f"model config attn_implementation='{model_attn_implementation}'. "
-                "Set both to the same value so sequence-parallel wrapper can intercept the active attention path.")
+        # Only a loaded model's config carries the attn implementation resolved at load time;
+        # a bare AutoConfig still holds the unresolved 'eager' default, so there is nothing
+        # meaningful to compare for a string model path.
+        if model_was_loaded:
+            model_attn_implementation = getattr(hf_model_config, "_attn_implementation", None)
+            if model_attn_implementation is not None and model_attn_implementation != core_attn_implementation:
+                raise ValueError(
+                    f"core_attn_implementation='{core_attn_implementation}' does not match "
+                    f"model config attn_implementation='{model_attn_implementation}'. "
+                    "Set both to the same value so sequence-parallel wrapper can intercept the active attention path.")
 
         # eager always materializes a 4D attention_mask (O(n²) memory) and cannot fall back
         # to is_causal=True like sdpa — so it's incompatible with SP which discards masks.
@@ -666,7 +671,9 @@ class UlyssesSPDataLoaderAdapter:
                              "Ensure your data collator includes position_ids in its output.")
 
         # we have batches of variable seqlen so in order to do all_gather on batches - we need to know the exact length of each tensor on each rank
-        seqlen = torch.tensor(batch["input_ids"].shape[1], dtype=torch.int64, device=self.device)
+        # gloo validates gather shapes strictly, so send a 1-element tensor to match the
+        # receive list; a 0-dim scalar only passes on backends that move raw bytes.
+        seqlen = torch.full((1, ), batch["input_ids"].shape[1], dtype=torch.int64, device=self.device)
         seqlens = [torch.zeros(1, dtype=torch.int64, device=self.device) for _ in range(self.sp_world_size)]
         dist.all_gather(seqlens, seqlen, group=self.sp_group)
         seqlens = [x[0].item() for x in seqlens]

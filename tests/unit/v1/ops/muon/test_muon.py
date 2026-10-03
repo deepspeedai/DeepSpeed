@@ -548,6 +548,73 @@ class TestMuonOffloadLossScaling(DistributedTest):
                 f"with gradient clipping: max_diff={max_diff}, norm_1={norm_1}, norm_1024={norm_1024}")
 
 
+class TestMuonLossScaling(DistributedTest):
+    """The same invariance without offload, where the update stays in the fp16 gradient buffers.
+
+    Newton-Schulz returns the same update at any loss scale, so the step must not divide it by the
+    loss scale the way it unscales a gradient. It used to, and a Muon parameter under fp16 moved
+    by 1/loss_scale of its update.
+    """
+
+    world_size = 2
+
+    @pytest.mark.parametrize("zero_stage", [1, 2, 3])
+    def test_loss_scale_invariance(self, zero_stage):
+        from deepspeed.utils import safe_get_full_fp32_param
+
+        hidden_dim = 128
+
+        def _update_with_scale(loss_scale):
+            torch.manual_seed(42)
+            model = SimpleModel(hidden_dim=hidden_dim, nlayers=2)
+            config_dict = {
+                "train_micro_batch_size_per_gpu": 4,
+                "gradient_clipping": 1.0,
+                "optimizer": {
+                    "type": "muon",
+                    "params": {
+                        "lr": 0.02
+                    }
+                },
+                "fp16": {
+                    "enabled": True,
+                    "loss_scale": loss_scale
+                },
+                "zero_optimization": {
+                    "stage": zero_stage,
+                    "reduce_scatter": False
+                },
+            }
+            engine, _, _, _ = deepspeed.initialize(config=config_dict,
+                                                   model=model,
+                                                   model_parameters=model.parameters(),
+                                                   dist_init_required=False)
+            muon_named = [(n, p) for n, p in engine.module.named_parameters() if getattr(p, "use_muon", False)]
+            assert muon_named, "No Muon parameters identified"
+            before = {n: safe_get_full_fp32_param(p).clone() for n, p in muon_named}
+
+            torch.manual_seed(999)
+            x = torch.randn(4, hidden_dim, device=engine.device).half()
+            y = torch.randint(0, hidden_dim, (4, ), device=engine.device)
+            engine.backward(engine(x, y))
+            engine.step()
+            updates = {n: (before[n] - safe_get_full_fp32_param(p)).float() for n, p in muon_named}
+            engine.destroy()
+            return updates
+
+        unscaled = _update_with_scale(1.0)
+        scaled = _update_with_scale(1024.0)
+        for name, expected in unscaled.items():
+            actual = scaled[name]
+            ratio = (actual.norm() / expected.norm()).item()
+            # fp16 rounds the two runs' momentum differently, which the update inherits; a scale
+            # applied to it is a factor of 1024.
+            relative = ((actual - expected).norm() / expected.norm()).item()
+            assert abs(ratio - 1) < 1e-2 and relative < 1e-1, (
+                f"{name}: the update under loss scale 1024 is {ratio:.3e} of the one under 1 "
+                f"(relative difference {relative:.1e}, ZeRO-{zero_stage})")
+
+
 class TestMuonZero3NVMeMomentumResidency(DistributedTest):
     """Verify ZeRO-3 resident Muon momentum buffers persist across NVMe swapping steps."""
 

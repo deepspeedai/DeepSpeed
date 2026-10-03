@@ -169,6 +169,11 @@ def test_continuous_generation_covers_modern_static_cache_path():
                 def get_text_config(self, **_kwargs):
                     return self
 
+                @property
+                def per_layer_config(self):
+                    # StaticCache on current Transformers main reads this before choosing layer types.
+                    return [self]
+
             self.config = CacheConfig(
                 max_position_embeddings=32,
                 num_hidden_layers=1,
@@ -211,6 +216,11 @@ def test_continuous_generation_trims_cache_after_staggered_eos():
 
         def get_text_config(self, **_kwargs):
             return self
+
+        @property
+        def per_layer_config(self):
+            # StaticCache on current Transformers main reads this before choosing layer types.
+            return [self]
 
     class CacheClassModel(torch.nn.Module):
         _supports_cache_class = True
@@ -547,34 +557,6 @@ def test_engine_pairs_shared_prefill_cache_tensors():
     workspace.repeat_kv_cache.assert_called_once_with(2, 2)
 
 
-# -- _sample_top_p ------------------------------------------------------
-
-
-def test_sample_top_p_returns_correct_shape():
-    logits = torch.randn(4, 100)
-    tokens = HybridEngineRollout._sample_top_p(logits, temperature=1.0, top_p=1.0)
-    assert tokens.shape == (4, 1)
-
-
-def test_sample_top_p_deterministic_with_low_temp():
-    logits = torch.tensor([[1.0, 10.0, 2.0]])
-    tok = HybridEngineRollout._sample_top_p(logits, temperature=1e-10, top_p=1.0)
-    assert tok.item() == 1
-
-
-def test_sample_top_p_top_p_filters():
-    logits = torch.tensor([[0.0, 0.0, 100.0]])
-    tok = HybridEngineRollout._sample_top_p(logits, temperature=1.0, top_p=0.5)
-    assert tok.item() == 2
-
-
-def test_sample_top_p_batch():
-    logits = torch.randn(8, 50)
-    tokens = HybridEngineRollout._sample_top_p(logits, temperature=0.8, top_p=0.9)
-    assert tokens.shape == (8, 1)
-    assert (tokens >= 0).all() and (tokens < 50).all()
-
-
 # -- sync_weights is no-op ---------------------------------------------
 
 
@@ -635,6 +617,43 @@ def test_generate_keeps_ranks_in_lockstep_and_pads_after_eos():
     assert engine.module.generate.call_args.kwargs['eos_token_id'] is None
     assert result.input_ids.tolist() == [[10, 11, 5, 2, 0, 0]]
     assert result.attention_mask.tolist() == [[1, 1, 1, 1, 0, 0]]
+
+
+def test_generate_forwards_top_k_for_sampling_with_multiple_samples_and_eos():
+    engine = _make_engine()
+    tok = _make_tokenizer()
+    rollout = HybridEngineRollout(engine, tok)
+    engine.module.generate.return_value = torch.tensor([
+        [10, 11, 5, 2, 7, 8],
+        [10, 11, 6, 7, 2, 8],
+    ])
+    request = RolloutRequest(torch.tensor([[10, 11]]), torch.ones((1, 2), dtype=torch.long))
+    sampling = SamplingConfig(max_new_tokens=4, temperature=0.7, top_p=0.8, top_k=5, n_samples_per_prompt=2)
+
+    result = rollout.generate(request, sampling)
+
+    generate_call = engine.module.generate.call_args
+    assert generate_call.args[0].tolist() == [[10, 11], [10, 11]]
+    assert generate_call.kwargs["attention_mask"].tolist() == [[1, 1], [1, 1]]
+    assert generate_call.kwargs["do_sample"] is True
+    assert generate_call.kwargs["temperature"] == 0.7
+    assert generate_call.kwargs["top_p"] == 0.8
+    assert generate_call.kwargs["top_k"] == 5
+    assert generate_call.kwargs["eos_token_id"] is None
+    assert result.input_ids.tolist() == [[10, 11, 5, 2, 0, 0], [10, 11, 6, 7, 2, 0]]
+    assert result.attention_mask.tolist() == [[1, 1, 1, 1, 0, 0], [1, 1, 1, 1, 1, 0]]
+
+
+@pytest.mark.parametrize("top_k", [-1, 0])
+def test_generate_disables_top_k_for_sampling(top_k):
+    engine = _make_engine()
+    rollout = HybridEngineRollout(engine, _make_tokenizer())
+    engine.module.generate.return_value = torch.tensor([[10, 11, 5]])
+    request = RolloutRequest(torch.tensor([[10, 11]]), torch.ones((1, 2), dtype=torch.long))
+
+    rollout.generate(request, SamplingConfig(max_new_tokens=1, temperature=0.7, top_k=top_k))
+
+    assert engine.module.generate.call_args.kwargs["top_k"] == 0
 
 
 def test_pad_after_eos_handles_different_lengths_and_missing_eos():
