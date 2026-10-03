@@ -3,6 +3,7 @@
 
 # DeepSpeed Team
 
+import copy
 import deepspeed
 import torch
 import pytest
@@ -131,3 +132,68 @@ def test_fused_adam_matches_reference(adam_w_mode, dtype):
     for ds_param, ref_param in zip(ds_params, ref_params):
         atol = 8 * torch.finfo(dtype).eps * ref_param.abs().max().item()
         torch.testing.assert_close(ds_param.float(), ref_param.float(), rtol=0, atol=atol)
+
+
+@pytest.mark.parametrize('adam_w_mode', [True, False], ids=['adamw', 'adam'])
+@pytest.mark.parametrize('mixed_dtype', [False, True], ids=['fp32', 'mixed'])
+@pytest.mark.parametrize('intermittent_grad', [False, True], ids=['all_grads', 'intermittent'])
+def test_fused_adam_parameter_steps(adam_w_mode, mixed_dtype, intermittent_grad):
+    dtypes = [torch.float16, torch.bfloat16, torch.float32] if mixed_dtype else [torch.float32] * 3
+    if not all(dtype in get_accelerator().supported_dtypes() for dtype in dtypes):
+        pytest.skip('Required dtypes are not supported')
+    if not deepspeed.ops.__compatible_ops__[FusedAdamBuilder.NAME]:
+        pytest.skip('FusedAdam is not compatible')
+    torch.manual_seed(123)
+    params = [torch.nn.Parameter(torch.randn(128, device=get_accelerator().device_name(), dtype=dtype) * 0.1)
+              for dtype in dtypes]
+    references = [p.detach().clone() for p in params]
+    moments = [(torch.zeros_like(p), torch.zeros_like(p)) for p in params]
+    steps = [0] * len(params)
+    options = dict(lr=0.03, betas=(0.8, 0.95), eps=1e-6, weight_decay=0.1, adam_w_mode=adam_w_mode)
+    optimizer = FusedAdam(params, **options)
+    for iteration in range(6):
+        optimizer.zero_grad()
+        for i, (param, reference, (first, second)) in enumerate(zip(params, references, moments)):
+            if intermittent_grad and iteration % 3 == i:
+                continue
+            param.grad = torch.randn_like(param) * 0.1
+            steps[i] += 1
+            reference_adam_step(reference, param.grad, first, second, steps[i], options['lr'],
+                                *options['betas'], options['eps'], options['weight_decay'], adam_w_mode)
+        optimizer.step()
+        for i, (param, reference) in enumerate(zip(params, references)):
+            atol = {torch.float32: 2e-6, torch.float16: 1e-4, torch.bfloat16: 1e-3}[param.dtype]
+            torch.testing.assert_close(param.detach(), reference, rtol=0, atol=atol)
+            if steps[i]:
+                assert optimizer.state[param]['step'] == steps[i]
+        if iteration == 2:
+            state_dict = copy.deepcopy(optimizer.state_dict())
+            optimizer = FusedAdam(params, **options)
+            optimizer.load_state_dict(state_dict)
+
+
+def test_fused_adam_intermittent_training():
+    if not deepspeed.ops.__compatible_ops__[FusedAdamBuilder.NAME]:
+        pytest.skip('FusedAdam is not compatible')
+    torch.manual_seed(123)
+    model = SimpleModel(16).to(get_accelerator().device_name())
+    reference = copy.deepcopy(model)
+    options = dict(lr=0.02, betas=(0.8, 0.95), eps=1e-6, weight_decay=0.1)
+    optimizer = FusedAdam(model.parameters(), **options)
+    reference_optimizer = torch.optim.AdamW(reference.parameters(), **options)
+    for iteration in range(6):
+        bias_grad = iteration % 3 != 1
+        model.linears[0].bias.requires_grad_(bias_grad)
+        reference.linears[0].bias.requires_grad_(bias_grad)
+        optimizer.zero_grad()
+        reference_optimizer.zero_grad(set_to_none=True)
+        inputs = torch.randn(8, 16, device=get_accelerator().device_name())
+        labels = torch.randint(0, 16, (8,), device=get_accelerator().device_name())
+        actual, expected = model(inputs, labels), reference(inputs, labels)
+        torch.testing.assert_close(actual, expected)
+        actual.backward()
+        expected.backward()
+        optimizer.step()
+        reference_optimizer.step()
+        for param, ref_param in zip(model.parameters(), reference.parameters()):
+            torch.testing.assert_close(param, ref_param, rtol=1e-5, atol=2e-6)
