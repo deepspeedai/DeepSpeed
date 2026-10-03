@@ -997,6 +997,12 @@ smoke coverage used for this AutoEP surface produced the following version gates
 | -------------------------------------------------------------------------------------------------------------- | -------- |
 | How the DeepEP route applies one FP32 routing weight to each received row at the existing `score_apply` boundary. `"auto"` resolves to `"eager"`, preserving `(rows.float() * weights).to(rows.dtype)`. `"fused"` is experimental and uses a separate Triton pointwise operator for that per-row product only; it does not perform the top-k reduction or move the BF16/FP16 rounding point. It requires `comm_backend="deepep"`, `autoep_size > 1`, CUDA, Triton, contiguous bfloat16/float16 rows shaped `[N, H]`, and contiguous FP32 weights shaped `[N, 1]` on the same device; DeepEP dispatch currently supports BF16 rows only. Fused weight gradients can differ from eager due to FP32 summation order. Unsupported configurations fail rather than falling back. | `"auto"` |
 
+***gate_up_impl***: [string]
+
+| Description                                                                                                    | Default  |
+| -------------------------------------------------------------------------------------------------------------- | -------- |
+| How the grouped experts compute their gate and up projections. `"separate"` runs two grouped GEMMs. `"fused"` is experimental and runs one `torch._grouped_mm` over the gate and up weights concatenated on each call, followed by an activation that reads the two halves of its output in place; for `swiglu` this is a Triton kernel. Parameters, checkpoints and optimizer state keep the separate `w1`/`w3` layout. Forward values and weight gradients are those of `"separate"`; the input gradient accumulates both projections in one FP32 GEMM accumulation instead of adding two rounded results. Requires `use_grouped_mm=true` and the `torch._grouped_mm` path (set `disable_triton_grouped_mm=true` on devices that prefer the Triton grouped GEMM); unsupported configurations fail rather than falling back. | `"separate"` |
+
 ***route_norm***: [boolean]
 
 | Description                                                                                                     | Default |

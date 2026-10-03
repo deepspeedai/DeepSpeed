@@ -637,6 +637,7 @@ class AutoEPMoELayer(nn.Module):
             activation=spec.expert_activation,
             activation_alpha=spec.expert_activation_alpha,
             activation_limit=spec.expert_activation_limit,
+            gate_up_impl=config.gate_up_impl,
         )
         _copy_parameter_data(self.experts.w1, w1)
         _copy_parameter_data(self.experts.w2, w2)
