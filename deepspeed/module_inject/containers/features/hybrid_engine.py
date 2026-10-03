@@ -4,8 +4,6 @@
 # DeepSpeed Team
 
 from abc import ABC, abstractmethod
-from typing import List, Tuple
-
 import torch
 
 
@@ -97,60 +95,13 @@ class HybridEngineContainer(ABC):
         # TODO(cmikeh2): Re-enable this once verified
         #self.apply_weight_quantization()
 
-    def _release_params(self, param_pairs: List[Tuple[torch.Tensor, torch.Tensor]]):
-        """
-        Helper for `release_[component]` methods. Accepts a list of tuples where the first
-        element is the module param that needs to be deleted, and the second is the reassignment
-        from the container.
-        """
-        for module_param, container_param in param_pairs:
-            if module_param is not None:
-                del module_param
-            module_param = container_param
-
-    def release_memory(self):
-        """
-        Delete module parameters if they exist and point them back to the container. The primary
-        purpose of this is for TP-inference with ZeRO-3. In this scenario, we need to delete the
-        parameters we've created for inference to free their memory.
-        """
-        general_params = [
-            (self.module.attention.attn_ow, self.dense_w),
-            (self.module.attention.attn_ob, self.dense_b),
-            (self.module.mlp.attn_nw, self.attn_nw),
-            (self.module.mlp.attn_nb, self.attn_nb),
-            (self.module.norm_w, self.input_nw),
-            (self.module.norm_b, self.input_nb),
-        ]
-
-        self._release_params(general_params)
-
-        self.release_qkv()
-        self.release_mlp()
-
-    def release_qkv(self):
-        """
-        Release for QKV parameters (as well as any aliases).
-        """
-        qkv_params = [
-            (self.module.attention.attn_qkvw, self.qkvw),
-            (self.module.attention.attn_qkvb, self.qkvb),
-        ]
-
-        self._release_params(qkv_params)
-
-    def release_mlp(self):
-        """
-        Release for MLP parameters (as well as any aliases).
-        """
-        mlp_params = [
-            (self.module.mlp.inter_w, self._h4h_w),
-            (self.module.mlp.inter_b, self._h4h_b),
-            (self.module.mlp.output_w, self._4hh_w),
-            (self.module.mlp.output_b, self._4hh_b),
-        ]
-
-        self._release_params(mlp_params)
+    def release_memory(self) -> None:
+        """Drop inference shards and restore the ZeRO-managed training parameters."""
+        self.set_params_wo_copy(Z3_enabled=True)
+        self.module.attention._attn_qkvw = None
+        self.module.attention._attn_qkvb = None
+        self.module.mlp._inter_w = None
+        self.module.mlp._inter_b = None
 
     def reset_params(self):
         """

@@ -271,9 +271,8 @@ class DeepSpeedHybridEngine(DeepSpeedEngine):
                             if len(self.all_lora_params) > 0:
                                 self._fuse_lora_layer(layer_id)
 
-                            if self.mpu is not None:
-                                self._inference_containers[layer_id].apply_tensor_parallelism(self.mp_replace,
-                                                                                              reversed_dim=True)
+                            self._inference_containers[layer_id].apply_tensor_parallelism(mp_replace=self.mp_replace,
+                                                                                          reversed_dim=True)
 
                 # TODO(cmikeh2) Evaluate if this can be deferred when release_inference_cache
                 # is enabled.
@@ -299,11 +298,12 @@ class DeepSpeedHybridEngine(DeepSpeedEngine):
                 self.retake_inference_cache()
 
                 non_active_params = get_inactive_params(non_tp_params)
-                with GatheredParameters(non_active_params):
-                    generate_ret_vals = self._generate(*inputs, **kwargs)
-
-                for layer_id in range(len(self.layer_params)):
-                    self._inference_containers[layer_id].release_memory()
+                try:
+                    with GatheredParameters(non_active_params):
+                        generate_ret_vals = self._generate(*inputs, **kwargs)
+                finally:
+                    for layer_id in range(len(self.layer_params)):
+                        self._inference_containers[layer_id].release_memory()
 
                 rank = dist.get_rank(group=self.mp_group)
                 generate_ret_vals = generate_ret_vals[input_shape[0] * rank:input_shape[0] * (rank + 1)]

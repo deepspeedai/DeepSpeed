@@ -34,32 +34,22 @@ class HybridSplitQKVContainer(HybridEngineContainer):
         # Only need to alter
         if self.module.attention.attn_qkvw is None:
             params = [
-                (self.module.attention.attn_qw, self.qw),
-                (self.module.attention.attn_qb, self.qb),
-                (self.module.attention.attn_kw, self.kw),
-                (self.module.attention.attn_kb, self.kb),
-                (self.module.attention.attn_vw, self.vw),
-                (self.module.attention.attn_vb, self.vb),
+                ("attn_qw", self.qw),
+                ("attn_qb", self.qb),
+                ("attn_kw", self.kw),
+                ("attn_kb", self.kb),
+                ("attn_vw", self.vw),
+                ("attn_vb", self.vb),
             ]
-            for dst, src in params:
-                dst = mp_replace.copy(
-                    dst[:self.qw.shape[0] // mp_replace.mp_size], src, int8=reversed_dim,
-                    allocate_tensor=reversed_dim) if src is not None else None
+            for name, src in params:
+                dst: torch.Tensor | None = getattr(self.module.attention, name)
+                dst = mp_replace.copy(dst=dst[:src.shape[0] // mp_replace.mp_size],
+                                      src=src,
+                                      int8=reversed_dim,
+                                      allocate_tensor=reversed_dim) if src is not None else None
+                setattr(self.module.attention, name, dst)
         else:
-            super().attention_qkv_mp(mp_replace)
-
-    def release_qkv(self):
-        super().release_qkv()
-        split_qkv_params = [
-            (self.module.attention.attn_qw, self.qw),
-            (self.module.attention.attn_qb, self.qb),
-            (self.module.attention.attn_kw, self.kw),
-            (self.module.attention.attn_kb, self.kb),
-            (self.module.attention.attn_vw, self.vw),
-            (self.module.attention.attn_vb, self.vb),
-        ]
-
-        self._release_params(split_qkv_params)
+            super().attention_qkv_mp(mp_replace=mp_replace, reversed_dim=reversed_dim)
 
     def reset_qkv(self):
         self.qkvw.data[:self.qw.shape[0]] = self.qw.data
