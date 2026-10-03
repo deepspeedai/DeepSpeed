@@ -392,7 +392,14 @@ class BF16_Optimizer(ZeROOptimizer):
 
         self._global_grad_norm = all_groups_norm
 
-        assert all_groups_norm > 0.
+        if all_groups_norm < 0.:
+            # -1 is what `mask_nan_or_inf_with_val_inplace` writes for a non-finite norm, and what
+            # `get_norm_with_moe_layers` returns for one. Passing it on would give
+            # `clip_tensors_by_global_norm` a negative clip coefficient, which flips the sign of
+            # every gradient instead of shrinking it. The `assert` this replaces caught that, but
+            # said nothing about it and is removed entirely under `python -O`.
+            raise RuntimeError("The bf16 gradient norm is not finite, which is reported as -1. Check the model and "
+                               "the loss for an overflow or a NaN; clipping cannot proceed from this norm.")
         if self.clip_grad > 0.:
             clip_tensors_by_global_norm(input_tensors=self.get_grads_for_norm(for_clipping=True),
                                         max_norm=self.clip_grad,
