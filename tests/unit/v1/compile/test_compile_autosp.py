@@ -3,6 +3,7 @@
 
 # DeepSpeed Team
 
+import copy
 import operator
 import re
 from unittest.mock import patch
@@ -85,6 +86,100 @@ class TestAutoSPCompile(DistributedTest):
             config_dict["bf16"] = {"enabled": True}
 
         compare_sp_loss(self, config_dict, sp_size)
+
+
+class _SeqDimModel(torch.nn.Module):
+    """Causal single-layer transformer whose inputs carry the sequence on `seq_dim` of a 2-D [seq, batch] layout."""
+
+    def __init__(self, seq_dim, vocab_size=64, hidden=32, num_heads=2):
+        super().__init__()
+        self.seq_dim = seq_dim
+        self.num_heads = num_heads
+        self.embed = torch.nn.Embedding(vocab_size, hidden)
+        self.pos_embed = torch.nn.Embedding(1024, hidden)
+        self.qkv = torch.nn.Linear(hidden, 3 * hidden)
+        self.out = torch.nn.Linear(hidden, hidden)
+        self.head = torch.nn.Linear(hidden, vocab_size)
+
+    def forward(self, input_ids, labels, position_ids):
+        if self.seq_dim == 1:
+            input_ids, labels, position_ids = input_ids.t(), labels.t(), position_ids.t()
+        seq_len, batch = input_ids.shape
+        x = self.embed(input_ids) + self.pos_embed(position_ids)
+        q, k, v = self.qkv(x).chunk(3, dim=-1)
+
+        def to_heads(t):
+            return t.view(seq_len, batch, self.num_heads, -1).permute(1, 2, 0, 3)
+
+        attn = F.scaled_dot_product_attention(to_heads(q), to_heads(k), to_heads(v), is_causal=True)
+        x = x + self.out(attn.permute(2, 0, 1, 3).reshape(seq_len, batch, -1))
+        logits = self.head(x)
+        return F.cross_entropy(logits.reshape(-1, logits.size(-1)), labels.reshape(-1))
+
+
+class TestAutoSPSeqDim(DistributedTest):
+    world_size = 2
+    non_daemonic_procs = True
+
+    @pytest.mark.sequential
+    @pytest.mark.parametrize("seq_dim", [0, 1])
+    def test_matches_full_sequence_reference(self, seq_dim):
+        import deepspeed
+        import deepspeed.comm as dist
+        from deepspeed.compile.passes.sp_compile import prepare_autosp_inputs
+
+        if get_accelerator().device_name() == "cpu":
+            pytest.skip("CPU does not support this test yet")
+
+        sp_size = self.world_size
+        seq_len, batch, vocab_size = 16, 2, 64
+        device = get_accelerator().current_device_name()
+
+        torch.manual_seed(0)
+        reference = _SeqDimModel(seq_dim, vocab_size=vocab_size).to(device)
+        config = {
+            "train_micro_batch_size_per_gpu": batch,
+            "train_batch_size": batch,
+            "zero_optimization": {
+                "stage": 0
+            },
+            "compile": {
+                "deepcompile": True,
+                "passes": ["autosp"]
+            },
+            "sequence_parallel_size": sp_size,
+        }
+        engine, _, _, _ = deepspeed.initialize(config=config, model=copy.deepcopy(reference))
+        engine.compile()
+
+        # Only forward losses are compared: they pin which dimension is sharded without
+        # depending on how gradients are reduced across the SP group.
+        for step in range(3):
+            torch.manual_seed(100 + step)
+            input_ids = torch.randint(0, vocab_size, (seq_len, batch), device=device)
+            labels = torch.randint(0, vocab_size, (seq_len, batch), device=device)
+            position_ids = torch.arange(seq_len, device=device).unsqueeze(1).expand(seq_len, batch)
+            if seq_dim == 1:
+                input_ids, labels, position_ids = input_ids.t(), labels.t(), position_ids.t()
+            input_ids, labels, position_ids = (t.contiguous() for t in (input_ids, labels, position_ids))
+
+            with torch.no_grad():
+                reference_loss = reference(input_ids, labels, position_ids)
+
+            autosp_inputs = prepare_autosp_inputs(input_ids.clone(),
+                                                  labels.clone(),
+                                                  position_ids.clone(),
+                                                  seq_dim=seq_dim)
+            loss = engine(*autosp_inputs[:3])
+
+            # The SP group is the whole world. Every rank holds the mean over an equally sized
+            # shard of the sequence, so their average is the full-sequence mean.
+            global_loss = loss.detach().clone()
+            dist.all_reduce(global_loss)
+            global_loss /= sp_size
+            torch.testing.assert_close(global_loss, reference_loss, rtol=1e-4, atol=1e-5)
+
+        engine.destroy()
 
 
 class TestAutoSPMeshRegistry(DistributedTest):

@@ -180,7 +180,11 @@ def find_node_by_tag(gm: GraphModule, tag: str) -> Optional[Node]:
     for node in gm.graph.nodes:
         # https://github.com/pytorch/pytorch/blob/085b71eab05cbc7d474a173884269c62d2778f77/torch/_dynamo/utils.py#L5048
         tensor_dict = node.meta.get('tensor_dict')
-        if tensor_dict and tensor_dict.get('tag') == tag:
+        node_tag = tensor_dict.get('tag') if tensor_dict else None
+        # prepare_autosp_inputs tags tensors with (key, seq_dim); a bare key is also accepted.
+        if isinstance(node_tag, tuple):
+            node_tag = node_tag[0]
+        if node_tag == tag:
             input_id_node = node
             break
     return input_id_node

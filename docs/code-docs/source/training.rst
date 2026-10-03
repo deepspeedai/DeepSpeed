@@ -742,6 +742,8 @@ automatic sharding:
     )
 
 This serves as a hint to the compiler to know which inputs should be sharded across which dimension.
+``seq_dim`` applies to every prepared tensor, so use ``seq_dim=0`` for sequence-first ``[seq, batch]`` inputs.
+The compiler records it on the tagged inputs and shards along that dimension.
 
 Memory Optimization
 ~~~~~~~~~~~~~~~~~~~

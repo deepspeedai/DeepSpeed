@@ -17,7 +17,8 @@ from deepspeed.compile import constants
 
 from ..custom_ops import all_to_all, sp_dp_registry  # noqa: F401
 from ..fx import find_node_by_name, get_node_shape_meta
-from ..util import get_input_id_node, get_label_id_node, get_position_id_node, shard_tensor_node, get_sdpa_nodes
+from ..util import (get_autosp_seq_dim, get_input_id_node, get_label_id_node, get_position_id_node, shard_tensor_node,
+                    get_sdpa_nodes)
 
 
 def prepare_autosp_inputs(input_id: torch.Tensor,
@@ -43,6 +44,8 @@ def prepare_autosp_inputs(input_id: torch.Tensor,
 
     if seq_dim < 0 or seq_dim >= input_id.ndim:
         raise ValueError(f"seq_dim {seq_dim} must be a valid index for input_id with shape {input_id.shape}")
+    if seq_dim >= label_id.ndim:
+        raise ValueError(f"seq_dim {seq_dim} is out of bounds for label_id with shape {label_id.shape}")
 
     if position_id is not None:
         if seq_dim >= position_id.ndim:
@@ -60,10 +63,11 @@ def prepare_autosp_inputs(input_id: torch.Tensor,
     if attention_mask is not None:
         torch._dynamo.decorators.mark_dynamic(attention_mask, seq_dim)
 
-    input_id.tag = constants.AUTOSP_INPUT_ID_KEY
-    label_id.tag = constants.AUTOSP_LABEL_ID_KEY
+    # Dynamo only carries the `tag` attribute into graph metadata, so seq_dim must travel inside it.
+    input_id.tag = (constants.AUTOSP_INPUT_ID_KEY, seq_dim)
+    label_id.tag = (constants.AUTOSP_LABEL_ID_KEY, seq_dim)
     if position_id is not None:
-        position_id.tag = constants.AUTOSP_POSITION_ID_KEY
+        position_id.tag = (constants.AUTOSP_POSITION_ID_KEY, seq_dim)
 
     return input_id, label_id, position_id, attention_mask
 
@@ -77,7 +81,7 @@ def pass_shard_seq_dim(gm: GraphModule, example_inputs):
 
     input_ids_node = get_input_id_node(gm)
     val = get_node_shape_meta(input_ids_node)
-    seq_symint = val.shape[1]
+    seq_symint = val.shape[get_autosp_seq_dim(input_ids_node)]
     assert isinstance(
         seq_symint,
         torch.SymInt), f"expected sequence dimension to be of type {torch.SymInt!r} but found {type(seq_symint)!r}"
