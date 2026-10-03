@@ -71,3 +71,64 @@ def test_continuous_generation_profile_on_accelerator():
     assert profile["active_batch_size"] == 1
     assert profile["continuous_batch_size"] == 1
     assert profile["total_ms"] >= profile["generation_ms"]
+
+
+def test_continuous_graph_generation_refills_a_fixed_slot_on_cuda():
+    accelerator = get_accelerator()
+    if not accelerator.is_available() or accelerator.device_name() != "cuda":
+        pytest.skip("CUDA is required for CUDA graph rollout coverage")
+
+    class CacheConfig(SimpleNamespace):
+
+        def get_text_config(self, **_kwargs):
+            return self
+
+        @property
+        def per_layer_config(self):
+            return [self]
+
+    class CacheClassModel(torch.nn.Module):
+        _supports_cache_class = True
+
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.zeros(1))
+            self.config = CacheConfig(
+                max_position_embeddings=32,
+                num_hidden_layers=1,
+                num_attention_heads=1,
+                num_key_value_heads=1,
+                hidden_size=1,
+                head_dim=1,
+            )
+
+        def forward(self, input_ids, attention_mask, past_key_values=None, use_cache=True, **kwargs):
+            states = input_ids[:, None, :, None].to(dtype=torch.float32)
+            _, values = past_key_values.update(states, states, layer_idx=0, **kwargs)
+            cache_mask = attention_mask[:, :values.shape[2]].to(values.dtype).unsqueeze(-1)
+            next_tokens = ((values[:, 0] * cache_mask).sum(dim=(1, 2)).long() % 10) + 5
+            logits = torch.zeros((input_ids.shape[0], input_ids.shape[1], 16), device=input_ids.device)
+            logits.scatter_(2, next_tokens[:, None, None].expand(-1, input_ids.shape[1], 1), 1)
+            return SimpleNamespace(logits=logits, past_key_values=past_key_values)
+
+    device = torch.device(accelerator.device_name())
+    graph_rollout = HybridEngineRollout(
+        SimpleNamespace(module=CacheClassModel().to(device)),
+        SimpleNamespace(pad_token_id=0, eos_token_id=2),
+        cfg=HybridEngineRolloutConfig(use_graph_capture=True),
+    )
+    eager_rollout = HybridEngineRollout(
+        SimpleNamespace(module=CacheClassModel().to(device)),
+        SimpleNamespace(pad_token_id=0, eos_token_id=2),
+    )
+    request = RolloutRequest(
+        torch.tensor([[1, 2, 3], [1, 2, 4]], device=device),
+        torch.ones((2, 3), dtype=torch.long, device=device),
+    )
+
+    sampling = SamplingConfig(max_new_tokens=2, temperature=0, continuous_batch_size=1)
+    eager_output = eager_rollout.generate(request, sampling)
+    graph_output = graph_rollout.generate(request, sampling)
+
+    assert torch.equal(graph_output.input_ids, eager_output.input_ids)
+    assert torch.equal(graph_output.attention_mask, eager_output.attention_mask)

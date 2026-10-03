@@ -8,6 +8,7 @@ the transformer inference extension are available.
 """
 
 from types import SimpleNamespace
+from contextlib import nullcontext
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -94,6 +95,71 @@ def test_continuous_generation_rejects_unsupported_inputs():
         rollout.generate(request, SamplingConfig(max_new_tokens=2, continuous_batch_size=0))
     with pytest.raises(ValueError, match="greedy"):
         rollout.generate(request, SamplingConfig(max_new_tokens=2, temperature=0.5, continuous_batch_size=1))
+
+
+def test_continuous_generation_routes_graph_capture_to_fixed_capacity_path():
+    rollout = HybridEngineRollout(
+        _make_engine(),
+        _make_tokenizer(),
+        cfg=HybridEngineRolloutConfig(use_graph_capture=True),
+    )
+    request = _make_request()
+    sampling = SamplingConfig(max_new_tokens=2, temperature=0, continuous_batch_size=4)
+    expected = MagicMock()
+
+    with patch.object(rollout, "_generate_continuous_graph", return_value=expected) as generate_graph:
+        assert rollout.generate(request, sampling) is expected
+
+    generate_graph.assert_called_once()
+    original_request, requests, captured_sampling, max_batch_size = generate_graph.call_args.args
+    assert original_request is request
+    assert len(requests) == request.prompt_ids.shape[0]
+    assert captured_sampling is sampling
+    assert max_batch_size == 4
+
+
+@patch("deepspeed.runtime.rollout.hybrid_engine_rollout.get_accelerator")
+def test_continuous_graph_capture_uses_fixed_capacity_buffers(mock_get_accelerator):
+
+    class DecodeModule(torch.nn.Module):
+
+        def __init__(self):
+            super().__init__()
+            self.calls = []
+
+        def forward(self, input_ids, **_kwargs):
+            self.calls.append(input_ids)
+            return SimpleNamespace(logits=torch.zeros((input_ids.shape[0], 1, 8)))
+
+    stream = MagicMock()
+    accelerator = mock_get_accelerator.return_value
+    accelerator.Stream.return_value = stream
+    accelerator.current_stream.return_value = stream
+    accelerator.stream.side_effect = lambda _stream: nullcontext()
+    accelerator.capture_to_graph.side_effect = lambda _graph: nullcontext()
+
+    module = DecodeModule()
+    static_input = torch.zeros((4, 1), dtype=torch.long)
+    static_attention = torch.zeros((4, 6), dtype=torch.long)
+    static_write_positions = torch.zeros(4, dtype=torch.long)
+    static_cache_position = torch.tensor([5], dtype=torch.long)
+    static_position_ids = torch.zeros((4, 1), dtype=torch.long)
+
+    graph, logits = HybridEngineRollout._capture_continuous_graph(
+        module,
+        MagicMock(),
+        static_input,
+        static_attention,
+        static_write_positions,
+        static_cache_position,
+        static_position_ids,
+    )
+
+    assert graph is accelerator.create_graph.return_value
+    assert logits.shape == (4, 1, 8)
+    assert len(module.calls) == 4
+    assert all(call is static_input for call in module.calls)
+    accelerator.capture_to_graph.assert_called_once_with(graph)
 
 
 def test_static_cache_constructor_supports_max_batch_keyword():

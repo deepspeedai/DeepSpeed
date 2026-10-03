@@ -259,6 +259,8 @@ class HybridEngineRollout(RolloutEngine):
             RolloutRequest(request.prompt_ids[index:index + 1], request.prompt_attention_mask[index:index + 1])
             for index in range(request.prompt_ids.shape[0]))
         self._validate_continuous_inputs(requests, sampling, max_batch_size)
+        if self.use_graph_capture:
+            return self._generate_continuous_graph(original_request, requests, sampling, max_batch_size)
 
         module = self.engine.module
         profile = self._start_continuous_profile() if self.enable_profiling else None
@@ -405,6 +407,184 @@ class HybridEngineRollout(RolloutEngine):
                                             generation_end, post_processing_end)
         return output
 
+    @torch.no_grad()
+    def _generate_continuous_graph(self, original_request, requests, sampling, max_batch_size):
+        """Run continuous greedy decoding with a fixed-capacity CUDA graph.
+
+        Scheduler slots stay attached to physical cache rows for their whole
+        lifetime. Retired rows are masked until a new prompt is prefetched into
+        them, so the captured decode always receives the same batch shape and
+        static tensor addresses.
+        """
+        module = self.engine.module
+        device = requests[0].prompt_ids.device
+        if device.type != "cuda":
+            raise ValueError("continuous CUDA graph capture requires CUDA rollout inputs")
+
+        from transformers import StaticCache
+        from deepspeed.utils.static_cache import DeepSpeedStaticCache
+
+        profile = self._start_continuous_profile() if self.enable_profiling else None
+        prompt_len = requests[0].prompt_ids.shape[1]
+        max_cache_len = prompt_len + sampling.max_new_tokens
+        model_dtype = next(module.parameters()).dtype
+        scheduler = ContinuousBatchScheduler(max_batch_size, sampling.max_new_tokens)
+        request_by_id = {}
+        responses = {}
+        for request_id, request in enumerate(requests):
+            scheduler.submit(ContinuousBatchRequest(request_id))
+            request_by_id[request_id] = request
+            responses[request_id] = []
+
+        cache = DeepSpeedStaticCache(
+            module.config,
+            batch_size=max_batch_size,
+            max_cache_len=max_cache_len,
+            device=device,
+            dtype=model_dtype,
+        )
+        static_input = torch.zeros((max_batch_size, 1), dtype=torch.long, device=device)
+        static_attention = torch.zeros((max_batch_size, max_cache_len), dtype=torch.long, device=device)
+        static_position_ids = torch.zeros((max_batch_size, 1), dtype=torch.long, device=device)
+        static_write_positions = torch.zeros(max_batch_size, dtype=torch.long, device=device)
+        cache.set_write_position(static_write_positions)
+        # Transformers uses cache_position to build the causal mask. Per-row
+        # validity is represented by static_attention, so a fixed upper bound
+        # lets one captured graph serve requests at different decode lengths.
+        static_cache_position = torch.tensor([max_cache_len - 1], dtype=torch.long, device=device)
+        graph, static_logits = self._capture_continuous_graph(
+            module,
+            cache,
+            static_input,
+            static_attention,
+            static_write_positions,
+            static_cache_position,
+            static_position_ids,
+        )
+
+        slot_by_request = {}
+        write_positions = {}
+        next_tokens = {}
+        update = scheduler.schedule()
+        while update.active:
+            if profile is not None:
+                profile["active_batch_sizes"].append(len(update.active))
+
+            for request_id in update.retired:
+                static_attention[slot_by_request[request_id]].zero_()
+                slot_by_request.pop(request_id, None)
+                write_positions.pop(request_id, None)
+                next_tokens.pop(request_id, None)
+
+            free_slots = [slot for slot in range(max_batch_size) if slot not in slot_by_request.values()]
+            admitted_ids = tuple(request.request_id for request in update.admitted)
+            admitted_slots = []
+            for request_id in admitted_ids:
+                slot = free_slots.pop(0)
+                slot_by_request[request_id] = slot
+                write_positions[request_id] = prompt_len
+                admitted_slots.append(slot)
+
+            cache_start = self._profile_start(profile)
+            if admitted_ids:
+                admitted_tokens = self._continuous_prefill(
+                    module,
+                    StaticCache,
+                    cache,
+                    update,
+                    request_by_id,
+                    static_attention,
+                    static_write_positions,
+                    prompt_len,
+                    prompt_len,
+                    model_dtype,
+                    device,
+                    profile,
+                    target_slots=tuple(admitted_slots),
+                )
+                next_tokens.update(admitted_tokens)
+            self._profile_end(profile, "cache_management_overhead_ms", cache_start)
+
+            decode_ids = tuple(request_id for request_id in update.active_ids if request_id not in admitted_ids)
+            static_input.zero_()
+            static_position_ids.zero_()
+            static_write_positions.zero_()
+            for request_id in decode_ids:
+                slot = slot_by_request[request_id]
+                position = write_positions[request_id]
+                static_input[slot:slot + 1].copy_(next_tokens[request_id])
+                static_position_ids[slot, 0] = static_attention[slot, :position].sum()
+                static_attention[slot, position] = 1
+                static_write_positions[slot] = position
+
+            decoded_tokens = {}
+            if decode_ids:
+                decode_start = self._profile_start(profile)
+                get_accelerator().replay_graph(graph)
+                self._profile_end(profile, "decode_forward_ms", decode_start, count="num_decode_forwards")
+                for request_id in decode_ids:
+                    slot = slot_by_request[request_id]
+                    decoded_tokens[request_id] = static_logits[slot:slot + 1, -1, :].argmax(dim=-1, keepdim=True)
+                    write_positions[request_id] += 1
+                next_tokens.update(decoded_tokens)
+
+            finished_ids = []
+            for request_id in update.active_ids:
+                token = next_tokens[request_id]
+                responses[request_id].append(token)
+                if self._is_eos(token):
+                    finished_ids.append(request_id)
+
+            scheduler_start = self._profile_start(profile)
+            update = scheduler.advance(finished_ids)
+            self._profile_end(profile, "scheduler_overhead_ms", scheduler_start)
+
+        generation_end = self._profile_start(profile)
+        output = self._build_continuous_batch(original_request, responses)
+        post_processing_end = self._profile_end(profile, None, generation_end)
+        if profile is not None:
+            self._finish_continuous_profile(profile, original_request, responses, max_batch_size, prompt_len,
+                                            generation_end, post_processing_end)
+        return output
+
+    @staticmethod
+    def _capture_continuous_graph(module, cache, static_input, static_attention, static_write_positions,
+                                  static_cache_position, static_position_ids):
+        """Capture one fixed-capacity decode forward and return its static logits."""
+        accelerator = get_accelerator()
+        saved_pre = dict(module._forward_pre_hooks)
+        saved_post = dict(module._forward_hooks)
+        module._forward_pre_hooks.clear()
+        module._forward_hooks.clear()
+        try:
+            warmup_stream = accelerator.Stream()
+            warmup_stream.wait_stream(accelerator.current_stream())
+            with accelerator.stream(warmup_stream):
+                for _ in range(3):
+                    module(
+                        static_input,
+                        attention_mask=static_attention,
+                        past_key_values=cache,
+                        use_cache=True,
+                        cache_position=static_cache_position,
+                        position_ids=static_position_ids,
+                    )
+            accelerator.current_stream().wait_stream(warmup_stream)
+            graph = accelerator.create_graph()
+            with accelerator.capture_to_graph(graph):
+                output = module(
+                    static_input,
+                    attention_mask=static_attention,
+                    past_key_values=cache,
+                    use_cache=True,
+                    cache_position=static_cache_position,
+                    position_ids=static_position_ids,
+                )
+        finally:
+            module._forward_pre_hooks.update(saved_pre)
+            module._forward_hooks.update(saved_post)
+        return graph, output.logits
+
     def _start_continuous_profile(self):
         accelerator = get_accelerator()
         accelerator.synchronize()
@@ -510,8 +690,6 @@ class HybridEngineRollout(RolloutEngine):
             raise ValueError("continuous batching requires at least one request")
         if max_batch_size <= 0:
             raise ValueError("max_batch_size must be positive")
-        if self.use_graph_capture:
-            raise ValueError("continuous batching does not yet support CUDA graph capture")
         if self.use_shared_prefill:
             raise ValueError("continuous batching does not support shared prompt prefill")
 
@@ -552,7 +730,8 @@ class HybridEngineRollout(RolloutEngine):
                             prompt_len,
                             model_dtype,
                             device,
-                            profile=None):
+                            profile=None,
+                            target_slots=None):
         if not update.admitted:
             return {}
 
@@ -575,12 +754,16 @@ class HybridEngineRollout(RolloutEngine):
         cache_start = self._profile_start(profile)
         prefill_tokens = prefill_output.logits[:, -1, :].argmax(dim=-1, keepdim=True)
         cache_offset = cache_position - prompt_len
+        if target_slots is None:
+            target_slots = update.admitted_slots
+        if len(target_slots) != len(admitted_ids):
+            raise ValueError("continuous prefill needs one target slot per admitted request")
         for layer_idx, prefill_layer in enumerate(prefill_cache.layers):
             target_layer = cache.layers[layer_idx]
-            for source_row, target_row in enumerate(update.admitted_slots):
+            for source_row, target_row in enumerate(target_slots):
                 target_layer.keys[target_row, :, cache_offset:cache_position].copy_(prefill_layer.keys[source_row])
                 target_layer.values[target_row, :, cache_offset:cache_position].copy_(prefill_layer.values[source_row])
-        for source_row, target_row in enumerate(update.admitted_slots):
+        for source_row, target_row in enumerate(target_slots):
             attention_mask[target_row, cache_offset:cache_position].copy_(prompt_attention[source_row])
             write_positions[target_row] = cache_position
         self._profile_end(profile, "cache_management_overhead_ms", cache_start)
