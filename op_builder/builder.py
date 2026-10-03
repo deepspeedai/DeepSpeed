@@ -27,6 +27,18 @@ WARNING = f"{YELLOW} [WARNING] {END}"
 DEFAULT_TORCH_EXTENSION_PATH = "/tmp/torch_extensions"
 DEFAULT_COMPUTE_CAPABILITIES = "6.0;6.1;7.0"
 
+
+def _parse_cuda_arch(cc):
+    major = int(cc[0])
+    minor_part = cc[1]
+    has_ptx = minor_part.endswith('+PTX')
+    minor_version = minor_part.removesuffix('+PTX')
+    match = re.fullmatch(r'(\d+)([a-z]?)', minor_version)
+    if match is None:
+        raise ValueError(f"Invalid CUDA architecture: {'.'.join(cc)}")
+    return major, int(match.group(1)), match.group(2), has_ptx
+
+
 try:
     import torch
 except ImportError:
@@ -715,7 +727,7 @@ class CUDAOpBuilder(OpBuilder):
                         raise RuntimeError(f"DeepSpeed JIT builder for '{self.name}' found no CUDA devices. Set "
                                            "TORCH_CUDA_ARCH_LIST or make GPUs visible.")
 
-            ccs = sorted(ccs, key=lambda cc: tuple(int(part.split('+')[0]) for part in cc.split('.')))
+            ccs = sorted(ccs, key=lambda cc: _parse_cuda_arch(cc.split('.'))[:3])
             if not any('+PTX' in cc for cc in ccs):
                 ccs[-1] += '+PTX'
         else:
@@ -746,16 +758,13 @@ class CUDAOpBuilder(OpBuilder):
         # carries through after dedupe.
         canonical = {}
         for cc in ccs:
-            major = int(cc[0])
-            minor_part = cc[1]
-            has_ptx = minor_part.endswith('+PTX')
-            minor = int(minor_part.split('+')[0])
-            key = (major, minor)
+            major, minor, suffix, has_ptx = _parse_cuda_arch(cc)
+            key = (major, minor, suffix)
             canonical[key] = canonical.get(key, False) or has_ptx
         canonical_archs = sorted(canonical.items())
 
         self.enable_bf16 = True
-        for (major, _minor), _has_ptx in canonical_archs:
+        for (major, _minor, _suffix), _has_ptx in canonical_archs:
             if major <= 7:
                 self.enable_bf16 = False
 
@@ -764,7 +773,10 @@ class CUDAOpBuilder(OpBuilder):
         # token per arch using the X.Y or X.Y+PTX form, matching PyTorch's
         # canonical parsing where +PTX on an arch token already implies both
         # the sm and PTX emissions for that arch.
-        arch_tokens = [f"{major}.{minor}{'+PTX' if has_ptx else ''}" for (major, minor), has_ptx in canonical_archs]
+        arch_tokens = [
+            f"{major}.{minor}{suffix}{'+PTX' if has_ptx else ''}"
+            for (major, minor, suffix), has_ptx in canonical_archs
+        ]
         os.environ["TORCH_CUDA_ARCH_LIST"] = ";".join(arch_tokens)
 
         if self.jit_mode:
@@ -775,8 +787,8 @@ class CUDAOpBuilder(OpBuilder):
         # Emit exactly one sm_X line per arch, followed by one compute_X PTX
         # line when any variant of that arch carried +PTX.
         args = []
-        for (major, minor), has_ptx in canonical_archs:
-            num = f"{major}{minor}"
+        for (major, minor, suffix), has_ptx in canonical_archs:
+            num = f"{major}{minor}{suffix}"
             args.append(f'-gencode=arch=compute_{num},code=sm_{num}')
             if has_ptx:
                 args.append(f'-gencode=arch=compute_{num},code=compute_{num}')
