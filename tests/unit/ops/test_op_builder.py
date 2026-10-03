@@ -170,6 +170,51 @@ def test_non_jit_branch_unchanged():
     ]
 
 
+@pytest.mark.parametrize("original_arch", [None, "", "gfx1100;gfx1030"])
+@pytest.mark.parametrize("build_fails", [False, True])
+@pytest.mark.parametrize("rocm", [False, True])
+def test_jit_load_preserves_rocm_arch_environment(monkeypatch, original_arch, build_fails, rocm):
+    from torch.utils import cpp_extension
+
+    class StubOpBuilder(builder_module.OpBuilder):
+
+        def absolute_name(self):
+            return "deepspeed.ops.rocm_env_test"
+
+        def sources(self):
+            return []
+
+    builder = StubOpBuilder("rocm_env_test")
+    # Reset discovery caches so each case exercises the normal ROCm metadata path.
+    for attribute in ("_is_rocm_pytorch", "_rocm_gpu_arch", "_rocm_wavefront_size"):
+        monkeypatch.setattr(builder_module.OpBuilder, attribute, None)
+    monkeypatch.setattr(builder_module.OpBuilder, "_loaded_ops", {})
+    monkeypatch.setattr(builder_module.torch.version, "hip", "6.1" if rocm else None)
+    monkeypatch.setattr(cpp_extension, "ROCM_HOME", "/opt/rocm")
+    monkeypatch.setattr(subprocess, "check_output", lambda *args, **kwargs: b"Name: gfx942\nWavefront Size: 64\n")
+    monkeypatch.setattr(cpp_extension, "verify_ninja_availability", lambda: None)
+    if original_arch is None:
+        monkeypatch.delenv("PYTORCH_ROCM_ARCH", raising=False)
+    else:
+        monkeypatch.setenv("PYTORCH_ROCM_ARCH", original_arch)
+    op_module = object()
+
+    def load(**kwargs):
+        assert os.environ.get("PYTORCH_ROCM_ARCH") == ("gfx942" if rocm else original_arch)
+        if build_fails:
+            raise RuntimeError("extension build failed")
+        return op_module
+
+    monkeypatch.setattr(cpp_extension, "load", load)
+    if build_fails:
+        with pytest.raises(RuntimeError, match="extension build failed"):
+            builder.jit_load(verbose=False)
+    else:
+        assert builder.jit_load(verbose=False) is op_module
+    assert os.environ.get("PYTORCH_ROCM_ARCH") == original_arch
+    assert builder.jit_mode is False
+
+
 def test_non_jit_branch_sorts_and_dedupes_gencode_flags():
     builder = make_builder(jit_mode=False)
 
