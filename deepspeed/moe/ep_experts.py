@@ -40,7 +40,9 @@ class ExpertActivation:
     """One way an expert MLP turns its gate and up projections into the input of the down projection.
 
     ``fn(gate, up, alpha, limit)`` computes the form in plain PyTorch; ``fused_fn`` has the same
-    signature and runs a fused kernel, when the form has one. ``uses_alpha`` and ``uses_limit`` say
+    signature and runs a fused kernel, when the form has one. ``packed_fused_fn(gate_up, alpha, limit)``
+    is a fused kernel that reads ``gate`` and ``up`` packed side by side in one ``[..., 2 * I]`` tensor;
+    forms without one run ``fn`` on views of the two halves. ``uses_alpha`` and ``uses_limit`` say
     which of the two scalars the form reads. ``gate_fn`` is the elementwise function the form applies
     to ``gate`` when it is ``gate_fn(gate) * up`` inside the clamp region; AutoEP compares it with the
     ``act_fn`` of the model's experts module to catch a preset that names the wrong form. It is
@@ -51,6 +53,7 @@ class ExpertActivation:
     uses_alpha: bool = False
     uses_limit: bool = False
     gate_fn: Callable[[torch.Tensor], torch.Tensor] | None = None
+    packed_fused_fn: Callable[[torch.Tensor, float, float], torch.Tensor] | None = None
 
 
 #: The expert activations AutoEP can compute, by name. They are different functions: a model trained
@@ -72,11 +75,12 @@ def register_expert_activation(
     uses_alpha: bool = False,
     uses_limit: bool = False,
     gate_fn: Callable[[torch.Tensor], torch.Tensor] | None = None,
+    packed_fused_fn: Callable[[torch.Tensor, float, float], torch.Tensor] | None = None,
 ) -> None:
     """Make ``name`` selectable as a preset's or the config's ``expert_activation``."""
     if name in EXPERT_ACTIVATIONS:
         raise ValueError(f"expert activation {name!r} is already registered")
-    EXPERT_ACTIVATIONS[name] = ExpertActivation(fn, fused_fn, uses_alpha, uses_limit, gate_fn)
+    EXPERT_ACTIVATIONS[name] = ExpertActivation(fn, fused_fn, uses_alpha, uses_limit, gate_fn, packed_fused_fn)
 
 
 def get_expert_activation(name: str) -> ExpertActivation:
@@ -99,6 +103,11 @@ def _swiglu_fused(gate: torch.Tensor, up: torch.Tensor, alpha: float, limit: flo
     return swiglu(gate, up)
 
 
+def _swiglu_packed_fused(gate_up: torch.Tensor, alpha: float, limit: float) -> torch.Tensor:
+    from deepspeed.ops.triton_ops.swiglu_triton import swiglu_packed
+    return swiglu_packed(gate_up)
+
+
 def _geglu_tanh(gate: torch.Tensor, up: torch.Tensor, alpha: float, limit: float) -> torch.Tensor:
     return _gelu_tanh(gate) * up
 
@@ -113,7 +122,11 @@ def _swiglu_oai(gate: torch.Tensor, up: torch.Tensor, alpha: float, limit: float
     return (up + 1.0) * (gate * torch.sigmoid(gate * alpha))
 
 
-register_expert_activation("swiglu", _swiglu, fused_fn=_swiglu_fused, gate_fn=F.silu)
+register_expert_activation("swiglu",
+                           _swiglu,
+                           fused_fn=_swiglu_fused,
+                           gate_fn=F.silu,
+                           packed_fused_fn=_swiglu_packed_fused)
 register_expert_activation("geglu_tanh", _geglu_tanh, gate_fn=_gelu_tanh)
 register_expert_activation("swiglu_clamped", _swiglu_clamped, uses_limit=True, gate_fn=F.silu)
 register_expert_activation("swiglu_oai", _swiglu_oai, uses_alpha=True, uses_limit=True)
@@ -133,6 +146,23 @@ def apply_expert_activation(gate: torch.Tensor,
     entry = get_expert_activation(activation)
     if fused and entry.fused_fn is not None:
         return entry.fused_fn(gate, up, alpha, limit)
+    return entry.fn(gate, up, alpha, limit)
+
+
+def apply_packed_expert_activation(gate_up: torch.Tensor,
+                                   activation: str = "swiglu",
+                                   alpha: float = 1.702,
+                                   limit: float = 7.0,
+                                   fused: bool = True) -> torch.Tensor:
+    """:func:`apply_expert_activation` for ``gate`` and ``up`` packed side by side in ``[..., 2 * I]``.
+
+    Forms without a packed kernel run on views of the two halves, which their elementwise ops read in
+    place.
+    """
+    entry = get_expert_activation(activation)
+    if fused and entry.packed_fused_fn is not None:
+        return entry.packed_fused_fn(gate_up, alpha, limit)
+    gate, up = gate_up.chunk(2, dim=-1)
     return entry.fn(gate, up, alpha, limit)
 
 
@@ -254,6 +284,44 @@ def _run_experts_grouped_mm(
     return out
 
 
+def _run_experts_grouped_mm_fused_gate_up(
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    w3: torch.Tensor,
+    x: torch.Tensor,
+    num_tokens_per_expert: torch.Tensor,
+    activation: str = "swiglu",
+    alpha: float = 1.702,
+    limit: float = 7.0,
+) -> torch.Tensor:
+    """:func:`_run_experts_grouped_mm` with the gate and up projections in one grouped GEMM.
+
+    The parameters keep their separate ``w1``/``w3`` layout; their concatenation is rebuilt on each call.
+    One GEMM over ``2 * hidden_dim`` output columns replaces two in the forward pass, and in the backward
+    pass a single input-gradient GEMM accumulates both projections in FP32 instead of adding two rounded
+    results. The forward values and weight gradients are those of the separate path.
+
+    Args mirror :func:`_run_experts_grouped_mm`.
+    """
+    offsets = torch.cumsum(num_tokens_per_expert, dim=0, dtype=torch.int32)
+
+    cast_dtype = x.dtype
+    w13 = torch.cat([w1.to(cast_dtype), w3.to(cast_dtype)], dim=1)
+    gate_up = torch._grouped_mm(
+        x.to(cast_dtype),
+        w13.transpose(-2, -1),
+        offs=offsets,
+    )
+    h = apply_packed_expert_activation(gate_up, activation, alpha, limit)
+    out = torch._grouped_mm(
+        h,
+        w2.to(cast_dtype).transpose(-2, -1),
+        offs=offsets,
+    ).type_as(x)
+
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Expert computation: Triton grouped GEMM (sm80 / sm86 fast path)
 # ---------------------------------------------------------------------------
@@ -327,6 +395,9 @@ class GroupedExperts(nn.Module):
             the default is plain SwiGLU.
         activation_alpha (float): ``alpha`` for the forms that read it (``swiglu_oai``).
         activation_limit (float): Clamp limit for the forms that read it.
+        gate_up_impl (str): ``"separate"`` runs the gate and up projections as two grouped GEMMs;
+            ``"fused"`` runs them as one over the concatenated weights. ``"fused"`` needs the
+            ``torch._grouped_mm`` path.
     """
 
     def __init__(
@@ -339,6 +410,7 @@ class GroupedExperts(nn.Module):
         activation: str = "swiglu",
         activation_alpha: float = 1.702,
         activation_limit: float = 7.0,
+        gate_up_impl: str = "separate",
     ):
         super().__init__()
         # An unknown name is refused here, at construction, rather than at the first forward step.
@@ -371,6 +443,15 @@ class GroupedExperts(nn.Module):
                                "Triton to enable the Triton grouped-GEMM path, or set "
                                "use_grouped_mm=False to use the sequential expert loop.")
 
+        if gate_up_impl not in ("separate", "fused"):
+            raise ValueError(f'gate_up_impl must be "separate" or "fused", got {gate_up_impl!r}')
+        self.gate_up_impl = gate_up_impl
+        if gate_up_impl == "fused" and (not use_grouped_mm or self.use_triton_grouped_mm):
+            selected = "the Triton grouped GEMM" if use_grouped_mm else "the sequential expert loop"
+            raise ValueError('gate_up_impl="fused" runs the gate and up projections as one torch._grouped_mm, '
+                             f"but {selected} was selected. Set use_grouped_mm=true and, on devices that prefer "
+                             'the Triton kernel, disable_triton_grouped_mm=true, or leave gate_up_impl unset.')
+
         if use_grouped_mm and self.use_triton_grouped_mm:
             warning_once("Triton grouped-GEMM path is selected for grouped_gemm. "
                          "The Triton path is preferred on compute capability smaller than sm90, "
@@ -395,6 +476,8 @@ class GroupedExperts(nn.Module):
         if self.use_triton_grouped_mm:
             return _run_experts_triton_grouped_mm(self.w1, self.w2, self.w3, x, num_tokens_per_expert, *act)
         elif self.use_grouped_mm:
+            if self.gate_up_impl == "fused":
+                return _run_experts_grouped_mm_fused_gate_up(self.w1, self.w2, self.w3, x, num_tokens_per_expert, *act)
             return _run_experts_grouped_mm(self.w1, self.w2, self.w3, x, num_tokens_per_expert, *act)
         else:
             return _run_experts_for_loop(self.w1, self.w2, self.w3, x, num_tokens_per_expert, *act)

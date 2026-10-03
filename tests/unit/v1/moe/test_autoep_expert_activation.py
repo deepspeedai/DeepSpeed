@@ -30,6 +30,7 @@ from deepspeed.moe.ep_experts import (
     EXPERT_ACTIVATIONS,
     GroupedExperts,
     apply_expert_activation,
+    apply_packed_expert_activation,
     register_expert_activation,
 )
 from unit.v1.moe.autoep_test_utils import MockMoETransformer
@@ -204,7 +205,7 @@ class TestGroupedExpertsActivation:
         ref.sum().backward()
         torch.testing.assert_close(x.grad, x_ref.grad)
 
-    @pytest.mark.parametrize("path", ["grouped_mm", "triton_grouped_mm"])
+    @pytest.mark.parametrize("path", ["grouped_mm", "triton_grouped_mm", "fused_gate_up"])
     @pytest.mark.parametrize("activation", tuple(EXPERT_ACTIVATIONS))
     def test_grouped_gemm_paths_match_the_for_loop(self, activation, path):
         # The grouped-GEMM paths hand the activation the packed [rows, ffn] tensors and, for swiglu,
@@ -212,7 +213,7 @@ class TestGroupedExpertsActivation:
         # three paths must compute the same function, forward and backward. Runs on the accelerator.
         if get_accelerator().device_name() == "cpu":
             pytest.skip("needs an accelerator")
-        if path == "grouped_mm" and not hasattr(torch, "_grouped_mm"):
+        if path in ("grouped_mm", "fused_gate_up") and not hasattr(torch, "_grouped_mm"):
             pytest.skip("this PyTorch build has no torch._grouped_mm")
         device = get_accelerator().current_device_name()
         torch.manual_seed(0)
@@ -221,7 +222,11 @@ class TestGroupedExpertsActivation:
         loop = GroupedExperts(use_grouped_mm=False, **shape, **act)
         for weight in (loop.w1, loop.w2, loop.w3):
             nn.init.normal_(weight, std=0.1)  # pre-activations of order one: the clamps engage on ~1/5 of them
-        grouped = GroupedExperts(use_grouped_mm=True, disable_triton_grouped_mm=True, **shape, **act)
+        grouped = GroupedExperts(use_grouped_mm=True,
+                                 disable_triton_grouped_mm=True,
+                                 gate_up_impl="fused" if path == "fused_gate_up" else "separate",
+                                 **shape,
+                                 **act)
         grouped.load_state_dict(loop.state_dict())
         grouped.use_triton_grouped_mm = path == "triton_grouped_mm"
         loop.to(device=device, dtype=torch.bfloat16)
@@ -261,6 +266,122 @@ class TestGroupedExpertsActivation:
         for weight in (experts.w1, experts.w2, experts.w3):
             nn.init.normal_(weight, std=0.02)
         assert experts(torch.randn(4, 8), torch.tensor([2, 2])).shape == (4, 8)
+
+
+class TestFusedGateUp:
+    """gate_up_impl="fused": one grouped GEMM over the concatenated gate and up weights."""
+
+    @pytest.mark.parametrize("activation", tuple(EXPERT_ACTIVATIONS))
+    def test_packed_activation_matches_the_separate_halves(self, activation):
+        # Same elementwise math on views of the two halves. On CPU, a strided view can take a different
+        # vectorization path than a contiguous tensor, so agreement is to rounding rather than bitwise.
+        torch.manual_seed(0)
+        gate = torch.randn(6, 5, requires_grad=True)
+        up = torch.randn(6, 5, requires_grad=True)
+        gate_up = torch.cat([gate, up], dim=-1).detach().requires_grad_(True)
+        expected = apply_expert_activation(gate, up, activation, 1.5, 1.0, fused=False)
+        packed = apply_packed_expert_activation(gate_up, activation, 1.5, 1.0, fused=False)
+
+        torch.testing.assert_close(packed, expected)
+        grad = torch.randn_like(expected)
+        expected.backward(grad)
+        packed.backward(grad)
+        torch.testing.assert_close(gate_up.grad, torch.cat([gate.grad, up.grad], dim=-1))
+
+    def test_only_swiglu_has_a_packed_kernel(self):
+        # The other forms run their plain expression on views of the two halves, so none of them needs one.
+        assert [name for name, entry in EXPERT_ACTIVATIONS.items() if entry.packed_fused_fn] == ["swiglu"]
+
+    def test_default_keeps_the_separate_projections(self):
+        assert parse_autoep_config({"enabled": True}).gate_up_impl == "separate"
+        assert GroupedExperts(dim=8, hidden_dim=16, num_experts=2, use_grouped_mm=False).gate_up_impl == "separate"
+        fused = parse_autoep_config({"enabled": True, "gate_up_impl": "fused"})
+        assert fused.gate_up_impl == "fused"
+
+    def test_unsupported_settings_are_rejected(self, monkeypatch):
+
+        def validate(**settings):
+            validate_autoep_config(parse_autoep_config({"enabled": True, **settings}), 1, 1, 1, 1)
+
+        validate(gate_up_impl="fused")
+        with pytest.raises(ValueError, match="gate_up_impl must be one of"):
+            validate(gate_up_impl="concat")
+        with pytest.raises(ValueError, match="sequential expert loop"):
+            validate(gate_up_impl="fused", use_grouped_mm=False)
+        with pytest.raises(ValueError, match="gate_up_impl must be"):
+            GroupedExperts(dim=8, hidden_dim=16, num_experts=2, use_grouped_mm=False, gate_up_impl="concat")
+        with pytest.raises(ValueError, match="sequential expert loop"):
+            GroupedExperts(dim=8, hidden_dim=16, num_experts=2, use_grouped_mm=False, gate_up_impl="fused")
+        # Devices below sm90 auto-select the Triton grouped GEMM, which has no fused form.
+        monkeypatch.setattr(type(get_accelerator()), "prefer_triton_grouped_mm", lambda self: True)
+        with pytest.raises(ValueError, match="disable_triton_grouped_mm"):
+            GroupedExperts(dim=8, hidden_dim=16, num_experts=2, use_grouped_mm=True, gate_up_impl="fused")
+        assert GroupedExperts(dim=8,
+                              hidden_dim=16,
+                              num_experts=2,
+                              use_grouped_mm=True,
+                              disable_triton_grouped_mm=True,
+                              gate_up_impl="fused").gate_up_impl == "fused"
+
+    def test_config_reaches_the_replaced_experts(self):
+        if not hasattr(torch, "_grouped_mm"):
+            pytest.skip("this PyTorch build has no torch._grouped_mm")
+        model = _custom_pattern_model()
+        config = _runtime_config(moe_layer_pattern=MOE_PATTERN,
+                                 use_grouped_mm=True,
+                                 disable_triton_grouped_mm=True,
+                                 gate_up_impl="fused")
+        auto_ep = AutoEP(model, config)
+        [spec] = auto_ep.ep_parser()
+        auto_ep.replace_moe_layer(spec, ep_size=1, ep_rank=0)
+        experts = model.model.layers[0].mlp.experts
+        assert experts.gate_up_impl == "fused"
+        # Parameters, and so checkpoints and optimizer state, keep the separate layout.
+        assert [name for name, _ in experts.named_parameters()] == ["w1", "w2", "w3"]
+
+    @pytest.mark.parametrize("activation", tuple(EXPERT_ACTIVATIONS))
+    def test_matches_separate_with_skewed_and_empty_experts(self, activation):
+        # Forward values and weight gradients are the separate path's; the input gradient sums both projections
+        # inside one FP32 GEMM accumulation, so it is held to FP64 instead and must be no less accurate.
+        if get_accelerator().device_name() != "cuda" or not hasattr(torch, "_grouped_mm"):
+            pytest.skip("needs CUDA with torch._grouped_mm and FP64")
+        device = get_accelerator().current_device_name()
+        torch.manual_seed(0)
+        shape = dict(dim=256, hidden_dim=384, num_experts=4)
+        act = dict(activation=activation, activation_alpha=1.5, activation_limit=1.0)
+        separate = GroupedExperts(use_grouped_mm=True, disable_triton_grouped_mm=True, **shape, **act)
+        for weight in (separate.w1, separate.w2, separate.w3):
+            nn.init.normal_(weight, std=0.06)
+        fused = GroupedExperts(use_grouped_mm=True,
+                               disable_triton_grouped_mm=True,
+                               gate_up_impl="fused",
+                               **shape,
+                               **act)
+        fused.load_state_dict(separate.state_dict())
+        reference = copy.deepcopy(separate).to(device=device, dtype=torch.float64)
+        reference.use_grouped_mm = False
+        separate.to(device=device, dtype=torch.bfloat16)
+        fused.to(device=device, dtype=torch.bfloat16)
+
+        counts = torch.tensor([37, 0, 291, 72], device=device)
+        x = torch.randn(int(counts.sum()), 256, device=device, dtype=torch.bfloat16)
+        grad_out = torch.randn(x.shape, device=device, dtype=torch.bfloat16)
+        inputs = {name: x.clone().requires_grad_(True) for name in ("separate", "fused")}
+        out_separate = separate(inputs["separate"], counts)
+        out_fused = fused(inputs["fused"], counts)
+        out_separate.backward(grad_out)
+        out_fused.backward(grad_out)
+        x_reference = x.double().requires_grad_(True)
+        reference(x_reference, counts).backward(grad_out.double())
+
+        torch.testing.assert_close(out_fused, out_separate, rtol=0, atol=0)
+        for name in ("w1", "w2", "w3"):
+            torch.testing.assert_close(getattr(fused, name).grad, getattr(separate, name).grad, rtol=0, atol=0)
+
+        def relative_error(got):
+            return ((got.double() - x_reference.grad).norm() / x_reference.grad.norm()).item()
+
+        assert relative_error(inputs["fused"].grad) <= relative_error(inputs["separate"].grad) * 1.05
 
 
 class TestPresetAndConfig:

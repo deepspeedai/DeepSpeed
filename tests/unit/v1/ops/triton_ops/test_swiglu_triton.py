@@ -15,7 +15,7 @@ import torch.nn.functional as F
 
 from deepspeed.accelerator import get_accelerator
 from deepspeed.ops.triton_ops import is_triton_available
-from deepspeed.ops.triton_ops.swiglu_triton import swiglu
+from deepspeed.ops.triton_ops.swiglu_triton import swiglu, swiglu_packed
 
 if not is_triton_available():
     pytest.skip("Triton is not available", allow_module_level=True)
@@ -96,6 +96,41 @@ def test_shape_mismatch_raises():
     up = torch.randn(8, 32, device=dev)
     with pytest.raises(ValueError):
         swiglu(gate, up)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("shape", [(32, 16), (1, 1), (7, 13), (4, 768), (3, 5, 384), (0, 16)])
+def test_packed_matches_the_separate_kernel_bitwise(dtype, shape):
+    # The packed kernel reads gate and up in place from one [..., 2 * I] tensor with the same FP32 math, so
+    # it must reproduce the separate kernel exactly, forward and backward.
+    dev = get_accelerator().current_device_name()
+    gate = torch.randn(shape, device=dev, dtype=dtype, requires_grad=True)
+    up = torch.randn(shape, device=dev, dtype=dtype, requires_grad=True)
+    gate_up = torch.cat([gate, up], dim=-1).detach().requires_grad_(True)
+    grad_out = torch.randn(shape, device=dev, dtype=dtype)
+
+    out = swiglu_packed(gate_up)
+    expected = swiglu(gate, up)
+    assert out.shape == expected.shape and out.dtype == dtype
+    torch.testing.assert_close(out, expected, rtol=0, atol=0)
+    torch.testing.assert_close(out, _ref_swiglu(gate, up), **_tol(dtype))
+
+    out.backward(grad_out)
+    expected.backward(grad_out)
+    torch.testing.assert_close(gate_up.grad, torch.cat([gate.grad, up.grad], dim=-1), rtol=0, atol=0)
+
+
+def test_packed_non_contiguous_input():
+    dev = get_accelerator().current_device_name()
+    gate_up = torch.randn(32, 64, device=dev, dtype=torch.float32).t()
+    gate, up = gate_up.chunk(2, dim=-1)
+
+    torch.testing.assert_close(swiglu_packed(gate_up), _ref_swiglu(gate, up), **_tol(torch.float32))
+
+
+def test_packed_odd_width_raises():
+    with pytest.raises(ValueError, match="even last dimension"):
+        swiglu_packed(torch.randn(4, 7, device=get_accelerator().current_device_name()))
 
 
 def test_dtype_mismatch_raises():
