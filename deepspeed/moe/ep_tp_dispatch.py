@@ -394,6 +394,40 @@ def _debug_validate_restore_coverage(payload: RoutedAssignmentPayload, ctx: Rest
                                f"missing={missing} unexpected={duplicate_or_stale}")
 
 
+class _AverageGradientOverTP(torch.autograd.Function):
+    """Identity in forward; averages the gradient over the TP folding group in backward.
+
+    Applied to the input of a folded MoE layer. ``restore_combined`` gives each TP peer
+    ``tp_size`` times the gradient of the assignments that peer kept, so the gradient the layer
+    returns for its input is ``tp_size * E_p + S`` on peer ``p``: ``E_p`` is the routed-expert and
+    router part from peer ``p``'s assignments, ``S`` the part every peer computes alike (the
+    shared expert). The true gradient, ``E + S``, is the average over the peers. Replicated
+    parameters before the layer would recover it through the AVERAGE reduction, because their
+    gradients are linear in this one, but a tensor-parallel layer cannot: each peer computes its
+    shard's weight gradient from its own ``dx``, and the column-parallel backward sums the
+    peers' partial input gradients. Averaging here gives every peer the true gradient.
+    """
+
+    @staticmethod
+    def forward(ctx, tensor, group):
+        ctx.group = group
+        return tensor.view_as(tensor)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        grad = grad_output.clone(memory_format=torch.contiguous_format)
+        dist.all_reduce(grad, group=ctx.group)
+        grad.div_(dist.get_world_size(group=ctx.group))
+        return grad, None
+
+
+def average_gradient_over_tp(tensor: torch.Tensor, tp_group, tp_size: int) -> torch.Tensor:
+    """Return ``tensor`` unchanged, with its gradient averaged over the TP folding group."""
+    if tp_size <= 1 or not dist.is_initialized() or not tensor.requires_grad:
+        return tensor
+    return _AverageGradientOverTP.apply(tensor, tp_group)
+
+
 def restore_combined(local_combined: torch.Tensor,
                      ctx: RestoreContext,
                      *,

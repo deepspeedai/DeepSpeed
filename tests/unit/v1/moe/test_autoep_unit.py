@@ -564,7 +564,7 @@ class TestAutoEPConfig:
         with pytest.raises(AssertionError, match="sequence parallelism"):
             engine._validate_zero3_moe_compatibility()
 
-    def test_zero3_compatibility_gate_rejects_active_autotp(self):
+    def test_zero3_compatibility_gate_allows_active_autotp(self):
         model = MockMoETransformer(num_layers=1)
         replace_autoep_layers(model, "mixtral")
         engine = object.__new__(DeepSpeedEngine)
@@ -577,8 +577,7 @@ class TestAutoEPConfig:
             expert_parallel_config=AutoEPConfig(enabled=True, autoep_size=1),
         )
 
-        with pytest.raises(AssertionError, match="AutoTP"):
-            engine._validate_zero3_moe_compatibility()
+        engine._validate_zero3_moe_compatibility()
 
     def test_zero3_compatibility_gate_rejects_quantized_gradients(self):
         model = MockMoETransformer(num_layers=1)
@@ -744,6 +743,7 @@ class TestAutoEPConfig:
         param.ds_zero_placement_family = "autoep_expert"
         param.ds_zero_partition_group_name = "ep_size_2"
         optimizer.model_parallel_rank = 0
+        optimizer.model_parallel_group = None
         optimizer.norm_for_param_grads = {7: 3.0}
         optimizer.get_param_id = lambda _: 7
         optimizer._assert_same_partition_group = lambda _: None

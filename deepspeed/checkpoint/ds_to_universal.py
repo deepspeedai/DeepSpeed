@@ -1286,6 +1286,12 @@ def main(args):
         if not has_zero3_partitioned_autoep:
             autoep_expert_param_names = set()
         else:
+            # The AutoEP files are matched by data-parallel rank alone, so the files of different
+            # tensor-parallel ranks under AutoEP + AutoTP folding cannot be told apart.
+            _, autoep_tp_degree, _ = _build_zero3_rank_grid(model_files)
+            if autoep_tp_degree > 1:
+                raise NotImplementedError("Universal checkpoint conversion of an AutoEP + AutoTP folded ZeRO-3 "
+                                          "checkpoint is not supported yet. Load it with the same topology.")
             _validate_zero3_model_optim_rank_sets(model_files, optim_files)
         param_shapes = _parse_model_states_stage3(model_files)
         # Recover the tensor-parallel / data-parallel grid from the file names. With
