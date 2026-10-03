@@ -90,8 +90,11 @@ def batch_by_seqlens(
     while batch_init < len(metrics):
 
         # we iterate over possible effective batch sizes (groups of microbatches of same size)
+        # `len(metrics) + 1` because `batch_end` is the exclusive end of `metrics[batch_init:batch_end]`,
+        # so stopping at `len(metrics)` never offers the slice that reaches the last sample and the
+        # final sample of the dataset was never placed in a microbatch.
         valid_batch_end = batch_init
-        for batch_end in range(batch_init + equal_size_multiple, len(metrics), equal_size_multiple):
+        for batch_end in range(batch_init + equal_size_multiple, len(metrics) + 1, equal_size_multiple):
 
             # attempt effective batch
             batch = metrics[batch_init:batch_end]
