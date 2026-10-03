@@ -71,11 +71,12 @@ class DSUNet(CUDAGraph, torch.nn.Module):
                  cross_attention_kwargs=None,
                  timestep_cond=None,
                  added_cond_kwargs=None):
-        if cross_attention_kwargs:
-            return self.unet(sample,
-                             timestamp,
-                             encoder_hidden_states,
-                             return_dict,
-                             cross_attention_kwargs=cross_attention_kwargs)
-        else:
-            return self.unet(sample, timestamp, encoder_hidden_states, return_dict)
+        # Everything after encoder_hidden_states goes in by keyword: the fourth positional
+        # parameter of UNet2DConditionModel.forward is class_labels, not return_dict.
+        return self.unet(sample,
+                         timestamp,
+                         encoder_hidden_states,
+                         timestep_cond=timestep_cond,
+                         cross_attention_kwargs=cross_attention_kwargs,
+                         added_cond_kwargs=added_cond_kwargs,
+                         return_dict=return_dict)
