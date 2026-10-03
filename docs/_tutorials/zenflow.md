@@ -38,6 +38,7 @@ Each field in the `zenflow` block controls selective gradient update behavior:
 - `select_strategy`: Strategy for selecting important gradients (`"auto"`, `"step"`, or custom).
 - `select_interval`: How often to re-select important gradients (`"auto"` or integer like 1).
 - `update_interval`: How often to update unimportant gradients (`"auto"` or an integer like 4, meaning every 4 steps).
+- `steps_per_epoch`: Number of steps in one epoch. `"auto"` selection counts `select_interval` in epochs, and DeepSpeed can only read the epoch length from a dataloader it builds, i.e. when you pass `training_data=` to `deepspeed.initialize()`. If you drive your own dataloader, set this to its length; otherwise the important gradients are selected once and never re-selected, and a warning says so.
 - `full_warm_up_rounds`: Number of initial steps with full gradient updates before selection begins.
 - `overlap_step`: Whether to overlap communication with computation (`true` enables it).
 
