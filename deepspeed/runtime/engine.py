@@ -1345,7 +1345,8 @@ class DeepSpeedEngine(Module):
         """Return the 2-norm of all gradients. If there is model parallelism,
         the norm will be global.
         The computed norm will be cached and reused until the next step() pass.
-        Returns ``None`` when ZeRO Stage 1/2 gradient-norm computation is disabled.
+        Returns ``None`` when ZeRO Stage 1/2 gradient-norm computation is disabled,
+        or when ZeRO Stage 0 gradient clipping is disabled.
         .. note::
             In the presence of model parallelism, this is a collective call
             and acts as a barrier among ``mpu.get_model_parallel_group()``.
@@ -3471,15 +3472,16 @@ class DeepSpeedEngine(Module):
             param.grad = None
 
     def clip_fp32_gradients(self):
-        clip_grad_norm_(parameters=self.module.parameters(), max_norm=self.gradient_clipping(), mpu=self.mpu)
+        return clip_grad_norm_(parameters=self.module.parameters(), max_norm=self.gradient_clipping(), mpu=self.mpu)
 
     def _take_model_step(self, lr_kwargs):
+        self._global_grad_norm = None
         if self.gradient_clipping() > 0.0:
             if self.torch_autocast_z0_gradscaler:
                 # Unscale for gradient clipping
                 self.torch_autocast_z0_gradscaler.unscale_(self.optimizer)
             if not (self.fp16_enabled() or self.bfloat16_enabled() or self.zero_optimization()):
-                self.clip_fp32_gradients()
+                self._global_grad_norm = self.clip_fp32_gradients()
         if self.torch_autocast_z0_gradscaler:
             self.torch_autocast_z0_gradscaler.step(self.optimizer)
             self.torch_autocast_z0_gradscaler.update()
