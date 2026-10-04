@@ -100,6 +100,13 @@ class TestAllToAllQuantReduceFallback(DistributedTest):
 
 class TestAllToAllQuantReduceAverage(DistributedTest):
     world_size = 4
+    backend = "gloo"
+    requires_cuda_env = False
+
+    def _launch_procs(self, num_procs, init_method):
+        # CPU tensors on gloo, so the four ranks do not need four accelerator devices.
+        torch.multiprocessing.set_start_method('forkserver', force=True)
+        self._launch_daemonic_procs(num_procs, init_method)
 
     def test_matches_reduce_scatter_average(self):
         # Run the two-stage qgZ path as 2 nodes x 2 devices with the pure-torch quantizer.
@@ -114,10 +121,9 @@ class TestAllToAllQuantReduceAverage(DistributedTest):
         accelerator.device_count = lambda: 2
         coalesced_collectives.quantizer_module = NPUQuantizer
         try:
-            device = accelerator.current_device_name()
             value = -(dist.get_rank() + 1.0)
-            weight = torch.full((8, 16), value, dtype=torch.half, device=device)
-            bias = torch.full((16, ), value, dtype=torch.half, device=device)
+            weight = torch.full((8, 16), value, dtype=torch.half)
+            bias = torch.full((16, ), value, dtype=torch.half)
             outputs = all_to_all_quant_reduce([weight, bias], groups._get_local_all_to_all_group())
         finally:
             accelerator.device_count = saved_device_count
