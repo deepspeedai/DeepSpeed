@@ -583,6 +583,7 @@ class TestDeepEPMatchesCollective(DistributedTest):
                       activation_checkpointing=True,
                       reentrant_checkpointing=True,
                       gate_up_impl=gate_up_impl,
+                      use_grouped_mm=True,
                       disable_triton_grouped_mm=True)
 
         serial = _run_one_step("deepep", self.world_size, seed, **common)

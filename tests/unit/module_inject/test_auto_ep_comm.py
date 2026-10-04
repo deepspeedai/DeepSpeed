@@ -787,11 +787,13 @@ class TestWeightGradOverlap(unittest.TestCase):
         exchange.buffer = self.Buffer(self, log)
         exchange.deep_ep = SimpleNamespace(topk_idx_t=torch.int64)
         exchange.num_experts, exchange.num_sms, exchange.last_handle = self.EXPERTS, 12, None
+        # A form without a Triton kernel, so the CPU route runs wherever Triton is installed.
         experts = GroupedExperts(dim=self.HIDDEN,
                                  hidden_dim=self.INTER,
                                  num_experts=self.EXPERTS,
                                  use_grouped_mm=True,
                                  disable_triton_grouped_mm=True,
+                                 activation="geglu_tanh",
                                  gate_up_impl=gate_up_impl)
         with torch.no_grad():
             for name, value in zip(("w1", "w2", "w3"), self.weights):

@@ -25,6 +25,7 @@ from deepspeed.module_inject.auto_ep_config import (
     validate_autoep_config,
 )
 from deepspeed.module_inject.auto_ep_layer import AutoEPMoELayer
+from deepspeed.ops.triton_ops import is_triton_available
 from deepspeed.module_inject.auto_ep_presets.registry import resolve_preset_candidates
 from deepspeed.moe.ep_experts import (
     EXPERT_ACTIVATIONS,
@@ -471,6 +472,9 @@ class TestDeferredExpertWeightGrad:
     def test_matches_the_plain_path_bitwise_on_cpu(self, activation, gate_up_impl, deferred):
         if not _grouped_mm_runs_on("cpu"):
             pytest.skip("this PyTorch build has no CPU torch._grouped_mm")
+        if EXPERT_ACTIVATIONS[activation].fused_fn is not None and is_triton_available():
+            # The grouped path's fused kernel is Triton, which reads CUDA tensors only; the CUDA test covers it.
+            pytest.skip("with Triton installed, this form's grouped path needs CUDA tensors")
         for dtype in (torch.float32, torch.bfloat16):
             self._compare("cpu", dtype, activation, gate_up_impl, deferred)
 
