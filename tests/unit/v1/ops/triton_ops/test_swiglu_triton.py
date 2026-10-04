@@ -15,7 +15,7 @@ import torch.nn.functional as F
 
 from deepspeed.accelerator import get_accelerator
 from deepspeed.ops.triton_ops import is_triton_available
-from deepspeed.ops.triton_ops.swiglu_triton import swiglu, swiglu_packed
+from deepspeed.ops.triton_ops.swiglu_triton import swiglu, swiglu_backward, swiglu_packed, swiglu_packed_backward
 
 if not is_triton_available():
     pytest.skip("Triton is not available", allow_module_level=True)
@@ -118,6 +118,23 @@ def test_packed_matches_the_separate_kernel_bitwise(dtype, shape):
     out.backward(grad_out)
     expected.backward(grad_out)
     torch.testing.assert_close(gate_up.grad, torch.cat([gate.grad, up.grad], dim=-1), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_standalone_backward_matches_autograd_bitwise(dtype):
+    # Callers that run the forward inside their own autograd function differentiate it with these.
+    dev = get_accelerator().current_device_name()
+    gate = torch.randn(7, 384, device=dev, dtype=dtype, requires_grad=True)
+    up = torch.randn(7, 384, device=dev, dtype=dtype, requires_grad=True)
+    gate_up = torch.cat([gate, up], dim=-1).detach().requires_grad_(True)
+    grad_out = torch.randn(7, 384, device=dev, dtype=dtype)
+    swiglu(gate, up).backward(grad_out)
+    swiglu_packed(gate_up).backward(grad_out)
+
+    grad_gate, grad_up = swiglu_backward(grad_out, gate.detach(), up.detach())
+    torch.testing.assert_close(grad_gate, gate.grad, rtol=0, atol=0)
+    torch.testing.assert_close(grad_up, up.grad, rtol=0, atol=0)
+    torch.testing.assert_close(swiglu_packed_backward(grad_out, gate_up.detach()), gate_up.grad, rtol=0, atol=0)
 
 
 def test_packed_non_contiguous_input():

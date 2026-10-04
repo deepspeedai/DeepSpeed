@@ -273,6 +273,54 @@ not run ``torch._grouped_mm``: with ``use_grouped_mm=false``, or on devices that
 select the Triton grouped GEMM (compute capability below 9.0) unless
 ``disable_triton_grouped_mm=true``.
 
+**Overlapping expert weight gradients with the DeepEP backward (experimental):**
+
+In the backward pass, the experts compute their input gradient (dX), which
+DeepEP then combines back to the ranks the tokens came from, and their weight
+gradients (dW). The two are independent, but normally run one after the other:
+a grouped GEMM's backward computes dX and dW together, before the combine
+starts. ``overlap_weight_grad`` runs them side by side:
+
+.. code-block:: json
+
+    {
+      "expert_parallel": {
+        "enabled": true,
+        "autoep_size": 8,
+        "comm_backend": "deepep",
+        "comm_max_tokens_per_rank": 16384,
+        "gate_up_impl": "fused",
+        "overlap_weight_grad": true
+      }
+    }
+
+The expert backward returns dX at once and leaves its dW GEMMs in a slot. The
+DeepEP dispatch, which takes the expert weights as extra inputs, launches its
+backward combine of dX on DeepEP's stream, runs the dW GEMMs on the compute
+stream, waits for the combine, and returns dW through autograd, so ZeRO's
+gradient handling is unchanged. ``torch._grouped_mm`` launches persistent
+kernels sized to every SM, which would leave the combine nowhere to run, so the
+dW GEMMs are launched with ``comm_num_sm`` SMs withheld through PyTorch's
+experimental SM carveout, restored immediately afterwards.
+
+The gradients are those of the serial backward: the same GEMMs, in the same
+products autograd forms for ``torch._grouped_mm``, run in a different order.
+
+On Qwen3-30B-A3B with 8 H100s (expert parallel size 8, micro-batch 4, 16
+accumulation steps, sequence length 4096, reentrant activation checkpointing,
+``gate_up_impl="fused"``), a full optimizer step went from 21.57 s to 21.10 s
+(-2.2%) in two pairs measured in the same job; overlapping without the SM
+carveout recovered only -0.7%. A kernel profile showed DeepEP running alongside
+the grouped GEMMs for 1.3 s of the step, against none before. Peak allocated
+memory was unchanged and reserved memory about 0.7 GB higher.
+
+``overlap_weight_grad`` is rejected, rather than silently ignored, unless
+``comm_backend="deepep"`` with ``autoep_size > 1``, the experts run
+``torch._grouped_mm`` (``use_grouped_mm=true``, and
+``disable_triton_grouped_mm=true`` on devices that select the Triton grouped
+GEMM), ZeRO stage is 1 or 2, and PyTorch provides
+``torch._C._set_sm_carveout_experimental``.
+
 **DeepEP row weighting implementation (experimental):**
 
 DeepEP dispatch returns one received row per routed assignment and one FP32
