@@ -979,7 +979,10 @@ class HybridEngineRollout(RolloutEngine):
                 if step % eos_check_every == eos_check_every - 1:
                     tok_val = static_token.view(-1)[0].item()
                     if tok_val == eos_token_id:
-                        full_token_buf[step + 2:] = pad_token_id
+                        # step is response-relative; the buffer also carries the
+                        # prompt prefix, so pad from the buffer-absolute slot
+                        # after the EOS (which sits at prompt_len + step + 1).
+                        full_token_buf[prompt_len + step + 2:] = pad_token_id
                         break
             gen_ids = full_token_buf[prompt_len:prompt_len + max_new_tokens].unsqueeze(0)
             return torch.cat([prompt_ids, gen_ids], dim=1)
