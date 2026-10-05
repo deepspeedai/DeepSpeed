@@ -69,7 +69,7 @@ MODAL_TORCH_PRESETS = {
 }
 PYTORCH_CUDA_128_INDEX_URL = "https://download.pytorch.org/whl/cu128"
 APP_NAME = "deepspeedai-torch-latest-ci"
-SANDBOX_TIMEOUT_SECONDS = 5400
+SANDBOX_TIMEOUT_SECONDS = 7200
 SANDBOX_ACQUIRE_TIMEOUT_SECONDS = 1800
 # Exit codes that nightly triage (see .github/workflows/nightly-bisect.yml) keys on. GitHub only
 # reports run success/failure, so the controller also prints a DS_CI_FAILURE_CLASS=<class> sentinel

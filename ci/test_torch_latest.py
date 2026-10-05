@@ -428,7 +428,7 @@ def test_remote_plan_is_structural_and_preserves_order_and_scope():
 def test_sandbox_kwargs_are_fixed_and_secret_free():
     kwargs = torch_latest.build_sandbox_kwargs("image")
     assert kwargs["gpu"] == "l40s:2"
-    assert kwargs["timeout"] == 5400
+    assert kwargs["timeout"] == 7200
     assert torch_latest.SANDBOX_ACQUIRE_TIMEOUT_SECONDS == 1800
     assert kwargs["secrets"] == []
     assert kwargs["network_file_systems"] == {}
@@ -630,7 +630,7 @@ def test_workflow_keeps_github_execution_trusted_and_preserves_modes():
     assert "HF_TOKEN" not in text
     assert "modal==1.2.6" in text
     assert "timeout-minutes: 20" in text
-    assert "timeout-minutes: 105" in text
+    assert "timeout-minutes: 135" in text
     assert text.count("persist-credentials: false") == 2
     assert text.count("lfs: false") == 2
     assert text.count("submodules: false") == 2

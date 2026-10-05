@@ -142,7 +142,7 @@ jobs:
   deploy:
     name: modal-torch-latest / DeepSpeedAI CI
     runs-on: ubuntu-latest
-    timeout-minutes: 105
+    timeout-minutes: 135
     permissions:
       contents: read
     needs: collect-tests
