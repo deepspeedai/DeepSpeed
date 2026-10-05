@@ -456,9 +456,13 @@ def _decode_attn_forward(self,
     step CUDA-graph replayable."""
     if (hidden_states.shape[0] != 1 or hidden_states.shape[1] > 1 or past_key_values is None
             or getattr(self, "_ki_attn_op", None) is None
+            or getattr(self, "_ki_prompt_padded", False)
             or getattr(past_key_values, "_write_position", None) is not self._ki_write_pos):
-        # Prefill, batched decode, or a non-graph cache (e.g. DynamicCache
-        # inside module.generate): the original forward is the correct path.
+        # Prefill, batched decode, a non-graph cache (e.g. DynamicCache
+        # inside module.generate), or a padded prompt: the original forward
+        # is the correct path. The kernel attends every cached slot up to
+        # write_pos unconditionally, so padded prompt positions would leak
+        # into the softmax; SDPA masks them natively via attention_mask.
         return self._ki_orig_attn_forward(hidden_states, position_embeddings, attention_mask, past_key_values,
                                           **kwargs)
 

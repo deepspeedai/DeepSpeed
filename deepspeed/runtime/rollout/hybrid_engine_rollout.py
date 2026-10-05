@@ -158,6 +158,12 @@ class HybridEngineRollout(RolloutEngine):
             prompt_ids = request.prompt_ids
             prompt_attn = request.prompt_attention_mask
 
+        # The injected decode-attention kernel attends every cached slot up
+        # to write_pos unconditionally, so padded prompts must ride the SDPA
+        # path (which masks pad positions natively). One host sync per
+        # generate call; the decode loop itself stays sync-free.
+        module._ki_prompt_padded = bool((prompt_attn == 0).any().item())
+
         if self.enable_profiling:
             accelerator.synchronize()
             expansion_end = time.perf_counter()
