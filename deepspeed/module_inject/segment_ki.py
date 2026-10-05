@@ -459,7 +459,9 @@ def _decode_attn_forward(self,
     The kernel reads the valid KV length from the same GPU-resident
     write_pos tensor the cache update writes through, keeping the whole
     step CUDA-graph replayable."""
-    if (hidden_states.shape[0] != 1 or hidden_states.shape[1] > 1 or past_key_values is None
+    if (hidden_states.shape[0] != 1 or hidden_states.shape[1] > 1
+            or hidden_states.dtype is not torch.bfloat16 or not hidden_states.is_contiguous()
+            or past_key_values is None
             or getattr(self, "_ki_attn_op", None) is None
             or getattr(self, "_ki_prompt_padded", False)
             or getattr(past_key_values, "_write_position", None) is not self._ki_write_pos):
