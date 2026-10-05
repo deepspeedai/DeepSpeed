@@ -1,24 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # DeepSpeed Team
-"""op_builder module for the C++ decode loop (graph replay + step update)."""
+"""Runtime loader for the C++ decode loop (graph replay + step update).
 
-from ..op_builder.builder import CUDAOpBuilder
+The builder lives in op_builder/ so DS_BUILD_DECODE_LOOP=1 installs pick
+it up; this module only exposes the lazily JIT-loaded op to callers."""
 
-
-class DecodeLoopBuilder(CUDAOpBuilder):
-    BUILD_VAR = "DS_BUILD_DECODE_LOOP"
-    NAME = "decode_loop"
-
-    def __init__(self, name=None):
-        super().__init__(name=self.NAME if name is None else name)
-
-    def absolute_name(self):
-        return f"deepspeed.ops.{self.NAME}_op"
-
-    def sources(self):
-        return ["csrc/module_inject/decode_loop.cu"]
-
+from deepspeed.ops.op_builder import DecodeLoopBuilder
 
 _DECODE_LOOP_OP = None
 
