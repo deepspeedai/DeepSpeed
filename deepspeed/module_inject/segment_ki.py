@@ -333,7 +333,7 @@ def _fused_gdn_forward(self, hidden_states, *args, **kwargs):
                        initial_state=recurrent_state,
                        output_final_state=cache_params is not None,
                        use_qk_l2norm_in_kernel=True)
-    # dict.get's default avoids truth-value evaluation: `or` on a
+    # The dict.get default avoids truth-value evaluation: `or` on a
     # multi-element cu-seqlens tensor raises "ambiguous boolean value".
     cu_seqlens = kwargs.get("cu_seq_lens_q", kwargs.get("cu_seqlens"))
     if cu_seqlens is not None:
