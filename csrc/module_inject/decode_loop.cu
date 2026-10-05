@@ -10,10 +10,12 @@
 // vs Python for-loop ≈ 30-50μs.
 // The fused step-update kernel launch is pure C++ (zero Python).
 
+#include <cuda_bf16.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <cuda_runtime.h>
 #include <torch/extension.h>
 #include <functional>
+#include <pybind11/functional.h>
 
 __global__ void ds_loop_step_kernel(const __nv_bfloat16* __restrict__ logits,
                                     int64_t* __restrict__ token_out,
