@@ -32,7 +32,24 @@ from deepspeed.module_inject.kernel_reference import gdn_input_proj as ref_gdn_p
 from deepspeed.module_inject.kernel_reference import triple_gemv as ref_triple_gemv
 
 DEV = get_accelerator().device_name()
-GPU_AVAILABLE = DEV != "cpu"
+
+
+def _kernel_op_available() -> bool:
+    """True when this accelerator registers the segment-KI op builder.
+
+    The kernels are CUDA source today; other backends (XPU/HPU/NPU/MPS) do
+    not register the builder, so their CI must skip rather than fail while
+    JIT-loading CUDA sources. A backend that implements the op later gets
+    these tests automatically."""
+    try:
+        builder = get_accelerator().get_op_builder("FusedGLUBuilder")
+    except Exception:
+        return False
+    # backends without the op answer with the NotImplemented placeholder
+    return builder is not None and builder.__name__ != "NotImplementedBuilder"
+
+
+GPU_AVAILABLE = _kernel_op_available()
 
 
 def _op():
