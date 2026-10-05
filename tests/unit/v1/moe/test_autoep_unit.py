@@ -348,6 +348,33 @@ class TestAutoEPConfig:
         })
         validate_autoep_config(config, world_size=2, pp_size=1, tp_size=1, sp_size=1)
 
+    def test_skip_recompute_combine_defaults_off_and_requires_the_deepep_route(self):
+        assert parse_autoep_config({}).skip_recompute_combine is False
+        deepep = {"comm_backend": "deepep", "comm_max_tokens_per_rank": 4096}
+        rejected = (
+            ({
+                "autoep_size": 2,
+                "skip_recompute_combine": "true"
+            }, "skip_recompute_combine must be a boolean"),
+            ({
+                "autoep_size": 2,
+                "skip_recompute_combine": True
+            }, 'comm_backend="comm"'),
+            ({
+                "autoep_size": 1,
+                "skip_recompute_combine": True,
+                **deepep
+            }, "autoep_size=1"),
+        )
+        for overrides, match in rejected:
+            config = parse_autoep_config({"enabled": True, **overrides})
+            with pytest.raises(ValueError, match=match):
+                validate_autoep_config(config, world_size=2, pp_size=1, tp_size=1, sp_size=1)
+
+        config = parse_autoep_config({"enabled": True, "autoep_size": 2, "skip_recompute_combine": True, **deepep})
+        assert config.skip_recompute_combine is True
+        validate_autoep_config(config, world_size=2, pp_size=1, tp_size=1, sp_size=1)
+
     def test_fused_combine_rejects_folded_tensor_parallelism(self):
         config = parse_autoep_config({
             "enabled": True,
@@ -1393,6 +1420,14 @@ class TestRoutingAndLayerSemantics:
                            ep_rank=0,
                            config=AutoEPConfig(enabled=True, autoep_size=1, load_balance_coeff=0.02))
 
+    def test_skip_recompute_combine_is_limited_to_checked_presets(self):
+        source = MockMoEBlock(num_experts=4, ffn_hidden=128, hidden_size=64)
+        config = _runtime_config(enabled=True, autoep_size=1, skip_recompute_combine=True)
+        with pytest.raises(ValueError, match="skip_recompute_combine is not supported for preset 'custom_family'"):
+            AutoEPMoELayer(_make_spec(model_family="custom_family"), source, ep_size=1, ep_rank=0, config=config)
+        layer = AutoEPMoELayer(_make_spec(), source, ep_size=1, ep_rank=0, config=config)
+        assert layer.skip_recompute_combine is True
+
     def test_router_cache_does_not_duplicate_model_level_gate_capture(self):
         source = MockMoEBlock(num_experts=4, ffn_hidden=128, hidden_size=64)
         layer = AutoEPMoELayer(_make_spec(router_logits_capture_target="router", router_logits_capture_mode="raw"),
@@ -1948,6 +1983,19 @@ class TestModelDetectionAndReplacement:
         auto_ep.replace_moe_layer(specs[0], ep_size=1, ep_rank=0)
         assert isinstance(model.model.layers[0].mlp, AutoEPMoELayer)
         assert model(torch.randn(1, 4, 64)).shape == (1, 4, 100)
+
+    def test_skip_recompute_combine_attaches_each_layer_to_its_decoder_layer(self):
+        for skip in (False, True):
+            model = MockMoETransformer(num_layers=2, moe_every_n=1)
+            config = _runtime_config(enabled=True, autoep_size=1, preset_model="mixtral", skip_recompute_combine=skip)
+            auto_ep = AutoEP(model, config)
+            for spec in auto_ep.ep_parser():
+                auto_ep.replace_moe_layer(spec, ep_size=1, ep_rank=0)
+            for decoder_layer in model.model.layers:
+                attached = decoder_layer.mlp._decoder_layer
+                # Held weakly, so the decoder layer is not registered as a child of its own MoE layer.
+                assert (attached() if skip else attached) is (decoder_layer if skip else None)
+                assert all(module is not decoder_layer for module in decoder_layer.mlp.modules())
 
     def test_fused_replacement_preserves_frozen_experts_and_trainable_router(self):
         model = MockMoETransformer(num_layers=1, num_experts=4, moe_every_n=1).to(dtype=torch.bfloat16)

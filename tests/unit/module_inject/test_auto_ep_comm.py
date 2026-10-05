@@ -2,12 +2,15 @@
 # DeepSpeed Team
 
 import ast
+import functools
 import inspect
+import itertools
 import textwrap
 import sys
 import unittest
 
 import torch
+from torch.utils.checkpoint import checkpoint
 from types import SimpleNamespace
 from unittest import mock
 
@@ -15,6 +18,7 @@ from deepspeed.module_inject.auto_ep_comm import (COMM_BACKEND, DEEPEP_BACKEND, 
                                                   _DeepEPCombine, _DeepEPDispatch, _import_deep_ep, _qps_for_sms,
                                                   assert_dtype_supported, destroy_exchanges, new_exchange_scope,
                                                   shared_exchange)
+from deepspeed.accelerator import get_accelerator
 from deepspeed.module_inject import auto_ep_comm, auto_ep_layer
 from deepspeed.module_inject.auto_ep_config import parse_autoep_config, validate_autoep_config
 
@@ -518,6 +522,7 @@ class TestDeepEPEarlyRoute(unittest.TestCase):
         # Keep the fixture valid when composed with opt-in async split planning.
         layer.async_split_plan = False
         layer._async_split_plan_pending = None
+        layer.skip_recompute_combine = False
         layer.top_k = 2
         layer.num_experts = 2
         layer.num_local_experts = 1
@@ -762,6 +767,232 @@ class TestAutogradSignatures(unittest.TestCase):
         source = inspect.getsource(_DeepEPDispatch.forward)
 
         self.assertIn("return received, recv_weights", source)
+
+
+class TestSkipRecomputeCombine(unittest.TestCase):
+    """skip_recompute_combine: the decoder layer's reentrant recompute records the combine without running it."""
+
+    TOKENS, TOP_K, EXPERTS, HIDDEN, INTER = 24, 2, 4, 16, 8
+
+    class Buffer:
+        """DeepEP's expanded dispatch/combine contract on one rank, logging which calls ran."""
+
+        def __init__(self, test, log):
+            self.test = test
+            self.log = log
+
+        def dispatch(self, tokens, *, topk_idx=None, topk_weights=None, handle=None, do_expand=False, **kwargs):
+            test = self.test
+            if handle is None:
+                self.log.append("dispatch")
+                slots = [(t, k) for e in range(test.EXPERTS) for t, k in (topk_idx == e).nonzero().tolist()]
+                counts = torch.bincount(topk_idx.flatten(), minlength=test.EXPERTS)
+                handle = SimpleNamespace(do_expand=do_expand,
+                                         topk_idx=topk_idx.clone(),
+                                         token_of_row=torch.tensor([t for t, _ in slots], dtype=torch.long),
+                                         slot_of_row=torch.tensor([k for _, k in slots], dtype=torch.long),
+                                         num_expanded_tokens=len(slots),
+                                         psum_num_recv_tokens_per_expert=torch.cumsum(counts, 0))
+            else:
+                self.log.append("cached_dispatch")
+            weights = None if topk_weights is None else topk_weights[handle.token_of_row, handle.slot_of_row]
+            # A real buffer hands back more rows than arrived.
+            rows = torch.cat([tokens[handle.token_of_row], tokens.new_full((3, tokens.shape[1]), float("nan"))])
+            return rows, None, weights, handle, None
+
+        def combine(self, rows, *, handle, topk_weights=None, **kwargs):
+            self.log.append("combine")
+            rows = rows[:handle.num_expanded_tokens]
+            num_tokens = handle.topk_idx.shape[0]
+            combined = rows.new_zeros(num_tokens, rows.shape[1]).index_add(0, handle.token_of_row, rows)
+            combined_weights = None
+            if topk_weights is not None:
+                combined_weights = topk_weights.new_zeros(num_tokens, self.test.TOP_K)
+                combined_weights[handle.token_of_row, handle.slot_of_row] = topk_weights[:handle.num_expanded_tokens]
+            return combined, combined_weights, None
+
+    class DecoderLayer(torch.nn.Module):
+        """A Hugging Face decoder layer as far as the contract goes: its own checkpoint, and a residual add."""
+
+        def __init__(self, mlp, gate, routing, checkpoint_func, reads_output=False):
+            super().__init__()
+            self.mlp = mlp
+            self.gate = torch.nn.Parameter(gate.clone())
+            self.routing = routing
+            self.gradient_checkpointing = checkpoint_func is not None
+            self._gradient_checkpointing_func = checkpoint_func
+            self.reads_output = reads_output
+
+        def block(self, x):
+            scores = torch.softmax(x.float() @ self.gate.float(), dim=-1).gather(1, self.routing)
+            counts = torch.bincount(self.routing.flatten(), minlength=self.gate.shape[1])
+            router_output = auto_ep_layer.RouterOutput(top_scores=scores,
+                                                       selected_experts=self.routing,
+                                                       num_tokens_per_expert=counts)
+            moe = self.mlp._deepep_route(x, router_output)
+            if self.reads_output:
+                # Outside the contract: the product saves the MoE output for its backward.
+                return x + moe * moe
+            return x + moe
+
+        def forward(self, x):
+            if self.gradient_checkpointing:
+                return self._gradient_checkpointing_func(self.block, x)
+            return self.block(x)
+
+    def setUp(self):
+        torch.manual_seed(0)
+        self.routing = torch.randint(0, self.EXPERTS, (self.TOKENS, self.TOP_K))
+        self.inputs = torch.randn(self.TOKENS, self.HIDDEN).bfloat16()
+        self.gate = torch.randn(self.HIDDEN, self.EXPERTS).bfloat16()
+        self.expert_weights = [
+            torch.randn(self.EXPERTS, self.INTER, self.HIDDEN) * 0.3,
+            torch.randn(self.EXPERTS, self.HIDDEN, self.INTER) * 0.3,
+            torch.randn(self.EXPERTS, self.INTER, self.HIDDEN) * 0.3,
+        ]
+        self.target = torch.randn(self.TOKENS, self.HIDDEN)
+
+    def make_layer(self, log, skip, score_apply):
+        from deepspeed.moe.ep_experts import GroupedExperts
+
+        exchange = auto_ep_comm.DeepEPExchange.__new__(auto_ep_comm.DeepEPExchange)
+        exchange.buffer = self.Buffer(self, log)
+        exchange.deep_ep = SimpleNamespace(topk_idx_t=torch.int64)
+        exchange.num_experts, exchange.num_sms, exchange.last_handle = self.EXPERTS, 12, None
+        exchange.num_max_tokens_per_rank = self.TOKENS
+        # A form without a Triton kernel, so the CPU route runs wherever Triton is installed.
+        experts = GroupedExperts(dim=self.HIDDEN,
+                                 hidden_dim=self.INTER,
+                                 num_experts=self.EXPERTS,
+                                 use_grouped_mm=True,
+                                 disable_triton_grouped_mm=True,
+                                 activation="geglu_tanh").bfloat16()
+        with torch.no_grad():
+            for name, value in zip(("w1", "w2", "w3"), self.expert_weights):
+                getattr(experts, name).copy_(value)
+        # Only the attributes the DeepEP route reads, without building a router or a buffer.
+        layer = auto_ep_layer.AutoEPMoELayer.__new__(auto_ep_layer.AutoEPMoELayer)
+        torch.nn.Module.__init__(layer)
+        layer.experts = experts
+        layer._deepep_exchange = exchange
+        layer.num_local_experts = self.EXPERTS
+        layer.score_apply = score_apply
+        layer.row_weighting_impl = "eager"
+        layer.skip_recompute_combine = skip
+        layer._decoder_layer = None
+        return layer
+
+    def run_block(self, skip, checkpoint_func, score_apply="post", reads_output=False, attach=True, routing=None):
+        log = []
+        layer = self.make_layer(log, skip, score_apply)
+        decoder = self.DecoderLayer(layer, self.gate, self.routing if routing is None else routing, checkpoint_func,
+                                    reads_output)
+        if attach:
+            layer.attach_decoder_layer(decoder)
+        x = self.inputs.clone().requires_grad_(True)
+        output = decoder(x)
+        (output.float() * self.target).sum().backward()
+        result = {"output": output.detach(), "x": x.grad, "gate": decoder.gate.grad}
+        result.update({name: getattr(layer.experts, name).grad for name in ("w1", "w2", "w3")})
+        return result, log
+
+    @staticmethod
+    def reentrant():
+        return functools.partial(checkpoint, use_reentrant=True)
+
+    def test_recorded_recompute_matches_the_normal_recompute_bitwise(self):
+        routings = {"spread": self.routing, "empty_expert": self.routing % (self.EXPERTS - 1)}
+        for (routing_name, routing), score_apply in itertools.product(routings.items(), ("post", "pre")):
+            with self.subTest(routing=routing_name, score_apply=score_apply):
+                normal, normal_log = self.run_block(False, self.reentrant(), score_apply, routing=routing)
+                skipped, skipped_log = self.run_block(True, self.reentrant(), score_apply, routing=routing)
+                for name, expected in normal.items():
+                    self.assertTrue(torch.equal(skipped[name], expected), name)
+                # Forward, recompute, then backward's cached dispatch and the dispatch's combine. The recompute
+                # still dispatches, since backward needs the experts' activations, but does not combine.
+                self.assertEqual(normal_log,
+                                 ["dispatch", "combine", "dispatch", "combine", "cached_dispatch", "combine"])
+                self.assertEqual(skipped_log, ["dispatch", "combine", "dispatch", "cached_dispatch", "combine"])
+
+    def test_nothing_is_skipped_without_a_recompute(self):
+        normal, normal_log = self.run_block(False, None)
+        skipped, skipped_log = self.run_block(True, None)
+        for name, expected in normal.items():
+            self.assertTrue(torch.equal(skipped[name], expected), name)
+        self.assertEqual(skipped_log, normal_log)
+        self.assertEqual(skipped_log, ["dispatch", "combine", "cached_dispatch", "combine"])
+
+    def test_the_skipped_combine_returns_nan_so_a_reader_fails_loudly(self):
+        normal, _ = self.run_block(False, self.reentrant(), reads_output=True)
+        skipped, _ = self.run_block(True, self.reentrant(), reads_output=True)
+        self.assertTrue(torch.isfinite(normal["x"]).all())
+        self.assertTrue(torch.isnan(skipped["x"]).any())
+
+        log = []
+        layer = self.make_layer(log, True, "post")
+        handle = SimpleNamespace(topk_idx=self.routing)
+        recorded = auto_ep_comm.deepep_record_combine(layer._deepep_exchange, torch.ones(5, self.HIDDEN), handle)
+        self.assertEqual(recorded.shape, (self.TOKENS, self.HIDDEN))
+        self.assertTrue(torch.isnan(recorded).all())
+        self.assertEqual(log, [])
+
+    def test_any_other_recompute_is_rejected(self):
+        non_reentrant = functools.partial(checkpoint, use_reentrant=False)
+        another_function = lambda function, *args: checkpoint(function, *args, use_reentrant=True)
+        cases = {
+            "not attached to a decoder layer": dict(checkpoint_func=self.reentrant(), attach=False),
+            "non-reentrant checkpointing": dict(checkpoint_func=non_reentrant),
+            "a checkpoint function other than torch's": dict(checkpoint_func=another_function),
+        }
+        for name, kwargs in cases.items():
+            with self.subTest(case=name), self.assertRaisesRegex(RuntimeError, "skip_recompute_combine"):
+                self.run_block(True, **kwargs)
+
+        # A checkpoint that spans the decoder layer from outside, with its own checkpointing off.
+        layer = self.make_layer([], True, "post")
+        decoder = self.DecoderLayer(layer, self.gate, self.routing, None)
+        layer.attach_decoder_layer(decoder)
+        x = self.inputs.clone().requires_grad_(True)
+        output = checkpoint(decoder, x, use_reentrant=True)
+        with self.assertRaisesRegex(RuntimeError, "skip_recompute_combine"):
+            output.float().sum().backward()
+
+    def test_recorded_eager_row_weighting_backward_matches_autograd_bitwise(self):
+        for dtype in (torch.bfloat16, torch.float32):
+            with self.subTest(dtype=dtype):
+                rows = torch.randn(32, self.HIDDEN).to(dtype)
+                weights = torch.rand(32, 1)
+                grad_output = torch.randn(32, self.HIDDEN).to(dtype)
+                gradients = []
+                for apply in (auto_ep_layer.apply_deepep_row_weights, auto_ep_layer.record_deepep_row_weights):
+                    leaf_rows = rows.clone().requires_grad_(True)
+                    leaf_weights = weights.clone().requires_grad_(True)
+                    output = apply(leaf_rows, leaf_weights, "eager")
+                    self.assertEqual((output.shape, output.dtype), (rows.shape, dtype))
+                    output.backward(grad_output)
+                    gradients.append((leaf_rows.grad, leaf_weights.grad))
+                (rows_eager, weights_eager), (rows_recorded, weights_recorded) = gradients
+                self.assertTrue(torch.equal(rows_recorded, rows_eager))
+                self.assertTrue(torch.equal(weights_recorded, weights_eager))
+
+    def test_recorded_fused_row_weighting_backward_matches_the_fused_one_bitwise(self):
+        from deepspeed.ops.triton_ops import autoep_fused_token_ops as fused_token_ops
+
+        if not (get_accelerator().device_name() == "cuda" and fused_token_ops.is_available()):
+            self.skipTest("the fused row weighting needs CUDA and Triton")
+        device = get_accelerator().current_device_name()
+        rows = torch.randn(64, 256, device=device).bfloat16()
+        weights = torch.rand(64, 1, device=device)
+        grad_output = torch.randn_like(rows)
+        gradients = []
+        for apply in (auto_ep_layer.apply_deepep_row_weights, auto_ep_layer.record_deepep_row_weights):
+            leaf_rows = rows.clone().requires_grad_(True)
+            leaf_weights = weights.clone().requires_grad_(True)
+            apply(leaf_rows, leaf_weights, "fused").backward(grad_output)
+            gradients.append((leaf_rows.grad, leaf_weights.grad))
+        (rows_fused, weights_fused), (rows_recorded, weights_recorded) = gradients
+        self.assertTrue(torch.equal(rows_recorded, rows_fused))
+        self.assertTrue(torch.equal(weights_recorded, weights_fused))
 
 
 if __name__ == "__main__":

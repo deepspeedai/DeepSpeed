@@ -997,6 +997,12 @@ smoke coverage used for this AutoEP surface produced the following version gates
 | -------------------------------------------------------------------------------------------------------------- | -------- |
 | How the DeepEP route applies one FP32 routing weight to each received row at the existing `score_apply` boundary. `"auto"` resolves to `"eager"`, preserving `(rows.float() * weights).to(rows.dtype)`. `"fused"` is experimental and uses a separate Triton pointwise operator for that per-row product only; it does not perform the top-k reduction or move the BF16/FP16 rounding point. It requires `comm_backend="deepep"`, `autoep_size > 1`, CUDA, Triton, contiguous bfloat16/float16 rows shaped `[N, H]`, and contiguous FP32 weights shaped `[N, 1]` on the same device; DeepEP dispatch currently supports BF16 rows only. Fused weight gradients can differ from eager due to FP32 summation order. Unsupported configurations fail rather than falling back. | `"auto"` |
 
+***skip_recompute_combine***: [boolean]
+
+| Description                                                                                                    | Default  |
+| -------------------------------------------------------------------------------------------------------------- | -------- |
+| Experimental. In the reentrant recompute of a decoder layer, record the DeepEP route's post-expert row weighting and combine without running them: nothing reads that recomputed output, and their backward is unchanged. The skipped output is NaN. Requires `comm_backend="deepep"` with `autoep_size > 1`, a preset whose decoder layer adds the MoE output to the residual (`deepseek_v2`, `deepseek_v3`, `minimax_m3`, `mixtral`, `qwen3_5_moe`, `qwen3_moe`), and Hugging Face per-layer gradient checkpointing with `use_reentrant=True`; anything else is rejected rather than ignored. | `false` |
+
 ***route_norm***: [boolean]
 
 | Description                                                                                                     | Default |

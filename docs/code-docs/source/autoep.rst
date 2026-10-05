@@ -284,6 +284,56 @@ The model-level gradient comparison samples gradients before the wrapper
 computes the norm and clips them in ``engine.step()``. GPU validation applies
 both independent corrections; neither is part of this opt-in change.
 
+**Skipping the recomputed combine (experimental):**
+
+With reentrant activation checkpointing, backward recomputes each decoder layer
+only to rebuild its autograd graph, and never reads the recomputed outputs. In a
+decoder layer that adds the MoE output to the residual, nothing reads the
+recomputed MoE output either. ``skip_recompute_combine`` lets the DeepEP route
+record the post-expert row weighting and the combine in that recompute without
+running them. Their backward is unchanged: a cached dispatch on the same handle,
+and the row-weighting gradients. The dispatch and the experts still run, because
+backward needs their activations.
+
+.. code-block:: json
+
+    {
+      "expert_parallel": {
+        "enabled": true,
+        "autoep_size": 8,
+        "comm_backend": "deepep",
+        "comm_max_tokens_per_rank": 16384,
+        "skip_recompute_combine": true
+      }
+    }
+
+On Qwen3-30B-A3B with 8 H100s (expert parallel size 8, micro-batch 4, 16
+accumulation steps, sequence length 4096, DeepEP with 28 SMs), an equivalent
+benchmark prototype cut the step from 20.57 s to 19.94 s (-3.1%). Gradients
+matched the normal recompute, and memory was unchanged.
+
+The skip relies on nothing reading the skipped output, so it is guarded:
+
+- The recompute is recognized as a grad-enabled forward that runs inside a
+  backward pass. Each time, AutoEP checks that the MoE layer's decoder layer has
+  Hugging Face gradient checkpointing enabled with ``use_reentrant=True``, for
+  example via ``model.gradient_checkpointing_enable(
+  gradient_checkpointing_kwargs={"use_reentrant": True})``, and raises
+  otherwise. Transformers 5 defaults to non-reentrant checkpointing, so the
+  argument is required there. A checkpoint that spans several layers would
+  feed the skipped output to the next layer. Non-reentrant checkpointing and
+  DeepSpeed's own checkpointing API are also rejected.
+- Only presets whose decoder layer adds the MoE output straight to the residual
+  are accepted: ``deepseek_v2``, ``deepseek_v3``, ``minimax_m3``, ``mixtral``,
+  ``qwen3_5_moe`` and ``qwen3_moe``. Other presets and custom patterns are
+  rejected at conversion.
+- The skipped combine returns NaN rather than uninitialized memory. If
+  something the contract rules out does read it, training fails visibly rather
+  than silently using garbage.
+- It requires ``comm_backend="deepep"`` and ``autoep_size > 1``. Both
+  ``row_weighting_impl`` values are supported; the recorded eager weighting
+  takes autograd's own steps through the eager expression.
+
 Requirements and limits:
 
 - The ``deep_ep`` package must be installed. It is imported only when this
