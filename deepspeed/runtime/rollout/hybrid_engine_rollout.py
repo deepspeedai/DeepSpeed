@@ -944,7 +944,7 @@ class HybridEngineRollout(RolloutEngine):
             module._forward_pre_hooks.update(saved_pre)
             module._forward_hooks.update(saved_post)
 
-        # --- Decode loop: full-step graph (b=1) > graph+Python (b>1) > fallbacks ---
+        # --- Decode loop: full-step graph (b=1) > graph+Python (b>1) > Python loop ---
         if graph is not None and batch_size > 1:
             # Graph forward + Python argmax for b>1: the graph eliminates kernel
             # launch overhead for the forward pass; argmax and buffer updates
@@ -985,39 +985,6 @@ class HybridEngineRollout(RolloutEngine):
                         full_token_buf[prompt_len + step + 2:] = pad_token_id
                         break
             gen_ids = full_token_buf[prompt_len:prompt_len + max_new_tokens].unsqueeze(0)
-            return torch.cat([prompt_ids, gen_ids], dim=1)
-
-        loop_op = None
-        try:
-            from deepspeed.ops.module_inject.decode_loop import get_decode_loop_op
-            loop_op = get_decode_loop_op()
-        except Exception:
-            pass
-
-        static_token.copy_(next_token)
-        token_buf = torch.zeros(max_new_tokens, dtype=torch.long, device=device)
-        token_buf[0] = next_token.squeeze(0)[0] if batch_size == 1 else next_token[0, 0]
-
-        if loop_op is not None and hasattr(loop_op, "decode_loop"):
-            # Construct the replay callable: use the graph's bound method if a
-            # graph was captured; otherwise fall back to an eager forward.
-            if graph is not None:
-                replay_fn = graph.replay
-            else:
-
-                def replay_fn():
-                    module(static_token,
-                           attention_mask={
-                               "full_attention": static_attn,
-                               "linear_attention": None
-                           },
-                           past_key_values=ds_cache,
-                           use_cache=True)
-
-            loop_op.decode_loop(replay_fn, static_logits[:, -1, :].contiguous(), static_token, write_pos, static_attn,
-                                token_buf, max_new_tokens, eos_token_id if eos_token_id is not None else -1,
-                                pad_token_id if pad_token_id is not None else 0, 16)
-            gen_ids = token_buf.unsqueeze(0)
             return torch.cat([prompt_ids, gen_ids], dim=1)
 
         eos_mask = torch.zeros(batch_size, dtype=torch.bool, device=device)

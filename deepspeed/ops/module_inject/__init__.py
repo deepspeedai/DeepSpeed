@@ -2,5 +2,4 @@
 # DeepSpeed Team
 """op_builder module for segment-KI native kernels."""
 
-from .decode_loop import DecodeLoopBuilder, get_decode_loop_op
 from .fused_glu import FusedGLUBuilder, get_fused_glu_op
