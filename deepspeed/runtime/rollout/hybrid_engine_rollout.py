@@ -548,6 +548,14 @@ class HybridEngineRollout(RolloutEngine):
             raise ValueError("max_batch_size must be positive")
         if self.use_graph_capture:
             raise ValueError("continuous batching does not yet support CUDA graph capture")
+        # Hybrid models: GDN layers keep per-row conv/recurrent state that
+        # the continuous-batching cache does not yet scatter or compact, so
+        # a run would crash on an unbound pass-through slot mid-decode. Fail
+        # with a clear message up front instead.
+        config = getattr(self.engine.module, "config", None)
+        text_config = getattr(config, "text_config", config)
+        if "linear_attention" in (getattr(text_config, "layer_types", None) or []):
+            raise ValueError("continuous batching does not yet support hybrid models with linear-attention layers")
 
         prompt_len = requests[0].prompt_ids.shape[1]
         device = requests[0].prompt_ids.device
