@@ -477,6 +477,50 @@ class TestRoutingWeightsAreApplied(unittest.TestCase):
         self.assertEqual(seen["combine_rows"].shape[0], self.ARRIVED_ROWS)
         self.assertTrue(torch.equal(seen["counts"], torch.tensor([3, 3, 3, 3], dtype=torch.int32)))
 
+    def test_a_buffer_of_exactly_the_arrived_rows_is_used_without_slicing(self):
+        # A slice would change nothing forward, but its backward zero-fills a
+        # buffer-sized gradient and copies the real one into it.
+        for buffer_rows in (self.ARRIVED_ROWS, self.BUFFER_ROWS):
+            with self.subTest(buffer_rows=buffer_rows):
+                prefix = torch.tensor([3, 6, 9, self.ARRIVED_ROWS], dtype=torch.int64)
+                handle = mock.Mock(psum_num_recv_tokens_per_expert=prefix, num_expanded_tokens=self.ARRIVED_ROWS)
+                exchange = mock.Mock(last_handle=handle, num_max_tokens_per_rank=1024)
+                received = torch.randn(buffer_rows, self.HIDDEN, requires_grad=True)
+                recv_weights = torch.rand(buffer_rows, requires_grad=True)
+                seen = {}
+
+                def experts(rows, _counts):
+                    seen["expert_input"] = rows
+                    return rows
+
+                layer = mock.Mock(_deepep_exchange=exchange,
+                                  num_local_experts=self.LOCAL_EXPERTS,
+                                  score_apply="post",
+                                  row_weighting_impl="eager",
+                                  comm_num_sm=12,
+                                  comm_qp_margin=4,
+                                  experts=experts)
+                with mock.patch.object(auto_ep_layer, "deepep_dispatch",
+                                       lambda *_args: (received, recv_weights, exchange)), \
+                        mock.patch.object(auto_ep_layer, "deepep_combine", lambda _exchange, rows, _handle: rows):
+                    router_output = auto_ep_layer.RouterOutput(
+                        top_scores=torch.ones((4, 2)),
+                        selected_experts=torch.zeros((4, 2), dtype=torch.long),
+                        num_tokens_per_expert=torch.zeros(self.LOCAL_EXPERTS, dtype=torch.long),
+                    )
+                    tokens = torch.ones((4, self.HIDDEN), dtype=torch.bfloat16)
+                    result = auto_ep_layer.AutoEPMoELayer._deepep_route(layer, tokens, router_output)
+                result.float().sum().backward()
+
+                exact = buffer_rows == self.ARRIVED_ROWS
+                self.assertIs(seen["expert_input"] is received, exact)
+                # The gradient is the same either way; only rows beyond the ones that arrived stay zero.
+                arrived = self.ARRIVED_ROWS
+                expected_rows = recv_weights.detach()[:arrived, None].expand(-1, self.HIDDEN)
+                self.assertTrue(torch.equal(received.grad[:arrived], expected_rows))
+                self.assertTrue(torch.equal(recv_weights.grad[:arrived], received.detach()[:arrived].sum(dim=1)))
+                self.assertFalse(received.grad[arrived:].any())
+
     def test_row_count_comes_from_the_handle_not_the_device(self):
         # Reading it off the prefix sum needs a device-to-host synchronisation
         # in front of every layer's GEMM; the handle already holds it as an int.
