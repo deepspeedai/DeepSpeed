@@ -300,7 +300,11 @@ def _fused_gdn_forward(self, hidden_states, *args, **kwargs):
 
     gdn_op = getattr(self, "_ki_gdn_op", None)
     from deepspeed.accelerator import get_accelerator
-    if gdn_op is not None and get_accelerator().on_accelerator(a):
+    # The native gdn_gates op has no autograd registration, so a training
+    # step through this branch would silently cut gradients to the a/b
+    # projections, A_log, and dt_bias. The kernel's win is decode launch
+    # overhead (a no-grad path); training runs the composite ops instead.
+    if (gdn_op is not None and get_accelerator().on_accelerator(a) and not torch.is_grad_enabled()):
         a_log_f = self.A_log.detach().float().contiguous()
         dt_f = self.dt_bias.detach().float().contiguous()
         # gdn_gates accepts row-strided a/b, so the fused-output slices go in
@@ -562,9 +566,13 @@ def _fused_norm_layer_forward(self,
     plain add for the same reason. Attention and MLP are called unchanged,
     so attention-level patches (decode_attn / triple_gemv) still apply."""
     if (hidden_states.shape[0] != 1 or hidden_states.shape[1] > 1 or hidden_states.dtype is not torch.bfloat16
-            or not hidden_states.is_contiguous() or getattr(self, "_ki_norm_op", None) is None):
-        # Prefill, batched decode, or a non-graph path: the original forward
-        # is the correct path.
+            or not hidden_states.is_contiguous() or getattr(self, "_ki_norm_op", None) is None
+            or torch.is_grad_enabled()):
+        # Prefill, batched decode, a non-graph path, or any grad-enabled
+        # forward: the original forward is the correct path. fused_add_norm
+        # has no autograd registration and mutates the residual stream
+        # in-place, so a training step through it would silently lose the
+        # residual/norm gradients (the kernel's win is decode-only).
         return self._ki_orig_layer_forward(hidden_states, position_embeddings, attention_mask, position_ids,
                                            past_key_values, **kwargs)
 
