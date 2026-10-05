@@ -1542,7 +1542,11 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         allreduce_sizes = []
 
         for i, bucket_elem in enumerate(bucket):
-            rank, tensor, output = bucket_elem
+            if len(bucket_elem) == 2:
+                rank, tensor = bucket_elem
+                output = None
+            else:
+                rank, tensor, output = bucket_elem
             small_bucket.append(tensor)
             small_bucket_ranks.append(rank)
             small_bucket_outputs.append(output)
