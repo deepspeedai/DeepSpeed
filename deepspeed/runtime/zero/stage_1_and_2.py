@@ -2103,7 +2103,21 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 del full_grad, full_momentum, grad, param_momentum, update
 
     ############################################################################################
-    def copy_grads_in_partition(self, param, group_idx):
+    def _get_param_group_idx(self, param):
+        param_idx_in_group = getattr(param, "param_idx_in_group", None)
+        if param_idx_in_group is not None:
+            for group_idx, group in enumerate(self.bit16_groups):
+                if param_idx_in_group < len(group) and group[param_idx_in_group] is param:
+                    return group_idx
+
+        for group_idx, group in enumerate(self.bit16_groups):
+            for group_param in group:
+                if group_param is param:
+                    return group_idx
+
+        raise RuntimeError(f"Unable to find ZeRO parameter group for {debug_param2name(param)}")
+
+    def copy_grads_in_partition(self, param, group_idx=None):
         if self.cpu_offload:
             # Accumulate when there were prior backwards in this step (restore from
             # CPU buffer) or more will follow (save to CPU buffer). Skipping only
@@ -2122,6 +2136,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 self.async_inplace_copy_grad_to_fp32_buffer_from_gpu(param)
 
             return
+        if group_idx is None:
+            group_idx = self._get_param_group_idx(param)
         if self._use_compact_grad_partition_buffer(group_idx):
             if self.use_grad_accum_attribute:
                 self.clear_grad_attribute(param)

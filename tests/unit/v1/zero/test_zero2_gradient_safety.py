@@ -224,7 +224,7 @@ def test_only_buffer_consumers_replace_reuse_event(monkeypatch, bucket_size, ele
     opt.reduce_bucket_size = bucket_size
     opt.is_param_in_current_partition = {0: True}
     opt.average_tensor = lambda *args: None
-    opt.copy_grads_in_partition = lambda param: None
+    opt.copy_grads_in_partition = lambda param, group_idx=None: None
     bucket = opt.ipg_buckets[torch.float32]
     bucket.elements = elements
     previous, consumer = FakeEvent(), FakeStream()
