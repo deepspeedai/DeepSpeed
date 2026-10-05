@@ -208,9 +208,14 @@ def _dual_weight_glu_forward(self, input):
     b>1 falls through to the original projections.  Gradients flow to the
     original Parameters through autograd.Function — train and generate share
     the same path with no forward switching."""
-    if input.shape[0] == 1 and input.dim() == 2 and getattr(self, "_ki_dual_op", None) is not None:
-        out = DualWeightGluGEMV.apply(input.squeeze(0), self.gate_proj.weight, self.up_proj.weight, self._ki_dual_op)
-        return self.down_proj(out.unsqueeze(0))
+    # One hidden vector in any [*, 1, hidden] / [1, hidden] / [hidden]
+    # shape — HF decode activations arrive as [1, 1, hidden], so keying on
+    # dim()==2 would exclude the exact greedy-decode case this fusion
+    # targets. The kernel op handles a flat vector; reshape on the way out.
+    if input.numel() == input.shape[-1] and getattr(self, "_ki_dual_op", None) is not None:
+        out = DualWeightGluGEMV.apply(input.reshape(-1), self.gate_proj.weight, self.up_proj.weight,
+                                      self._ki_dual_op)
+        return self.down_proj(out.reshape(*input.shape[:-1], -1))
     # b>1 or no kernel: original forward (gradients also correct here)
     from deepspeed.module_inject.kernel_reference import dual_gemv_silu_mul
     return self.down_proj(dual_gemv_silu_mul(input, self.gate_proj.weight, self.up_proj.weight))
