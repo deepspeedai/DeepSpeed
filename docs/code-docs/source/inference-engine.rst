@@ -80,10 +80,11 @@ Segment-Based Kernel Injection (experimental)
 ``HybridEngineRolloutConfig(use_segki=True)`` accelerates greedy decode by
 injecting native CUDA kernels into comm-free segments of the model at rollout
 construction. Segments are detected structurally, by attribute names, so any
-HF family whose gated MLP uses ``gate_proj``/``up_proj``/``down_proj`` (LLaMA,
-Qwen, Mistral, DeepSeek, Gemma, ...) or whose GatedDeltaNet block uses the
-``in_proj_{qkv,z,b,a}`` set is picked up without per-model code. Unsupported
-architectures pass through silently. The option is disabled by default and
+HF family whose gated MLP uses ``gate_proj``/``up_proj``/``down_proj`` with a
+SiLU activation (LLaMA, Qwen, Mistral, DeepSeek, ...) or whose GatedDeltaNet
+block uses the ``in_proj_{qkv,z,b,a}`` set is picked up without per-model code.
+GELU-gated variants (e.g. Gemma) and other unsupported architectures pass
+through silently. The option is disabled by default and
 combines with ``use_graph_capture=True`` for the fastest path.
 
 Injected replacements read the original weight ``Parameter`` objects directly
