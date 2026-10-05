@@ -930,15 +930,14 @@ class HybridEngineRollout(RolloutEngine):
                     graph_op.decode_step_graph(static_logits[:, -1, :].contiguous(), static_token.view(batch_size, 1),
                                                write_pos, static_attn, full_token_buf)
 
-            if graph_op is not None:
-                # The capture run advanced the GDN conv/recurrent states (its
-                # forward consumed static_token) and mutated write_pos; without
-                # this restore every batch size would re-feed the first decode
-                # token to the GDN layers, double-counting it and derailing the
-                # whole trajectory at b>1.
-                restore_gdn_states()
-                write_pos.fill_(prompt_len)
-                static_token.copy_(next_token)
+            # The capture run advanced the GDN conv/recurrent states (its
+            # forward consumed static_token) and mutated write_pos whether
+            # or not decode_step_graph was mounted; restore unconditionally
+            # so the fallback graph (native op unavailable) does not start
+            # from a state that already consumed the first decode token.
+            restore_gdn_states()
+            write_pos.fill_(prompt_len)
+            static_token.copy_(next_token)
         finally:
             module._forward_pre_hooks.update(saved_pre)
             module._forward_hooks.update(saved_post)
