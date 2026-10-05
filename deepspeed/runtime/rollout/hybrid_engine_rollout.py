@@ -900,6 +900,7 @@ class HybridEngineRollout(RolloutEngine):
             # tensor the kernel itself advances), so no host-side step counter
             # is needed — the graph is fully self-contained for replay.
             graph_op = None
+            step_kernel_mounted = False
             try:
                 from deepspeed.ops.module_inject import get_fused_glu_op
                 candidate = get_fused_glu_op()
@@ -929,6 +930,7 @@ class HybridEngineRollout(RolloutEngine):
                         and get_accelerator().on_accelerator(static_logits)):
                     graph_op.decode_step_graph(static_logits[:, -1, :].contiguous(), static_token.view(batch_size, 1),
                                                write_pos, static_attn, full_token_buf)
+                    step_kernel_mounted = True
 
             # The capture run advanced the GDN conv/recurrent states (its
             # forward consumed static_token) and mutated write_pos whether
@@ -967,9 +969,10 @@ class HybridEngineRollout(RolloutEngine):
                 eos_mask |= (next_token.view(batch_size) == eos_token_id)
             return torch.cat(output_ids, dim=1)
 
-        if graph_op is not None:
-            # Full-step graph: one replay = forward + argmax + buffer updates.
-            # Python only does replay + periodic EOS check (every 16 steps).
+        # Full-step graph requires the step kernel to actually be in the
+        # graph: mounting is conditional (b=1, CUDA bf16 logits), and a
+        # kernel-less graph replay would read a token buffer nobody wrote.
+        if step_kernel_mounted:
             eos_check_every = 16
             for step in range(max_new_tokens - 1):
                 get_accelerator().replay_graph(graph)
