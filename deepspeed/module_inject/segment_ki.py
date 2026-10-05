@@ -213,8 +213,7 @@ def _dual_weight_glu_forward(self, input):
     # dim()==2 would exclude the exact greedy-decode case this fusion
     # targets. The kernel op handles a flat vector; reshape on the way out.
     if input.numel() == input.shape[-1] and getattr(self, "_ki_dual_op", None) is not None:
-        out = DualWeightGluGEMV.apply(input.reshape(-1), self.gate_proj.weight, self.up_proj.weight,
-                                      self._ki_dual_op)
+        out = DualWeightGluGEMV.apply(input.reshape(-1), self.gate_proj.weight, self.up_proj.weight, self._ki_dual_op)
         return self.down_proj(out.reshape(*input.shape[:-1], -1))
     # b>1 or no kernel: original forward (gradients also correct here)
     from deepspeed.module_inject.kernel_reference import dual_gemv_silu_mul
@@ -472,11 +471,9 @@ def _decode_attn_forward(self,
     The kernel reads the valid KV length from the same GPU-resident
     write_pos tensor the cache update writes through, keeping the whole
     step CUDA-graph replayable."""
-    if (hidden_states.shape[0] != 1 or hidden_states.shape[1] > 1
-            or hidden_states.dtype is not torch.bfloat16 or not hidden_states.is_contiguous()
-            or past_key_values is None
-            or getattr(self, "_ki_attn_op", None) is None
-            or getattr(self, "_ki_prompt_padded", False)
+    if (hidden_states.shape[0] != 1 or hidden_states.shape[1] > 1 or hidden_states.dtype is not torch.bfloat16
+            or not hidden_states.is_contiguous() or past_key_values is None
+            or getattr(self, "_ki_attn_op", None) is None or getattr(self, "_ki_prompt_padded", False)
             or getattr(past_key_values, "_write_position", None) is not self._ki_write_pos):
         # Prefill, batched decode, a non-graph cache (e.g. DynamicCache
         # inside module.generate), or a padded prompt: the original forward
