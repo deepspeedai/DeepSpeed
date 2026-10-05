@@ -214,13 +214,14 @@ class TestZeroBf16Fp32GradAccum(DistributedTest):
     world_size = 2
 
     @pytest.mark.parametrize('zero_stage', [2, 3])
-    def test_safe_get_full_grad_preserves_fp32_reduced_average(self, zero_stage):
-        # Catches storing the fp32 communication result back into a bf16 partition.
+    def test_safe_get_full_grad_preserves_fp32_accumulated_average(self, zero_stage):
+        # Catches storing or accumulating fp32 communication results in a bf16 partition.
         if not get_accelerator().is_bf16_supported():
             pytest.skip("requires bf16")
 
         config_dict = {
             "train_micro_batch_size_per_gpu": 1,
+            "gradient_accumulation_steps": 4,
             "steps_per_print": 1,
             "communication_data_type": "fp32",
             "optimizer": {
@@ -247,7 +248,10 @@ class TestZeroBf16Fp32GradAccum(DistributedTest):
         rank = dist.get_rank()
         local_grad = 1.0 if rank == 0 else 1.0078125
         x = torch.full((4, ), local_grad, dtype=torch.bfloat16, device=engine.device)
-        engine.backward(engine(x))
+        for micro_step in range(engine.gradient_accumulation_steps()):
+            engine.backward(engine(x))
+            if not engine.is_gradient_accumulation_boundary():
+                engine.step()
 
         if zero_stage == 2:
             stored_grad = next(grad for grad in engine.optimizer.averaged_gradients[0]
