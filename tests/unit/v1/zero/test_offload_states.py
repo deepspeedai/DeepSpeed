@@ -15,6 +15,12 @@ from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum, OffloadStat
 from deepspeed.utils import safe_get_local_fp32_param, safe_get_local_optimizer_state
 from deepspeed.runtime.zero.offload_states import get_state_devices
 
+# The strict allocated-memory deltas asserted in this file assume memory_allocated()
+# is allocator bookkeeping (cuda); on cpu it reports process RSS, which does not
+# shrink when tensors are freed.
+accelerator_device_mod = torch.get_device_module(get_accelerator().device_name())
+allocator_backed_memory_stats = hasattr(accelerator_device_mod, 'memory_allocated')
+
 # ==============================================================================
 # ZeRO-1 and ZeRO-2 TESTS
 # ==============================================================================
@@ -80,7 +86,8 @@ def run_model_zero12(model, param_groups, config_dict, hidden_dim, dtype, offloa
     optimizer_device = offload_torch_device if is_offload_optimizer_enabled(config_dict) else accelerator_device
     offload_only_optimizer_states = is_only_offload_optimizer_states(
         offloaded_states, [OffloadStateTypeEnum.optim_states, OffloadStateTypeEnum.hp_params])
-    expect_memory_change = not (is_offload_optimizer_enabled(config_dict) and offload_only_optimizer_states)
+    expect_memory_change = allocator_backed_memory_stats and not (is_offload_optimizer_enabled(config_dict)
+                                                                  and offload_only_optimizer_states)
 
     model, _, _, _ = deepspeed.initialize(model=model, model_parameters=param_groups, config=config_dict)
 
@@ -116,14 +123,16 @@ def run_model_zero12(model, param_groups, config_dict, hidden_dim, dtype, offloa
         alloc_after_offload = get_accelerator().memory_allocated()
 
         if grad_numel > 0:
-            assert alloc_after_offload < alloc_before_offload, f"FAIL: Allocated memory for grads should decrease after offload {alloc_after_offload=} < {alloc_before_offload=}"
+            if allocator_backed_memory_stats:
+                assert alloc_after_offload < alloc_before_offload, f"FAIL: Allocated memory for grads should decrease after offload {alloc_after_offload=} < {alloc_before_offload=}"
             validate_grad_device(model, offload_torch_device)
 
         model.reload_states()
         alloc_after_reload = get_accelerator().memory_allocated()
 
         if grad_numel > 0:
-            assert alloc_after_reload > alloc_after_offload, f"FAIL: Allocated memory for grads should increase after reload {alloc_after_reload=} > {alloc_after_offload=}"
+            if allocator_backed_memory_stats:
+                assert alloc_after_reload > alloc_after_offload, f"FAIL: Allocated memory for grads should increase after reload {alloc_after_reload=} > {alloc_after_offload=}"
             validate_grad_device(model, accelerator_device)
 
         reloaded_grads = [
@@ -279,7 +288,8 @@ def run_model_zero3(model, param_groups, config_dict, hidden_dim, dtype, offload
     offload_only_optimizer_states = is_only_offload_optimizer_states(
         offloaded_states,
         [OffloadStateTypeEnum.optim_states, OffloadStateTypeEnum.hp_params, OffloadStateTypeEnum.lp_grads])
-    expect_memory_change = not (is_offload_optimizer_enabled(config_dict) and offload_only_optimizer_states)
+    expect_memory_change = allocator_backed_memory_stats and not (is_offload_optimizer_enabled(config_dict)
+                                                                  and offload_only_optimizer_states)
 
     offload_state_device: dict[OffloadStateTypeEnum, torch.device] = {
         OffloadStateTypeEnum.hp_params: offload_torch_device,

@@ -13,7 +13,7 @@ from __future__ import annotations
 import math
 import re
 from collections import OrderedDict
-from typing import Literal
+from typing import Callable, TYPE_CHECKING, Literal
 
 import torch
 import torch.nn as nn
@@ -32,9 +32,13 @@ from deepspeed.module_inject.auto_ep_presets.registry import (
     resolve_preset_candidates,
     unsupported_preset_for_hf_model_type,
 )
+from deepspeed.moe.ep_experts import EXPERT_ACTIVATIONS
 from deepspeed.moe.fused_expert_layout import classify_fused_gate_up_layout
 from deepspeed.runtime.zero.utils import is_zero_param
 from deepspeed.utils import logger
+
+if TYPE_CHECKING:
+    from deepspeed.module_inject.auto_ep_layer import ReplacementSourceMap
 
 
 def _remove_transformers_output_capture_hooks(model: nn.Module) -> int:
@@ -175,6 +179,118 @@ def _detect_expert_storage(experts_module: nn.Module, preset: MoEModelPreset) ->
     return "module_list"
 
 
+def _detect_clamped_swiglu(experts_module: nn.Module, model_config) -> tuple[float | None, float] | None:
+    """Return ``(alpha, limit)`` when the model's experts clamp their SwiGLU, else ``None``.
+
+    ``hidden_act`` cannot tell: Hugging Face reports ``hidden_act="silu"`` for MiniMax-M3 and
+    DeepSeek-V4 although their experts clamp. The clamp limit is the reliable sign. MiniMax-M3
+    has ``swiglu_limit`` / ``swiglu_alpha`` on the experts module and on the config; GPT-OSS has
+    ``limit`` / ``alpha`` on the experts module; DeepSeek-V4 has ``limit`` on the experts module
+    and ``swiglu_limit`` on the config, and no alpha. ``alpha`` is ``None`` when the model does
+    not state it.
+    """
+    owners = [experts_module, model_config]
+    get_text_config = getattr(model_config, "get_text_config", None)
+    if callable(get_text_config):
+        owners.append(get_text_config())
+
+    alpha, limit = None, None
+    for owner in owners:
+        if owner is None:
+            continue
+        if limit is None:
+            limit = getattr(owner, "swiglu_limit", None)
+        if alpha is None:
+            alpha = getattr(owner, "swiglu_alpha", None)
+    if limit is None:
+        module_limit = getattr(experts_module, "limit", None)
+        if isinstance(module_limit, (int, float)) and not isinstance(module_limit, bool):
+            limit = module_limit
+            alpha = getattr(experts_module, "alpha", None)
+    if limit is None:
+        return None
+    return (None if alpha is None else float(alpha)), float(limit)
+
+
+def _gate_activation_matches(experts_module: nn.Module) -> set[str] | None:
+    """Names of the registered forms whose gate function agrees with the experts' ``act_fn``.
+
+    Returns ``None`` when the module has no ``act_fn`` that runs on a CPU probe. The comparison
+    is numerical, so it does not depend on how transformers names or wraps the activation.
+    """
+    act_fn = getattr(experts_module, "act_fn", None)
+    if act_fn is None:
+        return None
+    probe = torch.linspace(-8.0, 8.0, steps=161)
+    try:
+        with torch.no_grad():
+            observed = act_fn(probe)
+    except Exception:
+        return None
+    if not torch.is_tensor(observed) or observed.shape != probe.shape:
+        return None
+    matches = set()
+    for name, entry in EXPERT_ACTIVATIONS.items():
+        if entry.gate_fn is None:
+            continue
+        if torch.allclose(observed.float(), entry.gate_fn(probe), atol=1e-5):
+            matches.add(name)
+    return matches
+
+
+def _resolve_expert_activation(
+    config: AutoEPConfig,
+    preset_name: str,
+    preset: MoEModelPreset,
+    experts_module: nn.Module,
+    model_config,
+    module_name: str,
+) -> tuple[str, float, float]:
+    """Resolve the expert activation of one layer and refuse a form the model contradicts.
+
+    The preset (or ``expert_activation`` in the config) names the form; the model is not asked to
+    name it, because ``hidden_act`` is wrong for the clamped families. The model is checked against
+    the name instead: a clamp limit on the experts or the config means a clamped form, and the
+    experts' ``act_fn`` must agree with the gate function of a plain gated form. Either mismatch
+    would make the replaced layer compute a different function with no error anywhere, so it is
+    refused unless the user set ``expert_activation`` on purpose.
+    """
+    activation = preset.expert_activation
+    alpha = preset.expert_activation_alpha
+    limit = preset.expert_activation_limit
+    entry = EXPERT_ACTIVATIONS.get(activation)
+    if entry is None:
+        raise ValueError(f"AutoEP: preset '{preset_name}' names expert_activation='{activation}', which is not "
+                         f"registered; expected one of {tuple(EXPERT_ACTIVATIONS)}.")
+    user_chose = config.expert_activation is not None
+
+    clamped = _detect_clamped_swiglu(experts_module, model_config)
+    if clamped is not None:
+        if not entry.uses_limit and not user_chose:
+            raise ValueError(
+                f"AutoEP: the experts of '{module_name}' clamp their SwiGLU (limit={clamped[1]}), but preset "
+                f"'{preset_name}' computes '{activation}', which does not clamp and is a different function. "
+                f"Set expert_parallel.expert_activation to the form the model uses: \"swiglu_clamped\" for "
+                f"silu(clamp(gate)) * clamp(up) (DeepSeek-V4), \"swiglu_oai\" for "
+                f"(clamp(up) + 1) * clamp(gate) * sigmoid(alpha * clamp(gate)) (GPT-OSS, MiniMax-M3), or "
+                f"\"{activation}\" to keep the preset's form on purpose.")
+        if entry.uses_limit:
+            limit = clamped[1]
+            if clamped[0] is not None:
+                alpha = clamped[0]
+
+    matches = _gate_activation_matches(experts_module)
+    if matches is not None and entry.gate_fn is not None and activation not in matches and not user_chose:
+        observed = ", ".join(sorted(matches)) if matches else "none of the registered forms"
+        raise ValueError(
+            f"AutoEP: the act_fn of the experts of '{module_name}' matches {observed}, but preset "
+            f"'{preset_name}' computes '{activation}', which is a different function. Set "
+            f"expert_parallel.expert_activation to the form the model uses (registered: "
+            f"{tuple(EXPERT_ACTIVATIONS)}; deepspeed.moe.ep_experts.register_expert_activation adds one), or to "
+            f"\"{activation}\" to keep the preset's form on purpose.")
+    return activation, alpha, limit
+
+
 def _infer_hidden_and_ffn_size(
     experts_module: nn.Module,
     preset: MoEModelPreset,
@@ -287,8 +403,13 @@ class AutoEP:
     """Automatic Expert Parallelism: detect and replace MoE layers."""
 
     def __init__(self, model: nn.Module, config: AutoEPConfig) -> None:
+        from deepspeed.module_inject.auto_ep_comm import new_exchange_scope
+
         self.model = model
         self.config = config
+        # One DeepEP sharing scope per converted model. Its layers all want
+        # the same buffer; another model's do not, even on the same group.
+        self.deepep_scope = new_exchange_scope()
         self.model_config = getattr(model, 'config', None)
         self._retargeted_transformers_output_recorders: set[str] = set()
         fill_autoep_config_from_hf(self.config, self.model_config)
@@ -453,6 +574,9 @@ class AutoEP:
                         logger.warning(f"Layer {module_name}: model has router_z_loss_coef={z_loss}, "
                                        f"AutoEP router does not implement z-loss.")
 
+                expert_activation, activation_alpha, activation_limit = _resolve_expert_activation(
+                    self.config, preset_name, preset, experts_child, self.model_config, module_name)
+
                 spec = MoELayerSpec(
                     moe_module_name=module_name,
                     model_family=preset_name,
@@ -487,6 +611,9 @@ class AutoEP:
                     router_logits_capture_mode=forward_contract.router_logits_capture_mode,
                     moe_output_shape=forward_contract.moe_output_shape,
                     e_score_correction_bias_path=e_score_correction_bias_path,
+                    expert_activation=expert_activation,
+                    expert_activation_alpha=activation_alpha,
+                    expert_activation_limit=activation_limit,
                 )
                 specs.append(spec)
                 logger.debug(f"Detected MoE layer: {module_name} (family={preset_name}, "
@@ -506,8 +633,10 @@ class AutoEP:
         spec: MoELayerSpec,
         ep_size: int,
         ep_rank: int,
-    ) -> nn.Module:
-        from deepspeed.module_inject.auto_ep_layer import AutoEPMoELayer
+        collect_sources: bool = False,
+    ) -> tuple[nn.Module, "ReplacementSourceMap"]:
+        from deepspeed.module_inject.auto_ep_layer import (AutoEPMoELayer, ReplacementSourceMap,
+                                                           collect_replacement_sources)
 
         # Navigate to the parent module and get the child name
         parts = spec.moe_module_name.split(".")
@@ -524,11 +653,17 @@ class AutoEP:
             ep_size=ep_size,
             ep_rank=ep_rank,
             config=self.config,
+            deepep_scope=self.deepep_scope,
         )
+
+        # Collected before the source module leaves the tree, and only when a caller-supplied
+        # optimizer needs it: the values are the discarded pre-shard expert weights.
+        sources = (collect_replacement_sources(source_module, replacement, spec, ep_size, ep_rank)
+                   if collect_sources else ReplacementSourceMap())
 
         # Replace in-place on parent
         setattr(parent, child_name, replacement)
-        return replacement
+        return replacement, sources
 
     def _retarget_transformers_output_recorders(self, spec: MoELayerSpec, replacement: nn.Module) -> None:
         adapter = get_preset_adapter(spec.preset_adapter)
@@ -547,7 +682,7 @@ class AutoEP:
         ep_rank: int,
     ) -> None:
         """Replace a single MoE module with AutoEPMoELayer in-place on the model."""
-        replacement = self._replace_moe_layer_without_retarget(spec, ep_size, ep_rank)
+        replacement, _ = self._replace_moe_layer_without_retarget(spec, ep_size, ep_rank)
         self._retarget_transformers_output_recorders(spec, replacement)
 
         logger.info(f"AutoEP: replaced '{spec.moe_module_name}' with AutoEPMoELayer "
@@ -559,11 +694,28 @@ class AutoEP:
         specs: list[MoELayerSpec],
         ep_size: int,
         ep_rank: int,
-    ) -> None:
-        """Replace multiple MoE modules and batch post-replacement recorder retargeting."""
+        collect_sources: bool = False,
+        on_moe_layer_replaced: Callable[[nn.Module], None] | None = None,
+    ) -> "ReplacementSourceMap":
+        """Replace multiple MoE modules and batch post-replacement recorder retargeting.
+
+        With ``collect_sources``, returns a ``ReplacementSourceMap``: the source parameters behind
+        each replacement parameter, so a caller-supplied optimizer can put each replacement back
+        into the param group its sources belonged to, plus the identity of every parameter the
+        replacement detached, so the same optimizer can drop exactly those. The source values are
+        the discarded pre-shard expert weights and stay alive until the engine has finished the
+        remap, so the caller asks for them only when there is such an optimizer. Otherwise the map
+        is empty and each source module is freed as its replacement takes its place.
+        """
+        from deepspeed.module_inject.auto_ep_layer import ReplacementSourceMap
+
         replacements: list[tuple[MoELayerSpec, nn.Module]] = []
+        replacement_sources = ReplacementSourceMap()
         for spec in specs:
-            replacement = self._replace_moe_layer_without_retarget(spec, ep_size, ep_rank)
+            replacement, sources = self._replace_moe_layer_without_retarget(spec, ep_size, ep_rank, collect_sources)
+            replacement_sources.update(sources)
+            if on_moe_layer_replaced is not None:
+                on_moe_layer_replaced(replacement)
             replacements.append((spec, replacement))
             logger.info(f"AutoEP: replaced '{spec.moe_module_name}' with AutoEPMoELayer "
                         f"(ep_size={ep_size}, ep_rank={ep_rank}, "
@@ -576,6 +728,8 @@ class AutoEP:
 
         for spec, replacement in retarget_groups.values():
             self._retarget_transformers_output_recorders(spec, replacement)
+
+        return replacement_sources
 
     def _apply_config_overrides(self, preset: MoEModelPreset) -> MoEModelPreset:
         return apply_config_overrides(self.config, preset)

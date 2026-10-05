@@ -8,12 +8,14 @@ import sys
 import unittest
 
 import torch
+from types import SimpleNamespace
 from unittest import mock
 
 from deepspeed.module_inject.auto_ep_comm import (COMM_BACKEND, DEEPEP_BACKEND, SUPPORTED_DTYPES, _conform_rows,
                                                   _DeepEPCombine, _DeepEPDispatch, _import_deep_ep, _qps_for_sms,
-                                                  assert_dtype_supported, destroy_exchanges)
-from deepspeed.module_inject import auto_ep_layer
+                                                  assert_dtype_supported, destroy_exchanges, new_exchange_scope,
+                                                  shared_exchange)
+from deepspeed.module_inject import auto_ep_comm, auto_ep_layer
 from deepspeed.module_inject.auto_ep_config import parse_autoep_config, validate_autoep_config
 
 
@@ -111,6 +113,124 @@ class TestDtypeGuard(unittest.TestCase):
         self.assertEqual(SUPPORTED_DTYPES, (torch.bfloat16, ))
 
 
+class TestBufferSharing(unittest.TestCase):
+    """One buffer per model and geometry, not one per layer.
+
+    Each buffer reserves fabric resources that nothing reports, and they run
+    out: on 32 H100s across four nodes the twenty-eighth construction fails
+    inside ncclDevCommCreate, so a 48-layer model cannot start at all. Layers
+    of one model agree on every constructor argument, so they can share.
+    Layers of two models do not share, whatever they agree on.
+    """
+
+    def setUp(self):
+        self.built = []
+        # Kept from before the patch below replaces the name: the release tests
+        # need a real instance, and sharing has to be driven through a stub
+        # because a live buffer is collective.
+        self.exchange_class = auto_ep_comm.DeepEPExchange
+        patch = mock.patch.object(auto_ep_comm, "DeepEPExchange", side_effect=self.build)
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.addCleanup(auto_ep_comm._SHARED_EXCHANGES.clear)
+        auto_ep_comm._SHARED_EXCHANGES.clear()
+
+    def build(self, **kwargs):
+        exchange = mock.Mock(holders=0, **{"kwargs": kwargs})
+        self.built.append(exchange)
+        return exchange
+
+    @staticmethod
+    def geometry(**overrides):
+        arguments = {
+            "scope": 0,
+            "ep_group": "group",
+            "num_experts": 128,
+            "top_k": 8,
+            "hidden_size": 2048,
+            "num_max_tokens_per_rank": 1024,
+            "num_sms": 12,
+            "qp_margin": 4,
+        }
+        arguments.update(overrides)
+        return arguments
+
+    def test_layers_of_one_model_share_one_buffer(self):
+        exchanges = [shared_exchange(**self.geometry()) for _ in range(48)]
+
+        self.assertEqual(len(self.built), 1)
+        self.assertEqual({id(exchange) for exchange in exchanges}, {id(self.built[0])})
+        self.assertEqual(self.built[0].holders, 48)
+
+    def test_each_scope_is_new(self):
+        # Layers get a scope from whoever converted them; a layer built on its
+        # own must not fall into a shared default.
+        self.assertNotEqual(new_exchange_scope(), new_exchange_scope())
+
+    def test_two_models_do_not_share_a_buffer(self):
+        # Identical geometry on one group, so only the scope keeps them apart.
+        # Two engines are driven independently: an actor and a frozen
+        # reference model in a reinforcement-learning loop need not reach
+        # their MoE layers in any fixed order relative to each other, and one
+        # DeepEP communication context between them would make that order
+        # matter.
+        first = shared_exchange(**self.geometry(scope=0))
+        second = shared_exchange(**self.geometry(scope=1))
+
+        self.assertEqual(len(self.built), 2)
+        self.assertIsNot(first, second)
+        self.assertEqual(first.holders, 1)
+        self.assertEqual(second.holders, 1)
+
+    def test_a_different_geometry_gets_its_own_buffer(self):
+        # Not a micro-optimization: every argument in the key either sizes the
+        # buffer or is passed to dispatch, so sharing across a mismatch would
+        # drive one buffer two ways.
+        for field, value in (("ep_group", "other"), ("num_experts", 64), ("top_k", 4), ("hidden_size", 4096),
+                             ("num_max_tokens_per_rank", 2048), ("num_sms", 8), ("qp_margin", 2)):
+            # "scope" is deliberately not in this list: it is not part of the
+            # geometry, and test_two_models_do_not_share_a_buffer covers it.
+            with self.subTest(field=field):
+                auto_ep_comm._SHARED_EXCHANGES.clear()
+                self.built.clear()
+                shared_exchange(**self.geometry())
+                shared_exchange(**self.geometry(**{field: value}))
+                self.assertEqual(len(self.built), 2)
+
+    def test_the_buffer_survives_until_its_last_holder_releases(self):
+        exchange = self.exchange_class.__new__(self.exchange_class)
+        exchange.buffer = mock.Mock()
+        exchange.key = "key"
+        exchange.holders = 3
+        exchange.destroyed = False
+        auto_ep_comm._SHARED_EXCHANGES["key"] = exchange
+
+        exchange.release()
+        exchange.release()
+        exchange.buffer.destroy.assert_not_called()
+
+        exchange.release()
+        exchange.buffer.destroy.assert_called_once_with()
+        self.assertNotIn("key", auto_ep_comm._SHARED_EXCHANGES)
+
+    def test_a_destroyed_buffer_is_not_handed_out_again(self):
+        # destroy() can be called directly, past the holder count. Leaving the
+        # entry behind would hand the next layer a buffer DeepEP has reclaimed.
+        exchange = self.exchange_class.__new__(self.exchange_class)
+        exchange.buffer = mock.Mock()
+        exchange.key = "key"
+        exchange.holders = 5
+        exchange.destroyed = False
+        auto_ep_comm._SHARED_EXCHANGES["key"] = exchange
+
+        exchange.destroy()
+
+        self.assertEqual(exchange.holders, 0)
+        self.assertNotIn("key", auto_ep_comm._SHARED_EXCHANGES)
+        exchange.destroy()
+        exchange.buffer.destroy.assert_called_once_with()
+
+
 class TestTeardownScope(unittest.TestCase):
     """Teardown belongs to one engine's module, not to the whole process."""
 
@@ -125,8 +245,8 @@ class TestTeardownScope(unittest.TestCase):
 
         destroy_exchanges(torch.nn.Sequential(owned))
 
-        mine.destroy.assert_called_once_with()
-        theirs.destroy.assert_not_called()
+        mine.release.assert_called_once_with()
+        theirs.release.assert_not_called()
         self.assertIsNone(owned._deepep_exchange)
         self.assertIs(foreign._deepep_exchange, theirs)
 
@@ -224,7 +344,7 @@ class TestRoutingWeightsAreApplied(unittest.TestCase):
     LOCAL_EXPERTS = 4
     WEIGHT = 0.25
 
-    def route(self, score_apply):
+    def route(self, score_apply, row_weighting_impl="eager"):
         """Drive _deepep_route with a stub exchange, recording what each stage saw."""
         prefix = torch.tensor([3, 6, 9, self.ARRIVED_ROWS], dtype=torch.int64)
         handle = mock.Mock(psum_num_recv_tokens_per_expert=prefix, num_expanded_tokens=self.ARRIVED_ROWS)
@@ -251,6 +371,7 @@ class TestRoutingWeightsAreApplied(unittest.TestCase):
             _deepep_exchange=exchange,
             num_local_experts=self.LOCAL_EXPERTS,
             score_apply=score_apply,
+            row_weighting_impl=row_weighting_impl,
             comm_num_sm=12,
             comm_qp_margin=4,
             experts=fake_experts,
@@ -289,6 +410,63 @@ class TestRoutingWeightsAreApplied(unittest.TestCase):
         self.assertTrue(torch.allclose(seen["expert_input"].float(), torch.full((1, ), self.WEIGHT)))
         self.assertTrue(torch.allclose(seen["combine_rows"].float(), torch.full((1, ), self.WEIGHT)))
 
+    def test_default_row_weighting_is_the_eager_path(self):
+        seen = self.route("post")
+
+        self.assertTrue(torch.equal(seen["combine_rows"], torch.full_like(seen["combine_rows"], self.WEIGHT)))
+
+    def test_fused_row_weighting_uses_the_same_boundaries(self):
+        for score_apply, expected_stage in (("pre", "expert_input"), ("post", "combine_rows")):
+            with self.subTest(score_apply=score_apply):
+                calls = []
+
+                def fake_fused(rows, weights):
+                    calls.append((rows, weights))
+                    return (rows.float() * weights).to(rows.dtype)
+
+                with mock.patch.object(auto_ep_layer.fused_token_ops, "fused_row_weighting", fake_fused):
+                    seen = self.route(score_apply, row_weighting_impl="fused")
+
+                self.assertEqual(len(calls), 1)
+                self.assertTrue(torch.allclose(seen[expected_stage].float(), torch.full((1, ), self.WEIGHT)))
+
+    def test_weight_gradient_keeps_flowing_through_fused_row_weighting(self):
+        prefix = torch.tensor([2, 4], dtype=torch.int64)
+        handle = mock.Mock(psum_num_recv_tokens_per_expert=prefix, num_expanded_tokens=4)
+        exchange = mock.Mock(last_handle=handle, num_max_tokens_per_rank=1024)
+        received = torch.ones((4, 3), dtype=torch.bfloat16)
+        recv_weights = torch.full((4, ), 0.5, dtype=torch.float32, requires_grad=True)
+
+        def fake_dispatch(_exchange, *_args):
+            return received, recv_weights, exchange
+
+        def fake_fused(rows, weights):
+            return (rows.float() * weights).to(rows.dtype)
+
+        layer = mock.Mock(
+            _deepep_exchange=exchange,
+            num_local_experts=2,
+            score_apply="post",
+            row_weighting_impl="fused",
+            comm_num_sm=12,
+            comm_qp_margin=4,
+            experts=lambda rows, _counts: rows,
+        )
+
+        with mock.patch.object(auto_ep_layer, "deepep_dispatch", fake_dispatch), \
+                mock.patch.object(auto_ep_layer, "deepep_combine", lambda _exchange, rows, _handle: rows), \
+                mock.patch.object(auto_ep_layer.fused_token_ops, "fused_row_weighting", fake_fused):
+            router_output = auto_ep_layer.RouterOutput(
+                top_scores=torch.ones((2, 2), dtype=torch.float32, requires_grad=True),
+                selected_experts=torch.zeros((2, 2), dtype=torch.long),
+                num_tokens_per_expert=torch.zeros(2, dtype=torch.long),
+            )
+            result = auto_ep_layer.AutoEPMoELayer._deepep_route(layer, received, router_output)
+
+        result.float().sum().backward()
+        self.assertIsNotNone(recv_weights.grad)
+        self.assertTrue(torch.equal(recv_weights.grad, torch.full_like(recv_weights, 3.0)))
+
     def test_combine_receives_exactly_the_rows_that_arrived(self):
         # Dispatch returns a worst-case buffer while combine reads the rows the
         # handle recorded. Handing it the whole buffer reads past what the
@@ -306,6 +484,104 @@ class TestRoutingWeightsAreApplied(unittest.TestCase):
 
         self.assertIn("arrived = handle.num_expanded_tokens", source)
         self.assertNotIn("psum_num_recv_tokens_per_expert[-1]", source)
+
+
+class TestDeepEPEarlyRoute(unittest.TestCase):
+    """DeepEP must branch before collective-only token preparation."""
+
+    class Router(torch.nn.Module):
+
+        def __init__(self, output):
+            super().__init__()
+            self.output = output
+            self.gate = torch.nn.Linear(4, 2, bias=False)
+
+        def forward(self, *_args):
+            return self.output
+
+    @staticmethod
+    def layer(ep_size=2, comm_backend=DEEPEP_BACKEND, *, return_router_logits=False):
+        layer = object.__new__(auto_ep_layer.AutoEPMoELayer)
+        torch.nn.Module.__init__(layer)
+        scores = torch.tensor([[0.75, 0.25], [0.6, 0.4]])
+        experts = torch.tensor([[1, 0], [1, 0]], dtype=torch.long)
+        counts = torch.tensor([2, 2], dtype=torch.int32)
+        layer.router = TestDeepEPEarlyRoute.Router((scores, experts, counts))
+        layer.expert_bias = None
+        layer.register_buffer("tokens_per_expert", torch.zeros_like(counts, dtype=torch.float32))
+        layer.combine_impl = "weighted_sum"
+        layer._fused_combine_checked = False
+        layer.row_weighting_impl = "eager"
+        layer._fused_row_weighting_checked = False
+        layer.ep_size = ep_size
+        layer.comm_backend = comm_backend
+        # Keep the fixture valid when composed with opt-in async split planning.
+        layer.async_split_plan = False
+        layer._async_split_plan_pending = None
+        layer.top_k = 2
+        layer.num_experts = 2
+        layer.num_local_experts = 1
+        layer.folding_group_handles = None
+        layer.score_apply = "post"
+        layer.shared_experts = None
+        layer.shared_experts_gate = None
+        layer.moe_output_shape = "batched"
+        layer.return_router_logits = return_router_logits
+        layer.router_logits_capture_target = "router"
+        layer.router_logits_capture_mode = "raw"
+        layer._deepep_route = mock.Mock(return_value=torch.ones((2, 4)))
+        return layer
+
+    def test_deepep_bypasses_collective_preparation(self):
+        layer = self.layer()
+        hidden = torch.randn(1, 2, 4)
+
+        with mock.patch.object(auto_ep_layer.torch, "argsort", side_effect=AssertionError("argsort ran")), \
+                mock.patch.object(auto_ep_layer, "compute_split_plan",
+                                  side_effect=AssertionError("split plan ran")), \
+                mock.patch.object(auto_ep_layer, "compute_split_plan_from_expert_indices",
+                                  side_effect=AssertionError("folded split plan ran")), \
+                mock.patch.object(auto_ep_layer, "apply_scores_before_experts_if_enabled",
+                                  side_effect=AssertionError("score application ran")):
+            output = auto_ep_layer.AutoEPMoELayer.forward(layer, hidden)
+
+        self.assertEqual(tuple(output.shape), (1, 2, 4))
+        tokens, router_output = layer._deepep_route.call_args.args
+        self.assertEqual(tuple(tokens.shape), (2, 4))
+        self.assertTrue(torch.equal(tokens, hidden.reshape(2, 4)))
+        self.assertTrue(torch.equal(router_output.selected_experts, torch.tensor([[1, 0], [1, 0]])))
+        self.assertTrue(torch.equal(layer.tokens_per_expert, torch.tensor([2.0, 2.0])))
+
+    def test_fused_row_weighting_fails_before_the_router_when_unsupported(self):
+        layer = self.layer()
+        layer.row_weighting_impl = "fused"
+
+        with self.assertRaisesRegex(RuntimeError, 'row_weighting_impl="fused"'):
+            auto_ep_layer.AutoEPMoELayer.forward(layer, torch.randn(1, 2, 4))
+        layer._deepep_route.assert_not_called()
+
+    def test_standard_comm_and_ep1_keep_the_existing_path(self):
+        for ep_size, backend in ((2, COMM_BACKEND), (1, DEEPEP_BACKEND)):
+            with self.subTest(ep_size=ep_size, backend=backend):
+                layer = self.layer(ep_size=ep_size, comm_backend=backend)
+                with mock.patch.object(auto_ep_layer.torch, "argsort", side_effect=RuntimeError("sort reached")):
+                    with self.assertRaisesRegex(RuntimeError, "sort reached"):
+                        auto_ep_layer.AutoEPMoELayer.forward(layer, torch.randn(1, 2, 4))
+                layer._deepep_route.assert_not_called()
+
+    def test_shared_tail_and_router_logits_are_preserved(self):
+        layer = self.layer(return_router_logits=True)
+        layer.moe_output_shape = "flat"
+        layer.shared_experts = mock.Mock(side_effect=lambda x: x * 2)
+        hidden = torch.arange(8, dtype=torch.float32).reshape(1, 2, 4)
+        expected_logits = torch.nn.functional.linear(hidden.reshape(2, 4), layer.router.gate.weight)
+
+        output, logits = auto_ep_layer.AutoEPMoELayer.forward(layer, hidden)
+
+        self.assertEqual(tuple(output.shape), (2, 4))
+        self.assertTrue(torch.equal(output, torch.ones_like(output) + hidden.reshape(2, 4) * 2))
+        torch.testing.assert_close(logits, expected_logits)
+        layer.shared_experts.assert_called_once()
 
 
 class TestBufferLifecycle(unittest.TestCase):
@@ -336,10 +612,22 @@ class TestBufferLifecycle(unittest.TestCase):
         self.assertIn("600", message)
 
     def test_the_configured_capacity_sizes_the_buffer(self):
-        layer = mock.Mock(_deepep_exchange=None, comm_max_tokens_per_rank=4096, comm_num_sm=12, comm_qp_margin=4)
+        layer = TestDeepEPEarlyRoute.layer()
+        layer._deepep_exchange = None
+        layer.deepep_scope = 0
+        layer.ep_group = object()
+        layer.hidden_size = 8
+        layer.comm_max_tokens_per_rank = 4096
+        layer.comm_num_sm = 12
+        layer.comm_qp_margin = 4
+        tokens = torch.ones((8, 8), dtype=torch.bfloat16)
 
-        built = mock.Mock(return_value=mock.Mock(num_max_tokens_per_rank=4096))
-        with mock.patch.object(auto_ep_layer, "DeepEPExchange", built), \
+        def build_exchange(**kwargs):
+            barrier.assert_called_once_with(group=layer.ep_group, device_ids=[tokens.device.index])
+            return mock.Mock(num_max_tokens_per_rank=4096)
+
+        with mock.patch.object(auto_ep_layer.dist, "barrier") as barrier, \
+                mock.patch.object(auto_ep_layer, "shared_exchange", side_effect=build_exchange) as built, \
                 mock.patch.object(auto_ep_layer, "deepep_dispatch", side_effect=RuntimeError("stop here")), \
                 mock.patch.object(auto_ep_layer.dist, "all_reduce", lambda *a, **k: None):
             router_output = auto_ep_layer.RouterOutput(
@@ -347,11 +635,89 @@ class TestBufferLifecycle(unittest.TestCase):
                 selected_experts=torch.zeros((8, 1), dtype=torch.long),
                 num_tokens_per_expert=torch.zeros(4, dtype=torch.long),
             )
-            with self.assertRaises(RuntimeError):
-                auto_ep_layer.AutoEPMoELayer._deepep_route(layer, torch.ones((8, 8), dtype=torch.bfloat16),
-                                                           router_output)
+            for _ in range(2):
+                with self.assertRaisesRegex(RuntimeError, "stop here"):
+                    auto_ep_layer.AutoEPMoELayer._deepep_route(layer, tokens, router_output)
 
         self.assertEqual(built.call_args.kwargs["num_max_tokens_per_rank"], 4096)
+        self.assertEqual(built.call_args.kwargs["scope"], 0)
+        built.assert_called_once()
+        barrier.assert_called_once_with(group=layer.ep_group, device_ids=[tokens.device.index])
+
+
+class TestCachedDispatchLayout(unittest.TestCase):
+    """A cached dispatch must reproduce the layout its handle was built with.
+
+    DeepEP's cached dispatch takes ``do_expand`` from the caller, defaulting to
+    False, rather than from the handle, while combine reads it from the handle.
+    The forward dispatch is expanded, so the combine backward, which replays
+    that dispatch, has to ask for the expanded layout explicitly or it scatters
+    gradient rows into a different layout than the experts produced.
+    """
+
+    # The token each of four received rows came from, in DeepEP's source-major and expanded (expert-major) layouts.
+    TOKEN_OF_ROW = {False: torch.tensor([0, 1, 0, 2]), True: torch.tensor([1, 0, 2, 0])}
+
+    def exchange(self, buffer):
+        exchange = auto_ep_comm.DeepEPExchange.__new__(auto_ep_comm.DeepEPExchange)
+        exchange.buffer = buffer
+        exchange.num_sms = 12
+        return exchange
+
+    def elastic_buffer(self):
+        token_of_row = self.TOKEN_OF_ROW
+
+        class ElasticBufferContract:
+            """DeepEP's documented behavior: a cached dispatch takes do_expand from its argument, combine from the handle."""
+
+            def dispatch(self, tokens, *, handle, do_expand=False, **kwargs):
+                return tokens[token_of_row[do_expand]], None, None, handle, None
+
+            def combine(self, rows, *, handle, **kwargs):
+                combined = rows.new_zeros(3, rows.shape[1]).index_add(0, token_of_row[handle.do_expand], rows)
+                return combined, None, None
+
+        return ElasticBufferContract()
+
+    def test_the_combine_backward_matches_the_rows_it_combined(self):
+        target = torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]])
+        for expanded in (False, True):
+            with self.subTest(expanded=expanded):
+                exchange = self.exchange(self.elastic_buffer())
+                handle = SimpleNamespace(do_expand=expanded)
+                token_of_row = self.TOKEN_OF_ROW[expanded]
+                weights = torch.nn.Parameter(torch.arange(12, dtype=torch.float32).reshape(4, 3) / 10)
+                expected_weights = torch.nn.Parameter(weights.detach().clone())
+                optimizer = torch.optim.SGD([weights], lr=0.01)
+                expected_optimizer = torch.optim.SGD([expected_weights], lr=0.01)
+                # Two steps, so a gradient scattered into the wrong rows also shows up in the next forward.
+                for _ in range(2):
+                    rows = torch.arange(12, dtype=torch.float32).reshape(4, 3).requires_grad_(True)
+                    expected_rows = rows.detach().clone().requires_grad_(True)
+                    combined = auto_ep_comm.deepep_combine(exchange, rows * weights, handle)
+                    expected = torch.zeros(3, 3).index_add(0, token_of_row, expected_rows * expected_weights)
+                    torch.testing.assert_close(combined, expected, rtol=0, atol=0)
+
+                    (combined * target).sum().backward()
+                    (expected * target).sum().backward()
+                    torch.testing.assert_close(rows.grad, expected_rows.grad, rtol=0, atol=0)
+                    torch.testing.assert_close(weights.grad, expected_weights.grad, rtol=0, atol=0)
+
+                    optimizer.step()
+                    expected_optimizer.step()
+                    torch.testing.assert_close(weights, expected_weights, rtol=0, atol=0)
+                    optimizer.zero_grad(set_to_none=True)
+                    expected_optimizer.zero_grad(set_to_none=True)
+
+    def test_the_forward_dispatch_records_an_expanded_layout(self):
+        exchange = self.exchange(mock.Mock())
+        exchange.buffer.dispatch.return_value = (torch.zeros((4, 8)), None, torch.zeros((4, 1)), mock.Mock(), None)
+        exchange.deep_ep = mock.Mock(topk_idx_t=torch.int64)
+        exchange.num_experts = 4
+
+        exchange.dispatch(torch.ones((2, 8)), torch.zeros((2, 2), dtype=torch.long), torch.ones((2, 2)))
+
+        self.assertIs(exchange.buffer.dispatch.call_args.kwargs["do_expand"], True)
 
 
 class TestAutogradSignatures(unittest.TestCase):

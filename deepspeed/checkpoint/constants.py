@@ -18,6 +18,7 @@ BASE_OPTIMIZER_STATE_STEP = 'base_optimizer_state_step'
 SINGLE_PARTITION_OF_FP32_GROUPS = "single_partition_of_fp32_groups"
 PARAM_GROUPS = 'param_groups'
 GROUP_PADDINGS = 'group_paddings'
+PARAM_ALIGNMENT_PADDINGS = 'param_alignment_paddings'
 PARTITION_COUNT = 'partition_count'
 ZERO_STAGE = 'zero_stage'
 CLIP_GRAD = 'clip_grad'
@@ -62,6 +63,12 @@ UNIVERSAL_CHECKPOINT_VERSION_VALUE = 0.4
 # Attribute name used to store AutoTP universal-checkpoint metadata on torch Parameters.
 DS_AUTOTP_UC_META = "ds_autotp_universal_checkpoint_meta"
 AUTOTP_UNSUPPORTED_PARAMETER_PATTERNS = "autotp_unsupported_parameter_patterns"
+# Geometric description of how each parameter is sharded, keyed by parameter pattern.
+# Written alongside the pattern lists below rather than replacing them, so a converter
+# that predates it simply does not see the key. See checkpoint/affine_ir_spec.md.
+AFFINE_MAP = 'affine_map'
+AFFINE_MAP_VERSION = 'version'
+AFFINE_MAP_PARAMS = 'params'
 
 # Vocabulary padding
 VOCAB_TENSOR = 'vocab_tensor'
@@ -106,6 +113,12 @@ AUTOEP_EXPERT_KEY_PREFIX = 'expert_key_prefix'
 AUTOEP_NUM_EXPERTS = 'num_experts'
 AUTOEP_NUM_LOCAL_EXPERTS = 'num_local_experts'
 AUTOEP_EP_SIZE = 'ep_size'
+AUTOEP_EXPERT_PLACEMENT = 'expert_placement'
+AUTOEP_AFFINE_MAPS = 'affine_maps'
+DS_AUTOEP_UC_META = 'ds_autoep_uc_meta'
+AUTOEP_PARAM_LOGICAL_SHAPE = 'logical_shape'
+AUTOEP_PARAM_EP_RANK = 'ep_rank'
+AUTOEP_PARAM_LOCAL_EXPERTS = 'local_experts'
 AUTOEP_ZERO12_REQUIRED_FIELDS = (
     AUTOEP_EXPERT_KEY_PREFIX,
     AUTOEP_NUM_EXPERTS,
@@ -116,6 +129,13 @@ AUTOEP_ZERO3_EXPERT_STATE_FORMAT_KEY = 'checkpoint_format'
 AUTOEP_ZERO3_PARTITIONED_EXPERT_STATE_FORMAT = 'zero3_partitioned'
 AUTOEP_ZERO3_EXPERT_STATE_FORMAT_VERSION_KEY = 'checkpoint_format_version'
 AUTOEP_ZERO3_EXPERT_STATE_FORMAT_VERSION = 1
+AUTOEP_PLACEMENT_VERSION_KEY = 'version'
+AUTOEP_PLACEMENT_VERSION = 1
+AUTOEP_PLACEMENT_NUM_EXPERTS = 'num_experts'
+AUTOEP_PLACEMENT_EP_SIZE = 'ep_size'
+AUTOEP_PLACEMENT_RANKS = 'ranks'
+AUTOEP_PLACEMENT_RANK = 'rank'
+AUTOEP_PLACEMENT_EXPERTS = 'experts'
 
 #########################################
 # Universal Checkpoint EP keys

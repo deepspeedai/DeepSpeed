@@ -2,7 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # DeepSpeed Team
+"""Compatibility package for the removed compression library.
 
-from .compress import init_compression, redundancy_clean
-from .scheduler import compression_scheduler
-from .helper import convert_conv1d_to_linear
+Import ``recursive_getattr`` / ``recursive_setattr`` from
+``deepspeed.utils.module_utils`` instead. See
+https://github.com/deepspeedai/DeepSpeed/issues/8489
+"""

@@ -128,7 +128,11 @@ def train_cifar(model, config, num_steps=400, average_dp_losses=True, fp16=True,
         fork_kwargs = {"device_type": get_accelerator().device_name()}
     else:
         fork_kwargs = {}
-    with get_accelerator().random().fork_rng(devices=[get_accelerator().current_device_name()], **fork_kwargs):
+    # fork_rng only needs entries for backends with per-device generators: the global
+    # CPU RNG is always saved, and torch.cpu has no get_rng_state to call anyway.
+    device_mod = torch.get_device_module(get_accelerator().device_name())
+    fork_devices = [get_accelerator().current_device_name()] if hasattr(device_mod, 'get_rng_state') else []
+    with get_accelerator().random().fork_rng(devices=fork_devices, **fork_kwargs):
         ds_utils.set_random_seed(seed)
 
         # disable dropout
