@@ -477,6 +477,41 @@ class TestRoutingWeightsAreApplied(unittest.TestCase):
         self.assertEqual(seen["combine_rows"].shape[0], self.ARRIVED_ROWS)
         self.assertTrue(torch.equal(seen["counts"], torch.tensor([3, 3, 3, 3], dtype=torch.int32)))
 
+    def test_activation_row_weighting_hands_the_weights_to_the_experts(self):
+        # The experts apply them inside the activation; nothing scales the expert output afterwards.
+        seen = {}
+
+        def experts(rows, counts, row_weights=None):
+            seen["row_weights"] = row_weights
+            return rows * 2
+
+        prefix = torch.tensor([3, 6, 9, self.ARRIVED_ROWS], dtype=torch.int64)
+        handle = mock.Mock(psum_num_recv_tokens_per_expert=prefix, num_expanded_tokens=self.ARRIVED_ROWS)
+        exchange = mock.Mock(last_handle=handle, num_max_tokens_per_rank=1024)
+        received = torch.ones((self.BUFFER_ROWS, self.HIDDEN))
+        recv_weights = torch.full((self.BUFFER_ROWS, ), self.WEIGHT)
+        layer = mock.Mock(_deepep_exchange=exchange,
+                          num_local_experts=self.LOCAL_EXPERTS,
+                          score_apply="post",
+                          row_weighting_impl="activation",
+                          comm_num_sm=12,
+                          comm_qp_margin=4,
+                          experts=experts)
+        with mock.patch.object(auto_ep_layer, "deepep_dispatch", lambda *_args: (received, recv_weights, exchange)), \
+                mock.patch.object(auto_ep_layer, "deepep_combine", lambda _exchange, rows, _handle: rows), \
+                mock.patch.object(auto_ep_layer, "apply_deepep_row_weights", side_effect=AssertionError("applied")):
+            router_output = auto_ep_layer.RouterOutput(
+                top_scores=torch.ones((4, 2)),
+                selected_experts=torch.zeros((4, 2), dtype=torch.long),
+                num_tokens_per_expert=torch.zeros(self.LOCAL_EXPERTS, dtype=torch.long),
+            )
+            tokens = torch.ones((4, self.HIDDEN), dtype=torch.bfloat16)
+            result = auto_ep_layer.AutoEPMoELayer._deepep_route(layer, tokens, router_output)
+
+        self.assertEqual(seen["row_weights"].shape, (self.ARRIVED_ROWS, ))
+        self.assertTrue(torch.equal(seen["row_weights"], torch.full((self.ARRIVED_ROWS, ), self.WEIGHT)))
+        self.assertTrue(torch.equal(result, torch.full((self.ARRIVED_ROWS, self.HIDDEN), 2.0)))
+
     def test_row_count_comes_from_the_handle_not_the_device(self):
         # Reading it off the prefix sum needs a device-to-host synchronisation
         # in front of every layer's GEMM; the handle already holds it as an int.

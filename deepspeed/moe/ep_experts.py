@@ -44,13 +44,15 @@ class ExpertActivation:
     which of the two scalars the form reads. ``gate_fn`` is the elementwise function the form applies
     to ``gate`` when it is ``gate_fn(gate) * up`` inside the clamp region; AutoEP compares it with the
     ``act_fn`` of the model's experts module to catch a preset that names the wrong form. It is
-    ``None`` for forms that are not such a product.
+    ``None`` for forms that are not such a product. ``weighted_fused_fn(gate, up, weights, alpha, limit)`` runs a
+    fused kernel that also scales each row by one FP32 weight, when the form has one.
     """
     fn: Callable[[torch.Tensor, torch.Tensor, float, float], torch.Tensor]
     fused_fn: Callable[[torch.Tensor, torch.Tensor, float, float], torch.Tensor] | None = None
     uses_alpha: bool = False
     uses_limit: bool = False
     gate_fn: Callable[[torch.Tensor], torch.Tensor] | None = None
+    weighted_fused_fn: Callable[[torch.Tensor, torch.Tensor, torch.Tensor, float, float], torch.Tensor] | None = None
 
 
 #: The expert activations AutoEP can compute, by name. They are different functions: a model trained
@@ -72,11 +74,12 @@ def register_expert_activation(
     uses_alpha: bool = False,
     uses_limit: bool = False,
     gate_fn: Callable[[torch.Tensor], torch.Tensor] | None = None,
+    weighted_fused_fn: Callable[[torch.Tensor, torch.Tensor, torch.Tensor, float, float], torch.Tensor] | None = None,
 ) -> None:
     """Make ``name`` selectable as a preset's or the config's ``expert_activation``."""
     if name in EXPERT_ACTIVATIONS:
         raise ValueError(f"expert activation {name!r} is already registered")
-    EXPERT_ACTIVATIONS[name] = ExpertActivation(fn, fused_fn, uses_alpha, uses_limit, gate_fn)
+    EXPERT_ACTIVATIONS[name] = ExpertActivation(fn, fused_fn, uses_alpha, uses_limit, gate_fn, weighted_fused_fn)
 
 
 def get_expert_activation(name: str) -> ExpertActivation:
@@ -99,6 +102,12 @@ def _swiglu_fused(gate: torch.Tensor, up: torch.Tensor, alpha: float, limit: flo
     return swiglu(gate, up)
 
 
+def _swiglu_weighted_fused(gate: torch.Tensor, up: torch.Tensor, weights: torch.Tensor, alpha: float,
+                           limit: float) -> torch.Tensor:
+    from deepspeed.ops.triton_ops.swiglu_triton import swiglu_weighted
+    return swiglu_weighted(gate, up, weights)
+
+
 def _geglu_tanh(gate: torch.Tensor, up: torch.Tensor, alpha: float, limit: float) -> torch.Tensor:
     return _gelu_tanh(gate) * up
 
@@ -113,7 +122,11 @@ def _swiglu_oai(gate: torch.Tensor, up: torch.Tensor, alpha: float, limit: float
     return (up + 1.0) * (gate * torch.sigmoid(gate * alpha))
 
 
-register_expert_activation("swiglu", _swiglu, fused_fn=_swiglu_fused, gate_fn=F.silu)
+register_expert_activation("swiglu",
+                           _swiglu,
+                           fused_fn=_swiglu_fused,
+                           gate_fn=F.silu,
+                           weighted_fused_fn=_swiglu_weighted_fused)
 register_expert_activation("geglu_tanh", _geglu_tanh, gate_fn=_gelu_tanh)
 register_expert_activation("swiglu_clamped", _swiglu_clamped, uses_limit=True, gate_fn=F.silu)
 register_expert_activation("swiglu_oai", _swiglu_oai, uses_alpha=True, uses_limit=True)
@@ -124,13 +137,21 @@ def apply_expert_activation(gate: torch.Tensor,
                             activation: str = "swiglu",
                             alpha: float = 1.702,
                             limit: float = 7.0,
-                            fused: bool = True) -> torch.Tensor:
+                            fused: bool = True,
+                            row_weights: torch.Tensor | None = None) -> torch.Tensor:
     """Combine the gate and up projections of an expert MLP with the named activation.
 
     ``fused`` selects the form's fused kernel when it has one; ``fused=False`` keeps everything in
     plain PyTorch, which also runs on CPU tensors.
+
+    ``row_weights``, one FP32 weight per row, scales each row of the result. It is computed in FP32
+    and rounded once: in the form's weighted kernel when it has one, else in plain PyTorch.
     """
     entry = get_expert_activation(activation)
+    if row_weights is not None:
+        if fused and entry.weighted_fused_fn is not None:
+            return entry.weighted_fused_fn(gate, up, row_weights, alpha, limit)
+        return (entry.fn(gate.float(), up.float(), alpha, limit) * row_weights.reshape(-1, 1)).to(gate.dtype)
     if fused and entry.fused_fn is not None:
         return entry.fused_fn(gate, up, alpha, limit)
     return entry.fn(gate, up, alpha, limit)
@@ -150,6 +171,7 @@ def _run_experts_for_loop(
     activation: str = "swiglu",
     alpha: float = 1.702,
     limit: float = 7.0,
+    row_weights: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Compute SwiGLU expert MLP via a sequential for-loop over experts.
 
@@ -164,6 +186,7 @@ def _run_experts_for_loop(
         activation: Expert activation name from ``EXPERT_ACTIVATIONS``.
         alpha: ``alpha`` for the forms that read it.
         limit: Clamp limit for the forms that read it.
+        row_weights: Optional FP32 weight per input row, shape ``(T,)``, applied inside the activation.
 
     Returns:
         Output tensor of shape ``(T, dim)``.
@@ -179,6 +202,9 @@ def _run_experts_for_loop(
         split_size_or_sections=num_tokens_per_expert_list,
         dim=0,
     )
+    weight_splits = [None] * len(x_splits)
+    if row_weights is not None:
+        weight_splits = torch.split(row_weights[:sum(num_tokens_per_expert_list)], num_tokens_per_expert_list)
 
     cast_dtype = x.dtype
     out_experts_splits = []
@@ -189,7 +215,13 @@ def _run_experts_for_loop(
         gate = torch.matmul(x_expert, w1_e)
         up = torch.matmul(x_expert, w3_e)
         # fused=False keeps the reference path in plain PyTorch, so it still runs on CPU tensors.
-        h = apply_expert_activation(gate, up, activation, alpha, limit, fused=False)
+        h = apply_expert_activation(gate,
+                                    up,
+                                    activation,
+                                    alpha,
+                                    limit,
+                                    fused=False,
+                                    row_weights=weight_splits[expert_idx])
         h = torch.matmul(h, w2_e)
         out_experts_splits.append(h)
 
@@ -215,6 +247,7 @@ def _run_experts_grouped_mm(
     activation: str = "swiglu",
     alpha: float = 1.702,
     limit: float = 7.0,
+    row_weights: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Compute SwiGLU expert MLP via torch._grouped_mm (grouped GEMM).
 
@@ -226,7 +259,7 @@ def _run_experts_grouped_mm(
         w3: Up weight, shape ``(E, hidden_dim, dim)``.
         x: Input tokens, shape ``(T, dim)``.
         num_tokens_per_expert: Token counts per expert, shape ``(E,)``.
-        activation, alpha, limit: As in :func:`_run_experts_for_loop`.
+        activation, alpha, limit, row_weights: As in :func:`_run_experts_for_loop`.
 
     Returns:
         Output tensor of shape ``(T, dim)``.
@@ -244,7 +277,7 @@ def _run_experts_grouped_mm(
         w3.to(cast_dtype).transpose(-2, -1),
         offs=offsets,
     )
-    h = apply_expert_activation(gate, up, activation, alpha, limit)
+    h = apply_expert_activation(gate, up, activation, alpha, limit, row_weights=row_weights)
     out = torch._grouped_mm(
         h,
         w2.to(cast_dtype).transpose(-2, -1),
@@ -268,6 +301,7 @@ def _run_experts_triton_grouped_mm(
     activation: str = "swiglu",
     alpha: float = 1.702,
     limit: float = 7.0,
+    row_weights: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Compute SwiGLU expert MLP via the Triton grouped GEMM drop-in.
 
@@ -289,7 +323,7 @@ def _run_experts_triton_grouped_mm(
     dtype = x.dtype
     gate = group_gemm_triton(x, w1.to(dtype), offsets, trans_b=True)
     up = group_gemm_triton(x, w3.to(dtype), offsets, trans_b=True)
-    h = apply_expert_activation(gate, up, activation, alpha, limit)
+    h = apply_expert_activation(gate, up, activation, alpha, limit, row_weights=row_weights)
     out = group_gemm_triton(h, w2.to(dtype), offsets, trans_b=True).type_as(x)
 
     return out
@@ -381,11 +415,15 @@ class GroupedExperts(nn.Module):
         self,
         x: torch.Tensor,
         num_tokens_per_expert: torch.Tensor,
+        row_weights: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         Args:
             x: Input tokens, shape ``(T, dim)``.
             num_tokens_per_expert: Token counts per expert, shape ``(E,)``.
+            row_weights: Optional FP32 weight per row, shape ``(T,)``, that scales each row inside the
+                activation, before the down projection. The down projection is linear and has no bias, so
+                this scales each output row by its weight.
 
         Returns:
             Output tensor of shape ``(T, dim)``.
@@ -393,8 +431,9 @@ class GroupedExperts(nn.Module):
 
         act = (self.activation, self.activation_alpha, self.activation_limit)
         if self.use_triton_grouped_mm:
-            return _run_experts_triton_grouped_mm(self.w1, self.w2, self.w3, x, num_tokens_per_expert, *act)
+            return _run_experts_triton_grouped_mm(self.w1, self.w2, self.w3, x, num_tokens_per_expert, *act,
+                                                  row_weights)
         elif self.use_grouped_mm:
-            return _run_experts_grouped_mm(self.w1, self.w2, self.w3, x, num_tokens_per_expert, *act)
+            return _run_experts_grouped_mm(self.w1, self.w2, self.w3, x, num_tokens_per_expert, *act, row_weights)
         else:
-            return _run_experts_for_loop(self.w1, self.w2, self.w3, x, num_tokens_per_expert, *act)
+            return _run_experts_for_loop(self.w1, self.w2, self.w3, x, num_tokens_per_expert, *act, row_weights)

@@ -107,7 +107,8 @@ def resolve_combine_impl(
     return "weighted_sum"
 
 
-def resolve_row_weighting_impl(config_override: Literal["auto", "eager", "fused"]) -> Literal["eager", "fused"]:
+def resolve_row_weighting_impl(
+        config_override: Literal["auto", "eager", "fused", "activation"]) -> Literal["eager", "fused", "activation"]:
     """Resolve DeepEP row weighting implementation from config override."""
     if config_override != "auto":
         return config_override
@@ -534,6 +535,11 @@ class AutoEPMoELayer(nn.Module):
         self.score_apply = resolve_score_apply_mode(spec, config.score_apply)
         self.combine_impl = resolve_combine_impl(config.combine_impl)
         self.row_weighting_impl = resolve_row_weighting_impl(config.row_weighting_impl)
+        if self.row_weighting_impl == "activation" and self.score_apply != "post":
+            raise ValueError('row_weighting_impl="activation" applies the routing weights inside the expert '
+                             'activation, after the experts\' first projections, so it requires score_apply to '
+                             f'resolve to "post"; preset \'{spec.model_family}\' resolves it to '
+                             f'"{self.score_apply}". Use "eager" or "fused" for this model.')
         self._fused_combine_checked = False
         self._fused_row_weighting_checked = False
         route_norm = spec.route_norm if config.route_norm is None else config.route_norm
@@ -864,10 +870,14 @@ class AutoEPMoELayer(nn.Module):
             raise RuntimeError(f"DeepEP returned {counts.numel()} expert counts, but this rank owns "
                                f"{self.num_local_experts} experts")
 
-        expert_output = self.experts(received, counts)
-
-        if weights is not None:
-            expert_output = apply_deepep_row_weights(expert_output, weights, self.row_weighting_impl)
+        if weights is not None and self.row_weighting_impl == "activation":
+            # The down projection is linear and has no bias, so scaling its input rows by the routing weights
+            # scales its output rows the same way, without a separate pass over the expert output.
+            expert_output = self.experts(received, counts, row_weights=weights.reshape(-1))
+        else:
+            expert_output = self.experts(received, counts)
+            if weights is not None:
+                expert_output = apply_deepep_row_weights(expert_output, weights, self.row_weighting_impl)
 
         return deepep_combine(exchange, expert_output, handle)
 

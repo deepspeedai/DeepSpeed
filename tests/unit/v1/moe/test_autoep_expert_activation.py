@@ -248,6 +248,95 @@ class TestGroupedExpertsActivation:
         for name in ("w1", "w2", "w3"):
             assert_same(getattr(grouped, name).grad, getattr(loop, name).grad)
 
+    @pytest.mark.parametrize("activation", tuple(EXPERT_ACTIVATIONS))
+    def test_row_weights_are_the_fp32_product_rounded_once(self, activation):
+        torch.manual_seed(0)
+        gate = torch.randn(6, 8).bfloat16()
+        up = torch.randn(6, 8).bfloat16()
+        weights = torch.rand(6)
+
+        got = apply_expert_activation(gate, up, activation, 1.5, 1.0, fused=False, row_weights=weights)
+
+        fp32 = EXPERT_ACTIVATIONS[activation].fn(gate.float(), up.float(), 1.5, 1.0) * weights[:, None]
+        assert torch.equal(got, fp32.bfloat16())
+        written = _written_out(gate.float(), up.float(), activation, 1.5, 1.0) * weights[:, None]
+        torch.testing.assert_close(got.float(), written, rtol=1e-2, atol=1e-2)
+
+    @pytest.mark.parametrize("activation", tuple(EXPERT_ACTIVATIONS))
+    def test_row_weights_scale_each_expert_output_row(self, activation):
+        # The down projection is linear and has no bias, so weighting its input row weights its output row.
+        torch.manual_seed(0)
+        experts = GroupedExperts(dim=16,
+                                 hidden_dim=32,
+                                 num_experts=4,
+                                 use_grouped_mm=False,
+                                 activation=activation,
+                                 activation_alpha=1.5,
+                                 activation_limit=1.0)
+        for weight in (experts.w1, experts.w2, experts.w3):
+            nn.init.normal_(weight, std=0.5)
+        counts = torch.tensor([1, 4, 0, 5])  # an empty expert, and two padding rows after the routed ones
+        x = torch.randn(12, 16, requires_grad=True)
+        weights = torch.rand(12, requires_grad=True)
+        x_post = x.detach().clone().requires_grad_(True)
+        weights_post = weights.detach().clone().requires_grad_(True)
+
+        out = experts(x, counts, row_weights=weights)
+        post = experts(x_post, counts) * weights_post[:, None]
+        grad_out = torch.randn_like(out)
+        out.backward(grad_out)
+        post.backward(grad_out)
+
+        torch.testing.assert_close(out, post, rtol=1e-5, atol=1e-5)
+        torch.testing.assert_close(x.grad, x_post.grad, rtol=1e-5, atol=1e-5)
+        torch.testing.assert_close(weights.grad[:10], weights_post.grad[:10], rtol=1e-4, atol=1e-5)
+        # Padding rows produce zeros whatever their weight.
+        assert not out[10:].any()
+
+    @pytest.mark.parametrize("path", ["grouped_mm", "triton_grouped_mm"])
+    @pytest.mark.parametrize("activation", tuple(EXPERT_ACTIVATIONS))
+    def test_grouped_gemm_paths_take_row_weights_like_the_for_loop(self, activation, path):
+        # For swiglu the grouped paths run the fused weighted kernel; the for-loop path, plain PyTorch.
+        from deepspeed.ops.triton_ops import is_triton_available
+
+        if get_accelerator().device_name() == "cpu":
+            pytest.skip("needs an accelerator")
+        if path == "grouped_mm" and not hasattr(torch, "_grouped_mm"):
+            pytest.skip("this PyTorch build has no torch._grouped_mm")
+        if path == "triton_grouped_mm" and not is_triton_available():
+            pytest.skip("the Triton grouped GEMM needs Triton")
+        device = get_accelerator().current_device_name()
+        torch.manual_seed(0)
+        shape = dict(dim=64, hidden_dim=128, num_experts=4)
+        act = dict(activation=activation, activation_alpha=1.5, activation_limit=1.0)
+        loop = GroupedExperts(use_grouped_mm=False, **shape, **act)
+        for weight in (loop.w1, loop.w2, loop.w3):
+            nn.init.normal_(weight, std=0.1)
+        grouped = GroupedExperts(use_grouped_mm=True, disable_triton_grouped_mm=True, **shape, **act)
+        grouped.load_state_dict(loop.state_dict())
+        grouped.use_triton_grouped_mm = path == "triton_grouped_mm"
+        loop.to(device=device, dtype=torch.bfloat16)
+        grouped.to(device=device, dtype=torch.bfloat16)
+
+        counts = torch.tensor([16, 32, 16, 64], device=device)
+        x = torch.randn(int(counts.sum()), 64, device=device, dtype=torch.bfloat16)
+        weights = torch.rand(int(counts.sum()), device=device)
+        inputs = {name: (x.clone().requires_grad_(True), weights.clone().requires_grad_(True)) for name in "lg"}
+        out_loop = loop(inputs["l"][0], counts, row_weights=inputs["l"][1])
+        out_grouped = grouped(inputs["g"][0], counts, row_weights=inputs["g"][1])
+        grad_out = torch.randn_like(out_loop)
+        out_loop.backward(grad_out)
+        out_grouped.backward(grad_out)
+
+        def assert_same(got, want):
+            torch.testing.assert_close(got, want, rtol=2e-2, atol=2e-2 * want.abs().max().item())
+
+        assert_same(out_grouped, out_loop)
+        for index in range(2):
+            assert_same(inputs["g"][index].grad, inputs["l"][index].grad)
+        for name in ("w1", "w2", "w3"):
+            assert_same(getattr(grouped, name).grad, getattr(loop, name).grad)
+
     def test_for_loop_path_does_not_need_the_triton_kernel(self, monkeypatch):
         # The for-loop path is the reference path and runs on CPU tensors. It must not reach the
         # Triton kernel, which exists whenever Triton is installed.
