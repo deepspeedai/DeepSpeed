@@ -393,20 +393,34 @@ def _install_gdn_segment(seg: GDNSegment) -> bool:
         fn = parent.recurrent_gated_delta_rule if single else parent.chunk_gated_delta_rule
         return fn(query, key, value, **kw)
 
-    kernel_op = None
-    try:
-        from deepspeed.accelerator import get_accelerator
-        if get_accelerator().device_name() != "cpu":
-            from deepspeed.ops.module_inject import get_fused_glu_op
-            kernel_op = get_fused_glu_op()
-    except Exception:
-        kernel_op = None
-    parent._ki_gdn_op = kernel_op
+    parent._ki_gdn_op = _load_native_op()
     parent._ki_gdn_conv_update = conv_update_with_weights
     parent._ki_gdn_conv_fn = conv_fn_with_weights
     parent._ki_gdn_scan = scan
     parent.forward = _fused_gdn_forward.__get__(parent, type(parent))
     return True
+
+
+def _load_native_op():
+    """Best-effort load of the segment-KI native op; None → composite.
+
+    Ask the accelerator whether it registers this builder — the kernels are
+    CUDA source today, so other backends answer NotImplemented and skip the
+    futile JIT attempt, while a backend that implements the op later is
+    picked up automatically. A registered builder whose JIT toolchain is
+    unusable on this host falls back instead of raising through rollout
+    construction."""
+    from deepspeed.accelerator import get_accelerator
+    try:
+        builder = get_accelerator().get_op_builder("FusedGLUBuilder")
+    except Exception:
+        return None
+    if builder is None or builder.__name__ == "NotImplementedBuilder":
+        return None
+    try:
+        return builder().load()
+    except Exception:
+        return None
 
 
 def apply_segment_ki(model: torch.nn.Module) -> dict:
@@ -418,11 +432,7 @@ def apply_segment_ki(model: torch.nn.Module) -> dict:
     Returns a small report so callers (tests, journals) can assert what was
     found and replaced without introspecting the module tree again.
     """
-    kernel_op = None
-    from deepspeed.accelerator import get_accelerator
-    if get_accelerator().device_name() != "cpu":
-        from deepspeed.ops.module_inject import get_fused_glu_op
-        kernel_op = get_fused_glu_op()
+    kernel_op = _load_native_op()
 
     report = {"backend": "cuda" if kernel_op is not None else "composite"}
 
