@@ -309,7 +309,10 @@ def _fused_gdn_forward(self, hidden_states, *args, **kwargs):
     # step through this branch would silently cut gradients to the a/b
     # projections, A_log, and dt_bias. The kernel's win is decode launch
     # overhead (a no-grad path); training runs the composite ops instead.
-    if (gdn_op is not None and get_accelerator().on_accelerator(a) and not torch.is_grad_enabled()):
+    # It also reads raw BFloat16 pointers only — fp16 models must take the
+    # composite path rather than raise inside the binding.
+    if (gdn_op is not None and get_accelerator().on_accelerator(a) and not torch.is_grad_enabled()
+            and a.dtype is torch.bfloat16):
         a_log_f = self.A_log.detach().float().contiguous()
         dt_f = self.dt_bias.detach().float().contiguous()
         # gdn_gates accepts row-strided a/b, so the fused-output slices go in
