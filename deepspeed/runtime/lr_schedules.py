@@ -551,7 +551,7 @@ class OneCycle(object):
         # Validate both bounds before touching the optimizer, so a bad cycle_max_lr does
         # not leave the param groups half updated.
         if last_batch_iteration == -1:
-            update_lr(optimizer.param_groups, self.min_lrs)
+            self._last_lr = update_lr(optimizer.param_groups, self.min_lrs)
 
         self.decay_lr_rate = decay_lr_rate
 
