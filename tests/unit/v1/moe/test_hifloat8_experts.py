@@ -58,6 +58,46 @@ def test_hifloat8_experts_fail_closed_on_cpu_without_changing_state():
     assert all(dict(experts.named_parameters())[name] is parameter for name, parameter in parameters.items())
 
 
+def test_npu_expert_helper_preserves_upstream_activation(monkeypatch):
+    """The NPU GEMM dispatch must use AutoEP's resolved expert activation."""
+    # Pin the merge regression without NPU hardware: the stub implements the
+    # native grouped GEMM contract while the helper supplies activation policy.
+    import deepspeed.moe.ep_experts as ep_experts
+
+    def fake_grouped_mm(lhs, weight, offsets):
+        starts = [0] + offsets.tolist()[:-1]
+        return torch.cat([lhs[start:end] @ weight[i] for i, (start, end) in enumerate(zip(starts, offsets.tolist()))])
+
+    class NativeStub:
+        apply = staticmethod(fake_grouped_mm)
+
+    monkeypatch.setattr(ep_experts, "_NPUGroupedMatmul", NativeStub)
+    torch.manual_seed(7)
+    counts = torch.tensor([2, 1])
+    x = torch.randn(4, 8, requires_grad=True)
+    weights = [torch.randn(shape, requires_grad=True) for shape in ((2, 16, 8), (2, 8, 16), (2, 16, 8))]
+    w1, w2, w3 = weights
+    actual = ep_experts._run_experts_npu(w1, w2, w3, x, counts, "swiglu_clamped", limit=0.5, hifloat8=False)
+
+    x_ref = x.detach().clone().requires_grad_()
+    w1_ref, w2_ref, w3_ref = [w.detach().clone().requires_grad_() for w in weights]
+    pieces = []
+    start = 0
+    for i, count in enumerate(counts.tolist()):
+        rows = x_ref[start:start + count]
+        gate = rows @ w1_ref[i].T
+        up = rows @ w3_ref[i].T
+        hidden = torch.nn.functional.silu(gate.clamp(max=0.5)) * up.clamp(min=-0.5, max=0.5)
+        pieces.append(hidden @ w2_ref[i].T)
+        start += count
+    expected = torch.cat((torch.cat(pieces), x_ref.new_zeros((1, 8))))
+    torch.testing.assert_close(actual, expected)
+    actual.sum().backward()
+    expected.sum().backward()
+    for value, reference in ((x, x_ref), (w1, w1_ref), (w2, w2_ref), (w3, w3_ref)):
+        torch.testing.assert_close(value.grad, reference.grad)
+
+
 @pytest.mark.parametrize("wrapper", [False, True])
 def test_qwen35_autoep_preserves_native_router_and_text_outputs(wrapper):
     # Catches wrong wrapper paths, top-k/dtype drift, and post-softmax logit capture.
@@ -116,7 +156,9 @@ def test_qwen35_autoep_preserves_native_router_and_text_outputs(wrapper):
     assert actual_scores.dtype == scores.dtype == torch.bfloat16
     torch.testing.assert_close(actual_indices, indices, rtol=0, atol=0)
     torch.testing.assert_close(actual_scores, scores, rtol=0, atol=0)
-    torch.testing.assert_close(replaced._cached_router_logits, logits, rtol=0, atol=0)
+    with torch.no_grad():
+        _, returned_logits = replaced(x.unsqueeze(0))
+    torch.testing.assert_close(returned_logits, logits, rtol=0, atol=0)
     assert counts.sum() == 26
     ids = torch.tensor([[1, 5, 7, 9, 11]])
     with torch.no_grad():

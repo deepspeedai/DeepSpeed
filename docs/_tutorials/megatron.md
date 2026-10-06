@@ -346,7 +346,7 @@ b) Replace in `mpu/transformer.py`:
 ```python
 if deepspeed.checkpointing.is_configured():
     global get_cuda_rng_tracker, checkpoint
-    get_cuda_rng_tracker = deepspeed.checkpoint.get_cuda_rng_tracker
+    get_cuda_rng_tracker = deepspeed.checkpointing.get_cuda_rng_tracker
     checkpoint = deepspeed.checkpointing.checkpoint
 
 ```

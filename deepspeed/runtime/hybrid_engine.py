@@ -3,9 +3,11 @@
 
 # DeepSpeed Team
 
+import inspect
 import torch
 from deepspeed.inference.config import DeepSpeedInferenceConfig
 from deepspeed.module_inject.replace_policy import replace_policies
+from deepspeed.module_inject.containers.opt import HFOPTLayerPolicy
 from deepspeed.module_inject.utils import policy_to_ds_container
 from .engine import DeepSpeedEngine
 from .utils import TLinear, get_inactive_params
@@ -129,6 +131,12 @@ class DeepSpeedHybridEngine(DeepSpeedEngine):
         self.inference_policies = {}
         for plcy in replace_policies:
             _ = plcy(None)
+            if plcy is HFOPTLayerPolicy and plcy._orig_layer_class is not None:
+                parameters = inspect.signature(plcy._orig_layer_class.forward).parameters
+                # The injected OPT layer only implements the legacy tuple-cache
+                # contract. Keep modern Cache-based decoders on the native path.
+                if "cache_position" in parameters or "past_key_values" in parameters:
+                    continue
             if isinstance(plcy._orig_layer_class, list):
                 for orig_layer_class in plcy._orig_layer_class:
                     self.inference_policies.update({orig_layer_class: (self.new_inference_container, plcy)})

@@ -68,7 +68,6 @@ Available `DS_BUILD` options include:
 * `DS_BUILD_FUSED_LAMB` builds the FusedLamb op.
 * `DS_BUILD_QUANTIZER` builds the quantizer op.
 * `DS_BUILD_RANDOM_LTD` builds the random ltd op.
-* `DS_BUILD_SPARSE_ATTN` builds the sparse attention op.
 * `DS_BUILD_TRANSFORMER` builds the transformer op.
 * `DS_BUILD_TRANSFORMER_INFERENCE` builds the transformer-inference op.
 * `DS_BUILD_STOCHASTIC_TRANSFORMER` builds the stochastic transformer op.

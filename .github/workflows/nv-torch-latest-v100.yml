@@ -31,7 +31,7 @@ jobs:
 
       - name: Install deepspeed
         run: |
-          pip install .[dev,1bit,autotuning,deepcompile]
+          pip install .[dev,autotuning,deepcompile]
           pip install pytest-timeout pytest-instafail
           ds_report
 
