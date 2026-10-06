@@ -40,7 +40,10 @@ def _emit(event: str, **fields: object) -> None:
         "time_ns": time.time_ns(),
         "monotonic_ns": time.monotonic_ns(),
         **_identity(),
-        **{key: _json_safe(value) for key, value in fields.items()},
+        **{
+            key: _json_safe(value)
+            for key, value in fields.items()
+        },
     }
     line = (json.dumps(record, sort_keys=True, ensure_ascii=False) + "\n").encode("utf-8", errors="replace")
     path = Path(path_value)
@@ -99,9 +102,7 @@ class _Collector:
 
 
 def _read_manifest(path: Path) -> list[str]:
-    targets = [
-        line for line in path.read_text(encoding="utf-8").splitlines() if line and not line.startswith("#")
-    ]
+    targets = [line for line in path.read_text(encoding="utf-8").splitlines() if line and not line.startswith("#")]
     if not targets or any(not target for target in targets):
         raise ValueError("diagnostic manifest must contain non-empty targets")
     if len(targets) != len(set(targets)):
@@ -139,14 +140,8 @@ def collect_nodes(args: argparse.Namespace) -> int:
     }
     args.output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print("DS_DIAGNOSTIC_COLLECTION " + json.dumps(result, sort_keys=True), flush=True)
-    valid = (
-        pytest_exit == 0
-        and len(requested) == args.expected_count
-        and len(collected) == args.expected_count
-        and len(set(collected)) == args.expected_count
-        and not result["missing"]
-        and not result["unexpected"]
-    )
+    valid = (pytest_exit == 0 and len(requested) == args.expected_count and len(collected) == args.expected_count
+             and len(set(collected)) == args.expected_count and not result["missing"] and not result["unexpected"])
     return 0 if valid else 2
 
 

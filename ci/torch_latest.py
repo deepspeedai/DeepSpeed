@@ -788,7 +788,11 @@ def build_remote_commands(inputs: ControllerInputs) -> tuple[RemoteCommand, ...]
     constraint_args: tuple[str, ...] = ()
     if inputs.diagnostic_suite:
         commands.extend(_diagnostic_bootstrap_commands(inputs))
-        constraint_args = ("-c", REMOTE_DIAGNOSTIC_CONSTRAINTS)
+        # The frozen environment contains the exact Transformers prerelease built from the
+        # pinned source commit. Opt in to prerelease resolution so pip accepts that exact
+        # constraint while processing requirements-dev.txt; every diagnostic dependency
+        # remains fixed by the constraint file.
+        constraint_args = ("--pre", "-c", REMOTE_DIAGNOSTIC_CONSTRAINTS)
     commands.extend([
         RemoteCommand(
             "install runtime requirements",

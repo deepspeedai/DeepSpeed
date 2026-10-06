@@ -343,8 +343,13 @@ def test_diagnostic_remote_plan_separates_controller_and_target_and_recovers_evi
         assert f"--randomly-seed={inputs.diagnostic_seed}" in pytest_command.argv
         assert "--capture=tee-sys" in pytest_command.argv
         assert pytest_command.argv[-71:] == inputs.targets
-        runtime_install = next(command for command in commands if command.label == "install runtime requirements")
-        assert ("-c", torch_latest.REMOTE_DIAGNOSTIC_CONSTRAINTS) == runtime_install.argv[4:6]
+        constrained_installs = [
+            command for command in commands
+            if command.label.startswith("install ") and command.argv[:4] == ("python", "-m", "pip", "install")
+        ]
+        assert len(constrained_installs) == 5
+        for command in constrained_installs:
+            assert ("--pre", "-c", torch_latest.REMOTE_DIAGNOSTIC_CONSTRAINTS) == command.argv[4:7]
         assert "verify diagnostic dependency consistency" in labels
         assert torch_latest.build_sandbox_kwargs("image", diagnostic=True)["timeout"] == 2400
     finally:
