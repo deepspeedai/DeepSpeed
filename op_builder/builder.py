@@ -505,12 +505,14 @@ class OpBuilder(ABC):
             if cpu_info is None:
                 return '-D__SCALAR__'
 
+        # py-cpuinfo reports no 'flags' on some CPUs, e.g. Apple Silicon.
+        flags = cpu_info.get('flags', [])
         if cpu_info['arch'] == 'X86_64':
-            if 'avx512' in cpu_info['flags'] or 'avx512f' in cpu_info['flags']:
+            if 'avx512' in flags or 'avx512f' in flags:
                 return '-D__AVX512__'
-            elif 'avx2' in cpu_info['flags']:
+            elif 'avx2' in flags:
                 return '-D__AVX256__'
-        elif (cpu_info['arch'] or '').startswith('ARM') and 'sve' in cpu_info['flags']:
+        elif (cpu_info['arch'] or '').startswith('ARM') and 'sve' in flags:
             return '-D__SVE__'
         elif cpu_info['arch'] == 'ARM_8':
             # NEON is baseline on AArch64; vdivq/vsqrtq used by simd.h are A64-only,
