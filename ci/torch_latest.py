@@ -87,6 +87,21 @@ REMOTE_ROOT = "/workspace"
 REMOTE_REPOSITORY = f"{REMOTE_ROOT}/deepspeed"
 REMOTE_TRANSFORMERS = f"{REMOTE_ROOT}/transformers"
 GDS_TEST_TARGET = "tests/unit/v1/nvme/test_gds.py"
+PRIVATE_NODE_INVENTORY_COMMAND = r"""
+printf 'PRIVATE_NODE_INVENTORY_V1\n'
+printf 'modal_sandbox_id=%s\n' "${MODAL_SANDBOX_ID:-unavailable}"
+printf 'modal_task_id=%s\n' "${MODAL_TASK_ID:-unavailable}"
+printf 'modal_cloud_provider=%s\n' "${MODAL_CLOUD_PROVIDER:-unavailable}"
+printf 'modal_region=%s\n' "${MODAL_REGION:-unavailable}"
+printf 'container_hostname=%s\n' "$(hostname 2>/dev/null || printf unavailable)"
+if command -v nvidia-smi >/dev/null 2>&1; then
+    nvidia-smi --query-gpu=index,uuid,pci.bus_id,driver_version,name --format=csv,noheader
+else
+    printf 'nvidia_smi=unavailable\n'
+fi
+printf 'PRIVATE_NODE_INVENTORY_END\n'
+exec sleep infinity
+""".strip()
 
 _REPOSITORY_COMPONENT = r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}"
 _REPOSITORY_RE = re.compile(rf"{_REPOSITORY_COMPONENT}/{_REPOSITORY_COMPONENT}\Z")
@@ -447,6 +462,11 @@ def build_sandbox_kwargs(image: Any) -> dict[str, Any]:
     }
 
 
+def build_sandbox_entrypoint() -> tuple[str, ...]:
+    """Emit narrow node inventory only to private Sandbox entrypoint logs."""
+    return ("bash", "-lc", PRIVATE_NODE_INVENTORY_COMMAND)
+
+
 def _remote_git(*args: str) -> tuple[str, ...]:
     return tuple(_git_command(*args))
 
@@ -672,7 +692,7 @@ def run_controller(env: Mapping[str, str], modal_module: Any | None = None) -> i
     primary_error: BaseException | None = None
     cleanup_error: BaseException | None = None
     try:
-        sandbox = modal_module.Sandbox.create(app=app, **build_sandbox_kwargs(image))
+        sandbox = modal_module.Sandbox.create(*build_sandbox_entrypoint(), app=app, **build_sandbox_kwargs(image))
         startup_seconds = await_sandbox_start(sandbox)
         sandbox_started_at = time.monotonic()
         print(f"Sandbox started after {startup_seconds:.0f}s", flush=True)

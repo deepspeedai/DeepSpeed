@@ -462,7 +462,12 @@ def test_controller_creates_one_sandbox_without_forwarding_secrets_and_cleans_up
         assert torch_latest.run_controller(env, fake) == 0
         assert state.app_calls == [(torch_latest.APP_NAME, True)]
         assert len(state.create_calls) == 1
-        create_kwargs = state.create_calls[0][1]
+        create_args, create_kwargs = state.create_calls[0]
+        assert create_args == torch_latest.build_sandbox_entrypoint()
+        assert "MODAL_SANDBOX_ID" in create_args[2]
+        assert "MODAL_TASK_ID" in create_args[2]
+        assert "nvidia-smi --query-gpu=index,uuid,pci.bus_id,driver_version,name" in create_args[2]
+        assert "exec sleep infinity" in create_args[2]
         assert create_kwargs["gpu"] == "l40s:2"
         assert create_kwargs["secrets"] == []
         assert set(create_kwargs["env"]) == set(torch_latest.build_sandbox_env())

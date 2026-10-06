@@ -1,1 +1,1 @@
-tests/unit/v1/zero/test_zero2_gradient_safety.py::test_two_rank_offload_and_nonoffload_training
+tests/unit/v1/distributed/test_minimal_nccl_broadcast.py::test_two_rank_minimal_nccl_broadcast
