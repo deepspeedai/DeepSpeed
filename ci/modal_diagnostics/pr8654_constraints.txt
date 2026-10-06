@@ -145,7 +145,8 @@ tomli==2.4.1
 torch==2.10.0+cu128
 torchvision==0.25.0+cu128
 tqdm==4.70.1
-transformers==5.19.0.dev0
+# Transformers is installed from the suite's exact source commit after dependency setup.
+# Its expected 5.19.0.dev0 version is enforced by the diagnostic runtime probe.
 triton==3.6.0
 typer==0.27.2
 typing-extensions==4.16.0

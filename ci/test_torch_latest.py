@@ -350,6 +350,9 @@ def test_diagnostic_remote_plan_separates_controller_and_target_and_recovers_evi
         assert len(constrained_installs) == 5
         for command in constrained_installs:
             assert ("--pre", "-c", torch_latest.REMOTE_DIAGNOSTIC_CONSTRAINTS) == command.argv[4:7]
+        constraints = (Path(torch_latest.__file__).resolve().parent / suite.constraints).read_text(encoding="utf-8")
+        assert "\ntransformers==" not in constraints
+        assert "'transformers':'5.19.0.dev0'" in torch_latest._diagnostic_runtime_probe()
         assert "verify diagnostic dependency consistency" in labels
         assert torch_latest.build_sandbox_kwargs("image", diagnostic=True)["timeout"] == 2400
     finally:

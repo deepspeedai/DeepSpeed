@@ -631,9 +631,9 @@ def _diagnostic_runtime_probe() -> str:
     return ("import importlib.metadata as m,json,platform,torch; "
             "actual={'python':platform.python_version(),'torch':torch.__version__,'cuda':torch.version.cuda,"
             "'pytest':m.version('pytest'),'xdist':m.version('pytest-xdist'),'randomly':m.version('pytest-randomly'),"
-            "'nccl':m.version('nvidia-nccl-cu12')}; "
+            "'nccl':m.version('nvidia-nccl-cu12'),'transformers':m.version('transformers')}; "
             "expected={'python':'3.10.13','torch':'2.10.0+cu128','cuda':'12.8','pytest':'8.3.5',"
-            "'xdist':'3.8.0','randomly':'5.0.0','nccl':'2.27.5'}; "
+            "'xdist':'3.8.0','randomly':'5.0.0','nccl':'2.27.5','transformers':'5.19.0.dev0'}; "
             "print(json.dumps({'actual':actual,'expected':expected},sort_keys=True)); "
             "assert actual==expected,(actual,expected)")
 
