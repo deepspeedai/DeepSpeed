@@ -63,6 +63,8 @@ Updated with MoE Layers
     self.fc4 = nn.Linear(84, 10)
 ```
 
+`MoE(..., route_norm=...)` is optional and defaults to `None`. That default keeps the historical combine weights: `k=1` uses the chosen expert's softmax probability, and `k>=2` rescales the kept weights so they sum to 1. `True` rescales for every `k`, and `False` leaves the raw softmax probabilities for every `k`. Either explicit value changes the layer output relative to a checkpoint trained with the other setting. The auxiliary load-balancing loss is unchanged. This constructor argument is the legacy gate. It is not the AutoEP config key `expert_parallel.route_norm`.
+
 ### Pyramid-Residual MoE
 
 Recently, we proposed a novel [Pyramid-Residual MoE](https://arxiv.org/abs/2201.05596) (PR-MoE) model architecture. To create such an MoE model, the users need to do two additional things:
