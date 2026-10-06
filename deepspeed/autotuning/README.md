@@ -286,10 +286,10 @@ By default, the Autotuner does not run experiments whose results already exist. 
 
 The Autotuner ranks tuning experiments by a metric. Currently, three metric types are supported, `"latency"`, `"throughput"`, and `"FLOPS"`:
 * "throughput": training samples per second (calculated as  `train_batch_size * 1000 / "latency"`)
-* "latency": training step latency in ms (`training iteration latency * gradient accumulation steps`)
-* "FLOPS": floating-point operations per second achieved per GPU (calculated as `the number of flops / training iteration latency`). Refer to [DeepSpeed flops profiler](https://www.deepspeed.ai/tutorials/flops-profiler/) for details on how the number of flops is measured.
+* "latency": training step latency in ms (`training iteration latency * gradient accumulation steps`). Lower latency ranks higher.
+* "FLOPS": floating-point operations per second achieved per GPU (calculated as `the number of flops / training iteration latency`). The metrics file stores this number as `FLOPS_per_gpu`. `"FLOPS"` and `"flops"` both read that field. Refer to [DeepSpeed flops profiler](https://www.deepspeed.ai/tutorials/flops-profiler/) for details on how the number of flops is measured.
 
-By default, `"throughput"` is used for ranking. Users can select other metrics, e.g., setting `{"metric": "latency"}` would use latency as the ranking metric.
+By default, `"throughput"` is used for ranking, and a larger number wins. Setting `{"metric": "latency"}` ranks configs by the lowest latency. `"throughput"` and `"FLOPS"` still keep the largest number.
 
 Note that the performance metric used in autotuning is calculated using the timings captured within DeepSpeed forward, backward and step functions. The sum of these timings is less than the actual training step latency, thus the throughput metric values used by autotuning would be higher than the end-to-end throughput in training.
 

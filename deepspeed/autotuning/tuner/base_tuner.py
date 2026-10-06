@@ -6,7 +6,7 @@
 import sys
 
 from deepspeed.autotuning.constants import *
-from deepspeed.autotuning.utils import write_experiments
+from deepspeed.autotuning.utils import metric_is_better, write_experiments
 from deepspeed.utils import logger
 
 
@@ -46,8 +46,7 @@ class BaseTuner:
                 self.rm.schedule_experiments(exp_paths)
                 self.rm.run()
                 exp, metric_val = self.rm.parse_results(self.metric)
-                if self.best_exp is None or self.best_metric_val is None or (metric_val
-                                                                             and metric_val > self.best_metric_val):
+                if metric_is_better(self.metric, metric_val, self.best_metric_val):
                     # logger.info(f"tuner finds better = {exp}")
                     self.best_exp = exp
                     self.best_metric_val = metric_val
