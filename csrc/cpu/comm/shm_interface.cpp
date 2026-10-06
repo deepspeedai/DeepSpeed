@@ -116,7 +116,10 @@ int vector_kernel_level()
     if (__builtin_cpu_supports("avx2")) return 1;
     return 0;
 #else
-    return 2;  // arm64/riscv kernels are JIT-compiled for the host ISA
+    // The arm64/riscv ports have no runtime ISA probe, so keep the pre-guard
+    // behavior of always enabling them; stricter gating for their optional
+    // extensions (e.g. riscv +v/+zvfh) is left to those ports' maintainers.
+    return 2;
 #endif
 }
 
