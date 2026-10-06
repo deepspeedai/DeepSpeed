@@ -357,10 +357,29 @@ def test_cpu_buffer_reuse_waits_for_offload_copies(operation):
 
 
 def _distributed_default_training(rank, rendezvous):
+    visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if visible_devices is None:
+        visible_devices_for_log = "<unset>"
+    elif not visible_devices:
+        visible_devices_for_log = "<empty>"
+    elif all(device.isdigit() for device in visible_devices.split(",")):
+        visible_devices_for_log = visible_devices
+    else:
+        visible_devices_for_log = f"<redacted:{len(visible_devices.split(','))}-devices>"
+
+    print(
+        f"DEVICE_ORDINAL child-entry rank={rank} local_rank_before={os.environ.get('LOCAL_RANK', '<unset>')} "
+        f"cuda_visible_devices={visible_devices_for_log}",
+        flush=True)
     os.environ["LOCAL_RANK"] = str(rank)
     accelerator = get_accelerator()
     accelerator.set_device(rank)
     device = accelerator.device_name()
+    print(
+        f"DEVICE_ORDINAL child-bound rank={rank} local_rank={os.environ['LOCAL_RANK']} "
+        f"device_name={device} indexed_device_name={accelerator.device_name(rank)} "
+        f"device_count={accelerator.device_count()} current_device={accelerator.current_device()}",
+        flush=True)
     with pytest.MonkeyPatch.context() as patch:
         patch.setitem(__compatible_ops__, "deepspeed_shm_comm", False)
         dist.init_distributed(accelerator.communication_backend_name(),
@@ -380,8 +399,13 @@ def _distributed_default_training(rank, rendezvous):
             (True, False, "cpu", True),
             (True, True, "nvme", True),
         ]
-        for partition_grads, contiguous, offload, expected in constructor_cases:
+        for case_index, (partition_grads, contiguous, offload, expected) in enumerate(constructor_cases):
             model = torch.nn.Linear(4, 4).to(device)
+            print(
+                f"DEVICE_ORDINAL constructor-before rank={rank} case={case_index} "
+                f"partition_grads={partition_grads} contiguous={contiguous} offload={offload} "
+                f"parameter_device={next(model.parameters()).device} current_device={accelerator.current_device()}",
+                flush=True)
             offload_config = DeepSpeedZeroOffloadOptimizerConfig(device=offload) if offload else None
             opt = zero.DeepSpeedZeroOptimizer(torch.optim.SGD(model.parameters(), lr=0.01), {
                 param: name
@@ -393,7 +417,15 @@ def _distributed_default_training(rank, rendezvous):
                                               offload_optimizer_config=offload_config,
                                               reduce_bucket_size=8)
             assert opt._offload_gradient_safety_enabled is expected
+            print(
+                f"DEVICE_ORDINAL constructor-after rank={rank} case={case_index} optimizer_device={opt.device} "
+                f"parameter_device={next(model.parameters()).device} current_device={accelerator.current_device()}",
+                flush=True)
             opt.destroy()
+            print(
+                f"DEVICE_ORDINAL constructor-destroyed rank={rank} case={case_index} "
+                f"parameter_device={next(model.parameters()).device} current_device={accelerator.current_device()}",
+                flush=True)
 
         # Use actual two-rank training and an independent full-batch reference.
         cases = [
@@ -434,7 +466,9 @@ def _distributed_default_training(rank, rendezvous):
                 }
             }, True),
         ]
-        for zero_config, expected in cases:
+        original_broadcast = dist.broadcast
+        original_set_device = accelerator.set_device
+        for case_index, (zero_config, expected) in enumerate(cases):
             torch.manual_seed(42)
             model = torch.nn.Linear(4, 4)
             reference = copy.deepcopy(model)
@@ -450,10 +484,54 @@ def _distributed_default_training(rank, rendezvous):
                     **zero_config
                 },
             }
-            engine, opt, _, _ = deepspeed.initialize(model=model,
-                                                     optimizer=torch.optim.SGD(model.parameters(), lr=0.01),
-                                                     config=config,
-                                                     dist_init_required=False)
+            print(
+                f"DEVICE_ORDINAL initialize-before rank={rank} case={case_index} zero_config={zero_config} "
+                f"local_rank={os.environ['LOCAL_RANK']} device_count={accelerator.device_count()} "
+                f"current_device={accelerator.current_device()} device_name={accelerator.device_name()} "
+                f"indexed_device_name={accelerator.device_name(rank)} parameter_device={next(model.parameters()).device}",
+                flush=True)
+            broadcast_index = 0
+            set_device_index = 0
+
+            def observed_set_device(device_index):
+                nonlocal set_device_index
+                call_index = set_device_index
+                set_device_index += 1
+                print(
+                    f"DEVICE_ORDINAL set-device-before rank={rank} case={case_index} call={call_index} "
+                    f"requested_device={device_index} local_rank={os.environ['LOCAL_RANK']}",
+                    flush=True)
+                result = original_set_device(device_index)
+                print(
+                    f"DEVICE_ORDINAL set-device-after rank={rank} case={case_index} call={call_index} "
+                    f"requested_device={device_index} current_device={accelerator.current_device()}",
+                    flush=True)
+                return result
+
+            def observed_broadcast(tensor, *args, **kwargs):
+                nonlocal broadcast_index
+                source_rank = kwargs.get("src", args[0] if args else None)
+                print(
+                    f"DEVICE_ORDINAL broadcast rank={rank} case={case_index} call={broadcast_index} "
+                    f"tensor_device={tensor.device} current_device={accelerator.current_device()} "
+                    f"device_count={accelerator.device_count()} local_rank={os.environ['LOCAL_RANK']} "
+                    f"source_rank={source_rank}",
+                    flush=True)
+                broadcast_index += 1
+                return original_broadcast(tensor, *args, **kwargs)
+
+            with pytest.MonkeyPatch.context() as patch:
+                patch.setattr(accelerator, "set_device", observed_set_device)
+                patch.setattr(dist, "broadcast", observed_broadcast)
+                engine, opt, _, _ = deepspeed.initialize(model=model,
+                                                         optimizer=torch.optim.SGD(model.parameters(), lr=0.01),
+                                                         config=config,
+                                                         dist_init_required=False)
+            print(
+                f"DEVICE_ORDINAL initialize-after rank={rank} case={case_index} engine_device={engine.device} "
+                f"optimizer_device={opt.device} parameter_device={next(model.parameters()).device} "
+                f"current_device={accelerator.current_device()}",
+                flush=True)
             try:
                 assert opt._offload_gradient_safety_enabled is expected
                 for step in range(2):
@@ -479,6 +557,10 @@ def _distributed_default_training(rank, rendezvous):
                         torch.testing.assert_close(param.cpu(), ref, rtol=1e-5, atol=1e-6)
             finally:
                 engine.destroy()
+                print(
+                    f"DEVICE_ORDINAL engine-destroyed rank={rank} case={case_index} "
+                    f"parameter_device={next(model.parameters()).device} current_device={accelerator.current_device()}",
+                    flush=True)
     finally:
         dist.destroy_process_group()
 
