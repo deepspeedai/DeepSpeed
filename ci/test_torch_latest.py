@@ -434,7 +434,7 @@ def test_remote_plan_is_structural_and_preserves_order_and_scope():
 
 def test_sandbox_kwargs_are_fixed_and_secret_free():
     kwargs = torch_latest.build_sandbox_kwargs("image")
-    assert kwargs["gpu"] == "l40s:2"
+    assert kwargs["gpu"] == "l40s:4"
     assert kwargs["timeout"] == 5400
     assert torch_latest.SANDBOX_ACQUIRE_TIMEOUT_SECONDS == 1800
     assert kwargs["secrets"] == []
@@ -463,7 +463,7 @@ def test_controller_creates_one_sandbox_without_forwarding_secrets_and_cleans_up
         assert state.app_calls == [(torch_latest.APP_NAME, True)]
         assert len(state.create_calls) == 1
         create_kwargs = state.create_calls[0][1]
-        assert create_kwargs["gpu"] == "l40s:2"
+        assert create_kwargs["gpu"] == "l40s:4"
         assert create_kwargs["secrets"] == []
         assert set(create_kwargs["env"]) == set(torch_latest.build_sandbox_env())
         assert sandbox.terminated
