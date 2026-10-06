@@ -550,6 +550,7 @@ def build_remote_commands(inputs: ControllerInputs) -> tuple[RemoteCommand, ...]
                 "-n",
                 "1",
                 "--verbose",
+                "-x",
                 # GDS tests require GPUDirect Storage support unavailable on these runners.
                 "--ignore=tests/unit/v1/nvme/test_gds.py",
                 f"--torch_ver={preset['torch_test_version']}",
