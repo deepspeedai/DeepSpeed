@@ -548,7 +548,7 @@ def build_remote_commands(inputs: ControllerInputs) -> tuple[RemoteCommand, ...]
             (
                 "pytest",
                 "-n",
-                "4",
+                "1",
                 "--verbose",
                 # GDS tests require GPUDirect Storage support unavailable on these runners.
                 "--ignore=tests/unit/v1/nvme/test_gds.py",
