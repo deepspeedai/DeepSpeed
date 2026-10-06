@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import contextlib
 import io
-import json
 import os
 import shutil
 import subprocess
@@ -21,7 +20,6 @@ from types import SimpleNamespace
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import torch_latest  # noqa: E402
-import modal_diagnostic  # noqa: E402
 import test_tests_fetcher  # noqa: E402
 
 
@@ -215,6 +213,11 @@ def test_selection_modes_and_path_validation():
         ("all", "tests/unit/v1\n", ("tests/unit/v1", )),
         ("subset", "tests/unit/v1/test_one.py\ntests/unit/v1/sub/test_two.py\n", ("tests/unit/v1/test_one.py",
                                                                                   "tests/unit/v1/sub/test_two.py")),
+        (
+            "subset",
+            "tests/unit/v1/test_one.py::TestOne::test_case[value-2-True]\n",
+            ("tests/unit/v1/test_one.py::TestOne::test_case[value-2-True]", ),
+        ),
         ("none", "", ()),
     ]
     for mode, content, expected in cases:
@@ -233,8 +236,8 @@ def test_selection_modes_and_path_validation():
         ("subset", "tests\\unit\\v1\\test_bad.py\n"),
         ("subset", "--collect-only\n"),
         ("subset", "tests/unit/v1/helper.py\n"),
-        ("subset", "tests/unit/v1/test_one.py::bad node\n"),
-        ("subset", "tests/unit/v1/test_one.py::TestOne::\n"),
+        ("subset", "tests/unit/v1/test_one.py::\n"),
+        ("subset", "tests/unit/v1/test_one.py::TestOne/../../bad\n"),
         ("none", "tests/unit/v1\n"),
         ("bogus", ""),
     ]
@@ -244,151 +247,6 @@ def test_selection_modes_and_path_validation():
             _expect_error(torch_latest.load_test_selection, path, mode)
         finally:
             shutil.rmtree(root, ignore_errors=True)
-
-
-def test_selection_accepts_exact_parametrized_nodes():
-    target = "tests/unit/v1/zero/test_zero.py::TestZeroToFP32::test_1_param_group[False-2]"
-    root, path = _selection_file(target + "\n")
-    try:
-        assert torch_latest.load_test_selection(path, "subset") == (target, )
-    finally:
-        shutil.rmtree(root, ignore_errors=True)
-
-
-def test_pr8654_diagnostic_request_is_exact_and_bounded():
-    suite = torch_latest.DIAGNOSTIC_SUITES["pr8654-71"]
-    targets = torch_latest._diagnostic_manifest_targets(suite)
-    assert len(targets) == len(set(targets)) == 71
-    counts = {}
-    for target in targets:
-        path = target.split("::", 1)[0]
-        counts[path] = counts.get(path, 0) + 1
-    assert counts == {
-        "tests/unit/v1/compile/test_offload_opt_states.py": 1,
-        "tests/unit/v1/half_precision/test_mixed_precision_dtype.py": 4,
-        "tests/unit/v1/moe/test_autoep_fused_parity.py": 2,
-        "tests/unit/v1/moe/test_moe.py": 8,
-        "tests/unit/v1/zero/test_zero.py": 10,
-        "tests/unit/v1/zero/test_zero2_gradient_safety.py": 1,
-        "tests/unit/v1/zero/test_zero_autocast.py": 1,
-        "tests/unit/v1/zero/test_zero_user_backward.py": 44,
-    }
-    root = Path(tempfile.mkdtemp(prefix="ds-modal-diagnostic-"))
-    output = root / "selection.txt"
-    try:
-        torch_latest.prepare_diagnostic_selection(
-            "pr8654-71",
-            suite.target_sha,
-            suite.base_sha,
-            "4280143884",
-            "15",
-            suite.transformers_sha,
-            output,
-        )
-        assert tuple(output.read_text(encoding="utf-8").splitlines()) == targets
-        _expect_error(
-            torch_latest.prepare_diagnostic_selection,
-            "pr8654-71",
-            "f" * 40,
-            suite.base_sha,
-            "4280143884",
-            "15",
-            suite.transformers_sha,
-            output,
-        )
-        _expect_error(
-            torch_latest.prepare_diagnostic_selection,
-            "pr8654-71",
-            suite.target_sha,
-            suite.base_sha,
-            "4280143884",
-            "14",
-            suite.transformers_sha,
-            output,
-        )
-    finally:
-        shutil.rmtree(root, ignore_errors=True)
-
-
-def test_diagnostic_remote_plan_separates_controller_and_target_and_recovers_evidence():
-    suite = torch_latest.DIAGNOSTIC_SUITES["pr8654-71"]
-    targets = torch_latest._diagnostic_manifest_targets(suite)
-    root, path = _selection_file("\n".join(targets) + "\n")
-    try:
-        env = _valid_env(
-            path,
-            GITHUB_EVENT_NAME="workflow_dispatch",
-            DS_CI_REPOSITORY="deepspeedai/DeepSpeed",
-            DS_CI_SHA=suite.target_sha,
-            DS_CI_BASE_SHA=suite.base_sha,
-            DS_TEST_SELECTION_MODE="subset",
-            DS_DIAGNOSTIC_SUITE="pr8654-71",
-            DS_DIAGNOSTIC_SEED="4280143884",
-            DS_DIAGNOSTIC_TIMEOUT_MINUTES="15",
-            DS_DIAGNOSTIC_CONTROLLER_SHA="1" * 40,
-            DS_DIAGNOSTIC_ARTIFACT_DIR="ci/.modal_diagnostic_artifacts",
-            MODAL_TRANSFORMERS_REF=suite.transformers_sha,
-        )
-        inputs = torch_latest.resolve_controller_inputs(env)
-        assert inputs.sha == suite.target_sha
-        assert inputs.diagnostic_controller_sha == "1" * 40
-        assert inputs.diagnostic_timeout_seconds == 900
-        commands = torch_latest.build_remote_commands(inputs)
-        labels = [command.label for command in commands]
-        assert labels.index("collect diagnostic nodes") < labels.index("run diagnostic pytest")
-        pytest_command = next(command for command in commands if command.label == "run diagnostic pytest")
-        assert pytest_command.argv[:5] == ("timeout", "--signal=TERM", "--kill-after=30s", "900s", "env")
-        assert ("PYTHONFAULTHANDLER=1" in pytest_command.argv and "-n" in pytest_command.argv
-                and pytest_command.argv[pytest_command.argv.index("-n") + 1] == "4")
-        assert f"--randomly-seed={inputs.diagnostic_seed}" in pytest_command.argv
-        assert "--capture=tee-sys" in pytest_command.argv
-        assert pytest_command.argv[-71:] == inputs.targets
-        constrained_installs = [
-            command for command in commands
-            if command.label.startswith("install ") and command.argv[:4] == ("python", "-m", "pip", "install")
-        ]
-        assert len(constrained_installs) == 5
-        for command in constrained_installs:
-            assert ("--pre", "-c", torch_latest.REMOTE_DIAGNOSTIC_CONSTRAINTS) == command.argv[4:7]
-        constraints = (Path(torch_latest.__file__).resolve().parent / suite.constraints).read_text(encoding="utf-8")
-        assert "\ntransformers==" not in constraints
-        assert "'transformers':'5.19.0.dev0'" in torch_latest._diagnostic_runtime_probe()
-        assert "verify diagnostic dependency consistency" in labels
-        assert torch_latest.build_sandbox_kwargs("image", diagnostic=True)["timeout"] == 2400
-    finally:
-        shutil.rmtree(root, ignore_errors=True)
-
-
-def test_diagnostic_summary_deduplicates_xdist_worker_and_controller_events():
-    root = Path(tempfile.mkdtemp(prefix="ds-modal-events-"))
-    events_path = root / "events.jsonl"
-    summary_path = root / "summary.json"
-    nodeid = "tests/unit/v1/test_one.py::test_one"
-    records = []
-    for event in ("node_start", "phase_report", "node_finish"):
-        for worker in ("gw0", "controller"):
-            record = {"event": event, "worker": worker, "nodeid": nodeid}
-            if event == "phase_report":
-                record.update({"phase": "call", "outcome": "failed", "longrepr": "boom"})
-            records.append(record)
-    try:
-        events_path.write_text("\n".join(json.dumps(record) for record in records) + "\n", encoding="utf-8")
-        args = SimpleNamespace(events=events_path, output=summary_path)
-        assert modal_diagnostic.summarize_events(args) == 0
-        summary = json.loads(summary_path.read_text(encoding="utf-8"))
-        assert summary["failure_count"] == 1
-        assert summary["phase_counts"] == {"call:failed": 1}
-        assert summary["unfinished_count"] == 0
-
-        events_path.write_text(
-            "\n".join(json.dumps(record) for record in records if record["event"] == "node_start") + "\n",
-            encoding="utf-8",
-        )
-        assert modal_diagnostic.summarize_events(args) == 0
-        summary = json.loads(summary_path.read_text(encoding="utf-8"))
-        assert summary["unfinished_count"] == 1
-    finally:
-        shutil.rmtree(root, ignore_errors=True)
 
 
 def test_selection_rejects_duplicate_symlink_size_count_and_controls():
@@ -793,7 +651,6 @@ def test_workflow_keeps_github_execution_trusted_and_preserves_modes():
     assert "needs.collect-tests.outputs.mode != 'none'" in text
     assert "needs.collect-tests.result != 'success'" in text
     assert 'python3 ci/torch_latest.py controller' in text
-    assert "SELECTION_MODE: ${{ steps.diagnostic.outputs.mode || steps.select.outputs.mode }}" in text
 
     deploy = text.split("\n  deploy:\n", 1)[1]
     assert "CANDIDATE_ROOT" not in deploy

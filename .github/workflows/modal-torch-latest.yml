@@ -39,41 +39,14 @@ on:
         required: false
         default: 'main'
         type: string
-      diagnostic_suite:
-        description: Trusted bounded diagnostic suite (manual runs only)
+      test_suite:
+        description: Test selection for manual runs
         required: false
-        default: 'none'
+        default: 'auto'
         type: choice
         options:
-          - 'none'
+          - 'auto'
           - 'pr8654-71'
-      diagnostic_target_sha:
-        description: Exact public DeepSpeed commit tested by diagnostic mode
-        required: false
-        default: '34704e111bd480d89aa505461a91ae027b38731f'
-        type: string
-      diagnostic_base_sha:
-        description: Exact public base commit used for diagnostic dependencies
-        required: false
-        default: 'a77aeb676507beb9fe0604bc31c2bf075daf7c46'
-        type: string
-      diagnostic_seed:
-        description: Unsigned 32-bit pytest-randomly seed
-        required: false
-        default: '4280143884'
-        type: string
-      diagnostic_timeout_minutes:
-        description: Pytest session budget; setup and evidence recovery are separate
-        required: false
-        default: '15'
-        type: choice
-        options:
-          - '15'
-      diagnostic_transformers_sha:
-        description: Exact Transformers commit shared by diagnostic repeats
-        required: false
-        default: '080c288fe607ef54cd4a469608f4d82ac4dd4d4d'
-        type: string
   # Nightly full-suite run of master. This is the only event whose failures feed
   # automated regression triage; see .github/workflows/nightly-triage.yml.
   schedule:
@@ -107,7 +80,7 @@ jobs:
     permissions:
       contents: read
     outputs:
-      mode: ${{ steps.diagnostic.outputs.mode || steps.select.outputs.mode }}
+      mode: ${{ steps.select.outputs.mode }}
 
     steps:
       - name: Checkout trusted workflow code
@@ -140,35 +113,18 @@ jobs:
       - name: Self-test the trusted selector
         run: python3 ci/test_tests_fetcher.py
 
-      - name: Prepare trusted diagnostic selection
-        if: github.event_name == 'workflow_dispatch' && inputs.diagnostic_suite != 'none'
-        id: diagnostic
-        env:
-          DIAGNOSTIC_SUITE: ${{ inputs.diagnostic_suite }}
-          DIAGNOSTIC_TARGET_SHA: ${{ inputs.diagnostic_target_sha }}
-          DIAGNOSTIC_BASE_SHA: ${{ inputs.diagnostic_base_sha }}
-          DIAGNOSTIC_SEED: ${{ inputs.diagnostic_seed }}
-          DIAGNOSTIC_TIMEOUT_MINUTES: ${{ inputs.diagnostic_timeout_minutes }}
-          DIAGNOSTIC_TRANSFORMERS_SHA: ${{ inputs.diagnostic_transformers_sha }}
-        run: |
-          python3 ci/torch_latest.py prepare-diagnostic \
-            --suite "$DIAGNOSTIC_SUITE" \
-            --target-sha "$DIAGNOSTIC_TARGET_SHA" \
-            --base-sha "$DIAGNOSTIC_BASE_SHA" \
-            --seed "$DIAGNOSTIC_SEED" \
-            --timeout-minutes "$DIAGNOSTIC_TIMEOUT_MINUTES" \
-            --transformers-ref "$DIAGNOSTIC_TRANSFORMERS_SHA" \
-            --output ci/.test_selection/test_list.txt
-          echo 'mode=subset' >> "$GITHUB_OUTPUT"
-
       - name: Select impacted tests
-        if: github.event_name != 'workflow_dispatch' || inputs.diagnostic_suite == 'none'
         id: select
         env:
           EVENT_NAME: ${{ github.event_name }}
           CANDIDATE_ROOT: ${{ runner.temp }}/deepspeed-candidate
+          TEST_SUITE: ${{ github.event.inputs.test_suite || 'auto' }}
         run: |
-          if [ "$EVENT_NAME" = "pull_request_target" ] || [ "$EVENT_NAME" = "merge_group" ]; then
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$TEST_SUITE" = "pr8654-71" ]; then
+            mkdir -p ci/.test_selection
+            cp ci/modal_diagnostics/pr8654_71_nodes.txt ci/.test_selection/test_list.txt
+            echo 'mode=subset' >> "$GITHUB_OUTPUT"
+          elif [ "$EVENT_NAME" = "pull_request_target" ] || [ "$EVENT_NAME" = "merge_group" ]; then
             python3 ci/tests_fetcher.py \
               --workflow modal-torch-latest \
               --repo-root "$CANDIDATE_ROOT" \
@@ -182,7 +138,7 @@ jobs:
 
       - name: Validate test selection
         env:
-          SELECTION_MODE: ${{ steps.diagnostic.outputs.mode || steps.select.outputs.mode }}
+          SELECTION_MODE: ${{ steps.select.outputs.mode }}
         run: |
           python3 ci/torch_latest.py validate-selection \
             --mode "$SELECTION_MODE" \
@@ -244,7 +200,6 @@ jobs:
           uv pip install --system modal==1.2.6
 
       - name: Run tests in isolated Modal Sandbox
-        if: github.event_name != 'workflow_dispatch' || inputs.diagnostic_suite == 'none'
         env:
           DS_CI_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
           DS_CI_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -257,37 +212,3 @@ jobs:
           MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
           MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
         run: python3 ci/torch_latest.py controller
-
-      - name: Run bounded diagnostic in isolated Modal Sandbox
-        if: github.event_name == 'workflow_dispatch' && inputs.diagnostic_suite != 'none'
-        env:
-          DS_CI_REPOSITORY: ${{ github.repository }}
-          DS_CI_SHA: ${{ inputs.diagnostic_target_sha }}
-          DS_CI_BASE_SHA: ${{ inputs.diagnostic_base_sha }}
-          DS_TEST_SELECTION_MODE: ${{ needs.collect-tests.outputs.mode }}
-          DS_TEST_LIST_FILE: ci/.test_selection/test_list.txt
-          DS_DIAGNOSTIC_SUITE: ${{ inputs.diagnostic_suite }}
-          DS_DIAGNOSTIC_SEED: ${{ inputs.diagnostic_seed }}
-          DS_DIAGNOSTIC_TIMEOUT_MINUTES: ${{ inputs.diagnostic_timeout_minutes }}
-          DS_DIAGNOSTIC_CONTROLLER_SHA: ${{ github.sha }}
-          DS_DIAGNOSTIC_ARTIFACT_DIR: ci/.modal_diagnostic_artifacts
-          MODAL_TORCH_PRESET: '2.10.0-cuda12.8'
-          MODAL_TRANSFORMERS_SOURCE: 'git'
-          MODAL_TRANSFORMERS_REF: ${{ inputs.diagnostic_transformers_sha }}
-          MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
-          MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
-        shell: bash
-        run: |
-          set -o pipefail
-          mkdir -p ci/.modal_diagnostic_artifacts
-          python3 ci/torch_latest.py controller 2>&1 | tee ci/.modal_diagnostic_artifacts/controller.log
-
-      - name: Upload diagnostic evidence
-        if: always() && github.event_name == 'workflow_dispatch' && inputs.diagnostic_suite != 'none'
-        uses: actions/upload-artifact@v4
-        with:
-          name: modal-diagnostic-${{ inputs.diagnostic_suite }}-${{ inputs.diagnostic_seed }}
-          path: ci/.modal_diagnostic_artifacts
-          include-hidden-files: true
-          if-no-files-found: error
-          retention-days: 14

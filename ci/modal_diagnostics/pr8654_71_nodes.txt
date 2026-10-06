@@ -1,6 +1,3 @@
-# Copyright (c) DeepSpeed Team.
-# SPDX-License-Identifier: Apache-2.0
-# DeepSpeed Team
 tests/unit/v1/compile/test_offload_opt_states.py::TestOffloadOptStates::test_offload_opt_states_correctness[dtype0]
 tests/unit/v1/half_precision/test_mixed_precision_dtype.py::TestNarrowDtypeBroadcast::test_initialize_broadcasts_narrow_params[float8_e4m3fn]
 tests/unit/v1/half_precision/test_mixed_precision_dtype.py::TestNarrowDtypeBroadcast::test_initialize_broadcasts_narrow_params[float8_e4m3fnuz]
