@@ -372,7 +372,7 @@ class TestInferenceAllReduceDispatch:
 
         monkeypatch.setattr(torch.distributed, 'get_world_size', stubbed_world_size)
         monkeypatch.setattr(torch.distributed, 'all_reduce', stubbed_pg_all_reduce)
-        monkeypatch.setattr(torch.ops.deepspeed, 'inference_all_reduce_', stubbed_shm_reduce)
+        monkeypatch.setattr(torch.ops.deepspeed, 'inference_all_reduce_', stubbed_shm_reduce, raising=False)
         monkeypatch.setattr(backend, 'shm_vector_kernel_level', forced_level, raising=False)
 
         backend.inference_all_reduce(torch.ones(1, 4, dtype=dtype), torch.distributed.ReduceOp.SUM)
