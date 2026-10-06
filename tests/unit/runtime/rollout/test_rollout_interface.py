@@ -115,14 +115,36 @@ def test_response_token_batch_aligns_causal_logits():
         response_batch.select_causal_logits(torch.randn(1, 2, 5))
 
 
-def test_generalized_jsd_loss_matches_forward_kl_on_response_tokens():
+@pytest.mark.parametrize(
+    "beta, expected",
+    [
+        (
+            0.0,
+            0.5 * torch.log(torch.tensor(0.5 / 0.8)) + 0.5 * torch.log(torch.tensor(0.5 / 0.2)),
+        ),
+        (
+            1.0,
+            0.8 * torch.log(torch.tensor(0.8 / 0.5)) + 0.2 * torch.log(torch.tensor(0.2 / 0.5)),
+        ),
+        (
+            0.5,
+            0.5 * (
+                0.5 * torch.log(torch.tensor(0.5 / 0.65)) +
+                0.5 * torch.log(torch.tensor(0.5 / 0.35))
+            ) + 0.5 * (
+                0.8 * torch.log(torch.tensor(0.8 / 0.65)) +
+                0.2 * torch.log(torch.tensor(0.2 / 0.35))
+            ),
+        ),
+    ],
+)
+def test_generalized_jsd_loss_covers_beta_variants(beta, expected):
     student_logits = torch.log(torch.tensor([[[0.8, 0.2], [0.5, 0.5]]]))
     teacher_logits = torch.log(torch.tensor([[[0.5, 0.5], [0.9, 0.1]]]))
     response_mask = torch.tensor([[True, False]])
 
-    output = generalized_jsd_loss(student_logits, teacher_logits, response_mask, beta=0.0)
+    output = generalized_jsd_loss(student_logits, teacher_logits, response_mask, beta=beta)
 
-    expected = 0.5 * torch.log(torch.tensor(0.5 / 0.8)) + 0.5 * torch.log(torch.tensor(0.5 / 0.2))
     assert isinstance(output, JSDLossOutput)
     assert output.valid_token_count.item() == 1
     assert torch.allclose(output.loss_sum, expected)
