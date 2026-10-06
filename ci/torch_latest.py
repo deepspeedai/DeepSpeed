@@ -16,7 +16,10 @@ Modal.
 from __future__ import annotations
 
 import argparse
+import base64
 import importlib
+import importlib.metadata
+import json
 import os
 import re
 import shutil
@@ -71,12 +74,14 @@ PYTORCH_CUDA_128_INDEX_URL = "https://download.pytorch.org/whl/cu128"
 APP_NAME = "deepspeedai-torch-latest-ci"
 SANDBOX_TIMEOUT_SECONDS = 5400
 SANDBOX_ACQUIRE_TIMEOUT_SECONDS = 1800
+DIAGNOSTIC_SANDBOX_TIMEOUT_SECONDS = 2400
 # Exit codes that nightly triage (see .github/workflows/nightly-bisect.yml) keys on. GitHub only
 # reports run success/failure, so the controller also prints a DS_CI_FAILURE_CLASS=<class> sentinel
 # line that survives into the job logs even when the job is killed before it can exit.
 EXIT_TEST_FAILURE = 1
 EXIT_INFRA = 75  # EX_TEMPFAIL: no GPU instance was provisioned, so no test ever ran
 EXIT_TIMEOUT = 124
+EXIT_DIAGNOSTIC_SETUP = 78
 # The Sandbox server-side lifetime can kill a run slightly before the local clock crosses the
 # nominal budget, so classify a failure as a timeout just inside the limit.
 SANDBOX_TIMEOUT_GRACE_SECONDS = 120
@@ -86,12 +91,45 @@ MAX_DISPLAY_BYTES_PER_COMMAND = 16 * 1024 * 1024
 REMOTE_ROOT = "/workspace"
 REMOTE_REPOSITORY = f"{REMOTE_ROOT}/deepspeed"
 REMOTE_TRANSFORMERS = f"{REMOTE_ROOT}/transformers"
+REMOTE_DIAGNOSTIC_ROOT = f"{REMOTE_ROOT}/modal-diagnostic"
+REMOTE_DIAGNOSTIC_HELPER = f"{REMOTE_DIAGNOSTIC_ROOT}/modal_diagnostic.py"
+REMOTE_DIAGNOSTIC_MANIFEST = f"{REMOTE_DIAGNOSTIC_ROOT}/targets.txt"
+REMOTE_DIAGNOSTIC_CONSTRAINTS = f"{REMOTE_DIAGNOSTIC_ROOT}/constraints.txt"
+REMOTE_DIAGNOSTIC_COLLECTION = f"{REMOTE_DIAGNOSTIC_ROOT}/collection.json"
+REMOTE_DIAGNOSTIC_EVENTS = f"{REMOTE_DIAGNOSTIC_ROOT}/events.jsonl"
+REMOTE_DIAGNOSTIC_SUMMARY = f"{REMOTE_DIAGNOSTIC_ROOT}/summary.json"
+REMOTE_DIAGNOSTIC_JUNIT = f"{REMOTE_DIAGNOSTIC_ROOT}/junit.xml"
 GDS_TEST_TARGET = "tests/unit/v1/nvme/test_gds.py"
 
 _REPOSITORY_COMPONENT = r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}"
 _REPOSITORY_RE = re.compile(rf"{_REPOSITORY_COMPONENT}/{_REPOSITORY_COMPONENT}\Z")
 _SHA_RE = re.compile(r"[0-9a-fA-F]{40}\Z")
 _TEST_FILE_RE = re.compile(r"tests/unit/v1/(?:[^/\x00-\x1f\x7f]+/)*test_[^/\x00-\x1f\x7f]+\.py\Z")
+_TEST_NODE_SEGMENT_RE = re.compile(r"[A-Za-z0-9_.\-\[\],=]+\Z")
+_SEED_RE = re.compile(r"[0-9]{1,10}\Z")
+
+
+@dataclass(frozen=True)
+class DiagnosticSuite:
+    manifest: str
+    constraints: str
+    expected_count: int
+    target_sha: str
+    base_sha: str
+    transformers_sha: str
+
+
+DIAGNOSTIC_SUITES = {
+    "pr8654-71":
+    DiagnosticSuite(
+        manifest="modal_diagnostics/pr8654_71_nodes.txt",
+        constraints="modal_diagnostics/pr8654_constraints.txt",
+        expected_count=71,
+        target_sha="34704e111bd480d89aa505461a91ae027b38731f",
+        base_sha="a77aeb676507beb9fe0604bc31c2bf075daf7c46",
+        transformers_sha="080c288fe607ef54cd4a469608f4d82ac4dd4d4d",
+    ),
+}
 
 
 def exclude_unsupported_gds_targets(targets: Sequence[str]) -> tuple[str, ...]:
@@ -109,6 +147,11 @@ class ControllerInputs:
     transformers_source: str
     transformers_ref: str
     base_sha: str
+    diagnostic_suite: str
+    diagnostic_seed: int | None
+    diagnostic_timeout_seconds: int | None
+    diagnostic_controller_sha: str
+    diagnostic_artifact_dir: str
 
 
 @dataclass(frozen=True)
@@ -117,6 +160,24 @@ class RemoteCommand:
     argv: tuple[str, ...]
     workdir: str | None = None
     expected_line: str | None = None
+
+
+class RemoteCommandError(RuntimeError):
+    """A Sandbox command returned a nonzero exit code."""
+
+    def __init__(self, command: RemoteCommand, return_code: int):
+        super().__init__(f"{command.label} failed with exit code {return_code}")
+        self.command = command
+        self.return_code = return_code
+
+
+class DiagnosticSetupError(RuntimeError):
+    """The diagnostic environment or exact-node collection was invalid."""
+
+    def __init__(self, command: RemoteCommand, error: BaseException):
+        super().__init__(f"diagnostic setup failed during {command.label}: {error}")
+        self.command = command
+        self.error = error
 
 
 class ControllerCleanupError(RuntimeError):
@@ -171,12 +232,92 @@ def validate_transformers_ref(value: str) -> str:
 def _validate_target(value: str) -> str:
     if not isinstance(value, str) or not value or value.startswith("-") or "\\" in value:
         raise ValueError(f"invalid pytest target: {value!r}")
-    path = PurePosixPath(value)
+    file_target, separator, node_target = value.partition("::")
+    path = PurePosixPath(file_target)
     if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
         raise ValueError(f"invalid pytest target: {value!r}")
-    if not _TEST_FILE_RE.fullmatch(value):
+    if not _TEST_FILE_RE.fullmatch(file_target):
         raise ValueError(f"pytest target is outside tests/unit/v1 or is not a test file: {value!r}")
+    if separator:
+        segments = node_target.split("::")
+        if not all(segment and _TEST_NODE_SEGMENT_RE.fullmatch(segment) for segment in segments):
+            raise ValueError(f"invalid parametrized pytest node: {value!r}")
     return value
+
+
+def _diagnostic_suite(name: str) -> DiagnosticSuite:
+    try:
+        return DIAGNOSTIC_SUITES[name]
+    except KeyError as exc:
+        supported = ", ".join(sorted(DIAGNOSTIC_SUITES))
+        raise ValueError(f"unsupported diagnostic suite {name!r}; supported values: {supported}") from exc
+
+
+def _diagnostic_manifest_targets(suite: DiagnosticSuite) -> tuple[str, ...]:
+    path = Path(__file__).resolve().parent / suite.manifest
+    raw_lines = path.read_text(encoding="utf-8").splitlines()
+    targets = tuple(_validate_target(line) for line in raw_lines if line and not line.startswith("#"))
+    if len(targets) != len(set(targets)):
+        raise ValueError(f"diagnostic manifest {suite.manifest} contains duplicate targets")
+    if len(targets) != suite.expected_count:
+        raise ValueError(
+            f"diagnostic manifest {suite.manifest} contains {len(targets)} targets; expected {suite.expected_count}")
+    return targets
+
+
+def validate_diagnostic_seed(value: str) -> int:
+    if not _SEED_RE.fullmatch(value):
+        raise ValueError("diagnostic seed must be an unsigned 32-bit decimal integer")
+    seed = int(value)
+    if not 0 <= seed <= 2**32 - 1:
+        raise ValueError("diagnostic seed must be an unsigned 32-bit decimal integer")
+    return seed
+
+
+def validate_diagnostic_request(
+    suite_name: str,
+    target_sha: str,
+    base_sha: str,
+    seed: str,
+    timeout_minutes: str,
+    transformers_ref: str,
+) -> tuple[DiagnosticSuite, int, int]:
+    suite = _diagnostic_suite(suite_name)
+    if validate_sha(target_sha) != suite.target_sha:
+        raise ValueError(f"diagnostic target SHA must be {suite.target_sha}")
+    if validate_sha(base_sha) != suite.base_sha:
+        raise ValueError(f"diagnostic base SHA must be {suite.base_sha}")
+    if validate_sha(transformers_ref) != suite.transformers_sha:
+        raise ValueError(f"diagnostic Transformers SHA must be {suite.transformers_sha}")
+    validated_seed = validate_diagnostic_seed(seed)
+    if timeout_minutes != "15":
+        raise ValueError("diagnostic pytest budget must be exactly 15 minutes")
+    _diagnostic_manifest_targets(suite)
+    return suite, validated_seed, int(timeout_minutes) * 60
+
+
+def prepare_diagnostic_selection(
+    suite_name: str,
+    target_sha: str,
+    base_sha: str,
+    seed: str,
+    timeout_minutes: str,
+    transformers_ref: str,
+    output: Path,
+) -> None:
+    suite, validated_seed, timeout_seconds = validate_diagnostic_request(
+        suite_name,
+        target_sha,
+        base_sha,
+        seed,
+        timeout_minutes,
+        transformers_ref,
+    )
+    targets = _diagnostic_manifest_targets(suite)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text("\n".join(targets) + "\n", encoding="utf-8")
+    print(f"Prepared diagnostic suite={suite_name} count={len(targets)} seed={validated_seed} "
+          f"pytest_budget_seconds={timeout_seconds} target_sha={suite.target_sha}")
 
 
 def load_test_selection(path: Path, mode: str) -> tuple[str, ...]:
@@ -381,6 +522,31 @@ def resolve_controller_inputs(env: Mapping[str, str]) -> ControllerInputs:
     else:
         transformers_ref = ""
 
+    diagnostic_suite = env.get("DS_DIAGNOSTIC_SUITE", "")
+    if diagnostic_suite == "none":
+        diagnostic_suite = ""
+    diagnostic_seed = None
+    diagnostic_timeout_seconds = None
+    diagnostic_controller_sha = ""
+    diagnostic_artifact_dir = ""
+    if diagnostic_suite:
+        suite, diagnostic_seed, diagnostic_timeout_seconds = validate_diagnostic_request(
+            diagnostic_suite,
+            sha,
+            base_sha,
+            env.get("DS_DIAGNOSTIC_SEED", ""),
+            env.get("DS_DIAGNOSTIC_TIMEOUT_MINUTES", ""),
+            transformers_ref,
+        )
+        if selection_mode != "subset" or targets != _diagnostic_manifest_targets(suite):
+            raise ValueError("diagnostic selection does not exactly match its trusted manifest")
+        diagnostic_controller_sha = validate_sha(env.get("DS_DIAGNOSTIC_CONTROLLER_SHA", ""))
+        if diagnostic_controller_sha == sha:
+            raise ValueError("diagnostic controller revision must be separate from the code-under-test SHA")
+        diagnostic_artifact_dir = env.get("DS_DIAGNOSTIC_ARTIFACT_DIR", "")
+        if diagnostic_artifact_dir != "ci/.modal_diagnostic_artifacts":
+            raise ValueError("unexpected diagnostic artifact directory")
+
     return ControllerInputs(
         repository=repository,
         sha=sha,
@@ -390,6 +556,11 @@ def resolve_controller_inputs(env: Mapping[str, str]) -> ControllerInputs:
         transformers_source=transformers_source,
         transformers_ref=transformers_ref,
         base_sha=base_sha,
+        diagnostic_suite=diagnostic_suite,
+        diagnostic_seed=diagnostic_seed,
+        diagnostic_timeout_seconds=diagnostic_timeout_seconds,
+        diagnostic_controller_sha=diagnostic_controller_sha,
+        diagnostic_artifact_dir=diagnostic_artifact_dir,
     )
 
 
@@ -427,7 +598,7 @@ def _build_sandbox_image(modal_module: Any, preset: dict[str, str], inputs: Cont
                              index_url=PYTORCH_CUDA_128_INDEX_URL)
 
 
-def build_sandbox_kwargs(image: Any) -> dict[str, Any]:
+def build_sandbox_kwargs(image: Any, *, diagnostic: bool = False) -> dict[str, Any]:
     return {
         "image": image,
         "env": build_sandbox_env(),
@@ -440,12 +611,147 @@ def build_sandbox_kwargs(image: Any) -> dict[str, Any]:
         "proxy": None,
         "block_network": False,
         "gpu": "l40s:2",
-        "timeout": SANDBOX_TIMEOUT_SECONDS,
+        "timeout": DIAGNOSTIC_SANDBOX_TIMEOUT_SECONDS if diagnostic else SANDBOX_TIMEOUT_SECONDS,
     }
 
 
 def _remote_git(*args: str) -> tuple[str, ...]:
     return tuple(_git_command(*args))
+
+
+def _remote_file_command(path: str, content: bytes) -> tuple[str, ...]:
+    encoded = base64.b64encode(content).decode("ascii")
+    source = ("import base64,pathlib,sys; "
+              "path=pathlib.Path(sys.argv[1]); path.parent.mkdir(parents=True,exist_ok=True); "
+              "path.write_bytes(base64.b64decode(sys.argv[2]))")
+    return ("python", "-c", source, path, encoded)
+
+
+def _diagnostic_runtime_probe() -> str:
+    return ("import importlib.metadata as m,json,platform,torch; "
+            "actual={'python':platform.python_version(),'torch':torch.__version__,'cuda':torch.version.cuda,"
+            "'pytest':m.version('pytest'),'xdist':m.version('pytest-xdist'),'randomly':m.version('pytest-randomly'),"
+            "'nccl':m.version('nvidia-nccl-cu12')}; "
+            "expected={'python':'3.10.13','torch':'2.10.0+cu128','cuda':'12.8','pytest':'8.3.5',"
+            "'xdist':'3.8.0','randomly':'5.0.0','nccl':'2.27.5'}; "
+            "print(json.dumps({'actual':actual,'expected':expected},sort_keys=True)); "
+            "assert actual==expected,(actual,expected)")
+
+
+def _diagnostic_bootstrap_commands(inputs: ControllerInputs) -> tuple[RemoteCommand, ...]:
+    suite = _diagnostic_suite(inputs.diagnostic_suite)
+    constraints = (Path(__file__).resolve().parent / suite.constraints).read_bytes()
+    return (
+        RemoteCommand("create diagnostic evidence directory", ("mkdir", "-p", REMOTE_DIAGNOSTIC_ROOT)),
+        RemoteCommand("write trusted diagnostic constraints",
+                      _remote_file_command(REMOTE_DIAGNOSTIC_CONSTRAINTS, constraints)),
+    )
+
+
+def _diagnostic_setup_commands(inputs: ControllerInputs, preset: dict[str, str]) -> tuple[RemoteCommand, ...]:
+    suite = _diagnostic_suite(inputs.diagnostic_suite)
+    helper = Path(__file__).resolve().with_name("modal_diagnostic.py").read_bytes()
+    manifest = ("\n".join(inputs.targets) + "\n").encode("utf-8")
+    return (
+        RemoteCommand("write trusted diagnostic helper", _remote_file_command(REMOTE_DIAGNOSTIC_HELPER, helper)),
+        RemoteCommand("write trusted diagnostic manifest", _remote_file_command(REMOTE_DIAGNOSTIC_MANIFEST, manifest)),
+        RemoteCommand("verify diagnostic dependency consistency", ("python", "-m", "pip", "check"), REMOTE_REPOSITORY),
+        RemoteCommand(
+            "verify diagnostic runtime",
+            ("python", "-c", _diagnostic_runtime_probe()),
+            REMOTE_REPOSITORY,
+        ),
+        RemoteCommand("record diagnostic package freeze", ("python", "-m", "pip", "freeze", "--all"),
+                      REMOTE_REPOSITORY),
+        RemoteCommand(
+            "collect diagnostic nodes",
+            (
+                "python",
+                REMOTE_DIAGNOSTIC_HELPER,
+                "collect",
+                "--manifest",
+                REMOTE_DIAGNOSTIC_MANIFEST,
+                "--expected-count",
+                str(suite.expected_count),
+                "--torch-version",
+                preset["torch_test_version"],
+                "--cuda-version",
+                preset["cuda_test_version"],
+                "--output",
+                REMOTE_DIAGNOSTIC_COLLECTION,
+            ),
+            REMOTE_REPOSITORY,
+        ),
+    )
+
+
+def _diagnostic_pytest_command(inputs: ControllerInputs, preset: dict[str, str]) -> RemoteCommand:
+    assert inputs.diagnostic_seed is not None
+    assert inputs.diagnostic_timeout_seconds is not None
+    return RemoteCommand(
+        "run diagnostic pytest",
+        (
+            "timeout",
+            "--signal=TERM",
+            "--kill-after=30s",
+            f"{inputs.diagnostic_timeout_seconds}s",
+            "env",
+            f"PYTHONPATH={REMOTE_DIAGNOSTIC_ROOT}",
+            "PYTHONFAULTHANDLER=1",
+            f"PYTHONHASHSEED={inputs.diagnostic_seed}",
+            f"DS_DIAGNOSTIC_SEED={inputs.diagnostic_seed}",
+            f"DS_DIAGNOSTIC_EVENTS_FILE={REMOTE_DIAGNOSTIC_EVENTS}",
+            "pytest",
+            "-p",
+            "modal_diagnostic",
+            "-n",
+            "4",
+            "--verbose",
+            "--tb=long",
+            "--capture=tee-sys",
+            "-ra",
+            "--durations=0",
+            f"--randomly-seed={inputs.diagnostic_seed}",
+            f"--junitxml={REMOTE_DIAGNOSTIC_JUNIT}",
+            "--ignore=tests/unit/v1/nvme/test_gds.py",
+            f"--torch_ver={preset['torch_test_version']}",
+            f"--cuda_ver={preset['cuda_test_version']}",
+            "--",
+            *inputs.targets,
+        ),
+        REMOTE_REPOSITORY,
+    )
+
+
+def _diagnostic_recovery_commands() -> tuple[RemoteCommand, ...]:
+    return (
+        RemoteCommand(
+            "summarize diagnostic events",
+            (
+                "python",
+                REMOTE_DIAGNOSTIC_HELPER,
+                "summarize",
+                "--events",
+                REMOTE_DIAGNOSTIC_EVENTS,
+                "--output",
+                REMOTE_DIAGNOSTIC_SUMMARY,
+            ),
+            REMOTE_REPOSITORY,
+        ),
+        RemoteCommand(
+            "emit diagnostic artifacts",
+            (
+                "python",
+                REMOTE_DIAGNOSTIC_HELPER,
+                "emit",
+                REMOTE_DIAGNOSTIC_COLLECTION,
+                REMOTE_DIAGNOSTIC_EVENTS,
+                REMOTE_DIAGNOSTIC_SUMMARY,
+                REMOTE_DIAGNOSTIC_JUNIT,
+            ),
+            REMOTE_REPOSITORY,
+        ),
+    )
 
 
 def build_remote_commands(inputs: ControllerInputs) -> tuple[RemoteCommand, ...]:
@@ -478,24 +784,30 @@ def build_remote_commands(inputs: ControllerInputs) -> tuple[RemoteCommand, ...]
             _remote_git("-C", REMOTE_REPOSITORY, "rev-parse", "--verify", "HEAD^{commit}"),
             expected_line=inputs.sha,
         ),
+    ]
+    constraint_args: tuple[str, ...] = ()
+    if inputs.diagnostic_suite:
+        commands.extend(_diagnostic_bootstrap_commands(inputs))
+        constraint_args = ("-c", REMOTE_DIAGNOSTIC_CONSTRAINTS)
+    commands.extend([
         RemoteCommand(
             "install runtime requirements",
-            ("python", "-m", "pip", "install", "-r", "requirements/requirements.txt"),
+            ("python", "-m", "pip", "install", *constraint_args, "-r", "requirements/requirements.txt"),
             REMOTE_REPOSITORY,
         ),
         RemoteCommand(
             "install development requirements",
-            ("python", "-m", "pip", "install", "-r", "requirements/requirements-dev.txt"),
+            ("python", "-m", "pip", "install", *constraint_args, "-r", "requirements/requirements-dev.txt"),
             REMOTE_REPOSITORY,
         ),
         RemoteCommand(
             "install DeepCompile requirements",
-            ("python", "-m", "pip", "install", "-r", "requirements/requirements-deepcompile.txt"),
+            ("python", "-m", "pip", "install", *constraint_args, "-r", "requirements/requirements-deepcompile.txt"),
             REMOTE_REPOSITORY,
         ),
         # Torch itself is pinned in the image (see _build_sandbox_image), after the requirements
         # layers, so a transitive dependency cannot displace the intended CUDA build.
-    ]
+    ])
     if inputs.transformers_source == "git":
         commands.extend([
             RemoteCommand("initialize Transformers repository", _remote_git("init", REMOTE_TRANSFORMERS)),
@@ -519,15 +831,17 @@ def build_remote_commands(inputs: ControllerInputs) -> tuple[RemoteCommand, ...]
             RemoteCommand(
                 "report Transformers commit",
                 _remote_git("-C", REMOTE_TRANSFORMERS, "rev-parse", "HEAD"),
+                expected_line=inputs.transformers_ref if inputs.diagnostic_suite else None,
             ),
             RemoteCommand(
                 "install Transformers",
-                ("python", "-m", "pip", "install", "."),
+                ("python", "-m", "pip", "install", *constraint_args, "."),
                 REMOTE_TRANSFORMERS,
             ),
         ])
     commands.extend([
-        RemoteCommand("install candidate DeepSpeed", ("python", "-m", "pip", "install", "."), REMOTE_REPOSITORY),
+        RemoteCommand("install candidate DeepSpeed", ("python", "-m", "pip", "install", *constraint_args, "."),
+                      REMOTE_REPOSITORY),
         RemoteCommand(
             "report package versions",
             (
@@ -540,23 +854,28 @@ def build_remote_commands(inputs: ControllerInputs) -> tuple[RemoteCommand, ...]
             ),
             REMOTE_REPOSITORY,
         ),
-        RemoteCommand(
-            "run pytest",
-            (
-                "pytest",
-                "-n",
-                "4",
-                "--verbose",
-                # GDS tests require GPUDirect Storage support unavailable on these runners.
-                "--ignore=tests/unit/v1/nvme/test_gds.py",
-                f"--torch_ver={preset['torch_test_version']}",
-                f"--cuda_ver={preset['cuda_test_version']}",
-                "--",
-                *inputs.targets,
-            ),
-            REMOTE_REPOSITORY,
-        ),
     ])
+    if inputs.diagnostic_suite:
+        commands.extend(_diagnostic_setup_commands(inputs, preset))
+        commands.append(_diagnostic_pytest_command(inputs, preset))
+    else:
+        commands.append(
+            RemoteCommand(
+                "run pytest",
+                (
+                    "pytest",
+                    "-n",
+                    "4",
+                    "--verbose",
+                    # GDS tests require GPUDirect Storage support unavailable on these runners.
+                    "--ignore=tests/unit/v1/nvme/test_gds.py",
+                    f"--torch_ver={preset['torch_test_version']}",
+                    f"--cuda_ver={preset['cuda_test_version']}",
+                    "--",
+                    *inputs.targets,
+                ),
+                REMOTE_REPOSITORY,
+            ))
     return tuple(commands)
 
 
@@ -564,7 +883,17 @@ def _single_line(value: object) -> str:
     return "".join(char if char.isprintable() else f"\\x{ord(char):02x}" for char in str(value))
 
 
-def run_sandbox_command(sandbox: Any, modal_module: Any, command: RemoteCommand) -> str:
+def _command_artifact_path(artifact_dir: Path, command: RemoteCommand) -> Path:
+    safe_label = re.sub(r"[^a-z0-9]+", "-", command.label.lower()).strip("-")
+    return artifact_dir / f"sandbox-{safe_label}.log"
+
+
+def run_sandbox_command(
+    sandbox: Any,
+    modal_module: Any,
+    command: RemoteCommand,
+    artifact_dir: Path | None = None,
+) -> str:
     process = sandbox.exec(
         *command.argv,
         stderr=modal_module.stream_type.StreamType.STDOUT,
@@ -573,27 +902,77 @@ def run_sandbox_command(sandbox: Any, modal_module: Any, command: RemoteCommand)
     displayed = 0
     last_line = ""
     truncated = False
-    for raw_line in process.stdout:
-        line = _single_line(raw_line.rstrip("\r\n"))
-        last_line = line
-        rendered = f"[sandbox:{command.label}] {line}"
-        encoded_size = len(rendered.encode("utf-8", errors="replace")) + 1
-        if displayed + encoded_size <= MAX_DISPLAY_BYTES_PER_COMMAND:
-            print(rendered)
-            displayed += encoded_size
-        else:
-            truncated = True
+    artifact_stream = None
+    try:
+        if artifact_dir is not None:
+            artifact_dir.mkdir(parents=True, exist_ok=True)
+            artifact_stream = _command_artifact_path(artifact_dir, command).open("a",
+                                                                                 encoding="utf-8",
+                                                                                 errors="replace")
+        for raw_line in process.stdout:
+            if artifact_stream is not None:
+                artifact_stream.write(raw_line)
+                artifact_stream.flush()
+            line = _single_line(raw_line.rstrip("\r\n"))
+            last_line = line
+            rendered = f"[sandbox:{command.label}] {line}"
+            encoded_size = len(rendered.encode("utf-8", errors="replace")) + 1
+            if displayed + encoded_size <= MAX_DISPLAY_BYTES_PER_COMMAND:
+                print(rendered, flush=True)
+                displayed += encoded_size
+            else:
+                truncated = True
+    finally:
+        if artifact_stream is not None:
+            artifact_stream.close()
     if truncated:
         print(f"[sandbox:{command.label}] output truncated after {MAX_DISPLAY_BYTES_PER_COMMAND} bytes")
     return_code = process.wait()
     if return_code:
-        raise RuntimeError(f"{command.label} failed with exit code {return_code}")
+        raise RemoteCommandError(command, return_code)
     if command.expected_line is not None:
         actual = last_line.strip()
         if actual != command.expected_line:
             raise RuntimeError(
                 f"{command.label} returned {_single_line(actual)!r}, expected {command.expected_line!r}")
     return last_line
+
+
+def _run_remote_plan(
+    sandbox: Any,
+    modal_module: Any,
+    inputs: ControllerInputs,
+    artifact_dir: Path | None,
+) -> None:
+    for command in build_remote_commands(inputs):
+        if command.label != "run diagnostic pytest":
+            try:
+                run_sandbox_command(sandbox, modal_module, command, artifact_dir)
+            except BaseException as exc:
+                if inputs.diagnostic_suite:
+                    raise DiagnosticSetupError(command, exc) from exc
+                raise
+            continue
+
+        test_error = None
+        recovery_error = None
+        try:
+            run_sandbox_command(sandbox, modal_module, command, artifact_dir)
+        except BaseException as exc:
+            test_error = exc
+        for recovery in _diagnostic_recovery_commands():
+            try:
+                run_sandbox_command(sandbox, modal_module, recovery, artifact_dir)
+            except BaseException as exc:
+                if recovery_error is None:
+                    recovery_error = exc
+        if test_error is not None and recovery_error is not None:
+            raise RuntimeError(f"diagnostic pytest failed ({test_error}); evidence recovery failed ({recovery_error})"
+                               ) from test_error
+        if test_error is not None:
+            raise test_error.with_traceback(test_error.__traceback__)
+        if recovery_error is not None:
+            raise RuntimeError(f"diagnostic evidence recovery failed: {recovery_error}") from recovery_error
 
 
 def _cleanup_sandbox(sandbox: Any) -> None:
@@ -662,17 +1041,35 @@ def run_controller(env: Mapping[str, str], modal_module: Any | None = None) -> i
     preset = MODAL_TORCH_PRESETS[inputs.torch_preset]
     image = _build_sandbox_image(modal_module, preset, inputs)
     app = modal_module.App.lookup(APP_NAME, create_if_missing=True)
+    artifact_dir = Path(inputs.diagnostic_artifact_dir) if inputs.diagnostic_artifact_dir else None
+    if artifact_dir is not None:
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        request = {
+            "controller_sha": inputs.diagnostic_controller_sha,
+            "target_sha": inputs.sha,
+            "base_sha": inputs.base_sha,
+            "suite": inputs.diagnostic_suite,
+            "target_count": len(inputs.targets),
+            "seed": inputs.diagnostic_seed,
+            "pytest_timeout_seconds": inputs.diagnostic_timeout_seconds,
+            "sandbox_timeout_seconds": DIAGNOSTIC_SANDBOX_TIMEOUT_SECONDS,
+            "transformers_sha": inputs.transformers_ref,
+            "modal_version": importlib.metadata.version("modal"),
+        }
+        (artifact_dir / "request.json").write_text(json.dumps(request, indent=2, sort_keys=True) + "\n",
+                                                   encoding="utf-8")
+        print("DS_DIAGNOSTIC_REQUEST " + json.dumps(request, sort_keys=True), flush=True)
     sandbox = None
     sandbox_started_at: float | None = None
     primary_error: BaseException | None = None
     cleanup_error: BaseException | None = None
     try:
-        sandbox = modal_module.Sandbox.create(app=app, **build_sandbox_kwargs(image))
+        sandbox = modal_module.Sandbox.create(app=app,
+                                              **build_sandbox_kwargs(image, diagnostic=bool(inputs.diagnostic_suite)))
         startup_seconds = await_sandbox_start(sandbox)
         sandbox_started_at = time.monotonic()
         print(f"Sandbox started after {startup_seconds:.0f}s", flush=True)
-        for command in build_remote_commands(inputs):
-            run_sandbox_command(sandbox, modal_module, command)
+        _run_remote_plan(sandbox, modal_module, inputs, artifact_dir)
     except BaseException as exc:
         primary_error = exc
     finally:
@@ -685,13 +1082,18 @@ def run_controller(env: Mapping[str, str], modal_module: Any | None = None) -> i
     if primary_error is not None and cleanup_error is not None:
         raise ControllerCleanupError(primary_error, cleanup_error) from primary_error
     if primary_error is not None:
-        return _report_primary_failure(primary_error, sandbox_started_at)
+        sandbox_timeout = DIAGNOSTIC_SANDBOX_TIMEOUT_SECONDS if inputs.diagnostic_suite else SANDBOX_TIMEOUT_SECONDS
+        return _report_primary_failure(primary_error, sandbox_started_at, sandbox_timeout)
     if cleanup_error is not None:
         raise RuntimeError(f"Sandbox cleanup failed: {cleanup_error}") from cleanup_error
     return 0
 
 
-def _report_primary_failure(error: BaseException, sandbox_started_at: float | None) -> int:
+def _report_primary_failure(
+    error: BaseException,
+    sandbox_started_at: float | None,
+    sandbox_timeout_seconds: float = SANDBOX_TIMEOUT_SECONDS,
+) -> int:
     """Map a controller failure to a triage class for nightly regression tooling.
 
     A Sandbox that never started is a capacity problem and a run that died at the Sandbox
@@ -702,8 +1104,15 @@ def _report_primary_failure(error: BaseException, sandbox_started_at: float | No
     if sandbox_started_at is None:
         print(f"DS_CI_FAILURE_CLASS=infra: no test ran ({error})", flush=True)
         return EXIT_INFRA
+    if isinstance(error, DiagnosticSetupError):
+        print(f"DS_CI_FAILURE_CLASS=diagnostic_setup: no product test ran ({error})", flush=True)
+        return EXIT_DIAGNOSTIC_SETUP
+    if isinstance(error,
+                  RemoteCommandError) and error.command.label == "run diagnostic pytest" and error.return_code == 124:
+        print(f"DS_CI_FAILURE_CLASS=timeout: diagnostic pytest budget exhausted ({error})", flush=True)
+        return EXIT_TIMEOUT
     elapsed = time.monotonic() - sandbox_started_at
-    if elapsed >= SANDBOX_TIMEOUT_SECONDS - SANDBOX_TIMEOUT_GRACE_SECONDS:
+    if elapsed >= sandbox_timeout_seconds - SANDBOX_TIMEOUT_GRACE_SECONDS:
         print(f"DS_CI_FAILURE_CLASS=timeout: Sandbox lifetime exhausted after {elapsed:.0f}s ({error})", flush=True)
         return EXIT_TIMEOUT
     print("DS_CI_FAILURE_CLASS=test: candidate failed", flush=True)
@@ -725,6 +1134,16 @@ def _build_parser() -> argparse.ArgumentParser:
     selection.add_argument("--mode", required=True)
     selection.add_argument("--path", type=Path, required=True)
 
+    diagnostic = subparsers.add_parser("prepare-diagnostic",
+                                       help="Validate and materialize a trusted diagnostic suite")
+    diagnostic.add_argument("--suite", required=True)
+    diagnostic.add_argument("--target-sha", required=True)
+    diagnostic.add_argument("--base-sha", required=True)
+    diagnostic.add_argument("--seed", required=True)
+    diagnostic.add_argument("--timeout-minutes", required=True)
+    diagnostic.add_argument("--transformers-ref", required=True)
+    diagnostic.add_argument("--output", type=Path, required=True)
+
     subparsers.add_parser("controller", help="Create the no-secret Modal Sandbox and run the selected tests")
     return parser
 
@@ -743,6 +1162,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "validate-selection":
         targets = load_test_selection(args.path, args.mode)
         print(f"Validated selection mode={args.mode} count={len(targets)}")
+        return 0
+    if args.command == "prepare-diagnostic":
+        prepare_diagnostic_selection(
+            args.suite,
+            args.target_sha,
+            args.base_sha,
+            args.seed,
+            args.timeout_minutes,
+            args.transformers_ref,
+            args.output,
+        )
         return 0
     return run_controller(os.environ)
 
