@@ -419,6 +419,69 @@ Requirements and limits:
   constants. Differentiating those gradients again (double backward) raises.
   ``torch.compile`` and ``torch.func`` transforms are not covered.
 
+**Attention outputs kept for the recompute (experimental):**
+
+Like RoPE, this belongs to the attention layers, so it is installed rather than
+configured under ``expert_parallel``:
+
+.. code-block:: python
+
+    from deepspeed.runtime.activation_checkpointing.attention_stash import install_attention_stash
+
+    model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": True})
+    stashed_layers = install_attention_stash(model, num_layers=30)
+
+With Hugging Face per-layer reentrant checkpointing, backward recomputes each
+decoder layer, including its attention forward. For the last ``num_layers``
+decoder layers, the first forward instead calls the cuDNN SDPA op that
+``F.scaled_dot_product_attention`` dispatches to, with the log-sum-exp its
+backward needs, and keeps the output until the layer's recompute. The recompute
+still recomputes the projections, norms and rotary embedding, then builds the
+attention node from the kept output; its backward is the call PyTorch's own
+derivative makes. Each stashed layer saves one attention forward per
+micro-batch and holds one attention output plus its FP32 log-sum-exp from its
+forward to its recompute: ``batch * seq * heads * (head_dim * 2 + 4)`` bytes for
+BF16, 136 MB per layer for Qwen3-30B-A3B at batch 4 and sequence 4096. Choose
+``num_layers`` to fit that memory.
+
+The attention forward output equals Hugging Face's SDPA call element for
+element, and so do the key and value gradients. cuDNN accumulates the query
+gradient non-deterministically, which is why PyTorch does not select cuDNN SDPA
+under ``torch.use_deterministic_algorithms(True)``. The query gradient from a
+kept output is as accurate as a normal recompute's against an FP32 reference,
+and differs from one only as much as two normal recomputes differ from each
+other.
+
+Measured with an equivalent benchmark prototype on Qwen3-30B-A3B, 8 H100
+GPUs, ``autoep_size=8`` with DeepEP, sequence 4096, micro-batch 4, 16
+accumulation steps: 30 stashed layers took
+528 ms (2.8%) off a 18.7 s step and raised peak allocated memory by 4.1 GB;
+all 48 layers took 826 ms (4.4%) for 6.5 GB.
+
+Each kept output is keyed by its decoder layer's input. The reentrant recompute
+runs on a detached alias of that same tensor, so a backward can only use the
+output its own forward kept. The output of a forward whose graph is freed
+without a backward is released with the forward's input. Reentrant
+checkpointing makes the embedding output require grad even under
+``torch.no_grad()``, so such forwards in training mode may keep the first
+stashed layer's output briefly; it is released the same way.
+
+Requirements and limits:
+
+- A Hugging Face model with ``attn_implementation="sdpa"``, whose decoder
+  layers are ``GradientCheckpointingLayer`` modules with a ``self_attn``
+  submodule, trained with Hugging Face per-layer gradient checkpointing and
+  ``use_reentrant=True``. A training forward of a stashed layer outside such a
+  checkpoint, including non-reentrant checkpointing, raises.
+- PyTorch must select cuDNN SDPA for the layer's inputs, which needs CUDA with
+  cuDNN; causal attention without an attention mask (no padding) and without
+  attention dropout. Anything else raises when the layer runs.
+- The installer wraps Hugging Face's ``"sdpa"`` entry in
+  ``ALL_ATTENTION_FUNCTIONS`` for the whole process; attention modules without a
+  stash call the original function. Installing twice on one layer raises.
+- ``torch.compile`` and DeepSpeed's own activation checkpointing are not
+  covered.
+
 **Constraints:**
 
 - ``autoep_size`` must divide ``num_experts`` for all detected MoE layers.
