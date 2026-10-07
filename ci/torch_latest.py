@@ -141,6 +141,14 @@ class SandboxStartTimeout(RuntimeError):
         self.timeout_seconds = timeout_seconds
 
 
+class DiagnosticRetrievalError(RuntimeError):
+    """The tests completed, but their diagnostic archive could not be retrieved."""
+
+    def __init__(self, cause: BaseException):
+        super().__init__(f"diagnostic artifact retrieval failed: {cause}")
+        self.cause = cause
+
+
 def validate_repository(value: str) -> str:
     if not isinstance(value, str) or not _REPOSITORY_RE.fullmatch(value):
         raise ValueError("repository must be an ASCII owner/name pair")
@@ -652,21 +660,29 @@ def _retrieve_diagnostics(sandbox: Any, modal_module: Any, destination: Path) ->
     completed = destination / "modal-torch-latest-diagnostics.tar.gz"
 
     def download_archive() -> None:
-        remote = sandbox.open(REMOTE_DIAGNOSTICS_ARCHIVE, "rb")
-        size = 0
+        process = sandbox.exec(
+            "cat",
+            REMOTE_DIAGNOSTICS_ARCHIVE,
+            stderr=modal_module.stream_type.StreamType.STDOUT,
+            text=False,
+            timeout=int(REMOTE_CALL_TIMEOUT_SECONDS),
+        )
         try:
+            size = 0
             with partial.open("wb") as local:
-                while True:
-                    chunk = remote.read(1024 * 1024)
-                    if not chunk:
-                        break
+                for chunk in process.stdout:
+                    if not isinstance(chunk, bytes):
+                        raise TypeError("diagnostics archive stream returned non-binary data")
                     size += len(chunk)
                     if size > MAX_DIAGNOSTICS_ARCHIVE_BYTES:
                         raise ValueError("diagnostics archive exceeds the 100 MiB limit")
                     local.write(chunk)
-        finally:
-            remote.close()
-        partial.replace(completed)
+            if process.wait():
+                raise RuntimeError("diagnostics archive transfer failed")
+            partial.replace(completed)
+        except BaseException:
+            partial.unlink(missing_ok=True)
+            raise
 
     _call_with_timeout(download_archive, REMOTE_CALL_TIMEOUT_SECONDS, "diagnostics archive download")
     return completed
@@ -779,7 +795,7 @@ def run_controller(env: Mapping[str, str], modal_module: Any | None = None) -> i
                 cleanup_error = exc
 
     if primary_error is None and retrieval_error is not None:
-        primary_error = retrieval_error
+        primary_error = DiagnosticRetrievalError(retrieval_error)
     if primary_error is not None and cleanup_error is not None:
         raise ControllerCleanupError(primary_error, cleanup_error) from primary_error
     if primary_error is not None:
@@ -800,6 +816,9 @@ def _report_primary_failure(error: BaseException, sandbox_started_at: float | No
     if sandbox_started_at is None:
         print(f"DS_CI_FAILURE_CLASS=infra: no test ran ({error})", flush=True)
         return EXIT_INFRA
+    if isinstance(error, DiagnosticRetrievalError):
+        print("DS_CI_FAILURE_CLASS=artifact: diagnostic retrieval failed", flush=True)
+        raise error from error.cause
     elapsed = time.monotonic() - sandbox_started_at
     if elapsed >= SANDBOX_TIMEOUT_SECONDS - SANDBOX_TIMEOUT_GRACE_SECONDS:
         print(f"DS_CI_FAILURE_CLASS=timeout: Sandbox lifetime exhausted after {elapsed:.0f}s ({error})", flush=True)

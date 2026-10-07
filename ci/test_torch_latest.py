@@ -15,6 +15,7 @@ import signal
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import threading
 from pathlib import Path
@@ -98,25 +99,6 @@ class FakeProcess:
         return self.return_code
 
 
-class FakeRemoteFile:
-
-    def __init__(self, content=b"diagnostics"):
-        self.content = content
-        self.offset = 0
-        self.closed = False
-
-    def read(self, size=None):
-        if self.offset >= len(self.content):
-            return b""
-        end = len(self.content) if size is None else self.offset + size
-        value = self.content[self.offset:end]
-        self.offset += len(value)
-        return value
-
-    def close(self):
-        self.closed = True
-
-
 class FakeSandbox:
 
     def __init__(
@@ -126,32 +108,33 @@ class FakeSandbox:
         cleanup_failure: bool = False,
         wait_failure: bool = False,
         never_starts: bool = False,
+        transfer_failure: bool = False,
     ):
         self.candidate_sha = candidate_sha
         self.fail_label = fail_label
         self.cleanup_failure = cleanup_failure
         self.wait_failure = wait_failure
         self.never_starts = never_starts
+        self.transfer_failure = transfer_failure
         self.exec_calls = []
         self.processes = []
         self.terminated = False
         self.wait_calls = []
-        self.open_calls = []
 
     def exec(self, *args, **kwargs):
         self.exec_calls.append((args, kwargs))
         if self.never_starts:
             # A container that never gets a GPU never returns from its first exec.
             threading.Event().wait()
-        lines = [self.candidate_sha + "\n"] if "rev-parse" in args and "HEAD^{commit}" in args else ["ok\n"]
-        label_failure = self.fail_label and self.fail_label in " ".join(args)
+        if args[0] == "cat":
+            lines = [b"diagnostics"]
+        else:
+            lines = [self.candidate_sha + "\n"] if "rev-parse" in args and "HEAD^{commit}" in args else ["ok\n"]
+        label_failure = (self.fail_label and self.fail_label in " ".join(args)) or (self.transfer_failure
+                                                                                    and args[0] == "cat")
         process = FakeProcess(lines, return_code=9 if label_failure else 0)
         self.processes.append(process)
         return process
-
-    def open(self, path, mode):
-        self.open_calls.append((path, mode))
-        return FakeRemoteFile()
 
     def terminate(self):
         self.terminated = True
@@ -171,9 +154,10 @@ def _fake_modal(
     wait_failure: bool = False,
     create_failure: bool = False,
     never_starts: bool = False,
+    transfer_failure: bool = False,
 ):
     state = SimpleNamespace(image_calls=[], app_calls=[], create_calls=[])
-    sandbox = FakeSandbox(candidate_sha, fail_label, cleanup_failure, wait_failure, never_starts)
+    sandbox = FakeSandbox(candidate_sha, fail_label, cleanup_failure, wait_failure, never_starts, transfer_failure)
 
     class FakeImage:
 
@@ -499,9 +483,53 @@ def test_controller_creates_one_sandbox_without_forwarding_secrets_and_cleans_up
         assert sandbox.terminated
         assert sandbox.wait_calls == [False]
         assert all(process.waited for process in sandbox.processes)
-        assert sandbox.open_calls == [(torch_latest.REMOTE_DIAGNOSTICS_ARCHIVE, "rb")]
-        assert (path.parent / "diagnostics" / "modal-torch-latest-diagnostics.tar.gz").is_file()
+        transfer_args, transfer_kwargs = next(call for call in sandbox.exec_calls if call[0][0] == "cat")
+        assert transfer_args == ("cat", torch_latest.REMOTE_DIAGNOSTICS_ARCHIVE)
+        assert transfer_kwargs["text"] is False
+        assert (path.parent / "diagnostics" / "modal-torch-latest-diagnostics.tar.gz").read_bytes() == b"diagnostics"
     finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_diagnostic_transfer_round_trip_uses_exec_without_legacy_filesystem_api():
+    root = Path(tempfile.mkdtemp(prefix="ds-modal-transfer-"))
+    remote_root = root / "remote"
+    diagnostics = remote_root / "diagnostics"
+    destination = root / "download"
+    diagnostics.mkdir(parents=True)
+    payload = bytes(range(256)) * 257
+    (diagnostics / "events.bin").write_bytes(payload)
+
+    class LocalExecSandbox:
+
+        def __init__(self):
+            self.exec_calls = []
+
+        def exec(self, *args, **kwargs):
+            self.exec_calls.append((args, dict(kwargs)))
+            text = kwargs.pop("text", True)
+            kwargs.pop("stderr", None)
+            kwargs.pop("timeout", None)
+            return subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=text, **kwargs)
+
+    sandbox = LocalExecSandbox()
+    modal = SimpleNamespace(stream_type=SimpleNamespace(StreamType=SimpleNamespace(STDOUT=object())))
+    old_root = torch_latest.REMOTE_ROOT
+    old_archive = torch_latest.REMOTE_DIAGNOSTICS_ARCHIVE
+    torch_latest.REMOTE_ROOT = str(remote_root)
+    torch_latest.REMOTE_DIAGNOSTICS_ARCHIVE = str(remote_root / "diagnostics.tar.gz")
+    try:
+        archive = torch_latest._retrieve_diagnostics(sandbox, modal, destination)
+        with tarfile.open(archive, "r:gz") as downloaded:
+            assert "diagnostics/events.bin" in downloaded.getnames()
+            extracted = downloaded.extractfile("diagnostics/events.bin")
+            assert extracted is not None
+            assert extracted.read() == payload
+        assert not hasattr(sandbox, "open")
+        assert any(args[0] == "cat" and kwargs["text"] is False for args, kwargs in sandbox.exec_calls)
+    finally:
+        torch_latest.REMOTE_ROOT = old_root
+        torch_latest.REMOTE_DIAGNOSTICS_ARCHIVE = old_archive
         shutil.rmtree(root, ignore_errors=True)
 
 
@@ -588,6 +616,28 @@ def test_controller_propagates_command_and_cleanup_failures():
         _expect_error(torch_latest.run_controller, env, fake, exception=RuntimeError)
         assert sandbox.terminated
         assert sandbox.wait_calls == [False]
+
+        fake, _, sandbox = _fake_modal("a" * 40, fail_label="cat")
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            error = _expect_error(torch_latest.run_controller,
+                                  env,
+                                  fake,
+                                  exception=torch_latest.DiagnosticRetrievalError)
+        assert isinstance(error.cause, RuntimeError)
+        assert "DS_CI_FAILURE_CLASS=artifact" in stdout.getvalue()
+        assert "DS_CI_FAILURE_CLASS=test" not in stdout.getvalue()
+        assert sandbox.terminated
+        assert not (path.parent / "diagnostics" / "modal-torch-latest-diagnostics.tar.gz.partial").exists()
+
+        fake, _, sandbox = _fake_modal("a" * 40, fail_label="pytest", transfer_failure=True)
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            error = _expect_error(torch_latest.run_controller, env, fake, exception=RuntimeError)
+        assert not isinstance(error, torch_latest.DiagnosticRetrievalError)
+        assert "DS_CI_FAILURE_CLASS=test" in stdout.getvalue()
+        assert "DS_CI_FAILURE_CLASS=artifact" not in stdout.getvalue()
+        assert sandbox.terminated
 
         fake, state, sandbox = _fake_modal("a" * 40, create_failure=True)
         assert torch_latest.run_controller(env, fake) == torch_latest.EXIT_INFRA
