@@ -43,6 +43,12 @@ class MoEModelPreset:
     has_shared_experts: bool = False
     shared_experts_pattern: str = ""
     shared_experts_gate_pattern: str = ""
+    #: Expert MLP activation, a name in deepspeed.moe.ep_experts.EXPERT_ACTIVATIONS. alpha and limit
+    #: are read only by the forms that use them, and only when neither the experts module nor the
+    #: model config states its own values.
+    expert_activation: str = "swiglu"
+    expert_activation_alpha: float = 1.702
+    expert_activation_limit: float = 7.0
     autoep_config_defaults: dict[str, Any] = field(default_factory=dict)
     supports_expert_bias: bool = True
     unsupported_router_bias_names: tuple[str, ...] = ()
@@ -91,6 +97,10 @@ class MoELayerSpec:
     router_logits_capture_mode: Literal["raw", "post_score"] = "post_score"
     moe_output_shape: Literal["batched", "flat"] = "batched"
     e_score_correction_bias_path: str | None = None
+    #: Expert MLP activation resolved for this layer (see MoEModelPreset.expert_activation).
+    expert_activation: str = "swiglu"
+    expert_activation_alpha: float = 1.702
+    expert_activation_limit: float = 7.0
 
 
 @dataclass
@@ -112,6 +122,7 @@ class AutoEPConfig:
     route_scale: float = 1.0
     score_apply: Literal["auto", "pre", "post"] = "auto"
     combine_impl: Literal["auto", "weighted_sum", "fused_weighted_sum", "legacy_bmm"] = "auto"
+    row_weighting_impl: Literal["auto", "eager", "fused"] = "auto"
     comm_backend: Literal["comm", "deepep"] = "comm"
     comm_num_sm: int = 12
     comm_qp_margin: int = 4
@@ -130,6 +141,9 @@ class AutoEPConfig:
     has_shared_experts: bool | None = None
     shared_experts_pattern: str | None = None
     shared_experts_gate_pattern: str | None = None
+    #: None = take it from the preset. Set it for a custom preset whose experts are not plain
+    #: SwiGLU, or to keep a form on purpose when AutoEP would refuse it.
+    expert_activation: str | None = None
     _load_balance_coeff_explicit: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self) -> None:

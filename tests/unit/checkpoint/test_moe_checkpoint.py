@@ -8,12 +8,14 @@ from deepspeed.utils.torch import required_torch_version
 
 from unit.common import DistributedTest
 from unit.simple_model import *
+from deepspeed.accelerator import get_accelerator
 
 from unit.checkpoint.common import checkpoint_correctness_verification
 
 import pytest
 
 
+@pytest.mark.skipif(not get_accelerator().is_fp16_supported(), reason="fp16 is not supported on this accelerator")
 class TestMoECheckpoint(DistributedTest):
     world_size = 4
 

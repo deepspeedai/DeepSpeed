@@ -394,7 +394,7 @@ class PipelineModule(nn.Module):
         return x
 
     def _partition_layers(self, method='uniform'):
-        num_stages = self._topo.get_dim('pipe')
+        num_stages = self.num_stages
         stage_id = self._topo.get_coord(self.global_rank).pipe
 
         if self.global_rank == 0:
@@ -537,7 +537,7 @@ class PipelineModule(nn.Module):
 
     def stage_owner(self, layer_idx):
         assert 0 <= layer_idx < self._num_layers
-        for stage in range(self._topo.get_dim('pipe')):
+        for stage in range(self.num_stages):
             if self.parts[stage] <= layer_idx < self.parts[stage + 1]:
                 return stage
         raise RuntimeError(f'Layer {layer_idx} not owned? parts={self.parts}')
