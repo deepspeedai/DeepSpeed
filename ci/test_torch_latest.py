@@ -776,6 +776,61 @@ def test_diagnostic_registered_pids_timeout_and_collection_count():
     assert modal_runner._collection_count("71 tests collected") == 71
 
 
+def test_diagnostic_stack_registration_after_forkserver_fork():
+    root = Path(tempfile.mkdtemp(prefix="ds-modal-forkserver-"))
+    probe = root / "probe.py"
+    probe.write_text(
+        """import json
+import multiprocessing
+import os
+import signal
+import time
+from pathlib import Path
+
+def child(connection):
+    connection.send(os.getpid())
+    connection.close()
+    time.sleep(10)
+
+if __name__ == "__main__":
+    context = multiprocessing.get_context("forkserver")
+    parent, child_connection = context.Pipe(duplex=False)
+    process = context.Process(target=child, args=(child_connection,))
+    process.start()
+    child_connection.close()
+    pid = parent.recv()
+    stack_dir = Path(os.environ["DS_DIAGNOSTICS_DIR"]) / "stacks"
+    marker = stack_dir / f"registered-{pid}.json"
+    deadline = time.monotonic() + 5
+    while not marker.exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    os.kill(pid, signal.SIGUSR1)
+    stack = stack_dir / f"stack-{pid}.log"
+    deadline = time.monotonic() + 5
+    while (not stack.exists() or "Current thread" not in stack.read_text()) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    result = {"marker": marker.exists(), "stack": stack.exists() and "Current thread" in stack.read_text()}
+    process.terminate()
+    process.join(5)
+    print(json.dumps(result, sort_keys=True))
+""",
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    diagnostics = root / "diagnostics"
+    env["DS_DIAGNOSTICS_DIR"] = str(diagnostics)
+    helper_dir = str(Path(modal_runner.__file__).resolve().parent)
+    env["PYTHONPATH"] = helper_dir + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+    result = subprocess.run([sys.executable, str(probe)],
+                            env=env,
+                            check=False,
+                            capture_output=True,
+                            text=True,
+                            timeout=15)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout.splitlines()[-1]) == {"marker": True, "stack": True}
+
+
 def test_launcher_source_has_no_local_packaging_or_shell_execution():
     source = Path(torch_latest.__file__).read_text(encoding="utf-8")
     for forbidden in ("add_local_dir", "modal.Function", "@app.function", "shell=True", "os.system(", "HF_TOKEN"):

@@ -4,6 +4,7 @@
 # DeepSpeed Team
 import faulthandler
 import json
+import multiprocessing.util
 import os
 import signal
 import sys
@@ -11,15 +12,24 @@ from pathlib import Path
 
 _STACK_FILE = None
 
-root = os.environ.get("DS_DIAGNOSTICS_DIR")
-if root and hasattr(signal, "SIGUSR1"):
+
+def _register_stack_handler():
+    global _STACK_FILE
+    root = os.environ.get("DS_DIAGNOSTICS_DIR")
+    if not root or not hasattr(signal, "SIGUSR1"):
+        return
     try:
         stack_dir = Path(root) / "stacks"
         stack_dir.mkdir(parents=True, exist_ok=True)
         pid = os.getpid()
-        _STACK_FILE = (stack_dir / f"stack-{pid}.log").open("a", encoding="utf-8")
-        faulthandler.enable(file=_STACK_FILE, all_threads=True)
-        faulthandler.register(signal.SIGUSR1, file=_STACK_FILE, all_threads=True, chain=False)
+        stack_file = (stack_dir / f"stack-{pid}.log").open("a", encoding="utf-8")
+        faulthandler.enable(file=stack_file, all_threads=True)
+        faulthandler.unregister(signal.SIGUSR1)
+        faulthandler.register(signal.SIGUSR1, file=stack_file, all_threads=True, chain=False)
+        previous = _STACK_FILE
+        _STACK_FILE = stack_file
+        if previous is not None:
+            previous.close()
         marker = {"argv0": Path(sys.argv[0]).name, "pid": pid}
         (stack_dir / f"registered-{pid}.json").write_text(
             json.dumps(marker, sort_keys=True) + "\n",
@@ -27,3 +37,9 @@ if root and hasattr(signal, "SIGUSR1"):
         )
     except (OSError, RuntimeError, ValueError):
         pass
+
+
+_register_stack_handler()
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_register_stack_handler)
+multiprocessing.util.register_after_fork(_register_stack_handler, lambda _: _register_stack_handler())
