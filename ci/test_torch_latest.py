@@ -7,8 +7,11 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import io
+import json
 import os
+import signal
 import shutil
 import subprocess
 import sys
@@ -21,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import torch_latest  # noqa: E402
 import test_tests_fetcher  # noqa: E402
+from modal_diagnostics import runner as modal_runner  # noqa: E402
 
 
 def _expect_error(function, *args, exception=ValueError, **kwargs):
@@ -48,6 +52,7 @@ def _valid_env(path: Path, **overrides: str) -> dict[str, str]:
         "MODAL_TORCH_PRESET": "2.10.0-cuda12.8",
         "MODAL_TRANSFORMERS_SOURCE": "git",
         "MODAL_TRANSFORMERS_REF": "main",
+        "DS_DIAGNOSTICS_DIR": str(path.parent / "diagnostics"),
     }
     values.update(overrides)
     return values
@@ -93,6 +98,25 @@ class FakeProcess:
         return self.return_code
 
 
+class FakeRemoteFile:
+
+    def __init__(self, content=b"diagnostics"):
+        self.content = content
+        self.offset = 0
+        self.closed = False
+
+    def read(self, size=None):
+        if self.offset >= len(self.content):
+            return b""
+        end = len(self.content) if size is None else self.offset + size
+        value = self.content[self.offset:end]
+        self.offset += len(value)
+        return value
+
+    def close(self):
+        self.closed = True
+
+
 class FakeSandbox:
 
     def __init__(
@@ -112,6 +136,7 @@ class FakeSandbox:
         self.processes = []
         self.terminated = False
         self.wait_calls = []
+        self.open_calls = []
 
     def exec(self, *args, **kwargs):
         self.exec_calls.append((args, kwargs))
@@ -123,6 +148,10 @@ class FakeSandbox:
         process = FakeProcess(lines, return_code=9 if label_failure else 0)
         self.processes.append(process)
         return process
+
+    def open(self, path, mode):
+        self.open_calls.append((path, mode))
+        return FakeRemoteFile()
 
     def terminate(self):
         self.terminated = True
@@ -213,6 +242,8 @@ def test_selection_modes_and_path_validation():
         ("all", "tests/unit/v1\n", ("tests/unit/v1", )),
         ("subset", "tests/unit/v1/test_one.py\ntests/unit/v1/sub/test_two.py\n", ("tests/unit/v1/test_one.py",
                                                                                   "tests/unit/v1/sub/test_two.py")),
+        ("subset", "tests/unit/v1/test_one.py::TestOne::test_value[param]\n",
+         ("tests/unit/v1/test_one.py::TestOne::test_value[param]", )),
         ("none", "", ()),
     ]
     for mode, content, expected in cases:
@@ -231,6 +262,8 @@ def test_selection_modes_and_path_validation():
         ("subset", "tests\\unit\\v1\\test_bad.py\n"),
         ("subset", "--collect-only\n"),
         ("subset", "tests/unit/v1/helper.py\n"),
+        ("subset", "tests/unit/v1/test_one.py::\n"),
+        ("subset", "tests/unit/v1/test_one.py::TestOne/test_value\n"),
         ("none", "tests/unit/v1\n"),
         ("bogus", ""),
     ]
@@ -417,6 +450,9 @@ def test_remote_plan_is_structural_and_preserves_order_and_scope():
         pytest_command = next(command for command in commands if command.label == "run pytest")
         separator = pytest_command.argv.index("--")
         assert pytest_command.argv[separator + 1:] == ("tests/unit/v1/test_one.py", )
+        assert pytest_command.argv[:3] == ("python3", "ci/modal_diagnostics/runner.py", "run-pytest")
+        assert pytest_command.argv[pytest_command.argv.index("--workers") + 1] == "4"
+        assert pytest_command.argv[pytest_command.argv.index("--stall-seconds") + 1] == "300"
         fetch = next(command for command in commands if command.label == "fetch candidate SHA")
         assert "https://github.com/example/DeepSpeed.git" in fetch.argv
         assert f"{'c' * 40}:refs/ci/candidate" in fetch.argv
@@ -463,6 +499,8 @@ def test_controller_creates_one_sandbox_without_forwarding_secrets_and_cleans_up
         assert sandbox.terminated
         assert sandbox.wait_calls == [False]
         assert all(process.waited for process in sandbox.processes)
+        assert sandbox.open_calls == [(torch_latest.REMOTE_DIAGNOSTICS_ARCHIVE, "rb")]
+        assert (path.parent / "diagnostics" / "modal-torch-latest-diagnostics.tar.gz").is_file()
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
@@ -642,6 +680,10 @@ def test_workflow_keeps_github_execution_trusted_and_preserves_modes():
     assert "refs/ci/base" in text
     assert "refs/" + "dev" + "ds" not in text
     assert text.count("modal-torch-latest-test-selection") == 2
+    assert "cp ci/modal_diagnostics/modal_master_71_nodes.txt ci/.test_selection/test_list.txt" in text
+    assert 'echo "mode=subset" >> "$GITHUB_OUTPUT"' in text
+    assert "if: always()" in text
+    assert "modal-torch-latest-focused-diagnostics" in text
     assert "needs.collect-tests.outputs.mode != 'none'" in text
     assert "needs.collect-tests.result != 'success'" in text
     assert 'python3 ci/torch_latest.py controller' in text
@@ -651,6 +693,87 @@ def test_workflow_keeps_github_execution_trusted_and_preserves_modes():
     assert "checkout-candidate" not in deploy
     assert "pull_request.head.sha || github.sha" in deploy
     assert "pull_request.head.repo.full_name || github.repository" in deploy
+
+
+def test_focused_manifest_is_exact_and_unique():
+    manifest = Path(torch_latest.__file__).resolve().parent / "modal_diagnostics/modal_master_71_nodes.txt"
+    content = manifest.read_bytes()
+    lines = content.decode("utf-8").splitlines()
+    assert len(lines) == 71
+    assert len(set(lines)) == 71
+    assert hashlib.sha256(content).hexdigest() == "7005c702faeb3a9bb89d1335a3aea326d293b5df00869a836621ce31ef5ff9da"
+    assert torch_latest.load_test_selection(manifest, "subset") == tuple(lines)
+
+
+def test_diagnostic_events_are_incremental_and_failure_details_are_immediate():
+    root = Path(tempfile.mkdtemp(prefix="ds-modal-events-"))
+    old_root = os.environ.get("DS_DIAGNOSTICS_DIR")
+    old_worker = os.environ.get("PYTEST_XDIST_WORKER")
+    try:
+        os.environ["DS_DIAGNOSTICS_DIR"] = str(root)
+        os.environ["PYTEST_XDIST_WORKER"] = "gw2"
+        nodeid = "tests/unit/v1/test_one.py::test_value"
+        modal_runner.pytest_runtest_logstart(nodeid, ("test_one.py", 1, "test_value"))
+        report = SimpleNamespace(nodeid=nodeid,
+                                 outcome="failed",
+                                 when="call",
+                                 duration=1.25,
+                                 failed=True,
+                                 longrepr="traceback",
+                                 longreprtext="detailed traceback")
+        modal_runner.pytest_runtest_logreport(report)
+        modal_runner.pytest_runtest_logfinish(nodeid, ("test_one.py", 1, "test_value"))
+        events = modal_runner.EventReader(root / "events")
+        values = events.poll()
+        assert [value["event"] for value in values] == ["node_start", "phase_outcome", "node_finish"]
+        assert all(value["worker"] == "gw2" and value["pid"] == os.getpid() for value in values)
+        assert values[1]["traceback"] == "detailed traceback"
+        assert events.poll() == []
+        assert "heartbeat" not in modal_runner.PROGRESS_EVENTS
+    finally:
+        if old_root is None:
+            os.environ.pop("DS_DIAGNOSTICS_DIR", None)
+        else:
+            os.environ["DS_DIAGNOSTICS_DIR"] = old_root
+        if old_worker is None:
+            os.environ.pop("PYTEST_XDIST_WORKER", None)
+        else:
+            os.environ["PYTEST_XDIST_WORKER"] = old_worker
+
+
+def test_diagnostic_command_and_bounded_process_stop():
+    root = Path(tempfile.mkdtemp(prefix="ds-modal-command-"))
+    args = SimpleNamespace(workers=4, torch_version="2.10", cuda_version="12.8")
+    targets = ("tests/unit/v1/test_one.py::test_a", "tests/unit/v1/test_two.py::test_b")
+    command = modal_runner._pytest_command(args, targets, 12345, root)
+    assert command[command.index("-n") + 1] == "4"
+    assert "--randomly-seed=12345" in command
+    assert "-x" not in command
+    assert command[command.index("--") + 1:] == list(targets)
+
+    process = SimpleNamespace(pid=123, poll=lambda: None)
+    sent = []
+    original = modal_runner._signal_process_group
+    try:
+        modal_runner._signal_process_group = lambda target, requested_signal: sent.append(requested_signal)
+        actions = modal_runner._stop_process_group(process, waits=(0.0, 0.0, 0.0), sleep=lambda _: None)
+    finally:
+        modal_runner._signal_process_group = original
+    assert actions == ["SIGINT", "SIGTERM", "SIGKILL"]
+    assert sent == [signal.SIGINT, signal.SIGTERM, signal.SIGKILL]
+
+
+def test_diagnostic_registered_pids_timeout_and_collection_count():
+    root = Path(tempfile.mkdtemp(prefix="ds-modal-stacks-"))
+    stack_dir = root / "stacks"
+    stack_dir.mkdir()
+    (stack_dir / "registered-self.json").write_text(json.dumps({"pid": os.getpid()}), encoding="utf-8")
+    (stack_dir / "registered-bad.json").write_text("not json", encoding="utf-8")
+    assert modal_runner._registered_pids(root) == [os.getpid()]
+    probe = modal_runner._run_capture([sys.executable, "-c", "import time; time.sleep(1)"], timeout=0.01)
+    assert probe["timed_out"] is True
+    assert modal_runner._collection_count("collected 71 items") == 71
+    assert modal_runner._collection_count("71 tests collected") == 71
 
 
 def test_launcher_source_has_no_local_packaging_or_shell_execution():

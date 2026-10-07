@@ -83,9 +83,13 @@ SANDBOX_TIMEOUT_GRACE_SECONDS = 120
 MAX_TEST_LIST_BYTES = 64 * 1024
 MAX_TEST_TARGETS = 1024
 MAX_DISPLAY_BYTES_PER_COMMAND = 16 * 1024 * 1024
+MAX_DIAGNOSTICS_ARCHIVE_BYTES = 100 * 1024 * 1024
+REMOTE_CALL_TIMEOUT_SECONDS = 60
 REMOTE_ROOT = "/workspace"
 REMOTE_REPOSITORY = f"{REMOTE_ROOT}/deepspeed"
 REMOTE_TRANSFORMERS = f"{REMOTE_ROOT}/transformers"
+REMOTE_DIAGNOSTICS = f"{REMOTE_ROOT}/diagnostics"
+REMOTE_DIAGNOSTICS_ARCHIVE = f"{REMOTE_ROOT}/modal-torch-latest-diagnostics.tar.gz"
 GDS_TEST_TARGET = "tests/unit/v1/nvme/test_gds.py"
 
 _REPOSITORY_COMPONENT = r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}"
@@ -171,11 +175,14 @@ def validate_transformers_ref(value: str) -> str:
 def _validate_target(value: str) -> str:
     if not isinstance(value, str) or not value or value.startswith("-") or "\\" in value:
         raise ValueError(f"invalid pytest target: {value!r}")
-    path = PurePosixPath(value)
+    file_target, *node_parts = value.split("::")
+    path = PurePosixPath(file_target)
     if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
         raise ValueError(f"invalid pytest target: {value!r}")
-    if not _TEST_FILE_RE.fullmatch(value):
+    if not _TEST_FILE_RE.fullmatch(file_target):
         raise ValueError(f"pytest target is outside tests/unit/v1 or is not a test file: {value!r}")
+    if any(not part or "/" in part for part in node_parts):
+        raise ValueError(f"invalid pytest node ID: {value!r}")
     return value
 
 
@@ -544,14 +551,21 @@ def build_remote_commands(inputs: ControllerInputs) -> tuple[RemoteCommand, ...]
         RemoteCommand(
             "run pytest",
             (
-                "pytest",
-                "-n",
+                "python3",
+                "ci/modal_diagnostics/runner.py",
+                "run-pytest",
+                "--artifact-dir",
+                REMOTE_DIAGNOSTICS,
+                "--stall-seconds",
+                "300",
+                "--telemetry-seconds",
+                "30",
+                "--workers",
                 "4",
-                "--verbose",
-                # GDS tests require GPUDirect Storage support unavailable on these runners.
-                "--ignore=tests/unit/v1/nvme/test_gds.py",
-                f"--torch_ver={preset['torch_test_version']}",
-                f"--cuda_ver={preset['cuda_test_version']}",
+                "--torch-version",
+                preset["torch_test_version"],
+                "--cuda-version",
+                preset["cuda_test_version"],
                 "--",
                 *inputs.targets,
             ),
@@ -597,15 +611,86 @@ def run_sandbox_command(sandbox: Any, modal_module: Any, command: RemoteCommand)
     return last_line
 
 
+def _call_with_timeout(function: Any, timeout_seconds: float, label: str) -> Any:
+    values: list[Any] = []
+    errors: list[BaseException] = []
+
+    def invoke() -> None:
+        try:
+            values.append(function())
+        except BaseException as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=invoke, daemon=True)
+    thread.start()
+    thread.join(timeout_seconds)
+    if thread.is_alive():
+        raise TimeoutError(f"{label} did not finish within {timeout_seconds:g}s")
+    if errors:
+        raise errors[0].with_traceback(errors[0].__traceback__)
+    return values[0] if values else None
+
+
+def _retrieve_diagnostics(sandbox: Any, modal_module: Any, destination: Path) -> Path:
+    destination.mkdir(parents=True, exist_ok=True)
+
+    def create_archive() -> None:
+        process = sandbox.exec(
+            "tar",
+            "-C",
+            REMOTE_ROOT,
+            "-czf",
+            REMOTE_DIAGNOSTICS_ARCHIVE,
+            "diagnostics",
+            stderr=modal_module.stream_type.StreamType.STDOUT,
+        )
+        if process.wait():
+            raise RuntimeError("diagnostics archive creation failed")
+
+    _call_with_timeout(create_archive, REMOTE_CALL_TIMEOUT_SECONDS, "diagnostics archive creation")
+    partial = destination / "modal-torch-latest-diagnostics.tar.gz.partial"
+    completed = destination / "modal-torch-latest-diagnostics.tar.gz"
+
+    def download_archive() -> None:
+        remote = sandbox.open(REMOTE_DIAGNOSTICS_ARCHIVE, "rb")
+        size = 0
+        try:
+            with partial.open("wb") as local:
+                while True:
+                    chunk = remote.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    size += len(chunk)
+                    if size > MAX_DIAGNOSTICS_ARCHIVE_BYTES:
+                        raise ValueError("diagnostics archive exceeds the 100 MiB limit")
+                    local.write(chunk)
+        finally:
+            remote.close()
+        partial.replace(completed)
+
+    _call_with_timeout(download_archive, REMOTE_CALL_TIMEOUT_SECONDS, "diagnostics archive download")
+    return completed
+
+
+def _record_retrieval_error(destination: Path, error: BaseException) -> None:
+    destination.mkdir(parents=True, exist_ok=True)
+    text = f"{type(error).__name__}: diagnostic retrieval did not complete\n"
+    (destination / "retrieval-error.txt").write_text(text, encoding="utf-8")
+
+
 def _cleanup_sandbox(sandbox: Any) -> None:
     termination_error = None
     observation_error = None
     try:
-        sandbox.terminate()
+        _call_with_timeout(sandbox.terminate, REMOTE_CALL_TIMEOUT_SECONDS, "Sandbox termination")
     except BaseException as exc:
         termination_error = exc
     try:
-        sandbox.wait(raise_on_termination=False)
+        _call_with_timeout(
+            lambda: sandbox.wait(raise_on_termination=False),
+            REMOTE_CALL_TIMEOUT_SECONDS,
+            "Sandbox terminal-state observation",
+        )
     except BaseException as exc:
         observation_error = exc
     if termination_error is not None and observation_error is not None:
@@ -666,7 +751,9 @@ def run_controller(env: Mapping[str, str], modal_module: Any | None = None) -> i
     sandbox = None
     sandbox_started_at: float | None = None
     primary_error: BaseException | None = None
+    retrieval_error: BaseException | None = None
     cleanup_error: BaseException | None = None
+    diagnostics_destination = Path(env.get("DS_DIAGNOSTICS_DIR", "modal-diagnostics"))
     try:
         sandbox = modal_module.Sandbox.create(app=app, **build_sandbox_kwargs(image))
         startup_seconds = await_sandbox_start(sandbox)
@@ -677,12 +764,22 @@ def run_controller(env: Mapping[str, str], modal_module: Any | None = None) -> i
     except BaseException as exc:
         primary_error = exc
     finally:
+        if sandbox is not None and sandbox_started_at is not None:
+            try:
+                archive = _retrieve_diagnostics(sandbox, modal_module, diagnostics_destination)
+                print(f"Saved diagnostic archive to {archive}", flush=True)
+            except BaseException as exc:
+                retrieval_error = exc
+                _record_retrieval_error(diagnostics_destination, exc)
+                print(f"Diagnostic retrieval failed: {type(exc).__name__}", flush=True)
         if sandbox is not None:
             try:
                 _cleanup_sandbox(sandbox)
             except BaseException as exc:
                 cleanup_error = exc
 
+    if primary_error is None and retrieval_error is not None:
+        primary_error = retrieval_error
     if primary_error is not None and cleanup_error is not None:
         raise ControllerCleanupError(primary_error, cleanup_error) from primary_error
     if primary_error is not None:

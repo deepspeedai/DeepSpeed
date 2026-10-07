@@ -111,7 +111,11 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           CANDIDATE_ROOT: ${{ runner.temp }}/deepspeed-candidate
         run: |
-          if [ "$EVENT_NAME" = "pull_request_target" ] || [ "$EVENT_NAME" = "merge_group" ]; then
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            mkdir -p ci/.test_selection
+            cp ci/modal_diagnostics/modal_master_71_nodes.txt ci/.test_selection/test_list.txt
+            echo "mode=subset" >> "$GITHUB_OUTPUT"
+          elif [ "$EVENT_NAME" = "pull_request_target" ] || [ "$EVENT_NAME" = "merge_group" ]; then
             python3 ci/tests_fetcher.py \
               --workflow modal-torch-latest \
               --repo-root "$CANDIDATE_ROOT" \
@@ -196,6 +200,16 @@ jobs:
           MODAL_TORCH_PRESET: ${{ github.event.inputs.torch_preset || '2.10.0-cuda12.8' }}
           MODAL_TRANSFORMERS_SOURCE: ${{ github.event.inputs.transformers_source || 'git' }}
           MODAL_TRANSFORMERS_REF: ${{ github.event.inputs.transformers_ref || 'main' }}
+          DS_DIAGNOSTICS_DIR: ${{ runner.temp }}/modal-torch-latest-diagnostics
           MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
           MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
         run: python3 ci/torch_latest.py controller
+
+      - name: Upload focused diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: modal-torch-latest-focused-diagnostics
+          path: ${{ runner.temp }}/modal-torch-latest-diagnostics
+          if-no-files-found: warn
+          retention-days: 7
