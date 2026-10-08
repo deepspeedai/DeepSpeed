@@ -142,7 +142,7 @@ By default, non-Muon parameters use `FusedAdam`. When optimizer state is offload
     }
   }
 ```
-The Adam optimizer also supports the following two params keys/values in addition to the standard parameters from [torch.optim.Adam](https://pytorch.org/docs/stable/_modules/torch/optim/adam.html#Adam):
+The Adam optimizer also supports the following two params keys/values in addition to the standard parameters from [torch.optim.Adam](https://docs.pytorch.org/docs/stable/generated/torch.optim.Adam.html):
 
 | "params" key  | Description                                                                 | Default |
 | ------------- | --------------------------------------------------------------------------- | ------- |
