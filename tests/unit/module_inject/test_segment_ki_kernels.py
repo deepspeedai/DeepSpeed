@@ -69,6 +69,34 @@ def _rand_bf16(*shape, device=DEV):
 @pytest.mark.skipif(not GPU_AVAILABLE, reason="non-CPU device required")
 class TestKernelReferenceConsistency:
 
+    def test_decode_step_graph_contract(self):
+        """The full-step graph kernel must reproduce torch.argmax (first
+        index on ties), advance write_pos, reveal exactly the next slot,
+        and record the token in the buffer across repeated calls."""
+        vocab, max_len = 2048, 16
+        logits = torch.full((1, vocab), -3.0, dtype=torch.bfloat16, device=DEV)
+        logits[0, 10] = 2.0
+        logits[0, 1500] = 2.0  # exact bf16 tie: torch.argmax keeps index 10
+        token_out = torch.zeros(1, 1, dtype=torch.long, device=DEV)
+        write_pos = torch.tensor([5], dtype=torch.long, device=DEV)
+        mask = torch.zeros(1, 1, 1, max_len, dtype=torch.bool, device=DEV)
+        out_buf = torch.zeros(max_len, dtype=torch.long, device=DEV)
+
+        expected = torch.argmax(logits[0].float())
+        assert expected.item() == 10  # torch.argmax first-index rule
+
+        _op().decode_step_graph(logits, token_out, write_pos, mask, out_buf)
+        assert token_out.view(-1)[0].item() == 10
+        assert write_pos.item() == 6
+        assert bool(mask[0, 0, 0, 6]) and not bool(mask[0, 0, 0, 7])
+        assert out_buf[6].item() == 10
+
+        # a second call advances from the updated write_pos and reveals slot 7
+        _op().decode_step_graph(logits, token_out, write_pos, mask, out_buf)
+        assert write_pos.item() == 7
+        assert bool(mask[0, 0, 0, 7]) and not bool(mask[0, 0, 0, 8])
+        assert out_buf[7].item() == 10
+
     def test_dual_gemv_silu_mul(self):
         h = _rand_bf16(256)
         gw = _rand_bf16(384, 256)
