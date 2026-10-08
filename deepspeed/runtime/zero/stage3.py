@@ -1315,7 +1315,13 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         # Initialize the optimizer states with the flattened fp32 partition.
         if is_adagrad:
-            self.optimizer = torch.optim.Adagrad(self.fp32_partitioned_groups_flat, **self.optimizer.defaults)
+            param_groups = [{**group, "params": []} for group in self.optimizer.param_groups]
+            for subgroup_id, param in enumerate(self.fp32_partitioned_groups_flat):
+                group_id = self.sub_group_to_group_id[subgroup_id]
+                param_groups[group_id]["params"].append(param)
+            self.optimizer = torch.optim.Adagrad(param_groups, **self.optimizer.defaults)
+            for group in self.optimizer.param_groups:
+                group["params"] = []
 
         self.timers(INIT_OPTIMIZER_TIMER).stop()
         self.timers.log(timer_names)
