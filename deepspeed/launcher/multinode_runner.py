@@ -416,7 +416,11 @@ class SlurmRunner(MultiNodeRunner):
         for key, val in self.exports.items():
             exports += f",{key}={val}"
 
-        python_exec = [sys.executable, "-u"]
+        python_exec = []
+        if not self.args.no_python:
+            python_exec = [sys.executable, "-u"]
+            if self.args.module:
+                python_exec.append("-m")
         command = srun_cmd + [exports] + python_exec + [self.user_script] + self.user_arguments
         return command
 
