@@ -5484,7 +5484,11 @@ class DeepSpeedEngine(Module):
                 else:
                     shared_index[param_id] = key
 
-            for name, child in module.named_children():
+            # Use module._modules directly instead of named_children(), which de-duplicates
+            # children by identity: a submodule aliased under two attribute names (not just a
+            # tied leaf Parameter) would otherwise have its second name skipped entirely, so its
+            # params would never be recorded as shared and would go missing on reconstruction.
+            for name, child in module._modules.items():
                 if child is not None:
                     get_layer_state_dict(child, prefix + name + ".")
 
