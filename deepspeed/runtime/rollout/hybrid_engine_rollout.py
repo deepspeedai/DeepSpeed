@@ -1028,15 +1028,14 @@ class HybridEngineRollout(RolloutEngine):
 
         # --- Prefill with HF StaticCache (correct attention semantics) ---
         prefill_cache = self._create_static_cache(StaticCache, module.config, batch_size, max_len, device, model_dtype)
-        # Mirror generate's hybrid-model kwargs exactly: a per-type mask dict
-        # (GDN must see None) and no explicit cache_position. A 2D mask here
-        # corrupts the GDN conv-state initialization and collapses decode.
+        # Hybrid models take a per-type mask dict (GDN must see None; a 2D
+        # mask corrupts its conv-state init); standard models take a tensor.
+        is_hybrid = "linear_attention" in (getattr(getattr(module.config, "text_config", module.config),
+                                                  "layer_types", None) or [])
+        prefill_mask = {"full_attention": None, "linear_attention": None} if is_hybrid else prompt_attn
         prefill_out = module(
             prompt_ids,
-            attention_mask={
-                "full_attention": None,
-                "linear_attention": None
-            },
+            attention_mask=prefill_mask,
             past_key_values=prefill_cache,
             use_cache=True,
         )
@@ -1080,6 +1079,10 @@ class HybridEngineRollout(RolloutEngine):
         static_attn = torch.zeros(batch_size, 1, 1, max_len, dtype=torch.bool, device=device)
         static_attn[:, :, :, :prompt_len] = prompt_attn.unsqueeze(1).unsqueeze(1).bool()
         static_attn[:, :, :, prompt_len] = True
+
+        # Decode-step mask argument: the per-type dict for hybrid models, the
+        # plain 4-D tensor for standard full-attention ones.
+        decode_mask = {"full_attention": static_attn, "linear_attention": None} if is_hybrid else static_attn
 
         full_token_buf = torch.zeros(max_len, dtype=torch.long, device=device)
         if batch_size == 1:
@@ -1135,10 +1138,7 @@ class HybridEngineRollout(RolloutEngine):
                 for _ in range(3):
                     out = module(
                         static_token,
-                        attention_mask={
-                            "full_attention": static_attn,
-                            "linear_attention": None
-                        },
+                        attention_mask=decode_mask,
                         past_key_values=ds_cache,
                         use_cache=True,
                     )
@@ -1163,10 +1163,7 @@ class HybridEngineRollout(RolloutEngine):
             with get_accelerator().capture_to_graph(graph):
                 out = module(
                     static_token,
-                    attention_mask={
-                        "full_attention": static_attn,
-                        "linear_attention": None
-                    },
+                    attention_mask=decode_mask,
                     past_key_values=ds_cache,
                     use_cache=True,
                 )
