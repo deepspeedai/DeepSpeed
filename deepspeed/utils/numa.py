@@ -101,9 +101,16 @@ def parse_range_list(range_str):
     return number_list
 
 
-def get_numactl_cmd(bind_core_list, num_local_procs, local_rank):
+def get_numactl_cmd(bind_core_list, num_local_procs, local_rank, validate_numactl=True):
+    """Build a binding command; disable local validation for commands executed by remote workers."""
     numactl_cmd = []
-    check_for_numactl_pkg()
+    if validate_numactl:
+        check_for_numactl_pkg()
+        if shutil.which("numactl") is None:
+            # Fail before spawning a local rank, but do not require remote-worker
+            # executables to be installed on an MPI command-building node.
+            raise ValueError("numactl was not found on this system, but binding ranks to cores "
+                             "requires it. Install numactl or launch without --bind_cores_to_rank.")
     if 'KMP_AFFINITY' in os.environ.keys():
         raise ValueError("Environment variable KMP_AFFINITY conflicts with numactl "
                          "because it interfere with how many CPU cores numactl can set. "
