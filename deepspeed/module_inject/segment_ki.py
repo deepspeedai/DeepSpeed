@@ -557,7 +557,9 @@ def install_decode_attention(model: torch.nn.Module, write_pos: torch.Tensor, ke
         if getattr(module, "_ki_orig_attn_forward", None) is None:
             module._ki_orig_attn_forward = module.forward
         module._ki_attn_op = kernel_op
-        module._ki_qkv_op = kernel_op if (hasattr(kernel_op, "triple_gemv")
+        # The fused QKV kernel consumes weights only; biased projections would lose their bias.
+        unbiased_qkv = all(p.bias is None for p in projections[:3])
+        module._ki_qkv_op = kernel_op if (hasattr(kernel_op, "triple_gemv") and unbiased_qkv
                                           and os.environ.get("DS_TIER2", "1") == "1") else None
         module._ki_write_pos = write_pos
         module._ki_rope = apply_rotary_pos_emb
