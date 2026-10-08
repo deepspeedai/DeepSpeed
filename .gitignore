@@ -66,3 +66,6 @@ tests/unit/saved_checkpoint/
 
 # virtual env directory for format
 venv
+
+# CUDA wheels built on the GPU node (large; live on the shared disk, not in git)
+autorun/wheels/*.whl

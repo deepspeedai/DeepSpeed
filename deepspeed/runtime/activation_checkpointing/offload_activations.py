@@ -7,7 +7,10 @@ Offload activation checkpoint inputs to CPU on a pinned side-stream buffer pool.
 Two consumers share one ``_ActivationOffloadEngine``:
 
 * ``CheckpointHiddenStatesOffload``: a ``saved_tensors_hooks`` context manager for
-  HF non-reentrant checkpointing that offloads only marked inputs.
+  HF non-reentrant checkpointing that offloads only marked inputs. ``DeepSpeedEngine``
+  installs this automatically when ``activation_checkpointing.cpu_checkpointing`` is
+  true, spanning ``forward()`` and ``backward()``.
+* DeepSpeed native ``cpu_checkpointing`` (checkpointing.py), which drives the
 * DeepSpeed native ``cpu_checkpointing`` (checkpointing.py), which drives the
   engine directly instead of blocking ``.to('cpu')`` / ``.to(cuda)``.
 
@@ -39,6 +42,7 @@ class CheckpointActivationOffloadStats:
     kept_last_tensors: int = 0
     offloaded_bytes: int = 0
     restored_bytes: int = 0
+    prefetched_tensors: int = 0
 
 
 @dataclass(frozen=True)
@@ -70,6 +74,7 @@ class _ActivationOffloadEngine:
         max_fwd_stash_count: int = 2,
         max_cpu_buffer_pool_count: int = 64,
         keep_last_count: int = 1,
+        prefetch: bool = False,
     ) -> None:
         if keep_last_count < 0:
             raise ValueError(f"keep_last_count must be >= 0, got {keep_last_count}")
@@ -89,18 +94,25 @@ class _ActivationOffloadEngine:
         self.keep_last_count = keep_last_count
         self.stats = CheckpointActivationOffloadStats()
         self._next_id = 0
-        self._tracker: dict[int, tuple[torch.Tensor, torch.device, torch.Size, tuple[int, ...], _BufferKey]] = {}
+        self._tracker: dict[int, tuple[torch.Tensor, torch.device, torch.Size, tuple[int, ...], _BufferKey,
+                                       Optional[torch.Event]]] = {}
         self._fwd_stash: dict[int, tuple[torch.Tensor, torch.Event]] = {}
         self._keep_last: dict[int, torch.Tensor] = {}
         self._restored: dict[int, torch.Tensor] = {}
         self._cpu_buffer_pool: dict[_BufferKey, list[torch.Tensor]] = {}
         self._cpu_buffer_pool_count = 0
         self._pending_cpu_buffers: list[tuple[_BufferKey, torch.Tensor, torch.Event]] = []
+        self._order: list[int] = []
+        self._reloads: dict[int, tuple[torch.Tensor, torch.Event, torch.Tensor, _BufferKey]] = {}
 
         # cpu-like accelerators have no streams; offload_input never offloads there
         stream_cls = get_accelerator().Stream
         self.s1 = stream_cls() if (use_streams and stream_cls is not None) else None
         self.use_streams = bool(use_streams and self.s1 is not None)
+        # Dedicated H2D stream so LIFO prefetch of the previous id overlaps
+        # with compute. Off when prefetch is disabled to keep the one-stream path.
+        self.prefetch = bool(prefetch and self.use_streams)
+        self.s_reload = stream_cls() if self.prefetch else None
 
     @property
     def compute_stream(self):
@@ -192,19 +204,23 @@ class _ActivationOffloadEngine:
             cpu_tensor, buffer_key = self._empty_cpu_like(tensor)
             cpu_tensor.copy_(tensor.detach(), non_blocking=self.use_streams)
 
+        d2h_event = None
+        if self.use_streams:
+            # record_stream holds the allocation until s1 drains, so a zero stash
+            # can drop the GPU ref now.
+            tensor.record_stream(self.s1)
+            d2h_event = self.s1.record_event()
+            if self.max_fwd_stash_count > 0:
+                self._fwd_stash[tensor_id] = (tensor, d2h_event)
+
         self._tracker[tensor_id] = (
             cpu_tensor,
             tensor.device,
             tensor.size(),
             tensor.stride(),
             buffer_key,
+            d2h_event,
         )
-        if self.use_streams:
-            # record_stream holds the allocation until s1 drains, so a zero stash
-            # can drop the GPU ref now.
-            tensor.record_stream(self.s1)
-            if self.max_fwd_stash_count > 0:
-                self._fwd_stash[tensor_id] = (tensor, self.s1.record_event())
 
         self.stats.offloaded_tensors += 1
         self.stats.offloaded_bytes += self._num_bytes(cpu_tensor)
@@ -225,6 +241,7 @@ class _ActivationOffloadEngine:
             self.stats.skipped_marked_tensors += 1
             return None
         tensor_id = self._next_tensor_id()
+        self._order.append(tensor_id)
         self._keep_last[tensor_id] = tensor
         self._flush_keep_last(tensor_id)
         return tensor_id
@@ -232,6 +249,61 @@ class _ActivationOffloadEngine:
     def restore_input(self, tensor_id: int) -> torch.Tensor:
         """Restore an offloaded tensor for a single consumption (no caching)."""
         return self._restore_tensor(tensor_id, cache=False)
+
+    def _remove_order(self, tensor_id: int) -> None:
+        try:
+            self._order.remove(tensor_id)
+        except ValueError:
+            pass
+
+    def _start_reload(self, tensor_id: int) -> bool:
+        """Begin H2D of ``tensor_id`` on the reload stream. Returns True if started."""
+        if tensor_id in self._reloads or tensor_id in self._keep_last or tensor_id in self._fwd_stash:
+            return False
+        tracked = self._tracker.pop(tensor_id, None)
+        if tracked is None:
+            return False
+        cpu_tensor, device, shape, stride, buffer_key, d2h_event = tracked
+        # Allocate on compute, then wait so s_reload does not reuse a block compute
+        # still owns (DSS waits current_stream before H2D).
+        gpu_tensor = torch.empty_strided(shape, stride, dtype=cpu_tensor.dtype, device=device)
+        self.s_reload.wait_stream(self.compute_stream)
+        if d2h_event is not None:
+            self.s_reload.wait_event(d2h_event)
+        else:
+            self.s_reload.wait_stream(self.s1)
+        with self._stream_context(self.s_reload):
+            gpu_tensor.record_stream(self.s_reload)
+            gpu_tensor.copy_(cpu_tensor, non_blocking=True)
+        event = self.s_reload.record_event()
+        self._reloads[tensor_id] = (gpu_tensor, event, cpu_tensor, buffer_key)
+        return True
+
+    def _prefetch_prev(self, tensor_id: int) -> None:
+        if not self.prefetch:
+            return
+        try:
+            idx = self._order.index(tensor_id)
+        except ValueError:
+            return
+        if idx <= 0:
+            return
+        prev = self._order[idx - 1]
+        if self._start_reload(prev):
+            self.stats.prefetched_tensors += 1
+
+    def _finish_reload(self, tensor_id: int, cache: bool) -> torch.Tensor:
+        gpu_tensor, event, cpu_tensor, buffer_key = self._reloads.pop(tensor_id)
+        compute = self.compute_stream
+        compute.wait_event(event)
+        gpu_tensor.record_stream(compute)
+        self._pending_cpu_buffers.append((buffer_key, cpu_tensor, event))
+        self.stats.restored_tensors += 1
+        self.stats.restored_bytes += self._num_bytes(gpu_tensor)
+        self._remove_order(tensor_id)
+        if cache:
+            self._restored[tensor_id] = gpu_tensor
+        return gpu_tensor
 
     def _restore_tensor(self, tensor_id: int, cache: bool = True) -> torch.Tensor:
         # cache=True allows repeated unpack of one id (HF retain_graph), cleared on
@@ -243,27 +315,39 @@ class _ActivationOffloadEngine:
 
         kept = self._keep_last.pop(tensor_id, None)
         if kept is not None:
+            self._prefetch_prev(tensor_id)
+            self._remove_order(tensor_id)
             self.stats.kept_last_tensors += 1
             if cache:
                 self._restored[tensor_id] = kept
             return kept
 
         if tensor_id in self._fwd_stash:
+            self._prefetch_prev(tensor_id)
             tensor, event = self._fwd_stash.pop(tensor_id)
             self.compute_stream.wait_event(event)
-            cpu_tensor, *_unused, buffer_key = self._tracker.pop(tensor_id)
+            cpu_tensor, *_rest, buffer_key, _d2h = self._tracker.pop(tensor_id)
             self._pool_cpu_buffer(buffer_key, cpu_tensor)
             self.stats.restored_tensors += 1
             self.stats.restored_bytes += self._num_bytes(tensor)
+            self._remove_order(tensor_id)
             if cache:
                 self._restored[tensor_id] = tensor
             return tensor
+
+        if self.prefetch:
+            # Reload current first so waiting on it does not wait the prefetch H2D.
+            if tensor_id not in self._reloads:
+                self._start_reload(tensor_id)
+            self._prefetch_prev(tensor_id)
+            if tensor_id in self._reloads:
+                return self._finish_reload(tensor_id, cache)
 
         tracked = self._tracker.pop(tensor_id, None)
         if tracked is None:
             raise RuntimeError(f"offloaded activation {tensor_id} is no longer tracked. backward() must run "
                                "before the offload engine is reset.")
-        cpu_tensor, device, shape, stride, buffer_key = tracked
+        cpu_tensor, device, shape, stride, buffer_key, _d2h = tracked
         stream = self.s1 if self.use_streams else self.compute_stream
         with self._stream_context(stream):
             # fresh offset-0 storage; a source offset would index past the pool buffer
@@ -280,6 +364,7 @@ class _ActivationOffloadEngine:
 
         self.stats.restored_tensors += 1
         self.stats.restored_bytes += self._num_bytes(gpu_tensor)
+        self._remove_order(tensor_id)
         if cache:
             self._restored[tensor_id] = gpu_tensor
         return gpu_tensor
@@ -289,6 +374,8 @@ class _ActivationOffloadEngine:
             return
         if self.s1 is not None:
             self.s1.synchronize()
+        if self.s_reload is not None:
+            self.s_reload.synchronize()
         self._reap_cpu_buffer_pool(force=True)
 
     def reset(self) -> None:
@@ -300,17 +387,23 @@ class _ActivationOffloadEngine:
         self._keep_last.clear()
         self._restored.clear()
         self._pending_cpu_buffers.clear()
+        self._order.clear()
+        self._reloads.clear()
         self._next_id = 0
 
     def _sync_and_clear(self) -> None:
         self._sync_copy_streams()
         for tracked in self._tracker.values():
-            self._pool_cpu_buffer(tracked[-1], tracked[0])
+            self._pool_cpu_buffer(tracked[4], tracked[0])
+        for reload in self._reloads.values():
+            self._pool_cpu_buffer(reload[-1], reload[2])
         self._tracker.clear()
         self._fwd_stash.clear()
         self._keep_last.clear()
         self._restored.clear()
         self._pending_cpu_buffers.clear()
+        self._order.clear()
+        self._reloads.clear()
 
 
 def _manager_stack() -> list["CheckpointHiddenStatesOffload"]:
@@ -404,6 +497,7 @@ class CheckpointHiddenStatesOffload(_ActivationOffloadEngine, saved_tensors_hook
         max_fwd_stash_count: int = 2,
         max_cpu_buffer_pool_count: int = 64,
         keep_last_count: int = 1,
+        prefetch: bool = False,
     ) -> None:
         _ActivationOffloadEngine.__init__(
             self,
@@ -413,6 +507,7 @@ class CheckpointHiddenStatesOffload(_ActivationOffloadEngine, saved_tensors_hook
             max_fwd_stash_count=max_fwd_stash_count,
             max_cpu_buffer_pool_count=max_cpu_buffer_pool_count,
             keep_last_count=keep_last_count,
+            prefetch=prefetch,
         )
         self._allowed: dict[int, int] = {}
         saved_tensors_hooks.__init__(self, self._pack_tensor, self._unpack_tensor)
@@ -511,6 +606,7 @@ def get_checkpoint_hidden_states_offloading_ctx_manager(
     max_fwd_stash_count: int = 2,
     max_cpu_buffer_pool_count: int = 64,
     keep_last_count: int = 1,
+    prefetch: bool = False,
 ) -> CheckpointHiddenStatesOffload:
     return CheckpointHiddenStatesOffload(
         use_pin_memory=use_pin_memory,
@@ -519,4 +615,5 @@ def get_checkpoint_hidden_states_offloading_ctx_manager(
         max_fwd_stash_count=max_fwd_stash_count,
         max_cpu_buffer_pool_count=max_cpu_buffer_pool_count,
         keep_last_count=keep_last_count,
+        prefetch=prefetch,
     )

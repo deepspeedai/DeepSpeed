@@ -414,6 +414,22 @@ This can be enabled by setting the following in the `deepspeed_config` file.
 
 ```
 
+###  Activation Checkpoint CPU Offload
+
+Offload checkpointed activations to CPU with one ds_config flag. This is the
+same mechanism used for long-sequence ALST training and applies to HuggingFace
+gradient checkpointing through `DeepSpeedEngine` as well as native
+`deepspeed.checkpointing.checkpoint`:
+
+```json
+{
+  "activation_checkpointing": {
+    "cpu_checkpointing": true
+  }
+}
+
+```
+
 ###  Timing Activation Checkpoint Functions
 
 When activation checkpointing is enabled, profiling the forward and backward time of each checkpoint function can be enabled in the `deepspeed_config` file.

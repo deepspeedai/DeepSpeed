@@ -779,6 +779,63 @@ class DeepSpeedEngine(Module):
         if self.dist_backend is None:
             self.enable_backward_allreduce = False
 
+        self._configure_activation_checkpoint_cpu_offload()
+
+    def _configure_activation_checkpoint_cpu_offload(self):
+        """Honor ``activation_checkpointing.cpu_checkpointing`` for HF and native paths.
+
+        Native ``deepspeed.checkpointing.checkpoint`` still needs ``configure()``;
+        call it from ds_config when the user has not already. HuggingFace
+        non-reentrant checkpointing is wrapped across engine forward+backward.
+        """
+        self._activation_cpu_offload_ctx = None
+        self._activation_cpu_offload_entered = False
+        act_cfg = self._config.activation_checkpointing_config
+        if not act_cfg.cpu_checkpointing:
+            return
+
+        from deepspeed.runtime.activation_checkpointing import checkpointing as ds_ckpt
+        if not ds_ckpt.is_configured():
+            ds_ckpt.configure(self.mpu, deepspeed_config=self.config)
+
+        # Pipeline schedules forward/backward separately from engine.forward.
+        if self.pipeline_parallelism:
+            return
+
+        import importlib.util
+        if importlib.util.find_spec("transformers") is None:
+            return
+
+        from deepspeed.runtime.activation_checkpointing.offload_activations import get_checkpoint_hidden_states_offloading_ctx_manager
+
+        self._activation_cpu_offload_ctx = get_checkpoint_hidden_states_offloading_ctx_manager()
+        log_dist("Enabled activation checkpoint CPU offload (activation_checkpointing.cpu_checkpointing)", ranks=[0])
+
+    def _enter_activation_cpu_offload(self):
+        ctx = self._activation_cpu_offload_ctx
+        if ctx is None or self._activation_cpu_offload_entered:
+            return
+        if not self.training or not torch.is_grad_enabled():
+            return
+        if self.is_deepcompile_active():
+            return
+        from deepspeed.runtime.activation_checkpointing.offload_activations import _current_manager
+        # User already wrapped this step with CheckpointHiddenStatesOffload.
+        if _current_manager() is not None:
+            return
+        ctx.__enter__()
+        self._activation_cpu_offload_entered = True
+
+    def _exit_activation_cpu_offload(self):
+        if not getattr(self, "_activation_cpu_offload_entered", False):
+            return
+        self._activation_cpu_offload_entered = False
+        self._activation_cpu_offload_ctx.__exit__(None, None, None)
+
+    def _drain_native_activation_offload(self):
+        from deepspeed.runtime.activation_checkpointing.checkpointing import _drain_cpu_offload_engine
+        _drain_cpu_offload_engine()
+
     def _optimized_linear_offload_setup(self):
         self.optimized_linear_base_weight_sharding = False
         self.optimized_linear_lora_enabled = False
@@ -1291,6 +1348,8 @@ class DeepSpeedEngine(Module):
         if self._config.disable_python_gc:
             from deepspeed.runtime.python_gc import python_gc_manager
             self._python_gc_generation = python_gc_manager.acquire()
+
+        self._exit_activation_cpu_offload()
 
     def _get_model_parameters(self):
         if self.autotuning_profile_model_info():
@@ -3016,8 +3075,15 @@ class DeepSpeedEngine(Module):
             # We can't have this in forward prologue as the compiler compiles hooks including the forward prologue.
             self.launch_compile_passes(self.global_steps)
 
-        with deepcompile_z3_forward_context(self) as z3_eager_fallback, autocast_if_enabled(self):
-            loss = self.module(*inputs, **kwargs)
+        # saved_tensors_hooks must stay active until backward unpacks.
+        self._enter_activation_cpu_offload()
+        try:
+            with deepcompile_z3_forward_context(self) as z3_eager_fallback, autocast_if_enabled(self):
+                loss = self.module(*inputs, **kwargs)
+        except Exception:
+            self._exit_activation_cpu_offload()
+            self._drain_native_activation_offload()
+            raise
 
         forward_graph_id = None
 
@@ -3200,6 +3266,7 @@ class DeepSpeedEngine(Module):
         see_memory_usage("Engine after backward", force=self.memory_breakdown())
         self._stop_timers(self.engine_timers.backward_reduce_timers)
         self._stop_timers(self.engine_timers.backward_timers)
+        self._exit_activation_cpu_offload()
 
     def _backward_prologue_per_tensor(self, grad):
         if is_functorch_transforming():
@@ -3456,7 +3523,13 @@ class DeepSpeedEngine(Module):
                 self._backward_epilogue()
 
             return gas_scaled_loss
+        except Exception:
+            # Failed backward must still drop saved_tensors_hooks; skip the rest of
+            # epilogue (allreduce / optimizer) because grads are incomplete.
+            self._exit_activation_cpu_offload()
+            raise
         finally:
+            self._drain_native_activation_offload()
             if engine_backward_graph_hook is not None:
                 engine_backward_graph_hook.remove()
             _ENGINE_BACKWARD_GRAPH_TRACKER.unregister(engine_backward_graph_state)

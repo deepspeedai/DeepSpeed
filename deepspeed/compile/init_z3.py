@@ -125,6 +125,8 @@ def init_z3(engine, backend, compile_config, compile_kwargs, schedule=None):
     # Unpatch linear
     if hasattr(InsertPostInitMethodToModuleSubClasses, "linear_bk"):
         torch.nn.functional.linear = InsertPostInitMethodToModuleSubClasses.linear_bk
+    if hasattr(InsertPostInitMethodToModuleSubClasses, "linear_forward_bk"):
+        torch.nn.Linear.forward = InsertPostInitMethodToModuleSubClasses.linear_forward_bk
 
     if compile_config.symmetric_memory:
         group_name = engine.data_parallel_group.group_name

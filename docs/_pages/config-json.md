@@ -1373,7 +1373,14 @@ Use a built-in preset but override specific naming/weight fields for a fine-tune
 
 | Description                                                                                                                                                                                                                        | Default |
 | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| Offloads activation checkpoint inputs to CPU. With `partition_activations` it offloads the partitioned activations; otherwise it uses an asynchronous pinned side-stream copy that overlaps the CPU transfer with compute. | `false` |
+| Offloads activation checkpoint inputs to CPU so a given GPU memory budget can fit a much longer sequence. With `partition_activations` it offloads the partitioned activations; otherwise DeepSpeed uses an asynchronous pinned side-stream copy that overlaps the CPU transfer with compute. | `false` |
+
+When this flag is `true`, `DeepSpeedEngine` applies the offload automatically:
+
+* **HuggingFace** non-reentrant gradient checkpointing (`use_reentrant=False`, including `GradientCheckpointingLayer`) is wrapped across `engine.forward()` and `engine.backward()`. No Python context manager is required.
+* **Native** `deepspeed.checkpointing.checkpoint` is configured from this same ds_config entry if you have not already called `deepspeed.checkpointing.configure()`.
+
+The engine keeps the offload context open until backward unpacks; do not wrap the same step with `get_checkpoint_hidden_states_offloading_ctx_manager()` unless you are bypassing the engine's forward/backward. DeepCompile has its own activation-offload passes, so the engine wrap is skipped while DeepCompile is active.
 
 The asynchronous side-stream copy matches the peak-memory reduction of a blocking copy at a fraction of the step-time cost. On a single H200 with Qwen3-8B full-parameter SFT (`use_reentrant=False`), it lowers the GPU activation peak by up to ~14% at 32K sequence length while staying within ~2% of the no-offload step time, whereas a blocking offload is 1.4–1.9x slower. For very long sequences, set `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` to avoid allocator fragmentation from the offload/restore cycle.
 

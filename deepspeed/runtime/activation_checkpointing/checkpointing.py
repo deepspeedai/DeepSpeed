@@ -14,6 +14,7 @@ b886b7bb972afe72bac0f5de4f42a4a7bae8ebef
 
 # Parts of the code here are adapted from PyTorch
 # repo: https://github.com/pytorch/pytorch
+import contextvars
 import copy
 import torch
 import contextlib
@@ -66,6 +67,7 @@ PROFILE_TIME = False
 # keep-last/stash span the whole forward. Built lazily so its stream binds to the
 # selected device.
 _cpu_offload_engine = None
+_cpu_offload_prefetch = False
 
 # Function.forward always runs with grad disabled, so grad mode is captured in the
 # checkpoint() wrapper and read in CheckpointFunction.forward.
@@ -507,13 +509,21 @@ def _get_cpu_offload_engine():
     if get_accelerator().is_synchronized_device():
         return None
     if _cpu_offload_engine is None:
-        _cpu_offload_engine = _ActivationOffloadEngine(keep_last_count=1, min_offload_bytes=0)
+        _cpu_offload_engine = _ActivationOffloadEngine(keep_last_count=1,
+                                                       min_offload_bytes=0,
+                                                       prefetch=_cpu_offload_prefetch)
     return _cpu_offload_engine
 
 
 def _reset_cpu_offload_engine():
     if _cpu_offload_engine is not None:
         _cpu_offload_engine.reset()
+
+
+def _drain_cpu_offload_engine():
+    # Drop leftover GPU/host refs without zeroing stats (bench counters are cumulative).
+    if _cpu_offload_engine is not None:
+        _cpu_offload_engine._sync_and_clear()
 
 
 def get_offloaded_activations_for_backward(args, engine):
@@ -785,6 +795,22 @@ class CheckpointFunction(torch.autograd.Function):
         return tuple(ret_list)
 
 
+# Set only around non_reentrant_checkpoint's forward and its backward recompute.
+# Those are the passes that drop inner saves and rebuild them. Other saved-tensor
+# hooks must not flip this: the engine-wide offload hook returns an unmarked
+# tensor unchanged, so tiling still has to offload that input itself.
+_tiled_remat_offload_suspended = contextvars.ContextVar("tiled_remat_offload_suspended", default=False)
+
+
+@contextlib.contextmanager
+def _suspend_tiled_remat_offload():
+    token = _tiled_remat_offload_suspended.set(True)
+    try:
+        yield
+    finally:
+        _tiled_remat_offload_suspended.reset(token)
+
+
 def non_reentrant_checkpoint(function, *args):
     """This function is union of `torch.utils.checkpoint._checkpoint_without_reentrant` and `CheckpointFunction` in this module
 
@@ -969,7 +995,8 @@ def non_reentrant_checkpoint(function, *args):
             get_cuda_rng_tracker().set_states(fwd_cuda_rng_state_tracker)
 
             see_memory_usage("In backward checkpointing code before forward", force=False)
-            with torch.enable_grad(), torch.autograd.graph.saved_tensors_hooks(replay_pack, replay_unpack):
+            with torch.enable_grad(), _suspend_tiled_remat_offload(), torch.autograd.graph.saved_tensors_hooks(
+                    replay_pack, replay_unpack):
                 _unused = function(*detached_inputs)
 
             see_memory_usage("In backward checkpointing code after forward", force=False)
@@ -1002,7 +1029,7 @@ def non_reentrant_checkpoint(function, *args):
             if SYNCHRONIZE:
                 get_accelerator().synchronize()
 
-    with torch.autograd.graph.saved_tensors_hooks(checkpoint_pack, checkpoint_unpack):
+    with _suspend_tiled_remat_offload(), torch.autograd.graph.saved_tensors_hooks(checkpoint_pack, checkpoint_unpack):
         outputs = function(*inputs_cuda)
 
     # Save after forward has consumed inputs, so emptying GPU storage cannot

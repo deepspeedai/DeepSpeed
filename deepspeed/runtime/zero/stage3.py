@@ -516,6 +516,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         ###Calls all gather param
         self._grad_acc_hooks = []
         self._leaf_module_hooks = []
+        self._deferred_leaf_grad_hooks = {}
         self.create_reduce_and_remove_grad_hooks()
 
         #exit(0)
@@ -543,6 +544,9 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             hook.remove()
         for hook in self._leaf_module_hooks:
             hook.remove()
+        for hook in self._deferred_leaf_grad_hooks.values():
+            hook.remove()
+        self._deferred_leaf_grad_hooks.clear()
         print_rank_0("Removed grad acc hooks", force=False)
         self.ipg_buckets.clear()
         if get_accelerator().is_available():
@@ -1550,6 +1554,17 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                     self.reenter_backward_if_needed()
 
                     for param in params:
+                        if (param.requires_grad and param.grad is None
+                                and getattr(param, "ds_status", None) == ZeroParamStatus.NOT_AVAILABLE):
+                            # Under activation-checkpoint recompute this leaf full-backward hook fires
+                            # at the module output (PyTorch fires it there when no module input
+                            # requires grad), i.e. before the leaf's internal params accumulate their
+                            # grads and while they are still partitioned. Reducing now would bucket an
+                            # empty shard that the later AccumulateGrad crashes on. Defer this param's
+                            # reduce to right after its AccumulateGrad instead; the epilogue (queued
+                            # post-backward) then reduces the full grad.
+                            self._reduce_leaf_param_after_accumulation(param)
+                            continue
                         # this takes care of grads for MoE experts that didn't participate in the current iteration/layer
                         if param.grad is None:
                             param.grad = torch.zeros_like(param)
@@ -2171,6 +2186,23 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             return
         #print_rank_0(f"Backward {debug_param2name_id_shape(param)}", force=True)
         self.reduce_independent_p_g_buckets_and_remove_grads(param)
+
+    def _reduce_leaf_param_after_accumulation(self, param):
+        # Register a one-shot post-accumulation hook so a leaf param whose full-backward
+        # hook fired early (activation-checkpoint recompute, param still partitioned) is
+        # reduced right after its AccumulateGrad, when its grad is full-sized. Keyed by
+        # ds_id so a param that defers but never accumulates this backward (e.g. an unused
+        # MoE expert) is not registered twice and cannot double-reduce on a later backward.
+        if param.ds_id in self._deferred_leaf_grad_hooks:
+            return
+
+        def reduce_after_accumulation(*unused):
+            self.reduce_ready_partitions_and_remove_grads(param)
+            handle = self._deferred_leaf_grad_hooks.pop(param.ds_id, None)
+            if handle is not None:
+                handle.remove()
+
+        self._deferred_leaf_grad_hooks[param.ds_id] = register_grad_hook(param, reduce_after_accumulation)
 
     def zero_reduced_gradients(self, partition_id, i):
 

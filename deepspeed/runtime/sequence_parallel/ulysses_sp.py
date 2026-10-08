@@ -726,6 +726,12 @@ class UlyssesSPDataLoaderAdapter:
             self.micro_batches.append(batch)
 
 
+def _shard_grad_is_ready(is_last):
+    # Batch remat around this tile keeps the context false until its own last shard.
+    from deepspeed.runtime.activation_checkpointing.tiled_rematerialization import grad_reduce_allowed
+    return bool(is_last) and grad_reduce_allowed()
+
+
 def sequence_tiled_compute(
     fn,
     seqlen,
@@ -894,13 +900,9 @@ class SequenceTiledCompute(torch.autograd.Function):
             # shard when all gradients have been accumulated. An example for such a call is
             # `model.lm_head(hidden_states)`
             if compute_params is not None:
-                if i + 1 < shards:
-                    for param in compute_params:
-                        param.ds_grad_is_ready = False
-                else:
-                    # last shard, can add the grad
-                    for param in compute_params:
-                        param.ds_grad_is_ready = True
+                ready = _shard_grad_is_ready(i + 1 == shards)
+                for param in compute_params:
+                    param.ds_grad_is_ready = ready
 
             # Match forward's empty trailing slices, with offsets that remain valid for narrow().
             shard_offset = min(i * ctx.shard_step, ctx.seqlen)
@@ -1050,13 +1052,9 @@ class TiledMLP(torch.autograd.Function):
             # Tell deepspeed not to add a new grad to its ipg bucket until the last shard is run
             # XXX: DDP, FSDP will need something similar to make it work
             if compute_params is not None:
-                if i + 1 < shards:
-                    for param in compute_params:
-                        param.ds_grad_is_ready = False
-                else:
-                    # last shard, can add the grad
-                    for param in compute_params:
-                        param.ds_grad_is_ready = True
+                ready = _shard_grad_is_ready(i + 1 == shards)
+                for param in compute_params:
+                    param.ds_grad_is_ready = ready
 
             x_shard.requires_grad_(x_requires_grad)
 
@@ -1181,13 +1179,9 @@ class TiledFusedLogitsLoss(torch.autograd.Function):
             # Tell deepspeed not to add a new grad to its ipg bucket until the last shard is run
             # XXX: DDP, FSDP will need something similar to make it work
             if compute_params is not None:
-                if i + 1 < shards:
-                    for param in compute_params:
-                        param.ds_grad_is_ready = False
-                else:
-                    # last shard, can add the grad
-                    for param in compute_params:
-                        param.ds_grad_is_ready = True
+                ready = _shard_grad_is_ready(i + 1 == shards)
+                for param in compute_params:
+                    param.ds_grad_is_ready = ready
 
             x_shard.requires_grad_(x_requires_grad)
 

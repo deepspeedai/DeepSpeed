@@ -11,8 +11,9 @@ from torch.utils.checkpoint import checkpoint, set_checkpoint_early_stop
 import deepspeed
 import deepspeed.comm as dist
 from deepspeed.accelerator import get_accelerator
-from deepspeed.runtime.zero.linear import zero3_linear_wrap
+from deepspeed.runtime.zero.linear import zero3_gathered_param, zero3_linear_module_forward, zero3_linear_wrap
 from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
+from deepspeed.utils import safe_get_full_grad
 
 from unit.common import DistributedTest
 from unit.v1.zero.test_zero_user_backward import get_config_dict, initialize_distributed
@@ -490,4 +491,182 @@ class TestZero3ActivationCheckpointLifecycle(DistributedTest):
         assert model.external_consumer_statuses
         assert all(status == ZeroParamStatus.AVAILABLE for status in model.external_consumer_statuses)
         assert model.producer.bias.is_external_param
+        engine.destroy()
+
+
+class _SwiGLUBlock(torch.nn.Module):
+    """Qwen3.5-style SwiGLU: down(silu(gate(x)) * up(x)) with intermediate >> hidden."""
+
+    def __init__(self, hidden_dim, intermediate):
+        super().__init__()
+        self.gate = torch.nn.Linear(hidden_dim, intermediate, bias=False)
+        self.up = torch.nn.Linear(hidden_dim, intermediate, bias=False)
+        self.down = torch.nn.Linear(intermediate, hidden_dim, bias=False)
+
+    def forward(self, value):
+        return self.down(F.silu(self.gate(value)) * self.up(value))
+
+
+class _SwiGLUCheckpointModel(torch.nn.Module):
+
+    def __init__(self, hidden_dim, intermediate):
+        super().__init__()
+        self.block = _SwiGLUBlock(hidden_dim, intermediate)
+        self.head = torch.nn.Linear(hidden_dim, 1)
+
+    def forward(self, value):
+        return self.head(checkpoint(self.block, value, use_reentrant=False)).sum()
+
+
+class _SqueezedConvFn(torch.autograd.Function):
+    """Stand-in for GDN causal_conv1d_fn(..., conv1d.weight.squeeze(1))."""
+
+    @staticmethod
+    def forward(ctx, value, squeezed_weight):
+        ctx.save_for_backward(value, squeezed_weight)
+        scale = squeezed_weight.sum(dim=-1)
+        return value * scale.view(1, -1, 1)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        value, squeezed_weight = ctx.saved_tensors
+        scale = squeezed_weight.sum(dim=-1)
+        grad_value = grad_output * scale.view(1, -1, 1)
+        grad_scale = (grad_output * value).sum(dim=(0, 2))
+        grad_squeezed = grad_scale.unsqueeze(-1).expand_as(squeezed_weight)
+        return grad_value, grad_squeezed
+
+
+class _GDNLikeConvBlock(torch.nn.Module):
+
+    def __init__(self, channels, kernel):
+        super().__init__()
+        self.conv1d = torch.nn.Conv1d(channels, channels, kernel, groups=channels)
+        self.proj = torch.nn.Linear(channels, channels)
+
+    def forward(self, value):
+        # Gather the Parameter before squeeze so a partitioned view cannot hit C++ empty.
+        weight = zero3_gathered_param(self.conv1d.weight)
+        conv_out = _SqueezedConvFn.apply(value, weight.squeeze(1))
+        return self.proj(conv_out.transpose(1, 2)).transpose(1, 2)
+
+
+class _GDNLikeCheckpointModel(torch.nn.Module):
+
+    def __init__(self, channels, kernel):
+        super().__init__()
+        self.block = _GDNLikeConvBlock(channels, kernel)
+        self.head = torch.nn.Linear(channels, 1)
+
+    def forward(self, value):
+        hidden = checkpoint(self.block, value, use_reentrant=False)
+        return self.head(hidden.mean(dim=-1)).sum()
+
+
+class TestZero3CheckpointEmptyLinear(DistributedTest):
+    """ZeRO-3 + checkpoint must rematerialize gathered Linear/conv weights, not empty shards."""
+
+    world_size = 2
+
+    def _dtype(self):
+        if get_accelerator().is_bf16_supported():
+            return torch.bfloat16
+        return torch.float32
+
+    def test_linear_wrap_gathers_partitioned_weight_in_forward(self):
+        """Rematerialize can hit Linear after the post-hook emptied W; forward must gather."""
+        device, _, _ = initialize_distributed()
+        hidden_dim = 64
+        intermediate = 192
+        dtype = self._dtype()
+        engine = _initialize_zero3(torch.nn.Linear(hidden_dim, intermediate, bias=False), dtype=dtype)
+        param_dtype = next(engine.module.parameters()).dtype
+        value = torch.randn(2, hidden_dim, device=device, dtype=param_dtype)
+        engine(value)
+        _synchronize()
+        weight = engine.module.weight
+        assert weight.ds_status == ZeroParamStatus.NOT_AVAILABLE
+        output = zero3_linear_wrap(value, weight, None)
+        assert output.shape[-1] == intermediate
+        engine.destroy()
+
+    def test_backward_keeps_trainable_weight_full_for_accumulate(self):
+        """Backward must not re-partition a just-gathered trainable weight before AccumulateGrad.
+
+        Mirrors the Qwen3.5 GDN out_proj crash: the weight is full when the Linear
+        records its autograd node (so the returned grad shape is valid), but gets
+        partitioned again before backward. The wrap re-gathers it to compute the
+        grad; partitioning it back in the finally shrank it to numel 0 before
+        AccumulateGrad ran on the same parameter, giving
+        "size of tensor a (0) must match tensor b (N)".
+        """
+        device, _, _ = initialize_distributed()
+        hidden_dim = 64
+        out_dim = 96
+        dtype = self._dtype()
+        engine = _initialize_zero3(torch.nn.Linear(hidden_dim, out_dim, bias=False), dtype=dtype)
+        weight = engine.module.weight
+        param_dtype = next(engine.module.parameters()).dtype
+        value = torch.randn(2, hidden_dim, device=device, dtype=param_dtype, requires_grad=True)
+        engine(value)
+        _synchronize()
+
+        # Record the autograd node while the weight is full, then partition it so the
+        # backward has to re-gather -- reproducing the recompute ordering exactly.
+        weight.all_gather()
+        output = zero3_linear_wrap(value, weight, None)
+        weight.partition()
+        assert weight.ds_status == ZeroParamStatus.NOT_AVAILABLE
+        output.sum().backward()
+        _synchronize()
+
+        grad = safe_get_full_grad(weight)
+        assert grad is not None and torch.isfinite(grad).all()
+        engine.destroy()
+
+    def test_swiglu_checkpoint_backward_sees_gathered_weights(self):
+        """SwiGLU rematerialize must not hit 0 vs intermediate_size after Linear partition."""
+        device, _, _ = initialize_distributed()
+        hidden_dim = 64
+        intermediate = 192
+        dtype = self._dtype()
+        engine = _initialize_zero3(_SwiGLUCheckpointModel(hidden_dim, intermediate), dtype=dtype)
+        assert F.linear is zero3_linear_wrap
+        assert torch.nn.Linear.forward is zero3_linear_module_forward
+        param_dtype = next(engine.module.parameters()).dtype
+        value = torch.randn(2, hidden_dim, device=device, dtype=param_dtype, requires_grad=True)
+
+        engine.backward(engine(value))
+        _synchronize()
+
+        assert value.grad is not None and torch.isfinite(value.grad).all()
+        for parameter in engine.module.parameters():
+            if parameter.requires_grad:
+                grad = safe_get_full_grad(parameter)
+                assert grad is not None
+                assert torch.isfinite(grad).all()
+        _assert_checkpoint_state_clean(engine)
+        engine.destroy()
+
+    def test_conv_squeeze_checkpoint_gathers_before_view(self):
+        """GDN-shaped Conv1d.weight.squeeze(1) must gather the Parameter before the view."""
+        device, _, _ = initialize_distributed()
+        channels = 4
+        kernel = 3
+        seq_len = 8
+        dtype = self._dtype()
+        engine = _initialize_zero3(_GDNLikeCheckpointModel(channels, kernel), dtype=dtype)
+        param_dtype = next(engine.module.parameters()).dtype
+        value = torch.randn(2, channels, seq_len, device=device, dtype=param_dtype, requires_grad=True)
+
+        engine.backward(engine(value))
+        _synchronize()
+
+        assert value.grad is not None and torch.isfinite(value.grad).all()
+        for parameter in engine.module.parameters():
+            if parameter.requires_grad:
+                grad = safe_get_full_grad(parameter)
+                assert grad is not None
+                assert torch.isfinite(grad).all()
+        _assert_checkpoint_state_clean(engine)
         engine.destroy()

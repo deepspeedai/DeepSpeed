@@ -19,7 +19,7 @@ from deepspeed import comm as dist
 from torch.nn import Module
 from torch.nn import Parameter
 
-from .linear import zero3_linear_wrap
+from .linear import zero3_linear_module_forward, zero3_linear_wrap
 
 from deepspeed.utils import groups
 import deepspeed
@@ -415,8 +415,10 @@ class InsertPostInitMethodToModuleSubClasses(object):
             force=False)
         if not hasattr(InsertPostInitMethodToModuleSubClasses, "linear_bk"):
             InsertPostInitMethodToModuleSubClasses.linear_bk = torch.nn.functional.linear
-        if torch.nn.functional.linear is InsertPostInitMethodToModuleSubClasses.linear_bk:
-            torch.nn.functional.linear = zero3_linear_wrap
+        torch.nn.functional.linear = zero3_linear_wrap
+        if not hasattr(InsertPostInitMethodToModuleSubClasses, "linear_forward_bk"):
+            InsertPostInitMethodToModuleSubClasses.linear_forward_bk = torch.nn.Linear.forward
+        torch.nn.Linear.forward = zero3_linear_module_forward
 
     def patch_init_and_builtins(self):
 
@@ -2336,7 +2338,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
 
 class GatheredParameters:
 
-    def __init__(self, params, modifier_rank=None, fwd_module=None, enabled=True):
+    def __init__(self, params, modifier_rank=None, fwd_module=None, enabled=True, coalesced=False):
         """A context that collects parameters that were partitioned via a
         :class:`deepspeed.zero.Init` context. The parameters are partitioned
         again upon exit.
@@ -2425,6 +2427,7 @@ class GatheredParameters:
         self.enabled = enabled
         self._param_versions = None
         self._fallback_owners = {}
+        self.coalesced = coalesced
         if not enabled:
             return
 
@@ -2471,7 +2474,10 @@ class GatheredParameters:
         if overlapping_param_ids:
             raise RuntimeError("Nested GatheredParameters contexts cannot overlap parameters; "
                                f"parameter ds_ids already gathered by an outer context: {overlapping_param_ids}")
-        self.params[0].all_gather(param_list=self.params)
+        if self.coalesced:
+            self._all_gather_coalesced()
+        else:
+            self.params[0].all_gather(param_list=self.params)
         for param in self.params:
             depth = getattr(param, DS_Z3_GATHERED_PARAM_CONTEXT_DEPTH_ATTR, 0)
             setattr(param, DS_Z3_GATHERED_PARAM_CONTEXT_DEPTH_ATTR, depth + 1)
@@ -2499,6 +2505,30 @@ class GatheredParameters:
                 fallback_owner = self._fallback_owners.get(param.ds_id)
                 if fallback_owner is not None:
                     fallback_owner.release_user_context_claim(param)
+
+    def _all_gather_coalesced(self):
+        """Gather with one collective per bucket instead of one per parameter.
+
+        ``all_gather`` funnels into ``_allgather_params_coalesced``, which despite its
+        name launches one ``all_gather_into_tensor`` per parameter. Callers that gather
+        a whole layer on every microstep pay that as a collective count proportional to
+        the parameter count, so they can opt into the coordinator's flattening path
+        instead. It is strict where ``all_gather`` was lenient -- it rejects a parameter
+        that is not NOT_AVAILABLE -- and it reads the secondary-tensor and quantization
+        choice off the first parameter of the list, so bucket before submitting.
+        """
+        buckets = {}
+        for param in self.params:
+            if param.ds_status != ZeroParamStatus.NOT_AVAILABLE:
+                continue
+            use_secondary_tensor = param.ds_secondary_tensor is not None
+            partition = param.ds_secondary_tensor if use_secondary_tensor else param.ds_tensor
+            quantized = hasattr(partition, "ds_quant_scale")
+            bucket_key = (id(param.ds_process_group), use_secondary_tensor, quantized)
+            buckets.setdefault(bucket_key, []).append(param)
+        for (_, _, quantized), bucket in buckets.items():
+            # The coalesced gather is async and leaves params INFLIGHT until waited.
+            bucket[0].all_gather_coalesced(bucket, quantize=quantized).wait()
 
     def _params_to_partition(self):
         return [

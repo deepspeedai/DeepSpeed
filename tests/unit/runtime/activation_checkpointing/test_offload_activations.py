@@ -3,17 +3,23 @@
 # DeepSpeed Team
 
 import inspect
+from copy import deepcopy
+from functools import partial
 
 import pytest
 import torch
 from torch import nn
 from torch.utils.checkpoint import checkpoint
 
+import deepspeed
 from deepspeed.accelerator import get_accelerator
 from deepspeed.runtime.activation_checkpointing.offload_activations import (
     CheckpointHiddenStatesOffload,
+    _ActivationOffloadEngine,
+    _current_manager,
     get_checkpoint_hidden_states_offloading_ctx_manager,
 )
+from unit.common import DistributedTest
 
 _ACCEL = get_accelerator().is_available() and not get_accelerator().is_synchronized_device()
 
@@ -483,3 +489,291 @@ def test_zero_fwd_stash_retains_no_gpu_activation():
         assert torch.allclose(g, bg)
     assert offload.stats.offloaded_tensors == 4
     assert offload.stats.restored_tensors == 4
+
+
+@pytest.mark.skipif(not _ACCEL, reason="requires a stream-capable accelerator")
+def test_prefetch_starts_reload_of_previous_id():
+    device = get_accelerator().device_name()
+    engine = _ActivationOffloadEngine(keep_last_count=0, min_offload_bytes=0, max_fwd_stash_count=0, prefetch=True)
+    tensors = [torch.randn(8, 16, device=device) for _ in range(3)]
+    ids = [engine.offload_input(t) for t in tensors]
+    restored = engine.restore_input(ids[-1])
+    assert torch.allclose(restored, tensors[-1])
+    assert ids[-2] in engine._reloads
+    assert engine.stats.prefetched_tensors >= 1
+    restored_prev = engine.restore_input(ids[-2])
+    assert torch.allclose(restored_prev, tensors[-2])
+
+
+@pytest.mark.skipif(not _ACCEL, reason="requires a stream-capable accelerator")
+def test_prefetch_restore_matches_baseline():
+    device = get_accelerator().device_name()
+    torch.manual_seed(23)
+    layers = nn.ModuleList([nn.Linear(16, 16) for _ in range(4)]).to(device)
+
+    def run_step(x, manager=None):
+        h = x
+        for layer in layers:
+            if manager is not None:
+                manager.mark(h)
+            h = checkpoint(layer, h, use_reentrant=False)
+        return h.square().sum()
+
+    x = torch.randn(8, 16, device=device, requires_grad=True)
+    baseline_loss = run_step(x)
+    baseline_loss.backward()
+    baseline_x_grad = x.grad.detach().clone()
+    baseline_grads = [p.grad.detach().clone() for p in layers.parameters()]
+
+    layers.zero_grad(set_to_none=True)
+    x.grad = None
+    offload = get_checkpoint_hidden_states_offloading_ctx_manager(use_streams=True,
+                                                                  min_offload_bytes=0,
+                                                                  keep_last_count=1,
+                                                                  prefetch=True)
+    with offload:
+        loss = run_step(x, manager=offload)
+        loss.backward()
+    assert torch.allclose(loss, baseline_loss)
+    assert torch.allclose(x.grad, baseline_x_grad)
+    for g, bg in zip([p.grad for p in layers.parameters()], baseline_grads):
+        assert torch.allclose(g, bg)
+    assert offload.stats.prefetched_tensors >= 1
+    assert offload.stats.offloaded_tensors == offload.stats.restored_tensors
+
+
+@pytest.mark.skipif(not _ACCEL, reason="requires a stream-capable accelerator")
+def test_prefetch_second_step_matches_baseline():
+    """Allocator reuse across steps is where a missing compute-stream wait corrupts."""
+    device = get_accelerator().device_name()
+    torch.manual_seed(29)
+    layers = nn.ModuleList([nn.Linear(64, 64) for _ in range(8)]).to(device)
+    x = torch.randn(32, 64, device=device, requires_grad=True)
+
+    def run_step(h_in, module, manager=None):
+        h = h_in
+        for layer in module:
+            if manager is not None:
+                manager.mark(h)
+            h = checkpoint(layer, h, use_reentrant=False)
+        return h.square().sum()
+
+    opt = torch.optim.SGD(layers.parameters(), lr=0.01)
+    baseline = []
+    for _ in range(3):
+        opt.zero_grad(set_to_none=True)
+        x.grad = None
+        loss = run_step(x, layers)
+        loss.backward()
+        opt.step()
+        baseline.append(float(loss.detach()))
+
+    torch.manual_seed(29)
+    layers_p = nn.ModuleList([nn.Linear(64, 64) for _ in range(8)]).to(device)
+    x_p = torch.randn(32, 64, device=device, requires_grad=True)
+    opt_p = torch.optim.SGD(layers_p.parameters(), lr=0.01)
+    offload = get_checkpoint_hidden_states_offloading_ctx_manager(use_streams=True,
+                                                                  min_offload_bytes=0,
+                                                                  keep_last_count=1,
+                                                                  prefetch=True)
+    prefetch_losses = []
+    for _ in range(3):
+        opt_p.zero_grad(set_to_none=True)
+        x_p.grad = None
+        with offload:
+            loss = run_step(x_p, layers_p, manager=offload)
+            loss.backward()
+        opt_p.step()
+        prefetch_losses.append(float(loss.detach()))
+
+    for b, p in zip(baseline, prefetch_losses):
+        assert abs(b - p) / max(abs(b), 1e-6) < 1e-4
+    assert offload.stats.prefetched_tensors >= 1
+
+
+def _cpu_offload_ds_config(enabled):
+    return {
+        "train_batch_size": 8,
+        "train_micro_batch_size_per_gpu": 8,
+        "optimizer": {
+            "type": "Adam",
+            "params": {
+                "lr": 1e-3
+            }
+        },
+        "zero_optimization": {
+            "stage": 0
+        },
+        "activation_checkpointing": {
+            "cpu_checkpointing": enabled
+        },
+    }
+
+
+@pytest.mark.skipif(not _ACCEL, reason="requires a stream-capable accelerator")
+class TestEngineCpuCheckpointingConfig(DistributedTest):
+    world_size = 1
+
+    def test_cpu_checkpointing_config_configures_native_and_hf_offload(self):
+        transformers = pytest.importorskip("transformers")
+        if not hasattr(transformers, "GradientCheckpointingLayer"):
+            pytest.skip("transformers version does not provide GradientCheckpointingLayer")
+        from transformers import GradientCheckpointingLayer
+
+        class TinyCheckpointLayer(GradientCheckpointingLayer):
+
+            def __init__(self, dim):
+                super().__init__()
+                self.linear = nn.Linear(dim, dim)
+
+            def forward(self, hidden_states):
+                return self.linear(hidden_states).sin()
+
+        class TinyGCModel(nn.Module):
+
+            def __init__(self, dim, n_layers):
+                super().__init__()
+                self.layers = nn.ModuleList([TinyCheckpointLayer(dim) for _ in range(n_layers)])
+                for layer in self.layers:
+                    layer.gradient_checkpointing = True
+                    layer._gradient_checkpointing_func = partial(checkpoint, use_reentrant=False)
+                self.head = nn.Linear(dim, dim)
+
+            def forward(self, hidden_states):
+                for layer in self.layers:
+                    hidden_states = layer(hidden_states)
+                return self.head(hidden_states).square().sum()
+
+        import deepspeed.runtime.activation_checkpointing.checkpointing as ds_ckpt
+        saved = {
+            "PARTITION_ACTIVATIONS": ds_ckpt.PARTITION_ACTIVATIONS,
+            "CONTIGUOUS_CHECKPOINTING": ds_ckpt.CONTIGUOUS_CHECKPOINTING,
+            "num_layers": ds_ckpt.num_layers,
+            "CPU_CHECKPOINT": ds_ckpt.CPU_CHECKPOINT,
+            "SYNCHRONIZE": ds_ckpt.SYNCHRONIZE,
+            "PROFILE_TIME": ds_ckpt.PROFILE_TIME,
+            "mpu": ds_ckpt.mpu,
+            "deepspeed_checkpointing_enabled": ds_ckpt.deepspeed_checkpointing_enabled,
+        }
+        device = get_accelerator().device_name()
+        dim = 128
+        n_layers = 4
+        torch.manual_seed(7)
+        base = TinyGCModel(dim, n_layers).to(device)
+        x = torch.randn(8, dim, device=device)
+
+        try:
+            ref_model = deepcopy(base)
+            ref_engine, _, _, _ = deepspeed.initialize(model=ref_model,
+                                                       model_parameters=ref_model.parameters(),
+                                                       config=_cpu_offload_ds_config(False))
+            assert ref_engine._activation_cpu_offload_ctx is None
+            x_ref = x.clone()
+            ref_loss = ref_engine(x_ref)
+            ref_engine.backward(ref_loss)
+            ref_grads = [p.grad.detach().clone() for p in ref_engine.module.parameters() if p.grad is not None]
+            ref_engine.destroy()
+
+            test_model = deepcopy(base)
+            test_engine, _, _, _ = deepspeed.initialize(model=test_model,
+                                                        model_parameters=test_model.parameters(),
+                                                        config=_cpu_offload_ds_config(True))
+            assert ds_ckpt.is_configured()
+            assert ds_ckpt.CPU_CHECKPOINT
+            assert test_engine._activation_cpu_offload_ctx is not None
+            x_test = x.clone()
+            test_loss = test_engine(x_test)
+            test_engine.backward(test_loss)
+            stats = test_engine._activation_cpu_offload_ctx.stats
+            assert stats.marked_tensors == n_layers
+            assert stats.offloaded_tensors > 0
+            assert stats.offloaded_tensors == stats.restored_tensors
+            assert torch.allclose(test_loss, ref_loss)
+            test_grads = [p.grad.detach().clone() for p in test_engine.module.parameters() if p.grad is not None]
+            for g, rg in zip(test_grads, ref_grads):
+                assert torch.allclose(g, rg)
+            assert not test_engine._activation_cpu_offload_entered
+            test_engine.eval()
+            with torch.no_grad():
+                test_engine(x.clone())
+            assert not test_engine._activation_cpu_offload_entered
+            test_engine.destroy()
+        finally:
+            for name, value in saved.items():
+                setattr(ds_ckpt, name, value)
+
+    def test_cpu_checkpointing_exits_offload_on_backward_exception(self):
+        """A raised engine.backward() must still leave the CPU-offload context."""
+        transformers = pytest.importorskip("transformers")
+        if not hasattr(transformers, "GradientCheckpointingLayer"):
+            pytest.skip("transformers version does not provide GradientCheckpointingLayer")
+        from transformers import GradientCheckpointingLayer
+
+        import deepspeed.runtime.activation_checkpointing.checkpointing as ds_ckpt
+
+        class TinyCheckpointLayer(GradientCheckpointingLayer):
+
+            def __init__(self, dim):
+                super().__init__()
+                self.linear = nn.Linear(dim, dim)
+
+            def forward(self, hidden_states):
+                return self.linear(hidden_states)
+
+        class TinyGCModel(nn.Module):
+
+            def __init__(self, dim):
+                super().__init__()
+                self.layer = TinyCheckpointLayer(dim)
+                self.layer.gradient_checkpointing = True
+                self.layer._gradient_checkpointing_func = partial(checkpoint, use_reentrant=False)
+                self.head = nn.Linear(dim, 1)
+
+            def forward(self, hidden_states):
+                return self.head(self.layer(hidden_states)).sum()
+
+        class _RaiseInBackward(torch.autograd.Function):
+
+            @staticmethod
+            def forward(ctx, value):
+                return value
+
+            @staticmethod
+            def backward(ctx, grad_output):
+                raise RuntimeError("injected incomplete checkpoint backward")
+
+        saved = {
+            "PARTITION_ACTIVATIONS": ds_ckpt.PARTITION_ACTIVATIONS,
+            "CONTIGUOUS_CHECKPOINTING": ds_ckpt.CONTIGUOUS_CHECKPOINTING,
+            "num_layers": ds_ckpt.num_layers,
+            "CPU_CHECKPOINT": ds_ckpt.CPU_CHECKPOINT,
+            "SYNCHRONIZE": ds_ckpt.SYNCHRONIZE,
+            "PROFILE_TIME": ds_ckpt.PROFILE_TIME,
+            "mpu": ds_ckpt.mpu,
+            "deepspeed_checkpointing_enabled": ds_ckpt.deepspeed_checkpointing_enabled,
+        }
+        device = get_accelerator().device_name()
+        engine = None
+        try:
+            model = TinyGCModel(16).to(device)
+            engine, _, _, _ = deepspeed.initialize(model=model,
+                                                   model_parameters=model.parameters(),
+                                                   config=_cpu_offload_ds_config(True))
+            assert engine._activation_cpu_offload_ctx is not None
+            x = torch.randn(8, 16, device=device)
+            loss = _RaiseInBackward.apply(engine(x))
+            assert engine._activation_cpu_offload_entered
+            with pytest.raises(RuntimeError, match="injected incomplete checkpoint backward"):
+                engine.backward(loss)
+            assert not engine._activation_cpu_offload_entered
+            assert not engine._running_engine_backward
+            assert _current_manager() is None
+            retry = engine(x.clone())
+            engine.backward(retry)
+            assert not engine._activation_cpu_offload_entered
+            assert _current_manager() is None
+        finally:
+            if engine is not None:
+                engine.destroy()
+            for name, value in saved.items():
+                setattr(ds_ckpt, name, value)
