@@ -111,11 +111,7 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           CANDIDATE_ROOT: ${{ runner.temp }}/deepspeed-candidate
         run: |
-          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
-            mkdir -p ci/.test_selection
-            cp ci/modal_diagnostics/modal_master_71_nodes.txt ci/.test_selection/test_list.txt
-            echo "mode=subset" >> "$GITHUB_OUTPUT"
-          elif [ "$EVENT_NAME" = "pull_request_target" ] || [ "$EVENT_NAME" = "merge_group" ]; then
+          if [ "$EVENT_NAME" = "pull_request_target" ] || [ "$EVENT_NAME" = "merge_group" ]; then
             python3 ci/tests_fetcher.py \
               --workflow modal-torch-latest \
               --repo-root "$CANDIDATE_ROOT" \

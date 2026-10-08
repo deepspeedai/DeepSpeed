@@ -730,8 +730,10 @@ def test_workflow_keeps_github_execution_trusted_and_preserves_modes():
     assert "refs/ci/base" in text
     assert "refs/" + "dev" + "ds" not in text
     assert text.count("modal-torch-latest-test-selection") == 2
-    assert "cp ci/modal_diagnostics/modal_master_71_nodes.txt ci/.test_selection/test_list.txt" in text
-    assert 'echo "mode=subset" >> "$GITHUB_OUTPUT"' in text
+    assert "cp ci/modal_diagnostics/modal_master_71_nodes.txt ci/.test_selection/test_list.txt" not in text
+    assert 'echo "mode=subset" >> "$GITHUB_OUTPUT"' not in text
+    assert '--repo-root "$GITHUB_WORKSPACE"' in text
+    assert '--base ""' in text
     assert "if: always()" in text
     assert "modal-torch-latest-focused-diagnostics" in text
     assert "needs.collect-tests.outputs.mode != 'none'" in text
