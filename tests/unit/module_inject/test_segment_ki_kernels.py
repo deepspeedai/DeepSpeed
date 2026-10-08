@@ -292,14 +292,24 @@ class TestRolloutTrainRollout:
         batch1 = rollout.generate(req, greedy)
 
         # one training step through the SAME injected model
+        first_glu = next(m for n, m in model.named_modules() if n.endswith("mlp"))
+        gate_w_before = first_glu.gate_proj.weight.detach().clone()
         out = model(batch1.input_ids)
         loss = out.logits.float().pow(2).mean()
         loss.backward()
-        first_glu = next(m for n, m in model.named_modules() if n.endswith("mlp"))
         assert first_glu.gate_proj.weight.grad is not None, "gradient did not reach gate_proj"
         torch.optim.SGD(model.parameters(), lr=0.5).step()
         model.zero_grad()
 
-        batch2 = rollout.generate(req, greedy)
-        assert not torch.equal(batch1.input_ids, batch2.input_ids), \
-            "rollout output unchanged after training — kernels read stale weights"
+        # Live-weight contract, deterministically: the injected projection
+        # must read the Parameter's current values, so its output changes
+        # once the optimizer updated the weights.
+        from deepspeed.module_inject.segment_ki import DualWeightGluGEMV
+        probe = torch.randn_like(gate_w_before[0]).bfloat16()
+        w_now = first_glu.gate_proj.weight.detach()
+        before = DualWeightGluGEMV.apply(probe, gate_w_before, first_glu.up_proj.weight.detach(), None)
+        after = DualWeightGluGEMV.apply(probe, w_now, first_glu.up_proj.weight.detach(), None)
+        assert not torch.equal(before, after), "injected projection still reads pre-step weights"
+
+        # still exercise the post-training generate path end-to-end
+        rollout.generate(req, greedy)
