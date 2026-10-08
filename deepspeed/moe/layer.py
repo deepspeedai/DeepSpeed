@@ -22,7 +22,7 @@ class MoE(nn.Module):
         expert (nn.Module): the torch module that defines the expert (e.g., MLP, torch.linear).
         num_experts (int, optional): default=1, the total number of experts per layer.
         ep_size (int, optional): default=1, number of ranks in the expert parallel world or group.
-        k (int, optional): default=1, top-k gating value, only supports k=1 or k=2.
+        k (int, optional): default=1, number of experts selected per token.
         capacity_factor (float, optional): default=1.0, the capacity of the expert at training time.
         eval_capacity_factor (float, optional): default=1.0, the capacity of the expert at eval time.
         min_capacity (int, optional): default=4, the minimum capacity per expert regardless of the capacity_factor.
