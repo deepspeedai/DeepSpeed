@@ -284,17 +284,22 @@ class DeepSpeedHybridEngine(DeepSpeedEngine):
 
                 input_shape = inputs[0].shape if len(inputs) > 0 else \
                                 kwargs['input_ids'].shape
-                output = torch.zeros(
-                    (input_shape[0] * self._config.hybrid_engine.inference_tp_size, ) + input_shape[1:],
-                    dtype=inputs[0].dtype if len(inputs) > 0 else kwargs['input_ids'].dtype,
-                    device=inputs[0].device if len(inputs) > 0 else kwargs['input_ids'].device)
-                input_cont = inputs[0].contiguous() if len(inputs) > 0 else kwargs['input_ids'].contiguous()
-                dist.all_gather_into_tensor(output, input_cont, group=self.mp_group)
 
-                if len(inputs) > 0:
-                    inputs = (output, *inputs[1:])
-                else:
-                    kwargs['input_ids'] = output
+                def _gather_tensor(t):
+                    if isinstance(t, torch.Tensor) and len(t.shape) > 0 and t.shape[0] == input_shape[0]:
+                        is_bool = t.dtype == torch.bool
+                        gather_t = t.to(torch.uint8) if is_bool else t
+                        out = torch.zeros(
+                            (t.shape[0] * self._config.hybrid_engine.inference_tp_size, ) + t.shape[1:],
+                            dtype=gather_t.dtype,
+                            device=t.device)
+                        dist.all_gather_into_tensor(out, gather_t.contiguous(), group=self.mp_group)
+                        return out.to(torch.bool) if is_bool else out
+                    return t
+
+                inputs = tuple(_gather_tensor(x) for x in inputs)
+                for k, v in kwargs.items():
+                    kwargs[k] = _gather_tensor(v)
 
                 self.retake_inference_cache()
 
