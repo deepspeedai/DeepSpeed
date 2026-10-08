@@ -26,7 +26,6 @@ the same pattern serves every family that lays out its MLP as
 gate_proj/up_proj/down_proj.
 """
 
-import os
 from dataclasses import dataclass
 from typing import List
 
@@ -559,8 +558,7 @@ def install_decode_attention(model: torch.nn.Module, write_pos: torch.Tensor, ke
         module._ki_attn_op = kernel_op
         # The fused QKV kernel consumes weights only; biased projections would lose their bias.
         unbiased_qkv = all(p.bias is None for p in projections[:3])
-        module._ki_qkv_op = kernel_op if (hasattr(kernel_op, "triple_gemv") and unbiased_qkv
-                                          and os.environ.get("DS_TIER2", "1") == "1") else None
+        module._ki_qkv_op = kernel_op if (hasattr(kernel_op, "triple_gemv") and unbiased_qkv) else None
         module._ki_write_pos = write_pos
         module._ki_rope = apply_rotary_pos_emb
         module._ki_num_q_heads = num_q_heads
@@ -642,7 +640,7 @@ def install_fused_norm(model: torch.nn.Module, kernel_op) -> int:
     Detection is structural (block_type + mlp + both layernorms), so it
     covers full-attention and linear-attention layers alike. Returns the
     patched count."""
-    if kernel_op is None or not hasattr(kernel_op, "fused_add_norm") or os.environ.get("DS_TIER1", "1") != "1":
+    if kernel_op is None or not hasattr(kernel_op, "fused_add_norm"):
         return 0
     patched = 0
     for module in model.modules():
