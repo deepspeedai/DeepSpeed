@@ -8,6 +8,7 @@ from typing import Dict
 import torch
 
 from enum import Enum, IntEnum
+from deepspeed.utils.validation import ensure_nonzero_divisor
 
 
 class NormTypeEnum(Enum):
@@ -102,4 +103,5 @@ def ceil_div(a: int, b: int) -> int:
     """
     Return ceil(a / b).
     """
+    ensure_nonzero_divisor(b, name="b")
     return -(-a // b)
