@@ -2113,26 +2113,16 @@ class DeepSpeedEngine(Module):
         )
         try:
             if backend == "torchao_npu":
-                from torchao.quantization import quantize_
                 from torchao_npu.hifloat8 import (
-                    HiFloat8Linear,
-                    HiFloat8LinearConfig,
-                    hifloat8_grouped_mm,
-                    hifloat8_linear,
+                    HiFloat8Config,
+                    assert_hifloat8_training_available,
+                    convert_to_hifloat8_training,
                 )
-                if selected_names:
-                    x = torch.ones((16, 16), device=self.device, dtype=torch.bfloat16, requires_grad=True)
-                    w = torch.ones((16, 16), device=self.device, dtype=torch.bfloat16, requires_grad=True)
-                    hifloat8_linear(x, w, input_dst_type_max=15.0,
-                                    weight_dst_type_max=15.0, grad_dst_type_max=224.0).sum().backward()
-                if selected_experts:
-                    x = torch.ones((16, 16), device=self.device, dtype=torch.bfloat16, requires_grad=True)
-                    w = torch.ones((2, 16, 16), device=self.device, dtype=torch.bfloat16, requires_grad=True)
-                    offsets = torch.tensor((0, 16), device=self.device, dtype=torch.int64)
-                    hifloat8_grouped_mm(x, w, offsets).sum().backward()
-                    if not torch.isfinite(w.grad).all() or torch.count_nonzero(w.grad[0]):
-                        raise RuntimeError("HiFloat8 grouped probe produced invalid empty-expert gradients")
-                torch.npu.synchronize(self.device)
+                policy = HiFloat8Config.from_dict(config.get("config"))
+                assert_hifloat8_training_available(device=self.device,
+                                                   config=policy,
+                                                   linear=bool(selected_names),
+                                                   grouped=bool(selected_experts))
             else:
                 from torch_npu.utils.hifloat8_train import (
                     HiFloat8Linear,
@@ -2144,46 +2134,45 @@ class DeepSpeedEngine(Module):
                 if selected_experts:
                     from torch_npu.utils.hifloat8_train import assert_hifloat8_grouped_training_available
                     assert_hifloat8_grouped_training_available(probe_kernel=True, device=self.device)
-        except (ImportError, RuntimeError) as error:
+        except (ImportError, RuntimeError, ValueError, TypeError) as error:
             raise RuntimeError(
                 f"HiFloat8 selected {len(selected_names)} Linear modules ({total_numel} matrix elements), "
                 f"but native kernel validation failed before conversion: {error}") from error
-        parameters_before = dict(self.module.named_parameters())
-        requires_grad_before = {name: parameter.requires_grad for name, parameter in parameters_before.items()}
-        state_keys_before = tuple(self.module.state_dict())
         selected_set = set(selected_names)
         if backend == "torchao_npu":
-            quantize_(
+            converted = convert_to_hifloat8_training(
                 self.module,
-                HiFloat8LinearConfig(input_dst_type_max=15.0, weight_dst_type_max=15.0,
-                                     grad_dst_type_max=224.0),
+                policy,
                 filter_fn=lambda _module, name: name in selected_set,
             )
-            converted = self.module
         else:
+            parameters_before = dict(self.module.named_parameters())
+            requires_grad_before = {name: parameter.requires_grad for name, parameter in parameters_before.items()}
+            state_keys_before = tuple(self.module.state_dict())
             converted = convert_to_hifloat8_training(
                 self.module,
                 module_filter_fn=lambda _module, name: name in selected_set,
             )
+            parameters_after = dict(converted.named_parameters())
+            if parameters_before.keys() != parameters_after.keys():
+                raise RuntimeError("HiFloat8 conversion changed model parameter names")
+            if any(parameters_after[name] is not parameter for name, parameter in parameters_before.items()):
+                raise RuntimeError("HiFloat8 conversion replaced a model Parameter object")
+            if any(parameters_after[name].requires_grad != requires_grad_before[name] for name in parameters_after):
+                raise RuntimeError("HiFloat8 conversion changed requires_grad state")
+            if tuple(converted.state_dict()) != state_keys_before:
+                raise RuntimeError("HiFloat8 conversion changed state-dict keys")
+            modules_after = dict(converted.named_modules())
+            missing = [name for name in selected_names if not isinstance(modules_after.get(name), HiFloat8Linear)]
+            if missing:
+                raise RuntimeError(f"HiFloat8 conversion did not replace selected modules: {missing}")
         self._set_client_model(converted)
         for _, module in selected_experts:
             module.hifloat8_enabled = True
             module.hifloat8_backend = backend
+            if backend == "torchao_npu":
+                module.hifloat8_config = policy
 
-        parameters_after = dict(self.module.named_parameters())
-        if parameters_before.keys() != parameters_after.keys():
-            raise RuntimeError("HiFloat8 conversion changed model parameter names")
-        if any(parameters_after[name] is not parameter for name, parameter in parameters_before.items()):
-            raise RuntimeError("HiFloat8 conversion replaced a model Parameter object")
-        if any(parameters_after[name].requires_grad != requires_grad_before[name] for name in parameters_after):
-            raise RuntimeError("HiFloat8 conversion changed requires_grad state")
-        if tuple(self.module.state_dict()) != state_keys_before:
-            raise RuntimeError("HiFloat8 conversion changed state-dict keys")
-
-        modules_after = dict(self.module.named_modules())
-        missing = [name for name in selected_names if not isinstance(modules_after.get(name), HiFloat8Linear)]
-        if missing:
-            raise RuntimeError(f"HiFloat8 conversion did not replace selected modules: {missing}")
         self.hifloat8_converted_module_names = tuple(selected_names)
         self.hifloat8_grouped_module_names = tuple(name for name, _ in selected_experts)
         logger.info("HiFloat8 enabled %d AutoEP grouped expert modules: %s", len(selected_experts),

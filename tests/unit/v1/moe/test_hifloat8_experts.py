@@ -172,11 +172,15 @@ def test_qwen35_autoep_preserves_native_router_and_text_outputs(wrapper):
 @pytest.mark.parametrize("counts", [[64, 64], [128, 0], [0, 128], [1, 127], [0, 0], [32, 32, 32, 32], [0, 127, 0, 1],
                                     [1, 0, 0, 127], [0, 0, 0, 128], [0, 0, 0, 0], [2] * 64])
 @pytest.mark.parametrize("dim,hidden_dim", [(128, 128), (2048, 512)])
-@pytest.mark.parametrize("hifloat8", [False, True])
-def test_npu_hifloat8_expert_forward_and_gradients(counts, dim, hidden_dim, hifloat8):
+@pytest.mark.parametrize("backend", ["bf16", "torch_npu", "torchao_npu"])
+def test_npu_hifloat8_expert_forward_and_gradients(counts, dim, hidden_dim, backend):
     # Catches unsupported native dispatch, inaccurate dX/dW, and empty-expert leakage.
     import torch_npu
-    from torch_npu.utils.hifloat8_train import get_hifloat8_op_counts, reset_hifloat8_op_counts
+    if backend == "torch_npu":
+        pytest.importorskip("torch_npu.utils.hifloat8_train")
+        from torch_npu.utils.hifloat8_train import get_hifloat8_op_counts, reset_hifloat8_op_counts
+    elif backend == "torchao_npu":
+        implementation = pytest.importorskip("torchao_npu.hifloat8")
 
     torch_npu.npu.set_device(0)
     torch.manual_seed(42)
@@ -187,11 +191,15 @@ def test_npu_hifloat8_expert_forward_and_gradients(counts, dim, hidden_dim, hifl
             weight.normal_(std=0.02)
     candidate = GroupedExperts(dim, hidden_dim, len(counts)).to(device="npu", dtype=torch.bfloat16)
     candidate.load_state_dict(baseline.state_dict())
-    candidate.hifloat8_enabled = hifloat8
+    candidate.hifloat8_enabled = backend != "bf16"
+    candidate.hifloat8_backend = backend
+    if backend == "torchao_npu":
+        candidate.hifloat8_config = implementation.HiFloat8Config()
     x = torch.randn(sum(counts), dim, device="npu", dtype=torch.bfloat16, requires_grad=True)
     candidate_x = x.detach().clone().requires_grad_()
     groups = torch.tensor(counts, device="npu", dtype=torch.int64)
-    reset_hifloat8_op_counts()
+    if backend == "torch_npu":
+        reset_hifloat8_op_counts()
     reference = baseline(x, groups)
     actual = candidate(candidate_x, groups)
     grad = torch.randn_like(reference)
@@ -212,7 +220,7 @@ def test_npu_hifloat8_expert_forward_and_gradients(counts, dim, hidden_dim, hifl
     for index, count in enumerate(counts):
         if count == 0:
             assert all(torch.count_nonzero(weight.grad[index]) == 0 for weight in candidate.parameters())
-    if sum(counts) and hifloat8:
+    if sum(counts) and backend == "torch_npu":
         counters = get_hifloat8_op_counts()
         assert counters.get("grouped_backward_dw", 0) == 3
         assert counters.get("grouped_backward_dx", 0) == 3

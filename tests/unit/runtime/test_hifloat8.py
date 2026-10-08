@@ -22,8 +22,7 @@ def _has_torch_npu_hifloat8_helper():
 
 requires_torch_npu_hifloat8 = pytest.mark.skipif(not _has_torch_npu_hifloat8_helper(),
                                                  reason="torch_npu HiFloat8 training helper is not installed")
-requires_torchao_npu = pytest.mark.skipif(find_spec("torchao_npu") is None,
-                                         reason="torchao_npu is not installed")
+requires_torchao_npu = pytest.mark.skipif(find_spec("torchao_npu") is None, reason="torchao_npu is not installed")
 
 
 def test_hifloat8_config_defaults_disabled():
@@ -33,6 +32,7 @@ def test_hifloat8_config_defaults_disabled():
         "module_name_patterns": (),
         "min_numel": 0,
         "expected_module_count": None,
+        "config": None,
     }
 
 
@@ -108,7 +108,15 @@ def test_hifloat8_config_selects_torchao_npu():
 
 
 @requires_torchao_npu
-def test_torchao_npu_backend_preserves_dense_and_grouped_parameters():
+@pytest.mark.parametrize("policy", [
+    None, {
+        "input_dst_type_max": 31,
+        "weight_dst_type_max": 31,
+        "grad_dst_type_max": 127,
+        "compute_dtype": "bfloat16"
+    }
+])
+def test_torchao_npu_backend_preserves_dense_and_grouped_parameters(policy):
     if not hasattr(torch, "npu") or not torch.npu.is_available():
         pytest.skip("NPU unavailable")
     from deepspeed.moe.ep_experts import GroupedExperts
@@ -123,14 +131,16 @@ def test_torchao_npu_backend_preserves_dense_and_grouped_parameters():
     engine = _make_engine(model, ["dense", "experts"])
     engine.device = torch.device("npu:0")
     engine._config.hifloat8_config["backend"] = "torchao_npu"
+    engine._config.hifloat8_config["config"] = policy
     engine._configure_hifloat8()
 
     assert isinstance(model["dense"], HiFloat8Linear)
     assert model["experts"].hifloat8_enabled
     assert model["experts"].hifloat8_backend == "torchao_npu"
+    assert model["dense"].config is model["experts"].hifloat8_config
+    assert model["dense"].config.grad_dst_type_max == (127 if policy else 224)
     assert tuple(model.state_dict()) == keys_before
-    assert all(dict(model.named_parameters())[name] is parameter
-               for name, parameter in parameters_before.items())
+    assert all(dict(model.named_parameters())[name] is parameter for name, parameter in parameters_before.items())
 
 
 class _ToyModel(nn.Module):
@@ -317,3 +327,16 @@ def test_engine_kernel_failure_reports_selection_and_does_not_mutate(monkeypatch
     after = dict(model.named_parameters())
     assert before.keys() == after.keys()
     assert all(after[name] is parameter for name, parameter in before.items())
+
+
+@pytest.mark.parametrize("policy", [True, 1, "bf16", []])
+def test_hifloat8_config_rejects_non_object_policy(policy):
+    with pytest.raises(DeepSpeedConfigError, match="hifloat8.config"):
+        get_hifloat8_config({"hifloat8": {"backend": "torchao_npu", "config": policy}})
+
+
+def test_hifloat8_custom_policy_requires_ao_backend():
+    with pytest.raises(DeepSpeedConfigError, match="requires backend"):
+        get_hifloat8_config({"hifloat8": {"config": {"grad_dst_type_max": 15}}})
+    policy = {"grad_dst_type_max": 15, "compute_dtype": "bfloat16"}
+    assert get_hifloat8_config({"hifloat8": {"backend": "torchao_npu", "config": policy}})["config"] == policy

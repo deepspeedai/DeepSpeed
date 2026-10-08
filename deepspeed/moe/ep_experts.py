@@ -341,7 +341,8 @@ def _run_experts_npu(w1,
                      limit=7.0,
                      *,
                      hifloat8,
-                     hifloat8_backend="torch_npu"):
+                     hifloat8_backend="torch_npu",
+                     hifloat8_config=None):
     """Keep EP layout and BF16 parameters; select only the expert GEMM precision."""
     offsets = num_tokens_per_expert.cumsum(0).to(torch.int64)
     # AutoEP reserves extra rows for permutation padding beyond the last group.
@@ -359,8 +360,10 @@ def _run_experts_npu(w1,
         else:
             from torch_npu.utils.hifloat8_train import hifloat8_grouped_mm
 
+        kwargs = {"config": hifloat8_config} if hifloat8_backend == "torchao_npu" else {}
+
         def mm(lhs, weight):
-            return hifloat8_grouped_mm(lhs, weight.to(x.dtype).transpose(-2, -1), offsets)
+            return hifloat8_grouped_mm(lhs, weight.to(x.dtype).transpose(-2, -1), offsets, **kwargs)
     else:
 
         def mm(lhs, weight):
@@ -431,6 +434,7 @@ class GroupedExperts(nn.Module):
         self.use_grouped_mm = use_grouped_mm
         self.hifloat8_enabled = False
         self.hifloat8_backend = "torch_npu"
+        self.hifloat8_config = None
 
         # Resolve the Triton path. The device-specific decision is delegated to
         # the accelerator backend (e.g. the CUDA backend prefers Triton on
@@ -477,7 +481,8 @@ class GroupedExperts(nn.Module):
                                     num_tokens_per_expert,
                                     *act,
                                     hifloat8=True,
-                                    hifloat8_backend=self.hifloat8_backend)
+                                    hifloat8_backend=self.hifloat8_backend,
+                                    hifloat8_config=self.hifloat8_config)
         if x.device.type == "npu" and self.use_grouped_mm:
             return _run_experts_npu(self.w1, self.w2, self.w3, x, num_tokens_per_expert, *act, hifloat8=False)
         if self.use_triton_grouped_mm:
