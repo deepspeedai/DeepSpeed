@@ -162,6 +162,25 @@ class NPUInference:
             q = torch.cat([q_pos, q_pass], dim=-1)
             k_pos = torch_npu.npu_rotary_mul(k_pos, cos, sin, 'interleave')
             k = torch.cat([k_pos, k_pass], dim=-1)
+        elif rotary_dim > 0 and rotate_half:
+            # HF-style split-half rotary, the CUDA launch_apply_rotary_pos_emb counterpart:
+            # element j pairs with j + rotary_dim/2, cos/sin use the side-by-side duplicated
+            # layout (transformers cat((freqs, freqs))), and npu_rotary_mul's default half
+            # mode implements exactly this rotation. The same cached inv_freq serves both
+            # layouts -- only the per-forward angle derivation differs.
+            inv_freq = InferenceContext.inv_freq_table(rotary_dim, rope_theta, vals.device)
+            seq_id = torch.arange(0, seq_length, dtype=torch.float32, device=vals.device) + seq_offset
+            freqs = torch.outer(seq_id, inv_freq)
+            sin = torch.cat((freqs.sin(), freqs.sin()), dim=-1).view(-1, seq_length, 1, rotary_dim)
+            cos = torch.cat((freqs.cos(), freqs.cos()), dim=-1).view(-1, seq_length, 1, rotary_dim)
+
+            q_pos, q_pass = q[..., :rotary_dim], q[..., rotary_dim:]
+            k_pos, k_pass = k[..., :rotary_dim], k[..., rotary_dim:]
+
+            q_pos = torch_npu.npu_rotary_mul(q_pos, cos, sin)
+            q = torch.cat([q_pos, q_pass], dim=-1)
+            k_pos = torch_npu.npu_rotary_mul(k_pos, cos, sin)
+            k = torch.cat([k_pos, k_pass], dim=-1)
 
         output = q.reshape(bsz, seq_length, -1).contiguous()  # [b, s, H]
         # K and V carry num_kv groups (not heads), which differs in GQA; reshaping with
