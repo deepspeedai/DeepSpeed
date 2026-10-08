@@ -300,37 +300,6 @@ def _run_experts_triton_grouped_mm(
 # ---------------------------------------------------------------------------
 
 
-class _NPUGroupedMatmul(torch.autograd.Function):
-    """Native BF16 grouped GEMM, whose public operator lacks list-input autograd."""
-
-    @staticmethod
-    def _mm(x, weight, offsets, group_type=0):
-        import torch_npu
-
-        return torch_npu.npu_grouped_matmul([x], [weight],
-                                            group_list=offsets,
-                                            group_type=group_type,
-                                            group_list_type=0,
-                                            split_item=3,
-                                            output_dtype=x.dtype)[0]
-
-    @staticmethod
-    def forward(ctx, x, weight, offsets):
-        ctx.save_for_backward(x, weight, offsets)
-        return _NPUGroupedMatmul._mm(x, weight, offsets)
-
-    @staticmethod
-    def backward(ctx, grad):
-        x, weight, offsets = ctx.saved_tensors
-        grad = grad.contiguous()
-        dx = dw = None
-        if ctx.needs_input_grad[0]:
-            dx = _NPUGroupedMatmul._mm(grad, weight.transpose(-2, -1), offsets)
-        if ctx.needs_input_grad[1]:
-            dw = _NPUGroupedMatmul._mm(x.transpose(0, 1), grad, offsets, group_type=2)
-        return dx, dw, None
-
-
 def _run_experts_npu(w1,
                      w2,
                      w3,
@@ -341,7 +310,6 @@ def _run_experts_npu(w1,
                      limit=7.0,
                      *,
                      hifloat8,
-                     hifloat8_backend="torch_npu",
                      hifloat8_config=None):
     """Keep EP layout and BF16 parameters; select only the expert GEMM precision."""
     offsets = num_tokens_per_expert.cumsum(0).to(torch.int64)
@@ -349,25 +317,17 @@ def _run_experts_npu(w1,
     rows = int(offsets[-1].item())
     if rows < 0 or rows > x.shape[0]:
         raise ValueError("Expert token counts exceed the available rows")
-    if rows == 0:
-        # An empty rank still needs zero gradients for every expert parameter.
-        zero = sum(weight.sum(dtype=torch.float32) for weight in (w1, w2, w3)) * 0
-        return x * 0 + zero.to(x.dtype)
     inputs = x[:rows]
     if hifloat8:
-        if hifloat8_backend == "torchao_npu":
-            from torchao_npu.hifloat8 import hifloat8_grouped_mm
-        else:
-            from torch_npu.utils.hifloat8_train import hifloat8_grouped_mm
-
-        kwargs = {"config": hifloat8_config} if hifloat8_backend == "torchao_npu" else {}
+        from torchao_npu.hifloat8 import hifloat8_grouped_mm
 
         def mm(lhs, weight):
-            return hifloat8_grouped_mm(lhs, weight.to(x.dtype).transpose(-2, -1), offsets, **kwargs)
+            return hifloat8_grouped_mm(lhs, weight.to(x.dtype), offsets, config=hifloat8_config, trans_b=True)
     else:
+        from torchao_npu.ops.npu import grouped_mm
 
         def mm(lhs, weight):
-            return _NPUGroupedMatmul.apply(lhs, weight.to(x.dtype).transpose(-2, -1), offsets)
+            return grouped_mm(lhs, weight.to(x.dtype), offsets, trans_b=True)
 
     gate = mm(inputs, w1)
     up = mm(inputs, w3)
@@ -433,7 +393,6 @@ class GroupedExperts(nn.Module):
         self.use_triton_grouped_mm = False
         self.use_grouped_mm = use_grouped_mm
         self.hifloat8_enabled = False
-        self.hifloat8_backend = "torch_npu"
         self.hifloat8_config = None
 
         # Resolve the Triton path. The device-specific decision is delegated to
@@ -481,7 +440,6 @@ class GroupedExperts(nn.Module):
                                     num_tokens_per_expert,
                                     *act,
                                     hifloat8=True,
-                                    hifloat8_backend=self.hifloat8_backend,
                                     hifloat8_config=self.hifloat8_config)
         if x.device.type == "npu" and self.use_grouped_mm:
             return _run_experts_npu(self.w1, self.w2, self.w3, x, num_tokens_per_expert, *act, hifloat8=False)

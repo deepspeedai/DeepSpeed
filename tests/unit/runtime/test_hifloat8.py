@@ -12,23 +12,13 @@ from torch import nn
 from deepspeed.runtime.config import DeepSpeedConfigError, get_hifloat8_config
 from deepspeed.runtime.engine import DeepSpeedEngine
 
-
-def _has_torch_npu_hifloat8_helper():
-    try:
-        return find_spec("torch_npu.utils.hifloat8_train.hifloat8_linear") is not None
-    except (AttributeError, ImportError):
-        return False
-
-
-requires_torch_npu_hifloat8 = pytest.mark.skipif(not _has_torch_npu_hifloat8_helper(),
-                                                 reason="torch_npu HiFloat8 training helper is not installed")
 requires_torchao_npu = pytest.mark.skipif(find_spec("torchao_npu") is None, reason="torchao_npu is not installed")
 
 
 def test_hifloat8_config_defaults_disabled():
     assert get_hifloat8_config({}) == {
         "enabled": False,
-        "backend": "torch_npu",
+        "backend": "torchao_npu",
         "module_name_patterns": (),
         "min_numel": 0,
         "expected_module_count": None,
@@ -136,7 +126,6 @@ def test_torchao_npu_backend_preserves_dense_and_grouped_parameters(policy):
 
     assert isinstance(model["dense"], HiFloat8Linear)
     assert model["experts"].hifloat8_enabled
-    assert model["experts"].hifloat8_backend == "torchao_npu"
     assert model["dense"].config is model["experts"].hifloat8_config
     assert model["dense"].config.grad_dst_type_max == (127 if policy else 224)
     assert tuple(model.state_dict()) == keys_before
@@ -177,11 +166,11 @@ def _make_engine(model, patterns, min_numel=0):
     return engine
 
 
-@requires_torch_npu_hifloat8
+@requires_torchao_npu
 def test_engine_selects_routed_experts_without_replacing_parameters(monkeypatch):
     # Catches silently selecting the router or orphaning packed expert weights.
     from deepspeed.moe.ep_experts import GroupedExperts
-    import torch_npu.utils.hifloat8_train as implementation
+    import torchao_npu.hifloat8 as implementation
 
     model = nn.ModuleDict({
         "experts": GroupedExperts(8, 16, 2, use_grouped_mm=False),
@@ -190,7 +179,7 @@ def test_engine_selects_routed_experts_without_replacing_parameters(monkeypatch)
     model.experts.w1.requires_grad_(False)
     parameters = dict(model.named_parameters())
     keys = tuple(model.state_dict())
-    monkeypatch.setattr(implementation, "assert_hifloat8_grouped_training_available", lambda **kwargs: None)
+    monkeypatch.setattr(implementation, "assert_hifloat8_training_available", lambda **kwargs: None)
     engine = _make_engine(model, ["experts"])
     engine._configure_hifloat8()
     assert engine.hifloat8_grouped_module_names == ("experts", )
@@ -202,12 +191,12 @@ def test_engine_selects_routed_experts_without_replacing_parameters(monkeypatch)
     assert all(dict(model.named_parameters())[name] is parameter for name, parameter in parameters.items())
 
 
-@requires_torch_npu_hifloat8
+@requires_torchao_npu
 def test_engine_converts_only_selected_modules_and_preserves_parameters(monkeypatch):
     model = _ToyModel()
     before = dict(model.named_parameters())
     probe_calls = []
-    import torch_npu.utils.hifloat8_train as implementation
+    import torchao_npu.hifloat8 as implementation
 
     HiFloat8Linear = implementation.HiFloat8Linear
 
@@ -220,7 +209,10 @@ def test_engine_converts_only_selected_modules_and_preserves_parameters(monkeypa
     engine._config.hifloat8_config["expected_module_count"] = 3
     engine._configure_hifloat8()
 
-    assert probe_calls == [{"probe_kernel": True, "device": torch.device("cpu")}]
+    assert len(probe_calls) == 1
+    assert probe_calls[0]["device"] == torch.device("cpu")
+    assert probe_calls[0]["linear"] and not probe_calls[0]["grouped"]
+    assert probe_calls[0]["config"] is model.model.mlp["gate_proj"].config
     assert engine.hifloat8_converted_module_names == (
         "model.mlp.gate_proj",
         "model.mlp.up_proj",
@@ -255,7 +247,7 @@ def test_engine_rejects_wrong_module_count_before_kernel_probe(monkeypatch):
     original_import = builtins.__import__
 
     def checked_import(name, *args, **kwargs):
-        if name.startswith("torch_npu"):
+        if name.startswith("torchao_npu"):
             pytest.fail("module-count mismatch must fail before loading the optional backend")
         return original_import(name, *args, **kwargs)
 
@@ -284,8 +276,8 @@ def test_missing_optional_backend_reports_selection_before_model_mutation(monkey
     original_import = builtins.__import__
 
     def checked_import(name, *args, **kwargs):
-        if name.startswith("torch_npu"):
-            raise ImportError("torch_npu is not installed")
+        if name.startswith("torchao_npu"):
+            raise ImportError("torchao_npu is not installed")
         return original_import(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", checked_import)
@@ -306,10 +298,10 @@ def test_hifloat8_validation_rejects_custom_model_parallel_unit():
         engine._validate_hifloat8_configuration()
 
 
-@requires_torch_npu_hifloat8
-@pytest.mark.parametrize("error", [RuntimeError("unsupported device"), ImportError("missing torch_npu helper")])
+@requires_torchao_npu
+@pytest.mark.parametrize("error", [RuntimeError("unsupported device"), ImportError("missing torchao_npu backend")])
 def test_engine_kernel_failure_reports_selection_and_does_not_mutate(monkeypatch, error):
-    import torch_npu.utils.hifloat8_train as implementation
+    import torchao_npu.hifloat8 as implementation
 
     model = _ToyModel()
     before = dict(model.named_parameters())
@@ -335,8 +327,8 @@ def test_hifloat8_config_rejects_non_object_policy(policy):
         get_hifloat8_config({"hifloat8": {"backend": "torchao_npu", "config": policy}})
 
 
-def test_hifloat8_custom_policy_requires_ao_backend():
-    with pytest.raises(DeepSpeedConfigError, match="requires backend"):
-        get_hifloat8_config({"hifloat8": {"config": {"grad_dst_type_max": 15}}})
+def test_hifloat8_legacy_backend_is_rejected_with_migration_instruction():
+    with pytest.raises(DeepSpeedConfigError, match="legacy torch_npu helper was removed"):
+        get_hifloat8_config({"hifloat8": {"backend": "torch_npu"}})
     policy = {"grad_dst_type_max": 15, "compute_dtype": "bfloat16"}
-    assert get_hifloat8_config({"hifloat8": {"backend": "torchao_npu", "config": policy}})["config"] == policy
+    assert get_hifloat8_config({"hifloat8": {"config": policy}})["config"] == policy

@@ -63,15 +63,16 @@ def test_npu_expert_helper_preserves_upstream_activation(monkeypatch):
     # Pin the merge regression without NPU hardware: the stub implements the
     # native grouped GEMM contract while the helper supplies activation policy.
     import deepspeed.moe.ep_experts as ep_experts
+    import sys
+    from types import SimpleNamespace
 
-    def fake_grouped_mm(lhs, weight, offsets):
+    def fake_grouped_mm(lhs, weight, offsets, *, trans_b=False):
+        weight = weight.transpose(-1, -2) if trans_b else weight
         starts = [0] + offsets.tolist()[:-1]
         return torch.cat([lhs[start:end] @ weight[i] for i, (start, end) in enumerate(zip(starts, offsets.tolist()))])
 
-    class NativeStub:
-        apply = staticmethod(fake_grouped_mm)
-
-    monkeypatch.setattr(ep_experts, "_NPUGroupedMatmul", NativeStub)
+    # The collaborator is AO's documented packed-weight grouped_mm API.
+    monkeypatch.setitem(sys.modules, "torchao_npu.ops.npu", SimpleNamespace(grouped_mm=fake_grouped_mm))
     torch.manual_seed(7)
     counts = torch.tensor([2, 1])
     x = torch.randn(4, 8, requires_grad=True)
@@ -172,14 +173,12 @@ def test_qwen35_autoep_preserves_native_router_and_text_outputs(wrapper):
 @pytest.mark.parametrize("counts", [[64, 64], [128, 0], [0, 128], [1, 127], [0, 0], [32, 32, 32, 32], [0, 127, 0, 1],
                                     [1, 0, 0, 127], [0, 0, 0, 128], [0, 0, 0, 0], [2] * 64])
 @pytest.mark.parametrize("dim,hidden_dim", [(128, 128), (2048, 512)])
-@pytest.mark.parametrize("backend", ["bf16", "torch_npu", "torchao_npu"])
+@pytest.mark.parametrize("backend", ["bf16", "torchao_npu"])
 def test_npu_hifloat8_expert_forward_and_gradients(counts, dim, hidden_dim, backend):
     # Catches unsupported native dispatch, inaccurate dX/dW, and empty-expert leakage.
     import torch_npu
-    if backend == "torch_npu":
-        pytest.importorskip("torch_npu.utils.hifloat8_train")
-        from torch_npu.utils.hifloat8_train import get_hifloat8_op_counts, reset_hifloat8_op_counts
-    elif backend == "torchao_npu":
+    pytest.importorskip("torchao_npu.ops.npu")
+    if backend == "torchao_npu":
         implementation = pytest.importorskip("torchao_npu.hifloat8")
 
     torch_npu.npu.set_device(0)
@@ -192,14 +191,11 @@ def test_npu_hifloat8_expert_forward_and_gradients(counts, dim, hidden_dim, back
     candidate = GroupedExperts(dim, hidden_dim, len(counts)).to(device="npu", dtype=torch.bfloat16)
     candidate.load_state_dict(baseline.state_dict())
     candidate.hifloat8_enabled = backend != "bf16"
-    candidate.hifloat8_backend = backend
     if backend == "torchao_npu":
         candidate.hifloat8_config = implementation.HiFloat8Config()
     x = torch.randn(sum(counts), dim, device="npu", dtype=torch.bfloat16, requires_grad=True)
     candidate_x = x.detach().clone().requires_grad_()
     groups = torch.tensor(counts, device="npu", dtype=torch.int64)
-    if backend == "torch_npu":
-        reset_hifloat8_op_counts()
     reference = baseline(x, groups)
     actual = candidate(candidate_x, groups)
     grad = torch.randn_like(reference)
@@ -220,7 +216,3 @@ def test_npu_hifloat8_expert_forward_and_gradients(counts, dim, hidden_dim, back
     for index, count in enumerate(counts):
         if count == 0:
             assert all(torch.count_nonzero(weight.grad[index]) == 0 for weight in candidate.parameters())
-    if sum(counts) and backend == "torch_npu":
-        counters = get_hifloat8_op_counts()
-        assert counters.get("grouped_backward_dw", 0) == 3
-        assert counters.get("grouped_backward_dx", 0) == 3

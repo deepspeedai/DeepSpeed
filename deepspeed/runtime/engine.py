@@ -2077,7 +2077,6 @@ class DeepSpeedEngine(Module):
         from deepspeed.moe.ep_experts import GroupedExperts
 
         config = self._config.hifloat8_config
-        backend = config.get("backend", "torch_npu")
         patterns = config["module_name_patterns"]
         min_numel = config["min_numel"]
         selected_names = []
@@ -2112,66 +2111,30 @@ class DeepSpeedEngine(Module):
             total_numel,
         )
         try:
-            if backend == "torchao_npu":
-                from torchao_npu.hifloat8 import (
-                    HiFloat8Config,
-                    assert_hifloat8_training_available,
-                    convert_to_hifloat8_training,
-                )
-                policy = HiFloat8Config.from_dict(config.get("config"))
-                assert_hifloat8_training_available(device=self.device,
-                                                   config=policy,
-                                                   linear=bool(selected_names),
-                                                   grouped=bool(selected_experts))
-            else:
-                from torch_npu.utils.hifloat8_train import (
-                    HiFloat8Linear,
-                    assert_hifloat8_training_available,
-                    convert_to_hifloat8_training,
-                )
-                if selected_names:
-                    assert_hifloat8_training_available(probe_kernel=True, device=self.device)
-                if selected_experts:
-                    from torch_npu.utils.hifloat8_train import assert_hifloat8_grouped_training_available
-                    assert_hifloat8_grouped_training_available(probe_kernel=True, device=self.device)
+            from torchao_npu.hifloat8 import (
+                HiFloat8Config,
+                assert_hifloat8_training_available,
+                convert_to_hifloat8_training,
+            )
+            policy = HiFloat8Config.from_dict(config.get("config"))
+            assert_hifloat8_training_available(device=self.device,
+                                               config=policy,
+                                               linear=bool(selected_names),
+                                               grouped=bool(selected_experts))
         except (ImportError, RuntimeError, ValueError, TypeError) as error:
             raise RuntimeError(
                 f"HiFloat8 selected {len(selected_names)} Linear modules ({total_numel} matrix elements), "
                 f"but native kernel validation failed before conversion: {error}") from error
         selected_set = set(selected_names)
-        if backend == "torchao_npu":
-            converted = convert_to_hifloat8_training(
-                self.module,
-                policy,
-                filter_fn=lambda _module, name: name in selected_set,
-            )
-        else:
-            parameters_before = dict(self.module.named_parameters())
-            requires_grad_before = {name: parameter.requires_grad for name, parameter in parameters_before.items()}
-            state_keys_before = tuple(self.module.state_dict())
-            converted = convert_to_hifloat8_training(
-                self.module,
-                module_filter_fn=lambda _module, name: name in selected_set,
-            )
-            parameters_after = dict(converted.named_parameters())
-            if parameters_before.keys() != parameters_after.keys():
-                raise RuntimeError("HiFloat8 conversion changed model parameter names")
-            if any(parameters_after[name] is not parameter for name, parameter in parameters_before.items()):
-                raise RuntimeError("HiFloat8 conversion replaced a model Parameter object")
-            if any(parameters_after[name].requires_grad != requires_grad_before[name] for name in parameters_after):
-                raise RuntimeError("HiFloat8 conversion changed requires_grad state")
-            if tuple(converted.state_dict()) != state_keys_before:
-                raise RuntimeError("HiFloat8 conversion changed state-dict keys")
-            modules_after = dict(converted.named_modules())
-            missing = [name for name in selected_names if not isinstance(modules_after.get(name), HiFloat8Linear)]
-            if missing:
-                raise RuntimeError(f"HiFloat8 conversion did not replace selected modules: {missing}")
+        converted = convert_to_hifloat8_training(
+            self.module,
+            policy,
+            filter_fn=lambda _module, name: name in selected_set,
+        )
         self._set_client_model(converted)
         for _, module in selected_experts:
             module.hifloat8_enabled = True
-            module.hifloat8_backend = backend
-            if backend == "torchao_npu":
-                module.hifloat8_config = policy
+            module.hifloat8_config = policy
 
         self.hifloat8_converted_module_names = tuple(selected_names)
         self.hifloat8_grouped_module_names = tuple(name for name, _ in selected_experts)

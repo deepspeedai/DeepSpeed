@@ -375,7 +375,7 @@ def get_hybrid_engine_config(param_dict):
 HIFLOAT8 = "hifloat8"
 HIFLOAT8_DEFAULT = {
     "enabled": False,
-    "backend": "torch_npu",
+    "backend": "torchao_npu",
     "module_name_patterns": (),
     "min_numel": 0,
     "expected_module_count": None,
@@ -396,14 +396,13 @@ def get_hifloat8_config(param_dict):
     result.update(config)
     if not isinstance(result["enabled"], bool):
         raise DeepSpeedConfigError("'hifloat8.enabled' must be a boolean")
-    if result["backend"] not in ("torch_npu", "torchao_npu"):
-        raise DeepSpeedConfigError("'hifloat8.backend' must be 'torch_npu' or 'torchao_npu'")
+    if result["backend"] != "torchao_npu":
+        raise DeepSpeedConfigError("'hifloat8.backend' must be 'torchao_npu'; the legacy torch_npu helper "
+                                   "was removed. Install torchao_npu and migrate the backend setting.")
     policy = result["config"]
     if policy is not None:
         if not isinstance(policy, dict):
             raise DeepSpeedConfigError("'hifloat8.config' must be an object or null")
-        if result["backend"] != "torchao_npu":
-            raise DeepSpeedConfigError("'hifloat8.config' requires backend='torchao_npu'")
     patterns = result["module_name_patterns"]
     if not isinstance(patterns,
                       (list, tuple)) or not all(isinstance(pattern, str) and pattern for pattern in patterns):
