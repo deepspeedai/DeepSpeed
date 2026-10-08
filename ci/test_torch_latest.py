@@ -18,6 +18,7 @@ import sys
 import tarfile
 import tempfile
 import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -805,14 +806,66 @@ def test_diagnostic_command_and_bounded_process_stop():
 
     process = SimpleNamespace(pid=123, poll=lambda: None)
     sent = []
-    original = modal_runner._signal_process_group
+    original_signal = modal_runner._signal_process_group
+    original_alive = modal_runner._process_group_alive
     try:
         modal_runner._signal_process_group = lambda target, requested_signal: sent.append(requested_signal)
+        modal_runner._process_group_alive = lambda process_group_id: True
         actions = modal_runner._stop_process_group(process, waits=(0.0, 0.0, 0.0), sleep=lambda _: None)
     finally:
-        modal_runner._signal_process_group = original
+        modal_runner._signal_process_group = original_signal
+        modal_runner._process_group_alive = original_alive
     assert actions == ["SIGINT", "SIGTERM", "SIGKILL"]
     assert sent == [signal.SIGINT, signal.SIGTERM, signal.SIGKILL]
+
+
+def test_diagnostic_stop_escalates_after_parent_exits():
+    child_source = """import os
+import signal
+import time
+
+signal.signal(signal.SIGINT, signal.SIG_IGN)
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+print(os.getpid(), flush=True)
+time.sleep(30)
+"""
+    parent_source = f"""import signal
+import subprocess
+import sys
+import time
+
+signal.signal(signal.SIGINT, lambda *args: sys.exit(0))
+child = subprocess.Popen([sys.executable, "-c", {child_source!r}], stdout=subprocess.PIPE, text=True)
+print(child.stdout.readline().strip(), flush=True)
+time.sleep(30)
+"""
+    process = subprocess.Popen([sys.executable, "-c", parent_source],
+                               stdout=subprocess.PIPE,
+                               text=True,
+                               start_new_session=True)
+    assert process.stdout is not None
+    child_pid = int(process.stdout.readline())
+    try:
+        actions = modal_runner._stop_process_group(process, waits=(1.0, 0.2, 0.2))
+        assert actions == ["SIGINT", "SIGTERM", "SIGKILL"]
+        assert process.poll() == 0
+        deadline = time.monotonic() + 5.0
+        while modal_runner._process_group_alive(process.pid) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert not modal_runner._process_group_alive(process.pid)
+        try:
+            os.kill(child_pid, 0)
+        except ProcessLookupError:
+            pass
+        else:
+            raise AssertionError(f"child process {child_pid} survived bounded process-group shutdown")
+    finally:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.wait(timeout=5)
+        process.stdout.close()
 
 
 def test_diagnostic_registered_pids_timeout_and_collection_count():

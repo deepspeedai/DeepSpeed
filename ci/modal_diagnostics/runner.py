@@ -246,6 +246,16 @@ def _signal_process_group(process: subprocess.Popen[str], requested_signal: sign
         pass
 
 
+def _process_group_alive(process_group_id: int) -> bool:
+    try:
+        os.killpg(process_group_id, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
 def _stop_process_group(
         process: subprocess.Popen[str],
         waits: tuple[float, float, float] = (30.0, 10.0, 5.0),
@@ -253,12 +263,14 @@ def _stop_process_group(
 ) -> list[str]:
     actions: list[str] = []
     for requested_signal, wait_seconds in zip((signal.SIGINT, signal.SIGTERM, signal.SIGKILL), waits):
-        if process.poll() is not None:
+        process.poll()
+        if not _process_group_alive(process.pid):
             break
         _signal_process_group(process, requested_signal)
         actions.append(requested_signal.name)
         deadline = time.monotonic() + wait_seconds
-        while process.poll() is None and time.monotonic() < deadline:
+        while _process_group_alive(process.pid) and time.monotonic() < deadline:
+            process.poll()
             sleep(min(0.2, max(0.0, deadline - time.monotonic())))
     return actions
 
