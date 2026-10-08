@@ -279,7 +279,10 @@ def _fused_gdn_forward(self, hidden_states, *args, **kwargs):
     # One explicit repack of the qkv slice into the [b, conv_dim, s] layout
     # conv1d consumes; handing FLA a non-contiguous view triggers a slower
     # multi-op internal path (measured as ~40 extra launches per layer).
-    mixed_qkv = fused[..., :qkv_end].transpose(1, 2).contiguous()
+    # varlen keeps the transposed view: the conv package only accepts
+    # seq_idx with the native memory format.
+    qkv_view = fused[..., :qkv_end].transpose(1, 2)
+    mixed_qkv = qkv_view if kwargs.get("seq_idx") is not None else qkv_view.contiguous()
     z = fused[..., qkv_end:z_end].reshape(batch_size, seq_len, -1, self.head_v_dim)
     b = fused[..., z_end:b_end]
     a = fused[..., b_end:]
@@ -369,16 +372,13 @@ def _install_gdn_segment(seg: GDNSegment) -> bool:
                            parent.activation)
 
     def conv_fn_with_weights(mixed_qkv, **kw):
-        # causal_conv1d_fn does not accept HF generation kwargs; filter them
-        # the same way the scan closure does.
-        kw.pop("use_cache", None)
-        kw.pop("cu_seqlens", None)
-        kw.pop("cu_seq_lens_q", None)
+        # seq_idx carries the packed-sequence boundaries; the conv takes
+        # nothing else from the layer kwargs (matching the native call).
         return conv_fn(mixed_qkv,
                        parent.conv1d.weight.squeeze(1),
                        parent.conv1d.bias,
                        activation=parent.activation,
-                       **kw)
+                       seq_idx=kw.get("seq_idx"))
 
     def scan(query, key, value, **kw):
         # Route through the block's own instance-bound kernels: transformers
@@ -387,8 +387,6 @@ def _install_gdn_segment(seg: GDNSegment) -> bool:
         # back to the pure-torch references otherwise. Calling the module-level
         # torch_* functions directly forces the slow fallback on every layer.
         single = kw.get("initial_state") is not None and query.shape[1] == 1
-        kw.pop("cu_seqlens", None)
-        kw.pop("cu_seq_lens_q", None)
         fn = parent.recurrent_gated_delta_rule if single else parent.chunk_gated_delta_rule
         return fn(query, key, value, **kw)
 
