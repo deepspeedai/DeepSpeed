@@ -107,7 +107,9 @@ __global__ void decode_step_kernel(const __nv_bfloat16* __restrict__ logits,
 
     for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
         if (tid < stride) {
-            if (s_val[tid + stride] > s_val[tid]) {
+            // torch.argmax picks the lowest index on ties.
+            if (s_val[tid + stride] > s_val[tid] ||
+                (s_val[tid + stride] == s_val[tid] && s_idx[tid + stride] < s_idx[tid])) {
                 s_val[tid] = s_val[tid + stride];
                 s_idx[tid] = s_idx[tid + stride];
             }
@@ -181,7 +183,9 @@ __global__ void decode_step_graph_kernel(const __nv_bfloat16* __restrict__ logit
 
     for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
         if (tid < stride) {
-            if (s_val[tid + stride] > s_val[tid]) {
+            // torch.argmax picks the lowest index on ties.
+            if (s_val[tid + stride] > s_val[tid] ||
+                (s_val[tid + stride] == s_val[tid] && s_idx[tid + stride] < s_idx[tid])) {
                 s_val[tid] = s_val[tid + stride];
                 s_idx[tid] = s_idx[tid + stride];
             }
