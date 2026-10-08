@@ -69,7 +69,7 @@ MODAL_TORCH_PRESETS = {
 }
 PYTORCH_CUDA_128_INDEX_URL = "https://download.pytorch.org/whl/cu128"
 APP_NAME = "deepspeedai-torch-latest-ci"
-SANDBOX_TIMEOUT_SECONDS = 5400
+SANDBOX_TIMEOUT_SECONDS = 7200
 SANDBOX_ACQUIRE_TIMEOUT_SECONDS = 1800
 # Exit codes that nightly triage (see .github/workflows/nightly-bisect.yml) keys on. GitHub only
 # reports run success/failure, so the controller also prints a DS_CI_FAILURE_CLASS=<class> sentinel
@@ -439,6 +439,7 @@ def build_sandbox_kwargs(image: Any) -> dict[str, Any]:
         "unencrypted_ports": [],
         "proxy": None,
         "block_network": False,
+        "cloud": "oci",
         "gpu": "l40s:2",
         "timeout": SANDBOX_TIMEOUT_SECONDS,
     }

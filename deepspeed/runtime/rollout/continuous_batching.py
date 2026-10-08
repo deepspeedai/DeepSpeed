@@ -5,8 +5,8 @@
 
 This module deliberately stops at the scheduler/cache boundary. The model
 backend owns prompt prefill and decode; the scheduler reports which old cache
-rows survive, which requests retire, and which pending requests can be
-admitted into the newly free rows.
+rows survive, which requests retire, and which pending requests fill newly
+free rows.
 """
 
 from collections import deque

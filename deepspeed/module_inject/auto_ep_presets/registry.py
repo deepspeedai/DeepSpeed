@@ -13,7 +13,8 @@ from deepspeed.module_inject.auto_ep_presets.base import (
     AutoEPPresetAdapter,
     MoEModelPreset,
 )
-from deepspeed.module_inject.auto_ep_presets import deepseek_v2, deepseek_v3, mixtral, qwen3_5_moe, qwen3_moe
+from deepspeed.module_inject.auto_ep_presets import (deepseek_v2, deepseek_v3, minimax_m3, mixtral, qwen3_5_moe,
+                                                     qwen3_moe)
 from deepspeed.utils import logger
 
 _PRESET_MODULES = (
@@ -22,6 +23,7 @@ _PRESET_MODULES = (
     qwen3_5_moe,
     deepseek_v2,
     deepseek_v3,
+    minimax_m3,
 )
 
 PRESET_MODELS: dict[str, MoEModelPreset] = {module.PRESET_NAME: module.PRESET for module in _PRESET_MODULES}

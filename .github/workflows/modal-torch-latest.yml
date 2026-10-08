@@ -45,7 +45,7 @@ on:
     - cron: '0 10 * * *'
 
   pull_request_target:
-    types: [review_requested, ready_for_review, synchronize]
+    types: [opened, reopened, review_requested, ready_for_review, synchronize]
     branches:
       - master
 
@@ -142,7 +142,7 @@ jobs:
   deploy:
     name: modal-torch-latest / DeepSpeedAI CI
     runs-on: ubuntu-latest
-    timeout-minutes: 105
+    timeout-minutes: 135
     permissions:
       contents: read
     needs: collect-tests

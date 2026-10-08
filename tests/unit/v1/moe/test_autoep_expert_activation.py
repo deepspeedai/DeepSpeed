@@ -265,10 +265,11 @@ class TestGroupedExpertsActivation:
 
 class TestPresetAndConfig:
 
-    def test_builtin_presets_use_plain_swiglu(self):
-        # Every family with a built-in preset gates with silu (transformers hidden_act="silu").
+    def test_builtin_presets_name_their_form(self):
+        # MiniMax-M3 experts use the clamped GPT-OSS form; every other family with a preset gates
+        # with silu (transformers hidden_act="silu").
         for name, preset in PRESET_MODELS.items():
-            assert preset.expert_activation == "swiglu", name
+            assert preset.expert_activation == ("swiglu_oai" if name == "minimax_m3" else "swiglu"), name
 
     def test_config_key_reaches_custom_preset_and_overrides_builtin(self):
         config = parse_autoep_config({
@@ -374,8 +375,9 @@ class TestExpertActivationDetection:
         assert spec.expert_activation == "swiglu"
 
 
-class TestMiniMaxM3ThroughCustomPattern:
-    """MiniMax-M3 has no preset here; this is how a model with a clamped form runs before it gets one."""
+class TestMiniMaxM3Block:
+    """A real MiniMaxM3VLSparseMoeBlock through the preset (found from the model type, no config keys)
+    and through the custom pattern, which is how a clamped-form model runs before it has a preset."""
 
     def _tiny_model(self, std):
         modeling = pytest.importorskip("transformers.models.minimax_m3_vl.modeling_minimax_m3_vl",
@@ -416,7 +418,17 @@ class TestMiniMaxM3ThroughCustomPattern:
             nn.init.normal_(param, std=std)
         return model
 
-    def _custom_config(self, **kwargs):
+    def _model_for(self, route, std):
+        model = self._tiny_model(std)
+        if route == "custom_pattern":
+            # A model type with a preset is matched to it before the custom pattern is considered, so
+            # the custom route is only reachable for a model type AutoEP does not know yet.
+            model.config.model_type = "no_preset_for_this_type"
+        return model
+
+    def _config(self, route, **kwargs):
+        if route == "preset":
+            return _runtime_config(**kwargs)
         return _runtime_config(moe_layer_pattern=MOE_PATTERN,
                                score_func="sigmoid",
                                score_apply="post",
@@ -425,18 +437,21 @@ class TestMiniMaxM3ThroughCustomPattern:
                                shared_experts_pattern="shared_experts",
                                **kwargs)
 
-    def test_without_the_key_the_block_is_refused(self):
-        auto_ep = AutoEP(self._tiny_model(0.02), self._custom_config())
+    def test_custom_pattern_without_the_key_is_refused(self):
+        auto_ep = AutoEP(self._model_for("custom_pattern", 0.02), self._config("custom_pattern"))
         with pytest.raises(ValueError, match="clamp their SwiGLU"):
             auto_ep.ep_parser()
 
     @pytest.mark.parametrize("std", [0.02, 0.5])  # 0.5 pushes pre-activations past the clamp limit
-    def test_replaced_block_matches_hf_block(self, std):
-        model = self._tiny_model(std)
+    @pytest.mark.parametrize("route", ["preset", "custom_pattern"])
+    def test_replaced_block_matches_hf_block(self, route, std):
+        model = self._model_for(route, std)
         reference = copy.deepcopy(model.model.layers[0].mlp)
 
-        auto_ep = AutoEP(model, self._custom_config(expert_activation="swiglu_oai"))
+        keys = {} if route == "preset" else {"expert_activation": "swiglu_oai"}
+        auto_ep = AutoEP(model, self._config(route, **keys))
         [spec] = auto_ep.ep_parser()
+        assert spec.model_family == ("minimax_m3" if route == "preset" else "custom")
         assert (spec.expert_activation, spec.expert_activation_alpha, spec.expert_activation_limit) == ("swiglu_oai",
                                                                                                         1.702, 7.0)
         auto_ep.replace_moe_layer(spec, ep_size=1, ep_rank=0)
