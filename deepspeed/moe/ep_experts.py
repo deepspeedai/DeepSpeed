@@ -113,10 +113,24 @@ def _swiglu_oai(gate: torch.Tensor, up: torch.Tensor, alpha: float, limit: float
     return (up + 1.0) * (gate * torch.sigmoid(gate * alpha))
 
 
+def _swiglu_clamped_fused(gate: torch.Tensor, up: torch.Tensor, alpha: float, limit: float) -> torch.Tensor:
+    from deepspeed.ops.triton_ops.swiglu_triton import swiglu_clamped
+    return swiglu_clamped(gate, up, alpha=alpha, limit=limit, oai=False)
+
+
+def _swiglu_oai_fused(gate: torch.Tensor, up: torch.Tensor, alpha: float, limit: float) -> torch.Tensor:
+    from deepspeed.ops.triton_ops.swiglu_triton import swiglu_clamped
+    return swiglu_clamped(gate, up, alpha=alpha, limit=limit, oai=True)
+
+
 register_expert_activation("swiglu", _swiglu, fused_fn=_swiglu_fused, gate_fn=F.silu)
 register_expert_activation("geglu_tanh", _geglu_tanh, gate_fn=_gelu_tanh)
-register_expert_activation("swiglu_clamped", _swiglu_clamped, uses_limit=True, gate_fn=F.silu)
-register_expert_activation("swiglu_oai", _swiglu_oai, uses_alpha=True, uses_limit=True)
+register_expert_activation("swiglu_clamped",
+                           _swiglu_clamped,
+                           fused_fn=_swiglu_clamped_fused,
+                           uses_limit=True,
+                           gate_fn=F.silu)
+register_expert_activation("swiglu_oai", _swiglu_oai, fused_fn=_swiglu_oai_fused, uses_alpha=True, uses_limit=True)
 
 
 def apply_expert_activation(gate: torch.Tensor,
