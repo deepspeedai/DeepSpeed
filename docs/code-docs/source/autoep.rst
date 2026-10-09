@@ -9,8 +9,8 @@ This API is separate from the explicit ``deepspeed.moe.layer.MoE`` layer API.
 For the explicit DeepSpeed MoE layer API, see :doc:`moe`.
 
 **Built-in AutoEP presets:** ``mixtral`` (Mixtral), ``qwen3_moe`` (Qwen3-MoE),
-``qwen3_5_moe`` (Qwen3.5-MoE), ``deepseek_v2`` (DeepSeek-V2), and
-``deepseek_v3`` (DeepSeek-V3).
+``qwen3_5_moe`` (Qwen3.5-MoE), ``deepseek_v2`` (DeepSeek-V2),
+``deepseek_v3`` (DeepSeek-V3), and ``minimax_m3`` (MiniMax-M3).
 
 The preset name means AutoEP knows the router, expert, and weight naming
 patterns for that model family. Running a Hugging Face model also requires a
@@ -46,6 +46,13 @@ Transformers build that exposes the matching config/model classes,
      - ``5.0.0``
      - ``load_balance_coeff`` / expert-bias auxiliary-loss-free load balancing
        is not currently supported; non-null values are rejected.
+   * - ``minimax_m3``
+     - ``5.15.0``
+     - Requires the MiniMax-M3 text-backbone ``minimax_m3_vl_text`` model
+       type. The expert MLP uses the clamped GPT-OSS activation
+       (``swiglu_oai``), selected by the preset. ``load_balance_coeff`` /
+       expert-bias auxiliary-loss-free load balancing is not currently
+       supported; non-null values are rejected.
 
 **ZeRO compatibility:** Stages 0, 1, and 2, plus constrained Stage 3
 support. Stage 3 requires AutoEP-managed MoE layers and does not support native
@@ -224,6 +231,59 @@ SMs. The default of 12 was chosen by measuring whole steps: 8 SMs gave a median
 it is alone on the fabric, which exhausts the queue pairs ZeRO and the
 data-parallel groups have already claimed in a training step.
 
+**DeepEP row weighting implementation (experimental):**
+
+DeepEP dispatch returns one received row per routed assignment and one FP32
+weight per row. ``row_weighting_impl`` selects how AutoEP multiplies those rows
+by their weights at the existing ``score_apply`` boundary:
+
+.. code-block:: json
+
+    {
+      "expert_parallel": {
+        "enabled": true,
+        "autoep_size": 8,
+        "comm_backend": "deepep",
+        "comm_max_tokens_per_rank": 4096,
+        "row_weighting_impl": "fused"
+      }
+    }
+
+``"auto"`` (default) resolves to ``"eager"``, preserving the existing eager
+expression exactly. ``"fused"`` runs a separate Triton pointwise operator for
+``(rows.float() * weights).to(rows.dtype)``. It does not reduce over top-k, does
+not change where BF16/FP16 rounding occurs, and does not replace DeepEP's
+combine; the output remains one weighted row per received row in the same row
+order.
+
+The forward product and row gradient match eager's rounding. The FP32 gradient
+of the routing weight sums the same products in a different order, so it need
+not be bitwise equal to eager's; neither summation is consistently closer to
+an FP64 reference. Comparisons should use gradient errors relative to the
+gradient norm after backward and before optimizer clipping in ``engine.step()``.
+Adam's first update can differ on the scale of the learning rate when a
+near-zero gradient changes sign, even if the overall gradients agree closely.
+
+``"fused"`` is rejected, rather than silently ignored, when AutoEP cannot honor
+it:
+
+- ``comm_backend`` is not ``"deepep"`` or ``autoep_size=1``, because the call
+  sites exist only inside the DeepEP route;
+- Triton is unavailable, the device is not CUDA, or the build is ROCm;
+- rows are not bfloat16 or float16;
+- weights are not FP32 ``[N, 1]`` tensors on the same CUDA device;
+- rows or weights are not contiguous, or rows are not shaped ``[N, H]``.
+
+The operator also accepts FP16 rows, but the current DeepEP dispatch supports
+BF16 rows only. Correct backward replay through DeepEP additionally requires
+preserving the cached dispatch layout; that correction is independent of row
+weighting. The separate MoE gradient-norm correction affects the
+``FP16_Optimizer`` wrapper, which is also used by some BF16 configurations
+(for example, BF16 with BF16 gradient accumulation without ZeRO).
+The model-level gradient comparison samples gradients before the wrapper
+computes the norm and clips them in ``engine.step()``. GPU validation applies
+both independent corrections; neither is part of this opt-in change.
+
 Requirements and limits:
 
 - The ``deep_ep`` package must be installed. It is imported only when this
@@ -265,14 +325,17 @@ to turn it back into one row per token. ``combine_impl`` selects how:
 ``"auto"`` (default) resolves to ``"weighted_sum"``, which scatters the rows into
 a zero-filled ``[tokens * top_k, hidden]`` buffer, widens it to FP32 to apply the
 routing weights, and reduces over top-k. ``"fused_weighted_sum"`` computes the
-same result in a single pass: each program owns one token and one slice of the
-hidden dimension, walks its top-k rows in registers and accumulates in FP32, so
-neither the scattered buffer nor the FP32 intermediate is allocated. At the
-canonical shape the FP32 intermediate alone is 64 MiB per layer.
+weighted reduction in one kernel launch: each program owns a whole token and
+walks the hidden dimension in chunks, multiplying each routed row by its score
+in FP32 and accumulating the products in slot order in FP32. FP contraction is
+disabled so each product rounds before it is added; the result is cast only
+once to the output dtype. Neither the scattered buffer nor the FP32
+intermediate is allocated. At the canonical shape the FP32 intermediate alone
+is 64 MiB per layer.
 
-Routing weights are still accumulated in FP32 and cast once, so the result
-matches the eager reduction to within the order of the top-k summation. Only the
-reduction changes: the collectives, the router, the grouped GEMM and the
+The top-k summation order can differ from eager, so results are within the
+existing numerical tolerances, not bitwise unchanged. Only the forward
+reduction changes: the backward, collectives, router, grouped GEMM and
 expert-major reorder are untouched.
 
 ``"fused_weighted_sum"`` is rejected, rather than quietly ignored, when it would
@@ -290,6 +353,71 @@ have nothing to replace or would change semantics:
 Failing fast matters for measurement: a run that asked for the fused reduction
 and silently got the eager one would report the difference between an
 implementation and itself.
+
+**Fused rotary position embedding (experimental):**
+
+RoPE belongs to the attention layers rather than to AutoEP, so it is not
+configured under ``expert_parallel``. DeepSpeed provides an opt-in
+installer that runs Hugging Face's ``apply_rotary_pos_emb`` with a fused Triton
+kernel:
+
+.. code-block:: python
+
+    from deepspeed.ops.triton_ops.fused_rotary_pos_emb import replace_rotary_pos_emb
+
+    patched = replace_rotary_pos_emb(model)
+
+The eager function computes ``q * cos + rotate_half(q) * sin`` in several
+elementwise kernels, each reading and writing the whole query or key tensor.
+The fused kernel reads each tensor once and writes it once, in the forward and in
+the backward, and applies each position's ``cos`` and ``sin`` to all of its
+heads. Every product and sum is rounded to the input dtype where the eager
+expression rounds it, so the outputs, and the gradients for the queries and
+keys, equal eager's element for element as compared by ``torch.equal``, which
+does not distinguish ``+0.0`` from ``-0.0``.
+
+Attention modules look ``apply_rotary_pos_emb`` up in their modeling module, so
+the installer replaces it there: the replacement applies to every model of that
+architecture in the process, not only to ``model``, and
+``restore_rotary_pos_emb()`` undoes it. A modeling module is patched only if one
+of the model's submodules is defined in it, it is listed in
+``SUPPORTED_ROTARY_MODULES`` (Llama, Mistral, Mixtral, Qwen2, Qwen2-MoE, Qwen3,
+Qwen3-MoE and DeepSeek-V3), and its ``apply_rotary_pos_emb`` and
+``rotate_half`` still have the code of the split-half expression: the same
+bytecode, names, constants and defaults, whatever their docstrings. Other
+architectures define functions of the same name that rotate only part of the
+head dimension or add casts, so a module whose function has changed is left
+alone with a warning. The return value is the number of modeling modules
+patched: 1 for Qwen3-30B-A3B.
+
+The replacement runs the kernel when the queries, keys, ``cos`` and ``sin`` are
+bfloat16 or float16 CUDA tensors of one dtype, the head dimension is even, at
+most 512 and has unit stride, and ``cos`` and ``sin`` do not require grad. For
+any other input it runs the original function, so the result is exactly eager's,
+and logs a warning once. ``fused_apply_rotary_pos_emb`` in the same module
+applies the kernel directly and raises on unsupported inputs instead.
+
+Requirements and limits:
+
+- The kernel needs CUDA with Triton. On ROCm or without Triton, the replaced
+  function runs eager.
+- All four tensors must be on one device. Launches use that device's current
+  stream even if another device is current, and restore the caller's current
+  device afterwards.
+- ``unsqueeze_dim`` 1 (heads before the sequence) or 2 (sequence before the
+  heads), with ``cos`` and ``sin`` of shape ``[batch, sequence, head_dim]`` or
+  ``[1, sequence, head_dim]``.
+- For dense layouts, such as attention's transposed projection, outputs keep
+  the strides of the queries and keys, as eager's do; other non-contiguous
+  inputs can give outputs laid out differently from eager's. The gradients for
+  the queries and keys take the layout of the outputs, whereas eager's follow
+  the incoming gradient, so weight gradients computed from them further back,
+  such as the query projection's, can differ from eager's in the last bits.
+- Transformers releases whose ``apply_rotary_pos_emb`` still takes
+  ``position_ids``, such as 4.51, are left unpatched.
+- First-order gradients for the queries and keys; ``cos`` and ``sin`` are
+  constants. Differentiating those gradients again (double backward) raises.
+  ``torch.compile`` and ``torch.func`` transforms are not covered.
 
 **Constraints:**
 
