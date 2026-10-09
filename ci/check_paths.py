@@ -6,9 +6,13 @@ Documentation-only diffs skip them. ``is_docs_path`` is the single definition of
 documentation: ``.github/workflows/check-paths.yml`` runs this script as its gate,
 and ``ci/tests_fetcher.py`` imports it for the Modal GPU test selection.
 
+The gate copies this file from the base branch and runs it outside the repository,
+so a pull request's edits apply only after merge. Keep it a single file that
+imports only the standard library.
+
 Preview the gate's decision for your branch::
 
-    python ci/check_paths.py --base origin/master
+    python ci/check_paths.py --base "$(git merge-base origin/master HEAD)"
 """
 
 from __future__ import annotations

@@ -6,8 +6,8 @@
 
 These build small synthetic git repos on disk and assert the selector makes the
 right call (narrow vs. full vs. nothing). They are pure-stdlib (only need ``git``
-on PATH), so they run anywhere -- including the ``collect-tests`` CI job that uses
-the fetcher -- without a DeepSpeed/torch install.
+and ``bash`` on PATH), so they run anywhere -- including the ``collect-tests`` CI
+job that uses the fetcher -- without a DeepSpeed/torch install.
 
 Run standalone::
 
@@ -25,6 +25,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import textwrap
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # import the sibling module
@@ -395,6 +396,65 @@ def test_check_paths_runs_ci_when_unsure() -> None:
         assert code != 0 and output == "", "a glob in --ignore was accepted"
     finally:
         repo.cleanup()
+
+
+def _gate_step_script() -> str:
+    """The ``run:`` script of the detection step (``id: filter``) in check-paths.yml."""
+    workflow = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "check-paths.yml"
+    lines = workflow.read_text(encoding="utf-8").splitlines()
+    step_start = next(i for i, line in enumerate(lines) if line.strip() == "id: filter")
+    run_key = next(i for i in range(step_start, len(lines)) if lines[i].strip() == "run: |")
+    key_indent = len(lines[run_key]) - len(lines[run_key].lstrip())
+    script: list[str] = []
+    for line in lines[run_key + 1:]:
+        # The YAML block ends at the first non-blank line indented no deeper than "run:".
+        if line.strip() and len(line) - len(line.lstrip()) <= key_indent:
+            break
+        script.append(line)
+    return textwrap.dedent("\n".join(script))
+
+
+def _run_gate_step(repo: TmpRepo) -> tuple[int, str]:
+    """Run the detection step like GitHub Actions: in a shallow clone of the PR, with master as base."""
+    work = Path(tempfile.mkdtemp(prefix="ds-gate-step-"))
+    try:
+        clone = work / "pull-request"
+        clone_command = ["git", "clone", "-q", "--depth=1", "--branch", "feature", repo.root.as_uri(), str(clone)]
+        subprocess.run(clone_command, check=True, capture_output=True)
+        output = work / "github_output"
+        output.write_text("", encoding="utf-8")
+        env = dict(
+            os.environ,
+            BASE_SHA=repo._git("rev-parse", "master").strip(),
+            PR_IGNORE="",
+            GITHUB_OUTPUT=str(output),
+            RUNNER_TEMP=str(work),
+        )
+        # GitHub runs a run: block that has no explicit shell as ``bash -e {0}``.
+        result = subprocess.run(["bash", "-e", "-c", _gate_step_script()], cwd=clone, env=env, capture_output=True)
+        return result.returncode, output.read_text(encoding="utf-8")
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def test_check_paths_workflow_runs_base_branch_copy() -> None:
+    gate = (Path(__file__).resolve().parent / "check_paths.py").read_text(encoding="utf-8")
+    # A pull request's own gate that would skip CI for any diff.
+    pr_gate = 'import os\nopen(os.environ["GITHUB_OUTPUT"], "a").write("should_run=false\\n")\n'
+    docs_only = {"docs/guide.rst": "Changed\n=======\n"}
+    code_and_own_gate = {"ci/check_paths.py": pr_gate, "deepspeed/leaf.py": "VALUE = 11\n"}
+    for pr_changes, expected in ((docs_only, _GATE_SKIPS), (code_and_own_gate, _GATE_RUNS)):
+        repo = TmpRepo()
+        try:
+            repo.write("ci/check_paths.py", gate)
+            repo.commit("base branch gate")
+            repo._git("branch", "-f", "master")
+            for rel, content in pr_changes.items():
+                repo.write(rel, content)
+            repo.commit("pull request")
+            assert _run_gate_step(repo) == expected, sorted(pr_changes)
+        finally:
+            repo.cleanup()
 
 
 def test_new_test_file_is_selected() -> None:

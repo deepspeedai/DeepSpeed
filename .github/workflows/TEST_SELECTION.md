@@ -73,14 +73,19 @@ and `no-torch` workflows use the reusable `check-paths.yml` gate. Disabled
 legacy workflows are left unchanged.
 
 `ci/check_paths.py` is the single definition of documentation (`is_docs_path()`).
-The gate runs it on the complete git diff of the PR's merged tree or merge-group
-commit against its event base SHA. Renames count both the old and new paths: moving
-`module.py` to `docs/module.py` is a code deletion, not a documentation-only change.
-An empty diff runs tests, and diff failures emit a warning and fall back to running
-tests. Callers may pass `pr-ignore` (files, or directories ending in `/`, such as
+The gate runs the base branch's copy of it, read from the event base SHA, on the
+complete git diff of the PR's merged tree or merge-group commit against that SHA.
+A PR that edits the script is judged by the base copy, which runs its tests because
+the script is not documentation; the edits apply after merge. This guards against
+mistakes, not a malicious PR, which controls the workflow files on `pull_request`
+events. Renames count both the old and new paths: moving `module.py` to
+`docs/module.py` is a code deletion, not a documentation-only change. An empty
+diff runs tests, and detection failures, including a base branch without the
+script, emit a warning and fall back to running tests. Callers may pass
+`pr-ignore` (files, or directories ending in `/`, such as
 `version.txt`) to skip more paths on pull requests only; merge queue entries skip
 only documentation-only diffs. Preview the decision with
-`python ci/check_paths.py --base origin/master`.
+`python ci/check_paths.py --base "$(git merge-base origin/master HEAD)"`.
 
 Scheduled, manual, and push runs retain their existing behavior. Required
 workflows still start and report their statuses; only their heavy jobs or steps
@@ -100,7 +105,7 @@ without installing DeepSpeed or PyTorch.
 | `.github/workflows/modal-torch-latest.yml` | The workflow: a no-secret `collect-tests` job gating a trusted `deploy` controller job. |
 | `ci/tests_fetcher.py` | The selector. AST-parses the repo, builds an import graph, decides `all` / `subset` / `none`, writes the test-list file, emits a job summary. |
 | `ci/check_paths.py` | Defines documentation paths (`is_docs_path()`) for the selector and the `check-paths.yml` CPU/GPU workflow gate. |
-| `ci/test_tests_fetcher.py` | Self-tests for the selector and `ci/check_paths.py` (pure stdlib; run in `collect-tests`). |
+| `ci/test_tests_fetcher.py` | Self-tests for the selector and `ci/check_paths.py` (pure stdlib; run in `collect-tests` and, on the PR's own code, in the formatting workflow). |
 | `ci/torch_latest.py` | Pure-stdlib metadata/selection validation plus the trusted Modal-first, AWS-capacity-fallback controller. |
 | `ci/.test_selection/test_list.txt` | The hand-off artifact (one pytest target per line). Git-ignored. |
 

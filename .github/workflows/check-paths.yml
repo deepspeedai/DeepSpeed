@@ -30,6 +30,7 @@ jobs:
           persist-credentials: false
 
       # ci/check_paths.py defines documentation for this gate and the Modal test selector.
+      # Run the base branch's copy so a pull request's edits to it apply only after merge.
       - name: Check for non-documentation changes
         id: filter
         if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
@@ -40,7 +41,8 @@ jobs:
           PR_IGNORE: ${{ github.event_name == 'pull_request' && inputs.pr-ignore || '' }}
         run: |
           git fetch --quiet --no-tags --depth=1 origin "$BASE_SHA"
-          python3 ci/check_paths.py --base "$BASE_SHA" --ignore "$PR_IGNORE"
+          git show "$BASE_SHA:ci/check_paths.py" > "$RUNNER_TEMP/check_paths.py"
+          python3 "$RUNNER_TEMP/check_paths.py" --base "$BASE_SHA" --ignore "$PR_IGNORE"
 
       - name: Fall back to running tests if change detection failed
         if: steps.filter.outcome == 'failure'
