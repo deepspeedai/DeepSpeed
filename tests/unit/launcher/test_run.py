@@ -116,6 +116,18 @@ def test_parse_inclusion_exclusion_errors():
         dsrun.parse_inclusion_exclusion(pool, 'jeff', '')
 
 
+def test_parse_inclusion_exclusion_rejects_excluding_everything():
+    '''Excluding every slot used to return an empty pool, and main() then died with an
+    IndexError on list(active_resources.keys())[0] instead of saying what was wrong.'''
+    pool = {'worker-0': 2, 'worker-1': 2}
+
+    for spec in ('worker-0@worker-1', 'worker-0:0,1@worker-1', 'worker-0:0,1@worker-1:0,1'):
+        with pytest.raises(ValueError, match="leaves no slots"):
+            dsrun.parse_inclusion_exclusion(pool, '', spec)
+
+    assert dsrun.parse_inclusion_exclusion(pool, '', 'worker-0') == {'worker-1': [0, 1]}
+
+
 class _FakeAccelerator:
     '''Enough of an accelerator for main()'s VISIBLE_DEVICES branch.
 
