@@ -182,7 +182,8 @@ class DataAnalyzer(object):
                 else:
                     self.custom_map_update(data, self.metric_types, self.metric_dtypes, self.metric_functions,
                                            metric_results, batch_start_idx)
-                processed_sample += len(data)
+                # The batch sampler counts examples; len(data) can count dict keys or tuple fields.
+                processed_sample += min(self.batch_size, total_sample - processed_sample)
                 duration = (time.time() - start) / 3600.0
                 remain_duration = duration * total_sample / processed_sample - duration
                 logger.info(
@@ -544,7 +545,8 @@ class DistributedDataAnalyzer(object):
                         metric_results[m_idx] = metric_values
                     else:
                         metric_results[m_idx].add_(metric_values)
-            batch_start_idx += len(data)
+            # The batch sampler counts examples; len(data) can count dict keys or tuple fields.
+            batch_start_idx += min(self.batch_size, thread_end_idx - batch_start_idx)
 
         if self.num_threads == 1:
             return metric_results
