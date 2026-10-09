@@ -161,6 +161,10 @@ int ds_adagrad_step(int optimizer_id,
     opt->update_state(lr, epsilon, weight_decay);
     opt->Step_8(params_ptr, grads_ptr, exp_avg_sq_ptr, params_c.numel());
 
+    // contiguous() copies a non-contiguous tensor, so write the result back.
+    if (!params.is_same(params_c)) params.copy_(params_c);
+    if (!exp_avg_sq.is_same(exp_avg_sq_c)) exp_avg_sq.copy_(exp_avg_sq_c);
+
     return 0;
 }
 

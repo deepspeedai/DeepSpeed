@@ -197,6 +197,10 @@ int ds_adagrad_step(int optimizer_id,
 
     invoke(opt, params_c, grads_c, exp_avg_sq_c, params_c.numel());
 
+    // contiguous() copies a non-contiguous tensor, so write the result back.
+    if (!params.is_same(params_c)) params.copy_(params_c);
+    if (!exp_avg_sq.is_same(exp_avg_sq_c)) exp_avg_sq.copy_(exp_avg_sq_c);
+
     return 0;
 }
 
