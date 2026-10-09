@@ -264,6 +264,25 @@ gradient norm after backward and before optimizer clipping in ``engine.step()``.
 Adam's first update can differ on the scale of the learning rate when a
 near-zero gradient changes sign, even if the overall gradients agree closely.
 
+``"activation"`` (experimental) applies the weight inside the expert
+activation instead, between the experts' first projections and their down
+projection: ``h = act(gate, up) * weight``. The down projection is linear and has
+no bias, so this scales each expert output row by its weight, the same function
+as ``"post"``, without a separate pass over the expert output. For ``swiglu`` a
+fused Triton kernel computes ``silu(gate) * up * weight`` in FP32 with one
+rounding and returns the weight gradient from the same backward; other
+activations compute the same product in plain PyTorch. The BF16 rounding point
+therefore moves from the weighted expert output to the activation, so results
+are not bitwise equal to ``"eager"``. It requires ``score_apply`` to resolve to
+``"post"``, ``comm_backend="deepep"`` and ``autoep_size > 1``, and is rejected
+otherwise.
+
+On Qwen3-30B-A3B with 8 H100s (expert parallel size 8, micro-batch 4, 16
+accumulation steps, sequence length 4096, DeepEP with 36 SMs), an equivalent
+benchmark prototype cut the step by 685 ms (3.5%) against the separate
+weighting pass. The rest of the stack also had the fused gate+up projection,
+the backward weight-gradient overlap and the recomputed-combine skip.
+
 ``"fused"`` is rejected, rather than silently ignored, when AutoEP cannot honor
 it:
 

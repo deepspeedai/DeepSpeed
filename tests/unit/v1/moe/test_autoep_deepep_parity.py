@@ -190,7 +190,8 @@ def _run_one_step(backend,
                   reentrant_checkpointing=False,
                   skewed_routing=False,
                   row_weighting_impl="auto",
-                  score_apply=None):
+                  score_apply=None,
+                  use_grouped_mm=False):
     """Build a model on ``backend``, run one step, return its output and grads."""
     seed_everything(seed)
 
@@ -208,6 +209,8 @@ def _run_one_step(backend,
         config["expert_parallel"]["row_weighting_impl"] = row_weighting_impl
     if score_apply is not None:
         config["expert_parallel"]["score_apply"] = score_apply
+    if use_grouped_mm:
+        config["expert_parallel"]["use_grouped_mm"] = True
     if backend == "deepep":
         # Sized explicitly rather than from the first batch, so both backends
         # see identical shapes whatever that batch turns out to be.
@@ -566,6 +569,39 @@ class TestDeepEPMatchesCollective(DistributedTest):
         all_routes = torch.cat([route.flatten() for _, route in fused["routes"]])
         assert torch.count_nonzero(all_routes == 3) == 0
         assert torch.count_nonzero(all_routes == 1) > torch.count_nonzero(all_routes == 2)
+
+    @pytest.mark.parametrize("use_grouped_mm", [False, True])
+    @pytest.mark.parametrize("activation_checkpointing, skewed_routing", [(False, False), (False, True),
+                                                                          (True, False)])
+    def test_row_weighting_in_activation_matches_eager(self, activation_checkpointing, skewed_routing, use_grouped_mm):
+        # The grouped GEMM path runs the fused weighted SwiGLU kernel; the for-loop path, plain PyTorch.
+        skip_unless_h100_tests_enabled("row weighting in the activation needs H100s and a DeepEP build")
+        seed = 8642
+        runs = {}
+        for impl in ("eager", "activation"):
+            runs[impl] = _run_one_step("deepep",
+                                       self.world_size,
+                                       seed,
+                                       activation_checkpointing=activation_checkpointing,
+                                       reentrant_checkpointing=True,
+                                       skewed_routing=skewed_routing,
+                                       row_weighting_impl=impl,
+                                       use_grouped_mm=use_grouped_mm)
+        eager, activation = runs["eager"], runs["activation"]
+        # The same function with the BF16 rounding moved into the activation: compared by relative error, not
+        # bitwise. Adam's first update can turn a near-zero gradient's rounding into a learning-rate-scale step,
+        # so the parameter deltas are not compared.
+        for (name, route), (_, expected_route) in zip(activation["routes"], eager["routes"]):
+            assert torch.equal(route, expected_route), name
+        for name in ("output", "input_gradient"):
+            _assert_native_fused_gradient_close(activation[name], eager[name], name=name)
+        assert activation["gradients"].keys() == eager["gradients"].keys()
+        for name, gradient in eager["gradients"].items():
+            if gradient.norm() == 0:
+                # Skewed routing leaves an expert without tokens on the rank that owns it.
+                assert activation["gradients"][name].norm() == 0, f"{name} gradient should be zero"
+                continue
+            _assert_native_fused_gradient_close(activation["gradients"][name], gradient, name=name)
 
     @pytest.mark.parametrize(
         "activation_checkpointing, skewed_routing",

@@ -189,7 +189,7 @@ def validate_autoep_config(
                          f"got '{config.combine_impl}'")
 
     # Validate row_weighting_impl
-    valid_row_weighting_impl = ("auto", "eager", "fused")
+    valid_row_weighting_impl = ("auto", "eager", "fused", "activation")
     if config.row_weighting_impl not in valid_row_weighting_impl:
         raise ValueError(f"row_weighting_impl must be one of {valid_row_weighting_impl}, "
                          f"got '{config.row_weighting_impl}'")
@@ -200,13 +200,14 @@ def validate_autoep_config(
         raise ValueError(f"comm_backend must be one of {valid_comm_backend}, "
                          f"got '{config.comm_backend}'")
 
-    if config.row_weighting_impl == "fused":
+    if config.row_weighting_impl in ("fused", "activation"):
+        impl = config.row_weighting_impl
         if config.comm_backend != "deepep":
-            raise ValueError('row_weighting_impl="fused" only runs inside the DeepEP route, but '
+            raise ValueError(f'row_weighting_impl="{impl}" only runs inside the DeepEP route, but '
                              f'comm_backend="{config.comm_backend}" was selected. Set comm_backend to '
                              '"deepep", or leave row_weighting_impl unset.')
         if config.autoep_size == 1:
-            raise ValueError('row_weighting_impl="fused" only runs when DeepEP dispatch is active '
+            raise ValueError(f'row_weighting_impl="{impl}" only runs when DeepEP dispatch is active '
                              '(autoep_size > 1), but autoep_size=1. Increase autoep_size, or leave '
                              "row_weighting_impl unset.")
 
