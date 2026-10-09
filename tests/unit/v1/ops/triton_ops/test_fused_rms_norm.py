@@ -6,6 +6,7 @@ import copy
 import functools
 import importlib
 import io
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -15,15 +16,37 @@ import pytest
 import torch
 
 from deepspeed.accelerator import get_accelerator
-from deepspeed.ops.triton_ops import fused_rms_norm
+from unit.common import DistributedTest
 
 QWEN3_MOE_RMS_NORM = "transformers.models.qwen3_moe.modeling_qwen3_moe.Qwen3MoeRMSNorm"
+# Keep parametrization collection-safe: importing the Triton ops here would probe CUDA before --forked.
+RMS_NORM_CLASSES = (
+    "transformers.models.deepseek_v2.modeling_deepseek_v2.DeepseekV2RMSNorm",
+    "transformers.models.deepseek_v3.modeling_deepseek_v3.DeepseekV3RMSNorm",
+    "transformers.models.llama.modeling_llama.LlamaRMSNorm",
+    "transformers.models.mistral.modeling_mistral.MistralRMSNorm",
+    "transformers.models.mixtral.modeling_mixtral.MixtralRMSNorm",
+    "transformers.models.phi3.modeling_phi3.Phi3RMSNorm",
+    "transformers.models.qwen2.modeling_qwen2.Qwen2RMSNorm",
+    "transformers.models.qwen2_moe.modeling_qwen2_moe.Qwen2MoeRMSNorm",
+    "transformers.models.qwen3.modeling_qwen3.Qwen3RMSNorm",
+    QWEN3_MOE_RMS_NORM,
+)
+
+
+def _rms_norm():
+    from deepspeed.ops.triton_ops import fused_rms_norm
+    return fused_rms_norm
 
 
 def _fused_engine_available():
     accelerator = get_accelerator()
-    return (accelerator.is_available() and accelerator.device_name().startswith("cuda")
-            and fused_rms_norm.is_available())
+    return (accelerator.is_available() and accelerator.device_name().startswith("cuda") and _rms_norm().is_available())
+
+
+def _require_fused_engine():
+    if not _fused_engine_available():
+        pytest.skip("fused RMSNorm needs CUDA and Triton")
 
 
 def _device():
@@ -81,10 +104,7 @@ def _assert_ulp_close(actual, expected, *, max_ulp, min_frac_within_1, label):
     assert stats["frac_within_1"] >= min_frac_within_1, message
 
 
-@pytest.mark.skipif(not _fused_engine_available(), reason="fused RMSNorm needs CUDA and Triton")
-@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
-@pytest.mark.parametrize("shape", [(0, 2048), (7, 128), (5, 2048), (3, 130)])
-def test_fused_rms_norm_matches_hf_forward_and_backward(dtype, shape):
+def _check_fused_rms_norm_matches_hf_forward_and_backward(dtype, shape):
     device = _device()
     generator = torch.Generator(device=device).manual_seed(20260923)
     hidden = torch.randn(shape, device=device, dtype=dtype, generator=generator)
@@ -98,7 +118,7 @@ def test_fused_rms_norm_matches_hf_forward_and_backward(dtype, shape):
 
     fused_hidden = hidden.clone().requires_grad_(True)
     fused_weight = weight.clone().requires_grad_(True)
-    fused_out = fused_rms_norm.fused_rms_norm(fused_hidden, fused_weight, 1e-6)
+    fused_out = _rms_norm().fused_rms_norm(fused_hidden, fused_weight, 1e-6)
     fused_out.backward(upstream)
 
     _assert_ulp_close(fused_out, eager_out, max_ulp=2, min_frac_within_1=0.99, label="forward")
@@ -106,9 +126,7 @@ def test_fused_rms_norm_matches_hf_forward_and_backward(dtype, shape):
     _assert_ulp_close(fused_weight.grad, eager_weight.grad, max_ulp=8, min_frac_within_1=0.95, label="dgamma")
 
 
-@pytest.mark.skipif(not _fused_engine_available(), reason="fused RMSNorm needs CUDA and Triton")
-@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
-def test_fused_rms_norm_handles_head_major_non_contiguous_input(dtype):
+def _check_fused_rms_norm_handles_head_major_non_contiguous_input(dtype):
     device = _device()
     generator = torch.Generator(device=device).manual_seed(20260923)
     base = torch.randn((2, 4, 32, 128), device=device, dtype=dtype, generator=generator)
@@ -127,7 +145,7 @@ def test_fused_rms_norm_handles_head_major_non_contiguous_input(dtype):
 
     fused_hidden = hidden.clone().detach().as_strided(hidden.shape, hidden.stride()).requires_grad_(True)
     fused_weight = weight.clone().requires_grad_(True)
-    fused_out = fused_rms_norm.fused_rms_norm(fused_hidden, fused_weight, 1e-6)
+    fused_out = _rms_norm().fused_rms_norm(fused_hidden, fused_weight, 1e-6)
     fused_out.backward(upstream)
 
     _assert_ulp_close(fused_out, eager_out, max_ulp=2, min_frac_within_1=0.99, label="head-major forward")
@@ -139,10 +157,7 @@ def test_fused_rms_norm_handles_head_major_non_contiguous_input(dtype):
                       label="head-major dgamma")
 
 
-@pytest.mark.skipif(not _fused_engine_available(), reason="fused RMSNorm needs CUDA and Triton")
-@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
-@pytest.mark.parametrize("scale", [1e-4, 1e4])
-def test_fused_rms_norm_large_and_tiny_magnitudes(dtype, scale):
+def _check_fused_rms_norm_large_and_tiny_magnitudes(dtype, scale):
     device = _device()
     generator = torch.Generator(device=device).manual_seed(20260923)
     hidden = (scale * torch.randn((9, 2048), device=device, dtype=dtype, generator=generator)).requires_grad_(True)
@@ -156,7 +171,7 @@ def test_fused_rms_norm_large_and_tiny_magnitudes(dtype, scale):
 
     fused_hidden = hidden.detach().clone().requires_grad_(True)
     fused_weight = weight.detach().clone().requires_grad_(True)
-    fused_out = fused_rms_norm.fused_rms_norm(fused_hidden, fused_weight, 1e-6)
+    fused_out = _rms_norm().fused_rms_norm(fused_hidden, fused_weight, 1e-6)
     fused_out.backward(upstream)
 
     _assert_ulp_close(fused_out, eager_out, max_ulp=2, min_frac_within_1=0.99, label="scaled forward")
@@ -164,9 +179,7 @@ def test_fused_rms_norm_large_and_tiny_magnitudes(dtype, scale):
     _assert_ulp_close(fused_weight.grad, eager_weight.grad, max_ulp=16, min_frac_within_1=0.90, label="scaled dgamma")
 
 
-@pytest.mark.skipif(not _fused_engine_available(), reason="fused RMSNorm needs CUDA and Triton")
-@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
-def test_fused_rms_norm_handles_strided_weight(dtype):
+def _check_fused_rms_norm_handles_strided_weight(dtype):
     device = _device()
     generator = torch.Generator(device=device).manual_seed(20260923)
     hidden = torch.randn((6, 256), device=device, dtype=dtype, generator=generator)
@@ -182,7 +195,7 @@ def test_fused_rms_norm_handles_strided_weight(dtype):
     fused_hidden = hidden.clone().requires_grad_(True)
     fused_weight = weight_buffer.clone()[::2].requires_grad_(True)
     assert fused_weight.stride() == (2, )
-    fused_out = fused_rms_norm.fused_rms_norm(fused_hidden, fused_weight, 1e-6)
+    fused_out = _rms_norm().fused_rms_norm(fused_hidden, fused_weight, 1e-6)
     fused_out.backward(upstream)
 
     _assert_ulp_close(fused_out, eager_out, max_ulp=2, min_frac_within_1=0.99, label="strided-weight forward")
@@ -198,28 +211,20 @@ def test_fused_rms_norm_handles_strided_weight(dtype):
                       label="strided-weight dgamma")
 
 
-@pytest.mark.skipif(not _fused_engine_available(), reason="fused RMSNorm needs CUDA and Triton")
-@pytest.mark.parametrize("hidden_dtype, weight_dtype, width", [
-    (torch.bfloat16, torch.bfloat16, 2049),
-    (torch.float32, torch.float32, 128),
-    (torch.bfloat16, torch.float16, 128),
-],
-                         ids=["wider-than-2048", "float32", "mixed-dtypes"])
-def test_fused_rms_norm_rejects_unsupported_inputs(hidden_dtype, weight_dtype, width):
+def _check_fused_rms_norm_rejects_unsupported_inputs(hidden_dtype, weight_dtype, width):
     device = _device()
     hidden = torch.randn((4, width), device=device, dtype=hidden_dtype)
     weight = torch.randn((width, ), device=device, dtype=weight_dtype)
     with pytest.raises(RuntimeError, match="fused RMSNorm"):
-        fused_rms_norm.fused_rms_norm(hidden, weight, 1e-6)
+        _rms_norm().fused_rms_norm(hidden, weight, 1e-6)
 
 
-@pytest.mark.skipif(not _fused_engine_available(), reason="fused RMSNorm needs CUDA and Triton")
-def test_fused_rms_norm_rejects_double_backward():
+def _check_fused_rms_norm_rejects_double_backward():
     device = _device()
     generator = torch.Generator(device=device).manual_seed(20260923)
     hidden = torch.randn((4, 128), device=device, dtype=torch.bfloat16, generator=generator).requires_grad_(True)
     weight = torch.randn((128, ), device=device, dtype=torch.bfloat16, generator=generator).requires_grad_(True)
-    out = fused_rms_norm.fused_rms_norm(hidden, weight, 1e-6)
+    out = _rms_norm().fused_rms_norm(hidden, weight, 1e-6)
     (grad_hidden, ) = torch.autograd.grad(out.float().pow(2).sum(), hidden, create_graph=True)
 
     # A gradient penalty needs this op's second derivative, which the kernels do not provide. It must fail rather
@@ -230,6 +235,7 @@ def test_fused_rms_norm_rejects_double_backward():
 
 
 def test_fused_rms_norm_fail_fast_guards_on_cpu(monkeypatch):
+    fused_rms_norm = _rms_norm()
     monkeypatch.setattr(fused_rms_norm, "_TRITON_AVAILABLE", True)
     monkeypatch.setattr(fused_rms_norm, "_IS_ROCM_PYTORCH", False)
     hidden = torch.randn((2, 128), dtype=torch.bfloat16)
@@ -239,6 +245,7 @@ def test_fused_rms_norm_fail_fast_guards_on_cpu(monkeypatch):
 
 
 def test_fused_rms_norm_fail_fast_dtype_guard(monkeypatch):
+    fused_rms_norm = _rms_norm()
     monkeypatch.setattr(fused_rms_norm, "_TRITON_AVAILABLE", True)
     monkeypatch.setattr(fused_rms_norm, "_IS_ROCM_PYTORCH", False)
     hidden = torch.randn((2, 128), dtype=torch.float32)
@@ -247,7 +254,7 @@ def test_fused_rms_norm_fail_fast_dtype_guard(monkeypatch):
         fused_rms_norm.assert_supported(hidden, weight, 1e-6)
 
 
-@pytest.mark.parametrize("qualified_name", fused_rms_norm.SUPPORTED_RMS_NORM_CLASSES)
+@pytest.mark.parametrize("qualified_name", RMS_NORM_CLASSES)
 def test_supported_rms_norm_classes_compute_the_fused_expression(qualified_name):
     # The kernels are held to _hf_rms_norm; this holds every installable class to the same expression in the
     # installed transformers, where a class's order can change between releases (Olmo2RMSNorm's did).
@@ -349,13 +356,13 @@ def test_replace_rms_norm_leaves_other_forwards_untouched(build, monkeypatch):
     with torch.no_grad():
         before = norm(hidden)
 
-    assert fused_rms_norm.replace_rms_norm(torch.nn.Sequential(norm)) == 0
+    assert _rms_norm().replace_rms_norm(torch.nn.Sequential(norm)) == 0
     with torch.no_grad():
         after = norm(hidden)
     assert torch.equal(after, before)
 
 
-@pytest.mark.parametrize("qualified_name", fused_rms_norm.SUPPORTED_RMS_NORM_CLASSES)
+@pytest.mark.parametrize("qualified_name", RMS_NORM_CLASSES)
 def test_replace_rms_norm_runs_the_eager_forward_for_cpu_inputs(qualified_name):
     generator = torch.Generator().manual_seed(20260923)
     norm = _hf_class(qualified_name)(128).to(torch.bfloat16)
@@ -366,21 +373,20 @@ def test_replace_rms_norm_runs_the_eager_forward_for_cpu_inputs(qualified_name):
         before = norm(hidden)
 
     # Replacing works before the model moves to the GPU, and until then the module computes exactly what it did.
-    assert fused_rms_norm.replace_rms_norm(torch.nn.Sequential(norm)) == 1
+    assert _rms_norm().replace_rms_norm(torch.nn.Sequential(norm)) == 1
     with torch.no_grad():
         after = norm(hidden)
     assert torch.equal(after, before)
-    assert fused_rms_norm.replace_rms_norm(torch.nn.Sequential(norm)) == 0
+    assert _rms_norm().replace_rms_norm(torch.nn.Sequential(norm)) == 0
 
 
 def test_replace_rms_norm_leaves_norms_wider_than_the_kernels_alone():
     rms_norm_class = _hf_class(QWEN3_MOE_RMS_NORM)
-    assert fused_rms_norm.replace_rms_norm(rms_norm_class(2048)) == 1
-    assert fused_rms_norm.replace_rms_norm(rms_norm_class(2049)) == 0
+    assert _rms_norm().replace_rms_norm(rms_norm_class(2048)) == 1
+    assert _rms_norm().replace_rms_norm(rms_norm_class(2049)) == 0
 
 
-@pytest.mark.parametrize("device", ["cpu", "cuda"])
-def test_replace_rms_norm_shallow_copy_uses_its_own_epsilon(device):
+def _check_replace_rms_norm_copy_uses_its_own_epsilon(device, copy_module):
     if device == "cuda":
         if not _fused_engine_available():
             pytest.skip("fused RMSNorm needs CUDA and Triton")
@@ -389,9 +395,10 @@ def test_replace_rms_norm_shallow_copy_uses_its_own_epsilon(device):
     hidden = torch.full((4, 128), 0.25, device=device, dtype=torch.bfloat16)
     with torch.no_grad():
         original_output = norm(hidden)
-    assert fused_rms_norm.replace_rms_norm(norm) == 1
+    assert _rms_norm().replace_rms_norm(norm) == 1
 
-    replica = copy.copy(norm)
+    replica = copy_module(norm)
+    assert _rms_norm().replace_rms_norm(replica) == 0
     replica.variance_epsilon = 0.25
     with torch.no_grad():
         expected = _hf_rms_norm(hidden, replica.weight, replica.variance_epsilon)
@@ -405,8 +412,7 @@ def test_replace_rms_norm_shallow_copy_uses_its_own_epsilon(device):
         _assert_ulp_close(actual, expected, max_ulp=2, min_frac_within_1=0.99, label="shallow-copy forward")
 
 
-@pytest.mark.parametrize("device", ["cpu", "cuda"])
-def test_replace_rms_norm_model_round_trip_preserves_outputs_and_gradients(device):
+def _check_replace_rms_norm_model_round_trip_preserves_outputs_and_gradients(device):
     if device == "cuda":
         if not _fused_engine_available():
             pytest.skip("fused RMSNorm needs CUDA and Triton")
@@ -414,7 +420,7 @@ def test_replace_rms_norm_model_round_trip_preserves_outputs_and_gradients(devic
     norm = _hf_class(QWEN3_MOE_RMS_NORM)(128, eps=0.25)
     model = torch.nn.Sequential(norm).to(device=device, dtype=torch.bfloat16)
     state_dict_keys = tuple(model.state_dict())
-    assert fused_rms_norm.replace_rms_norm(model) == 1
+    assert _rms_norm().replace_rms_norm(model) == 1
 
     serialized = io.BytesIO()
     torch.save(model, serialized)
@@ -422,9 +428,14 @@ def test_replace_rms_norm_model_round_trip_preserves_outputs_and_gradients(devic
     loaded = torch.load(serialized, weights_only=False)
     assert tuple(loaded.state_dict()) == state_dict_keys
     assert torch.equal(loaded[0].weight, model[0].weight)
-    assert fused_rms_norm.replace_rms_norm(loaded) == 0
-
-    hidden = torch.full((4, 128), 0.5, device=device, dtype=torch.bfloat16)
+    hidden = torch.full((2, 4, 8, 128), 0.5, device=device, dtype=torch.bfloat16).transpose(1, 2)
+    with torch.no_grad():
+        before_reinstall = loaded(hidden)
+        eager_before_reinstall = _hf_rms_norm(hidden, loaded[0].weight, loaded[0].variance_epsilon)
+    assert torch.equal(before_reinstall, eager_before_reinstall)
+    assert before_reinstall.stride() == eager_before_reinstall.stride()
+    assert _rms_norm().replace_rms_norm(loaded) == 1
+    assert _rms_norm().replace_rms_norm(loaded) == 0
     eager_hidden = hidden.clone().requires_grad_(True)
     eager_weight = model[0].weight.detach().clone().requires_grad_(True)
     expected = _hf_rms_norm(eager_hidden, eager_weight, norm.variance_epsilon)
@@ -448,13 +459,14 @@ def test_replace_rms_norm_model_round_trip_preserves_outputs_and_gradients(devic
     assert model[0].weight.grad is None
 
 
-def test_replace_rms_norm_checkpoint_loads_in_a_fresh_process(tmp_path):
+@pytest.mark.parametrize("dispatcher_installed", [False, True], ids=["no-dispatcher", "installed-dispatcher"])
+def test_replace_rms_norm_checkpoint_loads_in_a_fresh_process(tmp_path, dispatcher_installed):
     norm = _hf_class(QWEN3_MOE_RMS_NORM)(128, eps=0.25).to(torch.bfloat16)
     model = torch.nn.Sequential(norm)
     hidden = torch.full((4, 128), 0.5, dtype=torch.bfloat16)
     with torch.no_grad():
         expected = _hf_rms_norm(hidden, norm.weight, norm.variance_epsilon)
-    assert fused_rms_norm.replace_rms_norm(model) == 1
+    assert _rms_norm().replace_rms_norm(model) == 1
     checkpoint = tmp_path / "rms_norm.pt"
     torch.save({"model": model, "hidden": hidden, "expected": expected}, checkpoint)
 
@@ -462,6 +474,11 @@ def test_replace_rms_norm_checkpoint_loads_in_a_fresh_process(tmp_path):
     script = """
 import sys
 import torch
+
+if sys.argv[2] == "installed":
+    from deepspeed.ops.triton_ops.fused_rms_norm import replace_rms_norm
+    from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeRMSNorm
+    assert replace_rms_norm(Qwen3MoeRMSNorm(128)) == 1
 
 checkpoint = torch.load(sys.argv[1], map_location="cpu", weights_only=False)
 model = checkpoint["model"]
@@ -474,8 +491,9 @@ assert replace_rms_norm(model) == 1
 assert replace_rms_norm(model) == 0
 assert torch.equal(model(hidden), expected)
 """
-    source_root = Path(fused_rms_norm.__file__).resolve().parents[3]
-    result = subprocess.run([sys.executable, "-c", script, str(checkpoint)],
+    source_root = Path(_rms_norm().__file__).resolve().parents[3]
+    mode = "installed" if dispatcher_installed else "not-installed"
+    result = subprocess.run([sys.executable, "-c", script, str(checkpoint), mode],
                             cwd=source_root,
                             capture_output=True,
                             text=True,
@@ -483,8 +501,7 @@ assert torch.equal(model(hidden), expected)
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-@pytest.mark.skipif(not _fused_engine_available(), reason="fused RMSNorm needs CUDA and Triton")
-def test_replace_rms_norm_data_parallel_matches_eager_training():
+def _check_replace_rms_norm_data_parallel_matches_eager_training():
     if get_accelerator().device_count() < 2:
         pytest.skip("DataParallel replication needs two CUDA devices")
     device = get_accelerator().device_name(0)
@@ -493,7 +510,7 @@ def test_replace_rms_norm_data_parallel_matches_eager_training():
     eager_weight = torch.nn.Parameter(model[0].weight.detach().clone())
     optimizer = torch.optim.SGD(model.parameters(), lr=1 / 32)
     eager_optimizer = torch.optim.SGD([eager_weight], lr=1 / 32)
-    assert fused_rms_norm.replace_rms_norm(model) == 1
+    assert _rms_norm().replace_rms_norm(model) == 1
     parallel = torch.nn.DataParallel(model, device_ids=[0, 1])
     # Constant rows keep DataParallel's extra BF16 gradient reduction exact.
     hidden = torch.full((8, 128), 0.5, device=device, dtype=torch.bfloat16)
@@ -522,9 +539,7 @@ def test_replace_rms_norm_data_parallel_matches_eager_training():
         eager_optimizer.zero_grad()
 
 
-@pytest.mark.skipif(not _fused_engine_available(), reason="fused RMSNorm needs CUDA and Triton")
-@pytest.mark.parametrize("qualified_name", fused_rms_norm.SUPPORTED_RMS_NORM_CLASSES)
-def test_replace_rms_norm_fuses_supported_norms(qualified_name):
+def _check_replace_rms_norm_fuses_supported_norms(qualified_name):
     rms_norm_class = _hf_class(qualified_name)
     device = _device()
     generator = torch.Generator(device=device).manual_seed(20260923)
@@ -538,8 +553,8 @@ def test_replace_rms_norm_fuses_supported_norms(qualified_name):
         for norm in eager.values():
             norm.weight.copy_(torch.randn(norm.weight.shape, device=device, generator=generator))
     fused = copy.deepcopy(eager)
-    assert fused_rms_norm.replace_rms_norm(fused) == 2
-    assert fused_rms_norm.replace_rms_norm(fused) == 0
+    assert _rms_norm().replace_rms_norm(fused) == 2
+    assert _rms_norm().replace_rms_norm(fused) == 0
 
     hidden = 0.1 * torch.randn((2, 8, 256), device=device, dtype=torch.bfloat16, generator=generator)
     heads = torch.randn((2, 8, 4, 128), device=device, dtype=torch.bfloat16, generator=generator)
@@ -570,8 +585,7 @@ def test_replace_rms_norm_fuses_supported_norms(qualified_name):
         _assert_ulp_close(fused_results[label], eager_results[label], max_ulp=8, min_frac_within_1=0.95, label=label)
 
 
-@pytest.mark.skipif(not _fused_engine_available(), reason="fused RMSNorm needs CUDA and Triton")
-def test_replace_rms_norm_runs_the_kernels_only_where_they_apply():
+def _check_replace_rms_norm_runs_the_kernels_only_where_they_apply():
     device = _device()
     generator = torch.Generator(device=device).manual_seed(20260923)
     norm = _hf_class(QWEN3_MOE_RMS_NORM)(128).to(device=device, dtype=torch.bfloat16)
@@ -584,10 +598,10 @@ def test_replace_rms_norm_runs_the_kernels_only_where_they_apply():
     with torch.no_grad():
         eager_out = norm(heads)
         eager_float_out = norm(heads.float())
-        kernel_out = fused_rms_norm.fused_rms_norm(heads, norm.weight, norm.variance_epsilon)
+        kernel_out = _rms_norm().fused_rms_norm(heads, norm.weight, norm.variance_epsilon)
     assert not eager_out.is_contiguous()
 
-    assert fused_rms_norm.replace_rms_norm(torch.nn.Sequential(norm)) == 1
+    assert _rms_norm().replace_rms_norm(torch.nn.Sequential(norm)) == 1
     with torch.no_grad():
         fused_out = norm(heads)
         # The kernels take no float32 input, so this one runs the class's eager forward and gets exactly its result.
@@ -598,7 +612,81 @@ def test_replace_rms_norm_runs_the_kernels_only_where_they_apply():
     assert torch.equal(fallback_out, eager_float_out)
     assert torch.equal(untouched_out, eager_out)
     assert not untouched_out.is_contiguous()
-    assert fused_rms_norm.replace_rms_norm(untouched) == 1
-    assert fused_rms_norm.replace_rms_norm(untouched) == 0
+    assert _rms_norm().replace_rms_norm(untouched) == 1
+    assert _rms_norm().replace_rms_norm(untouched) == 0
     with torch.no_grad():
         assert torch.equal(untouched(heads), kernel_out)
+
+
+@pytest.mark.parametrize("copy_module", [copy.copy, copy.deepcopy], ids=["shallow-copy", "deep-copy"])
+def test_replace_rms_norm_copy_uses_its_own_epsilon(copy_module):
+    _check_replace_rms_norm_copy_uses_its_own_epsilon("cpu", copy_module)
+
+
+def test_replace_rms_norm_model_round_trip_preserves_outputs_and_gradients():
+    _check_replace_rms_norm_model_round_trip_preserves_outputs_and_gradients("cpu")
+
+
+@pytest.mark.skipif(os.environ.get("DS_ACCELERATOR") == "cpu", reason="fused RMSNorm needs CUDA and Triton")
+class TestFusedRMSNormCUDA(DistributedTest):
+    # Fresh workers also tolerate CUDA state created while other test modules are being collected.
+    world_size = 1
+    init_distributed = False
+
+    @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+    @pytest.mark.parametrize("shape", [(0, 2048), (7, 128), (5, 2048), (3, 130)])
+    def test_fused_rms_norm_matches_hf_forward_and_backward(self, dtype, shape):
+        _require_fused_engine()
+        _check_fused_rms_norm_matches_hf_forward_and_backward(dtype, shape)
+
+    @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+    def test_fused_rms_norm_handles_head_major_non_contiguous_input(self, dtype):
+        _require_fused_engine()
+        _check_fused_rms_norm_handles_head_major_non_contiguous_input(dtype)
+
+    @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+    @pytest.mark.parametrize("scale", [1e-4, 1e4])
+    def test_fused_rms_norm_large_and_tiny_magnitudes(self, dtype, scale):
+        _require_fused_engine()
+        _check_fused_rms_norm_large_and_tiny_magnitudes(dtype, scale)
+
+    @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+    def test_fused_rms_norm_handles_strided_weight(self, dtype):
+        _require_fused_engine()
+        _check_fused_rms_norm_handles_strided_weight(dtype)
+
+    @pytest.mark.parametrize("hidden_dtype, weight_dtype, width", [
+        (torch.bfloat16, torch.bfloat16, 2049),
+        (torch.float32, torch.float32, 128),
+        (torch.bfloat16, torch.float16, 128),
+    ],
+                             ids=["wider-than-2048", "float32", "mixed-dtypes"])
+    def test_fused_rms_norm_rejects_unsupported_inputs(self, hidden_dtype, weight_dtype, width):
+        _require_fused_engine()
+        _check_fused_rms_norm_rejects_unsupported_inputs(hidden_dtype, weight_dtype, width)
+
+    def test_fused_rms_norm_rejects_double_backward(self):
+        _require_fused_engine()
+        _check_fused_rms_norm_rejects_double_backward()
+
+    @pytest.mark.parametrize("copy_module", [copy.copy, copy.deepcopy], ids=["shallow-copy", "deep-copy"])
+    def test_replace_rms_norm_copy_uses_its_own_epsilon(self, copy_module):
+        _require_fused_engine()
+        _check_replace_rms_norm_copy_uses_its_own_epsilon("cuda", copy_module)
+
+    def test_replace_rms_norm_model_round_trip_preserves_outputs_and_gradients(self):
+        _require_fused_engine()
+        _check_replace_rms_norm_model_round_trip_preserves_outputs_and_gradients("cuda")
+
+    def test_replace_rms_norm_data_parallel_matches_eager_training(self):
+        _require_fused_engine()
+        _check_replace_rms_norm_data_parallel_matches_eager_training()
+
+    @pytest.mark.parametrize("qualified_name", RMS_NORM_CLASSES)
+    def test_replace_rms_norm_fuses_supported_norms(self, qualified_name):
+        _require_fused_engine()
+        _check_replace_rms_norm_fuses_supported_norms(qualified_name)
+
+    def test_replace_rms_norm_runs_the_kernels_only_where_they_apply(self):
+        _require_fused_engine()
+        _check_replace_rms_norm_runs_the_kernels_only_where_they_apply()

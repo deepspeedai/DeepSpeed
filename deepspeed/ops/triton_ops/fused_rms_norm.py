@@ -35,6 +35,19 @@ _FUSED_INSTANCE_ATTRIBUTE = "_deepspeed_use_fused_rms_norm"
 # Class descriptors bind to the current receiver after copying or replication and are not stored in model pickles.
 _FUSED_CLASS_FORWARDS = {}
 
+
+class _FusedInstanceOptIn:
+    """Live copies keep opting in, but full-model checkpoints explicitly opt out."""
+
+    def __deepcopy__(self, memo):
+        return self
+
+    def __reduce__(self):
+        return bool, (False, )
+
+
+_FUSED_INSTANCE_OPT_IN = _FusedInstanceOptIn()
+
 if _TRITON_AVAILABLE:
 
     @triton.jit
@@ -286,7 +299,7 @@ def _runs_supported_rms_norm_forward(module: torch.nn.Module) -> bool:
     instance_forward_patched = "forward" in vars(module)
     if class_forward_patched or class_forward_wrapped or instance_forward_patched:
         return False
-    if class_forward_is_ours and getattr(module, _FUSED_INSTANCE_ATTRIBUTE, False):
+    if class_forward_is_ours and getattr(module, _FUSED_INSTANCE_ATTRIBUTE, False) is _FUSED_INSTANCE_OPT_IN:
         return False
     weight = getattr(module, "weight", None)
     eps = getattr(module, "variance_epsilon", None)
@@ -307,7 +320,7 @@ def _install_fused_class_forward(module_class) -> None:
     eager_forward = module_class.forward
 
     def forward(self, hidden_states):
-        if not getattr(self, _FUSED_INSTANCE_ATTRIBUTE, False):
+        if getattr(self, _FUSED_INSTANCE_ATTRIBUTE, False) is not _FUSED_INSTANCE_OPT_IN:
             return eager_forward(self, hidden_states)
         return _fused_module_forward(self, hidden_states, eager_forward)
 
@@ -333,9 +346,10 @@ def replace_rms_norm(module: torch.nn.Module) -> int:
 
     The class-level dispatcher is process-wide, but only explicitly replaced
     instances opt in. Copies and DataParallel replicas use their own weights
-    and epsilon. Full-model checkpoints keep the original HF classes and
-    state-dict keys; after loading in a fresh process, call this installer
-    again to enable fusion there.
+    and epsilon and retain their live opt-in. Full-model checkpoints keep the
+    original HF classes and state-dict keys but clear the opt-in on loading,
+    even if this process already has a dispatcher for that class. Call this
+    installer again to enable fusion on the loaded model.
 
     Returns the number of modules replaced.
     """
@@ -349,7 +363,7 @@ def replace_rms_norm(module: torch.nn.Module) -> int:
         module_class = type(child)
         if module_class.forward is not _FUSED_CLASS_FORWARDS.get(module_class):
             _install_fused_class_forward(module_class)
-        setattr(child, _FUSED_INSTANCE_ATTRIBUTE, True)
+        setattr(child, _FUSED_INSTANCE_ATTRIBUTE, _FUSED_INSTANCE_OPT_IN)
         count += 1
     if count and not is_available():
         logger.warning(f"fused RMSNorm replaced {count} modules, but its kernels need Triton on CUDA, not ROCm, "
