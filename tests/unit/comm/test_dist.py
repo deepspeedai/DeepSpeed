@@ -430,17 +430,24 @@ def test_barrier_device_warning(monkeypatch, world_size, expect_hidden):
     monkeypatch.setattr(torch.distributed, "get_backend", lambda group=None: "nccl")
     backend = ds_comm_torch.TorchBackend.__new__(ds_comm_torch.TorchBackend)
 
+    # The exact text torch emits at barrier() on a group without a bound device; pinned for #8775.
+    # With more than one rank it flags a real risk of ranks picking different devices, so it must stay
+    # visible, and so must any other warning that only starts with the same text.
+    torch_warning = ("barrier(): using the device under current context. "
+                     "You can specify `device_id` in `init_process_group` to mute this warning.")
+    other_warning = torch_warning + " Some other advice."
+
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         backend.init_process_group("nccl", timeout=None, init_method=None, rank=0, world_size=world_size)
-        # The text torch emits at barrier() on a group without a bound device (#8775). With more than
-        # one rank it flags a real risk of ranks picking different devices, so it must stay visible.
-        warnings.warn(
-            "barrier(): using the device under current context. "
-            "You can specify `device_id` in `init_process_group` to mute this warning.", UserWarning)
+        warnings.warn(torch_warning, UserWarning)
+        warnings.warn(other_warning, UserWarning)
 
-    barrier_warnings = [w for w in caught if str(w.message).startswith("barrier()")]
-    assert (not barrier_warnings) == expect_hidden
+    shown = [str(w.message) for w in caught if str(w.message).startswith("barrier()")]
+    if expect_hidden:
+        assert shown == [other_warning]
+    else:
+        assert shown == [torch_warning, other_warning]
 
 
 def assert_device_binding(expect_bound):

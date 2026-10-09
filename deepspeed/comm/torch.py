@@ -14,7 +14,12 @@ from .comm import *
 from ..runtime import compiler
 from deepspeed.utils.torch import required_torch_version
 import os
+import re
 import warnings
+
+# What torch (2.9+) emits at barrier() on a process group without a bound device.
+_BARRIER_DEVICE_WARNING = ("barrier(): using the device under current context. "
+                           "You can specify `device_id` in `init_process_group` to mute this warning.")
 
 DS_COMM_ALL_GATHER_OFF = False
 DS_COMM_REDUCE_SCATTER_OFF = False
@@ -283,9 +288,9 @@ class TorchBackend(Backend):
             # because ranks that disagree on it can hang. A single rank has no peer to disagree with,
             # and binding one is what #8248 avoids, so the warning is only noise there (#8775).
             if 'device_id' not in kwargs and torch.distributed.get_world_size() == 1:
-                warnings.filterwarnings('ignore',
-                                        message=r'barrier\(\): using the device under current context',
-                                        category=UserWarning)
+                # Match the whole message, so that any other warning with the same start stays visible.
+                exact_message = re.escape(_BARRIER_DEVICE_WARNING) + r'\Z'
+                warnings.filterwarnings('ignore', message=exact_message, category=UserWarning)
 
         self.using_mpi = torch.distributed.get_backend() == 'mpi'
 
