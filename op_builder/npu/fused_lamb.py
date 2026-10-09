@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # DeepSpeed Team
 
-import math
-
 try:
     import torch
 except ImportError:
@@ -19,14 +17,11 @@ class NPUFusedLamb:
       g      = grad / combined_scale
       m      = beta1 * m + (1 - beta1) * g
       v      = beta2 * v + (1 - beta2) * g**2
-      denom  = sqrt(v + eps)          (eps_mode 0)  or  sqrt(v) + eps  (eps_mode 1)
-      update = m / denom + weight_decay * p
+      m_hat  = m / (1 - beta1**step),  v_hat = v / (1 - beta2**step)  (bias correction on)
+      denom  = sqrt(v_hat + eps)      (eps_mode 0)  or  sqrt(v_hat) + eps  (eps_mode 1)
+      update = m_hat / denom + weight_decay * p
       coeff  = clamp(||p|| / ||update||, min_coeff, max_coeff)
-      p     -= step_size * coeff * update
-
-    with step_size = lr * sqrt(1 - beta2**step) / (1 - beta1**step) when bias
-    correction is on (the reference kernel scales the same two factors into
-    step_size).
+      p     -= lr * coeff * update
 
     The chained in-place form below follows torch_npu's NpuFusedLamb: on
     910B4 it launches ~33% fewer kernels than the equivalent explicit
@@ -39,12 +34,8 @@ class NPUFusedLamb:
     @staticmethod
     def lamb(p, p_copy, exp_avg, exp_avg_sq, grad, lr, beta1, beta2, max_coeff, min_coeff, eps, combined_scale, step,
              eps_mode, bias_correction, weight_decay):
-        if bias_correction:
-            bc1 = 1.0 - beta1**step
-            bc2 = 1.0 - beta2**step
-            step_size = lr * math.sqrt(bc2) / bc1
-        else:
-            step_size = lr
+        bc1 = 1.0 - beta1**step if bias_correction else 1.0
+        bc2 = 1.0 - beta2**step if bias_correction else 1.0
 
         g = grad.float()
         if combined_scale != 1.0:
@@ -54,11 +45,11 @@ class NPUFusedLamb:
         exp_avg_sq.mul_(beta2).addcmul_(g, g, value=1.0 - beta2)
 
         if eps_mode == 0:
-            denom = exp_avg_sq.add(eps).sqrt_()
+            denom = exp_avg_sq.div(bc2).add_(eps).sqrt_()
         else:
-            denom = exp_avg_sq.sqrt().add_(eps)
+            denom = exp_avg_sq.div(bc2).sqrt_().add_(eps)
 
-        update = exp_avg / denom
+        update = exp_avg.div(bc1).div_(denom)
         if weight_decay != 0:
             update.add_(p.float(), alpha=weight_decay)
 
@@ -70,7 +61,7 @@ class NPUFusedLamb:
         else:
             lamb_coeff = (p_norm / u_norm).clamp(min_coeff, max_coeff)
 
-        p.data.copy_((p.float() - step_size * lamb_coeff * update).to(p.dtype))
+        p.data.copy_((p.float() - lr * lamb_coeff * update).to(p.dtype))
         if p_copy.numel() > 0:
             p_copy.copy_(p.data)
 
