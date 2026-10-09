@@ -269,6 +269,78 @@ def test_elementwise_broadcast_flops(lhs_shape, rhs_shape):
     assert flops == result.numel()
 
 
+@pytest.mark.sequential
+@pytest.mark.parametrize("input_shape, interpolate_kwargs", [
+    ((8, 3, 32, 32), {
+        "size": (64, 64)
+    }),
+    ((8, 3, 32, 32), {
+        "size": 64
+    }),
+    ((8, 3, 32, 32), {
+        "scale_factor": 2
+    }),
+    ((8, 3, 32), {
+        "size": 64
+    }),
+    ((8, 3, 32), {
+        "size": (64, )
+    }),
+    ((2, 3, 8, 8, 8), {
+        "size": 16
+    }),
+    ((2, 3, 8, 8, 8), {
+        "size": (16, 16, 16)
+    }),
+    ((1, 4, 20, 20), {
+        "size": (10, 10)
+    }),
+    ((8, 3, 32, 32), {
+        "scale_factor": 1.4
+    }),
+    ((8, 3, 32, 32), {
+        "scale_factor": (1.4, 2.6)
+    }),
+    ((2, 3, 7, 7, 7), {
+        "scale_factor": 1.5
+    }),
+    ((1, 4, 20, 20), {
+        "scale_factor": (0.7, 1.9)
+    }),
+    ((8, 3, 32, 32), {
+        "scale_factor": 2.0
+    }),
+    ((4, 2, 16), {
+        "scale_factor": 3
+    }),
+    ((1, 1, 5, 5), {
+        "scale_factor": (2, 3)
+    }),
+])
+def test_interpolate_flops(input_shape, interpolate_kwargs):
+    """`size` is the output spatial shape, so the batch and channel dims still multiply it, and a
+    scalar `size` applies to every spatial dim. `scale_factor` sizes the same job from the input:
+    torch floors each output spatial dim on its own, so the scales cannot be multiplied together
+    and truncated once, which only shows up once a scale is not an integer."""
+
+    class Interpolate(torch.nn.Module):
+
+        def forward(self, x):
+            return torch.nn.functional.interpolate(x, **interpolate_kwargs)
+
+    model = Interpolate()
+    x = torch.randn(*input_shape)
+
+    prof = FlopsProfiler(model)
+    prof.start_profile()
+    result = model(x)
+    prof.stop_profile()
+    flops = prof.get_total_flops()
+    prof.end_profile()
+
+    assert flops == result.numel()
+
+
 class Block(torch.nn.Module):
 
     def __init__(self, linear):
