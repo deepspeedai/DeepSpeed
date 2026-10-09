@@ -60,6 +60,34 @@ import it.
 The design is a small, self-contained take on HuggingFace `transformers`'
 `utils/tests_fetcher.py`.
 
+### Documentation-only changes
+
+PRs and merge queue entries whose entire diff is under `docs/**`, under
+`blogs/**`, or matches `**/*.md` skip CPU/GPU test suites, Python install smoke,
+and native-op precompilation. This includes all documentation and blog assets
+and configuration files, plus Markdown at any directory depth. Formatting, DCO,
+and documentation checks are not disabled.
+
+The active `python`, `cpu-torch-latest`, `nv-pre-compile-ops`, `mps-torch-latest`,
+and `no-torch` workflows use the reusable `check-paths.yml` gate. Disabled
+legacy workflows are left unchanged.
+
+The gate uses `dorny/paths-filter` and the complete git diff of the PR's merged tree or
+merge-group commit against its event base SHA, rather than the size-limited PR
+files API. Renames count both the old and new paths: moving `module.py` to
+`docs/module.py` is a code deletion, not a documentation-only change. Diff failures emit
+a warning and fall back to running tests. Existing broader PR path exclusions
+remain in effect, but merge queue entries exclude only documentation.
+
+Scheduled, manual, and push runs retain their existing behavior. Required
+workflows still start and report their statuses; only their heavy jobs or steps
+skip. The Modal selector also recognizes documentation-only diffs before applying its
+run-all path globs; explicit `[test all]` / `[no filter]` overrides still win.
+
+Root `README.md` is package metadata, so the formatting workflow always runs
+`python scripts/check-readme.py` to check that it exists and is valid UTF-8
+without installing DeepSpeed or PyTorch.
+
 
 ## Moving parts
 
@@ -204,16 +232,18 @@ first that matches wins:
 3. **No merge-base** with the base (e.g. shallow clone, unrelated history) → `all`.
    A diff here would be wrong, so we never narrow on it.
 4. **Commit message tag** `[test all]` / `[no filter]` anywhere on the branch → `all`.
-5. **A changed file matches a run-all glob** (`COMMON_RUN_ALL_GLOBS` +
+5. **Only documentation paths changed** (`docs/**`, `blogs/**`, or `**/*.md`),
+   including deleted paths and both sides of renames → `none`.
+6. **A changed or deleted file matches a run-all glob** (`COMMON_RUN_ALL_GLOBS` +
    the workflow's `extra_run_all_globs`) → `all`. These are files too central or
    too dynamic to narrow safely: CI scripts, build system, `csrc/`, `op_builder/`,
    `accelerator/`, shared fixtures (`tests/unit/common.py`, `tests/conftest.py`,
    `pytest.ini`), and core runtime hubs (`deepspeed/__init__.py`,
    `deepspeed/runtime/engine.py`, `deepspeed/comm/**`, `deepspeed/accelerator/**`, …).
-6. **A deleted module is still imported** by a surviving file (a dangling import
+7. **A deleted module is still imported** by a surviving file (a dangling import
    the graph can't follow) → `all`. A *clean* deletion (importers removed/updated
    in the same PR) does **not** trigger this.
-7. Otherwise, **narrow via the import graph** (below). If nothing is impacted →
+8. Otherwise, **narrow via the import graph** (below). If nothing is impacted →
    `none`; if everything is → `all`; else → `subset`.
 
 ### The import graph
@@ -227,7 +257,7 @@ first that matches wins:
   these. Their `__init__.py` files eagerly pull in huge subtrees, so if treated as
   normal nodes *any* `deepspeed/**` change would fan out to the whole suite. We
   therefore don't expand their `__init__` imports; instead, changes to the hubs
-  themselves are caught by the run-all globs in step 5.
+  themselves are caught by the run-all globs in step 6.
 - **`conftest.py`** changes select every test under that conftest's directory.
 - **New test files** are selected directly (they have no importers yet).
 
@@ -237,7 +267,7 @@ Some dependencies are wired at runtime (monkey-patching, plugin/registry lookup,
 JIT-loaded ops, `deepspeed.initialize()`-time `replace_module` injection), so a
 test can depend on code it never `import`s. `DYNAMIC_EDGES` is a curated map of
 `changed-file glob → extra test-path globs` that patches these blind spots. It is
-additive on top of the static graph (and is only consulted if step 5 didn't
+additive on top of the static graph (and is only consulted if step 6 didn't
 already short-circuit to `all`).
 
 
@@ -268,7 +298,8 @@ deepspeed/shared.py impacts:
 
 - **Force the full suite for a push:** include `[test all]` (or `[no filter]`)
   anywhere in a commit message on the branch.
-- **Touch an infra file:** any change to a run-all glob runs everything.
+- **Touch an infra file:** a non-documentation-only diff matching a run-all glob runs
+  everything.
 - **Found a missed test?** It's likely a runtime/dynamic dependency the static
   graph can't see — add a `DYNAMIC_EDGES` entry (see below) and/or report it.
 
@@ -352,7 +383,7 @@ capacity fallback, assume its AWS role. The trust boundary is:
   git/AST data; it never imports, installs, builds, or executes candidate code.
 - The selector logic and its self-tests always come from the trusted checkout.
   A PR's `ci/` changes still appear in the diff, so the base selector's `ci/**`
-  run-all rule widens them to the full suite.
+  run-all rule widens them to the full suite unless the diff is documentation-only.
 - The handoff is a fixed `all` / `subset` / `none` mode plus one bounded,
   validated regular file. Test paths must stay under `tests/unit/v1`, cannot be
   options or traversal paths, and are passed after pytest's `--` separator.

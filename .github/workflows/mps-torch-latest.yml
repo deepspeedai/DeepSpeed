@@ -20,8 +20,13 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  check-paths:
+    uses: ./.github/workflows/check-paths.yml
+
   unit-tests:
     name: mps-torch-latest / unit tests
+    needs: check-paths
+    if: ${{ !cancelled() && needs.check-paths.outputs.should_run != 'false' }}
     # GitHub's macOS arm64 runners have an Apple Silicon GPU with a working MPS device.
     runs-on: macos-15
     timeout-minutes: 45

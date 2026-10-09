@@ -1,0 +1,50 @@
+# SPDX-License-Identifier: Apache-2.0
+# DeepSpeed Team
+
+name: CI path filter
+
+on:
+  workflow_call:
+    inputs:
+      pr-filters:
+        description: Path filters for pull requests; merge queues exclude only documentation
+        type: string
+        default: |
+          run_tests:
+            - '**'
+            - '!**/*.md'
+            - '!docs/**'
+            - '!blogs/**'
+    outputs:
+      should_run:
+        description: Whether the caller should run its build or tests
+        value: ${{ jobs.check-paths.outputs.should_run }}
+
+permissions:
+  contents: read
+
+jobs:
+  check-paths:
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.filter.outcome != 'success' || steps.filter.outputs.run_tests != 'false' }}
+    steps:
+      - uses: actions/checkout@v7
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+        with:
+          persist-credentials: false
+
+      - uses: dorny/paths-filter@v4
+        id: filter
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+        continue-on-error: true
+        with:
+          # Git includes both sides of renames and avoids the PR files API's size limit.
+          token: ''
+          predicate-quantifier: every
+          filters: >-
+            ${{ github.event_name == 'pull_request' && inputs.pr-filters || 'run_tests: ["**", "!**/*.md", "!docs/**", "!blogs/**"]' }}
+
+      - name: Fall back to running tests if change detection failed
+        if: steps.filter.outcome == 'failure'
+        run: echo "::warning::Path detection failed; running the build or tests instead of skipping."

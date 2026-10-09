@@ -24,6 +24,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Validate package README without installing DeepSpeed
+        run: python scripts/check-readme.py
+
       - name: environment
         run: |
           which python

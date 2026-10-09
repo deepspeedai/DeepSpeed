@@ -55,6 +55,7 @@ BASELINE = {
     "deepspeed/comm/comm.py": "VALUE = 5\n",
     "deepspeed/module_inject/__init__.py": "",
     "deepspeed/module_inject/replace.py": "VALUE = 6\n",
+    "csrc/kernel.cu": "// kernel\n",
     "tests/__init__.py": "",
     "tests/unit/__init__.py": "",
     "tests/unit/common.py": "import deepspeed  # noqa\n",
@@ -66,6 +67,8 @@ BASELINE = {
     "tests/unit/v1/moe/__init__.py": "",
     "tests/unit/v1/moe/test_moe.py": "import deepspeed  # noqa\n\n\ndef test_x():\n    assert True\n",
     "README.md": "# synthetic repo\n",
+    "docs/guide.rst": "Guide\n=====\n",
+    "blogs/tutorial/config.json": "{}\n",
 }
 
 
@@ -184,13 +187,138 @@ def test_commit_tag_forces_all() -> None:
         repo.cleanup()
 
 
-def test_non_python_change_selects_nothing() -> None:
+def test_documentation_only_changes_select_nothing() -> None:
+    for path in (
+            "README.md",
+            "docs/tutorial.md",
+            "docs/guide.rst",
+            "docs/images/diagram.svg",
+            "docs/_config.yml",
+            "docs/code-docs/source/conf.py",
+            "blogs/tutorial/config.json",
+            "blogs/tutorial/train.py",
+            "blogs/tutorial/image.png",
+            "ci/README.md",
+            "csrc/README.md",
+            "op_builder/README.md",
+            "accelerator/README.md",
+            "requirements/README.md",
+            "deepspeed/comm/README.md",
+            "deepspeed/module_inject/README.md",
+            "ci/.hidden.md",
+            "ci/name with spaces\tand\nnewlines.md",
+    ):
+        repo = TmpRepo()
+        try:
+            repo.write(path, "# changed\n")
+            repo.commit("docs only")
+            sel = repo.selector().select("master")
+            assert sel.mode == "none", (path, sel.reason)
+        finally:
+            repo.cleanup()
+
+
+def test_documentation_rename_and_deletion_select_nothing() -> None:
+    for source, destination in (
+        ("README.md", "renamed.md"),
+        ("docs/guide.rst", "blogs/guide.rst"),
+        ("blogs/tutorial/config.json", "docs/config.json"),
+    ):
+        repo = TmpRepo()
+        try:
+            (repo.root / destination).parent.mkdir(parents=True, exist_ok=True)
+            repo._git("mv", source, destination)
+            repo.commit("rename docs")
+            sel = repo.selector().select("master")
+            assert sel.mode == "none", (source, destination, sel.reason)
+
+            repo.delete(destination)
+            repo.commit("delete docs")
+            sel = repo.selector().select("master")
+            assert sel.mode == "none", (source, sel.reason)
+        finally:
+            repo.cleanup()
+
+
+def test_documentation_mixed_with_code_still_selects_tests() -> None:
     repo = TmpRepo()
     try:
         repo.write("README.md", "# changed\n")
-        repo.commit("docs only")
+        repo.write("docs/guide.rst", "Changed\n=======\n")
+        repo.write("blogs/tutorial/config.json", '{"changed": true}\n')
+        repo.write("deepspeed/leaf.py", "VALUE = 11\n")
+        repo.commit("code and docs")
         sel = repo.selector().select("master")
-        assert sel.mode == "none", sel.reason
+        assert sel.mode == "subset", sel.reason
+        assert _rel_names(repo, sel.tests) == {"tests/unit/v1/test_leaf.py"}
+    finally:
+        repo.cleanup()
+
+
+def test_renames_between_code_and_documentation_select_tests() -> None:
+    for source, destination in (
+        ("deepspeed/leaf.py", "docs/leaf.md"),
+        ("deepspeed/runtime/engine.py", "docs/engine.md"),
+        ("csrc/kernel.cu", "docs/kernel.md"),
+        ("README.md", "op_builder/example.py"),
+        ("deepspeed/leaf.py", "docs/leaf.py"),
+        ("deepspeed/runtime/engine.py", "blogs/engine.py"),
+        ("csrc/kernel.cu", "docs/kernel.cu"),
+        ("docs/guide.rst", "op_builder/guide.rst"),
+        ("blogs/tutorial/config.json", "requirements/docs.json"),
+    ):
+        repo = TmpRepo()
+        try:
+            (repo.root / destination).parent.mkdir(parents=True, exist_ok=True)
+            repo._git("mv", source, destination)
+            repo.commit("rename across file types")
+            sel = repo.selector().select("master")
+            assert sel.mode == "all", (source, destination, sel.reason)
+        finally:
+            repo.cleanup()
+
+
+def test_documentation_named_code_paths_still_run_all() -> None:
+    for path in ("ci/docs/check.py", "csrc/blogs/kernel.cu"):
+        repo = TmpRepo()
+        try:
+            repo.write(path, "// changed\n")
+            repo.commit("code outside documentation directories")
+            sel = repo.selector().select("master")
+            assert sel.mode == "all", (path, sel.reason)
+        finally:
+            repo.cleanup()
+
+
+def test_documentation_only_change_can_force_all() -> None:
+    repo = TmpRepo()
+    try:
+        repo.write("ci/README.md", "# changed\n")
+        repo.write("docs/guide.rst", "Changed\n=======\n")
+        repo.write("blogs/tutorial/config.json", '{"changed": true}\n')
+        repo.commit("docs only")
+        for tag in ("[test all]", "[no filter]"):
+            sel = repo.selector().select("master", commit_message=tag)
+            assert sel.mode == "all", sel.reason
+    finally:
+        repo.cleanup()
+
+
+def test_readme_check_rejects_missing_or_invalid_utf8() -> None:
+    script = Path(__file__).resolve().parents[1] / "scripts" / "check-readme.py"
+    repo = TmpRepo()
+    try:
+        repo.write("README.md", "# caf\u00e9\n")
+        result = subprocess.run([sys.executable, str(script)], cwd=repo.root, capture_output=True)
+        assert result.returncode == 0, result.stderr
+
+        (repo.root / "README.md").write_bytes(b"\xff\n")
+        result = subprocess.run([sys.executable, str(script)], cwd=repo.root, capture_output=True)
+        assert result.returncode != 0, "invalid UTF-8 README was accepted"
+
+        repo.delete("README.md")
+        result = subprocess.run([sys.executable, str(script)], cwd=repo.root, capture_output=True)
+        assert result.returncode != 0, "missing README was accepted"
     finally:
         repo.cleanup()
 
@@ -250,6 +378,8 @@ def test_dynamic_edge_pulls_in_moe_tests() -> None:
 def test_missing_base_runs_all() -> None:
     repo = TmpRepo()
     try:
+        repo.write("README.md", "# changed\n")
+        repo.commit("docs only")
         sel = repo.selector().select("")
         assert sel.mode == "all", sel.reason
         sel = repo.selector().select("origin/does-not-exist")

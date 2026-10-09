@@ -19,8 +19,13 @@ permissions:
     issues: write
 
 jobs:
+  check-paths:
+    uses: ./.github/workflows/check-paths.yml
+
   unit-tests:
     name: no-torch / source distribution build
+    needs: check-paths
+    if: ${{ !cancelled() && needs.check-paths.outputs.should_run != 'false' }}
     runs-on: ubuntu-24.04
 
     steps:
