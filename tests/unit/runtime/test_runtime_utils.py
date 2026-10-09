@@ -101,6 +101,29 @@ class TestClipGradNormPNorm(DistributedTest):
             assert torch.allclose(actual.grad, expected.grad)
 
 
+class TestClipGradNormPipeline(DistributedTest):
+    world_size = 2
+
+    def test_counts_every_stage_once(self):
+        from deepspeed.runtime.pipe.topology import PipeDataParallelTopology, PipelineParallelGrid
+
+        grid = PipelineParallelGrid(topology=PipeDataParallelTopology(num_pp=2, num_dp=1))
+        stage = grid.get_stage_id()
+        # Each stage owns one gradient. A tied weight sits on both stages with the same
+        # gradient and is marked replicated on every stage but its owner.
+        own = torch.nn.Parameter(torch.zeros(1))
+        own.grad = torch.Tensor([3.0 if stage == 0 else 4.0])
+        own.ds_pipe_replicated = False
+        tied = torch.nn.Parameter(torch.zeros(1))
+        tied.grad = torch.Tensor([12.0])
+        tied.ds_pipe_replicated = stage != 0
+
+        norm = ds_utils.clip_grad_norm_([own, tied], max_norm=1.0, mpu=grid)
+
+        # sqrt(3^2 + 4^2 + 12^2): both stages, the tied weight once.
+        assert norm.item() == pytest.approx(13.0)
+
+
 @pytest.mark.parametrize("check_using_norm", [(False), (True)])
 class TestCheckOverflow(DistributedTest):
     world_size = 2
