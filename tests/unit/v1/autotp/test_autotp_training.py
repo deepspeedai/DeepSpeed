@@ -25,7 +25,7 @@ from torch import nn
 from deepspeed.module_inject.auto_tp import AutoTP
 from deepspeed.module_inject.layers import (LinearAllreduce, LinearLayer, VocabParallelLinear, VocabParallelEmbedding,
                                             set_autotp_mode, is_autotp_training_mode, GatherFromTensorParallelRegion,
-                                            ScatterToTensorParallelRegion)
+                                            ScatterToTensorParallelRegion, HiddenParallelEmbedding)
 from deepspeed.module_inject.tp_shard import get_shard_size_list
 from unit.checkpoint.common import compare_lr_scheduler_states, compare_optimizer_states
 import os
@@ -1288,6 +1288,134 @@ class TestRowParallelOutputHeadTraining(DistributedTest):
             assert not torch.equal(reference_head.weight, initial_weight)
         finally:
             reset_tp_model_init_state()
+
+
+class TestTiedRowParallelOutputHeadTraining(DistributedTest):
+    """Catch a tied embedding and row-parallel head drifting apart or losing either gradient."""
+    world_size = 2
+    reuse_dist_env = False
+
+    @pytest.mark.parametrize("hidden_dim,padding_idx,embedding_spec,zero_stage", [
+        (32, None, False, 0),
+        (35, 3, False, 0),
+        (35, 3, True, 0),
+        (32, 3, False, 2),
+    ])
+    def test_training_matches_unsharded_reference(self, hidden_dim, padding_idx, embedding_spec, zero_stage):
+        skip_on_device()
+        reset_tp_model_init_state()
+        torch.manual_seed(8173)
+        vocab_size = 67
+        device = get_accelerator().current_device_name()
+        model = TiedRowParallelOutputTrainingModel(hidden_dim, vocab_size, padding_idx).to(device)
+        reference = deepcopy(model)
+        learning_rate = 0.05
+        optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate)
+        reference_optimizer = torch.optim.SGD(reference.parameters(), lr=learning_rate)
+        layer_specs = [{"patterns": [r".*lm_head\.weight$"], "partition_type": "row"}]
+        if embedding_spec:
+            layer_specs.append({"patterns": [r".*embed_tokens\.weight$"], "partition_type": "row"})
+        config = {
+            "train_micro_batch_size_per_gpu": 1,
+            "gradient_clipping": 0.0,
+            "zero_allow_untested_optimizer": True,
+            "zero_optimization": {
+                "stage": zero_stage
+            },
+            "tensor_parallel": {
+                "autotp_size": self.world_size,
+                "partition_config": {
+                    "use_default_specs": False,
+                    "layer_specs": layer_specs,
+                },
+            },
+        }
+        try:
+            engine, _, _, _ = deepspeed.initialize(model=model, optimizer=optimizer, config=config)
+            head = engine.module.lm_head
+            assert isinstance(engine.module.embed_tokens, HiddenParallelEmbedding)
+            assert head.weight is engine.module.embed_tokens.weight
+            initial_weight = reference.lm_head.weight.detach().clone()
+            for step in range(3):
+                torch.manual_seed(100 + step)
+                input_ids = torch.randint(vocab_size, (2, 5), device=device)
+                if padding_idx is not None:
+                    input_ids[0, 0] = padding_idx
+                labels = torch.randint(vocab_size, (2, 5), device=device)
+                reference_logits = reference(input_ids)
+                tp_logits = engine(input_ids)
+                torch.testing.assert_close(tp_logits, reference_logits, atol=1e-6, rtol=1e-5)
+                reference_loss = nn.functional.cross_entropy(reference_logits.reshape(-1, vocab_size),
+                                                             labels.reshape(-1))
+                tp_loss = nn.functional.cross_entropy(tp_logits.reshape(-1, vocab_size), labels.reshape(-1))
+                reference_loss.backward()
+                engine.backward(tp_loss)
+                if zero_stage == 0:
+                    # The tied gradient is the sum of the lookup and projection contributions.
+                    full_grad = head.weight.grad.detach().clone()
+                    head.gather_params([full_grad])
+                    torch.testing.assert_close(full_grad, reference.lm_head.weight.grad, atol=1e-6, rtol=1e-5)
+                engine.step()
+                reference_optimizer.step()
+                reference_optimizer.zero_grad()
+                full_weight = head.weight.detach().clone()
+                head.gather_params([full_weight])
+                torch.testing.assert_close(full_weight, reference.lm_head.weight, atol=1e-6, rtol=1e-5)
+                torch.testing.assert_close(engine.module.projection.weight,
+                                           reference.projection.weight,
+                                           atol=1e-6,
+                                           rtol=1e-5)
+            assert not torch.equal(reference.lm_head.weight, initial_weight)
+        finally:
+            reset_tp_model_init_state()
+
+    def test_universal_checkpoint_reconstructs_tied_weight(self):
+        skip_on_device()
+        reset_tp_model_init_state()
+        torch.manual_seed(8173)
+        hidden_dim = 35
+        model = TiedRowParallelOutputTrainingModel(hidden_dim, 67, None)
+        original_weight = model.lm_head.weight.detach().clone()
+        config = {
+            "train_micro_batch_size_per_gpu": 1,
+            "tensor_parallel": {
+                "autotp_size": self.world_size,
+                "partition_config": {
+                    "use_default_specs": False,
+                    "layer_specs": [{
+                        "patterns": [r".*lm_head\.weight$"],
+                        "partition_type": "row"
+                    }],
+                },
+            },
+        }
+        try:
+            engine, _, _, _ = deepspeed.initialize(model=model,
+                                                   optimizer=torch.optim.SGD(model.parameters(), lr=0.01),
+                                                   config=config)
+            uc_info = getattr(engine.module, UNIVERSAL_CHECKPOINT_INFO)
+            affine_map = ParamAffineMap.from_dict(uc_info[AFFINE_MAP][AFFINE_MAP_PARAMS][r"^embed_tokens\.weight$"])
+            shards = [None] * self.world_size
+            dist.all_gather_object(shards,
+                                   engine.module.lm_head.weight.detach().cpu(),
+                                   group=groups.get_tensor_model_parallel_group())
+            assert shards[0].shape[1] != shards[1].shape[1]
+            torch.testing.assert_close(affine_map.rebuild(dict(enumerate(shards))), original_weight)
+        finally:
+            reset_tp_model_init_state()
+
+
+class TiedRowParallelOutputTrainingModel(nn.Module):
+
+    def __init__(self, hidden_dim, vocab_size, padding_idx):
+        super().__init__()
+        self.embed_tokens = nn.Embedding(vocab_size, hidden_dim, padding_idx=padding_idx)
+        self.projection = nn.Linear(hidden_dim, hidden_dim)
+        self.lm_head = nn.Linear(hidden_dim, vocab_size, bias=False)
+        self.lm_head.weight = self.embed_tokens.weight
+
+    def forward(self, input_ids):
+        return self.lm_head(torch.tanh(self.projection(self.embed_tokens(input_ids))))
 
 
 # @pytest.mark.sequential
