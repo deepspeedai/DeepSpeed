@@ -21,6 +21,7 @@ or under pytest::
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -398,10 +399,12 @@ def test_check_paths_runs_ci_when_unsure() -> None:
         repo.cleanup()
 
 
+_CHECK_PATHS_WORKFLOW = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "check-paths.yml"
+
+
 def _gate_step_script() -> str:
     """The ``run:`` script of the detection step (``id: filter``) in check-paths.yml."""
-    workflow = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "check-paths.yml"
-    lines = workflow.read_text(encoding="utf-8").splitlines()
+    lines = _CHECK_PATHS_WORKFLOW.read_text(encoding="utf-8").splitlines()
     step_start = next(i for i, line in enumerate(lines) if line.strip() == "id: filter")
     run_key = next(i for i in range(step_start, len(lines)) if lines[i].strip() == "run: |")
     key_indent = len(lines[run_key]) - len(lines[run_key].lstrip())
@@ -414,18 +417,49 @@ def _gate_step_script() -> str:
     return textwrap.dedent("\n".join(script))
 
 
-def _run_gate_step(repo: TmpRepo) -> tuple[int, str]:
-    """Run the detection step like GitHub Actions: in a shallow clone of the PR, with master as base."""
+def _gate_fetch_depth() -> int:
+    """The checkout depth check-paths.yml requests; actions/checkout defaults to 1."""
+    text = _CHECK_PATHS_WORKFLOW.read_text(encoding="utf-8")
+    match = re.search(r"^\s*fetch-depth:\s*(\d+)\s*$", text, re.MULTILINE)
+    return int(match.group(1)) if match else 1
+
+
+def _run_gate_step(repo: TmpRepo, event: str) -> tuple[int, str]:
+    """Run the detection step like GitHub Actions for ``feature`` as a pull request into ``master``.
+
+    ``pull_request`` checks out GitHub's merge commit of the PR into master; ``merge_group``
+    checks out the merge queue's squash commit on top of master.
+    """
+    base = repo._git("rev-parse", "master").strip()
+    repo._git("checkout", "-q", "--detach", "master")
+    if event == "pull_request":
+        repo._git("merge", "-q", "--no-ff", "-m", "Merge feature into master", "feature")
+    else:
+        repo._git("merge", "-q", "--squash", "feature")
+        repo.commit("merge queue entry")
+    repo._git("update-ref", "refs/ci/checkout", "HEAD")
+    repo._git("checkout", "-q", "feature")
+
     work = Path(tempfile.mkdtemp(prefix="ds-gate-step-"))
     try:
-        clone = work / "pull-request"
-        clone_command = ["git", "clone", "-q", "--depth=1", "--branch", "feature", repo.root.as_uri(), str(clone)]
-        subprocess.run(clone_command, check=True, capture_output=True)
+        clone = work / "checkout"
+        clone.mkdir()
+        # Like actions/checkout: a shallow fetch of the event's commit at the workflow's depth.
+        depth = _gate_fetch_depth()
+        checkout_commands = [
+            ["init", "-q"],
+            ["remote", "add", "origin", repo.root.as_uri()],
+            ["fetch", "-q", f"--depth={depth}", "--no-tags", "origin", "+refs/ci/checkout:refs/ci/checkout"],
+            ["checkout", "-q", "--detach", "refs/ci/checkout"],
+        ]
+        for args in checkout_commands:
+            subprocess.run(["git", *args], cwd=clone, check=True, capture_output=True)
         output = work / "github_output"
         output.write_text("", encoding="utf-8")
         env = dict(
             os.environ,
-            BASE_SHA=repo._git("rev-parse", "master").strip(),
+            GITHUB_EVENT_NAME=event,
+            MERGE_GROUP_BASE_SHA=base if event == "merge_group" else "",
             PR_IGNORE="",
             GITHUB_OUTPUT=str(output),
             RUNNER_TEMP=str(work),
@@ -437,24 +471,42 @@ def _run_gate_step(repo: TmpRepo) -> tuple[int, str]:
         shutil.rmtree(work, ignore_errors=True)
 
 
-def test_check_paths_workflow_runs_base_branch_copy() -> None:
+def _gate_step_after_pull_request(pr_changes: dict[str, str], event: str, master_moves_on: bool) -> tuple[int, str]:
     gate = (Path(__file__).resolve().parent / "check_paths.py").read_text(encoding="utf-8")
+    repo = TmpRepo()
+    try:
+        repo.write("ci/check_paths.py", gate)
+        repo.commit("base branch gate")
+        repo._git("branch", "-f", "master")
+        for rel, content in pr_changes.items():
+            repo.write(rel, content)
+        repo.commit("pull request")
+        if master_moves_on:
+            repo._git("checkout", "-q", "master")
+            repo.write("deepspeed/shared.py", "VALUE = 22\n")
+            repo.commit("unrelated master change")
+            repo._git("checkout", "-q", "feature")
+        return _run_gate_step(repo, event)
+    finally:
+        repo.cleanup()
+
+
+def test_check_paths_workflow_runs_base_branch_copy() -> None:
     # A pull request's own gate that would skip CI for any diff.
     pr_gate = 'import os\nopen(os.environ["GITHUB_OUTPUT"], "a").write("should_run=false\\n")\n'
-    docs_only = {"docs/guide.rst": "Changed\n=======\n"}
     code_and_own_gate = {"ci/check_paths.py": pr_gate, "deepspeed/leaf.py": "VALUE = 11\n"}
-    for pr_changes, expected in ((docs_only, _GATE_SKIPS), (code_and_own_gate, _GATE_RUNS)):
-        repo = TmpRepo()
-        try:
-            repo.write("ci/check_paths.py", gate)
-            repo.commit("base branch gate")
-            repo._git("branch", "-f", "master")
-            for rel, content in pr_changes.items():
-                repo.write(rel, content)
-            repo.commit("pull request")
-            assert _run_gate_step(repo) == expected, sorted(pr_changes)
-        finally:
-            repo.cleanup()
+    for event in ("pull_request", "merge_group"):
+        assert _gate_step_after_pull_request(code_and_own_gate, event, master_moves_on=False) == _GATE_RUNS, event
+
+
+def test_check_paths_workflow_compares_with_the_merged_base() -> None:
+    # Most pull requests are behind master; master's own changes since then must not count.
+    docs_only = {"docs/guide.rst": "Changed\n=======\n"}
+    code = {"deepspeed/leaf.py": "VALUE = 11\n"}
+    for event in ("pull_request", "merge_group"):
+        for pr_changes, expected in ((docs_only, _GATE_SKIPS), (code, _GATE_RUNS)):
+            result = _gate_step_after_pull_request(pr_changes, event, master_moves_on=True)
+            assert result == expected, (event, sorted(pr_changes))
 
 
 def test_new_test_file_is_selected() -> None:

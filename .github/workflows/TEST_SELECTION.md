@@ -73,8 +73,12 @@ and `no-torch` workflows use the reusable `check-paths.yml` gate. Disabled
 legacy workflows are left unchanged.
 
 `ci/check_paths.py` is the single definition of documentation (`is_docs_path()`).
-The gate runs the base branch's copy of it, read from the event base SHA, on the
-complete git diff of the PR's merged tree or merge-group commit against that SHA.
+The gate diffs the checked-out commit against the exact commit it was built on: a
+PR's merge commit against its first parent, the base-branch commit GitHub merged
+the PR into, and a merge queue entry against `merge_group.base_sha`. It does not
+use the event's `pull_request.base.sha`, which can be days older and would add the
+base branch's own changes, so docs-only PRs behind master would not skip. The gate
+runs the base branch's copy of the script, read from that same commit.
 A PR that edits the script is judged by the base copy, which runs its tests because
 the script is not documentation; the edits apply after merge. This guards against
 mistakes, not a malicious PR, which controls the workflow files on `pull_request`
