@@ -472,3 +472,12 @@ the stock ``ForCausalLMLoss``:
 
     install_chunked_causal_lm_loss(model)
     engine, optimizer, _, _ = deepspeed.initialize(model=model, config=ds_config)
+
+Class-index targets must have dtype ``torch.long``. Other dtypes, including
+floating-point and boolean labels, are rejected instead of being converted.
+When ``shift_labels`` is provided, it is the target used by the loss; unused
+``labels`` are not dtype-checked. ``block_rows`` must be a positive integer
+or ``None`` for automatic sizing, even when the selected backend does not use
+row blocking. Invalid settings are rejected before a backend runs. A model
+with a non-writable stock ``loss_function`` raises an actionable error rather
+than being silently left unmodified.

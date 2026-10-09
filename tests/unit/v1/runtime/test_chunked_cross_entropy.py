@@ -2,15 +2,17 @@
 # DeepSpeed Team
 """The chunked causal-LM loss must equal Hugging Face's ForCausalLMLoss, in value and in gradient."""
 
+import importlib.util
+
 import pytest
 import torch
 
-from deepspeed.runtime.chunked_cross_entropy import (ChunkedCausalLMLoss, chunked_cross_entropy,
-                                                     install_chunked_causal_lm_loss, triton_backend_available)
-
 loss_utils = pytest.importorskip("transformers.loss.loss_utils")
 
-_TRITON_ON_CUDA = torch.cuda.is_available() and triton_backend_available()  #ignore-cuda
+# NVML-based discovery leaves CUDA uninitialized in the parent before pytest --forked starts workers.
+_CUDA_AVAILABLE = torch.cuda.device_count() > 0  #ignore-cuda
+_TRITON_ON_CUDA = (_CUDA_AVAILABLE and importlib.util.find_spec("triton") is not None
+                   and getattr(torch.version, "hip", None) is None)
 # Each backend on the device it runs on; the Triton one only where CUDA and Triton exist.
 BACKEND_DEVICES = [
     pytest.param("torch", "cpu", id="torch"),
@@ -19,6 +21,18 @@ BACKEND_DEVICES = [
                  id="triton",
                  marks=pytest.mark.skipif(not _TRITON_ON_CUDA, reason="the Triton backend needs CUDA and Triton")),
 ]
+
+
+@pytest.fixture(autouse=True)
+def _load_loss_runtime_in_the_worker(request):
+    global ChunkedCausalLMLoss, chunked_cross_entropy, install_chunked_causal_lm_loss, triton_backend_available
+    global _TRITON_ON_CUDA
+    # The shared Triton helper probes its driver on import, so load it after pytest has forked its worker.
+    from deepspeed.runtime.chunked_cross_entropy import (ChunkedCausalLMLoss, chunked_cross_entropy,
+                                                         install_chunked_causal_lm_loss, triton_backend_available)
+    _TRITON_ON_CUDA = _CUDA_AVAILABLE and triton_backend_available()
+    if "backend" in request.fixturenames and request.getfixturevalue("backend") == "triton" and not _TRITON_ON_CUDA:
+        pytest.skip("the Triton backend needs CUDA and Triton")
 
 
 def _inputs(batch, seq, vocab, dtype, seed=0, ignore_every=5, device="cpu"):
@@ -89,10 +103,15 @@ def test_normalizes_by_num_items_in_batch_like_hugging_face(backend, device):
     assert distance.max().item() <= 1
 
 
-def test_uses_given_shift_labels_like_hugging_face():
+@pytest.mark.parametrize("labels_kind", ["long", "float", "none"])
+def test_uses_given_shift_labels_like_hugging_face(labels_kind):
     vocab = 64
     logits, labels = _inputs(1, 19, vocab, torch.float32, seed=4)
     shift_labels = torch.roll(labels, shifts=-3, dims=-1)
+    if labels_kind == "float":
+        labels = labels.float() + 0.5
+    elif labels_kind == "none":
+        labels = None
 
     expected_loss, expected_grad = _loss_and_grad(loss_utils.ForCausalLMLoss,
                                                   logits,
@@ -103,6 +122,74 @@ def test_uses_given_shift_labels_like_hugging_face():
 
     torch.testing.assert_close(loss, expected_loss, rtol=1e-6, atol=1e-6)
     torch.testing.assert_close(grad, expected_grad, rtol=1e-5, atol=1e-8)
+
+
+@pytest.mark.parametrize("backend, device", BACKEND_DEVICES)
+@pytest.mark.parametrize("block_rows", [0, -1])
+def test_nonpositive_block_rows_are_rejected_at_all_public_entry_points(backend, device, block_rows):
+    with pytest.raises(ValueError, match="block_rows"):
+        ChunkedCausalLMLoss(block_rows=block_rows, backend=backend)
+    logits = torch.zeros((4, 8), device=device)
+    target = torch.ones(4, dtype=torch.long, device=device)
+    with pytest.raises(ValueError, match="block_rows"):
+        chunked_cross_entropy(logits, target, block_rows=block_rows, backend=backend)
+
+    model = _tiny_causal_lm(seed=17)
+    original_loss = model.loss_function
+    with pytest.raises(ValueError, match="block_rows"):
+        install_chunked_causal_lm_loss(model, block_rows=block_rows, backend=backend)
+    assert model.loss_function is original_loss
+
+
+def test_fractional_block_rows_are_not_silently_coerced():
+    with pytest.raises(TypeError, match="block_rows"):
+        ChunkedCausalLMLoss(block_rows=0.5)
+    with pytest.raises(TypeError, match="block_rows"):
+        chunked_cross_entropy(torch.zeros(4, 8), torch.ones(4, dtype=torch.long), block_rows=0.5)
+
+
+@pytest.mark.parametrize("backend, device", BACKEND_DEVICES)
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bool, torch.int32])
+def test_nonlong_class_indices_are_rejected_like_the_stock_loss(backend, device, dtype):
+    logits, labels = _inputs(1, 7, 17, torch.float32, seed=19, device=device)
+    value = 1.5 if dtype == torch.float32 else 1
+    bad = torch.full(labels.shape, value, dtype=dtype, device=device)
+    loss_function = ChunkedCausalLMLoss(block_rows=3, backend=backend)
+    with pytest.raises(RuntimeError):
+        loss_utils.ForCausalLMLoss(logits, bad, 17)
+    with pytest.raises(RuntimeError):
+        loss_function(logits, bad, 17)
+    with pytest.raises(RuntimeError):
+        loss_utils.ForCausalLMLoss(logits, labels, 17, shift_labels=bad)
+    with pytest.raises(RuntimeError):
+        loss_function(logits, labels, 17, shift_labels=bad)
+    with pytest.raises(RuntimeError):
+        torch.nn.functional.cross_entropy(logits.reshape(-1, 17), bad.reshape(-1))
+    with pytest.raises(RuntimeError):
+        chunked_cross_entropy(logits.reshape(-1, 17), bad.reshape(-1), backend=backend)
+
+
+def test_torch_20_uses_the_one_argument_async_assert_contract(monkeypatch):
+    generator = torch.Generator().manual_seed(23)
+    logits = torch.randn(4, 8, generator=generator).requires_grad_(True)
+    target = torch.tensor([1, 2, 3, 4])
+    expected_logits = logits.detach().clone().requires_grad_(True)
+    expected = torch.nn.functional.cross_entropy(expected_logits, target)
+    expected.backward()
+    assert_async = torch._assert_async
+
+    def legacy_assert_async(condition):
+        return assert_async(condition)
+
+    # This collaborator exposes the documented Torch 2.0 signature while still executing the real assertion.
+    monkeypatch.setattr(torch, "__version__", "2.0.0")
+    monkeypatch.setattr(torch, "_assert_async", legacy_assert_async)
+    actual = chunked_cross_entropy(logits, target, backend="torch")
+    actual.backward()
+    torch.testing.assert_close(actual, expected, rtol=1e-6, atol=1e-6)
+    torch.testing.assert_close(logits.grad, expected_logits.grad, rtol=1e-5, atol=1e-8)
+    with pytest.raises(RuntimeError):
+        chunked_cross_entropy(logits.detach(), torch.tensor([1, 8, 3, 4]), backend="torch")
 
 
 @pytest.mark.parametrize("backend, device", BACKEND_DEVICES)
@@ -155,6 +242,8 @@ def test_an_out_of_range_target_raises_on_cpu():
 @pytest.mark.skipif(not _TRITON_ON_CUDA, reason="the Triton backend needs CUDA and Triton")
 def test_an_out_of_range_target_fails_the_triton_backend_instead_of_reading_another_row():
     """A device-side assert poisons the CUDA context, so this runs in its own process."""
+    if not _TRITON_ON_CUDA:
+        pytest.skip("the Triton backend needs CUDA and Triton")
     import subprocess
     import sys
     import textwrap
@@ -226,6 +315,43 @@ def test_installed_loss_trains_a_hugging_face_model_like_the_stock_loss():
         torch.testing.assert_close(chunked_parameter.grad, stock_parameter.grad, rtol=1e-4, atol=1e-7, msg=name)
 
 
+@pytest.mark.parametrize("backend, device", BACKEND_DEVICES)
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bool])
+def test_installed_loss_rejects_malformed_labels_like_a_stock_model(backend, device, dtype):
+    stock = _tiny_causal_lm(seed=29).to(device)
+    chunked = _tiny_causal_lm(seed=29).to(device)
+    install_chunked_causal_lm_loss(chunked, block_rows=3, backend=backend)
+    input_ids = torch.ones((1, 7), dtype=torch.long, device=device)
+    value = 1.5 if dtype == torch.float32 else 1
+    labels = torch.full(input_ids.shape, value, dtype=dtype, device=device)
+    with pytest.raises(RuntimeError):
+        stock(input_ids=input_ids, labels=labels)
+    with pytest.raises(RuntimeError):
+        chunked(input_ids=input_ids, labels=labels)
+
+
+@pytest.mark.parametrize("assignment", ["read-only", "type-error", "ignored"])
+def test_install_reports_a_nonwritable_stock_loss_without_changing_it(assignment):
+
+    class ReadOnlyModel:
+
+        @property
+        def loss_function(self):
+            return loss_utils.ForCausalLMLoss
+
+    class RejectingModel(ReadOnlyModel):
+
+        @ReadOnlyModel.loss_function.setter
+        def loss_function(self, value):
+            if assignment == "type-error":
+                raise TypeError("loss_function assignment is not supported")
+
+    model = ReadOnlyModel() if assignment == "read-only" else RejectingModel()
+    with pytest.raises(ValueError, match="not writable"):
+        install_chunked_causal_lm_loss(model)
+    assert model.loss_function is loss_utils.ForCausalLMLoss
+
+
 def test_install_refuses_a_model_that_does_not_use_the_stock_loss():
     model = _tiny_causal_lm(seed=0)
     install_chunked_causal_lm_loss(model)
@@ -233,7 +359,7 @@ def test_install_refuses_a_model_that_does_not_use_the_stock_loss():
         install_chunked_causal_lm_loss(model)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="measures CUDA allocator peaks")  #ignore-cuda
+@pytest.mark.skipif(not _CUDA_AVAILABLE, reason="measures CUDA allocator peaks")
 def test_real_vocabulary_backward_peak_drops_by_the_float32_tensors():
     """At Qwen3's vocabulary, the stock loss holds three FP32 [tokens, vocab] tensors when backward starts."""
     cuda = torch.cuda  #ignore-cuda
@@ -261,3 +387,38 @@ def test_real_vocabulary_backward_peak_drops_by_the_float32_tensors():
     assert distance.max().item() <= 1
     assert (distance == 0).float().mean().item() >= 0.999
     assert stock_peak - chunked_peak >= 2 * float32_logits_bytes, (stock_peak, chunked_peak)
+
+
+@pytest.mark.skipif(not _CUDA_AVAILABLE, reason="CUDA is needed to check forked initialization")
+def test_collection_leaves_cuda_initialization_fork_safe():
+    import os
+    import subprocess
+    import sys
+    import textwrap
+    program = textwrap.dedent("""
+        import os
+        import runpy
+        import sys
+        import torch
+        runpy.run_path(sys.argv[1])
+        pid = os.fork()
+        if pid == 0:
+            try:
+                torch.ones(1, device="cuda")
+            except RuntimeError as error:
+                sys.stderr.write(str(error))
+                os._exit(1)
+            os._exit(0)
+        _, status = os.waitpid(pid, 0)
+        if os.WIFEXITED(status):
+            sys.exit(os.WEXITSTATUS(status))
+        sys.exit(1)
+    """)
+    env = os.environ.copy()
+    env.pop("PYTORCH_NVML_BASED_CUDA_CHECK", None)
+    result = subprocess.run([sys.executable, "-c", program, os.path.abspath(__file__)],
+                            env=env,
+                            capture_output=True,
+                            text=True,
+                            timeout=300)
+    assert result.returncode == 0, result.stdout + result.stderr

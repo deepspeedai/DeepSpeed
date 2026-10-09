@@ -16,9 +16,12 @@ backend does the same arithmetic one block of rows at a time and runs anywhere.
 
 from __future__ import annotations
 
+import operator
+
 import torch
 
 from deepspeed.ops.triton_ops._triton import _TRITON_AVAILABLE, triton, tl
+from deepspeed.utils.torch import required_torch_version
 
 _IS_ROCM_PYTORCH = getattr(torch.version, "hip", None) is not None
 BACKENDS = ("auto", "triton", "torch")
@@ -87,6 +90,18 @@ _BLOCK_ELEMENTS = 1 << 26
 
 def _block_rows(vocab_size: int) -> int:
     return max(1, _BLOCK_ELEMENTS // vocab_size)
+
+
+def _validate_block_rows(block_rows: int | None) -> int | None:
+    if block_rows is None:
+        return None
+    try:
+        block_rows = operator.index(block_rows)
+    except TypeError as error:
+        raise TypeError("block_rows must be a positive integer or None") from error
+    if block_rows <= 0:
+        raise ValueError(f"block_rows must be a positive integer or None, got {block_rows}")
+    return block_rows
 
 
 def _refuse_create_graph():
@@ -188,24 +203,33 @@ def chunked_cross_entropy(logits: torch.Tensor,
                           backend: str = "auto") -> torch.Tensor:
     """``torch.nn.functional.cross_entropy(logits.float(), target, ...)`` without FP32 ``[rows, vocab]`` tensors.
 
-    ``logits`` is ``[rows, vocab]`` and ``target`` is ``[rows]``. As with ``cross_entropy``, "mean"
+    ``logits`` is ``[rows, vocab]`` and ``target`` is ``[rows]`` with dtype ``torch.long``; targets are
+    not converted from other dtypes. As with ``cross_entropy``, "mean"
     divides by the number of non-ignored rows, so it is NaN when every row is ignored. ``backend``
     "auto" uses Triton for CUDA logits when it is available and PyTorch otherwise; naming a backend
-    that cannot run raises instead of substituting the other. ``block_rows`` applies to PyTorch only.
+    that cannot run raises instead of substituting the other. ``block_rows`` must be a positive
+    integer or ``None`` and controls the PyTorch backend only.
     """
+    block_rows = _validate_block_rows(block_rows)
     if logits.dim() != 2 or target.shape != logits.shape[:1]:
         raise ValueError(f"Expected [rows, vocab] logits and [rows] targets, got {tuple(logits.shape)} and "
                          f"{tuple(target.shape)}")
     if reduction not in ("none", "sum", "mean"):
         raise ValueError(f"Unsupported reduction: {reduction!r}")
+    if target.dtype != torch.long:
+        raise RuntimeError(f"Expected torch.long class-index targets, got {target.dtype}")
     # The Triton kernels index both tensors by row with unit stride.
-    target = target.to(device=logits.device, dtype=torch.long).contiguous()
+    target = target.to(device=logits.device).contiguous()
     logits = logits.contiguous()
     # The Triton kernel reads the target's logit without a bounds check, so an out-of-range target would
     # silently read another row. Asserting on the device fails the way cross_entropy does, without the host
     # synchronization a Python-side check would add to every step.
     out_of_range = (target != ignore_index) & ((target < 0) | (target >= logits.shape[-1]))
-    torch._assert_async(~out_of_range.any(), f"Target is out of range for vocabulary size {logits.shape[-1]}")
+    targets_in_range = ~out_of_range.any()
+    if required_torch_version(min_version="2.1"):
+        torch._assert_async(targets_in_range, f"Target is out of range for vocabulary size {logits.shape[-1]}")
+    else:
+        torch._assert_async(targets_in_range)
     if _resolve_backend(backend, logits) == "triton":
         loss = _TritonCrossEntropy.apply(logits, target, ignore_index)
     else:
@@ -225,7 +249,7 @@ class ChunkedCausalLMLoss:
     def __init__(self, block_rows: int | None = None, backend: str = "auto"):
         if backend not in BACKENDS:
             raise ValueError(f"Unsupported chunked cross-entropy backend {backend!r}; expected one of {BACKENDS}")
-        self.block_rows = block_rows
+        self.block_rows = _validate_block_rows(block_rows)
         self.backend = backend
 
     def __call__(self,
@@ -268,7 +292,11 @@ def install_chunked_causal_lm_loss(model, block_rows: int | None = None, backend
         raise ValueError("install_chunked_causal_lm_loss only replaces the stock Hugging Face ForCausalLMLoss, "
                          f"but this model's loss_function is {getattr(model, 'loss_function', None)!r}")
     loss_function = ChunkedCausalLMLoss(block_rows=block_rows, backend=backend)
-    model.loss_function = loss_function
+    try:
+        model.loss_function = loss_function
+    except (AttributeError, TypeError) as error:
+        raise ValueError(
+            "Unable to install the chunked causal-LM loss: the model's loss_function is not writable") from error
     if model.loss_function is not loss_function:
         raise ValueError("Unable to install the chunked causal-LM loss: the model's loss_function is not writable")
     return loss_function
