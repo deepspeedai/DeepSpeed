@@ -256,16 +256,26 @@ checkpoints, universal checkpoints, expert tensor parallelism and optimizer
 state, including Muon's per-expert treatment of ``w1`` and ``w3``, see the same
 layout as before.
 
-Forward values and weight gradients are those of ``"separate"``. In the
+The forward expression and parameter-gradient semantics are unchanged. Exact
+output and weight-gradient equality was observed in the tested H100 cases,
+not guaranteed for all GEMM backends, shapes or hardware. In the
 backward pass, one input-gradient GEMM accumulates both projections in FP32,
-where ``"separate"`` adds two BF16 results, so the input gradient can differ in
-the last bits; it is at least as close to an FP64 reference.
+where ``"separate"`` adds two results rounded to the input dtype, so the input gradient can differ in
+the last bits. The numerical regression compares relative L2 errors with an
+FP64 reference using the same represented BF16 parameters; it does not claim
+universal bitwise equivalence or accuracy improvement.
+
+The packed SwiGLU Triton path supports first-order gradients only:
+``create_graph=True`` raises instead of silently dropping its second derivative.
+Forward and backward launch on the input device's current stream, restoring
+the caller's device. Other activations keep their existing eager expression.
 
 Most of the saving is in the backward pass: one input-gradient GEMM instead of
 two, and no separate addition. On Qwen3-30B-A3B with 8 H100s (expert parallel
 size 8, micro-batch 4, 16 accumulation steps, sequence length 4096, DeepEP and
 reentrant activation checkpointing), a full optimizer step went from 22.02 s to
-21.60 s (-1.9%) in two pairs measured in the same job, with unchanged peak
+21.60 s (-1.9%) in two pairs using an equivalent benchmark prototype in the
+same allocation, with unchanged peak
 allocated memory and about 0.4 GB more reserved memory.
 
 ``"fused"`` is rejected, rather than silently ignored, when the experts would

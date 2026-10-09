@@ -163,18 +163,24 @@ if _TRITON_AVAILABLE:
             n_elements = out.numel()
             if n_elements > 0:
                 grid = (triton.cdiv(n_elements, _BLOCK_SIZE), )
-                _swiglu_packed_fwd_kernel[grid](gate_up,
-                                                out,
-                                                n_elements,
-                                                INTER=inter,
-                                                BLOCK_SIZE=_BLOCK_SIZE,
-                                                num_warps=_NUM_WARPS)
+                # Triton uses the current device and stream, which may differ from the input tensor's device.
+                with torch.cuda.device(gate_up.device):  #ignore-cuda
+                    _swiglu_packed_fwd_kernel[grid](gate_up,
+                                                    out,
+                                                    n_elements,
+                                                    INTER=inter,
+                                                    BLOCK_SIZE=_BLOCK_SIZE,
+                                                    num_warps=_NUM_WARPS)
 
             ctx.save_for_backward(gate_up)
             return out
 
         @staticmethod
         def backward(ctx, grad_out: torch.Tensor):
+            # The Triton backward has no autograd graph, so create_graph would silently lose the second derivative.
+            if torch.is_grad_enabled():
+                raise RuntimeError("The packed SwiGLU kernel has no second derivative; "
+                                   "backward with create_graph=True is not supported")
             gate_up, = ctx.saved_tensors
             grad_out = grad_out.contiguous()
             grad_gate_up = torch.empty_like(gate_up)
@@ -182,13 +188,14 @@ if _TRITON_AVAILABLE:
             n_elements = grad_out.numel()
             if n_elements > 0:
                 grid = (triton.cdiv(n_elements, _BLOCK_SIZE), )
-                _swiglu_packed_bwd_kernel[grid](grad_out,
-                                                gate_up,
-                                                grad_gate_up,
-                                                n_elements,
-                                                INTER=gate_up.shape[-1] // 2,
-                                                BLOCK_SIZE=_BLOCK_SIZE,
-                                                num_warps=_NUM_WARPS)
+                with torch.cuda.device(gate_up.device):  #ignore-cuda
+                    _swiglu_packed_bwd_kernel[grid](grad_out,
+                                                    gate_up,
+                                                    grad_gate_up,
+                                                    n_elements,
+                                                    INTER=gate_up.shape[-1] // 2,
+                                                    BLOCK_SIZE=_BLOCK_SIZE,
+                                                    num_warps=_NUM_WARPS)
 
             return grad_gate_up
 
@@ -231,6 +238,8 @@ def swiglu_packed(gate_up: torch.Tensor) -> torch.Tensor:
     Returns:
         Tensor of shape ``[..., I]`` and the dtype of ``gate_up``, matching :func:`swiglu` on the two halves.
 
+    The Triton path supports first-order gradients only and raises for ``create_graph=True``.
+    Forward and backward use the input device's current stream and restore the caller's current device.
     Falls back to the eager PyTorch expression when Triton is unavailable.
     """
     if gate_up.dim() == 0 or gate_up.shape[-1] % 2:

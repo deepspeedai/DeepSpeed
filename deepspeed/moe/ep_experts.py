@@ -299,7 +299,8 @@ def _run_experts_grouped_mm_fused_gate_up(
     The parameters keep their separate ``w1``/``w3`` layout; their concatenation is rebuilt on each call.
     One GEMM over ``2 * hidden_dim`` output columns replaces two in the forward pass, and in the backward
     pass a single input-gradient GEMM accumulates both projections in FP32 instead of adding two rounded
-    results. The forward values and weight gradients are those of the separate path.
+    results. The forward expression and parameter-gradient semantics are unchanged; exact numerical equality
+    across GEMM shapes and implementations is not guaranteed.
 
     Args mirror :func:`_run_experts_grouped_mm`.
     """

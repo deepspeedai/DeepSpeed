@@ -8,6 +8,7 @@ Everything here runs on CPU in one process, like test_autoep_unit.py.
 """
 
 import copy
+import io
 import math
 from types import SimpleNamespace
 
@@ -15,6 +16,7 @@ import pytest
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 
 from deepspeed.accelerator import get_accelerator
 from deepspeed.module_inject.auto_ep import AutoEP
@@ -342,7 +344,8 @@ class TestFusedGateUp:
     @pytest.mark.parametrize("activation", tuple(EXPERT_ACTIVATIONS))
     def test_matches_separate_with_skewed_and_empty_experts(self, activation):
         # Forward values and weight gradients are the separate path's; the input gradient sums both projections
-        # inside one FP32 GEMM accumulation, so it is held to FP64 instead and must be no less accurate.
+        # inside one FP32 GEMM accumulation. Compare relative L2 errors against the same represented weights
+        # in FP64, retaining the existing 5% relative slack instead of promising strict elementwise equality.
         if get_accelerator().device_name() != "cuda" or not hasattr(torch, "_grouped_mm"):
             pytest.skip("needs CUDA with torch._grouped_mm and FP64")
         device = get_accelerator().current_device_name()
@@ -358,10 +361,10 @@ class TestFusedGateUp:
                                **shape,
                                **act)
         fused.load_state_dict(separate.state_dict())
-        reference = copy.deepcopy(separate).to(device=device, dtype=torch.float64)
-        reference.use_grouped_mm = False
         separate.to(device=device, dtype=torch.bfloat16)
         fused.to(device=device, dtype=torch.bfloat16)
+        reference = copy.deepcopy(separate).to(dtype=torch.float64)
+        reference.use_grouped_mm = False
 
         counts = torch.tensor([37, 0, 291, 72], device=device)
         x = torch.randn(int(counts.sum()), 256, device=device, dtype=torch.bfloat16)
@@ -382,6 +385,67 @@ class TestFusedGateUp:
             return ((got.double() - x_reference.grad).norm() / x_reference.grad.norm()).item()
 
         assert relative_error(inputs["fused"].grad) <= relative_error(inputs["separate"].grad) * 1.05
+
+    @pytest.mark.parametrize("activation", tuple(EXPERT_ACTIVATIONS))
+    @pytest.mark.parametrize("recompute", [False, True])
+    def test_accumulated_updates_and_checkpoint_keep_the_separate_parameters(self, activation, recompute):
+        if get_accelerator().device_name() != "cuda" or not hasattr(torch, "_grouped_mm"):
+            pytest.skip("needs CUDA with torch._grouped_mm")
+        device = get_accelerator().current_device_name()
+        generator = torch.Generator(device=device).manual_seed(8733)
+        shape = dict(dim=256, hidden_dim=384, num_experts=4)
+        settings = dict(use_grouped_mm=True,
+                        disable_triton_grouped_mm=True,
+                        activation=activation,
+                        activation_alpha=1.5,
+                        activation_limit=1.0)
+        separate = GroupedExperts(**shape, **settings).to(device=device, dtype=torch.bfloat16)
+        for weight in separate.parameters():
+            nn.init.normal_(weight, std=0.06, generator=generator)
+        fused = GroupedExperts(**shape, **settings, gate_up_impl="fused").to(device=device, dtype=torch.bfloat16)
+        fused.load_state_dict(separate.state_dict())
+        separate_optimizer = torch.optim.SGD(separate.parameters(), lr=0.01, momentum=0.9)
+        fused_optimizer = torch.optim.SGD(fused.parameters(), lr=0.01, momentum=0.9)
+        counts = torch.tensor([16, 0, 32, 16], device=device)
+
+        for step in range(2):
+            for _ in range(2):
+                hidden = torch.randn((64, 256), device=device, dtype=torch.bfloat16, generator=generator)
+                upstream = torch.randn(hidden.shape, device=device, dtype=hidden.dtype, generator=generator)
+                expected = separate(hidden.clone().requires_grad_(True), counts)
+                fused_hidden = hidden.clone().requires_grad_(True)
+                actual = checkpoint(fused, fused_hidden, counts, use_reentrant=True) if recompute else fused(
+                    fused_hidden, counts)
+                torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+                actual.backward(upstream)
+                expected.backward(upstream)
+                for name in ("w1", "w2", "w3"):
+                    torch.testing.assert_close(getattr(fused, name).grad, getattr(separate, name).grad, rtol=0, atol=0)
+                    assert not getattr(fused, name).grad[1].any()
+            separate_optimizer.step()
+            fused_optimizer.step()
+            for name in ("w1", "w2", "w3"):
+                fused_weight, reference_weight = getattr(fused, name), getattr(separate, name)
+                torch.testing.assert_close(fused_weight, reference_weight, rtol=0, atol=0)
+                torch.testing.assert_close(fused_optimizer.state[fused_weight]["momentum_buffer"],
+                                           separate_optimizer.state[reference_weight]["momentum_buffer"],
+                                           rtol=0,
+                                           atol=0)
+            assert tuple(fused.state_dict()) == ("w1", "w2", "w3")
+            separate_optimizer.zero_grad()
+            fused_optimizer.zero_grad()
+
+            if step == 0:
+                # The next update must use reloaded separate parameters, not a cached concatenation or optimizer layout.
+                serialized = io.BytesIO()
+                torch.save({"experts": fused.state_dict(), "optimizer": fused_optimizer.state_dict()}, serialized)
+                serialized.seek(0)
+                state = torch.load(serialized, weights_only=True)
+                fused = GroupedExperts(**shape, **settings, gate_up_impl="fused").to(device=device,
+                                                                                     dtype=torch.bfloat16)
+                fused.load_state_dict(state["experts"])
+                fused_optimizer = torch.optim.SGD(fused.parameters(), lr=0.01, momentum=0.9)
+                fused_optimizer.load_state_dict(state["optimizer"])
 
 
 class TestPresetAndConfig:
