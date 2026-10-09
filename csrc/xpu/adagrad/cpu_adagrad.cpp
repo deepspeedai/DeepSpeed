@@ -43,9 +43,9 @@ void Adagrad_Optimizer::Step_1(float* _params,
             for (size_t k = t; k < offset; k++) {
                 float grad = half_precision ? (float)grads_cast_h[k] : grads[k];
                 float param = half_precision ? (float)params_cast_h[k] : _params[k];
-                float momentum = grads[k];
                 float variance = _exp_avg_sq[k];
                 if (_weight_decay > 0) { grad = param * _weight_decay + grad; }
+                float momentum = grad;
 
                 variance += grad * grad;
 
