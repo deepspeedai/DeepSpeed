@@ -84,9 +84,9 @@ only documentation-only diffs. Preview the decision with
 
 Scheduled, manual, and push runs retain their existing behavior. Required
 workflows still start and report their statuses; only their heavy jobs or steps
-skip. The Modal selector imports the same `is_docs_path()` and recognizes
-documentation-only diffs before applying its run-all path globs; explicit
-`[test all]` / `[no filter]` overrides still win.
+skip. The Modal selector imports the same `is_docs_path()` and drops documentation
+paths before applying its run-all path globs and import graph, so documentation
+never widens a selection; explicit `[test all]` / `[no filter]` overrides still win.
 
 Root `README.md` is package metadata, so the formatting workflow always runs
 `python scripts/check-readme.py` to check that it exists and is valid UTF-8
@@ -239,7 +239,8 @@ first that matches wins:
 4. **Commit message tag** `[test all]` / `[no filter]` anywhere on the branch → `all`.
 5. **Only documentation paths changed** (`docs/**`, `blogs/**`, or `**/*.md`, as
    defined by `is_docs_path()` in `ci/check_paths.py`), including deleted paths and
-   both sides of renames → `none`.
+   both sides of renames → `none`. Otherwise documentation paths are dropped, so
+   they cannot trigger the steps below.
 6. **A changed or deleted file matches a run-all glob** (`COMMON_RUN_ALL_GLOBS` +
    the workflow's `extra_run_all_globs`) → `all`. These are files too central or
    too dynamic to narrow safely: CI scripts, build system, `csrc/`, `op_builder/`,
@@ -304,8 +305,8 @@ deepspeed/shared.py impacts:
 
 - **Force the full suite for a push:** include `[test all]` (or `[no filter]`)
   anywhere in a commit message on the branch.
-- **Touch an infra file:** a non-documentation-only diff matching a run-all glob runs
-  everything.
+- **Touch an infra file:** changing a non-documentation file that matches a run-all
+  glob runs everything.
 - **Found a missed test?** It's likely a runtime/dynamic dependency the static
   graph can't see — add a `DYNAMIC_EDGES` entry (see below) and/or report it.
 
@@ -389,7 +390,7 @@ capacity fallback, assume its AWS role. The trust boundary is:
   git/AST data; it never imports, installs, builds, or executes candidate code.
 - The selector logic and its self-tests always come from the trusted checkout.
   A PR's `ci/` changes still appear in the diff, so the base selector's `ci/**`
-  run-all rule widens them to the full suite unless the diff is documentation-only.
+  run-all rule widens them to the full suite unless they are documentation.
 - The handoff is a fixed `all` / `subset` / `none` mode plus one bounded,
   validated regular file. Test paths must stay under `tests/unit/v1`, cannot be
   options or traversal paths, and are passed after pytest's `--` separator.

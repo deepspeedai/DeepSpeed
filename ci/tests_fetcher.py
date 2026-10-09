@@ -37,8 +37,8 @@ Escape hatches (for humans)
 ---------------------------
 * Put ``[test all]`` (or ``[no filter]``) anywhere in a commit message to force
   the full suite for that push.
-* Changing a file matched by the run-all globs (CI config, build system, shared
-  fixtures, core runtime) runs everything unless the diff is documentation-only.
+* Changing a non-documentation file matched by the run-all globs (CI config,
+  build system, shared fixtures, core runtime) runs everything.
 
 Preview what CI would run for your branch::
 
@@ -502,9 +502,12 @@ class TestSelector:
                 return Selection("all", all_tests, f"commit message contains {tag!r} -> full suite")
 
         changed, deleted = self._diff_files(merge_base)
+        has_changes = bool(changed or deleted)
+        # Documentation never affects tests, so it can neither force a full run nor seed the graph.
+        changed = [path for path in changed if not is_docs_path(path)]
+        deleted = [path for path in deleted if not is_docs_path(path)]
         all_changed = changed + deleted
-        only_docs = all(is_docs_path(path) for path in all_changed)
-        if all_changed and only_docs:
+        if has_changes and not all_changed:
             return Selection("none", [], "only documentation files changed")
 
         triggers = [p for p in all_changed if self._matches_glob(p, self.run_all_globs)]

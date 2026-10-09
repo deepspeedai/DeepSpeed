@@ -56,6 +56,7 @@ BASELINE = {
     "deepspeed/module_inject/__init__.py": "",
     "deepspeed/module_inject/replace.py": "VALUE = 6\n",
     "csrc/kernel.cu": "// kernel\n",
+    "csrc/README.md": "# kernels\n",
     "tests/__init__.py": "",
     "tests/unit/__init__.py": "",
     "tests/unit/common.py": "import deepspeed  # noqa\n",
@@ -246,6 +247,10 @@ def test_documentation_mixed_with_code_still_selects_tests() -> None:
         repo.write("README.md", "# changed\n")
         repo.write("docs/guide.rst", "Changed\n=======\n")
         repo.write("blogs/tutorial/config.json", '{"changed": true}\n')
+        # Documentation under run-all and dynamic-edge paths must not widen the selection.
+        repo.write("ci/README.md", "# changed\n")
+        repo.write("deepspeed/module_inject/README.md", "# changed\n")
+        repo.delete("csrc/README.md")
         repo.write("deepspeed/leaf.py", "VALUE = 11\n")
         repo.commit("code and docs")
         sel = repo.selector().select("master")
