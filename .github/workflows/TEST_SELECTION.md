@@ -68,9 +68,16 @@ and native-op precompilation. This includes all documentation and blog assets
 and configuration files, plus Markdown at any directory depth. Formatting, DCO,
 and documentation checks are not disabled.
 
-The active `python`, `cpu-torch-latest`, `nv-pre-compile-ops`, `mps-torch-latest`,
-and `no-torch` workflows use the reusable `check-paths.yml` gate. Disabled
-legacy workflows are left unchanged.
+The active `python`, `cpu-torch-latest`, and `nv-pre-compile-ops` workflows use
+the reusable `check-paths.yml` gate. Disabled legacy workflows are left unchanged.
+
+The optional `mps-torch-latest` and `no-torch` workflows rely on their PR trigger
+paths instead, which exclude Markdown. A README under a watched source directory
+cannot start these workflows merely because the PR also changes unrelated code.
+Their gate job is commented out because it could never skip: every PR run they
+start includes a non-documentation change. Re-enable it if either workflow must
+drop its path filters (to become a required check or run in the merge queue) or
+if `is_docs_path()` starts covering more than Markdown.
 
 `ci/check_paths.py` is the single definition of documentation (`is_docs_path()`).
 The gate diffs the checked-out commit against the exact commit it was built on: a
@@ -85,8 +92,9 @@ mistakes, not a malicious PR, which controls the workflow files on `pull_request
 events. Renames count both the old and new paths: moving `module.py` to
 `docs/module.py` is a code deletion, not a documentation-only change. An empty
 diff runs tests, and detection failures, including a base branch without the
-script, emit a warning and fall back to running tests. Callers may pass
-`pr-ignore` (files, or directories ending in `/`, such as
+script, emit a warning and fall back to running tests. If the gate job itself
+fails or exceeds its 10-minute limit, the required jobs fail instead of skipping.
+Callers may pass `pr-ignore` (files, or directories ending in `/`, such as
 `version.txt`) to skip more paths on pull requests only; merge queue entries skip
 only documentation-only diffs. Preview the decision with
 `python ci/check_paths.py --base "$(git merge-base origin/master HEAD)"`.

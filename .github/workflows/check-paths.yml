@@ -21,6 +21,8 @@ permissions:
 jobs:
   check-paths:
     runs-on: ubuntu-latest
+    # Normally under a minute; a hung git command must not hold merge queue entries for 6 hours.
+    timeout-minutes: 10
     outputs:
       should_run: ${{ steps.filter.outcome != 'success' || steps.filter.outputs.should_run != 'false' }}
     steps:
