@@ -596,9 +596,12 @@ class TopKGate(Module):
                                      self.drop_tokens, self.use_rts, self.ep_group, sparse_routes, use_tutel)
 
         elif self.k == 2:
+            # The Gumbel sample that picks the second expert is training-time noise, like the
+            # top-1 RSample above it, so it is off in eval: otherwise one input routes differently
+            # on every forward and eval loss, generated tokens and exp_counts all move.
             gate_output = top2gating(logits, self.capacity_factor if self.training else self.eval_capacity_factor,
-                                     self.min_capacity, self.drop_tokens, self.ep_group, self.top2_2nd_expert_sampling,
-                                     sparse_routes)
+                                     self.min_capacity, self.drop_tokens, self.ep_group, self.top2_2nd_expert_sampling
+                                     and self.training, sparse_routes)
         else:
             gate_output = topkgating(logits,
                                      self.k,
