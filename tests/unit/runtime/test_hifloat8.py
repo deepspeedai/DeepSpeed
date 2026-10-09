@@ -99,7 +99,13 @@ def test_hifloat8_config_selects_torchao_npu():
 
 @requires_torchao_npu
 @pytest.mark.parametrize("policy", [
-    None, {
+    None, {}, {
+        "input_dst_type_max": 15,
+        "weight_dst_type_max": 15,
+        "grad_dst_type_max": 224,
+        "scale_policy": "pertensor",
+        "compute_dtype": "bfloat16"
+    }, {
         "input_dst_type_max": 31,
         "weight_dst_type_max": 31,
         "grad_dst_type_max": 127,
@@ -127,7 +133,7 @@ def test_torchao_npu_backend_preserves_dense_and_grouped_parameters(policy):
     assert isinstance(model["dense"], HiFloat8Linear)
     assert model["experts"].hifloat8_enabled
     assert model["dense"].config is model["experts"].hifloat8_config
-    assert model["dense"].config.grad_dst_type_max == (127 if policy else 224)
+    assert model["dense"].config.grad_dst_type_max == (policy.get("grad_dst_type_max", 224) if policy else 224)
     assert tuple(model.state_dict()) == keys_before
     assert all(dict(model.named_parameters())[name] is parameter for name, parameter in parameters_before.items())
 
@@ -332,3 +338,23 @@ def test_hifloat8_legacy_backend_is_rejected_with_migration_instruction():
         get_hifloat8_config({"hifloat8": {"backend": "torch_npu"}})
     policy = {"grad_dst_type_max": 15, "compute_dtype": "bfloat16"}
     assert get_hifloat8_config({"hifloat8": {"config": policy}})["config"] == policy
+
+
+def test_minimal_hifloat8_json_requires_no_numerical_fields():
+    config = get_hifloat8_config({
+        "bf16": {
+            "enabled": True
+        },
+        "zero_optimization": {
+            "stage": 2
+        },
+        "hifloat8": {
+            "enabled": True,
+            "backend": "torchao_npu",
+            "module_name_patterns": ["*.experts", "*.shared_experts.*_proj"],
+            "min_numel": 65536,
+        },
+    })
+    assert config["enabled"] and config["config"] is None
+    assert config["backend"] == "torchao_npu"
+    assert config["min_numel"] == 65536

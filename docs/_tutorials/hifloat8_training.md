@@ -16,24 +16,41 @@ communication, and distributed lifecycle checks.
     "enabled": true,
     "backend": "torchao_npu",
     "module_name_patterns": ["*.experts", "*.shared_experts.*_proj"],
-    "min_numel": 65536,
-    "config": {
-      "input_dst_type_max": 15.0,
-      "weight_dst_type_max": 15.0,
-      "grad_dst_type_max": 224.0,
-      "scale_policy": "pertensor",
-      "compute_dtype": "bfloat16"
-    }
+    "min_numel": 65536
   }
 }
 ```
 
-The optional `config` object is parsed by `torchao_npu.hifloat8.HiFloat8Config`. One
-immutable policy is shared by converted Linear modules and selected grouped
-experts. Omitting it preserves DeepSpeed's existing 15/15/224 recipe.
-`compute_dtype` accepts `null`, `"bfloat16"` or `"float16"` and controls the
-high-precision working operands and GEMM output; it does not select the hardware
-accumulator dtype. Parameter and optimizer precision remain unchanged.
+No numerical fields are required in this recommended JSON. AO supplies the
+existing per-tensor input/weight/gradient recipe `15/15/224`. Omitting `config`,
+setting it to `null`, or using `{}` selects that same policy for both converted
+Linear modules and grouped experts. DeepSpeed does not supply separate defaults.
+
+Optional overrides remain supported, for example:
+
+```json
+"config": {"grad_dst_type_max": 224.0}
+```
+
+The original full object also remains valid. These ranges came from the
+established training helper; they influence scale and quantized payloads and
+are distinct from the native operator's `dst_type_max=0.0` default. Omitting
+the JSON fields does not omit the effective ranges at the native call.
+
+`compute_dtype` is optional (`null`, `"bfloat16"`, `"float16"`). It is retained
+because it controls both the high-precision staging tensors before quantization
+and quantized GEMM output in FWD/dX/dW. Renaming it to `output_dtype` would omit
+the input-cast behavior. BF16 training normally needs no explicit value.
+
+| Stage | Precision |
+| --- | --- |
+| Staging input/weight/output-gradient | Original supported high precision when null, or selected BF16/FP16 |
+| Actual Dense/grouped GEMM operands | HiFloat8-tagged uint8 payloads and FP32 dequantization scales |
+| Native accumulation | Kernel-owned; not selected by this field |
+| FWD/dX/dW GEMM result | Selected working dtype; input/parameter gradients then retain original tensor dtypes |
+
+Parameter objects and optimizer states remain unchanged. Existing BF16 grouped
+and CUDA paths are separate from this quantized GEMM dispatch.
 Only `"pertensor"` scaling is currently supported. `torchao_npu` is now the
 default backend. The former `backend="torch_npu"` helper is removed; migrate old
 JSON configurations to `backend="torchao_npu"` and install the current AO source.
