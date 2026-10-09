@@ -131,3 +131,38 @@ class ContinuousBatchScheduler:
             updated.append((request, generated))
         self._active = updated
         return self.schedule(finished)
+
+
+def plan_prefill_buckets(lengths, cost, max_tokens=None):
+    """Minimize additive predicted cost over contiguous length-sorted buckets.
+
+    ``cost(batch_size, padded_width)`` belongs to the model backend. Returned
+    indices refer to the caller's original request order. Complexity is O(n²)
+    in request count, independent of prompt token count.
+    """
+    if any(length <= 0 for length in lengths):
+        raise ValueError("prefill lengths must be positive")
+    if max_tokens is not None and max_tokens <= 0:
+        raise ValueError("prefill token limit must be positive")
+    order = sorted(range(len(lengths)), key=lambda i: -lengths[i])
+    best = [0.0] + [float("inf")] * len(order)
+    previous = [0] * (len(order) + 1)
+    for end in range(1, len(order) + 1):
+        for start in range(end):
+            count = end - start
+            width = lengths[order[start]]
+            if max_tokens is not None and count * width > max_tokens:
+                continue
+            candidate = best[start] + cost(count, width)
+            if candidate < best[end]:
+                best[end] = candidate
+                previous[end] = start
+    if best[-1] == float("inf"):
+        raise ValueError("a prompt exceeds the prefill token limit; increase the configured limit")
+    buckets = []
+    end = len(order)
+    while end:
+        start = previous[end]
+        buckets.append(tuple(order[start:end]))
+        end = start
+    return tuple(reversed(buckets)), best[-1]

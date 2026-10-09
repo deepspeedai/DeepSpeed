@@ -2,9 +2,12 @@
 
 # DeepSpeed Team
 
+from itertools import product
+
 import pytest
 
-from deepspeed.runtime.rollout.continuous_batching import (ContinuousBatchRequest, ContinuousBatchScheduler)
+from deepspeed.runtime.rollout.continuous_batching import (ContinuousBatchRequest, ContinuousBatchScheduler,
+                                                           plan_prefill_buckets)
 
 
 def _request(request_id):
@@ -78,3 +81,44 @@ def test_scheduler_rejects_invalid_transitions():
         scheduler.submit(_request("a"))
     with pytest.raises(ValueError, match="not active"):
         scheduler.schedule(finished_ids=("missing", ))
+
+
+@pytest.mark.parametrize("lengths,max_tokens", [([4, 1, 16, 4], None), ([2, 8, 3, 7, 1], 16)])
+def test_prefill_buckets_match_exhaustive_partition_cost(lengths, max_tokens):
+
+    def cost(count, width):
+        return 5.0 + count * width + 0.01 * count * width * width
+
+    order = sorted(range(len(lengths)), key=lambda i: -lengths[i])
+    reference = float("inf")
+    for cuts in product([False, True], repeat=len(lengths) - 1):
+        starts = [0] + [i + 1 for i, split in enumerate(cuts) if split]
+        ends = starts[1:] + [len(lengths)]
+        groups = [order[a:b] for a, b in zip(starts, ends)]
+        if max_tokens is not None and any(len(g) * max(lengths[i] for i in g) > max_tokens for g in groups):
+            continue
+        reference = min(reference, sum(cost(len(g), max(lengths[i] for i in g)) for g in groups))
+
+    buckets, predicted = plan_prefill_buckets(lengths, cost, max_tokens)
+    assert sorted(i for bucket in buckets for i in bucket) == list(range(len(lengths)))
+    assert predicted == pytest.approx(reference)
+    assert predicted == pytest.approx(sum(cost(len(g), max(lengths[i] for i in g)) for g in buckets))
+
+
+@pytest.mark.parametrize("fixed_cost,expected_count", [(25.0, 2), (5000.0, 1)])
+def test_prefill_bucket_count_responds_to_forward_cost(fixed_cost, expected_count):
+    lengths = [16] * 31 + [512]
+    buckets, _ = plan_prefill_buckets(lengths, lambda count, width: fixed_cost + 0.1 * count * width)
+    assert len(buckets) == expected_count
+
+
+def test_prefill_bucket_capacity_supports_long_lengths_without_token_expansion():
+    lengths = [65536, 16, 16]
+    buckets, _ = plan_prefill_buckets(lengths, lambda count, width: 1 + count * width, 65536)
+    assert sorted(i for bucket in buckets for i in bucket) == [0, 1, 2]
+    assert all(len(g) * max(lengths[i] for i in g) <= 65536 for g in buckets)
+    with pytest.raises(ValueError, match="prefill.*limit"):
+        plan_prefill_buckets([65537], lambda count, width: count * width, 65536)
+    assert plan_prefill_buckets([], lambda count, width: count * width) == ((), 0.0)
+    with pytest.raises(ValueError, match="positive"):
+        plan_prefill_buckets([0], lambda count, width: count * width)
