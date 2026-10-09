@@ -5,9 +5,11 @@
 
 import torch
 import os
+import numpy as np
 import deepspeed
 from deepspeed.accelerator import get_accelerator
 import pytest
+from deepspeed.runtime.data_pipeline.data_sampling import data_sampler
 from deepspeed.runtime.data_pipeline.data_sampling.data_analyzer import DataAnalyzer
 from deepspeed.runtime.data_pipeline.data_sampling.indexed_dataset import MMapIndexedDataset
 from unit.common import DistributedTest
@@ -181,6 +183,98 @@ class TestDataEfficiency(DistributedTest):
                 break
 
 
+class TestCurriculumCheckpointResume(DistributedTest):
+    world_size = 1
+
+    def test_resume_sees_the_same_batches(self, tmpdir):
+        # A run that saves and resumes from a checkpoint should train on the same batches,
+        # and so reach the same losses, as a run that never stopped.
+        device = get_accelerator().current_device_name()
+        hidden_dim = 10
+        dataset = random_dataset(20, hidden_dim, torch.device('cpu'), dtype=torch.float32)
+
+        def new_engine(cluster_path):
+            config_dict = {
+                "train_batch_size": 2,
+                "optimizer": {
+                    "type": "Adam",
+                    "params": {
+                        "lr": 0.00015,
+                        "torch_adam": True
+                    }
+                },
+                "data_efficiency": {
+                    "enabled": True,
+                    "seed": 1234,
+                    "data_sampling": {
+                        "enabled": True,
+                        "num_workers": 0,
+                        "curriculum_learning": {
+                            "enabled": True,
+                            "data_cluster_path": cluster_path,
+                            "curriculum_metrics": {
+                                "dummy_metric": {
+                                    "index_to_sample_path": "dummy",
+                                    "index_to_metric_path": "dummy",
+                                    "difficulty_type": "value",
+                                    "clustering_type": "single_cluster",
+                                    "min_difficulty": 2,
+                                    "max_difficulty": 10,
+                                    "schedule_type": "fixed_root",
+                                    "schedule_config": {
+                                        "total_curriculum_step": 8,
+                                        "difficulty_step": 2,
+                                        "root_degree": 1
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            torch.manual_seed(42)
+            model = SimpleModel(hidden_dim)
+            engine, _, data_loader, _ = deepspeed.initialize(config=config_dict,
+                                                             model=model,
+                                                             training_data=dataset,
+                                                             model_parameters=model.parameters())
+            return engine, data_loader
+
+        def train(engine, data_loader, steps):
+            inputs, losses = [], []
+            for batch in data_loader:
+                x = batch[0].to(device)
+                y = batch[1].to(device)
+                loss = engine(x, y)
+                engine.backward(loss)
+                engine.step()
+                inputs.append(batch[0].clone())
+                losses.append(loss.item())
+                if len(losses) == steps:
+                    break
+            return inputs, losses
+
+        # 16 steps of 2 from 20 samples crosses into the second epoch after the resume,
+        # so the cluster reshuffle happens in the resumed run too.
+        engine, data_loader = new_engine(str(tmpdir.join("straight")))
+        expected_inputs, expected_losses = train(engine, data_loader, 16)
+
+        cluster_path = str(tmpdir.join("resumed"))
+        engine, data_loader = new_engine(cluster_path)
+        inputs, losses = train(engine, data_loader, 8)
+        engine.save_checkpoint(str(tmpdir.join("ckpt")))
+
+        engine, data_loader = new_engine(cluster_path)
+        engine.load_checkpoint(str(tmpdir.join("ckpt")))
+        more_inputs, more_losses = train(engine, data_loader, 8)
+        inputs += more_inputs
+        losses += more_losses
+
+        for step, (got, want) in enumerate(zip(inputs, expected_inputs)):
+            assert torch.equal(got, want), f"step {step} trained on a different batch"
+        assert losses == expected_losses
+
+
 def identity_metric(batch):
     return batch
 
@@ -204,3 +298,85 @@ def test_data_analyzer_runs_only_the_specific_threads(tmp_path):
         fname = tmp_path / "value" / f"worker0_thread{thread}" / "value_sample_to_metric"
         stored = MMapIndexedDataset(str(fname), skip_warmup=True)
         assert [int(v[0]) for v in stored] == list(expected)
+
+
+class _SingleRankGroup:
+
+    def size(self):
+        return 1
+
+
+def _curriculum_sampler(cluster_path):
+    config = {
+        "seed": 1234,
+        "data_sampling": {
+            "num_epochs": 3,
+            "curriculum_learning": {
+                "enabled": True,
+                "data_cluster_path": cluster_path,
+                "curriculum_metrics": {
+                    "seqlen": {
+                        "index_to_sample_path": "unused",
+                        "index_to_metric_path": "unused",
+                        "difficulty_type": "value",
+                        "clustering_type": "single_cluster",
+                        "min_difficulty": 2,
+                        "max_difficulty": 10,
+                        "schedule_type": "fixed_root",
+                        "schedule_config": {
+                            "total_curriculum_step": 8,
+                            "difficulty_step": 2,
+                            "root_degree": 1
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return data_sampler.DeepSpeedDataSampler(config,
+                                             one_epoch_total_samples=40,
+                                             micro_batch_size=4,
+                                             data_parallel_rank=0,
+                                             data_parallel_size=1,
+                                             data_parallel_group=_SingleRankGroup(),
+                                             gradient_accumulation_steps=1,
+                                             global_rank=0)
+
+
+def test_data_sampler_resumes_where_it_left_off(tmp_path, monkeypatch):
+    # With one rank, rank 0 already holds every batch, so the collectives have nothing to do.
+    monkeypatch.setattr(data_sampler.dist, "barrier", lambda *args, **kwargs: None)
+    monkeypatch.setattr(data_sampler.dist, "broadcast", lambda *args, **kwargs: None)
+
+    straight = iter(_curriculum_sampler(str(tmp_path / "straight")))
+    expected = [next(straight) for _ in range(30)]
+
+    # Stop halfway, then resume in a fresh sampler. 30 batches of 4 from 40 samples also
+    # runs the cluster out after the save, so the reshuffle has to continue the same RNG.
+    first = _curriculum_sampler(str(tmp_path / "resumed"))
+    first_iter = iter(first)
+    batches = [next(first_iter) for _ in range(15)]
+    state = first.state_dict()
+    np.random.seed(0)  # other code using numpy's global RNG must not change the result
+
+    resumed = _curriculum_sampler(str(tmp_path / "resumed"))
+    resumed.load_state_dict(state)
+    resumed_iter = iter(resumed)
+    batches += [next(resumed_iter) for _ in range(15)]
+
+    assert batches == expected
+
+
+def test_data_sampler_loads_checkpoints_from_before_the_rng_fix(tmp_path, monkeypatch):
+    # Older checkpoints hold numpy's global RNG state, a tuple. Loading one still works and
+    # restores the global RNG as before.
+    monkeypatch.setattr(data_sampler.dist, "barrier", lambda *args, **kwargs: None)
+    monkeypatch.setattr(data_sampler.dist, "broadcast", lambda *args, **kwargs: None)
+    sampler = _curriculum_sampler(str(tmp_path))
+    state = sampler.state_dict()
+    np.random.seed(7)
+    state["np_rng_state"] = np.random.get_state()
+    expected = np.random.random()
+
+    _curriculum_sampler(str(tmp_path)).load_state_dict(state)
+    assert np.random.random() == expected
