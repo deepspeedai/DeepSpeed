@@ -5,9 +5,11 @@
 
 import torch
 import os
+import numpy as np
 import deepspeed
 from deepspeed.accelerator import get_accelerator
 import pytest
+from deepspeed.runtime.data_pipeline.data_sampling import data_sampler
 from deepspeed.runtime.data_pipeline.data_sampling.data_analyzer import DataAnalyzer
 from deepspeed.runtime.data_pipeline.data_sampling.indexed_dataset import MMapIndexedDataset
 from unit.common import DistributedTest
@@ -204,3 +206,85 @@ def test_data_analyzer_runs_only_the_specific_threads(tmp_path):
         fname = tmp_path / "value" / f"worker0_thread{thread}" / "value_sample_to_metric"
         stored = MMapIndexedDataset(str(fname), skip_warmup=True)
         assert [int(v[0]) for v in stored] == list(expected)
+
+
+class _SingleRankGroup:
+
+    def size(self):
+        return 1
+
+
+def _curriculum_sampler(cluster_path):
+    config = {
+        "seed": 1234,
+        "data_sampling": {
+            "num_epochs": 3,
+            "curriculum_learning": {
+                "enabled": True,
+                "data_cluster_path": cluster_path,
+                "curriculum_metrics": {
+                    "seqlen": {
+                        "index_to_sample_path": "unused",
+                        "index_to_metric_path": "unused",
+                        "difficulty_type": "value",
+                        "clustering_type": "single_cluster",
+                        "min_difficulty": 2,
+                        "max_difficulty": 10,
+                        "schedule_type": "fixed_root",
+                        "schedule_config": {
+                            "total_curriculum_step": 8,
+                            "difficulty_step": 2,
+                            "root_degree": 1
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return data_sampler.DeepSpeedDataSampler(config,
+                                             one_epoch_total_samples=40,
+                                             micro_batch_size=4,
+                                             data_parallel_rank=0,
+                                             data_parallel_size=1,
+                                             data_parallel_group=_SingleRankGroup(),
+                                             gradient_accumulation_steps=1,
+                                             global_rank=0)
+
+
+def test_data_sampler_resumes_where_it_left_off(tmp_path, monkeypatch):
+    # With one rank, rank 0 already holds every batch, so the collectives have nothing to do.
+    monkeypatch.setattr(data_sampler.dist, "barrier", lambda *args, **kwargs: None)
+    monkeypatch.setattr(data_sampler.dist, "broadcast", lambda *args, **kwargs: None)
+
+    straight = iter(_curriculum_sampler(str(tmp_path / "straight")))
+    expected = [next(straight) for _ in range(30)]
+
+    # Stop halfway, then resume in a fresh sampler. 30 batches of 4 from 40 samples also
+    # runs the cluster out after the save, so the reshuffle has to continue the same RNG.
+    first = _curriculum_sampler(str(tmp_path / "resumed"))
+    first_iter = iter(first)
+    batches = [next(first_iter) for _ in range(15)]
+    state = first.state_dict()
+    np.random.seed(0)  # other code using numpy's global RNG must not change the result
+
+    resumed = _curriculum_sampler(str(tmp_path / "resumed"))
+    resumed.load_state_dict(state)
+    resumed_iter = iter(resumed)
+    batches += [next(resumed_iter) for _ in range(15)]
+
+    assert batches == expected
+
+
+def test_data_sampler_loads_checkpoints_from_before_the_rng_fix(tmp_path, monkeypatch):
+    # Older checkpoints hold numpy's global RNG state, a tuple. Loading one still works and
+    # restores the global RNG as before.
+    monkeypatch.setattr(data_sampler.dist, "barrier", lambda *args, **kwargs: None)
+    monkeypatch.setattr(data_sampler.dist, "broadcast", lambda *args, **kwargs: None)
+    sampler = _curriculum_sampler(str(tmp_path))
+    state = sampler.state_dict()
+    np.random.seed(7)
+    state["np_rng_state"] = np.random.get_state()
+    expected = np.random.random()
+
+    _curriculum_sampler(str(tmp_path)).load_state_dict(state)
+    assert np.random.random() == expected
