@@ -72,17 +72,21 @@ The active `python`, `cpu-torch-latest`, `nv-pre-compile-ops`, `mps-torch-latest
 and `no-torch` workflows use the reusable `check-paths.yml` gate. Disabled
 legacy workflows are left unchanged.
 
-The gate uses `dorny/paths-filter` and the complete git diff of the PR's merged tree or
-merge-group commit against its event base SHA, rather than the size-limited PR
-files API. Renames count both the old and new paths: moving `module.py` to
-`docs/module.py` is a code deletion, not a documentation-only change. Diff failures emit
-a warning and fall back to running tests. Existing broader PR path exclusions
-remain in effect, but merge queue entries exclude only documentation.
+`ci/check_paths.py` is the single definition of documentation (`is_docs_path()`).
+The gate runs it on the complete git diff of the PR's merged tree or merge-group
+commit against its event base SHA. Renames count both the old and new paths: moving
+`module.py` to `docs/module.py` is a code deletion, not a documentation-only change.
+An empty diff runs tests, and diff failures emit a warning and fall back to running
+tests. Callers may pass `pr-ignore` (files, or directories ending in `/`, such as
+`version.txt`) to skip more paths on pull requests only; merge queue entries skip
+only documentation-only diffs. Preview the decision with
+`python ci/check_paths.py --base origin/master`.
 
 Scheduled, manual, and push runs retain their existing behavior. Required
 workflows still start and report their statuses; only their heavy jobs or steps
-skip. The Modal selector also recognizes documentation-only diffs before applying its
-run-all path globs; explicit `[test all]` / `[no filter]` overrides still win.
+skip. The Modal selector imports the same `is_docs_path()` and recognizes
+documentation-only diffs before applying its run-all path globs; explicit
+`[test all]` / `[no filter]` overrides still win.
 
 Root `README.md` is package metadata, so the formatting workflow always runs
 `python scripts/check-readme.py` to check that it exists and is valid UTF-8
@@ -95,7 +99,8 @@ without installing DeepSpeed or PyTorch.
 | --- | --- |
 | `.github/workflows/modal-torch-latest.yml` | The workflow: a no-secret `collect-tests` job gating a trusted `deploy` controller job. |
 | `ci/tests_fetcher.py` | The selector. AST-parses the repo, builds an import graph, decides `all` / `subset` / `none`, writes the test-list file, emits a job summary. |
-| `ci/test_tests_fetcher.py` | Self-tests for the selector (pure stdlib; run in `collect-tests`). |
+| `ci/check_paths.py` | Defines documentation paths (`is_docs_path()`) for the selector and the `check-paths.yml` CPU/GPU workflow gate. |
+| `ci/test_tests_fetcher.py` | Self-tests for the selector and `ci/check_paths.py` (pure stdlib; run in `collect-tests`). |
 | `ci/torch_latest.py` | Pure-stdlib metadata/selection validation plus the trusted Modal-first, AWS-capacity-fallback controller. |
 | `ci/.test_selection/test_list.txt` | The hand-off artifact (one pytest target per line). Git-ignored. |
 
@@ -232,8 +237,9 @@ first that matches wins:
 3. **No merge-base** with the base (e.g. shallow clone, unrelated history) → `all`.
    A diff here would be wrong, so we never narrow on it.
 4. **Commit message tag** `[test all]` / `[no filter]` anywhere on the branch → `all`.
-5. **Only documentation paths changed** (`docs/**`, `blogs/**`, or `**/*.md`),
-   including deleted paths and both sides of renames → `none`.
+5. **Only documentation paths changed** (`docs/**`, `blogs/**`, or `**/*.md`, as
+   defined by `is_docs_path()` in `ci/check_paths.py`), including deleted paths and
+   both sides of renames → `none`.
 6. **A changed or deleted file matches a run-all glob** (`COMMON_RUN_ALL_GLOBS` +
    the workflow's `extra_run_all_globs`) → `all`. These are files too central or
    too dynamic to narrow safely: CI scripts, build system, `csrc/`, `op_builder/`,

@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # DeepSpeed Team
-"""Self-tests for ci/tests_fetcher.py (#9).
+"""Self-tests for ci/tests_fetcher.py (#9) and the ci/check_paths.py gate.
 
 These build small synthetic git repos on disk and assert the selector makes the
 right call (narrow vs. full vs. nothing). They are pure-stdlib (only need ``git``
@@ -319,6 +319,75 @@ def test_readme_check_rejects_missing_or_invalid_utf8() -> None:
         repo.delete("README.md")
         result = subprocess.run([sys.executable, str(script)], cwd=repo.root, capture_output=True)
         assert result.returncode != 0, "missing README was accepted"
+    finally:
+        repo.cleanup()
+
+
+_GATE_RUNS = (0, "should_run=true\n")
+_GATE_SKIPS = (0, "should_run=false\n")
+
+
+def _run_gate(repo: TmpRepo, ignore: str = "", base: str = "master") -> tuple[int, str]:
+    """Run ci/check_paths.py in ``repo``; return its exit code and what it wrote to GITHUB_OUTPUT."""
+    script = Path(__file__).resolve().parent / "check_paths.py"
+    fd, output = tempfile.mkstemp(prefix="ds-gate-output-")
+    os.close(fd)
+    try:
+        env = dict(os.environ, GITHUB_OUTPUT=output)
+        command = [sys.executable, str(script), "--base", base, "--ignore", ignore]
+        result = subprocess.run(command, cwd=repo.root, env=env, capture_output=True)
+        return result.returncode, Path(output).read_text(encoding="utf-8")
+    finally:
+        os.unlink(output)
+
+
+def _gate_after_writing(paths: tuple[str, ...], ignore: str = "") -> tuple[int, str]:
+    repo = TmpRepo()
+    try:
+        for rel in paths:
+            repo.write(rel, "# changed\n")
+        repo.commit("change paths")
+        return _run_gate(repo, ignore)
+    finally:
+        repo.cleanup()
+
+
+def test_check_paths_skips_documentation_only_diffs() -> None:
+    docs = ("README.md", "ci/README.md", "docs/guide.rst", "docs/code-docs/source/conf.py", "blogs/tutorial/train.py")
+    assert _gate_after_writing(docs) == _GATE_SKIPS
+    assert _gate_after_writing(docs + ("deepspeed/leaf.py", )) == _GATE_RUNS
+
+
+def test_check_paths_counts_both_sides_of_renames() -> None:
+    repo = TmpRepo()
+    try:
+        repo._git("mv", "deepspeed/leaf.py", "docs/leaf.md")
+        repo.commit("move code into docs")
+        assert _run_gate(repo) == _GATE_RUNS
+    finally:
+        repo.cleanup()
+
+
+def test_check_paths_pr_ignore_matches_exact_files_and_directories() -> None:
+    ignore = "version.txt deepspeed/inference/v2/"
+    ignored = ("version.txt", "deepspeed/inference/v2/engine.py", "docs/guide.rst")
+    assert _gate_after_writing(ignored) == _GATE_RUNS
+    assert _gate_after_writing(ignored, ignore) == _GATE_SKIPS
+    for near_miss in ("ci/version.txt", "version.txt.bak", "deepspeed/inference/v20/engine.py"):
+        assert _gate_after_writing(ignored + (near_miss, ), ignore) == _GATE_RUNS, near_miss
+
+
+def test_check_paths_runs_ci_when_unsure() -> None:
+    repo = TmpRepo()
+    try:
+        repo.commit("empty")
+        assert _run_gate(repo) == _GATE_RUNS, "an empty diff skipped CI"
+
+        # A failed run must exit non-zero without output so the workflow falls back to running CI.
+        code, output = _run_gate(repo, base="does-not-exist")
+        assert code != 0 and output == "", "a git failure did not fail the gate"
+        code, output = _run_gate(repo, ignore="deepspeed/inference/v2/**")
+        assert code != 0 and output == "", "a glob in --ignore was accepted"
     finally:
         repo.cleanup()
 

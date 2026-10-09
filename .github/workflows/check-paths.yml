@@ -6,15 +6,10 @@ name: CI path filter
 on:
   workflow_call:
     inputs:
-      pr-filters:
-        description: Path filters for pull requests; merge queues exclude only documentation
+      pr-ignore:
+        description: Whitespace-separated files, or directories ending in /, whose changes also skip CI on pull requests
         type: string
-        default: |
-          run_tests:
-            - '**'
-            - '!**/*.md'
-            - '!docs/**'
-            - '!blogs/**'
+        default: ''
     outputs:
       should_run:
         description: Whether the caller should run its build or tests
@@ -27,23 +22,25 @@ jobs:
   check-paths:
     runs-on: ubuntu-latest
     outputs:
-      should_run: ${{ steps.filter.outcome != 'success' || steps.filter.outputs.run_tests != 'false' }}
+      should_run: ${{ steps.filter.outcome != 'success' || steps.filter.outputs.should_run != 'false' }}
     steps:
       - uses: actions/checkout@v7
         if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         with:
           persist-credentials: false
 
-      - uses: dorny/paths-filter@v4
+      # ci/check_paths.py defines documentation for this gate and the Modal test selector.
+      - name: Check for non-documentation changes
         id: filter
         if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         continue-on-error: true
-        with:
-          # Git includes both sides of renames and avoids the PR files API's size limit.
-          token: ''
-          predicate-quantifier: every
-          filters: >-
-            ${{ github.event_name == 'pull_request' && inputs.pr-filters || 'run_tests: ["**", "!**/*.md", "!docs/**", "!blogs/**"]' }}
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          # Merge queue entries skip CI only for documentation-only diffs.
+          PR_IGNORE: ${{ github.event_name == 'pull_request' && inputs.pr-ignore || '' }}
+        run: |
+          git fetch --quiet --no-tags --depth=1 origin "$BASE_SHA"
+          python3 ci/check_paths.py --base "$BASE_SHA" --ignore "$PR_IGNORE"
 
       - name: Fall back to running tests if change detection failed
         if: steps.filter.outcome == 'failure'

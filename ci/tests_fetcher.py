@@ -64,6 +64,9 @@ from dataclasses import dataclass, field
 from fnmatch import fnmatch
 from pathlib import Path
 
+# Shared with the CPU/GPU workflow gate so both agree on what counts as documentation.
+from check_paths import is_docs_path
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -500,7 +503,7 @@ class TestSelector:
 
         changed, deleted = self._diff_files(merge_base)
         all_changed = changed + deleted
-        only_docs = all(path.startswith(("docs/", "blogs/")) or path.endswith(".md") for path in all_changed)
+        only_docs = all(is_docs_path(path) for path in all_changed)
         if all_changed and only_docs:
             return Selection("none", [], "only documentation files changed")
 

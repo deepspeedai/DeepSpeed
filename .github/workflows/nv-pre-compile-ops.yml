@@ -19,14 +19,9 @@ jobs:
     name: nv-pre-compile-ops / check paths
     uses: ./.github/workflows/check-paths.yml
     with:
-      pr-filters: |
-        run_tests:
-          - '**'
-          - '!**/*.md'
-          - '!docs/**'
-          - '!blogs/**'
-          - '!deepspeed/inference/v2/**'
-          - '!tests/unit/inference/v2/**'
+      pr-ignore: |
+        deepspeed/inference/v2/
+        tests/unit/inference/v2/
 
   unit-tests:
     name: nv-pre-compile-ops / precompile ops
