@@ -48,3 +48,37 @@ def test_softmax(batch, sequence, channels, dtype, use_triton_ops):
     ds_out = run_softmax_ds(input_ds, use_triton_ops)
     ref_out = run_softmax_reference(input_ref)
     assert (allclose(ds_out, ref_out))
+
+
+@pytest.mark.inference_ops
+@pytest.mark.parametrize("dtype", [torch.float16, torch.float32])
+@pytest.mark.parametrize("mask_value", [-1000., -float('inf')])
+def test_masked_softmax_when_max_is_masked(dtype, mask_value):
+    if not deepspeed.get_accelerator().is_triton_supported():
+        pytest.skip("triton is not supported on this system")
+
+    from deepspeed.ops.transformer.inference.triton import softmax
+
+    device = deepspeed.accelerator.get_accelerator().device_name()
+    input_ds = torch.tensor([[0., -200.]], dtype=dtype, device=device)
+    mask = torch.tensor([[mask_value, 0.]], dtype=dtype, device=device)
+
+    ds_out = softmax(input_ds, mask)
+    ref_out = torch.tensor([[0., 1.]], dtype=dtype, device=device)
+    assert allclose(ds_out, ref_out)
+
+
+@pytest.mark.inference_ops
+def test_masked_softmax_preserves_small_mask_differences():
+    if not deepspeed.get_accelerator().is_triton_supported():
+        pytest.skip("triton is not supported on this system")
+
+    from deepspeed.ops.transformer.inference.triton import softmax
+
+    device = deepspeed.accelerator.get_accelerator().device_name()
+    input_ds = torch.tensor([[-16777216., -16777216.]], dtype=torch.float32, device=device)
+    mask = torch.tensor([[-1., 0.]], dtype=torch.float32, device=device)
+
+    ds_out = softmax(input_ds, mask)
+    ref_out = torch.softmax(input_ds.double() + mask.double(), dim=-1).float()
+    assert allclose(ds_out, ref_out)
