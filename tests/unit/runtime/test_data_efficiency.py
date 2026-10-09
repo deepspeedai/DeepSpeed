@@ -183,6 +183,98 @@ class TestDataEfficiency(DistributedTest):
                 break
 
 
+class TestCurriculumCheckpointResume(DistributedTest):
+    world_size = 1
+
+    def test_resume_sees_the_same_batches(self, tmpdir):
+        # A run that saves and resumes from a checkpoint should train on the same batches,
+        # and so reach the same losses, as a run that never stopped.
+        device = get_accelerator().current_device_name()
+        hidden_dim = 10
+        dataset = random_dataset(20, hidden_dim, torch.device('cpu'), dtype=torch.float32)
+
+        def new_engine(cluster_path):
+            config_dict = {
+                "train_batch_size": 2,
+                "optimizer": {
+                    "type": "Adam",
+                    "params": {
+                        "lr": 0.00015,
+                        "torch_adam": True
+                    }
+                },
+                "data_efficiency": {
+                    "enabled": True,
+                    "seed": 1234,
+                    "data_sampling": {
+                        "enabled": True,
+                        "num_workers": 0,
+                        "curriculum_learning": {
+                            "enabled": True,
+                            "data_cluster_path": cluster_path,
+                            "curriculum_metrics": {
+                                "dummy_metric": {
+                                    "index_to_sample_path": "dummy",
+                                    "index_to_metric_path": "dummy",
+                                    "difficulty_type": "value",
+                                    "clustering_type": "single_cluster",
+                                    "min_difficulty": 2,
+                                    "max_difficulty": 10,
+                                    "schedule_type": "fixed_root",
+                                    "schedule_config": {
+                                        "total_curriculum_step": 8,
+                                        "difficulty_step": 2,
+                                        "root_degree": 1
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            torch.manual_seed(42)
+            model = SimpleModel(hidden_dim)
+            engine, _, data_loader, _ = deepspeed.initialize(config=config_dict,
+                                                             model=model,
+                                                             training_data=dataset,
+                                                             model_parameters=model.parameters())
+            return engine, data_loader
+
+        def train(engine, data_loader, steps):
+            inputs, losses = [], []
+            for batch in data_loader:
+                x = batch[0].to(device)
+                y = batch[1].to(device)
+                loss = engine(x, y)
+                engine.backward(loss)
+                engine.step()
+                inputs.append(batch[0].clone())
+                losses.append(loss.item())
+                if len(losses) == steps:
+                    break
+            return inputs, losses
+
+        # 16 steps of 2 from 20 samples crosses into the second epoch after the resume,
+        # so the cluster reshuffle happens in the resumed run too.
+        engine, data_loader = new_engine(str(tmpdir.join("straight")))
+        expected_inputs, expected_losses = train(engine, data_loader, 16)
+
+        cluster_path = str(tmpdir.join("resumed"))
+        engine, data_loader = new_engine(cluster_path)
+        inputs, losses = train(engine, data_loader, 8)
+        engine.save_checkpoint(str(tmpdir.join("ckpt")))
+
+        engine, data_loader = new_engine(cluster_path)
+        engine.load_checkpoint(str(tmpdir.join("ckpt")))
+        more_inputs, more_losses = train(engine, data_loader, 8)
+        inputs += more_inputs
+        losses += more_losses
+
+        for step, (got, want) in enumerate(zip(inputs, expected_inputs)):
+            assert torch.equal(got, want), f"step {step} trained on a different batch"
+        assert losses == expected_losses
+
+
 def identity_metric(batch):
     return batch
 
