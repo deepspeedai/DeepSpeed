@@ -82,9 +82,10 @@ void Lion_Optimizer::Step_AVX(size_t* rounded_size,
 #endif
     size_t new_rounded_size = 0;
 
-    constexpr float neg1 = -1.0f;
-    AVX_Data neg1_4;
-    neg1_4.data = SIMD_SET(neg1);
+    // -0.0f has only the sign bit set.
+    constexpr float sign_mask = -0.0f;
+    AVX_Data sign_mask_4;
+    sign_mask_4.data = SIMD_SET(sign_mask);
 
     AVX_Data betta1_4;
     betta1_4.data = SIMD_SET(_betta1);
@@ -128,7 +129,7 @@ void Lion_Optimizer::Step_AVX(size_t* rounded_size,
             simd_mul<span>(tmp_4, momentum_4, betta1_4);
             simd_fma<span>(tmp_4, grad_4, betta1_minus1_4, tmp_4);
             // We already used intrinsics, so consider the machine representation fixed.
-            simd_and<span>(tmp_4, tmp_4, neg1_4);
+            simd_and<span>(tmp_4, tmp_4, sign_mask_4);
             simd_xor<span>(tmp_4, tmp_4, step_size_4);
             if (_weight_decay > 0) {
                 simd_fma<span>(param_4, param_4, after_decay_4, tmp_4);
