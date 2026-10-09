@@ -3945,10 +3945,8 @@ class DeepSpeedEngine(Module):
         if dp_world_size is None:
             dp_world_size = dist.get_world_size(group=dp_group)
         if self.gradient_average:
-            if self.postscale_gradients():
-                values.mul_(self.gradient_predivide_factor() / (dp_world_size))
-            else:
-                values.mul_(1. / (dp_world_size))
+            # all_gather concatenates, so no predivide happened; the full average is 1 / dp_world_size
+            values.mul_(1. / dp_world_size)
 
         indices_device_list = self.sparse_all_gather(indices, dp_group)
         values_device_list = self.sparse_all_gather(values, dp_group)
