@@ -14,6 +14,7 @@ from .comm import *
 from ..runtime import compiler
 from deepspeed.utils.torch import required_torch_version
 import os
+import warnings
 
 DS_COMM_ALL_GATHER_OFF = False
 DS_COMM_REDUCE_SCATTER_OFF = False
@@ -277,6 +278,14 @@ class TorchBackend(Backend):
                 local_rank = int(os.environ.get('LOCAL_RANK', 0))
                 kwargs.update(device_id=get_accelerator().device(local_rank))
             torch.distributed.init_process_group(backend, **kwargs)
+
+            # Without a bound device, torch warns at every barrier() that it uses the current device,
+            # because ranks that disagree on it can hang. A single rank has no peer to disagree with,
+            # and binding one is what #8248 avoids, so the warning is only noise there (#8775).
+            if 'device_id' not in kwargs and torch.distributed.get_world_size() == 1:
+                warnings.filterwarnings('ignore',
+                                        message=r'barrier\(\): using the device under current context',
+                                        category=UserWarning)
 
         self.using_mpi = torch.distributed.get_backend() == 'mpi'
 
