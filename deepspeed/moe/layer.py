@@ -33,6 +33,12 @@ class MoE(nn.Module):
         use_tutel (bool, optional): default=False, whether to use Tutel optimizations (if installed).
         enable_expert_tensor_parallelism (bool, optional): default=False, whether to use tensor parallelism for experts
         top2_2nd_expert_sampling (bool, optional): default=True, whether to perform sampling for 2nd expert
+        route_norm (bool, optional): default=None. None keeps the historical combine weights: k=1 leaves the chosen
+            expert's softmax probability, and k>=2 rescales the kept weights so they sum to 1. True rescales for every k.
+            False leaves the raw softmax probabilities for every k. True or False changes the MoE output relative to a
+            checkpoint trained with the other setting. The auxiliary load-balancing loss is computed before this step
+            and does not change. This is the legacy gate. It is not expert_parallel.route_norm, which configures the
+            AutoEP router.
     """
 
     def __init__(self,
@@ -50,7 +56,8 @@ class MoE(nn.Module):
                  use_rts: bool = True,
                  use_tutel: bool = False,
                  enable_expert_tensor_parallelism: bool = False,
-                 top2_2nd_expert_sampling: bool = True) -> None:
+                 top2_2nd_expert_sampling: bool = True,
+                 route_norm: Optional[bool] = None) -> None:
 
         super(MoE, self).__init__()
 
@@ -72,7 +79,7 @@ class MoE(nn.Module):
         experts = Experts(expert, self.num_local_experts, self.expert_group_name)
         self.deepspeed_moe = MOELayer(TopKGate(hidden_size, num_experts, k, capacity_factor, eval_capacity_factor,
                                                min_capacity, noisy_gate_policy, drop_tokens, use_rts, None,
-                                               top2_2nd_expert_sampling),
+                                               top2_2nd_expert_sampling, route_norm),
                                       experts,
                                       self.expert_group_name,
                                       self.ep_size,

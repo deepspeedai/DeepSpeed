@@ -14,7 +14,7 @@ import deepspeed.comm as dist
 import deepspeed.moe.sharded_moe as sharded_moe
 from deepspeed import get_accelerator
 from deepspeed.moe.layer import MoE
-from deepspeed.moe.sharded_moe import (top1gating, top2gating, topkgating, _route_slots, _sparse_encode,
+from deepspeed.moe.sharded_moe import (top1gating, top2gating, topkgating, TopKGate, _route_slots, _sparse_encode,
                                        _sparse_decode)
 from deepspeed.moe.utils import split_params_into_different_moe_groups_for_optimizer, is_moe_param
 from deepspeed.runtime.fp16.fused_optimizer import FP16_Optimizer
@@ -524,6 +524,190 @@ def test_top1gating_preserves_tensor_parallel_capacity():
     logits = torch.randn(3, 4)
     _, _, dispatch_mask, _ = top1gating(logits, capacity_factor=8.0, min_capacity=0, drop_tokens=True, use_rts=False)
     assert dispatch_mask.shape[-1] == 6
+
+
+def _routes_equal(left, right):
+    assert len(left) == len(right)
+    for lhs, rhs in zip(left, right):
+        if torch.is_tensor(lhs) or torch.is_tensor(rhs):
+            assert torch.is_tensor(lhs) and torch.is_tensor(rhs)
+            assert lhs.shape == rhs.shape
+            assert torch.equal(lhs, rhs)
+        else:
+            assert lhs == rhs
+
+
+def _fixed_logits():
+    return torch.tensor([[2.0, 0.0, -1.0, 0.5], [0.2, 3.0, 0.1, -0.4], [1.0, 1.1, 0.2, 0.0], [-0.5, 0.3, 2.5, 0.1]])
+
+
+_OMIT_ROUTE_NORM = object()
+
+
+def _gate_call(logits, k, sparse_routes, route_norm=_OMIT_ROUTE_NORM):
+    # Omitting the flag must hit the real default argument, not an explicit None.
+    kwargs = {} if route_norm is _OMIT_ROUTE_NORM else {"route_norm": route_norm}
+    if k == 1:
+        return top1gating(logits, 1.0, 0, drop_tokens=False, use_rts=False, sparse_routes=sparse_routes, **kwargs)
+    if k == 2:
+        return top2gating(logits,
+                          1.0,
+                          0,
+                          drop_tokens=False,
+                          top2_2nd_expert_sampling=False,
+                          sparse_routes=sparse_routes,
+                          **kwargs)
+    return topkgating(logits, k, 1.0, 0, drop_tokens=False, sparse_routes=sparse_routes, **kwargs)
+
+
+def _legacy_default(k):
+    # top-1 historically leaves the softmax probability. top-2 and top-k rescale the kept weights to 1.
+    return False if k == 1 else True
+
+
+def test_route_norm_default_matches_historical_gates():
+    logits = _fixed_logits()
+    for k in (1, 2, 3):
+        for sparse_routes in (False, True):
+            omitted = _gate_call(logits, k, sparse_routes)
+            unset = _gate_call(logits, k, sparse_routes, route_norm=None)
+            explicit = _gate_call(logits, k, sparse_routes, route_norm=_legacy_default(k))
+            _routes_equal(omitted, unset)
+            _routes_equal(omitted, explicit)
+
+
+def test_route_norm_changes_only_combine_weights():
+    logits = _fixed_logits()
+    probs = torch.softmax(logits, dim=1)
+    for k in (1, 2, 3):
+        for sparse_routes in (False, True):
+            baseline = _gate_call(logits, k, sparse_routes, route_norm=None)
+            enabled = _gate_call(logits, k, sparse_routes, route_norm=True)
+            disabled = _gate_call(logits, k, sparse_routes, route_norm=False)
+            # Selection, capacity, and the load-balancing loss stay on the pre-renorm gate.
+            assert torch.equal(baseline[0], enabled[0])
+            assert torch.equal(baseline[0], disabled[0])
+            weight = 5 if sparse_routes else 1
+            flipped = enabled if _legacy_default(k) is False else disabled
+            assert not torch.equal(baseline[weight], flipped[weight])
+            if sparse_routes:
+                _routes_equal(baseline[1:5], enabled[1:5])
+                _routes_equal(baseline[1:5], disabled[1:5])
+                _routes_equal(baseline[6:], enabled[6:])
+                _routes_equal(baseline[6:], disabled[6:])
+            else:
+                assert torch.equal(baseline[2], enabled[2])
+                assert torch.equal(baseline[2], disabled[2])
+                assert torch.equal(baseline[3], enabled[3])
+                assert torch.equal(baseline[3], disabled[3])
+
+    sparse_top1 = _gate_call(logits, 1, True, route_norm=None)
+    chosen = probs.gather(1, sparse_top1[3].reshape(-1).long().unsqueeze(1)).reshape(-1)
+    assert torch.equal(sparse_top1[5].reshape(-1), chosen)
+    assert not torch.allclose(chosen, torch.ones_like(chosen))
+
+    renorm_top1 = _gate_call(logits, 1, True, route_norm=True)
+    assert torch.equal(renorm_top1[5].reshape(-1), torch.ones_like(chosen))
+    dense_top1 = _gate_call(logits, 1, False, route_norm=True)
+    assert torch.equal(dense_top1[1].sum(dim=(1, 2)), torch.ones(logits.shape[0]))
+
+    raw_top2 = _gate_call(logits, 2, True, route_norm=False)
+    raw_mass = raw_top2[5].sum(dim=0)
+    assert not torch.allclose(raw_mass, torch.ones_like(raw_mass))
+    renorm_top2 = _gate_call(logits, 2, True, route_norm=None)
+    assert torch.allclose(renorm_top2[5].sum(dim=0), torch.ones(logits.shape[0]))
+
+
+def test_route_norm_dropped_token_stays_zero():
+    # Four tokens, four experts, capacity 1, every token prefers expert 0. Three tokens are dropped.
+    logits = torch.tensor([[5.0, 0.0, 0.0, 0.0], [4.0, 0.1, 0.0, 0.0], [3.0, 0.0, 0.1, 0.0], [2.0, 0.0, 0.0, 0.1]])
+    sparse = top1gating(logits, 1.0, 0, drop_tokens=True, use_rts=False, sparse_routes=True, route_norm=True)
+    gates = sparse[5].reshape(-1)
+    assert int((gates > 0).sum()) == 1
+    assert torch.equal(gates, (gates > 0).to(gates.dtype))
+    dense = top1gating(logits, 1.0, 0, drop_tokens=True, use_rts=False, sparse_routes=False, route_norm=True)
+    row_mass = dense[1].sum(dim=(1, 2))
+    assert torch.equal(row_mass, (row_mass > 0).to(row_mass.dtype))
+    assert int(row_mass.sum()) == 1
+
+
+def test_route_norm_does_not_change_aux_loss_between_top1_and_topk():
+    logits = _fixed_logits()
+    top1_loss = top1gating(logits, 1.0, 0, drop_tokens=False, use_rts=False)[0]
+    topk_loss = topkgating(logits, 1, 1.0, 0, drop_tokens=False)[0]
+    # The k=1 load-balancing formulas agree, so the loss matches even though top-k renormalizes and top-1 does not.
+    assert torch.equal(top1_loss, topk_loss)
+    assert torch.equal(top1_loss, top1gating(logits, 1.0, 0, drop_tokens=False, use_rts=False, route_norm=True)[0])
+    assert torch.equal(topk_loss, topkgating(logits, 1, 1.0, 0, drop_tokens=False, route_norm=False)[0])
+    top2_loss = top2gating(logits, 1.0, 0, drop_tokens=False, top2_2nd_expert_sampling=False)[0]
+    topk2_loss = topkgating(logits, 2, 1.0, 0, drop_tokens=False)[0]
+    # The two k=2 formulas do not agree. route_norm must not be used to paper over that.
+    assert not torch.equal(top2_loss, topk2_loss)
+    assert torch.equal(
+        top2_loss,
+        top2gating(logits, 1.0, 0, drop_tokens=False, top2_2nd_expert_sampling=False, route_norm=False)[0])
+    assert torch.equal(topk2_loss, topkgating(logits, 2, 1.0, 0, drop_tokens=False, route_norm=False)[0])
+
+
+def _moe_layer(k, route_norm, state):
+    expert = torch.nn.Linear(4, 4, bias=False)
+    layer = MoE(hidden_size=4,
+                expert=expert,
+                num_experts=4,
+                ep_size=1,
+                k=k,
+                min_capacity=0,
+                drop_tokens=False,
+                use_rts=False,
+                top2_2nd_expert_sampling=False,
+                route_norm=route_norm)
+    layer.load_state_dict(state)
+    return layer
+
+
+def test_moe_route_norm_default_preserves_output_and_opt_in_changes_it():
+    torch.manual_seed(7)
+    seed = MoE(hidden_size=4,
+               expert=torch.nn.Linear(4, 4, bias=False),
+               num_experts=4,
+               ep_size=1,
+               k=1,
+               min_capacity=0,
+               drop_tokens=False,
+               use_rts=False,
+               top2_2nd_expert_sampling=False)
+    hidden = torch.randn(2, 3, 4)
+    baseline = seed(hidden)[0]
+    same = _moe_layer(1, None, seed.state_dict())
+    assert torch.equal(same(hidden)[0], baseline)
+    assert torch.equal(same(hidden)[1], seed(hidden)[1])
+
+    flipped = _moe_layer(1, True, seed.state_dict())
+    assert not torch.equal(flipped(hidden)[0], baseline)
+    assert torch.equal(flipped(hidden)[1], seed(hidden)[1])
+
+    torch.manual_seed(8)
+    seed_k2 = MoE(hidden_size=4,
+                  expert=torch.nn.Linear(4, 4, bias=False),
+                  num_experts=4,
+                  ep_size=1,
+                  k=2,
+                  min_capacity=0,
+                  drop_tokens=False,
+                  use_rts=False,
+                  top2_2nd_expert_sampling=False)
+    hidden_k2 = torch.randn(2, 3, 4)
+    baseline_k2 = seed_k2(hidden_k2)[0]
+    assert torch.equal(_moe_layer(2, True, seed_k2.state_dict())(hidden_k2)[0], baseline_k2)
+    assert not torch.equal(_moe_layer(2, False, seed_k2.state_dict())(hidden_k2)[0], baseline_k2)
+    assert torch.equal(_moe_layer(2, False, seed_k2.state_dict())(hidden_k2)[1], seed_k2(hidden_k2)[1])
+
+
+def test_topk_gate_positional_constructor_leaves_route_norm_unset():
+    # deepspeed/ops/transformer/inference/moe_inference.py builds TopKGate with these positional args.
+    gate = TopKGate(8, 4, 1, 1.0, 1.0, 4, None, True, True, None)
+    assert gate.route_norm is None
+    assert gate.top2_2nd_expert_sampling is True
 
 
 class TestExpertWeightGradWithZero(DistributedTest):

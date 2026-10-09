@@ -232,6 +232,13 @@ def _sparse_decode(expert_output: Tensor, slots: Tensor, gates: Tensor, num_toke
     return combined.to(expert_output.dtype)
 
 
+def _route_norm_enabled(route_norm: Optional[bool], legacy_default: bool) -> bool:
+    """None keeps that gate's historical combine-weight rule. True or False overrides every gate."""
+    if route_norm is None:
+        return legacy_default
+    return route_norm
+
+
 def top1gating(logits: Tensor,
                capacity_factor: float,
                min_capacity: int,
@@ -241,8 +248,13 @@ def top1gating(logits: Tensor,
                use_rts: bool = True,
                ep_group: Union[torch.distributed.ProcessGroup, None] = None,
                sparse_routes: bool = False,
-               use_tutel: bool = False) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
-    """Implements Top1Gating on logits."""
+               use_tutel: bool = False,
+               route_norm: Optional[bool] = None) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
+    """Implements Top1Gating on logits.
+
+    route_norm=None keeps the historical weights: the chosen expert's softmax probability, with no
+    second normalization. The auxiliary loss is computed from those probabilities either way.
+    """
     if noisy_gate_policy == 'RSample':
         logits_w_noise = logits + gumbel_rsample(logits.shape, device=logits.device)
     # everything is in fp32 in this function
@@ -319,6 +331,11 @@ def top1gating(logits: Tensor,
 
     if sparse_routes:
         gates1_s = (gates * mask1).sum(dim=1)
+        # Historical top-1 does not renormalize. An explicit True makes a kept token's weight 1.
+        # A dropped token sums to 0, and 0 / eps stays 0.
+        if _route_norm_enabled(route_norm, False):
+            denom_s = torch.clamp(gates1_s, min=torch.finfo(gates1_s.dtype).eps)
+            gates1_s = gates1_s / denom_s
         locations1_s = torch.sum(locations1 * mask1, dim=1)
         return (l_aux, capacity, num_experts, indices1_s.to(torch.int32).unsqueeze(0),
                 locations1_s.to(torch.int32).unsqueeze(0), gates1_s.unsqueeze(0), exp_counts)
@@ -326,9 +343,13 @@ def top1gating(logits: Tensor,
     # Store the capacity location for each token
     locations1_s = torch.sum(locations1 * mask1, dim=1)
 
-    # Normalize gate probabilities
+    # Keep the assigned expert's softmax probability. route_norm rescales a kept row to 1.
     mask1_float = mask1.float()
     gates = gates * mask1_float
+    if _route_norm_enabled(route_norm, False):
+        denom_s = torch.sum(gates, dim=1, keepdim=True)
+        denom_s = torch.clamp(denom_s, min=torch.finfo(denom_s.dtype).eps)
+        gates = gates / denom_s
 
     locations1_sc = _one_hot_to_float(locations1_s, capacity)
     combine_weights = einsum("se,sc->sec", gates, locations1_sc)
@@ -344,8 +365,13 @@ def top2gating(logits: Tensor,
                drop_tokens: bool = True,
                ep_group: Union[torch.distributed.ProcessGroup, None] = None,
                top2_2nd_expert_sampling: bool = True,
-               sparse_routes: bool = False) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
-    """Implements Top2Gating on logits."""
+               sparse_routes: bool = False,
+               route_norm: Optional[bool] = None) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
+    """Implements Top2Gating on logits.
+
+    route_norm=None keeps the historical weights: the two kept probabilities are rescaled to sum to 1.
+    The auxiliary loss is computed before that rescaling.
+    """
     # everything is in fp32 in this function
     gates = F.softmax(logits, dim=1)
 
@@ -399,16 +425,17 @@ def top2gating(logits: Tensor,
     locations1_s = torch.sum(locations1 * mask1, dim=1)
     locations2_s = torch.sum(locations2 * mask2, dim=1)
 
-    # Normalize gate probabilities
+    # Normalize gate probabilities. route_norm=None keeps this rescaling; False leaves the raw softmax values.
     mask1_float = mask1.float()
     mask2_float = mask2.float()
     gates1_s = einsum("se,se->s", gates, mask1_float)
     gates2_s = einsum("se,se->s", gates, mask2_float)
-    denom_s = gates1_s + gates2_s
-    # Avoid divide-by-zero
-    denom_s = torch.clamp(denom_s, min=torch.finfo(denom_s.dtype).eps)
-    gates1_s /= denom_s
-    gates2_s /= denom_s
+    if _route_norm_enabled(route_norm, True):
+        denom_s = gates1_s + gates2_s
+        # Avoid divide-by-zero. A dropped token is 0 / eps and stays 0.
+        denom_s = torch.clamp(denom_s, min=torch.finfo(denom_s.dtype).eps)
+        gates1_s /= denom_s
+        gates2_s /= denom_s
 
     if sparse_routes:
         # Routes evicted by the capacity limit are flagged with a negative expert index.
@@ -440,8 +467,13 @@ def topkgating(
     ep_group: Union[torch.distributed.ProcessGroup, None] = None,
     drop_policy: str = "probs",
     sparse_routes: bool = False,
+    route_norm: Optional[bool] = None,
 ) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
-    """Implements TopKGating on logits."""
+    """Implements TopKGating on logits.
+
+    route_norm=None keeps the historical weights: the kept probabilities are rescaled to sum to 1.
+    The auxiliary loss is computed before that rescaling.
+    """
 
     # everything is in fp32 in this function
     # gating decisions
@@ -494,11 +526,12 @@ def topkgating(
         capacity = new_capacity
         locations = torch.cumsum(mask, dim=0) - 1
 
-    # normalize gates
+    # normalize gates. route_norm=None keeps this rescaling; False leaves the raw softmax values.
     gates_masked = gates * mask
-    gates_s = torch.sum(gates_masked, dim=-1, keepdim=True)
-    denom_s = torch.clamp(gates_s, min=torch.finfo(gates_masked.dtype).eps)
-    gates_masked = gates_masked / denom_s
+    if _route_norm_enabled(route_norm, True):
+        gates_s = torch.sum(gates_masked, dim=-1, keepdim=True)
+        denom_s = torch.clamp(gates_s, min=torch.finfo(gates_masked.dtype).eps)
+        gates_masked = gates_masked / denom_s
 
     if locations is None:
         raise ValueError(f"Locations is not set: {locations}")
@@ -539,6 +572,10 @@ class TopKGate(Module):
             size of model embedding dimension
         num_experts (int):
             number of experts in model
+        route_norm (bool, optional):
+            None keeps the historical combine weights (no renorm for k=1, renorm for k>=2).
+            True renormalizes the kept weights for every k. False leaves the raw softmax values.
+            The auxiliary loss does not use this flag.
     """
 
     wg: torch.nn.Linear
@@ -554,7 +591,8 @@ class TopKGate(Module):
                  drop_tokens: bool = True,
                  use_rts: bool = True,
                  ep_group: Union[torch.distributed.ProcessGroup, None] = None,
-                 top2_2nd_expert_sampling: bool = True) -> None:
+                 top2_2nd_expert_sampling: bool = True,
+                 route_norm: Optional[bool] = None) -> None:
         super().__init__()
 
         self.wg = torch.nn.Linear(model_dim, num_experts, bias=False)
@@ -570,6 +608,8 @@ class TopKGate(Module):
         self.drop_tokens = drop_tokens
         self.use_rts = use_rts
         self.top2_2nd_expert_sampling = top2_2nd_expert_sampling
+        # None is forwarded so each gating function keeps its own historical default.
+        self.route_norm = route_norm
 
     def _set_ep_group(self, ep_group):
         assert self.ep_group is None, 'Attempting to override an existing ep_group'
@@ -591,14 +631,27 @@ class TopKGate(Module):
         logits = torch.nn.functional.linear(input_fp32, weight=self.wg.weight.float(), bias=None)
 
         if self.k == 1:
-            gate_output = top1gating(logits, self.capacity_factor if self.training else self.eval_capacity_factor,
-                                     self.min_capacity, used_token, self.noisy_gate_policy if self.training else None,
-                                     self.drop_tokens, self.use_rts, self.ep_group, sparse_routes, use_tutel)
+            gate_output = top1gating(logits,
+                                     self.capacity_factor if self.training else self.eval_capacity_factor,
+                                     self.min_capacity,
+                                     used_token,
+                                     self.noisy_gate_policy if self.training else None,
+                                     self.drop_tokens,
+                                     self.use_rts,
+                                     self.ep_group,
+                                     sparse_routes,
+                                     use_tutel,
+                                     route_norm=self.route_norm)
 
         elif self.k == 2:
-            gate_output = top2gating(logits, self.capacity_factor if self.training else self.eval_capacity_factor,
-                                     self.min_capacity, self.drop_tokens, self.ep_group, self.top2_2nd_expert_sampling,
-                                     sparse_routes)
+            gate_output = top2gating(logits,
+                                     self.capacity_factor if self.training else self.eval_capacity_factor,
+                                     self.min_capacity,
+                                     self.drop_tokens,
+                                     self.ep_group,
+                                     self.top2_2nd_expert_sampling,
+                                     sparse_routes,
+                                     route_norm=self.route_norm)
         else:
             gate_output = topkgating(logits,
                                      self.k,
@@ -606,7 +659,8 @@ class TopKGate(Module):
                                      self.min_capacity,
                                      self.drop_tokens,
                                      self.ep_group,
-                                     sparse_routes=sparse_routes)
+                                     sparse_routes=sparse_routes,
+                                     route_norm=self.route_norm)
 
         if self.wall_clock_breakdown:
             self.timers(TOPK_GATE_TIMER).stop()
