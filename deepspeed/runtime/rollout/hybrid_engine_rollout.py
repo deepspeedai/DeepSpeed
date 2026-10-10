@@ -976,6 +976,7 @@ class HybridEngineRollout(RolloutEngine):
         if repetition_penalty == 1.0:
             return logits.argmax(dim=-1, keepdim=True)
 
+        logits = logits.float()
         next_tokens = []
         for row, request_id in enumerate(request_ids):
             input_ids = torch.cat((request_by_id[request_id].prompt_ids, *responses[request_id]), dim=1)

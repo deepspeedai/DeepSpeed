@@ -580,6 +580,20 @@ def test_continuous_generation_treats_none_repetition_penalty_as_one():
     assert next_tokens.tolist() == [[0]]
 
 
+def test_continuous_repetition_penalty_matches_hf_in_bfloat16():
+    from transformers import RepetitionPenaltyLogitsProcessor
+
+    logits = torch.tensor([[1.0, 0.333984375]], dtype=torch.bfloat16)
+    prompt = torch.tensor([[0]])
+    request = RolloutRequest(prompt, torch.ones_like(prompt))
+    model = SimpleNamespace(generation_config=SimpleNamespace(repetition_penalty=3.0))
+    expected = RepetitionPenaltyLogitsProcessor(3.0)(prompt, logits.float()).argmax(dim=-1, keepdim=True)
+    # Pin the BF16 rounding bug: dividing in BF16 ties the scores and incorrectly selects token 0.
+    actual = HybridEngineRollout._continuous_next_tokens(logits, (0, ), {0: request}, {0: ()}, model)
+    assert expected.tolist() == [[1]]
+    assert torch.equal(actual, expected)
+
+
 @patch("deepspeed.runtime.rollout.hybrid_engine_rollout.time.perf_counter")
 @patch("deepspeed.runtime.rollout.hybrid_engine_rollout.get_accelerator")
 def test_generate_records_profile_when_enabled(mock_get_accelerator, mock_perf_counter):
@@ -1359,10 +1373,11 @@ def test_adaptive_generation_resolves_custom_generation_config():
 
 @pytest.mark.parametrize("cache_support", [True, None])
 @pytest.mark.parametrize("capacity", [1, 2])
-def test_adaptive_generation_uses_resolved_penalty_on_both_routes(cache_support, capacity):
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
+def test_adaptive_generation_uses_resolved_penalty_on_both_routes(cache_support, capacity, dtype):
     from transformers import GenerationConfig
 
-    model = _make_small_qwen()
+    model = _make_small_qwen().to(dtype=dtype)
     model._supports_cache_class = cache_support
     native_prepare = model._prepare_generation_config
     prompt = torch.tensor([[11, 1, 2, 3, 4], [11, 1, 2, 3, 4]], device=next(model.parameters()).device)
