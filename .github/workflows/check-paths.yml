@@ -1,0 +1,60 @@
+# SPDX-License-Identifier: Apache-2.0
+# DeepSpeed Team
+
+name: CI path filter
+
+on:
+  workflow_call:
+    inputs:
+      pr-ignore:
+        description: Whitespace-separated files, or directories ending in /, whose changes also skip CI on pull requests
+        type: string
+        default: ''
+    outputs:
+      should_run:
+        description: Whether the caller should run its build or tests
+        value: ${{ jobs.check-paths.outputs.should_run }}
+
+permissions:
+  contents: read
+
+jobs:
+  check-paths:
+    runs-on: ubuntu-latest
+    # Normally under a minute; a hung git command must not hold merge queue entries for 6 hours.
+    timeout-minutes: 10
+    outputs:
+      should_run: ${{ steps.filter.outcome != 'success' || steps.filter.outputs.should_run != 'false' }}
+    steps:
+      - uses: actions/checkout@v7
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+        with:
+          persist-credentials: false
+          # A pull request checks out GitHub's merge commit; the step below needs its parents.
+          fetch-depth: 2
+
+      # ci/check_paths.py defines documentation for this gate and the Modal test selector.
+      # Run the base branch's copy so a pull request's edits to it apply only after merge.
+      - name: Check for non-documentation changes
+        id: filter
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+        continue-on-error: true
+        env:
+          MERGE_GROUP_BASE_SHA: ${{ github.event.merge_group.base_sha }}
+          # Merge queue entries skip CI only for documentation-only diffs.
+          PR_IGNORE: ${{ github.event_name == 'pull_request' && inputs.pr-ignore || '' }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            # The merge commit's first parent is the exact base GitHub merged the PR into.
+            # The event's pull_request.base.sha can be days older than that base.
+            BASE_SHA=$(git rev-parse HEAD^1)
+          else
+            BASE_SHA=$MERGE_GROUP_BASE_SHA
+            git fetch --quiet --no-tags --depth=1 origin "$BASE_SHA"
+          fi
+          git show "$BASE_SHA:ci/check_paths.py" > "$RUNNER_TEMP/check_paths.py"
+          python3 "$RUNNER_TEMP/check_paths.py" --base "$BASE_SHA" --ignore "$PR_IGNORE"
+
+      - name: Fall back to running tests if change detection failed
+        if: steps.filter.outcome == 'failure'
+        run: echo "::warning::Path detection failed; running the build or tests instead of skipping."

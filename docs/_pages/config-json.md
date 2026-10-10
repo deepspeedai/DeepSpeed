@@ -1759,7 +1759,8 @@ The offload pass is **not** in the default DeepCompile schedule; enable it only 
 
 ```json
 "data_types": {
-    "grad_accum_dtype"=["fp32"|"fp16"|"bf16"]
+    "grad_accum_dtype"=["fp32"|"fp16"|"bf16"],
+    "keep_in_fp32_modules"="auto"|[name patterns]
     }
 }
 ```
@@ -1769,3 +1770,9 @@ The offload pass is **not** in the default DeepCompile schedule; enable it only 
 | Description                                                                                                   | Default |
 | --------------------------------------------------------------------------------------------------------------| ------- |
 | Specifies the data type in which to do gradient accumulation. If None the default is to match the model type. |  None   |
+
+<i>**keep_in_fp32_modules**</i>: ["auto" or a list of strings]
+
+| Description | Default |
+| ----------- | ------- |
+| Buffers kept in fp32 while the model trains in bf16 or fp16. `"auto"` uses the model's Hugging Face transformers lists: `_keep_in_fp32_modules_strict`, plus `_keep_in_fp32_modules` under fp16. An example is the MoE routing bias `e_score_correction_bias` of DeepSeek-V3, GLM-4.5 and GLM-5, whose values bf16 cannot tell apart. A list gives name patterns, matched the way transformers matches them: `*` stands for any characters and a pattern may match anywhere in the buffer name. `[]` keeps nothing in fp32. Under ZeRO-3, `deepspeed.zero.Init` converts the buffers when it finishes building each module, before a checkpoint is loaded into them. Listed buffers stay fp32 even when `buffer_dtype` is set. Parameters named by the lists still follow the training dtype. | `"auto"` |

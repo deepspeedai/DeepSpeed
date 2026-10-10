@@ -252,20 +252,20 @@ class TestTiedEmbeddingAliasesAndFallback(DistributedTest):
                 expected_width = torch.tensor_split(reference.lm_head.weight,
                                                     self.world_size)[dist.get_rank()].shape[0]
             assert output.logits.shape == (1, input_ids.shape[1], expected_width)
-            torch.testing.assert_close(output.loss, expected.loss, atol=1e-6, rtol=1e-5)
+            torch.testing.assert_close(output.loss, expected.loss)
             expected.loss.backward()
             engine.backward(output.loss)
             gradient = head.weight.grad.detach().clone()
             if vocab_parallel:
                 head.gather_params([gradient])
-            torch.testing.assert_close(gradient, reference.lm_head.weight.grad, atol=1e-6, rtol=1e-5)
+            torch.testing.assert_close(gradient, reference.lm_head.weight.grad)
             reference_optimizer.step()
             reference_optimizer.zero_grad()
             engine.step()
             weight = head.weight.detach().clone()
             if vocab_parallel:
                 head.gather_params([weight])
-            torch.testing.assert_close(weight, reference.lm_head.weight, atol=1e-6, rtol=1e-5)
+            torch.testing.assert_close(weight, reference.lm_head.weight)
 
     @pytest.mark.parametrize("head_first", [False, True])
     @pytest.mark.parametrize("vocab_parallel_lm_head", [None, False, True])
@@ -578,20 +578,20 @@ class TestTiedVocabParallelLMHead(DistributedTest):
                                        reference.get_input_embeddings()(input_ids))
             expected = reference(input_ids=input_ids, labels=input_ids)
             output = engine(input_ids=input_ids, labels=input_ids)
-            torch.testing.assert_close(output.loss, expected.loss, atol=1e-6, rtol=1e-5)
+            torch.testing.assert_close(output.loss, expected.loss)
             expected.loss.backward()
             engine.backward(output.loss)
 
             # Compare on every rank so a shard-local mismatch cannot strand peers in the next collective.
             full_grad = head.weight.grad.detach().clone()
             head.gather_params([full_grad])
-            torch.testing.assert_close(full_grad, reference.lm_head.weight.grad, atol=1e-6, rtol=1e-4)
+            torch.testing.assert_close(full_grad, reference.lm_head.weight.grad)
             reference_optimizer.step()
             reference_optimizer.zero_grad()
             engine.step()
             full_weight = head.weight.detach().clone()
             head.gather_params([full_weight])
-            torch.testing.assert_close(full_weight, reference.lm_head.weight, atol=1e-6, rtol=1e-5)
+            torch.testing.assert_close(full_weight, reference.lm_head.weight)
 
     @pytest.mark.parametrize("vocab_size", [36, 37])
     def test_universal_checkpoint_reconstructs_tied_weight(self, vocab_size):
@@ -1248,19 +1248,14 @@ class TestRowParallelOutputHeadTraining(DistributedTest):
                     tp_logits = engine(tp_x)
                     reference_loss = nn.functional.cross_entropy(reference_logits.reshape(-1, 67), labels.reshape(-1))
                     tp_loss = nn.functional.cross_entropy(tp_logits.reshape(-1, 67), labels.reshape(-1))
-                    torch.testing.assert_close(tp_logits, reference_logits, atol=1e-6, rtol=1e-5)
+                    torch.testing.assert_close(tp_logits, reference_logits)
                     torch.testing.assert_close(tp_loss, reference_loss)
                     (reference_loss / 2).backward()
                     engine.backward(tp_loss)
-                    torch.testing.assert_close(tp_x.grad, x.grad, atol=1e-6, rtol=1e-5)
-                    torch.testing.assert_close(engine.module.projection.weight.grad,
-                                               reference.projection.weight.grad,
-                                               atol=1e-6,
-                                               rtol=1e-5)
+                    torch.testing.assert_close(tp_x.grad, x.grad)
+                    torch.testing.assert_close(engine.module.projection.weight.grad, reference.projection.weight.grad)
                     torch.testing.assert_close(output_head.weight.grad,
-                                               reference_head.weight.grad.narrow(1, offset, sizes[tp_rank]),
-                                               atol=1e-6,
-                                               rtol=1e-5)
+                                               reference_head.weight.grad.narrow(1, offset, sizes[tp_rank]))
                     if bias:
                         torch.testing.assert_close(output_head.bias.grad, reference_head.bias.grad)
                     previous_projection = engine.module.projection.weight.detach().clone()
@@ -1268,19 +1263,11 @@ class TestRowParallelOutputHeadTraining(DistributedTest):
                     engine.step()
                     if micro_step == 1:
                         torch.testing.assert_close(engine.module.projection.weight,
-                                                   previous_projection - learning_rate * accumulated_gradient,
-                                                   atol=1e-6,
-                                                   rtol=1e-5)
+                                                   previous_projection - learning_rate * accumulated_gradient)
                 reference_optimizer.step()
                 assert engine.global_steps == step + 1
-                torch.testing.assert_close(engine.module.projection.weight,
-                                           reference.projection.weight,
-                                           atol=1e-6,
-                                           rtol=1e-5)
-                torch.testing.assert_close(output_head.weight,
-                                           reference_head.weight.narrow(1, offset, sizes[tp_rank]),
-                                           atol=1e-6,
-                                           rtol=1e-5)
+                torch.testing.assert_close(engine.module.projection.weight, reference.projection.weight)
+                torch.testing.assert_close(output_head.weight, reference_head.weight.narrow(1, offset, sizes[tp_rank]))
                 if bias:
                     torch.testing.assert_close(output_head.bias, reference_head.bias)
                 if tp_rank == 0:
@@ -1344,7 +1331,7 @@ class TestTiedRowParallelOutputHeadTraining(DistributedTest):
                 labels = torch.randint(vocab_size, (2, 5), device=device)
                 reference_logits = reference(input_ids)
                 tp_logits = engine(input_ids)
-                torch.testing.assert_close(tp_logits, reference_logits, atol=1e-6, rtol=1e-5)
+                torch.testing.assert_close(tp_logits, reference_logits)
                 reference_loss = nn.functional.cross_entropy(reference_logits.reshape(-1, vocab_size),
                                                              labels.reshape(-1))
                 tp_loss = nn.functional.cross_entropy(tp_logits.reshape(-1, vocab_size), labels.reshape(-1))
@@ -1354,17 +1341,14 @@ class TestTiedRowParallelOutputHeadTraining(DistributedTest):
                     # The tied gradient is the sum of the lookup and projection contributions.
                     full_grad = head.weight.grad.detach().clone()
                     head.gather_params([full_grad])
-                    torch.testing.assert_close(full_grad, reference.lm_head.weight.grad, atol=1e-6, rtol=1e-5)
+                    torch.testing.assert_close(full_grad, reference.lm_head.weight.grad)
                 engine.step()
                 reference_optimizer.step()
                 reference_optimizer.zero_grad()
                 full_weight = head.weight.detach().clone()
                 head.gather_params([full_weight])
-                torch.testing.assert_close(full_weight, reference.lm_head.weight, atol=1e-6, rtol=1e-5)
-                torch.testing.assert_close(engine.module.projection.weight,
-                                           reference.projection.weight,
-                                           atol=1e-6,
-                                           rtol=1e-5)
+                torch.testing.assert_close(full_weight, reference.lm_head.weight)
+                torch.testing.assert_close(engine.module.projection.weight, reference.projection.weight)
             assert not torch.equal(reference.lm_head.weight, initial_weight)
         finally:
             reset_tp_model_init_state()
