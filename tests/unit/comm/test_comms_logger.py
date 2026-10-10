@@ -111,7 +111,8 @@ def test_collective_profiling(monkeypatch, op_name, positional, debug, profile_m
     backend = SimpleNamespace(using_mpi=False, is_initialized=lambda: True, get_world_size=lambda group=None: 2)
     setattr(backend, op_name, backend_op)
     monkeypatch.setattr(comm, 'cdb', backend)
-    monkeypatch.setattr(comm, 'get_accelerator', lambda: SimpleNamespace(synchronize=lambda: None))
+    synchronize = Mock()
+    monkeypatch.setattr(comm, 'get_accelerator', lambda: SimpleNamespace(synchronize=synchronize))
     op_timer = Mock()
     op_timer.elapsed.return_value = 1.0
     timers = Mock(return_value=op_timer)
@@ -151,7 +152,9 @@ def test_collective_profiling(monkeypatch, op_name, positional, debug, profile_m
     if profile_mode == 'unselected':
         assert comm.comms_logger.comms_dict == {}
         timers.assert_not_called()
+        synchronize.assert_not_called()
     else:
+        synchronize.assert_called_once_with()
         record_name, = comm.comms_logger.comms_dict
         if debug:
             assert record_name.startswith(log_name + ' | [Caller Func: ')
