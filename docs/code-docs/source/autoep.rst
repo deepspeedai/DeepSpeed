@@ -149,6 +149,12 @@ value other than ``False`` instead of silently changing the requested behavior.
 4. Expert parameters are marked for expert-data-parallel gradient reduction;
    router and shared-expert parameters use standard data-parallel reduction.
 
+On Ascend NPU, AutoEP generates permutation indices on device when there are
+at least 64 source/expert groups. Smaller groups use the CPU reference path
+because device launch overhead can dominate. The ordering and padding contract
+is identical; this internal choice does not change the AutoEP configuration.
+Other dispatch steps may still synchronize with the host.
+
 **Router outputs and activation checkpointing:**
 
 Models using Hugging Face's model-level router-logit recording capture the

@@ -382,7 +382,7 @@ def permute_by_local_expert(
         n_tokens: original token count before padding (for unpermute)
     """
     from deepspeed.moe.ep_kernels import (generate_permute_indices, permute_rows, permute_rows_supported,
-                                          TOKEN_GROUP_ALIGN_SIZE_M)
+                                          prefer_cpu_permutation_indices, TOKEN_GROUP_ALIGN_SIZE_M)
 
     if local_counts.ndim == 1:
         # [E_local]: already aggregated over sources (ep_degree=1)
@@ -404,9 +404,9 @@ def permute_by_local_expert(
     x_padded_per_expert = n_tokens + num_local_experts * alignment
     padded_max_len = ((x_padded_per_expert + alignment - 1) // alignment) * alignment
 
-    # Use the pure-PyTorch path for host tensors. The CPU accelerator reports
-    # CPU tensors as "on accelerator", but Triton still requires a GPU driver.
-    use_cpu = tokens.device.type == "cpu"
+    # Small NPU groups retain the lower-latency host reference path.
+    use_cpu = (local_counts_flat.device.type == "cpu"
+               or prefer_cpu_permutation_indices(tokens.device.type, local_counts_flat.numel()))
     counts_for_permute = local_counts_flat.cpu() if use_cpu else local_counts_flat
     with torch.no_grad():
         permuted_indices, m_sizes, _offsets = generate_permute_indices(
@@ -417,7 +417,7 @@ def permute_by_local_expert(
             alignment,
             use_cpu=use_cpu,
         )
-    if not use_cpu:
+    if tokens.device.type != "cpu":
         permuted_indices = permuted_indices.to(tokens.device)
         m_sizes = m_sizes.to(tokens.device)
 
@@ -594,6 +594,8 @@ class AutoEPMoELayer(nn.Module):
                 route_scale=spec.route_scale,
                 gate_bias=spec.gate_bias,
                 group_score_func=spec.group_score_func,
+                topk_sorted=spec.router_topk_sorted,
+                scores_in_input_dtype=spec.router_scores_in_input_dtype,
             )
             # Copy gate weights
             _copy_parameter_data(self.router.gate.weight, source_gate.weight)

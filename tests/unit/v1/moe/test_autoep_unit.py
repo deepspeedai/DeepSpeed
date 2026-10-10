@@ -43,10 +43,8 @@ from deepspeed.module_inject.auto_ep_layer import (
     resolve_score_apply_mode,
 )
 from deepspeed.module_inject.auto_ep_preset_adapters import get_preset_adapter
-from deepspeed.module_inject.auto_ep_presets.registry import (
-    preset_name_for_hf_model_type,
-    unsupported_preset_for_hf_model_type,
-)
+from deepspeed.module_inject.auto_ep_presets.registry import (preset_name_for_hf_model_type,
+                                                              unsupported_preset_for_hf_model_type)
 from deepspeed.moe.layer import MoE
 from deepspeed.moe.ep_experts import GroupedExperts
 from deepspeed.moe.ep_repack import repack_expert_weights
@@ -855,6 +853,34 @@ class TestAutoEPConfig:
         with pytest.raises(RuntimeError, match="outside AutoEP expert"):
             engine.load_module_state_dict(checkpoint, strict=True, allowed_missing_keys=["weight"])
 
+    @pytest.mark.parametrize("ep_rank", [1, 2, 3])
+    def test_autoep_resume_keeps_rank_local_frozen_experts(self, ep_rank):
+        # The shared model checkpoint contains rank-0 frozen fragments. Those
+        # must not overwrite expert tensors restored from this rank's files.
+        layer = object.__new__(AutoEPMoELayer)
+        nn.Module.__init__(layer)
+        layer.experts = GroupedExperts(4, 8, 2, use_grouped_mm=False)
+        model = nn.ModuleDict({"moe": layer, "dense": nn.Linear(4, 4, bias=False)})
+        model.requires_grad_(False)
+        engine = object.__new__(DeepSpeedEngine)
+        object.__setattr__(engine, "module", model)
+        object.__setattr__(engine, "param_names", {p: name for name, p in model.named_parameters()})
+        checkpoint = {
+            "module": {
+                name: torch.full_like(p, ep_rank + 1)
+                for name, p in model.named_parameters()
+            },
+            ds_engine.FROZEN_PARAM_FRAGMENTS: {
+                name: torch.ones_like(p)
+                for name, p in model.named_parameters()
+            },
+        }
+        engine.load_module_state_dict(checkpoint)
+        for parameter in layer.experts.parameters():
+            torch.testing.assert_close(parameter, torch.full_like(parameter, ep_rank + 1))
+        # Non-expert frozen-fragment restoration retains its existing behavior.
+        torch.testing.assert_close(model["dense"].weight, torch.ones_like(model["dense"].weight))
+
     def test_resolve_zero3_param_placement_rejects_pre_partitioned_expert_on_wrong_group(self, monkeypatch):
         engine = object.__new__(DeepSpeedEngine)
         model = nn.Linear(2, 2, bias=False)
@@ -1029,9 +1055,8 @@ class TestAutoEPConfig:
         assert preset_name_for_hf_model_type("minimax_m3_vl_text") == "minimax_m3"
         assert preset_name_for_hf_model_type("llama4_text") is None
 
-        qwen35 = unsupported_preset_for_hf_model_type("qwen3_5_moe")
-        assert qwen35 is not None
-        assert "qwen3_5_moe_text" in qwen35[1].unsupported_hf_model_type_notes["qwen3_5_moe"]
+        assert preset_name_for_hf_model_type("qwen3_5_moe") == "qwen3_5_moe"
+        assert unsupported_preset_for_hf_model_type("qwen3_5_moe") is None
         minimax = unsupported_preset_for_hf_model_type("minimax_m3_vl")
         assert minimax is not None
         assert "minimax_m3_vl_text" in minimax[1].unsupported_hf_model_type_notes["minimax_m3_vl"]
@@ -2173,8 +2198,9 @@ class TestModelDetectionAndReplacement:
         assert specs[0].model_family == "qwen3_moe"
 
         model.config.model_type = "qwen3_5_moe"
-        with pytest.raises(ValueError, match="qwen3_5_moe_text"):
-            AutoEP(model, _runtime_config(enabled=True, autoep_size=1))._resolve_presets()
+        monkeypatch.setattr(get_preset_adapter("qwen3_5_moe"), "_installed_transformers_version", lambda: "5.16.1")
+        specs = AutoEP(model, _runtime_config(enabled=True, autoep_size=1)).ep_parser()
+        assert specs[0].model_family == "qwen3_5_moe"
 
     def test_deepseek_v3_detection_and_score_correction_bias_copy(self, monkeypatch):
         FakeGatheredParameters.calls = []

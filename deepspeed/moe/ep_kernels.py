@@ -37,8 +37,7 @@ try:
 
     _TRITON_AVAILABLE = True
 except ImportError:
-    logger.info("Triton not available; using pure-PyTorch CPU fallback for "
-                "permutation index generation.")
+    logger.info("Triton not available; using the available PyTorch permutation-index backend.")
 
 # ---------------------------------------------------------------------------
 # Alignment constant
@@ -51,6 +50,14 @@ TOKEN_GROUP_ALIGN_SIZE_M = 8
  - fp8:  16 (16 bytes / 1 byte per elem)
  - mxfp8: 32 (scaling block size)
 """
+
+NPU_DEVICE_PERMUTE_MIN_GROUPS = 64
+
+
+def prefer_cpu_permutation_indices(device_type: str, group_count: int) -> bool:
+    """Use host indexing when device launch overhead dominates small NPU groups."""
+    return device_type == "cpu" or (device_type == "npu" and group_count < NPU_DEVICE_PERMUTE_MIN_GROUPS)
+
 
 # ---------------------------------------------------------------------------
 # Utility: round up
@@ -115,10 +122,16 @@ def fill_indices_wrapper(
     block_size: int = 128,
     max_blocks: int = 1024,
 ) -> torch.Tensor:
-    """Launch the Triton kernel to fill permutation indices.
-
-    Falls back to :func:`fill_indices_cpu` when Triton is unavailable.
-    """
+    """Fill permutation indices with the available device implementation."""
+    if tokens_per_expert_group.device.type == "npu":
+        return fill_indices_torch(
+            tokens_per_expert_group,
+            start_index_values,
+            write_offsets,
+            experts_per_rank,
+            num_ranks,
+            max_len,
+        )
     if not _TRITON_AVAILABLE:
         return fill_indices_cpu(
             tokens_per_expert_group,
@@ -180,6 +193,31 @@ def fill_indices_cpu(
                 )
             write_start += length
     return permuted_indices
+
+
+def fill_indices_torch(
+    tokens_per_expert_group: torch.Tensor,
+    start_index_values: torch.Tensor,
+    write_offsets: torch.Tensor,
+    experts_per_rank: int,
+    num_ranks: int,
+    max_len: int,
+) -> torch.Tensor:
+    """Build the padded permutation without host counts; AutoEP supplies ``max_len >= token count``."""
+    counts = tokens_per_expert_group.to(torch.int64)
+    source_ends = start_index_values + counts
+    source_prefix = (counts.view(num_ranks, experts_per_rank).cumsum(0) -
+                     counts.view(num_ranks, experts_per_rank)).reshape(-1)
+    source_rows = torch.arange(max_len, device=counts.device, dtype=torch.int64)
+    valid = source_rows < source_ends[-1]
+    group_ids = torch.searchsorted(source_ends, source_rows, right=True).clamp_max(counts.numel() - 1)
+    expert_ids = group_ids.remainder(experts_per_rank)
+    destinations = (write_offsets[expert_ids] + source_prefix[group_ids] + source_rows - start_index_values[group_ids])
+    # Extra slot absorbs all rows beyond the real token count; it is discarded.
+    destinations = torch.where(valid, destinations, max_len).to(torch.int64)
+    result = torch.full((max_len + 1, ), -1, dtype=torch.int32, device=counts.device)
+    result.scatter_(0, destinations, source_rows.to(torch.int32))
+    return result[:-1]
 
 
 # ===================================================================

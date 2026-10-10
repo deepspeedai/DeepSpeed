@@ -300,6 +300,42 @@ def _run_experts_triton_grouped_mm(
 # ---------------------------------------------------------------------------
 
 
+def _run_experts_npu(w1,
+                     w2,
+                     w3,
+                     x,
+                     num_tokens_per_expert,
+                     activation="swiglu",
+                     alpha=1.702,
+                     limit=7.0,
+                     *,
+                     hifloat8,
+                     hifloat8_config=None):
+    """Keep EP layout and BF16 parameters; select only the expert GEMM precision."""
+    offsets = num_tokens_per_expert.cumsum(0).to(torch.int64)
+    # AutoEP reserves extra rows for permutation padding beyond the last group.
+    rows = int(offsets[-1].item())
+    if rows < 0 or rows > x.shape[0]:
+        raise ValueError("Expert token counts exceed the available rows")
+    inputs = x[:rows]
+    if hifloat8:
+        from torchao_npu.hifloat8 import hifloat8_grouped_mm
+
+        def mm(lhs, weight):
+            return hifloat8_grouped_mm(lhs, weight.to(x.dtype), offsets, config=hifloat8_config, trans_b=True)
+    else:
+        from torchao_npu.ops.npu import grouped_mm
+
+        def mm(lhs, weight):
+            return grouped_mm(lhs, weight.to(x.dtype), offsets, trans_b=True)
+
+    gate = mm(inputs, w1)
+    up = mm(inputs, w3)
+    hidden = apply_expert_activation(gate, up, activation, alpha, limit, fused=False)
+    output = mm(hidden, w2)
+    return torch.cat((output, output.new_zeros((x.shape[0] - rows, output.shape[-1]))))
+
+
 class GroupedExperts(nn.Module):
     """Grouped expert computation for MoE layers.
 
@@ -356,6 +392,8 @@ class GroupedExperts(nn.Module):
         self.w3.is_expert_group = True
         self.use_triton_grouped_mm = False
         self.use_grouped_mm = use_grouped_mm
+        self.hifloat8_enabled = False
+        self.hifloat8_config = None
 
         # Resolve the Triton path. The device-specific decision is delegated to
         # the accelerator backend (e.g. the CUDA backend prefers Triton on
@@ -392,6 +430,19 @@ class GroupedExperts(nn.Module):
         """
 
         act = (self.activation, self.activation_alpha, self.activation_limit)
+        if self.hifloat8_enabled:
+            if x.device.type != "npu" or x.dtype != torch.bfloat16:
+                raise RuntimeError("HiFloat8 experts require BF16 NPU inputs")
+            return _run_experts_npu(self.w1,
+                                    self.w2,
+                                    self.w3,
+                                    x,
+                                    num_tokens_per_expert,
+                                    *act,
+                                    hifloat8=True,
+                                    hifloat8_config=self.hifloat8_config)
+        if x.device.type == "npu" and self.use_grouped_mm:
+            return _run_experts_npu(self.w1, self.w2, self.w3, x, num_tokens_per_expert, *act, hifloat8=False)
         if self.use_triton_grouped_mm:
             return _run_experts_triton_grouped_mm(self.w1, self.w2, self.w3, x, num_tokens_per_expert, *act)
         elif self.use_grouped_mm:

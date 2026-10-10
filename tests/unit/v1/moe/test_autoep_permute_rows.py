@@ -41,6 +41,94 @@ def _grads(function, inputs, upstream):
     return output.detach(), grad
 
 
+@pytest.mark.parametrize("rows_by_source", [
+    [[0, 0], [0, 0]],
+    [[3, 0, 2], [1, 4, 0]],
+    [[0, 5, 0, 1], [7, 0, 0, 0]],
+])
+def test_torch_indexer_matches_cpu_reference(rows_by_source):
+    counts = torch.tensor(rows_by_source, dtype=torch.int32)
+    ranks, experts = counts.shape
+    flat = counts.flatten()
+    starts = flat.cumsum(0) - flat
+    alignment = ep_kernels.TOKEN_GROUP_ALIGN_SIZE_M
+    sizes = ((counts.sum(0).clamp_min(alignment) + alignment - 1) // alignment) * alignment
+    write_offsets = sizes.cumsum(0) - sizes
+    max_len = int(flat.sum()) + experts * alignment + alignment
+    expected = ep_kernels.fill_indices_cpu(flat, starts, write_offsets, experts, ranks, max_len)
+    actual = ep_kernels.fill_indices_torch(flat, starts, write_offsets, experts, ranks, max_len)
+    assert torch.equal(actual, expected)
+
+
+@pytest.mark.parametrize("device_type,groups,expected", [
+    ("cpu", 256, True),
+    ("cuda", 256, False),
+    ("npu", 32, True),
+    ("npu", 48, True),
+    ("npu", 64, False),
+    ("npu", 256, False),
+])
+def test_permutation_index_backend_keeps_small_npu_groups_on_cpu(device_type, groups, expected):
+    assert ep_kernels.prefer_cpu_permutation_indices(device_type, groups) is expected
+
+
+@pytest.mark.skipif(get_accelerator().device_name() != "npu", reason="requires NPU kernels")
+@pytest.mark.parametrize("strided", [False, True])
+@pytest.mark.parametrize("rows_by_source", [
+    [[0, 0], [0, 0]],
+    [[3, 0, 2], [1, 4, 0]],
+    [[0, 5, 0, 1], [7, 0, 0, 0]],
+    [[0 if expert % 5 == 0 else (rank + expert) % 3 for expert in range(16)] for rank in range(4)],
+    [[0] * 16 for _ in range(4)],
+])
+def test_npu_permutation_matches_cpu_indices_and_gradients(rows_by_source, strided):
+    counts_cpu = torch.tensor(rows_by_source, dtype=torch.int32)
+    ranks, experts = counts_cpu.shape
+    rows = int(counts_cpu.sum())
+    alignment = ep_kernels.TOKEN_GROUP_ALIGN_SIZE_M
+    max_len = ep_kernels._round_up(rows + experts * alignment, alignment)
+    expected_indices, expected_sizes, _ = ep_kernels.generate_permute_indices(counts_cpu.flatten(),
+                                                                              experts,
+                                                                              ranks,
+                                                                              max_len,
+                                                                              alignment,
+                                                                              use_cpu=True)
+    counts = counts_cpu.to("npu:0")
+    if strided:
+        tokens = torch.randn((rows, 32), device="npu:0", dtype=torch.bfloat16)[:, ::2].detach().requires_grad_()
+    else:
+        tokens = torch.randn((rows, 16), device="npu:0", dtype=torch.bfloat16, requires_grad=True)
+    actual, indices, sizes, actual_rows = permute_by_local_expert(tokens, counts)
+    assert actual_rows == rows
+    assert torch.equal(indices.cpu(), expected_indices)
+    assert torch.equal(sizes.cpu(), expected_sizes)
+
+    reference_tokens = tokens.detach().clone().requires_grad_()
+    reference = _reference_permute(reference_tokens, expected_indices.to("npu:0"))
+    upstream = torch.randn_like(actual)
+    torch.testing.assert_close(actual, reference, rtol=0, atol=0)
+    (actual * upstream).sum().backward()
+    (reference * upstream).sum().backward()
+    torch.testing.assert_close(tokens.grad, reference_tokens.grad, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(get_accelerator().device_name() != "npu", reason="requires NPU kernels")
+def test_npu_permutation_accepts_host_counts():
+    counts_cpu = torch.ones((4, 16), dtype=torch.int32)
+    tokens = torch.randn((64, 16), device="npu:0", dtype=torch.bfloat16, requires_grad=True)
+    reference_tokens = tokens.detach().clone().requires_grad_()
+    actual, indices, sizes, _ = permute_by_local_expert(tokens, counts_cpu)
+    reference, reference_indices, reference_sizes, _ = permute_by_local_expert(reference_tokens,
+                                                                               counts_cpu.to("npu:0"))
+    assert torch.equal(indices, reference_indices)
+    assert torch.equal(sizes, reference_sizes)
+    assert torch.equal(actual, reference)
+    upstream = torch.randn_like(actual)
+    (actual * upstream).sum().backward()
+    (reference * upstream).sum().backward()
+    assert torch.equal(tokens.grad, reference_tokens.grad)
+
+
 @pytest.mark.skipif(get_accelerator().device_name() != "cuda" or not ep_kernels._TRITON_AVAILABLE,
                     reason="the gather-based reorder needs CUDA and Triton")
 class TestAutoEPPermuteRows(DistributedTest):
