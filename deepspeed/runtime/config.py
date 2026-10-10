@@ -434,6 +434,17 @@ class DeepSpeedConfigWriter:
             json.dump(self.data, outfile)
 
 
+def _sequence_data_parallel_size(world_size, sequence_parallel_size):
+    """Data-parallel size left after carving ``sequence_parallel_size`` out of ``world_size``.
+
+    Batch sizes are derived from this value, so it has to be an integer.
+    """
+    if sequence_parallel_size < 1 or world_size % sequence_parallel_size != 0:
+        raise ValueError(f"sequence_parallel_size ({sequence_parallel_size}) must be a positive divisor of "
+                         f"the world size ({world_size})")
+    return world_size // sequence_parallel_size
+
+
 class DeepSpeedConfig(object):
 
     def __init__(self, config: Union[str, dict], mpu=None, mesh_device=None):
@@ -458,15 +469,18 @@ class DeepSpeedConfig(object):
             if mpu is not None:
                 # Ulysses SP
                 if not hasattr(mpu, "get_data_parallel_world_size"):
-                    self.world_size = dist.get_world_size() / mpu.get_sequence_parallel_world_size()
+                    self.world_size = _sequence_data_parallel_size(dist.get_world_size(),
+                                                                   mpu.get_sequence_parallel_world_size())
                 else:
                     self.world_size = mpu.get_data_parallel_world_size()
             elif mesh_device is not None:
                 self.world_size = dist.get_world_size(mesh_device.get_group(mesh_dim="data_parallel"))
             else:
                 # HF zero.init case where there is no mpu
-                if "sequence_parallel_size" in config:
-                    self.world_size = dist.get_world_size() / config["sequence_parallel_size"]
+                # `config` may be a path or a base64 string; the parsed dict is `self._param_dict`
+                if "sequence_parallel_size" in self._param_dict:
+                    self.world_size = _sequence_data_parallel_size(dist.get_world_size(),
+                                                                   self._param_dict["sequence_parallel_size"])
                 else:
                     self.world_size = dist.get_world_size()
         except (RuntimeError, AssertionError, AttributeError):
