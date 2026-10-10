@@ -76,8 +76,8 @@ Escape hatches:
   in a commit message on the branch.
 * **Run all by touching infra:** changes to the run-all globs (CI config, build
   system, `deepspeed/__init__.py`, collectives/accelerator, shared fixtures, etc.)
-  always trigger everything. See `COMMON_RUN_ALL_GLOBS` / `extra_run_all_globs` in
-  `ci/tests_fetcher.py`.
+  trigger everything, except documentation files. See `COMMON_RUN_ALL_GLOBS` /
+  `extra_run_all_globs` in `ci/tests_fetcher.py`.
 * **Runtime/dynamic deps the import graph can't see** (monkey-patching, plugin
   registries, JIT ops, `deepspeed.initialize()`-time injection) are wired up via
   the curated `DYNAMIC_EDGES` map in `ci/tests_fetcher.py` — add an entry there if
