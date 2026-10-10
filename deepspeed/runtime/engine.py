@@ -3493,9 +3493,13 @@ class DeepSpeedEngine(Module):
                 self.torch_autocast_z0_gradscaler.unscale_(self.optimizer)
             if not (self.fp16_enabled() or self.bfloat16_enabled() or self.zero_optimization()):
                 self.clip_fp32_gradients()
+        overflow = False
         if self.torch_autocast_z0_gradscaler:
+            scale = self.torch_autocast_z0_gradscaler.get_scale()
             self.torch_autocast_z0_gradscaler.step(self.optimizer)
             self.torch_autocast_z0_gradscaler.update()
+            # GradScaler skips optimizer.step() on inf/nan gradients and backs off the scale.
+            overflow = self.torch_autocast_z0_gradscaler.get_scale() < scale
         else:
             self.optimizer.step()
 
@@ -3516,7 +3520,6 @@ class DeepSpeedEngine(Module):
             self.zero_grad()
 
         # Check overflow here since in DS fp16 optimizer, the overflow is updated in above step() function.
-        overflow = False
         if hasattr(self.optimizer, "overflow"):
             overflow = self.optimizer.overflow
         self._step_applied = not overflow
