@@ -139,15 +139,24 @@ identity rather than model configuration metadata such as `tie_word_embeddings`.
 Additional HuggingFace types such as `local_colwise` and `local_rowwise` are
 not yet handled and fall back to AutoTP preset-based partitioning.
 
-For an untied `lm_head` or `embed_out`, an explicit `row` partition rule also
+For an `lm_head` or `embed_out`, an explicit `row` partition rule also
 supports eager training with a replicated input. The head slices the input to
 match its weight shard, reduces the complete output, and reconstructs the full
 input gradient across tensor-parallel ranks. Bias stays replicated; uneven
 hidden dimensions and both flattened and sequence-shaped inputs are supported.
-The default training output-head layout remains column parallel. Explicit row
-training rejects tied weights and reshaped/non-input-dimension shards rather
-than silently breaking a parameter tie. Deferred DeepCompile collectives are
-not supported for this output-head path.
+The default training output-head layout remains column parallel. A head tied
+to its input embedding (`tie_word_embeddings`) is also supported: DeepSpeed
+shards every tied `nn.Embedding` along the same hidden dimension, so the pair
+keeps reading from and accumulating gradients into a single per-rank weight
+shard, and all-gathers each token's embedding slices into the full hidden
+activation. A conflicting explicit spec on the tied embedding is superseded
+with a warning. The embedding options `max_norm` and `sparse`, custom
+embedding forwards other than Gemma3's scaled embedding, weights tied to
+modules other than `nn.Embedding`, and reshaped/non-input-dimension shards are
+rejected rather than silently breaking a parameter tie. Deferred DeepCompile
+collectives are not supported for this output-head path. Note that a
+row-parallel head all-reduces the complete vocabulary logits; for tied models,
+`vocab_parallel_lm_head` avoids that and keeps logits sharded.
 
 If you need to override the model's built-in `tp_plan`, provide a
 `partition_config` in the DeepSpeed config -- it takes precedence.
