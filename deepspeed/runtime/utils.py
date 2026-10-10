@@ -392,15 +392,12 @@ def clip_grad_norm_(parameters, max_norm, norm_type=2, mpu=None):
             if mpu is not None:
                 if (mpu.get_model_parallel_rank() == 0) or is_model_parallel_parameter(p):
                     param_norm = p.grad.data.detach().float().norm(norm_type)
-                    all_norms.append(param_norm)
+                    all_norms.append(param_norm.pow(norm_type))
             else:
                 param_norm = p.grad.data.detach().float().norm(norm_type)
-                all_norms.append(param_norm)
+                all_norms.append(param_norm.pow(norm_type))
         if len(all_norms) > 0:
-            # The p-norm over every gradient is (sum_i ||g_i||_p ** p) ** (1/p), and the
-            # 1/norm_type root is taken below, so each per-parameter norm has to be raised
-            # to norm_type here. Squaring only matches that for norm_type == 2.
-            total_norm = torch.stack(all_norms).pow(norm_type).sum().float()
+            total_norm = torch.stack(all_norms).sum().float()
         else:
             total_norm = get_accelerator().FloatTensor([0.0])
         total_norm = total_norm.to(get_accelerator().current_device_name())
@@ -409,13 +406,11 @@ def clip_grad_norm_(parameters, max_norm, norm_type=2, mpu=None):
             dist.all_reduce(total_norm, op=dist.ReduceOp.SUM, group=mpu.get_model_parallel_group())
         total_norm = total_norm.pow(1. / norm_type)
 
-    # Need to average total_norm across different GPUs due to the presence of moe params
+    # Need to sum total_norm across different GPUs due to the presence of moe params
     pg = groups._get_data_parallel_group()
-    scaled_norm = total_norm * 1.0 / float(dist.get_world_size(group=pg))
-    scaled_norm_tensor = scaled_norm
-
-    dist.all_reduce(scaled_norm_tensor, group=pg)
-    total_norm = scaled_norm_tensor
+    total_norm = total_norm.pow(norm_type)
+    dist.all_reduce(total_norm, op=dist.ReduceOp.SUM, group=pg)
+    total_norm = total_norm.pow(1. / norm_type)
     total_norm = total_norm.to(parameters[0].device)
 
     max_norm = torch.tensor([float(max_norm)], device=total_norm.device)
