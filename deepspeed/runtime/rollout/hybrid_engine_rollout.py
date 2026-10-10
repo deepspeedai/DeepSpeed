@@ -564,6 +564,8 @@ class HybridEngineRollout(RolloutEngine):
         from deepspeed.utils.static_cache import DeepSpeedStaticCache
 
         profile = self._start_continuous_profile() if self.enable_profiling else None
+        profile_accelerator = profile["accelerator"] if profile is not None else None
+        profile_start = profile["start"] if profile is not None else None
         prompt_len = requests[0].prompt_ids.shape[1]
         minimum_cache_len = prompt_len + sampling.max_new_tokens
         max_cache_len = (self.continuous_cache_capacity
@@ -593,6 +595,29 @@ class HybridEngineRollout(RolloutEngine):
         static_write_positions = state.static_write_positions
         graph = state.graph
         static_logits = state.static_logits
+        stats = {
+            "cache_capacity":
+            max_cache_len,
+            "peak_cache_length":
+            prompt_len,
+            "cache_memory_bytes":
+            sum(layer.keys.numel() * layer.keys.element_size() + layer.values.numel() * layer.values.element_size()
+                for layer in cache.layers) + static_input.numel() * static_input.element_size() +
+            static_attention.numel() * static_attention.element_size() +
+            static_causal_attention.numel() * static_causal_attention.element_size() +
+            static_position_ids.numel() * static_position_ids.element_size() +
+            static_write_positions.numel() * static_write_positions.element_size(),
+            "trim_count":
+            0,
+            "trimmed_columns":
+            0,
+            "trim_latency_ms":
+            0.0,
+            "trim_bytes_moved":
+            0,
+            "decode_steps":
+            0,
+        }
 
         slot_by_request = {}
         write_positions = {}
@@ -668,6 +693,7 @@ class HybridEngineRollout(RolloutEngine):
                 for request_id, token in zip(decode_ids, decoded.split(1, dim=0)):
                     decoded_tokens[request_id] = token
                     write_positions[request_id] += 1
+                stats["decode_steps"] += 1
                 next_tokens.update(decoded_tokens)
 
             finished_ids = []
@@ -680,10 +706,23 @@ class HybridEngineRollout(RolloutEngine):
             scheduler_start = self._profile_start(profile)
             update = scheduler.advance(finished_ids)
             self._profile_end(profile, "scheduler_overhead_ms", scheduler_start)
+            if write_positions:
+                stats["peak_cache_length"] = max(stats["peak_cache_length"], max(write_positions.values()))
 
         generation_end = self._profile_start(profile)
         output = self._build_continuous_batch(original_request, responses)
         post_processing_end = self._profile_end(profile, None, generation_end)
+        if profile_accelerator is not None:
+            profile_accelerator.synchronize()
+            total_ms = (time.perf_counter() - profile_start) * 1000.0
+            generated_tokens = sum(len(response) for response in responses.values())
+            stats["end_to_end_ms"] = total_ms
+            stats["tokens_per_second"] = generated_tokens / (total_ms / 1000.0) if total_ms > 0.0 else 0.0
+        else:
+            stats["end_to_end_ms"] = None
+            stats["tokens_per_second"] = None
+        stats["trim_frequency"] = 0.0
+        self._last_continuous_stats = stats
         if profile is not None:
             self._finish_continuous_profile(profile, original_request, responses, max_batch_size, prompt_len,
                                             generation_end, post_processing_end)

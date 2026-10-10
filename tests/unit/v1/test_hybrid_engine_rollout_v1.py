@@ -135,3 +135,9 @@ def test_continuous_graph_generation_refills_a_fixed_slot_on_cuda():
 
     assert torch.equal(graph_output.input_ids, eager_output.input_ids)
     assert torch.equal(graph_output.attention_mask, eager_output.attention_mask)
+    stats = graph_rollout.get_last_continuous_stats()
+    assert stats["cache_capacity"] == 5
+    assert stats["peak_cache_length"] == 4
+    assert stats["decode_steps"] == 2
+    assert stats["trim_count"] == 0
+    assert stats["trim_frequency"] == 0.0
