@@ -8,6 +8,7 @@ import torch
 
 from deepspeed.accelerator import get_accelerator
 from deepspeed.runtime.zero.offload_config import OffloadStateTypeEnum
+from deepspeed.runtime.zero.utils import zero_parameters
 
 
 def _make_offload_state_key(key):
@@ -100,14 +101,14 @@ def get_state_devices(model, state: OffloadStateTypeEnum) -> Set[torch.device]:
 
     """
     if state == OffloadStateTypeEnum.hp_params:
-        return set(model.optimizer.get_hp_param_device(p) for p in model.parameters())
+        return set(model.optimizer.get_hp_param_device(p) for p in zero_parameters(model))
     elif state == OffloadStateTypeEnum.lp_params:
-        return set(p.ds_tensor.device for p in model.parameters())
+        return set(p.ds_tensor.device for p in zero_parameters(model))
     elif state == OffloadStateTypeEnum.lp_grads:
         return {model.optimizer.grad_partitions_flat_buffer.device}
     elif state == OffloadStateTypeEnum.optim_states:
-        return set(model.optimizer.get_hp_param_device(p, "exp_avg") for p in model.parameters()) | \
-               set(model.optimizer.get_hp_param_device(p, "exp_avg_sq") for p in model.parameters())
+        return set(model.optimizer.get_hp_param_device(p, "exp_avg") for p in zero_parameters(model)) | \
+               set(model.optimizer.get_hp_param_device(p, "exp_avg_sq") for p in zero_parameters(model))
     elif state == OffloadStateTypeEnum.contiguous_grad_buffer:
         return set(bucket.buffer.device for bucket in model.optimizer.ipg_buckets.values()
                    if bucket.buffer is not None)

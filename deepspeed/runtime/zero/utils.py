@@ -152,6 +152,16 @@ def is_zero_param(parameter):
     return hasattr(parameter, 'ds_id')
 
 
+def zero_parameters(module, recurse=True):
+    """Yield parameters of ``module`` that ZeRO-3 partitioned.
+
+    Zero-element parameters are left as ordinary tensors (see ``Init._leave_unpartitioned``),
+    so they have no ``ds_id``/``ds_numel``/``ds_tensor``. Post-init walks that read those
+    attributes should use this helper instead of ``module.parameters()``.
+    """
+    return (p for p in module.parameters(recurse=recurse) if is_zero_param(p))
+
+
 def apply_to_tensors_only(function, value, warning_msg_fn=None):
     """
     Apply `function` to every Tensor in `value`.
