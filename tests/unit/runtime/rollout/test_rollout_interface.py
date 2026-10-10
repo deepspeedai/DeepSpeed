@@ -128,13 +128,8 @@ def test_response_token_batch_aligns_causal_logits():
         ),
         (
             0.5,
-            0.5 * (
-                0.5 * torch.log(torch.tensor(0.5 / 0.65)) +
-                0.5 * torch.log(torch.tensor(0.5 / 0.35))
-            ) + 0.5 * (
-                0.8 * torch.log(torch.tensor(0.8 / 0.65)) +
-                0.2 * torch.log(torch.tensor(0.2 / 0.35))
-            ),
+            0.5 * (0.5 * torch.log(torch.tensor(0.5 / 0.65)) + 0.5 * torch.log(torch.tensor(0.5 / 0.35))) + 0.5 *
+            (0.8 * torch.log(torch.tensor(0.8 / 0.65)) + 0.2 * torch.log(torch.tensor(0.2 / 0.35))),
         ),
     ],
 )
