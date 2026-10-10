@@ -1329,6 +1329,59 @@ def test_adaptive_generation_resolves_custom_generation_config():
                              SamplingConfig(max_new_tokens=2, temperature=0, continuous_batch_size=1))
 
 
+@pytest.mark.parametrize("cache_support", [True, None])
+@pytest.mark.parametrize("capacity", [1, 2])
+def test_adaptive_generation_uses_resolved_penalty_on_both_routes(cache_support, capacity):
+    from transformers import GenerationConfig
+
+    model = _make_small_qwen()
+    model._supports_cache_class = cache_support
+    native_prepare = model._prepare_generation_config
+    prompt = torch.tensor([[11, 1, 2, 3, 4], [11, 1, 2, 3, 4]], device=next(model.parameters()).device)
+    expected_config = GenerationConfig.from_model_config(model.config)
+    expected_config.repetition_penalty = 3.0
+    with torch.no_grad():
+        expected = model.generate(prompt, generation_config=expected_config, max_new_tokens=3, do_sample=False)
+        unpenalized = model.generate(prompt, max_new_tokens=3, do_sample=False)
+    assert not torch.equal(expected[:, 5:], unpenalized[:, 5:])
+
+    def prepare(*args, **kwargs):
+        config, model_kwargs = native_prepare(*args, **kwargs)
+        config.repetition_penalty = 3.0
+        return config, model_kwargs
+
+    rollout = HybridEngineRollout(SimpleNamespace(module=model), SimpleNamespace(pad_token_id=0, eos_token_id=None),
+                                  HybridEngineRolloutConfig(adaptive_prefill=True))
+    with patch.object(model, "_prepare_generation_config", side_effect=prepare):
+        result = rollout.generate(RolloutRequest(prompt, torch.ones_like(prompt)),
+                                  SamplingConfig(max_new_tokens=3, temperature=0, continuous_batch_size=capacity))
+    assert torch.equal(result.input_ids, expected)
+    assert model.generation_config.repetition_penalty == 1.0
+    assert (rollout.get_last_continuous_stats() is None) == (capacity == 2)
+
+
+@pytest.mark.parametrize("align_decode_fronts", [False, True])
+def test_manual_continuous_generation_omits_unsupported_output_logits(align_decode_fronts):
+    model = _make_small_qwen()
+    model._supports_cache_class = None
+    native_generate = model.generate
+    prompt = torch.tensor([[1, 2, 3, 4], [1, 2, 3, 4]], device=next(model.parameters()).device)
+    with torch.no_grad():
+        expected = native_generate(prompt, max_new_tokens=2, do_sample=False)
+
+    def legacy_generate(*args, **kwargs):
+        if "output_logits" in kwargs:
+            raise ValueError("output_logits is not supported by this generation API")
+        return native_generate(*args, **kwargs)
+
+    rollout = HybridEngineRollout(SimpleNamespace(module=model), SimpleNamespace(pad_token_id=0, eos_token_id=None),
+                                  HybridEngineRolloutConfig(align_decode_fronts=align_decode_fronts))
+    with patch.object(model, "generate", side_effect=legacy_generate):
+        result = rollout.generate(RolloutRequest(prompt, torch.ones_like(prompt)),
+                                  SamplingConfig(max_new_tokens=2, temperature=0, continuous_batch_size=1))
+    assert torch.equal(result.input_ids, expected)
+
+
 @pytest.mark.parametrize("force_cb", [False, True])
 def test_adaptive_profile_includes_route_planning_time(force_cb):
     from deepspeed.accelerator import get_accelerator

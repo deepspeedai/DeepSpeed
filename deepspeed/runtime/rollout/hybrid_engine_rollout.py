@@ -564,6 +564,7 @@ class HybridEngineRollout(RolloutEngine):
                 device,
                 align_decode_fronts,
                 profile,
+                generation_config=prepared_generation_config,
             )
             if align_decode_fronts:
                 for admitted, target_row in zip(update.admitted, update.admitted_slots):
@@ -600,6 +601,7 @@ class HybridEngineRollout(RolloutEngine):
                     request_by_id,
                     responses,
                     module,
+                    generation_config=prepared_generation_config,
                 )
                 stats["decode_steps"] += 1
                 decoded_tokens = dict(zip(survivor_ids, decoded.split(1, dim=0)))
@@ -730,7 +732,8 @@ class HybridEngineRollout(RolloutEngine):
                             model_dtype,
                             device,
                             align_decode_fronts=False,
-                            profile=None):
+                            profile=None,
+                            generation_config=None):
         if not update.admitted:
             return {}
 
@@ -748,6 +751,7 @@ class HybridEngineRollout(RolloutEngine):
                 prompt_attention,
                 model_dtype,
                 device,
+                generation_config=generation_config,
             )
             self._profile_end(profile, "prefill_forward_ms", prefill_start, count="num_prefill_forwards")
             cache_copy_start = self._profile_start(profile)
@@ -796,7 +800,8 @@ class HybridEngineRollout(RolloutEngine):
                 prompt_attention,
                 model_dtype,
                 device,
-                prompt_requests=prompt_requests if self.adaptive_prefill else None)
+                prompt_requests=prompt_requests if self.adaptive_prefill else None,
+                generation_config=generation_config)
             self._profile_end(profile, "prefill_forward_ms", prefill_start, count="num_prefill_forwards")
             cache_copy_start = self._profile_start(profile)
             for source_row, row in enumerate(bucket):
@@ -908,7 +913,8 @@ class HybridEngineRollout(RolloutEngine):
                                   prompt_attention,
                                   model_dtype,
                                   device,
-                                  prompt_requests=None):
+                                  prompt_requests=None,
+                                  generation_config=None):
         position_ids = self._prefill_position_ids(prompt_attention)
         if getattr(module, "_supports_cache_class", None) is None:
             pad_token_id = self.tokenizer.pad_token_id
@@ -923,7 +929,9 @@ class HybridEngineRollout(RolloutEngine):
                 eos_token_id=None,
                 pad_token_id=pad_token_id,
                 return_dict_in_generate=True,
-                output_logits=self.adaptive_prefill,
+                **({
+                    "output_logits": True
+                } if self.adaptive_prefill else {}),
             )
             prefill_cache = prefill_output.past_key_values
             if not self.adaptive_prefill:
@@ -950,13 +958,19 @@ class HybridEngineRollout(RolloutEngine):
                 for row in request_ids
             }
         # Trimming model input must not trim HF's repetition-penalty history.
-        next_tokens = self._continuous_next_tokens(logits, request_ids, prompt_requests,
-                                                   dict.fromkeys(request_ids, ()), module)
+        next_tokens = self._continuous_next_tokens(logits,
+                                                   request_ids,
+                                                   prompt_requests,
+                                                   dict.fromkeys(request_ids, ()),
+                                                   module,
+                                                   generation_config=generation_config)
         return next_tokens, prefill_cache
 
     @staticmethod
-    def _continuous_next_tokens(logits, request_ids, request_by_id, responses, module):
-        repetition_penalty = getattr(getattr(module, "generation_config", None), "repetition_penalty", 1.0)
+    def _continuous_next_tokens(logits, request_ids, request_by_id, responses, module, generation_config=None):
+        if generation_config is None:
+            generation_config = getattr(module, "generation_config", None)
+        repetition_penalty = getattr(generation_config, "repetition_penalty", 1.0)
         if repetition_penalty is None:
             repetition_penalty = 1.0
         if repetition_penalty == 1.0:

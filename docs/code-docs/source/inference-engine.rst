@@ -165,13 +165,15 @@ uniform prompt lengths also admit an exact single-bucket estimate. The fallback
 reuses the resolved generation configuration and normalizes the result once.
 This keeps planning overhead small for short generations and large request counts.
 
-``benchmarks/rollout_prefill.py`` provides separate calibration and evaluation:
+The `DeepSpeedExamples adaptive prefill benchmark
+<https://github.com/deepspeedai/DeepSpeedExamples/tree/master/benchmarks/opsd#adaptive-prefill-calibration>`_
+provides separate calibration and evaluation. From the DeepSpeedExamples checkout:
 
 .. code-block:: bash
 
-   python benchmarks/rollout_prefill.py --model Qwen/Qwen3-32B --dtype bfloat16 \
+   python benchmarks/opsd/rollout_prefill.py --model Qwen/Qwen3-32B --dtype bfloat16 \
        --repeats 3 --calibrate costs.json
-   python benchmarks/rollout_prefill.py --model Qwen/Qwen3-32B --dtype bfloat16 \
+   python benchmarks/opsd/rollout_prefill.py --model Qwen/Qwen3-32B --dtype bfloat16 \
        --cost-config costs.json --repeats 3 --output sweep.json
 
 Use ``--model tiny-qwen2 --dtype float32`` for a seeded small-model smoke test.
@@ -181,6 +183,11 @@ and estimates extra CB Decode cost from one-token and eight-token calls.
 The saved JSON records model, GPU, precision, backend and library versions;
 the sweep rejects a calibration from a different configuration. Applications
 can pass its ``costs`` dictionary to ``HybridEngineRolloutConfig``.
+Calibration runs during deployment preparation; applications load the saved
+coefficients once at rollout initialization, without profiling or refitting
+inside generation requests. The built-in grid reaches 768 input tokens; extend
+it to cover the deployment's lengths and feasible batch sizes before relying
+on these estimates for longer contexts.
 
 The four evaluation workloads cover 128 short requests, a 128/4 tail, a
 16..512 spread and a 512/16 tail. Timing includes routing and cache work, with
