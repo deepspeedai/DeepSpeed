@@ -21,7 +21,9 @@ def test_static_layer_supports_per_row_decode_positions():
 
     assert layer.keys[0, 0, 1].tolist() == [2.0, 2.0]
     assert layer.keys[1, 0, 3].tolist() == [4.0, 4.0]
-    assert torch.equal(layer.get_seq_length(), torch.tensor([2, 4]))
+    # write_position is the next slot to write (== cached-token count
+    # maintained by the caller); update() does not increment it.
+    assert torch.equal(layer.get_seq_length(), torch.tensor([1, 3]))
 
 
 def test_static_cache_compact_preserves_rows_and_positions():
@@ -39,7 +41,7 @@ def test_static_cache_compact_preserves_rows_and_positions():
     cache.compact(torch.tensor([2, 0], dtype=torch.long))
 
     assert layer.keys[:2, 0, 0, 0].tolist() == [30.0, 10.0]
-    assert cache.get_seq_length().item() == 4
+    assert cache.get_seq_length().item() == 3
     assert layer.keys[2].abs().sum().item() == 0
 
 
@@ -58,7 +60,8 @@ def test_static_cache_compact_identity_keeps_active_rows_and_clears_tail():
     cache.compact(torch.tensor([0, 1], dtype=torch.long))
 
     assert layer.keys[:2, 0, 0, 0].tolist() == [10.0, 20.0]
-    assert layer.get_seq_length().tolist() == [2, 3, 0]
+    # cleared rows reset to -1 (the empty-row marker used at cache init)
+    assert layer.get_seq_length().tolist() == [1, 2, -1]
     assert layer.keys[2].abs().sum().item() == 0
 
 
