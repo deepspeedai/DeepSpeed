@@ -68,5 +68,5 @@ class BaseTuner:
                     break
             return i
         except Exception:
-            logger.info("Tuner Error:", sys.exc_info()[0])
+            logger.info("Tuner Error: %s", sys.exc_info()[0])
             return i
