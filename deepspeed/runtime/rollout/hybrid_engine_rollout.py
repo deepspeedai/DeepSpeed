@@ -343,7 +343,7 @@ class HybridEngineRollout(RolloutEngine):
                 for name, value in vars(generation_config).items():
                     if name.startswith("_") or name in supported_settings:
                         continue
-                    if value != getattr(defaults, name, value):
+                    if not hasattr(defaults, name) or value != getattr(defaults, name):
                         raise ValueError(f"adaptive prefill does not support non-default generation setting: {name}")
         if align_decode_fronts:
             prompt_lengths = dict(enumerate(map(int, effective_lengths)))

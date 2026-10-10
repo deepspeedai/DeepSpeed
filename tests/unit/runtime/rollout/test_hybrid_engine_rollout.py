@@ -1190,6 +1190,37 @@ def test_adaptive_generation_rejects_unsupported_generation_settings(setting, va
                          SamplingConfig(max_new_tokens=4, temperature=0, continuous_batch_size=2))
 
 
+@pytest.mark.parametrize("value", [True, False, None])
+@pytest.mark.parametrize("config_source", ["generation", "prepared"])
+def test_adaptive_generation_rejects_unknown_public_settings(value, config_source):
+    from transformers import Qwen2Config, Qwen2ForCausalLM
+
+    model = Qwen2ForCausalLM(
+        Qwen2Config(vocab_size=32,
+                    hidden_size=32,
+                    intermediate_size=64,
+                    num_hidden_layers=1,
+                    num_attention_heads=4,
+                    num_key_value_heads=2)).eval()
+    native_prepare = model._prepare_generation_config
+    if config_source == "generation":
+        model.generation_config.custom_generation_switch = value
+
+    def prepare(*args, **kwargs):
+        config, model_kwargs = native_prepare(*args, **kwargs)
+        if config_source == "prepared":
+            config.custom_generation_switch = value
+        return config, model_kwargs
+
+    prompt = torch.tensor([[1, 2, 3]])
+    rollout = HybridEngineRollout(SimpleNamespace(module=model), SimpleNamespace(pad_token_id=0, eos_token_id=None),
+                                  HybridEngineRolloutConfig(adaptive_prefill=True))
+    with patch.object(model, "_prepare_generation_config", side_effect=prepare):
+        with pytest.raises(ValueError, match="custom_generation_switch"):
+            rollout.generate(RolloutRequest(prompt, torch.ones_like(prompt)),
+                             SamplingConfig(max_new_tokens=1, temperature=0, continuous_batch_size=1))
+
+
 @pytest.mark.parametrize("capacity", [1, 2])
 @pytest.mark.parametrize("stop_at_first", [True, False])
 def test_adaptive_profile_counts_only_productive_tokens_after_eos(capacity, stop_at_first):
