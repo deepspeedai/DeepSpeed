@@ -4,6 +4,7 @@
 # DeepSpeed Team
 
 import time
+from collections import deque
 from numpy import mean
 from deepspeed.utils.logging import print_dist
 from deepspeed.accelerator import get_accelerator
@@ -50,7 +51,11 @@ class SynchronizedWallClockTimer:
         def __init__(self, name):
             self.name_ = name
             self.started_ = False
-            self.event_timers = []
+            # Bound the per-op history. TimedOp reads the value with
+            # elapsed(reset=False) and the records are never otherwise reset, so an
+            # unbounded list makes every subsequent collective walk all past records
+            # (O(N^2) step time in ZeRO-3). Keep the most recent records.
+            self.event_timers = deque(maxlen=1024)
             self.use_host_timer = get_accelerator().use_host_timers()
             self.start_event = None
             self.elapsed_records = None
