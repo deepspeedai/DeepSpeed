@@ -793,15 +793,14 @@ class HybridEngineRollout(RolloutEngine):
                 prompt_attention[source_row, -length:] = 1
                 prompt_requests[source_row] = request
             prefill_start = self._profile_start(profile)
-            prefill_tokens, prefill_cache = self._continuous_prefill_cache(
-                module,
-                static_cache_type,
-                prompt_ids,
-                prompt_attention,
-                model_dtype,
-                device,
-                prompt_requests=prompt_requests if self.adaptive_prefill else None,
-                generation_config=generation_config)
+            prefill_tokens, prefill_cache = self._continuous_prefill_cache(module,
+                                                                           static_cache_type,
+                                                                           prompt_ids,
+                                                                           prompt_attention,
+                                                                           model_dtype,
+                                                                           device,
+                                                                           prompt_requests=prompt_requests,
+                                                                           generation_config=generation_config)
             self._profile_end(profile, "prefill_forward_ms", prefill_start, count="num_prefill_forwards")
             cache_copy_start = self._profile_start(profile)
             for source_row, row in enumerate(bucket):

@@ -1279,9 +1279,10 @@ def test_adaptive_generation_applies_repetition_penalty_from_first_token(capacit
     assert torch.equal(result.input_ids[:, 5:], expected.unsqueeze(0).expand(2, -1))
 
 
-@pytest.mark.parametrize("cache_support", [True, None])
-@pytest.mark.parametrize("bucketed", [True, False])
-def test_adaptive_generation_preserves_padded_repetition_history(cache_support, bucketed):
+@pytest.mark.parametrize("cache_support,bucketed,adaptive_prefill", [(True, True, True), (True, False, True),
+                                                                     (None, True, True), (None, False, True),
+                                                                     (True, True, False)])
+def test_adaptive_generation_preserves_padded_repetition_history(cache_support, bucketed, adaptive_prefill):
     model = _make_small_qwen()
     model._supports_cache_class = cache_support
     model.generation_config.repetition_penalty = 3.0
@@ -1303,7 +1304,8 @@ def test_adaptive_generation_preserves_padded_repetition_history(cache_support, 
         ])
     rollout = HybridEngineRollout(
         SimpleNamespace(module=model), SimpleNamespace(pad_token_id=11, eos_token_id=11),
-        HybridEngineRolloutConfig(adaptive_prefill=True,
+        HybridEngineRolloutConfig(adaptive_prefill=adaptive_prefill,
+                                  align_decode_fronts=not adaptive_prefill,
                                   prefill_fixed_cost_ms=0.01 if bucketed else 1e6,
                                   prefill_token_cost_ms=1.0,
                                   prefill_attention_cost_ms=0.0,
