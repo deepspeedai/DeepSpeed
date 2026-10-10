@@ -99,6 +99,16 @@ class MyModel(torch.nn.Module):
         return self.cel(x, y)
 
 
+class ScaleModel(torch.nn.Module):
+
+    def __init__(self):
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.ones(4))
+
+    def forward(self, x):
+        return (self.weight * x).sum()
+
+
 def run_fragmented_model(model, config_dict, hidden_dim, dtype, validate_after_bwd, validate_after_step):
     model, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config_dict)
     data_loader = random_dataloader(model=model,
@@ -227,6 +237,62 @@ class TestTensorFragmentGet(DistributedTest):
         validate_after_step = lambda model: validate_tensor(model, api_type, opt_states=True)
 
         run_fragmented_model(model, config_dict, hidden_dim, torch.bfloat16, validate_after_bwd, validate_after_step)
+
+
+class TestZeroBf16Fp32GradAccum(DistributedTest):
+    world_size = 2
+
+    @pytest.mark.parametrize('zero_stage', [2, 3])
+    def test_safe_get_full_grad_preserves_fp32_accumulated_average(self, zero_stage):
+        # Catches storing or accumulating fp32 communication results in a bf16 partition.
+        if not get_accelerator().is_bf16_supported():
+            pytest.skip("requires bf16")
+
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 1,
+            "gradient_accumulation_steps": 4,
+            "steps_per_print": 1,
+            "communication_data_type": "fp32",
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 1e-6,
+                    "torch_adam": True
+                }
+            },
+            "bf16": {
+                "enabled": True
+            },
+            "data_types": {
+                "grad_accum_dtype": "fp32"
+            },
+            "zero_optimization": {
+                "stage": zero_stage,
+            }
+        }
+
+        model = ScaleModel()
+        engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config_dict)
+
+        rank = dist.get_rank()
+        local_grad = 1.0 if rank == 0 else 1.0078125
+        x = torch.full((4, ), local_grad, dtype=torch.bfloat16, device=engine.device)
+        for micro_step in range(engine.gradient_accumulation_steps()):
+            engine.backward(engine(x))
+            if not engine.is_gradient_accumulation_boundary():
+                engine.step()
+
+        if zero_stage == 2:
+            stored_grad = next(grad for grad in engine.optimizer.averaged_gradients[0]
+                               if not getattr(grad, "_zero_padding", False))
+            assert stored_grad.dtype == torch.float32
+
+        grad = safe_get_full_grad(engine.module.weight)
+        expected = torch.full((4, ), 1.00390625, dtype=torch.float32, device=engine.device)
+        assert grad.dtype == torch.float32
+        torch.testing.assert_close(grad, expected, rtol=0, atol=0)
+
+        engine.destroy()
 
 
 def create_random_values(model, key_list, group, grad_dtype):
