@@ -17,8 +17,6 @@ from deepspeed.ops.transformer.inference.triton import (
     context_4d_matmul,
 )
 
-minus_inf = -10000.0
-
 
 class TritonSelfAttention(nn.Module):
     num_layers = 0
@@ -297,7 +295,7 @@ def _flash_packed_kernel(
             qk = tl.where(P_SEQ + offs_m[:, None] >= (start_n + offs_n[None, :]), qk, float("-inf"))
 
         qk += tl.dot(q, tl.trans(k), out_dtype=tl.float16)
-        qk += tl.where((start_n + offs_n)[None, :] < N_CTX, 0, minus_inf)
+        qk += tl.where((start_n + offs_n)[None, :] < N_CTX, 0, -10000.0)
         # -- compute scaling constant ---
         m_i_new = tl.maximum(m_i, tl.max(qk, 1))
         alpha = tl.math.exp2(m_i - m_i_new)

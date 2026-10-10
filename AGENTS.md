@@ -1,11 +1,11 @@
-<!-- This file is duplicated as CLAUDE.md and AGENTS.md. Keep them in sync. -->
 # AGENTS.md — Workspace-level instructions for AI coding agents
 
 ## DeepSpeed Project Rules
 
 ### Commit & CI requirements
 
-- All non-merge commits MUST have a `Signed-off-by` line (use `--signoff`). Get the name and email from `git config user.name` / `git config user.email`.
+- When creating commits, use `git commit --signoff`.
+- DCO compliance is enforced by the required CI check; do not report commit-signoff findings in code reviews.
 - Formatting: yapf (column_limit=119, `.style.yapf`) + flake8 (`.flake8`).
 - Always verify changed files pass pre-commit checks before committing: `pre-commit run --files <changed_files>`. Only check modified files, not the entire codebase. Config: `.pre-commit-config.yaml`.
 - `check-torchdist` hook: NEVER directly import torch's distributed module. Use `import deepspeed.comm as dist` instead.

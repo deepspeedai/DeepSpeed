@@ -17,32 +17,11 @@ concurrency:
 jobs:
   check-paths:
     name: nv-pre-compile-ops / check paths
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pull-requests: read
-    outputs:
-      should_run: ${{ steps.non_pr.outputs.should_run || steps.filter.outputs.run_tests }}
-    steps:
-      - id: non_pr
-        if: github.event_name != 'pull_request'
-        run: echo "should_run=true" >> "$GITHUB_OUTPUT"
-
-      - uses: actions/checkout@v7
-        if: github.event_name == 'pull_request'
-
-      - uses: dorny/paths-filter@v4
-        id: filter
-        if: github.event_name == 'pull_request'
-        with:
-          predicate-quantifier: every
-          filters: |
-            run_tests:
-              - '**'
-              - '!docs/**'
-              - '!blogs/**'
-              - '!deepspeed/inference/v2/**'
-              - '!tests/unit/inference/v2/**'
+    uses: ./.github/workflows/check-paths.yml
+    with:
+      pr-ignore: |
+        deepspeed/inference/v2/
+        tests/unit/inference/v2/
 
   unit-tests:
     name: nv-pre-compile-ops / precompile ops
@@ -76,7 +55,7 @@ jobs:
             #python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
         - name: Compile DeepSpeed Ops
           run: |
-            DS_ACCELERATOR=cuda DS_ENABLE_NINJA=1 TORCH_CUDA_ARCH_LIST="7.0;7.5;8.0;8.6;8.9;9.0" DS_BUILD_OPS=1 DS_BUILD_SPARSE_ATTN=0 DS_BUILD_FP_QUANTIZER=0 DS_BUILD_CUTLASS_OPS=0 DS_BUILD_GDS=0 DS_BUILD_RAGGED_DEVICE_OPS=0 DS_BUILD_EVOFORMER_ATTN=0 DS_BUILD_DEEP_COMPILE=0 pip3 install .
+            DS_ACCELERATOR=cuda DS_ENABLE_NINJA=1 TORCH_CUDA_ARCH_LIST="7.0;7.5;8.0;8.6;8.9;9.0" DS_BUILD_OPS=1 DS_BUILD_FP_QUANTIZER=0 DS_BUILD_CUTLASS_OPS=0 DS_BUILD_GDS=0 DS_BUILD_RAGGED_DEVICE_OPS=0 DS_BUILD_EVOFORMER_ATTN=0 DS_BUILD_DEEP_COMPILE=0 pip3 install .
         - name: DS Report
           run: |
              DS_ACCELERATOR=cuda ds_report

@@ -40,6 +40,20 @@ def test_scheduler_compacts_survivors_and_admits_pending_request():
     assert update.active_ids == ("b", "c")
 
 
+def test_scheduler_admits_pending_request_after_retirement():
+    scheduler = ContinuousBatchScheduler(max_batch_size=1, max_new_tokens=3)
+    scheduler.submit(_request("long"))
+    scheduler.submit(_request("short"))
+
+    update = scheduler.schedule()
+    assert update.active_ids == ("long", )
+    assert scheduler.pending == (_request("short"), )
+
+    update = scheduler.advance(finished_ids=("long", ))
+    assert update.retired == ("long", )
+    assert update.admitted == (_request("short"), )
+
+
 def test_scheduler_advance_retires_by_budget():
     scheduler = ContinuousBatchScheduler(max_batch_size=2, max_new_tokens=1)
     scheduler.submit(_request("a"))

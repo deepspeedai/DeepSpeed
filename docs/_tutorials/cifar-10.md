@@ -260,7 +260,6 @@ worker-0:   optimizer_params ............. {'lr': 0.001, 'betas': [0.8, 0.999], 
 worker-0:   prescale_gradients ........... False
 worker-0:   scheduler_name ............... WarmupLR
 worker-0:   scheduler_params ............. {'warmup_min_lr': 0, 'warmup_max_lr': 0.001, 'warmup_num_steps': 1000}
-worker-0:   sparse_gradients_enabled ..... False
 worker-0:   steps_per_print .............. 2000
 worker-0:   tensorboard_enabled .......... False
 worker-0:   tensorboard_job_name ......... DeepSpeedJobName
