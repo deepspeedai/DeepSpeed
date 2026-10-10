@@ -1478,16 +1478,47 @@ class fused_LinearLayer(SubParamColumnParallel):
             set_fused_qkv_shard_state(self.fused_module.module, self._subparam_shard_widths, self.tp_index)
 
     def _segmented_affine_map(self, shape):
+        """Describe the fused layouts whose rows are not split per sub-parameter.
+
+        Both cases here need a per-piece description that one partition dimension cannot give:
+        GPTBigCode because its key/value block is held whole by every rank, CodeGen because its
+        rows are permuted before they are split.
+        """
+        from deepspeed.module_inject.fusedqkv_utils import get_fused_qkv_type
+
+        fused_type = get_fused_qkv_type(self.fused_module.module)
+        if fused_type == 'bigcodetype':
+            return self._bigcode_affine_map(shape)
+        if fused_type == 'codegentype':
+            return self._codegen_affine_map(shape)
+        return None
+
+    def _codegen_affine_map(self, shape):
+        """CodeGen reassembles q, k and v per sub-block, so a rank holds scattered equal blocks.
+
+        The partition builds that order out of reshapes rather than from a list of blocks, so
+        this derives the same order independently. What keeps the two from drifting is a test
+        requiring this map to equal one probed from the partition function itself.
+        """
+        from deepspeed.checkpoint.affine import block_gather_map
+        from deepspeed.module_inject.fusedqkv_utils import codegen_block_layout
+
+        if not shape:
+            return None
+        layout = codegen_block_layout(shape[0], self.tp_world_size, self.tp_meta.num_kv_heads)
+        if layout is None:
+            return None
+        block_size, block_ids_by_rank = layout
+        return block_gather_map(shape, block_ids_by_rank, block_size, 0)
+
+    def _bigcode_affine_map(self, shape):
         """GPTBigCode shards the query rows and gives every rank the whole key/value block.
 
         The two segments differ only in who holds them, which is what a per-piece location
         set expresses and a single partition dimension cannot.
         """
         from deepspeed.checkpoint.affine import segmented_map
-        from deepspeed.module_inject.fusedqkv_utils import get_fused_qkv_type
 
-        if get_fused_qkv_type(self.fused_module.module) != 'bigcodetype':
-            return None
         n_embd = self.tp_meta.n_embd
         if not shape or n_embd is None or n_embd >= shape[0]:
             return None
