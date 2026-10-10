@@ -190,7 +190,8 @@ def _run_one_step(backend,
                   reentrant_checkpointing=False,
                   skewed_routing=False,
                   row_weighting_impl="auto",
-                  score_apply=None):
+                  score_apply=None,
+                  **expert_parallel):
     """Build a model on ``backend``, run one step, return its output and grads."""
     seed_everything(seed)
 
@@ -208,6 +209,7 @@ def _run_one_step(backend,
         config["expert_parallel"]["row_weighting_impl"] = row_weighting_impl
     if score_apply is not None:
         config["expert_parallel"]["score_apply"] = score_apply
+    config["expert_parallel"].update(expert_parallel)
     if backend == "deepep":
         # Sized explicitly rather than from the first batch, so both backends
         # see identical shapes whatever that batch turns out to be.
@@ -566,6 +568,35 @@ class TestDeepEPMatchesCollective(DistributedTest):
         all_routes = torch.cat([route.flatten() for _, route in fused["routes"]])
         assert torch.count_nonzero(all_routes == 3) == 0
         assert torch.count_nonzero(all_routes == 1) > torch.count_nonzero(all_routes == 2)
+
+    @pytest.mark.parametrize("gate_up_impl", ["separate", "fused"])
+    @pytest.mark.parametrize("skewed_routing", [False, True])
+    def test_overlapped_weight_gradients_match_the_serial_backward(self, gate_up_impl, skewed_routing):
+        """overlap_weight_grad changes when the experts' weight gradients are computed, not their values.
+
+        The two runs dispatch separately, so DeepEP's arrival order can differ between them and change summation
+        order; gradients a backward mismatched by the overlap would be off by order one rather than by rounding.
+        """
+        skip_unless_h100_tests_enabled("DeepEP backward overlap needs H100s and a DeepEP build")
+        seed = 4321
+        common = dict(skewed_routing=skewed_routing,
+                      activation_checkpointing=True,
+                      reentrant_checkpointing=True,
+                      gate_up_impl=gate_up_impl,
+                      use_grouped_mm=True,
+                      disable_triton_grouped_mm=True)
+
+        serial = _run_one_step("deepep", self.world_size, seed, **common)
+        overlapped = _run_one_step("deepep", self.world_size, seed, overlap_weight_grad=True, **common)
+
+        _assert_cleanup_results_close(overlapped, serial, compare_score_gradients=False)
+        pairs = [("input_gradient", overlapped["input_gradient"], serial["input_gradient"])]
+        pairs += [(name, overlapped["gradients"][name], grad) for name, grad in serial["gradients"].items()]
+        for name, actual, expected in pairs:
+            if expected.norm() > 0:
+                error = ((actual - expected).norm() / expected.norm()).item()
+                assert error < 1e-2, f"{name} relative L2 error {error:.3e}"
+        assert torch._C._get_sm_carveout_experimental() is None, "the SM carveout leaked out of the backward"
 
     @pytest.mark.parametrize(
         "activation_checkpointing, skewed_routing",
