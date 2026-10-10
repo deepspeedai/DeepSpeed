@@ -142,14 +142,7 @@ class AffinePiece:
 
 
 def _dest_interval(piece):
-    """The shard addresses a piece writes, when they are one contiguous run.
-
-    A piece whose non-singleton destination strides match its own shape occupies
-    ``[dest_offset, dest_offset + numel)`` and nothing else, so its footprint is an interval and
-    overlap between two of them is decidable without touching elements. A piece cut along a
-    non-final dimension -- a column split, or Yuan's o_proj -- strides through the shard instead,
-    and intervals say nothing about it, so the caller gets None and checks what it can.
-    """
+    """Return a dense piece's destination interval, or None for a strided or empty piece."""
     if piece.numel == 0 or len(piece.dest_strides) != len(piece.shape):
         return None
     if any(size > 1 and got != want
@@ -196,13 +189,7 @@ class ParamAffineMap:
         return holders
 
     def validate(self):
-        """Cheap structural check: every rank's pieces account for exactly its shard.
-
-        Counting elements is not the same as placing them. Two pieces can both write the head of
-        a shard and leave its tail unwritten while summing to the shard size exactly, so the
-        totals agree and the count comparison cannot report the problem. The destination scan below
-        checks every piece that packs densely, bounded by the piece count rather than the shard size.
-        """
+        """Check shard element counts and dense destination bounds and overlap."""
         for rank, pieces in self.pieces_by_rank.items():
             held = sum(piece.numel for piece in pieces)
             expected = _product(self.shard_shapes[rank])
@@ -212,13 +199,7 @@ class ParamAffineMap:
             self._validate_destinations(rank, pieces, expected)
 
     def _validate_destinations(self, rank, pieces, shard_numel):
-        """Refuse two pieces of one rank that write the same shard address.
-
-        Dense pieces are the only ones an interval can describe, and a rank where every piece is
-        dense needs no separate hole check: intervals that lie inside the shard, do not overlap and
-        whose lengths sum to the shard size cannot leave a gap. Where some piece is strided the
-        hole question is not answerable from intervals, and this stays quiet rather than guess.
-        """
+        """Check that dense destination intervals stay within the shard and do not overlap."""
         intervals = []
         for piece in pieces:
             span = _dest_interval(piece)
