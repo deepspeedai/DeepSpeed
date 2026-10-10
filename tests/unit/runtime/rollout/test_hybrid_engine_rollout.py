@@ -388,6 +388,28 @@ def test_continuous_generation_rejects_legacy_cache_model():
         rollout.generate(request, SamplingConfig(max_new_tokens=2, temperature=0, continuous_batch_size=1))
 
 
+def test_continuous_graph_generation_rejects_legacy_cache_model():
+
+    class LegacyModel(torch.nn.Module):
+        _supports_cache_class = False
+
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.zeros(1))
+            self.config = SimpleNamespace(max_position_embeddings=32)
+
+    model = LegacyModel()
+    rollout = HybridEngineRollout(
+        SimpleNamespace(module=model),
+        SimpleNamespace(eos_token_id=None),
+        cfg=HybridEngineRolloutConfig(use_graph_capture=True),
+    )
+    request = RolloutRequest(torch.tensor([[1, 2, 3]]), torch.ones((1, 3), dtype=torch.long))
+
+    with pytest.raises(ValueError, match="cache-class support"):
+        rollout.generate(request, SamplingConfig(max_new_tokens=2, temperature=0, continuous_batch_size=1))
+
+
 def test_continuous_generation_covers_modern_static_cache_path():
 
     class CacheClassModel(torch.nn.Module):
