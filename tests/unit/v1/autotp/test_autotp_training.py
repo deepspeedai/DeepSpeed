@@ -1344,7 +1344,9 @@ class TestTiedRowParallelOutputHeadTraining(DistributedTest):
                 labels = torch.randint(vocab_size, (2, 5), device=device)
                 reference_logits = reference(input_ids)
                 tp_logits = engine(input_ids)
-                torch.testing.assert_close(tp_logits, reference_logits, atol=1e-6, rtol=1e-5)
+                # Row-parallel logits sum per-shard partial matmuls, which rounds differently from the unsharded
+                # matmul. The tied N(0,1) weights make logits large enough to exceed atol=1e-6 on some GPUs.
+                torch.testing.assert_close(tp_logits, reference_logits)
                 reference_loss = nn.functional.cross_entropy(reference_logits.reshape(-1, vocab_size),
                                                              labels.reshape(-1))
                 tp_loss = nn.functional.cross_entropy(tp_logits.reshape(-1, vocab_size), labels.reshape(-1))
