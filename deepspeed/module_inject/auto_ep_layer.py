@@ -14,11 +14,13 @@ Contains AutoEPMoELayer, compute_split_plan, _AllToAllV, and helper functions.
 
 from __future__ import annotations
 
-from functools import lru_cache
+import weakref
+from functools import lru_cache, partial
 from typing import Literal, NamedTuple
 
 import torch
 import torch.nn as nn
+from torch.utils.checkpoint import checkpoint as torch_checkpoint
 import deepspeed.comm as dist
 from deepspeed.accelerator import get_accelerator
 from deepspeed.checkpoint.autoep_affine import (autoep_experts_for_rank, autoep_placement_to_affine_map,
@@ -30,7 +32,8 @@ from deepspeed.module_inject.auto_ep_folding import mark_autoep_folding_router_p
 from deepspeed.ops.triton_ops import autoep_fused_token_ops as fused_token_ops
 from deepspeed.utils import logger
 from deepspeed.module_inject.auto_ep_comm import (COMM_BACKEND, DEEPEP_BACKEND, assert_dtype_supported, deepep_combine,
-                                                  deepep_dispatch, new_exchange_scope, shared_exchange)
+                                                  deepep_dispatch, deepep_record_combine, new_exchange_scope,
+                                                  shared_exchange)
 from deepspeed.moe.ep_router import TokenChoiceTopKRouter
 from deepspeed.moe.ep_count import count_tokens_per_expert
 from deepspeed.moe.ep_experts import GroupedExperts
@@ -174,6 +177,47 @@ def apply_deepep_row_weights(
     if row_weighting_impl == "fused":
         return fused_token_ops.fused_row_weighting(rows, weights)
     return (rows.float() * weights).to(rows.dtype)
+
+
+class _RecordedEagerRowWeighting(torch.autograd.Function):
+    """The backward of the eager row weighting, recorded without computing its product."""
+
+    @staticmethod
+    def forward(ctx, rows, weights):
+        ctx.save_for_backward(rows, weights)
+        return torch.empty_like(rows)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        rows, weights = ctx.saved_tensors
+        # The steps autograd takes through (rows.float() * weights).to(rows.dtype), so the gradients match it.
+        grad = grad_output.float()
+        grad_rows = (grad * weights).to(rows.dtype)
+        grad_weights = (grad * rows.float()).sum_to_size(weights.shape)
+        return grad_rows, grad_weights
+
+
+def record_deepep_row_weights(
+    rows: torch.Tensor,
+    weights: torch.Tensor,
+    row_weighting_impl: Literal["eager", "fused"],
+) -> torch.Tensor:
+    """apply_deepep_row_weights for a result nobody reads: the same backward, an uninitialized result."""
+    if row_weighting_impl == "fused":
+        return fused_token_ops.recorded_fused_row_weighting(rows, weights)
+    return _RecordedEagerRowWeighting.apply(rows, weights)
+
+
+# skip_recompute_combine is limited to presets whose Hugging Face decoder layer adds the MoE output to the residual
+# and returns the sum, checked against their modeling code. Inside that decoder layer's checkpoint, nothing reads
+# the recomputed MoE output.
+SKIP_RECOMPUTE_COMBINE_PRESETS = frozenset(
+    ("deepseek_v2", "deepseek_v3", "minimax_m3", "mixtral", "qwen3_5_moe", "qwen3_moe"))
+
+
+def _in_backward_recompute() -> bool:
+    """A grad-enabled forward inside a backward pass, which is how a reentrant checkpoint recomputes."""
+    return torch.is_grad_enabled() and torch._C._current_graph_task_id() != -1
 
 
 def _split_plan_from_expert_counts(
@@ -534,6 +578,14 @@ class AutoEPMoELayer(nn.Module):
         self.score_apply = resolve_score_apply_mode(spec, config.score_apply)
         self.combine_impl = resolve_combine_impl(config.combine_impl)
         self.row_weighting_impl = resolve_row_weighting_impl(config.row_weighting_impl)
+        self.skip_recompute_combine = config.skip_recompute_combine
+        if self.skip_recompute_combine and spec.model_family not in SKIP_RECOMPUTE_COMBINE_PRESETS:
+            raise ValueError(f"skip_recompute_combine is not supported for preset '{spec.model_family}'. It relies "
+                             "on the decoder layer only adding the MoE output to the residual, which has been "
+                             f"checked for {sorted(SKIP_RECOMPUTE_COMBINE_PRESETS)}. Leave it unset for this model.")
+        # The decoder layer holding this layer, set by attach_decoder_layer; held weakly, as the decoder layer
+        # owns this module.
+        self._decoder_layer = None
         self._fused_combine_checked = False
         self._fused_row_weighting_checked = False
         route_norm = spec.route_norm if config.route_norm is None else config.route_norm
@@ -798,6 +850,28 @@ class AutoEPMoELayer(nn.Module):
             )
         self.ep_group = groups._get_expert_parallel_group(self.ep_group_name)
 
+    def attach_decoder_layer(self, decoder_layer: nn.Module) -> None:
+        """Record the decoder layer whose checkpoint skip_recompute_combine requires."""
+        self._decoder_layer = weakref.ref(decoder_layer)
+
+    def _assert_recompute_skip_contract(self) -> None:
+        """Fail unless this recompute is the reentrant checkpoint of this layer's own decoder layer.
+
+        Only then is the recomputed output unread: the checkpoint only backpropagates through it, and the decoder
+        layer only adds it to the residual. A checkpoint spanning several layers would feed it to the next one.
+        """
+        decoder_layer = None if self._decoder_layer is None else self._decoder_layer()
+        checkpoint_func = getattr(decoder_layer, "_gradient_checkpointing_func", None)
+        reentrant = (isinstance(checkpoint_func, partial) and checkpoint_func.func is torch_checkpoint
+                     and checkpoint_func.keywords.get("use_reentrant") is True)
+        if not getattr(decoder_layer, "gradient_checkpointing", False) or not reentrant:
+            raise RuntimeError(
+                "skip_recompute_combine found a recompute that is not the reentrant checkpoint of this MoE "
+                "layer's own decoder layer. It requires Hugging Face per-layer gradient checkpointing with "
+                "use_reentrant=True, e.g. model.gradient_checkpointing_enable("
+                "gradient_checkpointing_kwargs={'use_reentrant': True}), so that nothing reads the skipped output. "
+                "Leave skip_recompute_combine unset for other checkpointing.")
+
     def _deepep_route(self, tokens: torch.Tensor, ro: "RouterOutput") -> torch.Tensor:
         """Dispatch, run the experts, and combine through DeepEP.
 
@@ -836,6 +910,13 @@ class AutoEPMoELayer(nn.Module):
                 "job will produce, normally train_micro_batch_size_per_gpu * maximum padded sequence length, or "
                 'set comm_backend="comm".')
 
+        # In the decoder layer's reentrant recompute nothing reads this layer's output; the checkpoint only
+        # backpropagates through it. The post-expert row weighting and the combine then record their backward
+        # without running.
+        record_only = self.skip_recompute_combine and _in_backward_recompute()
+        if record_only:
+            self._assert_recompute_skip_contract()
+
         received, recv_weights, exchange = deepep_dispatch(self._deepep_exchange, tokens, ro.selected_experts,
                                                            ro.top_scores)
         handle = exchange.last_handle
@@ -866,9 +947,13 @@ class AutoEPMoELayer(nn.Module):
 
         expert_output = self.experts(received, counts)
 
-        if weights is not None:
+        if weights is not None and record_only:
+            expert_output = record_deepep_row_weights(expert_output, weights, self.row_weighting_impl)
+        elif weights is not None:
             expert_output = apply_deepep_row_weights(expert_output, weights, self.row_weighting_impl)
 
+        if record_only:
+            return deepep_record_combine(exchange, expert_output, handle)
         return deepep_combine(exchange, expert_output, handle)
 
     def _finalize_output(self, output: torch.Tensor, x: torch.Tensor, hidden_states: torch.Tensor,

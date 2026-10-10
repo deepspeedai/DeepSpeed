@@ -420,6 +420,23 @@ class _DeepEPCombine(torch.autograd.Function):
         return None, _conform_rows(grad_rows, ctx.rows_shape), None
 
 
+class _RecordedDeepEPCombine(_DeepEPCombine):
+    """A combine whose result nobody reads: records the same backward and skips the transfer.
+
+    For ``skip_recompute_combine``. The output is NaN, so that a reader the layer's contract rules out fails
+    loudly instead of training on garbage.
+    """
+
+    @staticmethod
+    def forward(ctx, exchange: DeepEPExchange, rows: torch.Tensor, handle):
+        ctx.exchange = exchange
+        ctx.handle = handle
+        ctx.rows_shape = rows.shape
+        # The handle keeps the [tokens, top_k] routing it was dispatched with.
+        num_tokens = handle.topk_idx.shape[0]
+        return rows.new_full((num_tokens, rows.shape[1]), float("nan"))
+
+
 def deepep_dispatch(exchange: DeepEPExchange, tokens: torch.Tensor, topk_idx: torch.Tensor,
                     topk_weights: torch.Tensor):
     """Dispatch tokens and their routing weights, keeping both differentiable."""
@@ -429,3 +446,8 @@ def deepep_dispatch(exchange: DeepEPExchange, tokens: torch.Tensor, topk_idx: to
 
 def deepep_combine(exchange: DeepEPExchange, rows: torch.Tensor, handle) -> torch.Tensor:
     return _DeepEPCombine.apply(exchange, rows, handle)
+
+
+def deepep_record_combine(exchange: DeepEPExchange, rows: torch.Tensor, handle) -> torch.Tensor:
+    """Record :func:`deepep_combine`'s backward without running the combine; the result is all NaN."""
+    return _RecordedDeepEPCombine.apply(exchange, rows, handle)

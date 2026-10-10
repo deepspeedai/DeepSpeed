@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import torch
+
 from deepspeed.module_inject.auto_ep_presets.base import (
     _UNSET,
     _raise_unsupported_load_balance_coeff,
@@ -65,6 +67,7 @@ def parse_autoep_config(param_dict: dict) -> AutoEPConfig:
     config.comm_num_sm = param_dict.get("comm_num_sm", 12)
     config.comm_qp_margin = param_dict.get("comm_qp_margin", 4)
     config.comm_max_tokens_per_rank = param_dict.get("comm_max_tokens_per_rank", 0)
+    config.skip_recompute_combine = param_dict.get("skip_recompute_combine", False)
     config.num_expert_groups = param_dict.get("num_expert_groups", None)
     config.num_limited_groups = param_dict.get("num_limited_groups", None)
     config.score_func = param_dict.get("score_func", "auto")
@@ -224,6 +227,18 @@ def validate_autoep_config(
         raise ValueError("comm_max_tokens_per_rank must be a positive integer when comm_backend='deepep'. "
                          "Set it to the largest number of tokens one rank can route, normally "
                          "train_micro_batch_size_per_gpu * maximum padded sequence length.")
+
+    if not isinstance(config.skip_recompute_combine, bool):
+        raise ValueError(f"skip_recompute_combine must be a boolean, got {config.skip_recompute_combine!r}")
+    if config.skip_recompute_combine:
+        if config.comm_backend != "deepep" or config.autoep_size == 1:
+            raise ValueError('skip_recompute_combine skips the DeepEP combine, so it requires comm_backend="deepep" '
+                             f'and autoep_size > 1, but comm_backend="{config.comm_backend}" and '
+                             f"autoep_size={config.autoep_size} were set.")
+        # The recompute is recognized as a grad-enabled forward that runs inside a backward pass.
+        if not hasattr(torch._C, "_current_graph_task_id"):
+            raise ValueError("skip_recompute_combine needs torch._C._current_graph_task_id, which this PyTorch "
+                             "build lacks. Upgrade PyTorch or leave skip_recompute_combine unset.")
 
     # Validate score_func
     valid_score_func = ("auto", "softmax", "sigmoid")
