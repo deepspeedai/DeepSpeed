@@ -591,6 +591,15 @@ def get_position_id_node(gm: GraphModule) -> Node:
     return node
 
 
+def get_autosp_seq_dim(tensor_node: Node) -> int:
+    """Return the sequence dimension recorded by prepare_autosp_inputs, defaulting to 1."""
+    tensor_dict = tensor_node.meta.get("tensor_dict") or {}
+    tag = tensor_dict.get("tag")
+    if isinstance(tag, tuple):
+        return tag[1]
+    return 1
+
+
 def create_symbolic_slice_indices(
     gm: GraphModule,
     sym_seq_dim_node: Node,
@@ -610,7 +619,8 @@ def shard_tensor_node(gm: GraphModule, tensor_node: Node):
     val = get_node_shape_meta(tensor_node)
     assert val is not None, f"Node {tensor_node.name} has no shape metadata"
 
-    seq_len = val.shape[1]
+    seq_dim = get_autosp_seq_dim(tensor_node)
+    seq_len = val.shape[seq_dim]
 
     assert isinstance(
         seq_len,
@@ -620,7 +630,7 @@ def shard_tensor_node(gm: GraphModule, tensor_node: Node):
     assert symb_seq_int_node, f"Unable to find symbolic placeholder for {seq_len}"
 
     slice_all, slice_range = create_symbolic_slice_indices(gm, symb_seq_int_node)
-    indices = (slice_all, slice_range)
+    indices = tuple(slice_range if dim == seq_dim else slice_all for dim in range(val.ndim))
 
     positions = {node: i for i, node in enumerate(gm.graph.nodes)}
     # Insert after the later dependency so the new getitem does not appear
