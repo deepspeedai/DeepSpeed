@@ -5,6 +5,7 @@
 
 import importlib
 import os
+import warnings
 import torch
 import deepspeed.comm as dist
 import deepspeed
@@ -420,6 +421,35 @@ def test_known_world_size(monkeypatch, world_size, env, expected):
     assert ds_comm_torch.known_world_size(world_size) == expected
 
 
+@pytest.mark.parametrize("world_size,expect_hidden", [(1, True), (2, False)])
+def test_barrier_device_warning(monkeypatch, world_size, expect_hidden):
+    # Stand-ins for torch.distributed, so that a multi-rank world needs no extra devices here.
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: False)
+    monkeypatch.setattr(torch.distributed, "init_process_group", lambda backend, **kwargs: None)
+    monkeypatch.setattr(torch.distributed, "get_world_size", lambda group=None: world_size)
+    monkeypatch.setattr(torch.distributed, "get_backend", lambda group=None: "nccl")
+    backend = ds_comm_torch.TorchBackend.__new__(ds_comm_torch.TorchBackend)
+
+    # The exact text torch emits at barrier() on a group without a bound device; pinned for #8775.
+    # With more than one rank it flags a real risk of ranks picking different devices, so it must stay
+    # visible, and so must any other warning that only starts with the same text.
+    torch_warning = ("barrier(): using the device under current context. "
+                     "You can specify `device_id` in `init_process_group` to mute this warning.")
+    other_warning = torch_warning + " Some other advice."
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        backend.init_process_group("nccl", timeout=None, init_method=None, rank=0, world_size=world_size)
+        warnings.warn(torch_warning, UserWarning)
+        warnings.warn(other_warning, UserWarning)
+
+    shown = [str(w.message) for w in caught if str(w.message).startswith("barrier()")]
+    if expect_hidden:
+        assert shown == [other_warning]
+    else:
+        assert shown == [torch_warning, other_warning]
+
+
 def assert_device_binding(expect_bound):
     """A device is bound for multi-rank jobs, and not for a single-rank one (#8248)."""
     if get_accelerator().communication_backend_name() != 'nccl':
@@ -444,6 +474,17 @@ class TestSingleRankDeviceId(DistributedTest):
 
     def test(self):
         assert_device_binding(expect_bound=False)
+
+    def test_barrier_does_not_warn(self):
+        """A single rank has no bound device (#8248), and barrier() must not warn about it (#8775)."""
+        if get_accelerator().communication_backend_name() != 'nccl':
+            pytest.skip("torch only warns at barrier() for an accelerator backend")
+
+        # Turned into an error before DeepSpeed initializes, like a suite run with warnings as errors.
+        with warnings.catch_warnings():
+            warnings.filterwarnings("error", message=r"barrier\(\)", category=UserWarning)
+            deepspeed.init_distributed(dist_backend='nccl', auto_mpi_discovery=False)
+            torch.distributed.barrier()
 
 
 class TestMultiRankDeviceId(DistributedTest):
