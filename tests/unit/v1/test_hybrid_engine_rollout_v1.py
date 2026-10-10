@@ -2,6 +2,7 @@
 # DeepSpeed Team
 """Accelerator-backed v1 HybridEngineRollout tests."""
 
+import os
 from types import SimpleNamespace
 
 import pytest
@@ -141,3 +142,57 @@ def test_continuous_graph_generation_refills_a_fixed_slot_on_cuda():
     assert stats["decode_steps"] == 2
     assert stats["trim_count"] == 0
     assert stats["trim_frequency"] == 0.0
+
+
+def test_continuous_graph_matches_pretrained_model_when_enabled():
+    model_name = os.getenv("DEEPSPEED_PRETRAINED_ROLLOUT_MODEL")
+    if not model_name:
+        pytest.skip("set DEEPSPEED_PRETRAINED_ROLLOUT_MODEL to run pretrained rollout coverage")
+
+    accelerator = get_accelerator()
+    if not accelerator.is_available() or accelerator.device_name() != "cuda":
+        pytest.skip("CUDA is required for pretrained CUDA graph rollout coverage")
+
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    device = torch.device(accelerator.device_name())
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = "left"
+    eager_model = AutoModelForCausalLM.from_pretrained(model_name, dtype=torch.float16).to(device).eval()
+    graph_model = AutoModelForCausalLM.from_pretrained(model_name, dtype=torch.float16).to(device).eval()
+    graph_model.load_state_dict(eager_model.state_dict())
+
+    sampling = SamplingConfig(max_new_tokens=32, temperature=0, continuous_batch_size=1)
+    eager_rollout = HybridEngineRollout(SimpleNamespace(module=eager_model), tokenizer)
+    graph_rollout = HybridEngineRollout(
+        SimpleNamespace(module=graph_model),
+        tokenizer,
+        cfg=HybridEngineRolloutConfig(use_graph_capture=True),
+    )
+    original_create_graph = accelerator.create_graph
+    capture_count = [0]
+
+    def counted_create_graph():
+        capture_count[0] += 1
+        return original_create_graph()
+
+    accelerator.create_graph = counted_create_graph
+    try:
+        prompts = (
+            "CUDA Graph replay avoids repeated Python launch overhead during autoregressive decoding.",
+            "DeepSpeed continuous batching keeps physical cache slots stable across request refills.",
+        )
+        for seed, prompt in zip((1234, 1235), prompts):
+            torch.manual_seed(seed)
+            encoded = tokenizer(prompt, return_tensors="pt", padding="max_length", max_length=32, truncation=True)
+            request = RolloutRequest(encoded.input_ids.to(device), encoded.attention_mask.to(device))
+            eager_output = eager_rollout.generate(request, sampling)
+            graph_output = graph_rollout.generate(request, sampling)
+
+            assert torch.equal(graph_output.input_ids, eager_output.input_ids)
+            assert torch.equal(graph_output.attention_mask, eager_output.attention_mask)
+    finally:
+        accelerator.create_graph = original_create_graph
+
+    assert capture_count[0] == 1
