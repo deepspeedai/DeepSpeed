@@ -1,0 +1,163 @@
+---
+title: "Governance Process"
+permalink: /governance/
+toc: true
+toc_label: "Contents"
+---
+
+# Governance Process
+
+DeepSpeed's success comes from our strong open source community. We favor informal, meritocratic norms over formal policies. This document clarifies our governance philosophy and practices.
+
+## Values
+
+DeepSpeed is a deep learning optimization library that makes distributed training and inference easy, efficient, and effective. We stay current with advances, enable innovation, and support diverse models, modalities, and hardware.
+
+### Design Values
+
+1. **Top performance**: System performance is our top priority. We monitor overheads, optimize kernels, and publish benchmarks. We never leave performance on the table.
+2. **Ease of use**: DeepSpeed must be simple to install, configure, and operate. We provide clear documentation, fast startup, clean logs, helpful error messages, and monitoring guides. Many users fork our code or study it deeply, so we keep it readable and modular.
+3. **Wide coverage**: DeepSpeed supports frontier models and high-performance accelerators. We make it easy to add new models and hardware. DeepSpeed + PyTorch form a simple interface that avoids complexity.
+4. **Production ready**: DeepSpeed runs 24/7 in production. It must be easy to operate and monitor for health issues.
+5. **Extensibility**: DeepSpeed serves as fundamental deep learning infrastructure. Our codebase cannot cover every use case, so we design for easy forking and customization.
+
+### Collaboration Values
+
+1. **Tightly Knit and Fast-Moving**: Our maintainer team is aligned on vision, philosophy, and roadmap. We work closely to unblock each other and move quickly.
+2. **Individual Merit**: No one buys their way into governance. Committer status belongs to individuals, not companies. We reward contribution, maintenance, and project stewardship.
+
+## Project Maintainers
+
+Maintainers form a hierarchy based on sustained, high-quality contributions and alignment with our design philosophy.
+
+### Technical Steering Committee
+
+The Technical Steering Committee (TSC) is responsible for all technical oversight of the open source project. The TSC meets regularly to coordinate roadmap priorities and allocate engineering resources.
+
+**TSC Committers:**
+
+| Name | GitHub ID |
+|--- |--- |
+| Olatunji Ruwase | [@tjruwase](https://github.com/tjruwase) |
+| Logan Adams | [@loadams](https://github.com/loadams) |
+| Masahiro Tanaka | [@tohtana](https://github.com/tohtana) |
+| Jeff Rasley | [@jeffra](https://github.com/jeffra) |
+| Minjia Zhang | [@minjiazhang](https://github.com/minjiazhang) |
+| Ashwin Aji | [@ashwinma](https://github.com/ashwinma) |
+| Sam Foreman | [@saforem2](https://github.com/saforem2) |
+| Zhipeng Wang | [@PKUWZP](https://github.com/PKUWZP) |
+| Guokai Ma | [@delock](https://github.com/delock) |
+
+**Responsibilities:**
+
+- Author quarterly roadmap and responsible for each development effort.
+- Making major changes to the technical direction or scope of DeepSpeed and DeepSpeed projects.
+- Defining the project's release strategy.
+- Work with model providers, hardware vendors, and key users of DeepSpeed to ensure the project is on the right track.
+
+### Core Maintainers
+
+Core Maintainers function as the project planning and decision making committee within the TSC.
+
+- Olatunji Ruwase ([@tjruwase](https://github.com/tjruwase))
+- Logan Adams ([@loadams](https://github.com/loadams))
+- Masahiro Tanaka ([@tohtana](https://github.com/tohtana))
+- Jeff Rasley ([@jeffra](https://github.com/jeffra))
+- Minjia Zhang ([@minjiazhang](https://github.com/minjiazhang))
+- Zhipeng Wang ([@PKUWZP](https://github.com/PKUWZP))
+- Guokai Ma ([@delock](https://github.com/delock))
+
+### Lead Maintainers
+
+While the TSC assumes the day-to-day responsibilities of the project, Lead Maintainers are responsible for the overall direction and strategy of the project.
+
+**Responsibilities:**
+
+- Making decisions where consensus among TSC members cannot be reached.
+- Adopting changes to the project's technical governance.
+- Organizing the voting process for new committers.
+
+### Committers and Area Owners
+
+Committers have write access and merge rights. They typically have deep expertise in specific areas and help the community.
+
+**Responsibilities:**
+
+- Reviewing PRs and providing feedback.
+- Addressing issues and questions from the community.
+- Own specific areas of the codebase and development efforts: reviewing PRs, addressing issues, answering questions, improving documentation.
+
+Committers are almost all area owners. They author subsystems, review PRs, refactor code, monitor tests, and ensure compatibility with other areas. All area owners are committers with deep expertise in that area, but not all committers own areas.
+
+#### Committer Proposal Process
+
+Any committer can nominate candidates via our private committer mailing list. The process runs as follows:
+
+1. **Nominate**: A committer sends email to the committer group to nominate a candidate, highlighting the candidate's contributions (e.g., links to PRs, reviews, RFCs, issues, benchmarks, and adoption evidence) and how they map to the standards below.
+2. **Discuss and vote**: The committer group discusses the nomination, votes, and voices concerns if needed. Shared concerns can stop the process. For concerns, the group discusses clear criteria for the person to be nominated again. Most cases are decided by consensus; in contentious cases, the lead maintainers resolve conflicts and make the decision.
+3. **Feedback period**: After a two-week feedback period (allowing time for any last input or concerns), if no blocking concerns arise and the nominator confirms with lead maintainer group to move forward, the nominator sends an invitation to the candidate asking them to open a PR to update their code ownership.
+4. **Permissions and onboarding**: In parallel, the lead maintainers assign the necessary permissions in GitHub and add the new member to the committer mailing list and other communications channels as appropriate.
+5. **Finalize**: Once the CODEOWNERS/committer PR is ready and permissions are in place, the PR is merged and the new committer is welcomed.
+
+Committership is highly selective and merit based. The selection criteria requires:
+
+- **Area expertise**: leading design/implementation of core subsystems, material performance or reliability improvements adopted project-wide, or accepted RFCs that shape technical direction.
+- **Sustained contributions**: high-quality merged contributions and reviews across releases, responsiveness to feedback, and stewardship of code health.
+- **Community leadership**: mentoring contributors, triaging issues, improving docs, and elevating project standards.
+
+To further illustrate, a committer typically satisfies at least two of the following accomplishment patterns:
+
+- Author of an accepted RFC or design that materially shaped project direction
+- Measurable, widely adopted performance or reliability improvement in core paths
+- Long-term ownership of a subsystem with demonstrable quality and stability gains
+- Significant cross-project compatibility or ecosystem enablement work (models, hardware, tooling)
+
+### Working Groups
+
+DeepSpeed runs informal working groups for specific focus areas. These can be loosely tracked via dedicated channels in our communication platforms. Some groups have regular sync meetings.
+
+### Advisory Board
+
+DeepSpeed project leads consult with an informal advisory board that is composed of model providers, hardware vendors, and ecosystem partners.
+
+## Process
+
+### Project Roadmap
+
+Project Leads publish quarterly roadmaps as GitHub issues. These clarify current priorities. Unlisted topics are not excluded but may get less review attention.
+
+### Decision Making
+
+We make technical decisions in GitHub using RFCs and design docs. Discussion may happen elsewhere, but we maintain public records of significant changes: problem statements, rationale, and alternatives considered.
+
+### Merging Code
+
+Contributors and maintainers often collaborate closely on code changes, especially within organizations or specific areas. Maintainers should give others appropriate review opportunities based on change significance.
+
+PRs require at least one committer review and approval. If the code is covered by CODEOWNERS, the PR should be reviewed by the CODEOWNERS. There are cases where the code is trivial or a hotfix; the PR can be merged by the lead maintainers directly.
+
+In cases where CI did not pass due to a failure unrelated to the PR, the PR can be merged by the lead maintainers using a "force merge" option that overrides the CI checks.
+
+### AI Assisted Contributions
+
+AI tools can accelerate development, but contributors remain fully responsible for all code they submit. Like the Developer Certificate of Origin, this policy centers on accountability: contributors must believe they have the right to submit their contribution under DeepSpeed's open source license, regardless of how the code was created.
+
+All AI-assisted contributions must meet the same quality, testing, and review standards as any other code. Contributors must review and understand AI-generated code before submission:
+
+- Do not submit "pure agent" PRs. The human submitter is responsible for reviewing all changed lines, validating behavior end-to-end, and running relevant tests.
+- Attribution preserves legal clarity and community trust. Contributors must disclose AI assistance in pull requests and mark commits with appropriate trailers (e.g., `Co-authored-by:`).
+- Avoid one-off "busywork" PRs (single typo, isolated style cleanup, one mutable default fix, etc.). Bundle mechanical cleanups into a clear, systematic scope.
+
+### Contributor License Agreement
+
+This project requires all contributions to include a `Signed-off-by` line, indicating agreement with the [Developer Certificate of Origin (DCO)](https://developercertificate.org/). DCOs are per-commit, so each commit needs to be signed off using the `-s` or `--signoff` flag.
+
+### Code of Conduct
+
+All participants in the DeepSpeed community are expected to uphold our standards of respectful, inclusive, and constructive communication. See our [Code of Conduct](https://github.com/deepspeedai/DeepSpeed/blob/master/CODE_OF_CONDUCT.md) for details.
+
+### Compliance with Policies
+
+This project is subject to the policies of [LF Projects](https://lfprojects.org/policies/). Contributors will comply with the policies of LF Projects as may be adopted and amended, including the Trademark Policy and Terms of Use.
+
+For the full project charter, including details on TSC voting, intellectual property policy, and amendments, see the [DeepSpeed Governance Charter](https://github.com/deepspeedai/DeepSpeed/blob/master/GOVERNANCE.md).
