@@ -3,6 +3,8 @@
 
 # DeepSpeed Team
 
+from typing import Tuple
+
 import torch
 import deepspeed.comm as dist
 from torch.utils._sympy.functions import FloorDiv
@@ -93,3 +95,50 @@ def _all_to_all_backward(ctx, grad):
 
 
 torch.library.register_autograd("autosp::all_to_all", _all_to_all_backward, setup_context=_all_to_all_backward_setup)
+
+
+@torch.library.custom_op("autosp::aggregate_loss", mutates_args=())
+def aggregate_loss(local_loss_sum: torch.Tensor, local_valid_tokens: torch.Tensor,
+                   average: bool) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Combine the per-shard summed loss of a sequence-parallel group into the full-sequence loss.
+
+    Returns the full-sequence loss (summed, or averaged over the valid tokens of the group)
+    and the factor that backward applies to the incoming gradient.
+    """
+    assert is_setup(), 'Incorrect initialization of SP/DP mesh.'
+    group = get_group(dist.get_rank() // sp_size())
+
+    loss = local_loss_sum.clone()
+    dist.all_reduce(loss, group=group)
+    # The engine averages gradients over every rank, SP ranks included, so the
+    # local gradient is scaled by sp_size for that average to recover the full-sequence gradient.
+    grad_scale = torch.full_like(loss, sp_size())
+    if average:
+        valid_tokens = local_valid_tokens.clone()
+        dist.all_reduce(valid_tokens, group=group)
+        valid_tokens = valid_tokens.to(loss.dtype)
+        loss = loss / valid_tokens
+        grad_scale = grad_scale / valid_tokens
+    return loss, grad_scale
+
+
+@torch.library.register_fake("autosp::aggregate_loss")
+def aggregate_loss_fake(local_loss_sum: torch.Tensor, local_valid_tokens: torch.Tensor, average: bool):
+    return torch.empty_like(local_loss_sum), torch.empty_like(local_loss_sum)
+
+
+def _aggregate_loss_backward_setup(ctx, inputs, output):
+    _, grad_scale = output
+    ctx.mark_non_differentiable(grad_scale)
+    ctx.save_for_backward(grad_scale)
+
+
+def _aggregate_loss_backward(ctx, grad_loss, grad_scale_grad):
+    (grad_scale, ) = ctx.saved_tensors
+    return grad_loss * grad_scale, None, None
+
+
+torch.library.register_autograd("autosp::aggregate_loss",
+                                _aggregate_loss_backward,
+                                setup_context=_aggregate_loss_backward_setup)

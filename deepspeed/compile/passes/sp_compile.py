@@ -17,7 +17,8 @@ from deepspeed.compile import constants
 
 from ..custom_ops import all_to_all, sp_dp_registry  # noqa: F401
 from ..fx import find_node_by_name, get_node_shape_meta
-from ..util import get_input_id_node, get_label_id_node, get_position_id_node, shard_tensor_node, get_sdpa_nodes
+from ..util import (get_autosp_seq_dim, get_input_id_node, get_label_id_node, get_position_id_node, shard_tensor_node,
+                    get_sdpa_nodes)
 
 
 def prepare_autosp_inputs(input_id: torch.Tensor,
@@ -43,6 +44,8 @@ def prepare_autosp_inputs(input_id: torch.Tensor,
 
     if seq_dim < 0 or seq_dim >= input_id.ndim:
         raise ValueError(f"seq_dim {seq_dim} must be a valid index for input_id with shape {input_id.shape}")
+    if seq_dim >= label_id.ndim:
+        raise ValueError(f"seq_dim {seq_dim} is out of bounds for label_id with shape {label_id.shape}")
 
     if position_id is not None:
         if seq_dim >= position_id.ndim:
@@ -60,10 +63,11 @@ def prepare_autosp_inputs(input_id: torch.Tensor,
     if attention_mask is not None:
         torch._dynamo.decorators.mark_dynamic(attention_mask, seq_dim)
 
-    input_id.tag = constants.AUTOSP_INPUT_ID_KEY
-    label_id.tag = constants.AUTOSP_LABEL_ID_KEY
+    # Dynamo only carries the `tag` attribute into graph metadata, so seq_dim must travel inside it.
+    input_id.tag = (constants.AUTOSP_INPUT_ID_KEY, seq_dim)
+    label_id.tag = (constants.AUTOSP_LABEL_ID_KEY, seq_dim)
     if position_id is not None:
-        position_id.tag = constants.AUTOSP_POSITION_ID_KEY
+        position_id.tag = (constants.AUTOSP_POSITION_ID_KEY, seq_dim)
 
     return input_id, label_id, position_id, attention_mask
 
@@ -77,7 +81,7 @@ def pass_shard_seq_dim(gm: GraphModule, example_inputs):
 
     input_ids_node = get_input_id_node(gm)
     val = get_node_shape_meta(input_ids_node)
-    seq_symint = val.shape[1]
+    seq_symint = val.shape[get_autosp_seq_dim(input_ids_node)]
     assert isinstance(
         seq_symint,
         torch.SymInt), f"expected sequence dimension to be of type {torch.SymInt!r} but found {type(seq_symint)!r}"
@@ -131,9 +135,107 @@ def pass_shard_input_ids(gm: GraphModule, example_inputs):
     shard_tensor_node(gm, input_ids_node)
 
 
+def _get_cross_entropy_arg(loss_node: Node, name: str, position: int, default):
+    if name in loss_node.kwargs:
+        return loss_node.kwargs[name]
+    if len(loss_node.args) > position:
+        return loss_node.args[position]
+    return default
+
+
+def _find_full_label_node(target_node: Node, label_ids_node: Node, label_users: set) -> Optional[Node]:
+    """Walk back from a loss target to the closest node that still has the full shape of the labels."""
+    label_shape = str(get_node_shape_meta(label_ids_node).shape)
+    worklist = [target_node]
+    visited = set()
+    while worklist:
+        node = worklist.pop(0)
+        if node in visited or node not in label_users:
+            continue
+        visited.add(node)
+        node_meta = get_node_shape_meta(node)
+        if isinstance(node_meta, torch.Tensor) and str(node_meta.shape) == label_shape:
+            return node
+        worklist.extend(node.all_input_nodes)
+    return None
+
+
 def pass_shard_label_ids(gm: GraphModule, example_inputs):
+    """
+    Shard the labels so that the sequence-parallel loss equals the full-sequence loss.
+
+    A causal LM shifts its labels by one token before the loss. Sharding the labels before
+    that shift would pair the last token of every shard with a wrong target, so the labels
+    are sharded where the loss target still has the full label shape. Each cross entropy
+    is then summed per shard and combined over the SP group, which weights shards with
+    different numbers of valid tokens correctly.
+    """
     label_ids_node = get_label_id_node(gm)
-    shard_tensor_node(gm, label_ids_node)
+    seq_dim = get_autosp_seq_dim(label_ids_node)
+
+    label_users = set()
+    worklist = [label_ids_node]
+    while worklist:
+        node = worklist.pop()
+        if node not in label_users:
+            label_users.add(node)
+            worklist.extend(node.users)
+
+    loss_nodes = [
+        node for node in gm.graph.nodes
+        if node.target is torch.nn.functional.cross_entropy and len(node.args) > 1 and node.args[1] in label_users
+    ]
+    if not loss_nodes:
+        shard_tensor_node(gm, label_ids_node)
+        return
+
+    full_label_nodes = {}
+    for loss_node in loss_nodes:
+        full_label_node = _find_full_label_node(loss_node.args[1], label_ids_node, label_users)
+        if full_label_node is None:
+            print("[WARNING] AutoSP could not find the full-length labels of a cross entropy loss. "
+                  "Sharding the label input directly; the loss is only computed over the local shard.")
+            shard_tensor_node(gm, label_ids_node)
+            return
+        full_label_nodes[loss_node] = full_label_node
+
+    sharded_label_nodes = {}
+    for loss_node, full_label_node in full_label_nodes.items():
+        weight = _get_cross_entropy_arg(loss_node, "weight", 2, None)
+        if weight is not None:
+            raise RuntimeError("AutoSP does not support class-weighted cross entropy on sequence-sharded labels")
+        reduction = _get_cross_entropy_arg(loss_node, "reduction", 6, "mean")
+        if reduction not in ("mean", "sum"):
+            raise RuntimeError(f"AutoSP supports cross entropy with reduction 'mean' or 'sum', got {reduction!r}")
+        ignore_index = _get_cross_entropy_arg(loss_node, "ignore_index", 4, -100)
+
+        if full_label_node not in sharded_label_nodes:
+            sliced_node = shard_tensor_node(gm, full_label_node, seq_dim)
+            # The shard is a strided view, and loss code usually flattens its target with view().
+            with gm.graph.inserting_after(sliced_node):
+                contiguous_node = gm.graph.call_method("contiguous", args=(sliced_node, ))
+            sliced_node.replace_all_uses_with(contiguous_node)
+            contiguous_node.update_arg(0, sliced_node)
+            sharded_label_nodes[full_label_node] = contiguous_node
+
+        target_node = loss_node.args[1]
+        with gm.graph.inserting_after(target_node):
+            valid_mask = gm.graph.call_function(operator.ne, args=(target_node, ignore_index))
+        with gm.graph.inserting_after(valid_mask):
+            valid_tokens = gm.graph.call_function(torch.sum, args=(valid_mask, ))
+
+        if "reduction" in loss_node.kwargs or len(loss_node.args) <= 6:
+            loss_node.update_kwarg("reduction", "sum")
+        else:
+            loss_node.update_arg(6, "sum")
+
+        with gm.graph.inserting_after(loss_node):
+            aggregated = gm.graph.call_function(torch.ops.autosp.aggregate_loss.default,
+                                                args=(loss_node, valid_tokens, reduction == "mean"))
+        with gm.graph.inserting_after(aggregated):
+            global_loss = gm.graph.call_function(operator.getitem, args=(aggregated, 0))
+        loss_node.replace_all_uses_with(global_loss)
+        aggregated.update_arg(0, loss_node)
 
 
 def pass_shard_position_ids(gm: GraphModule, example_inputs):

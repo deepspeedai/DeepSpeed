@@ -742,6 +742,14 @@ automatic sharding:
     )
 
 This serves as a hint to the compiler to know which inputs should be sharded across which dimension.
+``seq_dim`` applies to every prepared tensor, so use ``seq_dim=0`` for sequence-first ``[seq, batch]`` inputs.
+The compiler records it on the tagged inputs and shards along that dimension.
+
+Labels are sharded where the target of ``torch.nn.functional.cross_entropy`` still has the full label shape,
+so a causal shift such as ``labels[..., 1:]`` on the padded labels is applied before sharding and no target crosses a shard boundary.
+Each rank then returns the loss of the full sequence: AutoSP sums the loss and the number of non-ignored
+tokens over the sequence-parallel group, for both ``reduction="mean"`` and ``reduction="sum"``.
+Class-weighted cross entropy and ``reduction="none"`` are not supported.
 
 Memory Optimization
 ~~~~~~~~~~~~~~~~~~~
