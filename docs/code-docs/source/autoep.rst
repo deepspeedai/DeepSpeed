@@ -234,6 +234,58 @@ SMs. The default of 12 was chosen by measuring whole steps: 8 SMs gave a median
 it is alone on the fabric, which exhausts the queue pairs ZeRO and the
 data-parallel groups have already claimed in a training step.
 
+**Fused gate and up projections (experimental):**
+
+The grouped experts compute two projections of the same input, ``gate`` with
+``w1`` and ``up`` with ``w3``, before the expert activation. ``gate_up_impl``
+selects whether they run as two grouped GEMMs or as one:
+
+.. code-block:: json
+
+    {
+      "expert_parallel": {
+        "enabled": true,
+        "autoep_size": 8,
+        "gate_up_impl": "fused"
+      }
+    }
+
+``"separate"`` (default) keeps the existing two GEMMs. ``"fused"`` concatenates
+``w1`` and ``w3`` on each call and runs one ``torch._grouped_mm`` with twice the
+output columns. The activation then reads the two halves of that output in
+place: ``swiglu`` uses a Triton kernel, and the other forms run their usual
+expression on views of the halves. The parameters are not changed, so
+checkpoints, universal checkpoints, expert tensor parallelism and optimizer
+state, including Muon's per-expert treatment of ``w1`` and ``w3``, see the same
+layout as before.
+
+The forward expression and parameter-gradient semantics are unchanged. Exact
+output and weight-gradient equality was observed in the tested H100 cases,
+not guaranteed for all GEMM backends, shapes or hardware. In the
+backward pass, one input-gradient GEMM accumulates both projections in FP32,
+where ``"separate"`` adds two results rounded to the input dtype, so the input gradient can differ in
+the last bits. The numerical regression compares relative L2 errors with an
+FP64 reference using the same represented BF16 parameters; it does not claim
+universal bitwise equivalence or accuracy improvement.
+
+The packed SwiGLU Triton path supports first-order gradients only:
+``create_graph=True`` raises instead of silently dropping its second derivative.
+Forward and backward launch on the input device's current stream, restoring
+the caller's device. Other activations keep their existing eager expression.
+
+Most of the saving is in the backward pass: one input-gradient GEMM instead of
+two, and no separate addition. On Qwen3-30B-A3B with 8 H100s (expert parallel
+size 8, micro-batch 4, 16 accumulation steps, sequence length 4096, DeepEP and
+reentrant activation checkpointing), a full optimizer step went from 22.02 s to
+21.60 s (-1.9%) in two pairs using an equivalent benchmark prototype in the
+same allocation, with unchanged peak
+allocated memory and about 0.4 GB more reserved memory.
+
+``"fused"`` is rejected, rather than silently ignored, when the experts would
+not run ``torch._grouped_mm``: with ``use_grouped_mm=false``, or on devices that
+select the Triton grouped GEMM (compute capability below 9.0) unless
+``disable_triton_grouped_mm=true``.
+
 **DeepEP row weighting implementation (experimental):**
 
 DeepEP dispatch returns one received row per routed assignment and one FP32
