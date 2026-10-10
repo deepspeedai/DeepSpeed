@@ -567,7 +567,13 @@ class OpBuilder(ABC):
             if torch.cuda.is_available() and isinstance(self, CUDAOpBuilder):
                 self.validate_torch_op_version(torch_info)
 
-            op_module = importlib.import_module(self.absolute_name())
+            try:
+                op_module = importlib.import_module(self.absolute_name())
+            except ImportError:
+                # installed_ops can say an op was prebuilt even though its extension module
+                # isn't actually importable here (e.g. a Windows wheel missing that .pyd);
+                # fall back to compiling it on the fly instead of raising.
+                return self.jit_load(verbose)
             __class__._loaded_ops[self.name] = op_module
             return op_module
         else:

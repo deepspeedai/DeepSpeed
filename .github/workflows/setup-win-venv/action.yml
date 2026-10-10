@@ -1,0 +1,64 @@
+name: Create Virtual Environment
+description: Set up Python, the MSVC toolchain, and install PyTorch for Windows CI
+
+inputs:
+  python-version:
+    description: Python version to set up
+    required: true
+  msvc-arch:
+    description: MSVC architecture to configure (e.g. amd64, arm64)
+    required: true
+  torch-version:
+    description: PyTorch version to install
+    required: false
+    default: '2.14.0'
+  torchvision-version:
+    description: torchvision version to install (skipped if empty)
+    required: false
+    default: ''
+
+runs:
+  using: "composite"
+  steps:
+    - name: Configure DeepSpeed build flags
+      shell: pwsh
+      run: |
+        "DISTUTILS_USE_SDK=1" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+        "DS_BUILD_OPS=1" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+        "DS_BUILD_AIO=1" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+        "DS_BUILD_PIN_MEMORY=1" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+        "DS_ENABLE_NINJA=1" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+    - uses: actions/setup-python@v6
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Setup MSVC environment
+      shell: pwsh
+      run: |
+        $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+        $vsPath = & $vswhere -latest -products * -property installationPath
+        $vcvarsall = Join-Path $vsPath 'VC\Auxiliary\Build\vcvarsall.bat'
+        $envDump = cmd /c "`"$vcvarsall`" ${{ inputs.msvc-arch }} >nul && set"
+        foreach ($line in $envDump) {
+          if ($line -match '^([^=]+)=(.*)$') {
+            "$($matches[1])=$($matches[2])" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          }
+        }
+
+    - name: Verify MSVC toolchain
+      shell: pwsh
+      run: where cl
+
+    - name: Install build tools
+      shell: pwsh
+      run: pip install build wheel setuptools
+
+    - name: Install PyTorch
+      shell: pwsh
+      run: pip install torch==${{ inputs.torch-version }} --index-url https://download.pytorch.org/whl/cpu
+
+    - name: Install torchvision
+      if: ${{ inputs.torchvision-version != '' }}
+      shell: pwsh
+      run: pip install torchvision==${{ inputs.torchvision-version }} --index-url https://download.pytorch.org/whl/cpu

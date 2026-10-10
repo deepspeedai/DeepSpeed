@@ -4,6 +4,7 @@
 # DeepSpeed Team
 
 import os
+import platform
 import re
 import time
 import inspect
@@ -65,6 +66,13 @@ def get_master_port(base_port=29500, port_range_size=1000):
 
 
 def _get_cpu_socket_count():
+    # /proc/cpuinfo (and the cat/grep/sort/wc pipeline below) is Linux-only, so
+    # Windows queries the physical socket count via WMI instead.
+    if platform.system() == "Windows":
+        return int(
+            subprocess.check_output(
+                ["powershell", "-Command",
+                 "(Get-CimInstance Win32_ComputerSystem).NumberOfProcessors"]).decode().strip())
     import shlex
     p1 = subprocess.Popen(shlex.split("cat /proc/cpuinfo"), stdout=subprocess.PIPE)
     p2 = subprocess.Popen(["grep", "physical id"], stdin=p1.stdout, stdout=subprocess.PIPE)
@@ -204,13 +212,21 @@ class DistributedExec(ABC):
         try:
             skip_msgs = skip_msgs_async.get(self.exec_timeout)
         except mp.TimeoutError:
-            # Shortcut to exit pytest in the case of a hanged test. This
-            # usually means an environment error and the rest of tests will
-            # hang (causing super long unit test runtimes)
-            pytest.exit("Test hanged, exiting", returncode=1)
-        finally:
-            # Regardless of the outcome, ensure proper teardown
-            # Tear down distributed environment and close process pools
+            # A hung worker can't respond to the graceful _dist_destroy RPC
+            # that _close_pool relies on, so terminate the pool directly here
+            # instead of exiting the whole session: under xdist, pytest.exit()
+            # kills this worker's channel to the controller in a way that
+            # surfaces as an INTERNALERROR for the entire run, even though
+            # only this one test actually hung.
+            pool.terminate()
+            pool.join()
+            if self.reuse_dist_env:
+                self._pool_cache.pop(num_procs, None)
+            pytest.fail("Test hanged and was terminated after exceeding the execution timeout")
+        except BaseException:
+            self._close_pool(pool, num_procs)
+            raise
+        else:
             self._close_pool(pool, num_procs)
 
         # If we skipped a test, propagate that to this process
@@ -287,8 +303,9 @@ class DistributedExec(ABC):
         if os.environ.get('DS_DISABLE_REUSE_DIST_ENV', '0') == '1':
             self.reuse_dist_env = False
 
-        # Set start method to `forkserver` (or `fork`)
-        mp.set_start_method('forkserver', force=True)
+        # Set start method to `forkserver` (or `fork`). Windows only supports `spawn`.
+        start_method = 'forkserver' if 'forkserver' in mp.get_all_start_methods() else 'spawn'
+        mp.set_start_method(start_method, force=True)
 
         if self.non_daemonic_procs:
             self._launch_non_daemonic_procs(num_procs, init_method)

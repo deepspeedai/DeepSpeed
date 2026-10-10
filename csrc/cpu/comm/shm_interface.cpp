@@ -39,9 +39,9 @@ void initialize(int size, int rank)
     is_initialized = 1;
 
     auto addr_string = std::getenv("MASTER_ADDR");
-    if (addr_string == NULL) { addr_string = ""; }
+    if (addr_string == NULL) { addr_string = const_cast<char*>(""); }
     auto port_string = std::getenv("MASTER_PORT");
-    if (port_string == NULL) { port_string = ""; }
+    if (port_string == NULL) { port_string = const_cast<char*>(""); }
 
     if (all_ranks_local_p) { shm_initialize(size, rank, addr_string, port_string); }
 }

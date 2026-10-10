@@ -330,6 +330,7 @@ class TestAsyncQueue(DistributedTest):
 class TestAsyncFileOffset(DistributedTest):
     world_size = 1
 
+    @pytest.mark.skipif(not hasattr(os, "O_DIRECT"), reason="O_DIRECT is not supported on this platform")
     @pytest.mark.parametrize('use_fd', [False, True])
     def test_offset_write(self, tmpdir, file_partitions, use_cuda_pinned_tensor, use_fd):
 
