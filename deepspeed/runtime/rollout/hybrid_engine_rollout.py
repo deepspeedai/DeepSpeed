@@ -552,13 +552,11 @@ class HybridEngineRollout(RolloutEngine):
         static tensor addresses.
         """
         module = self.engine.module
+        prompt_len = requests[0].prompt_ids.shape[1]
+        self._validate_continuous_graph_options(prompt_len, sampling)
         device = requests[0].prompt_ids.device
         if device.type != "cuda":
             raise ValueError("continuous CUDA graph capture requires CUDA rollout inputs")
-        if self.align_decode_fronts:
-            raise ValueError("continuous CUDA graph capture does not support aligned decode fronts")
-        if self.enable_cache_trimming:
-            raise ValueError("continuous CUDA graph capture does not support cache trimming")
 
         from transformers import StaticCache
         from deepspeed.utils.static_cache import DeepSpeedStaticCache
@@ -566,7 +564,6 @@ class HybridEngineRollout(RolloutEngine):
         profile = self._start_continuous_profile() if self.enable_profiling else None
         profile_accelerator = profile["accelerator"] if profile is not None else None
         profile_start = profile["start"] if profile is not None else None
-        prompt_len = requests[0].prompt_ids.shape[1]
         minimum_cache_len = prompt_len + sampling.max_new_tokens
         max_cache_len = (self.continuous_cache_capacity
                          if self.continuous_cache_capacity is not None else minimum_cache_len)
@@ -727,6 +724,15 @@ class HybridEngineRollout(RolloutEngine):
             self._finish_continuous_profile(profile, original_request, responses, max_batch_size, prompt_len,
                                             generation_end, post_processing_end)
         return output
+
+    def _validate_continuous_graph_options(self, prompt_len, sampling):
+        if self.align_decode_fronts:
+            raise ValueError("continuous CUDA graph capture does not support aligned decode fronts")
+        if self.enable_cache_trimming:
+            raise ValueError("continuous CUDA graph capture does not support cache trimming")
+        if (self.continuous_cache_capacity is not None
+                and self.continuous_cache_capacity < prompt_len + sampling.max_new_tokens):
+            raise ValueError("continuous_cache_capacity must fit the prompt and all generated tokens")
 
     def _get_continuous_graph_state(self, module, max_batch_size, prompt_len, max_cache_len, device, model_dtype,
                                     cache_type):

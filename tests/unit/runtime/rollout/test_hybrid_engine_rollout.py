@@ -110,6 +110,25 @@ def test_continuous_generation_rejects_unsupported_inputs():
         rollout.generate(request, SamplingConfig(max_new_tokens=2, temperature=0.5, continuous_batch_size=1))
 
 
+@pytest.mark.parametrize(
+    ("cfg", "message"),
+    [
+        (HybridEngineRolloutConfig(use_graph_capture=True, align_decode_fronts=True), "aligned decode fronts"),
+        (HybridEngineRolloutConfig(use_graph_capture=True, enable_cache_trimming=True), "cache trimming"),
+        (HybridEngineRolloutConfig(use_graph_capture=True, continuous_cache_capacity=4), "must fit"),
+    ],
+)
+def test_continuous_graph_rejects_incompatible_fixed_layout_options(cfg, message):
+    rollout = HybridEngineRollout(_make_engine(), _make_tokenizer(), cfg=cfg)
+    request = RolloutRequest(
+        prompt_ids=torch.tensor([[0, 1, 2]]),
+        prompt_attention_mask=torch.tensor([[0, 1, 1]]),
+    )
+
+    with pytest.raises(ValueError, match=message):
+        rollout.generate(request, SamplingConfig(max_new_tokens=2, temperature=0, continuous_batch_size=1))
+
+
 def test_continuous_generation_routes_graph_capture_to_fixed_capacity_path():
     rollout = HybridEngineRollout(
         _make_engine(),
