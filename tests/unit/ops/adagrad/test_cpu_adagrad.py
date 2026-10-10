@@ -27,6 +27,24 @@ def check_equal(first, second, atol=1e-2, verbose=False):
     np.testing.assert_allclose(x, y, err_msg="param-update mismatch!", atol=atol)
 
 
+@pytest.mark.parametrize('model_size', [129, 1024, 8000])
+@pytest.mark.parametrize('weight_decay', [0.0, 0.1])
+def test_cpu_adagrad_weight_decay(model_size, weight_decay):
+    param = torch.nn.Parameter(torch.ones(model_size, device='cpu', dtype=torch.float32))
+    ref_param = torch.nn.Parameter(param.detach().clone())
+    optimizer_kwargs = dict(lr=0.01, eps=1e-8, weight_decay=weight_decay)
+    optimizer = DeepSpeedCPUAdagrad([param], **optimizer_kwargs)
+    ref_optimizer = torch.optim.Adagrad([ref_param], **optimizer_kwargs)
+
+    for grad_value in (0.25, 0.0, -0.5):
+        param.grad = torch.full_like(param, grad_value)
+        ref_param.grad = param.grad.clone()
+        optimizer.step()
+        ref_optimizer.step()
+
+        torch.testing.assert_close(param, ref_param, rtol=1e-6, atol=1e-7)
+
+
 class TestCPUAdagrad(DistributedTest):
     world_size = 1
     requires_cuda_env = False
