@@ -390,11 +390,10 @@ def _in_backward() -> bool:
 class _PendingDispatch:
     """One forward dispatch's handle, owned by the autograd node of the combine that used it."""
 
-    __slots__ = ("handle", "replayed", "__weakref__")
+    __slots__ = ("handle", "__weakref__")
 
     def __init__(self, handle):
         self.handle = handle
-        self.replayed = False
 
 
 class DeepEPCheckpointReplay:
@@ -409,12 +408,12 @@ class DeepEPCheckpointReplay:
     activations in the recompute's order. The recompute therefore repeats the
     forward's dispatch on the forward's handle.
 
-    A recompute runs inside the backward that needs it, which is how it is
-    told apart from a forward. It is matched to its forward by elimination: a
-    forward's entry is alive while its graph is, and stops waiting once a
-    recompute has used it. Exactly one waiting forward is unambiguous, which
-    holds when each micro-batch runs backward before the next forward, as
-    gradient accumulation does. More than one is an error, never a guess.
+    Dispatches inside backward can either recompute an existing graph or
+    build an inner graph under a reentrant checkpoint. An existing graph's
+    handle is reusable only when exactly one forward graph remains alive.
+    An earlier replay does not eliminate it: retain_graph may need it again.
+    Sequential micro-batch forward/backward schedules satisfy this constraint.
+    More than one live graph is an error, never a guess.
     """
 
     def __init__(self):
@@ -429,20 +428,16 @@ class DeepEPCheckpointReplay:
     def forward_handle(self):
         """The handle a recompute must reuse, or None when no forward graph can need one."""
         live = [entry for entry in (ref() for ref in self._entries) if entry is not None]
-        waiting = [entry for entry in live if not entry.replayed]
-        # With retain_graph, a second backward recomputes a forward that was already replayed once.
-        candidates = waiting or live
-        if len(candidates) > 1:
+        if len(live) > 1:
             raise RuntimeError(
                 f"An activation-checkpoint recompute of an AutoEP layer using the DeepEP backend matches "
-                f"{len(candidates)} forward passes whose autograd graphs are still alive. It must repeat its own "
+                f"{len(live)} forward passes whose autograd graphs are still alive. It must repeat its own "
                 "forward's dispatch layout, so with non-reentrant checkpointing each micro-batch must run backward "
                 "before the layer's next forward, and earlier graphs must not be kept for another backward. "
                 "Use reentrant checkpointing (use_reentrant=True) to run several forwards before their backwards.")
-        if not candidates:
+        if not live:
             return None
-        candidates[0].replayed = True
-        return candidates[0].handle
+        return live[0].handle
 
 
 def _conform_rows(tensor: torch.Tensor, shape) -> torch.Tensor:
@@ -529,12 +524,12 @@ def deepep_dispatch(exchange: DeepEPExchange,
     ``replay`` is the calling layer's record of its forward dispatches, which
     makes non-reentrant activation checkpointing recompute them faithfully.
     """
-    recompute = replay is not None and _in_backward()
-    recorded_handle = replay.forward_handle() if recompute else None
+    inside_backward = replay is not None and _in_backward()
+    recorded_handle = replay.forward_handle() if inside_backward else None
     received, recv_weights = _DeepEPDispatch.apply(exchange, tokens, topk_idx, topk_weights, recorded_handle)
-    # A forward that builds a graph is one a non-reentrant checkpoint may recompute; one that does not, such as
-    # a reentrant checkpoint's first pass, rebuilds its graph when recomputed and needs nothing recorded.
-    if replay is not None and not recompute and torch.is_grad_enabled():
+    # An outer reentrant checkpoint can build an inner graph during backward. A fresh grad-enabled dispatch
+    # still needs recording there; only a dispatch actually replaying a handle can reuse its existing entry.
+    if replay is not None and recorded_handle is None and torch.is_grad_enabled():
         exchange.last_pending = replay.record(exchange.last_handle)
     return received, recv_weights, exchange
 

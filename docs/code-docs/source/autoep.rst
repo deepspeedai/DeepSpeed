@@ -205,6 +205,12 @@ activations it restores are in the order the backward expects. A recompute is
 matched to its forward pass by requiring each micro-batch to run backward before
 the layer's next forward, as gradient accumulation does; a recompute that could
 belong to more than one live forward pass raises an error rather than guessing.
+This also rejects interleaving a retained graph with a newer forward, even if
+the retained graph has already been replayed once. Repeating backward on one
+retained graph without another live forward remains supported. An inner
+non-reentrant checkpoint nested under a reentrant checkpoint records its fresh
+graph-building dispatch during the outer backward and reuses that layout for
+the inner recompute.
 Use reentrant checkpointing for schedules that run several forwards before their
 backwards. With PyTorch's default early stop, a non-reentrant recompute ends once
 the expert activations are restored, so it does not repeat the combine when

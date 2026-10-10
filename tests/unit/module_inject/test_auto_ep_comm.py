@@ -3,6 +3,7 @@
 
 import ast
 import functools
+import gc
 import inspect
 import textwrap
 import sys
@@ -853,6 +854,33 @@ class TestCheckpointRecomputeLayout(unittest.TestCase):
                 actual, _ = self.gradients(mode, micro_batches=3)
                 self.assert_same(actual, expected)
 
+    def test_nested_non_reentrant_checkpoint_matches_no_checkpoint(self):
+        expected, _ = self.gradients("off", micro_batches=3)
+        for trainable_inputs in (False, True):
+            with self.subTest(trainable_inputs=trainable_inputs):
+                exchange = self.exchange()
+                replay = auto_ep_comm.DeepEPCheckpointReplay()
+                expert_weights = self.expert_weights.clone().requires_grad_(True)
+                gate = self.gate.clone().requires_grad_(trainable_inputs)
+                input_grads = []
+
+                def nested(x, weights, scores):
+                    function = functools.partial(self.moe, exchange, replay, weights, scores)
+                    return torch.utils.checkpoint.checkpoint(function, x, use_reentrant=False)
+
+                for micro in range(3):
+                    x = (self.inputs + micro).requires_grad_(trainable_inputs)
+                    # Passing the trainable weights explicitly also permits a reentrant outer checkpoint when
+                    # tokens and the gate are frozen.
+                    output = torch.utils.checkpoint.checkpoint(nested, x, expert_weights, gate, use_reentrant=True)
+                    (output * self.target).sum().backward()
+                    if trainable_inputs:
+                        input_grads.append(x.grad)
+                torch.testing.assert_close(expert_weights.grad, expected["experts"], rtol=0, atol=0)
+                if trainable_inputs:
+                    torch.testing.assert_close(gate.grad, expected["gate"], rtol=0, atol=0)
+                    torch.testing.assert_close(torch.stack(input_grads), expected["input"], rtol=0, atol=0)
+
     def test_non_reentrant_recompute_reuses_the_handle_and_stops_before_combine(self):
         _, exchange = self.gradients("non_reentrant", micro_batches=2)
 
@@ -893,6 +921,22 @@ class TestCheckpointRecomputeLayout(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "use_reentrant=True"):
             sum((output * self.target).sum() for output in outputs).backward()
 
+    def test_a_retained_graph_interleaved_with_a_new_forward_is_rejected(self):
+        exchange = self.exchange()
+        replay = auto_ep_comm.DeepEPCheckpointReplay()
+        expert_weights = self.expert_weights.clone().requires_grad_(True)
+        function = functools.partial(self.moe, exchange, replay, expert_weights, self.gate)
+        retained = torch.utils.checkpoint.checkpoint(function, self.inputs, use_reentrant=False)
+        loss = (retained * self.target).sum()
+        loss.backward(retain_graph=True)
+        newer = torch.utils.checkpoint.checkpoint(function, self.inputs, use_reentrant=False)
+
+        # Identical routing cannot tell the two live graphs' arrival layouts apart. A second backward of the
+        # older graph must not silently choose the newer graph's handle.
+        with self.assertRaisesRegex(RuntimeError, "autograd graphs are still alive"):
+            loss.backward()
+        self.assertTrue(newer.requires_grad)
+
     def test_a_discarded_forward_does_not_block_the_next_recompute(self):
         exchange = self.exchange()
         replay = auto_ep_comm.DeepEPCheckpointReplay()
@@ -906,25 +950,44 @@ class TestCheckpointRecomputeLayout(unittest.TestCase):
         expected, _ = self.gradients("off")
         torch.testing.assert_close(expert_weights.grad, expected["experts"], rtol=0, atol=0)
 
-    def test_forward_without_autograd_records_nothing(self):
+    def test_a_no_grad_forward_does_not_block_checkpoint_backward(self):
         exchange = self.exchange()
         replay = auto_ep_comm.DeepEPCheckpointReplay()
+        expert_weights = self.expert_weights.clone().requires_grad_(True)
+        gate = self.gate.clone().requires_grad_(True)
+        inputs = self.inputs.clone().requires_grad_(True)
         with torch.no_grad():
-            self.moe(exchange, replay, self.expert_weights, self.gate, self.inputs)
+            no_grad_output = self.moe(exchange, replay, expert_weights, gate, inputs)
+        function = functools.partial(self.moe, exchange, replay, expert_weights, gate)
+        output = torch.utils.checkpoint.checkpoint(function, inputs, use_reentrant=False)
+        (output * self.target).sum().backward()
 
-        self.assertEqual([ref() for ref in replay._entries], [])
+        expected, _ = self.gradients("off")
+        self.assert_same({
+            "experts": expert_weights.grad,
+            "gate": gate.grad,
+            "input": inputs.grad.unsqueeze(0)
+        }, expected)
+        self.assertFalse(no_grad_output.requires_grad)
 
-    def test_the_replay_entry_lives_exactly_as_long_as_the_graph(self):
+    def test_discarded_plain_forward_does_not_block_checkpoint_with_gc_disabled(self):
         exchange = self.exchange()
         replay = auto_ep_comm.DeepEPCheckpointReplay()
         # Only the experts are trainable, so the dispatch itself builds no autograd node.
         expert_weights = self.expert_weights.clone().requires_grad_(True)
-        output = self.moe(exchange, replay, expert_weights, self.gate, self.inputs)
-        self.assertEqual(len([ref for ref in replay._entries if ref() is not None]), 1)
-        self.assertIsNone(exchange.last_pending)
-
-        del output
-        self.assertEqual([ref() for ref in replay._entries], [None])
+        function = functools.partial(self.moe, exchange, replay, expert_weights, self.gate)
+        gc_was_enabled = gc.isenabled()
+        gc.disable()
+        try:
+            discarded = function(self.inputs)
+            del discarded
+            output = torch.utils.checkpoint.checkpoint(function, self.inputs, use_reentrant=False)
+            (output * self.target).sum().backward()
+        finally:
+            if gc_was_enabled:
+                gc.enable()
+        expected, _ = self.gradients("off")
+        torch.testing.assert_close(expert_weights.grad, expected["experts"], rtol=0, atol=0)
 
     def test_frozen_inputs_with_trainable_experts_still_replay_the_layout(self):
         expected, _ = self.gradients("off")
