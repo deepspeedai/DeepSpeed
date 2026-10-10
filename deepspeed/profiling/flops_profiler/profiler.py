@@ -1264,30 +1264,36 @@ def get_model_profile(model,
                 _ = model(*args)
             if mode == 'generate':
                 _ = model.generate(*args)
+    flop_count_depth = len(module_flop_count)
+    mac_count_depth = len(module_mac_count)
     prof.start_profile(ignore_list=ignore_modules)
+    try:
+        if kwargs:
+            if mode == 'forward':
+                _ = model(*args, **kwargs)
+            if mode == 'generate':
+                _ = model.generate(*args, **kwargs)
+        else:
+            if mode == 'forward':
+                _ = model(*args)
+            if mode == 'generate':
+                _ = model.generate(*args)
 
-    if kwargs:
-        if mode == 'forward':
-            _ = model(*args, **kwargs)
-        if mode == 'generate':
-            _ = model.generate(*args, **kwargs)
-    else:
-        if mode == 'forward':
-            _ = model(*args)
-        if mode == 'generate':
-            _ = model.generate(*args)
+        flops = prof.get_total_flops()
+        macs = prof.get_total_macs()
+        params = prof.get_total_params()
+        if print_profile:
+            prof.print_model_profile(profile_step=warm_up,
+                                     module_depth=module_depth,
+                                     top_modules=top_modules,
+                                     detailed=detailed,
+                                     output_file=output_file)
+    finally:
+        prof.end_profile()
+        # A failed forward skips the post-hooks that normally pop these frames.
+        del module_flop_count[flop_count_depth:]
+        del module_mac_count[mac_count_depth:]
 
-    flops = prof.get_total_flops()
-    macs = prof.get_total_macs()
-    params = prof.get_total_params()
-    if print_profile:
-        prof.print_model_profile(profile_step=warm_up,
-                                 module_depth=module_depth,
-                                 top_modules=top_modules,
-                                 detailed=detailed,
-                                 output_file=output_file)
-
-    prof.end_profile()
     if as_string:
         return number_to_string(flops), macs_to_string(macs), params_to_string(params)
 
