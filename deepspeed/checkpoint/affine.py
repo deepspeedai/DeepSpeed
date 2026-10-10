@@ -147,6 +147,16 @@ class AffinePiece:
                      self.locations, self.scale))
 
 
+def _dest_interval(piece):
+    """Return a dense piece's destination interval, or None for a strided or empty piece."""
+    if piece.numel == 0 or len(piece.dest_strides) != len(piece.shape):
+        return None
+    if any(size > 1 and got != want
+           for size, got, want in zip(piece.shape, piece.dest_strides, _row_major_strides(piece.shape))):
+        return None
+    return piece.dest_offset, piece.dest_offset + piece.numel
+
+
 class ParamAffineMap:
     """How one parameter is spread over a tensor-parallel group.
 
@@ -185,12 +195,35 @@ class ParamAffineMap:
         return holders
 
     def validate(self):
-        """Cheap structural check: every rank's pieces account for exactly its shard."""
+        """Check shard element counts and dense destination bounds and overlap."""
         for rank, pieces in self.pieces_by_rank.items():
             held = sum(piece.numel for piece in pieces)
             expected = _product(self.shard_shapes[rank])
-            assert held == expected, (f'Rank {rank} holds a shard of {expected} elements but its pieces '
-                                      f'account for {held}.')
+            if held != expected:
+                raise ValueError(f'Rank {rank} holds a shard of {expected} elements but its pieces '
+                                 f'account for {held}.')
+            self._validate_destinations(rank, pieces, expected)
+
+    def _validate_destinations(self, rank, pieces, shard_numel):
+        """Check that dense destination intervals stay within the shard and do not overlap."""
+        intervals = []
+        for piece in pieces:
+            span = _dest_interval(piece)
+            if span is None:
+                continue
+            start, stop = span
+            if start < 0 or stop > shard_numel:
+                raise ValueError(f'Rank {rank} piece {piece} writes shard addresses [{start}, {stop}), '
+                                 f'outside the shard of {shard_numel} elements.')
+            intervals.append(span)
+
+        intervals.sort()
+        cursor = 0
+        for start, stop in intervals:
+            if start < cursor:
+                raise ValueError(f'Rank {rank} writes shard address {start} twice, so one piece would '
+                                 'silently overwrite another.')
+            cursor = stop
 
     def validate_coverage(self):
         """Full check: the shards cover the parameter, and every piece is homogeneous.
