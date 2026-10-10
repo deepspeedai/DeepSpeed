@@ -104,7 +104,9 @@ _REMOVED_TOP_LEVEL_CONFIG_KEYS = {
     f"supported. See {_REMOVED_FEATURES_ISSUE}.",
     "elasticity":
     "Elastic training has been removed; the 'elasticity' configuration block is no longer supported. "
-    "Set train_batch_size / train_micro_batch_size_per_gpu / gradient_accumulation_steps directly. "
+    "Set train_batch_size / train_micro_batch_size_per_gpu / gradient_accumulation_steps directly. ",
+    "graph_harvesting":
+    "Graph harvesting has been removed; the 'graph_harvesting' configuration option is no longer supported. "
     f"See {_REMOVED_FEATURES_ISSUE}.",
     "curriculum_learning":
     "Legacy top-level 'curriculum_learning' has been removed. Use "
@@ -265,10 +267,6 @@ def get_disable_python_gc(param_dict):
 
 def get_gradient_clipping(param_dict):
     return get_scalar_param(param_dict, GRADIENT_CLIPPING, GRADIENT_CLIPPING_DEFAULT)
-
-
-def get_graph_harvesting(param_dict):
-    return get_scalar_param(param_dict, GRAPH_HARVESTING, GRAPH_HARVESTING_DEFAULT)
 
 
 def get_pipeline_config(param_dict):
@@ -517,8 +515,6 @@ class DeepSpeedConfig(object):
         self.torch_autocast_dtype = get_torch_autocast_dtype(param_dict)
         self.torch_autocast_lower_precision_safe_modules = get_lower_precision_safe_modules(param_dict)
 
-        self.graph_harvesting = get_graph_harvesting(param_dict)
-
         self.optimizer_name = get_optimizer_name(param_dict)
         if (self.optimizer_name is not None and self.optimizer_name.lower() in DEEPSPEED_OPTIMIZERS):
             self.optimizer_name = self.optimizer_name.lower()
@@ -563,6 +559,12 @@ class DeepSpeedConfig(object):
         self.param_dtype = data_types_params.get(PARAM_DTYPE, PARAM_DTYPE_DEFAULT)
         # buffer_dtype=None keeps buffers at their loaded dtype.
         self.buffer_dtype = data_types_params.get(BUFFER_DTYPE, BUFFER_DTYPE_DEFAULT)
+        # Buffers kept in fp32 under bf16/fp16 training (deepspeed/runtime/keep_in_fp32.py).
+        self.keep_in_fp32_modules = data_types_params.get(KEEP_IN_FP32_MODULES, KEEP_IN_FP32_MODULES_DEFAULT)
+        if self.keep_in_fp32_modules != KEEP_IN_FP32_MODULES_DEFAULT and not (isinstance(
+                self.keep_in_fp32_modules, list) and all(isinstance(n, str) for n in self.keep_in_fp32_modules)):
+            raise DeepSpeedConfigError(f"data_types.{KEEP_IN_FP32_MODULES} must be \"auto\" or a list of name "
+                                       f"patterns, got {self.keep_in_fp32_modules!r}")
 
         par_write_pipe = get_checkpoint_parallel_write_pipeline(checkpoint_params)
         self.checkpoint_parallel_write_pipeline = par_write_pipe

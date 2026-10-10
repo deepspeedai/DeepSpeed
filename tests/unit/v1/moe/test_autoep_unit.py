@@ -39,6 +39,7 @@ from deepspeed.module_inject.auto_ep_layer import (
     combine_from_routed,
     compute_split_plan,
     compute_split_plan_from_expert_indices,
+    resolve_row_weighting_impl,
     resolve_score_apply_mode,
 )
 from deepspeed.module_inject.auto_ep_preset_adapters import get_preset_adapter
@@ -50,10 +51,16 @@ from deepspeed.moe.layer import MoE
 from deepspeed.moe.ep_experts import GroupedExperts
 from deepspeed.moe.ep_repack import repack_expert_weights
 from deepspeed.moe.ep_router import TokenChoiceTopKRouter
+from deepspeed.compile.config import CompileConfig
+from deepspeed.runtime.config import DeepSpeedConfig
 from deepspeed.runtime.engine import DeepSpeedEngine
+from deepspeed.runtime.compiler import compile_autoep_non_moe_regions, is_compiling
+from deepspeed.runtime.zero.offload_config import DeepSpeedZeroOffloadOptimizerConfig, DeepSpeedZeroOffloadParamConfig
 from deepspeed.runtime.zero.stage3 import DeepSpeedZeroOptimizer_Stage3
 from deepspeed.utils import groups
+from unit.simple_model import SimpleModel
 from unit.v1.moe.autoep_test_utils import (
+    MockHFConfig,
     MockMoEBlock,
     MockMoETransformer,
     UNSUPPORTED_LOAD_BALANCE_VALUES,
@@ -62,6 +69,7 @@ from unit.v1.moe.autoep_test_utils import (
     replace_autoep_layers,
     skip_unless_transformers_has,
     state_matched_models,
+    tiny_minimax_m3_config,
     tiny_mixtral_config,
 )
 
@@ -108,6 +116,41 @@ def _get_expert_weight_for_test(expert, name):
 def _assert_same_dtype_device(actual, expected):
     assert actual.dtype == expected.dtype
     assert actual.device == expected.device
+
+
+class _CallableMoEDecoderLayer(nn.Module):
+
+    def __init__(self):
+        super().__init__()
+        self.input_layernorm = nn.LayerNorm(64)
+        self.dense = nn.Linear(64, 64, bias=False)
+        self.mlp = MockMoEBlock()
+
+    def forward(self, hidden_states):
+        residual = hidden_states
+        hidden_states = self.input_layernorm(hidden_states)
+        hidden_states = residual + self.dense(hidden_states)
+        return hidden_states + self.mlp(hidden_states)
+
+
+class _CallableMoETransformer(nn.Module):
+
+    def __init__(self, num_layers=2):
+        super().__init__()
+        self.config = MockHFConfig()
+        self.model = nn.Module()
+        self.model.layers = nn.ModuleList([_CallableMoEDecoderLayer() for _ in range(num_layers)])
+
+    def forward(self, hidden_states):
+        for layer in self.model.layers:
+            hidden_states = layer(hidden_states)
+        return hidden_states
+
+
+def _replace_callable_autoep_layers(num_layers=2):
+    model = _CallableMoETransformer(num_layers=num_layers)
+    replace_autoep_layers(model, "mixtral", expected_count=num_layers)
+    return model
 
 
 def _mark_fake_zero_param(param, full_data, partition_data=None, ds_id=0, name="param"):
@@ -213,6 +256,7 @@ class TestAutoEPConfig:
         assert disabled.autoep_size == 1
         assert disabled.validate_folding_routing is False
         assert disabled.async_split_plan is False
+        assert disabled.row_weighting_impl == "auto"
         assert disabled.load_balance_coeff is None
         assert disabled._load_balance_coeff_explicit is False
 
@@ -222,6 +266,7 @@ class TestAutoEPConfig:
             "preset_model": "mixtral",
             "load_balance_coeff": None,
             "score_apply": "pre",
+            "row_weighting_impl": "eager",
             "route_scale": 2.0,
             "validate_folding_routing": True,
             "async_split_plan": True,
@@ -235,6 +280,7 @@ class TestAutoEPConfig:
         assert config.load_balance_coeff is None
         assert config._load_balance_coeff_explicit is True
         assert config.score_apply == "pre"
+        assert config.row_weighting_impl == "eager"
         assert config.route_scale == 2.0
         validate_autoep_config(config, world_size=4, pp_size=1, tp_size=1, sp_size=1)
 
@@ -266,6 +312,41 @@ class TestAutoEPConfig:
         config = parse_autoep_config({"enabled": True, "combine_impl": "triton"})
         with pytest.raises(ValueError, match="combine_impl must be one of"):
             validate_autoep_config(config, world_size=1, pp_size=1, tp_size=1, sp_size=1)
+
+    def test_row_weighting_impl_rejects_unknown_value(self):
+        config = parse_autoep_config({"enabled": True, "row_weighting_impl": "triton"})
+        with pytest.raises(ValueError, match="row_weighting_impl must be one of"):
+            validate_autoep_config(config, world_size=1, pp_size=1, tp_size=1, sp_size=1)
+
+    def test_fused_row_weighting_rejects_non_deepep_backend(self):
+        config = parse_autoep_config({
+            "enabled": True,
+            "autoep_size": 2,
+            "row_weighting_impl": "fused",
+        })
+        with pytest.raises(ValueError, match='row_weighting_impl="fused".*comm_backend="comm"'):
+            validate_autoep_config(config, world_size=2, pp_size=1, tp_size=1, sp_size=1)
+
+    def test_fused_row_weighting_rejects_ep_size_one(self):
+        config = parse_autoep_config({
+            "enabled": True,
+            "autoep_size": 1,
+            "row_weighting_impl": "fused",
+            "comm_backend": "deepep",
+            "comm_max_tokens_per_rank": 4096,
+        })
+        with pytest.raises(ValueError, match="autoep_size=1"):
+            validate_autoep_config(config, world_size=1, pp_size=1, tp_size=1, sp_size=1)
+
+    def test_fused_row_weighting_accepts_the_deepep_path(self):
+        config = parse_autoep_config({
+            "enabled": True,
+            "autoep_size": 2,
+            "row_weighting_impl": "fused",
+            "comm_backend": "deepep",
+            "comm_max_tokens_per_rank": 4096,
+        })
+        validate_autoep_config(config, world_size=2, pp_size=1, tp_size=1, sp_size=1)
 
     def test_fused_combine_rejects_folded_tensor_parallelism(self):
         config = parse_autoep_config({
@@ -543,6 +624,94 @@ class TestAutoEPConfig:
 
         for param in autoep_layer.router.parameters():
             assert param.ds_zero_placement_family == "replicated"
+
+    def test_autoep_layer_emits_uniform_placement_and_param_restore_metadata(self):
+        from deepspeed.checkpoint.constants import (
+            AFFINE_MAP,
+            AUTOEP_EXPERT_PLACEMENT,
+            AUTOEP_PARAM_EP_RANK,
+            AUTOEP_PARAM_LOCAL_EXPERTS,
+            AUTOEP_PARAM_LOGICAL_SHAPE,
+            DS_AUTOEP_UC_META,
+        )
+
+        source = MockMoEBlock(num_experts=4, ffn_hidden=128, hidden_size=64)
+        layer = AutoEPMoELayer(_make_spec(),
+                               source,
+                               ep_size=2,
+                               ep_rank=1,
+                               config=_runtime_config(enabled=True, autoep_size=2))
+        peer_layer = AutoEPMoELayer(_make_spec(),
+                                    source,
+                                    ep_size=2,
+                                    ep_rank=0,
+                                    config=_runtime_config(enabled=True, autoep_size=2))
+        expected_placement = {
+            "version": 1,
+            "num_experts": 4,
+            "ep_size": 2,
+            "ranks": [{
+                "rank": 0,
+                "experts": [0, 1]
+            }, {
+                "rank": 1,
+                "experts": [2, 3]
+            }],
+        }
+
+        assert layer.expert_placement_descriptor == expected_placement
+        assert peer_layer.expert_placement_descriptor == expected_placement
+        for param in layer.experts.parameters():
+            restore_metadata = getattr(param, DS_AUTOEP_UC_META)
+            assert restore_metadata[AUTOEP_EXPERT_PLACEMENT] == expected_placement
+            assert restore_metadata[AUTOEP_PARAM_LOGICAL_SHAPE] == [4, *param.shape[1:]]
+            assert restore_metadata[AUTOEP_PARAM_EP_RANK] == 1
+            assert restore_metadata[AUTOEP_PARAM_LOCAL_EXPERTS] == [2, 3]
+            assert restore_metadata[AFFINE_MAP]["logical_shape"] == [4, *param.shape[1:]]
+
+        for param in layer.router.parameters():
+            assert not hasattr(param, DS_AUTOEP_UC_META)
+
+    def test_checkpoint_source_placement_does_not_need_to_match_target_topology(self):
+        from deepspeed.checkpoint.autoep_affine import make_autoep_placement_descriptor
+        from deepspeed.checkpoint.constants import (
+            AUTOEP_EXPERT_PLACEMENT,
+            AUTOEP_ZERO3_EXPERT_STATE_FORMAT_KEY,
+            AUTOEP_ZERO3_EXPERT_STATE_FORMAT_VERSION,
+            AUTOEP_ZERO3_EXPERT_STATE_FORMAT_VERSION_KEY,
+            AUTOEP_ZERO3_PARTITIONED_EXPERT_STATE_FORMAT,
+        )
+
+        source = MockMoEBlock(num_experts=4, ffn_hidden=128, hidden_size=64)
+        target_layer = AutoEPMoELayer(_make_spec(),
+                                      source,
+                                      ep_size=4,
+                                      ep_rank=0,
+                                      config=_runtime_config(enabled=True, autoep_size=4))
+        target_model = nn.Sequential(target_layer)
+        source_metadata = [{
+            "moe_layer_id": 0,
+            "module_path": "0",
+            "num_experts": 4,
+            "num_local_experts": 2,
+            "ep_size": 2,
+            AUTOEP_EXPERT_PLACEMENT: make_autoep_placement_descriptor(4, [[0, 1], [2, 3]]),
+            "expert_key_prefix": "0.experts",
+            AUTOEP_ZERO3_EXPERT_STATE_FORMAT_KEY: AUTOEP_ZERO3_PARTITIONED_EXPERT_STATE_FORMAT,
+            AUTOEP_ZERO3_EXPERT_STATE_FORMAT_VERSION_KEY: AUTOEP_ZERO3_EXPERT_STATE_FORMAT_VERSION,
+            "ep_group_name": "ep_size_2",
+            "ep_rank": 0,
+            "expert_data_parallel_rank": 0,
+            "expert_data_parallel_world_size": 1,
+            "global_expert_start": 0,
+            "global_expert_end": 2,
+        }]
+
+        DeepSpeedEngine._validate_autoep_zero3_partitioned_metadata(source_metadata, model=target_model)
+        with pytest.raises(RuntimeError, match="expert order"):
+            DeepSpeedEngine._validate_autoep_zero3_partitioned_metadata(source_metadata,
+                                                                        model=target_model,
+                                                                        validate_runtime_placement=True)
 
     def test_zero3_checkpoint_metadata_includes_partition_group_ranks(self):
         optimizer = object.__new__(DeepSpeedZeroOptimizer_Stage3)
@@ -852,14 +1021,20 @@ class TestAutoEPConfig:
             parse_model_states([str(model_file)])
 
     def test_preset_registry_core_contracts(self):
-        assert set(PRESET_MODELS) == {"mixtral", "qwen3_moe", "qwen3_5_moe", "deepseek_v2", "deepseek_v3"}
+        assert set(PRESET_MODELS) == {
+            "mixtral", "qwen3_moe", "qwen3_5_moe", "deepseek_v2", "deepseek_v3", "minimax_m3"
+        }
         assert preset_name_for_hf_model_type("mixtral") == "mixtral"
         assert preset_name_for_hf_model_type("qwen2_moe") == "qwen3_moe"
+        assert preset_name_for_hf_model_type("minimax_m3_vl_text") == "minimax_m3"
         assert preset_name_for_hf_model_type("llama4_text") is None
 
         qwen35 = unsupported_preset_for_hf_model_type("qwen3_5_moe")
         assert qwen35 is not None
         assert "qwen3_5_moe_text" in qwen35[1].unsupported_hf_model_type_notes["qwen3_5_moe"]
+        minimax = unsupported_preset_for_hf_model_type("minimax_m3_vl")
+        assert minimax is not None
+        assert "minimax_m3_vl_text" in minimax[1].unsupported_hf_model_type_notes["minimax_m3_vl"]
         assert PRESET_MODELS["deepseek_v2"].supports_expert_bias is False
         assert PRESET_MODELS["deepseek_v3"].unsupported_router_bias_names == ()
 
@@ -890,6 +1065,272 @@ class TestAutoEPConfig:
     def test_invalid_routed_scaling_factor_rejected(self, value):
         with pytest.raises(ValueError, match="routed_scaling_factor"):
             _resolve_route_scale(AutoEPConfig(enabled=True, routed_scaling_factor=value), None)
+
+
+class TestAutoEPRegionalCompile:
+
+    @pytest.mark.parametrize("compile_options, expected", [(None, False), ({}, False),
+                                                           ({
+                                                               "autoep_non_moe": False
+                                                           }, False), ({
+                                                               "autoep_non_moe": True
+                                                           }, True)])
+    def test_compile_config(self, compile_options, expected):
+        config = {"train_batch_size": 1}
+        if compile_options is not None:
+            config["compile"] = compile_options
+        assert CompileConfig(**(compile_options or {})).autoep_non_moe is expected
+        assert DeepSpeedConfig(config).compile_config.autoep_non_moe is expected
+
+    @pytest.mark.parametrize("compile_options", [None, {"autoep_non_moe": False}])
+    def test_default_compiles_full_model(self, compile_options):
+        config = {"train_batch_size": 1}
+        if compile_options is not None:
+            config["compile"] = compile_options
+        engine = object.__new__(DeepSpeedEngine)
+        nn.Module.__init__(engine)
+        engine.module = SimpleModel(4)
+        engine._config = DeepSpeedConfig(config)
+        engine._deepcompile_active = False
+        engine._is_compiled = False
+        engine._compile_mode = None
+        engine._is_compiled_autograd_enabled = False
+        inputs = torch.randn(2, 4)
+        labels = torch.tensor([0, 1])
+        expected = engine.module(inputs, labels)
+        torch._dynamo.reset()
+        torch._dynamo.utils.counters.clear()
+
+        try:
+            engine.compile(backend="eager")
+            engine.compile(backend="eager")
+            torch.testing.assert_close(engine.module(inputs, labels), expected)
+            assert engine.is_compiled
+            assert torch._dynamo.utils.counters["stats"]["unique_graphs"] > 0
+        finally:
+            torch._dynamo.reset()
+            torch._dynamo.utils.counters.clear()
+
+    @pytest.mark.parametrize("checkpoint_enabled", [False, True])
+    def test_compiles_model_root_with_direct_autoep_child(self, checkpoint_enabled):
+        eager_model = _replace_callable_autoep_layers(num_layers=1).model.layers[0]
+        compiled_model = copy.deepcopy(eager_model)
+        compiled_inputs = torch.randn(1, 8, 64, requires_grad=True)
+        eager_inputs = compiled_inputs.detach().clone().requires_grad_(True)
+        eager_calls = []
+
+        def observe_router(_module, _inputs, _output):
+            assert not is_compiling(), "AutoEP router must remain eager"
+            eager_calls.append(True)
+
+        handle = compiled_model.mlp.router.register_forward_hook(observe_router)
+        torch._dynamo.reset()
+        torch._dynamo.utils.counters.clear()
+        try:
+            compile_autoep_non_moe_regions(compiled_model, backend="eager", compile_kwargs={})
+            if checkpoint_enabled:
+                expected = checkpoint(eager_model, eager_inputs, use_reentrant=False)
+                actual = checkpoint(compiled_model, compiled_inputs, use_reentrant=False)
+            else:
+                expected = eager_model(eager_inputs)
+                actual = compiled_model(compiled_inputs)
+            expected.square().mean().backward()
+            actual.square().mean().backward()
+
+            torch.testing.assert_close(actual, expected)
+            torch.testing.assert_close(compiled_inputs.grad, eager_inputs.grad)
+            eager_params = dict(eager_model.named_parameters())
+            for name, param in compiled_model.named_parameters():
+                assert param.grad is not None, f"Missing gradient for {name}"
+                torch.testing.assert_close(param.grad, eager_params[name].grad)
+            assert len(eager_calls) == (2 if checkpoint_enabled else 1)
+            assert torch._dynamo.utils.counters["stats"]["unique_graphs"] > 0
+        finally:
+            handle.remove()
+            torch._dynamo.reset()
+            torch._dynamo.utils.counters.clear()
+
+    def test_rejects_bare_autoep_model_root(self):
+        model = _replace_callable_autoep_layers(num_layers=1).model.layers[0].mlp
+        with pytest.raises(ValueError, match="AutoEPMoELayer at the model root"):
+            compile_autoep_non_moe_regions(model, backend="eager", compile_kwargs={})
+
+    def test_rejects_model_without_autoep_layers(self):
+        with pytest.raises(ValueError, match="requires at least one AutoEPMoELayer"):
+            compile_autoep_non_moe_regions(nn.Linear(4, 4), backend="eager", compile_kwargs={})
+
+    def test_rejects_non_callable_parent_region(self):
+        model = MockMoETransformer(num_layers=1)
+        replace_autoep_layers(model, "mixtral", expected_count=1)
+        with pytest.raises(ValueError, match="has no forward implementation"):
+            compile_autoep_non_moe_regions(model, backend="eager", compile_kwargs={})
+
+    def test_compiles_decoder_parents_and_disables_autoep(self, monkeypatch):
+        model = _replace_callable_autoep_layers()
+        compile_calls = []
+
+        def record_compile(module, **kwargs):
+            compile_calls.append((module, kwargs))
+            module._compiled_call_impl = object()
+
+        monkeypatch.setattr(_CallableMoEDecoderLayer, "compile", record_compile)
+
+        regions = compile_autoep_non_moe_regions(model, backend="eager", compile_kwargs={})
+
+        assert regions == ["model.layers.0", "model.layers.1"]
+        assert [module for module, _ in compile_calls] == list(model.model.layers)
+        assert all(kwargs == {"backend": "eager", "dynamic": False, "fullgraph": False} for _, kwargs in compile_calls)
+        for layer in model.model.layers:
+            assert getattr(layer.mlp.forward, "_torchdynamo_disable", False)
+
+    def test_deduplicates_shared_decoder_parent(self, monkeypatch):
+        model = _replace_callable_autoep_layers(num_layers=1)
+        model.model.layers[0].second_mlp = AutoEPMoELayer(
+            spec=_make_spec(moe_module_name="model.layers.0.second_mlp"),
+            source_module=MockMoEBlock(),
+            ep_size=1,
+            ep_rank=0,
+            config=_runtime_config(),
+        )
+        compile_calls = []
+
+        def record_compile(module, **kwargs):
+            compile_calls.append(module)
+            module._compiled_call_impl = object()
+
+        monkeypatch.setattr(_CallableMoEDecoderLayer, "compile", record_compile)
+
+        regions = compile_autoep_non_moe_regions(model, backend="eager", compile_kwargs={})
+
+        assert regions == ["model.layers.0"]
+        assert compile_calls == [model.model.layers[0]]
+        assert getattr(model.model.layers[0].mlp.forward, "_torchdynamo_disable", False)
+        assert getattr(model.model.layers[0].second_mlp.forward, "_torchdynamo_disable", False)
+
+    @pytest.mark.parametrize(
+        "compile_kwargs, match",
+        [
+            ({
+                "fullgraph": True
+            }, "fullgraph=False"),
+            ({
+                "fullgraph": None
+            }, "fullgraph=False"),
+            ({
+                "dynamic": True
+            }, "dynamic=False"),
+            ({
+                "dynamic": None
+            }, "dynamic=False"),
+        ],
+    )
+    def test_rejects_unsupported_compile_kwargs(self, compile_kwargs, match):
+        model = _replace_callable_autoep_layers(num_layers=1)
+        with pytest.raises(ValueError, match=match):
+            compile_autoep_non_moe_regions(model, backend="eager", compile_kwargs=compile_kwargs)
+
+    def test_rolls_back_partial_compilation(self, monkeypatch):
+        model = _replace_callable_autoep_layers()
+        original_forwards = [layer.mlp.forward for layer in model.model.layers]
+        compile_calls = 0
+
+        def fail_second_compile(module, **kwargs):
+            nonlocal compile_calls
+            compile_calls += 1
+            module._compiled_call_impl = object()
+            if compile_calls == 2:
+                raise RuntimeError("compile failed")
+
+        monkeypatch.setattr(_CallableMoEDecoderLayer, "compile", fail_second_compile)
+
+        with pytest.raises(RuntimeError, match="compile failed"):
+            compile_autoep_non_moe_regions(model, backend="eager", compile_kwargs={})
+
+        for layer, original_forward in zip(model.model.layers, original_forwards):
+            assert "forward" not in layer.mlp.__dict__
+            assert layer.mlp.forward.__func__ is original_forward.__func__
+            assert layer._compiled_call_impl is None
+
+    @pytest.mark.parametrize(
+        "condition, match",
+        [
+            ("deepcompile", "cannot be combined with DeepCompile"),
+            ("deepep", "comm_backend='comm'"),
+            ("autotp", "AutoEP\\+AutoTP folding"),
+            ("sequence_parallel", "sequence parallelism"),
+            ("pipeline_parallel", "pipeline parallelism"),
+            ("zero3", "ZeRO Stage 3"),
+            ("optimizer_offload", "optimizer or parameter offload"),
+            ("param_offload", "optimizer or parameter offload"),
+            ("schedule", "DeepCompile schedules"),
+            ("compiled_autograd", "compiled autograd"),
+        ],
+    )
+    def test_engine_rejects_unsupported_modes(self, monkeypatch, condition, match):
+        model = _replace_callable_autoep_layers(num_layers=1)
+        engine = object.__new__(DeepSpeedEngine)
+        nn.Module.__init__(engine)
+        engine.module = model
+        engine._config = SimpleNamespace(
+            compile_config=CompileConfig(autoep_non_moe=True, deepcompile=condition == "deepcompile"),
+            expert_parallel_config=SimpleNamespace(comm_backend="deepep" if condition == "deepep" else "comm"),
+        )
+        engine._is_compiled = False
+        engine._compile_mode = None
+        engine._compiled_regions = []
+        engine.autotp_size = lambda: 2 if condition == "autotp" else 1
+        engine._autoep_sequence_parallel_world_size = lambda: 2 if condition == "sequence_parallel" else 1
+        engine.pipeline_parallelism = condition == "pipeline_parallel"
+        engine._autoep_folding_spec = None
+        engine.zero_optimization_partition_weights = lambda: condition == "zero3"
+        optimizer_offload = DeepSpeedZeroOffloadOptimizerConfig(device="cpu")
+        param_offload = DeepSpeedZeroOffloadParamConfig(device="cpu")
+        engine.zero_offload_optimizer = lambda: optimizer_offload if condition == "optimizer_offload" else None
+        engine.zero_offload_param = lambda: param_offload if condition == "param_offload" else None
+        monkeypatch.setattr(_CallableMoEDecoderLayer, "compile", lambda module, **kwargs: None)
+
+        with pytest.raises(ValueError, match=match):
+            engine.compile(
+                backend="eager",
+                schedule=[] if condition == "schedule" else None,
+                compiled_autograd_enabled=condition == "compiled_autograd",
+            )
+
+    @pytest.mark.parametrize("offload_config", [None, {}, {"device": "none"}])
+    def test_engine_tracks_regional_compile_mode(self, monkeypatch, offload_config):
+        model = _replace_callable_autoep_layers()
+        engine = object.__new__(DeepSpeedEngine)
+        nn.Module.__init__(engine)
+        engine.module = model
+        engine._config = SimpleNamespace(
+            compile_config=CompileConfig(autoep_non_moe=True),
+            expert_parallel_config=SimpleNamespace(comm_backend="comm"),
+        )
+        engine._is_compiled = False
+        engine._compile_mode = None
+        engine._compiled_regions = []
+        engine._is_compiled_autograd_enabled = False
+        engine.autotp_size = lambda: 1
+        engine._autoep_sequence_parallel_world_size = lambda: 1
+        engine.pipeline_parallelism = False
+        engine._autoep_folding_spec = None
+        engine.zero_optimization_partition_weights = lambda: False
+        optimizer_offload = None if offload_config is None else DeepSpeedZeroOffloadOptimizerConfig(**offload_config)
+        param_offload = None if offload_config is None else DeepSpeedZeroOffloadParamConfig(**offload_config)
+        engine.zero_offload_optimizer = lambda: optimizer_offload
+        engine.zero_offload_param = lambda: param_offload
+        monkeypatch.setattr(_CallableMoEDecoderLayer, "compile",
+                            lambda module, **kwargs: setattr(module, "_compiled_call_impl", object()))
+
+        engine.compile(backend="eager")
+        engine.compile(backend="eager")
+
+        assert engine.is_compiled
+        assert engine._compile_mode == "autoep_non_moe"
+        assert engine._compiled_regions == ["model.layers.0", "model.layers.1"]
+        engine._config.compile_config.autoep_non_moe = False
+        with pytest.raises(RuntimeError, match="already compiled"):
+            engine.compile(backend="eager")
 
 
 class TestRoutingAndLayerSemantics:
@@ -925,6 +1366,7 @@ class TestRoutingAndLayerSemantics:
 
         spec = _make_spec(score_apply="post")
         assert resolve_score_apply_mode(spec, "auto") == "post"
+        assert resolve_row_weighting_impl("auto") == "eager"
         expert_output = torch.ones(4, 8)
         top_scores = torch.tensor([[0.6, 0.4], [0.7, 0.3]])
         out = combine_from_routed(expert_output, top_scores, torch.arange(4), 2, "post", "weighted_sum", (1, 2, 8))
@@ -1482,7 +1924,7 @@ class TestAsyncSplitPlanLifecycle:
                 output = rows.new_zeros((handle.num_tokens, rows.shape[1]))
                 return output.index_add_(0, handle.token_indices, rows)
 
-        monkeypatch.setattr(auto_ep_layer, "DeepEPExchange", LoopbackExchange)
+        monkeypatch.setattr(auto_ep_layer, "shared_exchange", LoopbackExchange)
         hidden = torch.randn(1, 8, 64, dtype=torch.bfloat16)
         expected = layer(hidden)
         layer.async_split_plan = True
@@ -1678,6 +2120,46 @@ class TestModelDetectionAndReplacement:
                                        compare_router_logits=True,
                                        compare_aux_loss=True,
                                        compare_logits=False)
+
+    def test_hf_minimax_m3_causal_lm_matches_autoep_with_router_logits(self):
+        transformers = pytest.importorskip("transformers")
+        skip_unless_transformers_has(transformers,
+                                     "MiniMaxM3VLTextConfig",
+                                     "MiniMaxM3VLForCausalLM",
+                                     min_version="5.15.0",
+                                     reason="MiniMax-M3 AutoEP router-logit capture")
+
+        torch.manual_seed(1234)
+        config = tiny_minimax_m3_config(transformers)
+        native_model, autoep_model = state_matched_models(transformers.MiniMaxM3VLForCausalLM, config)
+        replace_autoep_layers(autoep_model, "minimax_m3")
+        assert_causal_lm_outputs_close(native_model,
+                                       autoep_model,
+                                       output_router_logits=True,
+                                       compare_router_logits=True,
+                                       compare_aux_loss=True,
+                                       compare_logits=False)
+
+    def test_minimax_m3_adapter_guards(self, monkeypatch):
+        adapter = get_preset_adapter("minimax_m3")
+        model = MockMoETransformer(num_layers=1, num_experts=4, moe_every_n=1)
+        model.config.model_type = "minimax_m3_vl_text"
+
+        monkeypatch.setattr(adapter, "_installed_transformers_version", lambda: "5.15.0")
+        specs = AutoEP(model, _runtime_config(enabled=True, autoep_size=1)).ep_parser()
+        assert len(specs) == 1
+        assert specs[0].model_family == "minimax_m3"
+        assert specs[0].expert_activation == "swiglu_oai"
+
+        # The version gate runs for this preset: the MiniMax-M3 classes appear in 5.15.0.
+        monkeypatch.setattr(adapter, "_installed_transformers_version", lambda: "5.14.0")
+        with pytest.raises(ValueError, match="requires Transformers >= 5.15.0"):
+            AutoEP(model, _runtime_config(enabled=True, autoep_size=1))._resolve_presets()
+
+        monkeypatch.setattr(adapter, "_installed_transformers_version", lambda: "5.15.0")
+        model.config.model_type = "minimax_m3_vl"
+        with pytest.raises(ValueError, match="minimax_m3_vl_text"):
+            AutoEP(model, _runtime_config(enabled=True, autoep_size=1))._resolve_presets()
 
     def test_qwen_adapter_guards(self, monkeypatch):
         monkeypatch.setattr(get_preset_adapter("qwen3_moe"), "_installed_transformers_version", lambda: "5.0.0")

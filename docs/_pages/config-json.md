@@ -48,6 +48,10 @@ toc_label: "Contents"
 
 Muon optimizer is supported with ZeRO Stage 1, 2, and 3. To use Muon, set the optimizer name to `Muon`. The parameters applied for Muon are automatically determined by the matrix shape and name. For ZeRO Stage 3 with NVMe offloading, set `save_muon_momentum_buffer_in_memory` to `true` under `zero_optimization` to keep the Muon momentum buffer in GPU/CPU memory instead of swapping to NVMe.
 
+Keeping Muon momentum in memory does not keep gradients resident: swappable ZeRO-3 subgroups still load their gradients from NVMe before computing Muon updates.
+
+With ZeRO Stage 1/2 CPU optimizer offload, Muon gathers only locally owned gradient and momentum slices. Communication is chunked to a 64 MiB combined send/receive scratch budget per rank, independently of the 256 MiB buffer-cache limit. Full gradients and momentum are processed in batches targeting 64 MiB; a matrix exceeding that target is processed alone because Newton-Schulz requires the full matrix. These limits exclude Newton-Schulz workspaces and other training memory.
+
 Muon supports the following params:
 
 | "params" key   | Description                                                                                                          | Default   |
@@ -324,6 +328,12 @@ Example of <i>**scheduler**</i>
 |--------------------------------------------------------------------| ------- |
 | <i>**enabled**</i> indicates whether BFLOAT16 training is enabled. | `false` |
 
+<i>**bf16:immediate_grad_update**</i>: [boolean]
+
+| Description | Default |
+| ----------- | ------- |
+| When `BF16_Optimizer` is selected, accumulate each completed BF16 gradient in an autograd hook (in FP32 when `data_types.grad_accum_dtype="fp32"`). The consumed `param.grad` is released and may be `None` after backward. In that case, `deepspeed.utils.safe_get_full_grad(param)` reconstructs the accumulated gradient from the optimizer-owned fragments; all data-parallel ranks must call it before `engine.step()` in the same order. The default keeps the existing backward-epilogue accumulation. | `false` |
+
 <i>**bf16:bf16_master_weights_and_grads**</i>: [boolean]
 
 | Description | Default |
@@ -459,6 +469,16 @@ Enabling and configuring ZeRO memory optimizations
 | Description                                                                                                         | Default |
 | ------------------------------------------------------------------------------------------------------------------- | ------- |
 | Number of elements reduced/allreduced at a time. Limits the memory required for the allgather for large model sizes | `5e8`   |
+
+***ZeRO offload gradient protections***
+
+ZeRO-1 and ZeRO-2 with optimizer offload (`cpu` or `nvme`) always protects gradient storage
+and stream ordering; there is no configuration option. Gradients larger than
+`reduce_bucket_size` are cloned into independent storage before reduction, and
+events order bucket producers, bucket reuse, successive offload copies, and CPU
+consumption, with or without `overlap_comm`. This adds a gradient-sized copy for
+oversized gradients plus event synchronization overhead. ZenFlow uses its own
+reduction and offload ordering and is not covered; a warning is logged.
 
 <i>**contiguous_gradients**</i>: [boolean]
 
@@ -770,11 +790,19 @@ When a HuggingFace model provides a built-in `tp_plan` (via `model.config.base_m
 | -------------------------------------------------------------------------------------------------------- | ------- |
 | Overlap tensor-parallel allreduce communication with computation (training only).                       | `false` |
 
-***vocab_parallel_lm_head***: [boolean]
+***vocab_parallel_lm_head***: [boolean or null]
 
 | Description                                                                                                                                                  | Default |
 | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------- |
-| Keep an untied `lm_head`/`embed_out` output vocabulary sharded and install DeepSpeed's pure-PyTorch vocab-parallel causal-LM loss instead of gathering logits. | `false` |
+| `true` requires a vocabulary-sharded `lm_head`/`embed_out` and distributed causal-LM loss; `false` disables this path; `null` automatically follows supported HF tied-embedding plans. | `null` |
+
+When this field is omitted or `null`, an HF `embedding_rowwise` plan may enable tied
+vocabulary sharding automatically, returning rank-local rather than full-vocabulary
+logits. Set it to `false` to opt out. Unsupported implicit sharding, including the
+DeepCompile `autotp` pass, keeps the tied embedding/head replicated and logs a warning.
+Explicit `true` requests fail instead of silently downgrading. See
+[Vocabulary-parallel LM Loss](/tutorials/autotp-training/#vocabulary-parallel-lm-loss)
+for supported embedding semantics and compiler limitations.
 
 ***partition_config***: [dictionary]
 
@@ -905,7 +933,7 @@ This option reduces the host synchronization exposed by reading split sizes; it 
 
 | Description                                                                                                                            | Default |
 | -------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| Built-in model preset for MoE detection: `mixtral`, `qwen3_moe`, `qwen3_5_moe`, `deepseek_v2`, `deepseek_v3`. Determines router, expert, and weight naming patterns. | `null`  |
+| Built-in model preset for MoE detection: `mixtral`, `qwen3_moe`, `qwen3_5_moe`, `deepseek_v2`, `deepseek_v3`, `minimax_m3`. Determines router, expert, and weight naming patterns. | `null`  |
 
 Built-in AutoEP presets describe DeepSpeed's router/expert/weight-pattern support for a model family.
 Running a HuggingFace model also requires the installed Transformers package to expose the corresponding
@@ -919,6 +947,7 @@ smoke coverage used for this AutoEP surface produced the following version gates
 | `qwen3_5_moe` | `5.2.0` | Requires the Qwen3.5 text-backbone `qwen3_5_moe_text` model type. For performance on Qwen3.5's Gated DeltaNet layers, install optimized kernels; see the [Hugging Face Transformers kernel loading docs](https://huggingface.co/docs/transformers/kernel_doc/loading_kernels) and the [Qwen FlashQLA blog](https://qwen.ai/blog?id=flashqla). |
 | `deepseek_v2` | `5.0.0` | `load_balance_coeff` / expert-bias auxiliary-loss-free load balancing is not currently supported; non-null values are rejected. |
 | `deepseek_v3` | `5.0.0` | `load_balance_coeff` / expert-bias auxiliary-loss-free load balancing is not currently supported; non-null values are rejected. |
+| `minimax_m3` | `5.15.0` | Requires the MiniMax-M3 text-backbone `minimax_m3_vl_text` model type. The expert MLP uses the clamped GPT-OSS activation (`swiglu_oai`), selected by the preset. `load_balance_coeff` / expert-bias auxiliary-loss-free load balancing is not currently supported; non-null values are rejected. |
 
 ***use_grouped_mm***: [boolean]
 
@@ -967,6 +996,12 @@ smoke coverage used for this AutoEP surface produced the following version gates
 | Description                                                                                                    | Default  |
 | -------------------------------------------------------------------------------------------------------------- | -------- |
 | How expert outputs are weighted by their router scores and reduced over top-k. `"auto"` resolves to `"weighted_sum"`. `"fused_weighted_sum"` is experimental and computes the same reduction in one Triton pass, without materializing the scattered assignment buffer or the `[tokens, top_k, hidden]` FP32 intermediate; it requires CUDA, Triton, bfloat16/float16 activations, `tensor_parallel.autotp_size=1`, `expert_tensor_parallel_size=1`, and a resolved `score_apply="post"`, and is rejected rather than silently ignored when any of those does not hold. `"legacy_bmm"` is a debug reduction retained for model-family verification. | `"auto"` |
+
+***row_weighting_impl***: [string]
+
+| Description                                                                                                    | Default  |
+| -------------------------------------------------------------------------------------------------------------- | -------- |
+| How the DeepEP route applies one FP32 routing weight to each received row at the existing `score_apply` boundary. `"auto"` resolves to `"eager"`, preserving `(rows.float() * weights).to(rows.dtype)`. `"fused"` is experimental and uses a separate Triton pointwise operator for that per-row product only; it does not perform the top-k reduction or move the BF16/FP16 rounding point. It requires `comm_backend="deepep"`, `autoep_size > 1`, CUDA, Triton, contiguous bfloat16/float16 rows shaped `[N, H]`, and contiguous FP32 weights shaped `[N, 1]` on the same device; DeepEP dispatch currently supports BF16 rows only. Fused weight gradients can differ from eager due to FP32 summation order. Unsupported configurations fail rather than falling back. | `"auto"` |
 
 ***route_norm***: [boolean]
 
@@ -1051,6 +1086,12 @@ smoke coverage used for this AutoEP surface produced the following version gates
 | Description                                                                                              | Default |
 | -------------------------------------------------------------------------------------------------------- | ------- |
 | Direct child attribute name for shared experts (e.g., `"shared_expert"`). `null` = use preset default.   | `null`  |
+
+***expert_activation***: [string]
+
+| Description                                                                                              | Default |
+| -------------------------------------------------------------------------------------------------------- | ------- |
+| How the expert MLP combines its gate and up projections, by a name registered in `deepspeed.moe.ep_experts.EXPERT_ACTIVATIONS`: `"swiglu"` (`silu(gate) * up`), `"geglu_tanh"` (`gelu_tanh(gate) * up`, Gemma-4), `"swiglu_clamped"` (`silu(clamp(gate)) * clamp(up)`, DeepSeek-V4) or `"swiglu_oai"` (`(clamp(up) + 1) * clamp(gate) * sigmoid(alpha * clamp(gate))`, GPT-OSS and MiniMax-M3). `null` = use preset default, which is `"swiglu"` for every built-in preset. AutoEP checks the name against the model: a clamp limit on the experts module or the model config, or an experts `act_fn` that is not the named form's gate function, is an error unless this key is set. The clamp limit and alpha are taken from the model when it states them. `deepspeed.moe.ep_experts.register_expert_activation` adds a form. | `null`  |
 
 #### Custom Model Example
 
@@ -1718,7 +1759,8 @@ The offload pass is **not** in the default DeepCompile schedule; enable it only 
 
 ```json
 "data_types": {
-    "grad_accum_dtype"=["fp32"|"fp16"|"bf16"]
+    "grad_accum_dtype"=["fp32"|"fp16"|"bf16"],
+    "keep_in_fp32_modules"="auto"|[name patterns]
     }
 }
 ```
@@ -1728,3 +1770,9 @@ The offload pass is **not** in the default DeepCompile schedule; enable it only 
 | Description                                                                                                   | Default |
 | --------------------------------------------------------------------------------------------------------------| ------- |
 | Specifies the data type in which to do gradient accumulation. If None the default is to match the model type. |  None   |
+
+<i>**keep_in_fp32_modules**</i>: ["auto" or a list of strings]
+
+| Description | Default |
+| ----------- | ------- |
+| Buffers kept in fp32 while the model trains in bf16 or fp16. `"auto"` uses the model's Hugging Face transformers lists: `_keep_in_fp32_modules_strict`, plus `_keep_in_fp32_modules` under fp16. An example is the MoE routing bias `e_score_correction_bias` of DeepSeek-V3, GLM-4.5 and GLM-5, whose values bf16 cannot tell apart. A list gives name patterns, matched the way transformers matches them: `*` stands for any characters and a pattern may match anywhere in the buffer name. `[]` keeps nothing in fp32. Under ZeRO-3, `deepspeed.zero.Init` converts the buffers when it finishes building each module, before a checkpoint is loaded into them. Listed buffers stay fp32 even when `buffer_dtype` is set. Parameters named by the lists still follow the training dtype. | `"auto"` |

@@ -9,6 +9,7 @@ from .abstract_accelerator import DeepSpeedAccelerator
 # During setup stage torch may not be installed, pass on no torch will
 # allow op builder related API to be executed.
 try:
+    import torch
     import torch.npu
 except ImportError:
     pass
@@ -247,14 +248,13 @@ class NPU_Accelerator(DeepSpeedAccelerator):
 
     # Graph operations
     def create_graph(self):
-        return None
+        return torch.npu.NPUGraph()
 
     def capture_to_graph(self, graph, pool=None, stream=None):
-        from deepspeed.runtime.utils import noop_context
-        return noop_context()
+        return torch.npu.graph(graph, pool, stream)
 
     def replay_graph(self, graph):
-        return
+        graph.replay()
 
     # Tensor operations
 

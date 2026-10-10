@@ -444,19 +444,24 @@ class UlyssesSPAttentionHF(torch.nn.Module):
         mpu.initialize_sequence_parallel(sequence_parallel_size=sequence_parallel_size)
 
         from transformers import PreTrainedModel
-        if hasattr(model_name_or_path, "config") or isinstance(model_name_or_path, PreTrainedModel):
+        model_was_loaded = hasattr(model_name_or_path, "config") or isinstance(model_name_or_path, PreTrainedModel)
+        if model_was_loaded:
             # we already have the model (or a PEFT wrapper with config attribute)
             hf_model_config = model_name_or_path.config
         else:
             # if we don't have the model yet at this stage
             hf_model_config = AutoConfig.from_pretrained(model_name_or_path)
 
-        model_attn_implementation = getattr(hf_model_config, "_attn_implementation", None)
-        if model_attn_implementation is not None and model_attn_implementation != core_attn_implementation:
-            raise ValueError(
-                f"core_attn_implementation='{core_attn_implementation}' does not match "
-                f"model config attn_implementation='{model_attn_implementation}'. "
-                "Set both to the same value so sequence-parallel wrapper can intercept the active attention path.")
+        # Only a loaded model's config carries the attn implementation resolved at load time;
+        # a bare AutoConfig still holds the unresolved 'eager' default, so there is nothing
+        # meaningful to compare for a string model path.
+        if model_was_loaded:
+            model_attn_implementation = getattr(hf_model_config, "_attn_implementation", None)
+            if model_attn_implementation is not None and model_attn_implementation != core_attn_implementation:
+                raise ValueError(
+                    f"core_attn_implementation='{core_attn_implementation}' does not match "
+                    f"model config attn_implementation='{model_attn_implementation}'. "
+                    "Set both to the same value so sequence-parallel wrapper can intercept the active attention path.")
 
         # eager always materializes a 4D attention_mask (O(n²) memory) and cannot fall back
         # to is_causal=True like sdpa — so it's incompatible with SP which discards masks.
@@ -666,7 +671,9 @@ class UlyssesSPDataLoaderAdapter:
                              "Ensure your data collator includes position_ids in its output.")
 
         # we have batches of variable seqlen so in order to do all_gather on batches - we need to know the exact length of each tensor on each rank
-        seqlen = torch.tensor(batch["input_ids"].shape[1], dtype=torch.int64, device=self.device)
+        # gloo validates gather shapes strictly, so send a 1-element tensor to match the
+        # receive list; a 0-dim scalar only passes on backends that move raw bytes.
+        seqlen = torch.full((1, ), batch["input_ids"].shape[1], dtype=torch.int64, device=self.device)
         seqlens = [torch.zeros(1, dtype=torch.int64, device=self.device) for _ in range(self.sp_world_size)]
         dist.all_gather(seqlens, seqlen, group=self.sp_group)
         seqlens = [x[0].item() for x in seqlens]
@@ -823,6 +830,7 @@ class SequenceTiledCompute(torch.autograd.Function):
 
         with torch.no_grad():
             shard_step = math.ceil(seqlen / shards)
+            ctx.shard_step = shard_step
             output_shards = []
 
             for i in range(shards):
@@ -879,8 +887,6 @@ class SequenceTiledCompute(torch.autograd.Function):
         else:
             grad_requiring_tensor_grad = torch.empty_like(grad_requiring_tensor)
 
-        kwargs_to_shard_shards = {k: list(torch.chunk(v, chunks=shards, dim=1)) for k, v in kwargs_to_shard.items()}
-
         for i in range(shards):
             # when fn involves one or more model weights deepspeed will normally push a grad to
             # reduce per sub-module call, so since we only want it to add a grad for the last
@@ -896,14 +902,18 @@ class SequenceTiledCompute(torch.autograd.Function):
                     for param in compute_params:
                         param.ds_grad_is_ready = True
 
-            kwargs_to_shard_shard = {k: v[i] for k, v in kwargs_to_shard_shards.items()}
+            # Match forward's empty trailing slices, with offsets that remain valid for narrow().
+            shard_offset = min(i * ctx.shard_step, ctx.seqlen)
+            kwargs_to_shard_shard = {
+                k: v[:, shard_offset:shard_offset + ctx.shard_step]
+                for k, v in kwargs_to_shard.items()
+            }
             grad_requiring_tensor_shard = kwargs_to_shard_shard[grad_requiring_tensor_key]
 
             grad_requiring_tensor_shard.requires_grad_(grad_requiring_tensor_requires_grad)
 
             # if seqlen is not exactly divisible by shards the last step will be shorter than shard_step
-            shard_step = kwargs_to_shard_shards[grad_requiring_tensor_key][i].shape[1]
-            shard_offset = i * kwargs_to_shard_shards[grad_requiring_tensor_key][0].shape[1]
+            shard_step = grad_requiring_tensor_shard.shape[1]
 
             if grad_requiring_tensor.shape[0] == 1:
                 # on narrow the shard's stride is unaffected with dim0==1 (bs) so we use the most efficient `narrow` alias:

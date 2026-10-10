@@ -66,6 +66,11 @@ from deepspeed.runtime.constants import \
     DATA_PARALLEL_GROUP, GLOBAL_RANK, DDP_BFLOAT16, GRADIENT_ALLREDUCE_OP_MEAN
 from deepspeed.runtime.zero.config import ZeroStageEnum
 from deepspeed.checkpoint.constants import (
+    AFFINE_MAP,
+    AFFINE_MAP_PARAMS,
+    AFFINE_MAP_VERSION,
+    AUTOEP_AFFINE_MAPS,
+    AUTOEP_EXPERT_PLACEMENT,
     AUTOEP_ZERO3_EXPERT_STATE_FORMAT_VERSION,
     AUTOEP_ZERO3_EXPERT_STATE_FORMAT_VERSION_KEY,
     AUTOEP_ZERO3_EXPERT_STATE_FORMAT_KEY,
@@ -80,11 +85,14 @@ from deepspeed.checkpoint.constants import (
     UNIVERSAL_CHECKPOINT_INFO,
     UNIVERSAL_CHECKPOINT_VERSION_KEY,
     UNIVERSAL_CHECKPOINT_VERSION_VALUE,
+    DS_AUTOEP_UC_META,
 )
 from deepspeed.checkpoint.autoep_zero3_metadata import (
     is_autoep_zero3_partitioned_entry,
     validate_autoep_zero3_partitioned_metadata,
 )
+from deepspeed.checkpoint.affine import AFFINE_MAP_FORMAT_VERSION
+from deepspeed.checkpoint.autoep_affine import autoep_experts_for_rank
 from deepspeed.checkpoint.utils import clone_tensors_for_torch_save
 from deepspeed.checkpoint.ds_to_universal import dp_index_to_str
 from deepspeed.runtime.sparse_tensor import SparseTensor
@@ -101,7 +109,7 @@ from deepspeed.utils.timer import NoopTimer, ThroughputTimer, SynchronizedWallCl
     STEP_GLOBAL_TIMER
 from deepspeed.utils.debug import debug_extract_module_and_param_names, debug_clear_module_and_param_names
 from deepspeed.monitor.monitor import MonitorMaster
-from deepspeed.runtime.utils import clip_grad_norm_, compare_tensors_in_structures, maybe_loss_for_backward
+from deepspeed.runtime.utils import clip_grad_norm_, compare_tensors_in_structures, maybe_loss_for_backward, is_optimized_parameter
 from deepspeed.runtime.data_pipeline.constants import DATA_SAMPLING, \
     DATA_ROUTING, DATA_SAMPLING_ENABLED, CURRICULUM_LEARNING, \
     CURRICULUM_LEARNING_ENABLED, DATA_SAMPLING_NUM_WORKERS, RANDOM_LTD, \
@@ -116,6 +124,7 @@ from deepspeed.runtime.data_pipeline.data_routing.basic_layer import RandomLayer
 
 from deepspeed.utils.zero_to_fp32 import get_fp32_state_dict_from_zero_checkpoint
 from deepspeed.runtime.torch_autocast import init_autocast_params, get_default_autocast_lower_precision_modules, autocast_if_enabled
+from deepspeed.runtime.keep_in_fp32 import keep_in_fp32_pattern, keep_buffers_in_fp32, buffers_to_keep_in_fp32
 
 from .pipe.module import PipelineModule
 from .utils import get_ma_status
@@ -711,6 +720,8 @@ class DeepSpeedEngine(Module):
         self.unflatten = _unflatten_dense_tensors
 
         self._is_compiled = False
+        self._compile_mode = None
+        self._compiled_regions = []
         if is_deepcompile_supported():
             # Predefined compile passes
             self.register_compile_pass(zero_1_and_2_compile.NAME_Z1, zero_1_and_2_compile.add_z1_reduce,
@@ -1040,7 +1051,7 @@ class DeepSpeedEngine(Module):
         from deepspeed.runtime.tensor_parallel.config import _get_hf_tp_plan
         hf_tp_plan = _get_hf_tp_plan(model)
 
-        def finalize_autotp(autotp=None, attach_uc_metadata=False):
+        def finalize_autotp(autotp=None, attach_uc_metadata=False, require_vocab_parallel_lm_head=False):
             if autotp is not None:
                 autotp.register_replicated_grad_hooks(model)
 
@@ -1053,7 +1064,7 @@ class DeepSpeedEngine(Module):
                 configure_vocab_parallel_loss(model,
                                               vocab_parallel_heads[0],
                                               backend=tp_config.vocab_parallel_ce_backend)
-            elif tp_config.vocab_parallel_lm_head:
+            elif require_vocab_parallel_lm_head:
                 # Every partitioning path must agree; otherwise the request degrades into ordinary
                 # AutoTP with a gathered head and no distributed loss, which is easy to miss.
                 raise ValueError(
@@ -1074,14 +1085,16 @@ class DeepSpeedEngine(Module):
                             orig_layer_impl=None,
                             keep_module_on_host=tp_config.keep_module_on_host,
                             partition_config=partition_config,
-                            vocab_parallel_lm_head=tp_config.vocab_parallel_lm_head,
+                            vocab_parallel_lm_head=tp_config.vocab_parallel_lm_head is True,
                             model_config=model_config,
                             tp_grain_size=tp_config.tensor_parallel.tp_grain_size,
                             training_mode=True)
             autotp.set_tensor_parallel_config(tp_size, tp_config.tensor_parallel.tp_group)
             autotp.update_linear_policies()
             autotp._replace_module(model)
-            finalize_autotp(autotp, attach_uc_metadata=True)
+            finalize_autotp(autotp,
+                            attach_uc_metadata=True,
+                            require_vocab_parallel_lm_head=tp_config.vocab_parallel_lm_head is True)
             return
 
         if tp_size <= 1:
@@ -1095,6 +1108,29 @@ class DeepSpeedEngine(Module):
 
             layer_specs = TPPlanConverter.convert(hf_tp_plan)
             if layer_specs is not None:
+                hf_requests_vocab_parallel_embedding = any(style.lower() == "embedding_rowwise"
+                                                           for style in hf_tp_plan.values())
+                has_tied_vocab_head = False
+                if hf_requests_vocab_parallel_embedding:
+                    embedding_weight_ids = {
+                        id(module.weight)
+                        for module in model.modules() if isinstance(module, torch.nn.Embedding)
+                    }
+                    has_tied_vocab_head = any(
+                        isinstance(module, torch.nn.Linear) and module_name.split(".")[-1] in (
+                            "lm_head", "embed_out") and id(module.weight) in embedding_weight_ids
+                        for module_name, module in model.named_modules())
+                auto_vocab_parallel_lm_head = tp_config.vocab_parallel_lm_head is None and has_tied_vocab_head
+                use_vocab_parallel_lm_head = tp_config.vocab_parallel_lm_head is True or auto_vocab_parallel_lm_head
+                if auto_vocab_parallel_lm_head:
+                    if self.is_deepcompile_enabled() and self.compile_autotp():
+                        use_vocab_parallel_lm_head = False
+                        log_dist(
+                            "AutoTP: keeping the tied embedding and output head replicated despite the "
+                            "HuggingFace 'embedding_rowwise' plan because the DeepCompile 'autotp' pass "
+                            "does not support vocabulary-parallel embeddings.",
+                            ranks=[0],
+                            level=logging.WARNING)
                 gathered_output_patterns = [
                     pattern for pattern, style in hf_tp_plan.items()
                     if style.lower() in ("colwise_rep", "colwise_gather_output")
@@ -1114,15 +1150,41 @@ class DeepSpeedEngine(Module):
                     orig_layer_impl=None,
                     keep_module_on_host=tp_config.keep_module_on_host,
                     partition_config=tp_plan_config,
-                    vocab_parallel_lm_head=tp_config.vocab_parallel_lm_head,
+                    vocab_parallel_lm_head=use_vocab_parallel_lm_head,
                     model_config=model_config,
                     tp_grain_size=tp_config.tensor_parallel.tp_grain_size,
                     training_mode=True,
                 )
                 autotp.set_tensor_parallel_config(tp_size, tp_config.tensor_parallel.tp_group)
+                if use_vocab_parallel_lm_head:
+                    from deepspeed.sequence.cross_entropy import validate_vocab_parallel_loss
+
+                    # Only compatibility checks may fall back. Never catch errors after
+                    # replacement has mutated the shared weights or installed collectives.
+                    try:
+                        autotp._resolve_vocab_parallel_lm_head()
+                        validate_vocab_parallel_loss(model)
+                    except (ValueError, NotImplementedError) as exc:
+                        if not auto_vocab_parallel_lm_head:
+                            raise
+                        use_vocab_parallel_lm_head = False
+                        autotp.vocab_parallel_lm_head = False
+                        log_dist(
+                            "AutoTP: keeping the tied embedding and output head replicated despite the "
+                            f"HuggingFace 'embedding_rowwise' plan: {exc}",
+                            ranks=[0],
+                            level=logging.WARNING)
+                    if auto_vocab_parallel_lm_head and use_vocab_parallel_lm_head:
+                        log_dist(
+                            "AutoTP: HuggingFace tp_plan requests 'embedding_rowwise' for a tied output head; "
+                            "enabling vocabulary-parallel embedding/head sharding and distributed causal-LM loss. "
+                            "Set vocab_parallel_lm_head=false to retain full-vocabulary logits.",
+                            ranks=[0])
                 autotp.update_linear_policies()
                 autotp._replace_module(model)
-                finalize_autotp(autotp, attach_uc_metadata=True)
+                finalize_autotp(autotp,
+                                attach_uc_metadata=True,
+                                require_vocab_parallel_lm_head=use_vocab_parallel_lm_head)
                 return
             log_dist(
                 f"AutoTP: effective HuggingFace tp_plan could not be converted; falling back to heuristic AutoTP. "
@@ -1156,7 +1218,8 @@ class DeepSpeedEngine(Module):
 
         if vocab_head_autotp is not None:
             vocab_head_autotp._replace_vocab_parallel_lm_head()
-        finalize_autotp(attach_uc_metadata=True)
+        finalize_autotp(attach_uc_metadata=True,
+                        require_vocab_parallel_lm_head=tp_config.vocab_parallel_lm_head is True)
 
     def __del__(self):
         try:
@@ -1594,9 +1657,6 @@ class DeepSpeedEngine(Module):
     def autotp_size(self):
         return self._config.tensor_parallel_config.autotp_size
 
-    def graph_harvesting(self):
-        return self._config.graph_harvesting
-
     def fp16_enabled(self):
         return self._config.float16_config.enabled
 
@@ -1776,8 +1836,12 @@ class DeepSpeedEngine(Module):
 
         return param_dtype, buffer_dtype
 
-    def _cast_module_mixed_precision(self, param_dtype, buffer_dtype, is_zero_init_model):
-        """Cast params to param_dtype; cast buffers only when buffer_dtype is set."""
+    def _cast_module_mixed_precision(self, param_dtype, buffer_dtype, is_zero_init_model, keep_pattern=None):
+        """Cast params to param_dtype; cast buffers only when buffer_dtype is set.
+
+        Buffers whose names match keep_pattern stay in fp32 (data_types.keep_in_fp32_modules,
+        deepspeed/runtime/keep_in_fp32.py).
+        """
         # ZeRO-Init params are already at the configured dtype and partitioned, so
         # the per-parameter cast applies only in the non-zero-init path.
         if param_dtype is not None and not is_zero_init_model:
@@ -1786,8 +1850,15 @@ class DeepSpeedEngine(Module):
                     p.data = p.data.to(param_dtype)
 
         # Buffers are never ZeRO-partitioned.
+        kept = set()
+        if keep_pattern is not None:
+            kept = {id(b) for b in buffers_to_keep_in_fp32(self.module, keep_pattern)}
+            # Also upcasts a listed buffer that arrives in a lower precision.
+            keep_buffers_in_fp32(self.module, keep_pattern)
         if buffer_dtype is not None:
             for b in self.module.buffers(recurse=True):
+                if id(b) in kept:
+                    continue
                 if b.dtype in CASTABLE_DTYPES and b.dtype != buffer_dtype:
                     b.data = b.data.to(buffer_dtype)
 
@@ -2001,7 +2072,8 @@ class DeepSpeedEngine(Module):
             # Cast params only; preserve fp32 buffers (e.g. rotary inv_freq)
             # unless buffer_dtype is set. Replaces blanket module.half()/bfloat16().
             param_dtype, buffer_dtype = self._mixed_precision_dtypes()
-            self._cast_module_mixed_precision(param_dtype, buffer_dtype, is_zero_init_model)
+            keep_pattern = keep_in_fp32_pattern(self.module, self._config.keep_in_fp32_modules, param_dtype)
+            self._cast_module_mixed_precision(param_dtype, buffer_dtype, is_zero_init_model, keep_pattern)
         else:
             self.__check_params(self.module, torch.float)
 
@@ -2544,7 +2616,6 @@ class DeepSpeedEngine(Module):
                                    dp_process_group=self.seq_data_parallel_group,
                                    timers=timers,
                                    grad_acc_dtype=self.get_data_types()[1],
-                                   graph_harvesting=self.graph_harvesting(),
                                    has_moe_layers=self.has_moe_layers)
 
         return optimizer
@@ -3047,7 +3118,7 @@ class DeepSpeedEngine(Module):
 
         see_memory_usage("Engine before backward", force=self.memory_breakdown())
 
-        if self.is_deepcompile_active() and not self.compile_autotp():
+        if self.is_deepcompile_active() and not self.uses_parallelization_pass_only():
             deepcompile_backward_prologue(self.is_gradient_accumulation_boundary())
 
         if isinstance(self.optimizer, ZeROOptimizer):
@@ -3082,7 +3153,7 @@ class DeepSpeedEngine(Module):
                 self.optimizer.backward_epilogue()
             self.optimizer.exit_backward()
 
-        if self.is_deepcompile_active() and not self.compile_autotp():
+        if self.is_deepcompile_active() and not self.uses_parallelization_pass_only():
             deepcompile_backward_epilogue()
 
         see_memory_usage("Engine after backward", force=self.memory_breakdown())
@@ -4091,24 +4162,9 @@ class DeepSpeedEngine(Module):
         else:
             # Validate AutoEP metadata if present
             if autoep_layers is not None:
-                if not isinstance(autoep_layers, list):
-                    raise RuntimeError(
-                        f"ds_autoep_layers metadata is malformed: expected list, got {type(autoep_layers).__name__}")
-                seen_ids = set()
-                required_fields = {
-                    'moe_layer_id', 'module_path', 'num_experts', 'num_local_experts', 'ep_size', 'expert_key_prefix'
-                }
-                for entry in autoep_layers:
-                    if not isinstance(entry, dict):
-                        raise RuntimeError(
-                            f"ds_autoep_layers entry is malformed: expected dict, got {type(entry).__name__}")
-                    missing = required_fields - entry.keys()
-                    if missing:
-                        raise RuntimeError(f"ds_autoep_layers entry is invalid: missing fields {sorted(missing)}")
-                    lid = entry['moe_layer_id']
-                    if lid in seen_ids:
-                        raise RuntimeError(f"ds_autoep_layers metadata has duplicate moe_layer_id: {lid}")
-                    seen_ids.add(lid)
+                DeepSpeedEngine._validate_autoep_zero3_partitioned_metadata(autoep_layers,
+                                                                            model=model,
+                                                                            require_partitioned=False)
             elif has_autoep_layers:
                 logger.warning("Checkpoint does not contain ds_autoep_layers metadata. "
                                "Loading AutoEP expert weights using best-effort module detection.")
@@ -4229,7 +4285,7 @@ class DeepSpeedEngine(Module):
         if checkpoint.get(FROZEN_PARAM_FRAGMENTS, None) is not None:
             saved_frozen_params = checkpoint[FROZEN_PARAM_FRAGMENTS]
             for param in self.module.parameters():
-                if param.requires_grad:
+                if is_optimized_parameter(param):
                     continue
                 if param not in self.param_names:
                     raise ValueError(f"failed to find frozen {param} in named params")
@@ -4420,13 +4476,17 @@ class DeepSpeedEngine(Module):
         return any(is_autoep_zero3_partitioned_entry(entry) for entry in autoep_layers)
 
     @staticmethod
-    def _validate_autoep_zero3_partitioned_metadata(autoep_layers, model=None, require_partitioned=True):
+    def _validate_autoep_zero3_partitioned_metadata(autoep_layers,
+                                                    model=None,
+                                                    require_partitioned=True,
+                                                    validate_runtime_placement=False):
         try:
             from deepspeed.module_inject.auto_ep_layer import AutoEPMoELayer as _AutoEPMoELayer
         except ImportError:
             _AutoEPMoELayer = None
 
         expected_expert_prefixes = None
+        expected_runtime_layers = None
         if _AutoEPMoELayer is not None and model is not None:
             expected_expert_prefixes = {
                 module_name: f"{module_name}.experts" if module_name else "experts"
@@ -4434,10 +4494,23 @@ class DeepSpeedEngine(Module):
             }
             if not expected_expert_prefixes:
                 expected_expert_prefixes = None
+            if validate_runtime_placement:
+                expected_runtime_layers = {}
+                for module_name, module in model.named_modules():
+                    if not isinstance(module, _AutoEPMoELayer):
+                        continue
+                    expected_runtime_layers[module_name] = {
+                        'ep_rank': module.ep_rank,
+                        'local_experts':
+                        list(autoep_experts_for_rank(module.expert_placement_descriptor, module.ep_rank)),
+                    }
+                if not expected_runtime_layers:
+                    expected_runtime_layers = None
 
         validate_autoep_zero3_partitioned_metadata(autoep_layers,
                                                    require_partitioned=require_partitioned,
                                                    expected_expert_prefixes=expected_expert_prefixes,
+                                                   expected_runtime_layers=expected_runtime_layers,
                                                    version_context="This DeepSpeed build")
 
     @staticmethod
@@ -5058,6 +5131,13 @@ class DeepSpeedEngine(Module):
                 exp_dp_rank = groups._get_expert_data_parallel_rank(group_name)
                 module_prefix = f"{n_module}." if n_module else ""
                 expert_params = [getattr(module.experts, wname) for wname in ('w1', 'w2', 'w3')]
+                expert_affine_maps = {}
+                for wname, param in zip(('w1', 'w2', 'w3'), expert_params):
+                    param_metadata = getattr(param, DS_AUTOEP_UC_META, None)
+                    if not isinstance(param_metadata, dict) or AFFINE_MAP not in param_metadata:
+                        raise RuntimeError(f"AutoEP expert parameter {module_prefix}experts.{wname} "
+                                           "is missing save-time affine map metadata.")
+                    expert_affine_maps[f"{module_prefix}experts.{wname}"] = param_metadata[AFFINE_MAP]
                 if self.zero_optimization_partition_weights():
                     frozen_expert_names = [
                         f"{module_prefix}experts.{wname}" for wname, param in zip(('w1', 'w2', 'w3'), expert_params)
@@ -5080,6 +5160,12 @@ class DeepSpeedEngine(Module):
                     num_local_experts,
                     'ep_size':
                     module.ep_size,
+                    AUTOEP_EXPERT_PLACEMENT:
+                    module.expert_placement_descriptor,
+                    AUTOEP_AFFINE_MAPS: {
+                        AFFINE_MAP_VERSION: AFFINE_MAP_FORMAT_VERSION,
+                        AFFINE_MAP_PARAMS: expert_affine_maps,
+                    },
                     'expert_key_prefix':
                     f"{module_prefix}experts",
                     AUTOEP_ZERO3_EXPERT_STATE_FORMAT_KEY:
@@ -5143,6 +5229,12 @@ class DeepSpeedEngine(Module):
                             self.checkpoint_engine.save(saveable, moe_save_path)
 
                 moe_layer_id += 1
+
+        if autoep_layer_info:
+            DeepSpeedEngine._validate_autoep_zero3_partitioned_metadata(autoep_layer_info,
+                                                                        model=self.module,
+                                                                        require_partitioned=False,
+                                                                        validate_runtime_placement=True)
 
         self._curr_ckpt_path = os.path.join(save_dir, tag)
 
@@ -5320,8 +5412,10 @@ class DeepSpeedEngine(Module):
     def _get_zero_frozen_param_attributes(self, attr_func):
         frozen_param_fragments = OrderedDict()
 
+        # "Frozen" here means "not owned by the optimizer", which also covers zero-element
+        # parameters: they are not in the flat groups, so this is where their shape is saved.
         for param in self.module.parameters():
-            if param.requires_grad:
+            if is_optimized_parameter(param):
                 continue
             if param not in self.param_names:
                 raise ValueError(f"failed to find frozen {param} in named params")
@@ -5738,7 +5832,10 @@ class DeepSpeedEngine(Module):
                 schedule=None,
                 compiled_autograd_enabled=False) -> None:
         """Compile the module using the specified backend and kwargs.
-        If a compiler_fn is set, it will be used instead of torch.compile().
+
+        With ``compile.autoep_non_moe`` enabled in the DeepSpeed config, compile the
+        callable parents of AutoEP layers while keeping routing, token movement,
+        expert compute, and collectives eager. Otherwise, compile the full module.
         """
         # Avoid graph breaks
         deepspeed.utils.nvtx.enable_nvtx = False
@@ -5746,13 +5843,49 @@ class DeepSpeedEngine(Module):
         if not is_compile_supported():
             raise RuntimeError("compile is not supported in your version of PyTorch.")
 
+        compile_mode = "autoep_non_moe" if self._config.compile_config.autoep_non_moe else "model"
+
         if self.is_compiled:
-            return
+            if self._compile_mode == compile_mode:
+                return
+            raise RuntimeError(
+                "Engine is already compiled; compile.autoep_non_moe cannot be changed after compilation.")
 
         if 'backend' in compile_kwargs:
             logger.warning("The `backend` in `compile_kwargs` will be overridden. Use the `backend` argument instead.")
 
-        logger.info(f"Compiling deepcompile={self.is_deepcompile_enabled()} backend={backend}")
+        logger.info(f"Compiling mode={compile_mode} deepcompile={self.is_deepcompile_enabled()} backend={backend}")
+
+        if compile_mode == "autoep_non_moe":
+            if self.is_deepcompile_enabled():
+                raise ValueError("compile.autoep_non_moe=True uses vanilla torch.compile and cannot be combined "
+                                 "with DeepCompile.")
+            autoep_config = getattr(self._config, "expert_parallel_config", None)
+            if getattr(autoep_config, "comm_backend", "comm") != "comm":
+                raise ValueError("compile.autoep_non_moe=True supports only expert_parallel.comm_backend='comm'.")
+            if self.autotp_size() > 1:
+                raise ValueError("compile.autoep_non_moe=True does not support AutoEP+AutoTP folding yet.")
+            if self._autoep_sequence_parallel_world_size() > 1:
+                raise ValueError("compile.autoep_non_moe=True does not support sequence parallelism yet.")
+            folding_spec = getattr(self, "_autoep_folding_spec", None)
+            if getattr(self, "pipeline_parallelism", False) or getattr(folding_spec, "pp_size", 1) > 1:
+                raise ValueError("compile.autoep_non_moe=True does not support pipeline parallelism yet.")
+            if self.zero_optimization_partition_weights():
+                raise ValueError("compile.autoep_non_moe=True does not support ZeRO Stage 3 yet.")
+            for offload_config in (self.zero_offload_optimizer(), self.zero_offload_param()):
+                if offload_config is not None and offload_config.device != OffloadDeviceEnum.none:
+                    raise ValueError(
+                        "compile.autoep_non_moe=True does not support optimizer or parameter offload yet.")
+            if schedule is not None:
+                raise ValueError("compile.autoep_non_moe=True does not support DeepCompile schedules.")
+            if compiled_autograd_enabled:
+                raise ValueError("compile.autoep_non_moe=True does not support compiled autograd yet.")
+            from .compiler import compile_autoep_non_moe_regions
+            self._compiled_regions = compile_autoep_non_moe_regions(self.module, backend, compile_kwargs)
+            self._is_compiled = True
+            self._compile_mode = compile_mode
+            self._compile_kwargs = compile_kwargs
+            return
 
         resolved_backend = None
         if self.is_deepcompile_enabled():
@@ -5776,6 +5909,7 @@ class DeepSpeedEngine(Module):
             raise
 
         self._is_compiled = True
+        self._compile_mode = compile_mode
         self._compile_kwargs = compile_kwargs
         if compiled_autograd_enabled:
             if not self._deepcompile_active:
