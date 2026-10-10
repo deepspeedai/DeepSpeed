@@ -12,6 +12,7 @@ on:
       - 'tests/unit/ops/adam/**'
       - 'tests/unit/comm/**'
       - '.github/workflows/mps-torch-latest.yml'
+      - '!**/*.md'
   schedule:
     - cron: "0 0 * * *"
 
@@ -20,8 +21,18 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Docs-only gate, disabled for now: the pull_request paths above already exclude
+  # Markdown and watch nothing under docs/ or blogs/, so the gate could never skip.
+  # Re-enable it, with needs/if in unit-tests, if this workflow must drop its path
+  # filters (to become a required check or run in the merge queue) or if
+  # is_docs_path() starts covering more than Markdown.
+  # check-paths:
+  #   uses: ./.github/workflows/check-paths.yml
+
   unit-tests:
     name: mps-torch-latest / unit tests
+    # needs: check-paths
+    # if: ${{ !cancelled() && needs.check-paths.outputs.should_run != 'false' }}
     # GitHub's macOS arm64 runners have an Apple Silicon GPU with a working MPS device.
     runs-on: macos-15
     timeout-minutes: 45
