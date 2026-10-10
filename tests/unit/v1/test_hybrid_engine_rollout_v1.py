@@ -106,11 +106,11 @@ def test_continuous_graph_generation_refills_a_fixed_slot_on_cuda():
         def forward(self, input_ids, attention_mask, past_key_values=None, use_cache=True, **kwargs):
             states = input_ids[:, None, :, None].to(dtype=torch.float32)
             _, values = past_key_values.update(states, states, layer_idx=0, cache_kwargs=kwargs)
-            if attention_mask.dim() == 4:
-                cache_mask = (attention_mask[:, 0, 0, :values.shape[2]] == 0).to(values.dtype).unsqueeze(-1)
+            cache_sums = values[:, 0].sum(dim=(1, 2)).long()
+            if input_ids.shape[1] > 1:
+                next_tokens = torch.where(cache_sums == 6, 2, 7)
             else:
-                cache_mask = attention_mask[:, :values.shape[2]].to(values.dtype).unsqueeze(-1)
-            next_tokens = ((values[:, 0] * cache_mask).sum(dim=(1, 2)).long() % 10) + 5
+                next_tokens = torch.where((cache_sums == 14) | (cache_sums == 16), 2, 8)
             logits = torch.zeros((input_ids.shape[0], input_ids.shape[1], 16), device=input_ids.device)
             logits.scatter_(2, next_tokens[:, None, None].expand(-1, input_ids.shape[1], 1), 1)
             return SimpleNamespace(logits=logits, past_key_values=past_key_values)
@@ -126,16 +126,17 @@ def test_continuous_graph_generation_refills_a_fixed_slot_on_cuda():
         SimpleNamespace(pad_token_id=0, eos_token_id=2),
     )
     request = RolloutRequest(
-        torch.tensor([[1, 2, 3], [1, 2, 4]], device=device),
-        torch.ones((2, 3), dtype=torch.long, device=device),
+        torch.tensor([[1, 2, 3], [1, 2, 4], [3, 3, 3]], device=device),
+        torch.ones((3, 3), dtype=torch.long, device=device),
     )
 
-    sampling = SamplingConfig(max_new_tokens=2, temperature=0, continuous_batch_size=1)
+    sampling = SamplingConfig(max_new_tokens=2, temperature=0, continuous_batch_size=2)
     eager_output = eager_rollout.generate(request, sampling)
     graph_output = graph_rollout.generate(request, sampling)
 
     assert torch.equal(graph_output.input_ids, eager_output.input_ids)
     assert torch.equal(graph_output.attention_mask, eager_output.attention_mask)
+    assert graph_output.input_ids[:, 3:].cpu().tolist() == [[2, 0], [7, 2], [7, 2]]
     stats = graph_rollout.get_last_continuous_stats()
     assert stats["cache_capacity"] == 5
     assert stats["peak_cache_length"] == 4

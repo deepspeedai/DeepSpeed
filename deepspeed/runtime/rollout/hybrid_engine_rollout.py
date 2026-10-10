@@ -662,7 +662,9 @@ class HybridEngineRollout(RolloutEngine):
             decode_ids = tuple(request_id for request_id in update.active_ids if request_id not in admitted_ids)
             static_input.zero_()
             static_position_ids.zero_()
-            static_write_positions.zero_()
+            # Captured replay always executes every physical row. Keep non-decoding
+            # rows away from their prefetched prompt KV until they become active.
+            static_write_positions.fill_(max_cache_len - 1)
             for request_id in decode_ids:
                 slot = slot_by_request[request_id]
                 position = write_positions[request_id]
