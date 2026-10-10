@@ -93,6 +93,7 @@ AUTOTUNING_MP_SIZE_DEFAULT = 1
 AUTOTUNING_METRIC = "metric"
 AUTOTUNING_METRIC_LATENCY = "latency"
 AUTOTUNING_METRIC_THROUGHPUT = "throughput"
+# User configs say "flops" or "FLOPS". The engine writes the value as "FLOPS_per_gpu".
 AUTOTUNING_METRIC_FLOPS = "flops"
 AUTOTUNING_METRIC_FORWARD = "forward"
 AUTOTUNING_METRIC_BACKWRAD = "flops"

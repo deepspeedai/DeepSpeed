@@ -590,9 +590,10 @@ class Autotuner:
             logger.info(f"End tuning for space: {tuning_space_name}")
             return max_micro_batch_size, fast_best_mbs, fast_best_metric_val
 
-        # if the best metric or the micro batch size for that best metric in the current Zero stage after tuning micro batch size is less than the corresponding value in the previous Zero stage, return, do not tune other Zero configuration parameters
+        # Skip the bucket search when this stage did not raise the micro-batch, or its metric regressed.
         if stage > 0:
-            if fast_best_mbs <= prev_best_mbs or fast_best_metric_val < prev_best_metric_val:
+            metric_regressed = stage_metric_regressed(self.metric(), fast_best_metric_val, prev_best_metric_val)
+            if fast_best_mbs <= prev_best_mbs or metric_regressed:
                 logger.info(
                     f"End tuning for space: {tuning_space_name}. No need to tune other Zero configuration parameters.")
                 return max_micro_batch_size, fast_best_mbs, fast_best_metric_val
@@ -626,11 +627,12 @@ class Autotuner:
             self.update_records(tuning_space_name, exp, metric_val, num_exps)
 
         full_best_record = self.get_best_space_record(tuning_space_name)
-        full_best_metric_val = full_best_record[1] if full_best_record else -1
+        fast_metric_for_cmp = fast_best_record[1] if fast_best_record else None
+        full_metric_for_cmp = full_best_record[1] if full_best_record else None
 
-        if full_best_metric_val > fast_best_metric_val:
-            best_metric_val = full_best_metric_val
-            best_mbs = full_best_record[0][DS_CONFIG][TRAIN_MICRO_BATCH_SIZE_PER_GPU] if full_best_record else -1
+        if full_best_record and metric_is_better(self.metric(), full_metric_for_cmp, fast_metric_for_cmp):
+            best_metric_val = full_metric_for_cmp
+            best_mbs = full_best_record[0][DS_CONFIG][TRAIN_MICRO_BATCH_SIZE_PER_GPU]
         else:
             best_metric_val = fast_best_metric_val
             best_mbs = fast_best_mbs
@@ -723,7 +725,7 @@ class Autotuner:
             if metric_val is None:
                 # a run that did not produce a metric (e.g. OOM) is not a valid candidate
                 continue
-            if best_space_record is None or metric_val > best_space_record[1]:
+            if best_space_record is None or metric_is_better(self.metric(), metric_val, best_space_record[1]):
                 best_space_record = (exp, metric_val)
         if best_space_record:
             best_space_record = best_space_record + (space_num_exps, )
@@ -736,7 +738,8 @@ class Autotuner:
             best_space_record = self.get_best_space_record(space_name)
             if best_space_record:
                 best_space_records[space_name] = best_space_record
-                if not global_best_record or best_space_record[1] > global_best_record[1]:
+                if not global_best_record or metric_is_better(self.metric(), best_space_record[1],
+                                                              global_best_record[1]):
                     global_best_record = best_space_record
         if global_best_record:
             best_space_records[GLOBAL_TUNING_SPACE] = global_best_record
@@ -785,7 +788,7 @@ class Autotuner:
 
                     with open(metric_file, 'r') as f:
                         results = hjson.load(f)
-                        metric_val = results[self.metric()]
+                        metric_val = metric_value(results, self.metric())
                         self.update_records(tuning_space_name, exp, metric_val, 1)
                         if max_micro_batch_size == exp[DS_CONFIG][TRAIN_MICRO_BATCH_SIZE_PER_GPU]:
                             max_micro_batch_size_metric_val = metric_val
@@ -831,7 +834,7 @@ class Autotuner:
             if metric_val:
                 with open(metric_file, 'r') as f:
                     results = hjson.load(f)
-                    metric_val = results[self.metric()]
+                    metric_val = metric_value(results, self.metric())
                     if has_mlflow:
                         os.environ.pop('MLFLOW_RUN_ID')
                         mlflow.start_run(nested=True, run_name=exp_name)
