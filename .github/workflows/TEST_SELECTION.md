@@ -4,9 +4,9 @@ This document explains the diff-driven test-selection system that lets some GPU 
 workflows run only the tests a PR could affect, instead of the whole suite, while
 still satisfying Required status checks.
 
-It currently drives **`modal-torch-latest`** (which runs `tests/unit/v1/` on
-[modal.com](https://modal.com) GPUs), but is built to drive more workflows from
-one config — see [Adding a workflow](#add-a-new-workflow).
+It currently drives **`modal-torch-latest`** (which runs `tests/unit/v1/` on a
+Modal GPU or its bounded AWS capacity fallback), but is built to drive more
+workflows from one config — see [Adding a workflow](#add-a-new-workflow).
 
 - [TL;DR](#tldr)
 - [Why](#why)
@@ -26,9 +26,18 @@ one config — see [Adding a workflow](#add-a-new-workflow).
   list to `ci/.test_selection/test_list.txt`. A nightly scheduled run always
   executes the full suite.
 - The trusted controller validates that list, then fetches, installs, and tests
-  the exact candidate SHA inside a no-secret Modal Sandbox. The Sandbox runs
-  only for merge queue entries, the nightly scheduled full run, and
-  manual runs — a plain PR event never spends Modal quota.
+  the exact candidate SHA inside a no-secret Modal Sandbox. If the fixed
+  `L40S:2` Sandbox cannot start within its acquisition window, the controller
+  tries a fixed, ordered pool of AWS `g7.12xlarge` Spot locations. The backend
+  runs only for merge queue entries, the nightly scheduled full run, and manual
+  runs — a plain PR event never spends GPU quota.
+- A manual `infrastructure_smoke` dispatch skips selection and pytest entirely.
+  It starts one short OCI `L40S:2` Sandbox check and three independent regional
+  AWS jobs in parallel. Each AWS job directly selects one region, launches a
+  G7.12 Spot instance, reaches it through SSM, verifies two host and container
+  GPUs, stores a checksum-verified proof in the private regional log bucket,
+  and terminates its own run-tagged instance. The matrix uses
+  `fail-fast: false`, so one regional result cannot cancel the other regions.
 - It is **fail-safe**: anything it can't reason about safely → run the *full* suite.
   It never silently runs *fewer* tests than reality.
 - Preview locally:
@@ -59,13 +68,13 @@ The design is a small, self-contained take on HuggingFace `transformers`'
 | `.github/workflows/modal-torch-latest.yml` | The workflow: a no-secret `collect-tests` job gating a trusted `deploy` controller job. |
 | `ci/tests_fetcher.py` | The selector. AST-parses the repo, builds an import graph, decides `all` / `subset` / `none`, writes the test-list file, emits a job summary. |
 | `ci/test_tests_fetcher.py` | Self-tests for the selector (pure stdlib; run in `collect-tests`). |
-| `ci/torch_latest.py` | Pure-stdlib metadata/selection validation plus the trusted Modal Sandbox controller. |
+| `ci/torch_latest.py` | Pure-stdlib metadata/selection validation plus the trusted Modal-first, AWS-capacity-fallback controller. |
 | `ci/.test_selection/test_list.txt` | The hand-off artifact (one pytest target per line). Git-ignored. |
 
 ### Job flow
 
 ```
-           pull_request_target / merge_group / schedule / workflow_dispatch
+           pull_request_target / merge_group / schedule / ordinary dispatch
                                   │
                     ┌─────────────┴─────────────┐
                     │        collect-tests       │   (no secrets)
@@ -79,17 +88,40 @@ The design is a small, self-contained take on HuggingFace `transformers`'
                                   │ needs:
                                   ▼
                     ┌────────────────────────────┐
-                    │           deploy            │   (Modal token: controller only)
+                    │           deploy            │   (trusted controller only)
                     │  if mode != none            │
                     │  checkout exact base SHA    │
                     │  validate mode/list + SHA   │
-                    │  create one L40S:2 Sandbox  │
+                    │  try one L40S:2 Sandbox     │
                     │    no secrets or mounts     │
+                    │  startup capacity only:     │
+                    │    try G7.12 Spot by region │
+                    │    via GitHub OIDC + SSM    │
                     │    fetch exact head SHA      │
                     │    install + run pytest     │
-                    │  terminate/observe Sandbox  │
+                    │  terminate chosen backend  │
                     └────────────────────────────┘
 ```
+
+A manual dispatch with `infrastructure_smoke=true` takes a separate path:
+
+```text
+                  workflow_dispatch (infrastructure_smoke=true)
+                                   │
+                    ┌─────────────────┴─────────────────┐
+                    │                                     │
+          short Modal OCI smoke                  AWS regional matrix
+          startup + two GPUs                     fail-fast: false
+          always terminates                      east-1 / east-2 / west-2
+                                                 launch + SSM + two GPUs
+                                                 container + private proof
+                                                 per-region termination
+```
+
+That path never creates a test-selection artifact, installs DeepSpeed, or runs
+pytest. It is an explicit infrastructure diagnostic and is not available to
+scheduled, pull-request, or merge-queue executions, so it cannot weaken the
+Required check.
 
 `mode` controls `deploy`:
 
@@ -99,8 +131,8 @@ The design is a small, self-contained take on HuggingFace `transformers`'
 - **`all`** → `deploy` runs the whole scope (`tests/unit/v1`).
 
 Independent of `mode`, `deploy` is also skipped on `pull_request_target` runs,
-so pushing to a PR never spends Modal quota — the `collect-tests` summary still
-previews what the queue will run. The Sandbox actually executes on
+so pushing to a PR never spends GPU quota — the `collect-tests` summary still
+previews what the queue will run. The selected backend actually executes on
 `merge_group` (the merged tree, gating the merge), `schedule`, and
 `workflow_dispatch`. On `merge_group` the candidate is the merge-group commit
 in the base repository, diffed against the queue's base SHA, so the selection
@@ -109,6 +141,13 @@ trigger: master receives no direct pushes (the merge queue lands every entry,
 and each merge_group run already tested the merged tree), so a post-push run
 would duplicate the queue's work. Cross-entry interaction regressions are what
 the nightly full suite exists to catch.
+
+For a manual infrastructure-only check, select `infrastructure_smoke` when
+dispatching the workflow. That skips both `collect-tests` and `deploy`; the
+Modal and per-region AWS smoke jobs run directly and concurrently instead.
+Leaving the input at its default `false` preserves the ordinary manual full
+scope. The AWS smoke path does not depend on Modal's result, so a successful
+Modal allocation cannot bypass the regional checks.
 
 ### Nightly full-suite runs and regression triage
 
@@ -119,9 +158,9 @@ suite. Its outcome feeds `nightly-triage.yml`:
   anchors the last verified-good master revision (and is exactly the good
   endpoint a later manual bisect would need), so days that fail for operational
   reasons (no GPU instance, timeout) simply leave the tag in place.
-- **Infra** (the Sandbox never got a GPU instance) → nothing is concluded; no
-  report, no tag move.
-- **Timeout** (the Sandbox/job time budget ran out) → an issue is opened; a
+- **Infra** (neither Modal nor any configured AWS location acquired a GPU) →
+  nothing is concluded; no report, no tag move.
+- **Timeout** (the backend/job time budget ran out) → an issue is opened; a
   timeout points at an operational problem, not a candidate regression.
 - **Unknown** (no sentinel in the logs) → an issue is opened. A failed run can
   lack a sentinel for reasons other than a timeout — checkout, setup, or a job
@@ -136,9 +175,13 @@ suite. Its outcome feeds `nightly-triage.yml`:
   is the good endpoint it would start from.
 
 The controller (`ci/torch_latest.py`) classifies its own failures for this
-routing: it prints a `DS_CI_FAILURE_CLASS=infra|timeout|test` sentinel line and
-exits with a dedicated code (75 / 124 / 1). A failed run with no sentinel
-routes to the unknown class instead of guessing.
+routing. It waits up to 10 minutes for Modal Sandbox startup; only that
+startup-capacity timeout returns 75 to the workflow without a final sentinel
+so that AWS can run. The selected backend prints exactly one final
+`DS_CI_FAILURE_CLASS=infra|timeout|test` sentinel on failure. If no backend runs
+the outcome is infra (75); 300 seconds without pytest output is a timeout
+(124); setup and test errors are test failures (1). A failed run with no
+sentinel routes to the unknown class instead of guessing.
 
 Triage reports (timeout, unknown, test failures) go through `ci/nightly_report.sh`:
 every report carries the `nightly-triage` label, and a recurring outcome
@@ -296,7 +339,8 @@ tests.
 ## Security model
 
 The workflow triggers on **`pull_request_target`**, so it runs in the base repo's
-context and the `deploy` controller authenticates to Modal. The trust boundary is:
+context and the `deploy` controller can authenticate to Modal or, only for the
+capacity fallback, assume its AWS role. The trust boundary is:
 
 - Both jobs check out only the exact trusted base SHA (or the exact
   push/manual SHA), with persisted credentials, LFS, and submodules disabled.
@@ -314,34 +358,50 @@ context and the `deploy` controller authenticates to Modal. The trust boundary i
   options or traversal paths, and are passed after pytest's `--` separator.
 - `deploy` runs only the trusted controller. Candidate metadata is restricted
   to a public `owner/repository` and full 40-hex SHA; event values enter Python
-  through environment variables, not workflow shell interpolation.
+  through environment variables, not workflow shell interpolation. GitHub's
+  OIDC permission is scoped to this job and AWS credentials are requested only
+  after the Modal controller returns its dedicated startup-capacity result.
+- The controller role ARN and opaque regional fallback JSON are stored as
+  masked repository secrets. The controller logs region and ordinal location
+  transitions, but never the launch-template, subnet, bucket, instance, or SSM
+  command identifiers, and AWS CLI failures expose only a bounded error code.
+  The trusted job exchanges its GitHub OIDC token directly for only the three
+  credential fields, masks each value before exporting it, and never requests
+  or prints the STS assumed-role identity.
 - The Modal service token remains in the controller process. The Sandbox gets
   no Modal, GitHub, Hugging Face, OIDC, or other secret; no local checkout,
   mount, volume, network filesystem, port, proxy, or workload identity is
   attached. The controller constructs a positive allowlist of non-sensitive
   git/pip environment flags instead of forwarding its environment.
 - Candidate acquisition, dependency installation, DeepSpeed installation, and
-  pytest all happen inside one isolated `l40s:2` Sandbox with a 3600-second
-  server-side lifetime. Every subprocess uses structural arguments, and every
-  nonzero clone/install/test status fails the check.
-- The Sandbox retains outbound network access because it must reach public
+  pytest all happen inside one selected backend. Modal uses an isolated
+  `l40s:2` Sandbox with a bounded server-side lifetime. Its capacity fallback
+  uses only `g7.12xlarge` Spot, tries configured subnets in fixed `us-east-1`,
+  `us-east-2`, `us-west-2` order, exposes exactly GPUs 0 and 1 to the container,
+  and controls it through SSM. The instance has no inbound rules and a
+  60-minute termination guard. SSM sends prepare and test output to a scoped,
+  expiring CloudWatch Logs group; the controller forwards new stdout/stderr
+  events through the same public-output masking path while each command is
+  running. Every subprocess uses structural arguments, and every nonzero
+  clone/install/test status fails the check.
+- The selected backend retains outbound network access because it must reach public
   GitHub, package indexes, PyTorch wheels, and optionally Transformers. Those
   services do not have stable CIDRs suitable for the SDK's CIDR allowlist, so
   the containment control is the absence of secrets, identities, and mounts.
 - The `pull_request_target` trigger types are `review_requested`,
   `ready_for_review`, and `synchronize`. Because `synchronize` re-runs on every
   push to an open PR (not just on a maintainer action), the maintainer review is a
-  mitigation, **not** the trust boundary. Exact trusted base code plus Sandbox
+  mitigation, **not** the trust boundary. Exact trusted base code plus backend
   isolation is the primary protection.
 
 **`merge_group` runs are a separate trust context.** GitHub runs a queued
 entry's workflows from the merge-group commit — the PR's merged tree — so the
 workflow YAML itself is candidate-controlled. The jobs restore the repo's
 invariant by resolving every GitHub-side checkout to the trusted base revision
-(`merge_group.base_sha`): the selector, the controller, and the accelerate
-launcher all come from master there, and the merged candidate enters only as
+(`merge_group.base_sha`): the selector and controller come from master there,
+and the merged candidate enters only as
 validated git data (fetched by exact SHA into a separate root) or inside the
-no-secret Modal Sandbox. The residual exposure — a queued PR rewriting the
+no-secret execution backend. The residual exposure — a queued PR rewriting the
 workflow YAML itself to echo secrets — is inherent to GitHub's merge queue;
 review PRs that touch `.github/workflows/*` with that in mind.
 
@@ -349,8 +409,8 @@ review PRs that touch `.github/workflows/*` with that in mind.
 > effect under `pull_request_target` only after they're **merged**. A PR that
 > changes this launcher cannot prove its new PR-triggered end-to-end path by
 > running itself. Before merge, use pure-stdlib/unit/static validation and, only
-> when separately authorized credentials are available, a direct Modal smoke.
-> Do not describe mock coverage as live Modal evidence.
+> when separately authorized credentials are available, a direct backend smoke.
+> Do not describe mock coverage as live provider evidence.
 
 
 ## Failure modes & guarantees
@@ -366,14 +426,22 @@ The selector is built to **fail safe — to `all`, never to `none`**:
 - The only way to run *fewer* tests is a clean, well-understood narrow decision;
   every uncertain case widens to everything.
 - Missing or invalid repository/SHA metadata, an inconsistent mode/list pair,
-  and any failed Sandbox clone, install, version probe, or pytest command fail
-  the controller. There is no moving-branch fallback.
-- Once created, the task-owned Sandbox is terminated and its terminal state is
-  observed on success and failure. Cleanup failure is itself a failure and is
-  reported without hiding the primary command error. Forced controller loss is
-  bounded by the Sandbox's one-hour server lifetime.
-- `none` creates no Sandbox. `subset` and `all` create exactly one Sandbox; the
-  GPU shape and lifetime are constants rather than PR or manual inputs.
+  and any failed clone, install, version probe, or pytest command fail the
+  controller. There is no moving-branch fallback.
+- Only the bounded 10-minute Modal Sandbox startup timeout enables AWS. Modal API,
+  authentication, image-build, setup, test, cleanup, and lifetime failures are
+  terminal. After an AWS instance is allocated, boot, SSM, setup, test, and
+  cleanup failures are also terminal and never move to another location.
+- Before allocation, AWS advances through the fixed regional subnet list only
+  for explicit EC2 insufficient-capacity responses. If every location reports
+  capacity unavailable, no backend ran and the Required check fails as infra.
+- Once created, the task-owned Sandbox or EC2 instance is terminated on success
+  and failure. Cleanup failure is reported without hiding the primary command
+  error; a tag-scoped final reconciliation covers interrupted AWS controllers.
+- `none` creates no backend. `subset` and `all` run at most one test backend;
+  the GPU shape, region order, and time bounds are constants rather than PR or
+  manual inputs. A 300-second pytest-output watchdog is a terminal timeout and
+  is never made green by running the test again on another provider.
 
 Every run writes a summary to the GitHub job summary (mode, reason, and the
 selected files) so the decision is auditable from the Actions UI. Candidate

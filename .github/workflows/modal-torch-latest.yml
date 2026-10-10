@@ -1,12 +1,15 @@
 name: modal-torch-latest
 
 # This Required workflow selects tests on a no-secret GitHub runner, then tests
-# the exact candidate SHA inside a no-secret Modal Sandbox. Under
+# the exact candidate SHA inside a no-secret Modal Sandbox. If that Sandbox
+# cannot start within its bounded acquisition window, the same trusted
+# controller makes one bounded G7.12 Spot acquisition pass across the
+# configured AWS regions. Under
 # pull_request_target, every GitHub-side checkout and Python entrypoint comes
 # from the trusted base commit; merge queue runs resolve that trusted base from
-# merge_group.base_sha. The Sandbox only runs for merge queue entries, the
+# merge_group.base_sha. A GPU backend runs only for merge queue entries, the
 # nightly scheduled full run, and manual runs, so plain PR events never spend
-# Modal quota. Master receives no direct pushes (the merge queue lands every
+# GPU quota. Master receives no direct pushes (the merge queue lands every
 # entry, and each merge_group run already tested the merged tree), so there is
 # no push trigger; cross-entry interaction regressions are covered by the
 # nightly full suite, which feeds regression triage
@@ -15,6 +18,11 @@ name: modal-torch-latest
 on:
   workflow_dispatch:
     inputs:
+      infrastructure_smoke:
+        description: Run only the parallel backend infrastructure smoke checks
+        required: false
+        default: false
+        type: boolean
       torch_preset:
         description: Modal PyTorch/CUDA image preset for manual runs
         required: false
@@ -45,13 +53,13 @@ on:
     - cron: '0 10 * * *'
 
   pull_request_target:
-    types: [review_requested, ready_for_review, synchronize]
+    types: [opened, reopened, review_requested, ready_for_review, synchronize]
     branches:
       - master
 
   # Required checks must also trigger on merge queue entries, otherwise the
   # merge fails waiting for a status that is never reported. This is the only
-  # PR-related event that spends Modal quota.
+  # PR-related event that spends GPU quota.
   merge_group:
     types: [checks_requested]
     branches:
@@ -65,8 +73,120 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  modal-infrastructure-smoke:
+    name: modal-torch-latest / Modal infrastructure smoke
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.infrastructure_smoke == true }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout trusted controller code
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+          lfs: false
+          submodules: false
+
+      - name: Install Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.10"
+          cache: 'pip'
+
+      - name: Install trusted controller dependency
+        run: |
+          pip install uv
+          uv pip install --system modal==1.2.6
+
+      - name: Check Modal OCI startup, two GPUs, and cleanup
+        env:
+          MODAL_TORCH_PRESET: ${{ inputs.torch_preset }}
+          MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+          MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+        run: python3 ci/torch_latest.py modal-infrastructure-smoke
+
+  aws-infrastructure-smoke:
+    name: modal-torch-latest / AWS infrastructure smoke / ${{ matrix.region }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.infrastructure_smoke == true }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        region: [us-east-1, us-east-2, us-west-2]
+    steps:
+      - name: Checkout trusted controller code
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+          lfs: false
+          submodules: false
+
+      - name: Install Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.10"
+
+      - name: Configure AWS credentials for infrastructure smoke
+        id: aws-auth
+        env:
+          AWS_ROLE_ARN: ${{ secrets.AWS_MODAL_FALLBACK_ROLE_ARN }}
+          SMOKE_REGION: ${{ matrix.region }}
+        run: |
+          set -euo pipefail
+          test -n "$AWS_ROLE_ARN"
+          echo "::add-mask::$AWS_ROLE_ARN"
+          oidc_response=$(curl --fail --silent --show-error \
+            --header "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com")
+          web_identity_token=$(jq -er '.value | select(type == "string" and length > 0)' <<< "$oidc_response")
+          echo "::add-mask::$web_identity_token"
+          read -r aws_access_key_value aws_secret_key_value aws_session_token_value <<< "$(
+            aws --no-cli-pager sts assume-role-with-web-identity \
+              --role-arn "$AWS_ROLE_ARN" \
+              --role-session-name "DeepSpeedCI-${GITHUB_RUN_ID}-${SMOKE_REGION}" \
+              --web-identity-token "$web_identity_token" \
+              --duration-seconds 3600 \
+              --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken]' \
+              --output text
+          )"
+          test -n "$aws_access_key_value"
+          test -n "$aws_secret_key_value"
+          test -n "$aws_session_token_value"
+          echo "::add-mask::$aws_access_key_value"
+          echo "::add-mask::$aws_secret_key_value"
+          echo "::add-mask::$aws_session_token_value"
+          {
+            printf 'AWS_ACCESS_KEY_ID=%s\n' "$aws_access_key_value"
+            printf 'AWS_SECRET_ACCESS_KEY=%s\n' "$aws_secret_key_value"
+            printf 'AWS_SESSION_TOKEN=%s\n' "$aws_session_token_value"
+          } >> "$GITHUB_ENV"
+
+      - name: Check regional launch, SSM, two GPUs, container, and private proof
+        env:
+          AWS_MODAL_FALLBACK_CONFIG: ${{ secrets.AWS_MODAL_FALLBACK_CONFIG }}
+          DS_CI_AWS_RUN_SUFFIX: ${{ matrix.region }}
+          MODAL_TORCH_PRESET: ${{ inputs.torch_preset }}
+        run: python3 ci/torch_latest.py aws-infrastructure-smoke --region "${{ matrix.region }}"
+
+      - name: Reconcile regional infrastructure-smoke cleanup
+        if: ${{ always() && steps.aws-auth.outcome == 'success' }}
+        env:
+          AWS_MODAL_FALLBACK_CONFIG: ${{ secrets.AWS_MODAL_FALLBACK_CONFIG }}
+          DS_CI_AWS_RUN_SUFFIX: ${{ matrix.region }}
+        run: python3 ci/torch_latest.py cleanup-aws
+
   collect-tests:
     name: modal-torch-latest / collect tests
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.infrastructure_smoke != true }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -142,17 +262,18 @@ jobs:
   deploy:
     name: modal-torch-latest / DeepSpeedAI CI
     runs-on: ubuntu-latest
-    timeout-minutes: 135
+    timeout-minutes: 180
     permissions:
       contents: read
+      id-token: write
     needs: collect-tests
 
     # Preserve the Required check on failures and no-test selections. A selector
-    # failure enters this job and fails explicitly; mode=none skips the Sandbox.
-    # pull_request_target runs skip the Sandbox entirely (a skipped dependent
+    # failure enters this job and fails explicitly; mode=none skips GPU execution.
+    # pull_request_target runs skip the backend entirely (a skipped dependent
     # job still satisfies the Required check), so the tests gate the merge queue
     # entry instead of every PR update.
-    if: ${{ !cancelled() && (needs.collect-tests.result != 'success' || (needs.collect-tests.outputs.mode != 'none' && github.event_name != 'pull_request_target')) }}
+    if: ${{ (github.event_name != 'workflow_dispatch' || inputs.infrastructure_smoke != true) && !cancelled() && (needs.collect-tests.result != 'success' || (needs.collect-tests.outputs.mode != 'none' && github.event_name != 'pull_request_target')) }}
     steps:
       - name: Fail if test selection failed
         if: needs.collect-tests.result != 'success'
@@ -162,7 +283,7 @@ jobs:
         uses: actions/checkout@v7
         with:
           # Trusted base revision for every event: the merge-group commit is
-          # only ever fetched by exact SHA inside the no-secret Sandbox.
+          # only ever fetched by exact SHA inside the isolated backend.
           ref: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.sha }}
           fetch-depth: 1
           persist-credentials: false
@@ -186,7 +307,8 @@ jobs:
           pip install uv
           uv pip install --system modal==1.2.6
 
-      - name: Run tests in isolated Modal Sandbox
+      - name: Try tests in isolated Modal Sandbox
+        id: modal
         env:
           DS_CI_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
           DS_CI_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -198,4 +320,76 @@ jobs:
           MODAL_TRANSFORMERS_REF: ${{ github.event.inputs.transformers_ref || 'main' }}
           MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
           MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
-        run: python3 ci/torch_latest.py controller
+        run: |
+          set +e
+          python3 ci/torch_latest.py controller
+          status=$?
+          set -e
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          if [ "$status" -eq 0 ]; then
+            echo "fallback=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$status" -eq 75 ]; then
+            echo "fallback=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          exit "$status"
+
+      - name: Configure AWS credentials for capacity fallback
+        if: steps.modal.outputs.fallback == 'true'
+        env:
+          AWS_ROLE_ARN: ${{ secrets.AWS_MODAL_FALLBACK_ROLE_ARN }}
+        run: |
+          set -euo pipefail
+          test -n "$AWS_ROLE_ARN"
+          echo "::add-mask::$AWS_ROLE_ARN"
+          oidc_response=$(curl --fail --silent --show-error \
+            --header "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com")
+          web_identity_token=$(jq -er '.value | select(type == "string" and length > 0)' <<< "$oidc_response")
+          echo "::add-mask::$web_identity_token"
+          read -r aws_access_key_value aws_secret_key_value aws_session_token_value <<< "$(
+            aws --no-cli-pager sts assume-role-with-web-identity \
+              --role-arn "$AWS_ROLE_ARN" \
+              --role-session-name "DeepSpeedCI-${GITHUB_RUN_ID}" \
+              --web-identity-token "$web_identity_token" \
+              --duration-seconds 7200 \
+              --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken]' \
+              --output text
+          )"
+          test -n "$aws_access_key_value"
+          test -n "$aws_secret_key_value"
+          test -n "$aws_session_token_value"
+          echo "::add-mask::$aws_access_key_value"
+          echo "::add-mask::$aws_secret_key_value"
+          echo "::add-mask::$aws_session_token_value"
+          {
+            printf 'AWS_ACCESS_KEY_ID=%s\n' "$aws_access_key_value"
+            printf 'AWS_SECRET_ACCESS_KEY=%s\n' "$aws_secret_key_value"
+            printf 'AWS_SESSION_TOKEN=%s\n' "$aws_session_token_value"
+            printf 'AWS_REGION=us-east-1\n'
+            printf 'AWS_DEFAULT_REGION=us-east-1\n'
+          } >> "$GITHUB_ENV"
+
+      - name: Run tests on AWS capacity fallback
+        if: steps.modal.outputs.fallback == 'true'
+        env:
+          DS_CI_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          DS_CI_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          DS_CI_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || '' }}
+          DS_TEST_SELECTION_MODE: ${{ needs.collect-tests.outputs.mode }}
+          DS_TEST_LIST_FILE: ci/.test_selection/test_list.txt
+          MODAL_TORCH_PRESET: ${{ github.event.inputs.torch_preset || '2.10.0-cuda12.8' }}
+          MODAL_TRANSFORMERS_SOURCE: ${{ github.event.inputs.transformers_source || 'git' }}
+          MODAL_TRANSFORMERS_REF: ${{ github.event.inputs.transformers_ref || 'main' }}
+          AWS_MODAL_FALLBACK_CONFIG: ${{ secrets.AWS_MODAL_FALLBACK_CONFIG }}
+        run: python3 ci/torch_latest.py aws-controller
+
+      - name: Reconcile AWS capacity fallback cleanup
+        if: ${{ always() && steps.modal.outputs.fallback == 'true' }}
+        env:
+          AWS_MODAL_FALLBACK_CONFIG: ${{ secrets.AWS_MODAL_FALLBACK_CONFIG }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: python3 ci/torch_latest.py cleanup-aws

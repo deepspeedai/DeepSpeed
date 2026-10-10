@@ -25,7 +25,8 @@ from deepspeed.checkpoint.constants import UNIVERSAL_CHECKPOINT_INFO
 from deepspeed.checkpoint.constants import (DS_VERSION, PARTITION_COUNT, BASE_OPTIMIZER_STATE,
                                             SINGLE_PARTITION_OF_FP32_GROUPS, CLIP_GRAD, GROUP_PADDINGS,
                                             PARAM_SLICE_MAPPINGS)
-from deepspeed.module_inject.auto_ep_folding import apply_folding_correction_to_grad_buffer
+from deepspeed.module_inject.auto_ep_folding import (apply_folding_correction_to_grad_buffer,
+                                                     clear_autoep_folding_gradient_corrected)
 
 setattr(sys.modules[__name__], 'fragment_address', fragment_address)
 
@@ -349,6 +350,9 @@ class BF16_Optimizer(ZeROOptimizer):
                            partition_start=partition_id * partition_size,
                            partition_size=partition_size,
                            dp_group=self.real_dp_process_group[i])
+            # Unlike ZeRO's fragment lists, BF16's gradient dictionary includes every parameter.
+            for param_index, lp_param in enumerate(self.bf16_groups[i]):
+                lp_param._index_in_param_group = param_index
 
     def _lazy_init_hp_params_optimizer_state(self):
         if not self._hp_optimizer_states_linked:
@@ -703,6 +707,12 @@ class BF16_Optimizer(ZeROOptimizer):
     def accumulate_hp_grads_and_remove_lp(self, lp_param, group_idx, param_idx):
         assert self.immediate_grad_update
         self._update_hp_grad(lp_param, group_idx, param_idx, clear_lp_grads=False)
+        # The high-precision buffer now holds this gradient; reduction, clipping and the step all read it
+        # there. Keeping the low-precision copy until the step leaves every parameter's gradient alive twice
+        # through the end of backward, and zeroing it instead frees nothing.
+        # The correction marker belongs to the low-precision gradient being released.
+        clear_autoep_folding_gradient_corrected(lp_param)
+        lp_param.grad = None
 
     def create_grad_acc_hooks(self):
         for i, param_group in enumerate(self.bf16_groups):
