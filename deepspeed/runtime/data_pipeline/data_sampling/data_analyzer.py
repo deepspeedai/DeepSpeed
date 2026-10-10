@@ -16,6 +16,7 @@ from torch.utils.data import BatchSampler, SequentialSampler, DataLoader, Subset
 
 import deepspeed.comm as dist
 from deepspeed.utils import logger
+from deepspeed.accelerator import get_accelerator
 from deepspeed.runtime.data_pipeline.data_sampling.indexed_dataset import MMapIndexedDataset, valid_dtypes
 from deepspeed.runtime.data_pipeline.data_sampling.utils import split_dataset, split_index, create_mmap_dataset_builder, close_mmap_dataset_builder, find_fit_int_dtype
 
@@ -468,7 +469,7 @@ class DistributedDataAnalyzer(object):
         metric_types=[],
         save_path="./",
         collate_fn=None,
-        device='cuda',
+        device=None,
         comm_group=None,
         sample_indices=None,
     ) -> None:
@@ -479,7 +480,7 @@ class DistributedDataAnalyzer(object):
         self.metric_types = metric_types
         self.save_path = save_path
         self.collate_fn = collate_fn
-        self.device = device
+        self.device = device if device is not None else get_accelerator().device_name()
         self.sample_indices = sample_indices
         self.num_threads = num_threads
         self.worker_id = worker_id
