@@ -328,6 +328,12 @@ Example of <i>**scheduler**</i>
 |--------------------------------------------------------------------| ------- |
 | <i>**enabled**</i> indicates whether BFLOAT16 training is enabled. | `false` |
 
+<i>**bf16:immediate_grad_update**</i>: [boolean]
+
+| Description | Default |
+| ----------- | ------- |
+| When `BF16_Optimizer` is selected, accumulate each completed BF16 gradient in an autograd hook (in FP32 when `data_types.grad_accum_dtype="fp32"`). The consumed `param.grad` is released and may be `None` after backward. In that case, `deepspeed.utils.safe_get_full_grad(param)` reconstructs the accumulated gradient from the optimizer-owned fragments; all data-parallel ranks must call it before `engine.step()` in the same order. The default keeps the existing backward-epilogue accumulation. | `false` |
+
 <i>**bf16:bf16_master_weights_and_grads**</i>: [boolean]
 
 | Description | Default |
@@ -1753,7 +1759,8 @@ The offload pass is **not** in the default DeepCompile schedule; enable it only 
 
 ```json
 "data_types": {
-    "grad_accum_dtype"=["fp32"|"fp16"|"bf16"]
+    "grad_accum_dtype"=["fp32"|"fp16"|"bf16"],
+    "keep_in_fp32_modules"="auto"|[name patterns]
     }
 }
 ```
@@ -1763,3 +1770,9 @@ The offload pass is **not** in the default DeepCompile schedule; enable it only 
 | Description                                                                                                   | Default |
 | --------------------------------------------------------------------------------------------------------------| ------- |
 | Specifies the data type in which to do gradient accumulation. If None the default is to match the model type. |  None   |
+
+<i>**keep_in_fp32_modules**</i>: ["auto" or a list of strings]
+
+| Description | Default |
+| ----------- | ------- |
+| Buffers kept in fp32 while the model trains in bf16 or fp16. `"auto"` uses the model's Hugging Face transformers lists: `_keep_in_fp32_modules_strict`, plus `_keep_in_fp32_modules` under fp16. An example is the MoE routing bias `e_score_correction_bias` of DeepSeek-V3, GLM-4.5 and GLM-5, whose values bf16 cannot tell apart. A list gives name patterns, matched the way transformers matches them: `*` stands for any characters and a pattern may match anywhere in the buffer name. `[]` keeps nothing in fp32. Under ZeRO-3, `deepspeed.zero.Init` converts the buffers when it finishes building each module, before a checkpoint is loaded into them. Listed buffers stay fp32 even when `buffer_dtype` is set. Parameters named by the lists still follow the training dtype. | `"auto"` |
