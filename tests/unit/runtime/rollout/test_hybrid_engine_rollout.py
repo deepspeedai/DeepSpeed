@@ -162,6 +162,79 @@ def test_continuous_graph_capture_uses_fixed_capacity_buffers(mock_get_accelerat
     accelerator.capture_to_graph.assert_called_once_with(graph)
 
 
+@patch("deepspeed.runtime.rollout.hybrid_engine_rollout.get_accelerator")
+def test_continuous_graph_capture_uses_eager_attention(mock_get_accelerator):
+
+    class DecodeModule(torch.nn.Module):
+
+        def __init__(self):
+            super().__init__()
+            self.config = SimpleNamespace(_attn_implementation="sdpa")
+            self.attention_implementations = []
+
+        def forward(self, input_ids, **_kwargs):
+            self.attention_implementations.append(self.config._attn_implementation)
+            return SimpleNamespace(logits=torch.zeros((input_ids.shape[0], 1, 8)))
+
+    stream = MagicMock()
+    accelerator = mock_get_accelerator.return_value
+    accelerator.Stream.return_value = stream
+    accelerator.current_stream.return_value = stream
+    accelerator.stream.side_effect = lambda _stream: nullcontext()
+    accelerator.capture_to_graph.side_effect = lambda _graph: nullcontext()
+
+    module = DecodeModule()
+    HybridEngineRollout._capture_continuous_graph(
+        module,
+        MagicMock(),
+        torch.zeros((4, 1), dtype=torch.long),
+        torch.zeros((4, 6), dtype=torch.long),
+        torch.zeros(4, dtype=torch.long),
+        torch.tensor([5], dtype=torch.long),
+        torch.zeros((4, 1), dtype=torch.long),
+    )
+
+    assert module.attention_implementations == ["eager"] * 4
+    assert module.config._attn_implementation == "sdpa"
+
+
+def test_continuous_graph_state_reuses_matching_capture_and_rebuilds_for_weight_updates():
+
+    class GraphCache:
+
+        def __init__(self, *_args, **_kwargs):
+            self.reset_calls = 0
+
+        def set_write_position(self, _write_position):
+            return None
+
+        def reset(self):
+            self.reset_calls += 1
+
+    class DecodeModule(torch.nn.Module):
+
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.zeros(1))
+            self.config = SimpleNamespace()
+
+    module = DecodeModule()
+    rollout = HybridEngineRollout(SimpleNamespace(module=module), _make_tokenizer())
+    graph = MagicMock()
+    logits = torch.empty((1, 1, 8))
+
+    with patch.object(rollout, "_capture_continuous_graph", return_value=(graph, logits)) as capture:
+        first = rollout._get_continuous_graph_state(module, 1, 3, 5, torch.device("cpu"), torch.float32, GraphCache)
+        second = rollout._get_continuous_graph_state(module, 1, 3, 5, torch.device("cpu"), torch.float32, GraphCache)
+        with torch.no_grad():
+            module.weight.add_(1)
+        third = rollout._get_continuous_graph_state(module, 1, 3, 5, torch.device("cpu"), torch.float32, GraphCache)
+
+    assert first is second
+    assert third is not first
+    assert capture.call_count == 2
+
+
 def test_static_cache_constructor_supports_max_batch_keyword():
 
     class MaxBatchStaticCache:
@@ -206,6 +279,7 @@ def test_continuous_generation_validates_each_request_length():
 def test_continuous_generation_rejects_legacy_cache_model():
 
     class LegacyModel(torch.nn.Module):
+        _supports_cache_class = False
 
         def __init__(self):
             super().__init__()
@@ -251,7 +325,7 @@ def test_continuous_generation_covers_modern_static_cache_path():
 
         def forward(self, input_ids, attention_mask, past_key_values=None, use_cache=True, **kwargs):
             key_states = input_ids[:, None, :, None].to(dtype=torch.float32)
-            _, cache_values = past_key_values.update(key_states, key_states, layer_idx=0, **kwargs)
+            _, cache_values = past_key_values.update(key_states, key_states, layer_idx=0, cache_kwargs=kwargs)
             cache_sums = cache_values[:, 0].sum(dim=(1, 2))
             next_tokens = torch.where(cache_sums == 6, 2, 7).long()
             self.calls.append((input_ids.shape[0], input_ids.shape[1]))
@@ -305,7 +379,7 @@ def test_continuous_generation_trims_cache_after_staggered_eos():
 
         def forward(self, input_ids, attention_mask, past_key_values=None, use_cache=True, **kwargs):
             states = input_ids[:, None, :, None].to(dtype=torch.float32)
-            _, values = past_key_values.update(states, states, layer_idx=0, **kwargs)
+            _, values = past_key_values.update(states, states, layer_idx=0, cache_kwargs=kwargs)
             cache_sums = values[:, 0].sum(dim=(1, 2))
             eos_rows = (cache_sums == 6) | (cache_sums == 8) | (cache_sums == 10)
             next_tokens = torch.where(eos_rows, 2, 7).long()

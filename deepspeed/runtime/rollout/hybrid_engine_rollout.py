@@ -15,6 +15,7 @@ Two generation paths:
 """
 
 import time
+from contextlib import contextmanager
 from copy import copy
 from dataclasses import dataclass
 from inspect import signature
@@ -82,6 +83,19 @@ class HybridEngineRolloutConfig:
     use_shared_prefill: bool = False
 
 
+@dataclass
+class _ContinuousGraphState:
+    signature: tuple
+    cache: object
+    static_input: torch.Tensor
+    static_attention: torch.Tensor
+    static_causal_attention: torch.Tensor
+    static_position_ids: torch.Tensor
+    static_write_positions: torch.Tensor
+    graph: object
+    static_logits: torch.Tensor
+
+
 class HybridEngineRollout(RolloutEngine):
     """Rollout engine using DeepSpeed hybrid engine.
 
@@ -98,6 +112,7 @@ class HybridEngineRollout(RolloutEngine):
         self.enable_profiling = getattr(cfg, 'enable_profiling', False) if cfg else False
         self.use_shared_prefill = getattr(cfg, 'use_shared_prefill', False) if cfg else False
         self._last_profile = None
+        self._continuous_graph_state = None
 
     @torch.no_grad()
     def generate(self, request: RolloutRequest, sampling: SamplingConfig) -> RolloutBatch:
@@ -277,7 +292,7 @@ class HybridEngineRollout(RolloutEngine):
         )
         if max_positions is not None and max_cache_len > max_positions:
             raise ValueError("continuous batching cache exceeds the model maximum position embeddings")
-        if not getattr(module, "_supports_cache_class", False):
+        if getattr(module, "_supports_cache_class", None) is False:
             raise ValueError("continuous batching requires a model with cache-class support; use the default "
                              "generate() path or upgrade transformers")
 
@@ -436,31 +451,16 @@ class HybridEngineRollout(RolloutEngine):
             request_by_id[request_id] = request
             responses[request_id] = []
 
-        cache = DeepSpeedStaticCache(
-            module.config,
-            batch_size=max_batch_size,
-            max_cache_len=max_cache_len,
-            device=device,
-            dtype=model_dtype,
-        )
-        static_input = torch.zeros((max_batch_size, 1), dtype=torch.long, device=device)
-        static_attention = torch.zeros((max_batch_size, max_cache_len), dtype=torch.long, device=device)
-        static_position_ids = torch.zeros((max_batch_size, 1), dtype=torch.long, device=device)
-        static_write_positions = torch.zeros(max_batch_size, dtype=torch.long, device=device)
-        cache.set_write_position(static_write_positions)
-        # Transformers uses cache_position to build the causal mask. Per-row
-        # validity is represented by static_attention, so a fixed upper bound
-        # lets one captured graph serve requests at different decode lengths.
-        static_cache_position = torch.tensor([max_cache_len - 1], dtype=torch.long, device=device)
-        graph, static_logits = self._capture_continuous_graph(
-            module,
-            cache,
-            static_input,
-            static_attention,
-            static_write_positions,
-            static_cache_position,
-            static_position_ids,
-        )
+        state = self._get_continuous_graph_state(module, max_batch_size, prompt_len, max_cache_len, device,
+                                                 model_dtype, DeepSpeedStaticCache)
+        cache = state.cache
+        static_input = state.static_input
+        static_attention = state.static_attention
+        static_causal_attention = state.static_causal_attention
+        static_position_ids = state.static_position_ids
+        static_write_positions = state.static_write_positions
+        graph = state.graph
+        static_logits = state.static_logits
 
         slot_by_request = {}
         write_positions = {}
@@ -519,6 +519,7 @@ class HybridEngineRollout(RolloutEngine):
 
             decoded_tokens = {}
             if decode_ids:
+                self._update_static_causal_attention(static_attention, static_causal_attention)
                 decode_start = self._profile_start(profile)
                 get_accelerator().replay_graph(graph)
                 self._profile_end(profile, "decode_forward_ms", decode_start, count="num_decode_forwards")
@@ -547,6 +548,86 @@ class HybridEngineRollout(RolloutEngine):
                                             generation_end, post_processing_end)
         return output
 
+    def _get_continuous_graph_state(self, module, max_batch_size, prompt_len, max_cache_len, device, model_dtype,
+                                    cache_type):
+        signature = self._continuous_graph_signature(module, max_batch_size, prompt_len, max_cache_len, device,
+                                                     model_dtype)
+        state = self._continuous_graph_state
+        if state is None or state.signature != signature:
+            cache = cache_type(
+                module.config,
+                batch_size=max_batch_size,
+                max_cache_len=max_cache_len,
+                device=device,
+                dtype=model_dtype,
+            )
+            static_input = torch.zeros((max_batch_size, 1), dtype=torch.long, device=device)
+            static_attention = torch.zeros((max_batch_size, max_cache_len), dtype=torch.long, device=device)
+            static_causal_attention = torch.zeros((max_batch_size, 1, 1, max_cache_len),
+                                                  dtype=model_dtype,
+                                                  device=device)
+            static_position_ids = torch.zeros((max_batch_size, 1), dtype=torch.long, device=device)
+            static_write_positions = torch.zeros(max_batch_size, dtype=torch.long, device=device)
+            cache.set_write_position(static_write_positions)
+            # Transformers uses cache_position to build the causal mask. Per-row
+            # validity is represented by static_attention, so a fixed upper bound
+            # lets one captured graph serve requests at different decode lengths.
+            static_cache_position = torch.tensor([max_cache_len - 1], dtype=torch.long, device=device)
+            graph, static_logits = self._capture_continuous_graph(
+                module,
+                cache,
+                static_input,
+                static_causal_attention,
+                static_write_positions,
+                static_cache_position,
+                static_position_ids,
+            )
+            state = _ContinuousGraphState(
+                signature,
+                cache,
+                static_input,
+                static_attention,
+                static_causal_attention,
+                static_position_ids,
+                static_write_positions,
+                graph,
+                static_logits,
+            )
+            self._continuous_graph_state = state
+
+        state.cache.reset()
+        state.static_input.zero_()
+        state.static_attention.zero_()
+        state.static_causal_attention.zero_()
+        state.static_position_ids.zero_()
+        state.static_write_positions.zero_()
+        return state
+
+    @staticmethod
+    def _continuous_graph_signature(module, max_batch_size, prompt_len, max_cache_len, device, model_dtype):
+        parameter_signature = tuple((parameter.data_ptr(), parameter._version) for parameter in module.parameters())
+        return (id(module), device.type, device.index, model_dtype, max_batch_size, prompt_len, max_cache_len,
+                parameter_signature)
+
+    @staticmethod
+    def _update_static_causal_attention(static_attention, static_causal_attention):
+        static_causal_attention.copy_(static_attention[:, None, None, :])
+        static_causal_attention.neg_().add_(1).mul_(torch.finfo(static_causal_attention.dtype).min)
+
+    @staticmethod
+    @contextmanager
+    def _capture_eager_attention(module):
+        attributes = []
+        for target in (module, getattr(module, "config", None)):
+            if target is not None and hasattr(target, "_attn_implementation"):
+                attributes.append((target, target._attn_implementation))
+                target._attn_implementation = "eager"
+        try:
+            yield
+        finally:
+            for target, implementation in attributes:
+                target._attn_implementation = implementation
+
     @staticmethod
     def _capture_continuous_graph(module, cache, static_input, static_attention, static_write_positions,
                                   static_cache_position, static_position_ids):
@@ -557,11 +638,23 @@ class HybridEngineRollout(RolloutEngine):
         module._forward_pre_hooks.clear()
         module._forward_hooks.clear()
         try:
-            warmup_stream = accelerator.Stream()
-            warmup_stream.wait_stream(accelerator.current_stream())
-            with accelerator.stream(warmup_stream):
-                for _ in range(3):
-                    module(
+            with HybridEngineRollout._capture_eager_attention(module):
+                warmup_stream = accelerator.Stream()
+                warmup_stream.wait_stream(accelerator.current_stream())
+                with accelerator.stream(warmup_stream):
+                    for _ in range(3):
+                        module(
+                            static_input,
+                            attention_mask=static_attention,
+                            past_key_values=cache,
+                            use_cache=True,
+                            cache_position=static_cache_position,
+                            position_ids=static_position_ids,
+                        )
+                accelerator.current_stream().wait_stream(warmup_stream)
+                graph = accelerator.create_graph()
+                with accelerator.capture_to_graph(graph):
+                    output = module(
                         static_input,
                         attention_mask=static_attention,
                         past_key_values=cache,
@@ -569,17 +662,6 @@ class HybridEngineRollout(RolloutEngine):
                         cache_position=static_cache_position,
                         position_ids=static_position_ids,
                     )
-            accelerator.current_stream().wait_stream(warmup_stream)
-            graph = accelerator.create_graph()
-            with accelerator.capture_to_graph(graph):
-                output = module(
-                    static_input,
-                    attention_mask=static_attention,
-                    past_key_values=cache,
-                    use_cache=True,
-                    cache_position=static_cache_position,
-                    position_ids=static_position_ids,
-                )
         finally:
             module._forward_pre_hooks.update(saved_pre)
             module._forward_hooks.update(saved_post)
