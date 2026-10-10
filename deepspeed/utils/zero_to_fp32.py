@@ -35,7 +35,8 @@ from deepspeed.checkpoint.constants import (DS_VERSION, OPTIMIZER_STATE_DICT, SI
                                             FP32_FLAT_GROUPS, ZERO_STAGE, PARTITION_COUNT, PARAM_SHAPES, BUFFER_NAMES,
                                             FROZEN_PARAM_SHAPES, FROZEN_PARAM_FRAGMENTS, AUTOEP_LAYERS_KEY,
                                             AUTOEP_LAYERS_KEY_LEGACY, AUTOEP_ZERO3_EXPERT_STATE_FORMAT_KEY,
-                                            AUTOEP_ZERO3_PARTITIONED_EXPERT_STATE_FORMAT, PARAM_ALIGNMENT_PADDINGS)
+                                            AUTOEP_ZERO3_PARTITIONED_EXPERT_STATE_FORMAT, PARAM_ALIGNMENT_PADDINGS,
+                                            PARAM_SLICE_MAPPINGS)
 
 
 @dataclass
@@ -204,10 +205,15 @@ def parse_optim_states(files, ds_checkpoint_dir):
         state_dict["optimizer_state_dict"].pop("optimizer_state_dict", None)
         state_dicts.append(state_dict)
 
-    if ZERO_STAGE not in state_dicts[0][OPTIMIZER_STATE_DICT]:
+    optim_state = state_dicts[0][OPTIMIZER_STATE_DICT]
+    if ZERO_STAGE in optim_state:
+        zero_stage = optim_state[ZERO_STAGE]
+    elif SINGLE_PARTITION_OF_FP32_GROUPS in optim_state and PARAM_SLICE_MAPPINGS in optim_state:
+        # BF16_Optimizer stage 0 partitions its fp32 master weights like ZeRO-1.
+        zero_stage = 1
+    else:
         raise ValueError(f"{files[0]} is not a zero checkpoint")
-    zero_stage = state_dicts[0][OPTIMIZER_STATE_DICT][ZERO_STAGE]
-    world_size = state_dicts[0][OPTIMIZER_STATE_DICT][PARTITION_COUNT]
+    world_size = optim_state[PARTITION_COUNT]
 
     # For ZeRO-2 each param group can have different partition_count as data parallelism for expert
     # parameters can be different from data parallelism for non-expert parameters. So we can just
