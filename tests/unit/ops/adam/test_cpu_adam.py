@@ -334,6 +334,11 @@ def test_zenflow_adam_cross_process():
 class TestCPUAdamGPUError(DistributedTest):
 
     def test_cpu_adam_gpu_error(self):
+        if get_accelerator().device_name() == 'cpu':
+            # The premise is a parameter on a discrete accelerator (see device_name(0)
+            # below); on the cpu accelerator step() returns normally, and the test
+            # additionally deadlocks inside the rank pool.
+            pytest.skip("requires a discrete accelerator device")
         model_size = 64
         from deepspeed.ops.adam import DeepSpeedCPUAdam
         device = get_accelerator().device_name(0)  # 'cuda:0' or 'xpu:0'
