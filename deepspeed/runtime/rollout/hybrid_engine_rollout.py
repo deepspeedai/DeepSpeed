@@ -554,6 +554,8 @@ class HybridEngineRollout(RolloutEngine):
         module = self.engine.module
         prompt_len = requests[0].prompt_ids.shape[1]
         self._validate_continuous_graph_options(prompt_len, sampling)
+        if getattr(module.config, "_attn_implementation", None) == "flash_attention_2":
+            raise ValueError("continuous CUDA graph capture does not support flash_attention_2")
         device = requests[0].prompt_ids.device
         if device.type != "cuda":
             raise ValueError("continuous CUDA graph capture requires CUDA rollout inputs")
