@@ -40,6 +40,7 @@ def masked_softmax_kernel(output_ptr, input_ptr, stride, mask_ptr, mask_stride, 
     mask = tl.load(mask_ptrs, mask=col_offsets < n_cols, other=0).to(tl.float32)
     row_minus_max = row - tl.max(row, axis=0)
     row_minus_max = row_minus_max + mask
+    row_minus_max = row_minus_max - tl.max(row_minus_max, axis=0)
     numerator = tl.exp(row_minus_max)
     denominator = tl.sum(numerator, axis=0)
     softmax_output = numerator / denominator
