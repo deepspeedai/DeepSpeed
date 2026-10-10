@@ -671,6 +671,89 @@ class TestAutoEPConfig:
         for param in layer.router.parameters():
             assert not hasattr(param, DS_AUTOEP_UC_META)
 
+    def test_live_expert_maps_address_the_packed_runtime_weights(self):
+        source = MockMoEBlock(num_experts=4, ffn_hidden=128, hidden_size=64)
+        spec = _make_spec()
+        # Packing everything onto one rank is the logical tensor, derived without any affine map.
+        full = dict(zip(("w1", "w2", "w3"), repack_expert_weights(source.experts, spec, ep_rank=0, ep_size=1)))
+        layers = [
+            AutoEPMoELayer(spec, source, ep_size=2, ep_rank=rank, config=_runtime_config(enabled=True, autoep_size=2))
+            for rank in range(2)
+        ]
+
+        for name in ("w1", "w2", "w3"):
+            affine_map = layers[0].expert_affine_maps()[name]
+            assert affine_map.logical_shape == tuple(full[name].shape)
+            for rank, layer in enumerate(layers):
+                local_weight = getattr(layer.experts, name).detach()
+                assert affine_map.shard_shapes[rank] == tuple(local_weight.shape)
+                torch.testing.assert_close(affine_map.extract(full[name], rank), local_weight, rtol=0, atol=0)
+
+    def test_plan_expert_transfer_moves_live_shards_into_target_packed_order(self, monkeypatch):
+        from deepspeed.checkpoint.affine import ParamAffineMap
+        from deepspeed.checkpoint.autoep_affine import make_autoep_placement_descriptor
+
+        source = MockMoEBlock(num_experts=4, ffn_hidden=128, hidden_size=64)
+        spec = _make_spec()
+        full = dict(zip(("w1", "w2", "w3"), repack_expert_weights(source.experts, spec, ep_rank=0, ep_size=1)))
+        layers = [
+            AutoEPMoELayer(spec, source, ep_size=2, ep_rank=rank, config=_runtime_config(enabled=True, autoep_size=2))
+            for rank in range(2)
+        ]
+        # A resize to three ranks with reordered, uneven, empty and replicated placements.
+        target_experts = [[3, 0], [], [2, 1, 0]]
+        target_placement = make_autoep_placement_descriptor(4, target_experts)
+
+        def materializes(*args, **kwargs):
+            raise AssertionError("planning must not materialize the logical parameter")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(ParamAffineMap, "rebuild", materializes)
+            patch.setattr(ParamAffineMap, "extract", materializes)
+            plans = layers[0].plan_expert_transfer(target_placement)
+
+        assert set(plans) == {"w1", "w2", "w3"}
+        for name, plan in plans.items():
+            expert_shape = tuple(full[name].shape[1:])
+            targets = {
+                rank: torch.full((len(experts), ) + expert_shape, float("nan"))
+                for rank, experts in enumerate(target_experts)
+            }
+            writes = {rank: torch.zeros(target.shape, dtype=torch.int64) for rank, target in targets.items()}
+            for segment in plan.segments:
+                assert segment.source_rank in (0, 1)
+                local_weight = getattr(layers[segment.source_rank].experts, name).detach()
+                source_view = torch.as_strided(local_weight.reshape(-1), segment.shape, segment.source_strides,
+                                               segment.source_offset)
+                target_view = torch.as_strided(targets[segment.target_rank].view(-1), segment.shape,
+                                               segment.target_strides, segment.target_offset)
+                target_view.copy_(source_view)
+                torch.as_strided(writes[segment.target_rank].view(-1), segment.shape, segment.target_strides,
+                                 segment.target_offset).add_(1)
+
+            for rank, experts in enumerate(target_experts):
+                torch.testing.assert_close(targets[rank], full[name][experts], rtol=0, atol=0)
+                assert torch.all(writes[rank] == 1)
+
+    def test_live_expert_maps_reject_a_placement_the_weights_do_not_have(self):
+        from deepspeed.checkpoint.autoep_affine import make_autoep_placement_descriptor
+
+        layer = AutoEPMoELayer(_make_spec(),
+                               MockMoEBlock(num_experts=4, ffn_hidden=128, hidden_size=64),
+                               ep_size=2,
+                               ep_rank=0,
+                               config=_runtime_config(enabled=True, autoep_size=2))
+        uniform_placement = layer.expert_placement_descriptor
+
+        with pytest.raises(ValueError, match="num_experts"):
+            layer.plan_expert_transfer(make_autoep_placement_descriptor(8, [list(range(8))]))
+
+        layer.expert_placement_descriptor = make_autoep_placement_descriptor(4, [[1, 0], [2, 3]])
+        with pytest.raises(NotImplementedError, match="placement"):
+            layer.expert_affine_maps()
+        with pytest.raises(NotImplementedError, match="placement"):
+            layer.plan_expert_transfer(uniform_placement)
+
     def test_checkpoint_source_placement_does_not_need_to_match_target_topology(self):
         from deepspeed.checkpoint.autoep_affine import make_autoep_placement_descriptor
         from deepspeed.checkpoint.constants import (

@@ -22,7 +22,10 @@ import torch.nn as nn
 import deepspeed.comm as dist
 from deepspeed.accelerator import get_accelerator
 from deepspeed.checkpoint.autoep_affine import (autoep_experts_for_rank, autoep_placement_to_affine_map,
-                                                legacy_uniform_autoep_placement_descriptor)
+                                                legacy_uniform_autoep_placement_descriptor,
+                                                plan_autoep_placement_transfer)
+from deepspeed.checkpoint.affine import ParamAffineMap
+from deepspeed.checkpoint.affine_transfer import PlanBudget, TransferPlan
 from deepspeed.checkpoint.constants import (AFFINE_MAP, AUTOEP_EXPERT_PLACEMENT, AUTOEP_PARAM_EP_RANK,
                                             AUTOEP_PARAM_LOCAL_EXPERTS, AUTOEP_PARAM_LOGICAL_SHAPE, DS_AUTOEP_UC_META)
 from deepspeed.module_inject.auto_ep_config import AutoEPConfig, MoELayerSpec, resolve_autoep_config_defaults
@@ -646,8 +649,7 @@ class AutoEPMoELayer(nn.Module):
         self.experts.w3.requires_grad_(w3_requires_grad)
         local_experts = autoep_experts_for_rank(self.expert_placement_descriptor, self.ep_rank)
         for param in (self.experts.w1, self.experts.w2, self.experts.w3):
-            physical_shape = getattr(param, 'ds_shape', param.shape)
-            logical_shape = [self.num_experts, *physical_shape[1:]]
+            logical_shape = self._expert_logical_shape(param)
             affine_map = autoep_placement_to_affine_map(self.expert_placement_descriptor, logical_shape)
             setattr(
                 param,
@@ -752,6 +754,56 @@ class AutoEPMoELayer(nn.Module):
         plan = pending.wait()
         self._async_split_plan_pending = None
         return plan
+
+    def _expert_logical_shape(self, param: nn.Parameter) -> list[int]:
+        # ZeRO-3 partitions the packed local tensor in place; ds_shape keeps its unpartitioned shape.
+        physical_shape = getattr(param, 'ds_shape', param.shape)
+        return [self.num_experts, *physical_shape[1:]]
+
+    def _live_expert_placement(self) -> dict:
+        # repack_expert_weights packs each rank's experts as one contiguous, uniform range. A
+        # descriptor that says otherwise would address shards the weights do not have.
+        packed_placement = legacy_uniform_autoep_placement_descriptor(self.num_experts, self.num_local_experts,
+                                                                      self.ep_size)
+        if self.expert_placement_descriptor != packed_placement:
+            raise NotImplementedError("AutoEP expert weights are packed with the contiguous uniform placement; "
+                                      "the layer's expert placement descriptor does not describe them.")
+        return self.expert_placement_descriptor
+
+    def expert_affine_maps(self) -> dict[str, ParamAffineMap]:
+        """Return the affine map of each live expert parameter (``w1``, ``w2``, ``w3``).
+
+        Map ranks are EP-local ranks; translate them with ``dist.get_global_rank(self.ep_group, rank)``.
+        Each rank's shard is the unpartitioned packed ``[local_experts, ...]`` tensor, so ZeRO-3 and
+        expert-data-parallel fragments of it are outside the map.
+        """
+        placement = self._live_expert_placement()
+        affine_maps = {}
+        for name in ("w1", "w2", "w3"):
+            param = getattr(self.experts, name)
+            affine_maps[name] = autoep_placement_to_affine_map(placement, self._expert_logical_shape(param))
+        return affine_maps
+
+    def plan_expert_transfer(self,
+                             target_placement: dict,
+                             limits: PlanBudget | None = None,
+                             *,
+                             replica_selector=None) -> dict[str, TransferPlan]:
+        """Plan the copies that move the live expert parameters to ``target_placement``.
+
+        ``target_placement`` is an AutoEP placement descriptor in the target's EP-local ranks. This
+        only plans: it moves no data and does not check that this layer can run with the target.
+        """
+        placement = self._live_expert_placement()
+        plans = {}
+        for name in ("w1", "w2", "w3"):
+            param = getattr(self.experts, name)
+            plans[name] = plan_autoep_placement_transfer(placement,
+                                                         target_placement,
+                                                         self._expert_logical_shape(param),
+                                                         limits,
+                                                         replica_selector=replica_selector)
+        return plans
 
     def set_deepspeed_parallelism(
         self,
