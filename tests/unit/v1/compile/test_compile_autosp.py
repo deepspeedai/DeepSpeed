@@ -216,6 +216,29 @@ class TestSDPANodesCompile:
             assert node.target == F.scaled_dot_product_attention
 
 
+class TestNodeShapeMeta:
+
+    # Shape propagation stores real tensors in meta["val"]; reading them must not depend on their truthiness.
+    @pytest.mark.parametrize("value", [torch.empty(2, 3), torch.zeros(())], ids=["multi_element", "zero_scalar"])
+    def test_prefers_val_over_example_value(self, value):
+        from deepspeed.compile.fx import get_node_shape_meta
+
+        node = Graph().placeholder("input")
+        node.meta["val"] = value
+        node.meta["example_value"] = torch.empty(4)
+
+        assert get_node_shape_meta(node) is value
+
+    def test_falls_back_to_example_value(self):
+        from deepspeed.compile.fx import get_node_shape_meta
+
+        node = Graph().placeholder("input")
+        example_value = torch.empty(4)
+        node.meta["example_value"] = example_value
+
+        assert get_node_shape_meta(node) is example_value
+
+
 class TestInputIdCompile:
 
     @pytest.mark.sequential
