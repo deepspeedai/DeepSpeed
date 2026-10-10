@@ -335,7 +335,7 @@ def test_one_step_helper_keeps_original_learning_rate_for_default(row_weighting_
             _run_one_step("deepep", ep_size=4, seed=2468, row_weighting_impl=row_weighting_impl)
 
 
-def _assert_cleanup_results_close(actual, expected, *, compare_score_gradients):
+def _assert_cleanup_results_close(actual, expected, *, compare_score_gradients, extra_route_recomputes=0):
     for name, rtol, atol in (
         ("output", 2e-3, 2e-3),
         ("loss", 2e-3, 2e-3),
@@ -351,10 +351,25 @@ def _assert_cleanup_results_close(actual, expected, *, compare_score_gradients):
                                         f"expected_norm={expected[name].norm().item()}"))
     # DeepEP atomics can change small gradient elements between equivalent runs.
     # The checks below retain exact routes and compare the stable training invariants.
-    assert len(actual["routes"]) == len(expected["routes"])
-    for (actual_name, actual_route), (expected_name, expected_route) in zip(actual["routes"], expected["routes"]):
-        assert actual_name == expected_name
-        assert torch.equal(actual_route, expected_route)
+    if extra_route_recomputes:
+        # Nested checkpointing evaluates the router once more per layer. Every observed route must still match
+        # that layer's reference route, including the extra inner recompute.
+        actual_routes, expected_routes = {}, {}
+        for name, route in actual["routes"]:
+            actual_routes.setdefault(name, []).append(route)
+        for name, route in expected["routes"]:
+            expected_routes.setdefault(name, []).append(route)
+        assert actual_routes.keys() == expected_routes.keys()
+        for name, routes in actual_routes.items():
+            reference_routes = expected_routes[name]
+            assert len(routes) == len(reference_routes) + extra_route_recomputes
+            for route in routes + reference_routes:
+                assert torch.equal(route, reference_routes[0]), f"checkpoint routing changed for {name}"
+    else:
+        assert len(actual["routes"]) == len(expected["routes"])
+        for (actual_name, actual_route), (expected_name, expected_route) in zip(actual["routes"], expected["routes"]):
+            assert actual_name == expected_name
+            assert torch.equal(actual_route, expected_route)
     assert actual["score_gradients"].keys() == expected["score_gradients"].keys()
     for name, actual_grad in actual["score_gradients"].items():
         expected_grad = expected["score_gradients"][name]
@@ -642,7 +657,10 @@ class TestDeepEPMatchesCollective(DistributedTest):
                                           skewed_routing=skewed_routing,
                                           seq_len=seq_len)
 
-        _assert_cleanup_results_close(non_reentrant, reentrant, compare_score_gradients=False)
+        _assert_cleanup_results_close(non_reentrant,
+                                      reentrant,
+                                      compare_score_gradients=False,
+                                      extra_route_recomputes=int(nested))
         # A consistent layout differs from the reference only by reduction order, below 1e-4 relative; gradients
         # scattered onto another arrival order are off by order one.
         _assert_gradients_match_relatively(non_reentrant, reentrant, tolerance=1e-2)
