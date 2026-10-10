@@ -15,7 +15,6 @@ Two generation paths:
 """
 
 import time
-from contextlib import contextmanager
 from copy import copy
 from dataclasses import dataclass
 from inspect import signature
@@ -757,20 +756,6 @@ class HybridEngineRollout(RolloutEngine):
         static_causal_attention.neg_().add_(1).mul_(torch.finfo(static_causal_attention.dtype).min)
 
     @staticmethod
-    @contextmanager
-    def _capture_eager_attention(module):
-        attributes = []
-        for target in (module, getattr(module, "config", None)):
-            if target is not None and hasattr(target, "_attn_implementation"):
-                attributes.append((target, target._attn_implementation))
-                target._attn_implementation = "eager"
-        try:
-            yield
-        finally:
-            for target, implementation in attributes:
-                target._attn_implementation = implementation
-
-    @staticmethod
     def _capture_continuous_graph(module, cache, static_input, static_attention, static_write_positions,
                                   static_cache_position, static_position_ids):
         """Capture one fixed-capacity decode forward and return its static logits."""
@@ -780,23 +765,11 @@ class HybridEngineRollout(RolloutEngine):
         module._forward_pre_hooks.clear()
         module._forward_hooks.clear()
         try:
-            with HybridEngineRollout._capture_eager_attention(module):
-                warmup_stream = accelerator.Stream()
-                warmup_stream.wait_stream(accelerator.current_stream())
-                with accelerator.stream(warmup_stream):
-                    for _ in range(3):
-                        module(
-                            static_input,
-                            attention_mask=static_attention,
-                            past_key_values=cache,
-                            use_cache=True,
-                            cache_position=static_cache_position,
-                            position_ids=static_position_ids,
-                        )
-                accelerator.current_stream().wait_stream(warmup_stream)
-                graph = accelerator.create_graph()
-                with accelerator.capture_to_graph(graph):
-                    output = module(
+            warmup_stream = accelerator.Stream()
+            warmup_stream.wait_stream(accelerator.current_stream())
+            with accelerator.stream(warmup_stream):
+                for _ in range(3):
+                    module(
                         static_input,
                         attention_mask=static_attention,
                         past_key_values=cache,
@@ -804,6 +777,17 @@ class HybridEngineRollout(RolloutEngine):
                         cache_position=static_cache_position,
                         position_ids=static_position_ids,
                     )
+            accelerator.current_stream().wait_stream(warmup_stream)
+            graph = accelerator.create_graph()
+            with accelerator.capture_to_graph(graph):
+                output = module(
+                    static_input,
+                    attention_mask=static_attention,
+                    past_key_values=cache,
+                    use_cache=True,
+                    cache_position=static_cache_position,
+                    position_ids=static_position_ids,
+                )
         finally:
             module._forward_pre_hooks.update(saved_pre)
             module._forward_hooks.update(saved_post)

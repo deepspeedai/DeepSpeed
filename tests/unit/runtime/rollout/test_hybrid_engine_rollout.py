@@ -176,7 +176,7 @@ def test_continuous_graph_capture_uses_fixed_capacity_buffers(mock_get_accelerat
 
 
 @patch("deepspeed.runtime.rollout.hybrid_engine_rollout.get_accelerator")
-def test_continuous_graph_capture_uses_eager_attention(mock_get_accelerator):
+def test_continuous_graph_capture_preserves_attention_implementation(mock_get_accelerator):
 
     class DecodeModule(torch.nn.Module):
 
@@ -207,7 +207,7 @@ def test_continuous_graph_capture_uses_eager_attention(mock_get_accelerator):
         torch.zeros((4, 1), dtype=torch.long),
     )
 
-    assert module.attention_implementations == ["eager"] * 4
+    assert module.attention_implementations == ["sdpa"] * 4
     assert module.config._attn_implementation == "sdpa"
 
 
