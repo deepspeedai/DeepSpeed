@@ -960,9 +960,13 @@ def _patch_tensor_methods():
 
     torch.mul = wrapFunc(torch.mul, _mul_flops_compute)
     torch.Tensor.mul = wrapFunc(torch.Tensor.mul, _mul_flops_compute)
+    torch.Tensor.__mul__ = wrapFunc(torch.Tensor.__mul__, _mul_flops_compute)
+    torch.Tensor.__rmul__ = wrapFunc(torch.Tensor.__rmul__, _mul_flops_compute)
 
     torch.add = wrapFunc(torch.add, _add_flops_compute)
     torch.Tensor.add = wrapFunc(torch.Tensor.add, _add_flops_compute)
+    torch.Tensor.__add__ = wrapFunc(torch.Tensor.__add__, _add_flops_compute)
+    torch.Tensor.__radd__ = wrapFunc(torch.Tensor.__radd__, _add_flops_compute)
 
     torch.einsum = wrapFunc(torch.einsum, _einsum_flops_compute)
 
@@ -1026,8 +1030,12 @@ def _reload_tensor_methods():
     torch.Tensor.addmm = old_functions[torch.Tensor.addmm.__str__]
     torch.mul = old_functions[torch.mul.__str__]
     torch.Tensor.mul = old_functions[torch.Tensor.mul.__str__]
+    torch.Tensor.__mul__ = old_functions[torch.Tensor.__mul__.__str__]
+    torch.Tensor.__rmul__ = old_functions[torch.Tensor.__rmul__.__str__]
     torch.add = old_functions[torch.add.__str__]
     torch.Tensor.add = old_functions[torch.Tensor.add.__str__]
+    torch.Tensor.__add__ = old_functions[torch.Tensor.__add__.__str__]
+    torch.Tensor.__radd__ = old_functions[torch.Tensor.__radd__.__str__]
 
     torch.einsum = old_functions[torch.einsum.__str__]
 
