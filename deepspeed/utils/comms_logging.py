@@ -76,7 +76,13 @@ class CommsLogger:
         self.enabled = COMMS_LOGGER_ENABLED_DEFAULT
 
     def configure(self, comms_config):
-        self.enabled = comms_config.comms_logger_enabled
+        # Honor the `enabled` field inside the comms_logger section instead of
+        # the outer flag (which is true whenever the section is present). Without
+        # this, "comms_logger": {"enabled": false} enables the logger, whose
+        # per-op timers then accumulate without reset (O(N^2) in ZeRO-3).
+        _inner_logger = getattr(comms_config, "comms_logger", None)
+        self.enabled = (_inner_logger.enabled if _inner_logger is not None
+                        else comms_config.comms_logger_enabled)
         if self.enabled:
             self.verbose = comms_config.comms_logger.verbose
             self.debug = comms_config.comms_logger.debug
