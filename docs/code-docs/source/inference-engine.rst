@@ -125,6 +125,107 @@ from that pre-sorted pending queue. Cache trimming remains disabled unless
 span with ``continuous_cache_capacity``; if the span is exhausted, the rollout
 raises an error that names both remedies.
 
+Set ``HybridEngineRolloutConfig(adaptive_prefill=True)`` to choose ordinary
+batched generation or aligned CB with cost-based prefill buckets. Auto is
+opt-in and takes precedence over ``align_decode_fronts`` without modifying the
+caller's configuration. A length-sorted O(n²) dynamic program minimizes the
+additive estimated cost of contiguous buckets, including one large bucket and
+one request per bucket as candidates. Each bucket uses ordinary left padding
+and a two-dimensional attention mask; no packed/varlen kernel is required.
+The CB cache layout remains right-aligned for the entire call. Newly admitted
+requests are replanned together on every refill, without reordering survivors.
+
+The estimated bucket cost is a fixed Forward term plus linear padded-token
+work, quadratic Attention work, and KV traffic. Attention work uses the model's
+layer count, query heads and ``head_dim``; KV traffic uses KV heads, ``head_dim``
+and parameter element size. Projection/MLP work is represented by the calibrated
+linear coefficient rather than inferred from head dimension alone.
+
+The following coefficients are starting estimates, not portable guarantees:
+
+* ``prefill_fixed_cost_ms=25.0``: fixed cost per prefill Forward.
+* ``prefill_token_cost_ms=0.1``: milliseconds per padded token position.
+* ``prefill_attention_cost_ms=0.01``: milliseconds per estimated GFLOP of
+  Attention work (``4 * B * L² * layers * query_heads * head_dim``).
+* ``prefill_kv_cost_ms=0.04``: milliseconds per MiB of estimated KV traffic.
+* ``continuous_decode_cost_ms=10.0``: extra CB milliseconds per Decode step
+  (generation budget minus the first token returned by Prefill), used when
+  comparing with ordinary generation.
+
+All costs must be finite and non-negative. Calibrate them for the model,
+device, precision and attention backend. DP is optimal for these estimates;
+it cannot guarantee globally minimal measured GPU latency. Ordinary generation
+is eligible only when all requests fit the active-row and prefill limits, the
+physical input width fits the model position limit, and neither explicit static
+capacity nor trimming is requested. Otherwise Auto remains on the CB path.
+
+Auto validates masks and reads effective lengths in one batch transfer. When
+ordinary generation beats a lower bound on every CB partition, it skips DP;
+uniform prompt lengths also admit an exact single-bucket estimate. The fallback
+reuses the resolved generation configuration and normalizes the result once.
+This keeps planning overhead small for short generations and large request counts.
+
+The `DeepSpeedExamples adaptive prefill benchmark
+<https://github.com/deepspeedai/DeepSpeedExamples/tree/master/benchmarks/opsd#adaptive-prefill-calibration>`_
+provides separate calibration and evaluation. From the DeepSpeedExamples checkout:
+
+.. code-block:: bash
+
+   python benchmarks/opsd/rollout_prefill.py --model Qwen/Qwen3-32B --dtype bfloat16 \
+       --repeats 3 --calibrate costs.json
+   python benchmarks/opsd/rollout_prefill.py --model Qwen/Qwen3-32B --dtype bfloat16 \
+       --cost-config costs.json --repeats 3 --output sweep.json
+
+Use ``--model tiny-qwen2 --dtype float32`` for a seeded small-model smoke test.
+Calibration uses six uniform shapes distinct from the evaluation workloads,
+fits non-negative fixed/token/Attention terms, measures KV management rates,
+and estimates extra CB Decode cost from one-token and eight-token calls.
+The saved JSON records model, GPU, precision, backend and library versions;
+the sweep rejects a calibration from a different configuration. Applications
+can pass its ``costs`` dictionary to ``HybridEngineRolloutConfig``.
+Calibration runs during deployment preparation; applications load the saved
+coefficients once at rollout initialization, without profiling or refitting
+inside generation requests. The built-in grid reaches 768 input tokens; extend
+it to cover the deployment's lengths and feasible batch sizes before relying
+on these estimates for longer contexts.
+
+The four evaluation workloads cover 128 short requests, a 128/4 tail, a
+16..512 spread and a 512/16 tail. Timing includes routing and cache work, with
+one warmup and interleaved repetitions of all four paths. The report includes
+``auto_vs_best`` and the worst-case regression, plus selected routes and output
+ID agreement. Generation is deliberately limited to two tokens with EOS
+disabled to expose short-generation overhead; this is a controlled performance
+test rather than a natural-EOS rollout trace. Use ``--new-tokens`` to evaluate
+other budgets and recalibrate when the deployment configuration changes.
+
+``prefill_max_tokens=65536`` limits padded token positions in each Forward;
+set it to ``None`` to remove this planning limit. A single prompt above the
+configured limit raises an error; this does not implement chunked prefill.
+Long prompts also need a model position limit covering the prompt and generation
+budget, sufficient static KV capacity, and enough temporary Forward memory.
+The token limit does not bound allocated Decode KV memory; reduce the configured
+active-row capacity or cache capacity when needed.
+
+Automatic selection currently requires single-process greedy rollout with one
+sample per prompt and a supported cache-class model. Other non-default generation
+settings beyond repetition penalty, token IDs and the supported length/sampling
+settings are rejected; for example, beam search, no-repeat n-grams, forced tokens
+and dictionary outputs cannot be reproduced by the continuous path. Auto resolves
+HF's effective generation configuration before validation, including legacy model
+settings, while retaining explicit generation-configuration overrides. Repetition
+penalty retains the original padded prompt history even when bucket model input
+is trimmed.
+
+With profiling, ``get_last_profile()["generation_strategy"]`` reports
+``"batched"`` or ``"bucketed"`` for Auto; ``num_prefill_forwards`` counts actual
+bucket Forwards on the CB path. End-to-end time includes initial route planning
+and result normalization. Ordinary generation has no static-cache snapshot,
+so ``get_last_continuous_stats()`` returns ``None`` for that call. Across Auto
+paths, productive-token counts and throughput exclude structural padding and
+retain EOS plus PAD-valued tokens generated before termination; active/configured
+row-capacity fields retain their continuous-call meaning. Manual alignment and
+equal-width modes retain their existing profile strategy labels.
+
 The most recent cache statistics are available from
 ``rollout.get_last_continuous_stats()``. They include ``cache_capacity``,
 ``peak_cache_length``, ``cache_memory_bytes``, ``trim_count``,
