@@ -8,6 +8,8 @@ import os
 import torch
 import deepspeed.comm as dist
 import deepspeed
+from datetime import timedelta
+from deepspeed.comm.torch import TorchBackend
 
 from unit.common import DistributedTest, DistributedFixture, get_master_port
 from unit.simple_model import SimpleModel
@@ -333,6 +335,49 @@ class TestDistInferenceAllReduce(DistributedTest):
         x = x.to(dtype)
         dist.inference_all_reduce(x)
         assert torch.all(x == result)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("forced_level", [0, 1, 2])
+class TestInferenceAllReduceDispatch:
+
+    def test(self, dtype, forced_level, tmp_path, monkeypatch):
+        # The shm all-reduce must only run when the host ISA level covers the dtype's
+        # kernel: fp32 needs level 1 (avx2) and bf16/fp16 level 2 (avx512bw).  The
+        # collective sinks and the world size are stubbed so the routing decision is
+        # verified on any CPU instead of whichever ISA or rank count the runner
+        # happens to expose, without launching a second process.
+        required_level = 1 if dtype == torch.float32 else 2
+        expected_route = 'shm' if forced_level >= required_level else 'process-group'
+
+        routes = []
+
+        def stubbed_shm_reduce(tensor):
+            routes.append('shm')
+            return tensor
+
+        def stubbed_pg_all_reduce(*args, **kwargs):
+            routes.append('process-group')
+            return kwargs.get('tensor')
+
+        def stubbed_world_size(group=None):
+            return 2
+
+        if not torch.distributed.is_initialized():
+            torch.distributed.init_process_group('gloo',
+                                                 init_method=f'file://{tmp_path}/dispatch_store',
+                                                 rank=0,
+                                                 world_size=1)
+        backend = TorchBackend('gloo', timedelta(seconds=300), None)
+
+        monkeypatch.setattr(torch.distributed, 'get_world_size', stubbed_world_size)
+        monkeypatch.setattr(torch.distributed, 'all_reduce', stubbed_pg_all_reduce)
+        monkeypatch.setattr(torch.ops.deepspeed, 'inference_all_reduce_', stubbed_shm_reduce, raising=False)
+        monkeypatch.setattr(backend, 'shm_vector_kernel_level', forced_level, raising=False)
+
+        backend.inference_all_reduce(torch.ones(1, 4, dtype=dtype), torch.distributed.ReduceOp.SUM)
+
+        assert routes == [expected_route]
 
 
 @pytest.mark.parametrize("dist_init_required", [True, False, None])

@@ -36,6 +36,7 @@ from deepspeed.accelerator import get_accelerator
 from ..swap_tensor.partitioned_param_swapper import AsyncPartitionedParameterSwapper, PartitionedParamStatus
 from deepspeed.inference.quantization.utils import _quantize_param, WEIGHT_QUANTIZATION_LAYERS, wrap_quantized_functional, wrap_load_from_state_dict
 from deepspeed.runtime.torch_autocast import sort_dtypes, get_comm_dtype, has_comm_dtype
+from deepspeed.runtime.keep_in_fp32 import KEEP_IN_FP32_AUTO, keep_in_fp32_pattern, keep_buffers_in_fp32
 
 partitioned_param_data_shape = [0]
 zero_init_context = 0
@@ -73,11 +74,16 @@ class NoGatherHandle:
             param.data = param.ds_tensor.data.to(device=get_accelerator().current_device_name(),
                                                  non_blocking=True).view(param.ds_shape)
         self.__param = param
+        self.__complete = False
 
     def wait(self, **kwargs) -> None:
+        if self.__complete:
+            return
+
         if not get_accelerator().resolves_data_dependency():
             get_accelerator().current_stream().synchronize()
         self.__param.ds_status = ZeroParamStatus.AVAILABLE
+        self.__complete = True
 
 
 class NoGatherCoalescedHandle:
@@ -462,7 +468,7 @@ class InsertPostInitMethodToModuleSubClasses(object):
                     fn_to_apply(module_to_apply_fn_to)
 
                     for param in params_to_apply_fn_to:
-                        dist.broadcast(param.data, 0, group=param.ds_process_group)
+                        dist.broadcast(param.data.view(torch.uint8), 0, group=param.ds_process_group)
 
                     for param in params_to_apply_fn_to:
                         param.partition(has_been_updated=True)
@@ -705,8 +711,12 @@ class AllGatherHandle:
         self.__quantization = quantization
         self.__param_buffer = param_buffer
         self.__original_dtype = original_dtype
+        self.__complete = False
 
     def wait(self, handle_dependency=True) -> None:
+        if self.__complete:
+            return
+
         instrument_w_nvtx(self.__handle.wait)()
 
         if self.__param_buffer is not None:
@@ -719,6 +729,7 @@ class AllGatherHandle:
                                                                        dtype=self.__param.dtype).to(
                                                                            self.__param.device)
         self.__param.ds_status = ZeroParamStatus.AVAILABLE
+        self.__complete = True
 
 
 class AllGatherCoalescedHandle:
@@ -1070,6 +1081,8 @@ class Init(InsertPostInitMethodToModuleSubClasses):
 
         self.tensor_overrides = tensor_overrides
         super().__init__(enabled=enabled, mem_efficient_linear=mem_efficient_linear, ds_config=_ds_config, dtype=dtype)
+        # Buffers the model names for fp32 (deepspeed/runtime/keep_in_fp32.py).
+        self.keep_in_fp32_modules = (_ds_config.keep_in_fp32_modules if _ds_config is not None else KEEP_IN_FP32_AUTO)
         if not dist.is_initialized():
             init_distributed()
             assert dist.is_initialized(), "Parameters cannot be scattered without initializing deepspeed.comm"
@@ -1166,6 +1179,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
         if module is not None:
             assert isinstance(module, torch.nn.Module)
             self._convert_to_zero_parameters(module.parameters(recurse=True))
+            self._keep_in_fp32(module)
 
         self.use_all_gather_into_tensor = dist.has_all_gather_into_tensor()
         if not self.use_all_gather_into_tensor:
@@ -1187,9 +1201,9 @@ class Init(InsertPostInitMethodToModuleSubClasses):
         self._convert_to_deepspeed_param(param)
         partition_group = self.get_partition_dp_group(param)
         if dist.get_world_group() == partition_group:
-            dist.broadcast(param.data, 0, partition_group)
+            dist.broadcast(param.data.view(torch.uint8), 0, partition_group)
         else:
-            dist.broadcast(param.data, dist.get_global_rank(partition_group, 0), partition_group)
+            dist.broadcast(param.data.view(torch.uint8), dist.get_global_rank(partition_group, 0), partition_group)
         param.partition()
 
     def _convert_to_zero_parameters(self, param_list):
@@ -1238,6 +1252,20 @@ class Init(InsertPostInitMethodToModuleSubClasses):
         see_memory_usage(
             f"Param count {InsertPostInitMethodToModuleSubClasses.num_module_elements}. After converting and partitioning params in {module.__class__.__name__}",
             force=False)
+
+        # A transformers model's fp32 list is complete once its own __init__ has run, which is now, and
+        # this is before any checkpoint is loaded into the buffers it names.
+        self._keep_in_fp32(module)
+
+    def _keep_in_fp32(self, module):
+        """Convert the buffers of ``module`` that it names for fp32 (keep_in_fp32.py) back to fp32."""
+        pattern = keep_in_fp32_pattern(module, self.keep_in_fp32_modules, self.dtype)
+        if pattern is None:
+            return
+        converted = keep_buffers_in_fp32(module, pattern)
+        if converted:
+            print_rank_0(f"keep_in_fp32_modules: {converted} buffers of {module.__class__.__name__} kept in fp32",
+                         force=False)
 
     def _convert_to_deepspeed_param(self, param):
 
@@ -2078,8 +2106,10 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                     launch_quantize_handles.append(quant_handle)
             launch_handles.append(h)
 
-        # Wait ensures the operation is enqueued, but not necessarily complete.
-        launch_handles[-1].wait()
+        # gloo handles are independent and the CPU synchronize() below is a
+        # no-op, so every handle must be waited on, not just the last one.
+        for handle in launch_handles:
+            handle.wait()
         if quantize:
             for quant_handle in launch_quantize_handles:
                 quant_handle.wait()
@@ -2527,7 +2557,7 @@ class GatheredParameters:
                     f"the accelerator device. If you don't need to broadcast updates, use modifier_rank=None.")
 
         handles = [
-            dist.broadcast(p.data,
+            dist.broadcast(p.data.view(torch.uint8),
                            self.src_rank_by_group[id(p.ds_process_group)],
                            group=p.ds_process_group,
                            async_op=True) for p in self.params

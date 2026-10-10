@@ -45,7 +45,7 @@ public:
     }
     ~Adam_Optimizer() {}
 
-#if defined(__AVX512__) or defined(__AVX256__)
+#if defined(__AVX512__) or defined(__AVX256__) or defined(__NEON__)
     template <int span, typename ds_params_precision_t, typename ds_state_precision_t>
     void Step_AVX(size_t* rounded_size,
                   ds_params_precision_t* _params,
@@ -122,7 +122,7 @@ private:
     bool _adamw_mode;
 };
 
-#if defined(__AVX512__) or defined(__AVX256__)
+#if defined(__AVX512__) or defined(__AVX256__) or defined(__NEON__)
 template <int span, typename ds_params_precision_t, typename ds_state_precision_t>
 void Adam_Optimizer::Step_AVX(size_t* rounded_size,
                               ds_params_precision_t* _params,
@@ -132,7 +132,7 @@ void Adam_Optimizer::Step_AVX(size_t* rounded_size,
                               size_t _param_size,
                               bool parallel)
 {
-#if !defined(__AVX512__)
+#if !defined(__AVX512__) && !defined(__NEON__)
     if (std::is_same_v<ds_params_precision_t, c10::BFloat16> ||
         std::is_same_v<ds_state_precision_t, c10::BFloat16>) {
         return;

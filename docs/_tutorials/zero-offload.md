@@ -75,7 +75,7 @@ Finally, here is a screenshot of `htop` showing host CPU and memory activity dur
 </a>
 
 ### CPU Adam perf tuning
-On AArch64 CPUs with SVE support, the FP32 `DeepSpeedCPUAdam` kernel uses SVE automatically. Other data types and AArch64 CPUs without SVE continue to use the scalar implementation.
+On AArch64 CPUs with SVE support, the FP32 `DeepSpeedCPUAdam` kernel uses SVE automatically; other data types use the scalar implementation there. AArch64 CPUs without SVE (including Apple Silicon) use NEON for FP32, FP16, and BF16.
 
 ZeRO offload already support multi-gpu training.  If the workload is using CPU optimizer, the workload can be further tuned by passing `--bind_cores_to_rank` to the deepspeed launch command. This switch will mainly do two things:
 1. Divide physical CPU cores evenly among ranks, make each rank to have a dedicated set of CPU cores to run CPU optimizer.

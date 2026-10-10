@@ -4,10 +4,6 @@
 # DeepSpeed Team
 
 import os
-try:
-    from packaging import version as pkg_version
-except ImportError:
-    pkg_version = None
 
 from .builder import CUDAOpBuilder, installed_cuda_version
 
@@ -46,34 +42,6 @@ class FPQuantizerBuilder(CUDAOpBuilder):
                         if verbose:
                             self.warning("On Ampere and higher architectures please use CUDA 11+")
                         cuda_okay = False
-
-        try:
-            import triton
-        except ImportError:
-            if verbose:
-                self.warning(
-                    "please install triton==2.3.0, 2.3.1 or 3.0.0 if you want to use the FP Quantizer Kernels")
-            return False
-
-        # triton 2.3.{0,1} and 3.0.0 are ok.
-        allowed_versions = ("2.3", "3.0", "3.1", "3.2")
-        if pkg_version:
-            allowed = (pkg_version.parse(v) for v in allowed_versions)
-            installed_triton = pkg_version.parse(triton.__version__)
-            triton_mismatch = all(installed_triton.major != a.major or installed_triton.minor != a.minor
-                                  for a in allowed)
-        else:
-            installed_triton = triton.__version__
-            major, minor, _ = installed_triton.split(".")
-            allowed = (v.split(".") for v in allowed_versions)
-            triton_mismatch = all(major != v[0] or minor != v[1] for v in allowed)
-
-        if triton_mismatch:
-            if verbose:
-                self.warning(
-                    f"FP Quantizer is using an untested triton version ({installed_triton}), only 2.3.{0,1} and 3.0.0 are known to be compatible with these kernels"
-                )
-            return False
 
         return super().is_compatible(verbose) and cuda_okay
 

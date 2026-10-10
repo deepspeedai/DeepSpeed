@@ -26,15 +26,6 @@ def create_checkpoint_engine(config_params, groups, zero_stage, has_moe_layers, 
             else:
                 return FastCheckpointEngine(config_params, dp_writer_config, optimize_dp_state)
 
-        if config_params is not None and config_params.nebula_config.enabled:
-            try:
-                from .nebula_checkpoint_engine import NebulaCheckpointEngine
-            except ImportError as err:
-                logger.error(f"No torch_nebula was found! Will fall back to torch.save. Details: {err}")
-                return TorchCheckpointEngine(config_params)
-            else:
-                return NebulaCheckpointEngine(config_params=config_params.nebula_config)
-
         if config_params.datastates_config.enabled:
             try:
                 from .datastates_checkpoint_engine import DataStatesCheckpointEngine

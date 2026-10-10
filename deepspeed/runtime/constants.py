@@ -20,42 +20,6 @@ TRAIN_BATCH_SIZE = "train_batch_size"
 TRAIN_BATCH_SIZE_DEFAULT = None
 
 #############################################
-# Sparse attention
-#############################################
-SPARSE_ATTENTION = "sparse_attention"
-SPARSE_DENSE_MODE = "dense"
-SPARSE_FIXED_MODE = "fixed"
-SPARSE_VARIABLE_MODE = "variable"
-SPARSE_BIGBIRD_MODE = "bigbird"
-SPARSE_BSLONGFORMER_MODE = "bslongformer"
-SPARSE_MODE = "mode"
-SPARSE_MODE_DEFAULT = SPARSE_FIXED_MODE
-SPARSE_BLOCK = "block"
-SPARSE_BLOCK_DEFAULT = 16
-SPARSE_DIFFERENT_LAYOUT_PER_HEAD = "different_layout_per_head"
-SPARSE_DIFFERENT_LAYOUT_PER_HEAD_DEFAULT = False
-SPARSE_NUM_LOCAL_BLOCKS = "num_local_blocks"
-SPARSE_NUM_LOCAL_BLOCKS_DEFAULT = 4
-SPARSE_NUM_GLOBAL_BLOCKS = "num_global_blocks"
-SPARSE_NUM_GLOBAL_BLOCKS_DEFAULT = 1
-SPARSE_ATTENTION_TYPE = "attention"
-SPARSE_ATTENTION_TYPE_DEFAULT = "bidirectional"
-SPARSE_HORIZONTAL_GLOBAL_ATTENTION = "horizontal_global_attention"
-SPARSE_HORIZONTAL_GLOBAL_ATTENTION_DEFAULT = False
-SPARSE_NUM_DIFFERENT_GLOBAL_PATTERNS = "num_different_global_patterns"
-SPARSE_NUM_DIFFERENT_GLOBAL_PATTERNS_DEFAULT = 1
-SPARSE_NUM_RANDOM_BLOCKS = "num_random_blocks"
-SPARSE_NUM_RANDOM_BLOCKS_DEFAULT = 0
-SPARSE_LOCAL_WINDOW_BLOCKS = "local_window_blocks"
-SPARSE_LOCAL_WINDOW_BLOCKS_DEFAULT = [4]
-SPARSE_GLOBAL_BLOCK_INDICES = "global_block_indices"
-SPARSE_GLOBAL_BLOCK_INDICES_DEFAULT = [0]
-SPARSE_GLOBAL_BLOCK_END_INDICES = "global_block_end_indices"
-SPARSE_GLOBAL_BLOCK_END_INDICES_DEFAULT = None
-SPARSE_NUM_SLIDING_WINDOW_BLOCKS = "num_sliding_window_blocks"
-SPARSE_NUM_SLIDING_WINDOW_BLOCKS_DEFAULT = 3
-
-#############################################
 # Optimizer and lr scheduler
 #############################################
 OPTIMIZER = "optimizer"
@@ -113,10 +77,6 @@ GRADIENT_ACCUMULATION_STEPS_DEFAULT = None
 # True (default): DeepSpeed tracks micro-steps and steps on the boundary. False: the client owns the boundary and each step() applies an optimizer update.
 MANAGED_GRADIENT_ACCUMULATION = "managed_gradient_accumulation"
 MANAGED_GRADIENT_ACCUMULATION_DEFAULT = True
-
-# DeepSpeed CSR gradient sparsity
-SPARSE_GRADIENTS = "sparse_gradients"
-SPARSE_GRADIENTS_DEFAULT = False
 
 #########################################
 # BFLOAT16 support
@@ -210,24 +170,6 @@ FP16_MASTER_WEIGHTS_AND_GRADS = "fp16_master_weights_and_grads"
 FP16_MASTER_WEIGHTS_AND_GRADS_DEFAULT = False
 
 #########################################
-# Apex AMP support
-#########################################
-# Use Apex AMP for mixed precision support, all parameters (other than 'enabled') will be passed to
-# amp.initialize(model, optimizer, **amp_params)
-# See apex documentation for supported parameters/features: https://nvidia.github.io/apex/amp.html#apex.amp.initialize
-AMP_FORMAT = '''
-"amp" {
-  "enabled: true,
-  "opt_level": "O1",
-  ...
-}
-'''
-AMP = "amp"
-
-AMP_ENABLED = "enabled"
-AMP_ENABLED_DEFAULT = False
-
-#########################################
 # Torch AMP support
 #########################################
 TORCH_AUTOCAST_FORMAT = '''
@@ -259,18 +201,6 @@ Gradient clipping should be enabled as:
 '''
 GRADIENT_CLIPPING = 'gradient_clipping'
 GRADIENT_CLIPPING_DEFAULT = 1.0
-
-#########################################
-# Capture graph for short kernels sequences
-#########################################
-# Graph harvesting. By default, this feature is not enabled.
-# Users can configure in ds_config.json as below example:
-GRAPH_HARVESTING_FORMAT = '''
-Graph harvesting should be enabled as:
-"graph_harvesting": true
-'''
-GRAPH_HARVESTING = 'graph_harvesting'
-GRAPH_HARVESTING_DEFAULT = False
 
 #########################################
 # Communication data type
@@ -359,6 +289,18 @@ DUMP_STATE = 'dump_state'
 DUMP_STATE_DEFAULT = False
 
 #########################################
+# Disable automatic Python cyclic GC
+#########################################
+# Disable automatic Python cyclic GC. By default, this feature is not enabled.
+# Users can configure in ds_config.json as below example:
+DISABLE_PYTHON_GC_FORMAT = '''
+Disable automatic Python cyclic GC should be enabled as:
+"disable_python_gc": true
+'''
+DISABLE_PYTHON_GC = "disable_python_gc"
+DISABLE_PYTHON_GC_DEFAULT = False
+
+#########################################
 # Vocabulary size
 #########################################
 # Vocabulary size.
@@ -384,63 +326,6 @@ WALL_CLOCK_BREAKDOWN_DEFAULT = False
 
 MEMORY_BREAKDOWN = 'memory_breakdown'
 MEMORY_BREAKDOWN_DEFAULT = False
-
-#########################################
-# Eigenvalue
-#########################################
-# Eigenvalue computation. By default, this feature is not enabled.
-# Users can configure in ds_config.json as below example:
-EIGENVALUE_FORMAT = '''
-Tensorboard can be specified as:
-"eigenvalue": {
-  "enabled": true,
-  "verbose": true,
-  "max_iter": 100,
-  "tol": 1e-2,
-  "stability": 1e-6
-}
-'''
-EIGENVALUE = "eigenvalue"
-
-# Tensorboard enable signal
-EIGENVALUE_ENABLED = "enabled"
-EIGENVALUE_ENABLED_DEFAULT = False
-
-EIGENVALUE_VERBOSE = "verbose"
-EIGENVALUE_VERBOSE_DEFAULT = False
-
-EIGENVALUE_MAX_ITER = "max_iter"
-EIGENVALUE_MAX_ITER_DEFAULT = 100
-
-EIGENVALUE_TOL = "tol"
-EIGENVALUE_TOL_DEFAULT = 1e-2
-
-EIGENVALUE_STABILITY = "stability"
-EIGENVALUE_STABILITY_DEFAULT = 1e-6
-
-EIGENVALUE_GAS_BOUNDARY_RESOLUTION = "gas_boundary_resolution"
-EIGENVALUE_GAS_BOUNDARY_RESOLUTION_DEFAULT = 1
-
-EIGENVALUE_LAYER_NAME = "layer_name"
-EIGENVALUE_LAYER_NAME_DEFAULT = "bert.encoder.layer"
-
-EIGENVALUE_LAYER_NUM = "layer_num"
-EIGENVALUE_LAYER_NUM_DEFAULT = 0
-
-#########################################
-# Progressive Layer Drop (PLD)
-#########################################
-PROGRESSIVE_LAYER_DROP = "progressive_layer_drop"
-
-# PLD enable signal
-PLD_ENABLED = "enabled"
-PLD_ENABLED_DEFAULT = False
-
-PLD_THETA = "theta"
-PLD_THETA_DEFAULT = 1.0
-
-PLD_GAMMA = "gamma"
-PLD_GAMMA_DEFAULT = 0.001
 
 
 #########################################
@@ -485,11 +370,15 @@ CHECKPOINT_PARALLEL_WRITE_PIPELINE_STAGE_DEFAULT = False
 #   grad_accum_dtype=["bf16"|"fp16"|"fp32"]
 #   param_dtype=["bf16"|"fp16"|"fp32"]
 #   buffer_dtype=["bf16"|"fp16"|"fp32"]
+#   keep_in_fp32_modules="auto"|[name patterns]
 #   }
 # }
 # param_dtype and buffer_dtype mirror FSDP's MixedPrecisionPolicy.
 #   - param_dtype: if None uses the specified mixed precision dtype, otherwise casts the params into the provided dtype
 #   - buffer_dtype: if None uses the buffers' dtype found when the model was loaded (e.g. fp32 rotary inv_freq), otherwise casts the buffers into the provided dtype (which is likely to lead to unintended consequences)
+#   - keep_in_fp32_modules: buffers kept in fp32 under bf16/fp16 training; "auto" uses the model's transformers
+#     _keep_in_fp32_modules_strict (and _keep_in_fp32_modules under fp16), a list gives name patterns, [] keeps
+#     nothing. See deepspeed/runtime/keep_in_fp32.py
 
 DATA_TYPES = "data_types"
 GRAD_ACCUM_DTYPE = "grad_accum_dtype"
@@ -498,6 +387,8 @@ PARAM_DTYPE = "param_dtype"
 PARAM_DTYPE_DEFAULT = None
 BUFFER_DTYPE = "buffer_dtype"
 BUFFER_DTYPE_DEFAULT = None
+KEEP_IN_FP32_MODULES = "keep_in_fp32_modules"
+KEEP_IN_FP32_MODULES_DEFAULT = "auto"
 
 #########################################
 # Drop the last incomplete Batch

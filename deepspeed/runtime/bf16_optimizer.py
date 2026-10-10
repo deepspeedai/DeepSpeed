@@ -14,7 +14,8 @@ from packaging import version as pkg_version
 from deepspeed.git_version_info import version
 from deepspeed.runtime.utils import (get_global_norm_of_tensors, clip_tensors_by_global_norm, DummyOptim,
                                      align_dense_tensors, all_gather_dp_groups, is_model_parallel_parameter,
-                                     see_memory_usage, graph_process, get_norm_with_moe_layers)
+                                     see_memory_usage, get_norm_with_moe_layers, is_invalid_grad_norm,
+                                     is_optimized_parameter)
 from deepspeed.utils import link_hp_params, lazy_init_hp_params_optimizer_state, fragment_address, groups
 from deepspeed.moe.utils import is_moe_param, is_moe_param_group
 from deepspeed.utils.bwc import bwc_tensor_model_parallel_rank
@@ -24,7 +25,8 @@ from deepspeed.checkpoint.constants import UNIVERSAL_CHECKPOINT_INFO
 from deepspeed.checkpoint.constants import (DS_VERSION, PARTITION_COUNT, BASE_OPTIMIZER_STATE,
                                             SINGLE_PARTITION_OF_FP32_GROUPS, CLIP_GRAD, GROUP_PADDINGS,
                                             PARAM_SLICE_MAPPINGS)
-from deepspeed.module_inject.auto_ep_folding import apply_folding_correction_to_grad_buffer
+from deepspeed.module_inject.auto_ep_folding import (apply_folding_correction_to_grad_buffer,
+                                                     clear_autoep_folding_gradient_corrected)
 
 setattr(sys.modules[__name__], 'fragment_address', fragment_address)
 
@@ -47,12 +49,21 @@ class BF16_Optimizer(ZeROOptimizer):
                  dp_process_group=None,
                  timers=None,
                  grad_acc_dtype=None,
-                 graph_harvesting=False,
                  has_moe_layers=False):
         super().__init__()
         see_memory_usage('begin bf16_optimizer', force=True)
         self.timers = timers
         self.optimizer = init_optimizer
+        from deepspeed.runtime.zero.muon.muon_optimizer import MuonWithAuxAdam
+        self._uses_muon = isinstance(init_optimizer, MuonWithAuxAdam)
+        if self._uses_muon:
+            if grad_acc_dtype != torch.float32 or has_moe_layers or mpu is not None:
+                raise ValueError("BF16 Muon currently requires FP32 accumulation, dense DP and eager execution")
+            for group in init_optimizer.param_groups:
+                if group.get('use_muon', False):
+                    for param in group['params']:
+                        if param.ndim != 2 or getattr(param, 'is_expert_group', False):
+                            raise ValueError("BF16 Muon currently supports dense two-dimensional matrices only")
         self.param_names = param_names
         self.using_real_optimizer = not isinstance(self.optimizer, DummyOptim)
 
@@ -65,6 +76,7 @@ class BF16_Optimizer(ZeROOptimizer):
         self.custom_loss_scaler = False
         self.external_loss_scale = None
         self.torch_autocast_gradscaler = None
+        self.overflow = False
 
         self.immediate_grad_update = bfloat16_config.immediate_grad_update
 
@@ -105,7 +117,7 @@ class BF16_Optimizer(ZeROOptimizer):
         self.fp32_groups_has_gradients = []
 
         self.group_paddings = []
-        self.graph_harvesting = graph_harvesting
+        self._muon_exchange_layouts = []
         if self.using_real_optimizer:
             self._setup_for_real_optimizer()
 
@@ -147,7 +159,7 @@ class BF16_Optimizer(ZeROOptimizer):
             partition_id = dist.get_rank(group=self.real_dp_process_group[i])
 
             # grab the original list
-            trainable_parameters = [param for param in param_group['params'] if param.requires_grad]
+            trainable_parameters = [param for param in param_group['params'] if is_optimized_parameter(param)]
             self.bf16_groups.append(trainable_parameters)
 
             # create flat bf16 params
@@ -171,6 +183,9 @@ class BF16_Optimizer(ZeROOptimizer):
             self.fp32_groups_flat_partition[i].requires_grad = True
 
             num_elem_list = [t.numel() for t in self.bf16_groups[i]]
+            self._muon_exchange_layouts.append(
+                self._build_muon_exchange_layout(num_elem_list, partition_size, real_dp_world_size, partition_id
+                                                 ) if param_group.get('use_muon', False) else None)
 
             # create fp32 gradients
             fp32_flat_buffer = torch.zeros_like(self.bf16_groups_flat[i], dtype=self.grad_acc_dtype)
@@ -220,6 +235,69 @@ class BF16_Optimizer(ZeROOptimizer):
         self._hp_optimizer_states_linked = False
         self._enable_universal_checkpoint()
         self._param_slice_mappings = self._create_param_mapping()
+
+    @staticmethod
+    def _build_muon_exchange_layout(num_elem_list, partition_size, world_size, rank):
+        """Precompute the slices needed to reconstruct locally-owned split matrices."""
+        matrix_ranges = []
+        offset = 0
+        for count in num_elem_list:
+            matrix_ranges.append((offset, offset + count))
+            offset += count
+
+        partition_start = rank * partition_size
+        partition_end = partition_start + partition_size
+        local_matrices = []
+        has_split_matrix = any(matrix_start // partition_size != (matrix_end - 1) // partition_size
+                               for matrix_start, matrix_end in matrix_ranges)
+        for param_index, (matrix_start, matrix_end) in enumerate(matrix_ranges):
+            left = max(matrix_start, partition_start)
+            right = min(matrix_end, partition_end)
+            if left < right:
+                first_owner = matrix_start // partition_size
+                last_owner = (matrix_end - 1) // partition_size
+                is_split = first_owner != last_owner
+                local_matrices.append(
+                    (param_index, left - partition_start, left - matrix_start, right - left, is_split))
+
+        input_split_sizes = [0] * world_size
+        send_ranges = []
+        for destination in range(world_size):
+            destination_start = destination * partition_size
+            destination_end = destination_start + partition_size
+            for matrix_start, matrix_end in matrix_ranges:
+                if destination == rank or max(matrix_start, destination_start) >= min(matrix_end, destination_end):
+                    continue
+                left = max(matrix_start, partition_start)
+                right = min(matrix_end, partition_end)
+                if left < right:
+                    send_ranges.append((left - partition_start, right - left))
+                    input_split_sizes[destination] += right - left
+
+        output_split_sizes = [0] * world_size
+        recv_ranges = []
+        recv_offset = 0
+        for source in range(world_size):
+            source_start = source * partition_size
+            source_end = source_start + partition_size
+            for param_index, (matrix_start, matrix_end) in enumerate(matrix_ranges):
+                if source == rank or max(matrix_start, partition_start) >= min(matrix_end, partition_end):
+                    continue
+                left = max(matrix_start, source_start)
+                right = min(matrix_end, source_end)
+                if left < right:
+                    recv_ranges.append((recv_offset, param_index, left - matrix_start, right - left))
+                    recv_offset += right - left
+                    output_split_sizes[source] += right - left
+
+        return {
+            'has_split_matrix': has_split_matrix,
+            'input_split_sizes': input_split_sizes,
+            'output_split_sizes': output_split_sizes,
+            'send_ranges': send_ranges,
+            'recv_ranges': recv_ranges,
+            'local_matrices': local_matrices,
+        }
 
     def configure_autoep_folding_tp_gradient_reduction(self, folding_spec):
         if folding_spec is None or folding_spec.tp_size <= 1:
@@ -272,6 +350,9 @@ class BF16_Optimizer(ZeROOptimizer):
                            partition_start=partition_id * partition_size,
                            partition_size=partition_size,
                            dp_group=self.real_dp_process_group[i])
+            # Unlike ZeRO's fragment lists, BF16's gradient dictionary includes every parameter.
+            for param_index, lp_param in enumerate(self.bf16_groups[i]):
+                lp_param._index_in_param_group = param_index
 
     def _lazy_init_hp_params_optimizer_state(self):
         if not self._hp_optimizer_states_linked:
@@ -304,11 +385,11 @@ class BF16_Optimizer(ZeROOptimizer):
         if closure is not None:
             raise NotImplementedError(f'{self.__class__} does not support closure.')
 
+        self.overflow = False
         non_expert_grads_for_norm, expert_grads_for_norm = self.get_grads_for_norm()
         non_expert_groups_norm = get_global_norm_of_tensors(input_tensors=non_expert_grads_for_norm,
                                                             mpu=self.mpu,
-                                                            norm_type=self.norm_type,
-                                                            use_graph=self.graph_harvesting)
+                                                            norm_type=self.norm_type)
         all_groups_norm = non_expert_groups_norm
         if self.has_moe_layers:
             all_groups_norm = get_norm_with_moe_layers(non_expert_groups_norm,
@@ -318,13 +399,17 @@ class BF16_Optimizer(ZeROOptimizer):
 
         self._global_grad_norm = all_groups_norm
 
-        assert all_groups_norm > 0.
+        if is_invalid_grad_norm(all_groups_norm):
+            self.overflow = True
+            self._global_grad_norm = float("inf")
+            self.clear_hp_grads()
+            self.clear_lp_grads()
+            return
         if self.clip_grad > 0.:
             clip_tensors_by_global_norm(input_tensors=self.get_grads_for_norm(for_clipping=True),
                                         max_norm=self.clip_grad,
                                         global_norm=all_groups_norm,
-                                        mpu=self.mpu,
-                                        use_graph=self.graph_harvesting)
+                                        mpu=self.mpu)
 
         for param_partition, grad_partition in zip(self.fp32_groups_flat_partition,
                                                    self.fp32_groups_gradient_flat_partition):
@@ -332,6 +417,8 @@ class BF16_Optimizer(ZeROOptimizer):
             param_partition.grad = grad_partition.to(
                 param_partition.dtype) if grad_partition.dtype != param_partition.dtype else grad_partition
 
+        if self._uses_muon:
+            self._prepare_muon_updates()
         self.optimizer.step()
 
         if self.grad_acc_dtype is not torch.float32:
@@ -344,6 +431,71 @@ class BF16_Optimizer(ZeROOptimizer):
         self.update_lp_params()
 
         self.clear_hp_grads()
+
+    @torch.no_grad()
+    def _prepare_muon_updates(self):
+        """Orthogonalize whole matrices after reduction and global clipping.
+
+        Persistent momentum has the same partition layout as the master weights.
+        One all-to-all exchanges only the pieces of split matrices needed by
+        another owner. Full-matrix workspace is then allocated one matrix at a
+        time, and only the local intersection is committed.
+        """
+        from deepspeed.runtime.zero.muon.original_muon import muon_update
+
+        for group_index, group in enumerate(self.optimizer.param_groups):
+            if not group.get('use_muon', False):
+                continue
+            partition = self.fp32_groups_flat_partition[group_index]
+            state = self.optimizer.state[partition]
+            if 'momentum_buffer' not in state:
+                state['momentum_buffer'] = torch.zeros_like(partition)
+            committed = state['momentum_buffer']
+            process_group = self.real_dp_process_group[group_index]
+            partition_size = partition.numel()
+            layout = self._muon_exchange_layouts[group_index]
+            received = committed.new_empty(sum(layout['output_split_sizes']))
+            if layout['has_split_matrix']:
+                send = committed.new_empty(sum(layout['input_split_sizes']))
+                send_offset = 0
+                for local_offset, length in layout['send_ranges']:
+                    send.narrow(0, send_offset, length).copy_(committed.narrow(0, local_offset, length))
+                    send_offset += length
+                dist.all_to_all_single(received,
+                                       send,
+                                       output_split_sizes=layout['output_split_sizes'],
+                                       input_split_sizes=layout['input_split_sizes'],
+                                       group=process_group)
+
+            received_by_matrix = {}
+            for recv_offset, param_index, matrix_offset, length in layout['recv_ranges']:
+                received_by_matrix.setdefault(param_index, []).append((recv_offset, matrix_offset, length))
+
+            params = self.bf16_groups[group_index]
+            gradients = self.fp32_groups_gradients[group_index]
+            for param_index, local_offset, matrix_offset, length, is_split in layout['local_matrices']:
+                param = params[param_index]
+                if is_split:
+                    momentum = committed.new_empty(param.numel())
+                    momentum.narrow(0, matrix_offset, length).copy_(committed.narrow(0, local_offset, length))
+                    for recv_offset, remote_matrix_offset, remote_length in received_by_matrix[param_index]:
+                        momentum.narrow(0, remote_matrix_offset,
+                                        remote_length).copy_(received.narrow(0, recv_offset, remote_length))
+                else:
+                    momentum = committed.narrow(0, local_offset, length)
+                update = muon_update(gradients[param_index].view(param.shape).clone(),
+                                     momentum.view(param.shape),
+                                     beta=group['momentum'],
+                                     ns_method=group.get('ns_method', 'gram'))
+                partition.grad.narrow(0, local_offset,
+                                      length).copy_(update.reshape(-1).narrow(0, matrix_offset, length))
+                committed.narrow(0, local_offset, length).copy_(momentum.narrow(0, matrix_offset, length))
+            # Alignment padding must never become optimizer state or an update.
+            total_numel = sum(param.numel() for param in params)
+            rank = dist.get_rank(group=process_group)
+            padding_start = max(0, min(partition_size, total_numel - rank * partition_size))
+            partition.grad[padding_start:].zero_()
+            committed[padding_start:].zero_()
 
     def backward_prologue(self):
         self.clear_lp_grads()
@@ -377,26 +529,13 @@ class BF16_Optimizer(ZeROOptimizer):
             lp.grad.zero_()
 
     @torch.no_grad()
-    def _update_hp_grads_func(self, clear_lp_grads=False):
-        for i, group in enumerate(self.bf16_groups):
-            for j, lp in enumerate(group):
-                self._update_hp_grad(lp, i, j, clear_lp_grads)
-
-    @torch.no_grad()
     def update_hp_grads(self, clear_lp_grads=False):
         if self.immediate_grad_update:
             return
 
-        if self.graph_harvesting:
-            graph_process(False, self._update_hp_grads_func, clear_lp_grads)
-        else:
-            self._update_hp_grads_func(clear_lp_grads)
-        #cpu op
         for i, group in enumerate(self.bf16_groups):
             for j, lp in enumerate(group):
-                if lp.grad is None:
-                    continue
-                self.fp32_groups_has_gradients[i][j] = True
+                self._update_hp_grad(lp, i, j, clear_lp_grads)
 
     @torch.no_grad()
     def get_grads_for_reduction(self):
@@ -471,11 +610,6 @@ class BF16_Optimizer(ZeROOptimizer):
             self.fp32_groups_has_gradients[i] = [False] * len(group)
 
     def clear_lp_grads(self, set_to_none=False):
-
-        # using zero_() fixed memory address for graph replay
-        if self.graph_harvesting:
-            assert not set_to_none, "graph harvesting is incompatible with setting lp grads to None"
-
         zero_grads_list = []
         for group in self.bf16_groups:
             for param in group:
@@ -573,6 +707,12 @@ class BF16_Optimizer(ZeROOptimizer):
     def accumulate_hp_grads_and_remove_lp(self, lp_param, group_idx, param_idx):
         assert self.immediate_grad_update
         self._update_hp_grad(lp_param, group_idx, param_idx, clear_lp_grads=False)
+        # The high-precision buffer now holds this gradient; reduction, clipping and the step all read it
+        # there. Keeping the low-precision copy until the step leaves every parameter's gradient alive twice
+        # through the end of backward, and zeroing it instead frees nothing.
+        # The correction marker belongs to the low-precision gradient being released.
+        clear_autoep_folding_gradient_corrected(lp_param)
+        lp_param.grad = None
 
     def create_grad_acc_hooks(self):
         for i, param_group in enumerate(self.bf16_groups):
