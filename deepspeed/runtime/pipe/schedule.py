@@ -337,8 +337,8 @@ class DualPipeVSchedule(PipeSchedule):
 
     Sends and receives are queued and launched as one batch by :class:`CommitP2P`, so an
     instruction's communication is only complete once the next ``CommitP2P`` has run.
-    The reference implementation also defers weight gradients ("zero bubble"); this
-    schedule keeps them inside :class:`BackwardPass`.
+    A :class:`BackwardPass` with ``enable_zb`` may defer its weight gradients to a later
+    :class:`WeightPass` ("zero bubble").
 
     Args:
         micro_batches (int): Must be at least ``2 * stages``.
@@ -394,27 +394,29 @@ class DualPipeVSchedule(PipeSchedule):
             load = [LoadMicroBatch(buffer_id)] if is_first and phase == 0 else []
             return load + [ForwardPass(buffer_id, phase=phase)]
 
-        def backward(phase):
+        def backward(phase, enable_zb=False):
             if self.forward_only:
                 return []
-            return [BackwardPass(buffer(phase, 'bwd'), phase=phase)]
+            return [BackwardPass(buffer(phase, 'bwd'), phase=phase, enable_zb=enable_zb)]
 
         def forward_chunk(phase, recv=True, send=True):
             cmds = recv_forward(phase) if recv else []
             cmds += [CommitP2P()] + forward(phase)
             return cmds + (send_forward(phase) if send else [])
 
-        def backward_chunk(phase, send=True):
-            cmds = recv_backward(phase) + [CommitP2P()] + backward(phase)
+        def backward_chunk(phase, send=True, enable_zb=False):
+            cmds = recv_backward(phase) + [CommitP2P()] + backward(phase, enable_zb)
             return cmds + (send_backward(phase) if send else [])
 
         def forward_backward_chunk(phase0, phase1, recv0=True):
             cmds = recv_forward(phase0) if recv0 else []
-            cmds += recv_backward(phase1) + [CommitP2P()] + forward(phase0) + backward(phase1)
+            cmds += recv_backward(phase1) + [CommitP2P()] + forward(phase0)
+            if not self.forward_only:
+                cmds[-1] = ForwardBackwardPass(forward=cmds[-1], backward=backward(phase1)[0])
             return cmds + send_forward(phase0) + send_backward(phase1)
 
         def weight_chunk():
-            return [] if self.forward_only else [CommitP2P()]
+            return [] if self.forward_only else [CommitP2P(), WeightPass()]
 
         # Step 1: nF0
         for _ in range((num_ranks - rank - 1) * 2):
@@ -428,9 +430,10 @@ class DualPipeVSchedule(PipeSchedule):
             cmds += forward_chunk(1, send=(not is_last) or (i < step_2 - 1))
             yield cmds + send_forward(0)
 
-        # Step 3: nB1W1F1
+        # Step 3: nB1W1F1 (zero bubble)
         for _ in range(num_ranks - rank - 1):
-            yield backward_chunk(1) + recv_forward(1) + weight_chunk() + forward_chunk(1, recv=False)
+            cmds = backward_chunk(1, enable_zb=True) + recv_forward(1) + weight_chunk()
+            yield cmds + forward_chunk(1, recv=False)
 
         # Step 4 (main step): nF0B1F1B0
         for i in range(self.micro_batches - num_ranks * 2 + rank + 1):
@@ -448,13 +451,20 @@ class DualPipeVSchedule(PipeSchedule):
         for _ in range(num_ranks - rank - 1):
             yield backward_chunk(1) + forward_backward_chunk(1, 0)
 
-        # Step 6: nB1B0
-        for _ in range(rank + 1):
-            yield backward_chunk(1) + backward_chunk(0)
+        # Step 6: nB1B0 (the second half of the chunks use zero bubble)
+        step_6 = rank + 1
+        enable_zb = False
+        for i in range(step_6):
+            if i == step_6 // 2 and rank % 2 == 1:
+                enable_zb = True
+            cmds = backward_chunk(1, enable_zb=enable_zb)
+            if i == step_6 // 2 and rank % 2 == 0:
+                enable_zb = True
+            yield cmds + backward_chunk(0, enable_zb=enable_zb)
 
-        # Step 7: nWB0
+        # Step 7: nWB0 (zero bubble)
         for _ in range(num_ranks - rank - 1):
-            yield weight_chunk() + backward_chunk(0)
+            yield weight_chunk() + backward_chunk(0, enable_zb=True)
 
         # Step 8: nW
         for _ in range(rank + 1):
@@ -625,6 +635,18 @@ class RecvGrad(BufferOpInstruction):
         The communication is blocking and must be paired with a :class:`SendGrad`
         on the next pipeline stage to avoid deadlock.
     """
+    pass
+
+
+class ForwardBackwardPass(PipeInstruction):
+    """A :class:`ForwardPass` and the :class:`BackwardPass` of another micro-batch, which the
+    module may overlap.
+    """
+    pass
+
+
+class WeightPass(PipeInstruction):
+    """Compute the weight gradients deferred by the oldest pending :class:`BackwardPass`."""
     pass
 
 
