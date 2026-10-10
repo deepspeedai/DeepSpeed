@@ -1289,6 +1289,46 @@ def test_dp_prefill_rejects_single_prompt_above_forward_limit():
                          SamplingConfig(max_new_tokens=1, temperature=0, continuous_batch_size=1))
 
 
+def test_adaptive_short_batch_does_not_read_one_gpu_scalar_per_request():
+    model = _make_small_qwen()
+    prompt = torch.ones((128, 4), dtype=torch.long, device=next(model.parameters()).device)
+    request = RolloutRequest(prompt, torch.ones_like(prompt))
+    tokenizer = SimpleNamespace(pad_token_id=0, eos_token_id=None)
+    scalar_reads = []
+    outputs = []
+    for adaptive in (False, True):
+        rollout = HybridEngineRollout(SimpleNamespace(module=model), tokenizer,
+                                      HybridEngineRolloutConfig(adaptive_prefill=adaptive))
+        with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU]) as profile:
+            output = rollout.generate(
+                request,
+                SamplingConfig(max_new_tokens=2, temperature=0, continuous_batch_size=128 if adaptive else None))
+        outputs.append(output.input_ids)
+        # Pin the reported regression: per-row mask.any() caused 128 device-to-host scalar reads.
+        scalar_reads.append(
+            sum(event.count for event in profile.key_averages() if event.key == "aten::_local_scalar_dense"))
+    assert torch.equal(*outputs)
+    assert scalar_reads[1] <= scalar_reads[0] + 4
+
+
+def test_adaptive_generation_resolves_custom_generation_config():
+    model = _make_small_qwen()
+    native_prepare = model._prepare_generation_config
+
+    def prepare(*args, **kwargs):
+        config, model_kwargs = native_prepare(*args, **kwargs)
+        config.min_length = 5
+        return config, model_kwargs
+
+    prompt = torch.ones((1, 4), dtype=torch.long, device=next(model.parameters()).device)
+    rollout = HybridEngineRollout(SimpleNamespace(module=model), SimpleNamespace(pad_token_id=0, eos_token_id=None),
+                                  HybridEngineRolloutConfig(adaptive_prefill=True))
+    with patch.object(model, "_prepare_generation_config", side_effect=prepare):
+        with pytest.raises(ValueError, match="min_length"):
+            rollout.generate(RolloutRequest(prompt, torch.ones_like(prompt)),
+                             SamplingConfig(max_new_tokens=2, temperature=0, continuous_batch_size=1))
+
+
 @pytest.mark.parametrize("force_cb", [False, True])
 def test_adaptive_profile_includes_route_planning_time(force_cb):
     from deepspeed.accelerator import get_accelerator

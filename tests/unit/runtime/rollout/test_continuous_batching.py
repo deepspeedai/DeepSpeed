@@ -122,3 +122,12 @@ def test_prefill_bucket_capacity_supports_long_lengths_without_token_expansion()
     assert plan_prefill_buckets([], lambda count, width: count * width) == ((), 0.0)
     with pytest.raises(ValueError, match="positive"):
         plan_prefill_buckets([0], lambda count, width: count * width)
+
+
+def test_prefill_calibration_fit_recovers_nonnegative_costs():
+    from benchmarks.rollout_prefill import nonnegative_fit
+
+    matrix = [[1, 1, 1], [1, 2, 4], [1, 4, 16], [1, 8, 64]]
+    assert nonnegative_fit(matrix, [5.5, 10, 22, 58]) == pytest.approx([2, 3, 0.5])
+    # Decreasing noisy measurements must not produce negative execution costs.
+    assert nonnegative_fit(matrix, [4, 3, 2, 1]) == pytest.approx([2.5, 0, 0])

@@ -159,6 +159,38 @@ is eligible only when all requests fit the active-row and prefill limits, the
 physical input width fits the model position limit, and neither explicit static
 capacity nor trimming is requested. Otherwise Auto remains on the CB path.
 
+Auto validates masks and reads effective lengths in one batch transfer. When
+ordinary generation beats a lower bound on every CB partition, it skips DP;
+uniform prompt lengths also admit an exact single-bucket estimate. The fallback
+reuses the resolved generation configuration and normalizes the result once.
+This keeps planning overhead small for short generations and large request counts.
+
+``benchmarks/rollout_prefill.py`` provides separate calibration and evaluation:
+
+.. code-block:: bash
+
+   python benchmarks/rollout_prefill.py --model Qwen/Qwen3-32B --dtype bfloat16 \
+       --repeats 3 --calibrate costs.json
+   python benchmarks/rollout_prefill.py --model Qwen/Qwen3-32B --dtype bfloat16 \
+       --cost-config costs.json --repeats 3 --output sweep.json
+
+Use ``--model tiny-qwen2 --dtype float32`` for a seeded small-model smoke test.
+Calibration uses six uniform shapes distinct from the evaluation workloads,
+fits non-negative fixed/token/Attention terms, measures KV management rates,
+and estimates extra CB Decode cost from one-token and eight-token calls.
+The saved JSON records model, GPU, precision, backend and library versions;
+the sweep rejects a calibration from a different configuration. Applications
+can pass its ``costs`` dictionary to ``HybridEngineRolloutConfig``.
+
+The four evaluation workloads cover 128 short requests, a 128/4 tail, a
+16..512 spread and a 512/16 tail. Timing includes routing and cache work, with
+one warmup and interleaved repetitions of all four paths. The report includes
+``auto_vs_best`` and the worst-case regression, plus selected routes and output
+ID agreement. Generation is deliberately limited to two tokens with EOS
+disabled to expose short-generation overhead; this is a controlled performance
+test rather than a natural-EOS rollout trace. Use ``--new-tokens`` to evaluate
+other budgets and recalibrate when the deployment configuration changes.
+
 ``prefill_max_tokens=65536`` limits padded token positions in each Forward;
 set it to ``None`` to remove this planning limit. A single prompt above the
 configured limit raises an error; this does not implement chunked prefill.
