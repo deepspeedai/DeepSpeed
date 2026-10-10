@@ -11,6 +11,7 @@ from deepspeed.runtime.config_utils import get_scalar_param, pp_int, DeepSpeedCo
 from deepspeed.utils import logger
 from .offload_config import DeepSpeedZeroOffloadParamConfig, DeepSpeedZeroOffloadOptimizerConfig, OffloadDeviceEnum
 from deepspeed.runtime.zenflow.zenflow_config import ZenFlowConfig
+from deepspeed.runtime.reflow.reflow_config import ReflowConfig
 from .leaf_module_config import DeepSpeedZeroLeafModuleConfig
 
 # ZeRO optimization. By default, this optimization is not enabled.
@@ -178,6 +179,14 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
 
     zenflow: Optional[ZenFlowConfig] = None
     """Enable ZenFlow"""
+
+    reflow: Optional[ReflowConfig] = None
+    """
+    Enable Reflow, the asynchronous CPU-offload optimizer for ZeRO stage 3: the CPU optimizer runs
+    per gradient bucket during backward and commits its state in the background, overlapping GPU
+    compute instead of running as a phase after backward. Requires optimizer offload to CPU.
+    Expects a dictionary containing values for :any:`ReflowConfig`.
+    """
 
     sub_group_size: int = Field(pp_int(1e9), ge=0)
     """
@@ -405,4 +414,23 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
             logger.warning(
                 "ZeRO-3 elastic checkpointing is deprecated and no longer supported. Use Universal Checkpointing instead."
             )
+        return self
+
+    @model_validator(mode="after")
+    def reflow_compat_check(self):
+        # Reflow is its own ZeRO-3 optimizer path; reject what it cannot wrap here, so the user gets a
+        # clear config error instead of a downstream failure at optimizer build time.
+        if self.reflow is None:
+            return self
+        if self.stage != ZeroStageEnum.weights:
+            raise ValueError(f"Reflow requires ZeRO stage 3, got stage {int(self.stage)}.")
+        offload_config = self.offload_optimizer
+        if offload_config is None or offload_config.device not in (OffloadDeviceEnum.cpu, OffloadDeviceEnum.nvme):
+            # Reflow runs the optimizer on CPU. device='cpu' keeps its state in CPU memory; device='nvme'
+            # additionally swaps that state per subgroup around the CPU step.
+            raise ValueError("Reflow requires optimizer offload with device 'cpu' or 'nvme'.")
+        if self.zenflow is not None:
+            raise ValueError("Reflow is not compatible with ZenFlow; enable only one of them.")
+        if offload_config.super_offload:
+            raise ValueError("Reflow is not compatible with super_offload; enable only one of them.")
         return self

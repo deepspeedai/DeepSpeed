@@ -703,6 +703,84 @@ Note that if the value of "device" is not specified or not supported, an asserti
 | ------------------------------------------------------------- | ------- |
 | Enable fast optimizer initialization when offloading to NVMe. | `false` |
 
+### Reflow
+[Reflow](/tutorials/reflow/) is an asynchronous CPU-offload optimizer for ZeRO stage 3. The CPU optimizer runs per gradient bucket during backward, gradients move to CPU in BF16, and the FP32 master weights and optimizer state are committed in the background while the next forward runs.
+
+The `reflow` block enables it, so an empty block is enough to run with the defaults. Reflow requires `"stage": 3`, `"fp16": {"enabled": true}` or `"bf16": {"enabled": true}`, `offload_optimizer` on `cpu` (or `nvme`), and CPU Adam/Lion kernels built with AVX2 or AVX-512. Model parameters and offloaded gradients must be FP16/BF16; master weights and optimizer states must be FP32. FP32 model parameters, `torch_autocast`, low-precision master weights/states, and `fp32_optimizer_states: false` are rejected. It uses `ReflowCPUAdam`/`ReflowCPULion`; a client `DeepSpeedCPUAdam`/`DeepSpeedCPULion` is remapped automatically. Adam/AdamW support `maximize`, including per-group settings preserved when remapping a PyTorch optimizer; the default is `false`. Call `engine.step()`; direct `ReflowCPUAdam.step()` and `ReflowCPULion.step()` calls are rejected. It is not compatible with `super_offload`, ZenFlow, DeepCompile, the Muon optimizer (support to be implemented), or `managed_gradient_accumulation: false`.
+```json
+  "reflow": {
+    "num_threads": null,
+    "enable_cpu_affinity": false,
+    "main_thread_cores": 3,
+    "main_thread_core_type": "logical",
+    "pin_main_thread": false,
+    "worker_core_type": "logical",
+    "bucketwise_worker_affinity": "task",
+    "bucketwise_cores_per_worker": 8,
+    "state_update_cores": 2,
+    "state_update_backward_cores": null
+  }
+```
+***num_threads***: [integer or null]
+
+| Description | Default |
+| ----------- | ------- |
+| CPU optimizer kernel thread limit. When unset, each kernel uses the CPUs available under its worker's affinity. | `null` |
+
+***enable_cpu_affinity***: [boolean]
+
+| Description | Default |
+| ----------- | ------- |
+| Restrict the main process to the rank's NUMA-local CPU slice. Optimizer workers are pinned regardless of this setting. Use `pin_main_thread` to restrict the initializing thread to the reserved main CPUs. | `false` |
+
+***main_thread_cores***: [integer]
+
+| Description | Default |
+| ----------- | ------- |
+| CPUs or physical cores reserved from the optimizer workers, according to `main_thread_core_type`. Worker placement uses this reservation even when `enable_cpu_affinity` is false. | `3` |
+
+***main_thread_core_type***: [string]
+
+| Description | Default |
+| ----------- | ------- |
+| Count the main reservation as logical CPUs (`logical`) or physical cores with all available SMT siblings (`physical`). | `"logical"` |
+
+***pin_main_thread***: [boolean]
+
+| Description | Default |
+| ----------- | ------- |
+| Pin the initializing thread to the reserved main CPUs. Its original affinity is restored on engine destruction. Requires OS thread-affinity support. | `false` |
+
+***worker_core_type***: [string]
+
+| Description | Default |
+| ----------- | ------- |
+| Use all available worker CPU IDs (`logical`) or one logical CPU per worker physical core (`physical`). | `"logical"` |
+
+***bucketwise_worker_affinity***: [string]
+
+| Description | Default |
+| ----------- | ------- |
+| Assign a CPU mask per submitted task (`task`) or pin each pool thread to its initial mask (`thread`). | `"task"` |
+
+***bucketwise_cores_per_worker***: [integer]
+
+| Description | Default |
+| ----------- | ------- |
+| Maximum worker CPU IDs per bucketwise worker. Each NUMA group is split into chunks of this size; the final chunk may be smaller. One pool thread is created per chunk. | `8` |
+
+***state_update_cores***: [integer]
+
+| Description | Default |
+| ----------- | ------- |
+| Worker CPU IDs available to the background optimizer-state commit while it overlaps the next forward. Once backward starts, the commit uses the mask selected by `state_update_backward_cores`. | `2` |
+
+***state_update_backward_cores***: [integer or null]
+
+| Description | Default |
+| ----------- | ------- |
+| Limit the background state commit's worker CPU IDs during backward. When unset, all worker CPUs are available. Affinity changes take effect between commit slices. | `null` |
+
 
 ### Asynchronous I/O
 Configuring the asynchronous I/O module for offloading parameter and optimizer states to persistent (NVMe) storage. This module uses Linux native asynchronous I/O (libaio).

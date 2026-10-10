@@ -10,9 +10,23 @@
 # ]
 
 import os
+
+if __name__ == "__main__":
+    import sys
+    # Sibling types.py and logging.py must not shadow the standard library in the rank wrapper.
+    if sys.path and sys.path[0] == os.path.dirname(os.path.abspath(__file__)):
+        sys.path.pop(0)
+
 import psutil
 import shutil
 import subprocess
+
+# Running this file directly avoids importing DeepSpeed/PyTorch in the short-lived rank wrapper.
+if __name__ == "__main__":
+    import logging
+    logger = logging.getLogger("DeepSpeed")
+else:
+    from .logging import logger
 
 
 # return a list of list for cores to numa mapping
@@ -60,6 +74,22 @@ def check_for_numactl_pkg():
                 print(f"please install the {lib} package with {tool}")
             break
     return found
+
+
+def numactl_cmd_error(numactl_cmd):
+    """Dry-run numactl with a no-op program. Returns None on success, else the error message."""
+    try:
+        result = subprocess.run(numactl_cmd + ["true"], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    except OSError as e:
+        return str(e)
+    if result.returncode == 0:
+        return None
+    return result.stderr.decode("utf-8").strip().replace("\n", "; ")
+
+
+def _numactl_permission_error(error):
+    message = error.lower()
+    return "operation not permitted" in message or "permission denied" in message
 
 
 def parse_range(rng):
@@ -202,4 +232,49 @@ def get_numactl_cmd(bind_core_list, num_local_procs, local_rank):
     if first_core != last_core:
         core_list_str = f"{core_list_str}-{last_core}"
     numactl_cmd.append(f"{core_list_str}")
-    return cores_per_rank, numactl_cmd
+
+    # Containers without CAP_SYS_NICE reject NUMA memory policies (-m/-p) with "Operation not
+    # permitted", which would kill every rank at spawn. Degrade gracefully instead of failing.
+    error = numactl_cmd_error(numactl_cmd)
+    if error is None:
+        return cores_per_rank, numactl_cmd
+    if not _numactl_permission_error(error):
+        raise RuntimeError(f"'{' '.join(numactl_cmd)}' failed: {error}")
+    cpu_only_cmd = ["numactl", "-C", core_list_str]
+    cpu_only_error = numactl_cmd_error(cpu_only_cmd)
+    if cpu_only_error is None:
+        logger.warning(f"'{' '.join(numactl_cmd)}' failed ({error}). "
+                       f"Falling back to CPU binding without NUMA memory binding: '{' '.join(cpu_only_cmd)}'")
+        return cores_per_rank, cpu_only_cmd
+    if not _numactl_permission_error(cpu_only_error):
+        raise RuntimeError(f"'{' '.join(cpu_only_cmd)}' failed: {cpu_only_error}")
+    logger.warning(f"'{' '.join(cpu_only_cmd)}' failed ({cpu_only_error}). "
+                   "Launching without numactl core/memory binding.")
+    return cores_per_rank, []
+
+
+def main(args=None):
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Bind and exec a command using this host's NUMA permissions.")
+    parser.add_argument("--bind_core_list", default=None)
+    parser.add_argument("--num_local_procs", type=int, required=True)
+    parser.add_argument("--local_rank", type=int, required=True)
+    parser.add_argument("command", nargs=argparse.REMAINDER)
+    args = parser.parse_args(args)
+    command = args.command
+    if command and command[0] == "--":
+        command = command[1:]
+    if not command:
+        parser.error("a command to launch is required")
+
+    cores_per_rank, numactl_cmd = get_numactl_cmd(args.bind_core_list, args.num_local_procs, args.local_rank)
+    env = os.environ.copy()
+    env["OMP_NUM_THREADS"] = str(cores_per_rank)
+    command = numactl_cmd + command
+    # Keep the MPI rank's PID and signal/exit handling without a resident wrapper process.
+    os.execvpe(command[0], command, env)
+
+
+if __name__ == "__main__":
+    main()

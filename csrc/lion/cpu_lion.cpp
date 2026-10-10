@@ -4,10 +4,14 @@
 // DeepSpeed Team
 
 #include "cpu_lion.h"
+#include <pybind11/pybind11.h>
+#include "reflow_bindings.h"
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
 {
     m.def("lion_update", &ds_lion_step, "DeepSpeed CPU Lion update (C++)");
     m.def("create_lion", &create_lion_optimizer, "DeepSpeed CPU Lion (C++)");
     m.def("destroy_lion", &destroy_lion_optimizer, "DeepSpeed CPU Lion destroy (C++)");
+
+    bind_reflow_lion(m);
 }

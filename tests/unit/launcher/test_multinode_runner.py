@@ -9,6 +9,10 @@ from deepspeed.launcher import runner as ds_runner
 from deepspeed.launcher.runner import (encode_world_info, parse_args, parse_inclusion_exclusion,
                                        apply_num_nodes_and_gpus)
 import os
+import sys
+import json
+import subprocess
+from pathlib import Path
 import pytest
 
 
@@ -153,3 +157,147 @@ def test_mvapich_runner(runner_info):
     runner = mnrunner.MVAPICHRunner(args, world_info, resource_pool)
     cmd = runner.get_cmd(env, resource_pool)
     assert cmd[0] == 'mpirun'
+
+
+@pytest.fixture
+def target_numactl(tmp_path, monkeypatch):
+    # Model the numactl CLI, including exec and host-specific topology/permissions.
+    fake_numactl = tmp_path / 'numactl'
+    fake_numactl.write_text(f'''#!{sys.executable}
+import json
+import os
+import sys
+with open(os.environ['NUMACTL_LOG'], 'a') as log:
+    log.write(json.dumps(sys.argv[1:]) + '\\n')
+if sys.argv[1:] == ['--hardware']:
+    node = int(os.environ.get('NUMACTL_NODE', '0'))
+    print('available: 2 nodes (0-1)')
+    for i in range(2):
+        start = 0 if i == node else 8
+        print('node %d cpus: %s' % (i, ' '.join(str(c) for c in range(start, start + 8))))
+    sys.exit(0)
+args = sys.argv[1:]
+while args and args[0] in ('-m', '-p', '-C'):
+    option = args[0]
+    if option in os.environ.get('NUMACTL_DENIED', '').split():
+        error = os.environ.get('NUMACTL_CPU_ERROR') if option == '-C' else None
+        print(error or os.environ.get('NUMACTL_ERROR', 'Operation not permitted'), file=sys.stderr)
+        sys.exit(1)
+    args = args[2:]
+os.environ['NUMACTL_BINDING'] = json.dumps(sys.argv[1:len(sys.argv) - len(args)])
+os.execvp(args[0], args)
+''')
+    fake_numactl.chmod(0o755)
+    monkeypatch.setenv('PATH', f"{tmp_path}:{os.environ['PATH']}")
+    repo_root = Path(mnrunner.__file__).resolve().parents[2]
+    monkeypatch.setenv('PYTHONPATH', f"{repo_root}:{os.environ.get('PYTHONPATH', '')}")
+    monkeypatch.setenv('NUMACTL_LOG', str(tmp_path / 'launcher-numactl.log'))
+    monkeypatch.setenv('NUMACTL_DENIED', '-m')
+    monkeypatch.setenv('NUMACTL_ERROR', 'invalid NUMA node')
+    return tmp_path
+
+
+@pytest.mark.parametrize('launch_mode', [[], ['--module'], ['--no_python']])
+@pytest.mark.parametrize('denied_options', ['', '-m', '-m -C'])
+def test_impi_binding_uses_target_host(runner_info, target_numactl, launch_mode, denied_options):
+    env, resource_pool, world_info, _ = runner_info
+    script = target_numactl / 'rank_payload.py'
+    script.write_text(f'''#!{sys.executable}
+import json
+import os
+import sys
+with open(sys.argv[1], 'w') as output:
+    json.dump(dict(pid=os.getpid(), rank=os.environ['RANK'], local_rank=os.environ['LOCAL_RANK'],
+                   threads=os.environ['OMP_NUM_THREADS'], arguments=sys.argv[2:],
+                   binding=json.loads(os.environ.get('NUMACTL_BINDING', '[]'))), output)
+sys.exit(17)
+''')
+    script.chmod(0o755)
+    user_script = 'rank_payload' if '--module' in launch_mode else str(script)
+    output = target_numactl / 'rank.json'
+    args = parse_args(['--bind_cores_to_rank', '--bind_core_list', '0-7'] + launch_mode +
+                      [user_script, str(output), 'argument with spaces'])
+    runner = mnrunner.IMPIRunner(args, world_info, resource_pool)
+    cmd = runner.get_cmd(env, resource_pool)
+    # Command construction must neither probe nor depend on the launcher's permissions.
+    assert not (target_numactl / 'launcher-numactl.log').exists()
+    groups = []
+    group = []
+    for arg in cmd[cmd.index('-n'):]:
+        if arg == ':':
+            groups.append(group)
+            group = []
+        else:
+            group.append(arg)
+    groups.append(group)
+
+    # Execute the MPI rank commands with different target-host environments.
+    for rank, node, denied in [(1, '0', ''), (5, '1', denied_options)]:
+        rank_env = os.environ.copy()
+        rank_env.update(RANK=str(rank),
+                        LOCAL_RANK='1',
+                        LOCAL_SIZE='4',
+                        NUMACTL_NODE=node,
+                        NUMACTL_DENIED=denied,
+                        NUMACTL_ERROR='Operation not permitted',
+                        NUMACTL_LOG=str(target_numactl / f'target-{rank}.log'))
+        proc = subprocess.Popen(groups[rank][8:],
+                                env=rank_env,
+                                cwd=target_numactl,
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE)
+        _, stderr = proc.communicate(timeout=30)
+        assert proc.returncode == 17, stderr.decode()
+        result = json.loads(output.read_text())
+        if '-C' in denied:
+            binding = []
+        elif '-m' in denied:
+            binding = ['-C', '2-3']
+        else:
+            binding = ['-m', node, '-C', '2-3']
+        assert result == dict(pid=proc.pid,
+                              rank=str(rank),
+                              local_rank='1',
+                              threads='2',
+                              arguments=['argument with spaces'],
+                              binding=binding)
+
+
+@pytest.mark.parametrize('error', ['invalid NUMA node', 'invalid CPU list'])
+def test_impi_helper_rejects_invalid_binding(target_numactl, error):
+    output = target_numactl / 'must-not-launch'
+    helper = Path(mnrunner.numa.__file__)
+    env = os.environ.copy()
+    env.update(RANK='0', LOCAL_RANK='0', LOCAL_SIZE='2', NUMACTL_DENIED='-m -C')
+    if error == 'invalid CPU list':
+        env.update(NUMACTL_ERROR='Operation not permitted', NUMACTL_CPU_ERROR=error)
+    else:
+        env['NUMACTL_ERROR'] = error
+    result = subprocess.run([
+        sys.executable,
+        str(helper), '--num_local_procs', '2', '--local_rank', '0', '--bind_core_list', '0-7', '--', 'touch',
+        str(output)
+    ],
+                            env=env,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                            timeout=30)
+    assert result.returncode != 0
+    assert error in result.stderr.decode()
+    assert not output.exists()
+
+
+@pytest.mark.parametrize('launch_mode', [[], ['--module'], ['--no_python']])
+def test_impi_without_binding_skips_numa_wrapper(runner_info, launch_mode):
+    env, resource_pool, world_info, _ = runner_info
+    args = parse_args(launch_mode + ['training_script', '--training-arg'])
+    runner = mnrunner.IMPIRunner(args, world_info, resource_pool)
+    cmd = runner.get_cmd(env, resource_pool)
+    expected = []
+    if not args.no_python:
+        expected = [sys.executable, '-u']
+        if args.module:
+            expected.append('-m')
+    expected += ['training_script', '--training-arg']
+    first_rank_command = cmd.index('-n') + 8
+    assert cmd[first_rank_command:first_rank_command + len(expected)] == expected
