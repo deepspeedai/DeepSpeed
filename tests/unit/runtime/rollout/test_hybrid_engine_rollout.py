@@ -1102,6 +1102,34 @@ def test_adaptive_generation_matches_single_request_eager(lengths, capacity, str
         assert rollout.get_last_profile()["active_batch_size"] <= capacity
 
 
+@pytest.mark.parametrize("adaptive_prefill", [False, True])
+def test_continuous_opt_matches_eager_with_static_cache(adaptive_prefill):
+    from deepspeed.accelerator import get_accelerator
+    from transformers import OPTConfig, OPTForCausalLM
+
+    torch.manual_seed(8497)
+    config = OPTConfig(vocab_size=32,
+                       hidden_size=32,
+                       ffn_dim=64,
+                       num_hidden_layers=2,
+                       num_attention_heads=4,
+                       max_position_embeddings=32,
+                       pad_token_id=0,
+                       eos_token_id=None,
+                       attn_implementation="sdpa")
+    model = OPTForCausalLM(config).to(get_accelerator().device_name()).eval()
+    prompt = torch.tensor([[1, 4, 5], [0, 4, 5]], device=next(model.parameters()).device)
+    mask = prompt.ne(0).long()
+    with torch.no_grad():
+        expected = model.generate(prompt, attention_mask=mask, max_new_tokens=3, do_sample=False)
+    rollout = HybridEngineRollout(SimpleNamespace(module=model), SimpleNamespace(pad_token_id=0, eos_token_id=None),
+                                  HybridEngineRolloutConfig(adaptive_prefill=adaptive_prefill))
+    result = rollout.generate(RolloutRequest(prompt, mask),
+                              SamplingConfig(max_new_tokens=3, temperature=0, continuous_batch_size=1))
+    assert torch.equal(result.input_ids, expected)
+    assert result.attention_mask[:, :3].tolist() == mask.tolist()
+
+
 @pytest.mark.parametrize("name,value", [
     ("prefill_fixed_cost_ms", -1.0),
     ("prefill_token_cost_ms", float("nan")),
