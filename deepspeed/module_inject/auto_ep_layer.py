@@ -844,13 +844,20 @@ class AutoEPMoELayer(nn.Module):
         # the handle as a Python int rather than off the device prefix sum to
         # avoid a device-to-host sync in front of every layer's expert GEMM.
         arrived = handle.num_expanded_tokens
-        received = received[:arrived]
+        # A fresh dispatch syncs for exact counts, so its buffers usually hold
+        # exactly the rows that arrived. Slicing them anyway changes nothing
+        # forward, but its backward zero-fills a gradient the size of the whole
+        # buffer and copies the real one into it, in every layer.
+        if received.shape[0] != arrived:
+            received = received[:arrived]
+        if recv_weights is not None and recv_weights.shape[0] != arrived:
+            recv_weights = recv_weights[:arrived]
 
         # Applied here, not handed to combine: DeepEP's combine transports and
         # reduces topk_weights but doesn't multiply rows by them. Which side of
         # the experts it lands on must match the collective path, since SwiGLU
         # doesn't commute with the weight.
-        weights = None if recv_weights is None else recv_weights[:arrived].reshape(-1, 1)
+        weights = None if recv_weights is None else recv_weights.reshape(-1, 1)
         if weights is not None and self.score_apply == "pre":
             received = apply_deepep_row_weights(received, weights, self.row_weighting_impl)
             weights = None

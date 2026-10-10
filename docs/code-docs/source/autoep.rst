@@ -196,6 +196,12 @@ constructed, including when the caller supplied a lazily initialized process
 group. This initialization does not run on subsequent forwards. The standard
 ``comm`` and ``autoep_size=1`` paths are unchanged.
 
+Received rows and routing weights are passed through without a prefix slice
+when their buffers already contain exactly the arrived rows. Overallocated
+buffers are still trimmed independently to the handle's row count. This avoids
+redundant slice-gradient zero-fills and copies during checkpoint recomputation;
+it changes neither row weighting nor DeepEP's communication volume.
+
 On 16 H100s across two nodes, replaying routing captured from real training,
 DeepEP reduced payload AllToAll time from roughly 100 ms to 48 ms per step. A
 full SFT step on Qwen3.5-MoE went from roughly 325 ms to 266 ms, a 1.2x speedup

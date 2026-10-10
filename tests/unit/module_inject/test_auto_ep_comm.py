@@ -3,6 +3,7 @@
 
 import ast
 import inspect
+import itertools
 import textwrap
 import sys
 import unittest
@@ -476,6 +477,88 @@ class TestRoutingWeightsAreApplied(unittest.TestCase):
         self.assertEqual(seen["expert_input"].shape[0], self.ARRIVED_ROWS)
         self.assertEqual(seen["combine_rows"].shape[0], self.ARRIVED_ROWS)
         self.assertTrue(torch.equal(seen["counts"], torch.tensor([3, 3, 3, 3], dtype=torch.int32)))
+
+    def test_a_buffer_of_exactly_the_arrived_rows_is_used_without_slicing(self):
+        # A slice would change nothing forward, but its backward zero-fills a
+        # buffer-sized gradient and copies the real one into it. Pin that
+        # specific profiler event rather than relying on tensor identity.
+        generator = torch.Generator().manual_seed(8747)
+        for arrived in (0, self.ARRIVED_ROWS):
+            capacities = (arrived, arrived + self.BUFFER_ROWS - self.ARRIVED_ROWS)
+            cases = itertools.product(capacities, (None, *capacities), ("pre", "post"))
+            for buffer_rows, weight_rows, score_apply in cases:
+                with self.subTest(arrived=arrived,
+                                  buffer_rows=buffer_rows,
+                                  weight_rows=weight_rows,
+                                  score_apply=score_apply):
+                    prefix = torch.arange(1, self.LOCAL_EXPERTS + 1, dtype=torch.int64)
+                    prefix = prefix * (arrived // self.LOCAL_EXPERTS)
+                    handle = mock.Mock(psum_num_recv_tokens_per_expert=prefix, num_expanded_tokens=arrived)
+                    exchange = mock.Mock(last_handle=handle, num_max_tokens_per_rank=1024)
+                    received = torch.randn(buffer_rows,
+                                           self.HIDDEN,
+                                           dtype=torch.bfloat16,
+                                           generator=generator,
+                                           requires_grad=True)
+                    recv_weights = None
+                    if weight_rows is not None:
+                        recv_weights = torch.rand(weight_rows, generator=generator, requires_grad=True)
+                    reference_rows = received.detach().clone().requires_grad_(True)
+                    reference_weights = None
+                    if recv_weights is not None:
+                        reference_weights = recv_weights.detach().clone().requires_grad_(True)
+
+                    # Independent eager oracle for the previous always-sliced route. A nonlinear expert
+                    # makes applying weights before versus after the experts observably different.
+                    expected = reference_rows[:arrived]
+                    weights = None if reference_weights is None else reference_weights[:arrived, None]
+                    if weights is not None and score_apply == "pre":
+                        expected = (expected.float() * weights).to(expected.dtype)
+                    expected = expected.square()
+                    if weights is not None and score_apply == "post":
+                        expected = (expected.float() * weights).to(expected.dtype)
+                    expected.float().sum().backward()
+
+                    def experts(rows, counts):
+                        self.assertEqual(rows.shape[0], arrived)
+                        expected_counts = torch.full((self.LOCAL_EXPERTS, ),
+                                                     arrived // self.LOCAL_EXPERTS,
+                                                     dtype=torch.int32)
+                        self.assertTrue(torch.equal(counts, expected_counts))
+                        return rows.square()
+
+                    layer = mock.Mock(_deepep_exchange=exchange,
+                                      num_local_experts=self.LOCAL_EXPERTS,
+                                      score_apply=score_apply,
+                                      row_weighting_impl="eager",
+                                      comm_num_sm=12,
+                                      comm_qp_margin=4,
+                                      experts=experts)
+                    with mock.patch.object(auto_ep_layer, "deepep_dispatch",
+                                           lambda *_args: (received, recv_weights, exchange)), \
+                            mock.patch.object(auto_ep_layer, "deepep_combine", lambda _exchange, rows, _handle: rows):
+                        router_output = auto_ep_layer.RouterOutput(
+                            top_scores=torch.ones((4, 2)),
+                            selected_experts=torch.zeros((4, 2), dtype=torch.long),
+                            num_tokens_per_expert=torch.zeros(self.LOCAL_EXPERTS, dtype=torch.long),
+                        )
+                        tokens = torch.ones((4, self.HIDDEN), dtype=torch.bfloat16)
+                        with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU]) as profile:
+                            actual = auto_ep_layer.AutoEPMoELayer._deepep_route(layer, tokens, router_output)
+                            actual.float().sum().backward()
+
+                    self.assertTrue(torch.equal(actual, expected))
+                    self.assertTrue(torch.equal(received.grad, reference_rows.grad))
+                    self.assertFalse(received.grad[arrived:].any())
+                    if recv_weights is not None:
+                        self.assertTrue(torch.equal(recv_weights.grad, reference_weights.grad))
+                        self.assertFalse(recv_weights.grad[arrived:].any())
+                    expected_slices = int(buffer_rows != arrived)
+                    if weight_rows is not None:
+                        expected_slices += int(weight_rows != arrived)
+                    slice_gradients = sum(event.count for event in profile.key_averages()
+                                          if event.key == "aten::slice_backward")
+                    self.assertEqual(slice_gradients, expected_slices)
 
     def test_row_count_comes_from_the_handle_not_the_device(self):
         # Reading it off the prefix sum needs a device-to-host synchronisation
