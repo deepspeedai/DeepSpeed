@@ -92,10 +92,29 @@ class TestFused(DistributedTest):
 
         overflow_gradients = [float('inf'), float('-inf')] + [float('nan')] * 6
         for i, value in enumerate(overflow_gradients):
+            parameter_snapshots = [parameter.detach().clone() for parameter in model.module.parameters()]
+            master_snapshots = [master.detach().clone() for master in optim.fp32_groups_flat]
+            state_snapshots = []
+            for master in optim.fp32_groups_flat:
+                state = optim.optimizer.state[master]
+                state_snapshots.append({
+                    "step": state["step"],
+                    "exp_avg": state["exp_avg"].clone(),
+                    "exp_avg_sq": state["exp_avg_sq"].clone(),
+                })
             run_model_step(model, [value])
             expected_loss_scale = max(expected_loss_scale / 2, 1)
             assert optim.loss_scale_config.cur_scale == expected_loss_scale
             assert optim.loss_scale_config.cur_iter == (i + 1)
+            for parameter, snapshot in zip(model.module.parameters(), parameter_snapshots):
+                torch.testing.assert_close(parameter, snapshot, rtol=0, atol=0)
+            for master, master_snapshot, state_snapshot in zip(optim.fp32_groups_flat, master_snapshots,
+                                                               state_snapshots):
+                torch.testing.assert_close(master, master_snapshot, rtol=0, atol=0)
+                state = optim.optimizer.state[master]
+                assert state["step"] == state_snapshot["step"]
+                torch.testing.assert_close(state["exp_avg"], state_snapshot["exp_avg"], rtol=0, atol=0)
+                torch.testing.assert_close(state["exp_avg_sq"], state_snapshot["exp_avg_sq"], rtol=0, atol=0)
 
     def test_some_overflow(self):
         if not get_accelerator().is_fp16_supported():
