@@ -144,6 +144,67 @@ def pass_shard_position_ids(gm: GraphModule, example_inputs):
     shard_tensor_node(gm, position_ids_node)
 
 
+def get_sdpa_attn_mask(attn_node: Node):
+    """Return SDPA's attn_mask argument and whether it was passed as a keyword."""
+    if "attn_mask" in attn_node.kwargs:
+        return attn_node.kwargs["attn_mask"], True
+    if len(attn_node.args) > 3:
+        return attn_node.args[3], False
+    return None, True
+
+
+def set_sdpa_attn_mask(attn_node: Node, attn_mask, as_kwarg: bool):
+    if as_kwarg:
+        attn_node.update_kwarg("attn_mask", attn_mask)
+    else:
+        attn_node.update_arg(3, attn_mask)
+
+
+def gather_attn_mask_queries(gm: GraphModule, attn_mask: Node, q: Node, k: Node) -> Node:
+    """
+    Rewrite an SDPA mask for the layout after the Q/K/V all-to-all, where each rank attends with
+    the full query sequence and its own block of heads.
+
+    A mask computed from the local sequence shard only holds this rank's query rows, so the rows
+    are gathered across the SP group. A mask with a full head dimension must also be reduced to
+    this rank's heads.
+    """
+    mask_meta = get_node_shape_meta(attn_mask)
+    if mask_meta is None or mask_meta.ndim < 2:
+        return attn_mask
+
+    q_meta = get_node_shape_meta(q)
+    mask_keys = mask_meta.shape[-1]
+    # A key dimension of 1 is broadcast by SDPA, not sharded.
+    if mask_keys != 1 and str(mask_keys) == str(get_node_shape_meta(k).shape[2]):
+        # The other ranks' key columns were never computed here, so they cannot be gathered.
+        raise RuntimeError("AutoSP cannot rebuild an attention mask whose key dimension is sharded along the "
+                           f"sequence (mask shape {tuple(mask_meta.shape)}). Build the mask from the full, "
+                           "unsharded sequence length instead, for example from the 2D padding attention_mask.")
+    query_sharded = str(mask_meta.shape[-2]) == str(q_meta.shape[2])
+    per_head = mask_meta.ndim == 4 and mask_meta.shape[1] != 1
+
+    if per_head:
+        if str(mask_meta.shape[1]) != str(q_meta.shape[1]):
+            raise RuntimeError(f"AutoSP expects the head dimension of the attention mask {tuple(mask_meta.shape)} "
+                               f"to be 1 or the number of query heads ({q_meta.shape[1]})")
+        if query_sharded:
+            # Same redistribution as the query: [B, N, S/P, S] -> [B, N/P, S, S].
+            with gm.graph.inserting_after(attn_mask):
+                return gm.graph.call_function(torch.ops.autosp.all_to_all.default, args=(attn_mask, 1, 2, "attn_mask"))
+        # The query all-to-all hands rank r the r-th contiguous block of heads.
+        sp_size = sp_dp_registry.sp_size()
+        local_heads = q_meta.shape[1] // sp_size
+        sp_rank = dist.get_rank() % sp_size
+        with gm.graph.inserting_after(attn_mask):
+            return gm.graph.call_function(torch.narrow, args=(attn_mask, 1, sp_rank * local_heads, local_heads))
+
+    if not query_sharded:
+        return attn_mask
+    with gm.graph.inserting_after(attn_mask):
+        return gm.graph.call_function(torch.ops.autosp.all_gather_sequence.default, args=(attn_mask, -2))
+
+
 def pass_insert_attention_all_to_all(gm: GraphModule, real_inputs):
 
     def insert_a2a(node: Node, scatter_idx: int, gather_idx: int, name: str) -> Node:
@@ -165,6 +226,8 @@ def pass_insert_attention_all_to_all(gm: GraphModule, real_inputs):
                            "Please ensure your model uses torch.nn.functional.scaled_dot_product_attention "
                            "for AutoSP to work as expected.")
 
+    # Layers commonly share one mask node, so gather it once.
+    gathered_masks = {}
     for idx, attn_node in enumerate(attention_nodes):
         q, k, v = attn_node.args[:3]
         suffix = f"_{idx}" if len(attention_nodes) > 1 else ""
@@ -181,6 +244,12 @@ def pass_insert_attention_all_to_all(gm: GraphModule, real_inputs):
             if isinstance(num_heads, int) and num_heads % sp_size != 0:
                 raise ValueError(f"AutoSP requires the number of {role} heads ({num_heads}) to be divisible by "
                                  f"sequence_parallel_size ({sp_size})")
+
+        attn_mask, mask_as_kwarg = get_sdpa_attn_mask(attn_node)
+        if isinstance(attn_mask, Node):
+            if attn_mask not in gathered_masks:
+                gathered_masks[attn_mask] = gather_attn_mask_queries(gm, attn_mask, q, k)
+            set_sdpa_attn_mask(attn_node, gathered_masks[attn_mask], mask_as_kwarg)
 
         # QKV: [B, N, S/P, H] -> [B, N/P, S, H]
         insert_a2a(q, scatter_idx=1, gather_idx=2, name=f"q{suffix}")
@@ -232,18 +301,18 @@ def pass_propagate_shapes(gm: torch.fx.GraphModule, real_inputs):
     # SDPA output shapes are still determined by Q/K/V shapes, not mask values.
     saved_sdpa_masks = []
     for attn_node in get_sdpa_nodes(gm):
-        attn_mask = attn_node.kwargs.get("attn_mask")
+        attn_mask, mask_as_kwarg = get_sdpa_attn_mask(attn_node)
         if attn_mask is not None:
-            saved_sdpa_masks.append((attn_node, attn_mask))
-            attn_node.update_kwarg("attn_mask", None)
+            saved_sdpa_masks.append((attn_node, attn_mask, mask_as_kwarg))
+            set_sdpa_attn_mask(attn_node, None, mask_as_kwarg)
 
     try:
         # fake_inputs are already created under fake_mode above, so run
         # propagation without reconverting them into a different fake mode.
         FakeTensorProp(gm, mode=fake_mode).propagate_dont_convert_inputs(*fake_inputs)
     finally:
-        for attn_node, attn_mask in saved_sdpa_masks:
-            attn_node.update_kwarg("attn_mask", attn_mask)
+        for attn_node, attn_mask, mask_as_kwarg in saved_sdpa_masks:
+            set_sdpa_attn_mask(attn_node, attn_mask, mask_as_kwarg)
 
 
 def apply_autosp(gm: GraphModule,
@@ -268,6 +337,8 @@ def apply_autosp(gm: GraphModule,
         pass_shard_input_ids,
         pass_shard_label_ids,
         pass_shard_position_ids,
+        # The attention pass compares mask and Q/K/V shapes after sharding, so refresh them first.
+        pass_propagate_shapes,
         pass_insert_attention_all_to_all,
         pass_propagate_shapes,
         pass_canonicalize,

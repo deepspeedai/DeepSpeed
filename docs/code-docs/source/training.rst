@@ -759,3 +759,10 @@ Limitations
 AutoSP currently supports only ``torch.nn.functional.scaled_dot_product_attention``. Other attention patterns require additional pattern matching logic.
 
 AutoSP requires a fully connected computation graph without breaks. Graph breaks destroy the use-def chains across graphs and the compiler cannot propoaget sequence dimension sharding information.
+
+An ``attn_mask`` passed to ``scaled_dot_product_attention()`` may be built from the sharded sequence along its query
+dimension: AutoSP gathers the query rows across the sequence parallel group before attention. Its key dimension must
+cover the full sequence, for example by building it from the unsharded 2D padding ``attention_mask``. Masks whose key
+dimension comes from sharded tensors are rejected at compile time. The mask head dimension may be 1 or the number of
+query heads; a per-head mask is redistributed like the query, so each rank keeps the heads it attends with. Masks may
+require gradients, for example a learnable position bias.
