@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+from transformers import PretrainedConfig
 
 from deepspeed.ops.transformer.inference.op_binding.workspace import WorkspaceOp
 from deepspeed.runtime.hybrid_engine import DeepSpeedHybridEngine
@@ -164,12 +165,7 @@ def test_continuous_generation_covers_modern_static_cache_path():
             self.weight = torch.nn.Parameter(torch.zeros(1))
             self.calls = []
 
-            class CacheConfig(SimpleNamespace):
-
-                def get_text_config(self, **_kwargs):
-                    return self
-
-            self.config = CacheConfig(
+            self.config = PretrainedConfig(
                 max_position_embeddings=32,
                 num_hidden_layers=1,
                 num_attention_heads=1,
@@ -207,18 +203,13 @@ def test_continuous_generation_covers_modern_static_cache_path():
 
 def test_continuous_generation_trims_cache_after_staggered_eos():
 
-    class CacheConfig(SimpleNamespace):
-
-        def get_text_config(self, **_kwargs):
-            return self
-
     class CacheClassModel(torch.nn.Module):
         _supports_cache_class = True
 
         def __init__(self):
             super().__init__()
             self.weight = torch.nn.Parameter(torch.zeros(1))
-            self.config = CacheConfig(
+            self.config = PretrainedConfig(
                 max_position_embeddings=32,
                 num_hidden_layers=1,
                 num_attention_heads=1,

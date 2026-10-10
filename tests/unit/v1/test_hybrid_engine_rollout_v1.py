@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from transformers import PretrainedConfig
 
 from deepspeed.accelerator import get_accelerator
 from deepspeed.runtime.rollout.base import RolloutRequest, SamplingConfig
@@ -17,18 +18,13 @@ def test_continuous_generation_profile_on_accelerator():
     if not accelerator.is_available():
         pytest.skip("An accelerator is required for asynchronous profiling coverage")
 
-    class CacheConfig(SimpleNamespace):
-
-        def get_text_config(self, **_kwargs):
-            return self
-
     class CacheClassModel(torch.nn.Module):
         _supports_cache_class = True
 
         def __init__(self):
             super().__init__()
             self.weight = torch.nn.Parameter(torch.zeros(1))
-            self.config = CacheConfig(
+            self.config = PretrainedConfig(
                 max_position_embeddings=32,
                 num_hidden_layers=1,
                 num_attention_heads=1,
