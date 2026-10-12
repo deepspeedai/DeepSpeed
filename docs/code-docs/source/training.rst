@@ -745,9 +745,13 @@ This serves as a hint to the compiler to know which inputs should be sharded acr
 ``seq_dim`` applies to every prepared tensor, so use ``seq_dim=0`` for sequence-first ``[seq, batch]`` inputs.
 The compiler records it on the tagged inputs and shards along that dimension.
 
-Labels are sharded like the other inputs, so a causal LM must shift them to the next token on the full sequence
-before ``prepare_autosp_inputs()``, for example by passing ``F.pad(labels, (0, 1), value=-100)[..., 1:]`` as
-``label_id`` and computing the loss without shifting again. A shift inside the model would pair the last token of every shard with a wrong target.
+Labels stay whole on every rank, so a causal LM may shift them inside the model on the full sequence, as the
+Hugging Face loss does with ``F.pad(labels, (0, 1), value=-100)[..., 1:]``, or pass labels that are already shifted.
+AutoSP gives each ``torch.nn.functional.cross_entropy`` the part of its target that lines up with the local logits.
+Between the logits and the cross entropy, the logits may only be sliced on the sequence dimension by static
+amounts, such as ``logits[..., :-1, :]``, before being reshaped or cast; the labels may only flow into
+cross entropy targets and cannot be combined with sequence-sharded tensors such as the input ids. AutoSP raises
+an error for any other pattern instead of pairing logits with the wrong targets.
 Each rank then returns the loss of the full sequence: AutoSP sums the loss and the number of non-ignored
 tokens over the sequence-parallel group, for both ``reduction="mean"`` and ``reduction="sum"``. The per-token
 losses are summed in FP32, so half-precision training does not overflow the shard sum, and the result is returned

@@ -184,7 +184,8 @@ class TestAutoSPSeqDim(DistributedTest):
 
 class _CausalLMModel(torch.nn.Module):
     """
-    Single-layer causal LM whose labels are already shifted to the next token, like ``shift_labels``.
+    Single-layer causal LM. With ``label_shift="none"`` the labels are already shifted to the next token,
+    like ``shift_labels``; the other modes shift them inside the model.
     ``reduction`` is either a reduction name or the reduction keyword arguments of the cross entropy.
     """
 
@@ -196,9 +197,11 @@ class _CausalLMModel(torch.nn.Module):
                  keyword_args=False,
                  logit_scale=1.0,
                  probability_targets=False,
-                 autocast_dtype=None):
+                 autocast_dtype=None,
+                 label_shift="none"):
         super().__init__()
         self.reduction_kwargs = {"reduction": reduction} if isinstance(reduction, str) else reduction
+        self.label_shift = label_shift
         self.keyword_args = keyword_args
         self.probability_targets = probability_targets
         self.autocast_dtype = autocast_dtype
@@ -221,12 +224,24 @@ class _CausalLMModel(torch.nn.Module):
         attn = F.scaled_dot_product_attention(to_heads(q), to_heads(k), to_heads(v), is_causal=True)
         x = x + self.out(attn.transpose(1, 2).reshape(batch, seq_len, -1))
         if self.autocast_dtype is None:
-            return self.loss(x, labels)
+            return self.loss(x, labels, input_ids)
         with torch.autocast(device_type=x.device.type, dtype=self.autocast_dtype):
-            return self.loss(x, labels)
+            return self.loss(x, labels, input_ids)
 
-    def loss(self, x, labels):
+    def loss(self, x, labels, input_ids):
         logits = self.head(x) * self.logit_scale
+        if self.label_shift == "slice":
+            # Shift used by Megatron-style and older Hugging Face losses.
+            logits, labels = logits[..., :-1, :].contiguous(), labels[..., 1:].contiguous()
+        elif self.label_shift == "pad":
+            # Shift used by the Hugging Face ForCausalLMLoss.
+            labels = F.pad(labels, (0, 1), value=-100)[..., 1:].contiguous()
+        elif self.label_shift == "strided":
+            logits, labels = logits[:, ::2].contiguous(), labels[:, ::2].contiguous()
+        elif self.label_shift == "mask_input":
+            labels = labels.masked_fill(input_ids == 0, -100)
+        elif self.label_shift == "explicit_view":
+            labels = labels.view(labels.size(0), labels.size(1))
         if self.probability_targets:
             labels = F.one_hot(labels, logits.size(-1)).float().view(-1, logits.size(-1))
         else:
@@ -246,22 +261,28 @@ class TestAutoSPCausalLoss(DistributedTest):
 
     @pytest.mark.sequential
     @pytest.mark.parametrize(
-        "zero_stage, reduction, keyword_args, explicit_mesh, empty_shard",
+        "zero_stage, reduction, keyword_args, explicit_mesh, empty_shard, label_shift",
         [
-            (0, "mean", False, False, False),
-            (1, "mean", False, False, False),
-            (0, "sum", False, False, False),
-            (1, "sum", False, False, False),
-            (0, "mean", True, False, False),
-            (0, "mean", False, False, True),
-            (0, "mean", False, True, False),
-            (1, "sum", False, True, False),
+            (0, "mean", False, False, False, "none"),
+            (1, "mean", False, False, False, "none"),
+            (0, "sum", False, False, False, "none"),
+            (1, "sum", False, False, False, "none"),
+            (0, "mean", True, False, False, "none"),
+            (0, "mean", False, False, True, "none"),
+            (0, "mean", False, True, False, "none"),
+            (1, "sum", False, True, False, "none"),
+            (0, "mean", False, False, False, "slice"),
+            (1, "sum", False, False, False, "slice"),
+            (0, "mean", True, False, True, "slice"),
+            (0, "mean", False, False, False, "pad"),
+            (1, "sum", False, True, False, "pad"),
             # The deprecated argument overrides the default mean reduction.
             (0, {
                 "size_average": False
-            }, True, False, False),
+            }, True, False, False, "none"),
         ])
-    def test_matches_full_sequence_reference(self, zero_stage, reduction, keyword_args, explicit_mesh, empty_shard):
+    def test_matches_full_sequence_reference(self, zero_stage, reduction, keyword_args, explicit_mesh, empty_shard,
+                                             label_shift):
         import copy
         import deepspeed
         import deepspeed.comm as dist
@@ -290,7 +311,10 @@ class TestAutoSPCausalLoss(DistributedTest):
             return [t.to(device).contiguous() for t in (input_ids, labels, position_ids)]
 
         torch.manual_seed(0)
-        reference = _CausalLMModel(reduction, vocab_size=vocab_size, keyword_args=keyword_args).to(device)
+        reference = _CausalLMModel(reduction,
+                                   vocab_size=vocab_size,
+                                   keyword_args=keyword_args,
+                                   label_shift=label_shift).to(device)
         reference_optimizer = torch.optim.SGD(reference.parameters(), lr=lr)
         model = copy.deepcopy(reference)
         config = {
@@ -413,6 +437,41 @@ class TestAutoSPCausalLoss(DistributedTest):
 
         # A per-token loss cannot be combined over the shards, and probability targets have no ignored
         # tokens to count, so the full-sequence loss would be wrong.
+        input_ids = torch.randint(0, vocab_size, (batch, seq_len), device=device)
+        labels = torch.randint(0, vocab_size, (batch, seq_len), device=device)
+        position_ids = torch.arange(seq_len, device=device).unsqueeze(0).expand(batch, seq_len).contiguous()
+        with pytest.raises(Exception, match=error):
+            engine(*prepare_autosp_inputs(input_ids, labels, position_ids)[:3])
+        engine.destroy()
+
+    @pytest.mark.sequential
+    @pytest.mark.parametrize("label_shift, error", [
+        ("strided", "only static slices of the sequence dimension"),
+        ("mask_input", "labels cannot be combined with sequence-sharded tensors"),
+        ("explicit_view", "explicit symbolic sizes"),
+    ])
+    def test_rejects_labels_it_cannot_align(self, label_shift, error):
+        import deepspeed
+        from deepspeed.compile.passes.sp_compile import prepare_autosp_inputs
+
+        if get_accelerator().device_name() == "cpu":
+            pytest.skip("CPU does not support this test yet")
+
+        seq_len, batch, vocab_size = 16, 2, 64
+        device = get_accelerator().current_device_name()
+        config = {
+            "train_micro_batch_size_per_gpu": batch,
+            "compile": {
+                "deepcompile": True,
+                "passes": ["autosp"]
+            },
+            "sequence_parallel_size": 2,
+        }
+        model = _CausalLMModel("mean", vocab_size=vocab_size, label_shift=label_shift)
+        engine, _, _, _ = deepspeed.initialize(config=config, model=model)
+        engine.compile()
+
+        # Each rank would otherwise pair its logits with labels from other positions of the sequence.
         input_ids = torch.randint(0, vocab_size, (batch, seq_len), device=device)
         labels = torch.randint(0, vocab_size, (batch, seq_len), device=device)
         position_ids = torch.arange(seq_len, device=device).unsqueeze(0).expand(batch, seq_len).contiguous()
