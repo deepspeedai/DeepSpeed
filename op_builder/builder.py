@@ -493,18 +493,25 @@ class OpBuilder(ABC):
         return cpu_info
 
     def _riscv_has_vector(self):
-        # /proc/cpuinfo reports e.g. "isa             : rv64gcv_svinval..." -- the
+        # /proc/cpuinfo reports e.g. "isa             : rv64gcv_svinval...". The
         # single-letter V extension can only appear in the base segment before the first
         # underscore, so multi-letter extensions (zvl*b, zvfh, ...) can never match.
-        # Each character in the base segment is its own extension token, so a substring
-        # test would misfire on "vh" (half-float vector, no RVV 1.0): "v" in "imafdcvh"
-        # is True even though the host has no V. Use a set test instead.
+        # There, each letter is its own extension token, optionally versioned
+        # ("i2p0" style). A draft pre-1.0 V (e.g. "rv64imafdcv0p7") uses encodings that
+        # ratified V 1.0 replaced, and -march=rv64gcv would emit instructions such a
+        # CPU cannot execute, so only an unversioned V (ratified 1.0 on shipping
+        # devicetrees) or an explicit version >= 1.0 enables the vector path.
         try:
             with open('/proc/cpuinfo') as f:
                 for line in f:
                     if line.startswith('isa'):
-                        base = line.split(':', 1)[1].split('_', 1)[0].strip()
-                        return 'v' in set(base[4:])
+                        base = line.split(':', 1)[1].split('_', 1)[0].strip()[4:]
+                        for token in re.findall(r'[a-z](?:\d+p\d+)?', base):
+                            if token[0] != 'v':
+                                continue
+                            major = token[1:].partition('p')[0]
+                            return major == '' or int(major) >= 1
+                        return False
         except OSError:
             pass
         return False

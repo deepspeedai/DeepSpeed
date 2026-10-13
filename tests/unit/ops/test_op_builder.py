@@ -3,6 +3,7 @@
 
 # DeepSpeed Team
 
+import io
 import os
 import sys
 import subprocess
@@ -338,3 +339,26 @@ def test_probe_is_compatible_does_not_propagate_a_failed_probe():
 @pytest.mark.parametrize("answer", [True, False])
 def test_probe_is_compatible_passes_through_a_successful_probe(answer):
     assert probe_is_compatible(_AnsweringBuilder(answer)) is answer
+
+
+@pytest.mark.parametrize(
+    "isa_line,expected",
+    [
+        ("rv64gcv", True),  # ratified V, unversioned
+        ("rv64gcv1p0", True),  # explicitly versioned V 1.0
+        ("rv64i2p0m2p0a2p0f2p0d2p0c2p0v", True),  # fully versioned base, bare v
+        ("rv64gc", False),  # no V: keep the scalar build
+        ("rv64gc_zvfh", False),  # multi-letter extensions after '_' are not V
+        ("rv64imafdcv0p7", False),  # draft V 0.7 encodings differ from ratified 1.0
+    ])
+def test_riscv_has_vector_parses_isa_line(isa_line, expected):
+    # cpu_arch()/simd_width() gate -march=rv64gcv and __RVV__ on this parse. A wrong
+    # True on draft-v0p7 hardware builds V 1.0 encodings the CPU cannot execute.
+    cpuinfo = f"processor\t: 0\nisa\t\t: {isa_line}\nmmu\t\t: sv39\n"
+    with patch("builtins.open", lambda *args, **kwargs: io.StringIO(cpuinfo)):
+        assert make_builder()._riscv_has_vector() is expected
+
+
+def test_riscv_has_vector_unreadable_cpuinfo_is_scalar():
+    with patch("builtins.open", side_effect=OSError):
+        assert make_builder()._riscv_has_vector() is False
