@@ -5,6 +5,7 @@
 
 import io
 import os
+import struct
 import sys
 import subprocess
 import importlib.util
@@ -341,24 +342,49 @@ def test_probe_is_compatible_passes_through_a_successful_probe(answer):
     assert probe_is_compatible(_AnsweringBuilder(answer)) is answer
 
 
+_AT_HWCAP = 16  # <linux/auxvec.h>
+_HWCAP_ISA_V = 1 << (ord("V") - ord("A"))  # COMPAT_HWCAP_ISA_V in <asm/hwcap.h>
+
+
+def _fake_proc_open(cpuinfo, auxv):
+    # Stand in for open() against a synthetic /proc: auxv is the bytes to serve for
+    # /proc/self/auxv, or None to make it unreadable (kernel provides no HWCAP).
+    def fake_open(path, *args, **kwargs):
+        if str(path).endswith("auxv"):
+            if auxv is None:
+                raise OSError("no auxiliary vector")
+            return io.BytesIO(auxv)
+        return io.StringIO(cpuinfo)
+
+    return fake_open
+
+
 @pytest.mark.parametrize(
-    "isa_line,expected",
+    "isa_line,auxv,expected",
     [
-        ("rv64gcv", True),  # ratified V, unversioned
-        ("rv64gcv1p0", True),  # explicitly versioned V 1.0
-        ("rv64i2p0m2p0a2p0f2p0d2p0c2p0v", True),  # fully versioned base, bare v
-        ("rv64gc", False),  # no V: keep the scalar build
-        ("rv64gc_zvfh", False),  # multi-letter extensions after '_' are not V
-        ("rv64imafdcv0p7", False),  # draft V 0.7 encodings differ from ratified 1.0
+        # Bare "v" together with the kernel's HWCAP V bit: ratified V, modern kernel.
+        ("rv64gcv", struct.pack("=QQ", _AT_HWCAP, _HWCAP_ISA_V), True),
+        ("rv64i2p0m2p0a2p0f2p0d2p0c2p0v", struct.pack("=QQ", _AT_HWCAP, _HWCAP_ISA_V), True),
+        # Bare "v" without the HWCAP V bit, without AT_HWCAP, or with no auxv at all:
+        # unversioned "v" is also what draft-V 0.7.1 systems (T-Head C906/D1) report.
+        ("rv64gcv", struct.pack("=QQ", _AT_HWCAP, 0), False),
+        ("rv64gcv", struct.pack("=QQ", 6, 4096), False),  # auxv without AT_HWCAP
+        ("rv64gcv", None, False),
+        ("rv64gc", struct.pack("=QQ", _AT_HWCAP, 0), False),
+        ("rv64gc_zvfh", struct.pack("=QQ", _AT_HWCAP, 0), False),  # after '_' is not V
+        # An explicitly versioned token is authoritative even when HWCAP disagrees.
+        ("rv64gcv1p0", struct.pack("=QQ", 6, 4096), True),
+        ("rv64imafdcv0p7", struct.pack("=QQ", _AT_HWCAP, _HWCAP_ISA_V), False),
     ])
-def test_riscv_has_vector_parses_isa_line(isa_line, expected):
-    # cpu_arch()/simd_width() gate -march=rv64gcv and __RVV__ on this parse. A wrong
-    # True on draft-v0p7 hardware builds V 1.0 encodings the CPU cannot execute.
+def test_riscv_has_vector_detects_ratified_v(isa_line, auxv, expected):
+    # cpu_arch()/simd_width() gate -march=rv64gcv and __RVV__ on this probe. A wrong
+    # True on draft-V hardware builds V 1.0 encodings the CPU cannot execute.
     cpuinfo = f"processor\t: 0\nisa\t\t: {isa_line}\nmmu\t\t: sv39\n"
-    with patch("builtins.open", lambda *args, **kwargs: io.StringIO(cpuinfo)):
+    with patch("builtins.open", _fake_proc_open(cpuinfo, auxv)):
         assert make_builder()._riscv_has_vector() is expected
 
 
-def test_riscv_has_vector_unreadable_cpuinfo_is_scalar():
+def test_riscv_has_vector_unreadable_proc_keeps_scalar_build():
+    # Neither /proc/cpuinfo nor /proc/self/auxv readable: fall back to scalar.
     with patch("builtins.open", side_effect=OSError):
         assert make_builder()._riscv_has_vector() is False
