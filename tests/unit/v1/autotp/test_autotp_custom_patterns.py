@@ -995,3 +995,193 @@ class TestAutoTPFusedWeights(DistributedTest):
 
 # Multi-model (teacher + student in one process) and multimodal-config regressions live in
 # tests/unit/v1/autotp/test_autotp_multiple_models.py so they run on the GPU workflow too.
+
+
+class _WeightOnlyNorm(nn.Module):
+    """A norm with the shape every transformers RMSNorm has: one 1-D `weight`."""
+
+    def __init__(self, size=8):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(size))
+
+    def forward(self, hidden_states):
+        return hidden_states * self.weight
+
+
+def test_is_load_module_recognizes_a_norm_it_has_never_heard_of():
+    """Two norms with identical structure, differing only in class name (#8447).
+
+    `Loading.is_load_module` gated on a hardcoded list of 26 class names, so a norm
+    whose architecture was not on it returned False, `_replace_module` skipped it,
+    and on the meta-device path its weight was never materialized. transformers
+    defines one norm class per architecture, so the list named a small fraction of
+    them and the rest were silently left uninitialized.
+    """
+    from deepspeed.module_inject.auto_tp import Loading
+
+    on_the_list = type("LlamaRMSNorm", (_WeightOnlyNorm, ), {})()
+    not_on_the_list = type("GemmaRMSNorm", (_WeightOnlyNorm, ), {})()
+
+    assert Loading.is_load_module(on_the_list)
+    assert Loading.is_load_module(not_on_the_list), (
+        "a norm must be recognized by its shape, not by whether its class name was listed")
+
+
+def test_is_load_module_still_refuses_what_it_refused_before():
+    """The shape test must admit norms and nothing that wants a different load path."""
+    from deepspeed.module_inject.auto_tp import Loading
+
+    # 2-D weights: these are matched by class above and must not start matching by shape.
+    assert Loading.is_load_module(nn.Linear(4, 4))
+    assert Loading.is_load_module(nn.Embedding(4, 4))
+    assert Loading.is_load_module(nn.LayerNorm(4))
+
+    class _TwoDimLeaf(nn.Module):
+
+        def __init__(self):
+            super().__init__()
+            self.weight = nn.Parameter(torch.ones(4, 4))
+
+    assert not Loading.is_load_module(_TwoDimLeaf())
+    assert not Loading.is_load_module(nn.Conv1d(2, 2, 3))
+    assert not Loading.is_load_module(nn.MultiheadAttention(4, 2))
+    # A container owns its children's parameters but none of its own.
+    assert not Loading.is_load_module(nn.Sequential(nn.Linear(4, 4)))
+
+    class _NormWithExtraParam(_WeightOnlyNorm):
+
+        def __init__(self):
+            super().__init__()
+            self.scale = nn.Parameter(torch.ones(8))
+
+    assert not Loading.is_load_module(_NormWithExtraParam())
+
+
+def test_admitted_norm_absent_from_the_state_dict_still_gets_its_buffers_off_meta():
+    """A sharded checkpoint hands `_replace_module` one file at a time, so an admitted norm's
+    prefix can be missing. BatchNorm is admitted by shape now; its buffers must still leave meta."""
+    from deepspeed.module_inject.replace_module import _replace_module
+
+    with torch.device("meta"):
+        model = nn.Sequential()
+        model.add_module("norm", nn.BatchNorm1d(8))
+    state_dict = {"other.weight": torch.ones(8)}
+
+    _replace_module(model, policies={}, state_dict=state_dict)
+
+    assert not model.norm.running_mean.is_meta
+    assert not model.norm.running_var.is_meta
+
+
+def test_non_persistent_buffers_of_an_absent_module_stay_on_meta():
+    """A non-persistent buffer is in no shard, so there is nothing to copy into it. Materializing
+    it would leave uninitialized memory where a meta tensor used to fail loudly on first use."""
+    from deepspeed.module_inject.replace_module import _replace_module
+
+    class Phi3RotaryEmbedding(nn.Module):
+
+        def __init__(self):
+            super().__init__()
+            self.register_buffer("inv_freq", torch.arange(1, 5, dtype=torch.float32), persistent=False)
+
+    with torch.device("meta"):
+        model = nn.Sequential()
+        model.add_module("rotary", Phi3RotaryEmbedding())
+    state_dict = {"other.weight": torch.ones(8)}
+
+    _replace_module(model, policies={}, state_dict=state_dict)
+
+    assert model.rotary.inv_freq.is_meta
+
+
+def test_a_norm_it_has_never_heard_of_is_materialized_with_the_checkpoint_values():
+    """The reported failure, not the private gate: on the meta-device path an unlisted norm's
+    weight and bias stayed on meta. Run the replacement and read the tensors back."""
+    from deepspeed.module_inject.replace_module import _replace_module
+
+    weight_only = type("GemmaRMSNorm", (_WeightOnlyNorm, ), {})
+
+    class BiasedNorm(_WeightOnlyNorm):
+
+        def __init__(self):
+            super().__init__()
+            self.bias = nn.Parameter(torch.zeros(8))
+
+    with torch.device("meta"):
+        model = nn.Sequential()
+        model.add_module("plain", weight_only())
+        model.add_module("biased", type("CohereLayerNorm", (BiasedNorm, ), {})())
+    state_dict = {
+        "plain.weight": torch.full((8, ), 2.0),
+        "biased.weight": torch.full((8, ), 3.0),
+        "biased.bias": torch.full((8, ), 4.0),
+    }
+
+    _replace_module(model, policies={}, state_dict=state_dict)
+
+    for tensor, expected in ((model.plain.weight, 2.0), (model.biased.weight, 3.0), (model.biased.bias, 4.0)):
+        assert not tensor.is_meta
+        assert torch.equal(tensor.detach(), torch.full((8, ), expected))
+
+
+def test_is_load_module_refuses_a_bias_that_is_not_a_matching_parameter():
+    from deepspeed.module_inject.auto_tp import Loading
+
+    class BufferBias(_WeightOnlyNorm):
+
+        def __init__(self):
+            super().__init__()
+            self.register_buffer("bias", torch.zeros(8))
+
+    class WrongShapeBias(_WeightOnlyNorm):
+
+        def __init__(self):
+            super().__init__()
+            self.bias = nn.Parameter(torch.zeros(3))
+
+    class NoBias(_WeightOnlyNorm):
+
+        def __init__(self):
+            super().__init__()
+            self.register_parameter("bias", None)
+
+    assert not Loading.is_load_module(BufferBias())
+    assert not Loading.is_load_module(WrongShapeBias())
+    assert Loading.is_load_module(NoBias())
+
+
+def test_a_registered_none_buffer_does_not_break_an_absent_module():
+    """BatchNorm without running stats registers its buffers as None."""
+    from deepspeed.module_inject.replace_module import _replace_module
+
+    with torch.device("meta"):
+        model = nn.Sequential()
+        model.add_module("norm", nn.BatchNorm1d(8, track_running_stats=False))
+    state_dict = {"other.weight": torch.ones(8)}
+
+    _replace_module(model, policies={}, state_dict=state_dict)
+
+    assert model.norm.running_mean is None
+
+
+def test_only_the_persistent_buffer_of_an_absent_module_leaves_meta():
+    """One persistent buffer next to a non-persistent cache: the first is in the checkpoint's format
+    and gets a real tensor, the second is in no shard and stays on meta."""
+    from deepspeed.module_inject.replace_module import _replace_module
+
+    class Phi3RotaryEmbedding(nn.Module):
+
+        def __init__(self):
+            super().__init__()
+            self.register_buffer("stats", torch.zeros(4))
+            self.register_buffer("inv_freq", torch.arange(1, 5, dtype=torch.float32), persistent=False)
+
+    with torch.device("meta"):
+        model = nn.Sequential()
+        model.add_module("rotary", Phi3RotaryEmbedding())
+    state_dict = {"other.weight": torch.ones(8)}
+
+    _replace_module(model, policies={}, state_dict=state_dict)
+
+    assert not model.rotary.stats.is_meta
+    assert model.rotary.inv_freq.is_meta
