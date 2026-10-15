@@ -374,6 +374,36 @@ def merge_tensors(tensor_objects, non_tensor_objects, tensor_flags):
     return tuple(merged_objects)
 
 
+_DEALLOCATED_CHECKPOINT_INPUT = '_deepspeed_activation_checkpointing_deallocated'
+
+
+def _mark_activation_input_deallocated(tensor):
+    setattr(tensor, _DEALLOCATED_CHECKPOINT_INPUT, True)
+
+
+def _clear_activation_input_deallocated(tensor):
+    if hasattr(tensor, _DEALLOCATED_CHECKPOINT_INPUT):
+        delattr(tensor, _DEALLOCATED_CHECKPOINT_INPUT)
+
+
+def _raise_if_activation_input_was_deallocated(args):
+
+    def check(item):
+        if torch.is_tensor(item):
+            if getattr(item, _DEALLOCATED_CHECKPOINT_INPUT, False):
+                raise RuntimeError("An input tensor was deallocated by a previous activation checkpoint and cannot "
+                                   "be reused before backward restores it. Pass a fresh tensor to each checkpointed "
+                                   "layer or disable activation partitioning and CPU checkpointing.")
+        elif isinstance(item, (list, tuple)):
+            for value in item:
+                check(value)
+        elif isinstance(item, dict):
+            for value in item.values():
+                check(value)
+
+    check(args)
+
+
 def is_activation_to_checkpoint(item):
     """
         Is an activation to be checkpointed
@@ -455,6 +485,7 @@ def get_partitioned_activations_for_backward(args, inputs, contiguous_checkpoint
 
         arg.data = torch.empty([], device=arg.device).data
         arg.saved_data = inp.data
+        _mark_activation_input_deallocated(arg)
 
         new_args.append(arg)
         i = arg_index - num_non_fp_tensors
@@ -490,6 +521,7 @@ def get_cpu_activations_for_backward(args, inputs):
 
         arg.data = torch.empty([], device=arg.device).data
         arg.saved_data = inp.data
+        _mark_activation_input_deallocated(arg)
         new_args.append(arg)
 
     return new_args
@@ -543,6 +575,7 @@ def get_offloaded_activations_for_backward(args, engine):
     # mid-offload.
     for arg in to_empty:
         arg.data = torch.empty([], device=arg.device).data
+        _mark_activation_input_deallocated(arg)
 
     return new_args
 
@@ -561,6 +594,7 @@ def restore_offloaded_activations(tensors, engine):
             continue
         t.data = engine.restore_input(token).data
         t.ds_offload_id = None
+        _clear_activation_input_deallocated(t)
     return tensors
 
 
@@ -578,6 +612,7 @@ class CheckpointFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, run_function, all_outputs, *args):
         global mpu, timers, SYNCHRONIZE, PROFILE_TIME
+        _raise_if_activation_input_was_deallocated(args)
 
         def save_args_for_backward(*all_args):
             tensor_args, non_tensor_args, tensor_flags = extract_tensors(all_objects=all_args)
@@ -701,6 +736,7 @@ class CheckpointFunction(torch.autograd.Function):
             if t is not None and hasattr(t, 'saved_data') and t.saved_data is not None:
                 t.data = t.saved_data.to(t.device)
                 t.saved_data = None
+                _clear_activation_input_deallocated(t)
 
         offload_engine = getattr(ctx, 'ds_offload_engine', None)
         if PARTITION_ACTIVATIONS:
@@ -800,6 +836,7 @@ def non_reentrant_checkpoint(function, *args):
     5. above 4. is inspired by `torch.autograd.graph.register_multi_grad_hook`, which is only implemented after 2.0.0
     """
     global mpu, timers, SYNCHRONIZE, PROFILE_TIME
+    _raise_if_activation_input_was_deallocated(args)
 
     deepspeed_saved_tensors = None
     non_tensor_args = None
@@ -937,6 +974,7 @@ def non_reentrant_checkpoint(function, *args):
                 if t is not None and hasattr(t, 'saved_data') and t.saved_data is not None:
                     t.data = t.saved_data.to(t.device)
                     t.saved_data = None
+                    _clear_activation_input_deallocated(t)
 
             # gather inputs which is partitioned or checkpointed before first forward
             if PARTITION_ACTIVATIONS:
