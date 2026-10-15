@@ -15,7 +15,8 @@ Two concerns, in order:
 
 2. **The whole path, running.** `deepspeed.initialize` tags the parameters, the ZeRO call
    sites carry the tag into `muon_update`, and a real training loop takes steps with it,
-   across ZeRO stages and world size > 1.
+   across ZeRO stages and world size > 1. Both attention layouts are trained: the split
+   projections, and a fused `qkv_proj` whose sections hold different numbers of heads.
 
 See #8367. The arithmetic and the tagging are pinned on CPU in
 `tests/unit/runtime/zero/test_per_head_muon.py`.
@@ -30,6 +31,7 @@ import deepspeed
 from deepspeed.accelerator import get_accelerator
 from deepspeed.runtime.zero.muon.original_muon import (
     _per_head_orthogonalize,
+    ns_compute_dtype,
     zeropower_via_gram_newtonschulz,
     zeropower_via_newtonschulz5,
 )
@@ -60,19 +62,30 @@ def _column_parallel_shards(tensor, tp):
 @pytest.mark.parametrize("ns_method", ["gram", "standard"])
 @pytest.mark.parametrize("tp", [2, 4])
 def test_per_head_on_a_shard_is_the_shard_of_per_head(grad, ns_method, tp):
-    """Exactly equal, not close: the shards are the same matrices in the same batch."""
+    """The shards are the same matrices in the same batch, so the result is the same to rounding.
+
+    Which blocks Newton-Schulz runs on does not change with the split - each head is
+    orthogonalized against itself either way - so the two results differ only by how the
+    batched GEMM rounded. That is dtype-dependent rather than hardware-independent: `gram`
+    iterates in fp16 and came out bitwise equal here, while `standard` iterates in bf16, where a
+    batch of 8 and a batch of 4 select different kernels and land 4.2e-3 apart in relative norm
+    (measured on an RTX 5090, torch 2.13). The bound below is the compute dtype's own epsilon,
+    which is what "same computation, rounded differently" can produce; the whole-matrix path is
+    three orders of magnitude further out, which the test after this one pins.
+    """
     whole = _per_head_orthogonalize(grad.clone(), HEADS, STEPS, ns_method)
     sharded = torch.cat([
         _per_head_orthogonalize(shard.clone(), HEADS // tp, STEPS, ns_method)
         for shard in _column_parallel_shards(grad, tp)
     ])
 
-    assert torch.equal(sharded, whole)
+    epsilon = torch.finfo(ns_compute_dtype(ns_method)).eps
+    torch.testing.assert_close(sharded, whole, rtol=4 * epsilon, atol=4 * epsilon)
 
 
 @pytest.mark.parametrize("ns_method", ["gram", "standard"])
 def test_the_whole_matrix_path_does_not_survive_the_split(grad, ns_method):
-    """The comparison this is measured against, so "exact" above means something.
+    """The comparison this is measured against, so the rounding bound above means something.
 
     Newton-Schulz on a block of rows is a different computation from the same block of
     Newton-Schulz on every row, and the difference is not small.
@@ -95,7 +108,8 @@ def test_a_stale_head_count_splits_heads_in_half(grad):
     correct = _per_head_orthogonalize(shard.clone(), HEADS // 2, STEPS, "gram")
     stale = _per_head_orthogonalize(shard.clone(), HEADS, STEPS, "gram")
 
-    assert torch.equal(correct, whole[:shard.shape[0]])
+    epsilon = torch.finfo(ns_compute_dtype("gram")).eps
+    torch.testing.assert_close(correct, whole[:shard.shape[0]], rtol=4 * epsilon, atol=4 * epsilon)
     assert _relative(stale, whole[:shard.shape[0]]) > 0.1
 
 
@@ -193,6 +207,43 @@ class AttentionModel(torch.nn.Module):
         return self.cross_entropy_loss(x, y)
 
 
+class FusedAttentionModel(torch.nn.Module):
+    """The same GQA shape with Q, K and V held in one `qkv_proj`.
+
+    `AttentionModel` covers the split layout; this covers the fused one, whose sections do not
+    share a head count (8 query heads, 2 key, 2 value) and so cannot be read as `3 * num_heads`
+    uniform blocks.
+    """
+
+    def __init__(self, hidden_dim=64, q_heads=8, kv_heads=2, head_dim=8, nlayers=2):
+        super().__init__()
+        self.q_heads, self.kv_heads, self.head_dim = q_heads, kv_heads, head_dim
+        fused_dim = (q_heads + 2 * kv_heads) * head_dim
+        self.blocks = torch.nn.ModuleList()
+        for _ in range(nlayers):
+            self.blocks.append(
+                torch.nn.ModuleDict({
+                    "qkv_proj": torch.nn.Linear(hidden_dim, fused_dim, bias=False),
+                    "o_proj": torch.nn.Linear(q_heads * head_dim, hidden_dim, bias=False),
+                    "mlp": torch.nn.Linear(hidden_dim, hidden_dim, bias=False),
+                }))
+        self.cross_entropy_loss = torch.nn.CrossEntropyLoss()
+        self.config = SimpleNamespace(num_attention_heads=q_heads,
+                                      num_key_value_heads=kv_heads,
+                                      hidden_size=hidden_dim,
+                                      head_dim=head_dim)
+
+    def forward(self, x, y):
+        for b in self.blocks:
+            qkv = b["qkv_proj"](x)
+            q, k, v = qkv.split(
+                [self.q_heads * self.head_dim, self.kv_heads * self.head_dim, self.kv_heads * self.head_dim], dim=-1)
+            rep = self.q_heads // self.kv_heads
+            attn = q * k.repeat(1, rep) + v.repeat(1, rep)
+            x = x + b["mlp"](b["o_proj"](attn))
+        return self.cross_entropy_loss(x, y)
+
+
 def _config(zero_stage, per_head, lr=0.01, offload_optimizer=False):
     config = {
         "train_batch_size": 4,
@@ -227,7 +278,7 @@ def _config(zero_stage, per_head, lr=0.01, offload_optimizer=False):
 
 def _train(model, config, steps=6, hidden_dim=64, seed=1234):
     engine, *_ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config)
-    tags = {n: getattr(p, "muon_num_heads", "MISSING") for n, p in model.named_parameters()}
+    tags = {n: p.muon_num_heads for n, p in model.named_parameters()}
     gen = torch.Generator().manual_seed(seed)
     losses = []
     for _ in range(steps):
@@ -269,6 +320,38 @@ class TestPerHeadMuonEndToEnd(DistributedTest):
         _, full, _ = _train(AttentionModel(), _config(zero_stage, per_head=False))
         torch.manual_seed(1234)
         _, per_head, _ = _train(AttentionModel(), _config(zero_stage, per_head=True))
+
+        assert full[-1] < full[0], f"baseline did not train: {full}"
+        assert per_head[-1] < per_head[0], f"per-head did not train: {per_head}"
+
+
+@pytest.mark.parametrize("zero_stage", [1, 2, 3])
+class TestFusedQkvPerHeadMuonEndToEnd(DistributedTest):
+    """A fused QKV weight, through the same path."""
+
+    world_size = 2
+
+    def test_the_fused_projection_is_tagged_with_one_block_per_head(self, zero_stage):
+        """8 query heads + 2 key + 2 value = 12 head-sized blocks, not 8 and not 3 * 8."""
+        torch.manual_seed(1234)
+        tags, losses, _ = _train(FusedAttentionModel(), _config(zero_stage, per_head=True))
+
+        assert tags["blocks.0.qkv_proj.weight"] == 12
+        assert tags["blocks.0.o_proj.weight"] is None, "o_proj's heads are on the input axis"
+        assert tags["blocks.0.mlp.weight"] is None
+        assert all(torch.isfinite(torch.tensor(loss)) for loss in losses)
+
+    def test_the_fused_projection_stays_on_the_full_matrix_path_when_the_flag_is_off(self, zero_stage):
+        torch.manual_seed(1234)
+        tags, _, _ = _train(FusedAttentionModel(), _config(zero_stage, per_head=False))
+
+        assert all(v is None for v in tags.values()), {k: v for k, v in tags.items() if v is not None}
+
+    def test_training_makes_progress_either_way(self, zero_stage):
+        torch.manual_seed(1234)
+        _, full, _ = _train(FusedAttentionModel(), _config(zero_stage, per_head=False))
+        torch.manual_seed(1234)
+        _, per_head, _ = _train(FusedAttentionModel(), _config(zero_stage, per_head=True))
 
         assert full[-1] < full[0], f"baseline did not train: {full}"
         assert per_head[-1] < per_head[0], f"per-head did not train: {per_head}"
