@@ -35,7 +35,7 @@ from deepspeed.utils.logging import logger
 from einops import rearrange
 from packaging import version
 from torch import Tensor
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, IterableDataset
 from typing import Any
 from typing import Tuple
 import deepspeed.comm as dist
@@ -616,8 +616,10 @@ class UlyssesSPDataLoaderAdapter:
 
         `attention_mask` isn't used by Ulysses, because it's typically too large when it's 4D, and position_ids is just 1D, therefore it's much much smaller and consumes little GPU memory.
 
+        Because each SP rank contributes one batch per refill, the wrapped DataLoader has to be sharded across the SP group - normally by passing a `DistributedSampler` to it. An unsharded DataLoader gives every rank the same samples, so each batch is processed `sp_world_size` times and only `1/sp_world_size` of the dataset is seen per epoch. A warning is emitted when this is detectable.
+
         Arguments:
-        - `dl`: an existing DataLoader object to wrap
+        - `dl`: an existing DataLoader object to wrap, sharded across the SP group
         - `sp_rank`: SP rank
         - `sp_group`: SP group
         - `sp_world_size`: SP world size
@@ -635,6 +637,33 @@ class UlyssesSPDataLoaderAdapter:
 
         self.iter = iter(dl)
         self.micro_batches: deque[Any] = deque()
+
+        self._warn_if_not_sharded_across_sp_group()
+
+    def _warn_if_not_sharded_across_sp_group(self):
+        # Each refill replays one batch per SP rank, so the ranks have to read
+        # different samples for the gathered batches to be distinct. An
+        # unsharded sampler gives every rank the same stream, which processes
+        # each batch sp_world_size times and silently drops the rest of the
+        # epoch instead of failing.
+        if self.sp_world_size == 1:
+            return
+
+        # An IterableDataset shards inside the dataset, which cannot be
+        # inspected from here.
+        if isinstance(self.dl.dataset, IterableDataset):
+            return
+
+        num_replicas = getattr(self.dl.sampler, "num_replicas", 1)
+        if num_replicas > 1:
+            return
+
+        logger.warning(
+            f"The DataLoader wrapped by UlyssesSPDataLoaderAdapter does not appear to be sharded across the "
+            f"SP group: its sampler reports num_replicas={num_replicas}. All {self.sp_world_size} SP ranks will "
+            f"then read the same samples, so every batch is processed {self.sp_world_size} times and only "
+            f"1/{self.sp_world_size} of the dataset is seen per epoch. Pass a sharded sampler, such as "
+            f"DistributedSampler, to the wrapped DataLoader.")
 
     def __len__(self):
         return len(self.dl) * self.sp_world_size
