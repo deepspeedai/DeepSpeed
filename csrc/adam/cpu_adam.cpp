@@ -9,6 +9,20 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
 {
     using namespace pybind11::literals;
     m.def("adam_update", &ds_adam_step, "DeepSpeed CPU Adam update (C++)");
+    m.def("adam_update_scaled",
+          &ds_adam_step_scaled,
+          "DeepSpeed CPU Adam update with every gradient multiplied by grad_scale first (C++)");
+    m.def("adam_update_scaled_copy",
+          &ds_adam_step_scaled_copy,
+          "adam_update_scaled that also writes the updated parameters in bfloat16 to params_copy "
+          "(C++)");
+    m.def("adam_block_numel",
+          &ds_adam_block_numel,
+          "pieces starting at multiples of this element count are updated exactly as one call on "
+          "the whole tensor");
+    m.def("adam_copy_supported",
+          &ds_adam_copy_supported,
+          "whether adam_update_scaled_copy is available in this build (C++)");
     m.def("adam_rollback", &ds_adam_rollback, "DeepSpeed CPU Adam rollback (C++)");
     m.def("create_adam", &create_adam_optimizer, "DeepSpeed CPU Adam (C++)");
     m.def("destroy_adam", &destroy_adam_optimizer, "DeepSpeed CPU Adam destroy (C++)");

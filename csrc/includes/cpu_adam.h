@@ -91,6 +91,31 @@ public:
             }
         }
     }
+    // Multiplies every gradient as it is loaded, before weight decay and the moment updates: the
+    // same float multiply as scaling the gradients in place first, without a separate pass over
+    // them.
+    inline void set_grad_scale(float grad_scale) { _grad_scale = grad_scale; }
+
+    // While set, the updated float32 parameters are also written in bfloat16 to params_copy:
+    // element j of the parameter tensor that starts at param_base goes to params_copy[j]. Rounds to
+    // nearest even, as torch's cast.
+    inline void set_params_copy(const float* param_base, c10::BFloat16* params_copy)
+    {
+        _copy_param_base = param_base;
+        _params_copy = params_copy;
+    }
+
+    // Where the bfloat16 copy of _params[0] goes, or nullptr. _params may point past param_base
+    // (the remainder after the vectorized blocks is updated by a second call on offset pointers).
+    template <typename ds_params_precision_t>
+    inline c10::BFloat16* params_copy_for(const ds_params_precision_t* _params) const
+    {
+        if constexpr (std::is_same_v<ds_params_precision_t, float>) {
+            if (_params_copy != nullptr) { return _params_copy + (_params - _copy_param_base); }
+        }
+        return nullptr;
+    }
+
     inline void update_state(float lr, float epsilon, float weight_decay, bool bias_correction)
     {
         _alpha = lr;
@@ -115,6 +140,10 @@ private:
     float _betta1_t;
     float _betta2_t;
     size_t _step;
+
+    float _grad_scale = 1.0f;
+    const float* _copy_param_base = nullptr;
+    c10::BFloat16* _params_copy = nullptr;
 
     float _bias_correction1;
     float _bias_correction2;
@@ -158,6 +187,12 @@ void Adam_Optimizer::Step_AVX(size_t* rounded_size,
     AVX_Data eps_4;
     eps_4.data = SIMD_SET(_eps);
 
+    const bool scale_grads = _grad_scale != 1.0f;
+    AVX_Data grad_scale_4;
+    grad_scale_4.data = SIMD_SET(_grad_scale);
+
+    c10::BFloat16* params_copy = params_copy_for(_params);
+
     float step_size = -1 * _alpha / _bias_correction1;
     AVX_Data step_size_4;
     step_size_4.data = SIMD_SET(step_size);
@@ -175,6 +210,7 @@ void Adam_Optimizer::Step_AVX(size_t* rounded_size,
         for (size_t i = t; i < offset; i += SIMD_WIDTH * span) {
             AVX_Data grad_4[span];
             simd_load<span>(grad_4, grads + i);
+            if (scale_grads) { simd_mul<span>(grad_4, grad_4, grad_scale_4); }
 
             AVX_Data momentum_4[span];
             simd_load<span>(momentum_4, _exp_avg + i);
@@ -205,6 +241,7 @@ void Adam_Optimizer::Step_AVX(size_t* rounded_size,
             simd_fma<span>(param_4, grad_4, step_size_4, param_4);
 
             simd_store<span>(_params + i, param_4);
+            if (params_copy != nullptr) { simd_store<span>(params_copy + i, param_4); }
             simd_store<span>(_exp_avg + i, momentum_4);
             simd_store<span>(_exp_avg_sq + i, variance_4);
         }
@@ -238,7 +275,8 @@ void Adam_Optimizer::Step_SVE(size_t* rounded_size,
                               _alpha,
                               _weight_decay,
                               _adamw_mode,
-                              parallel);
+                              parallel,
+                              _grad_scale);
         *rounded_size = _param_size;
     }
 }
@@ -265,6 +303,39 @@ int ds_adam_step(int optimizer_id,
                  torch::Tensor& grads,
                  torch::Tensor& exp_avg,
                  torch::Tensor& exp_avg_sq);
+
+int ds_adam_step_scaled(int optimizer_id,
+                        size_t step,
+                        float lr,
+                        float beta1,
+                        float beta2,
+                        float epsilon,
+                        float weight_decay,
+                        bool bias_correction,
+                        torch::Tensor& params,
+                        torch::Tensor& grads,
+                        torch::Tensor& exp_avg,
+                        torch::Tensor& exp_avg_sq,
+                        float grad_scale);
+
+int ds_adam_step_scaled_copy(int optimizer_id,
+                             size_t step,
+                             float lr,
+                             float beta1,
+                             float beta2,
+                             float epsilon,
+                             float weight_decay,
+                             bool bias_correction,
+                             torch::Tensor& params,
+                             torch::Tensor& grads,
+                             torch::Tensor& exp_avg,
+                             torch::Tensor& exp_avg_sq,
+                             float grad_scale,
+                             torch::Tensor& params_copy);
+
+bool ds_adam_copy_supported();
+
+size_t ds_adam_block_numel();
 
 int ds_adam_rollback(int optimizer_id,
                      size_t step,

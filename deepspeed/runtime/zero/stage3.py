@@ -249,6 +249,12 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         self.offload_optimizer = False
         self.offload_optimizer_pin_memory = False
+        # Pinned buffers for copying CPU master partitions back to the device (_copy_through_pinned_staging). The
+        # element count is a power of two, so the pinned allocator does not round the buffers up.
+        self._staging_numel = 2**26
+        self._staging_buffers = None
+        self._cpu_adam_copy_supported = None  # DeepSpeedCPUAdam.copy_supported(), asked once
+        self._staging_events = None
         self.offload_optimizer_fast_init = False
         self.offload_param = False
         self.offload_param_pin_memory = False
@@ -561,6 +567,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             if buffer is not None:
                 accelerator.unpin_memory(buffer)
         for buffer in getattr(self, 'hp_params_pin_buffers', []):
+            accelerator.unpin_memory(buffer)
+        for buffer in getattr(self, '_staging_buffers', None) or []:
             accelerator.unpin_memory(buffer)
         unpin_offloaded_optimizer_states(self.optimizer)
         if self.offload_optimizer_pin_memory:
@@ -1231,7 +1239,9 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         return sub_groups
 
-    def _optimizer_step(self, sub_group_id):
+    def _optimizer_step(self, sub_group_id, grad_scale=None):
+        """grad_scale: the factor from _grad_scale_for_cpu_adam, applied by DeepSpeedCPUAdam to each gradient as it is
+        loaded (the sub-group's gradients were not scaled in place); None when they were."""
         param_group_id = self.sub_group_to_group_id[sub_group_id]
         fp32_param = self.fp32_partitioned_groups_flat[sub_group_id]
 
@@ -1249,7 +1259,10 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             cur_device = self.subgroup_to_device[sub_group_id]
             if cur_device == 'cpu' or (self.use_muon and self.sub_groups_using_muon[sub_group_id]):
                 self.optimizer.param_groups[param_group_id]['params'] = [fp32_param]
-                step_with_gradscaler(self.optimizer)
+                if grad_scale is not None:
+                    self.optimizer.step(grad_scale=grad_scale)
+                else:
+                    step_with_gradscaler(self.optimizer)
                 self.optimizer.param_groups[param_group_id]['params'] = []
             else:
                 self.backup_optimizer.param_groups[param_group_id]['params'] = [fp32_param]
@@ -2852,12 +2865,104 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         print_rank_0("------------------Finishing Step-----------------------")
 
     @instrument_w_nvtx
+    def _copy_through_pinned_staging(self, dst, src):
+        """Copy the pageable CPU master partition ``src`` into the device partition ``dst`` through two small pinned
+        buffers: each piece is cast on the CPU into one buffer while the previous piece is copied from the other.
+
+        Copies from pageable memory run at a few GB/s. Pinning the master partitions themselves, as ZeRO-1/2 does,
+        would also need a pinned low-precision buffer of each partition's size, so pinned host memory would grow with
+        the model; these two buffers have a fixed size."""
+        numel = src.numel()
+        chunk = self._staging_numel
+        if self._staging_buffers is None or self._staging_buffers[0].dtype != dst.dtype:
+            self._staging_buffers = [get_accelerator().pin_empty(chunk, dtype=dst.dtype) for _ in range(2)]
+            self._staging_events = [None, None]
+        src = src.view(-1)
+        dst = dst.view(-1)
+        last_event = None
+        for index, start in enumerate(range(0, numel, chunk)):
+            buf = index % 2
+            if self._staging_events[buf] is not None:
+                # The previous copy out of this buffer must finish before the buffer is refilled.
+                self._staging_events[buf].synchronize()
+            count = min(chunk, numel - start)
+            staging = self._staging_buffers[buf][:count]
+            staging.copy_(src[start:start + count])
+            dst[start:start + count].copy_(staging, non_blocking=True)
+            event = get_accelerator().Event()
+            event.record()
+            self._staging_events[buf] = event
+            last_event = event
+        # Callers expect the partition on the device when this returns: the parameter all-gathers of the next forward
+        # run on a stream that does not wait for this one.
+        if last_event is not None:
+            last_event.synchronize()
+
+    def _can_copy_back_from_cpu_adam(self, sub_group_id):
+        """Whether _cpu_adam_step_and_copy_back can replace _optimizer_step + _reassign_or_swap_out_partitioned_parameters
+        for this CPU sub-group (called only when _grad_scale_for_cpu_adam returned a factor): the device partition is
+        bfloat16 and would be copied through the pinned staging buffers, and the CPU Adam build can write the
+        bfloat16 copy."""
+        if self.fp16_partitioned_groups_flat[sub_group_id] is None or not self.offload_optimizer_pin_memory:
+            return False
+        dst = self.fp16_partitioned_groups_flat[sub_group_id]
+        src = self.fp32_partitioned_groups_flat[sub_group_id]
+        if dst.dtype != torch.bfloat16 or dst.device.type == "cpu" or src.is_pinned():
+            return False
+        if self._cpu_adam_copy_supported is None:
+            self._cpu_adam_copy_supported = self.optimizer.copy_supported()
+        return self._cpu_adam_copy_supported
+
+    def _cpu_adam_step_and_copy_back(self, sub_group_id, grad_scale):
+        """CPU Adam on this sub-group in pieces of the pinned staging size: for each piece the kernel updates the
+        fp32 parameters and writes them in bfloat16 into one staging buffer, which is copied to the device partition
+        while the next piece is updated. Replaces _optimizer_step followed by _copy_through_pinned_staging (which
+        reads the fp32 parameters again to cast them); same values, same rounding."""
+        param_group_id = self.sub_group_to_group_id[sub_group_id]
+        fp32_param = self.fp32_partitioned_groups_flat[sub_group_id]
+        dst = self.fp16_partitioned_groups_flat[sub_group_id].data.view(-1)
+        chunk = self._staging_numel
+        if self._staging_buffers is None or self._staging_buffers[0].dtype != dst.dtype:
+            self._staging_buffers = [get_accelerator().pin_empty(chunk, dtype=dst.dtype) for _ in range(2)]
+            self._staging_events = [None, None]
+        pieces = {"index": 0, "last_event": None}
+
+        def before_piece(param, start, count):
+            buf = pieces["index"] % 2
+            if self._staging_events[buf] is not None:
+                self._staging_events[buf].synchronize()  # the previous copy out of this buffer has finished
+            return self._staging_buffers[buf][:count]
+
+        def after_piece(param, start, count, out):
+            dst[start:start + count].copy_(out, non_blocking=True)
+            event = get_accelerator().Event()
+            event.record()
+            self._staging_events[pieces["index"] % 2] = event
+            pieces["last_event"] = event
+            pieces["index"] += 1
+
+        self.optimizer.param_groups[param_group_id]['params'] = [fp32_param]
+        self.optimizer.step_pieces(chunk, before_piece, after_piece, grad_scale=grad_scale)
+        self.optimizer.param_groups[param_group_id]['params'] = []
+        # As _copy_through_pinned_staging: the data must be on the device before returning (the next forward's
+        # parameter all-gathers run on a stream that does not wait for this one).
+        if pieces["last_event"] is not None:
+            pieces["last_event"].synchronize()
+        self._unflatten_partitioned_parameters(sub_group_id)
+
+    @instrument_w_nvtx
     def _reassign_or_swap_out_partitioned_parameters(self, sub_group_id):
         if self.fp16_partitioned_groups_flat[sub_group_id] is not None:
             # When torch autocast is enabled, groups in fp16_partitioned_groups are in fp32 already and those in
             # fp32_partitioned_groups are aliases. Calling tensor.data.copy_ will not trigger any copy in that case.
-            self.fp16_partitioned_groups_flat[sub_group_id].data.copy_(
-                self.fp32_partitioned_groups_flat[sub_group_id].data)
+            dst = self.fp16_partitioned_groups_flat[sub_group_id].data
+            src = self.fp32_partitioned_groups_flat[sub_group_id].data
+            accelerator = get_accelerator()
+            src_is_pageable = src.device.type == "cpu" and not accelerator.is_pinned(src)
+            if self.offload_optimizer_pin_memory and src_is_pageable and dst.device.type != "cpu":
+                self._copy_through_pinned_staging(dst, src)
+            else:
+                dst.copy_(src)
 
             #unflatten fp16 parameter subgroup
             self._unflatten_partitioned_parameters(sub_group_id)
@@ -2915,14 +3020,20 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             if self._muon_update_lacks_loss_scale(sub_group_id):
                 self.fp32_partitioned_groups_flat[sub_group_id].grad.mul_(self.loss_scale)
 
-            #scale the fp32 gradients
-            self.unscale_and_clip_grads(sub_group_id, scaled_global_grad_norm)
+            #scale the fp32 gradients; DeepSpeedCPUAdam applies the factor as it loads each gradient instead
+            grad_scale = self._grad_scale_for_cpu_adam(sub_group_id, scaled_global_grad_norm)
+            if grad_scale is None:
+                self.unscale_and_clip_grads(sub_group_id, scaled_global_grad_norm)
 
-            #apply the optimizer step on the sub group and copy fp32 parameters to fp16
-            self._optimizer_step(sub_group_id)
+            if grad_scale is not None and self._can_copy_back_from_cpu_adam(sub_group_id):
+                #one kernel pass updates the fp32 parameters and writes their bf16 copy, piece by piece
+                self._cpu_adam_step_and_copy_back(sub_group_id, grad_scale)
+            else:
+                #apply the optimizer step on the sub group and copy fp32 parameters to fp16
+                self._optimizer_step(sub_group_id, grad_scale=grad_scale)
 
-            #put fp16 parameters in appropriate location
-            self._reassign_or_swap_out_partitioned_parameters(sub_group_id)
+                #put fp16 parameters in appropriate location
+                self._reassign_or_swap_out_partitioned_parameters(sub_group_id)
 
             #release memory or swap out optimizer states of fp32 parameters
             self._release_sub_group(sub_group_id, timer_names)
@@ -2977,7 +3088,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                 print(f'Post-Step Norms {i} {param_id} = {norm_list}')
 
     @instrument_w_nvtx
-    def unscale_and_clip_grads(self, sub_group_id, total_norm):
+    def _combined_grad_scale(self, total_norm):
         # compute combined scale factor for this group
         combined_scale = self.loss_scale
         if self.clip_grad > 0.:
@@ -2985,8 +3096,31 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             clip = ((total_norm / self.loss_scale) + 1e-6) / self.clip_grad
             clip = torch.clamp(clip, min=1.0)
             combined_scale = clip * self.loss_scale
+        return combined_scale
 
+    def unscale_and_clip_grads(self, sub_group_id, total_norm):
+        combined_scale = self._combined_grad_scale(total_norm)
         self.fp32_partitioned_groups_flat[sub_group_id].grad.mul_(1. / combined_scale)
+
+    def _grad_scale_for_cpu_adam(self, sub_group_id, total_norm):
+        """The factor unscale_and_clip_grads would multiply this sub-group's gradients by, when DeepSpeedCPUAdam can
+        apply it while loading each gradient instead; None otherwise.
+
+        Scaling the CPU gradients in place is a separate pass over every offloaded gradient (read and write), done even
+        when the factor is 1. DeepSpeedCPUAdam.step(grad_scale=...) does the same float multiply on each loaded gradient,
+        so the update is unchanged. Only for float32 gradients and master weights (a bfloat16 gradient scaled in place
+        is rounded to bfloat16 before the step), without a GradScaler, ZenFlow, NVMe swapping or Muon.
+        """
+        if not (self.offload_optimizer and type(self.optimizer) == DeepSpeedCPUAdam
+                and self.subgroup_to_device[sub_group_id] == 'cpu'):
+            return None
+        if self.torch_autocast_gradscaler or self.zenflow or self.swap_optimizer or self.use_muon:
+            return None
+        fp32_param = self.fp32_partitioned_groups_flat[sub_group_id]
+        grad = fp32_param.grad
+        if grad is None or grad.dtype != torch.float32 or fp32_param.dtype != torch.float32 or grad.device.type != 'cpu':
+            return None
+        return float(1. / self._combined_grad_scale(total_norm))
 
     def _check_overflow(self, partition_gradients=True):
         self.overflow = self.has_overflow(partition_gradients)

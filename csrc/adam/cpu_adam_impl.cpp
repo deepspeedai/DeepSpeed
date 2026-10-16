@@ -52,6 +52,7 @@ void Adam_Optimizer::Step_1(ds_params_precision_t* _params,
 
         float step_size = -1 * _alpha / _bias_correction1;
         float w_decay = -1 * _alpha * _weight_decay;
+        c10::BFloat16* params_copy = params_copy_for(_params);
 
         for (size_t t = rounded_size; t < _param_size; t += TILE) {
             size_t copy_size = TILE;
@@ -60,6 +61,7 @@ void Adam_Optimizer::Step_1(ds_params_precision_t* _params,
 #pragma omp parallel for if (parallel)
             for (size_t k = t; k < offset; k++) {
                 float grad = (float)grads[k];
+                if (_grad_scale != 1.0f) { grad = grad * _grad_scale; }
                 float param = (float)_params[k];
                 float momentum = _exp_avg[k];
                 float variance = _exp_avg_sq[k];
@@ -77,6 +79,7 @@ void Adam_Optimizer::Step_1(ds_params_precision_t* _params,
                 if (_weight_decay > 0 && _adamw_mode) { param += w_decay * param; }
                 param = grad * step_size + param;
                 _params[k] = param;
+                if (params_copy != nullptr) { params_copy[k] = c10::BFloat16(param); }
                 _exp_avg[k] = momentum;
                 _exp_avg_sq[k] = variance;
             }
@@ -265,6 +268,120 @@ int ds_adam_step(int optimizer_id,
 
     invoke(opt, params_c, grads_c, exp_avg_c, exp_avg_sq_c, params_c.numel());
 
+    return 0;
+}
+
+bool ds_adam_copy_supported()
+{
+    // The vectorized loop needs a bfloat16 store (AVX512 or NEON); the SVE kernel does not write
+    // the copy.
+#if defined(__AVX512__) or defined(__NEON__)
+    return true;
+#elif defined(__AVX256__)
+    return false;
+#elif defined(__SVE__) && defined(__ARM_FEATURE_SVE)
+    return false;
+#else
+    return true;
+#endif
+}
+
+size_t ds_adam_block_numel()
+{
+    // Step_8 updates the first ROUND_DOWN(n, SIMD_WIDTH * 8) elements with the widest vector loop
+    // and the rest with narrower loops and finally scalar code, whose float rounding can differ
+    // (fused multiply-add or not). A call on a piece that starts at a multiple of this count sends
+    // every element through the same code as one call on the whole tensor.
+#if defined(__AVX512__) or defined(__AVX256__) or defined(__NEON__)
+    return SIMD_WIDTH * 8;
+#else
+    return 1;
+#endif
+}
+
+int ds_adam_step_scaled_copy(int optimizer_id,
+                             size_t step,
+                             float lr,
+                             float beta1,
+                             float beta2,
+                             float epsilon,
+                             float weight_decay,
+                             bool bias_correction,
+                             torch::Tensor& params,
+                             torch::Tensor& grads,
+                             torch::Tensor& exp_avg,
+                             torch::Tensor& exp_avg_sq,
+                             float grad_scale,
+                             torch::Tensor& params_copy)
+{
+    TORCH_CHECK(ds_adam_copy_supported(),
+                "adam_update_scaled_copy needs AVX512, NEON or the scalar kernel");
+    TORCH_CHECK(params.scalar_type() == torch::kFloat32 && params.is_contiguous(),
+                "adam_update_scaled_copy: params must be contiguous float32");
+    TORCH_CHECK(
+        params_copy.scalar_type() == torch::kBFloat16 && params_copy.is_contiguous() &&
+            params_copy.numel() == params.numel(),
+        "adam_update_scaled_copy: params_copy must be contiguous bfloat16 with params' numel");
+    std::shared_ptr<Adam_Optimizer> opt =
+        std::static_pointer_cast<Adam_Optimizer>(s_optimizers[optimizer_id]);
+    opt->set_params_copy(params.data_ptr<float>(), params_copy.data_ptr<c10::BFloat16>());
+    try {
+        ds_adam_step_scaled(optimizer_id,
+                            step,
+                            lr,
+                            beta1,
+                            beta2,
+                            epsilon,
+                            weight_decay,
+                            bias_correction,
+                            params,
+                            grads,
+                            exp_avg,
+                            exp_avg_sq,
+                            grad_scale);
+    } catch (...) {
+        opt->set_params_copy(nullptr, nullptr);
+        throw;
+    }
+    opt->set_params_copy(nullptr, nullptr);
+    return 0;
+}
+
+int ds_adam_step_scaled(int optimizer_id,
+                        size_t step,
+                        float lr,
+                        float beta1,
+                        float beta2,
+                        float epsilon,
+                        float weight_decay,
+                        bool bias_correction,
+                        torch::Tensor& params,
+                        torch::Tensor& grads,
+                        torch::Tensor& exp_avg,
+                        torch::Tensor& exp_avg_sq,
+                        float grad_scale)
+{
+    std::shared_ptr<Adam_Optimizer> opt =
+        std::static_pointer_cast<Adam_Optimizer>(s_optimizers[optimizer_id]);
+    opt->set_grad_scale(grad_scale);
+    try {
+        ds_adam_step(optimizer_id,
+                     step,
+                     lr,
+                     beta1,
+                     beta2,
+                     epsilon,
+                     weight_decay,
+                     bias_correction,
+                     params,
+                     grads,
+                     exp_avg,
+                     exp_avg_sq);
+    } catch (...) {
+        opt->set_grad_scale(1.0f);
+        throw;
+    }
+    opt->set_grad_scale(1.0f);
     return 0;
 }
 
