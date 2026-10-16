@@ -12,6 +12,62 @@ import itertools
 import copy
 
 from ..utils import logger
+from .constants import AUTOTUNING_METRIC_LATENCY
+
+# metrics.json stores per-GPU FLOPs under this key. The README and
+# AUTOTUNING_METRIC_FLOPS still say "flops" / "FLOPS".
+_FLOPS_METRIC_KEYS = ("FLOPS_per_gpu", "flops", "FLOPS")
+
+
+def lower_is_better(metric):
+    return metric == AUTOTUNING_METRIC_LATENCY
+
+
+def metric_value(results, metric):
+    """Return the value ``metric`` ranks on.
+
+    ``flops`` and ``FLOPS`` both read ``FLOPS_per_gpu``, which is the key the
+    engine writes. An exact key in ``results`` wins over that alias.
+    """
+    if metric in results:
+        return results[metric]
+    if isinstance(metric, str) and metric.lower() == "flops":
+        for key in _FLOPS_METRIC_KEYS:
+            if key in results:
+                return results[key]
+    raise KeyError(metric)
+
+
+def metric_is_better(metric, candidate, incumbent):
+    """Whether ``candidate`` should replace ``incumbent``.
+
+    Throughput and FLOPS keep the larger number. Latency keeps the smaller one.
+    ``None`` never replaces a measured value, and a measured value replaces ``None``.
+    """
+    if candidate is None:
+        return False
+    if incumbent is None:
+        return True
+    if lower_is_better(metric):
+        return candidate < incumbent
+    return candidate > incumbent
+
+
+def metric_is_worse(metric, candidate, baseline):
+    if candidate is None or baseline is None:
+        return False
+    return metric_is_better(metric, baseline, candidate)
+
+
+def stage_metric_regressed(metric, current, previous):
+    """Whether ``current`` is worse than the previous stage's metric.
+
+    ``previous`` stays 0 until some stage reports a larger micro-batch. That 0
+    is an unset sentinel, not a measured latency or throughput of zero.
+    """
+    if previous in (0, None):
+        return False
+    return metric_is_worse(metric, current, previous)
 
 
 def search_error(filename):
