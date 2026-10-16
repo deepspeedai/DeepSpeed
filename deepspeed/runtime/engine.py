@@ -966,7 +966,11 @@ class DeepSpeedEngine(Module):
                     args = list(args)
                 if len(args) > 0:
                     if self.mpu.get_tensor_model_parallel_rank() == 0:
-                        _src_args = [args]
+                        # Send CPU copies: a peer unpickles an accelerator tensor onto the sender's device, which
+                        # opens a context on that device that lives as long as the peer's process.
+                        _src_args = [
+                            torch.utils._pytree.tree_map(lambda x: x.cpu() if torch.is_tensor(x) else x, args)
+                        ]
                         dist.broadcast_object_list(object_list=_src_args,
                                                    src=bcast_rank,
                                                    group=bcast_group,

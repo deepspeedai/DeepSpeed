@@ -980,6 +980,78 @@ class TestTpDataloaderCorrectness(DistributedTest):
             model(batch[0], batch[1])
 
 
+class TestTpDataloaderCheckSendsCpuCopies(DistributedTest):
+    """The first-batch consistency check pickles the tensor-parallel source rank's inputs to its peers. A pickled
+    accelerator tensor is unpickled onto the sender's device, so every peer would open a context on the source rank's
+    device (memory that stays for the life of the process); the source must send CPU copies. The peers' comparison
+    must still pass."""
+    world_size = 2
+    reuse_dist_env = False
+
+    def test(self):
+        skip_on_device()
+        hidden_dim = 128
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 1,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 1e-6
+                }
+            },
+            "tensor_parallel": {
+                "autotp_size": 2,
+                "partition_config": {
+                    "use_default_specs": False,
+                    "layer_specs": [{
+                        "patterns": [".*\\.weight$"],
+                        "partition_type": "skip",
+                    }],
+                }
+            },
+            "zero_optimization": {
+                "stage": 0,
+            }
+        }
+        if preferred_dtype() is torch.float16:
+            config_dict["fp16"] = {"enabled": True}
+        elif preferred_dtype() is torch.bfloat16:
+            config_dict["bf16"] = {"enabled": True}
+
+        sent_devices = []
+        original = dist.broadcast_object_list
+
+        def record(object_list, src, *args, **kwargs):
+            if dist.get_rank() == src:
+                for value in torch.utils._pytree.tree_leaves(object_list):
+                    if torch.is_tensor(value):
+                        sent_devices.append(value.device.type)
+            return original(object_list, src, *args, **kwargs)
+
+        model = SimpleModel(hidden_dim=hidden_dim)
+        model, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config_dict)
+        data_loader = random_dataloader(model=model,
+                                        total_samples=1,
+                                        hidden_dim=hidden_dim,
+                                        device=model.device,
+                                        dtype=preferred_dtype())
+        # Only the first forward's check, not the broadcasts of deepspeed.initialize.
+        dist.broadcast_object_list = record
+        try:
+            for batch in data_loader:
+                dist.broadcast(batch[0],
+                               src=groups.get_tensor_model_parallel_src_rank(),
+                               group=groups.get_tensor_model_parallel_group())
+                dist.broadcast(batch[1],
+                               src=groups.get_tensor_model_parallel_src_rank(),
+                               group=groups.get_tensor_model_parallel_group())
+                model(batch[0], batch[1])
+        finally:
+            dist.broadcast_object_list = original
+        if groups.get_tensor_model_parallel_rank() == 0:
+            assert sent_devices and all(device == "cpu" for device in sent_devices), sent_devices
+
+
 def process_linear_layer(hidden_dim, input, output_dim=None):
     torch.manual_seed(42)
     if output_dim is None:
