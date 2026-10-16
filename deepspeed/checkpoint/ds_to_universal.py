@@ -827,15 +827,15 @@ def _consolidate_zero3_autoep_expert_states(output_dir, model_files, optim_files
         rank: torch.load(model_file, map_location=torch.device('cpu'), weights_only=False)
         for rank, model_file in model_rank_map.items()
     }
-    optim_states_by_rank = {
-        rank: torch.load(optim_file, map_location=torch.device('cpu'), weights_only=False)
-        for rank, optim_file in optim_rank_map.items()
-    }
     metadata_by_rank = {
         rank: _get_autoep_metadata(model_state)
         for rank, model_state in model_states_by_rank.items() if _get_autoep_metadata(model_state) is not None
     }
     _validate_autoep_expert_shapes(model_states_by_rank, metadata_by_rank)
+    # Together the optimizer files hold every optimizer state of the model, more than one host holds for a large
+    # model, so they are read one at a time and the expert fragments wait in files until every rank is read.
+    fragment_dir = os.path.join(output_dir, "tmp", "autoep_expert_fragments")
+    os.makedirs(fragment_dir, exist_ok=True)
 
     expert_fragments = {}
     num_experts_by_param = {}
@@ -846,13 +846,15 @@ def _consolidate_zero3_autoep_expert_states(output_dir, model_files, optim_files
     affine_map_by_param = {}
 
     for rank, model_state in model_states_by_rank.items():
-        optim_state = optim_states_by_rank.get(rank)
-        if optim_state is None:
+        optim_file = optim_rank_map.get(rank)
+        if optim_file is None:
             raise FileNotFoundError(f"Missing ZeRO optimizer checkpoint for rank {rank}")
 
         autoep_metadata = _get_autoep_metadata(model_state)
         if not _uses_zero3_partitioned_autoep_metadata(autoep_metadata):
             continue
+
+        optim_state = torch.load(optim_file, map_location=torch.device('cpu'), weights_only=False)
 
         expert_info = _autoep_expert_param_info(autoep_metadata)
         param_shapes = model_state[PARAM_SHAPES]
@@ -911,11 +913,16 @@ def _consolidate_zero3_autoep_expert_states(output_dir, model_files, optim_files
                         if flat_tensor is None:
                             raise RuntimeError(f"Missing optimizer state '{state_key}' for AutoEP expert "
                                                f"parameter {param_name} on ZeRO rank {rank}")
+                        # clone(): saving the narrowed view would write the whole flat tensor behind it.
                         fragment = flat_tensor.narrow(0, offset, padding_free_numel).clone()
+                        fragment_path = os.path.join(fragment_dir,
+                                                     f"{param_name}.{state_key}.ep{ep_rank}.part{partition_rank}.pt")
+                        torch.save(fragment, fragment_path)
                         key = (param_name, state_key, ep_rank)
-                        expert_fragments.setdefault(key, []).append((partition_rank, fragment, shape))
+                        expert_fragments.setdefault(key, []).append((partition_rank, fragment_path, shape))
 
                 offset += partitioned_numel
+        del optim_state, zero_optim_state
 
     grouped_by_param = {}
     for (param_name, state_key, ep_rank), fragments in expert_fragments.items():
@@ -948,7 +955,8 @@ def _consolidate_zero3_autoep_expert_states(output_dir, model_files, optim_files
             if any(tuple(fragment_shape) != tuple(shape) for _, _, fragment_shape in fragments):
                 raise RuntimeError(f"Inconsistent AutoEP expert fragment shapes for {param_name}/{state_key} "
                                    f"EP rank {ep_rank}")
-            full_flat = torch.cat([fragment for _, fragment, _ in fragments], dim=0)[:_shape_numel(shape)]
+            full_flat = torch.cat([torch.load(path, weights_only=True) for _, path, _ in fragments],
+                                  dim=0)[:_shape_numel(shape)]
             ep_tensors[ep_rank] = full_flat.view(shape)
 
         if not ep_tensors:
