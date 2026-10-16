@@ -768,11 +768,6 @@ class AutoEPMoELayer(nn.Module):
 
         if folding_group_handles is not None:
             self.folding_group_handles = folding_group_handles
-            if self.combine_impl == "fused_weighted_sum" and folding_group_handles.spec.tp_size > 1:
-                # Folded TP restores tokens through a different path.
-                raise ValueError('combine_impl="fused_weighted_sum" does not support folded tensor parallelism '
-                                 f"(tensor_parallel.autotp_size={folding_group_handles.spec.tp_size}). Set "
-                                 'tensor_parallel.autotp_size to 1, or leave combine_impl unset.')
             if self.comm_backend == DEEPEP_BACKEND and folding_group_handles.spec.tp_size > 1:
                 # DeepEP's combine returns token-major rows, which folded TP's
                 # assignment-metadata restore can't consume. Refuse rather than
@@ -999,6 +994,7 @@ class AutoEPMoELayer(nn.Module):
                 dispatch_counters,
                 partition_assignments,
                 restore_combined,
+                restore_combined_fused,
             )
             payload = RoutedAssignmentPayload(
                 token_indices=(token_indices_sorted // self.top_k).to(torch.long),
@@ -1079,10 +1075,18 @@ class AutoEPMoELayer(nn.Module):
             expert_output = _AllToAllV.apply(self.ep_group, expert_output, plan.output_splits, plan.input_splits)
 
         if folded_tp:
-            output = restore_combined(expert_output,
-                                      restore_ctx,
-                                      tp_group=self.tp_group,
-                                      validate_coverage=self.validate_folding_routing).reshape(bsz, seqlen, hdim)
+            if self.combine_impl == "fused_weighted_sum":
+                output = restore_combined_fused(expert_output,
+                                                restore_ctx,
+                                                tp_group=self.tp_group,
+                                                top_k=self.top_k,
+                                                validate_coverage=self.validate_folding_routing)
+            else:
+                output = restore_combined(expert_output,
+                                          restore_ctx,
+                                          tp_group=self.tp_group,
+                                          validate_coverage=self.validate_folding_routing)
+            output = output.reshape(bsz, seqlen, hdim)
             self._last_folding_dispatch_counters = dispatch_counters(restore_ctx)
         elif self.combine_impl == "fused_weighted_sum":
             output = fused_token_ops.fused_weighted_restore(
