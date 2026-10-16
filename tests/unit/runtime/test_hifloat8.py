@@ -397,6 +397,24 @@ def test_accelerator_without_hifloat8_fails_before_conversion(monkeypatch):
     assert type(model.model.mlp["gate_proj"]) is nn.Linear
 
 
+@requires_npu
+def test_public_grouped_quantize_rejects_missing_accelerator_capability(monkeypatch):
+    # Direct quantize_ must fail before changing experts when no device kernel is available.
+    from torchao.quantization import quantize_
+    from torchao.hifloat8 import HiFloat8Config
+    from deepspeed.accelerator import get_accelerator
+    from deepspeed.moe.ep_experts import GroupedExperts
+    from deepspeed.runtime.torchao import GroupedExpertsConfig
+
+    experts = GroupedExperts(8, 16, 2, use_grouped_mm=False)
+    parameters = dict(experts.named_parameters())
+    monkeypatch.setattr(get_accelerator(), "get_hifloat8_provider", lambda: None)
+    with pytest.raises(RuntimeError, match="No HiFloat8 provider"):
+        quantize_(experts, GroupedExpertsConfig(HiFloat8Config()), filter_fn=lambda module, name: name == "")
+    assert experts.grouped_mm is None
+    assert all(dict(experts.named_parameters())[name] is value for name, value in parameters.items())
+
+
 def test_npu_provider_missing_dependency_has_install_hint(monkeypatch):
     from importlib.metadata import PackageNotFoundError
     from deepspeed.accelerator.npu import hifloat8

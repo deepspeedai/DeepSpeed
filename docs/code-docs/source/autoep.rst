@@ -162,6 +162,8 @@ With the existing ``hifloat8`` configuration, selected Linear and GroupedExperts
 modules are converted together by ``torchao.quantization.quantize_`` using
 ``ModuleFqnToConfig`` and registered module handlers. Policy parsing belongs to
 TorchAO; selection and training lifecycle checks belong to DeepSpeed.
+The engine passes only the policy to ``GroupedExpertsConfig``. Its handler
+resolves and binds the HiFloat8 grouped GEMM through the accelerator capability.
 
 The separate ``get_grouped_mm()`` hook supplies high-precision grouped GEMM.
 On NPU it uses TorchNPU autograd without a TorchAO dependency. HiFloat8 requires

@@ -114,9 +114,7 @@ def test_npu_hifloat8_expert_forward_and_gradients(counts, dim, hidden_dim, back
 
         provider = get_accelerator().get_hifloat8_provider()
         policy = provider.HiFloat8Config()
-        quantize_(candidate,
-                  GroupedExpertsConfig(policy, provider.hifloat8_grouped_mm),
-                  filter_fn=lambda module, name: name == "")
+        quantize_(candidate, GroupedExpertsConfig(policy), filter_fn=lambda module, name: name == "")
     x = torch.randn(sum(counts), dim, device="npu", dtype=torch.bfloat16, requires_grad=True)
     candidate_x = x.detach().clone().requires_grad_()
     groups = torch.tensor(counts, device="npu", dtype=torch.int64)
@@ -207,9 +205,7 @@ def test_npu_provider_experts_preserve_bfloat16_residual_with_float16_compute():
 
     provider = get_accelerator().get_hifloat8_provider()
     policy = provider.HiFloat8Config.from_dict({"compute_dtype": "float16"})
-    quantize_(experts,
-              GroupedExpertsConfig(policy, provider.hifloat8_grouped_mm),
-              filter_fn=lambda module, name: name == "")
+    quantize_(experts, GroupedExpertsConfig(policy), filter_fn=lambda module, name: name == "")
     counts = torch.tensor([0, 8, 0, 4], device="npu", dtype=torch.int64)
     x = torch.randn(15, 64, device="npu", dtype=torch.bfloat16, requires_grad=True)
     branch = experts(x, counts)

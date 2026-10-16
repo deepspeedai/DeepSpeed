@@ -2129,10 +2129,7 @@ class DeepSpeedEngine(Module):
         from deepspeed.runtime.torchao import GroupedExpertsConfig
 
         module_configs = {name: policy for name in selected_names}
-        module_configs.update({
-            name: GroupedExpertsConfig(policy, provider.hifloat8_grouped_mm)
-            for name, _module in selected_experts
-        })
+        module_configs.update({name: GroupedExpertsConfig(policy) for name, _module in selected_experts})
         quantize_(self.module, ModuleFqnToConfig(module_configs), filter_fn=None)
         self.hifloat8_converted_module_names = tuple(selected_names)
         self.hifloat8_grouped_module_names = tuple(name for name, _ in selected_experts)

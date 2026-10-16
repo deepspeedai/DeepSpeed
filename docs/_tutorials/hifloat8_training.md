@@ -60,9 +60,10 @@ optional dependency/version availability. Unsupported accelerators fail before
 conversion. No NPU import or device-specific kernel selection occurs in Engine.
 
 `ModuleFqnToConfig` maps selected Linear modules to the shared `HiFloat8Config`
-and selected experts to a DeepSpeed `GroupedExpertsConfig` registry adapter.
-The Linear handler converts in place; the grouped handler binds a device-provided
-GEMM once. Both preserve Parameter identity, names, metadata, `requires_grad`,
+and selected experts to a DeepSpeed `GroupedExpertsConfig` carrying only that
+policy. The Linear handler converts in place; the grouped handler resolves
+`get_hifloat8_provider()` through the accelerator and binds its HiFloat8 GEMM
+once. Engine does not select or pass a grouped function. Both preserve Parameter identity, names, metadata, `requires_grad`,
 mode and state-dict keys. There is no second model-conversion API or registry.
 The expert container remains owned by DeepSpeed and retains its activation and
 routing/padding behavior.
