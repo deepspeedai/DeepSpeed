@@ -151,7 +151,7 @@ class DecoupledCheckpointEngine(CheckpointEngine):
             self.checkpoint_size.set_pre_size(pre_size)
 
     def load(self, path: str, map_location=None):
-        sd = torch.load(path, map_location=map_location)
+        sd = torch.load(path, map_location=map_location, weights_only=False)
         return sd
 
     def save(self, state_dict, path: str):
