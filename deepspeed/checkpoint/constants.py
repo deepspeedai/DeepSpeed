@@ -21,6 +21,9 @@ GROUP_PADDINGS = 'group_paddings'
 PARAM_ALIGNMENT_PADDINGS = 'param_alignment_paddings'
 PARTITION_COUNT = 'partition_count'
 ZERO_STAGE = 'zero_stage'
+# Per param group, the optimizer states that hold every parameter of the partition whole instead
+# of the partition's slice of it (ZeRO-1/2 Muon's momentum buffer).
+WHOLE_PARAM_OPTIMIZER_STATES = 'whole_param_optimizer_states'
 CLIP_GRAD = 'clip_grad'
 FP32_WEIGHT_KEY = "fp32"
 LOSS_SCALER = 'loss_scaler'

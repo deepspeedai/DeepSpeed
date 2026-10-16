@@ -58,6 +58,13 @@ metadata (`UNIVERSAL_CHECKPOINT_INFO`) to reconstruct tensor-parallel parameters
 correctly, including row-parallel, column-parallel, replicated, fused, and
 sub-parameter layouts.
 
+The converter carries whatever state the optimizer keeps, so a Muon run keeps its
+momentum next to the Adam moments of its non-matrix parameters. Under ZeRO Stage 1
+and ZeRO Stage 2, Muon holds each parameter's momentum whole on every rank that
+owns a piece of it, and the checkpoint records that layout. A ZeRO Stage 1 or 2
+Muon checkpoint saved before DeepSpeed recorded it is refused rather than guessed
+at; save it again with a newer version to convert it.
+
 ### Step 3: Resume Training with Universal Checkpoint
 
 With the Universal checkpoint ready, resume training by enabling Universal

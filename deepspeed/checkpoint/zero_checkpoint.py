@@ -5,7 +5,8 @@
 
 import torch
 
-from .constants import (BASE_OPTIMIZER_STATE, GROUP_PADDINGS, OPTIMIZER_STATE_DICT, PARTITION_COUNT)
+from .constants import (BASE_OPTIMIZER_STATE, GROUP_PADDINGS, OPTIMIZER_STATE_DICT, PARTITION_COUNT,
+                        WHOLE_PARAM_OPTIMIZER_STATES)
 
 from .reshape_utils import (basic_folder_validation, get_zero_files, merge_state)
 
@@ -101,11 +102,16 @@ class ZeROCheckpoint(object):
         if group_paddings is None:
             return
 
+        # A state the optimizer keeps whole per parameter (ZeRO-1/2 Muon's momentum) is not laid out
+        # like the partition, so the partition's alignment padding is not at its end.
+        whole_param_states = self._get_optimizer_state(sd, WHOLE_PARAM_OPTIMIZER_STATES) or ()
+
         for key, group_state in param_group_states.items():
             if group_paddings[key] == 0:
                 continue
+            whole = whole_param_states[key] if key < len(whole_param_states) else ()
             for state_name, state_value in group_state.items():
-                if state_name != "step" and torch.is_tensor(state_value):
+                if state_name != "step" and state_name not in whole and torch.is_tensor(state_value):
                     raw_length = state_value.numel() - group_paddings[key]
                     group_state[state_name] = torch.narrow(state_value, 0, 0, raw_length).clone()
                 else:
