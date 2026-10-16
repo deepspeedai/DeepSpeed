@@ -1159,7 +1159,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                     self.fp32_partitioned_groups_flat.append(converted.clone().detach())
                     self._create_momentum_buffer(num_elements, i, ds_id)
                 elif self.fp16_partitioned_groups_flat[i].dtype == self.master_weights_and_grads_dtype and \
-                        self.fp16_partitioned_groups_flat[i].device == self.device:
+                        self.fp16_partitioned_groups_flat[i].device == torch.device(self.device):
                     # When torch autocast is enabled, weights in the provided model (and thus groups in the so-called
                     # "fp16" partitioned groups) are already in and updated using fp32. In such cases we don't need
                     # another copy of the weights.
