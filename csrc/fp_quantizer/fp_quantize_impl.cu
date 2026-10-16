@@ -230,11 +230,11 @@ __global__ void apply_dequantization(uint8_t* val, T* q_val, int group_size, int
     constexpr uint32_t vector_size = quantization::access_granularity / sizeof(T);
     int tidx = (blockIdx.x * blockDim.x + threadIdx.x) * vector_size;
 
-    constexpr int quantized_bits = q_mantisa_bits + q_exponent_bits + 1;
-    constexpr int q_exponent_bits = total_q_bits - mantisa_bits - 1;
+    constexpr int new_qeb = total_q_bits - mantisa_bits - 1;
+    constexpr int quantized_bits = q_mantisa_bits + new_qeb + 1;
     constexpr uint16_t _mantisa_mask = (1 << q_mantisa_bits) - 1;
-    constexpr uint16_t _exponent_mask = ((1 << q_exponent_bits) - 1) << q_mantisa_bits;
-    constexpr uint16_t _sign_mask = 1U << (q_mantisa_bits + q_exponent_bits);
+    constexpr uint16_t _exponent_mask = ((1 << new_qeb) - 1) << q_mantisa_bits;
+    constexpr uint16_t _sign_mask = 1U << (q_mantisa_bits + new_qeb);
     const uint32_t g_index = (tidx / group_size);
     const uint32_t group_size_bytes = (group_size * quantized_bits / 8);
     const uint8_t* load_base_ptr =
@@ -409,11 +409,11 @@ __global__ void apply_selective_dequantization(uint8_t* val,
     constexpr uint32_t vector_size = quantization::access_granularity / sizeof(T);
     int tidx = (blockIdx.y * blockDim.x + threadIdx.x) * vector_size;
     int input_index = index * total_num_elements + tidx;
-    constexpr int quantized_bits = q_mantisa_bits + q_exponent_bits + 1;
-    constexpr int q_exponent_bits = total_q_bits - mantisa_bits - 1;
+    constexpr int new_qeb = total_q_bits - mantisa_bits - 1;
+    constexpr int quantized_bits = q_mantisa_bits + new_qeb + 1;
     constexpr uint16_t _mantisa_mask = (1 << q_mantisa_bits) - 1;
-    constexpr uint16_t _exponent_mask = ((1 << q_exponent_bits) - 1) << q_mantisa_bits;
-    constexpr uint16_t _sign_mask = 1U << (q_mantisa_bits + q_exponent_bits);
+    constexpr uint16_t _exponent_mask = ((1 << new_qeb) - 1) << q_mantisa_bits;
+    constexpr uint16_t _sign_mask = 1U << (q_mantisa_bits + new_qeb);
     const uint32_t g_index = (input_index / group_size);
     const uint32_t group_size_bytes = (group_size * quantized_bits / 8);
     const uint8_t* load_base_ptr =
