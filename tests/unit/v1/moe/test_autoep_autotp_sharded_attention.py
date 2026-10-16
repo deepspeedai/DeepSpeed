@@ -28,10 +28,13 @@ import deepspeed
 import deepspeed.comm as dist
 from deepspeed.accelerator import get_accelerator
 from deepspeed.checkpoint import ds_to_universal
+from deepspeed.module_inject.auto_ep_folding import build_folding_spec
 from deepspeed.module_inject.auto_ep_layer import AutoEPMoELayer
 from deepspeed.module_inject.auto_tp import AutoTP
 from deepspeed.module_inject.layers import LinearAllreduce, LinearLayer, TensorParallel_Layer, VocabParallelLinear
+from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer
 from deepspeed.utils import groups, safe_get_full_fp32_param, safe_get_full_grad
+from deepspeed.utils.timer import SynchronizedWallClockTimer
 from unit.common import DistributedTest
 
 transformers = pytest.importorskip("transformers")
@@ -145,39 +148,44 @@ def _gather_tp_shards(tensor, dim):
     return torch.cat(shards, dim=dim)
 
 
-def _gather_expert_grads(layer, param):
-    grad = safe_get_full_grad(param)
-    assert grad is not None
-    shards = [torch.empty_like(grad) for _ in range(dist.get_world_size(group=layer.ep_group))]
-    dist.all_gather(shards, grad.contiguous(), group=layer.ep_group)
+def _gather_expert_tensor(layer, param, read_tensor):
+    tensor = read_tensor(param)
+    assert tensor is not None
+    shards = [torch.empty_like(tensor) for _ in range(dist.get_world_size(group=layer.ep_group))]
+    dist.all_gather(shards, tensor.contiguous(), group=layer.ep_group)
     return torch.cat(shards, dim=0)
 
 
-def _folded_grads(model):
-    """Every gradient of the folded model, rebuilt at the reference model's names and shapes."""
-    grads = {}
+def _folded_tensors(model, read_tensor):
+    """Rebuild gradients or FP32 parameters at the reference model's names and shapes."""
+    tensors = {}
     for module_name, module in model.named_modules():
         prefix = f"{module_name}." if module_name else ""
         if isinstance(module, AutoEPMoELayer):
-            w1 = _gather_expert_grads(module, module.experts.w1)
-            w2 = _gather_expert_grads(module, module.experts.w2)
-            w3 = _gather_expert_grads(module, module.experts.w3)
-            grads[f"{prefix}experts.gate_up_proj"] = torch.cat([w1, w3], dim=1)
-            grads[f"{prefix}experts.down_proj"] = w2
-            grads[f"{prefix}gate.weight"] = safe_get_full_grad(module.router.gate.weight)
+            w1 = _gather_expert_tensor(module, module.experts.w1, read_tensor)
+            w2 = _gather_expert_tensor(module, module.experts.w2, read_tensor)
+            w3 = _gather_expert_tensor(module, module.experts.w3, read_tensor)
+            tensors[f"{prefix}experts.gate_up_proj"] = torch.cat([w1, w3], dim=1)
+            tensors[f"{prefix}experts.down_proj"] = w2
+            tensors[f"{prefix}gate.weight"] = read_tensor(module.router.gate.weight)
             continue
         for name, param in module.named_parameters(recurse=False):
             if any(isinstance(owner, AutoEPMoELayer) for owner in _owners(model, module_name)):
                 if ".shared_experts." not in f".{prefix}":
                     continue
-            grad = safe_get_full_grad(param)
-            assert grad is not None, f"{prefix}{name} has no gradient"
+            tensor = read_tensor(param)
+            assert tensor is not None, f"{prefix}{name} has no tensor"
             if isinstance(module, LinearAllreduce) and name == "weight":
-                grad = _gather_tp_shards(grad, dim=1)
+                tensor = _gather_tp_shards(tensor, dim=1)
             elif isinstance(module, LinearLayer):
-                grad = _gather_tp_shards(grad, dim=0)
-            grads[f"{prefix}{name}"] = grad
-    return {name: grad.detach().float().cpu() for name, grad in grads.items()}
+                tensor = _gather_tp_shards(tensor, dim=0)
+            tensors[f"{prefix}{name}"] = tensor
+    # Parameter snapshots must survive the optimizer's in-place update.
+    return {name: tensor.detach().float().cpu().clone() for name, tensor in tensors.items()}
+
+
+def _folded_grads(model):
+    return _folded_tensors(model, safe_get_full_grad)
 
 
 def _owners(model, module_name):
@@ -300,6 +308,204 @@ class TestShardedAttentionFolding(DistributedTest):
             pytest.skip("AutoEP folding runs on an accelerator")
         assert dist.get_world_size() == world_size
         _check_folded_matches_reference(tp_size=tp_size, ep_size=ep_size, zero_stage=zero_stage, zero_init=zero_init)
+
+
+class TestMixedExpertClipping(DistributedTest):
+    world_size = 2
+
+    @pytest.mark.parametrize("zero_stage", [1, 2])
+    @pytest.mark.parametrize("folded", [False, True])
+    def test_native_etp_and_folded_experts_share_global_clipping(self, zero_stage, folded):
+        if get_accelerator().device_name() == "cpu":
+            pytest.skip("ZeRO expert clipping runs on an accelerator")
+        groups._init_tp_mesh_device(tensor_model_parallel_size=2)
+        tp_group = groups.get_tensor_model_parallel_group()
+        dp_group = groups.get_data_parallel_group()
+        rank = dist.get_rank()
+        device = get_accelerator().current_device_name()
+        native = torch.nn.Parameter(torch.ones(2, device=device))
+        native.allreduce = False
+        native.group_name = "native_etp"
+        native.model_parallel = True
+        param_groups = [{"params": [native], "moe": True, "name": native.group_name}]
+        ep_groups = {native.group_name: dp_group}
+        edp_groups = {native.group_name: dp_group}
+        names = {native: "native"}
+        native_gradient = torch.tensor([3.0 if rank == 0 else 4.0, 0.0], device=device)
+        expected_gradients = [native_gradient]
+        if folded:
+            expert = torch.nn.Parameter(torch.ones(2, device=device))
+            expert.allreduce = False
+            expert.group_name = "folded_ep"
+            expert.ds_zero_placement_family = "autoep_expert"
+            param_groups.append({"params": [expert], "moe": True, "name": expert.group_name})
+            ep_groups[expert.group_name] = tp_group
+            edp_groups[expert.group_name] = dp_group
+            names[expert] = "folded"
+            expected_gradients.append(torch.tensor([0.0 if rank == 0 else 12.0, 0.0], device=device))
+        # Native ETP shards have norm 5; the folded expert on TP rank one contributes 12.
+        expected_norm = 13.0 if folded else 5.0
+        threshold = expected_norm / 2
+        parameters = list(names)
+        before = [param.detach().clone() for param in parameters]
+        optimizer = DeepSpeedZeroOptimizer(
+            torch.optim.SGD(param_groups, lr=0.1),
+            param_names=names,
+            timers=SynchronizedWallClockTimer(),
+            optimizer_params={},
+            dp_process_group=dp_group,
+            expert_parallel_group=ep_groups,
+            expert_data_parallel_group=edp_groups,
+            mpu=groups,
+            has_moe_layers=True,
+            partition_grads=zero_stage == 2,
+            overlap_comm=True,
+            reduce_bucket_size=32,
+            allgather_bucket_size=32,
+            communication_data_type=torch.float32,
+            clip_grad=threshold,
+        )
+        if folded:
+            spec = build_folding_spec(world_size=2, pp_size=1, tp_size=2, ep_size=2)
+            optimizer.configure_autoep_folding_tp_gradient_reduction(spec)
+        try:
+            loss = (native * native_gradient).sum()
+            if folded:
+                # Model the restore-combined backward's TP factor before ZeRO cancels it.
+                loss = loss + 2 * (expert * expected_gradients[1]).sum()
+            optimizer.enter_backward()
+            loss.backward()
+            optimizer.backward_epilogue()
+            optimizer.reduce_gradients()
+            optimizer.exit_backward()
+            norm = optimizer.scaled_global_norm().item()
+            optimizer.step()
+            coefficient = threshold / (expected_norm + 1e-6)
+            torch.testing.assert_close(norm, expected_norm)
+            for param, initial, gradient in zip(parameters, before, expected_gradients):
+                torch.testing.assert_close(param.detach() - initial,
+                                           -0.1 * coefficient * gradient,
+                                           rtol=1e-5,
+                                           atol=1e-7)
+        finally:
+            optimizer.destroy()
+
+
+def _clipped_step_against_reference(tp_size, ep_size, zero_stage, zero_init, clip_ratio, snapshot_callback=None):
+    """Observe a real SGD update with a threshold calibrated before building the folded engine.
+
+    A correct reported norm is not sufficient: a parameter family could escape clipping or be
+    scaled twice. Compare its actual FP32 update to the unsharded reference gradient instead.
+    The caller checks the returned failures after any distributed diagnostics have completed.
+    """
+    assert clip_ratio in (0.5, 2.0)
+    assert zero_stage in (1, 2, 3) and (not zero_init or zero_stage == 3)
+    torch.manual_seed(1234)
+    config = _tiny_glm4_moe_config()
+    reference_model = transformers.Glm4MoeForCausalLM(config).float()
+    reference_state = copy.deepcopy(reference_model.state_dict())
+    initial = {name: param.detach().float().cpu().clone() for name, param in reference_model.named_parameters()}
+    reference_engine, _, _, _ = deepspeed.initialize(model=reference_model, config=_reference_config())
+    logical_world_size = dist.get_world_size() // tp_size
+    logical_rank = dist.get_rank() // tp_size
+    reference_losses = _run_to_boundary(reference_engine, logical_rank, logical_world_size)
+    reference = _reference_grads(reference_engine.module)
+    reference_norm = torch.sqrt(sum(grad.double().square().sum() for grad in reference.values())).item()
+    assert 0 < reference_norm < float("inf"), reference_norm
+    threshold = clip_ratio * reference_norm
+    coefficient = min(1.0, threshold / (reference_norm + 1e-6))
+    assert (coefficient < 1.0) == (clip_ratio < 1.0)
+
+    folded_config = _folded_config(tp_size, ep_size, zero_stage)
+    folded_config["gradient_clipping"] = threshold
+    folded_config["optimizer"]["params"].update(momentum=0.0, weight_decay=0.0)
+    learning_rate = folded_config["optimizer"]["params"]["lr"]
+    if zero_init:
+        with deepspeed.zero.Init(config_dict_or_path=folded_config):
+            folded_model = transformers.Glm4MoeForCausalLM(config)
+        with deepspeed.zero.GatheredParameters(list(folded_model.parameters()), modifier_rank=0):
+            if dist.get_rank() == 0:
+                folded_model.load_state_dict(reference_state)
+    else:
+        folded_model = transformers.Glm4MoeForCausalLM(config).float()
+        folded_model.load_state_dict(reference_state)
+    engine, _, _, _ = deepspeed.initialize(model=folded_model, config=folded_config)
+    _assert_structure(engine.module)
+    before = _folded_tensors(engine.module, safe_get_full_fp32_param)
+    losses = _run_to_boundary(engine, logical_rank, logical_world_size)
+    gradients = _folded_grads(engine.module)
+    engine.step()
+    folded_norm = float(engine.get_global_grad_norm())
+    after = _folded_tensors(engine.module, safe_get_full_fp32_param)
+
+    if snapshot_callback is not None:
+        snapshot_callback(initial=initial, reference=reference, gradients=gradients, before=before, after=after)
+
+    # Finish every gather before checking values; an early per-rank failure must not strand peers.
+    assert initial.keys() == reference.keys() == gradients.keys() == before.keys() == after.keys()
+    failures = _grad_mismatches(gradients, reference)
+    if not torch.allclose(torch.tensor(losses), torch.tensor(reference_losses), rtol=1e-5, atol=1e-5):
+        failures.append("losses differ from the reference")
+    if not abs(folded_norm - reference_norm) <= 1e-4 * reference_norm:
+        failures.append(f"gradient norm: got {folded_norm}, expected {reference_norm}")
+    updates = {}
+    for name, grad in reference.items():
+        assert initial[name].shape == before[name].shape == after[name].shape == grad.shape, name
+        if not torch.equal(before[name], initial[name]):
+            failures.append(f"{name}: initial FP32 parameter differs")
+        want = -learning_rate * coefficient * grad.double()
+        got = after[name].double() - before[name].double()
+        difference = (got - want).abs()
+        # Check the update, not just the final weight: weight-relative tolerances can hide an
+        # omitted small update. Allow FP32 store rounding plus the gradient oracle's tolerance.
+        rounding = 2 * torch.finfo(torch.float32).eps * before[name].double().abs()
+        tolerance = rounding + 1e-4 * want.abs() + 1e-5 * want.abs().max()
+        matches = bool(torch.all(difference <= tolerance))
+        norm_squared = want.square().sum().item()
+        gradient = grad.double()
+        observed_gradient = gradients[name].double()
+        gradient_norm_squared = gradient.square().sum().item()
+        updates[name] = {
+            "shape":
+            list(grad.shape),
+            "numel":
+            grad.numel(),
+            "gradient_max_abs_error": (observed_gradient - gradient).abs().max().item(),
+            "gradient_relative_l2_error":
+            (observed_gradient - gradient).norm().item() / max(gradient.norm().item(), 1e-12),
+            "gradient_scale":
+            observed_gradient.mul(gradient).sum().item() / gradient_norm_squared if gradient_norm_squared else None,
+            "max_abs_error":
+            difference.max().item(),
+            "relative_l2_error": (got - want).norm().item() / max(want.norm().item(), 1e-12),
+            "scale":
+            got.mul(want).sum().item() / norm_squared if norm_squared else None,
+            "matches":
+            matches,
+        }
+        if not matches:
+            failures.append(f"{name}: clipped SGD update differs: {updates[name]}")
+    return {
+        "reference_norm": reference_norm,
+        "folded_norm": folded_norm,
+        "threshold": threshold,
+        "coefficient": coefficient,
+        "updates": updates,
+        "failures": failures,
+    }
+
+
+@pytest.mark.parametrize("world_size, tp_size, ep_size", [(4, 2, 4), (8, 2, 4)])
+@pytest.mark.parametrize("zero_stage, zero_init", [(1, False), (2, False), (3, False), (3, True)])
+@pytest.mark.parametrize("clip_ratio", [0.5, 2.0])
+class TestShardedAttentionClippedUpdate(DistributedTest):
+
+    def test_sgd_update_matches_reference(self, world_size, tp_size, ep_size, zero_stage, zero_init, clip_ratio):
+        if get_accelerator().device_name() == "cpu":
+            pytest.skip("AutoEP folding runs on an accelerator")
+        assert dist.get_world_size() == world_size
+        result = _clipped_step_against_reference(tp_size, ep_size, zero_stage, zero_init, clip_ratio)
+        assert not result["failures"], "\n".join(result["failures"])
 
 
 class TestTiedOutputHead(DistributedTest):

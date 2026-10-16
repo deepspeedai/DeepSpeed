@@ -603,6 +603,24 @@ Requirements and limits:
   yet. The built-in DeepSeek presets disable it by default; explicit non-null
   values fail.
 
+Gradient clipping under folding
+-------------------------------
+
+For AutoEP with AutoTP at ZeRO stages 1 and 2, the routed-expert gradient norm
+sums squared partition contributions over expert data parallelism and then
+expert parallelism. Every expert owner contributes, including owners whose
+tensor-parallel rank is nonzero. This expert total does not receive another
+tensor-parallel sum. Replicated and tensor-parallel dense parameters retain
+their existing norm reductions. Native MoE groups in the same optimizer
+retain their model-parallel reduction and expert-norm averaging.
+
+The clipping coefficient in ``engine.step()`` therefore uses each logical
+expert once. The sharded-attention regression checks complete gradients,
+the global norm, and actual FP32 SGD updates against the unsharded reference.
+Thresholds at half and twice the reference norm cover active clipping and
+an unclipped control, including models built under ``deepspeed.zero.Init``
+at ZeRO stage 3.
+
 Chunked causal-LM loss
 ----------------------
 
