@@ -8,7 +8,7 @@ importlib-metadata>=4
 liger-kernel>=0.8.1
 mup
 pre-commit>=3.2.0
-pytest>=7.2.0,<8.4.0
+pytest>=9.0.3
 pytest-forked
 pytest-randomly
 pytest-xdist
