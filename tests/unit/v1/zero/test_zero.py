@@ -1919,6 +1919,70 @@ class TestZeroOffloadOptim(DistributedTest):
             model, _, _, _ = deepspeed.initialize(model=model, optimizer=optimizer, config=config_dict)
 
 
+@pytest.mark.skipif(not get_accelerator().is_bf16_supported(), reason="bf16 is not supported on this accelerator")
+@pytest.mark.parametrize("ratio", [1.0, 0.5])
+class TestZero3OffloadPinnedCopyBack(DistributedTest):
+    """With pin_memory, the updated CPU master partitions must reach the device with the same values as the direct
+    copy from pageable memory (pin_memory False): the parameters after training are compared bitwise. The pinned run
+    must actually go through the staging buffers, or the test would compare the direct copy with itself."""
+    world_size = 2
+
+    def _train(self, pin_memory, ratio):
+        hidden_dim = 256
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 2,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 1e-3
+                }
+            },
+            "bf16": {
+                "enabled": True
+            },
+            "zero_optimization": {
+                "stage": 3,
+                "sub_group_size": 20000,
+                "offload_optimizer": {
+                    "device": "cpu",
+                    "pin_memory": pin_memory,
+                    "ratio": ratio
+                }
+            },
+        }
+        torch.manual_seed(0)
+        model = SimpleModel(hidden_dim, nlayers=4)
+        model, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config_dict)
+        # Pieces much smaller than a sub-group, so the copy refills both staging buffers many times per step: a buffer
+        # refilled before its previous copy finished would change the values.
+        model.optimizer._staging_numel = 1000
+        torch.manual_seed(1)
+        data_loader = random_dataloader(model=model,
+                                        total_samples=6,
+                                        hidden_dim=hidden_dim,
+                                        device=model.device,
+                                        dtype=torch.bfloat16)
+        for batch in data_loader:
+            loss = model(batch[0], batch[1])
+            model.backward(loss)
+            model.step()
+        params = []
+        for p in model.module.parameters():
+            with deepspeed.zero.GatheredParameters([p]):
+                params.append(p.detach().clone().cpu())
+        used_staging = model.optimizer._staging_buffers is not None
+        return params, used_staging
+
+    def test(self, ratio):
+        direct, direct_used_staging = self._train(pin_memory=False, ratio=ratio)
+        staged, staged_used_staging = self._train(pin_memory=True, ratio=ratio)
+        assert not direct_used_staging
+        assert staged_used_staging
+        assert len(direct) == len(staged)
+        for a, b in zip(direct, staged):
+            assert torch.equal(a, b)
+
+
 @pytest.mark.parametrize("training", [True, False])
 class TestZeroPartitionCache(DistributedTest):
     world_size = 1
