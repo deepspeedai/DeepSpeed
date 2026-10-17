@@ -85,8 +85,8 @@ def get_curriculum_learning(param_dict):
         param_dict[CURRICULUM_LEARNING] = {}
     sub_param_dict = param_dict[CURRICULUM_LEARNING]
     if output[CURRICULUM_LEARNING_ENABLED]:
-        assert CURRICULUM_LEARNING_METRICS in sub_param_dict.keys(
-        ), f"Curriculum learning is enabled, {CURRICULUM_LEARNING_METRICS} must be specified"
+        if CURRICULUM_LEARNING_METRICS not in sub_param_dict.keys():
+            raise AssertionError(f"Curriculum learning is enabled, {CURRICULUM_LEARNING_METRICS} must be specified")
         for key, val in get_curriculum_learning_params(param_dict).items():
             output[key] = val
     return output
@@ -105,8 +105,8 @@ def get_dynamic_batching(param_dict):
     output[DYNAMIC_BATCHING_SEQUENCE_PICKING_ORDER] = str(
         output.get(DYNAMIC_BATCHING_SEQUENCE_PICKING_ORDER, DYNAMIC_BATCHING_SEQUENCE_PICKING_ORDER_DEFAULT))
     if output[DYNAMIC_BATCHING_ENABLED]:
-        assert DYNAMIC_BATCHING_MAX_TOKENS in output.keys(
-        ), f"Dynamic batching is enabled, so {DYNAMIC_BATCHING_MAX_TOKENS} must be specified"
+        if DYNAMIC_BATCHING_MAX_TOKENS not in output.keys():
+            raise AssertionError(f"Dynamic batching is enabled, so {DYNAMIC_BATCHING_MAX_TOKENS} must be specified")
         output[DYNAMIC_BATCHING_MAX_TOKENS] = int(output[DYNAMIC_BATCHING_MAX_TOKENS])
     output[DYNAMIC_BATCHING_VERBOSE] = bool(output.get(DYNAMIC_BATCHING_VERBOSE, False))
     return output
