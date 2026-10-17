@@ -20,6 +20,9 @@ def bwc_tensor_model_parallel_rank(mpu=None):
     This should "just work" with both Megatron-LM and DeepSpeed's pipeline
     parallelism.
 
+    An ``mpu`` that implements none of these spellings is treated as providing
+    no tensor model parallelism, the same as ``mpu=None``.
+
     Args:
         mpu (model parallel unit, optional): The tensor model parallel rank.
             If ``mpu=None``, returns 0. Defaults to ``None``.
@@ -37,9 +40,14 @@ def bwc_tensor_model_parallel_rank(mpu=None):
     elif hasattr(mpu, 'get_slice_parallel_rank'):
         # Some DeepSpeed + pipeline parallelism versions
         return mpu.get_slice_parallel_rank()
-    else:
+    elif hasattr(mpu, 'get_model_parallel_rank'):
         # Deprecated Megatron and DeepSpeed convention
         return mpu.get_model_parallel_rank()
+    else:
+        # An mpu that partitions along some other dimension, such as Ulysses
+        # sequence parallelism, exposes no tensor model parallel API at all.
+        # Tensors are left intact in that case, which is rank 0 of a group of 1.
+        return 0
 
 
 def bwc_tensor_model_parallel_world_size(mpu=None):
@@ -55,9 +63,13 @@ def bwc_tensor_model_parallel_world_size(mpu=None):
     elif hasattr(mpu, 'get_slice_parallel_world_size'):
         # Some DeepSpeed + pipeline parallelism versions
         return mpu.get_slice_parallel_world_size()
-    else:
+    elif hasattr(mpu, 'get_model_parallel_world_size'):
         # Deprecated Megatron and DeepSpeed convention
         return mpu.get_model_parallel_world_size()
+    else:
+        # No tensor model parallel API means tensors are not split, so the
+        # tensor model parallel group holds a single process.
+        return 1
 
 
 def bwc_tensor_model_parallel_group(mpu=None):
@@ -73,9 +85,13 @@ def bwc_tensor_model_parallel_group(mpu=None):
     elif hasattr(mpu, 'get_slice_parallel_group'):
         # Some DeepSpeed + pipeline parallelism versions
         return mpu.get_slice_parallel_group()
-    else:
+    elif hasattr(mpu, 'get_model_parallel_group'):
         # Deprecated Megatron and DeepSpeed convention
         return mpu.get_model_parallel_group()
+    else:
+        # No tensor model parallel API means there is no such group to return,
+        # which callers already handle as the no-tensor-parallelism case.
+        return None
 
 
 def bwc_pipeline_parallel_world_size(mpu=None):
