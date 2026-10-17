@@ -186,6 +186,7 @@ class LossScaler(LossScalerBase):
         return False
 
     # `x` is a torch.Tensor
+    @staticmethod
     def _has_inf_or_nan(x):
         return False
 
@@ -246,6 +247,7 @@ class DynamicLossScaler(LossScalerBase):
         return False
 
     # `x` is a torch.Tensor
+    @staticmethod
     def _has_inf_or_nan(x):
         return has_inf_or_nan(x)
 
