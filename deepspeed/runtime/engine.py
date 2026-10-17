@@ -237,6 +237,12 @@ def _client_optimizer_needs_remap(optimizer):
     return optimizer is not None and hasattr(optimizer, "param_groups")
 
 
+def _offload_device(offload_config):
+    if offload_config is None:
+        return None
+    return OffloadDeviceEnum(offload_config.device).value
+
+
 def _model_parameters_need_remap(model_parameters):
     """Whether caller-supplied parameters were materialized before module replacement.
 
@@ -859,8 +865,8 @@ class DeepSpeedEngine(Module):
             autoep_enabled=autoep_config.enabled,
             tp_preset=getattr(self._config.tensor_parallel_config, "preset_model", None),
             ep_preset=autoep_config.preset_model,
-            zero_offload_optimizer=self.zero_offload_optimizer() is not None,
-            zero_offload_param=self.zero_offload_param() is not None,
+            offload_optimizer_device=_offload_device(self.zero_offload_optimizer()),
+            offload_param_device=_offload_device(self.zero_offload_param()),
         )
         self._autoep_folding_spec = folding_spec
 
