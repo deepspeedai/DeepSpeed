@@ -117,12 +117,12 @@ Only a few lines of code changes are needed to enable a PyTorch model to use Dee
 
 ## Features
 
-Below we provide a brief feature list, see our detailed [feature overview](https://www.deepspeed.ai/features/) for descriptions and usage.
+Below we provide a brief feature list, see our detailed [feature overview](https://www.deepspeed.ai/training/) for descriptions and usage.
 
-* [Distributed Training with Mixed Precision](https://www.deepspeed.ai/features/#distributed-training-with-mixed-precision)
+* [Distributed Training with Mixed Precision](https://www.deepspeed.ai/training/#distributed-training-with-mixed-precision)
   * 16-bit mixed precision
   * Single-GPU/Multi-GPU/Multi-Node
-* [Model Parallelism](https://www.deepspeed.ai/features/#model-parallelism)
+* [Model Parallelism](https://www.deepspeed.ai/training/#model-parallelism)
   * Support for Custom Model Parallelism
   * Integration with Megatron-LM
 * [Pipeline Parallelism](https://www.deepspeed.ai/tutorials/pipeline/)
@@ -136,29 +136,29 @@ Below we provide a brief feature list, see our detailed [feature overview](https
   * Leverage both CPU/GPU memory for model training
   * Support 10B model training on a single GPU
 * [Ultra-fast dense transformer kernels](https://www.deepspeed.ai/2020/05/18/bert-record.html)
-* [Additional Memory and Bandwidth Optimizations](https://www.deepspeed.ai/features/#additional-memory-and-bandwidth-optimizations)
+* [Additional Memory and Bandwidth Optimizations](https://www.deepspeed.ai/training/#additional-memory-and-bandwidth-optimizations)
   * Smart Gradient Accumulation
   * Communication/Computation Overlap
-* [Training Features](https://www.deepspeed.ai/features/#training-features)
+* [Training Features](https://www.deepspeed.ai/training/#training-features)
   * Simplified training API
   * Gradient Clipping
   * Automatic loss scaling with mixed precision
-* [Training Optimizers](https://www.deepspeed.ai/features/#training-optimizers)
+* [Training Optimizers](https://www.deepspeed.ai/training/#training-optimizers)
   * Fused Adam optimizer and arbitrary `torch.optim.Optimizer`
   * Memory bandwidth optimized FP16 Optimizer
   * Large Batch Training with LAMB Optimizer
   * Memory efficient Training with ZeRO Optimizer
   * CPU-Adam
-* [Training Agnostic Checkpointing](https://www.deepspeed.ai/features/#training-agnostic-checkpointing)
-* [Advanced Parameter Search](https://www.deepspeed.ai/features/#advanced-parameter-search)
+* [Training Agnostic Checkpointing](https://www.deepspeed.ai/training/#training-agnostic-checkpointing)
+* [Advanced Parameter Search](https://www.deepspeed.ai/training/#advanced-parameter-search)
   * Learning Rate Range Test
   * 1Cycle Learning Rate Schedule
-* [Simplified Data Loader](https://www.deepspeed.ai/features/#simplified-data-loader)
+* [Simplified Data Loader](https://www.deepspeed.ai/training/#simplified-data-loader)
 * [Data Efficiency](https://www.deepspeed.ai/tutorials/data-efficiency/)
   * Efficient data sampling via curriculum learning and efficient data routing via random layerwise token dropping
   * Up to 2x data and 2x time saving during GPT-3/BERT pretraining and GPT/ViT finetuning
   * Or further improve model quality under the same data/time
-* [Performance Analysis and Debugging](https://www.deepspeed.ai/features/#performance-analysis-and-debugging)
+* [Performance Analysis and Debugging](https://www.deepspeed.ai/training/#performance-analysis-and-debugging)
 * [Mixture of Experts (DeepSpeed MoE)](https://www.deepspeed.ai/tutorials/mixture-of-experts/)
 
 
