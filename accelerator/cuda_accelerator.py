@@ -183,10 +183,14 @@ class CUDA_Accelerator(DeepSpeedAccelerator):
 
         If the latter isn't set return the same id
         """
-        # if CUDA_VISIBLE_DEVICES is used automagically remap the id since pynvml ignores this env var
+        # If CUDA_VISIBLE_DEVICES is used, remap the id since pynvml ignores this env var. CUDA accepts
+        # both physical indices and UUIDs (including MIG UUIDs), so preserve UUID selectors for NVML.
         if "CUDA_VISIBLE_DEVICES" in os.environ:
-            ids = list(map(int, os.environ.get("CUDA_VISIBLE_DEVICES", "").split(",")))
-            return ids[torch_gpu_id]  # remap
+            ids = [device_id.strip() for device_id in os.environ.get("CUDA_VISIBLE_DEVICES", "").split(",")]
+            device_id = ids[torch_gpu_id]
+            if device_id.startswith(("GPU-", "MIG-")):
+                return device_id
+            return int(device_id)
         else:
             return torch_gpu_id
 
@@ -194,7 +198,11 @@ class CUDA_Accelerator(DeepSpeedAccelerator):
         if pynvml:
             if device_index is None:
                 device_index = self.current_device()
-            handle = pynvml.nvmlDeviceGetHandleByIndex(self._get_nvml_gpu_id(device_index))
+            nvml_gpu_id = self._get_nvml_gpu_id(device_index)
+            if isinstance(nvml_gpu_id, str):
+                handle = pynvml.nvmlDeviceGetHandleByUUID(nvml_gpu_id)
+            else:
+                handle = pynvml.nvmlDeviceGetHandleByIndex(nvml_gpu_id)
             info = pynvml.nvmlDeviceGetMemoryInfo(handle)
             return info.free
         else:
