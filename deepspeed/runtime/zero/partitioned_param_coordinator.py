@@ -14,6 +14,7 @@ from deepspeed.utils import z3_leaf_module
 from deepspeed.utils.logging import logger
 from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum
 from deepspeed.runtime.zero.partition_parameters import *
+from deepspeed.runtime.zero.utils import is_zero_param
 from deepspeed.runtime.zero.partitioned_param_profiler import PartitionedParameterProfiler
 from deepspeed.runtime.swap_tensor.partitioned_param_swapper import PartitionedParamStatus
 from deepspeed.utils.debug import debug_param2name_id_shape
@@ -47,7 +48,8 @@ def get_all_parameters(sub_module, recurse=False):
 
 @compiler.enable(min_version="2.7.0")
 def iter_params(module: Module, recurse=False) -> Iterable[Parameter]:
-    return map(lambda pair: pair[1], get_all_parameters(module, recurse))
+    # Zero-element parameters are left unpartitioned (see Init._leave_unpartitioned).
+    return filter(is_zero_param, map(lambda pair: pair[1], get_all_parameters(module, recurse)))
 
 
 class ZeRoTraceMode(Enum):
