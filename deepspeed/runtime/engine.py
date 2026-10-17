@@ -839,7 +839,12 @@ class DeepSpeedEngine(Module):
             pp_size = bwc_pipeline_parallel_world_size(self.mpu)
 
         world_size = dist.get_world_size()
-        validate_autoep_config(autoep_config, world_size, pp_size, tp_size, sp_size)
+        validate_autoep_config(autoep_config,
+                               world_size,
+                               pp_size,
+                               tp_size,
+                               sp_size,
+                               zero_stage=self.zero_optimization_stage())
         folding_spec = build_folding_spec(
             world_size=world_size,
             pp_size=pp_size,
