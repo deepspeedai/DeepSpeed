@@ -34,7 +34,7 @@ from deepspeed.module_inject.auto_ep_comm import (COMM_BACKEND, DEEPEP_BACKEND, 
                                                   new_exchange_scope, shared_exchange)
 from deepspeed.moe.ep_router import TokenChoiceTopKRouter
 from deepspeed.moe.ep_count import count_tokens_per_expert
-from deepspeed.moe.ep_experts import GroupedExperts
+from deepspeed.moe.ep_experts import ExpertWeightGradSlot, GroupedExperts
 from deepspeed.moe.ep_repack import (_gather_source_zero_params, repack_expert_requires_grad_flags,
                                      repack_expert_source_params, repack_expert_weights)
 
@@ -108,7 +108,8 @@ def resolve_combine_impl(
     return "weighted_sum"
 
 
-def resolve_row_weighting_impl(config_override: Literal["auto", "eager", "fused"]) -> Literal["eager", "fused"]:
+def resolve_row_weighting_impl(
+        config_override: Literal["auto", "eager", "fused", "activation"]) -> Literal["eager", "fused", "activation"]:
     """Resolve DeepEP row weighting implementation from config override."""
     if config_override != "auto":
         return config_override
@@ -535,6 +536,11 @@ class AutoEPMoELayer(nn.Module):
         self.score_apply = resolve_score_apply_mode(spec, config.score_apply)
         self.combine_impl = resolve_combine_impl(config.combine_impl)
         self.row_weighting_impl = resolve_row_weighting_impl(config.row_weighting_impl)
+        if self.row_weighting_impl == "activation" and self.score_apply != "post":
+            raise ValueError('row_weighting_impl="activation" applies the routing weights inside the expert '
+                             'activation, after the experts\' first projections, so it requires score_apply to '
+                             f'resolve to "post"; preset \'{spec.model_family}\' resolves it to '
+                             f'"{self.score_apply}". Use "eager" or "fused" for this model.')
         self._fused_combine_checked = False
         self._fused_row_weighting_checked = False
         route_norm = spec.route_norm if config.route_norm is None else config.route_norm
@@ -719,6 +725,11 @@ class AutoEPMoELayer(nn.Module):
         # Per layer, unlike the shared exchange: a checkpoint recompute must find this layer's forward handle.
         self._deepep_replay = DeepEPCheckpointReplay()
         self.comm_max_tokens_per_rank = config.comm_max_tokens_per_rank
+        self.overlap_weight_grad = config.overlap_weight_grad
+        if self.overlap_weight_grad and (self.experts.use_triton_grouped_mm or not self.experts.use_grouped_mm):
+            raise ValueError("overlap_weight_grad defers the experts' torch._grouped_mm weight gradients, but this "
+                             "device selects the Triton grouped GEMM. Set disable_triton_grouped_mm=true, or leave "
+                             "overlap_weight_grad unset.")
 
     def _start_async_split_plan(self, num_tokens_per_expert: torch.Tensor) -> _PendingSplitPlan:
         if self._async_split_plan_pending is not None:
@@ -840,11 +851,17 @@ class AutoEPMoELayer(nn.Module):
                 "job will produce, normally train_micro_batch_size_per_gpu * maximum padded sequence length, or "
                 'set comm_backend="comm".')
 
+        # With overlap, the experts' backward leaves their weight gradients in the slot, and the dispatch backward
+        # computes them while it sends the experts' input gradient back.
+        weight_grad_slot = ExpertWeightGradSlot() if self.overlap_weight_grad else None
+        expert_weights = (self.experts.w1, self.experts.w2, self.experts.w3) if self.overlap_weight_grad else ()
         received, recv_weights, exchange = deepep_dispatch(self._deepep_exchange,
                                                            tokens,
                                                            ro.selected_experts,
                                                            ro.top_scores,
-                                                           replay=self._deepep_replay)
+                                                           replay=self._deepep_replay,
+                                                           weight_grad_slot=weight_grad_slot,
+                                                           expert_weights=expert_weights)
         handle = exchange.last_handle
 
         # combine reads exactly the rows the handle says arrived, taken from
@@ -878,9 +895,19 @@ class AutoEPMoELayer(nn.Module):
             raise RuntimeError(f"DeepEP returned {counts.numel()} expert counts, but this rank owns "
                                f"{self.num_local_experts} experts")
 
-        expert_output = self.experts(received, counts)
+        if weights is not None and self.row_weighting_impl == "activation":
+            # The down projection is linear and has no bias, so scaling its input rows by the routing weights
+            # scales its output rows the same way, without a separate pass over the expert output.
+            expert_output = self.experts(received,
+                                         counts,
+                                         weight_grad_slot=weight_grad_slot,
+                                         row_weights=weights.reshape(-1))
+        elif weight_grad_slot is None:
+            expert_output = self.experts(received, counts)
+        else:
+            expert_output = self.experts(received, counts, weight_grad_slot=weight_grad_slot)
 
-        if weights is not None:
+        if weights is not None and self.row_weighting_impl != "activation":
             expert_output = apply_deepep_row_weights(expert_output, weights, self.row_weighting_impl)
 
         return deepep_combine(exchange, expert_output, handle)

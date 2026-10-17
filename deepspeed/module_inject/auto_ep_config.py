@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import torch
+
 from deepspeed.module_inject.auto_ep_presets.base import (
     _UNSET,
     _raise_unsupported_load_balance_coeff,
@@ -62,6 +64,7 @@ def parse_autoep_config(param_dict: dict) -> AutoEPConfig:
     config.combine_impl = param_dict.get("combine_impl", "auto")
     config.row_weighting_impl = param_dict.get("row_weighting_impl", "auto")
     config.gate_up_impl = param_dict.get("gate_up_impl", "separate")
+    config.overlap_weight_grad = param_dict.get("overlap_weight_grad", False)
     config.comm_backend = param_dict.get("comm_backend", "comm")
     config.comm_num_sm = param_dict.get("comm_num_sm", 12)
     config.comm_qp_margin = param_dict.get("comm_qp_margin", 4)
@@ -190,7 +193,7 @@ def validate_autoep_config(
                          f"got '{config.combine_impl}'")
 
     # Validate row_weighting_impl
-    valid_row_weighting_impl = ("auto", "eager", "fused")
+    valid_row_weighting_impl = ("auto", "eager", "fused", "activation")
     if config.row_weighting_impl not in valid_row_weighting_impl:
         raise ValueError(f"row_weighting_impl must be one of {valid_row_weighting_impl}, "
                          f"got '{config.row_weighting_impl}'")
@@ -209,13 +212,38 @@ def validate_autoep_config(
         raise ValueError(f"comm_backend must be one of {valid_comm_backend}, "
                          f"got '{config.comm_backend}'")
 
-    if config.row_weighting_impl == "fused":
+    if not isinstance(config.overlap_weight_grad, bool):
+        raise ValueError(f"overlap_weight_grad must be true or false, got {config.overlap_weight_grad!r}")
+    if config.overlap_weight_grad:
+        if config.comm_backend != "deepep" or config.autoep_size == 1:
+            raise ValueError(
+                "overlap_weight_grad overlaps the experts' weight-gradient GEMMs with DeepEP's backward "
+                f'combine, but comm_backend="{config.comm_backend}" with autoep_size={config.autoep_size} '
+                'has none. Set comm_backend="deepep" with autoep_size > 1, or leave overlap_weight_grad '
+                "unset.")
+        if not config.use_grouped_mm:
+            raise ValueError("overlap_weight_grad defers the experts' torch._grouped_mm weight gradients, but "
+                             "use_grouped_mm=false selects the sequential expert loop. Set use_grouped_mm=true, or "
+                             "leave overlap_weight_grad unset.")
+        if zero_stage not in (1, 2):
+            raise ValueError("overlap_weight_grad returns expert weight gradients from the DeepEP dispatch, which "
+                             f"has not been validated with ZeRO stage {zero_stage}. Use ZeRO stage 1 or 2, or "
+                             "leave overlap_weight_grad unset.")
+        if not all(
+                hasattr(torch._C, name)
+                for name in ("_get_sm_carveout_experimental", "_set_sm_carveout_experimental")):
+            raise ValueError("overlap_weight_grad withholds DeepEP's SMs from the weight-gradient GEMMs through "
+                             "torch._C._set_sm_carveout_experimental, which this PyTorch build lacks. Upgrade "
+                             "PyTorch, or leave overlap_weight_grad unset.")
+
+    if config.row_weighting_impl in ("fused", "activation"):
+        impl = config.row_weighting_impl
         if config.comm_backend != "deepep":
-            raise ValueError('row_weighting_impl="fused" only runs inside the DeepEP route, but '
+            raise ValueError(f'row_weighting_impl="{impl}" only runs inside the DeepEP route, but '
                              f'comm_backend="{config.comm_backend}" was selected. Set comm_backend to '
                              '"deepep", or leave row_weighting_impl unset.')
         if config.autoep_size == 1:
-            raise ValueError('row_weighting_impl="fused" only runs when DeepEP dispatch is active '
+            raise ValueError(f'row_weighting_impl="{impl}" only runs when DeepEP dispatch is active '
                              '(autoep_size > 1), but autoep_size=1. Increase autoep_size, or leave '
                              "row_weighting_impl unset.")
 

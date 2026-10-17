@@ -348,6 +348,24 @@ class TestAutoEPConfig:
         })
         validate_autoep_config(config, world_size=2, pp_size=1, tp_size=1, sp_size=1)
 
+    def test_row_weighting_in_activation_requires_the_deepep_route(self):
+        deepep = {"comm_backend": "deepep", "comm_max_tokens_per_rank": 4096}
+        rejected = (
+            ({
+                "autoep_size": 2
+            }, 'row_weighting_impl="activation".*comm_backend="comm"'),
+            ({
+                "autoep_size": 1,
+                **deepep
+            }, "autoep_size=1"),
+        )
+        for overrides, match in rejected:
+            config = parse_autoep_config({"enabled": True, "row_weighting_impl": "activation", **overrides})
+            with pytest.raises(ValueError, match=match):
+                validate_autoep_config(config, world_size=2, pp_size=1, tp_size=1, sp_size=1)
+        config = parse_autoep_config({"enabled": True, "autoep_size": 2, "row_weighting_impl": "activation", **deepep})
+        validate_autoep_config(config, world_size=2, pp_size=1, tp_size=1, sp_size=1)
+
     def test_fused_combine_rejects_folded_tensor_parallelism(self):
         config = parse_autoep_config({
             "enabled": True,
@@ -1392,6 +1410,14 @@ class TestRoutingAndLayerSemantics:
                            ep_size=1,
                            ep_rank=0,
                            config=AutoEPConfig(enabled=True, autoep_size=1, load_balance_coeff=0.02))
+
+    def test_row_weighting_in_activation_requires_post_score_application(self):
+        source = MockMoEBlock(num_experts=4, ffn_hidden=128, hidden_size=64)
+        config = _runtime_config(enabled=True, autoep_size=1, row_weighting_impl="activation")
+        with pytest.raises(ValueError, match='row_weighting_impl="activation".*"pre"'):
+            AutoEPMoELayer(_make_spec(score_apply="pre"), source, ep_size=1, ep_rank=0, config=config)
+        layer = AutoEPMoELayer(_make_spec(score_apply="post"), source, ep_size=1, ep_rank=0, config=config)
+        assert layer.row_weighting_impl == "activation"
 
     def test_router_cache_does_not_duplicate_model_level_gate_capture(self):
         source = MockMoEBlock(num_experts=4, ffn_hidden=128, hidden_size=64)
