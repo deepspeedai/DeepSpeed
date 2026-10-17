@@ -1009,6 +1009,12 @@ smoke coverage used for this AutoEP surface produced the following version gates
 | -------------------------------------------------------------------------------------------------------------- | -------- |
 | How the grouped experts compute their gate and up projections. `"separate"` runs two grouped GEMMs. `"fused"` is experimental and runs one `torch._grouped_mm` over the gate and up weights concatenated on each call, followed by an activation that reads the two halves of its output in place; for `swiglu` this is a Triton kernel with first-order gradients only (`create_graph=True` raises). Parameters, checkpoints and optimizer state keep the separate `w1`/`w3` layout. The forward expression and parameter-gradient semantics are unchanged, but exact numerical equality is not guaranteed across GEMM shapes/backends; the input gradient accumulates both projections in one FP32 GEMM instead of adding two rounded results. Requires `use_grouped_mm=true` and the `torch._grouped_mm` path (set `disable_triton_grouped_mm=true` on devices that prefer the Triton grouped GEMM); unsupported configurations fail rather than falling back. | `"separate"` |
 
+***skip_recompute_combine***: [boolean]
+
+| Description                                                                                                    | Default  |
+| -------------------------------------------------------------------------------------------------------------- | -------- |
+| Experimental. In the reentrant recompute of a decoder layer, record the DeepEP route's post-expert row weighting and combine without running them: nothing reads that recomputed output, and their backward is unchanged. The skipped output is NaN. Requires `comm_backend="deepep"` with `autoep_size > 1`, a preset whose decoder layer adds the MoE output to the residual (`deepseek_v2`, `deepseek_v3`, `minimax_m3`, `mixtral`, `qwen3_5_moe`, `qwen3_moe`), and Hugging Face per-layer gradient checkpointing with `use_reentrant=True`; anything else is rejected rather than ignored. | `false` |
+
 ***route_norm***: [boolean]
 
 | Description                                                                                                     | Default |
