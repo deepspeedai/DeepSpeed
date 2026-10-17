@@ -4598,13 +4598,16 @@ class DeepSpeedEngine(Module):
         folding_spec = getattr(self, "_autoep_folding_spec", None)
         folded_autoep_tp = folding_spec is not None and folding_spec.tp_size > 1
         ep_group_name = f"ep_size_{folding_spec.ep_size}" if folded_autoep_tp else None
-        DeepSpeedEngine._validate_autoep_folding_checkpoint_metadata(
-            checkpoint,
-            folding_spec=folding_spec,
-            family="dense",
-            zero_partition_group="dense_dp",
-            zero_partition_count=folding_spec.dp_size if folded_autoep_tp else None,
-            tp_rank=groups.get_tensor_model_parallel_rank() if folded_autoep_tp else None)
+        # A universal checkpoint is re-sliced from zero/ for this runtime's layout, so the layout the
+        # source run recorded in its model states need not match.
+        if not self.load_universal_checkpoint():
+            DeepSpeedEngine._validate_autoep_folding_checkpoint_metadata(
+                checkpoint,
+                folding_spec=folding_spec,
+                family="dense",
+                zero_partition_group="dense_dp",
+                zero_partition_count=folding_spec.dp_size if folded_autoep_tp else None,
+                tp_rank=groups.get_tensor_model_parallel_rank() if folded_autoep_tp else None)
 
         fetch_z3_params = False
         z3_params_to_fetch = None

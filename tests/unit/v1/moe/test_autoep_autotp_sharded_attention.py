@@ -31,8 +31,8 @@ from deepspeed.checkpoint import ds_to_universal
 from deepspeed.module_inject.auto_ep_layer import AutoEPMoELayer
 from deepspeed.module_inject.auto_tp import AutoTP
 from deepspeed.module_inject.layers import LinearAllreduce, LinearLayer, TensorParallel_Layer, VocabParallelLinear
-from deepspeed.utils import groups, safe_get_full_fp32_param, safe_get_full_grad
-from unit.common import DistributedTest
+from deepspeed.utils import groups, safe_get_full_fp32_param, safe_get_full_grad, safe_get_full_optimizer_state
+from unit.common import DistributedFixture, DistributedTest
 
 transformers = pytest.importorskip("transformers")
 
@@ -345,8 +345,7 @@ class TestZero3FoldedCheckpoint(DistributedTest):
 
     Train one step, save, load into an engine built the same way from a different random
     initialization, then train one more step on both: the losses and every parameter must agree.
-    SGD momentum makes that step depend on the restored optimizer state. Universal Checkpoint
-    conversion of such a checkpoint is not supported yet and must say so.
+    SGD momentum makes that step depend on the restored optimizer state.
     """
     world_size = 4
 
@@ -393,18 +392,194 @@ class TestZero3FoldedCheckpoint(DistributedTest):
             if not torch.allclose(got, want, rtol=1e-6, atol=1e-7):
                 differing.append(name)
 
-        conversion_error = None
-        args = SimpleNamespace(input_folder=os.path.join(save_dir, "step1"),
-                               output_folder=os.path.join(save_dir, f"universal_rank{dist.get_rank()}"))
-        try:
-            ds_to_universal.main(args)
-        except NotImplementedError as error:
-            conversion_error = str(error)
-
         torch.testing.assert_close(resumed_losses, losses, rtol=1e-6, atol=1e-6)
         assert not differing, f"{len(differing)} parameters differ after resuming: {differing}"
-        assert conversion_error is not None, "Universal conversion accepted a folded ZeRO-3 checkpoint"
-        assert "folded ZeRO-3 checkpoint is not supported" in conversion_error, conversion_error
+
+
+UNIVERSAL_SOURCE = (2, 2)  # TP, EP of the run that saves, on 4 ranks
+UNIVERSAL_STATES = ("fp32", "exp_avg", "exp_avg_sq")
+
+
+def _universal_config(tp_size, ep_size, precision):
+    config = _folded_config(tp_size, ep_size, zero_stage=3)
+    # Universal Checkpointing converts Adam's states.
+    config["optimizer"] = {"type": "AdamW", "params": {"lr": 1e-3, "weight_decay": 0.01}}
+    if tp_size == 1:
+        del config["tensor_parallel"]
+    if precision == "bf16":
+        config["bf16"] = {"enabled": True}
+    return config
+
+
+def _build_universal_engine(tp_size, ep_size, precision, seed, load_universal=False):
+    config = _universal_config(tp_size, ep_size, precision)
+    if load_universal:
+        config["checkpoint"] = {"load_universal": True}
+    torch.manual_seed(seed)
+    model = transformers.Glm4MoeForCausalLM(_tiny_glm4_moe_config()).float()
+    engine, _, _, _ = deepspeed.initialize(model=model, config=config)
+    return engine
+
+
+def _logical_state(engine, key, tp_size):
+    """Every parameter, or one of its Adam states, at full size under names every layout shares."""
+
+    def full(param):
+        if key == "fp32":
+            return safe_get_full_fp32_param(param)
+        return safe_get_full_optimizer_state(param, key)
+
+    values = {}
+    moe_layers = []
+    for module_name, module in engine.module.named_modules():
+        prefix = f"{module_name}." if module_name else ""
+        if isinstance(module, AutoEPMoELayer):
+            moe_layers.append((prefix, module))
+        for name, param in module.named_parameters(recurse=False):
+            value = full(param)
+            assert value is not None, f"{prefix}{name} has no {key}"
+            if tp_size > 1 and isinstance(module, LinearAllreduce) and name == "weight":
+                value = _gather_tp_shards(value, dim=1)
+            elif tp_size > 1 and isinstance(module, LinearLayer):
+                value = _gather_tp_shards(value, dim=0)
+            values[f"{prefix}{name}"] = value
+    # Each EP rank holds a block of experts; the full tensor stacks them in EP-rank order.
+    for prefix, module in moe_layers:
+        for wname in ("w1", "w2", "w3"):
+            local = values[f"{prefix}experts.{wname}"]
+            shards = [torch.empty_like(local) for _ in range(dist.get_world_size(group=module.ep_group))]
+            dist.all_gather(shards, local.contiguous(), group=module.ep_group)
+            values[f"{prefix}experts.{wname}"] = torch.cat(shards, dim=0)
+    return {name: value.detach().float().cpu() for name, value in values.items()}
+
+
+def _universal_mismatches(got, want, rtol, atol):
+    assert got.keys() == want.keys(), sorted(set(got) ^ set(want))
+    mismatches = []
+    for name, expected in want.items():
+        actual = got[name]
+        if actual.shape != expected.shape:
+            mismatches.append(f"{name}: shape {tuple(actual.shape)}, expected {tuple(expected.shape)}")
+        elif not torch.allclose(actual, expected, rtol=rtol, atol=atol):
+            relative = (actual - expected).abs().max().item() / max(expected.abs().max().item(), 1e-12)
+            mismatches.append(f"{name}: largest relative difference {relative:.3e}")
+    return mismatches
+
+
+class _FoldedUniversalSource(DistributedFixture):
+    """Train a folded TP 2 x EP 2 run one step, save it, convert it, and record what a load must restore.
+
+    The record holds every parameter and Adam state at full size after the step, then the losses of
+    the next accumulation window and the parameters after the next step.
+    """
+    world_size = 4
+
+    def run(self, universal_precision, tmpdir):
+        tp_size, ep_size = UNIVERSAL_SOURCE
+        engine = _build_universal_engine(tp_size, ep_size, universal_precision, seed=1234)
+        logical_rank, logical_world_size = dist.get_rank() // tp_size, dist.get_world_size() // tp_size
+        _run_to_boundary(engine, logical_rank, logical_world_size)
+        engine.step()
+        save_dir = str(tmpdir)
+        engine.save_checkpoint(save_dir, tag="step1")
+
+        dist.barrier()
+        error = None
+        if dist.get_rank() == 0:
+            try:
+                ds_to_universal.main(
+                    SimpleNamespace(input_folder=os.path.join(save_dir, "step1"),
+                                    output_folder=os.path.join(save_dir, "step1_universal"),
+                                    num_extract_workers=1,
+                                    num_merge_workers=1,
+                                    keep_temp_folder=False,
+                                    strict=True,
+                                    inject_missing_state=False))
+            except Exception as exc:  # report on every rank instead of leaving them in the next collective
+                error = f"{type(exc).__name__}: {exc}"
+        errors = [None] * dist.get_world_size()
+        dist.all_gather_object(errors, error)
+        assert errors[0] is None, f"universal conversion failed: {errors[0]}"
+
+        states = {key: _logical_state(engine, key, tp_size) for key in UNIVERSAL_STATES}
+        losses = _run_to_boundary(engine, logical_rank, logical_world_size)
+        engine.step()
+        params_after = _logical_state(engine, "fp32", tp_size)
+        all_losses = [None] * dist.get_world_size()
+        dist.all_gather_object(all_losses, losses)
+        if dist.get_rank() == 0:
+            torch.save({
+                "states": states,
+                "next_losses": all_losses,
+                "next_params": params_after
+            }, os.path.join(save_dir, "source_record.pt"))
+        dist.barrier()
+
+
+@pytest.fixture(params=["fp32", "bf16"])
+def universal_precision(request):
+    return request.param
+
+
+@pytest.fixture
+def folded_universal_source(request):
+    _FoldedUniversalSource()(request)
+
+
+UNIVERSAL_TARGETS = [
+    (4, 2, 2),  # the same layout
+    (4, 2, 4),  # EP 4: each EP group spans both TP groups
+    (4, 4, 2),  # TP 4: one data-parallel group
+    (8, 4, 2),  # more ranks with the same 2 data-parallel groups
+    (2, 1, 2),  # AutoEP without AutoTP, 2 data-parallel groups
+]
+
+
+@pytest.mark.parametrize("world_size, tp_size, ep_size", UNIVERSAL_TARGETS)
+class TestZero3FoldedUniversalCheckpoint(DistributedTest):
+    """A folded ZeRO-3 checkpoint converted to the universal format loads into another layout.
+
+    Every parameter and Adam state must come back exactly. Layouts with the source's 2 data-parallel
+    groups read the same batches, so they must also repeat its next step.
+    """
+
+    def test_universal_load_restores_and_resumes(self, folded_universal_source, universal_precision, tmpdir,
+                                                 world_size, tp_size, ep_size):
+        if get_accelerator().device_name() == "cpu":
+            pytest.skip("AutoEP folding runs on an accelerator")
+        save_dir = str(tmpdir)
+        record = torch.load(os.path.join(save_dir, "source_record.pt"), weights_only=False)
+        engine = _build_universal_engine(tp_size, ep_size, universal_precision, seed=999, load_universal=True)
+        engine.load_checkpoint(save_dir, tag="step1_universal")
+
+        # Every rank finishes its collectives before any assertion, so a failure cannot leave others waiting.
+        problems = []
+        for key in UNIVERSAL_STATES:
+            loaded = _logical_state(engine, key, tp_size)
+            problems += [f"{key}: {m}" for m in _universal_mismatches(loaded, record["states"][key], 1e-6, 1e-8)]
+
+        source_tp, source_ep = UNIVERSAL_SOURCE
+        logical_world_size = world_size // tp_size
+        same_batches = logical_world_size == 4 // source_tp
+        same_layout = (world_size, tp_size, ep_size) == (4, source_tp, source_ep)
+        # In bf16 another TP split rounds the forward differently, so there only the same layout repeats the step.
+        if same_batches and (universal_precision == "fp32" or same_layout):
+            logical_rank = dist.get_rank() // tp_size
+            losses = _run_to_boundary(engine, logical_rank, logical_world_size)
+            engine.step()
+            want_losses = record["next_losses"][logical_rank * source_tp]
+            if max(abs(got - want) for got, want in zip(losses, want_losses)) > 1e-5:
+                problems.append(f"next losses {losses}, expected {want_losses}")
+            # The attention key bias has a zero true gradient, so its gradient is rounding noise that
+            # another layout adds up in another order, and AdamW turns that noise into steps of about lr.
+            after = {
+                name: value
+                for name, value in _logical_state(engine, "fp32", tp_size).items() if not name.endswith("k_proj.bias")
+            }
+            want = {name: record["next_params"][name] for name in after}
+            problems += [f"after the next step: {m}" for m in _universal_mismatches(after, want, 1e-4, 1e-6)]
+
+        assert not problems, f"{len(problems)} problems:\n" + "\n".join(problems[:40])
 
 
 class _LlamaWithoutTPPlan(transformers.LlamaForCausalLM):

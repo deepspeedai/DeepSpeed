@@ -64,10 +64,11 @@ including models built under ``deepspeed.zero.Init``. Stage 3 AutoEP checkpoints
 partition-natively in the ``zero_pp_rank_*`` shard files and support
 same-topology load, module-only loads (``load_module_only``),
 optimizer-state-free loads (``load_optimizer_states=False``), and Universal
-Checkpoint conversion, except with AutoTP folding. Optimizer-including
+Checkpoint conversion, also with AutoTP folding. Optimizer-including
 Universal Checkpoint loads can
 resume with a different data-parallel world size, a different ``autoep_size``,
-or both, when the target ``autoep_size`` divides the model's expert count.
+a different ``tensor_parallel.autotp_size`` (folded or not), or any
+combination, when the target ``autoep_size`` divides the model's expert count.
 Weights-only/module-only Universal Checkpoint loads use the converted
 ``fp32.pt`` parameter files and support the same data-parallel and
 ``autoep_size`` topology changes.

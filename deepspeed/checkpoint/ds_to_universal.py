@@ -605,6 +605,10 @@ def _merge_tp_slice_files(args, uc_info, tp_degree, slice_shapes, temp_dir, excl
     # if a pattern was not used by any of the workers, then it was not used at all -> assert/alert
     sets = [set(lst) for lst in unmatched_patterns_lists]
     unmatched_patterns = list(set.intersection(*sets))
+    # A pattern for a parameter merged elsewhere (AutoEP experts) has nothing to match here.
+    unmatched_patterns = [
+        pattern for pattern in unmatched_patterns if not any(re.match(pattern, name) for name in exclude_param_names)
+    ]
     if args.strict:
         assert not unmatched_patterns, f'Unused patterns={unmatched_patterns} while merging tp slices'
     elif unmatched_patterns:
@@ -628,13 +632,6 @@ def _shape_numel(shape):
     if hasattr(shape, "numel"):
         return shape.numel()
     return math.prod(shape)
-
-
-def _zero3_rank_from_file(path):
-    match = re.search(r'(?:bf16_)?zero_pp_rank_([0-9]+)_mp_rank_', os.path.basename(path))
-    if match is None:
-        raise ValueError(f"Cannot parse ZeRO rank from checkpoint file name: {path}")
-    return int(match.group(1))
 
 
 def _zero3_tp_dp_ranks_from_file(path):
@@ -709,7 +706,7 @@ def _autoep_expert_param_names_by_rank(model_files):
     expert_param_names = set()
     metadata_by_rank = {}
     for model_file in model_files:
-        rank = _zero3_rank_from_file(model_file)
+        rank = _zero3_tp_dp_ranks_from_file(model_file)
         model_state = torch.load(model_file, map_location=torch.device('cpu'), weights_only=False)
         autoep_metadata = _get_autoep_metadata(model_state)
         if autoep_metadata is not None:
@@ -720,9 +717,11 @@ def _autoep_expert_param_names_by_rank(model_files):
 
 
 def _rank_map_from_files(files, description):
+    # Keyed by (tp_rank, dp_rank): under AutoEP + AutoTP folding the files of different
+    # tensor-parallel ranks share a data-parallel rank.
     rank_map = {}
     for path in files:
-        rank = _zero3_rank_from_file(path)
+        rank = _zero3_tp_dp_ranks_from_file(path)
         if rank in rank_map:
             raise RuntimeError(f"Duplicate ZeRO rank {rank} in {description} files: "
                                f"{rank_map[rank]} and {path}")
@@ -836,6 +835,7 @@ def _consolidate_zero3_autoep_expert_states(output_dir, model_files, optim_files
         for rank, model_state in model_states_by_rank.items() if _get_autoep_metadata(model_state) is not None
     }
     _validate_autoep_expert_shapes(model_states_by_rank, metadata_by_rank)
+    dp_degree = len({dp_rank for _, dp_rank in model_states_by_rank})
 
     expert_fragments = {}
     num_experts_by_param = {}
@@ -867,8 +867,8 @@ def _consolidate_zero3_autoep_expert_states(output_dir, model_files, optim_files
                 'exp_avg_sq': optimizer_sub_state.get('exp_avg_sq'),
             }
             partition_metadata = partition_groups[sub_group_id] if sub_group_id < len(partition_groups) else {}
-            partition_count = partition_metadata.get('partition_count', len(model_states_by_rank))
-            partition_rank = partition_metadata.get('partition_rank', rank)
+            partition_count = partition_metadata.get('partition_count', dp_degree)
+            partition_rank = partition_metadata.get('partition_rank', rank[1])
 
             offset = 0
             for param_name, shape in sub_group_shape.items():
@@ -1286,12 +1286,6 @@ def main(args):
         if not has_zero3_partitioned_autoep:
             autoep_expert_param_names = set()
         else:
-            # The AutoEP files are matched by data-parallel rank alone, so the files of different
-            # tensor-parallel ranks under AutoEP + AutoTP folding cannot be told apart.
-            _, autoep_tp_degree, _ = _build_zero3_rank_grid(model_files)
-            if autoep_tp_degree > 1:
-                raise NotImplementedError("Universal checkpoint conversion of an AutoEP + AutoTP folded ZeRO-3 "
-                                          "checkpoint is not supported yet. Load it with the same topology.")
             _validate_zero3_model_optim_rank_sets(model_files, optim_files)
         param_shapes = _parse_model_states_stage3(model_files)
         # Recover the tensor-parallel / data-parallel grid from the file names. With
@@ -1337,7 +1331,12 @@ def main(args):
                 dict((k, v) for sub in grid_tp for k, v in sub.items()) for grid_tp in param_shapes_grid
             ]
             slice_shapes = {name: [param_shapes_by_tp[tp][name] for tp in range(tp_degree)] for name in param_keys}
-            _merge_tp_slice_files(args, uc_info, tp_degree, slice_shapes, temp_dir)
+            _merge_tp_slice_files(args,
+                                  uc_info,
+                                  tp_degree,
+                                  slice_shapes,
+                                  temp_dir,
+                                  exclude_param_names=autoep_expert_param_names)
         else:
             # Plain ZeRO-3 (no tensor parallelism): DP-only merge, unchanged behavior.
             _merge_zero3_slice_files(args, param_keys, dp_degree, temp_dir)
