@@ -58,16 +58,19 @@ class AutoTPMeta:
     num_attention_heads: Optional[int] = None
     n_embd: Optional[int] = None
     tp_grain_size: int = 1
+    # Whether the model was sharded for training. None means unknown (a layer built outside
+    # AutoTP), in which case the layer falls back to the process-wide AutoTP mode.
+    training: Optional[bool] = None
 
     @classmethod
-    def from_model_config(cls, model_config, tp_grain_size: int = 1) -> "AutoTPMeta":
+    def from_model_config(cls, model_config, tp_grain_size: int = 1, training: Optional[bool] = None) -> "AutoTPMeta":
         """The single source of truth for reading kv-head / hidden / attention-head counts.
 
         ``model_config`` may be ``None`` for callers that build a synthetic AutoTP with no real
         model (some unit tests); they get an empty meta and the resulting even-grain split.
         """
         if model_config is None:
-            return cls(tp_grain_size=tp_grain_size)
+            return cls(tp_grain_size=tp_grain_size, training=training)
         # Multimodal configs (e.g. vision-language models) keep the head counts only under
         # text_config while the outer config carries the modality heads, so descend to the
         # text config when it exists.
@@ -85,7 +88,8 @@ class AutoTPMeta:
         return cls(num_kv_heads=num_kv_heads,
                    num_attention_heads=num_attention_heads,
                    n_embd=n_embd,
-                   tp_grain_size=tp_grain_size)
+                   tp_grain_size=tp_grain_size,
+                   training=training)
 
 
 def get_shard_size(total_size, mp_size, meta: AutoTPMeta, name=None, rank=None, mp_group=None):
