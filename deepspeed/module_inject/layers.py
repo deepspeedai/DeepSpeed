@@ -221,7 +221,8 @@ class RowParallel(torch.autograd.Function):
         if is_inference_mode:
             dist.inference_all_reduce(input, group=group)
         else:
-            dist.all_reduce(input.contiguous(), group=group)
+            input = input.contiguous()
+            dist.all_reduce(input, group=group)
         return input
 
     @staticmethod
@@ -275,8 +276,8 @@ class AsyncColumnParallel(torch.autograd.Function):
     def backward(ctx: Any, grad_output: torch.Tensor) -> Tuple[None, torch.Tensor]:
 
         input, weight = ctx.saved_tensors
-        grad_input = grad_output.matmul(weight)
-        handle = dist.all_reduce(grad_input.contiguous(), group=ctx.group, async_op=True)
+        grad_input = grad_output.matmul(weight).contiguous()
+        handle = dist.all_reduce(grad_input, group=ctx.group, async_op=True)
         grad_weight = grad_output.view(-1, grad_output.shape[-1]).t().matmul(input.view(-1, input.shape[-1]))
         grad_bias = grad_output.sum(0) if ctx.use_bias else None
         handle.wait()
@@ -309,7 +310,8 @@ class ColumnParallel(torch.autograd.Function):
         if ctx.group == None:
             return None, grad_output
 
-        dist.all_reduce(grad_output.contiguous(), group=ctx.group)
+        grad_output = grad_output.contiguous()
+        dist.all_reduce(grad_output, group=ctx.group)
         return None, grad_output
 
 
