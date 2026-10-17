@@ -629,8 +629,15 @@ def shard_tensor_node(gm: GraphModule, tensor_node: Node):
     symb_seq_int_node = find_node_by_name(gm, str(seq_len))
     assert symb_seq_int_node, f"Unable to find symbolic placeholder for {seq_len}"
 
+    sliced_node = insert_sequence_shard(gm, tensor_node, val.ndim, seq_dim, symb_seq_int_node)
+    replace_node_users(tensor_node, sliced_node, exclude=[sliced_node])
+
+
+def insert_sequence_shard(gm: GraphModule, tensor_node: Node, ndim: int, seq_dim: int,
+                          symb_seq_int_node: Node) -> Node:
+    """Insert a node that takes this rank's shard of ``tensor_node`` along ``seq_dim`` and return it."""
     slice_all, slice_range = create_symbolic_slice_indices(gm, symb_seq_int_node)
-    indices = tuple(slice_range if dim == seq_dim else slice_all for dim in range(val.ndim))
+    indices = tuple(slice_range if dim == seq_dim else slice_all for dim in range(ndim))
 
     positions = {node: i for i, node in enumerate(gm.graph.nodes)}
     # Insert after the later dependency so the new getitem does not appear
@@ -642,5 +649,4 @@ def shard_tensor_node(gm: GraphModule, tensor_node: Node):
             operator.getitem,
             args=(tensor_node, indices),
         )
-
-    replace_node_users(tensor_node, sliced_node, exclude=[sliced_node])
+    return sliced_node

@@ -831,6 +831,8 @@ def _get_sequence_data_parallel_world_size():
     global mpu
     if mpu is not None and hasattr(mpu, 'get_sequence_data_parallel_world_size'):
         return mpu.get_sequence_data_parallel_world_size()
+    if mesh_device is not None and mpu is None:
+        return dist.get_world_size(group=_get_sequence_data_parallel_group())
     return _get_data_parallel_world_size()
 
 
@@ -839,6 +841,8 @@ def _get_sequence_data_parallel_rank():
     global mpu
     if mpu is not None and hasattr(mpu, 'get_sequence_data_parallel_rank'):
         return mpu.get_sequence_data_parallel_rank()
+    if mesh_device is not None and mpu is None:
+        return dist.get_rank(group=_get_sequence_data_parallel_group())
     return _get_data_parallel_rank()
 
 
@@ -848,6 +852,9 @@ def _get_sequence_data_parallel_group():
     # gradient allreduce must be across both dimensions of data and sequence parallelism.
     if mpu is not None and hasattr(mpu, 'get_sequence_data_parallel_group'):
         return mpu.get_sequence_data_parallel_group()
+    if mesh_device is not None and mpu is None:
+        # The (data_parallel, sequence_parallel) mesh covers every rank, so the combined group is the world.
+        return _clone_world_group()
     return _get_data_parallel_group()
 
 
