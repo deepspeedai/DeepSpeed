@@ -5,6 +5,7 @@
 
 import torch
 from deepspeed import comm as dist
+from deepspeed.comm import pg_utils
 from packaging import version as pkg_version
 from collections import OrderedDict, defaultdict
 from dataclasses import dataclass, field
@@ -2641,9 +2642,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
     def _model_parallel_all_reduce(self, tensor, op):
         """ Perform all reduce within model parallel group, if any.
         """
-        if self.model_parallel_group is None or self.model_parallel_world_size == 1:
-            pass
-        else:
+        if pg_utils.is_parallel(self.model_parallel_group):
             dist.all_reduce(tensor=tensor, op=op, group=self.model_parallel_group)
 
     def get_grad_norm_direct(self, gradients, params, norm_type=2):

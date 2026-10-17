@@ -16,11 +16,8 @@ import torch
 from torch.autograd.function import once_differentiable
 
 import deepspeed.comm as dist
+from deepspeed.comm import pg_utils
 from deepspeed.sequence.cross_entropy import _global_sp_sum, _resolve_vocab_metadata
-
-
-def _tp_active(tp_group):
-    return tp_group is not None and dist.get_world_size(tp_group) > 1
 
 
 def _default_chunk_rows(num_tokens, global_vocab_size, tp_world_size, hidden_size):
@@ -116,7 +113,7 @@ class _VocabParallelLinearCrossEntropy(torch.autograd.Function):
                 chunk_rows, compute_dtype):
         num_tokens = hidden.shape[0]
         local_vocab_size = weight.shape[0]
-        tp_active = _tp_active(tp_group)
+        tp_active = pg_utils.is_parallel(tp_group)
         # Mirror what autocast would do for ``F.linear``: run the GEMMs in one compute dtype even
         # when activations and parameters differ (e.g. bf16 activations with fp32 weights).
         hidden_compute = hidden.to(compute_dtype)
@@ -203,7 +200,7 @@ class _VocabParallelLinearCrossEntropy(torch.autograd.Function):
             # Each rank only saw its vocabulary shard, so the input gradient is a partial sum, the
             # same reduction the column-parallel LM head performs in its own backward. The partials
             # are summed in fp32 because they can overflow fp16 even when their sum does not.
-            if _tp_active(ctx.tp_group):
+            if pg_utils.is_parallel(ctx.tp_group):
                 dist.all_reduce(grad_hidden, op=dist.ReduceOp.SUM, group=ctx.tp_group)
             grad_hidden = grad_hidden.to(hidden.dtype)
         return grad_hidden, grad_weight, grad_bias, None, None, None, None, None, None, None

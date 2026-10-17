@@ -762,6 +762,7 @@ class TestAutoEPConfig:
 
         monkeypatch.setattr(zero_stage3, "get_accelerator", lambda: FakeAccelerator())
         monkeypatch.setattr(zero_stage3.dist, "all_reduce", fake_all_reduce)
+        monkeypatch.setattr(zero_stage3.dist, "get_world_size", lambda group=None: 2)
 
         norm = optimizer.complete_grad_norm_calculation_for_cpu_offload([param])
 
