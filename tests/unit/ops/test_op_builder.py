@@ -170,6 +170,33 @@ def test_non_jit_branch_unchanged():
     ]
 
 
+@pytest.mark.parametrize("cpu_count,expected_threads", [(None, 1), (1, 1), (16, 8)])
+@pytest.mark.parametrize("thread_override", [None, "invalid", "0", "-1"])
+def test_nvcc_threads_fallback_when_override_is_unusable(cpu_count, expected_threads, thread_override):
+    builder = make_builder()
+    with patch.dict(os.environ, {"TORCH_CUDA_ARCH_LIST": "8.9"}, clear=False):
+        if thread_override is None:
+            os.environ.pop("DS_NVCC_THREADS", None)
+        else:
+            os.environ["DS_NVCC_THREADS"] = thread_override
+        with patch.object(BUILDER_MODULE.os, "cpu_count", return_value=cpu_count):
+            with patch.object(BUILDER_MODULE, "installed_cuda_version", return_value=(12, 8)):
+                args = builder.nvcc_args()
+
+    assert f"--threads={expected_threads}" in args
+
+
+@pytest.mark.parametrize("thread_override", ["4", "64"])
+def test_nvcc_threads_honors_valid_override_when_cpu_count_is_unknown(thread_override):
+    builder = make_builder()
+    with patch.dict(os.environ, {"TORCH_CUDA_ARCH_LIST": "8.9", "DS_NVCC_THREADS": thread_override}, clear=False):
+        with patch.object(BUILDER_MODULE.os, "cpu_count", return_value=None):
+            with patch.object(BUILDER_MODULE, "installed_cuda_version", return_value=(12, 8)):
+                args = builder.nvcc_args()
+
+    assert f"--threads={thread_override}" in args
+
+
 def test_non_jit_branch_sorts_and_dedupes_gencode_flags():
     builder = make_builder(jit_mode=False)
 
