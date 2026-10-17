@@ -130,7 +130,8 @@ def timed_op(func):
         finally:
             if comms_logger.enabled:
                 # Need to make op blocking for accurate logging
-                get_accelerator().synchronize()
+                if should_profile:
+                    get_accelerator().synchronize()
                 # If we're using MPI, we can't simply sync the stream
                 if cdb.using_mpi:
                     cdb.barrier()
