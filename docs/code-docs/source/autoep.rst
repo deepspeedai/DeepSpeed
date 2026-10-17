@@ -644,3 +644,84 @@ or ``None`` for automatic sizing, even when the selected backend does not use
 row blocking. Invalid settings are rejected before a backend runs. A model
 with a non-writable stock ``loss_function`` raises an actionable error rather
 than being silently left unmodified.
+
+Planning expert placement transfers
+-----------------------------------
+
+An ``AutoEPMoELayer`` can describe where its live expert weights are, and plan
+the copies that would move them to another expert placement, for example to
+rebalance experts or to change the EP size. Planning moves no data, does not
+plan optimizer states, and does not change the placement the layer runs with.
+
+.. code-block:: python
+
+    from deepspeed.checkpoint.autoep_affine import make_autoep_placement_descriptor
+
+    # layer: an AutoEPMoELayer after deepspeed.initialize()
+    affine_maps = layer.expert_affine_maps()  # {"w1": ParamAffineMap, "w2": ..., "w3": ...}
+
+    # Move 8 experts onto 2 EP ranks: rank 0 holds experts 0-2, rank 1 holds experts 3-7.
+    target = make_autoep_placement_descriptor(8, [[0, 1, 2], [3, 4, 5, 6, 7]])
+    plans = layer.plan_expert_transfer(target)  # {"w1": TransferPlan, "w2": ..., "w3": ...}
+    for segment in plans["w1"].segments:
+        ...  # copy segment.shape elements from the source shard into the target shard
+
+- ``make_autoep_placement_descriptor(num_experts, experts_by_rank)`` builds the
+  target placement. ``experts_by_rank[r]`` lists the global expert IDs that
+  target rank ``r`` holds, in the order they are packed in its local tensor.
+  Ranks may hold different numbers of experts, non-contiguous experts, no
+  experts, or experts that other ranks also hold, but every expert must be
+  held by at least one rank.
+- Ranks in a plan are EP-local. ``segment.source_rank`` is a rank of the
+  layer's EP group; translate it with
+  ``dist.get_global_rank(layer.ep_group, segment.source_rank)``.
+  ``segment.target_rank`` indexes ``experts_by_rank`` of the target placement;
+  mapping it to a process is up to the caller, since the target EP group may
+  differ from the current one.
+- ``source_offset``/``target_offset`` and the stride vectors count elements of
+  a rank's packed local expert tensor ``[local_experts, ...]`` in row-major
+  order. That tensor is the unpartitioned parameter: under ZeRO-3, gather the
+  parameter (for example with ``deepspeed.zero.GatheredParameters``) before
+  applying the offsets. Expert-data-parallel replicas of a rank hold the same
+  tensor, so any of them can serve as the source.
+- When several source ranks hold an element, the plan reads it from the
+  lowest-ranked holder. Pass ``replica_selector``, a callable that receives a
+  ``ReplicaSelectionRequest`` and returns the ``source_rank`` of one of its
+  ``candidates``, to choose a different holder.
+- ``limits`` takes a ``deepspeed.checkpoint.affine_transfer.PlanBudget``. A plan
+  that exceeds it raises ``AffineTransferError`` instead of being truncated.
+- The runtime packs experts with the contiguous, uniform placement. If the
+  layer's placement descriptor describes anything else, both methods raise
+  ``NotImplementedError``.
+
+``expert_affine_maps()`` describes one packed tensor per EP rank, so ZeRO and
+expert-data-parallel (EDP) storage has to be normalized before its offsets apply.
+``expert_storage_affine_maps()`` instead describes what every process actually
+stores, so a plan built from it reads directly from runtime storage:
+
+.. code-block:: python
+
+    from deepspeed.checkpoint.affine_transfer import plan_transfer
+
+    # Collective: every rank in the default process group must call it.
+    storage_maps = layer.expert_storage_affine_maps()  # {"w1": ParamAffineMap, ...}
+    plan = plan_transfer(target_map, storage_maps["w1"])
+
+- Map ranks are global ranks. The logical shape is the flattened parameter
+  ``(numel,)``, and each shard is a rank's flat storage, so offsets count
+  elements of ``param.data.view(-1)`` or, under ZeRO-3, of ``param.ds_tensor``.
+  ``target_map`` must use the same flat logical shape;
+  ``autoep_storage_affine_map`` in ``deepspeed.checkpoint.autoep_affine`` builds
+  one from a placement descriptor and its holders.
+- Under ZeRO-0/1/2, every EDP replica of an EP rank stores the whole packed
+  tensor and is listed as a holder. The plan reads from the lowest global rank
+  unless ``replica_selector`` chooses another candidate.
+- Under ZeRO-3, each EDP rank stores its partition of the packed tensor. The
+  trailing padding is not part of a shard, so a rank whose partition is all
+  padding, or whose EP rank holds no experts, has an empty shard and is never
+  a source or target of a copy.
+- Optimizer states are not described. Expert tensor parallelism
+  (``expert_tensor_parallel_size > 1``) raises ``NotImplementedError``.
+
+The maps and plans use the affine representation that Universal Checkpoint
+uses for expert parameters; see ``deepspeed/checkpoint/affine_ir_spec.md``.

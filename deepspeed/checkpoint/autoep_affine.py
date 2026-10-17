@@ -2,12 +2,14 @@
 # DeepSpeed Team
 """AutoEP expert placement descriptors and their affine lowering.
 
-The descriptor records placement in EP-local rank coordinates. ZeRO and EDP
-fragments are deliberately outside this map: callers must first normalize
-storage to one logical, packed expert tensor per EP rank.
+The descriptor records placement in EP-local rank coordinates, and
+``autoep_placement_to_affine_map`` describes one logical, packed expert tensor
+per EP rank. ``autoep_storage_affine_map`` adds the expert-data-parallel and
+ZeRO layer on top: it describes what each global rank actually stores.
 """
 
 from deepspeed.checkpoint.affine import AFFINE_MAP_FORMAT_VERSION, AffinePiece, ParamAffineMap
+from deepspeed.checkpoint.affine_transfer import plan_transfer
 from deepspeed.checkpoint.constants import (AFFINE_MAP, AFFINE_MAP_PARAMS, AFFINE_MAP_VERSION, AUTOEP_AFFINE_MAPS,
                                             AUTOEP_EXPERT_PLACEMENT, AUTOEP_PLACEMENT_EP_SIZE,
                                             AUTOEP_PLACEMENT_EXPERTS, AUTOEP_PLACEMENT_NUM_EXPERTS,
@@ -20,9 +22,12 @@ __all__ = [
     'validate_autoep_placement_descriptor',
     'autoep_experts_for_rank',
     'legacy_uniform_autoep_placement_descriptor',
+    'autoep_placements_equal',
     'autoep_placement_to_affine_map',
+    'autoep_storage_affine_map',
     'autoep_metadata_to_affine_map',
     'extract_autoep_rank_tensor',
+    'plan_autoep_placement_transfer',
 ]
 
 
@@ -114,6 +119,24 @@ def legacy_uniform_autoep_placement_descriptor(num_experts, num_local_experts, e
     return make_autoep_placement_descriptor(num_experts, experts_by_rank)
 
 
+def autoep_placements_equal(descriptor, other):
+    """Return whether two descriptors place the same experts, in the same order, on each rank ID.
+
+    Rank entries are identified by their explicit rank IDs, so listing them in another order does
+    not change the placement.
+    """
+    validate_autoep_placement_descriptor(descriptor)
+    validate_autoep_placement_descriptor(other)
+    if descriptor[AUTOEP_PLACEMENT_NUM_EXPERTS] != other[AUTOEP_PLACEMENT_NUM_EXPERTS]:
+        return False
+    if descriptor[AUTOEP_PLACEMENT_EP_SIZE] != other[AUTOEP_PLACEMENT_EP_SIZE]:
+        return False
+    for rank in range(descriptor[AUTOEP_PLACEMENT_EP_SIZE]):
+        if autoep_experts_for_rank(descriptor, rank) != autoep_experts_for_rank(other, rank):
+            return False
+    return True
+
+
 def autoep_placement_to_affine_map(descriptor, logical_shape):
     """Lower one ``[num_experts, ...]`` parameter to a :class:`ParamAffineMap`."""
     validate_autoep_placement_descriptor(descriptor)
@@ -144,6 +167,101 @@ def autoep_placement_to_affine_map(descriptor, logical_shape):
     affine_map = ParamAffineMap(logical_shape=logical_shape, shard_shapes=shard_shapes, pieces_by_rank=pieces_by_rank)
     # Descriptor validation already proves expert-level coverage. Expanding that
     # check to every tensor element is prohibitively expensive for expert weights.
+    affine_map.validate()
+    return affine_map
+
+
+def autoep_storage_affine_map(descriptor, logical_shape, holders_by_ep_rank, partition_numel_by_ep_rank=None):
+    """Lower one expert parameter to the storage each global rank actually holds.
+
+    ``holders_by_ep_rank`` maps every rank ID of ``descriptor`` to the global ranks that store that
+    EP rank's packed ``[local_experts, ...]`` tensor, in expert-data-parallel (EDP) rank order.
+
+    Without ``partition_numel_by_ep_rank``, every holder stores the whole packed tensor, as EDP
+    replicas do under ZeRO-0/1/2. With it, holder ``d`` of EP rank ``r`` stores elements
+    ``[d * n, (d + 1) * n)`` of the flattened packed tensor, where ``n`` is
+    ``partition_numel_by_ep_rank[r]``, as ZeRO-3 does. ZeRO-3's trailing padding holds no
+    parameter elements and is not part of the shard, so a holder whose partition is all padding,
+    like every holder of an EP rank without experts, has an empty shard.
+
+    The returned map is keyed by global rank and describes the flattened parameter, so each shard
+    is the holder's flat storage and a ZeRO-3 fragment that splits an expert is still one interval.
+    Every holder of an element is listed in the piece's ``locations``; choosing among replicas is
+    left to the transfer planner's replica selection.
+    """
+    validate_autoep_placement_descriptor(descriptor)
+    logical_shape = tuple(int(dim) for dim in logical_shape)
+    num_experts = descriptor[AUTOEP_PLACEMENT_NUM_EXPERTS]
+    if not logical_shape or logical_shape[0] != num_experts:
+        raise ValueError(f'Expert parameter logical shape must start with num_experts ({num_experts}); '
+                         f'got {logical_shape}.')
+    if any(dim < 0 for dim in logical_shape):
+        raise ValueError(f'Expert parameter logical shape cannot contain negative dimensions: {logical_shape}.')
+
+    entries_by_rank = {entry[AUTOEP_PLACEMENT_RANK]: entry for entry in descriptor[AUTOEP_PLACEMENT_RANKS]}
+    holders_by_ep_rank = _validated_storage_holders(holders_by_ep_rank, entries_by_rank)
+    expert_numel = _product(logical_shape[1:])
+
+    # Each fragment is (global rank, start, stop) in its EP rank's flattened packed tensor.
+    fragments_by_ep_rank = {}
+    for ep_rank, global_ranks in holders_by_ep_rank.items():
+        packed_numel = len(entries_by_rank[ep_rank][AUTOEP_PLACEMENT_EXPERTS]) * expert_numel
+        if partition_numel_by_ep_rank is None:
+            fragments_by_ep_rank[ep_rank] = [(global_rank, 0, packed_numel) for global_rank in global_ranks]
+            continue
+        partition_numel = _storage_partition_numel(partition_numel_by_ep_rank, ep_rank, len(global_ranks),
+                                                   packed_numel)
+        fragments = []
+        for edp_rank, global_rank in enumerate(global_ranks):
+            start = min(edp_rank * partition_numel, packed_numel)
+            stop = min(start + partition_numel, packed_numel)
+            fragments.append((global_rank, start, stop))
+        fragments_by_ep_rank[ep_rank] = fragments
+
+    shard_shapes = {}
+    pieces_by_rank = {}
+    for fragments in fragments_by_ep_rank.values():
+        for global_rank, start, stop in fragments:
+            shard_shapes[global_rank] = (stop - start, )
+            pieces_by_rank[global_rank] = []
+
+    copies_by_expert = {expert_id: [] for expert_id in range(num_experts)}
+    for ep_rank, entry in entries_by_rank.items():
+        for local_index, expert_id in enumerate(entry[AUTOEP_PLACEMENT_EXPERTS]):
+            copies_by_expert[expert_id].append((ep_rank, local_index * expert_numel))
+
+    for expert_id, copies in copies_by_expert.items():
+        # Replicas of an expert can be split at different places, so cut every copy at every
+        # holder's boundary; otherwise two holders would describe overlapping but unequal blocks.
+        cuts = {0, expert_numel}
+        for ep_rank, base in copies:
+            for _, start, stop in fragments_by_ep_rank[ep_rank]:
+                for boundary in (start, stop):
+                    if base < boundary < base + expert_numel:
+                        cuts.add(boundary - base)
+        cuts = sorted(cuts)
+        for low, high in zip(cuts, cuts[1:]):
+            placed = []
+            for ep_rank, base in copies:
+                packed_offset = base + low
+                for global_rank, start, stop in fragments_by_ep_rank[ep_rank]:
+                    if start <= packed_offset < stop:
+                        placed.append((global_rank, packed_offset - start))
+            locations = frozenset(global_rank for global_rank, _ in placed)
+            for global_rank, shard_offset in placed:
+                pieces_by_rank[global_rank].append(
+                    AffinePiece(shape=(high - low, ),
+                                source_offset=expert_id * expert_numel + low,
+                                source_strides=(1, ),
+                                dest_offset=shard_offset,
+                                dest_strides=(1, ),
+                                locations=locations))
+
+    for global_rank, pieces in pieces_by_rank.items():
+        pieces_by_rank[global_rank] = _merge_private_runs(pieces)
+    affine_map = ParamAffineMap(logical_shape=(_product(logical_shape), ),
+                                shard_shapes=shard_shapes,
+                                pieces_by_rank=pieces_by_rank)
     affine_map.validate()
     return affine_map
 
@@ -188,6 +306,24 @@ def extract_autoep_rank_tensor(full_param, target_map, ep_rank):
     return target_map.extract(full_param, ep_rank)
 
 
+def plan_autoep_placement_transfer(source_placement,
+                                   target_placement,
+                                   logical_shape,
+                                   limits=None,
+                                   *,
+                                   replica_selector=None):
+    """Plan copies that move one expert parameter from ``source_placement`` to ``target_placement``.
+
+    Both placements are lowered with :func:`autoep_placement_to_affine_map`, so plan ranks are
+    EP-local ranks of the respective placements, and offsets follow each rank's local packed order.
+    The plan only describes the copies; it does not require that the AutoEP runtime can execute
+    with ``target_placement``.
+    """
+    source_map = autoep_placement_to_affine_map(source_placement, logical_shape)
+    target_map = autoep_placement_to_affine_map(target_placement, logical_shape)
+    return plan_transfer(target_map, source_map, limits, replica_selector=replica_selector)
+
+
 def _pieces_for_rank(experts, holders, expert_shape, expert_numel, source_strides, dest_strides):
     pieces = []
     run_start = 0
@@ -211,6 +347,59 @@ def _pieces_for_rank(experts, holders, expert_shape, expert_numel, source_stride
                             locations=holders[first_expert]))
             run_start = local_index
     return pieces
+
+
+def _validated_storage_holders(holders_by_ep_rank, entries_by_rank):
+    if not isinstance(holders_by_ep_rank, dict):
+        raise TypeError('holders_by_ep_rank must map each EP rank ID to its global holder ranks.')
+    if set(holders_by_ep_rank) != set(entries_by_rank):
+        raise ValueError(f'holders_by_ep_rank names EP ranks {sorted(holders_by_ep_rank)}; the placement '
+                         f'descriptor names {sorted(entries_by_rank)}.')
+    seen = set()
+    validated = {}
+    for ep_rank in sorted(holders_by_ep_rank):
+        global_ranks = list(holders_by_ep_rank[ep_rank])
+        if not global_ranks:
+            raise ValueError(f'EP rank {ep_rank} has no global holder rank.')
+        for global_rank in global_ranks:
+            if not isinstance(global_rank, int) or isinstance(global_rank, bool) or global_rank < 0:
+                raise ValueError(f'Global holder rank {global_rank!r} of EP rank {ep_rank} is not a '
+                                 'non-negative integer.')
+            if global_rank in seen:
+                raise ValueError(f'Global rank {global_rank} holds storage for more than one EP rank entry.')
+            seen.add(global_rank)
+        validated[ep_rank] = global_ranks
+    return validated
+
+
+def _storage_partition_numel(partition_numel_by_ep_rank, ep_rank, num_holders, packed_numel):
+    partition_numel = partition_numel_by_ep_rank.get(ep_rank)
+    if not isinstance(partition_numel, int) or isinstance(partition_numel, bool) or partition_numel < 0:
+        raise ValueError(f'Partition size {partition_numel!r} of EP rank {ep_rank} is not a non-negative integer.')
+    if partition_numel * num_holders < packed_numel:
+        raise ValueError(f'EP rank {ep_rank} packs {packed_numel} elements, but its {num_holders} holders of '
+                         f'{partition_numel} elements each cannot store them.')
+    return partition_numel
+
+
+def _merge_private_runs(pieces):
+    # Only single-holder runs are merged: a replica may store the next block elsewhere, and its
+    # block boundaries must stay equal to this rank's.
+    merged = []
+    for piece in sorted(pieces, key=lambda piece: piece.dest_offset):
+        previous = merged[-1] if merged else None
+        if (previous is not None and len(piece.locations) == 1 and previous.locations == piece.locations
+                and previous.source_offset + previous.numel == piece.source_offset
+                and previous.dest_offset + previous.numel == piece.dest_offset):
+            merged[-1] = AffinePiece(shape=(previous.numel + piece.numel, ),
+                                     source_offset=previous.source_offset,
+                                     source_strides=(1, ),
+                                     dest_offset=previous.dest_offset,
+                                     dest_strides=(1, ),
+                                     locations=previous.locations)
+            continue
+        merged.append(piece)
+    return merged
 
 
 def _expert_holders(entries_by_rank, num_experts):
