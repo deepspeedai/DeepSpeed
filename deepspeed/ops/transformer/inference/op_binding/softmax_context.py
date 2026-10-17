@@ -3,6 +3,8 @@
 
 # DeepSpeed Team
 
+import inspect
+
 import torch
 from deepspeed import comm as dist
 from ..config import DeepSpeedInferenceConfig
@@ -80,8 +82,22 @@ class SoftmaxContextOp(BaseOp):
             from transformers.models.llama.modeling_llama import apply_rotary_pos_emb
 
             rotary = InferenceContext.Instance().get_rotary(rotary_dim, rope_theta, bat_0213_value.device)
-            cos, sin = rotary(bat_0213_value, InferenceContext.Instance().get_max_tokens_num())
-            bat_0213_query, bat_0213_key = apply_rotary_pos_emb(bat_0213_query, bat_0213_key, cos, sin, position_ids)
+            if "position_ids" in inspect.signature(rotary.forward).parameters:
+                cos, sin = rotary(bat_0213_value, position_ids)
+                # apply_rotary_pos_emb takes them only through cos/sin. transformers 5.0
+                # dropped the deprecated position_ids parameter, so the fifth positional
+                # slot is unsqueeze_dim there:
+                #   4.38.2 .. 4.57.0   (q, k, cos, sin, position_ids=None, unsqueeze_dim=1)
+                #   5.0.0  .. 5.16.1   (q, k, cos, sin, unsqueeze_dim=1)
+                # Passing four arguments is correct on both, and leaves unsqueeze_dim at its
+                # default rather than handing it a tensor.
+                bat_0213_query, bat_0213_key = apply_rotary_pos_emb(bat_0213_query, bat_0213_key, cos, sin)
+            else:
+                # transformers <= 4.37: forward takes a token count and returns position tables
+                # that apply_rotary_pos_emb indexes with the required position_ids.
+                cos, sin = rotary(bat_0213_value, InferenceContext.Instance().get_max_tokens_num())
+                bat_0213_query, bat_0213_key = apply_rotary_pos_emb(bat_0213_query, bat_0213_key, cos, sin,
+                                                                    position_ids)
 
         bat_0213_key, bat_0213_value = InferenceContext.Instance().update_cache(layer_id, token_idx, is_prompt,
                                                                                 bat_0213_key, bat_0213_value)
