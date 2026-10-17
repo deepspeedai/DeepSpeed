@@ -286,6 +286,9 @@ class CUDA_Accelerator(DeepSpeedAccelerator):
         return major < 9
 
     # Graph operations
+    def is_current_stream_capturing(self) -> bool:
+        return torch.cuda.is_current_stream_capturing()
+
     def create_graph(self):
         return torch.cuda.CUDAGraph()
 
