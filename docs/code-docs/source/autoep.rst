@@ -448,6 +448,19 @@ Where the kernels run, results are not bitwise identical to eager RMSNorm: the
 kernels' FP32 reductions sum in a different order, so a small fraction of
 outputs and gradients differ in their last bits.
 
+For norms at most 128 wide, the fused kernels schedule several rows per
+program and combine the input- and weight-gradient reads in backward. Small
+inputs cap the row tile at the next power of two of their row count, so a
+single row does not instantiate a full 4096-element tile. Larger inputs keep
+the existing tile size. Wider norms retain the one-row kernels. The different
+FP32 reduction order still uses the existing ULP accuracy contract, not
+bitwise equality with eager.
+At width one, the pre-gamma input derivative in exact arithmetic is
+``eps / (x**2 + eps)**(3/2)``, which is nonzero when ``eps > 0``. With a
+very small epsilon and large ``abs(x)``, low-precision rounding can hide this
+gradient; width-one tests use a measurable positive epsilon and an FP64
+reference rather than assuming the derivative is zero.
+
 Requirements and limits:
 
 - The kernels need CUDA with Triton. On ROCm or without Triton, replaced
