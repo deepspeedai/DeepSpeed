@@ -5,6 +5,8 @@
 
 import os
 import math
+import socket
+import hashlib
 import torch
 import psutil
 from deepspeed import comm as dist
@@ -62,14 +64,6 @@ def disable_accelerator():
         accelerator._initialized = True
 
 
-def all_tensors_equal(tensor_list):
-    first_tensor = tensor_list[0]
-    for tensor in tensor_list[1:]:
-        if not torch.equal(first_tensor, tensor):
-            return False
-    return True
-
-
 def _split_affinity(cores, pt_reserved_cores_perc):
     """Split a rank's core list into (zf_affinity, pt_affinity): reserve the first
     ceil(pt_reserved_cores_perc * n) cores for the training thread and give the rest to the
@@ -81,29 +75,147 @@ def _split_affinity(cores, pt_reserved_cores_perc):
     return cores, cores
 
 
+def _env_int(*names):
+    for name in names:
+        value = os.environ.get(name)
+        if value is None or value == "":
+            continue
+        try:
+            return int(value)
+        except ValueError:
+            continue
+    return None
+
+
+def _format_cpu_list(cpus):
+    if not cpus:
+        return "(none)"
+    ordered = sorted(set(cpus))
+    ranges = []
+    start = prev = ordered[0]
+    for cpu in ordered[1:]:
+        if cpu == prev + 1:
+            prev = cpu
+            continue
+        ranges.append(f"{start}-{prev}" if start != prev else str(start))
+        start = prev = cpu
+    ranges.append(f"{start}-{prev}" if start != prev else str(start))
+    return ",".join(ranges)
+
+
+def _physical_core_key(cpu):
+    """One logical CPU per physical core. core_id repeats across sockets, so the package id is part of the key."""
+    topology = f"/sys/devices/system/cpu/cpu{cpu}/topology"
+    try:
+        with open(os.path.join(topology, "physical_package_id")) as handle:
+            package = int(handle.read())
+        with open(os.path.join(topology, "core_id")) as handle:
+            core = int(handle.read())
+    except (OSError, ValueError):
+        return (cpu, 0)
+    return (package, core)
+
+
+def _one_logical_per_physical_core(allowed):
+    chosen = {}
+    for cpu in allowed:
+        key = _physical_core_key(cpu)
+        current = chosen.get(key)
+        if current is None or cpu < current:
+            chosen[key] = cpu
+    return [chosen[key] for key in sorted(chosen)]
+
+
+def _affinity_device():
+    # Collectives in a GPU job run on the accelerator. A CPU tensor here breaks NCCL.
+    return get_accelerator().current_device_name()
+
+
+def _host_token():
+    digest = hashlib.sha256(socket.gethostname().encode()).digest()
+    return int.from_bytes(digest[:8], "little", signed=True)
+
+
+def _local_rank_and_size_from_hosts():
+    world = dist.get_world_size()
+    rank = dist.get_rank()
+    device = _affinity_device()
+    token = torch.tensor([_host_token()], dtype=torch.int64, device=device)
+    gathered = [torch.empty_like(token) for _ in range(world)]
+    dist.all_gather(gathered, token)
+    mine = int(gathered[rank].item())
+    group = [index for index, item in enumerate(gathered) if int(item.item()) == mine]
+    return group.index(rank), len(group)
+
+
+def _local_rank_and_size():
+    # Keep each rank name paired with its own size. Mixing a rank from one launcher with a size
+    # from another reports the wrong node shape when both are present and disagree.
+    pairs = (
+        ("LOCAL_RANK", "LOCAL_WORLD_SIZE"),
+        ("LOCAL_RANK", "LOCAL_SIZE"),
+        ("OMPI_COMM_WORLD_LOCAL_RANK", "OMPI_COMM_WORLD_LOCAL_SIZE"),
+        ("MPI_LOCALRANKID", "MPI_LOCALNRANKS"),
+        ("SLURM_LOCALID", "SLURM_NTASKS_PER_NODE"),
+    )
+    for rank_name, size_name in pairs:
+        local_rank = _env_int(rank_name)
+        local_size = _env_int(size_name)
+        if local_rank is not None and local_size is not None:
+            return local_rank, local_size
+    return _local_rank_and_size_from_hosts()
+
+
+def _masks_match(current_affinity):
+    world = dist.get_world_size()
+    if world <= 1:
+        return True
+    # Lengths first: an all_gather of the ids themselves deadlocks on NCCL when ranks were
+    # handed different-sized masks. Different lengths are already enough to say they differ.
+    device = _affinity_device()
+    length = torch.tensor([len(current_affinity)], dtype=torch.int64, device=device)
+    lengths = [torch.empty_like(length) for _ in range(world)]
+    dist.all_gather(lengths, length)
+    if not all(torch.equal(length, item) for item in lengths):
+        return False
+    if not current_affinity:
+        return True
+    ids = torch.tensor(sorted(current_affinity), dtype=torch.int64, device=device)
+    gathered = [torch.empty_like(ids) for _ in range(world)]
+    dist.all_gather(gathered, ids)
+    return all(torch.equal(ids, item) for item in gathered)
+
+
+def _shard_physical_cores(allowed):
+    physical = _one_logical_per_physical_core(allowed)
+    local_rank, local_size = _local_rank_and_size()
+    allowed_text = _format_cpu_list(allowed)
+    if local_size < 1 or not 0 <= local_rank < local_size:
+        raise RuntimeError(f"ZenFlow local rank {local_rank} is outside local size {local_size}. "
+                           f"Allowed CPUs: {allowed_text}.")
+    if len(physical) < local_size:
+        raise RuntimeError(f"ZenFlow has {len(physical)} usable physical cores for {local_size} local ranks. "
+                           f"Allowed CPUs: {allowed_text}.")
+    per_rank = len(physical) // local_size
+    start = local_rank * per_rank
+    return physical[start:start + per_rank]
+
+
 def _compute_zf_pt_affinity(zf_optimizer):
     """Split this rank's cores into a ZenFlow-optimizer set and a training (PyTorch) set.
-    When every rank reports the same affinity the launcher did not bind workers, so do a
-    soft per-rank bind first, then carve off pt_reserved_cores_perc for training."""
-    curr_rank = dist.get_rank()
-    total_rank = dist.get_world_size()
 
-    current_affinity = psutil.Process().cpu_affinity()
-    all_affinities = [
-        torch.zeros(len(current_affinity),
-                    dtype=type(current_affinity[0]),
-                    device=get_accelerator().current_device_name()) for _ in range(total_rank)
-    ]
-    dist.all_gather(
-        all_affinities,
-        torch.tensor(current_affinity, dtype=type(current_affinity[0]),
-                     device=get_accelerator().current_device_name()))
-    if all_tensors_equal(all_affinities):
-        num_phy_cores = psutil.cpu_count(logical=False)
-        available_phy_cores = [i for i in current_affinity if i < num_phy_cores]
-        cores_per_rank = len(available_phy_cores) // total_rank
-        current_affinity = available_phy_cores[curr_rank * cores_per_rank:(curr_rank + 1) * cores_per_rank]
-
+    When every rank reports the same affinity the launcher did not bind workers. Shard the
+    allowed CPUs by local rank, keeping one logical CPU per physical core, then carve off
+    pt_reserved_cores_perc for training. Ranks that already have different masks keep them.
+    """
+    current_affinity = list(psutil.Process().cpu_affinity() or [])
+    # Compare masks before raising so every rank joins the collective, including a rank whose
+    # allowed set is empty.
+    masks_match = _masks_match(current_affinity)
+    if not current_affinity:
+        raise RuntimeError("ZenFlow found no allowed CPUs. Allowed CPUs: (none).")
+    if masks_match:
+        current_affinity = _shard_physical_cores(current_affinity)
     return _split_affinity(current_affinity, zf_optimizer.pt_reserved_cores_perc)
 
 
