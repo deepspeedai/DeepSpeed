@@ -134,6 +134,8 @@ void launch_fused_ln(T* output,
                      int elems_per_row,
                      cudaStream_t stream)
 {
+    if (rows == 0) { return; }
+
     // 8 for __half, 4 for float
     constexpr int T_per_load = ln::granularity / sizeof(T);
 
@@ -352,6 +354,8 @@ void launch_fused_residual_ln(T* output,
                               int elems_per_row,
                               cudaStream_t stream)
 {
+    if (rows == 0) { return; }
+
     // 8 for __half, 4 for float
     constexpr int T_per_load = ln::granularity / sizeof(T);
 
@@ -426,6 +430,8 @@ void launch_fused_residual_ln_store_pre_ln_res(T* norm_output,
                                                int elems_per_row,
                                                cudaStream_t stream)
 {
+    if (rows == 0) { return; }
+
     // 8 for __half, 4 for float
     constexpr int T_per_load = ln::granularity / sizeof(T);
 
