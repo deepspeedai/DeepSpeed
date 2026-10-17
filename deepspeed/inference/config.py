@@ -87,9 +87,18 @@ class BaseQuantConfig(DeepSpeedConfigModel):
     q_groups: int = 1
 
 
+class WeightQuantAlgoEnum(str, Enum):
+    default = "default"
+    rtn = "rtn"
+    awq = "awq"
+    gptq = "gptq"
+    teq = "teq"
+
+
 class WeightQuantConfig(BaseQuantConfig):
     enabled: bool = True
     quantized_initialization: Dict = {}
+    algo_type: WeightQuantAlgoEnum = WeightQuantAlgoEnum.default
     post_init_quant: Dict = {}
 
 
