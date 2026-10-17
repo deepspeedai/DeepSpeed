@@ -186,7 +186,15 @@ def is_initialized() -> bool:
 
 def destroy_process_group(group: Optional[Any] = None) -> None:
     global cdb
-    return cdb.destroy_process_group(group=group)
+    destroy_world = group is None or group is cdb.get_world_group()
+    result = cdb.destroy_process_group(group=group)
+    if group == torch.distributed.GroupMember.NON_GROUP_MEMBER:
+        return result
+
+    # Imported here because groups imports deepspeed.comm during module setup.
+    from deepspeed.utils import groups
+    groups._release_process_group_references(group=None if destroy_world else group)
+    return result
 
 
 def new_group(ranks):
