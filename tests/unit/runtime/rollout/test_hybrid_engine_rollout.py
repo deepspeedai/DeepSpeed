@@ -265,6 +265,56 @@ def test_continuous_generation_covers_modern_static_cache_path():
     assert (1, 3) in model.calls
 
 
+def test_continuous_prefill_requests_last_logits_only():
+
+    class LastLogitsModel(torch.nn.Module):
+        _supports_cache_class = True
+
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.zeros(1))
+            self.prefill_logits_to_keep = []
+
+            self.config = PretrainedConfig(
+                max_position_embeddings=32,
+                num_hidden_layers=1,
+                num_attention_heads=1,
+                num_key_value_heads=1,
+                hidden_size=1,
+                head_dim=1,
+            )
+
+        # Mirrors the Transformers contract: 0 returns logits for every position, k for the last k.
+        def forward(self,
+                    input_ids,
+                    attention_mask,
+                    past_key_values=None,
+                    use_cache=True,
+                    cache_position=None,
+                    position_ids=None,
+                    logits_to_keep=0):
+            key_states = input_ids[:, None, :, None].to(dtype=torch.float32)
+            past_key_values.update(key_states,
+                                   key_states,
+                                   layer_idx=0,
+                                   cache_kwargs={"cache_position": cache_position})
+            if input_ids.shape[1] > 1:
+                self.prefill_logits_to_keep.append(logits_to_keep)
+            # Each position predicts its own token + 5, so reading any position but the last changes the output.
+            logits = torch.nn.functional.one_hot((input_ids + 5) % 16, num_classes=16).to(torch.float32)
+            if logits_to_keep:
+                logits = logits[:, -logits_to_keep:]
+            return SimpleNamespace(logits=logits, past_key_values=past_key_values)
+
+    model = LastLogitsModel()
+    rollout = HybridEngineRollout(SimpleNamespace(module=model), SimpleNamespace(pad_token_id=0, eos_token_id=2))
+    request = RolloutRequest(torch.tensor([[1, 2, 3], [1, 2, 4]]), torch.ones((2, 3), dtype=torch.long))
+    output = rollout.generate(request, SamplingConfig(max_new_tokens=2, temperature=0, continuous_batch_size=2))
+
+    assert output.input_ids[:, 3:].tolist() == [[8, 13], [9, 14]]
+    assert model.prefill_logits_to_keep == [1]
+
+
 def test_aligned_continuous_generation_supports_mixed_effective_prompt_lengths():
 
     class CacheConfig(SimpleNamespace):
