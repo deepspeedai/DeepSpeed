@@ -111,6 +111,30 @@ def test_cpu_adam_strict_state_updates(model_size, adamw_mode, weight_decay, bia
         torch.testing.assert_close(state['exp_avg_sq'], ref_exp_avg_sq, rtol=3e-5, atol=2e-6)
 
 
+def test_cpu_adam_updates_non_contiguous_param():
+    from deepspeed.ops.adam import DeepSpeedCPUAdam
+
+    initial = torch.randn(6, 5).t()
+    cpu_param = torch.nn.Parameter(initial.clone(memory_format=torch.preserve_format))
+    assert not cpu_param.is_contiguous()
+    ref_param = initial.clone()
+    ref_exp_avg = torch.zeros_like(ref_param)
+    ref_exp_avg_sq = torch.zeros_like(ref_param)
+    optimizer = DeepSpeedCPUAdam([cpu_param], lr=1e-2, weight_decay=0.01)
+
+    for step in range(1, 4):
+        grad = torch.randn_like(ref_param)
+        cpu_param.grad = grad
+        optimizer.step()
+        _reference_adam_step(ref_param, grad, ref_exp_avg, ref_exp_avg_sq, step, 1e-2, (0.9, 0.999), 1e-8, 0.01, True,
+                             True)
+
+    state = optimizer.state[cpu_param]
+    torch.testing.assert_close(cpu_param, ref_param, rtol=3e-5, atol=2e-6)
+    torch.testing.assert_close(state['exp_avg'], ref_exp_avg, rtol=3e-5, atol=2e-6)
+    torch.testing.assert_close(state['exp_avg_sq'], ref_exp_avg_sq, rtol=3e-5, atol=2e-6)
+
+
 def test_cpu_adam_rejects_amsgrad():
     from deepspeed.ops.adam import DeepSpeedCPUAdam
 
