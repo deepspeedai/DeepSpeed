@@ -154,3 +154,16 @@ def test_count_used_parameters_enables_grad_for_grad_acc_lookup(monkeypatch):
     loss.backward()
     assert seen["lookup_calls"] > 0
     assert "count" in seen
+
+
+def test_mask_nan_or_inf_with_val_inplace_honors_val():
+    """The masked entries should take the requested value, not always -1."""
+    for val in (0.0, 1.5, -1.0):
+        tensor = torch.tensor([float('nan'), float('inf'), float('-inf'), 2.0])
+        ds_utils.mask_nan_or_inf_with_val_inplace(tensor, device=tensor.device, val=val)
+        assert tensor.tolist() == [val, val, val, 2.0]
+
+    # The documented default stays -1.
+    tensor = torch.tensor([float('nan'), 2.0])
+    ds_utils.mask_nan_or_inf_with_val_inplace(tensor, device=tensor.device)
+    assert tensor.tolist() == [-1.0, 2.0]
