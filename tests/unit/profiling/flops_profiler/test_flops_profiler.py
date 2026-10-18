@@ -9,6 +9,8 @@ import pytest
 import deepspeed
 from types import SimpleNamespace
 from deepspeed.profiling.flops_profiler import get_model_profile, FlopsProfiler
+from deepspeed.utils.timer import SynchronizedWallClockTimer, FORWARD_GLOBAL_TIMER, BACKWARD_GLOBAL_TIMER, \
+    STEP_GLOBAL_TIMER
 from unit.simple_model import SimpleModel, random_dataloader
 from unit.common import DistributedTest
 from deepspeed.utils.torch import required_torch_version
@@ -236,6 +238,46 @@ def test_print_model_profile_with_none_dp_world_size(capsys):
     assert match is not None
     # The sequence-data-parallel world size is reported in place of the None dp_world_size.
     assert match.group(1) == "4"
+
+
+@pytest.mark.sequential
+def test_print_model_profile_averages_accumulated_micro_batches(capsys):
+    # With gradient accumulation the engine's global timers hold every micro-batch since the last
+    # optimizer step, while the profiled flops are for one forward. Fixed records stand in for one
+    # global step: 4 micro-batches of 100 ms forward and 200 ms backward, then one 80 ms optimizer step.
+    gas, micro_batch, dp_size, mp_size = 4, 2, 4, 2
+    timers = SynchronizedWallClockTimer()
+    for name, seconds in ((FORWARD_GLOBAL_TIMER, [0.1] * gas), (BACKWARD_GLOBAL_TIMER, [0.2] * gas),
+                          (STEP_GLOBAL_TIMER, [0.08])):
+        timers(name).use_host_timer = True  # records are plain seconds on any accelerator
+        timers(name).event_timers.extend(seconds)
+
+    model = torch.nn.Sequential(torch.nn.Linear(128, 128, bias=False))
+    prof = FlopsProfiler(model)
+    prof.ds_engine = SimpleNamespace(world_size=dp_size * mp_size,
+                                     dp_world_size=dp_size,
+                                     mp_world_size=mp_size,
+                                     has_moe_layers=False,
+                                     train_micro_batch_size_per_gpu=lambda: micro_batch,
+                                     train_batch_size=lambda: micro_batch * gas * dp_size,
+                                     gradient_accumulation_steps=lambda: gas,
+                                     wall_clock_breakdown=lambda: True,
+                                     timers=timers)
+    prof.start_profile()
+    model(torch.randn(micro_batch, 128))
+    prof.print_model_profile(profile_step=1, detailed=False)
+    prof.end_profile()
+
+    summary = dict(re.findall(r"^(\S.*?): +(\S.*?) *$", capsys.readouterr().out, re.MULTILINE))
+    # Per micro-batch: 100 ms fwd, 200 ms bwd and the 80 ms step spread over the 4 micro-batches.
+    assert summary["fwd latency"] == "100 ms"
+    assert summary["bwd latency"] == "200 ms"
+    assert summary["step latency"] == "20 ms"
+    assert summary["iter latency"] == "320 ms"
+    # One forward is 2 * 2 * 128 * 128 = 65536 flops, so 3 * 65536 / 0.32 s.
+    assert summary["FLOPS per GPU = 3 * fwd flops per GPU / iter latency"] == "614.4 KFLOPS"
+    # 2 samples on each of the 4 data-parallel ranks per 0.32 s; model-parallel ranks share them.
+    assert summary["samples/second"] == "25.0"
 
 
 @pytest.mark.sequential
