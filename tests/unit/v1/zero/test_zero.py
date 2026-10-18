@@ -4,6 +4,7 @@
 # DeepSpeed Team
 
 from copy import deepcopy
+from types import SimpleNamespace
 import math
 from collections import namedtuple
 from typing import Dict, List, NamedTuple, Set, Tuple
@@ -24,7 +25,7 @@ import deepspeed
 from deepspeed.runtime.engine import DeepSpeedEngine
 from deepspeed.runtime.bf16_optimizer import BF16_Optimizer
 from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
-from deepspeed.runtime.zero.stage_1_and_2 import split_half_float_double
+from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer, split_half_float_double
 from deepspeed.utils.zero_to_fp32 import load_state_dict_from_zero_checkpoint
 from deepspeed.runtime.zero.utils import ZeRORuntimeException
 from deepspeed.accelerator import get_accelerator
@@ -51,6 +52,22 @@ class TestSplitHalfFloatDouble:
         for bucket, grad in zip(buckets, dense_grads):
             assert len(bucket) == 1
             assert bucket[0] is grad
+
+
+@pytest.mark.parametrize("postscale_gradients,gradient_predivide_factor", [(False, 1.0), (True, 1.0), (True, 2.0)])
+class TestZeroPredivideWithSequenceParallel(DistributedTest):
+    world_size = 2
+
+    def test(self, postscale_gradients, gradient_predivide_factor):
+        # Both ranks form one sequence-parallel group, so the gradient is averaged over 2 / 2 = 1 rank.
+        optimizer = SimpleNamespace(dp_process_group=dist.get_world_group(),
+                                    gradient_average=True,
+                                    postscale_gradients=postscale_gradients,
+                                    gradient_predivide_factor=gradient_predivide_factor,
+                                    sequence_parallel_size=2)
+        grad = torch.full((4, ), float(dist.get_rank() + 1), device=get_accelerator().current_device_name())
+        DeepSpeedZeroOptimizer.gradient_reduction_w_predivide(optimizer, grad, grad.dtype)
+        torch.testing.assert_close(grad, torch.full_like(grad, 3.0))
 
 
 @pytest.mark.parametrize("zero_stage", [0, 1, 2])
