@@ -59,10 +59,15 @@ def get_data(device):
 class TestSparseAdam(DistributedTest):
     world_size = 2
 
-    def test(self):
+    @pytest.mark.parametrize("gradient_predivide_factor", [1.0, 2.0])
+    def test(self, gradient_predivide_factor):
         skip_on_arch(min_arch=7)
 
-        config_dict = {"train_batch_size": 2, "steps_per_print": 1}
+        config_dict = {
+            "train_batch_size": 2,
+            "steps_per_print": 1,
+            "gradient_predivide_factor": gradient_predivide_factor
+        }
         model, optimizer = get_model_optimizer()
         loss = torch.nn.BCEWithLogitsLoss()
         engine, _, _, _ = deepspeed.initialize(model=model, optimizer=optimizer, config=config_dict)
