@@ -170,6 +170,10 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
                 if self.subgroup_to_device[i] == 'cpu' and not self.clip_grad:
                     param_group_id = self.sub_group_to_group_id[i]
                     fp32_param = self.fp32_partitioned_groups_flat[i]
+                    # step() rolls back an overflowed step, and the rollback cannot undo an inf or nan
+                    # gradient (it zeroes the param and leaves nan moments), so do not step on one.
+                    if not fp32_param.grad.isfinite().all():
+                        continue
                     current_lr = self.optimizer.param_groups[param_group_id]['lr']
 
                     self.superoffload_cpu_optimizer.async_step(param_group_id,
