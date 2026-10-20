@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import torch
 
-from deepspeed.ops.triton_ops._triton import _TRITON_AVAILABLE, triton, tl
+from deepspeed.ops.triton_ops._triton import _TRITON_AVAILABLE, is_accelerator_tensor, triton, tl
 
 _IS_ROCM_PYTORCH = getattr(torch.version, "hip", None) is not None
 
@@ -235,8 +235,8 @@ def assert_supported(rows: torch.Tensor, *, score_apply: str) -> None:
     if _IS_ROCM_PYTORCH:
         raise RuntimeError('combine_impl="fused_weighted_sum" is not yet supported on ROCm. Leave combine_impl '
                            "unset to run here.")
-    if rows.device.type != "cuda":
-        raise RuntimeError('combine_impl="fused_weighted_sum" runs CUDA kernels but this layer is on device '
+    if not is_accelerator_tensor(rows):
+        raise RuntimeError('combine_impl="fused_weighted_sum" runs Triton kernels but this layer is on device '
                            f'"{rows.device.type}". Leave combine_impl unset to run here.')
     if rows.dtype not in SUPPORTED_ROW_DTYPES:
         raise RuntimeError('combine_impl="fused_weighted_sum" supports bfloat16, float16, and float32 rows, got '
@@ -353,11 +353,11 @@ def assert_row_weighting_supported(rows: torch.Tensor, weights: torch.Tensor) ->
     if _IS_ROCM_PYTORCH:
         raise RuntimeError('row_weighting_impl="fused" is not yet supported on ROCm. Set '
                            'row_weighting_impl="eager" to run here.')
-    if rows.device.type != "cuda":
-        raise RuntimeError('row_weighting_impl="fused" runs CUDA kernels but rows are on device '
+    if not is_accelerator_tensor(rows):
+        raise RuntimeError('row_weighting_impl="fused" runs Triton kernels but rows are on device '
                            f'"{rows.device.type}". Set row_weighting_impl="eager" to run here.')
     if weights.device != rows.device:
-        raise RuntimeError('row_weighting_impl="fused" requires rows and weights on the same CUDA device, got '
+        raise RuntimeError('row_weighting_impl="fused" requires rows and weights on the same device, got '
                            f"rows on {rows.device} and weights on {weights.device}.")
     if rows.dim() != 2:
         raise RuntimeError('row_weighting_impl="fused" requires rows with shape [N, H], got '

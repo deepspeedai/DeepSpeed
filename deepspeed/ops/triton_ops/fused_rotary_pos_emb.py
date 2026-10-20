@@ -12,7 +12,7 @@ import types
 import torch
 from torch.autograd.function import once_differentiable
 
-from deepspeed.ops.triton_ops._triton import _TRITON_AVAILABLE, triton, tl
+from deepspeed.ops.triton_ops._triton import _TRITON_AVAILABLE, current_device, is_accelerator_tensor, triton, tl
 from deepspeed.utils import logger
 
 _IS_ROCM_PYTORCH = getattr(torch.version, "hip", None) is not None
@@ -133,8 +133,8 @@ def assert_supported(q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: t
     for name, tensor in tensors.items():
         if not isinstance(tensor, torch.Tensor):
             raise RuntimeError(f"fused RoPE needs tensors, but {name} is {type(tensor).__name__}.")
-        if tensor.device.type != "cuda":
-            raise RuntimeError(f'fused RoPE runs CUDA kernels but {name} is on device "{tensor.device.type}".')
+        if not is_accelerator_tensor(tensor):
+            raise RuntimeError(f'fused RoPE runs Triton kernels but {name} is on device "{tensor.device.type}".')
         if tensor.dtype != q.dtype:
             # Eager type promotion would compute in the wider dtype.
             raise RuntimeError(f"fused RoPE needs q, k, cos and sin in one dtype, got {q.dtype} and {tensor.dtype}.")
@@ -170,8 +170,8 @@ def _launch(x, cos, sin, out, backward):
     if x.numel() == 0:
         return out
     grid = (triton.cdiv(seq_len, _BLOCK_S), batch, triton.cdiv(heads, _HEADS_PER_PROGRAM))
-    # Triton launches on the current CUDA device and stream, which need not be the input tensor's device.
-    with torch.cuda.device(x.device):  #ignore-cuda
+    # Triton launches on the current device and stream, which need not be the input tensor's device.
+    with current_device(x):
         _rotary_kernel[grid](
             x,
             cos,

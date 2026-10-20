@@ -1553,12 +1553,15 @@ class TestRoutingAndLayerSemantics:
 
     @pytest.mark.parametrize("return_logits", [False, True])
     @pytest.mark.parametrize("checkpoint_mode", [None, False, True])
-    @pytest.mark.parametrize("device", ["cpu", "cuda"])
+    @pytest.mark.parametrize("device", ["cpu", "accelerator"])
     def test_router_cache_checkpoint_training(self, return_logits, checkpoint_mode, device):
         from deepspeed.accelerator import get_accelerator
 
-        if device == "cuda" and (get_accelerator().device_name() != "cuda" or not get_accelerator().is_available()):
-            pytest.skip("CUDA regression case requires a CUDA accelerator")
+        if device == "accelerator":
+            accelerator = get_accelerator()
+            if not accelerator.is_available() or accelerator.device_name() == "cpu":
+                pytest.skip("accelerator regression case requires an available accelerator")
+            device = accelerator.device_name()
         torch.manual_seed(1234)
         source = MockMoEBlock(num_experts=4, ffn_hidden=128, hidden_size=64)
         spec = _make_spec(return_router_logits=return_logits,
@@ -1832,11 +1835,18 @@ def async_split_layer(monkeypatch):
         finally:
             activity["stream"] = "caller"
 
-    class CUDADeviceCounts(torch.Tensor):
+    from deepspeed.accelerator import get_accelerator
+
+    accelerator_device = get_accelerator().device_name()
+    if accelerator_device == "cpu":
+        # Protocol doubles still need accelerator device metadata on CPU-only runners.
+        accelerator_device = "cuda"
+
+    class AcceleratorDeviceCounts(torch.Tensor):
 
         @property
         def device(self):
-            return torch.device("cuda", 0)
+            return torch.device(accelerator_device, 0)
 
         def sum(self, *args, **kwargs):
             if not any(operation == "payload" for operation, _ in activity["timeline"]):
@@ -1865,18 +1875,19 @@ def async_split_layer(monkeypatch):
                                   Event=create_event,
                                   Stream=lambda device: stream,
                                   stream=copy_stream,
-                                  pin_memory=pin_memory)
+                                  pin_memory=pin_memory,
+                                  on_accelerator=lambda tensor: tensor.device.type != "cpu")
 
     def device_counts(_module, _inputs, output):
         scores, selected, counts = output
-        return scores, selected, counts.as_subclass(CUDADeviceCounts)
+        return scores, selected, counts.as_subclass(AcceleratorDeviceCounts)
 
     def exchange(output, input_, **kwargs):
         kind = "payload" if "input_split_sizes" in kwargs else "counts"
         activity["timeline"].append((kind, activity["stream"]))
         output.copy_(input_)
 
-    # Counts have CUDA device metadata with host storage so the real planner
+    # Counts carry accelerator device metadata over host storage so the real planner
     # can run against deterministic stream/collective protocol doubles.
     hook = layer.router.register_forward_hook(device_counts)
     monkeypatch.setattr(auto_ep_layer, "get_accelerator", lambda: accelerator)

@@ -20,7 +20,7 @@ import operator
 
 import torch
 
-from deepspeed.ops.triton_ops._triton import _TRITON_AVAILABLE, triton, tl
+from deepspeed.ops.triton_ops._triton import _TRITON_AVAILABLE, is_accelerator_tensor, triton, tl
 from deepspeed.utils.torch import required_torch_version
 
 _IS_ROCM_PYTORCH = getattr(torch.version, "hip", None) is not None
@@ -74,11 +74,11 @@ def triton_backend_available() -> bool:
 def _resolve_backend(backend: str, logits: torch.Tensor) -> str:
     if backend not in BACKENDS:
         raise ValueError(f"Unsupported chunked cross-entropy backend {backend!r}; expected one of {BACKENDS}")
-    on_cuda = logits.device.type == "cuda"
+    on_accelerator = is_accelerator_tensor(logits)
     if backend == "auto":
-        return "triton" if on_cuda and triton_backend_available() else "torch"
-    if backend == "triton" and not (on_cuda and triton_backend_available()):
-        raise RuntimeError("The Triton chunked cross-entropy backend needs CUDA logits and Triton; use "
+        return "triton" if on_accelerator and triton_backend_available() else "torch"
+    if backend == "triton" and not (on_accelerator and triton_backend_available()):
+        raise RuntimeError("The Triton chunked cross-entropy backend needs accelerator logits and Triton; use "
                            'backend="torch" to run elsewhere')
     return backend
 
@@ -206,7 +206,7 @@ def chunked_cross_entropy(logits: torch.Tensor,
     ``logits`` is ``[rows, vocab]`` and ``target`` is ``[rows]`` with dtype ``torch.long``; targets are
     not converted from other dtypes. As with ``cross_entropy``, "mean"
     divides by the number of non-ignored rows, so it is NaN when every row is ignored. ``backend``
-    "auto" uses Triton for CUDA logits when it is available and PyTorch otherwise; naming a backend
+    "auto" uses Triton for accelerator logits when it is available and PyTorch otherwise; naming a backend
     that cannot run raises instead of substituting the other. ``block_rows`` must be a positive
     integer or ``None`` and controls the PyTorch backend only.
     """

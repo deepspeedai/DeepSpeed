@@ -7,7 +7,7 @@ from __future__ import annotations
 import torch
 from torch.autograd.function import once_differentiable
 
-from deepspeed.ops.triton_ops._triton import _TRITON_AVAILABLE, triton, tl
+from deepspeed.ops.triton_ops._triton import _TRITON_AVAILABLE, is_accelerator_tensor, triton, tl
 from deepspeed.utils import logger
 
 _IS_ROCM_PYTORCH = getattr(torch.version, "hip", None) is not None
@@ -148,8 +148,8 @@ def _assert_supported_device_and_dtype(tensor: torch.Tensor, *, name: str) -> No
     if tensor.dtype not in SUPPORTED_DTYPES:
         raise RuntimeError(
             f"fused RMSNorm supports bfloat16 and float16 tensors, but {name} has dtype {tensor.dtype}.")
-    if tensor.device.type != "cuda":
-        raise RuntimeError(f'fused RMSNorm runs CUDA kernels but {name} is on device "{tensor.device.type}".')
+    if not is_accelerator_tensor(tensor):
+        raise RuntimeError(f'fused RMSNorm runs Triton kernels but {name} is on device "{tensor.device.type}".')
 
 
 def assert_supported(hidden: torch.Tensor, weight: torch.Tensor, eps: float) -> None:

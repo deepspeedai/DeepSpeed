@@ -30,7 +30,7 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
-from deepspeed.ops.triton_ops._triton import _TRITON_AVAILABLE, triton, tl
+from deepspeed.ops.triton_ops._triton import _TRITON_AVAILABLE, current_device, triton, tl
 
 if _TRITON_AVAILABLE:
 
@@ -164,7 +164,7 @@ if _TRITON_AVAILABLE:
             if n_elements > 0:
                 grid = (triton.cdiv(n_elements, _BLOCK_SIZE), )
                 # Triton uses the current device and stream, which may differ from the input tensor's device.
-                with torch.cuda.device(gate_up.device):  #ignore-cuda
+                with current_device(gate_up):
                     _swiglu_packed_fwd_kernel[grid](gate_up,
                                                     out,
                                                     n_elements,
@@ -188,7 +188,7 @@ if _TRITON_AVAILABLE:
             n_elements = grad_out.numel()
             if n_elements > 0:
                 grid = (triton.cdiv(n_elements, _BLOCK_SIZE), )
-                with torch.cuda.device(gate_up.device):  #ignore-cuda
+                with current_device(gate_up):
                     _swiglu_packed_bwd_kernel[grid](grad_out,
                                                     gate_up,
                                                     grad_gate_up,
