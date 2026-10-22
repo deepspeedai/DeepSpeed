@@ -7,7 +7,8 @@ from __future__ import annotations
 import torch
 from torch.autograd.function import once_differentiable
 
-from deepspeed.ops.triton_ops._triton import _TRITON_AVAILABLE, is_accelerator_tensor, triton, tl
+from deepspeed.ops.triton_ops import _probes
+from deepspeed.ops.triton_ops._triton import _TRITON_AVAILABLE, is_accelerator_tensor, is_triton_kernel_supported, triton, tl
 from deepspeed.utils import logger
 
 _IS_ROCM_PYTORCH = getattr(torch.version, "hip", None) is not None
@@ -175,6 +176,10 @@ def assert_supported(hidden: torch.Tensor, weight: torch.Tensor, eps: float) -> 
             f"fused RMSNorm supports normalized dimensions up to {_MAX_FORWARD_BLOCK}, got {hidden.shape[-1]}.")
     if not isinstance(eps, float):
         raise RuntimeError(f"fused RMSNorm needs a float epsilon, got {type(eps).__name__}.")
+    if not is_triton_kernel_supported("fused_rms_norm", hidden.dtype, hidden.device, _probes.fused_rms_norm,
+                                      hidden.dtype, hidden.device):
+        raise RuntimeError("fused RMSNorm's Triton kernels failed this platform's runtime validation; "
+                           "run the eager forward instead.")
 
 
 def _block_n(n_cols: int) -> int:

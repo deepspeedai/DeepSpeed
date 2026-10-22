@@ -3,7 +3,7 @@
 
 # DeepSpeed Team
 """
-Shared Triton availability check for the ``triton_ops`` package.
+Shared Triton availability check and self-reporting kernel probes for the ``triton_ops`` package.
 """
 
 from contextlib import contextmanager
@@ -26,6 +26,70 @@ except Exception:
 def is_triton_available() -> bool:
     """Return True if Triton is importable and its kernels can be used."""
     return _TRITON_AVAILABLE
+
+
+_TRITON_PROBE_CACHE: dict[str, bool] = {}
+
+
+def probe_triton_kernel(key: str, run, reference=None, tolerance: float | None = None) -> bool:
+    """Probe a Triton kernel once per process and cache the answer.
+
+    The gate for a kernel becomes self-reporting: the current backend answers by
+    actually running the kernel, so every platform - present or future - decides
+    for itself, and a platform that gains or fixes support flips the gate
+    automatically with no code change. ``run`` executes the smallest form of the
+    kernel that reproduces its known-risky usage (a compile crash, a precision
+    loss, ...); when ``reference`` is given the outputs are compared - bitwise
+    when ``tolerance`` is None, else with ``torch.allclose``. Any exception
+    answers False, which sends callers to their fallback.
+    """
+    if key in _TRITON_PROBE_CACHE:
+        return _TRITON_PROBE_CACHE[key]
+    import torch  # keep the module import-light; the probe path is cold
+
+    supported = False
+    try:
+        actual = run()
+        if reference is not None:
+            expected = reference()
+            if tolerance is None:
+                supported = torch.equal(actual, expected)
+            else:
+                supported = torch.allclose(actual, expected, atol=tolerance, rtol=tolerance)
+        else:
+            supported = True
+    except Exception:
+        supported = False
+    _TRITON_PROBE_CACHE[key] = supported
+    return supported
+
+
+def is_triton_kernel_supported(kernel: str, dtype, device, probe_fn, *probe_args) -> bool:
+    """Ask the accelerator's Triton gate to validate ``kernel`` on this device and dtype.
+
+    ``probe_fn(*probe_args)`` returns the kernel's minimal risky usage (see the
+    ``_probes`` library) and is only invoked when the answer is not yet cached, so
+    the probe runs at most once per process and every later call costs one
+    dictionary lookup without even constructing the probe. No platform keeps a
+    blacklist, and a backend that gains or fixes support flips the gate
+    automatically. Platforms whose ``is_triton_supported`` predates the per-kernel
+    extension keep their static backend-level answer.
+    """
+    from deepspeed.accelerator import get_accelerator
+
+    accelerator = get_accelerator()
+    if not accelerator.is_triton_supported():
+        return False
+    key = f"triton_kernel:{kernel}:{device.type}:{dtype}"
+    if key in _TRITON_PROBE_CACHE:
+        return _TRITON_PROBE_CACHE[key]
+    try:
+        supported = accelerator.is_triton_supported(kernel=f"{kernel}:{device.type}:{dtype}",
+                                                    probe=probe_fn(*probe_args))
+    except TypeError:
+        supported = True
+    _TRITON_PROBE_CACHE[key] = supported
+    return supported
 
 
 def is_accelerator_tensor(tensor) -> bool:

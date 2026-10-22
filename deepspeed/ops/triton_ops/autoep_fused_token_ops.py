@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import torch
 
-from deepspeed.ops.triton_ops._triton import _TRITON_AVAILABLE, is_accelerator_tensor, triton, tl
+from deepspeed.ops.triton_ops import _probes
+from deepspeed.ops.triton_ops._triton import _TRITON_AVAILABLE, is_accelerator_tensor, is_triton_kernel_supported, triton, tl
 
 _IS_ROCM_PYTORCH = getattr(torch.version, "hip", None) is not None
 
@@ -245,6 +246,10 @@ def assert_supported(rows: torch.Tensor, *, score_apply: str) -> None:
         raise RuntimeError('combine_impl="fused_weighted_sum" folds the routing weight into the top-k reduction, '
                            f'which only exists for score_apply="post", but this layer resolved '
                            f'score_apply="{score_apply}". Leave combine_impl unset.')
+    if not is_triton_kernel_supported("fused_weighted_restore", rows.dtype, rows.device,
+                                      _probes.fused_weighted_restore, rows.dtype, rows.device):
+        raise RuntimeError('combine_impl="fused_weighted_sum" failed this platform\'s runtime validation; '
+                           "leave combine_impl unset to run the eager restore.")
 
 
 def _block_hidden(hidden: int, slots: int) -> int:
@@ -378,6 +383,10 @@ def assert_row_weighting_supported(rows: torch.Tensor, weights: torch.Tensor) ->
     if not weights.is_contiguous():
         raise RuntimeError('row_weighting_impl="fused" requires contiguous weights. Set row_weighting_impl="eager" '
                            "for non-contiguous weight layouts.")
+    if not is_triton_kernel_supported("fused_row_weighting", rows.dtype, rows.device, _probes.fused_row_weighting,
+                                      rows.dtype, rows.device):
+        raise RuntimeError('row_weighting_impl="fused" failed this platform\'s runtime validation; '
+                           'set row_weighting_impl="eager" to run the eager path.')
 
 
 class _FusedRowWeighting(torch.autograd.Function):

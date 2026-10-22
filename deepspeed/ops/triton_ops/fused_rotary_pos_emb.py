@@ -12,7 +12,9 @@ import types
 import torch
 from torch.autograd.function import once_differentiable
 
-from deepspeed.ops.triton_ops._triton import _TRITON_AVAILABLE, current_device, is_accelerator_tensor, triton, tl
+from deepspeed.ops.triton_ops import _probes
+from deepspeed.ops.triton_ops._triton import (_TRITON_AVAILABLE, current_device, is_accelerator_tensor,
+                                              is_triton_kernel_supported, triton, tl)
 from deepspeed.utils import logger
 
 _IS_ROCM_PYTORCH = getattr(torch.version, "hip", None) is not None
@@ -163,6 +165,10 @@ def assert_supported(q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: t
         raise RuntimeError(f"fused RoPE needs q and k with one batch size, got {q.shape[0]} and {k.shape[0]}.")
     if cos.requires_grad or sin.requires_grad:
         raise RuntimeError("fused RoPE treats cos and sin as constants, but one of them requires grad.")
+    if not is_triton_kernel_supported("fused_rotary_pos_emb", q.dtype, q.device, _probes.fused_rotary, q.dtype,
+                                      q.device):
+        raise RuntimeError("fused RoPE's Triton kernels failed this platform's runtime validation; "
+                           "run the eager function instead.")
 
 
 def _launch(x, cos, sin, out, backward):

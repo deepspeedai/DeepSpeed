@@ -30,7 +30,8 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
-from deepspeed.ops.triton_ops._triton import _TRITON_AVAILABLE, current_device, triton, tl
+from deepspeed.ops.triton_ops import _probes
+from deepspeed.ops.triton_ops._triton import _TRITON_AVAILABLE, current_device, is_triton_kernel_supported, triton, tl
 
 if _TRITON_AVAILABLE:
 
@@ -205,6 +206,21 @@ def _swiglu_eager(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
     return F.silu(gate) * up
 
 
+def _swiglu_packed_1elem_supported(gate_up: torch.Tensor) -> bool:
+    """Whether the packed backward kernel compiles for one packed element on this backend.
+
+    n_elements=1 with BLOCK_SIZE=2048 overflows some backends' unified buffer at compile
+    time (reported upstream). The accelerator answers via a kernel probe - it runs the
+    minimal risky usage once per process and caches: whoever compiles it keeps the packed
+    path, whoever does not falls back to the separate kernel for this shape only. The
+    probe runs only when a one-element call actually happens, so regular shapes never
+    pay for it.
+    """
+
+    return is_triton_kernel_supported("swiglu_packed_bwd_1elem", gate_up.dtype, gate_up.device,
+                                      _probes.swiglu_packed_1elem, gate_up.dtype, gate_up.device)
+
+
 def swiglu(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
     """Fused SwiGLU activation: ``silu(gate) * up``.
 
@@ -226,6 +242,11 @@ def swiglu(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
     if not _TRITON_AVAILABLE:
         return _swiglu_eager(gate, up)
 
+    # Runtime detection: the current backend validates the kernels for itself once per
+    # process; a platform that fails the probe runs eager for every later call.
+    if not is_triton_kernel_supported("swiglu", gate.dtype, gate.device, _probes.swiglu, gate.dtype, gate.device):
+        return _swiglu_eager(gate, up)
+
     return _SwiGLUFn.apply(gate, up)
 
 
@@ -240,7 +261,9 @@ def swiglu_packed(gate_up: torch.Tensor) -> torch.Tensor:
 
     The Triton path supports first-order gradients only and raises for ``create_graph=True``.
     Forward and backward use the input device's current stream and restore the caller's current device.
-    Falls back to the eager PyTorch expression when Triton is unavailable.
+    Falls back to the eager PyTorch expression when Triton is unavailable, and to the separate
+    :func:`swiglu` kernel for one packed element when the backend cannot compile the packed
+    backward at that size.
     """
     if gate_up.dim() == 0 or gate_up.shape[-1] % 2:
         raise ValueError(f"swiglu_packed expects an even last dimension, got shape {tuple(gate_up.shape)}")
@@ -248,6 +271,21 @@ def swiglu_packed(gate_up: torch.Tensor) -> torch.Tensor:
     if not _TRITON_AVAILABLE:
         gate, up = gate_up.chunk(2, dim=-1)
         return _swiglu_eager(gate, up)
+
+    # Runtime detection at a regular size: the current backend validates the packed
+    # kernels for itself once per process.
+    if not is_triton_kernel_supported("swiglu_packed", gate_up.dtype, gate_up.device, _probes.swiglu_packed,
+                                      gate_up.dtype, gate_up.device):
+        gate, up = gate_up.chunk(2, dim=-1)
+        return _swiglu_eager(gate, up)
+
+    # The single-element packed backward fails to compile on some Triton backends
+    # (unified-buffer overflow; reported upstream). The accelerator answers via the
+    # kernel probe once per process; whoever compiles it keeps the packed path, whoever
+    # does not falls back to the separate kernel for this shape only. No platform is named.
+    if gate_up.numel() == 2 and not _swiglu_packed_1elem_supported(gate_up):
+        gate, up = gate_up.chunk(2, dim=-1)
+        return swiglu(gate, up)
 
     return _SwiGLUPackedFn.apply(gate_up)
 
