@@ -244,6 +244,8 @@ class NPU_Accelerator(DeepSpeedAccelerator):
         return self._communication_backend_name
 
     def is_triton_supported(self):
+        if not self.is_available():
+            return False
         # Triton kernels run on Ascend via the triton-ascend backend, which
         # reports itself through the same driver probe as CUDA/ROCm in
         # deepspeed.ops.triton_ops._triton. If the backend is not installed,
