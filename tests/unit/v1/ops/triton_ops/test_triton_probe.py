@@ -78,11 +78,13 @@ def test_failing_probe_closes_the_gate_with_a_cached_false():
 
 def test_probe_does_not_advance_the_caller_rng_sequence():
     dtype, device = _dtype_and_device()
-    torch.manual_seed(4321)
-    expected = torch.randn(4)
+    # Check the accelerator's device generator - the one the probe's tensors
+    # actually consume - not just the CPU generator.
+    _ACCELERATOR.manual_seed(4321)
+    expected = torch.randn(4, device=device)
     is_triton_kernel_supported("unit_probe_rng", dtype, device, _probes.fused_rms_norm, dtype, device)
-    torch.manual_seed(4321)
-    actual = torch.randn(4)
+    _ACCELERATOR.manual_seed(4321)
+    actual = torch.randn(4, device=device)
     assert torch.equal(expected, actual)
 
 
