@@ -14,18 +14,34 @@ fixes support flips the gate automatically.
 
 Kernel modules are imported lazily inside each probe, so this module stays
 import-light and free of import cycles. Probe names follow the module that owns
-the kernel.
+the kernel. Probe inputs are deterministic constants: a probe never draws
+random numbers, so the caller's RNG state is never touched and the probe is
+reproducible run over run.
 """
 
 import torch
 
 
+def _probe_tensor(size, dtype, device):
+    """A deterministic probe input in [0, 1) with no RNG involvement.
+
+    A probe's job is to make the backend compile and run the kernel's risky
+    usage; the input values do not carry the risk (a compile crash or a device
+    fault fires for any values), so no randomness is needed. Deterministic
+    inputs mean the caller's generator is never touched - some backends cannot
+    reliably save/restore their generator state - and the probe runs the same
+    values every time.
+    """
+    numel = torch.Size(size).numel()
+    return torch.arange(numel, dtype=torch.float32, device=device).div_(numel).reshape(size).to(dtype=dtype)
+
+
 def _fwd_bwd(forward, device):
-    """Wrap a forward callable in a grad-enabled, device-pinned, RNG-forked forward + backward.
+    """Wrap a forward callable in a grad-enabled, device-pinned forward + backward.
 
     The device pin makes the probe launch on the tensor's device rather than the
-    caller's current device, and the RNG fork keeps the probe's random tensors
-    from advancing the caller's generator sequence.
+    caller's current device. The probe's inputs are deterministic (see
+    ``_probe_tensor``), so the caller's RNG state is never touched.
     """
 
     def run():
@@ -36,7 +52,7 @@ def _fwd_bwd(forward, device):
         # current_device takes a tensor or an index; pass the index so a concrete
         # torch.device works directly and index-less devices skip the switch.
         device_ctx = current_device(device.index) if device.index is not None else nullcontext()
-        with torch.enable_grad(), torch.random.fork_rng(), device_ctx:
+        with torch.enable_grad(), device_ctx:
             y = forward()
             y.sum().backward()
             return y.detach()
@@ -48,8 +64,8 @@ def swiglu(dtype, device):
     from deepspeed.ops.triton_ops.swiglu_triton import _SwiGLUFn
 
     def forward():
-        gate = torch.randn((32, 16), dtype=dtype, device=device, requires_grad=True)
-        up = torch.randn((32, 16), dtype=dtype, device=device, requires_grad=True)
+        gate = _probe_tensor((32, 16), dtype, device).requires_grad_()
+        up = _probe_tensor((32, 16), dtype, device).requires_grad_()
         return _SwiGLUFn.apply(gate, up)
 
     return _fwd_bwd(forward, device)
@@ -59,7 +75,7 @@ def swiglu_packed(dtype, device):
     from deepspeed.ops.triton_ops.swiglu_triton import _SwiGLUPackedFn
 
     def forward():
-        x = torch.randn((32, 32), dtype=dtype, device=device, requires_grad=True)
+        x = _probe_tensor((32, 32), dtype, device).requires_grad_()
         return _SwiGLUPackedFn.apply(x)
 
     return _fwd_bwd(forward, device)
@@ -71,7 +87,7 @@ def swiglu_packed_1elem(dtype, device):
     from deepspeed.ops.triton_ops.swiglu_triton import _SwiGLUPackedFn
 
     def forward():
-        x = torch.randn((2, ), dtype=dtype, device=device, requires_grad=True)
+        x = _probe_tensor((2, ), dtype, device).requires_grad_()
         return _SwiGLUPackedFn.apply(x)
 
     return _fwd_bwd(forward, device)
@@ -81,8 +97,8 @@ def group_gemm(dtype, device):
     from deepspeed.ops.triton_ops.group_gemm_triton import _GroupGemmFn
 
     def forward():
-        a = torch.randn((8, 16), dtype=dtype, device=device, requires_grad=True)
-        b = torch.randn((2, 16, 32), dtype=dtype, device=device, requires_grad=True)
+        a = _probe_tensor((8, 16), dtype, device).requires_grad_()
+        b = _probe_tensor((2, 16, 32), dtype, device).requires_grad_()
         offs = torch.tensor([0, 4, 8], dtype=torch.int32, device=device)
         return _GroupGemmFn.apply(a, b, offs, False)
 
@@ -93,8 +109,8 @@ def fused_rms_norm(dtype, device):
     from deepspeed.ops.triton_ops.fused_rms_norm import _FusedRMSNorm
 
     def forward():
-        hidden = torch.randn((2, 256), dtype=dtype, device=device, requires_grad=True)
-        weight = torch.randn((256, ), dtype=dtype, device=device, requires_grad=True)
+        hidden = _probe_tensor((2, 256), dtype, device).requires_grad_()
+        weight = _probe_tensor((256, ), dtype, device).requires_grad_()
         return _FusedRMSNorm.apply(hidden, weight, 1e-6)
 
     return _fwd_bwd(forward, device)
@@ -104,10 +120,10 @@ def fused_rotary(dtype, device):
     from deepspeed.ops.triton_ops.fused_rotary_pos_emb import _FusedRotaryPosEmb
 
     def forward():
-        q = torch.randn((1, 4, 8, 64), dtype=dtype, device=device, requires_grad=True)
-        k = torch.randn((1, 4, 8, 64), dtype=dtype, device=device, requires_grad=True)
-        cos = torch.randn((1, 8, 64), dtype=dtype, device=device)
-        sin = torch.randn((1, 8, 64), dtype=dtype, device=device)
+        q = _probe_tensor((1, 4, 8, 64), dtype, device).requires_grad_()
+        k = _probe_tensor((1, 4, 8, 64), dtype, device).requires_grad_()
+        cos = _probe_tensor((1, 8, 64), dtype, device)
+        sin = _probe_tensor((1, 8, 64), dtype, device)
         q_out, k_out = _FusedRotaryPosEmb.apply(q, k, cos, sin)
         return q_out + k_out
 
@@ -119,8 +135,8 @@ def fused_weighted_restore(dtype, device):
 
     def forward():
         bsz, seqlen, hidden, top_k = 1, 2, 64, 2
-        combined_rows = torch.randn((bsz * seqlen * top_k, hidden), dtype=dtype, device=device, requires_grad=True)
-        top_scores = torch.randn((bsz * seqlen, top_k), dtype=torch.float32, device=device, requires_grad=True)
+        combined_rows = _probe_tensor((bsz * seqlen * top_k, hidden), dtype, device).requires_grad_()
+        top_scores = _probe_tensor((bsz * seqlen, top_k), torch.float32, device).requires_grad_()
         token_indices_sorted = torch.arange(bsz * seqlen * top_k, dtype=torch.int32, device=device)
         return fused_weighted_restore(combined_rows, top_scores, token_indices_sorted, top_k, (bsz, seqlen, hidden))
 
@@ -131,8 +147,8 @@ def fused_row_weighting(dtype, device):
     from deepspeed.ops.triton_ops.autoep_fused_token_ops import _FusedRowWeighting
 
     def forward():
-        rows = torch.randn((8, 64), dtype=dtype, device=device, requires_grad=True)
-        weights = torch.randn((8, 1), dtype=torch.float32, device=device, requires_grad=True)
+        rows = _probe_tensor((8, 64), dtype, device).requires_grad_()
+        weights = _probe_tensor((8, 1), torch.float32, device).requires_grad_()
         return _FusedRowWeighting.apply(rows, weights)
 
     return _fwd_bwd(forward, device)
@@ -142,8 +158,8 @@ def chunked_cross_entropy(dtype, device):
     from deepspeed.runtime.chunked_cross_entropy import _TritonCrossEntropy
 
     def forward():
-        logits = torch.randn((2, 64), dtype=dtype, device=device, requires_grad=True)
-        target = torch.randint(0, 64, (2, ), device=device)
+        logits = _probe_tensor((2, 64), dtype, device).requires_grad_()
+        target = torch.arange(2, dtype=torch.long, device=device)
         return _TritonCrossEntropy.apply(logits, target, -100)
 
     return _fwd_bwd(forward, device)
@@ -155,8 +171,12 @@ def fp8_gemm(dtype, device, weight_dtype, k, n, quantization_group_size):
     from deepspeed.ops.triton_ops._triton import current_device
 
     def run():
-        with current_device(device.index):
-            inp = torch.randn((16, k), dtype=dtype, device=device)
+        from contextlib import nullcontext
+
+        # current_device takes an index; index-less devices skip the switch.
+        device_ctx = current_device(device.index) if device.index is not None else nullcontext()
+        with device_ctx:
+            inp = _probe_tensor((16, k), dtype, device)
             weight = torch.zeros((k, n), dtype=weight_dtype, device=device)
             scale = torch.ones((k // quantization_group_size, n // quantization_group_size), device=device)
             matmul_fp8_triton(inp, weight, scale, quantization_group_size)

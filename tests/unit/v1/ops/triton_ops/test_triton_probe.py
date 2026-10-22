@@ -78,14 +78,19 @@ def test_failing_probe_closes_the_gate_with_a_cached_false():
 
 def test_probe_does_not_advance_the_caller_rng_sequence():
     dtype, device = _dtype_and_device()
-    # Check the accelerator's device generator - the one the probe's tensors
-    # actually consume - not just the CPU generator.
+    # Compare the first draw after seeding WITH the probe in between against
+    # the same draw WITHOUT the probe: reseed, run the probe, draw
+    # ``after_probe``, then reseed again and draw ``control``. If the probe
+    # consumed any random numbers, ``after_probe`` starts further along the
+    # sequence than ``control`` and the two draws differ.
     _ACCELERATOR.manual_seed(4321)
-    expected = torch.randn(4, device=device)
     is_triton_kernel_supported("unit_probe_rng", dtype, device, _probes.fused_rms_norm, dtype, device)
+    after_probe = torch.randn(4, device=device)
+
     _ACCELERATOR.manual_seed(4321)
-    actual = torch.randn(4, device=device)
-    assert torch.equal(expected, actual)
+    control = torch.randn(4, device=device)
+
+    assert torch.equal(after_probe, control)
 
 
 def test_env_escape_hatch_bypasses_probing(monkeypatch):

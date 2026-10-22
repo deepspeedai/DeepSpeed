@@ -40,11 +40,12 @@ def probe_triton_kernel(key: str, run, reference=None, tolerance: float | None =
     actually running the kernel, so every platform - present or future - decides
     for itself, and a platform that gains or fixes support flips the gate
     automatically with no code change. ``run`` executes the smallest form of the
-    kernel that reproduces its known-risky usage (a compile crash, a precision
-    loss, ...) and is followed by a device synchronize so faults a backend only
-    reports asynchronously fail the probe here, not on the first real workload.
-    When ``reference`` is given the outputs are compared - bitwise when
-    ``tolerance`` is None, else with ``torch.allclose``. Any exception answers
+    kernel that reproduces its known-risky usage (a compile crash, for example)
+    and is followed by a synchronization of the current stream so faults a
+    backend only reports asynchronously fail the probe here, not on the first
+    real workload. When ``reference`` is given the outputs are compared -
+    bitwise when ``tolerance`` is None, else with ``torch.allclose`` - though
+    none of the current probes needs a numerical check. Any exception answers
     False (with a one-time warning), which sends callers to their fallback.
     """
     with _TRITON_PROBE_LOCK:
@@ -57,7 +58,11 @@ def probe_triton_kernel(key: str, run, reference=None, tolerance: float | None =
             actual = run()
             from deepspeed.accelerator import get_accelerator
 
-            get_accelerator().synchronize()
+            # Synchronize the current stream only: a device-wide synchronize
+            # would also wait on unrelated streams and could surface their
+            # asynchronous errors here. The probe's run pinned the current
+            # device, so this is the probe's own stream.
+            get_accelerator().current_stream().synchronize()
             if reference is not None:
                 if actual is None:
                     supported = False
@@ -109,6 +114,12 @@ def is_triton_kernel_supported(kernel: str, dtype, device, probe_fn, *probe_args
         # The backend-level gate cannot open mid-process; cache its answer too.
         _TRITON_PROBE_CACHE[key] = False
         return False
+    if accelerator.is_current_stream_capturing():
+        # Launching a probe while the stream is being captured would break the
+        # capture, and a capture-time failure would poison the graph; defer the
+        # probe to the first non-capturing call. Deliberately not cached: the
+        # probe still has to run once outside capture.
+        return True
     import inspect
     if "probe" not in inspect.signature(accelerator.is_triton_supported).parameters:
         # Platform whose gate predates the per-kernel extension: its static
