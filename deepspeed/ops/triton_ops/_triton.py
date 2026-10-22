@@ -6,6 +6,7 @@
 Shared Triton availability check and self-reporting kernel probes for the ``triton_ops`` package.
 """
 
+import threading
 from contextlib import contextmanager
 
 try:
@@ -29,6 +30,7 @@ def is_triton_available() -> bool:
 
 
 _TRITON_PROBE_CACHE: dict[str, bool] = {}
+_TRITON_PROBE_LOCK = threading.Lock()
 
 
 def probe_triton_kernel(key: str, run, reference=None, tolerance: float | None = None) -> bool:
@@ -39,29 +41,43 @@ def probe_triton_kernel(key: str, run, reference=None, tolerance: float | None =
     for itself, and a platform that gains or fixes support flips the gate
     automatically with no code change. ``run`` executes the smallest form of the
     kernel that reproduces its known-risky usage (a compile crash, a precision
-    loss, ...); when ``reference`` is given the outputs are compared - bitwise
-    when ``tolerance`` is None, else with ``torch.allclose``. Any exception
-    answers False, which sends callers to their fallback.
+    loss, ...) and is followed by a device synchronize so faults a backend only
+    reports asynchronously fail the probe here, not on the first real workload.
+    When ``reference`` is given the outputs are compared - bitwise when
+    ``tolerance`` is None, else with ``torch.allclose``. Any exception answers
+    False (with a one-time warning), which sends callers to their fallback.
     """
-    if key in _TRITON_PROBE_CACHE:
-        return _TRITON_PROBE_CACHE[key]
-    import torch  # keep the module import-light; the probe path is cold
+    with _TRITON_PROBE_LOCK:
+        if key in _TRITON_PROBE_CACHE:
+            return _TRITON_PROBE_CACHE[key]
+        import torch  # keep the module import-light; the probe path is cold
 
-    supported = False
-    try:
-        actual = run()
-        if reference is not None:
-            expected = reference()
-            if tolerance is None:
-                supported = torch.equal(actual, expected)
-            else:
-                supported = torch.allclose(actual, expected, atol=tolerance, rtol=tolerance)
-        else:
-            supported = True
-    except Exception:
         supported = False
-    _TRITON_PROBE_CACHE[key] = supported
-    return supported
+        try:
+            actual = run()
+            from deepspeed.accelerator import get_accelerator
+
+            get_accelerator().synchronize()
+            if reference is not None:
+                if actual is None:
+                    supported = False
+                else:
+                    expected = reference()
+                    if tolerance is None:
+                        supported = torch.equal(actual, expected)
+                    else:
+                        supported = torch.allclose(actual, expected, atol=tolerance, rtol=tolerance)
+            else:
+                supported = True
+        except Exception:
+            supported = False
+        if not supported:
+            from deepspeed.utils import logger
+
+            logger.warning_once(f"Triton kernel probe {key!r} failed on this platform; "
+                                "callers keep their non-Triton fallback.")
+        _TRITON_PROBE_CACHE[key] = supported
+        return supported
 
 
 def is_triton_kernel_supported(kernel: str, dtype, device, probe_fn, *probe_args) -> bool:
@@ -75,19 +91,38 @@ def is_triton_kernel_supported(kernel: str, dtype, device, probe_fn, *probe_args
     automatically. Platforms whose ``is_triton_supported`` predates the per-kernel
     extension keep their static backend-level answer.
     """
+    key = f"triton_kernel:{kernel}:{device.type}:{device.index}"
+    if key in _TRITON_PROBE_CACHE:
+        # Steady state: one dictionary lookup per call; no probe construction, no backend query.
+        return _TRITON_PROBE_CACHE[key]
+    import os
+    if os.environ.get("DS_TRITON_KERNEL_GATE") == "0":
+        # Emergency escape hatch: skip per-kernel probing entirely and trust the
+        # backend-level gate (the pre-probe behavior).
+        from deepspeed.accelerator import get_accelerator
+
+        return get_accelerator().is_triton_supported()
     from deepspeed.accelerator import get_accelerator
 
     accelerator = get_accelerator()
     if not accelerator.is_triton_supported():
+        # The backend-level gate cannot open mid-process; cache its answer too.
+        _TRITON_PROBE_CACHE[key] = False
         return False
-    key = f"triton_kernel:{kernel}:{device.type}:{dtype}"
-    if key in _TRITON_PROBE_CACHE:
-        return _TRITON_PROBE_CACHE[key]
+    import inspect
+    if "probe" not in inspect.signature(accelerator.is_triton_supported).parameters:
+        # Platform whose gate predates the per-kernel extension: its static
+        # backend-level answer stands.
+        _TRITON_PROBE_CACHE[key] = True
+        return True
     try:
-        supported = accelerator.is_triton_supported(kernel=f"{kernel}:{device.type}:{dtype}",
-                                                    probe=probe_fn(*probe_args))
-    except TypeError:
-        supported = True
+        probe = probe_fn(*probe_args)
+    except Exception:
+        # The probe library cannot even build its minimal case here; fail closed
+        # rather than open the gate on a broken probe.
+        _TRITON_PROBE_CACHE[key] = False
+        return False
+    supported = accelerator.is_triton_supported(kernel=f"{kernel}:{device.type}:{device.index}", probe=probe)
     _TRITON_PROBE_CACHE[key] = supported
     return supported
 

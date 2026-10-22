@@ -34,8 +34,11 @@ def _fp8_gemm_gated(inp, weight, scale, quantization_group_size) -> bool:
     if min(k, n) < quantization_group_size:
         # Too small to build a representative probe case; the backend-level answer stands.
         return True
-    return is_triton_kernel_supported("fp8_gemm", inp.dtype, inp.device, _probes.fp8_gemm, inp.dtype, inp.device,
-                                      weight.dtype, k, n, quantization_group_size)
+    # The kernel name carries what the probe tested: the weight dtype and the group
+    # size are compile-time constants, so distinct values keep distinct answers.
+    return is_triton_kernel_supported(f"fp8_gemm:{weight.dtype}:{quantization_group_size}", inp.dtype, inp.device,
+                                      _probes.fp8_gemm, inp.dtype, inp.device, weight.dtype, k, n,
+                                      quantization_group_size)
 
 
 def matmul_fp8_fallback(inp, weight, scale, quantization_group_size, quantizer):

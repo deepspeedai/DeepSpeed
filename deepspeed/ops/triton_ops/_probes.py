@@ -20,13 +20,26 @@ the kernel.
 import torch
 
 
-def _fwd_bwd(forward):
-    """Wrap a forward callable in a grad-enabled forward + backward."""
+def _fwd_bwd(forward, device):
+    """Wrap a forward callable in a grad-enabled, device-pinned, RNG-forked forward + backward.
+
+    The device pin makes the probe launch on the tensor's device rather than the
+    caller's current device, and the RNG fork keeps the probe's random tensors
+    from advancing the caller's generator sequence.
+    """
 
     def run():
-        with torch.enable_grad():
+        from contextlib import nullcontext
+
+        from deepspeed.ops.triton_ops._triton import current_device
+
+        # current_device takes a tensor or an index; pass the index so a concrete
+        # torch.device works directly and index-less devices skip the switch.
+        device_ctx = current_device(device.index) if device.index is not None else nullcontext()
+        with torch.enable_grad(), torch.random.fork_rng(), device_ctx:
             y = forward()
             y.sum().backward()
+            return y.detach()
 
     return run
 
@@ -39,7 +52,7 @@ def swiglu(dtype, device):
         up = torch.randn((32, 16), dtype=dtype, device=device, requires_grad=True)
         return _SwiGLUFn.apply(gate, up)
 
-    return _fwd_bwd(forward)
+    return _fwd_bwd(forward, device)
 
 
 def swiglu_packed(dtype, device):
@@ -49,7 +62,7 @@ def swiglu_packed(dtype, device):
         x = torch.randn((32, 32), dtype=dtype, device=device, requires_grad=True)
         return _SwiGLUPackedFn.apply(x)
 
-    return _fwd_bwd(forward)
+    return _fwd_bwd(forward, device)
 
 
 def swiglu_packed_1elem(dtype, device):
@@ -61,7 +74,7 @@ def swiglu_packed_1elem(dtype, device):
         x = torch.randn((2, ), dtype=dtype, device=device, requires_grad=True)
         return _SwiGLUPackedFn.apply(x)
 
-    return _fwd_bwd(forward)
+    return _fwd_bwd(forward, device)
 
 
 def group_gemm(dtype, device):
@@ -73,7 +86,7 @@ def group_gemm(dtype, device):
         offs = torch.tensor([0, 4, 8], dtype=torch.int32, device=device)
         return _GroupGemmFn.apply(a, b, offs, False)
 
-    return _fwd_bwd(forward)
+    return _fwd_bwd(forward, device)
 
 
 def fused_rms_norm(dtype, device):
@@ -84,7 +97,7 @@ def fused_rms_norm(dtype, device):
         weight = torch.randn((256, ), dtype=dtype, device=device, requires_grad=True)
         return _FusedRMSNorm.apply(hidden, weight, 1e-6)
 
-    return _fwd_bwd(forward)
+    return _fwd_bwd(forward, device)
 
 
 def fused_rotary(dtype, device):
@@ -98,7 +111,7 @@ def fused_rotary(dtype, device):
         q_out, k_out = _FusedRotaryPosEmb.apply(q, k, cos, sin)
         return q_out + k_out
 
-    return _fwd_bwd(forward)
+    return _fwd_bwd(forward, device)
 
 
 def fused_weighted_restore(dtype, device):
@@ -111,7 +124,7 @@ def fused_weighted_restore(dtype, device):
         token_indices_sorted = torch.arange(bsz * seqlen * top_k, dtype=torch.int32, device=device)
         return fused_weighted_restore(combined_rows, top_scores, token_indices_sorted, top_k, (bsz, seqlen, hidden))
 
-    return _fwd_bwd(forward)
+    return _fwd_bwd(forward, device)
 
 
 def fused_row_weighting(dtype, device):
@@ -122,7 +135,7 @@ def fused_row_weighting(dtype, device):
         weights = torch.randn((8, 1), dtype=torch.float32, device=device, requires_grad=True)
         return _FusedRowWeighting.apply(rows, weights)
 
-    return _fwd_bwd(forward)
+    return _fwd_bwd(forward, device)
 
 
 def chunked_cross_entropy(dtype, device):
@@ -133,18 +146,20 @@ def chunked_cross_entropy(dtype, device):
         target = torch.randint(0, 64, (2, ), device=device)
         return _TritonCrossEntropy.apply(logits, target, -100)
 
-    return _fwd_bwd(forward)
+    return _fwd_bwd(forward, device)
 
 
 def fp8_gemm(dtype, device, weight_dtype, k, n, quantization_group_size):
     """FP8 GEMM has no autograd; the probe only runs the forward kernel."""
     from deepspeed.ops.fp_quantizer.fp8_gemm_triton import matmul_fp8_triton
+    from deepspeed.ops.triton_ops._triton import current_device
 
     def run():
-        inp = torch.randn((16, k), dtype=dtype, device=device)
-        weight = torch.zeros((k, n), dtype=weight_dtype, device=device)
-        scale = torch.ones((k // quantization_group_size, n // quantization_group_size), device=device)
-        matmul_fp8_triton(inp, weight, scale, quantization_group_size)
+        with current_device(device.index):
+            inp = torch.randn((16, k), dtype=dtype, device=device)
+            weight = torch.zeros((k, n), dtype=weight_dtype, device=device)
+            scale = torch.ones((k // quantization_group_size, n // quantization_group_size), device=device)
+            matmul_fp8_triton(inp, weight, scale, quantization_group_size)
 
     return run
 
@@ -157,4 +172,4 @@ def liger_vocab_parallel_cross_entropy(dtype, device, tp_group, local_vocab_size
         target = torch.zeros((2, ), dtype=torch.long, device=device)
         return _liger_vocab_cross_entropy(logits, target, tp_group, -100)
 
-    return _fwd_bwd(forward)
+    return _fwd_bwd(forward, device)
