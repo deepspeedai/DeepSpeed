@@ -76,8 +76,10 @@ def _swiglu_packed_fn():
 
     A probe must exercise the class the production path actually runs - the
     gate protects that implementation - so the class resolves through the
-    dispatch exactly like the portable module's ``swiglu_packed`` does.
-    Platforms without a variant get the portable class.
+    dispatch exactly like the portable module's dispatched ``swiglu_packed``
+    does (the probe must not call the public function itself: that function
+    checks the gate, and a probe running inside the gate would deadlock on the
+    probe lock). Platforms without a variant get the portable class.
     """
     from deepspeed.ops.triton_ops._triton import resolve_triton_ops_impl
 

@@ -41,7 +41,7 @@ from __future__ import annotations
 import torch
 
 from deepspeed.ops.triton_ops import _probes
-from deepspeed.ops.triton_ops._triton import _TRITON_AVAILABLE, is_triton_kernel_supported, triton, tl
+from deepspeed.ops.triton_ops._triton import _TRITON_AVAILABLE, dispatch, is_triton_kernel_supported, triton, tl
 
 _SUPPORTED_DTYPES = (torch.float16, torch.bfloat16, torch.float32)
 
@@ -460,6 +460,7 @@ class _GroupGemmFn(torch.autograd.Function):
         return grad_a, grad_b, None, None
 
 
+@dispatch("group_gemm_triton")
 def group_gemm_triton(mat_a: torch.Tensor,
                       mat_b: torch.Tensor,
                       offs: torch.Tensor,

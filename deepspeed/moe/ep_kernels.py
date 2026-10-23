@@ -24,7 +24,7 @@ from typing import Callable
 
 import torch
 
-from deepspeed.ops.triton_ops._triton import _TRITON_AVAILABLE, is_accelerator_tensor, triton, tl
+from deepspeed.ops.triton_ops._triton import _TRITON_AVAILABLE, dispatch, is_accelerator_tensor, triton, tl
 
 logger = logging.getLogger(__name__)
 
@@ -279,6 +279,7 @@ if _TRITON_AVAILABLE:
 _GATHER_ROWS = 4
 
 
+@dispatch("ep_kernels", portable_module="deepspeed.moe.ep_kernels")
 def gather_rows(src: torch.Tensor, index: torch.Tensor) -> torch.Tensor:
     """``out[r] = src[index[r]]``, or a zero row where ``index[r]`` is outside ``[0, src.shape[0])``.
 
@@ -359,6 +360,7 @@ class _UnpermuteRows(torch.autograd.Function):
         return _PermuteRows.apply(grad_out, permuted_indices, inverse), None, None
 
 
+@dispatch("ep_kernels", portable_module="deepspeed.moe.ep_kernels")
 def permute_rows(rows: torch.Tensor, permuted_indices: torch.Tensor) -> torch.Tensor:
     """``rows`` in the padded order of ``permuted_indices``, with zero rows at padding slots.
 
@@ -376,6 +378,7 @@ def permute_rows(rows: torch.Tensor, permuted_indices: torch.Tensor) -> torch.Te
     return _PermuteRows.apply(rows, permuted_indices, inverse_permutation(permuted_indices, rows.shape[0]))
 
 
+@dispatch("ep_kernels", portable_module="deepspeed.moe.ep_kernels")
 def unpermute_rows(rows: torch.Tensor, permuted_indices: torch.Tensor, num_rows: int) -> torch.Tensor:
     """Invert :func:`permute_rows`: the ``num_rows`` original rows back from the padded order.
 

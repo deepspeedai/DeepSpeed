@@ -14,6 +14,8 @@ import torch
 import triton
 import triton.language as tl
 
+from deepspeed.ops.triton_ops._triton import dispatch
+
 
 @triton.jit
 def matmul_kernel_fp8_bf16(inp_ptr, weight_ptr, out_ptr, scale_ptr, M, N, K, stride_am, stride_ak, stride_bk,
@@ -115,6 +117,7 @@ def matmul_kernel_fp8_fp16(inp_ptr, weight_ptr, out_ptr, scale_ptr, M, N, K, str
     tl.store(out_data, out, mask=(offs_cm[:, None] < M) & (offs_cn[None, :] < N))
 
 
+@dispatch("fp8_gemm_triton", portable_module="deepspeed.ops.fp_quantizer.fp8_gemm_triton")
 def matmul_fp8_triton(inp, weight, scale, quantization_group_size):
 
     assert inp.shape[1] == weight.shape[0], \

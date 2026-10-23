@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # DeepSpeed Team
-"""Ascend variant of the fused Triton SwiGLU kernels.
+"""Ascend (NPU) variant of the fused Triton SwiGLU kernels.
 
 The packed backward kernel overflows the unified buffer at compile time for a
 single output element with BLOCK_SIZE=2048 on the triton-ascend backend
@@ -10,16 +10,21 @@ the packed backward's block size is lowered, so the packed path - single
 element included - runs on Ascend with no shape-specific gate in the shared
 code. Remove this variant once the backend fix lands (or keep it if 1024 stays
 the better Ascend tile).
+
+The per-hardware dispatch (``_triton.dispatch``) picks this module's
+``swiglu_packed`` over the portable one on Ascend. The steps the platform does
+not change - validation, the runtime gate, the eager fallback - are imported
+from the portable module, so the variant only forks what actually differs.
 """
 
 import torch
 
 from deepspeed.ops.triton_ops._triton import _TRITON_AVAILABLE, current_device, triton
+from deepspeed.ops.triton_ops.swiglu_triton import _swiglu_packed_eager, _swiglu_packed_supported, _validate_packed_input
 
-# The public API stays the portable functions; they resolve the packed class
-# through the dispatch, so the re-exports keep this module a drop-in for the
-# portable one.
-from deepspeed.ops.triton_ops.swiglu_triton import swiglu, swiglu_packed  # noqa: F401
+# The separate (unpacked) kernels are unchanged on Ascend; keep the re-export
+# so this module stays a drop-in for the portable one.
+from deepspeed.ops.triton_ops.swiglu_triton import swiglu  # noqa: F401
 
 if _TRITON_AVAILABLE:
     from deepspeed.ops.triton_ops.swiglu_triton import (_BLOCK_SIZE, _NUM_WARPS, _swiglu_packed_bwd_kernel,
@@ -76,3 +81,11 @@ if _TRITON_AVAILABLE:
                                                     num_warps=_NUM_WARPS)
 
             return grad_gate_up
+
+
+def swiglu_packed(gate_up: torch.Tensor) -> torch.Tensor:
+    """The packed SwiGLU with the Ascend packed-backward tile (see the module docstring)."""
+    _validate_packed_input(gate_up)
+    if not _TRITON_AVAILABLE or not _swiglu_packed_supported(gate_up):
+        return _swiglu_packed_eager(gate_up)
+    return _SwiGLUPackedFn.apply(gate_up)

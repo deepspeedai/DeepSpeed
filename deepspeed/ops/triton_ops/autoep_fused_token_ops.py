@@ -11,7 +11,8 @@ from __future__ import annotations
 import torch
 
 from deepspeed.ops.triton_ops import _probes
-from deepspeed.ops.triton_ops._triton import _TRITON_AVAILABLE, is_accelerator_tensor, is_triton_kernel_supported, triton, tl
+from deepspeed.ops.triton_ops._triton import (_TRITON_AVAILABLE, dispatch, is_accelerator_tensor,
+                                              is_triton_kernel_supported, triton, tl)
 
 _IS_ROCM_PYTORCH = getattr(torch.version, "hip", None) is not None
 
@@ -456,12 +457,14 @@ class _FusedRowWeighting(torch.autograd.Function):
         return grad_rows, grad_weights
 
 
+@dispatch("autoep_fused_token_ops")
 def fused_row_weighting(rows: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
     """Apply ``weights`` to ``rows`` as ``(rows.float() * weights).to(rows.dtype)``."""
     assert_row_weighting_supported(rows, weights)
     return _FusedRowWeighting.apply(rows, weights)
 
 
+@dispatch("autoep_fused_token_ops")
 def fused_weighted_restore(
     combined_rows: torch.Tensor,
     top_scores: torch.Tensor,

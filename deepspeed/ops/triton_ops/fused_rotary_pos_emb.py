@@ -13,7 +13,7 @@ import torch
 from torch.autograd.function import once_differentiable
 
 from deepspeed.ops.triton_ops import _probes
-from deepspeed.ops.triton_ops._triton import (_TRITON_AVAILABLE, current_device, is_accelerator_tensor,
+from deepspeed.ops.triton_ops._triton import (_TRITON_AVAILABLE, current_device, dispatch, is_accelerator_tensor,
                                               is_triton_kernel_supported, triton, tl)
 from deepspeed.utils import logger
 
@@ -248,6 +248,7 @@ def _run_kernels(q, k, cos, sin, unsqueeze_dim):
     return _FusedRotaryPosEmb.apply(q, k, cos, sin)
 
 
+@dispatch("fused_rotary_pos_emb")
 def fused_apply_rotary_pos_emb(q: torch.Tensor,
                                k: torch.Tensor,
                                cos: torch.Tensor,

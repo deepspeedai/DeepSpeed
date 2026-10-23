@@ -21,7 +21,8 @@ import operator
 import torch
 
 from deepspeed.ops.triton_ops import _probes
-from deepspeed.ops.triton_ops._triton import _TRITON_AVAILABLE, is_accelerator_tensor, is_triton_kernel_supported, triton, tl
+from deepspeed.ops.triton_ops._triton import (_TRITON_AVAILABLE, dispatch, is_accelerator_tensor,
+                                              is_triton_kernel_supported, triton, tl)
 from deepspeed.utils.torch import required_torch_version
 
 _IS_ROCM_PYTORCH = getattr(torch.version, "hip", None) is not None
@@ -207,6 +208,7 @@ class _ChunkedCrossEntropy(torch.autograd.Function):
         return grad_logits, None, None, None
 
 
+@dispatch("chunked_cross_entropy", portable_module="deepspeed.runtime.chunked_cross_entropy")
 def chunked_cross_entropy(logits: torch.Tensor,
                           target: torch.Tensor,
                           ignore_index: int = -100,

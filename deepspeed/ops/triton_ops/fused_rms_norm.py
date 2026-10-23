@@ -8,7 +8,8 @@ import torch
 from torch.autograd.function import once_differentiable
 
 from deepspeed.ops.triton_ops import _probes
-from deepspeed.ops.triton_ops._triton import _TRITON_AVAILABLE, is_accelerator_tensor, is_triton_kernel_supported, triton, tl
+from deepspeed.ops.triton_ops._triton import (_TRITON_AVAILABLE, dispatch, is_accelerator_tensor,
+                                              is_triton_kernel_supported, triton, tl)
 from deepspeed.utils import logger
 
 _IS_ROCM_PYTORCH = getattr(torch.version, "hip", None) is not None
@@ -251,6 +252,7 @@ class _FusedRMSNorm(torch.autograd.Function):
         return grad_hidden, grad_weight, None
 
 
+@dispatch("fused_rms_norm")
 def fused_rms_norm(hidden: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
     """Apply Hugging Face RMSNorm with fused Triton kernels.
 
