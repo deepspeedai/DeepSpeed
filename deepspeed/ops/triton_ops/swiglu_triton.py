@@ -212,6 +212,16 @@ def _swiglu_eager(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
     return F.silu(gate) * up
 
 
+def _swiglu_supported(gate: torch.Tensor) -> bool:
+    """The separate path's runtime gate, shared with platform variants.
+
+    The probe resolves the separate class through the same dispatch as the
+    production path, so the gate answers for whichever implementation the
+    platform actually runs.
+    """
+    return is_triton_kernel_supported("swiglu", gate.dtype, gate.device, _probes.swiglu, gate.dtype, gate.device)
+
+
 def _validate_packed_input(gate_up: torch.Tensor) -> None:
     """Shape validation of the packed input, shared with platform variants."""
     if gate_up.dim() == 0 or gate_up.shape[-1] % 2:
@@ -259,7 +269,7 @@ def swiglu(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
 
     # Runtime detection: the current backend validates the kernels for itself once per
     # process; a platform that fails the probe runs eager for every later call.
-    if not is_triton_kernel_supported("swiglu", gate.dtype, gate.device, _probes.swiglu, gate.dtype, gate.device):
+    if not _swiglu_supported(gate):
         return _swiglu_eager(gate, up)
 
     return _SwiGLUFn.apply(gate, up)

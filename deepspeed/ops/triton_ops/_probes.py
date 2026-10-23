@@ -22,6 +22,21 @@ reproducible run over run.
 import torch
 
 
+def _dispatched_class(feature: str, class_name: str, portable_module: str | None = None):
+    """The kernel class the production path runs, through the per-hardware dispatch.
+
+    A probe must exercise the class production actually runs - the gate
+    protects that implementation - so the class resolves through the dispatch
+    exactly like the dispatched public function does (the probe must not call
+    the public function itself: that function checks the gate, and a probe
+    running inside the gate would deadlock on the probe lock). Platforms
+    without a variant get the portable class.
+    """
+    from deepspeed.ops.triton_ops._triton import resolve_triton_ops_impl
+
+    return getattr(resolve_triton_ops_impl(feature, portable_module), class_name)
+
+
 def _probe_tensor(size, dtype, device):
     """A deterministic probe input in [0, 1) with no RNG involvement.
 
@@ -61,7 +76,7 @@ def _fwd_bwd(forward, device):
 
 
 def swiglu(dtype, device):
-    from deepspeed.ops.triton_ops.swiglu_triton import _SwiGLUFn
+    _SwiGLUFn = _dispatched_class("swiglu_triton", "_SwiGLUFn")
 
     def forward():
         gate = _probe_tensor((32, 16), dtype, device).requires_grad_()
@@ -72,18 +87,8 @@ def swiglu(dtype, device):
 
 
 def _swiglu_packed_fn():
-    """The packed SwiGLU class through the per-hardware dispatch.
-
-    A probe must exercise the class the production path actually runs - the
-    gate protects that implementation - so the class resolves through the
-    dispatch exactly like the portable module's dispatched ``swiglu_packed``
-    does (the probe must not call the public function itself: that function
-    checks the gate, and a probe running inside the gate would deadlock on the
-    probe lock). Platforms without a variant get the portable class.
-    """
-    from deepspeed.ops.triton_ops._triton import resolve_triton_ops_impl
-
-    return resolve_triton_ops_impl("swiglu_triton")._SwiGLUPackedFn
+    """The packed SwiGLU class through the per-hardware dispatch (see ``_dispatched_class``)."""
+    return _dispatched_class("swiglu_triton", "_SwiGLUPackedFn")
 
 
 def swiglu_packed(dtype, device):
@@ -109,7 +114,7 @@ def group_gemm(dtype, device):
 
 
 def fused_rms_norm(dtype, device):
-    from deepspeed.ops.triton_ops.fused_rms_norm import _FusedRMSNorm
+    _FusedRMSNorm = _dispatched_class("fused_rms_norm", "_FusedRMSNorm")
 
     def forward():
         hidden = _probe_tensor((2, 256), dtype, device).requires_grad_()
@@ -120,7 +125,7 @@ def fused_rms_norm(dtype, device):
 
 
 def fused_rotary(dtype, device):
-    from deepspeed.ops.triton_ops.fused_rotary_pos_emb import _FusedRotaryPosEmb
+    _FusedRotaryPosEmb = _dispatched_class("fused_rotary_pos_emb", "_FusedRotaryPosEmb")
 
     def forward():
         q = _probe_tensor((1, 4, 8, 64), dtype, device).requires_grad_()
@@ -158,7 +163,8 @@ def fused_row_weighting(dtype, device):
 
 
 def chunked_cross_entropy(dtype, device):
-    from deepspeed.runtime.chunked_cross_entropy import _TritonCrossEntropy
+    _TritonCrossEntropy = _dispatched_class("chunked_cross_entropy", "_TritonCrossEntropy",
+                                            "deepspeed.runtime.chunked_cross_entropy")
 
     def forward():
         logits = _probe_tensor((2, 64), dtype, device).requires_grad_()

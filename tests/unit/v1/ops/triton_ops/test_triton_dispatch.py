@@ -55,8 +55,8 @@ def test_platform_subpackage_resolves_the_platform_module(monkeypatch):
 def test_unoverridden_feature_falls_back_to_the_portable_module(monkeypatch):
     monkeypatch.setattr(deepspeed.accelerator, "get_accelerator",
                         lambda: _FakeAccelerator("deepspeed.ops.triton_ops.npu"))
-    impl = resolve_triton_ops_impl("fused_rms_norm")
-    assert impl.__name__ == "deepspeed.ops.triton_ops.fused_rms_norm"
+    impl = resolve_triton_ops_impl("group_gemm_triton")
+    assert impl.__name__ == "deepspeed.ops.triton_ops.group_gemm_triton"
 
 
 def test_missing_feature_raises_after_the_platform_fallback(monkeypatch):
