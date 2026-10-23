@@ -215,6 +215,14 @@ class DeepSpeedAccelerator(ABC):
     def prefer_triton_grouped_mm(self):
         return False
 
+    # The triton_ops subpackage holding this accelerator's own Triton kernel
+    # variants, or None for the portable implementations (op_builder-style
+    # per-hardware dispatch: the shared triton_ops layer asks here and never
+    # names a platform). Backends override this only when they ship a variant;
+    # features the subpackage does not override keep the portable kernels.
+    def triton_ops_dir(self):
+        return None
+
     # Graph operations
     def is_current_stream_capturing(self) -> bool:
         return False

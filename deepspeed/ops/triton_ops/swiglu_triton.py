@@ -206,21 +206,6 @@ def _swiglu_eager(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
     return F.silu(gate) * up
 
 
-def _swiglu_packed_1elem_supported(gate_up: torch.Tensor) -> bool:
-    """Whether the packed backward kernel compiles for one packed element on this backend.
-
-    n_elements=1 with BLOCK_SIZE=2048 overflows some backends' unified buffer at compile
-    time (reported upstream). The accelerator answers via a kernel probe - it runs the
-    minimal risky usage once per process and caches: whoever compiles it keeps the packed
-    path, whoever does not falls back to the separate kernel for this shape only. The
-    probe runs only when a one-element call actually happens, so regular shapes never
-    pay for it.
-    """
-
-    return is_triton_kernel_supported("swiglu_packed_bwd_1elem", gate_up.dtype, gate_up.device,
-                                      _probes.swiglu_packed_1elem, gate_up.dtype, gate_up.device)
-
-
 def swiglu(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
     """Fused SwiGLU activation: ``silu(gate) * up``.
 
@@ -261,9 +246,7 @@ def swiglu_packed(gate_up: torch.Tensor) -> torch.Tensor:
 
     The Triton path supports first-order gradients only and raises for ``create_graph=True``.
     Forward and backward use the input device's current stream and restore the caller's current device.
-    Falls back to the eager PyTorch expression when Triton is unavailable, and to the separate
-    :func:`swiglu` kernel for one packed element when the backend cannot compile the packed
-    backward at that size.
+    Falls back to the eager PyTorch expression when Triton is unavailable.
     """
     if gate_up.dim() == 0 or gate_up.shape[-1] % 2:
         raise ValueError(f"swiglu_packed expects an even last dimension, got shape {tuple(gate_up.shape)}")
@@ -279,15 +262,14 @@ def swiglu_packed(gate_up: torch.Tensor) -> torch.Tensor:
         gate, up = gate_up.chunk(2, dim=-1)
         return _swiglu_eager(gate, up)
 
-    # The single-element packed backward fails to compile on some Triton backends
-    # (unified-buffer overflow; reported upstream). The accelerator answers via the
-    # kernel probe once per process; whoever compiles it keeps the packed path, whoever
-    # does not falls back to the separate kernel for this shape only. No platform is named.
-    if gate_up.numel() == 2 and not _swiglu_packed_1elem_supported(gate_up):
-        gate, up = gate_up.chunk(2, dim=-1)
-        return swiglu(gate, up)
+    # The packed class resolves through the per-hardware dispatch: a platform
+    # that ships its own variant (see the accelerator's triton_ops_dir) answers
+    # here, every other platform gets the portable class. The resolution is
+    # cached, so the steady state is one dictionary lookup per call.
+    from deepspeed.ops.triton_ops._triton import resolve_triton_ops_impl
 
-    return _SwiGLUPackedFn.apply(gate_up)
+    packed_fn = resolve_triton_ops_impl("swiglu_triton")._SwiGLUPackedFn
+    return packed_fn.apply(gate_up)
 
 
 # ---------------------------------------------------------------------------

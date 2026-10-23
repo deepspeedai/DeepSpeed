@@ -150,6 +150,44 @@ def is_triton_kernel_supported(kernel: str, dtype, device, probe_fn, *probe_args
     return supported
 
 
+_TRITON_OPS_IMPL_CACHE: dict[str, object] = {}
+
+
+def resolve_triton_ops_impl(feature: str):
+    """Resolve the platform-specific implementation module for a triton_ops feature.
+
+    The accelerator names its own triton_ops subpackage (op_builder-style) when
+    it ships kernel variants; platforms without one resolve the portable module.
+    A feature the platform does not override falls back to the portable module,
+    so a subpackage may hold a single kernel. The accelerator is fixed per
+    process, so the answer is cached per feature: the steady state is one
+    dictionary lookup. Kernel probes must import their classes through this
+    resolver so the gate exercises the platform's variant, not the portable
+    kernel.
+    """
+    cached = _TRITON_OPS_IMPL_CACHE.get(feature)
+    if cached is not None:
+        return cached
+    import importlib
+
+    from deepspeed.accelerator import get_accelerator
+
+    subpackage = get_accelerator().triton_ops_dir()
+    if subpackage is not None:
+        try:
+            impl = importlib.import_module(f"{subpackage}.{feature}")
+        except ModuleNotFoundError:
+            # The platform ships a subpackage but does not override this
+            # feature; the portable module stands.
+            impl = None
+        if impl is not None:
+            _TRITON_OPS_IMPL_CACHE[feature] = impl
+            return impl
+    impl = importlib.import_module(f"deepspeed.ops.triton_ops.{feature}")
+    _TRITON_OPS_IMPL_CACHE[feature] = impl
+    return impl
+
+
 def is_accelerator_tensor(tensor) -> bool:
     """Whether the package's kernels can launch on ``tensor``'s device.
 

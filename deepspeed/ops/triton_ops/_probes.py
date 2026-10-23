@@ -71,23 +71,24 @@ def swiglu(dtype, device):
     return _fwd_bwd(forward, device)
 
 
+def _swiglu_packed_fn():
+    """The packed SwiGLU class through the per-hardware dispatch.
+
+    A probe must exercise the class the production path actually runs - the
+    gate protects that implementation - so the class resolves through the
+    dispatch exactly like the portable module's ``swiglu_packed`` does.
+    Platforms without a variant get the portable class.
+    """
+    from deepspeed.ops.triton_ops._triton import resolve_triton_ops_impl
+
+    return resolve_triton_ops_impl("swiglu_triton")._SwiGLUPackedFn
+
+
 def swiglu_packed(dtype, device):
-    from deepspeed.ops.triton_ops.swiglu_triton import _SwiGLUPackedFn
+    _SwiGLUPackedFn = _swiglu_packed_fn()
 
     def forward():
         x = _probe_tensor((32, 32), dtype, device).requires_grad_()
-        return _SwiGLUPackedFn.apply(x)
-
-    return _fwd_bwd(forward, device)
-
-
-def swiglu_packed_1elem(dtype, device):
-    """The n_elements=1 packed backward overflows some backends' unified buffer at
-    compile time (reported upstream), so this usage is gated separately."""
-    from deepspeed.ops.triton_ops.swiglu_triton import _SwiGLUPackedFn
-
-    def forward():
-        x = _probe_tensor((2, ), dtype, device).requires_grad_()
         return _SwiGLUPackedFn.apply(x)
 
     return _fwd_bwd(forward, device)
