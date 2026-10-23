@@ -105,3 +105,12 @@ def test_env_escape_hatch_bypasses_probing(monkeypatch):
     # The gate answers at the backend level without ever touching the probe.
     assert is_triton_kernel_supported("unit_probe_env", dtype, device, probe_fn) == _ACCELERATOR.is_triton_supported()
     assert calls["n"] == 0
+
+
+def test_static_declaration_answers_from_the_backend_gate_without_a_probe():
+    dtype, device = _dtype_and_device()
+    # probe_fn=None is the static-declaration form for probe-unsafe paths:
+    # nothing runs, and a kernel name no backend declares answers with the
+    # backend-level gate.
+    _TRITON_PROBE_CACHE.pop(_key("unit_probe_static", dtype, device), None)
+    assert is_triton_kernel_supported("unit_probe_static", dtype, device, None) == _ACCELERATOR.is_triton_supported()

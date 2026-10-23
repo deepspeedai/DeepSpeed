@@ -91,8 +91,10 @@ def is_triton_kernel_supported(kernel: str, dtype, device, probe_fn, *probe_args
     ``probe_fn(*probe_args)`` returns the kernel's minimal risky usage (see the
     ``_probes`` library) and is only invoked when the answer is not yet cached, so
     the probe runs at most once per process and every later call costs one
-    dictionary lookup without even constructing the probe. No platform keeps a
-    blacklist, and a backend that gains or fixes support flips the gate
+    dictionary lookup without even constructing the probe. ``probe_fn`` may be
+    None for a static per-kernel declaration: nothing runs, and the accelerator
+    answers for the kernel name alone (used for probe-unsafe paths). No platform
+    keeps a blacklist, and a backend that gains or fixes support flips the gate
     automatically. Platforms whose ``is_triton_supported`` predates the per-kernel
     extension keep their static backend-level answer.
     """
@@ -114,17 +116,27 @@ def is_triton_kernel_supported(kernel: str, dtype, device, probe_fn, *probe_args
         # The backend-level gate cannot open mid-process; cache its answer too.
         _TRITON_PROBE_CACHE[key] = False
         return False
+    import inspect
+    extended = "probe" in inspect.signature(accelerator.is_triton_supported).parameters
+    if probe_fn is None:
+        # A static per-kernel declaration with no probe: the accelerator
+        # answers for the kernel name alone and nothing runs. Used for
+        # probe-unsafe paths, whose answer must not depend on capture state.
+        # Platforms whose gate predates the extension keep their backend-level
+        # answer, already checked above.
+        supported = accelerator.is_triton_supported(kernel) if extended else True
+        _TRITON_PROBE_CACHE[key] = supported
+        return supported
+    if not extended:
+        # Platform whose gate predates the per-kernel extension: its static
+        # backend-level answer stands.
+        _TRITON_PROBE_CACHE[key] = True
+        return True
     if accelerator.is_current_stream_capturing():
         # Launching a probe while the stream is being captured would break the
         # capture, and a capture-time failure would poison the graph; defer the
         # probe to the first non-capturing call. Deliberately not cached: the
         # probe still has to run once outside capture.
-        return True
-    import inspect
-    if "probe" not in inspect.signature(accelerator.is_triton_supported).parameters:
-        # Platform whose gate predates the per-kernel extension: its static
-        # backend-level answer stands.
-        _TRITON_PROBE_CACHE[key] = True
         return True
     try:
         probe = probe_fn(*probe_args)

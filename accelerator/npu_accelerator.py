@@ -254,6 +254,12 @@ class NPU_Accelerator(DeepSpeedAccelerator):
 
         if not is_triton_available():
             return False
+        if kernel == "permute_rows_gather":
+            # The Triton gather path faults on the device in multi-card runs on
+            # Ascend (reported upstream, being fixed). Keep the eager fallback
+            # until the fix lands; narrow to multi-card here if single-card is
+            # verified first.
+            return False
         if probe is None:
             # Backend-level gate: the backend is installed and active.
             return True
@@ -264,13 +270,6 @@ class NPU_Accelerator(DeepSpeedAccelerator):
         from deepspeed.ops.triton_ops._triton import probe_triton_kernel
 
         return probe_triton_kernel(key=f"triton_kernel:{kernel}", run=probe)
-
-    def is_triton_gather_supported(self):
-        # The Triton gather path faults on the device in multi-card runs on
-        # Ascend (reported upstream, being fixed). Keep the eager fallback
-        # until the fix lands; narrow to multi-card here if single-card is
-        # verified first.
-        return False
 
     # Graph operations
     def is_current_stream_capturing(self) -> bool:

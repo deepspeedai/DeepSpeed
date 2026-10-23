@@ -207,15 +207,6 @@ class DeepSpeedAccelerator(ABC):
     def is_triton_supported(self):
         ...
 
-    # Whether the Triton indexed-gather path (permute_rows/unpermute_rows) is
-    # safe on this accelerator. Defaults to the backend-level Triton gate, so a
-    # backend that has validated the path inherits it automatically; backends
-    # with a known problem in this specific path (e.g. a multi-card device
-    # fault being fixed upstream) override it to return False without
-    # affecting other Triton kernels.
-    def is_triton_gather_supported(self):
-        return self.is_triton_supported()
-
     # Whether the fused MoE expert path should prefer a Triton grouped-GEMM
     # kernel over ``torch._grouped_mm`` on this accelerator. Backends override
     # this to return True when the Triton path is faster than the native op
