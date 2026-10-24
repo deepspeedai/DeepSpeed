@@ -2,6 +2,7 @@
 
 # DeepSpeed Team
 
+import ctypes
 import pytest
 import torch
 
@@ -9,6 +10,8 @@ from deepspeed.accelerator import npu_accelerator
 from deepspeed.accelerator.cpu_accelerator import CPU_Accelerator
 from deepspeed.accelerator.cuda_accelerator import CUDA_Accelerator
 from deepspeed.accelerator.npu_accelerator import NPU_Accelerator
+from deepspeed.accelerator import xpu_accelerator
+from deepspeed.accelerator.xpu_accelerator import XPU_Accelerator
 from deepspeed.utils.pin_memory import NativePinnedMemory
 
 
@@ -209,6 +212,91 @@ def test_cuda_device_registration_calls_cudart(monkeypatch):
     assert cudart.registered == [(1234, 4096, 0)]
     assert cudart.unregistered == [1234]
     assert errors == [0, 0]
+
+
+def test_xpu_device_registration_calls_level_zero(monkeypatch):
+
+    calls = []
+
+    class _FakeLoader:
+
+        def zeMemAllocHost(self, context, host_desc, size, alignment, out):
+            host = ctypes.cast(host_desc, ctypes.POINTER(xpu_accelerator._ZeHostMemAllocDesc))[0]
+            memmap = ctypes.cast(host.pNext, ctypes.POINTER(xpu_accelerator._ZeExternalMemmapSysmemDesc))[0]
+            calls.append(("alloc", memmap.pSystemMemory, memmap.size, size))
+            # byref() without argtypes arrives as a CArgObject; cast it back.
+            ctypes.cast(out, ctypes.POINTER(ctypes.c_void_p))[0] = memmap.pSystemMemory
+            return xpu_accelerator._ZE_RESULT_SUCCESS
+
+        def zeMemFree(self, context, address):
+            calls.append(("free", address))
+            return xpu_accelerator._ZE_RESULT_SUCCESS
+
+    monkeypatch.setattr(xpu_accelerator, "_l0_host_registration", lambda: (_FakeLoader(), "ctx"))
+    accelerator = XPU_Accelerator.__new__(XPU_Accelerator)
+
+    assert accelerator.register_host_memory(1234, 4096) is True
+    accelerator.unregister_host_memory(1234)
+    assert calls == [("alloc", 1234, 4096, 4096), ("free", 1234)]
+
+
+def test_xpu_registration_rejects_changed_address(monkeypatch):
+    """A mapping that comes back at another address is a failed registration
+    and the unusable mapping is released."""
+
+    freed = []
+
+    class _FakeLoader:
+
+        def zeMemAllocHost(self, context, host_desc, size, alignment, out):
+            ctypes.cast(out, ctypes.POINTER(ctypes.c_void_p))[0] = 0xDEAD0000
+            return xpu_accelerator._ZE_RESULT_SUCCESS
+
+        def zeMemFree(self, context, address):
+            freed.append(address)
+            return xpu_accelerator._ZE_RESULT_SUCCESS
+
+    monkeypatch.setattr(xpu_accelerator, "_l0_host_registration", lambda: (_FakeLoader(), "ctx"))
+    accelerator = XPU_Accelerator.__new__(XPU_Accelerator)
+    assert accelerator.register_host_memory(1234, 4096) is False
+    assert freed == [0xDEAD0000]
+
+
+def test_xpu_registration_alloc_failure_returns_false(monkeypatch):
+    """A Level Zero allocation failure must degrade to mlock-only, not raise."""
+
+    class _FakeLoader:
+
+        def zeMemAllocHost(self, context, host_desc, size, alignment, out):
+            return 0x78000001  # ZE_RESULT_ERROR_OUT_OF_HOST_MEMORY
+
+    monkeypatch.setattr(xpu_accelerator, "_l0_host_registration", lambda: (_FakeLoader(), "ctx"))
+    accelerator = XPU_Accelerator.__new__(XPU_Accelerator)
+    assert accelerator.register_host_memory(1234, 4096) is False
+
+
+def test_xpu_unregister_failure_raises(monkeypatch):
+    """A failed unmap must raise so the caller keeps the CPU allocation alive
+    (the driver may still hold a mapping for those pages)."""
+
+    class _FakeLoader:
+
+        def zeMemFree(self, context, address):
+            return 0x78000001
+
+    monkeypatch.setattr(xpu_accelerator, "_l0_host_registration", lambda: (_FakeLoader(), "ctx"))
+    accelerator = XPU_Accelerator.__new__(XPU_Accelerator)
+    with pytest.raises(RuntimeError, match="zeMemFree failed"):
+        accelerator.unregister_host_memory(1234)
+
+
+def test_xpu_device_registration_without_level_zero(monkeypatch):
+    """Missing loader or extension must degrade to mlock-only, not raise."""
+    monkeypatch.setattr(xpu_accelerator, "_l0_host_registration", lambda: None)
+    accelerator = XPU_Accelerator.__new__(XPU_Accelerator)
+
+    assert accelerator.register_host_memory(1234, 4096) is False
+    assert accelerator.unregister_host_memory(1234) is None
 
 
 def test_cpu_native_pin_with_register_env_on(monkeypatch, native_pins):
