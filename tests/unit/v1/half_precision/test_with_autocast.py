@@ -267,3 +267,55 @@ class TestTorchAutocastWithPrecisionModes(DistributedTest):
                     f"Parameter {name} comm_dtype should be {autocast_dtype}, got {get_comm_dtype(param)}"
 
         engine.destroy()
+
+
+class TestTorchAutocastFp16Z0Overflow(DistributedTest):
+    world_size = 1
+
+    def test_overflow_step_is_skipped(self):
+        """GradScaler skips optimizer.step() on overflow; the engine must report the step as skipped."""
+        if not get_accelerator().is_fp16_supported():
+            pytest.skip("fp16 is not supported")
+
+        hidden_dim = 6
+        model = SimpleModel(hidden_dim)
+        optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+        lr_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda step: 1.0)
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 2,
+            "steps_per_print": 1,
+            "torch_autocast": {
+                "enabled": True,
+                "dtype": str(torch.float16)
+            },
+            "zero_optimization": {
+                "stage": 0
+            }
+        }
+        engine, _, _, lr_scheduler = deepspeed.initialize(config=config_dict,
+                                                          model=model,
+                                                          optimizer=optimizer,
+                                                          lr_scheduler=lr_scheduler)
+        assert engine.torch_autocast_z0_gradscaler is not None
+
+        data_loader = random_dataloader(model=engine,
+                                        total_samples=4,
+                                        hidden_dim=hidden_dim,
+                                        device=engine.device,
+                                        dtype=torch.float32)
+        for step, (batch, grad_value) in enumerate(zip(data_loader, [float('inf'), 1.0])):
+            loss = engine(batch[0], batch[1])
+            engine.backward(loss)
+            for p in engine.module.parameters():
+                p.grad.fill_(grad_value)
+            params_before = [p.detach().clone() for p in engine.module.parameters()]
+            engine.step()
+            params_changed = any(not torch.equal(b, p) for b, p in zip(params_before, engine.module.parameters()))
+
+            overflow = step == 0
+            assert params_changed != overflow
+            assert engine.was_step_applied() != overflow
+            assert engine.skipped_steps == 1
+            assert lr_scheduler.last_epoch == step
+
+        engine.destroy()
