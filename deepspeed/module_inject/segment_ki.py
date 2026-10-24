@@ -60,15 +60,19 @@ class GLUSegment:
 
 def _find_fusable_projections(root: torch.nn.Module, attr_names: tuple) -> dict:
     """Yield (module, projections_dict) for each module under ``root`` whose
-    named projections are all plain, bias-free, comm-free nn.Linear.
+    named projections are bias-free, comm-free linear-like layers with a
+    2-D weight.
 
-    Rejecting non-Linear types guards against AutoTP sharded wrappers:
-    fusing across a shard/full-layout mismatch needs shard-aware slicing,
-    which is out of scope.
+    Duck-typed (weight + bias attrs): AutoTP replaces nn.Linear with a
+    LinearLayer wrapper that still exposes both. Shard-aware fusion is
+    unnecessary — the kernels derive per-rank shapes from weight.shape,
+    so sharded weights work unchanged at any TP degree.
     """
     for module in root.modules():
         projections = {name: getattr(module, name, None) for name in attr_names}
-        if not all(isinstance(p, torch.nn.Linear) for p in projections.values()):
+        if not all(p is not None and hasattr(p, "weight") and hasattr(p, "bias") for p in projections.values()):
+            continue
+        if any(p.weight is None or p.weight.dim() != 2 for p in projections.values()):
             continue
         if any(p.bias is not None for p in projections.values()):
             continue
