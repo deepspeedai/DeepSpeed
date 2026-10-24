@@ -106,6 +106,73 @@ class TestGradientAllreduceOp(DistributedTest):
 
 
 @pytest.mark.parametrize(
+    "reduce_scatter,contiguous_gradients,reduce_bucket_size",
+    [
+        (False, True, 500),
+        (False, False, 500),
+        (True, True, 500),
+        (False, True, 16),
+    ],
+)
+class TestZero3SequenceParallelGradientScale(DistributedTest):
+    world_size = 2
+
+    def test(self, reduce_scatter, contiguous_gradients, reduce_bucket_size):
+        import deepspeed.runtime.sequence_parallel.parallel_state_sp as sp_mpu
+        from deepspeed.utils import groups
+
+        class TwoLayerLoss(Module):
+
+            def __init__(self):
+                super().__init__()
+                self.small = Parameter(torch.zeros(4))
+                self.large = Parameter(torch.zeros(64))
+
+            def forward(self, scale):
+                return (self.small.sum() + self.large.sum()) * scale
+
+        sp_mpu.initialize_sequence_parallel(sequence_parallel_size=self.world_size)
+        try:
+            model = TwoLayerLoss()
+            optimizer = torch.optim.SGD(model.parameters(), lr=1.0)
+            config_dict = {
+                "train_micro_batch_size_per_gpu": 1,
+                "gradient_clipping": 0.0,
+                "zero_allow_untested_optimizer": True,
+                "zero_optimization": {
+                    "stage": 3,
+                    "reduce_scatter": reduce_scatter,
+                    "contiguous_gradients": contiguous_gradients,
+                    "reduce_bucket_size": reduce_bucket_size,
+                },
+            }
+            engine, _, _, _ = deepspeed.initialize(
+                model=model,
+                optimizer=optimizer,
+                config=config_dict,
+                mpu=sp_mpu,
+            )
+
+            # Each sequence-parallel rank contributes 1 / sp_size of the full-sequence loss.
+            local_loss = engine(torch.tensor(1.0 / self.world_size, device=engine.device))
+            engine.backward(local_loss)
+
+            grad_small = safe_get_full_grad(engine.module.small).detach().cpu()
+            grad_large = safe_get_full_grad(engine.module.large).detach().cpu()
+            torch.testing.assert_close(grad_small, torch.ones_like(grad_small))
+            torch.testing.assert_close(grad_large, torch.ones_like(grad_large))
+
+            engine.step()
+            param_small = safe_get_full_fp32_param(engine.module.small).detach().cpu()
+            param_large = safe_get_full_fp32_param(engine.module.large).detach().cpu()
+            torch.testing.assert_close(param_small, -torch.ones_like(param_small))
+            torch.testing.assert_close(param_large, -torch.ones_like(param_large))
+            engine.destroy()
+        finally:
+            groups.mpu = None
+
+
+@pytest.mark.parametrize(
     "optimizer_name,zero_stage",
     [
         pytest.param("AdamW", 0, id="adamw-zero0"),
