@@ -38,13 +38,14 @@ class ProcessTopology:
         self.ProcessCoord = namedtuple('ProcessCoord', axes)
 
         self.mapping = {}
+        self.rank_to_coord = {}
         ranges = [range(d) for d in dims]
         # example: 1, (0,0,1)
         for global_rank, coord in enumerate(cartesian_product(*ranges)):
-            key = {axis: coord[self.axes.index(axis)] for axis in self.axes}
-            key = self.ProcessCoord(**key)
+            key = self.ProcessCoord(*coord)
             # for example, {ProcessCoord(row=0, col=1) : 1}
             self.mapping[key] = global_rank
+            self.rank_to_coord[global_rank] = key
 
     def get_rank(self, **coord_kwargs):
         """Return the global rank of a process via its coordinates.
@@ -89,9 +90,10 @@ class ProcessTopology:
         """
         omit_axes = frozenset(omit_axes)
         axes = [a for a in self.get_axis_names() if a not in omit_axes]
+        coord = self.get_coord(rank=rank)
         names = []
         for ax in axes:
-            ax_rank = getattr(self.get_coord(rank=rank), ax)
+            ax_rank = getattr(coord, ax)
             names.append(f'{ax}{inner_sep}{ax_rank:02d}')
         return outer_sep.join(names)
 
@@ -119,8 +121,12 @@ class ProcessTopology:
             >>> coord.y
             1
         """
+        coord = self.rank_to_coord.get(rank)
+        if coord is not None and self.mapping.get(coord) == rank:
+            return coord
         for coord, idx in self.mapping.items():
             if idx == rank:
+                self.rank_to_coord[rank] = coord
                 return coord
         raise ValueError(f'rank {rank} not found in topology.')
 
@@ -153,11 +159,12 @@ class ProcessTopology:
 
         # Construct all combinations of coords with other_axes
         ranges = [range(self.get_dim(a)) for a in other_axes]
+        axis_dim = self.get_dim(axis)
         for coord in cartesian_product(*ranges):
-            other_keys = {a: coord[other_axes.index(a)] for a in other_axes}
+            other_keys = dict(zip(other_axes, coord))
             # now go over all ranks in `axis`.
             sub_list = []
-            for axis_key in range(self.get_dim(axis)):
+            for axis_key in range(axis_dim):
                 key = self.ProcessCoord(**other_keys, **{axis: axis_key})
                 sub_list.append(self.mapping[key])
             lists.append(sub_list)
@@ -326,12 +333,12 @@ class PipelineParallelGrid:
         self.is_first_stage = (self.stage_id == 0)
         self.is_last_stage = (self.stage_id == (self.pipe_parallel_size - 1))
 
+        self.pipe_groups = self._topo.get_axis_comm_lists('pipe')
         self.p2p_groups = self._build_p2p_groups()
 
         # Create new ProcessGroup for pipeline collectives - these are pipe parallel groups
         self.pp_group = []
         self.pp_proc_group = None
-        self.pipe_groups = self._topo.get_axis_comm_lists('pipe')
         for ranks in self.pipe_groups:
             if self.global_rank == 0:
                 #print(f'RANK={self.global_rank} building pipeline group: {ranks}')
@@ -374,17 +381,14 @@ class PipelineParallelGrid:
         """Groups for sending and receiving activations and gradients across model
         parallel stages.
         """
-        comm_lists = self._topo.get_axis_comm_lists('pipe')
-        p2p_lists = []
-        for rank in range(self.world_size):
-            for l in comm_lists:
-                assert len(l) == self.pipe_parallel_size
-                if rank in l:
-                    idx = l.index(rank)
-                    buddy_rank = l[(idx + 1) % self.pipe_parallel_size]
-                    p2p_lists.append([rank, buddy_rank])
-                    break  # next global rank
-        assert len(p2p_lists) == self.world_size
+        comm_lists = self.pipe_groups
+        p2p_lists = [None] * self.world_size
+        for l in comm_lists:
+            assert len(l) == self.pipe_parallel_size
+            for idx, rank in enumerate(l):
+                buddy_rank = l[(idx + 1) % self.pipe_parallel_size]
+                p2p_lists[rank] = [rank, buddy_rank]
+        assert all(group is not None for group in p2p_lists)
         return p2p_lists
 
     def _is_grid_valid(self):
