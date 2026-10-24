@@ -250,6 +250,11 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         self.offload_optimizer = False
         self.offload_optimizer_pin_memory = False
+        # Pinned buffers for copying CPU master partitions back to the device (_copy_through_pinned_staging). The
+        # element count is a power of two, so the pinned allocator does not round the buffers up.
+        self._staging_numel = 2**26
+        self._staging_buffers = None
+        self._staging_events = None
         self.offload_optimizer_fast_init = False
         self.offload_param = False
         self.offload_param_pin_memory = False
@@ -562,6 +567,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             if buffer is not None:
                 accelerator.unpin_memory(buffer)
         for buffer in getattr(self, 'hp_params_pin_buffers', []):
+            accelerator.unpin_memory(buffer)
+        for buffer in getattr(self, '_staging_buffers', None) or []:
             accelerator.unpin_memory(buffer)
         unpin_offloaded_optimizer_states(self.optimizer)
         if self.offload_optimizer_pin_memory:
@@ -2851,12 +2858,52 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         print_rank_0("------------------Finishing Step-----------------------")
 
     @instrument_w_nvtx
+    def _copy_through_pinned_staging(self, dst, src):
+        """Copy the pageable CPU master partition ``src`` into the device partition ``dst`` through two small pinned
+        buffers: each piece is cast on the CPU into one buffer while the previous piece is copied from the other.
+
+        Copies from pageable memory run at a few GB/s. Pinning the master partitions themselves, as ZeRO-1/2 does,
+        would also need a pinned low-precision buffer of each partition's size, so pinned host memory would grow with
+        the model; these two buffers have a fixed size."""
+        numel = src.numel()
+        chunk = self._staging_numel
+        if self._staging_buffers is None or self._staging_buffers[0].dtype != dst.dtype:
+            self._staging_buffers = [get_accelerator().pin_empty(chunk, dtype=dst.dtype) for _ in range(2)]
+            self._staging_events = [None, None]
+        src = src.view(-1)
+        dst = dst.view(-1)
+        last_event = None
+        for index, start in enumerate(range(0, numel, chunk)):
+            buf = index % 2
+            if self._staging_events[buf] is not None:
+                # The previous copy out of this buffer must finish before the buffer is refilled.
+                self._staging_events[buf].synchronize()
+            count = min(chunk, numel - start)
+            staging = self._staging_buffers[buf][:count]
+            staging.copy_(src[start:start + count])
+            dst[start:start + count].copy_(staging, non_blocking=True)
+            event = get_accelerator().Event()
+            event.record()
+            self._staging_events[buf] = event
+            last_event = event
+        # Callers expect the partition on the device when this returns: the parameter all-gathers of the next forward
+        # run on a stream that does not wait for this one.
+        if last_event is not None:
+            last_event.synchronize()
+
+    @instrument_w_nvtx
     def _reassign_or_swap_out_partitioned_parameters(self, sub_group_id):
         if self.fp16_partitioned_groups_flat[sub_group_id] is not None:
             # When torch autocast is enabled, groups in fp16_partitioned_groups are in fp32 already and those in
             # fp32_partitioned_groups are aliases. Calling tensor.data.copy_ will not trigger any copy in that case.
-            self.fp16_partitioned_groups_flat[sub_group_id].data.copy_(
-                self.fp32_partitioned_groups_flat[sub_group_id].data)
+            dst = self.fp16_partitioned_groups_flat[sub_group_id].data
+            src = self.fp32_partitioned_groups_flat[sub_group_id].data
+            accelerator = get_accelerator()
+            src_is_pageable = src.device.type == "cpu" and not accelerator.is_pinned(src)
+            if self.offload_optimizer_pin_memory and src_is_pageable and dst.device.type != "cpu":
+                self._copy_through_pinned_staging(dst, src)
+            else:
+                dst.copy_(src)
 
             #unflatten fp16 parameter subgroup
             self._unflatten_partitioned_parameters(sub_group_id)
