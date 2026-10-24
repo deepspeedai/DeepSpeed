@@ -259,7 +259,14 @@ class GDNSegment:
 
 
 def find_gdn_segments(root: torch.nn.Module) -> List[GDNSegment]:
-    """Detect GatedDeltaNet blocks by structure (in_proj attribute set)."""
+    """Detect GatedDeltaNet blocks by structure (in_proj attribute set).
+
+    TP>1: the fused GDN forward's conv/scan width assumptions are not yet
+    shard-aware (AutoTP also shards the conv1d weight), so skip there and
+    leave the block on its native forward."""
+    import deepspeed.comm as dist
+    if dist.is_initialized() and dist.get_world_size() > 1:
+        return []
     segments = []
     names = ("in_proj_qkv", "in_proj_z", "in_proj_b", "in_proj_a")
     for module, p in _find_fusable_projections(root, names):
