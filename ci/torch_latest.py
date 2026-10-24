@@ -740,6 +740,11 @@ def build_remote_commands(inputs: ControllerInputs) -> tuple[RemoteCommand, ...]
                 "-n",
                 "4",
                 "--verbose",
+                # The relay (_single_line) rewrites any ANSI codes to literal
+                # "\x1b" text that neither renders as color in the Actions log
+                # viewer nor matches nightly-triage's FAILED parsing, so keep
+                # the pytest output plain.
+                "--color=no",
                 # GDS tests require GPUDirect Storage support unavailable on these runners.
                 "--ignore=tests/unit/v1/nvme/test_gds.py",
                 f"--torch_ver={preset['torch_test_version']}",
