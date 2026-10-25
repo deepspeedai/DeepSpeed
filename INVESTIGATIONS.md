@@ -895,3 +895,12 @@ revisiting only on P2P-capable pairs (NVLink or same-socket PCIe with
 P2P). On THIS box the honest lever list: GEMM 33% (down/o_proj cuBLAS
 at halved N), elementwise 8.8%, and NCCL per-call latency (no software
 fix without P2P).
+
+
+### TP=2 bs=64 profile status (infra-blocked, honest)
+Measured step times: segKI 30.4ms vs vLLM 36.9ms (+21.7%). segKI bs=32
+composition scaled to 30-32ms at bs=64 — consistent with measurement,
+no new bottleneck. Both detailed profiles blocked: segKI prof variant
+OOMs on a 60.62GiB full-sequence lm_head alloc (modeling line 1725,
+logits_to_keep default; trigger path unpinned — bench itself runs);
+vLLM EngineCore is a separate process (needs tensorboard trace tools).
