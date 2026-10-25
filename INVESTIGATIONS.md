@@ -852,3 +852,11 @@ vLLM TP=2 saturates at ~1730 tok/s from bs=64 onward (its GDN mamba
 cache blocks scaling — max_num_seqs); segKI keeps scaling to 2106 at
 bs=64. segKI's bs=128 blocker is the fp32 GDN recurrent state (~4GB
 over 2 cards at 128 rows); bf16 state or paging would unblock.
+
+
+### TP=2 C-C-R correctness at bs=64 (vs full-width eager HF)
+rate=0.959, full_rows=56/64, 8 rows diverge (first-diff positions
+scattered 0-15, cascade after). Same near-tie class as bs=8 (0.969):
+TP-sharded bf16 numerics vs full-width eager — expected divergence, not
+a systematic bug (systematic errors would flip ALL rows at step 0-1 and
+never match; 56/64 rows are token-identical for 32 steps).
