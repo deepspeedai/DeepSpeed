@@ -266,14 +266,7 @@ class GDNSegment:
 
 
 def find_gdn_segments(root: torch.nn.Module) -> List[GDNSegment]:
-    """Detect GatedDeltaNet blocks by structure (in_proj attribute set).
-
-    TP>1: the fused GDN forward's conv/scan width assumptions are not yet
-    shard-aware (AutoTP also shards the conv1d weight), so skip there and
-    leave the block on its native forward."""
-    import deepspeed.comm as dist
-    if dist.is_initialized() and dist.get_world_size() > 1:
-        return []
+    """Detect GatedDeltaNet blocks by structure (in_proj attribute set)."""
     segments = []
     names = ("in_proj_qkv", "in_proj_z", "in_proj_b", "in_proj_a")
     for module, p in _find_fusable_projections(root, names):
@@ -297,6 +290,17 @@ def _fused_gdn_forward(self, hidden_states, *args, **kwargs):
 
     batch_size, seq_len, _ = hidden_states.shape
     use_precomputed_states = cache_params is not None and cache_params.has_previous_state(self.layer_idx)
+    # Shard-aware dims: under TP the in_proj weights are head-sharded, so all
+    # split boundaries and head counts derive from the per-rank shapes (the
+    # config values are the global ones). The colwise/rowwise GDN partition
+    # keeps the whole block rank-local (per-head math); out_proj's AllReduce
+    # is the layer's only collective.
+    import deepspeed.comm as dist
+    tp_size = dist.get_world_size() if dist.is_initialized() else 1
+    key_dim = self.key_dim // tp_size
+    value_dim = self.value_dim // tp_size
+    num_v_heads = self.num_v_heads // tp_size
+    num_k_heads = self.num_k_heads // tp_size
 
     # Fused [qkv | z | b | a] projection reading the original weights (b=1
     # quad_gemv kernel, b>1 on-the-fly concat) — no weight copies.
@@ -308,10 +312,9 @@ def _fused_gdn_forward(self, hidden_states, *args, **kwargs):
     else:
         fused = GDNInputProj.apply(hidden_states, self.in_proj_qkv.weight, self.in_proj_z.weight,
                                    self.in_proj_b.weight, self.in_proj_a.weight, gdn_kernel_op)
-    key_dim, value_dim = self.key_dim, self.value_dim
     qkv_end = key_dim * 2 + value_dim
     z_end = qkv_end + value_dim
-    b_end = z_end + self.num_v_heads
+    b_end = z_end + num_v_heads
     # One explicit repack of the qkv slice into the [b, conv_dim, s] layout
     # conv1d consumes; handing FLA a non-contiguous view triggers a slower
     # multi-op internal path (measured as ~40 extra launches per layer).
@@ -351,17 +354,19 @@ def _fused_gdn_forward(self, hidden_states, *args, **kwargs):
     # composite path rather than raise inside the binding.
     if (gdn_op is not None and get_accelerator().on_accelerator(a) and not torch.is_grad_enabled()
             and a.dtype is torch.bfloat16):
-        a_log_f = self.A_log.detach().float().contiguous()
-        dt_f = self.dt_bias.detach().float().contiguous()
+        a_log_f = self.A_log.detach()[:num_v_heads].float().contiguous()
+        dt_f = self.dt_bias.detach()[:num_v_heads].float().contiguous()
         # gdn_gates accepts row-strided a/b, so the fused-output slices go in
         # without contiguous copies.
         beta, g = gdn_op.gdn_gates(a, b, a_log_f, dt_f)
     else:
         beta = b.sigmoid()
-        g = -self.A_log.float().exp() * F.softplus(a.float() + self.dt_bias)
-    if self.num_v_heads // self.num_k_heads > 1:
-        query = query.repeat_interleave(self.num_v_heads // self.num_k_heads, dim=2)
-        key = key.repeat_interleave(self.num_v_heads // self.num_k_heads, dim=2)
+        a_log_l = self.A_log[:num_v_heads]
+        dt_l = self.dt_bias[:num_v_heads]
+        g = -a_log_l.float().exp() * F.softplus(a.float() + dt_l)
+    if num_v_heads // num_k_heads > 1:
+        query = query.repeat_interleave(num_v_heads // num_k_heads, dim=2)
+        key = key.repeat_interleave(num_v_heads // num_k_heads, dim=2)
 
     recurrent_state = cache_params.layers[self.layer_idx].recurrent_states[0] if use_precomputed_states else None
     # Whitelist the scan inputs: transformers threads unrelated layer kwargs
