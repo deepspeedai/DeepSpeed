@@ -733,3 +733,37 @@ install's layer detection). This is optimization item #1 for TP.
    untested
 3. Graph-splitting / communication overlap (multi-graph architecture
    from the earlier design discussion)
+
+
+## 18. TP=2 grouped-kernel engagement — diagnosis trail (open)
+
+Goal: make MLP grouped kernels engage at TP=2 (profile showed none).
+
+### Confirmed so far
+1. Duck-typed _find_fusable_projections (LinearLayer wrappers pass).
+2. GDN segment gated off at TP>1: with the finder open, the fused GDN
+   forward engaged and crashed causal_conv1d — the conv weight is
+   channel-sharded and the fused forward's width assumptions are not
+   shard-aware. GDN stays native under TP (follow-up: shard-aware GDN).
+3. find_glu_segments required gate/up/DOWN all comm-free; down is a
+   LinearAllreduce under AutoTP -> 0 segments. Fixed: only gate/up are
+   fused (down is delegated to its own forward, whose AllReduce must
+   run). After the fix the report shows 32/32 segments installed and a
+   direct mlp(x) call routes through the kernel (probe ok=True).
+4. The full generate() path STILL shows no grouped kernels in the
+   profile and bench-identical numbers (523-533/1114-1120), i.e. the
+   rollout generate does not reach the installed MLP forward even
+   though the install is live. A generate-path trace script died
+   silently (no traceback, host VM at 79GB — suspected host OOM),
+   leaving the routing gap unresolved.
+
+### Where to look next (narrowed)
+- rollout _generate_graph forward call chain under the DeepSpeed engine
+  wrapper (engine.forward -> module forward -> decoder layer -> mlp):
+  verify which object's forward actually runs at capture time
+- whether the engine's forward re-dispatches through a compiled/
+  scripted path that bypasses the patched module __call__
+- rerun the trace with host memory headroom (the OOM suspicion)
+
+TP=2 bench stands: segKI 523-533 / 1114-1120 (bs8/32), +18%/+36% over
+graphonly, gains from decode_attn only.
