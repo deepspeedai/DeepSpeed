@@ -839,3 +839,16 @@ superset via tp_size=1 defaults).
 
 Collectives/layer: 6 -> 1 (out_proj AR); the GDN fused forward re-engaged
 under TP (gate lifted). opbuilder interface: unchanged throughout.
+
+
+### TP=2 bs=64: segKI WINS at large batch (vLLM plateaus)
+| bs | segKI C-C-R | vLLM TP=2 | segKI % |
+|---|---|---|---|
+| 32 | 1649.4 | 1727.2 | 95.5% |
+| **64** | **2106.2** | 1729.6 | **121.7%** |
+| 128 | OOM (state) | 1731.5 | — |
+
+vLLM TP=2 saturates at ~1730 tok/s from bs=64 onward (its GDN mamba
+cache blocks scaling — max_num_seqs); segKI keeps scaling to 2106 at
+bs=64. segKI's bs=128 blocker is the fp32 GDN recurrent state (~4GB
+over 2 cards at 128 rows); bf16 state or paging would unblock.
