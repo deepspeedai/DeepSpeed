@@ -305,7 +305,31 @@ def _fused_gdn_forward(self, hidden_states, *args, **kwargs):
     # Fused [qkv | z | b | a] projection reading the original weights (b=1
     # quad_gemv kernel, b>1 on-the-fly concat) — no weight copies.
     gdn_kernel_op = getattr(self, "_ki_gdn_op", None)
-    if batch_size == 1 and seq_len == 1:
+    if tp_size > 1:
+        # The fused [q|k|v] weight cannot be column-sharded head-aligned
+        # (a contiguous row split lands mid-block), so it stays replicated
+        # and each rank slices its own head ranges per block — zero-copy
+        # views, no gather. z/b/a are single-block weights and shard
+        # head-aligned under AutoTP.
+        r = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+        nq = self.key_dim // tp_size
+        nv = value_dim
+        qkv_w = self.in_proj_qkv.weight
+        q_w = qkv_w[r * nq:(r + 1) * nq]
+        k_w = qkv_w[self.key_dim + r * nq:self.key_dim + (r + 1) * nq]
+        v_w = qkv_w[2 * self.key_dim + r * nv:2 * self.key_dim + (r + 1) * nv]
+        x2 = hidden_states.reshape(-1, hidden_states.shape[-1])
+        qkv = torch.cat([
+            torch.nn.functional.linear(x2, q_w),
+            torch.nn.functional.linear(x2, k_w),
+            torch.nn.functional.linear(x2, v_w),
+        ],
+                        dim=-1)
+        zb = torch.nn.functional.linear(x2, self.in_proj_z.weight)
+        bb = torch.nn.functional.linear(x2, self.in_proj_b.weight)
+        aa = torch.nn.functional.linear(x2, self.in_proj_a.weight)
+        fused = torch.cat([qkv, zb, bb, aa], dim=-1).view(batch_size, seq_len, -1)
+    elif batch_size == 1 and seq_len == 1:
         fused = GDNInputProj.apply(
             hidden_states.squeeze(0).squeeze(0), self.in_proj_qkv.weight, self.in_proj_z.weight, self.in_proj_b.weight,
             self.in_proj_a.weight, gdn_kernel_op).view(1, 1, -1)
