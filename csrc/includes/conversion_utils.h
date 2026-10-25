@@ -9,7 +9,7 @@
 
 #include <stdint.h>
 
-#ifdef BF16_AVAILABLE
+#if defined(BF16_AVAILABLE) && !defined(__HIP_PLATFORM_AMD__)
 #include <cuda_bf16.h>
 #endif
 
