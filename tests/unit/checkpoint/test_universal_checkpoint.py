@@ -162,6 +162,11 @@ class _baseline(DistributedFixture):
     world_size = None
 
     def run(self, tmpdir, ds_config, zero_stage, dtype, load_optim, use_torch_adam):
+        # fp16 configs crash deepspeed.initialize's sanity check on accelerators
+        # without fp16 support, surfacing as a setup error for every dependent
+        # test instead of a skip.
+        if dtype == torch.float16 and not get_accelerator().is_fp16_supported():
+            pytest.skip("fp16 is not supported on this accelerator")
         hidden_dim = 10
         train_save_convert(ds_config, hidden_dim, load_optim, use_torch_adam, dtype, tmpdir, self.world_size)
 

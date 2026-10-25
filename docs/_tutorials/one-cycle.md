@@ -90,7 +90,7 @@ and so should be added to the appropriate section of the model configuration.
 
 PyTorch versions 1.0.1 and newer provide a feature for implementing schedulers
 for hyper-parameters, called  [learning rate
-  schedulers](https://pytorch.org/docs/stable/_modules/torch/optim/lr_scheduler.html).
+  schedulers](https://docs.pytorch.org/docs/stable/optim.html).
   We have implemented 1-Cycle schedule using this feature.  You will add a
   scheduler entry of type **"OneCycle"** as illustrated below.
 

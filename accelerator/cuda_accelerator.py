@@ -286,6 +286,9 @@ class CUDA_Accelerator(DeepSpeedAccelerator):
         return major < 9
 
     # Graph operations
+    def is_current_stream_capturing(self) -> bool:
+        return torch.cuda.is_current_stream_capturing()
+
     def create_graph(self):
         return torch.cuda.CUDAGraph()
 
@@ -375,9 +378,14 @@ class CUDA_Accelerator(DeepSpeedAccelerator):
                     for member_name in module.__dir__():
                         if member_name.endswith(
                                 'Builder'
-                        ) and member_name != "OpBuilder" and member_name != "CUDAOpBuilder" and member_name != "TorchCPUOpBuilder":  # avoid abstract classes
+                        ) and member_name != "OpBuilder" and member_name != "CUDAOpBuilder":  # avoid abstract classes
                             if not member_name in self.class_dict:
                                 self.class_dict[member_name] = getattr(module, member_name)
+            # Host-side optimizers run on the CPU wherever the model lives,
+            # so they share their builders with the CPU accelerator.
+            cpu_op_builder_module = importlib.import_module("{}.cpu".format(op_builder_dir))
+            for member_name in ["CPUAdamBuilder", "CPUAdagradBuilder", "CPULionBuilder"]:
+                self.class_dict[member_name] = getattr(cpu_op_builder_module, member_name)
             # end initialize for create_op_builder()
 
     # create an instance of op builder and return, name specified by class_name

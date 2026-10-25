@@ -378,6 +378,7 @@ class TestQuantizedInt(DistributedTest):
         reset_random()
         quantization_test_helper(torch.float32, 8)
 
+    @pytest.mark.skipif(device == 'cpu', reason='CPU does support FP16 GEMM')
     def test_half_int8_quantization(self):
         reset_random()
         quantization_test_helper(torch.float16, 8)

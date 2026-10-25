@@ -59,8 +59,17 @@ deepspeed_io_handle_t::deepspeed_io_handle_t(const int block_size,
 
 deepspeed_io_handle_t::~deepspeed_io_handle_t()
 {
-    _stop_threads();
-    for (auto& thr : _threads) { thr.join(); }
+    const auto stop_and_join = [this]() {
+        _stop_threads();
+        for (auto& thr : _threads) { thr.join(); }
+    };
+
+    if (PyGILState_Check()) {
+        py::gil_scoped_release release;
+        stop_and_join();
+    } else {
+        stop_and_join();
+    }
 }
 
 const int deepspeed_io_handle_t::get_block_size() const

@@ -193,8 +193,8 @@ class AttentionModel(torch.nn.Module):
         return self.cross_entropy_loss(x, y)
 
 
-def _config(zero_stage, per_head, lr=0.01):
-    return {
+def _config(zero_stage, per_head, lr=0.01, offload_optimizer=False):
+    config = {
         "train_batch_size": 4,
         "optimizer": {
             "type": "muon",
@@ -217,6 +217,12 @@ def _config(zero_stage, per_head, lr=0.01):
             "enabled": True
         },
     }
+    if offload_optimizer:
+        config["zero_optimization"]["offload_optimizer"] = {
+            "device": "cpu",
+            "pin_memory": True,
+        }
+    return config
 
 
 def _train(model, config, steps=6, hidden_dim=64, seed=1234):
@@ -231,7 +237,8 @@ def _train(model, config, steps=6, hidden_dim=64, seed=1234):
         engine.backward(loss)
         engine.step()
         losses.append(loss.item())
-    return tags, losses
+    params = {n: p.detach().clone() for n, p in model.named_parameters()}
+    return tags, losses, params
 
 
 @pytest.mark.parametrize("zero_stage", [1, 2, 3])
@@ -241,7 +248,7 @@ class TestPerHeadMuonEndToEnd(DistributedTest):
     def test_tags_reach_the_optimizer(self, zero_stage):
         """Per-parameter tags have to survive `deepspeed.initialize` into the ZeRO call sites."""
         torch.manual_seed(1234)
-        tags, losses = _train(AttentionModel(), _config(zero_stage, per_head=True))
+        tags, losses, _ = _train(AttentionModel(), _config(zero_stage, per_head=True))
 
         assert tags["blocks.0.q_proj.weight"] == 8
         assert tags["blocks.0.k_proj.weight"] == 2, "GQA: kv projections carry the kv head count"
@@ -252,16 +259,44 @@ class TestPerHeadMuonEndToEnd(DistributedTest):
 
     def test_opt_in_is_off_by_default(self, zero_stage):
         torch.manual_seed(1234)
-        tags, _ = _train(AttentionModel(), _config(zero_stage, per_head=False))
+        tags, _, _ = _train(AttentionModel(), _config(zero_stage, per_head=False))
 
         assert all(v is None for v in tags.values()), {k: v for k, v in tags.items() if v is not None}
 
     def test_training_makes_progress_either_way(self, zero_stage):
         """Both paths have to train; this is the baseline delock asked for alongside per-head."""
         torch.manual_seed(1234)
-        _, full = _train(AttentionModel(), _config(zero_stage, per_head=False))
+        _, full, _ = _train(AttentionModel(), _config(zero_stage, per_head=False))
         torch.manual_seed(1234)
-        _, per_head = _train(AttentionModel(), _config(zero_stage, per_head=True))
+        _, per_head, _ = _train(AttentionModel(), _config(zero_stage, per_head=True))
 
         assert full[-1] < full[0], f"baseline did not train: {full}"
         assert per_head[-1] < per_head[0], f"per-head did not train: {per_head}"
+
+
+@pytest.mark.parametrize("zero_stage", [1, 2, 3])
+class TestPerHeadMuonUnderCPUOffload(DistributedTest):
+    """The CPU-offloaded Muon path gathers full parameters itself instead of going through
+    the non-offload call sites above, so it has to forward `muon_num_heads` independently.
+    """
+    world_size = 2
+
+    def test_offload_opt_in_changes_the_update(self, zero_stage):
+        """If the offload path silently ignored `muon_num_heads`, every offloaded parameter
+        would fall back to whole-matrix orthogonalization regardless of the per-head tag, and
+        the tagged (attention-projection) parameters would come out bit-for-bit identical
+        between the two runs - the downstream Adam-style update normalizes away the update's
+        magnitude closely enough that comparing losses (as
+        `test_opt_in_is_off_by_default` does for the non-offload path) does not reliably
+        surface this, so the parameters themselves are compared instead.
+        """
+        torch.manual_seed(1234)
+        _, _, whole_matrix = _train(AttentionModel(), _config(zero_stage, per_head=False, offload_optimizer=True))
+        torch.manual_seed(1234)
+        tags, _, per_head = _train(AttentionModel(), _config(zero_stage, per_head=True, offload_optimizer=True))
+
+        tagged_params = [name for name, num_heads in tags.items() if num_heads is not None]
+        assert tagged_params, "no attention projection ended up tagged for per-head Muon"
+        for name in tagged_params:
+            assert not torch.equal(whole_matrix[name], per_head[name]), \
+                f"{name}: per-head tag had no effect on the CPU-offloaded update"

@@ -33,7 +33,7 @@ def debug_rank0(message: str) -> None:
 
 @torch.no_grad()
 @instrument_w_nvtx
-@compiler.disable
+@compiler.lazy_disable
 def update_recompute_parameters(sub_module: Module, param: Parameter) -> None:
     sub_module.ds_recompute_parameters.add(param)
     param.ds_active_sub_modules.add(sub_module.ds_id)
@@ -247,7 +247,7 @@ class PartitionedParameterCoordinator:
         for sub_module in self.__submodule_order:
             self.record_parameters(sub_module)
 
-    @compiler.disable
+    @compiler.lazy_disable
     def reset_step(self) -> None:
         """indicate that we have completed one fwd+bwd for the model"""
         if is_compiling():
@@ -304,7 +304,7 @@ class PartitionedParameterCoordinator:
     Fetching, prefetching, and releasing parameters
     """
 
-    @compiler.disable
+    @compiler.lazy_disable
     @instrument_w_nvtx
     @torch.no_grad()
     def fetch_sub_module(self, current_submodule: Module, forward: bool) -> None:
@@ -540,7 +540,7 @@ class PartitionedParameterCoordinator:
             if param in self.__inflight_param_registry:
                 self.__inflight_param_registry.pop(param).wait()
 
-            # TODO. make this throw if if there are still active submodules. currently
+            # TODO. make this throw if there are still active submodules. currently
             # there's a hook execution issue
             param.ds_active_sub_modules.clear()
             self.__release_param(param)
@@ -619,7 +619,7 @@ class PartitionedParameterCoordinator:
             if swap_persisted_params:
                 swap_persisted_params[0].nvme_swapper.remove_partition_and_release_buffers(swap_persisted_params)
 
-    @compiler.disable
+    @compiler.lazy_disable
     @instrument_w_nvtx
     def __release_param(self, param: Parameter, free_data: bool = True) -> None:
         if param.ds_status == ZeroParamStatus.AVAILABLE and not param.ds_active_sub_modules:

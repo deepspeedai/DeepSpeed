@@ -37,8 +37,8 @@ Escape hatches (for humans)
 ---------------------------
 * Put ``[test all]`` (or ``[no filter]``) anywhere in a commit message to force
   the full suite for that push.
-* Changing a file matched by the run-all globs (CI config, build system, shared
-  fixtures, core runtime) always runs everything.
+* Changing a non-documentation file matched by the run-all globs (CI config,
+  build system, shared fixtures, core runtime) runs everything.
 
 Preview what CI would run for your branch::
 
@@ -63,6 +63,9 @@ from collections import deque
 from dataclasses import dataclass, field
 from fnmatch import fnmatch
 from pathlib import Path
+
+# Shared with the CPU/GPU workflow gate so both agree on what counts as documentation.
+from check_paths import is_docs_path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -222,26 +225,17 @@ class TestSelector:
         deleted / renamed-old. ``base_rev`` should be the merge-base commit so
         two-dot == three-dot.
         """
-        out = self._run_git(["diff", "--name-status", "--find-renames", f"{base_rev}", "HEAD"])
+        # Treat renames as deletion + addition so moving code into documentation
+        # cannot hide the removed code. NUL delimiters preserve unusual filenames.
+        out = self._run_git(["diff", "--name-status", "--no-renames", "-z", base_rev, "HEAD"])
         changed: list[str] = []
         deleted: list[str] = []
-        for line in out.splitlines():
-            if not line.strip():
-                continue
-            parts = line.split("\t")
-            status = parts[0]
-            if status.startswith("R") and len(parts) >= 3:
-                # rename: old path goes away, new path is what changed.
-                deleted.append(parts[1])
-                changed.append(parts[2])
-            elif status.startswith("C") and len(parts) >= 3:
-                # copy: source is untouched (do NOT mark it deleted); the new
-                # destination path is the one that's effectively "changed".
-                changed.append(parts[2])
-            elif status.startswith("D"):
-                deleted.append(parts[1])
-            elif len(parts) >= 2:
-                changed.append(parts[1])
+        fields = out.split("\0")
+        for status, path in zip(fields[::2], fields[1::2]):
+            if status == "D":
+                deleted.append(path)
+            else:
+                changed.append(path)
         return changed, deleted
 
     def _commit_messages(self, base_rev: str) -> str:
@@ -508,8 +502,15 @@ class TestSelector:
                 return Selection("all", all_tests, f"commit message contains {tag!r} -> full suite")
 
         changed, deleted = self._diff_files(merge_base)
+        has_changes = bool(changed or deleted)
+        # Documentation never affects tests, so it can neither force a full run nor seed the graph.
+        changed = [path for path in changed if not is_docs_path(path)]
+        deleted = [path for path in deleted if not is_docs_path(path)]
+        all_changed = changed + deleted
+        if has_changes and not all_changed:
+            return Selection("none", [], "only documentation files changed")
 
-        triggers = [p for p in changed if self._matches_glob(p, self.run_all_globs)]
+        triggers = [p for p in all_changed if self._matches_glob(p, self.run_all_globs)]
         if triggers:
             shown = ", ".join(triggers[:5]) + (" ..." if len(triggers) > 5 else "")
             return Selection("all", all_tests, f"changed shared/infra file(s) [{shown}] -> full suite")

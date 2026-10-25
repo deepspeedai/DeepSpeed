@@ -10,7 +10,7 @@ import math
 from deepspeed import comm as dist
 from deepspeed.utils import logger
 from deepspeed.ops.adam import ZenFlowSelectiveAdamW_stage3
-from deepspeed.runtime.utils import see_memory_usage
+from deepspeed.runtime.utils import combine_grad_norm_groups, is_invalid_grad_norm, see_memory_usage
 from typing import List
 from deepspeed.accelerator import get_accelerator
 from typing import TYPE_CHECKING
@@ -617,14 +617,18 @@ def step(optimizer_z3, closure=None):
     optimizer_z3._pre_step()
     optimizer_z3._partition_all_parameters()
 
-    #checks for overflow, adjust the loss scale accordingly
-    if optimizer_z3._overflow_check_and_loss_scale_update():
+    optimizer_z3._overflow_check_and_loss_scale_update(update_scale=False)
+    scaled_global_grad_norm = None
+    if not optimizer_z3.overflow:
+        norm_groups = optimizer_z3._get_norm_groups()
+        scaled_global_grad_norm = combine_grad_norm_groups(norm_groups)
+        if is_invalid_grad_norm(scaled_global_grad_norm):
+            optimizer_z3.overflow = True
+
+    if optimizer_z3._loss_scale_update_and_overflow_cleanup():
         if optimizer_z3.swap_optimizer:
             optimizer_z3.optimizer_swapper.log_timers()
         return
-
-    norm_groups = optimizer_z3._get_norm_groups()
-    scaled_global_grad_norm = torch.linalg.vector_norm(torch.stack(norm_groups))
 
     # Stash unscaled gradient norm
     optimizer_z3._global_grad_norm = scaled_global_grad_norm / optimizer_z3.loss_scale

@@ -26,7 +26,7 @@ def _triton_ops_matmul_early_config_prune(configs, named_args):
         BLOCK_M, BLOCK_N, BLOCK_K, num_stages = \
             kw['BLOCK_M'], kw['BLOCK_N'], kw['BLOCK_K'], config.num_stages
 
-        max_shared_memory = triton.runtime.driver.utils.get_device_properties(device)["max_shared_mem"]
+        max_shared_memory = triton.runtime.driver.active.utils.get_device_properties(device)["max_shared_mem"]
         required_shared_memory = (BLOCK_M + BLOCK_N) * BLOCK_K * num_stages * dtsize
         if required_shared_memory <= max_shared_memory:
             pruned_configs.append(config)
@@ -34,7 +34,7 @@ def _triton_ops_matmul_early_config_prune(configs, named_args):
     return pruned_configs
 
 
-def _fp16_matmul_prune_config(configs, named_args, skip_autotune=SKIP_AUTOTUNE):
+def _fp16_matmul_prune_config(configs, named_args, skip_autotune=SKIP_AUTOTUNE, **kwargs):
     if skip_autotune:
         configs = [configs[0]]
     else:
@@ -204,7 +204,7 @@ def _fp_matmul(
         tl.atomic_add(C, acc, mask=mask)
 
 
-def matmul_4d_prune_config(configs, named_args, skip_autotune=SKIP_AUTOTUNE):
+def matmul_4d_prune_config(configs, named_args, skip_autotune=SKIP_AUTOTUNE, **kwargs):
     if skip_autotune:
         configs = [configs[0]]
     else:
@@ -221,7 +221,7 @@ def matmul_4d_prune_config(configs, named_args, skip_autotune=SKIP_AUTOTUNE):
             BLOCK_M, BLOCK_N, BLOCK_K, num_stages = \
                 kw['BLOCK_SIZE_M'], kw['BLOCK_SIZE_N'], kw['BLOCK_SIZE_K'], config.num_stages
 
-            max_shared_memory = triton.runtime.driver.utils.get_device_properties(device)["max_shared_mem"]
+            max_shared_memory = triton.runtime.driver.active.utils.get_device_properties(device)["max_shared_mem"]
             required_shared_memory = (BLOCK_M + BLOCK_N) * BLOCK_K * num_stages * dtsize
             if required_shared_memory <= max_shared_memory:
                 pruned_configs.append(config)

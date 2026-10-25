@@ -244,7 +244,7 @@ In this section we discuss several fixes in support of the ZeRO Stage 3 feature.
 
 - [PR #3819 - Fix racing condition in GatheredParameters](https://github.com/deepspeedai/DeepSpeed/pull/3819)
 
-  - A race condition in the the ZeRO `GatheredParameters` context, which resulted in various `'status': 'INFLIGHT'` issues, was fixed by removing duplicate input parameters that were being passed from the Hybrid Engine.
+  - A race condition in the ZeRO `GatheredParameters` context, which resulted in various `'status': 'INFLIGHT'` issues, was fixed by removing duplicate input parameters that were being passed from the Hybrid Engine.
 
 - [PR #3884 - Separate ZeRO3 InflightParamRegistry for train and eval](https://github.com/deepspeedai/DeepSpeed/pull/3884)
 

@@ -4,7 +4,6 @@
 # DeepSpeed Team
 
 import torch
-from cpuinfo import get_cpu_info
 from deepspeed.utils import logger
 from deepspeed.utils.logging import should_log_le
 from deepspeed.ops.op_builder import CPUAdamBuilder
@@ -72,6 +71,8 @@ class DeepSpeedCPUAdam(torch.optim.Optimizer):
                             amsgrad=amsgrad)
         super(DeepSpeedCPUAdam, self).__init__(model_params, default_args)
 
+        # Imported here because importing cpuinfo runs subprocesses (file, uname), which slows down import deepspeed.
+        from cpuinfo import get_cpu_info
         cpu_info = get_cpu_info()
         self.cpu_vendor = cpu_info["vendor_id_raw"].lower() if "vendor_id_raw" in cpu_info else "unknown"
         if "amd" in self.cpu_vendor:
@@ -88,7 +89,10 @@ class DeepSpeedCPUAdam(torch.optim.Optimizer):
         DeepSpeedCPUAdam.optimizer_id = DeepSpeedCPUAdam.optimizer_id + 1
         self.adam_w_mode = adamw_mode
         self.fp32_optimizer_states = fp32_optimizer_states
-        self.ds_opt_adam = CPUAdamBuilder().load()
+        try:
+            self.ds_opt_adam = CPUAdamBuilder().load()
+        except Exception as e:
+            raise RuntimeError("DeepSpeedCPUAdam requires the cpu_adam op, which failed to build/load.") from e
 
         self.ds_opt_adam.create_adam(self.opt_id, lr, betas[0], betas[1], eps, weight_decay, adamw_mode,
                                      should_log_le("info"))
@@ -96,7 +100,13 @@ class DeepSpeedCPUAdam(torch.optim.Optimizer):
     def __del__(self):
         # need to destroy the C++ object explicitly to avoid a memory leak when deepspeed.initialize
         # is used multiple times in the same process (notebook or pytest worker)
-        self.ds_opt_adam.destroy_adam(self.opt_id)
+        if hasattr(self, 'ds_opt_adam'):
+            self.ds_opt_adam.destroy_adam(self.opt_id)
+
+    def add_param_group(self, param_group):
+        if param_group.get('amsgrad', self.defaults['amsgrad']):
+            raise RuntimeError('DeepSpeedCPUAdam does not support the AMSGrad variant.')
+        super().add_param_group(param_group)
 
     def __setstate__(self, state):
         super(DeepSpeedCPUAdam, self).__setstate__(state)
