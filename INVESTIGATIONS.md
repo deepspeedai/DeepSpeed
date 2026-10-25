@@ -869,3 +869,29 @@ never match; 56/64 rows are token-identical for 32 steps).
 | 64 | 2106.2 | 2102.6 |
 Sampling cost within noise at every batch size under TP=2 as well
 (softmax+multinomial outside the graph, amortized).
+
+
+### TP=2 profile AFTER C-C-R (bs=32, rank0) + hardware finding
+| class | ms/step | calls/step | % |
+|---|---|---|---|
+| NCCL | 15.96 | **66.0** | 42.9% |
+| GEMM (cuBLAS) | 12.25 | 216.3 | 33.0% |
+| elementwise | 3.27 | 620.6 | 8.8% |
+| grouped GEMM (ours) | 3.18 | 40.9 | 8.5% |
+| decode_attn (ours) | 0.80 | 8.2 | 2.2% |
+| GDN scan/conv | 0.70 | 49.7 | 1.9% |
+| TOTAL | 37.17 | | |
+
+Collectives 166 -> 66 calls (C-C-R confirmed). NCCL now 15.96ms
+(242us/call average — pure per-call fixed latency on non-P2P PCIe).
+
+**Hardware finding**: this box has NO P2P (can_device_access_peer False
+both ways, topology cross-CPU). vLLM's custom one-shot AR is impossible
+here too — vLLM also rides NCCL on this machine. Its remaining edge at
+bs=32 is therefore NOT custom-AR; candidates are fused-projection
+boundaries (fewer AR-adjacent sync points), better overlap, and its
+GEMM library choices. The custom-AR plan is hardware-gated: worth
+revisiting only on P2P-capable pairs (NVLink or same-socket PCIe with
+P2P). On THIS box the honest lever list: GEMM 33% (down/o_proj cuBLAS
+at halved N), elementwise 8.8%, and NCCL per-call latency (no software
+fix without P2P).
