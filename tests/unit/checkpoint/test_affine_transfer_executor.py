@@ -497,7 +497,7 @@ class TestB2ResidencyAndOffload:
             target_buffers[rank] = shard
             target_guards.append((storage, numel, 5))
 
-        endpoints = TransferEndpoints({0: 0, 1: 0, 2: 0}, {0: 0, 1: 0, 2: 0})
+        endpoints = TransferEndpoints({0: 0, 1: 1, 2: 0}, {0: 0, 1: 1, 2: 0})
 
         # Use small budget of 32 bytes (8 fp32 elements) to force bounded chunking across pinned staging
         budget = StagingBudget(bytes_per_peer=32)

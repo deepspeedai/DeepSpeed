@@ -688,7 +688,9 @@ def nest_affine_maps(outer, inner_by_outer_rank):
                                  f'{sorted(listed)} hold it.')
         _nest_replicated_block(copies, intervals_by_outer_rank, pieces_by_rank)
 
-    affine_map = ParamAffineMap(logical_shape=outer.logical_shape,
+    map_logical_shape = storage_shapes[0] if len(storage_shapes) == 1 and len(outer.logical_shape) > 1 and outer.logical_shape.numel() == storage_shapes[0].numel() else outer.logical_shape
+
+    affine_map = ParamAffineMap(logical_shape=map_logical_shape,
                                 shard_shapes=storage_shapes,
                                 pieces_by_rank=pieces_by_rank)
     affine_map.validate()
