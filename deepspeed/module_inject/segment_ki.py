@@ -297,6 +297,7 @@ def _fused_gdn_forward(self, hidden_states, *args, **kwargs):
     # is the layer's only collective.
     import deepspeed.comm as dist
     tp_size = dist.get_world_size() if dist.is_initialized() else 1
+    r = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
     key_dim = self.key_dim // tp_size
     value_dim = self.value_dim // tp_size
     num_v_heads = self.num_v_heads // tp_size
@@ -311,7 +312,6 @@ def _fused_gdn_forward(self, hidden_states, *args, **kwargs):
         # and each rank slices its own head ranges per block — zero-copy
         # views, no gather. z/b/a are single-block weights and shard
         # head-aligned under AutoTP.
-        r = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
         nq = self.key_dim // tp_size
         nv = value_dim
         qkv_w = self.in_proj_qkv.weight
@@ -378,15 +378,19 @@ def _fused_gdn_forward(self, hidden_states, *args, **kwargs):
     # composite path rather than raise inside the binding.
     if (gdn_op is not None and get_accelerator().on_accelerator(a) and not torch.is_grad_enabled()
             and a.dtype is torch.bfloat16):
-        a_log_f = self.A_log.detach()[:num_v_heads].float().contiguous()
-        dt_f = self.dt_bias.detach()[:num_v_heads].float().contiguous()
+        hv = self.num_v_heads
+        a_log_f = self.A_log.detach().reshape(-1)[r * num_v_heads:(r + 1) * num_v_heads].float().contiguous() \
+            if hv > num_v_heads else self.A_log.detach().float().contiguous()
+        dt_f = self.dt_bias.detach().reshape(-1)[r * num_v_heads:(r + 1) * num_v_heads].float().contiguous() \
+            if hv > num_v_heads else self.dt_bias.detach().float().contiguous()
         # gdn_gates accepts row-strided a/b, so the fused-output slices go in
         # without contiguous copies.
         beta, g = gdn_op.gdn_gates(a, b, a_log_f, dt_f)
     else:
         beta = b.sigmoid()
-        a_log_l = self.A_log[:num_v_heads]
-        dt_l = self.dt_bias[:num_v_heads]
+        hv = self.num_v_heads
+        a_log_l = self.A_log.reshape(-1)[r * num_v_heads:(r + 1) * num_v_heads] if hv > num_v_heads else self.A_log
+        dt_l = self.dt_bias.reshape(-1)[r * num_v_heads:(r + 1) * num_v_heads] if hv > num_v_heads else self.dt_bias
         g = -a_log_l.float().exp() * F.softplus(a.float() + dt_l)
     if num_v_heads // num_k_heads > 1:
         query = query.repeat_interleave(num_v_heads // num_k_heads, dim=2)
@@ -441,15 +445,34 @@ def _install_gdn_segment(seg: GDNSegment) -> bool:
     parent = seg.parent
 
     def _local_conv_wb():
-        # AutoTP shards only Linear layers; slice the conv to local channels
+        # The conv weight channels follow the fused [q|k|v] block order; a
+        # rank's local channels are one range per block, so the local weight
+        # is the cat of the three rank-indexed block rows (cached — tiny).
         import deepspeed.comm as dist
         tp_sz = dist.get_world_size() if dist.is_initialized() else 1
+        if tp_sz == 1:
+            return parent.conv1d.weight.squeeze(1), parent.conv1d.bias
+        rk = torch.distributed.get_rank()
+        nq = parent.key_dim // tp_sz
+        nv = parent.value_dim // tp_sz
         w = parent.conv1d.weight.squeeze(1)
-        bias = parent.conv1d.bias
-        if tp_sz > 1:
-            w = w[:w.shape[0] // tp_sz]
-            bias = bias[:bias.shape[0] // tp_sz] if bias is not None else None
-        return w, bias
+        cached = getattr(parent, "_ki_conv_w_local", None)
+        if cached is not None and cached[2] == (rk, tp_sz):
+            return cached[0], cached[1]
+        key_dim = parent.key_dim
+        wl = torch.cat([
+            w[rk * nq:(rk + 1) * nq], w[key_dim + rk * nq:key_dim + (rk + 1) * nq],
+            w[2 * key_dim + rk * nv:2 * key_dim + (rk + 1) * nv]
+        ])
+        bl = None
+        if parent.conv1d.bias is not None:
+            b = parent.conv1d.bias
+            bl = torch.cat([
+                b[rk * nq:(rk + 1) * nq], b[key_dim + rk * nq:key_dim + (rk + 1) * nq],
+                b[2 * key_dim + rk * nv:2 * key_dim + (rk + 1) * nv]
+            ])
+        parent._ki_conv_w_local = (wl.contiguous(), bl, (rk, tp_sz))
+        return wl.contiguous(), bl
 
     def conv_update_with_weights(mixed_qkv, conv_state):
         w, bias = _local_conv_wb()
