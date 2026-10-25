@@ -3,13 +3,16 @@
 
 # DeepSpeed Team
 
+import time
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
 import torch
 
+from deepspeed.accelerator import get_accelerator
 from deepspeed.utils.comms_logging import CommsLogger
+from unit.common import DistributedTest
 
 
 def test_stop_profiling_comms_disables_prof_all():
@@ -164,6 +167,34 @@ def test_collective_profiling(monkeypatch, op_name, positional, debug, profile_m
         op_timer.stop.assert_called_once_with()
         op_timer.elapsed.assert_called_once_with(reset=False)
         assert all(call.args == (record_name, ) for call in timers.call_args_list)
+
+
+class TestCommsLoggerLatency(DistributedTest):
+    world_size = 2
+
+    def test_logged_latencies_fit_in_the_loop(self):
+        # Each call is timed on its own and the calls run one after another, so the logged
+        # latencies can add up to at most the wall-clock time of the loop.
+        import deepspeed.comm as dist
+        from deepspeed.comm import comm
+
+        num_calls = 200
+        tensor = torch.ones(1024, device=get_accelerator().current_device_name())
+        dist.configure(enabled=True, prof_all=True, verbose=False, debug=False)
+        try:
+            get_accelerator().synchronize()
+            loop_start = time.time()
+            for _ in range(num_calls):
+                dist.all_reduce(tensor)
+            loop_msec = (time.time() - loop_start) * 1000.0
+            msg_size = tensor.numel() * tensor.element_size()
+            latencies = comm.comms_logger.comms_dict['all_reduce'][msg_size][1]
+        finally:
+            dist.configure(enabled=False)
+            comm.comms_logger.reset_data()
+
+        assert len(latencies) == num_calls
+        assert sum(latencies) <= loop_msec
 
 
 def test_timed_op_disabled_does_not_access_profiling_state(monkeypatch):

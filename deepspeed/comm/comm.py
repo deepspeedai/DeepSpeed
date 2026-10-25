@@ -138,7 +138,6 @@ def timed_op(func):
                     log_name = get_debug_log_name(func_args, comms_logger.debug)
                     raw_name = func.__name__
                     timers(log_name).stop()
-                    # need temp var since 'elapsed' resets events
                     time_elapsed = timers(log_name).elapsed(reset=False)
                     comms_logger.append(raw_name, log_name, time_elapsed, msg_size)
 

@@ -29,18 +29,6 @@ except ImportError:
     pass
 
 
-class CudaEventTimer(object):
-
-    def __init__(self, start_event: get_accelerator().Event, end_event: get_accelerator().Event):
-        self.start_event = start_event
-        self.end_event = end_event
-
-    def get_elapsed_msec(self):
-        get_accelerator().current_stream().wait_event(self.end_event)
-        self.end_event.synchronize()
-        return self.start_event.elapsed_time(self.end_event)
-
-
 class SynchronizedWallClockTimer:
     """Group of timers. Borrowed from Nvidia Megatron code"""
 
@@ -50,72 +38,95 @@ class SynchronizedWallClockTimer:
         def __init__(self, name):
             self.name_ = name
             self.started_ = False
-            self.event_timers = []
             self.use_host_timer = get_accelerator().use_host_timers()
             self.start_event = None
-            self.elapsed_records = None
+            self.stop_event = None
             self.start_time = 0.0
             self.end_time = 0.0
+            # Reading device events waits for the device, so the latest interval is
+            # measured when it is first needed instead of in stop().
+            self.read_pending = False
+            self.latest_elapsed_msec = 0.0
+            self.total_elapsed_msec = 0.0
+            self.num_intervals = 0
 
         def start(self):
             """Start the timer."""
             assert not self.started_, f"{self.name_} timer has already been started"
+            # Measure the previous interval before its events are recorded again.
+            self._read_latest()
             if self.use_host_timer:
                 self.start_time = time.time()
             else:
-                event_class = get_accelerator().Event
-                self.start_event = event_class(enable_timing=True)
+                if self.start_event is None:
+                    event_class = get_accelerator().Event
+                    self.start_event = event_class(enable_timing=True)
                 self.start_event.record()
             self.started_ = True
 
         def stop(self, reset=False, record=False):
             """Stop the timer."""
             assert self.started_, "timer is not started"
-            event_class = get_accelerator().Event
             if self.use_host_timer:
                 self.end_time = time.time()
-                self.event_timers.append(self.end_time - self.start_time)
             else:
-                event_class = get_accelerator().Event
-                end_event = event_class(enable_timing=True)
-                end_event.record()
-                self.event_timers.append(CudaEventTimer(self.start_event, end_event))
-                self.start_event = None
+                if self.stop_event is None:
+                    event_class = get_accelerator().Event
+                    self.stop_event = event_class(enable_timing=True)
+                self.stop_event.record()
+            self.read_pending = True
             self.started_ = False
 
-        def _get_elapsed_msec(self):
+        def _read_latest(self):
+            if not self.read_pending:
+                return
             if self.use_host_timer:
-                self.elapsed_records = [et * 1000.0 for et in self.event_timers]
+                self.latest_elapsed_msec = (self.end_time - self.start_time) * 1000.0
             else:
-                self.elapsed_records = [et.get_elapsed_msec() for et in self.event_timers]
-            return sum(self.elapsed_records)
+                get_accelerator().current_stream().wait_event(self.stop_event)
+                self.stop_event.synchronize()
+                self.latest_elapsed_msec = self.start_event.elapsed_time(self.stop_event)
+            self.total_elapsed_msec += self.latest_elapsed_msec
+            self.num_intervals += 1
+            self.read_pending = False
 
         def reset(self):
             """Reset timer."""
             self.started_ = False
-            self.start_event = None
-            self.elapsed_records = None
-            self.event_timers.clear()
+            self.read_pending = False
+            self.latest_elapsed_msec = 0.0
+            self.total_elapsed_msec = 0.0
+            self.num_intervals = 0
 
-        def elapsed(self, reset=True):
-            """Calculate the elapsed time."""
-            started_ = self.started_
-            # If the timing in progress, end it first.
+        def _elapsed(self, reset, total):
+            # A timer still running here was not stopped by its caller, so end its interval.
             if self.started_:
                 self.stop()
             # Get the elapsed time.
-            elapsed_ = self._get_elapsed_msec()
+            self._read_latest()
+            if total:
+                elapsed_ = self.total_elapsed_msec
+            else:
+                elapsed_ = self.latest_elapsed_msec
             # Reset the elapsed time
             if reset:
                 self.reset()
-            # If timing was in progress, set it back.
-            if started_:
-                self.start()
             return elapsed_
 
+        def elapsed(self, reset=True):
+            """Elapsed time in ms of the latest start/stop interval."""
+            return self._elapsed(reset, total=False)
+
+        def elapsed_total(self, reset=True):
+            """Total elapsed time in ms of all intervals since the last reset."""
+            return self._elapsed(reset, total=True)
+
         def mean(self):
+            """Mean elapsed time in ms of all intervals since the last reset."""
             self.elapsed(reset=False)
-            return trim_mean(self.elapsed_records, 0.1)
+            if self.num_intervals == 0:
+                return 0.0
+            return self.total_elapsed_msec / self.num_intervals
 
     def __init__(self):
         self.timers = {}
@@ -144,7 +155,7 @@ class SynchronizedWallClockTimer:
         string = "time (ms)"
         for name in names:
             if name in self.timers:
-                elapsed_time = (self.timers[name].elapsed(reset=reset) / normalizer)
+                elapsed_time = (self.timers[name].elapsed_total(reset=reset) / normalizer)
                 string += " | {}: {:.2f}".format(name, elapsed_time)
 
         # timers logging should be independent of the global log level it's already conditional on wall_clock_breakdown being True, so using use_logger=False will always print the stats
@@ -175,6 +186,9 @@ class NoopTimer:
             ...
 
         def elapsed(self, **kwargs):
+            return 0
+
+        def elapsed_total(self, **kwargs):
             return 0
 
         def mean(self):

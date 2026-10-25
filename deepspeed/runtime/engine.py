@@ -3694,7 +3694,7 @@ class DeepSpeedEngine(Module):
     def _update_wall_clock_timers(self):
         self.engine_timers_cache = {}
         for name in self.engine_timers.active_timers():
-            self.engine_timers_cache[name] = self.timers(name).elapsed(reset=False)
+            self.engine_timers_cache[name] = self.timers(name).elapsed_total(reset=False)
 
     def get_wall_clock_timers(self):
         r"""
@@ -3731,27 +3731,27 @@ class DeepSpeedEngine(Module):
             self.summary_events = [
                 (
                     "Train/Samples/elapsed_time_ms_forward",
-                    self.timers(FORWARD_GLOBAL_TIMER).elapsed(reset=False),
+                    self.timers(FORWARD_GLOBAL_TIMER).elapsed_total(reset=False),
                     self.global_samples,
                 ),
                 (
                     "Train/Samples/elapsed_time_ms_backward",
-                    self.timers(BACKWARD_GLOBAL_TIMER).elapsed(reset=False),
+                    self.timers(BACKWARD_GLOBAL_TIMER).elapsed_total(reset=False),
                     self.global_samples,
                 ),
                 (
                     "Train/Samples/elapsed_time_ms_backward_inner",
-                    self.timers(BACKWARD_INNER_GLOBAL_TIMER).elapsed(reset=False),
+                    self.timers(BACKWARD_INNER_GLOBAL_TIMER).elapsed_total(reset=False),
                     self.global_samples,
                 ),
                 (
                     "Train/Samples/elapsed_time_ms_backward_allreduce",
-                    self.timers(BACKWARD_REDUCE_GLOBAL_TIMER).elapsed(reset=False),
+                    self.timers(BACKWARD_REDUCE_GLOBAL_TIMER).elapsed_total(reset=False),
                     self.global_samples,
                 ),
                 (
                     "Train/Samples/elapsed_time_ms_step",
-                    self.timers(STEP_GLOBAL_TIMER).elapsed(reset=False),
+                    self.timers(STEP_GLOBAL_TIMER).elapsed_total(reset=False),
                     self.global_samples,
                 ),
             ]
