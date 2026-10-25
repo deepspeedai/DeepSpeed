@@ -201,6 +201,15 @@ class GDNInputProj(torch.autograd.Function):
         from deepspeed.module_inject.kernel_reference import gdn_input_proj
         return gdn_input_proj(hidden, w_qkv, w_z, w_b, w_a)
 
+    @classmethod
+    def apply6(cls, x, q_w, k_w, v_w, z_w, b_w, a_w, kernel_op):
+        """TP block-sliced GDN in_proj through the same grouped_linear
+        interface as the fused 4-mat form (path consistency TP=1/TP=2)."""
+        if _native_kernel_ready(kernel_op, x, q_w, k_w, v_w, z_w, b_w, a_w):
+            if hasattr(kernel_op, "grouped_linear"):
+                return kernel_op.grouped_linear(x, [q_w, k_w, v_w, z_w, b_w, a_w], False)[0]
+        return torch.cat([torch.nn.functional.linear(x, w) for w in (q_w, k_w, v_w, z_w, b_w, a_w)], dim=-1)
+
     @staticmethod
     def backward(ctx, grad_out):
         hidden, w_qkv, w_z, w_b, w_a = ctx.saved_tensors
@@ -319,16 +328,10 @@ def _fused_gdn_forward(self, hidden_states, *args, **kwargs):
         k_w = qkv_w[self.key_dim + r * nq:self.key_dim + (r + 1) * nq]
         v_w = qkv_w[2 * self.key_dim + r * nv:2 * self.key_dim + (r + 1) * nv]
         x2 = hidden_states.reshape(-1, hidden_states.shape[-1])
-        qkv = torch.cat([
-            torch.nn.functional.linear(x2, q_w),
-            torch.nn.functional.linear(x2, k_w),
-            torch.nn.functional.linear(x2, v_w),
-        ],
-                        dim=-1)
-        zb = torch.nn.functional.linear(x2, self.in_proj_z.weight)
-        bb = torch.nn.functional.linear(x2, self.in_proj_b.weight)
-        aa = torch.nn.functional.linear(x2, self.in_proj_a.weight)
-        fused = torch.cat([qkv, zb, bb, aa], dim=-1).view(batch_size, seq_len, -1)
+        # Same dispatch path as TP=1 (GDNInputProj -> grouped_linear); the
+        # backend routes the block-sliced 6-mat form — no raw aten here.
+        fused = GDNInputProj.apply6(x2, q_w, k_w, v_w, self.in_proj_z.weight, self.in_proj_b.weight,
+                                    self.in_proj_a.weight, gdn_kernel_op).view(batch_size, seq_len, -1)
     elif batch_size == 1 and seq_len == 1:
         fused = GDNInputProj.apply(
             hidden_states.squeeze(0).squeeze(0), self.in_proj_qkv.weight, self.in_proj_z.weight, self.in_proj_b.weight,

@@ -1439,7 +1439,16 @@ at::Tensor dual_gemm_silu_mul(at::Tensor x, at::Tensor gate_w, at::Tensor up_w)
 std::vector<at::Tensor> grouped_linear(at::Tensor x, std::vector<at::Tensor> weights, bool glu_epilogue)
 {
     const size_t n = weights.size();
-    TORCH_CHECK(n >= 1 && n <= 4, "grouped_linear takes 1..4 weight matrices");
+    TORCH_CHECK(n >= 1 && n <= 6, "grouped_linear takes 1..6 weight matrices");
+    if (n == 6) {
+        // TP block-sliced GDN in_proj [q, k, v, z, b, a]: route through this
+        // interface so TP=1 (fused 4-mat) and TP=2 (block-sliced 6-mat)
+        // share one dispatch path in the forward
+        auto qkv = grouped_linear(x, {weights[0], weights[1], weights[2]}, false);
+        auto zba = grouped_linear(x, {weights[3], weights[4], weights[5]}, false);
+        at::Tensor fused = at::cat({qkv[0], qkv[1], qkv[2], zba[0], zba[1], zba[2]}, -1);
+        return {fused};
+    }
     const int64_t K = weights[0].size(1);
     // M == 1 rides the flat GEMV kernels (1-D input or a single row)
     if (x.numel() == K) {
