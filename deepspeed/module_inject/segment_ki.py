@@ -416,18 +416,26 @@ def _install_gdn_segment(seg: GDNSegment) -> bool:
 
     parent = seg.parent
 
+    def _local_conv_wb():
+        # AutoTP shards only Linear layers; slice the conv to local channels
+        import deepspeed.comm as dist
+        tp_sz = dist.get_world_size() if dist.is_initialized() else 1
+        w = parent.conv1d.weight.squeeze(1)
+        bias = parent.conv1d.bias
+        if tp_sz > 1:
+            w = w[:w.shape[0] // tp_sz]
+            bias = bias[:bias.shape[0] // tp_sz] if bias is not None else None
+        return w, bias
+
     def conv_update_with_weights(mixed_qkv, conv_state):
-        return conv_update(mixed_qkv, conv_state, parent.conv1d.weight.squeeze(1), parent.conv1d.bias,
-                           parent.activation)
+        w, bias = _local_conv_wb()
+        return conv_update(mixed_qkv, conv_state, w, bias, parent.activation)
 
     def conv_fn_with_weights(mixed_qkv, **kw):
         # seq_idx carries the packed-sequence boundaries; the conv takes
         # nothing else from the layer kwargs (matching the native call).
-        return conv_fn(mixed_qkv,
-                       parent.conv1d.weight.squeeze(1),
-                       parent.conv1d.bias,
-                       activation=parent.activation,
-                       seq_idx=kw.get("seq_idx"))
+        w, bias = _local_conv_wb()
+        return conv_fn(mixed_qkv, w, bias, activation=parent.activation, seq_idx=kw.get("seq_idx"))
 
     def scan(query, key, value, **kw):
         init_state = kw.get("initial_state")
