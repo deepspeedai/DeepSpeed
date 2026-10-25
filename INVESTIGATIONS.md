@@ -904,3 +904,27 @@ no new bottleneck. Both detailed profiles blocked: segKI prof variant
 OOMs on a 60.62GiB full-sequence lm_head alloc (modeling line 1725,
 logits_to_keep default; trigger path unpinned — bench itself runs);
 vLLM EngineCore is a separate process (needs tensorboard trace tools).
+
+
+## 20. GDN in_proj TP path unified through grouped_linear — bonus perf
+
+grouped_linear now accepts the 6-mat block-sliced form (internally
+3-mat qkv + 3-mat zba, one concat); GDNInputProj.apply6 routes TP=2
+through the same dispatch as TP=1's fused 4-mat form. The raw-F.linear
+TP-only path is gone (path consistency + test coverage restored).
+
+Results (same bench, same prompts):
+| bs | before (raw F.linear) | after (apply6/grouped_linear) |
+|----|-----------------------|-------------------------------|
+| 32 | 1649-1661 | **1785.3 (+7.9%)** |
+| 64 | 2103-2106 | **2272.3 (+8.1%)** |
+Correctness unchanged: bs=64 rate=0.959, 56/64 rows exact (same
+near-tie pattern); 184 tests pass.
+
+The 1-1.5% estimate was wrong — the win is ~8%: the grouped kernels
+also replaced the z/b/a cuBLAS GEMMs (previously outside our dispatch),
+and single dispatch removed 5 launches × 24 layers of graph-internal
+scheduling. Path consistency and performance were the same fix.
+
+vs vLLM TP=2: bs=32 1785/1727 = 103.4%; bs=64 2272/1730 = 131.4%.
+Both TP=2 batch points now beat vLLM.
