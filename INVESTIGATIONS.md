@@ -802,3 +802,40 @@ smaller-N_TILE compile-time variant for sharded shapes.
 3. grouped N_TILE variant for halved shapes (recover the wash)
 Also: bench-side lesson — the earlier "silent death" was rank1 exiting
 early under torchrun (not OOM); both ranks must always participate.
+
+
+## 19. GDN column-column-row re-partition at TP=2 — SUCCESS (+48%)
+
+The #8877 analysis led here: HF's tp_plan marks the whole GDN block
+colwise_gather_output (6 collects/layer = 144/step). Because GDN math is
+per-head independent, in_proj colwise (no gather) + out_proj rowwise makes
+the block rank-local with ONE AllReduce per layer.
+
+### Four correctness bugs found and fixed along the way
+1. Shard-aware dims: derive split boundaries/head counts from per-rank
+   weight shapes, not the global config.
+2. in_proj_qkv is a FUSED [q|k|v] block weight — a contiguous column
+   split lands mid-block (rank0 got [all-q, all-k]!). Fix: keep it
+   replicated; each rank slices its head ranges per block as zero-copy
+   views (z/b/a are single-block and shard head-aligned).
+3. conv1d is not a Linear — AutoTP leaves it full-width. The conv weight
+   channels follow the [q|k|v] block order, so a rank's local weight is
+   the cat of its THREE block ranges (cached per module), not a prefix.
+4. A_log/dt_bias slices were a prefix on every rank — rank-indexed head
+   ranges required.
+
+### Results (2x 4080 SUPER, bs=32, 256-token distinct prompts, greedy)
+| config | tok/s | vs vLLM TP=2 |
+|---|---|---|
+| segKI + stock tp_plan | 1114-1120 | 64% |
+| **segKI + C-C-R GDN partition** | **1649.4** | **95.5%** (vLLM 1727.2) |
+| vLLM 0.31 TP=2 | 1727.2 | — |
+
+Correctness vs full-width eager: 0.969 (6/8 rows perfect, 2 rows single
+near-tie flips — TP-sharded numerics vs full-width, same class as bf16
+tolerance; first 8 tokens identical).
+184 tests still pass (TP=1 unchanged; the shard-aware forward is a
+superset via tp_size=1 defaults).
+
+Collectives/layer: 6 -> 1 (out_proj AR); the GDN fused forward re-engaged
+under TP (gate lifted). opbuilder interface: unchanged throughout.
