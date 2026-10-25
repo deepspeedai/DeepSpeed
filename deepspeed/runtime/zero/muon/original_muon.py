@@ -27,6 +27,7 @@ SOFTWARE.
 
 """
 
+import math
 import torch
 import deepspeed.comm as dist  # replace torch's distributed package with deepspeed.comm to resolve deepspeed check
 from deepspeed.runtime import compiler
@@ -159,6 +160,13 @@ def zeropower_via_gram_newtonschulz(G, steps: int):
 NS_METHODS = {"standard", "gram"}
 
 
+def _aspect_ratio_scale(rows, cols):
+    # sqrt(max(1, rows / cols)), written without max() or **. Once `muon_update` is recompiled
+    # for a second shape the sizes are symbolic: inductor casts both sides of a symbolic max to
+    # int64, so max(1, 32 / 12) came out as 2, and a symbolic ** failed to compile for Triton.
+    return math.sqrt(rows / cols) if rows > cols else 1.0
+
+
 def _per_head_orthogonalize(update, num_heads, ns_steps, ns_method):
     """Newton-Schulz per attention head, then fold the head dim back."""
     if update.ndim != 2:
@@ -172,7 +180,7 @@ def _per_head_orthogonalize(update, num_heads, ns_steps, ns_method):
     head_dim = out_features // num_heads
     ns_fn = zeropower_via_gram_newtonschulz if ns_method == "gram" else zeropower_via_newtonschulz5
     # Scale per head block, matching what the full-matrix path does for the whole matrix.
-    scale = max(1, head_dim / in_features)**0.5
+    scale = _aspect_ratio_scale(head_dim, in_features)
     per_head = ns_fn(update.view(num_heads, head_dim, in_features), steps=ns_steps) * scale
 
     return per_head.reshape(out_features, in_features)
@@ -210,7 +218,7 @@ def muon_update(grad,
         return _per_head_orthogonalize(update, num_heads, ns_steps, ns_method).to(orig_dtype)
     if is_expert_group:
         ns_fn = zeropower_via_gram_newtonschulz if ns_method == "gram" else zeropower_via_newtonschulz5
-        scale = max(1, update.size(-2) / update.size(-1))**0.5
+        scale = _aspect_ratio_scale(update.size(-2), update.size(-1))
         update = ns_fn(update, steps=ns_steps) * scale
     else:
         if update.ndim == 4:  # for the case of conv filters
@@ -219,7 +227,7 @@ def muon_update(grad,
             update = zeropower_via_gram_newtonschulz(update, steps=ns_steps)
         else:
             update = zeropower_via_newtonschulz5(update, steps=ns_steps)
-        update *= max(1, grad.size(-2) / grad.size(-1))**0.5
+        update *= _aspect_ratio_scale(grad.size(-2), grad.size(-1))
     if update.dtype != orig_dtype:
         update = update.to(orig_dtype)
     # On the non-nesterov path `update` is the (untouched, finite) momentum, so without this

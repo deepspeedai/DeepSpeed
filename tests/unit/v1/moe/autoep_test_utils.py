@@ -3,6 +3,7 @@
 """Shared fixtures and assertions for compact AutoEP tests."""
 
 import copy
+import gc
 import os
 import tempfile
 import traceback
@@ -373,6 +374,26 @@ def tiny_mixtral_config(transformers):
     )
 
 
+def tiny_minimax_m3_config(transformers):
+    return transformers.MiniMaxM3VLTextConfig(
+        vocab_size=64,
+        hidden_size=32,
+        intermediate_size=64,
+        shared_intermediate_size=64,
+        dense_intermediate_size=64,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=8,
+        max_position_embeddings=64,
+        num_local_experts=4,
+        num_experts_per_tok=2,
+        output_router_logits=True,
+        tie_word_embeddings=False,
+        use_cache=False,
+    )
+
+
 def _cpu_gloo_worker_entry(rank, world_size, init_method, master_port, worker, shared_tmpdir, error_queue):
     set_accelerator(CPU_Accelerator())
     os.environ["MASTER_ADDR"] = "127.0.0.1"
@@ -392,6 +413,8 @@ def _cpu_gloo_worker_entry(rank, world_size, init_method, master_port, worker, s
     finally:
         if dist.is_initialized():
             dist.destroy_process_group()
+            # Completed test-engine cycles can otherwise retain Gloo groups until interpreter finalization.
+            gc.collect()
 
 
 def run_cpu_gloo_test(worker, tmpdir, *, world_size=4, timeout=DEEPSPEED_TEST_TIMEOUT):

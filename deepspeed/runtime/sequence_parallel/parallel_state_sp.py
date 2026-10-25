@@ -14,6 +14,14 @@ _SEQUENCE_PARALLEL_GROUP = None
 _SEQUENCE_DATA_PARALLEL_GROUP = None
 
 
+def _release_sequence_parallel_groups() -> None:
+    """Release owned process-group references after WORLD teardown."""
+    global _SEQUENCE_PARALLEL_GROUP
+    global _SEQUENCE_DATA_PARALLEL_GROUP
+    _SEQUENCE_PARALLEL_GROUP = None
+    _SEQUENCE_DATA_PARALLEL_GROUP = None
+
+
 def initialize_sequence_parallel(sequence_parallel_size: int) -> None:
     """Initialize sequence parallel groups."""
 

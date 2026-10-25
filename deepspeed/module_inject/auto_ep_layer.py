@@ -21,12 +21,17 @@ import torch
 import torch.nn as nn
 import deepspeed.comm as dist
 from deepspeed.accelerator import get_accelerator
+from deepspeed.checkpoint.autoep_affine import (autoep_experts_for_rank, autoep_placement_to_affine_map,
+                                                legacy_uniform_autoep_placement_descriptor)
+from deepspeed.checkpoint.constants import (AFFINE_MAP, AUTOEP_EXPERT_PLACEMENT, AUTOEP_PARAM_EP_RANK,
+                                            AUTOEP_PARAM_LOCAL_EXPERTS, AUTOEP_PARAM_LOGICAL_SHAPE, DS_AUTOEP_UC_META)
 from deepspeed.module_inject.auto_ep_config import AutoEPConfig, MoELayerSpec, resolve_autoep_config_defaults
 from deepspeed.module_inject.auto_ep_folding import mark_autoep_folding_router_parameter
 from deepspeed.ops.triton_ops import autoep_fused_token_ops as fused_token_ops
 from deepspeed.utils import logger
-from deepspeed.module_inject.auto_ep_comm import (COMM_BACKEND, DEEPEP_BACKEND, assert_dtype_supported, deepep_combine,
-                                                  deepep_dispatch, new_exchange_scope, shared_exchange)
+from deepspeed.module_inject.auto_ep_comm import (COMM_BACKEND, DEEPEP_BACKEND, DeepEPCheckpointReplay,
+                                                  assert_dtype_supported, deepep_combine, deepep_dispatch,
+                                                  new_exchange_scope, shared_exchange)
 from deepspeed.moe.ep_router import TokenChoiceTopKRouter
 from deepspeed.moe.ep_count import count_tokens_per_expert
 from deepspeed.moe.ep_experts import GroupedExperts
@@ -103,6 +108,13 @@ def resolve_combine_impl(
     return "weighted_sum"
 
 
+def resolve_row_weighting_impl(config_override: Literal["auto", "eager", "fused"]) -> Literal["eager", "fused"]:
+    """Resolve DeepEP row weighting implementation from config override."""
+    if config_override != "auto":
+        return config_override
+    return "eager"
+
+
 def _copy_parameter_data(target: nn.Parameter, source: torch.Tensor) -> None:
     full_shape = torch.Size(getattr(source, "ds_shape", source.shape))
     with torch.no_grad():
@@ -152,6 +164,17 @@ def apply_scores_before_experts_if_enabled(
     if score_apply == "pre":
         return (routed_input.to(torch.float32) * top_scores.reshape(-1, 1)).to(routed_input.dtype)
     return routed_input
+
+
+def apply_deepep_row_weights(
+    rows: torch.Tensor,
+    weights: torch.Tensor,
+    row_weighting_impl: Literal["eager", "fused"],
+) -> torch.Tensor:
+    """Apply DeepEP's per-arrival routing weights at the configured boundary."""
+    if row_weighting_impl == "fused":
+        return fused_token_ops.fused_row_weighting(rows, weights)
+    return (rows.float() * weights).to(rows.dtype)
 
 
 def _split_plan_from_expert_counts(
@@ -349,6 +372,9 @@ def permute_by_local_expert(
     """Reorder tokens so they are grouped contiguously by local expert ID.
 
     Uses TorchTitan's Triton kernel for permutation index generation.
+    ``local_counts`` must account for every row of ``tokens`` exactly once,
+    i.e. sum to ``tokens.shape[0]``. On CUDA the reorder and its inverse are
+    gathers that rely on this; see :func:`deepspeed.moe.ep_kernels.permute_rows`.
 
     Returns:
         tokens_permuted: [N_padded, H] (alignment-padded)
@@ -356,7 +382,8 @@ def permute_by_local_expert(
         aligned_counts: [E_local] aligned token counts per expert (for expert computation)
         n_tokens: original token count before padding (for unpermute)
     """
-    from deepspeed.moe.ep_kernels import generate_permute_indices, TOKEN_GROUP_ALIGN_SIZE_M
+    from deepspeed.moe.ep_kernels import (generate_permute_indices, permute_rows, permute_rows_supported,
+                                          TOKEN_GROUP_ALIGN_SIZE_M)
 
     if local_counts.ndim == 1:
         # [E_local]: already aggregated over sources (ep_degree=1)
@@ -395,9 +422,13 @@ def permute_by_local_expert(
         permuted_indices = permuted_indices.to(tokens.device)
         m_sizes = m_sizes.to(tokens.device)
 
-    # Add padding row for out-of-bounds indices (index n_tokens -> zero row)
-    tokens_padded = torch.vstack((tokens, tokens.new_zeros((tokens.shape[-1], ))))
-    tokens_permuted = tokens_padded[permuted_indices, :]
+    if permute_rows_supported(tokens):
+        # One gather that writes zero rows at padding slots, and a gather again in the backward.
+        tokens_permuted = permute_rows(tokens, permuted_indices)
+    else:
+        # Add padding row for out-of-bounds indices (index n_tokens -> zero row)
+        tokens_padded = torch.vstack((tokens, tokens.new_zeros((tokens.shape[-1], ))))
+        tokens_permuted = tokens_padded[permuted_indices, :]
 
     return tokens_permuted, permuted_indices, m_sizes, n_tokens
 
@@ -414,6 +445,11 @@ def unpermute_by_local_expert(
         permuted_indices: [N_padded] index mapping from permute_by_local_expert
         n_tokens: original token count before alignment padding
     """
+    from deepspeed.moe.ep_kernels import permute_rows_supported, unpermute_rows
+
+    if permute_rows_supported(expert_output):
+        # A gather through the inverse permutation instead of zero-filling and scattering.
+        return unpermute_rows(expert_output, permuted_indices, n_tokens)
     # Scatter expert outputs back to original positions.
     # permuted_indices values range 0..n_tokens, where n_tokens is the zero-padding row.
     out_unpermuted = expert_output.new_zeros((n_tokens + 1, expert_output.shape[-1]))
@@ -498,12 +534,16 @@ class AutoEPMoELayer(nn.Module):
         self.top_k = spec.top_k
         self.score_apply = resolve_score_apply_mode(spec, config.score_apply)
         self.combine_impl = resolve_combine_impl(config.combine_impl)
+        self.row_weighting_impl = resolve_row_weighting_impl(config.row_weighting_impl)
         self._fused_combine_checked = False
+        self._fused_row_weighting_checked = False
         route_norm = spec.route_norm if config.route_norm is None else config.route_norm
         self.ep_size = ep_size
         self.ep_rank = ep_rank
         self.num_experts = spec.num_experts
         self.num_local_experts = spec.num_experts // ep_size
+        self.expert_placement_descriptor = legacy_uniform_autoep_placement_descriptor(
+            self.num_experts, self.num_local_experts, self.ep_size)
         self.hidden_size = spec.hidden_size
         self.ep_group_name = f"ep_size_{ep_size}"
         self.ep_group = None  # Set by set_deepspeed_parallelism()
@@ -595,6 +635,10 @@ class AutoEPMoELayer(nn.Module):
             num_experts=self.num_local_experts,
             use_grouped_mm=config.use_grouped_mm,
             disable_triton_grouped_mm=config.disable_triton_grouped_mm,
+            activation=spec.expert_activation,
+            activation_alpha=spec.expert_activation_alpha,
+            activation_limit=spec.expert_activation_limit,
+            gate_up_impl=config.gate_up_impl,
         )
         _copy_parameter_data(self.experts.w1, w1)
         _copy_parameter_data(self.experts.w2, w2)
@@ -602,6 +646,22 @@ class AutoEPMoELayer(nn.Module):
         self.experts.w1.requires_grad_(w1_requires_grad)
         self.experts.w2.requires_grad_(w2_requires_grad)
         self.experts.w3.requires_grad_(w3_requires_grad)
+        local_experts = autoep_experts_for_rank(self.expert_placement_descriptor, self.ep_rank)
+        for param in (self.experts.w1, self.experts.w2, self.experts.w3):
+            physical_shape = getattr(param, 'ds_shape', param.shape)
+            logical_shape = [self.num_experts, *physical_shape[1:]]
+            affine_map = autoep_placement_to_affine_map(self.expert_placement_descriptor, logical_shape)
+            setattr(
+                param,
+                DS_AUTOEP_UC_META,
+                {
+                    AUTOEP_EXPERT_PLACEMENT: self.expert_placement_descriptor,
+                    AFFINE_MAP: affine_map.to_dict(),
+                    AUTOEP_PARAM_LOGICAL_SHAPE: logical_shape,
+                    AUTOEP_PARAM_EP_RANK: self.ep_rank,
+                    AUTOEP_PARAM_LOCAL_EXPERTS: list(local_experts),
+                },
+            )
 
         self.shared_experts = getattr(source_module, spec.shared_experts_name,
                                       None) if spec.has_shared_experts else None
@@ -656,6 +716,8 @@ class AutoEPMoELayer(nn.Module):
         self.comm_num_sm = config.comm_num_sm
         self.comm_qp_margin = config.comm_qp_margin
         self._deepep_exchange = None
+        # Per layer, unlike the shared exchange: a checkpoint recompute must find this layer's forward handle.
+        self._deepep_replay = DeepEPCheckpointReplay()
         self.comm_max_tokens_per_rank = config.comm_max_tokens_per_rank
 
     def _start_async_split_plan(self, num_tokens_per_expert: torch.Tensor) -> _PendingSplitPlan:
@@ -778,23 +840,33 @@ class AutoEPMoELayer(nn.Module):
                 "job will produce, normally train_micro_batch_size_per_gpu * maximum padded sequence length, or "
                 'set comm_backend="comm".')
 
-        received, recv_weights, exchange = deepep_dispatch(self._deepep_exchange, tokens, ro.selected_experts,
-                                                           ro.top_scores)
+        received, recv_weights, exchange = deepep_dispatch(self._deepep_exchange,
+                                                           tokens,
+                                                           ro.selected_experts,
+                                                           ro.top_scores,
+                                                           replay=self._deepep_replay)
         handle = exchange.last_handle
 
         # combine reads exactly the rows the handle says arrived, taken from
         # the handle as a Python int rather than off the device prefix sum to
         # avoid a device-to-host sync in front of every layer's expert GEMM.
         arrived = handle.num_expanded_tokens
-        received = received[:arrived]
+        # A fresh dispatch syncs for exact counts, so its buffers usually hold
+        # exactly the rows that arrived. Slicing them anyway changes nothing
+        # forward, but its backward zero-fills a gradient the size of the whole
+        # buffer and copies the real one into it, in every layer.
+        if received.shape[0] != arrived:
+            received = received[:arrived]
+        if recv_weights is not None and recv_weights.shape[0] != arrived:
+            recv_weights = recv_weights[:arrived]
 
         # Applied here, not handed to combine: DeepEP's combine transports and
         # reduces topk_weights but doesn't multiply rows by them. Which side of
         # the experts it lands on must match the collective path, since SwiGLU
         # doesn't commute with the weight.
-        weights = None if recv_weights is None else recv_weights[:arrived].reshape(-1, 1)
+        weights = None if recv_weights is None else recv_weights.reshape(-1, 1)
         if weights is not None and self.score_apply == "pre":
-            received = (received.float() * weights).to(received.dtype)
+            received = apply_deepep_row_weights(received, weights, self.row_weighting_impl)
             weights = None
 
         # The grouped GEMM needs per-expert row counts, which arrive as a
@@ -809,7 +881,7 @@ class AutoEPMoELayer(nn.Module):
         expert_output = self.experts(received, counts)
 
         if weights is not None:
-            expert_output = (expert_output.float() * weights).to(expert_output.dtype)
+            expert_output = apply_deepep_row_weights(expert_output, weights, self.row_weighting_impl)
 
         return deepep_combine(exchange, expert_output, handle)
 
@@ -878,17 +950,27 @@ class AutoEPMoELayer(nn.Module):
 
     def _forward(self, hidden_states: torch.Tensor) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         bsz, seqlen, hdim = hidden_states.shape
+        folded_tp = self.folding_group_handles is not None and self.folding_group_handles.spec.tp_size > 1
+        if folded_tp:
+            # Tensor-parallel layers before this one need the same input gradient on every TP peer;
+            # see average_gradient_over_tp.
+            from deepspeed.moe.ep_tp_dispatch import average_gradient_over_tp
+            hidden_states = average_gradient_over_tp(hidden_states, self.tp_group,
+                                                     self.folding_group_handles.spec.tp_size)
         x = hidden_states.reshape(-1, hdim)  # [T, H]
 
         # Fail all ranks before any collective can stall.
         if self.combine_impl == "fused_weighted_sum" and not self._fused_combine_checked:
             fused_token_ops.assert_supported(x, score_apply=self.score_apply)
             self._fused_combine_checked = True
+        if self.row_weighting_impl == "fused" and not self._fused_row_weighting_checked:
+            weights = x.new_empty((x.shape[0], 1), dtype=torch.float32)
+            fused_token_ops.assert_row_weighting_supported(x, weights)
+            self._fused_row_weighting_checked = True
 
         # Router
         ro: RouterOutput = RouterOutput(*self.router(x, self.expert_bias))
 
-        folded_tp = self.folding_group_handles is not None and self.folding_group_handles.spec.tp_size > 1
         pending_plan = None
         if self.async_split_plan and self.ep_size > 1 and self.comm_backend == COMM_BACKEND:
             if folded_tp:

@@ -16,6 +16,16 @@ except ImportError:
     from deepspeed.ops.op_builder.builder import OpBuilder
 
 
+def cpp_standard():
+    import torch
+    torch_major, torch_minor = map(int, torch.__version__.split('.')[0:2])
+    # PyTorch headers require C++17 on 2.x and C++20 from 2.12 on; a later -std flag overrides
+    # the one torch adds.
+    if (torch_major, torch_minor) >= (2, 12):
+        return '-std=c++20'
+    return '-std=c++17'
+
+
 class SYCLOpBuilder(OpBuilder):
 
     def builder(self):
@@ -75,7 +85,7 @@ class SYCLOpBuilder(OpBuilder):
             '-g',
             '-gdwarf-4',
             '-O3',
-            '-std=c++17',
+            cpp_standard(),
             '-fPIC',
             '-DMKL_ILP64',
             '-fno-strict-aliasing',

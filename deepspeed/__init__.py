@@ -14,8 +14,6 @@ import os
 os.environ.setdefault("PYTORCH_NVML_BASED_CUDA_CHECK", "1")
 
 import argparse
-import sys
-import types
 import json
 from typing import Any, Callable, Dict, Optional, Tuple, Union
 import torch
@@ -23,15 +21,25 @@ from torch.optim import Optimizer
 from torch.optim.lr_scheduler import _LRScheduler
 from packaging import version as pkg_version
 
-# Skip Triton import for AMD due to pytorch-triton-rocm module breaking device API in DeepSpeed
-if not (hasattr(torch.version, 'hip') and torch.version.hip is not None):
-    try:
-        import triton  # noqa: F401 # type: ignore
-        HAS_TRITON = True
-    except ImportError:
-        HAS_TRITON = False
-else:
-    HAS_TRITON = False
+
+def _has_triton():
+    # Triton supports AMD GPUs (ROCm 6.2+, https://github.com/triton-lang/triton#compatibility), and PyTorch ships it
+    # for ROCm as pytorch-triton-rocm. HAS_TRITON is still False on ROCm on purpose: it turns on DeepSpeed's Triton
+    # inference kernels, and keeping them off there avoids having to validate all of those inference ops on ROCm.
+    if hasattr(torch.version, 'hip') and torch.version.hip is not None:
+        return False
+    from .ops.triton_ops._triton import is_triton_available
+    return is_triton_available()
+
+
+def __getattr__(name):
+    # HAS_TRITON is computed on first access because importing triton slows down import deepspeed. Assigning
+    # deepspeed.HAS_TRITON = False turns DeepSpeed's Triton kernels off, since they read this attribute.
+    if name == "HAS_TRITON":
+        globals()["HAS_TRITON"] = _has_triton()
+        return globals()["HAS_TRITON"]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 from . import ops
 from . import module_inject
@@ -39,24 +47,23 @@ from . import module_inject
 from .accelerator import get_accelerator
 from .constants import TORCH_DISTRIBUTED_DEFAULT_PORT
 from .runtime.engine import DeepSpeedEngine, DeepSpeedOptimizerCallable, DeepSpeedSchedulerCallable
-from .runtime.engine import ADAM_OPTIMIZER, LAMB_OPTIMIZER, MUON_OPTIMIZER
+from .runtime.engine import MUON_OPTIMIZER
 from .runtime.base_optimizer import DeepSpeedOptimizer
 from .runtime.dataloader import DeepSpeedDataLoader
 from .runtime.hybrid_engine import DeepSpeedHybridEngine
 from .runtime.pipe.engine import PipelineEngine
+from .runtime.pipe.dualpipev import DualPipeVEngine, DualPipeVModule
 from .inference.engine import InferenceEngine
 from .inference.config import DeepSpeedInferenceConfig
-from .runtime.lr_schedules import add_tuning_arguments
 from .runtime.config import DeepSpeedConfig, DeepSpeedConfigError
 from .runtime.activation_checkpointing import checkpointing
 from .ops.transformer import DeepSpeedTransformerLayer, DeepSpeedTransformerConfig
-from .module_inject import replace_transformer_layer, revert_transformer_layer, set_autotp_mode
+from .module_inject import replace_transformer_layer, set_autotp_mode
 
 from .utils import log_dist, OnDevice, logger
 from .comm.comm import init_distributed
 
-from .runtime import zero, domino
-from .runtime.compiler import is_compile_supported
+from .runtime import zero
 
 from .pipe import PipelineModule
 
@@ -576,17 +583,18 @@ def initialize(
         mpu = model.mpu()
         config_class = DeepSpeedConfig(config, mpu)
         set_optimizer_flags(config_class, model)
-        engine = PipelineEngine(args=args,
-                                model=model,
-                                optimizer=optimizer,
-                                model_parameters=model_parameters,
-                                training_data=training_data,
-                                lr_scheduler=lr_scheduler,
-                                mpu=mpu,
-                                dist_init_required=dist_init_required,
-                                collate_fn=collate_fn,
-                                config=config,
-                                config_class=config_class)
+        engine_cls = DualPipeVEngine if isinstance(model, DualPipeVModule) else PipelineEngine
+        engine = engine_cls(args=args,
+                            model=model,
+                            optimizer=optimizer,
+                            model_parameters=model_parameters,
+                            training_data=training_data,
+                            lr_scheduler=lr_scheduler,
+                            mpu=mpu,
+                            dist_init_required=dist_init_required,
+                            collate_fn=collate_fn,
+                            config=config,
+                            config_class=config_class)
 
     # Restore zero.Init context if necessary
     zero.partition_parameters.restore_init_context()

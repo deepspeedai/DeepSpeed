@@ -87,7 +87,7 @@ If your model matches a built-in preset, set `tensor_parallel.preset_model` in t
 }
 ```
 
-For the list of available presets, see [supported models](/code-docs/training#autotp-supported-models).
+For the list of available presets, see [supported models](https://deepspeed.readthedocs.io/en/latest/training.html#autotp-supported-models).
 
 
 
@@ -139,15 +139,24 @@ identity rather than model configuration metadata such as `tie_word_embeddings`.
 Additional HuggingFace types such as `local_colwise` and `local_rowwise` are
 not yet handled and fall back to AutoTP preset-based partitioning.
 
-For an untied `lm_head` or `embed_out`, an explicit `row` partition rule also
+For an `lm_head` or `embed_out`, an explicit `row` partition rule also
 supports eager training with a replicated input. The head slices the input to
 match its weight shard, reduces the complete output, and reconstructs the full
 input gradient across tensor-parallel ranks. Bias stays replicated; uneven
 hidden dimensions and both flattened and sequence-shaped inputs are supported.
-The default training output-head layout remains column parallel. Explicit row
-training rejects tied weights and reshaped/non-input-dimension shards rather
-than silently breaking a parameter tie. Deferred DeepCompile collectives are
-not supported for this output-head path.
+The default training output-head layout remains column parallel. A head tied
+to its input embedding (`tie_word_embeddings`) is also supported: DeepSpeed
+shards every tied `nn.Embedding` along the same hidden dimension, so the pair
+keeps reading from and accumulating gradients into a single per-rank weight
+shard, and all-gathers each token's embedding slices into the full hidden
+activation. A conflicting explicit spec on the tied embedding is superseded
+with a warning. The embedding options `max_norm` and `sparse`, custom
+embedding forwards other than Gemma3's scaled embedding, weights tied to
+modules other than `nn.Embedding`, and reshaped/non-input-dimension shards are
+rejected rather than silently breaking a parameter tie. Deferred DeepCompile
+collectives are not supported for this output-head path. Note that a
+row-parallel head all-reduces the complete vocabulary logits; for tied models,
+`vocab_parallel_lm_head` avoids that and keeps logits sharded.
 
 If you need to override the model's built-in `tp_plan`, provide a
 `partition_config` in the DeepSpeed config -- it takes precedence.
@@ -156,7 +165,7 @@ If you need to override the model's built-in `tp_plan`, provide a
 ## Vocabulary-parallel LM Loss
 
 Causal language models normally gather the complete `lm_head` output before
-computing cross entropy. To keep an untied output vocabulary sharded, enable
+computing cross entropy. To keep an output vocabulary sharded, enable
 `vocab_parallel_lm_head`:
 
 ```json
@@ -189,19 +198,55 @@ second backward and higher-order gradients raise an error rather than reusing
 its overwritten gradient buffer. Select `"torch"` for those workloads.
 
 Only an `nn.Linear` whose final name segment is `lm_head` or `embed_out` is
-supported. If no such head exists, initialization fails instead of quietly
-falling back to an ordinary gathered head. When `partition_config` or a
+supported. With `vocab_parallel_lm_head: true`, if no such head exists,
+initialization fails instead of quietly falling back to an ordinary gathered
+head. When `partition_config` or a
 HuggingFace `tp_plan` also describes that head, `vocab_parallel_lm_head` takes
 precedence and a warning names the superseded partitioning.
 
-This option requires an untied output head and a model with a writable
-`loss_function` hook. Models that share the output weight with the input
-embedding must continue using gathered output until coupled vocabulary-parallel
-embedding support is available. The head's vocabulary must also be at least as
-large as `autotp_size`; smaller vocabularies fail at startup instead of leaving
-TP ranks with empty shards. The flag itself is the only trigger: a `colwise`
-`lm_head` specification with local output keeps the previous behavior of
-returning rank-local logits without installing the distributed loss.
+Models that tie the output head to the input embedding (`tie_word_embeddings`)
+are also supported: DeepSpeed detects the shared `nn.Embedding` and vocabulary-
+shards it jointly with `lm_head`, including all registered aliases of the
+embedding and distinct embedding modules sharing the same weight. These modules
+keep reading from and accumulating gradients into a single physical, per-rank-sharded weight
+`Parameter` instead of falling back to a gathered, replicated head. This also
+covers the HuggingFace `tp_plan` `embedding_rowwise` style that newer
+`transformers` releases inject for tied-embedding models. That style
+automatically enables the same vocabulary-parallel embedding/head path when
+`vocab_parallel_lm_head` is omitted or `null`, so no separate enable flag is
+required. This returns rank-local `outputs.logits`; set
+`vocab_parallel_lm_head: false` to opt out and keep the replicated tied
+embedding/head with full-vocabulary logits. Tied models whose plan
+does not contain `embedding_rowwise` retain the previous replicated behavior
+unless the flag is enabled explicitly. A conflicting explicit
+`partition_config` spec on the tied embedding is likewise superseded, with a
+warning.
+
+Vocabulary-parallel embeddings preserve `padding_idx` gradient suppression and
+Gemma3's scaled-embedding forward behavior. Other custom embedding forwards and
+the `max_norm`, `scale_grad_by_freq`, and `sparse` options are unsupported.
+Implicit automatic sharding checks compatibility before mutating weights; an
+unsupported embedding, missing or unwritable loss hook, empty vocabulary shard,
+or ambiguous output head retains the replicated embedding/head and logs a
+warning. Explicit `true` requests raise instead of falling back. Tied embeddings
+retain the full vocabulary shape in universal-checkpoint metadata, including
+uneven shards.
+
+With `compile.deepcompile: true` and `"autotp"` in `compile.passes`, automatic
+sharding from `embedding_rowwise` is disabled: the tied embedding and output
+head remain replicated with gathered logits, while the other supported layers
+are still tensor-parallel. An explicit `vocab_parallel_lm_head: true` request
+is not downgraded; vocabulary-parallel embeddings are not supported by the
+AutoTP compile pass.
+
+This option requires a model with a writable `loss_function` hook. The head's
+vocabulary must also produce a nonempty shard on every TP rank; smaller
+vocabularies or a grain size that leaves empty shards trigger the compatibility
+behavior above instead of leaving ranks with empty logits. An explicit `true`
+flag or a supported tied HuggingFace `embedding_rowwise` plan entry triggers this path. A
+plain `colwise` `lm_head` specification with local output keeps the previous
+behavior of returning rank-local logits without installing the distributed
+loss.
 
 The lower-level `vocab_parallel_cross_entropy` API also accepts an explicit
 sequence-parallel group. With `reduction="none"`, callers may return local token
@@ -226,6 +271,84 @@ each shard's mean itself, weighted by the shard's valid-token count, so an
 additional SP reduction would double-count tokens. Pass an `sp_group` only when
 this loss is the sole aggregation over a manually constructed TP x SP mesh.
 
+### Fused Projection and Loss
+
+The vocabulary-parallel loss above still materializes `[tokens, vocab / tp]`
+logits on every rank. `vocab_parallel_linear_cross_entropy` fuses the LM-head
+projection into the loss. Forward processes tokens in chunks and keeps only
+per-token softmax statistics; backward recomputes the logits one vocabulary block
+at a time. Only one block of logits is alive at a time:
+
+```python
+from deepspeed.sequence.linear_cross_entropy import vocab_parallel_linear_cross_entropy
+
+head = model.lm_head  # VocabParallelLinear
+hidden = model.model(input_ids).last_hidden_state[:, :-1]
+loss = vocab_parallel_linear_cross_entropy(hidden,
+                                           head.weight,
+                                           labels[:, 1:],
+                                           bias=head.bias,
+                                           tp_group=head.mp_group,
+                                           vocab_start_index=head.vocab_start_index,
+                                           vocab_end_index=head.vocab_end_index)
+```
+
+The call replaces both `head(hidden)` and the loss: it all-reduces the hidden
+gradient over the TP group in backward, as the column-parallel head would. It
+supports `none`, `sum` and `mean` reductions. `chunk_size` (tokens per forward
+chunk; backward uses vocabulary blocks of the same size) trades peak memory for
+speed; by default each FP32 logits block is about the size of the hidden states.
+This API is not yet wired into the HuggingFace forward or
+the `vocab_parallel_lm_head` configuration.
+
+
+### Log-probabilities, Entropy, and KL on Sharded Logits
+
+RL and on-policy distillation losses can consume the local logits shard
+directly through `deepspeed.sequence.vocab_parallel_ops`, so they never
+all-gather the full vocabulary:
+
+```python
+from deepspeed.sequence.vocab_parallel_ops import (vocab_parallel_entropy, vocab_parallel_kl_div,
+                                                   vocab_parallel_logprobs)
+
+head = model.lm_head  # VocabParallelLinear installed by vocab_parallel_lm_head
+shard = dict(tp_group=head.mp_group)
+ids = dict(vocab_start_index=head.vocab_start_index, vocab_end_index=head.vocab_end_index, **shard)
+student_logits = model(input_ids).logits  # [batch, seq, local_vocab]
+
+# Policy-gradient losses: log-probabilities of the sampled tokens, plus entropy.
+token_logprobs = vocab_parallel_logprobs(student_logits, sampled_ids, **ids)
+token_entropy = vocab_parallel_entropy(student_logits, **shard)
+
+# Dense distillation against an identically sharded teacher.
+token_kl = vocab_parallel_kl_div(student_logits, teacher_logits.detach(), reverse=True, **shard)
+
+# Distillation from a teacher that only provides top-k (logprob, id) pairs.
+student_topk = vocab_parallel_logprobs(student_logits, teacher_topk_ids, **ids)
+token_kl = (teacher_topk_logprobs.exp() * (teacher_topk_logprobs - student_topk)).sum(-1)
+
+loss = (token_kl * mask).sum() / mask.sum()
+```
+
+Every op returns an fp32 per-token tensor that is identical on all TP ranks;
+masking and reduction are left to the caller. `vocab_parallel_logprobs` accepts
+one token id per position or a trailing top-k dimension, and returns 0 for
+`ignore_index`. `vocab_parallel_kl_div` computes `KL(teacher || student)` by
+default and `KL(student || teacher)` with `reverse=True`; apply any temperature
+to both logits before calling. Teacher and student logits must use the same TP
+group and vocabulary sharding.
+
+Each op saves only its inputs and per-token statistics, and recomputes the
+softmax in bounded row chunks during backward. Its peak activation memory is
+therefore a small multiple of the local logits shard instead of the several
+fp32 copies that an equivalent composition of PyTorch ops keeps alive.
+When Triton supports the logits' device, each pass over the logits runs in a
+fused Triton kernel that keeps no fp32 copy of the shard; other devices, or
+`deepspeed.HAS_TRITON = False`, use an eager implementation with the same
+semantics. The entropy and KL forward passes read each logit once, and a slice
+along the sequence, such as the next-token shift `logits[:, :-1]`, is read in
+place rather than copied.
 
 ## Custom Patterns
 
@@ -314,7 +437,7 @@ For Grouped Query Attention with different Q/K/V sizes:
 
 1. **Ranks beyond the key/value head count stay idle**: Attention heads are distributed whole, and the distribution may be uneven -- 6 key/value heads over 4 ranks becomes 2/2/1/1, and a fused QKV weight is cut on the same head boundaries rather than inside a head. With more ranks than key/value heads, for example an 8-head model at `autotp_size=16`, the surplus ranks receive no attention weights at all. The result is still correct, because those ranks contribute zeros to the row-parallel all-reduce, but they do no attention work; AutoTP logs a warning instead of replicating heads to fill them. Hidden and vocabulary dimensions do not need to be divisible by the tensor parallel size: uneven shards are carried through save, conversion and restore via per-TP-rank shapes and widths.
 
-2. **Vocabulary-parallel tied weights**: `vocab_parallel_lm_head` requires an untied output projection and a writable model `loss_function` hook, and a vocabulary at least as large as the tensor-parallel size. Coupled sharding of a tied input embedding and output projection is not yet implemented.
+2. **Vocabulary-parallel LM loss requires a writable `loss_function` hook**: `vocab_parallel_lm_head` requires a model with a writable `loss_function` hook, and a vocabulary at least as large as the tensor-parallel size. Both tied and untied `lm_head`/`embed_out` heads are supported; a tied embedding is jointly vocabulary-sharded with its output head.
 
 3. **Combined TP and SP orchestration**: The vocab-parallel loss supports explicit orthogonal TP and SP groups, but AutoTP does not currently construct a combined TP x SP process mesh automatically.
 

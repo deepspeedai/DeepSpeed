@@ -26,6 +26,7 @@
 """
 
 import os
+import sys
 
 from deepspeed import comm as dist
 from deepspeed.utils import log_dist
@@ -83,6 +84,71 @@ _DATA_PARALLEL_GROUP = None
 # These values enable us to change the mpu sizes on the fly.
 _MPU_TENSOR_MODEL_PARALLEL_WORLD_SIZE = None
 _MPU_TENSOR_MODEL_PARALLEL_RANK = None
+
+
+def _release_process_group_references(group=None):
+    """Release DeepSpeed-owned references after successful backend destruction.
+
+    A ``None`` group represents WORLD teardown, which destroys every process
+    group. Explicit subgroup teardown only releases references to that group.
+    """
+    global _WORLD_GROUP
+    global _ZERO_PARAM_INTRA_PARALLEL_GROUP
+    global _TENSOR_MODEL_PARALLEL_GROUP
+    global _MODEL_PARALLEL_GROUP
+    global _DATA_PARALLEL_GROUP
+    global _MPU_TENSOR_MODEL_PARALLEL_WORLD_SIZE
+    global _MPU_TENSOR_MODEL_PARALLEL_RANK
+    global expert_tensor_parallel_world_size
+    global mesh_device
+    global mpu
+
+    if group is None:
+        sequence_parallel = sys.modules.get("deepspeed.runtime.sequence_parallel.parallel_state_sp")
+        if sequence_parallel is not None:
+            sequence_parallel._release_sequence_parallel_groups()
+        _EXPERT_PARALLEL_GROUP.clear()
+        _EXPERT_PARALLEL_GROUP_RANKS.clear()
+        _EXPERT_DATA_PARALLEL_GROUP.clear()
+        _EXPERT_DATA_PARALLEL_GROUP_RANKS.clear()
+        _ALL_TO_ALL_GROUP.clear()
+        _WORLD_GROUP = None
+        _ZERO_PARAM_INTRA_PARALLEL_GROUP = None
+        _TENSOR_MODEL_PARALLEL_GROUP = None
+        _MODEL_PARALLEL_GROUP = None
+        _DATA_PARALLEL_GROUP = None
+        _MPU_TENSOR_MODEL_PARALLEL_WORLD_SIZE = None
+        _MPU_TENSOR_MODEL_PARALLEL_RANK = None
+        expert_tensor_parallel_world_size = 1
+        mesh_device = None
+        mpu = None
+        return
+
+    for group_map, rank_map in (
+        (_EXPERT_PARALLEL_GROUP, _EXPERT_PARALLEL_GROUP_RANKS),
+        (_EXPERT_DATA_PARALLEL_GROUP, _EXPERT_DATA_PARALLEL_GROUP_RANKS),
+    ):
+        for group_name, cached_group in list(group_map.items()):
+            if cached_group is group:
+                del group_map[group_name]
+                rank_map.pop(group_name, None)
+
+    for group_name, cached_group in list(_ALL_TO_ALL_GROUP.items()):
+        if cached_group is group:
+            del _ALL_TO_ALL_GROUP[group_name]
+
+    if _WORLD_GROUP is group:
+        _WORLD_GROUP = None
+    if _ZERO_PARAM_INTRA_PARALLEL_GROUP is group:
+        _ZERO_PARAM_INTRA_PARALLEL_GROUP = None
+    if _TENSOR_MODEL_PARALLEL_GROUP is group:
+        _TENSOR_MODEL_PARALLEL_GROUP = None
+        _MPU_TENSOR_MODEL_PARALLEL_WORLD_SIZE = None
+        _MPU_TENSOR_MODEL_PARALLEL_RANK = None
+    if _MODEL_PARALLEL_GROUP is group:
+        _MODEL_PARALLEL_GROUP = None
+    if _DATA_PARALLEL_GROUP is group:
+        _DATA_PARALLEL_GROUP = None
 
 
 def _init_tp_groups_with_new_group(tensor_model_parallel_size=1, data_parallel_size=None):
