@@ -767,3 +767,38 @@ Goal: make MLP grouped kernels engage at TP=2 (profile showed none).
 
 TP=2 bench stands: segKI 523-533 / 1114-1120 (bs8/32), +18%/+36% over
 graphonly, gains from decode_attn only.
+
+
+### RESOLUTION: the "routing gap" was a classifier illusion
+The TP=2 profile script's classify() jumped from NCCL straight to "gemm"
+— glu_gemm_kernel contains "gemm" and was silently bucketed as cuBLAS.
+Proof: after install the GEMM bucket's calls/step dropped 232.3 -> 199.6
+(= one launch saved per MLP layer). With the classifier fixed:
+
+| class | ms/step | calls/step | % |
+|---|---|---|---|
+| NCCL communication | 28.68 | 166.1 | 56.2% |
+| GEMM (cuBLAS) | 10.52 | 166.8 | 20.6% |
+| elementwise | 4.88 | 1072.4 | 9.6% |
+| grouped GEMM (ours) | 3.44 | 40.9 | 6.7% |
+| GDN scan/conv | 1.28 | 49.7 | 2.5% |
+| decode_attn (ours) | 0.81 | 8.2 | 1.6% |
+| TOTAL | 51.06 | | |
+
+40.9 calls/step = 32 MLP + 8 qkv grouped — exactly as designed.
+
+### Why the bench was flat: TP halves N, halving block count
+Per-rank MLP N = 4608 (of 9216) -> 72 blocks on 128 SMs = underfilled;
+cuBLAS is already strong at that shape. The TP=1 grouped advantage was
+N-driven and does not transfer at halved N. Fix (kernel-track): a
+smaller-N_TILE compile-time variant for sharded shapes.
+
+### TP=2 priorities (final, evidence-based)
+1. NCCL 56.2% (28.7ms) — #8877 AllGather pattern + o/down AllReduces;
+   custom partition config (GDN replicate) untested; graph-splitting
+   with comm overlap is the structural fix
+2. elementwise 9.6% (1072 calls/step — GDN glue at TP since GDN segment
+   is gated off; shard-aware GDN forward would restore its fusions)
+3. grouped N_TILE variant for halved shapes (recover the wash)
+Also: bench-side lesson — the earlier "silent death" was rank1 exiting
+early under torchrun (not OOM); both ranks must always participate.
