@@ -1104,6 +1104,7 @@ class HybridEngineRollout(RolloutEngine):
             use_cache=True,
             cache_position=torch.arange(prompt_len, device=device),
             position_ids=position_ids,
+            **self._last_logits_kwargs(module),
         )
         return prefill_output.logits[:, -1, :].argmax(dim=-1, keepdim=True), prefill_cache
 
@@ -1136,6 +1137,15 @@ class HybridEngineRollout(RolloutEngine):
             return False
         eos_ids = torch.as_tensor(eos_token_id, dtype=token.dtype, device=token.device).flatten()
         return bool((token == eos_ids).any().item())
+
+    @staticmethod
+    def _last_logits_kwargs(module):
+        """Ask models that support it for last-position logits only, since prefill samples just one token."""
+        # Without this the prefill materializes [batch, prompt_len, vocab] logits, the largest activation of the
+        # rollout. Models that do not declare the argument may forward unknown kwargs to submodules, so skip them.
+        if "logits_to_keep" in signature(module.forward).parameters:
+            return {"logits_to_keep": 1}
+        return {}
 
     @staticmethod
     def _call_model(module, input_ids, **kwargs):
@@ -1314,6 +1324,7 @@ class HybridEngineRollout(RolloutEngine):
             past_key_values=prefill_cache,
             use_cache=True,
             cache_position=torch.arange(prompt_len, device=device),
+            **self._last_logits_kwargs(module),
         )
         next_token = prefill_out.logits[:, -1, :].argmax(dim=-1, keepdim=True)
 

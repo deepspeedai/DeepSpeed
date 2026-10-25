@@ -579,7 +579,7 @@ def _build_sandbox_image(modal_module: Any, preset: dict[str, str], inputs: Cont
     the candidate SHA the controller tests.
     """
     requirements_url = f"https://raw.githubusercontent.com/{inputs.repository}/{inputs.base_sha}/requirements"
-    image = modal_module.Image.from_registry(preset["image"], add_python="3.10")
+    image = modal_module.Image.from_registry(preset["image"], add_python="3.12")
     image = image.run_commands(
         f"python -m pip install -r {requirements_url}/requirements.txt "
         f"-r {requirements_url}/requirements-dev.txt -r {requirements_url}/requirements-deepcompile.txt")
