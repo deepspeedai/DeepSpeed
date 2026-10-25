@@ -94,14 +94,21 @@ def _is_silu_activation(act) -> bool:
 def find_glu_segments(root: torch.nn.Module) -> List[GLUSegment]:
     """Detect gated MLPs by structure (gate_proj/up_proj/down_proj attribute set)."""
     segments = []
-    for module, p in _find_fusable_projections(root, ("gate_proj", "up_proj", "down_proj")):
+    # Only gate/up are fused (read directly by the kernel); down_proj is
+    # delegated to its own forward, so it may carry a collective — under
+    # AutoTP it is a LinearAllreduce and must stay excluded from the
+    # comm-free check above.
+    for module, p in _find_fusable_projections(root, ("gate_proj", "up_proj")):
+        down = getattr(module, "down_proj", None)
+        if down is None or not hasattr(down, "weight"):
+            continue
         # The fused replacement hardcodes SiLU, while the name-based selector
         # also matches GELU-gated families (e.g. Gemma). Only fuse when the
         # module's own activation is positively identified as SiLU.
         activations = [getattr(module, name, None) for name in ("act_fn", "activation_fn", "activation_func")]
         if not any(_is_silu_activation(act) for act in activations if act is not None):
             continue
-        segments.append(GLUSegment(parent=module, gate=p["gate_proj"], up=p["up_proj"], down=p["down_proj"]))
+        segments.append(GLUSegment(parent=module, gate=p["gate_proj"], up=p["up_proj"], down=down))
     return segments
 
 
