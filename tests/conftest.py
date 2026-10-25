@@ -22,7 +22,10 @@ sys.path.insert(1, git_repo_path)
 
 
 def pytest_configure(config):
-    config.option.color = "yes"
+    # Force color on for plain invocations, but keep an explicit --color
+    # choice: the CI nightlies pass --color=no so their logs parse cleanly.
+    if config.option.color == "auto":
+        config.option.color = "yes"
     config.option.durations = 0
     config.option.durations_min = 1
     config.option.verbose = True
