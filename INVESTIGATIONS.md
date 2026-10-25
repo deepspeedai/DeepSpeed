@@ -860,3 +860,12 @@ scattered 0-15, cascade after). Same near-tie class as bs=8 (0.969):
 TP-sharded bf16 numerics vs full-width eager — expected divergence, not
 a systematic bug (systematic errors would flip ALL rows at step 0-1 and
 never match; 56/64 rows are token-identical for 32 steps).
+
+
+### TP=2 sampling (temp=1.0) — free, RL/OPD-ready
+| bs | greedy | temp=1.0 |
+|---|---|---|
+| 32 | 1660.1 | 1667.2 |
+| 64 | 2106.2 | 2102.6 |
+Sampling cost within noise at every batch size under TP=2 as well
+(softmax+multinomial outside the graph, amortized).
