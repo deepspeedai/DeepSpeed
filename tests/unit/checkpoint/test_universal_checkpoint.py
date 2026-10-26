@@ -32,7 +32,7 @@ def get_expected_mismatch_keys():
 
 
 def maybe_step(t):
-    return not torch.is_tensor(t) or (t.device.type == 'cpu' and t.numel() == 1)
+    return not torch.is_tensor(t) or t.numel() == 1
 
 
 def gather_opt_state(optimizer_state):
@@ -275,3 +275,195 @@ class TestZeROUniversalCheckpointDP(DistributedTest):
     @pytest.mark.world_size(4)
     def test_dp_world_size_2to4(self, baseline_ws2, tmpdir, dtype, ds_config, load_optim, use_torch_adam):
         self._run_test(tmpdir, dtype, ds_config, load_optim, use_torch_adam, 4)
+
+
+@pytest.mark.parametrize("fused,capturable", [(True, False), (False, True), (False, False)])
+def test_zero_optimizer_normalize_step_tensor(fused, capturable):
+    from deepspeed.runtime.base_optimizer import ZeROOptimizer
+    from deepspeed.accelerator import get_accelerator
+
+    acc = get_accelerator()
+    target_device = torch.device(acc.device_name(0) if acc.is_available() else 'cpu')
+    param = torch.nn.Parameter(torch.randn(2, 2, device=target_device))
+    group = {"fused": fused, "capturable": capturable}
+
+    # Step on CPU as a float tensor
+    cpu_step = torch.tensor(3.0, device="cpu")
+    normalized = ZeROOptimizer._normalize_step_tensor(cpu_step, param, group)
+    if fused or capturable:
+        assert normalized.device == param.device
+        assert normalized.dtype == torch.float32
+        assert normalized.item() == 3.0
+    else:
+        assert normalized.device == torch.device("cpu")
+        assert normalized.item() == 3.0
+
+    # Step on accelerator as a float tensor
+    if acc.is_available():
+        acc_step = torch.tensor(4.0, device=acc.device_name(0))
+        normalized = ZeROOptimizer._normalize_step_tensor(acc_step, param, group)
+        if fused or capturable:
+            assert normalized.device == param.device
+            assert normalized.dtype == torch.float32
+            assert normalized.item() == 4.0
+        else:
+            assert normalized.device == torch.device("cpu")
+            assert normalized.item() == 4.0
+
+    # Integer scalar and integer tensor steps
+    for raw_step in (5, torch.tensor(5, dtype=torch.int64)):
+        normalized = ZeROOptimizer._normalize_step_tensor(raw_step, param, group)
+        if fused or capturable:
+            assert normalized.device == param.device
+            assert normalized.dtype == torch.float32
+            assert normalized.item() == 5.0
+        else:
+            if isinstance(raw_step, int):
+                assert normalized == 5 and not torch.is_tensor(normalized)
+            else:
+                assert normalized.item() == 5 and normalized.device == torch.device("cpu")
+
+
+@pytest.mark.parametrize("fused,capturable", [(True, False), (False, True), (False, False)])
+def test_universal_checkpoint_load_hp_step_device_policy(tmp_path, fused, capturable):
+    from deepspeed.runtime.base_optimizer import ZeROOptimizer
+    from deepspeed.accelerator import get_accelerator
+
+    acc = get_accelerator()
+    if (fused or capturable) and not acc.is_available():
+        pytest.skip("Accelerator required for fused/capturable optimizer test")
+
+    # Guard against capturable=True on CPU device
+    if capturable and (not torch.cuda.is_available()  #ignore-cuda
+                       or acc.is_available() and acc.device_name() == "cpu"):
+        pytest.skip("PyTorch capturable optimizers require a CUDA/GPU accelerator device")
+
+    device = torch.device(acc.device_name(0) if acc.is_available() else "cpu")
+
+    zero_dir = tmp_path / "zero"
+    zero_dir.mkdir(parents=True)
+
+    optim_sd = {
+        "param_groups": [{
+            "fused": fused,
+            "capturable": capturable,
+            "lr": 0.001
+        }],
+        "ds_version": "0.14.0",
+    }
+    torch.save(optim_sd, zero_dir / "optimizer_state.pt")
+
+    param = torch.nn.Parameter(torch.randn(4, 4, device=device))
+    client_optimizer = torch.optim.AdamW([param], lr=0.001, fused=fused, capturable=capturable)
+
+    class DummyZeROOptimizer(ZeROOptimizer):
+
+        def __init__(self, optimizer):
+            super().__init__()
+            self.optimizer = optimizer
+            self.mpu = None
+            self.param_names = {param: "param_0"}
+            self.dummy_groups = [[param]]
+
+        def _load_global_state(self, sd):
+            pass
+
+    param._hp_mapping = SimpleNamespace(get_optim_state_keys=lambda: [])
+    # Universal checkpoint restores steps from disk on CPU
+    param.load_hp_checkpoint_state = lambda *args, **kwargs: torch.tensor(7.0, device="cpu")
+
+    zero_opt = DummyZeROOptimizer(client_optimizer)
+    zero_opt.load_hp_checkpoint_state_from_checkpoint_dir("dummy_groups", str(tmp_path))
+
+    restored_step = client_optimizer.state[param]["step"]
+    if fused or capturable:
+        assert restored_step.device == param.device
+        assert restored_step.dtype == torch.float32
+    else:
+        assert restored_step.device == torch.device("cpu")
+
+    # Verify that the restored optimizer state allows step() to execute without device errors
+    client_optimizer.state[param]["exp_avg"] = torch.zeros_like(param)
+    client_optimizer.state[param]["exp_avg_sq"] = torch.zeros_like(param)
+    param.grad = torch.randn_like(param)
+    client_optimizer.step()
+    assert client_optimizer.state[param]["step"].item() == 8.0
+
+
+@pytest.mark.parametrize("fused,capturable", [(True, False), (False, True), (False, False)])
+def test_universal_checkpoint_stage3_load_hp_step_device_policy(tmp_path, fused, capturable):
+    from deepspeed.runtime.zero.stage3 import DeepSpeedZeroOptimizer_Stage3
+    from deepspeed.checkpoint.constants import OPTIMIZER_STATE_DICT
+    from deepspeed.accelerator import get_accelerator
+
+    acc = get_accelerator()
+    if (fused or capturable) and not acc.is_available():
+        pytest.skip("Accelerator required for fused/capturable optimizer test")
+
+    # Guard against capturable=True on CPU device
+    if capturable and (not torch.cuda.is_available()  #ignore-cuda
+                       or acc.is_available() and acc.device_name() == "cpu"):
+        pytest.skip("PyTorch capturable optimizers require a CUDA/GPU accelerator device")
+
+    device = torch.device(acc.device_name(0) if acc.is_available() else "cpu")
+
+    zero_dir = tmp_path / "zero"
+    zero_dir.mkdir(parents=True)
+
+    fp32_param = torch.nn.Parameter(torch.randn(16, device=device))
+    client_optimizer = torch.optim.AdamW([fp32_param], lr=0.001, fused=fused, capturable=capturable)
+
+    optim_sd = {
+        OPTIMIZER_STATE_DICT: {
+            "state": [{
+                "step": torch.tensor(12.0, device="cpu")
+            }],
+            "param_groups": [{
+                "fused": fused,
+                "capturable": capturable,
+                "lr": 0.001
+            }],
+        },
+        "ds_version": "0.14.0",
+    }
+    torch.save(optim_sd, zero_dir / "optimizer_state.pt")
+
+    class DummyStage3Optimizer(DeepSpeedZeroOptimizer_Stage3):
+
+        def __init__(self, optimizer):
+            self._backward_hook_state = SimpleNamespace()
+            self._is_gradient_accumulation_boundary = True
+            self.optimizer = optimizer
+            self.fp32_partitioned_groups_flat = [fp32_param]
+            self.fp16_partitioned_groups_flat = [fp32_param]
+            self.fp16_groups = [[fp32_param]]
+            self.fp16_partitioned_groups = [[fp32_param]]
+            self.param_names = {fp32_param: "param_0"}
+            self.sub_group_to_group_id = {0: 0}
+            self.swap_optimizer = False
+
+        def _load_global_state_stage3(self, sd):
+            pass
+
+        def load_hp_checkpoint_state(self, path, key, param=None):
+            return torch.zeros_like(param)
+
+        def unflatten(self, flat, params):
+            return [flat]
+
+    stage3_opt = DummyStage3Optimizer(client_optimizer)
+    stage3_opt.load_hp_checkpoint_state_from_checkpoint_dir_stage3(str(tmp_path))
+
+    restored_step = client_optimizer.state[fp32_param]["step"]
+    if fused or capturable:
+        assert restored_step.device == fp32_param.device
+        assert restored_step.dtype == torch.float32
+    else:
+        assert restored_step.device == torch.device("cpu")
+
+    client_optimizer.state[fp32_param]["exp_avg"] = torch.zeros_like(fp32_param)
+    client_optimizer.state[fp32_param]["exp_avg_sq"] = torch.zeros_like(fp32_param)
+    client_optimizer.param_groups[0]["params"] = [fp32_param]
+    fp32_param.grad = torch.randn_like(fp32_param)
+    client_optimizer.step()
+    assert client_optimizer.state[fp32_param]["step"].item() == 13.0

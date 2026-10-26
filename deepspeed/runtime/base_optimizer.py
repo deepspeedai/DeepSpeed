@@ -379,6 +379,57 @@ class ZeROOptimizer(DeepSpeedOptimizer):
                     continue
                 param_group[key] = value
 
+        self._normalize_step_for_all_param_groups()
+
+    def _normalize_step_tensor(self, step=None, param=None, fused=False, capturable=False):
+        if not isinstance(self, ZeROOptimizer):
+            capturable = fused
+            fused = param
+            param = step
+            step = self
+
+        if isinstance(fused, dict):
+            capturable = fused.get('capturable', False)
+            fused = fused.get('fused', False)
+
+        fused = bool(fused)
+        capturable = bool(capturable)
+
+        if step is None:
+            return None
+
+        # Preserve scalar integer steps for built-in/C++ optimizers (like FusedAdam, CPUAdam)
+        # when not using PyTorch tensor-step policy.
+        if not (fused or capturable):
+            if not torch.is_tensor(step):
+                return step
+            # If it's already a tensor but was stored as scalar/cpu int, keep as int/scalar if appropriate,
+            # or respect standard non-fused CPU step policy.
+            if step.numel() == 1 and not step.is_floating_point():
+                return step.item() if not torch.is_tensor(step) else step
+
+        if param is None:
+            return step
+
+        # For PyTorch fused/capturable optimizers requiring tensor steps on device:
+        target_device = param.device if (fused or capturable) else torch.device("cpu")
+        target_dtype = torch.float32 if (fused or capturable) else torch.float32
+
+        if not torch.is_tensor(step):
+            step = torch.tensor(step, dtype=target_dtype, device=target_device)
+        else:
+            step = step.to(device=target_device, dtype=target_dtype)
+        return step
+
+    def _normalize_step_for_all_param_groups(self) -> None:
+        for param_group in self.optimizer.param_groups:
+            fused = bool(param_group.get('fused', False)) if param_group is not None else False
+            capturable = bool(param_group.get('capturable', False)) if param_group is not None else False
+            for param in param_group['params']:
+                if param in self.optimizer.state and 'step' in self.optimizer.state[param]:
+                    self.optimizer.state[param]['step'] = self._normalize_step_tensor(
+                        self.optimizer.state[param]['step'], param, fused, capturable)
+
     def report_ipg_memory_usage(self, tag, param_elems, dtype=None):
         dtypes = self.ipg_buckets.keys() if dtype is None else [dtype]
 
