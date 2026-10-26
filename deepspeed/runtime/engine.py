@@ -4410,6 +4410,8 @@ class DeepSpeedEngine(Module):
             load_optimizer_states: Optional. Boolean to load the training optimizer states from Checkpoint. Ex. ADAM's momentum and variance
             load_lr_scheduler_states: Optional. Boolean to add the learning rate scheduler states from Checkpoint.
             load_module_only: Optional. Boolean to load only the model weights from the checkpoint. Ex. warmstarting.
+                NVMe optimizer offload requires the same DP world size, parameter/subgroup layout, and swap storage
+                configuration, and does not support custom_load_fn. Existing optimizer states are preserved.
             custom_load_fn: Optional. Custom model load function.
 
         Returns:
@@ -4440,6 +4442,9 @@ class DeepSpeedEngine(Module):
                     )
                     return None, None
 
+        if load_module_only and self.zero_nvme_offload_optimizer() and custom_load_fn is not None:
+            raise ZeRORuntimeException("NVMe module-only checkpoint load does not support custom_load_fn")
+
         if self._optimizer_has_ckpt_event_prologue():
             # Prepare for checkpoint load by ensuring all parameters are partitioned
             self.optimizer.checkpoint_event_prologue()
@@ -4466,7 +4471,7 @@ class DeepSpeedEngine(Module):
             if not success:
                 self.optimizer._restore_from_bit16_weights()
 
-        if self.zero_nvme_offload_optimizer():
+        if load_zero_checkpoint and self.zero_nvme_offload_optimizer():
             from shutil import copytree, disk_usage
             rank = self.local_rank if self.use_node_local_storage() else self.global_rank
             rank_dir = "rank" + dp_index_to_str(rank)
@@ -4476,10 +4481,17 @@ class DeepSpeedEngine(Module):
             logger.info(
                 f"Copying NVMe offload checkpoint from {offload_ckpt_dir} to {offload_dir}, {free / 1e9:,.2f} GB free on target filesystem..."
             )
-            copytree(offload_ckpt_dir, offload_dir, dirs_exist_ok=True)
+            if load_module_only:
+                zero_sd_list = self._get_all_zero_checkpoints(load_dir, tag)
+                if zero_sd_list is None:
+                    raise ZeRORuntimeException("NVMe module-only checkpoint load requires the ZeRO checkpoint shards")
+                partition_id = dist.get_rank(group=self.optimizer.dp_process_group)
+                self.optimizer.load_module_only_nvme_checkpoint(zero_sd_list[partition_id], offload_ckpt_dir)
+            else:
+                copytree(offload_ckpt_dir, offload_dir, dirs_exist_ok=True)
+                self.optimizer.reset_swap_buffers()
             _, _, free = disk_usage(offload_dir)
             logger.info(f"Copying complete! {free / 1e9:,.2f} GB free on target filesystem")
-            self.optimizer.reset_swap_buffers()
 
         if self._optimizer_has_ckpt_event_epilogue():
             self.optimizer.checkpoint_event_epilogue()
@@ -4606,11 +4618,21 @@ class DeepSpeedEngine(Module):
             zero_partition_count=folding_spec.dp_size if folded_autoep_tp else None,
             tp_rank=groups.get_tensor_model_parallel_rank() if folded_autoep_tp else None)
 
+        if load_module_only and self.zero_nvme_offload_optimizer():
+            if self.seq_dp_world_size != checkpoint['dp_world_size']:
+                raise ZeRORuntimeException("NVMe module-only checkpoint load requires the same DP world size")
+            saved_shapes = [list(group.items()) for group in checkpoint['param_shapes']]
+            current_shapes = [list(group.items()) for group in self._get_zero_param_shapes()]
+            if saved_shapes != current_shapes:
+                raise ZeRORuntimeException("NVMe module-only checkpoint load requires matching parameter names, "
+                                           "shapes, and optimizer subgroup order")
+
         fetch_z3_params = False
         z3_params_to_fetch = None
         autoep_partitioned_experts = False
         allowed_missing_keys = None
-        if self.zero_optimization_partition_weights() and not load_optimizer_states and not self.has_moe_layers:
+        if (self.zero_optimization_partition_weights() and not load_optimizer_states and not self.has_moe_layers
+                and not (load_module_only and self.zero_nvme_offload_optimizer())):
             checkpoint['module'] = get_fp32_state_dict_from_zero_checkpoint(load_dir)
             fetch_z3_params = True
 
@@ -4670,7 +4692,8 @@ class DeepSpeedEngine(Module):
         optim_checkpoint = None
         if load_module_only:
             deepspeed_states = ['module']
-            if self.optimizer is not None and hasattr(self.optimizer, 'refresh_fp32_params'):
+            if (self.optimizer is not None and hasattr(self.optimizer, 'refresh_fp32_params')
+                    and not self.zero_nvme_offload_optimizer()):
                 self.optimizer.refresh_fp32_params()
         else:
             has_zero_optimizer_state = self.zero_optimization()
