@@ -564,6 +564,11 @@ def build_sandbox_env() -> dict[str, str]:
         "GIT_LFS_SKIP_SMUDGE": "1",
         "PIP_DISABLE_PIP_VERSION_CHECK": "1",
         "PIP_NO_INPUT": "1",
+        # torch <=2.12 SubprocPool.shutdown() blocks up to 300s when compile
+        # workers are still in flight at process exit (pytorch/pytorch#162199,
+        # fixed by #184038 in 2.13). Serial compile avoids the worker pool
+        # entirely; unit-test graphs are tiny so parallel compile gains nothing.
+        "TORCHINDUCTOR_COMPILE_THREADS": "1",
     }
 
 
@@ -579,7 +584,7 @@ def _build_sandbox_image(modal_module: Any, preset: dict[str, str], inputs: Cont
     the candidate SHA the controller tests.
     """
     requirements_url = f"https://raw.githubusercontent.com/{inputs.repository}/{inputs.base_sha}/requirements"
-    image = modal_module.Image.from_registry(preset["image"], add_python="3.10")
+    image = modal_module.Image.from_registry(preset["image"], add_python="3.12")
     image = image.run_commands(
         f"python -m pip install -r {requirements_url}/requirements.txt "
         f"-r {requirements_url}/requirements-dev.txt -r {requirements_url}/requirements-deepcompile.txt")
