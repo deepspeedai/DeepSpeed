@@ -945,7 +945,7 @@ class TestZeroPaddedPartitionForwardsTheHeadCount(DistributedTest):
     world_size = 1
 
     def test_q_proj_reaches_muon_update_with_its_head_count(self, zero_stage, monkeypatch):
-        import deepspeed.runtime.zero.stage_1_and_2 as stage_1_and_2
+        import deepspeed.runtime.zero.muon.original_muon as original_muon
 
         seen = []
 
@@ -953,7 +953,8 @@ class TestZeroPaddedPartitionForwardsTheHeadCount(DistributedTest):
             seen.append((tuple(grad.shape), kwargs.get("num_heads")))
             return muon_update(grad, momentum, *args, **kwargs)
 
-        monkeypatch.setattr(stage_1_and_2, "muon_update", spy)
+        # `get_flat_partition` imports `muon_update` when it runs, so patch it where it is defined.
+        monkeypatch.setattr(original_muon, "muon_update", spy)
 
         config = {
             "train_micro_batch_size_per_gpu": 2,
