@@ -44,7 +44,6 @@ cdb = None
 
 # Create global timer for ops
 timers = timer.SynchronizedWallClockTimer()
-timer_summary = {}
 
 comms_logger = CommsLogger()
 

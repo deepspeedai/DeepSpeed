@@ -3,6 +3,7 @@
 
 # DeepSpeed Team
 
+import importlib.util
 import time
 from numpy import mean
 from deepspeed.utils.logging import print_dist
@@ -19,14 +20,6 @@ BACKWARD_REDUCE_GLOBAL_TIMER = 'bwd_allreduce'
 STEP_MICRO_TIMER = 'step_microstep'
 STEP_GLOBAL_TIMER = 'step'
 TIME_EPSILON = 1e-6
-
-try:
-    import psutil
-
-    PSUTILS_INSTALLED = True
-except ImportError:
-    PSUTILS_INSTALLED = False
-    pass
 
 
 class SynchronizedWallClockTimer:
@@ -232,7 +225,7 @@ class ThroughputTimer:
             self.logging = logger.info
         self.initialized = False
 
-        if self.monitor_memory and not PSUTILS_INSTALLED:
+        if self.monitor_memory and importlib.util.find_spec("psutil") is None:
             raise ImportError("Unable to import 'psutils', please install package")
 
     def update_epoch_count(self):
@@ -287,6 +280,7 @@ class ThroughputTimer:
                             round(get_accelerator().max_memory_allocated() / 1024**3, 2),
                         ))
                     if self.monitor_memory:
+                        import psutil
                         virt_mem = psutil.virtual_memory()
                         swap = psutil.swap_memory()
                         self.logging("epoch={}/micro_step={}/global_step={}, vm %: {}, swap %: {}".format(
