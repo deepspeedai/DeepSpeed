@@ -142,7 +142,7 @@ By default, non-Muon parameters use `FusedAdam`. When optimizer state is offload
     }
   }
 ```
-The Adam optimizer also supports the following two params keys/values in addition to the standard parameters from [torch.optim.Adam](https://pytorch.org/docs/stable/_modules/torch/optim/adam.html#Adam):
+The Adam optimizer also supports the following two params keys/values in addition to the standard parameters from [torch.optim.Adam](https://docs.pytorch.org/docs/stable/generated/torch.optim.Adam.html):
 
 | "params" key  | Description                                                                 | Default |
 | ------------- | --------------------------------------------------------------------------- | ------- |
@@ -489,8 +489,8 @@ reduction and offload ordering and is not covered; a warning is logged.
 <i>**load_from_fp32_weights**</i>: [boolean]
 
 | Description                                                                                                                                                                                                                          | Default |
-| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------- |
-| Initialize fp32 master weights from fp32 copies in checkpoint (no precision loss) or from model's fp16 copies (with precision loss). `load_checkpoint(..., load_fp32_weights=...)` overrides this for one load; `None` uses this value. `load_module_only=True` rebuilds the masters from the loaded model weights. | `True`  |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| Deprecated and ignored by `DeepSpeedEngine.load_checkpoint`. Full ZeRO checkpoint loads always restore saved fp32 master weights. Module-only loads rebuild ZeRO-1/2 fp32 master weights from the loaded model weights, while ZeRO-3 still reads fp32 weights because its model checkpoint is empty. | `True`  |
 
 ***round_robin_gradients***: [boolean]
 

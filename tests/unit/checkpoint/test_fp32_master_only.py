@@ -14,6 +14,7 @@ import deepspeed
 import deepspeed.comm as dist
 from deepspeed.accelerator import get_accelerator
 from deepspeed.checkpoint.constants import UNIVERSAL_CHECKPOINT_INFO
+from deepspeed.runtime.zero.utils import ZeRORuntimeException
 from unit.common import DistributedTest, get_master_port
 
 TAG = "fp32-masters"
@@ -29,7 +30,7 @@ class _OneParam(torch.nn.Module):
         return (x @ self.weight).sum()
 
 
-def _config(*, load_universal=False, world_size=1, load_from_fp32_weights=True):
+def _config(*, load_universal=False, world_size=1):
     config = {
         "train_micro_batch_size_per_gpu": 1,
         "train_batch_size": world_size,
@@ -45,7 +46,6 @@ def _config(*, load_universal=False, world_size=1, load_from_fp32_weights=True):
         },
         "zero_optimization": {
             "stage": 2,
-            "load_from_fp32_weights": load_from_fp32_weights,
         },
     }
     if load_universal:
@@ -53,11 +53,9 @@ def _config(*, load_universal=False, world_size=1, load_from_fp32_weights=True):
     return config
 
 
-def _init_engine(*, load_universal=False, world_size=1, load_from_fp32_weights=True):
+def _init_engine(*, load_universal=False, world_size=1):
     model = _OneParam()
-    engine, _, _, _ = deepspeed.initialize(config=_config(load_universal=load_universal,
-                                                          world_size=world_size,
-                                                          load_from_fp32_weights=load_from_fp32_weights),
+    engine, _, _, _ = deepspeed.initialize(config=_config(load_universal=load_universal, world_size=world_size),
                                            model=model,
                                            model_parameters=model.parameters())
     return engine
@@ -108,6 +106,10 @@ def _save_dp2(rank, world_size, tmpdir, port):
     torch.save(_unpadded_master(engine), os.path.join(tmpdir, f"part_{rank}.pt"))
     legacy_dir = os.path.join(tmpdir, "dp2")
     engine.save_checkpoint(legacy_dir, tag=TAG, client_state={UNIVERSAL_CHECKPOINT_INFO: {}})
+    # The same masters saved in the elastic layout, which stores per-group partitions without optimizer ids.
+    engine.optimizer.elastic_checkpoint = True
+    engine.save_checkpoint(os.path.join(tmpdir, "dp2_elastic"), tag=TAG)
+    engine.optimizer.elastic_checkpoint = False
     dist.barrier()
     if rank == 0:
         from deepspeed.checkpoint.ds_to_universal import main as convert_to_universal
@@ -146,17 +148,31 @@ def _load_dp1(tmpdir, port):
 def _load_dp1_legacy(tmpdir, port):
     _init_dist(0, 1, port)
     loaded = _init_engine(world_size=1)
-    # Per-rank fp32 master partitions cannot be resized, so this resume has to fall back to
-    # the bit16 rebuild instead of failing.
-    loaded.load_checkpoint(os.path.join(tmpdir, "dp2"),
+    with pytest.raises(ZeRORuntimeException, match="DP world size"):
+        loaded.load_checkpoint(os.path.join(tmpdir, "dp2"),
+                               tag=TAG,
+                               load_module_only=False,
+                               load_optimizer_states=False,
+                               load_lr_scheduler_states=False)
+    dist.destroy_process_group()
+
+
+def _load_dp1_elastic(tmpdir, port):
+    _init_dist(0, 1, port)
+    loaded = _init_engine(world_size=1)
+    loaded.load_checkpoint(os.path.join(tmpdir, "dp2_elastic"),
                            tag=TAG,
                            load_module_only=False,
                            load_optimizer_states=False,
                            load_lr_scheduler_states=False)
-    rebuilt = _unpadded_master(loaded)
-    assert torch.equal(rebuilt, rebuilt.to(torch.bfloat16).to(rebuilt.dtype))
-    assert not torch.equal(rebuilt, _saved_dp2_masters(tmpdir))
+    expected = _saved_dp2_masters(tmpdir)
+    assert torch.equal(_unpadded_master(loaded), expected)
+    assert not torch.equal(expected, expected.to(torch.bfloat16).to(expected.dtype))
     assert not _has_moments(loaded)
+
+    with_optimizer = _init_engine(world_size=1)
+    with pytest.raises(ZeRORuntimeException, match="DP world size"):
+        with_optimizer.load_checkpoint(os.path.join(tmpdir, "dp2_elastic"), tag=TAG, load_optimizer_states=True)
     dist.destroy_process_group()
 
 
@@ -197,8 +213,12 @@ def test_universal_dp_change_keeps_masters_and_drops_moments(dp2_checkpoint):
     _spawn(_load_dp1, dp2_checkpoint, get_master_port())
 
 
-def test_legacy_dp_change_rebuilds_masters(dp2_checkpoint):
+def test_legacy_dp_change_rejects_incompatible_fp32_partitions(dp2_checkpoint):
     _spawn(_load_dp1_legacy, dp2_checkpoint, get_master_port())
+
+
+def test_elastic_dp_change_repartitions_masters_and_drops_moments(dp2_checkpoint):
+    _spawn(_load_dp1_elastic, dp2_checkpoint, get_master_port())
 
 
 class TestFp32MasterOnlyLoad(DistributedTest):
@@ -218,8 +238,8 @@ class TestFp32MasterOnlyLoad(DistributedTest):
         module_only = _init_engine()
         module_only.load_checkpoint(load_dir, tag=TAG, load_module_only=True)
         rebuilt = _masters(module_only).cpu()
-        assert not torch.equal(rebuilt, saved.cpu())
-        assert torch.equal(rebuilt, rebuilt.to(torch.bfloat16).to(rebuilt.dtype))
+        expected = saved.to(torch.bfloat16).to(saved.dtype).cpu()
+        assert torch.equal(rebuilt, expected)
         assert not _has_moments(module_only)
 
         loaded = _init_engine()
@@ -262,55 +282,14 @@ class TestFp32MasterOnlyLoad(DistributedTest):
         assert torch.equal(_masters(loaded).cpu(), saved.cpu())
         assert not _has_moments(loaded)
 
-        dropped = _init_engine(load_universal=True)
-        dropped.load_checkpoint(os.path.join(str(tmpdir), "universal"),
-                                tag=TAG,
-                                load_module_only=False,
-                                load_optimizer_states=False,
-                                load_lr_scheduler_states=False,
-                                load_fp32_weights=False)
-        rebuilt = _masters(dropped).cpu()
-        assert not torch.equal(rebuilt, saved.cpu())
-        assert torch.equal(rebuilt, rebuilt.to(torch.bfloat16).to(rebuilt.dtype))
-        assert not _has_moments(dropped)
-
-    def test_load_fp32_weights_overrides_config(self, tmpdir):
-        if not get_accelerator().is_bf16_supported():
-            pytest.skip("bf16 is not supported")
-
-        engine = _init_engine()
-        saved = _train_and_detach_masters(engine)
-        load_dir = os.path.join(str(tmpdir), "legacy")
-        engine.save_checkpoint(load_dir, tag=TAG)
-
-        def _load(engine, **kwargs):
-            engine.load_checkpoint(load_dir,
-                                   tag=TAG,
-                                   load_module_only=False,
-                                   load_optimizer_states=False,
-                                   load_lr_scheduler_states=False,
-                                   **kwargs)
-
-        dropped = _init_engine(load_from_fp32_weights=True)
-        _load(dropped, load_fp32_weights=False)
-        rebuilt = _masters(dropped).cpu()
-        assert not torch.equal(rebuilt, saved.cpu())
-        assert torch.equal(rebuilt, rebuilt.to(torch.bfloat16).to(rebuilt.dtype))
-        assert not _has_moments(dropped)
-
-        kept = _init_engine(load_from_fp32_weights=False)
-        _load(kept, load_fp32_weights=True)
-        assert torch.equal(_masters(kept).cpu(), saved.cpu())
-        assert not _has_moments(kept)
-
-        module_only = _init_engine(load_from_fp32_weights=False)
-        module_only.load_checkpoint(load_dir, tag=TAG, load_module_only=True, load_fp32_weights=True)
+        module_only = _init_engine(load_universal=True)
+        module_only.load_checkpoint(os.path.join(str(tmpdir), "universal"), tag=TAG, load_module_only=True)
         rebuilt = _masters(module_only).cpu()
-        assert not torch.equal(rebuilt, saved.cpu())
-        assert torch.equal(rebuilt, rebuilt.to(torch.bfloat16).to(rebuilt.dtype))
+        expected = saved.to(torch.bfloat16).to(saved.dtype).cpu()
+        assert torch.equal(rebuilt, expected)
         assert not _has_moments(module_only)
 
-    def test_missing_optim_shards_rebuild_when_fp32_load_is_disabled(self, tmpdir):
+    def test_missing_fp32_shards_only_allows_module_only_load(self, tmpdir):
         if not get_accelerator().is_bf16_supported():
             pytest.skip("bf16 is not supported")
 
@@ -324,13 +303,17 @@ class TestFp32MasterOnlyLoad(DistributedTest):
         for path in shard_paths:
             os.rename(path, path + ".absent")
 
-        loaded = _init_engine(load_from_fp32_weights=False)
-        loaded.load_checkpoint(load_dir,
-                               tag=TAG,
-                               load_module_only=False,
-                               load_optimizer_states=False,
-                               load_lr_scheduler_states=False)
-        rebuilt = _masters(loaded).cpu()
+        module_only = _init_engine()
+        module_only.load_checkpoint(load_dir, tag=TAG, load_module_only=True)
+        rebuilt = _masters(module_only).cpu()
         expected = saved.detach().to(torch.bfloat16).to(saved.dtype).cpu()
         assert torch.equal(rebuilt, expected)
-        assert not _has_moments(loaded)
+        assert not _has_moments(module_only)
+
+        loaded = _init_engine()
+        with pytest.raises(ZeRORuntimeException, match="Saved fp32 weights are required"):
+            loaded.load_checkpoint(load_dir,
+                                   tag=TAG,
+                                   load_module_only=False,
+                                   load_optimizer_states=False,
+                                   load_lr_scheduler_states=False)

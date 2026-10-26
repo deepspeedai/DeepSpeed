@@ -334,12 +334,6 @@ class ZeROOptimizer(DeepSpeedOptimizer):
                                                      checkpoint_dir: str,
                                                      load_optimizer_states: bool = True) -> None:
         checkpoint_dir = os.path.join(checkpoint_dir, "zero")
-        optim_state_path = os.path.join(checkpoint_dir, "optimizer_state.pt")
-        assert os.path.isfile(
-            optim_state_path), f'{optim_state_path} containing optimizer global state is missing! Cannot proceed.'
-        optim_sd = torch.load(optim_state_path, weights_only=False)
-
-        self._load_global_state(optim_sd)
 
         tp_rank = bwc_tensor_model_parallel_rank(mpu=self.mpu)
         if self.mpu is None:
@@ -350,14 +344,32 @@ class ZeROOptimizer(DeepSpeedOptimizer):
                 else self.mpu.get_tensor_model_parallel_world_size()
 
         ep_rank, ep_size = _get_universal_checkpoint_ep_info()
+        lp_groups = getattr(self, lp_groups_name)
+
+        # Loading only the fp32 masters does not require optimizer metadata or moments.
+        if not load_optimizer_states:
+            for lp_group in lp_groups:
+                for lp in lp_group:
+                    if lp._hp_mapping is not None:
+                        lp.load_hp_checkpoint_state(os.path.join(checkpoint_dir, self.param_names[lp]),
+                                                    tp_rank,
+                                                    tp_world_size,
+                                                    ep_rank=ep_rank,
+                                                    ep_size=ep_size,
+                                                    load_optimizer_states=False)
+            return
+
+        optim_state_path = os.path.join(checkpoint_dir, "optimizer_state.pt")
+        assert os.path.isfile(
+            optim_state_path), f'{optim_state_path} containing optimizer global state is missing! Cannot proceed.'
+        optim_sd = torch.load(optim_state_path, weights_only=False)
+        self._load_global_state(optim_sd)
 
         for i, (param_group,
                 loaded_param_group) in enumerate(zip(self.optimizer.param_groups, optim_sd['param_groups'])):
             # We have an assumption that all params in the same param_group have the same keys
             opt_keys = set()
             steps = []
-
-            lp_groups = getattr(self, lp_groups_name)
             for lp in lp_groups[i]:
                 if lp._hp_mapping is not None:
                     #print(f"Loading {self.param_names[lp]} {tp_rank=} {tp_world_size=}")
@@ -365,15 +377,10 @@ class ZeROOptimizer(DeepSpeedOptimizer):
                                                        tp_rank,
                                                        tp_world_size,
                                                        ep_rank=ep_rank,
-                                                       ep_size=ep_size,
-                                                       load_optimizer_states=load_optimizer_states)
-                    if load_optimizer_states:
-                        for key in lp._hp_mapping.get_optim_state_keys():
-                            opt_keys.add(key)
-                        steps.append(step)
-
-            if not load_optimizer_states:
-                continue
+                                                       ep_size=ep_size)
+                    for key in lp._hp_mapping.get_optim_state_keys():
+                        opt_keys.add(key)
+                    steps.append(step)
 
             hp_param = param_group['params'][0]
             assert all(step == steps[0] for step in steps), f"Steps {steps} are not equal"
