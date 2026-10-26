@@ -10,7 +10,7 @@ the transformer inference extension are available.
 import gc
 import weakref
 from types import SimpleNamespace
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -1302,3 +1302,85 @@ def test_static_cache_falls_back_to_derived_head_dim():
     cache = DeepSpeedStaticCache(_cache_config(), batch_size=1, max_cache_len=8, device="cpu", dtype=torch.float32)
 
     assert tuple(cache.layers[0].keys.shape) == (1, 2, 8, 16)
+
+
+@patch("deepspeed.runtime.rollout.hybrid_engine_rollout.get_accelerator")
+def test_static_graph_capture_receives_a_prebuilt_4d_mask(mock_get_accelerator):
+    """The captured decode forward must not get a 2-D attention_mask.
+
+    Transformers builds its SDPA mask from a 2-D mask with host-side checks (``padding_mask.all()``), which
+    synchronize the stream and invalidate CUDA graph capture. The captured forward therefore receives a
+    pre-built 4-D mask, and every replay must see exactly the prompt's valid columns plus the decode
+    positions written so far. Additive (finite min) and boolean (False) masks are both accepted.
+    """
+
+    class CacheClassModel(torch.nn.Module):
+        _supports_cache_class = True
+
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.zeros(1))
+            self.capturing = False
+            self.captured_masks = []
+            self.config = PretrainedConfig(
+                max_position_embeddings=32,
+                num_hidden_layers=1,
+                num_attention_heads=1,
+                num_key_value_heads=1,
+                hidden_size=1,
+                head_dim=1,
+            )
+
+        def forward(self, input_ids, attention_mask, past_key_values=None, use_cache=True, **kwargs):
+            if self.capturing:
+                self.captured_masks.append(attention_mask)
+            key_states = input_ids[:, None, :, None].to(dtype=torch.float32)
+            past_key_values.update(key_states, key_states, layer_idx=0, cache_kwargs=kwargs)
+            return SimpleNamespace(logits=torch.zeros((input_ids.shape[0], input_ids.shape[1], 8)))
+
+    def masked_columns(mask):
+        if mask.dtype == torch.bool:
+            return ~mask[:, 0, 0, :]
+        return mask[:, 0, 0, :] < 0
+
+    module = CacheClassModel()
+    prompt_attention = torch.tensor([[0, 1, 1], [1, 1, 1]])
+    prompt_len = prompt_attention.shape[1]
+    max_new_tokens = 4
+    replay_views = []
+
+    @contextmanager
+    def capture(_graph):
+        module.capturing = True
+        try:
+            yield
+        finally:
+            module.capturing = False
+
+    stream = MagicMock()
+    accelerator = mock_get_accelerator.return_value
+    accelerator.Stream.return_value = stream
+    accelerator.current_stream.return_value = stream
+    accelerator.stream.side_effect = lambda _stream: nullcontext()
+    accelerator.capture_to_graph.side_effect = capture
+    accelerator.replay_graph.side_effect = lambda _graph: replay_views.append(
+        masked_columns(module.captured_masks[0]).clone())
+
+    rollout = HybridEngineRollout(SimpleNamespace(module=module),
+                                  _make_tokenizer(),
+                                  cfg=HybridEngineRolloutConfig(use_graph_capture=True))
+    request = RolloutRequest(torch.tensor([[1, 3, 4], [5, 6, 7]]), prompt_attention)
+    batch = rollout.generate(request, SamplingConfig(max_new_tokens=max_new_tokens, temperature=0))
+
+    assert batch.input_ids.shape == (2, prompt_len + max_new_tokens)
+    assert len(module.captured_masks) == 1
+    captured = module.captured_masks[0]
+    assert captured.ndim == 4 and captured.shape == (2, 1, 1, prompt_len + max_new_tokens)
+    # The first token comes from prefill; every later token comes from one replay.
+    assert len(replay_views) == max_new_tokens - 1
+    for step, masked in enumerate(replay_views):
+        position = prompt_len + step
+        expected = torch.ones_like(masked)
+        expected[:, :prompt_len] = prompt_attention == 0
+        expected[:, prompt_len:position + 1] = False
+        assert torch.equal(masked, expected), f"replay {step}"
