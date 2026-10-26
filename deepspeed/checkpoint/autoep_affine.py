@@ -8,6 +8,7 @@ storage to one logical, packed expert tensor per EP rank.
 """
 
 from deepspeed.checkpoint.affine import AFFINE_MAP_FORMAT_VERSION, AffinePiece, ParamAffineMap
+from deepspeed.checkpoint.affine_transfer import plan_transfer
 from deepspeed.checkpoint.constants import (AFFINE_MAP, AFFINE_MAP_PARAMS, AFFINE_MAP_VERSION, AUTOEP_AFFINE_MAPS,
                                             AUTOEP_EXPERT_PLACEMENT, AUTOEP_PLACEMENT_EP_SIZE,
                                             AUTOEP_PLACEMENT_EXPERTS, AUTOEP_PLACEMENT_NUM_EXPERTS,
@@ -20,9 +21,11 @@ __all__ = [
     'validate_autoep_placement_descriptor',
     'autoep_experts_for_rank',
     'legacy_uniform_autoep_placement_descriptor',
+    'autoep_placements_equal',
     'autoep_placement_to_affine_map',
     'autoep_metadata_to_affine_map',
     'extract_autoep_rank_tensor',
+    'plan_autoep_placement_transfer',
 ]
 
 
@@ -114,6 +117,24 @@ def legacy_uniform_autoep_placement_descriptor(num_experts, num_local_experts, e
     return make_autoep_placement_descriptor(num_experts, experts_by_rank)
 
 
+def autoep_placements_equal(descriptor, other):
+    """Return whether two descriptors place the same experts, in the same order, on each rank ID.
+
+    Rank entries are identified by their explicit rank IDs, so listing them in another order does
+    not change the placement.
+    """
+    validate_autoep_placement_descriptor(descriptor)
+    validate_autoep_placement_descriptor(other)
+    if descriptor[AUTOEP_PLACEMENT_NUM_EXPERTS] != other[AUTOEP_PLACEMENT_NUM_EXPERTS]:
+        return False
+    if descriptor[AUTOEP_PLACEMENT_EP_SIZE] != other[AUTOEP_PLACEMENT_EP_SIZE]:
+        return False
+    for rank in range(descriptor[AUTOEP_PLACEMENT_EP_SIZE]):
+        if autoep_experts_for_rank(descriptor, rank) != autoep_experts_for_rank(other, rank):
+            return False
+    return True
+
+
 def autoep_placement_to_affine_map(descriptor, logical_shape):
     """Lower one ``[num_experts, ...]`` parameter to a :class:`ParamAffineMap`."""
     validate_autoep_placement_descriptor(descriptor)
@@ -186,6 +207,24 @@ def extract_autoep_rank_tensor(full_param, target_map, ep_rank):
     if ep_rank not in target_map.shard_shapes:
         raise ValueError(f'EP rank {ep_rank} is not present in the target affine map.')
     return target_map.extract(full_param, ep_rank)
+
+
+def plan_autoep_placement_transfer(source_placement,
+                                   target_placement,
+                                   logical_shape,
+                                   limits=None,
+                                   *,
+                                   replica_selector=None):
+    """Plan copies that move one expert parameter from ``source_placement`` to ``target_placement``.
+
+    Both placements are lowered with :func:`autoep_placement_to_affine_map`, so plan ranks are
+    EP-local ranks of the respective placements, and offsets follow each rank's local packed order.
+    The plan only describes the copies; it does not require that the AutoEP runtime can execute
+    with ``target_placement``.
+    """
+    source_map = autoep_placement_to_affine_map(source_placement, logical_shape)
+    target_map = autoep_placement_to_affine_map(target_placement, logical_shape)
+    return plan_transfer(target_map, source_map, limits, replica_selector=replica_selector)
 
 
 def _pieces_for_rank(experts, holders, expert_shape, expert_numel, source_strides, dest_strides):

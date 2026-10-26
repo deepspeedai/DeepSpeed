@@ -564,6 +564,11 @@ def build_sandbox_env() -> dict[str, str]:
         "GIT_LFS_SKIP_SMUDGE": "1",
         "PIP_DISABLE_PIP_VERSION_CHECK": "1",
         "PIP_NO_INPUT": "1",
+        # torch <=2.12 SubprocPool.shutdown() blocks up to 300s when compile
+        # workers are still in flight at process exit (pytorch/pytorch#162199,
+        # fixed by #184038 in 2.13). Serial compile avoids the worker pool
+        # entirely; unit-test graphs are tiny so parallel compile gains nothing.
+        "TORCHINDUCTOR_COMPILE_THREADS": "1",
     }
 
 
