@@ -24,10 +24,7 @@ import torch
 from torch.distributed import GradBucket  # noqa: F401
 import inspect
 import os
-from typing import Any, Optional, TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from deepspeed.runtime.config import DeepSpeedConfig
+from typing import Any, Optional
 
 from ..constants import TORCH_DISTRIBUTED_DEFAULT_PORT, default_pg_timeout
 from .constants import *
@@ -69,11 +66,6 @@ class ProcessGroup():
         self.size = len(ranks)
 
 
-def _configure_using_config_file(config):
-    if config.comms_logger_enabled:
-        comms_logger.configure(config)
-
-
 def configure(
     deepspeed_config=None,
     enabled=None,
@@ -84,7 +76,9 @@ def configure(
 ):
 
     if deepspeed_config is not None:
-        _configure_using_config_file(deepspeed_config.comms_config)
+        comms_config = deepspeed_config.comms_config
+        if comms_config.comms_logger_enabled:
+            comms_logger.configure(comms_config)
 
     if enabled is not None:
         comms_logger.enabled = enabled
@@ -847,7 +841,6 @@ def init_distributed(dist_backend: Optional[str] = None,
                      timeout: timedelta = default_pg_timeout,
                      init_method: Optional[str] = None,
                      dist_init_required: Optional[bool] = None,
-                     config: Optional["DeepSpeedConfig"] = None,
                      rank: int = -1,
                      world_size: int = -1) -> None:
     ''' Initialize dist backend, potentially performing MPI discovery if needed
@@ -859,13 +852,10 @@ def init_distributed(dist_backend: Optional[str] = None,
         verbose: Optional (bool). verbose logging
         timeout: Optional (timedelta). Timeout for operations executed against the process group. The default value of 10 minutes can be overridden by the environment variable `DEEPSPEED_TIMEOUT`.
         init_method: Optional (string). Torch distributed, URL specifying how to initialize the process group. Default is "env://" if no init_method or store is specified.
-        config: Optional (DeepSpeedConfig). DeepSpeed configuration for setting up comms options (e.g. Comms profiling)
         rank: Optional (int). The current manually specified rank. Some init_method like "tcp://" need the rank and world_size as well (see: https://pytorch.org/docs/stable/distributed.html#tcp-initialization)
         world_size: Optional (int). Desired world_size for the TCP or Shared file-system initialization.
     '''
     global cdb
-
-    configure(deepspeed_config=config)
 
     if dist_init_required is None:
         dist_init_required = cdb is None or not cdb.is_initialized()

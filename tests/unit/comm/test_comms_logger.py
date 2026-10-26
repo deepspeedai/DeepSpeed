@@ -28,6 +28,27 @@ def test_stop_profiling_comms_disables_prof_all():
     assert comms_logger.prof_all is False
 
 
+@pytest.mark.parametrize('enabled', [False, True, None])
+def test_configure_from_config_follows_the_enabled_field(monkeypatch, enabled):
+    # The section's own "enabled" field decides, not whether the section is present.
+    # None leaves "enabled" out of the section, which means the documented default of False.
+    from deepspeed.comm import comm
+    from deepspeed.comm.config import DeepSpeedCommsConfig
+
+    monkeypatch.setattr(comm, 'comms_logger', CommsLogger())
+    section = {'prof_all': False, 'prof_ops': ['all_reduce']}
+    if enabled is not None:
+        section['enabled'] = enabled
+    comms_config = DeepSpeedCommsConfig({'comms_logger': section})
+    comm.configure(deepspeed_config=SimpleNamespace(comms_config=comms_config))
+
+    expected_enabled = enabled is True
+    assert comm.comms_logger.enabled is expected_enabled
+    if expected_enabled:
+        assert comm.comms_logger.prof_all is False
+        assert comm.comms_logger.prof_ops == ['all_reduce']
+
+
 def test_get_operation_summary_does_not_reorder_the_stored_records():
     # comms_dict stores parallel lists per message size: [count, latencies, algbws,
     # busbws], where index i is the i-th recorded op. trim_mean used to sort in
