@@ -38,6 +38,16 @@ class RepeatingLoader:
         return batch
 
 
+class _EpochTrackingSampler(DistributedSampler):
+    """A DistributedSampler that records whether the caller has set its epoch."""
+
+    epoch_set_by_caller = False
+
+    def set_epoch(self, epoch):
+        super().set_epoch(epoch)
+        self.epoch_set_by_caller = True
+
+
 class DeepSpeedDataLoader(object):
 
     def __init__(self,
@@ -57,6 +67,8 @@ class DeepSpeedDataLoader(object):
         self.tput_timer = tput_timer
         self.batch_size = batch_size
         self.curriculum_learning_enabled = False
+        self.owns_distributed_sampler = False
+        self.sampler_started = False
         if CURRICULUM_LEARNING in deepspeed_dataloader_config:
             self.curriculum_learning_enabled = deepspeed_dataloader_config[CURRICULUM_LEARNING]
 
@@ -75,9 +87,10 @@ class DeepSpeedDataLoader(object):
         else:
             if local_rank >= 0:
                 if data_sampler is None:
-                    data_sampler = DistributedSampler(dataset=dataset,
-                                                      num_replicas=data_parallel_world_size,
-                                                      rank=data_parallel_rank)
+                    data_sampler = _EpochTrackingSampler(dataset=dataset,
+                                                         num_replicas=data_parallel_world_size,
+                                                         rank=data_parallel_rank)
+                    self.owns_distributed_sampler = True
                 device_count = 1
             else:
                 if data_sampler is None:
@@ -106,8 +119,19 @@ class DeepSpeedDataLoader(object):
             self.len = ceil(len(self.data_sampler) / self.batch_size)
 
     def __iter__(self):
+        self._advance_sampler_epoch()
         self._create_dataloader()
         return self
+
+    def _advance_sampler_epoch(self):
+        # Each pass over the data is a new epoch for the sampler this class created, so the shuffle
+        # differs between passes. An epoch the caller set since the last pass is used as given.
+        if not self.owns_distributed_sampler:
+            return
+        if self.sampler_started and not self.data_sampler.epoch_set_by_caller:
+            self.data_sampler.epoch += 1
+        self.data_sampler.epoch_set_by_caller = False
+        self.sampler_started = True
 
     def __len__(self):
         return self.len
