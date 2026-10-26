@@ -404,7 +404,7 @@ class _FPDTGPUAttentionImpl_(torch.autograd.Function):
                                          window_size[1],
                                          0.0,
                                          alibi_slopes,
-                                         False,
+                                         torch.are_deterministic_algorithms_enabled(),
                                          rng_state=None)
                 elif flash_attn_version >= version.parse("2.6.0"):
                     _flash_attn_backward(d_out,
@@ -422,7 +422,7 @@ class _FPDTGPUAttentionImpl_(torch.autograd.Function):
                                          window_size,
                                          softcap=0.0,
                                          alibi_slopes=alibi_slopes,
-                                         deterministic=False,
+                                         deterministic=torch.are_deterministic_algorithms_enabled(),
                                          rng_state=None)
                 else:
                     _flash_attn_backward(d_out,
@@ -439,7 +439,7 @@ class _FPDTGPUAttentionImpl_(torch.autograd.Function):
                                          causal_chunk,
                                          window_size,
                                          alibi_slopes=alibi_slopes,
-                                         deterministic=False,
+                                         deterministic=torch.are_deterministic_algorithms_enabled(),
                                          rng_state=None)
 
                 dq[q_i].add_(dq_this.to(torch.float))
@@ -902,7 +902,7 @@ class _FPDTGPUOffloadingAttentionImpl_(torch.autograd.Function):
                                              window_size[1],
                                              0.0,
                                              alibi_slopes,
-                                             False,
+                                             torch.are_deterministic_algorithms_enabled(),
                                              rng_state=None)
                     elif flash_attn_version >= version.parse("2.6.0"):
                         _flash_attn_backward(grad_global_attn_output[q_compute_chunk_idx].get_gpu_chunk(),
@@ -920,7 +920,7 @@ class _FPDTGPUOffloadingAttentionImpl_(torch.autograd.Function):
                                              window_size,
                                              softcap=0.0,
                                              alibi_slopes=alibi_slopes,
-                                             deterministic=False,
+                                             deterministic=torch.are_deterministic_algorithms_enabled(),
                                              rng_state=None)
                     else:
                         _flash_attn_backward(grad_global_attn_output[q_compute_chunk_idx].get_gpu_chunk(),
@@ -937,7 +937,7 @@ class _FPDTGPUOffloadingAttentionImpl_(torch.autograd.Function):
                                              causal_chunk,
                                              window_size,
                                              alibi_slopes=alibi_slopes,
-                                             deterministic=False,
+                                             deterministic=torch.are_deterministic_algorithms_enabled(),
                                              rng_state=None)
 
                 if i != (len(global_k) - 1):

@@ -35,6 +35,31 @@ def _tol(dtype):
     return dict(atol=3e-2, rtol=3e-2)  # bfloat16
 
 
+@pytest.mark.parametrize("trans_b", [False, True])
+def test_deterministic_grouped_forward_and_backward(trans_b):
+    before = (torch.are_deterministic_algorithms_enabled(), torch.is_deterministic_algorithms_warn_only_enabled())
+    try:
+        torch.use_deterministic_algorithms(True)
+        torch.manual_seed(1234)
+        a = torch.randn(37, 64, device="cuda", dtype=torch.bfloat16)
+        shape = (3, 128, 64) if trans_b else (3, 64, 128)
+        b = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+        offsets = torch.tensor([13, 13, 37], device="cuda", dtype=torch.int32)
+        gradient = torch.randn(37, 128, device="cuda", dtype=torch.bfloat16)
+        results = []
+        for _ in range(3):
+            inputs = a.clone().requires_grad_()
+            weights = b.clone().requires_grad_()
+            output = group_gemm_triton(inputs, weights, offsets, trans_b=trans_b)
+            output.backward(gradient)
+            results.append((output.detach().clone(), inputs.grad.clone(), weights.grad.clone()))
+        for result in results[1:]:
+            for expected, actual in zip(results[0], result):
+                assert torch.equal(expected.contiguous().view(torch.uint8), actual.contiguous().view(torch.uint8))
+    finally:
+        torch.use_deterministic_algorithms(before[0], warn_only=before[1])
+
+
 def _ref_grouped_mm(a, b, offs):
     """Pure-PyTorch reference: out[rows_g] = a[rows_g] @ b[g]."""
     outs = []

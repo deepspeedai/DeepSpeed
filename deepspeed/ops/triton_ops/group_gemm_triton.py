@@ -300,6 +300,15 @@ def _validate(mat_a: torch.Tensor, mat_b: torch.Tensor, offs: torch.Tensor, tran
         raise ValueError(f"Contraction dim mismatch: mat_a K={mat_a.shape[1]} vs mat_b K={mat_b_k}.")
 
 
+def _launch_group_gemm(kernel, configs, grid, *args, **kwargs):
+    if torch.are_deterministic_algorithms_enabled():
+        # Bypass timing-dependent autotuning without changing its shared cache/configs.
+        config = configs[0]
+        kernel.fn[grid](*args, **kwargs, **config.kwargs, num_warps=config.num_warps, num_stages=config.num_stages)
+    else:
+        kernel[grid](*args, **kwargs)
+
+
 def _group_gemm(mat_a: torch.Tensor, mat_b: torch.Tensor, offs: torch.Tensor) -> torch.Tensor:
     """Forward-style grouped GEMM: a[M,KC] x b[E,KC,NO] -> out[M,NO], grouped over M."""
     M, KC = mat_a.shape
@@ -317,7 +326,10 @@ def _group_gemm(mat_a: torch.Tensor, mat_b: torch.Tensor, offs: torch.Tensor) ->
         max_m_tiles = (M + block_m - 1) // block_m + E
         return (max_m_tiles, triton.cdiv(NO, meta["BLOCK_N"]))
 
-    _group_gemm_kernel[grid](
+    _launch_group_gemm(
+        _group_gemm_kernel,
+        _gmm_configs(),
+        grid,
         mat_a,
         mat_b,
         out,
@@ -358,7 +370,10 @@ def _grouped_dw(mat_a: torch.Tensor, grad_out: torch.Tensor, offs: torch.Tensor,
     def grid(meta):
         return (E, triton.cdiv(K, meta["BLOCK_K"]), triton.cdiv(NO, meta["BLOCK_N"]))
 
-    _group_gemm_dw_kernel[grid](
+    _launch_group_gemm(
+        _group_gemm_dw_kernel,
+        _dw_configs(),
+        grid,
         mat_a,
         grad_out,
         out,
