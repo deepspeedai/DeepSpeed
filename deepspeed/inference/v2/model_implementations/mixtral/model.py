@@ -114,7 +114,7 @@ class MixtralInferenceModel(DSMoETransformerModelBase):
         """
         The positional embedding configuration for the model.
         """
-        return RotateHalfConfig(theta_base=self._config.rope_theta)
+        return RotateHalfConfig(theta_base=self.rope_theta)
 
     """
     Inherited from `DSMoETransformerModelBase`

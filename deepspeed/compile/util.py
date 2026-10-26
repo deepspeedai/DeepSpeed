@@ -25,8 +25,6 @@ from deepspeed.utils.torch import required_torch_version
 from deepspeed.ops.op_builder.dc import DeepCompileBuilder
 from deepspeed.compile import constants
 
-from .custom_ops import sp_dp_registry
-
 
 def is_deepcompile_supported() -> bool:
     return required_torch_version(min_version=2.6) and get_accelerator().device_name() == "cuda"
@@ -538,9 +536,23 @@ def pad_tensors(specs: List[Tuple[torch.Tensor, int, int]]) -> List[torch.Tensor
 
 
 def create_shard_offsets(gm: GraphModule, s0_node: Node) -> Tuple[Node, Node]:
+    # Imported here because custom_ops registers torch custom ops, which slows down import deepspeed.
+    from .custom_ops import sp_dp_registry
     sp_size: int = sp_dp_registry.sp_size()
     sp_rank: int = dist.get_rank() % sp_dp_registry.sp_size()
+    # The sequence length is dynamic, so its divisibility can only be checked when the graph runs.
+    # Without the check, every rank takes s0 // sp_size tokens and the remainder is silently dropped.
     with gm.graph.inserting_after(s0_node):
+        remainder_node = gm.graph.call_function(operator.mod, args=(s0_node, sp_size))
+    with gm.graph.inserting_after(remainder_node):
+        divisible_node = gm.graph.call_function(operator.eq, args=(remainder_node, 0))
+    with gm.graph.inserting_after(divisible_node):
+        assert_node = gm.graph.call_function(
+            torch.ops.aten._assert_scalar.default,
+            args=(divisible_node, f"AutoSP requires the sequence length to be divisible by "
+                  f"sequence_parallel_size ({sp_size})"),
+        )
+    with gm.graph.inserting_after(assert_node):
         chunk_size_node = gm.graph.call_function(operator.floordiv, args=(s0_node, sp_size))
     with gm.graph.inserting_after(chunk_size_node):
         start_node = gm.graph.call_function(operator.mul, args=(sp_rank, chunk_size_node))
@@ -579,6 +591,15 @@ def get_position_id_node(gm: GraphModule) -> Node:
     return node
 
 
+def get_autosp_seq_dim(tensor_node: Node) -> int:
+    """Return the sequence dimension recorded by prepare_autosp_inputs, defaulting to 1."""
+    tensor_dict = tensor_node.meta.get("tensor_dict") or {}
+    tag = tensor_dict.get("tag")
+    if isinstance(tag, tuple):
+        return tag[1]
+    return 1
+
+
 def create_symbolic_slice_indices(
     gm: GraphModule,
     sym_seq_dim_node: Node,
@@ -598,7 +619,8 @@ def shard_tensor_node(gm: GraphModule, tensor_node: Node):
     val = get_node_shape_meta(tensor_node)
     assert val is not None, f"Node {tensor_node.name} has no shape metadata"
 
-    seq_len = val.shape[1]
+    seq_dim = get_autosp_seq_dim(tensor_node)
+    seq_len = val.shape[seq_dim]
 
     assert isinstance(
         seq_len,
@@ -608,7 +630,7 @@ def shard_tensor_node(gm: GraphModule, tensor_node: Node):
     assert symb_seq_int_node, f"Unable to find symbolic placeholder for {seq_len}"
 
     slice_all, slice_range = create_symbolic_slice_indices(gm, symb_seq_int_node)
-    indices = (slice_all, slice_range)
+    indices = tuple(slice_range if dim == seq_dim else slice_all for dim in range(val.ndim))
 
     positions = {node: i for i, node in enumerate(gm.graph.nodes)}
     # Insert after the later dependency so the new getitem does not appear

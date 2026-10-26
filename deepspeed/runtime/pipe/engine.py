@@ -86,11 +86,6 @@ class PipelineEngine(DeepSpeedEngine):
 
         self.pipeline_enable_backward_allreduce = True
 
-        if self.elasticity_enabled():
-            if not self.is_elastic_model_parallel_supported():
-                assert not self.elasticity_enabled(), "Elasticity is not currently supported" \
-                " with pipeline parallelism."
-
         # pipeline step for logging
         self.log_batch_step_id = -1
 
@@ -225,9 +220,6 @@ class PipelineEngine(DeepSpeedEngine):
             self.module._precompute_checkpointable_values()
 
         self.module.checkpoint_parallel_write_pipeline = self._config.checkpoint_parallel_write_pipeline
-
-        if self.is_last_stage():
-            self.loss_model = self.module.loss_fn
 
         self.has_attention_mask = self.module.__class__.__name__ == 'GPT2ModelPipe'
         # Initialize pipeline communicators. Just send a 0.
@@ -364,17 +356,6 @@ class PipelineEngine(DeepSpeedEngine):
         if not torch._C.is_grad_enabled():
             raise RuntimeError('train_batch() requires gradients enabled. Use eval_batch() instead.')
 
-        # Curriculum learning could change activation shape
-        if self.curriculum_enabled_legacy():
-            new_difficulty = self.curriculum_scheduler_legacy.update_difficulty( \
-                self.global_steps + 1)
-            if self.global_steps == 0 or self.curriculum_scheduler_legacy.first_step:
-                self.reset_activation_shape()
-                self.curriculum_scheduler_legacy.first_step = False
-            elif new_difficulty != self.curriculum_scheduler_legacy.get_difficulty( \
-                self.global_steps):
-                self.reset_activation_shape()
-
         if data_iter is not None:
             self.set_dataiterator(data_iter)
 
@@ -385,9 +366,7 @@ class PipelineEngine(DeepSpeedEngine):
 
         # Do the work
         self.timers(TRAIN_BATCH_TIMER).start()
-        sched = schedule.TrainSchedule(micro_batches=self.micro_batches,
-                                       stages=self.num_stages,
-                                       stage_id=self.stage_id)
+        sched = self._train_schedule()
         self._exec_schedule(sched)
 
         with torch.no_grad():
@@ -463,17 +442,6 @@ class PipelineEngine(DeepSpeedEngine):
         self.eval_return_logits = return_logits
         self.module.eval()
 
-        # Curriculum learning could change activation shape
-        if self.curriculum_enabled_legacy():
-            new_difficulty = self.curriculum_scheduler_legacy.update_difficulty( \
-                self.global_steps + 1)
-            if self.global_steps == 0 or self.curriculum_scheduler_legacy.first_step:
-                self.reset_activation_shape()
-                self.curriculum_scheduler_legacy.first_step = False
-            elif new_difficulty != self.curriculum_scheduler_legacy.get_difficulty( \
-                self.global_steps):
-                self.reset_activation_shape()
-
         eval_output = None
 
         self._compute_loss = compute_loss
@@ -486,7 +454,7 @@ class PipelineEngine(DeepSpeedEngine):
         micro_batches = self.micro_batches if num_micro_batches is None else num_micro_batches
 
         # Do the work
-        sched = schedule.InferenceSchedule(micro_batches=micro_batches, stages=self.num_stages, stage_id=self.stage_id)
+        sched = self._inference_schedule(micro_batches)
 
         # prevent dead-lock with multiple evals sequence
         dist.barrier()
@@ -528,6 +496,16 @@ class PipelineEngine(DeepSpeedEngine):
         """
         super().set_train_batch_size(train_batch_size)
         self.micro_batches = self.gradient_accumulation_steps()
+
+    def _train_schedule(self):
+        return schedule.TrainSchedule(micro_batches=self.micro_batches, stages=self.num_stages, stage_id=self.stage_id)
+
+    def _inference_schedule(self, micro_batches):
+        return schedule.InferenceSchedule(micro_batches=micro_batches, stages=self.num_stages, stage_id=self.stage_id)
+
+    def _loss_stage_global_rank(self):
+        """Global rank of the stage that computes the loss."""
+        return self.grid.stage_to_global(self.num_stages - 1)
 
     def is_first_stage(self):
         """True if this process is in the first stage in the pipeline."""
@@ -580,7 +558,7 @@ class PipelineEngine(DeepSpeedEngine):
     def _bcast_pipe_scalar(self, data, src_rank=None, dtype=torch.float32):
         # Default to last stage (e.g., for broadcasting loss)
         if src_rank is None:
-            src_rank = self.grid.stage_to_global(self.num_stages - 1)
+            src_rank = self._loss_stage_global_rank()
         assert src_rank in self.grid.pp_group
 
         if self.global_rank == src_rank:
@@ -641,7 +619,7 @@ class PipelineEngine(DeepSpeedEngine):
                 dist.broadcast(tensor=losses, src=self.global_rank, group=self.mpu.get_pipe_parallel_group())
         else:
             # Get loss from last stage
-            src_rank = self.grid.stage_to_global(self.num_stages - 1)
+            src_rank = self._loss_stage_global_rank()
             assert src_rank in self.grid.pp_group
             # losses to reduce are: dp_group_loss, agg_loss, model additional losses
             # therefore: 2 + n_additional_losses

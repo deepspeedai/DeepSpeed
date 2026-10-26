@@ -7,7 +7,7 @@ from enum import Enum
 from deepspeed.runtime.config_utils import DeepSpeedConfigModel
 import torch
 from pydantic import Field
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Literal
 
 
 class AUTOTP_MODE(Enum):
@@ -49,6 +49,12 @@ class TPTrainingConfig(DeepSpeedConfigModel):
     """
     tp_overlap_comm: bool = False
     """ Whether to overlap communication with computation. Currently, only allreduce supports overlap. """
+
+    vocab_parallel_lm_head: Optional[bool] = None
+    """True requires vocabulary sharding, False disables it, and None follows a supported HF tied-embedding plan."""
+
+    vocab_parallel_ce_backend: Literal["torch", "liger"] = "torch"
+    """Optional Liger CE acceleration; the PyTorch reference remains the default."""
 
     tensor_parallel: TPConfig = Field({}, alias="tp")
     """

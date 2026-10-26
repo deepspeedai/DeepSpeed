@@ -21,6 +21,9 @@ sized at construction and are expensive to rebuild.
 
 from __future__ import annotations
 
+import itertools
+import weakref
+
 import torch
 
 from deepspeed.utils import logger
@@ -66,19 +69,87 @@ def assert_dtype_supported(dtype: torch.dtype) -> None:
                         "default all-to-all, which has no such restriction.")
 
 
+# Live shared buffers, keyed by everything that has to match for two layers to
+# use the same one. Entries leave when their last holder releases them.
+_SHARED_EXCHANGES: dict = {}
+
+_SCOPE_COUNTER = itertools.count()
+
+
+def new_exchange_scope() -> int:
+    """A fresh sharing scope, normally one per model AutoEP converts.
+
+    Layers sharing a scope share a buffer. Two models do not, even on one
+    expert-parallel group with identical geometry: they are driven
+    independently, so one DeepEP communication context between them would
+    couple schedules that nothing forces to agree. Reinforcement learning
+    puts an actor and a frozen reference model in exactly that position. The
+    cost of keeping them apart is one more buffer, against a ceiling of 27.
+
+    Every rank converts the same models in the same order, so a scope number
+    means the same thing on all of them.
+    """
+    return next(_SCOPE_COUNTER)
+
+
+def _exchange_key(scope: int, ep_group, num_experts: int, top_k: int, hidden_size: int, num_max_tokens_per_rank: int,
+                  num_sms: int, qp_margin: int) -> tuple:
+    """Everything two layers must agree on to share one buffer.
+
+    Capacity, hidden size and top-k size the buffer itself; the queue-pair
+    budget is fixed at construction; the group decides the topology; and the
+    expert count and SM budget are passed to every dispatch, so a layer that
+    disagreed on either would drive the shared buffer differently. The scope
+    is not about the buffer's shape at all: it is who is allowed to share it.
+    """
+    return (scope, ep_group, num_experts, top_k, hidden_size, num_max_tokens_per_rank, num_sms, qp_margin)
+
+
+def shared_exchange(scope: int,
+                    ep_group,
+                    num_experts: int,
+                    top_k: int,
+                    hidden_size: int,
+                    num_max_tokens_per_rank: int,
+                    num_sms: int = DEFAULT_COMM_SMS,
+                    qp_margin: int = 4) -> "DeepEPExchange":
+    """The buffer for this scope and geometry, building it on first ask.
+
+    Collective on construction, and every rank asks in the same order because
+    they run the same layers of the same model, so a hit on one rank is a hit
+    on all of them.
+    """
+    key = _exchange_key(scope, ep_group, num_experts, top_k, hidden_size, num_max_tokens_per_rank, num_sms, qp_margin)
+    exchange = _SHARED_EXCHANGES.get(key)
+    if exchange is None:
+        exchange = DeepEPExchange(
+            scope=scope,
+            ep_group=ep_group,
+            num_experts=num_experts,
+            top_k=top_k,
+            hidden_size=hidden_size,
+            num_max_tokens_per_rank=num_max_tokens_per_rank,
+            num_sms=num_sms,
+            qp_margin=qp_margin,
+        )
+        _SHARED_EXCHANGES[key] = exchange
+    exchange.holders += 1
+    return exchange
+
+
 def destroy_exchanges(module) -> None:
     """Release the DeepEP buffers held by the AutoEP layers under ``module``.
 
     Collective, and ordered by the module tree, which every rank walks the same
     way. Scoped to one module rather than to the process because several
-    engines can exist at once, and one engine's teardown must not free
-    another's buffers. Worth calling at the end of training: the buffers ask
-    DeepEP not to reclaim them, so nothing else will.
+    engines can exist at once, and each holds buffers no other engine shares.
+    Worth calling at the end of training: the buffers ask DeepEP not to
+    reclaim them, so nothing else will.
     """
     for submodule in module.modules():
         exchange = getattr(submodule, "_deepep_exchange", None)
         if exchange is not None:
-            exchange.destroy()
+            exchange.release()
             submodule._deepep_exchange = None
 
 
@@ -123,7 +194,7 @@ def _nccl_version() -> tuple[int, ...] | None:
 
 
 class DeepEPExchange:
-    """Wraps a DeepEP v2 ``ElasticBuffer`` for one MoE layer.
+    """Wraps a DeepEP v2 ``ElasticBuffer``, shared by the layers that fit it.
 
     Only v2 is supported. The legacy v1 ``Buffer`` moves data over NVSHMEM and
     IBGDA instead of NCCL, which needs either the NVreg_EnableStreamMemOPs
@@ -134,9 +205,16 @@ class DeepEPExchange:
     a dispatch and the gradient of a dispatch is a combine, both replayed
     against the handle the forward dispatch produced, so the handle has to
     survive from forward to backward.
+
+    Build these through :func:`shared_exchange` rather than directly. A buffer
+    reserves fabric resources that are scarce and, unlike device memory, are
+    not reported anywhere, so one per MoE layer is both wasteful and a ceiling
+    on depth: on 32 H100s across four nodes the twenty-eighth buffer fails
+    inside ``ncclDevCommCreate``, which no forty-eight-layer model can survive.
     """
 
     def __init__(self,
+                 scope: int,
                  ep_group,
                  num_experts: int,
                  top_k: int,
@@ -162,13 +240,25 @@ class DeepEPExchange:
             allow_hybrid_mode=True,
             explicitly_destroy=True,
         )
+        self.key = _exchange_key(scope, ep_group, num_experts, top_k, hidden_size, num_max_tokens_per_rank, num_sms,
+                                 qp_margin)
         self.num_sms = num_sms
         self.num_experts = num_experts
         # Recorded so the layer can tell when a later batch outgrows it.
         self.num_max_tokens_per_rank = num_max_tokens_per_rank
         # The handle the last dispatch produced. Combine and both backward
         # passes replay against it, so it has to outlive the dispatch call.
+        # Overwritten by whichever layer dispatched most recently, which is
+        # safe only because callers read it before dispatching again; the
+        # handle each layer needs for its backward is held by its autograd
+        # node, not here.
         self.last_handle = None
+        # The last forward dispatch's checkpoint-replay entry, handed to the
+        # combine that consumes its handle, whose autograd node then owns it.
+        self.last_pending = None
+        # Layers holding this buffer. Sharing is the point, so the last holder
+        # to let go is the one that may free it.
+        self.holders = 0
         self.destroyed = False
         # Buffer construction is collective and allocates fabric resources, so
         # it's often where an unsuitable cluster kills the process silently.
@@ -212,8 +302,36 @@ class DeepEPExchange:
             tokens,
             handle=handle,
             num_sms=self.num_sms,
+            # DeepEP takes do_expand from this argument, defaulting to False, even
+            # for a cached dispatch, while combine reads it from the handle. The
+            # forward dispatch is expanded, so the replay must ask for it too.
+            do_expand=handle.do_expand,
         )
         return recv_x
+
+    def replay_dispatch(self, tokens: torch.Tensor, topk_idx: torch.Tensor, topk_weights: torch.Tensor, handle):
+        """Repeat a forward dispatch in the layout its handle recorded.
+
+        Used when activation checkpointing recomputes a forward dispatch. The
+        routing must be the one the handle was built from; a different routing
+        cannot be reproduced from it.
+        """
+        recorded = handle.topk_idx
+        selected = topk_idx.to(recorded.dtype)
+        if selected.shape != recorded.shape:
+            raise RuntimeError(f"activation checkpointing recomputed a DeepEP dispatch with routing of shape "
+                               f"{tuple(selected.shape)}, but its forward pass routed {tuple(recorded.shape)}")
+        # Checked on the device: comparing on the host would stall every recomputed layer.
+        torch._assert_async((selected == recorded).all(), "activation checkpointing recomputed a different routing")
+        recv_x, _, recv_weights, _, _ = self.buffer.dispatch(
+            tokens,
+            topk_weights=None if topk_weights is None else topk_weights.float(),
+            handle=handle,
+            num_sms=self.num_sms,
+            do_expand=handle.do_expand,
+        )
+        self.last_handle = handle
+        return recv_x, recv_weights, handle
 
     def combine_with_weight_grad(self, rows: torch.Tensor, handle, weight_grads=None):
         """Combine that also reduces the routing-weight gradient.
@@ -241,12 +359,85 @@ class DeepEPExchange:
         combined, _, _ = self.buffer.combine(rows, handle=handle, num_sms=self.num_sms)
         return combined
 
+    def release(self) -> None:
+        """Give up one holder's claim, freeing the buffer at the last one.
+
+        Collective at the point it frees, so every rank has to release the
+        same number of times. Ranks agree because they hold the same layers.
+        """
+        self.holders = max(self.holders - 1, 0)
+        if self.holders == 0:
+            self.destroy()
+
     def destroy(self) -> None:
         """Release the buffer. Collective, so every rank must call it."""
         if self.destroyed:
             return
         self.destroyed = True
+        self.holders = 0
+        # Only if this instance is still the registered one: a caller that
+        # destroys a buffer directly may already have been replaced.
+        if _SHARED_EXCHANGES.get(self.key) is self:
+            del _SHARED_EXCHANGES[self.key]
         self.buffer.destroy()
+
+
+def _in_backward() -> bool:
+    """Whether this thread is running inside an autograd backward pass."""
+    return torch._C._current_graph_task_id() != -1
+
+
+class _PendingDispatch:
+    """One forward dispatch's handle, owned by the autograd node of the combine that used it."""
+
+    __slots__ = ("handle", "__weakref__")
+
+    def __init__(self, handle):
+        self.handle = handle
+
+
+class DeepEPCheckpointReplay:
+    """Gives a checkpoint recompute of one layer the handle of the forward it repeats.
+
+    DeepEP's received row order depends on arrival timing. A reentrant
+    checkpoint is unaffected: its recompute builds a new graph, so the nodes
+    that run backward use the recomputed handle. A non-reentrant checkpoint
+    keeps the forward's nodes, holding the forward's handle, and only replaces
+    the activations they saved. If the recompute dispatched afresh, combine's
+    backward would scatter gradient rows in the forward's order onto expert
+    activations in the recompute's order. The recompute therefore repeats the
+    forward's dispatch on the forward's handle.
+
+    Dispatches inside backward can either recompute an existing graph or
+    build an inner graph under a reentrant checkpoint. An existing graph's
+    handle is reusable only when exactly one forward graph remains alive.
+    An earlier replay does not eliminate it: retain_graph may need it again.
+    Sequential micro-batch forward/backward schedules satisfy this constraint.
+    More than one live graph is an error, never a guess.
+    """
+
+    def __init__(self):
+        self._entries = []
+
+    def record(self, handle) -> _PendingDispatch:
+        entry = _PendingDispatch(handle)
+        self._entries = [ref for ref in self._entries if ref() is not None]
+        self._entries.append(weakref.ref(entry))
+        return entry
+
+    def forward_handle(self):
+        """The handle a recompute must reuse, or None when no forward graph can need one."""
+        live = [entry for entry in (ref() for ref in self._entries) if entry is not None]
+        if len(live) > 1:
+            raise RuntimeError(
+                f"An activation-checkpoint recompute of an AutoEP layer using the DeepEP backend matches "
+                f"{len(live)} forward passes whose autograd graphs are still alive. It must repeat its own "
+                "forward's dispatch layout, so with non-reentrant checkpointing each micro-batch must run backward "
+                "before the layer's next forward, and earlier graphs must not be kept for another backward. "
+                "Use reentrant checkpointing (use_reentrant=True) to run several forwards before their backwards.")
+        if not live:
+            return None
+        return live[0].handle
 
 
 def _conform_rows(tensor: torch.Tensor, shape) -> torch.Tensor:
@@ -272,8 +463,11 @@ class _DeepEPDispatch(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, exchange: DeepEPExchange, tokens: torch.Tensor, topk_idx: torch.Tensor,
-                topk_weights: torch.Tensor):
-        received, recv_weights, handle = exchange.dispatch(tokens, topk_idx, topk_weights)
+                topk_weights: torch.Tensor, recorded_handle):
+        if recorded_handle is None:
+            received, recv_weights, handle = exchange.dispatch(tokens, topk_idx, topk_weights)
+        else:
+            received, recv_weights, handle = exchange.replay_dispatch(tokens, topk_idx, topk_weights, recorded_handle)
         ctx.exchange = exchange
         ctx.handle = handle
         ctx.tokens_shape = tokens.shape
@@ -294,7 +488,7 @@ class _DeepEPDispatch(torch.autograd.Function):
         conformed_weights = None
         if grad_weights is not None and ctx.weights_shape is not None:
             conformed_weights = _conform_rows(grad_weights, ctx.weights_shape).reshape(ctx.weights_shape)
-        return None, _conform_rows(grad_tokens, ctx.tokens_shape), None, conformed_weights
+        return None, _conform_rows(grad_tokens, ctx.tokens_shape), None, conformed_weights, None
 
 
 class _DeepEPCombine(torch.autograd.Function):
@@ -302,6 +496,11 @@ class _DeepEPCombine(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, exchange: DeepEPExchange, rows: torch.Tensor, handle):
+        pending = getattr(exchange, "last_pending", None)
+        if pending is not None and pending.handle is handle:
+            # Keeps the forward's replay entry alive exactly as long as the graph that needs its layout.
+            ctx.pending = pending
+            exchange.last_pending = None
         ctx.exchange = exchange
         ctx.handle = handle
         # The backward dispatch hands back a whole buffer, while autograd
@@ -315,10 +514,23 @@ class _DeepEPCombine(torch.autograd.Function):
         return None, _conform_rows(grad_rows, ctx.rows_shape), None
 
 
-def deepep_dispatch(exchange: DeepEPExchange, tokens: torch.Tensor, topk_idx: torch.Tensor,
-                    topk_weights: torch.Tensor):
-    """Dispatch tokens and their routing weights, keeping both differentiable."""
-    received, recv_weights = _DeepEPDispatch.apply(exchange, tokens, topk_idx, topk_weights)
+def deepep_dispatch(exchange: DeepEPExchange,
+                    tokens: torch.Tensor,
+                    topk_idx: torch.Tensor,
+                    topk_weights: torch.Tensor,
+                    replay: DeepEPCheckpointReplay | None = None):
+    """Dispatch tokens and their routing weights, keeping both differentiable.
+
+    ``replay`` is the calling layer's record of its forward dispatches, which
+    makes non-reentrant activation checkpointing recompute them faithfully.
+    """
+    inside_backward = replay is not None and _in_backward()
+    recorded_handle = replay.forward_handle() if inside_backward else None
+    received, recv_weights = _DeepEPDispatch.apply(exchange, tokens, topk_idx, topk_weights, recorded_handle)
+    # An outer reentrant checkpoint can build an inner graph during backward. A fresh grad-enabled dispatch
+    # still needs recording there; only a dispatch actually replaying a handle can reuse its existing entry.
+    if replay is not None and recorded_handle is None and torch.is_grad_enabled():
+        exchange.last_pending = replay.record(exchange.last_handle)
     return received, recv_weights, exchange
 
 

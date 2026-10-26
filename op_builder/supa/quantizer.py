@@ -29,38 +29,6 @@ class SUPAQuantizer:
         return getattr(torch.ops.deepspeed, name)
 
     @staticmethod
-    def ds_quantize_fp16(vals, groups, bits):
-        return SUPAQuantizer._op('ds_quantize_fp16')(vals, groups, bits)
-
-    @staticmethod
-    def ds_quantize_fp32(vals, groups, bits):
-        return SUPAQuantizer._op('ds_quantize_fp32')(vals, groups, bits)
-
-    @staticmethod
-    def ds_sr_quantize_fp16(vals, groups, bits):
-        return SUPAQuantizer._op('ds_sr_quantize_fp16')(vals, groups, bits)
-
-    @staticmethod
-    def ds_sr_quantize_fp32(vals, groups, bits):
-        return SUPAQuantizer._op('ds_sr_quantize_fp32')(vals, groups, bits)
-
-    @staticmethod
-    def ds_quantize_asym_fp16(vals, groups, bits):
-        return SUPAQuantizer._op('ds_quantize_asym_fp16')(vals, groups, bits)
-
-    @staticmethod
-    def ds_quantize_asym_fp32(vals, groups, bits):
-        return SUPAQuantizer._op('ds_quantize_asym_fp32')(vals, groups, bits)
-
-    @staticmethod
-    def ds_sr_quantize_asym_fp16(vals, groups, bits):
-        return SUPAQuantizer._op('ds_sr_quantize_asym_fp16')(vals, groups, bits)
-
-    @staticmethod
-    def ds_sr_quantize_asym_fp32(vals, groups, bits):
-        return SUPAQuantizer._op('ds_sr_quantize_asym_fp32')(vals, groups, bits)
-
-    @staticmethod
     def quantize(input_vals, groups, num_bits, quant_type):
         return SUPAQuantizer._op('quantize')(input_vals, groups, num_bits, int(quant_type))
 
@@ -92,19 +60,6 @@ class SUPAQuantizer:
         return SUPAQuantizer._op('quantized_reduction')(input_vals, input_scales, in_groups, out_groups, num_bits,
                                                         int(quant_type), devices_per_node)
 
-    @staticmethod
-    def loco_swizzle_quant(input_vals, error_feedback, err_beta, groups, num_bits, quant_type, pipeline_size, nodes,
-                           devices_per_node):
-        return SUPAQuantizer._op('loco_swizzle_quant')(input_vals, error_feedback, err_beta, groups, num_bits,
-                                                       int(quant_type), pipeline_size, nodes, devices_per_node)
-
-    @staticmethod
-    def loco_quantized_reduction(input_vals, input_scales, error_feedback, err_beta, in_groups, out_groups, num_bits,
-                                 quant_type, devices_per_node):
-        return SUPAQuantizer._op('loco_quantized_reduction')(input_vals, input_scales,
-                                                             error_feedback, err_beta, in_groups, out_groups, num_bits,
-                                                             int(quant_type), devices_per_node)
-
 
 class QuantizerBuilder(SUPAOpBuilder):
     BUILD_VAR = "DS_BUILD_QUANTIZER"
@@ -123,4 +78,4 @@ class QuantizerBuilder(SUPAOpBuilder):
         return SUPAQuantizer
 
     def is_compatible(self, verbose=False):
-        return hasattr(torch.ops, 'deepspeed') and hasattr(torch.ops.deepspeed, 'ds_quantize_fp16')
+        return hasattr(torch.ops, 'deepspeed') and hasattr(torch.ops.deepspeed, 'quantize')

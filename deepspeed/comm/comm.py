@@ -9,7 +9,6 @@
         -- use torch.distributed directly if both this package and torch.distributed use the same NCCL version
         -- use custom collectives
             -- can either use torch.dist or ds.ops.comm?
-        Note: the old 1-bit compressed allreduce variants that resided in deepspeed.runtime.comm will be moved here as well.
     deepspeed.comm API
         -- must be kept fully compatible (same signatures) as torch.dist API to ensure backward/cross-framework compatibility.
         -- e.g. if a client code used
@@ -187,7 +186,15 @@ def is_initialized() -> bool:
 
 def destroy_process_group(group: Optional[Any] = None) -> None:
     global cdb
-    return cdb.destroy_process_group(group=group)
+    destroy_world = group is None or group is cdb.get_world_group()
+    result = cdb.destroy_process_group(group=group)
+    if group == torch.distributed.GroupMember.NON_GROUP_MEMBER:
+        return result
+
+    # Imported here because groups imports deepspeed.comm during module setup.
+    from deepspeed.utils import groups
+    groups._release_process_group_references(group=None if destroy_world else group)
+    return result
 
 
 def new_group(ranks):
@@ -410,6 +417,32 @@ def isend(tensor, dst, group=None, tag=0, prof=False, log_name='isend', debug=ge
 def irecv(tensor, src=None, group=None, tag=0, prof=False, log_name='irecv', debug=get_caller_func()):
     global cdb
     return cdb.irecv(tensor=tensor, src=src, group=group, tag=tag)
+
+
+class P2POp:
+    """A point-to-point operation for :func:`batch_isend_irecv`.
+
+    Args:
+        op: :func:`isend` or :func:`irecv`.
+        tensor: The tensor to send or receive into.
+        peer: Global rank of the destination or source.
+    """
+
+    def __init__(self, op, tensor, peer, group=None, tag=0):
+        assert op in (isend, irecv), "op must be deepspeed.comm.isend or deepspeed.comm.irecv"
+        self.op = 'isend' if op is isend else 'irecv'
+        self.tensor = tensor
+        self.peer = peer
+        self.group = group
+        self.tag = tag
+
+
+@timed_op
+def batch_isend_irecv(p2p_op_list, prof=False, log_name='batch_isend_irecv', debug=get_caller_func()):
+    """Launch a list of :class:`P2POp` as one batch and return their requests.
+    """
+    global cdb
+    return cdb.batch_isend_irecv(p2p_op_list)
 
 
 @timed_op
