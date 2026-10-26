@@ -92,7 +92,7 @@ class DataParallelWriterFactory(object):
     def _get_data_parallel_config(self):
         mpu_info = self._uni_parallel_info.mpu_info
         if self._parallel_unit is None:
-            dp_rank = self._uni_parallel_info.dp_rank if mpu_info is None else mpu_info.dp_rank
+            dp_rank = self._uni_parallel_info.global_rank if mpu_info is None else mpu_info.dp_rank
             return self._create_config(1, 0) if dp_rank == 0 else None
 
         if self._uni_parallel_info.pure_dp:
