@@ -215,6 +215,8 @@ def test_cuda_device_registration_calls_cudart(monkeypatch):
 
 
 def test_xpu_device_registration_calls_level_zero(monkeypatch):
+    monkeypatch.setattr(XPU_Accelerator, "current_device", lambda self: 0)
+    monkeypatch.setattr(xpu_accelerator, "_l0_registrations", {})
 
     calls = []
 
@@ -232,7 +234,7 @@ def test_xpu_device_registration_calls_level_zero(monkeypatch):
             calls.append(("free", address))
             return xpu_accelerator._ZE_RESULT_SUCCESS
 
-    monkeypatch.setattr(xpu_accelerator, "_l0_host_registration", lambda: (_FakeLoader(), "ctx"))
+    monkeypatch.setattr(xpu_accelerator, "_l0_device_context", lambda idx: (_FakeLoader(), f"ctx{idx}"))
     accelerator = XPU_Accelerator.__new__(XPU_Accelerator)
 
     assert accelerator.register_host_memory(1234, 4096) is True
@@ -241,6 +243,8 @@ def test_xpu_device_registration_calls_level_zero(monkeypatch):
 
 
 def test_xpu_registration_rejects_changed_address(monkeypatch):
+    monkeypatch.setattr(XPU_Accelerator, "current_device", lambda self: 0)
+    monkeypatch.setattr(xpu_accelerator, "_l0_registrations", {})
     """A mapping that comes back at another address is a failed registration
     and the unusable mapping is released."""
 
@@ -256,13 +260,54 @@ def test_xpu_registration_rejects_changed_address(monkeypatch):
             freed.append(address)
             return xpu_accelerator._ZE_RESULT_SUCCESS
 
-    monkeypatch.setattr(xpu_accelerator, "_l0_host_registration", lambda: (_FakeLoader(), "ctx"))
+    monkeypatch.setattr(xpu_accelerator, "_l0_device_context", lambda idx: (_FakeLoader(), f"ctx{idx}"))
     accelerator = XPU_Accelerator.__new__(XPU_Accelerator)
     assert accelerator.register_host_memory(1234, 4096) is False
     assert freed == [0xDEAD0000]
 
 
+def test_xpu_registers_per_device_context_and_frees_there(monkeypatch):
+    """Registration happens in a per-device context and unregister frees in the
+    same context that created the mapping."""
+
+    alloc_ctx = []
+    frees = []
+
+    class _FakeLoader:
+
+        def zeMemAllocHost(self, context, host_desc, size, alignment, out):
+            alloc_ctx.append(context)
+            host = ctypes.cast(host_desc, ctypes.POINTER(xpu_accelerator._ZeHostMemAllocDesc))[0]
+            memmap = ctypes.cast(host.pNext, ctypes.POINTER(xpu_accelerator._ZeExternalMemmapSysmemDesc))[0]
+            ctypes.cast(out, ctypes.POINTER(ctypes.c_void_p))[0] = memmap.pSystemMemory
+            return xpu_accelerator._ZE_RESULT_SUCCESS
+
+        def zeMemFree(self, context, address):
+            frees.append((context, address))
+            return xpu_accelerator._ZE_RESULT_SUCCESS
+
+    contexts = {}
+    monkeypatch.setattr(xpu_accelerator, "_l0_device_context", lambda idx: (_FakeLoader(), f"ctx{idx}"))
+    monkeypatch.setattr(xpu_accelerator, "_l0_registrations", {})
+    accelerator = XPU_Accelerator.__new__(XPU_Accelerator)
+
+    for dev in (0, 1):
+        monkeypatch.setattr(XPU_Accelerator, "current_device", lambda self, d=dev: d)
+        assert accelerator.register_host_memory(1000 + dev, 4096) is True
+    assert alloc_ctx == ["ctx0", "ctx1"]
+
+    accelerator.unregister_host_memory(1000)
+    accelerator.unregister_host_memory(1001)
+    assert frees == [("ctx0", 1000), ("ctx1", 1001)]
+
+    # unregistering an unregistered address is a no-op
+    accelerator.unregister_host_memory(999)
+    assert len(frees) == 2
+
+
 def test_xpu_registration_alloc_failure_returns_false(monkeypatch):
+    monkeypatch.setattr(XPU_Accelerator, "current_device", lambda self: 0)
+    monkeypatch.setattr(xpu_accelerator, "_l0_registrations", {})
     """A Level Zero allocation failure must degrade to mlock-only, not raise."""
 
     class _FakeLoader:
@@ -270,12 +315,13 @@ def test_xpu_registration_alloc_failure_returns_false(monkeypatch):
         def zeMemAllocHost(self, context, host_desc, size, alignment, out):
             return 0x78000001  # ZE_RESULT_ERROR_OUT_OF_HOST_MEMORY
 
-    monkeypatch.setattr(xpu_accelerator, "_l0_host_registration", lambda: (_FakeLoader(), "ctx"))
+    monkeypatch.setattr(xpu_accelerator, "_l0_device_context", lambda idx: (_FakeLoader(), f"ctx{idx}"))
     accelerator = XPU_Accelerator.__new__(XPU_Accelerator)
     assert accelerator.register_host_memory(1234, 4096) is False
 
 
 def test_xpu_unregister_failure_raises(monkeypatch):
+    monkeypatch.setattr(xpu_accelerator, "_l0_registrations", {})
     """A failed unmap must raise so the caller keeps the CPU allocation alive
     (the driver may still hold a mapping for those pages)."""
 
@@ -284,15 +330,18 @@ def test_xpu_unregister_failure_raises(monkeypatch):
         def zeMemFree(self, context, address):
             return 0x78000001
 
-    monkeypatch.setattr(xpu_accelerator, "_l0_host_registration", lambda: (_FakeLoader(), "ctx"))
+    monkeypatch.setattr(xpu_accelerator, "_l0_device_context", lambda idx: (_FakeLoader(), f"ctx{idx}"))
     accelerator = XPU_Accelerator.__new__(XPU_Accelerator)
+    xpu_accelerator._l0_registrations[1234] = (_FakeLoader(), "ctx")
     with pytest.raises(RuntimeError, match="zeMemFree failed"):
         accelerator.unregister_host_memory(1234)
 
 
 def test_xpu_device_registration_without_level_zero(monkeypatch):
+    monkeypatch.setattr(xpu_accelerator, "_l0_registrations", {})
     """Missing loader or extension must degrade to mlock-only, not raise."""
-    monkeypatch.setattr(xpu_accelerator, "_l0_host_registration", lambda: None)
+    monkeypatch.setattr(XPU_Accelerator, "current_device", lambda self: 0)
+    monkeypatch.setattr(xpu_accelerator, "_l0_device_context", lambda idx: None)
     accelerator = XPU_Accelerator.__new__(XPU_Accelerator)
 
     assert accelerator.register_host_memory(1234, 4096) is False
