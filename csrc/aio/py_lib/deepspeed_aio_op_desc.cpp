@@ -49,7 +49,7 @@ void warn_consumer_ssd_writes() noexcept
 
 io_op_desc_t::io_op_desc_t(const bool read_op,
                            const torch::Tensor& buffer,
-                           const int fd,
+                           const aio_fd_t fd,
                            const char* filename,
                            const int intra_op_parallelism,
                            const bool validate,

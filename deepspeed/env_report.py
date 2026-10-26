@@ -4,6 +4,7 @@
 # DeepSpeed Team
 
 import os
+import sys
 import torch
 import deepspeed
 import subprocess
@@ -102,6 +103,11 @@ def installed_cann_version():
 
 
 def get_shm_size():
+    if sys.platform == "win32":
+        # os.statvfs (and /dev/shm itself) don't exist on Windows; unlike the
+        # UNKNOWN case below, this isn't a detection failure, there is just no
+        # single size-capped shared-memory mount to report here.
+        return "N/A (Windows has no /dev/shm equivalent)", None
     try:
         shm_stats = os.statvfs('/dev/shm')
     except (OSError, FileNotFoundError, ValueError, AttributeError):

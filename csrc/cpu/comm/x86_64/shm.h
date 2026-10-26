@@ -5,14 +5,22 @@
 
 #include <immintrin.h>
 
-inline __m512 cvt_bf16_to_fp32(const __m256i src) __attribute__((target("avx512bw")));
+// MSVC has no equivalent of GCC/Clang's function-multiversioning target attribute: it exposes all
+// AVX-512 intrinsics regardless of /arch, so the attribute is simply unneeded there.
+#if defined(_MSC_VER) && !defined(__clang__)
+#define DS_ATTRIBUTE_TARGET_AVX512BW
+#else
+#define DS_ATTRIBUTE_TARGET_AVX512BW __attribute__((target("avx512bw")))
+#endif
+
+inline __m512 cvt_bf16_to_fp32(const __m256i src) DS_ATTRIBUTE_TARGET_AVX512BW;
 inline __m512 cvt_bf16_to_fp32(const __m256i src)
 {
     auto y = _mm512_cvtepu16_epi32(src);
     return _mm512_castsi512_ps(_mm512_bslli_epi128(y, 2));
 }
 
-inline __m256i cvt_fp32_to_bf16(const __m512 src) __attribute__((target("avx512bw")));
+inline __m256i cvt_fp32_to_bf16(const __m512 src) DS_ATTRIBUTE_TARGET_AVX512BW;
 inline __m256i cvt_fp32_to_bf16(const __m512 src)
 {
     __m512i value = _mm512_castps_si512(src);
@@ -33,10 +41,10 @@ inline __m256i cvt_fp32_to_bf16(const __m512 src)
     return _mm512_cvtusepi32_epi16(t_value);
 }
 
-inline __m512 cvt_fp16_to_fp32(const __m256i src) __attribute__((target("avx512bw")));
+inline __m512 cvt_fp16_to_fp32(const __m256i src) DS_ATTRIBUTE_TARGET_AVX512BW;
 inline __m512 cvt_fp16_to_fp32(const __m256i src) { return _mm512_cvtph_ps(src); }
 
-inline __m256i cvt_fp32_to_fp16(const __m512 src) __attribute__((target("avx512bw")));
+inline __m256i cvt_fp32_to_fp16(const __m512 src) DS_ATTRIBUTE_TARGET_AVX512BW;
 inline __m256i cvt_fp32_to_fp16(const __m512 src)
 {
     return _mm512_cvtps_ph(src, (_MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC));
@@ -49,13 +57,13 @@ inline __m256i cvt_fp32_to_fp16(const __m512 src)
 static int vector_length_in_bytes = 32;
 
 void reduce_bf16_buffers(int start_elements, int num_elements, char* to_buffer, char** buffers)
-    __attribute__((target("avx512bw")));
+    DS_ATTRIBUTE_TARGET_AVX512BW;
 void reduce_fp16_buffers(int start_elements, int num_elements, char* to_buffer, char** buffers)
-    __attribute__((target("avx512bw")));
+    DS_ATTRIBUTE_TARGET_AVX512BW;
 void reduce_fp32_buffers(int start_elements, int num_elements, char* to_buffer, char** buffers)
-    __attribute__((target("avx512bw")));
+    DS_ATTRIBUTE_TARGET_AVX512BW;
 
-void parallel_memcpy(void* to, void* from, size_t n_bytes) __attribute__((target("avx512bw")));
+void parallel_memcpy(void* to, void* from, size_t n_bytes) DS_ATTRIBUTE_TARGET_AVX512BW;
 
 #define VLOAD_U8(X) _mm256_loadu_si256((__m256i*)(X))
 #define VLOAD_U16(X) _mm256_loadu_si256((__m256i*)(X))

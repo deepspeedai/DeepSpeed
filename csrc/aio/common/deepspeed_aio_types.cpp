@@ -61,16 +61,24 @@ aio_context::aio_context(const int block_size, const int queue_depth)
 {
     _block_size = block_size;
     _queue_depth = queue_depth;
+#if defined(_WIN32)
+    for (auto i = 0; i < queue_depth; ++i) { _iocbs.push_back(new io_request_t()); }
+#else
     for (auto i = 0; i < queue_depth; ++i) {
         _iocbs.push_back((struct iocb*)calloc(1, sizeof(struct iocb)));
     }
     _io_events.resize(queue_depth);
     io_queue_init(queue_depth, &_io_ctxt);
+#endif
 }
 
 aio_context::~aio_context()
 {
+#if defined(_WIN32)
+    for (auto& req : _iocbs) { delete req; }
+#else
     for (auto& iocb : _iocbs) { free(iocb); }
     _io_events.resize(0);
     io_queue_release(_io_ctxt);
+#endif
 }

@@ -4,7 +4,9 @@
 # DeepSpeed Team
 
 import pytest
+import shutil
 import subprocess
+import sys
 
 from types import SimpleNamespace
 
@@ -65,12 +67,19 @@ def dummy_runner():
 def test_user_args(cmd, multi_node):
     if multi_node and get_accelerator().device_name() == "cpu":
         pytest.skip("CPU accelerator does not support this test yet")
-    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    # On Windows the deepspeed console script is a .bat file, which CreateProcess
+    # cannot launch directly (unlike POSIX exec) -- it needs cmd.exe as a shell.
+    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=(sys.platform == "win32"))
     out, err = p.communicate()
     assert "ARG PARSE SUCCESS" in out.decode("utf-8"), f"User args not parsed correctly: {err.decode('utf-8')}"
 
 
 def test_bash_string_args(tmpdir, user_script_fp):
+    if shutil.which("bash") is None:
+        pytest.skip("bash is not available on this system")
+    if sys.platform == "win32":
+        pytest.skip("bare 'deepspeed' is not invocable from bash on Windows (entry point is a .bat file)")
+
     bash_script = f"""
     ARGS="--prompt 'DeepSpeed is the best'"
     echo ${{ARGS}}|xargs deepspeed --num_nodes 1 --num_gpus 1 {user_script_fp}

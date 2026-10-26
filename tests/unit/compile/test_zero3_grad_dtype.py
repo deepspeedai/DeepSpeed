@@ -129,7 +129,20 @@ def test_zero3_semantic_guard_ignores_transient_physical_state_changes(monkeypat
     def backend(_gm, _inputs):
         backend_calls.append(None)
         param.data = torch.ones(2, 2, device=param.device)
-        return lambda _weight, value: (value, )
+
+        # dynamo doesn't guarantee the compiled graph is called with a fixed (weight, value)
+        # signature -- e.g. a constant-folded weight may be dropped from args entirely -- so
+        # the fake backend must locate the actual forward input rather than assume its position.
+        def compiled_forward(*args):
+            tensor_args = [arg for arg in args if torch.is_tensor(arg)]
+            for arg in tensor_args:
+                if arg.shape == value.shape:
+                    return (arg, )
+            if len(tensor_args) == 1:
+                return (tensor_args[0], )
+            raise AssertionError(f"compiled callable invoked without the forward input: {args}")
+
+        return compiled_forward
 
     patch_fake_tensor()
     compiled = torch.compile(module, backend=backend)

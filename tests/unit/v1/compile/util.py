@@ -72,25 +72,28 @@ def compare_loss(self, config, dtype, iteration=5, hidden_dim_override=None, rto
     ys = [torch.randn_like(x) for x in xs]
 
     target_losses = []
-    for x, y in zip(xs, ys):
-        baseline_loss = baseline_engine(x, y)
-        target_loss = target_engine(x, y)
-        target_losses.append(target_loss.detach().float().item())
+    # Always destroy the engines, even if a loss/parameter assertion fails, otherwise their
+    # process groups leak into whatever test runs next.
+    try:
+        for x, y in zip(xs, ys):
+            baseline_loss = baseline_engine(x, y)
+            target_loss = target_engine(x, y)
+            target_losses.append(target_loss.detach().float().item())
 
-        allclose_on_all_ranks(baseline_loss, target_loss, "Loss values are not close.", rtol=RTOL, atol=ATOL)
+            allclose_on_all_ranks(baseline_loss, target_loss, "Loss values are not close.", rtol=RTOL, atol=ATOL)
 
-        baseline_engine.backward(baseline_loss)
-        target_engine.backward(target_loss)
+            baseline_engine.backward(baseline_loss)
+            target_engine.backward(target_loss)
 
-        baseline_engine.step()
-        target_engine.step()
+            baseline_engine.step()
+            target_engine.step()
 
-        with GatheredParameters(target_engine.parameters()):
-            for p1, p2 in zip(baseline_engine.parameters(), target_engine.parameters()):
-                allclose_on_all_ranks(p1, p2, "Parameters are not equal.", rtol=RTOL, atol=ATOL)
-
-    baseline_engine.destroy()
-    target_engine.destroy()
+            with GatheredParameters(target_engine.parameters()):
+                for p1, p2 in zip(baseline_engine.parameters(), target_engine.parameters()):
+                    allclose_on_all_ranks(p1, p2, "Parameters are not equal.", rtol=RTOL, atol=ATOL)
+    finally:
+        baseline_engine.destroy()
+        target_engine.destroy()
 
     # Returned so callers can compare two compiled configurations far more tightly.
     return target_losses
@@ -184,48 +187,49 @@ def compare_sp_loss(self, config, sp_size, iterations=3):
 
     # Train both engines in lockstep; compare the losses at the final step.
     ul_loss = autosp_loss = None
-    for i in range(iterations):
-        torch.manual_seed(42 + i)
-        full_ids = torch.randint(0, vocab_size, (1, seq_length), device=device)
+    try:
+        for i in range(iterations):
+            torch.manual_seed(42 + i)
+            full_ids = torch.randint(0, vocab_size, (1, seq_length), device=device)
 
-        # Ulysses: each rank processes its own shard.
-        shard_ids = full_ids[:, sp_rank * chunk:(sp_rank + 1) * chunk]
-        shard_pos = torch.arange(sp_rank * chunk, (sp_rank + 1) * chunk, device=device).unsqueeze(0)
-        shard_mask = torch.ones(1, chunk, device=device, dtype=torch.long)
-        ul_out = ulysses_engine(input_ids=shard_ids,
-                                labels=shard_ids,
-                                position_ids=shard_pos,
-                                attention_mask=shard_mask)
-        # Average per-shard losses across SP ranks to get the full-sequence loss.
-        ul_loss = ul_out.loss.clone()
-        dist.all_reduce(ul_loss, group=sp_group)
-        ul_loss = ul_loss / sp_size
+            # Ulysses: each rank processes its own shard.
+            shard_ids = full_ids[:, sp_rank * chunk:(sp_rank + 1) * chunk]
+            shard_pos = torch.arange(sp_rank * chunk, (sp_rank + 1) * chunk, device=device).unsqueeze(0)
+            shard_mask = torch.ones(1, chunk, device=device, dtype=torch.long)
+            ul_out = ulysses_engine(input_ids=shard_ids,
+                                    labels=shard_ids,
+                                    position_ids=shard_pos,
+                                    attention_mask=shard_mask)
+            # Average per-shard losses across SP ranks to get the full-sequence loss.
+            ul_loss = ul_out.loss.clone()
+            dist.all_reduce(ul_loss, group=sp_group)
+            ul_loss = ul_loss / sp_size
 
-        # AutoSP: full sequence.  dynamic=True makes all shapes symbolic, so mark_dynamic
-        # is not needed; only the tag attributes that the autosp pass uses are set here.
-        autosp_ids = full_ids.clone()
-        autosp_lbl = autosp_ids.clone()
-        autosp_pos = torch.arange(seq_length, device=device).unsqueeze(0)
-        autosp_msk = torch.ones(1, seq_length, device=device, dtype=torch.long)
-        autosp_ids.tag = autosp_constants.AUTOSP_INPUT_ID_KEY
-        autosp_lbl.tag = autosp_constants.AUTOSP_LABEL_ID_KEY
-        autosp_pos.tag = autosp_constants.AUTOSP_POSITION_ID_KEY
-        autosp_out = autosp_engine(input_ids=autosp_ids,
-                                   labels=autosp_lbl,
-                                   position_ids=autosp_pos,
-                                   attention_mask=autosp_msk)
-        autosp_loss = autosp_out.loss
+            # AutoSP: full sequence.  dynamic=True makes all shapes symbolic, so mark_dynamic
+            # is not needed; only the tag attributes that the autosp pass uses are set here.
+            autosp_ids = full_ids.clone()
+            autosp_lbl = autosp_ids.clone()
+            autosp_pos = torch.arange(seq_length, device=device).unsqueeze(0)
+            autosp_msk = torch.ones(1, seq_length, device=device, dtype=torch.long)
+            autosp_ids.tag = autosp_constants.AUTOSP_INPUT_ID_KEY
+            autosp_lbl.tag = autosp_constants.AUTOSP_LABEL_ID_KEY
+            autosp_pos.tag = autosp_constants.AUTOSP_POSITION_ID_KEY
+            autosp_out = autosp_engine(input_ids=autosp_ids,
+                                       labels=autosp_lbl,
+                                       position_ids=autosp_pos,
+                                       attention_mask=autosp_msk)
+            autosp_loss = autosp_out.loss
 
-        ulysses_engine.backward(ul_out.loss)
-        ulysses_engine.step()
-        autosp_engine.backward(autosp_loss)
-        autosp_engine.step()
+            ulysses_engine.backward(ul_out.loss)
+            ulysses_engine.step()
+            autosp_engine.backward(autosp_loss)
+            autosp_engine.step()
+    finally:
+        ulysses_engine.destroy()
+        del ALL_ATTENTION_FUNCTIONS["ulyssess"]
+        autosp_engine.destroy()
 
     allclose_on_all_ranks(autosp_loss, ul_loss, "AutoSP and Ulysses losses are not close.", rtol=RTOL, atol=ATOL)
-
-    ulysses_engine.destroy()
-    del ALL_ATTENTION_FUNCTIONS["ulyssess"]
-    autosp_engine.destroy()
 
 
 def create_gm_nodes(batch_size: int = 1, seq_len: int = 16):

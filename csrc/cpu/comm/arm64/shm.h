@@ -13,6 +13,13 @@
 #include <stdint.h>
 #include <cmath>
 
+#if defined(_MSC_VER) && !defined(__clang__)
+// MSVC's arm64_neon.h defines the float16x4_t/float16x8_t vector types but,
+// unlike GCC/Clang's arm_neon.h, never typedefs the scalar float16_t that
+// vld1_f16/vst1_f16 below cast a pointer to.
+typedef unsigned short float16_t;
+#endif
+
 // 128 bits = 16 bytes -> fits 8 fp16/bf16 or 4 fp32 elements.
 static int vector_length_in_bytes = 16;
 // When widening fp16/bf16 -> fp32, 4 elements fit in one 128-bit register.

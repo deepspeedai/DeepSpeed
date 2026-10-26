@@ -11,15 +11,25 @@ Functionality for managing CPU tensors occupying page-locked memory.
 
 #include <cassert>
 
+#if defined(_WIN32)
+#define NOMINMAX
+#include <windows.h>
+#else
 #include <sys/mman.h>
+#endif
 
 using namespace std;
 
 deepspeed_pin_tensor_t::~deepspeed_pin_tensor_t()
 {
     for (auto iter = _locked_tensors.begin(); iter != _locked_tensors.end(); ++iter) {
+#if defined(_WIN32)
+        VirtualUnlock(iter->first, iter->second);
+        _aligned_free((void*)iter->first);
+#else
         munlock(iter->first, iter->second);
         std::free((void*)iter->first);
+#endif
     }
     _locked_tensors.clear();
 }
@@ -30,7 +40,7 @@ std::shared_ptr<deepspeed_pin_tensor_t> deepspeed_pin_tensor_t::shared()
     return mgr;
 }
 
-extern "C" void* deepspeed_pin_tensor_mgr_holder()
+extern "C" DS_PIN_TENSOR_EXPORT void* deepspeed_pin_tensor_mgr_holder()
 {
     // Heap-allocate the shared_ptr so its control block outlives any transient
     // copies made by other extensions that resolve this symbol via dlsym.
@@ -71,8 +81,13 @@ bool deepspeed_pin_tensor_t::free(void* addr)
     std::lock_guard<std::mutex> guard(_mutex);
     auto iter = _locked_tensors.find(addr);
     if (iter != _locked_tensors.end()) {
+#if defined(_WIN32)
+        VirtualUnlock(addr, iter->second);
+        _aligned_free(addr);
+#else
         munlock(addr, iter->second);
         std::free(addr);
+#endif
         _locked_tensors.erase(iter);
         return true;
     }
@@ -96,3 +111,30 @@ bool deepspeed_pin_tensor_t::is_managed(const torch::Tensor& buffer)
     }
     return false;
 };
+
+#if defined(_WIN32)
+extern "C" DS_PIN_TENSOR_EXPORT torch::Tensor deepspeed_pin_tensor_alloc_by_scalartype(
+    const int64_t num_elem,
+    const at::ScalarType elem_type)
+{
+    return deepspeed_pin_tensor_t::shared()->alloc(num_elem, elem_type);
+}
+
+extern "C" DS_PIN_TENSOR_EXPORT torch::Tensor deepspeed_pin_tensor_alloc_by_options(
+    const int64_t num_elem,
+    const torch::TensorOptions& options)
+{
+    return deepspeed_pin_tensor_t::shared()->alloc(num_elem, options);
+}
+
+extern "C" DS_PIN_TENSOR_EXPORT bool deepspeed_pin_tensor_free_tensor(torch::Tensor& locked_tensor)
+{
+    return deepspeed_pin_tensor_t::shared()->free(locked_tensor);
+}
+
+extern "C" DS_PIN_TENSOR_EXPORT bool deepspeed_pin_tensor_check_is_managed(
+    const torch::Tensor& buffer)
+{
+    return deepspeed_pin_tensor_t::shared()->is_managed(buffer);
+}
+#endif

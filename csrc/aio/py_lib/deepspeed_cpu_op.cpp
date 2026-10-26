@@ -12,7 +12,7 @@ cpu_op_desc_t::cpu_op_desc_t(
     const std::shared_ptr<struct deepspeed_pin_tensor_t>& pinned_tensor_mgr,
     const bool read_op,
     const torch::Tensor& buffer,
-    const int fd,
+    const aio_fd_t fd,
     const char* filename,
     const int intra_op_parallelism,
     const bool validate,

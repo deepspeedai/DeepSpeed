@@ -80,6 +80,7 @@ install_requires = fetch_requirements('requirements/requirements.txt')
 extras_require = {
     'readthedocs': fetch_requirements('requirements/requirements-readthedocs.txt'),
     'dev': fetch_requirements('requirements/requirements-dev.txt'),
+    'win-dev': fetch_requirements('requirements/requirements-win-dev.txt'),
     'autotuning': fetch_requirements('requirements/requirements-autotuning.txt'),
     'autotuning_ml': fetch_requirements('requirements/requirements-autotuning-ml.txt'),
     'inf': fetch_requirements('requirements/requirements-inf.txt'),

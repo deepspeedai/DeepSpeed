@@ -30,6 +30,10 @@ class CCLCommBuilder(CPUOpBuilder):
         return ['-O2', '-fopenmp']
 
     def is_compatible(self, verbose=False):
+        if sys.platform == "win32":
+            if verbose:
+                self.warning(f"{self.NAME} requires oneCCL, which is not verified on Windows.")
+            return False
         # TODO: add soft compatibility check for private binary release.
         #  a soft check, as in we know it can be trivially changed.
         return super().is_compatible(verbose)
@@ -63,10 +67,13 @@ class ShareMemCommBuilder(CPUOpBuilder):
         return includes
 
     def cxx_args(self):
+        if sys.platform == "win32":
+            return super().cxx_args()
         return ['-O2', '-fopenmp']
 
     def is_compatible(self, verbose=False):
-        # The shared-memory kernels use Linux-only APIs, so let other platforms fall back to gloo.
-        if sys.platform != 'linux':
+        # The shared-memory kernels have Linux and Windows implementations; other
+        # platforms (e.g. macOS) fall back to gloo.
+        if sys.platform not in ('linux', 'win32'):
             return False
         return super().is_compatible(verbose)

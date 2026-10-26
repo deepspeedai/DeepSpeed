@@ -7,13 +7,35 @@
 Functionality for swapping optimizer tensors to/from (NVMe) storage devices.
 */
 
+#if defined(_WIN32)
+#define NOMINMAX
+#include <windows.h>
+#else
 #include <libaio.h>
+#endif
 #include <stdlib.h>
 
 #include <string>
 #include <vector>
 
 using namespace std;
+
+#if defined(_WIN32)
+using aio_fd_t = HANDLE;
+const aio_fd_t AIO_INVALID_FD = INVALID_HANDLE_VALUE;
+struct win_aio_request {
+    aio_fd_t _fd;
+    void* _buf;
+    size_t _nbytes;
+    int64_t _offset;
+    bool _read_op;
+};
+using io_request_t = win_aio_request;
+#else
+using aio_fd_t = int;
+const aio_fd_t AIO_INVALID_FD = -1;
+using io_request_t = struct iocb;
+#endif
 
 struct deepspeed_aio_latency_t {
     double _min_usec;
@@ -48,9 +70,11 @@ struct deepspeed_aio_config_t {
 };
 
 struct aio_context {
+#if !defined(_WIN32)
     io_context_t _io_ctxt;
     std::vector<struct io_event> _io_events;
-    std::vector<struct iocb*> _iocbs;
+#endif
+    std::vector<io_request_t*> _iocbs;
     int _block_size;
     int _queue_depth;
 

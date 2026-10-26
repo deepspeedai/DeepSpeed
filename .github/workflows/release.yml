@@ -6,9 +6,8 @@ on:
       - 'v*.*.*'
 
 jobs:
-  deploy:
+  build-sdist:
     runs-on: ubuntu-24.04
-    environment: release-env
 
     steps:
     - uses: actions/checkout@v7
@@ -28,13 +27,99 @@ jobs:
         pip install setuptools
         pip install build
         DS_BUILD_STRING=" " python -m build --sdist
-    - name: Publish to PyPI
-      uses: pypa/gh-action-pypi-publish@release/v1
+    - name: Upload sdist
+      uses: actions/upload-artifact@v4
       with:
-        password: ${{ secrets.PYPI_API_TOKEN }}
-        repository-url: https://upload.pypi.org/legacy/
+        name: dist-sdist
+        path: dist/*.tar.gz
+
+  build-wheels:
+    name: windows-release / build wheel (${{ matrix.arch }}, py${{ matrix.python-version }})
+    runs-on: ${{ matrix.runs-on }}
+    concurrency:
+      group: windows-release-${{ github.ref }}-${{ matrix.arch }}-${{ matrix.python-version }}
+      cancel-in-progress: true
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [arm64, x64]
+        python-version: ['3.11', '3.12', '3.13']
+        include:
+          - arch: arm64
+            runs-on: windows-11-arm
+            msvc-arch: arm64
+          - arch: x64
+            runs-on: windows-latest
+            msvc-arch: amd64
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup virtual environment
+        uses: ./.github/workflows/setup-win-venv
+        with:
+          python-version: ${{ matrix.python-version }}
+          msvc-arch: ${{ matrix.msvc-arch }}
+
+      - name: Get release version from tag
+        shell: bash
+        run: |
+          echo "RELEASE_VERSION=${GITHUB_REF#refs/*/v}" >> $GITHUB_ENV
+
+      - name: Check release version
+        shell: bash
+        run: |
+          pip install packaging
+          python release/check_release_version.py --release_version ${{ env.RELEASE_VERSION }}
+
+      - name: Build wheel
+        shell: pwsh
+        run: |
+          $env:DS_BUILD_STRING = " "
+          python -m build --wheel --no-isolation
+
+      - name: Upload wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-wheel-${{ matrix.arch }}-py${{ matrix.python-version }}
+          path: dist/*.whl
+
+  publish-pypi:
+    name: release / publish to PyPI
+    needs: [build-sdist, build-wheels]
+    runs-on: ubuntu-24.04
+    environment: release-env
+
+    steps:
+      - uses: actions/checkout@v7
+      - name: Download all distributions
+        uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          path: dist
+          merge-multiple: true
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
+          repository-url: https://upload.pypi.org/legacy/
+
+  bump-version:
+    name: release / bump version
+    needs: [publish-pypi]
+    runs-on: ubuntu-24.04
+    environment: release-env
+
+    steps:
+    - uses: actions/checkout@v7
+      with:
+        ref: "master"
+    - name: Get release version from tag
+      run: |
+        echo "RELEASE_VERSION=${GITHUB_REF#refs/*/v}" >> $GITHUB_ENV
     - name: Bump version
       run: |
+        pip install packaging
         python release/bump_patch_version.py --current_version ${{ env.RELEASE_VERSION }}
     - name: Create Pull Request
       uses: peter-evans/create-pull-request@v8
