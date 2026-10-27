@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # DeepSpeed Team
-"""CUDA graph capture for HybridEngine token generation.
+"""Graph capture for HybridEngine token generation.
 
 Generation in the HybridEngine is bound by CPU work rather than by the GPU: a
 single decode step issues on the order of a thousand kernel launches, and the
 kernels finish well before the host can queue the next step. Capturing the decode
-forward into a CUDA graph replaces all of those launches with one replay.
+forward into a graph replaces all of those launches with one replay.
 
 Two properties of the inference kernels shape this design.
 
@@ -37,7 +37,7 @@ def _tensor_kwargs(kwargs):
 
 
 class DecodeGraphCache:
-    """Dispatches generation forwards to a per-position CUDA graph.
+    """Dispatches generation forwards to a per-position graph.
 
     Args:
         forward: The original ``forward``, used both for capture and as the
@@ -97,7 +97,7 @@ class DecodeGraphCache:
         # A different generation length needs its own set of graphs, because each
         # graph has both its sequence offset and its attention-mask width baked in.
         if self._captured_length is not None and self._captured_length != num_decode_steps:
-            logger.info(f"HybridEngine CUDA graph: generation length changed "
+            logger.info(f"HybridEngine graph capture: generation length changed "
                         f"{self._captured_length} -> {num_decode_steps}, recapturing.")
             self.invalidate()
 
@@ -141,7 +141,7 @@ class DecodeGraphCache:
         Only safe before any replay has happened in the current sequence, which
         is why this is reachable only from the capture path.
         """
-        logger.warning(f"HybridEngine CUDA graph disabled: {reason}")
+        logger.warning(f"HybridEngine graph capture disabled: {reason}")
         self.invalidate()
         self._disabled = True
         self._use_graphs = False
@@ -161,7 +161,7 @@ class DecodeGraphCache:
             # begin_sequence() bounds the length, so this means the caller ran
             # longer than it declared. Replays have already happened, so eager
             # execution would read a stale sequence counter.
-            raise RuntimeError(f"HybridEngine CUDA graph: generation exceeded the declared length "
+            raise RuntimeError(f"HybridEngine graph capture: generation exceeded the declared length "
                                f"({self._max_positions} decode steps). Set hybrid_engine.max_out_tokens "
                                f"to cover the longest generation, or disable hybrid_engine.enable_cuda_graph.")
 
@@ -195,23 +195,23 @@ def decode_steps_from_generate_kwargs(kwargs):
     return int(max_new) - 1
 
 
-def validate_cuda_graph_support(config, zero_stage):
-    """Return the reason CUDA graphs cannot be used, or ``None`` if they can."""
-    if not get_accelerator().is_available() or get_accelerator().device_name() != "cuda":
-        return "CUDA graphs require the CUDA accelerator"
+def validate_graph_capture_support(config, zero_stage):
+    """Return the reason graph capture cannot be used, or ``None`` if it can."""
+    if not get_accelerator().is_available() or get_accelerator().create_graph() is None:
+        return "graph capture is not supported on the current accelerator"
 
     if zero_stage == 3:
         # Under ZeRO-3 the inference containers hold no persistent weights; the
         # parameters are gathered into fresh buffers for each generate call. A
         # graph would keep replaying whichever buffers existed at capture time,
         # which is silently wrong rather than merely slow.
-        return "CUDA graphs are not supported with ZeRO stage 3"
+        return "graph capture is not supported with ZeRO stage 3"
 
     if config.release_inference_cache:
         # Releasing the workspace frees the buffers the graphs write into.
-        return "CUDA graphs are not supported with release_inference_cache"
+        return "graph capture is not supported with release_inference_cache"
 
     if config.inference_tp_size > 1:
-        return "CUDA graphs are not supported with inference_tp_size > 1"
+        return "graph capture is not supported with inference_tp_size > 1"
 
     return None

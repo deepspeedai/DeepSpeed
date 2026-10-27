@@ -21,7 +21,7 @@ from torch import nn
 from deepspeed.utils import logger
 from deepspeed.module_inject.layers import LinearLayer, Normalize, EmbeddingLayer, OPTEmbedding
 from ..ops.transformer.inference.op_binding.workspace import WorkspaceOp
-from .hybrid_engine_graph import (DecodeGraphCache, decode_steps_from_generate_kwargs, validate_cuda_graph_support)
+from .hybrid_engine_graph import (DecodeGraphCache, decode_steps_from_generate_kwargs, validate_graph_capture_support)
 
 
 class DeepSpeedHybridEngine(DeepSpeedEngine):
@@ -62,9 +62,9 @@ class DeepSpeedHybridEngine(DeepSpeedEngine):
         self._orig_module_forward = None
         self._decode_graphs = None
         if self._config.hybrid_engine.enable_cuda_graph and len(self._inference_containers) > 0:
-            unsupported = validate_cuda_graph_support(self._config.hybrid_engine, self._config.zero_config.stage)
+            unsupported = validate_graph_capture_support(self._config.hybrid_engine, self._config.zero_config.stage)
             if unsupported is not None:
-                logger.warning(f"HybridEngine: running without CUDA graphs. {unsupported}.")
+                logger.warning(f"HybridEngine: running without graph capture. {unsupported}.")
             else:
                 self._orig_module_forward = self.module.forward
                 self._decode_graphs = DecodeGraphCache(self._orig_module_forward,
@@ -204,7 +204,7 @@ class DeepSpeedHybridEngine(DeepSpeedEngine):
         if hybrid_config.release_inference_cache:
             raise RuntimeError("Shared prefill does not support release_inference_cache")
         if hybrid_config.enable_cuda_graph:
-            raise RuntimeError("Shared prefill does not support CUDA graph capture")
+            raise RuntimeError("Shared prefill does not support graph capture")
         if len(self._inference_containers) == 0:
             raise RuntimeError("Shared prefill requires HybridEngine inference containers")
 
