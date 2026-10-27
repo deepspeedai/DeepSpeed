@@ -608,6 +608,12 @@ subset of a parameter combined with a list of ranks holding this subset" — is 
 §2.1's exact `locations` implements, and the same mechanism can later describe normalized
 ZeRO/offload placement without introducing another geometry IR.
 
+At runtime, `AutoEPMoELayer.expert_affine_maps()` returns the maps of the live packed
+expert parameters, and `AutoEPMoELayer.plan_expert_transfer(target_placement)` composes
+them with a target descriptor through `plan_transfer` into shard-to-shard copies. Plan
+ranks are EP-local ranks of the respective placements; the plan is not executed, and ZeRO
+and EDP storage must still be normalized before its offsets apply.
+
 ---
 
 ## 9. Staging
