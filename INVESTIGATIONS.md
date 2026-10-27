@@ -928,3 +928,42 @@ scheduling. Path consistency and performance were the same fix.
 
 vs vLLM TP=2: bs=32 1785/1727 = 103.4%; bs=64 2272/1730 = 131.4%.
 Both TP=2 batch points now beat vLLM.
+
+
+## 21. A100 TP=2 results (2×A100-SXM4-80GB, NVLink, RunPod)
+
+NCCL latency on NVLink: 44 us/call (4KB-256KB), vs 150-250 us on
+AutoDL's non-P2P PCIe. First RunPod attempt (2×RTX 6000 Ada) failed:
+NCCL communication broken at hardware level (allreduce(10) hangs,
+canDeviceAccessPeer=True was a false positive, container only exposed
+/dev/nvidia7).
+
+### Full comparison (same prompts, greedy, slope method)
+| bs | segKI | graphonly | segKI delta | vLLM 0.32 | segKI % of vLLM |
+|----|-------|-----------|-------------|-----------|-----------------|
+| 8  | 730.2  | 583.1   | +25%  | 1452.2  | 50.3% |
+| 32 | 2200.8 | 1479.4  | +49%  | 4883.1  | 45.1% |
+| 64 | 3791.9 | 2081.2  | +82%  | 7635.7  | 49.7% |
+
+### Why segKI is ~50% of vLLM on A100 (vs 103-131% on 4080 SUPER)
+1. Our WMMA kernels are tile-tuned for Ada (sm_89): NT=64, smem=61KB.
+   A100 has 164KB smem/SM (vs Ada 99KB) and 2TB/s HBM2e (vs 736GB/s
+   GDDR6X) — larger tiles could use both. Architecture-adaptive tiling
+   (compile-time __CUDA_ARCH__ or runtime template dispatch) is the fix;
+   the grouped_linear dispatcher already has the extension point.
+2. vLLM 0.32 has years of A100-specific optimization (fused attention,
+   PagedAttention, custom AR for NVLink).
+3. NVLink neutralizes our communication optimization advantage (C-C-R
+   partition): on PCIe both engines were equally hampered; on NVLink
+   vLLM's custom collectives run at full speed.
+
+Positive signal: segKI vs graphonly +82% at bs=64 proves kernel
+injection works correctly on Ampere — the gap is efficiency, not
+correctness.
+
+### Environment notes for future RunPod work
+- Use python venv for vLLM (system packages conflict with pip)
+- NCCL minimal test first (30s) before any benchmark
+- RunPod A100 SXM4: torch 2.13.0+cu129, NCCL 2.29.3, fla + causal_conv1d
+  installed via pip (--no-build-isolation)
+- First RunPod attempt (RTX 6000 Ada) had broken NCCL at hardware level
