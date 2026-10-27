@@ -19,6 +19,88 @@ except ImportError as e:
     oneccl_imported_p = False
 
 import os
+import sys
+
+# Default for capping total_memory() and available_memory() at the cgroup memory limit of the process.
+# Flip this one line to change the default; DS_CPU_RESPECT_CGROUP_MEMORY=1 or =0 overrides it.
+RESPECT_CGROUP_MEMORY_BY_DEFAULT = False
+
+_CGROUP_ROOT = "/sys/fs/cgroup"
+_PROC_SELF_CGROUP = "/proc/self/cgroup"
+# cgroup v1 reports "no limit" as a huge sentinel instead of "max".
+_CGROUP_UNLIMITED = 1 << 62
+
+
+def _read_cgroup_int(path):
+    try:
+        with open(path) as f:
+            value = f.read().strip()
+    except OSError:
+        return None
+    return int(value) if value.isdigit() else None
+
+
+def _read_memory_stat(path, key):
+    try:
+        with open(path) as f:
+            for line in f:
+                name, _, value = line.partition(" ")
+                if name == key:
+                    return int(value)
+    except (OSError, ValueError):
+        pass
+    return 0
+
+
+def _cgroup_dirs(controller):
+    """Directories of this process's cgroup from /proc/self/cgroup, nearest first, mount root last."""
+    root = _CGROUP_ROOT if controller is None else os.path.join(_CGROUP_ROOT, controller)
+    rel_path = ""
+    try:
+        with open(_PROC_SELF_CGROUP) as f:
+            for line in f:
+                parts = line.strip().split(":", 2)
+                if len(parts) != 3:
+                    continue
+                is_v2 = controller is None and parts[0] == "0" and parts[1] == ""
+                is_v1 = controller is not None and controller in parts[1].split(",")
+                if is_v2 or is_v1:
+                    rel_path = parts[2]
+                    break
+    except OSError:
+        pass
+    components = [c for c in rel_path.split("/") if c]
+    if ".." in components:
+        # A cgroup outside this cgroup namespace cannot be resolved from here.
+        components = []
+    return [os.path.join(root, *components[:depth]) for depth in range(len(components), 0, -1)] + [root]
+
+
+def _cgroup_memory():
+    """Returns (limit, working_set) in bytes of the cgroup that limits this process, or None.
+
+    The limit is the smallest one from the process's cgroup up to the root, which is the one the kernel enforces.
+    The working set is the usage of that same cgroup minus its inactive page cache, which the kernel can reclaim.
+    """
+    override = os.environ.get("DS_CPU_RESPECT_CGROUP_MEMORY")
+    enabled = RESPECT_CGROUP_MEMORY_BY_DEFAULT if override is None else override.strip().lower() in ("1", "true")
+    if not enabled or not sys.platform.startswith("linux"):
+        return None
+    for controller, limit_file, usage_file, inactive_key in (
+        (None, "memory.max", "memory.current", "inactive_file"),
+        ("memory", "memory.limit_in_bytes", "memory.usage_in_bytes", "total_inactive_file"),
+    ):
+        levels = [(d, _read_cgroup_int(os.path.join(d, limit_file))) for d in _cgroup_dirs(controller)]
+        levels = [(d, limit) for d, limit in levels if limit is not None and limit < _CGROUP_UNLIMITED]
+        if not levels:
+            continue
+        cgroup_dir, limit = min(levels, key=lambda level: level[1])
+        usage = _read_cgroup_int(os.path.join(cgroup_dir, usage_file))
+        if usage is None:
+            return None
+        inactive_file = _read_memory_stat(os.path.join(cgroup_dir, "memory.stat"), inactive_key)
+        return limit, max(0, usage - inactive_file)
+    return None
 
 
 # accelerator for Intel CPU
@@ -192,11 +274,15 @@ class CPU_Accelerator(DeepSpeedAccelerator):
 
     def total_memory(self, device_index=None):
         import psutil
-        return psutil.virtual_memory().total
+        total = psutil.virtual_memory().total
+        cgroup = _cgroup_memory()
+        return total if cgroup is None else min(total, cgroup[0])
 
     def available_memory(self, device_index=None):
         import psutil
-        return psutil.virtual_memory().available
+        available = psutil.virtual_memory().available
+        cgroup = _cgroup_memory()
+        return available if cgroup is None else min(available, max(0, cgroup[0] - cgroup[1]))
 
     # Misc
     def is_available(self):

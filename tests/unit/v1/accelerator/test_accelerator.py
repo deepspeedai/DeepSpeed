@@ -285,3 +285,70 @@ def test_is_pinned_handles_storageless_tensors(monkeypatch):
 
     meta_tensor = torch.zeros(2, 8, device="meta")
     assert accel.is_pinned(meta_tensor) is False
+
+
+GiB = 1 << 30
+
+
+@pytest.fixture
+def cpu_cgroup(monkeypatch, tmp_path):
+    """Fake cgroup tree and /proc/self/cgroup for the CPU accelerator's memory queries."""
+    from deepspeed.accelerator import cpu_accelerator as cpu_module
+    root = tmp_path / "cgroup"
+    proc_self_cgroup = tmp_path / "proc_self_cgroup"
+    monkeypatch.setattr(cpu_module, "_CGROUP_ROOT", str(root))
+    monkeypatch.setattr(cpu_module, "_PROC_SELF_CGROUP", str(proc_self_cgroup))
+    monkeypatch.setattr(cpu_module.sys, "platform", "linux")
+    monkeypatch.setenv("DS_CPU_RESPECT_CGROUP_MEMORY", "1")
+
+    def write(cgroup_line, files):
+        proc_self_cgroup.write_text(cgroup_line + "\n")
+        for rel_path, content in files.items():
+            (root / rel_path).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel_path).write_text(content + "\n")
+        return cpu_module.CPU_Accelerator()
+
+    return write
+
+
+def test_cpu_memory_uses_limit_on_parent_cgroup(cpu_cgroup):
+    """Kubernetes sets the pod limit on the parent cgroup; the container's own memory.max is 'max'."""
+    import psutil
+    accel = cpu_cgroup(
+        "0::/pod/ctr", {
+            "memory.max": "max",
+            "pod/memory.max": str(GiB),
+            "pod/memory.current": str(GiB // 2),
+            "pod/memory.stat": f"anon {GiB // 4}\ninactive_file {GiB // 4}",
+            "pod/ctr/memory.max": "max",
+        })
+    assert accel.total_memory() == min(GiB, psutil.virtual_memory().total)
+    # 1 GiB limit - (512 MiB usage - 256 MiB reclaimable page cache)
+    assert accel.available_memory() == min(3 * GiB // 4, psutil.virtual_memory().available)
+
+
+def test_cpu_memory_smallest_limit_and_v1_sentinel(cpu_cgroup):
+    accel = cpu_cgroup(
+        "12:memory:/pod\n3:cpu,cpuacct:/pod", {
+            "memory/memory.limit_in_bytes": "9223372036854771712",
+            "memory/pod/memory.limit_in_bytes": str(GiB),
+            "memory/pod/memory.usage_in_bytes": "0",
+        })
+    import psutil
+    assert accel.total_memory() == min(GiB, psutil.virtual_memory().total)
+
+
+@pytest.mark.parametrize("default, override, capped", [(False, None, False), (True, None, True), (False, "1", True),
+                                                       (True, "0", False)])
+def test_cpu_memory_cgroup_default_and_override(cpu_cgroup, monkeypatch, default, override, capped):
+    """RESPECT_CGROUP_MEMORY_BY_DEFAULT is the one line that flips the behavior; the env var overrides it."""
+    import psutil
+    from deepspeed.accelerator import cpu_accelerator as cpu_module
+    monkeypatch.setattr(cpu_module, "RESPECT_CGROUP_MEMORY_BY_DEFAULT", default)
+    if override is None:
+        monkeypatch.delenv("DS_CPU_RESPECT_CGROUP_MEMORY", raising=False)
+    else:
+        monkeypatch.setenv("DS_CPU_RESPECT_CGROUP_MEMORY", override)
+    accel = cpu_cgroup("0::/", {"memory.max": str(GiB), "memory.current": "0"})
+    expected = min(GiB, psutil.virtual_memory().total) if capped else psutil.virtual_memory().total
+    assert accel.total_memory() == expected
