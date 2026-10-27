@@ -928,15 +928,20 @@ def get_global_norm_of_tensors(input_tensors, norm_type=2, mpu=None, moe_ep_grou
         Total norm of the tensors (viewed as a single vector), as a detached float32 scalar tensor.
     """
     assert isinstance(input_tensors, Iterable), f'expected Iterable type not {type(input_tensors)}'
+    input_tensors = list(input_tensors)
     assert all([torch.is_tensor(t) for t in input_tensors]), 'expected list of only tensors'
 
     norm_type = float(norm_type)
+    device = get_accelerator().current_device_name()
+    return_device = input_tensors[0].device if input_tensors else device
     all_norms = []
+    if not input_tensors and norm_type > 0:
+        all_norms.append(torch.zeros((), dtype=torch.float32, device=device))
     if norm_type == inf:
         for t in input_tensors:
             all_norms.append(t.data.abs().max().float())
         total_norm = torch.stack(all_norms).max()
-        device_total_norm = total_norm.to(get_accelerator().current_device_name())
+        device_total_norm = total_norm.to(device)
         # Max across model parallel
         if mpu is not None:
             # For MoE grads, max over model parallel only if MoE-TP is enabled
@@ -949,10 +954,9 @@ def get_global_norm_of_tensors(input_tensors, norm_type=2, mpu=None, moe_ep_grou
         # MoE grads: max across expert parallel group
         if pg_utils.is_parallel(moe_ep_group):
             dist.all_reduce(device_total_norm, op=dist.ReduceOp.MAX, group=moe_ep_group)
-        total_norm = device_total_norm.to(input_tensors[0].device)
+        total_norm = device_total_norm.to(return_device)
     else:
 
-        device = get_accelerator().current_device_name()
         for tensor in input_tensors:
             tensor_norm = tensor.detach().float().norm(norm_type)
             all_norms.append(tensor_norm.to(device))
@@ -971,7 +975,7 @@ def get_global_norm_of_tensors(input_tensors, norm_type=2, mpu=None, moe_ep_grou
         # MoE grads: sum across expert parallel group
         if pg_utils.is_parallel(moe_ep_group):
             dist.all_reduce(device_total_norm, op=dist.ReduceOp.SUM, group=moe_ep_group)
-        total_norm = device_total_norm.to(input_tensors[0].device).pow(1. / norm_type)
+        total_norm = device_total_norm.to(return_device).pow(1. / norm_type)
 
     mask_nan_or_inf_with_val_inplace(total_norm, device=total_norm.device)
 
