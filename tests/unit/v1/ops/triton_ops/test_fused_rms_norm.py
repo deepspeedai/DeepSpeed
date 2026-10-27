@@ -40,13 +40,16 @@ def _rms_norm():
 
 
 def _fused_engine_available():
+    # Import lazily: this module keeps collection fork-safe by not importing the Triton ops at module level.
+    from deepspeed.ops.triton_ops import is_triton_available
+
     accelerator = get_accelerator()
-    return (accelerator.is_available() and accelerator.device_name().startswith("cuda") and _rms_norm().is_available())
+    return (accelerator.is_available() and is_triton_available() and _rms_norm().is_available())
 
 
 def _require_fused_engine():
     if not _fused_engine_available():
-        pytest.skip("fused RMSNorm needs CUDA and Triton")
+        pytest.skip("fused RMSNorm needs Triton support on the accelerator")
 
 
 def _device():
@@ -240,7 +243,7 @@ def test_fused_rms_norm_fail_fast_guards_on_cpu(monkeypatch):
     monkeypatch.setattr(fused_rms_norm, "_IS_ROCM_PYTORCH", False)
     hidden = torch.randn((2, 128), dtype=torch.bfloat16)
     weight = torch.randn((128, ), dtype=torch.bfloat16)
-    with pytest.raises(RuntimeError, match="CUDA kernels"):
+    with pytest.raises(RuntimeError, match="Triton kernels"):
         fused_rms_norm.assert_supported(hidden, weight, 1e-6)
 
 
@@ -599,7 +602,6 @@ def _check_replace_rms_norm_runs_the_kernels_only_where_they_apply():
         eager_out = norm(heads)
         eager_float_out = norm(heads.float())
         kernel_out = _rms_norm().fused_rms_norm(heads, norm.weight, norm.variance_epsilon)
-    assert not eager_out.is_contiguous()
 
     assert _rms_norm().replace_rms_norm(torch.nn.Sequential(norm)) == 1
     with torch.no_grad():
@@ -607,11 +609,15 @@ def _check_replace_rms_norm_runs_the_kernels_only_where_they_apply():
         # The kernels take no float32 input, so this one runs the class's eager forward and gets exactly its result.
         fallback_out = norm(heads.float())
         untouched_out = untouched(heads)
+    # The layout shows which path a call took: eager keeps the head-major layout while the kernels return
+    # a contiguous one. Eager backends that return contiguous tensors for non-contiguous inputs cannot use
+    # this fingerprint; the numerical checks still verify both paths run everywhere.
     assert fused_out.is_contiguous()
+    if not eager_out.is_contiguous():
+        assert not untouched_out.is_contiguous()
     assert torch.equal(fused_out, kernel_out)
     assert torch.equal(fallback_out, eager_float_out)
     assert torch.equal(untouched_out, eager_out)
-    assert not untouched_out.is_contiguous()
     assert _rms_norm().replace_rms_norm(untouched) == 1
     assert _rms_norm().replace_rms_norm(untouched) == 0
     with torch.no_grad():

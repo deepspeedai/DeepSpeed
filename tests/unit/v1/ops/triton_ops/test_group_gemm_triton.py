@@ -21,8 +21,8 @@ from deepspeed.ops.triton_ops.group_gemm_triton import _group_meta, _GROUP_META_
 if not is_triton_available():
     pytest.skip("Triton is not available", allow_module_level=True)
 
-if not (get_accelerator().is_available() and get_accelerator().device_name() == "cuda"):
-    pytest.skip("Triton grouped GEMM requires a CUDA device", allow_module_level=True)
+if not (get_accelerator().is_available() and is_triton_available()):
+    pytest.skip("Triton grouped GEMM requires an accelerator and Triton", allow_module_level=True)
 
 
 def _tol(dtype):
@@ -117,11 +117,11 @@ _DTYPES = [torch.bfloat16, torch.float16, torch.float32]
 
 
 def _skip_unsupported_dtype(dtype):
-    # bfloat16 requires compute capability >= 8.0 (Ampere+). This runs inside each test instead of at module level,
-    # because querying the device initializes CUDA in the process that collects the tests, and tests forked from that
-    # process (pytest --forked) then cannot use CUDA.
-    if dtype == torch.bfloat16 and torch.cuda.get_device_capability()[0] < 8:  #ignore-cuda
-        pytest.skip("bfloat16 requires compute capability >= 8.0")
+    # bfloat16 needs accelerator support (compute capability >= 8.0 on CUDA). This runs inside each test instead of
+    # at module level, because querying the device initializes the accelerator in the process that collects the
+    # tests, and tests forked from that process (pytest --forked) then cannot use it.
+    if dtype == torch.bfloat16 and not get_accelerator().is_bf16_supported():
+        pytest.skip("bfloat16 requires accelerator support")
 
 
 @pytest.mark.parametrize("counts,K,N", _SHAPES)
@@ -388,6 +388,8 @@ def test_grouped_experts_triton_path_parity():
     torch.testing.assert_close(triton_experts.w3.grad.float(), loop_experts.w3.grad.float(), **tol)
 
 
+@pytest.mark.skipif(get_accelerator().device_name() != "cuda",
+                    reason="sm capability-based auto-selection is CUDA-specific")
 def test_grouped_experts_auto_selects_triton_on_ampere():
     """On sm < 9.0 the module auto-selects Triton; disable_triton_grouped_mm opts out."""
     from deepspeed.moe.ep_experts import GroupedExperts

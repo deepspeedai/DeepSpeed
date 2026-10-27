@@ -234,8 +234,8 @@ def _start_async_split_plan_from_expert_counts(
     dependency_event,
 ) -> _PendingSplitPlan:
     """Prepare counts on the caller stream, then start a pinned-memory D2H copy."""
-    if num_tokens_per_expert.device.type != "cuda":
-        raise RuntimeError("expert_parallel.async_split_plan requires CUDA tensors")
+    if not get_accelerator().on_accelerator(num_tokens_per_expert):
+        raise RuntimeError("expert_parallel.async_split_plan requires accelerator tensors")
 
     # Keep count communication and reductions ahead of packing so they do not
     # compete with the packing kernels. Only the metadata copy overlaps them.

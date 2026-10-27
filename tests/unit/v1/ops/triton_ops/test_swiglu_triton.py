@@ -16,16 +16,17 @@ import torch.nn.functional as F
 
 @pytest.fixture(autouse=True)
 def _load_swiglu_in_the_worker():
-    global get_accelerator, swiglu, swiglu_packed
+    global current_device, get_accelerator, swiglu, swiglu_packed
     # The shared Triton availability probe initializes its driver, so it must run after pytest forks its worker.
     from deepspeed.accelerator import get_accelerator
     from deepspeed.ops.triton_ops import is_triton_available
+    from deepspeed.ops.triton_ops._triton import current_device
     from deepspeed.ops.triton_ops.swiglu_triton import swiglu, swiglu_packed
 
     if not is_triton_available():
         pytest.skip("Triton is not available")
-    if not (get_accelerator().is_available() and get_accelerator().device_name() == "cuda"):
-        pytest.skip("Fused Triton SwiGLU requires a CUDA device")
+    if not (get_accelerator().is_available() and is_triton_available()):
+        pytest.skip("Fused Triton SwiGLU requires an accelerator and Triton")
 
 
 def _tol(dtype):
@@ -157,15 +158,15 @@ def test_packed_create_graph_is_rejected(dtype):
 def test_packed_uses_the_input_device_and_stream(dtype):
     accelerator = get_accelerator()
     if accelerator.device_count() < 2:
-        pytest.skip("cross-device launch regression needs two CUDA devices")
-    with torch.cuda.device(0):  #ignore-cuda
+        pytest.skip("cross-device launch regression needs two accelerator devices")
+    with current_device(0):
         caller_stream = accelerator.current_stream()
         input_device = accelerator.device_name(1)
         stream = accelerator.Stream(device=1)
         with accelerator.stream(stream):
             gate_up = torch.ones((7, 26), device=input_device, dtype=dtype, requires_grad=True)
             reference = gate_up.detach().clone().requires_grad_(True)
-        with accelerator.stream(stream), torch.cuda.device(0):  #ignore-cuda
+        with accelerator.stream(stream), current_device(0):
             actual = swiglu_packed(gate_up)
             assert accelerator.current_device() == 0
             gate, up = reference.chunk(2, dim=-1)

@@ -23,6 +23,11 @@ PyTorch expression so callers on non-Triton builds keep working unchanged.
 :func:`swiglu_packed` takes ``gate`` and ``up`` packed side by side in one
 ``[..., 2 * I]`` tensor, the output of a single gate+up GEMM, and reads both
 halves in place with the same math, so the packed GEMM output needs no copy.
+
+``swiglu_packed`` is the portable packed implementation and carries the
+per-hardware dispatch (``_triton.dispatch``): a platform that ships its own
+packed variant overrides it by defining a same-named function in its triton_ops
+subpackage, every other platform runs this portable implementation.
 """
 
 from __future__ import annotations
@@ -30,7 +35,9 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
-from deepspeed.ops.triton_ops._triton import _TRITON_AVAILABLE, triton, tl
+from deepspeed.ops.triton_ops import _probes
+from deepspeed.ops.triton_ops._triton import (_TRITON_AVAILABLE, current_device, dispatch, is_triton_kernel_supported,
+                                              triton, tl)
 
 if _TRITON_AVAILABLE:
 
@@ -164,7 +171,7 @@ if _TRITON_AVAILABLE:
             if n_elements > 0:
                 grid = (triton.cdiv(n_elements, _BLOCK_SIZE), )
                 # Triton uses the current device and stream, which may differ from the input tensor's device.
-                with torch.cuda.device(gate_up.device):  #ignore-cuda
+                with current_device(gate_up):
                     _swiglu_packed_fwd_kernel[grid](gate_up,
                                                     out,
                                                     n_elements,
@@ -188,7 +195,7 @@ if _TRITON_AVAILABLE:
             n_elements = grad_out.numel()
             if n_elements > 0:
                 grid = (triton.cdiv(n_elements, _BLOCK_SIZE), )
-                with torch.cuda.device(gate_up.device):  #ignore-cuda
+                with current_device(gate_up):
                     _swiglu_packed_bwd_kernel[grid](grad_out,
                                                     gate_up,
                                                     grad_gate_up,
@@ -205,6 +212,40 @@ def _swiglu_eager(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
     return F.silu(gate) * up
 
 
+def _swiglu_supported(gate: torch.Tensor) -> bool:
+    """The separate path's runtime gate, shared with platform variants.
+
+    The probe resolves the separate class through the same dispatch as the
+    production path, so the gate answers for whichever implementation the
+    platform actually runs.
+    """
+    return is_triton_kernel_supported("swiglu", gate.dtype, gate.device, _probes.swiglu, gate.dtype, gate.device)
+
+
+def _validate_packed_input(gate_up: torch.Tensor) -> None:
+    """Shape validation of the packed input, shared with platform variants."""
+    if gate_up.dim() == 0 or gate_up.shape[-1] % 2:
+        raise ValueError(f"swiglu_packed expects an even last dimension, got shape {tuple(gate_up.shape)}")
+
+
+def _swiglu_packed_eager(gate_up: torch.Tensor) -> torch.Tensor:
+    """Eager fallback of the packed path, shared with platform variants."""
+    gate, up = gate_up.chunk(2, dim=-1)
+    return _swiglu_eager(gate, up)
+
+
+def _swiglu_packed_supported(gate_up: torch.Tensor) -> bool:
+    """The packed path's runtime gate, shared with platform variants.
+
+    The probe resolves the packed class through the same dispatch as the
+    production path, so the gate answers for whichever implementation the
+    platform actually runs.
+    """
+    return is_triton_kernel_supported("swiglu_packed", gate_up.dtype, gate_up.device, _probes.swiglu_packed,
+                                      gate_up.dtype, gate_up.device)
+
+
+@dispatch("swiglu_triton")
 def swiglu(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
     """Fused SwiGLU activation: ``silu(gate) * up``.
 
@@ -226,9 +267,15 @@ def swiglu(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
     if not _TRITON_AVAILABLE:
         return _swiglu_eager(gate, up)
 
+    # Runtime detection: the current backend validates the kernels for itself once per
+    # process; a platform that fails the probe runs eager for every later call.
+    if not _swiglu_supported(gate):
+        return _swiglu_eager(gate, up)
+
     return _SwiGLUFn.apply(gate, up)
 
 
+@dispatch("swiglu_triton")
 def swiglu_packed(gate_up: torch.Tensor) -> torch.Tensor:
     """Fused SwiGLU of a packed gate+up tensor: ``silu(gate_up[..., :I]) * gate_up[..., I:]``.
 
@@ -242,11 +289,9 @@ def swiglu_packed(gate_up: torch.Tensor) -> torch.Tensor:
     Forward and backward use the input device's current stream and restore the caller's current device.
     Falls back to the eager PyTorch expression when Triton is unavailable.
     """
-    if gate_up.dim() == 0 or gate_up.shape[-1] % 2:
-        raise ValueError(f"swiglu_packed expects an even last dimension, got shape {tuple(gate_up.shape)}")
+    _validate_packed_input(gate_up)
 
-    if not _TRITON_AVAILABLE:
-        gate, up = gate_up.chunk(2, dim=-1)
-        return _swiglu_eager(gate, up)
+    if not _TRITON_AVAILABLE or not _swiglu_packed_supported(gate_up):
+        return _swiglu_packed_eager(gate_up)
 
     return _SwiGLUPackedFn.apply(gate_up)
