@@ -292,12 +292,9 @@ jobs:
         run: |
           unset TORCH_CUDA_ARCH_LIST # only jit compile for current arch
           cd tests
-          # The suite is split so each half gets fresh xdist workers: multi-rank pool
-          # teardown eventually wedges a worker, and one 3400-test process never
-          # reaches its summary inside the 6h job limit. maxfail is raised so every
-          # failure is listed, and timeout caps each half.
+          # Only the v1 multi-rank tests run here now: the non-v1 half is covered by
+          # the nightly cpu-torch-multi-latest suite, and the sequential-marked tests
+          # move with it. maxfail is raised so every failure is listed.
           overall=0
-          HF_HOME=/tmp/hf_home timeout 210m pytest $PYTEST_OPTS --maxfail=100000 --forked -n 4 unit/ --ignore=unit/v1 --torch_ver="$TORCH_TEST_VERSION" || overall=$?
           HF_HOME=/tmp/hf_home timeout 150m pytest $PYTEST_OPTS --maxfail=100000 --forked -n 4 unit/v1 --torch_ver="$TORCH_TEST_VERSION" || overall=$?
-          HF_HOME=/tmp/hf_home/ pytest $PYTEST_OPTS --forked -m 'sequential' unit/ --torch_ver="$TORCH_TEST_VERSION" || overall=$?
           exit $overall
