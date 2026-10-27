@@ -509,18 +509,24 @@ class BF16_Optimizer(ZeROOptimizer):
         if lp.grad is None:
             return
 
+        grad = lp.grad
         if self.autoep_folding_tp_group is not None and getattr(lp, "ds_grad_is_ready", True):
+            if self.grad_acc_dtype == torch.float32:
+                grad = grad.float()
             apply_folding_correction_to_grad_buffer(self.autoep_folding_spec,
                                                     lp,
-                                                    lp.grad,
+                                                    grad,
                                                     tp_group=self.autoep_folding_tp_group,
                                                     param_name=self.param_names.get(lp))
+            # Retained LP gradients must still agree with their correction marker.
+            if grad is not lp.grad:
+                lp.grad.copy_(grad)
 
         hp_grad = self.fp32_groups_gradients[group_idx][param_idx]
         assert hp_grad is not None, \
             f'high precision param has no gradient, lp param_id = {id(lp)} group_info = [{group_idx}][{param_idx}]'
 
-        hp_grad.data.add_(lp.grad.data.to(hp_grad.dtype).view(hp_grad.shape))
+        hp_grad.data.add_(grad.data.to(hp_grad.dtype).view(hp_grad.shape))
         lp._hp_grad = hp_grad
         self.fp32_groups_has_gradients[group_idx][param_idx] = True
 
