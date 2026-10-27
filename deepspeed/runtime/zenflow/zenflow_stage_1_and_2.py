@@ -793,7 +793,8 @@ class ZenFlowZeroOptimizerParallel(ZenFlowZeroOptimizer):
         if not self.overflow:
             see_memory_usage('Before norm calculation')
             scaled_global_grad_norm = self.scaled_global_norm()
-            if is_invalid_grad_norm(scaled_global_grad_norm):
+            if (self.dtype != torch.bfloat16
+                    or self.check_grad_overflow) and is_invalid_grad_norm(scaled_global_grad_norm):
                 self.overflow = True
 
         self._update_scale(self.overflow)

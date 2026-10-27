@@ -328,9 +328,9 @@ class CPU_Accelerator(DeepSpeedAccelerator):
             # is op_builder from deepspeed or a 3p version? this should only succeed if it's deepspeed
             # if successful this also means we're doing a local install and not JIT compile path
             from op_builder import __deepspeed__  # noqa: F401 # type: ignore
-            from op_builder.cpu import AsyncIOBuilder, CCLCommBuilder, ShareMemCommBuilder, FusedAdamBuilder, CPUAdamBuilder, CPUAdagradBuilder, PinMemoryBuilder, NotImplementedBuilder
+            from op_builder.cpu import AsyncIOBuilder, CCLCommBuilder, ShareMemCommBuilder, FusedAdamBuilder, CPUAdamBuilder, CPUAdagradBuilder, CPULionBuilder, PinMemoryBuilder, NotImplementedBuilder
         except ImportError:
-            from deepspeed.ops.op_builder.cpu import AsyncIOBuilder, CCLCommBuilder, ShareMemCommBuilder, FusedAdamBuilder, CPUAdamBuilder, CPUAdagradBuilder, PinMemoryBuilder, NotImplementedBuilder
+            from deepspeed.ops.op_builder.cpu import AsyncIOBuilder, CCLCommBuilder, ShareMemCommBuilder, FusedAdamBuilder, CPUAdamBuilder, CPUAdagradBuilder, CPULionBuilder, PinMemoryBuilder, NotImplementedBuilder
 
         if class_name == "CCLCommBuilder":
             return CCLCommBuilder
@@ -342,6 +342,8 @@ class CPU_Accelerator(DeepSpeedAccelerator):
             return CPUAdamBuilder
         elif class_name == "CPUAdagradBuilder":
             return CPUAdagradBuilder
+        elif class_name == "CPULionBuilder":
+            return CPULionBuilder
         elif class_name == "AsyncIOBuilder":
             return AsyncIOBuilder
         elif class_name == "PinMemoryBuilder":

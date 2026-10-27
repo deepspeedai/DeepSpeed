@@ -503,7 +503,7 @@ def test_topkgating_probs_capacity_exceeds_num_tokens():
 
 def test_top1gating_drop_capacity_exceeds_num_tokens():
     # s=8, e=2, capacity_factor=4 -> capacity = ceil(8/2 * 4) = 16 > 8. This is the
-    # top1gating drop branch, which reaches torch.topk via _top_idx.
+    # top1gating drop branch, which reaches torch.topk.
     num_tokens, num_experts = 8, 2
     logits = torch.randn(num_tokens, num_experts)
     _, _, dispatch_mask, _ = top1gating(logits, capacity_factor=4.0, min_capacity=0, drop_tokens=True, use_rts=False)
@@ -524,6 +524,20 @@ def test_top1gating_preserves_tensor_parallel_capacity():
     logits = torch.randn(3, 4)
     _, _, dispatch_mask, _ = top1gating(logits, capacity_factor=8.0, min_capacity=0, drop_tokens=True, use_rts=False)
     assert dispatch_mask.shape[-1] == 6
+
+
+@pytest.mark.parametrize("gate_fn, gate_kwargs", [(top1gating, dict(use_rts=False)),
+                                                  (top2gating, dict(top2_2nd_expert_sampling=False))])
+def test_traced_gating_capacity_follows_token_count(gate_fn, gate_kwargs):
+    # torch.jit.trace (used by the TorchScript-based torch.onnx.export) records only the Python branches taken
+    # while tracing. Traced with 64 tokens the min_capacity clamp is inactive; 16 tokens need it.
+    def dispatch_mask(logits):
+        return gate_fn(logits, 1.0, 6, **gate_kwargs)[2]
+
+    traced = torch.jit.trace(dispatch_mask, torch.randn(64, 8))
+    for num_tokens in (16, 200):
+        logits = torch.randn(num_tokens, 8)
+        assert torch.equal(traced(logits), dispatch_mask(logits))
 
 
 class TestExpertWeightGradWithZero(DistributedTest):

@@ -12,6 +12,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 
 from deepspeed import comm as dist
+from deepspeed.comm import pg_utils
 from deepspeed.utils import groups, z3_leaf_parameter
 
 from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
@@ -50,8 +51,6 @@ from deepspeed.checkpoint.constants import (
     LOSS_SCALER,
 )
 from deepspeed.accelerator import get_accelerator
-from deepspeed.runtime.zero.muon.original_muon import muon_update
-from deepspeed.runtime.zero.muon.muon_optimizer import MuonWithAuxAdam
 
 # Toggle this to true to enable correctness test
 # with gradient partitioning and without
@@ -352,6 +351,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         self.all2all_process_group = all2all_process_group
 
         self.reduce_scatter = reduce_scatter
+        # Imported here because importing Muon compiles its kernels, which slows down import deepspeed.
+        from deepspeed.runtime.zero.muon.muon_optimizer import MuonWithAuxAdam
         self.use_muon = isinstance(self.optimizer, MuonWithAuxAdam)
         # Sub-groups whose Muon update was written into the gradient partitions without loss scale.
         self.sub_groups_lacking_loss_scale = set()
@@ -1702,6 +1703,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         all-gathered, so every rank ends with the full update in `grad` and its own momentum
         partition written back.
         """
+        from deepspeed.runtime.zero.muon.original_muon import muon_update
         params = [param for param, _, _ in group_items]
         grads = [grad for _, _, grad in group_items]
         if not params:
@@ -1991,7 +1993,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         if not counts_every_rank:
             self._model_parallel_all_reduce(tensor=total_norm_cuda, op=dist.ReduceOp.SUM)
         autoep_ep_group = self._autoep_expert_parallel_group(params)
-        if autoep_ep_group is not None:
+        if pg_utils.is_parallel(autoep_ep_group):
             dist.all_reduce(total_norm_cuda, op=dist.ReduceOp.SUM, group=autoep_ep_group)
 
         total_norm = total_norm_cuda[0]**(1. / norm_type)
@@ -2410,9 +2412,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
     def _model_parallel_all_reduce(self, tensor, op):
         """ Perform all reduce within model parallel group, if any.
         """
-        if self.model_parallel_group is None:
-            pass
-        else:
+        if pg_utils.is_parallel(self.model_parallel_group):
             dist.all_reduce(tensor=tensor, op=op, group=self.model_parallel_group)
 
     @instrument_w_nvtx
@@ -2443,7 +2443,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             # Take max across all GPUs.
             self._model_parallel_all_reduce(tensor=total_norm_cuda, op=dist.ReduceOp.MAX)
             autoep_ep_group = self._autoep_expert_parallel_group(params)
-            if autoep_ep_group is not None:
+            if pg_utils.is_parallel(autoep_ep_group):
                 dist.all_reduce(total_norm_cuda, op=dist.ReduceOp.MAX, group=autoep_ep_group)
             total_norm = total_norm_cuda[0]
         else:
@@ -2471,7 +2471,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             if not counts_every_rank:
                 self._model_parallel_all_reduce(tensor=total_norm_cuda, op=dist.ReduceOp.SUM)
             autoep_ep_group = self._autoep_expert_parallel_group(params)
-            if autoep_ep_group is not None:
+            if pg_utils.is_parallel(autoep_ep_group):
                 dist.all_reduce(total_norm_cuda, op=dist.ReduceOp.SUM, group=autoep_ep_group)
 
             total_norm = total_norm_cuda**(1. / norm_type)
@@ -2589,6 +2589,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         """Orthogonalize full logical gradients before clipping CPU-offloaded updates."""
         if not self.use_muon:
             return
+        from deepspeed.runtime.zero.muon.original_muon import muon_update
 
         accelerator_device = get_accelerator().current_device_name()
         for sub_group_id, params in enumerate(self.fp16_groups):

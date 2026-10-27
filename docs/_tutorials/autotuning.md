@@ -24,7 +24,7 @@ Compared to the original training script (`deepspeed your_program.py <normal cl 
 
 ## Example
 
-We demonstrate the usage and benefit of autotuning using the training of a 0.77 billion parameter [GPT2-large model](https://huggingface.co/gpt2-large) from Hugging Face on 16 Nvidia V100 GPUs. For more examples, refer to [autotuning](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/autotuning) in the DeepSpeedExamples repo. Note that autotuning works with any DeepSpeed-accelerated model training, not limited to Hugging Face models.
+We demonstrate the usage and benefit of autotuning using the training of a 0.77 billion parameter [GPT2-large model](https://huggingface.co/gpt2-large) from Hugging Face on 16 Nvidia V100 GPUs. For more examples, refer to [autotuning](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/training/autotuning) in the DeepSpeedExamples repo. Note that autotuning works with any DeepSpeed-accelerated model training, not limited to Hugging Face models.
 
 The model has:
 
@@ -119,7 +119,7 @@ Note that the performance metric used in autotuning is calculated using the timi
 
 Tuning completed in 0:27:33.988447. Total number of experiments: 13.
 
-As we can see the DeepSpeed Autotuner can select a better than hand-tuned configuration with a reasonable number of experiments. Examples in [Autotuning Hugging Face Examples](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/autotuning/hf#autotuning-hugging-face-examples) would demonstrate the effectiveness of autotuning across different models.
+As we can see the DeepSpeed Autotuner can select a better than hand-tuned configuration with a reasonable number of experiments. Examples in [Autotuning Hugging Face Examples](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/training/autotuning/hf#autotuning-hugging-face-examples) would demonstrate the effectiveness of autotuning across different models.
 
 ### DeepSpeed Autotuning with AzureML
 

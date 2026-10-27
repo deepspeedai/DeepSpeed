@@ -7,10 +7,14 @@ from .optimized_linear import LoRAOptimizedLinear, OptimizedLinear
 
 import torch
 
-try:
-    import transformers
-except ImportError:
-    transformers = None
+
+def _import_transformers_library():
+    # Imported on first use because importing transformers slows down import deepspeed.
+    try:
+        import transformers
+    except ImportError:
+        return None
+    return transformers
 
 
 def init_lora(model):
@@ -37,6 +41,7 @@ class Init(object):
     def __init__(self, lora_config=None, quant_config=None):
         self._orig_nn_linear = torch.nn.Linear
         self._orig_causallm_pretrained = None
+        transformers = _import_transformers_library()
         if transformers != None:
             self._orig_causallm_pretrained = transformers.AutoModelForCausalLM.from_pretrained
             self._orig_causallm_config = transformers.AutoModelForCausalLM.from_config
@@ -74,6 +79,7 @@ class Init(object):
             return _model_init(model)
 
         torch.nn.Linear = OptLinearWrapper
+        transformers = _import_transformers_library()
         if transformers != None:
             transformers.AutoModelForCausalLM.from_pretrained = from_pretrained
             transformers.AutoModelForCausalLM.from_config = from_config
@@ -86,5 +92,6 @@ class Init(object):
                   'You must call `init_lora` on each module in order to use DeepSpeed LoRA, otherwise '
                   'you will error out during runtime.')
         else:
+            transformers = _import_transformers_library()
             transformers.AutoModelForCausalLM.from_pretrained = self._orig_causallm_pretrained
             transformers.AutoModelForCausalLM.from_config = self._orig_causallm_config

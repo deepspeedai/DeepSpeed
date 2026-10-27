@@ -10,6 +10,7 @@ import deepspeed.comm as dist
 import deepspeed
 from datetime import timedelta
 from deepspeed.comm.torch import TorchBackend
+from deepspeed.comm import pg_utils
 
 from unit.common import DistributedTest, DistributedFixture, get_master_port
 from unit.simple_model import SimpleModel
@@ -129,6 +130,32 @@ class TestDistAllReduce(DistributedTest):
         result = torch.ones(1, num_elements).to(get_accelerator().device_name()) * sum_of_ranks
         dist.all_reduce(x)
         assert torch.all(x == result)
+
+
+class TestPgUtilsIsParallel(DistributedTest):
+    world_size = 4
+
+    def test(self):
+        rank = dist.get_rank()
+        pairs = [dist.new_group([0, 1]), dist.new_group([2, 3])]
+        singles = [dist.new_group([r]) for r in range(self.world_size)]
+
+        assert pg_utils.is_parallel(pairs[rank // 2])
+        assert pg_utils.is_parallel(dist.get_world_group())
+        # None marks an absent parallel dimension; it must not be treated as the world group.
+        assert not pg_utils.is_parallel(None)
+        assert not pg_utils.is_parallel(singles[rank])
+
+
+def test_pg_utils_without_process_group():
+    # Single-device code paths pass group=None before any process group exists.
+    assert not pg_utils.is_parallel(None)
+
+
+def test_pg_utils_not_exported_from_comm():
+    # group=None means "no parallelism" here but "world group" for deepspeed.comm collectives; keeping the
+    # helper out of the deepspeed.comm namespace prevents mistaking one for the other.
+    assert not hasattr(dist, "is_parallel")
 
 
 class FakeP2PWork:

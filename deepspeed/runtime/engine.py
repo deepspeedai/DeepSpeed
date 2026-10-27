@@ -28,7 +28,7 @@ from typing import Callable, Dict, Union, Iterable, Container, List, Optional
 import deepspeed
 
 from deepspeed import comm as dist
-from deepspeed.runtime.utils import see_memory_usage, DummyOptim, register_output_backward_hooks, check_internal_apis_for_count_used_parameters
+from deepspeed.runtime.utils import see_memory_usage, DummyOptim, register_output_backward_hooks, check_internal_apis_for_count_used_parameters, view_as_uint8
 from .zero.offload_config import OffloadDeviceEnum, OffloadStateTypeEnum
 from deepspeed.runtime.base_optimizer import ZeROOptimizer
 from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer
@@ -59,7 +59,6 @@ from deepspeed.runtime.model_checkpointing.constants import ValidationMode, \
     CHECKPOINT_TAG_VALIDATION, CHECKPOINT_WRITER, CHECKPOINT_SERIALIZATION
 
 from deepspeed.runtime.dataloader import DeepSpeedDataLoader
-from deepspeed.runtime.zero.muon.muon_optimizer import MuonWithAuxAdam
 from deepspeed.runtime.constants import \
     ROUTE_TRAIN, ROUTE_PREDICT, ROUTE_EVAL, \
     BFLOAT16, FP16, GRADIENT_ACCUMULATION_STEPS, \
@@ -144,15 +143,10 @@ from deepspeed.runtime.config import DtypeEnum
 
 from deepspeed.compile.util import (is_deepcompile_supported, get_deepcompile_handle, deepcompile_backward_prologue,
                                     deepcompile_backward_epilogue)
-from deepspeed.compile.backend import register_compile_pass, opt_passes
 from deepspeed.compile.passes.contract import validate_schedule
 from deepspeed.compile.passes import (zero_1_and_2_compile, zero3_compile, prefetch, selective_gather,
                                       offload_parameters, offload_adam_states, offload_activation)
-from deepspeed.compile.init_z1_and_2 import init_z1_and_2
-from deepspeed.compile.init_z3 import init_z3
 from deepspeed.compile.z3_eager_fallback import deepcompile_z3_forward_context
-from deepspeed.compile.init_sp import init_autosp
-from deepspeed.compile.init_tp import init_autotp
 
 MEMORY_OPT_ALLREDUCE_SIZE = 500000000
 
@@ -2057,12 +2051,12 @@ class DeepSpeedEngine(Module):
             # Broadcast the model for different parameters
             if is_moe_param(p):
                 if torch.is_tensor(p) and is_replicated(p):
-                    dist.broadcast(p.data.view(torch.uint8),
+                    dist.broadcast(view_as_uint8(p.data),
                                    groups._get_expert_broadcast_src_rank(p.group_name),
                                    group=self.expert_data_parallel_group[p.group_name])
             else:
                 if torch.is_tensor(p) and is_replicated(p):
-                    dist.broadcast(p.data.view(torch.uint8),
+                    dist.broadcast(view_as_uint8(p.data),
                                    groups._get_broadcast_src_rank(),
                                    group=self.seq_data_parallel_group)
 
@@ -2542,6 +2536,8 @@ class DeepSpeedEngine(Module):
             if self.has_moe_layers:
                 from deepspeed.moe.utils import split_params_into_different_moe_groups_for_optimizer
                 param_groups = split_params_into_different_moe_groups_for_optimizer(param_groups)
+            # Imported here because importing Muon compiles its kernels, which slows down import deepspeed.
+            from deepspeed.runtime.zero.muon.muon_optimizer import MuonWithAuxAdam
             optimizer = MuonWithAuxAdam(param_groups,
                                         adam_optimizer=adam_optimizer,
                                         adam_optimizer_kwargs=adam_optimizer_kwargs,
@@ -5769,6 +5765,8 @@ class DeepSpeedEngine(Module):
             get_accelerator().empty_cache()
 
     def get_autosp_backend(self, compile_kwargs):
+        from deepspeed.compile.init_sp import init_autosp
+
         if self.compile_autosp() and self.zero_optimization_stage() not in [
                 ZeroStageEnum.disabled, ZeroStageEnum.optimizer_states
         ]:
@@ -5794,9 +5792,14 @@ class DeepSpeedEngine(Module):
                            "rank of the TP group.")
 
         compile_kwargs['fullgraph'] = True
+        # Imported here because init_tp imports the custom ops, and registering them slows down import deepspeed.
+        from deepspeed.compile.init_tp import init_autotp
         return init_autotp(self.module)
 
     def get_deepcompile_backend(self, backend, compile_kwargs, schedule):
+        from deepspeed.compile.init_z1_and_2 import init_z1_and_2
+        from deepspeed.compile.init_z3 import init_z3
+
         if self.zero_optimization_stage() != ZeroStageEnum.optimizer_states \
                 and self.zero_optimization_stage() != ZeroStageEnum.weights \
                 and self.zero_optimization_stage() != ZeroStageEnum.gradients:
@@ -5820,6 +5823,8 @@ class DeepSpeedEngine(Module):
         return None
 
     def get_deepspeed_compile_backend(self, backend, compile_kwargs, schedule):
+        from deepspeed.compile.backend import opt_passes
+
         resolved_backend = None
 
         if schedule is not None:
@@ -6002,6 +6007,7 @@ class DeepSpeedEngine(Module):
         return opt_pass_times
 
     def register_compile_pass(self, pass_name: str, pass_fn: Callable, contract=None) -> None:
+        from deepspeed.compile.backend import register_compile_pass
         register_compile_pass(pass_name, pass_fn, contract)
 
     def is_deepcompile_enabled(self) -> bool:

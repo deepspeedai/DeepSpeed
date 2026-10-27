@@ -53,12 +53,12 @@ make test
 
 ### Diff-based CI test selection
 Some GPU CI workflows (currently `modal-torch-latest`, which runs `tests/unit/v1/`)
-run their modal tests on the merge queue entry instead of on every PR push, to
-conserve Modal GPU quota. `ci/tests_fetcher.py` looks at the files your PR
+run their Modal tests on the merge queue entry instead of on every PR push, to
+conserve GPU quota. `ci/tests_fetcher.py` looks at the files your PR
 changes, builds an import graph over `deepspeed/` and the `unit` test helpers,
 and selects only the tests that could be affected. The selection is previewed on
-the PR by a cheap no-secret job and executed once the PR enters the merge queue
-(`push` to `master` always runs everything). The full design — and
+the PR by a cheap no-secret job and executed once the PR enters the merge queue.
+The full design — and
 how to drive and extend it — is in
 [`.github/workflows/TEST_SELECTION.md`](.github/workflows/TEST_SELECTION.md).
 
@@ -93,12 +93,13 @@ cat ci/.test_selection/test_list.txt
 python ci/tests_fetcher.py --base origin/master --explain
 ```
 
-> Note: plain PR events never start the modal `deploy` job (it stays skipped to
+> Note: plain PR events never start the `deploy` job (it stays skipped to
 > conserve GPU quota), and under `pull_request_target` GitHub runs the base branch's
 > CI scripts anyway. Merge queue runs also use trusted master for the CI scripts —
 > your merged tree is only fetched as the candidate under test — so changes to
 > `ci/*` take effect once **merged**; validate them before that via a
-> `pull_request`-triggered run or the `modal` CLI.
+> focused local checks; live execution starts from the trusted workflow after
+> the change is merged.
 
 ### Model Tests
 To execute model tests, first [install DeepSpeed](README.md#installation). The
