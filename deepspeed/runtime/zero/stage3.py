@@ -250,11 +250,9 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         self.offload_optimizer = False
         self.offload_optimizer_pin_memory = False
-        # Pinned buffers for copying CPU master partitions back to the device (_copy_through_pinned_staging). The
-        # element count is a power of two, so the pinned allocator does not round the buffers up.
-        self._staging_numel = 2**26
-        self._staging_buffers = None
-        self._staging_events = None
+        # Elements per piece when a pinned CPU master partition is copied back to the device
+        # (_copy_pinned_master_to_device): the device temporary holds one piece, not a whole sub-group.
+        self._copy_back_numel = 2**26
         self.offload_optimizer_fast_init = False
         self.offload_param = False
         self.offload_param_pin_memory = False
@@ -568,13 +566,13 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                 accelerator.unpin_memory(buffer)
         for buffer in getattr(self, 'hp_params_pin_buffers', []):
             accelerator.unpin_memory(buffer)
-        for buffer in getattr(self, '_staging_buffers', None) or []:
-            accelerator.unpin_memory(buffer)
         unpin_offloaded_optimizer_states(self.optimizer)
         if self.offload_optimizer_pin_memory:
-            for fp32_partition in self.fp32_partitioned_groups_flat:
+            for sub_group_id, fp32_partition in enumerate(self.fp32_partitioned_groups_flat):
                 if fp32_partition.grad is not None:
                     accelerator.unpin_memory(fp32_partition.grad)
+                if self._master_pinned_at_construction(sub_group_id):
+                    accelerator.unpin_memory(fp32_partition)
         if self.zenflow:
             # ZenFlow keeps per-parameter selective-optimizer state and per-subgroup
             # overlap-grad buffers pinned on the host.
@@ -1164,7 +1162,12 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                 elif self.offload_optimizer:
                     converted = self.fp16_partitioned_groups_flat[i].to(self.subgroup_to_device[i],
                                                                         dtype=self.master_weights_and_grads_dtype)
-                    self.fp32_partitioned_groups_flat.append(converted.clone().detach())
+                    master = converted.clone().detach()
+                    if self.offload_optimizer_pin_memory and master.device.type == "cpu":
+                        # As ZeRO-1/2 does: the master is copied to the device after every step, which is fast only
+                        # from pinned memory (_copy_pinned_master_to_device).
+                        master = get_accelerator().pin_memory(master)
+                    self.fp32_partitioned_groups_flat.append(master)
                     self._create_momentum_buffer(num_elements, i, ds_id)
                 elif self.fp16_partitioned_groups_flat[i].dtype == self.master_weights_and_grads_dtype and \
                         self.fp16_partitioned_groups_flat[i].device == self.device:
@@ -2857,39 +2860,30 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         see_memory_usage('After zero_optimizer step', force=False)
         print_rank_0("------------------Finishing Step-----------------------")
 
-    @instrument_w_nvtx
-    def _copy_through_pinned_staging(self, dst, src):
-        """Copy the pageable CPU master partition ``src`` into the device partition ``dst`` through two small pinned
-        buffers: each piece is cast on the CPU into one buffer while the previous piece is copied from the other.
+    def _master_pinned_at_construction(self, sub_group_id):
+        """Whether _create_fp32_partitions pinned this sub-group's CPU master partition (offload_optimizer.pin_memory;
+        NVMe-swapped sub-groups are managed by the optimizer swapper)."""
+        master = self.fp32_partitioned_groups_flat[sub_group_id]
+        return (self.offload_optimizer_pin_memory and master.device.type == "cpu"
+                and not self._swappable_optimizer_subgroup(sub_group_id) and get_accelerator().is_pinned(master))
 
-        Copies from pageable memory run at a few GB/s. Pinning the master partitions themselves, as ZeRO-1/2 does,
-        would also need a pinned low-precision buffer of each partition's size, so pinned host memory would grow with
-        the model; these two buffers have a fixed size."""
-        numel = src.numel()
-        chunk = self._staging_numel
-        if self._staging_buffers is None or self._staging_buffers[0].dtype != dst.dtype:
-            self._staging_buffers = [get_accelerator().pin_empty(chunk, dtype=dst.dtype) for _ in range(2)]
-            self._staging_events = [None, None]
+    @instrument_w_nvtx
+    def _copy_pinned_master_to_device(self, dst, src):
+        """Copy the pinned CPU master partition ``src`` into the low-precision device partition ``dst``.
+
+        The master goes to the device in its own dtype and is cast there, the form #5301 introduced in ZeRO-1/2:
+        ``dst.copy_(src)`` would cast on the CPU into a pageable temporary and copy from that at a few GB/s. The copy
+        goes in pieces, so the device temporary holds one piece instead of the whole sub-group."""
         src = src.view(-1)
         dst = dst.view(-1)
-        last_event = None
-        for index, start in enumerate(range(0, numel, chunk)):
-            buf = index % 2
-            if self._staging_events[buf] is not None:
-                # The previous copy out of this buffer must finish before the buffer is refilled.
-                self._staging_events[buf].synchronize()
-            count = min(chunk, numel - start)
-            staging = self._staging_buffers[buf][:count]
-            staging.copy_(src[start:start + count])
-            dst[start:start + count].copy_(staging, non_blocking=True)
-            event = get_accelerator().Event()
-            event.record()
-            self._staging_events[buf] = event
-            last_event = event
+        for start in range(0, src.numel(), self._copy_back_numel):
+            end = min(start + self._copy_back_numel, src.numel())
+            dst[start:end].copy_(src[start:end].to(dst.device, non_blocking=True))
         # Callers expect the partition on the device when this returns: the parameter all-gathers of the next forward
         # run on a stream that does not wait for this one.
-        if last_event is not None:
-            last_event.synchronize()
+        event = get_accelerator().Event()
+        event.record()
+        event.synchronize()
 
     @instrument_w_nvtx
     def _reassign_or_swap_out_partitioned_parameters(self, sub_group_id):
@@ -2898,10 +2892,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             # fp32_partitioned_groups are aliases. Calling tensor.data.copy_ will not trigger any copy in that case.
             dst = self.fp16_partitioned_groups_flat[sub_group_id].data
             src = self.fp32_partitioned_groups_flat[sub_group_id].data
-            accelerator = get_accelerator()
-            src_is_pageable = src.device.type == "cpu" and not accelerator.is_pinned(src)
-            if self.offload_optimizer_pin_memory and src_is_pageable and dst.device.type != "cpu":
-                self._copy_through_pinned_staging(dst, src)
+            if self._master_pinned_at_construction(sub_group_id) and dst.device.type != "cpu":
+                self._copy_pinned_master_to_device(dst, src)
             else:
                 dst.copy_(src)
 

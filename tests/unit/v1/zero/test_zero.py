@@ -1922,9 +1922,10 @@ class TestZeroOffloadOptim(DistributedTest):
 @pytest.mark.skipif(not get_accelerator().is_bf16_supported(), reason="bf16 is not supported on this accelerator")
 @pytest.mark.parametrize("ratio", [1.0, 0.5])
 class TestZero3OffloadPinnedCopyBack(DistributedTest):
-    """With pin_memory, the updated CPU master partitions must reach the device with the same values as the direct
-    copy from pageable memory (pin_memory False): the parameters after training are compared bitwise. The pinned run
-    must actually go through the staging buffers, or the test would compare the direct copy with itself."""
+    """With pin_memory, the CPU master partitions are pinned, as in ZeRO-1/2, and the updated masters must reach the
+    device with the same values as the direct copy from pageable memory (pin_memory False): the parameters after
+    training are compared bitwise. The pinned run must actually go through the pinned copy, or the test would compare
+    the direct copy with itself."""
     world_size = 2
 
     def _train(self, pin_memory, ratio):
@@ -1953,9 +1954,19 @@ class TestZero3OffloadPinnedCopyBack(DistributedTest):
         torch.manual_seed(0)
         model = SimpleModel(hidden_dim, nlayers=4)
         model, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config_dict)
-        # Pieces much smaller than a sub-group, so the copy refills both staging buffers many times per step: a buffer
-        # refilled before its previous copy finished would change the values.
-        model.optimizer._staging_numel = 1000
+        optimizer = model.optimizer
+        cpu_masters = [m for m in optimizer.fp32_partitioned_groups_flat if m.device.type == "cpu" and m.numel() > 0]
+        pinned_masters = sum(get_accelerator().is_pinned(m) for m in cpu_masters)
+        # Pieces much smaller than a sub-group, so every sub-group is copied in many pieces per step.
+        optimizer._copy_back_numel = 1000
+        pinned_copies = []
+        copy_pinned_master = optimizer._copy_pinned_master_to_device
+
+        def counting_copy(dst, src):
+            pinned_copies.append(src.numel())
+            copy_pinned_master(dst, src)
+
+        optimizer._copy_pinned_master_to_device = counting_copy
         torch.manual_seed(1)
         data_loader = random_dataloader(model=model,
                                         total_samples=6,
@@ -1970,19 +1981,18 @@ class TestZero3OffloadPinnedCopyBack(DistributedTest):
         for p in model.module.parameters():
             with deepspeed.zero.GatheredParameters([p]):
                 params.append(p.detach().clone().cpu())
-        used_staging = model.optimizer._staging_buffers is not None
-        return params, used_staging
+        return params, len(cpu_masters), pinned_masters, len(pinned_copies)
 
     def test(self, ratio):
         if get_accelerator().device_name() == "cpu":
             pytest.skip("optimizer offload copies the master weights back to an accelerator; on the CPU accelerator "
                         "they never leave the host")
-        direct, direct_used_staging = self._train(pin_memory=False, ratio=ratio)
-        staged, staged_used_staging = self._train(pin_memory=True, ratio=ratio)
-        assert not direct_used_staging
-        assert staged_used_staging
-        assert len(direct) == len(staged)
-        for a, b in zip(direct, staged):
+        direct, direct_cpu_masters, direct_pinned, direct_copies = self._train(pin_memory=False, ratio=ratio)
+        pinned, pinned_cpu_masters, pinned_pinned, pinned_copies = self._train(pin_memory=True, ratio=ratio)
+        assert direct_cpu_masters > 0 and direct_pinned == 0 and direct_copies == 0
+        assert pinned_cpu_masters > 0 and pinned_pinned == pinned_cpu_masters and pinned_copies > 0
+        assert len(direct) == len(pinned)
+        for a, b in zip(direct, pinned):
             assert torch.equal(a, b)
 
 
