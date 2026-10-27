@@ -12,6 +12,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 
 from deepspeed import comm as dist
+from deepspeed.comm import pg_utils
 from deepspeed.utils import groups, z3_leaf_parameter
 
 from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
@@ -31,7 +32,7 @@ from deepspeed.runtime.zero.config import ZeroStageEnum
 from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum, OffloadStateTypeEnum
 from deepspeed.runtime.zero.parameter_offload import DeepSpeedZeRoOffload
 import deepspeed.runtime.zenflow.engine_stage3 as zf_engine_stage3
-from deepspeed.runtime.zero.utils import get_mapping_to_flat_buffer, defragment, get_norm_dtype
+from deepspeed.runtime.zero.utils import ZeRORuntimeException, get_mapping_to_flat_buffer, defragment, get_norm_dtype
 from deepspeed.runtime.zero.offload_states import (offload_adam_states, reload_adam_states,
                                                    unpin_offloaded_optimizer_states)
 from deepspeed.ops.adam import DeepSpeedCPUAdam
@@ -50,8 +51,6 @@ from deepspeed.checkpoint.constants import (
     LOSS_SCALER,
 )
 from deepspeed.accelerator import get_accelerator
-from deepspeed.runtime.zero.muon.original_muon import muon_update
-from deepspeed.runtime.zero.muon.muon_optimizer import MuonWithAuxAdam
 
 # Toggle this to true to enable correctness test
 # with gradient partitioning and without
@@ -352,6 +351,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         self.all2all_process_group = all2all_process_group
 
         self.reduce_scatter = reduce_scatter
+        # Imported here because importing Muon compiles its kernels, which slows down import deepspeed.
+        from deepspeed.runtime.zero.muon.muon_optimizer import MuonWithAuxAdam
         self.use_muon = isinstance(self.optimizer, MuonWithAuxAdam)
         # Sub-groups whose Muon update was written into the gradient partitions without loss scale.
         self.sub_groups_lacking_loss_scale = set()
@@ -1702,6 +1703,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         all-gathered, so every rank ends with the full update in `grad` and its own momentum
         partition written back.
         """
+        from deepspeed.runtime.zero.muon.original_muon import muon_update
         params = [param for param, _, _ in group_items]
         grads = [grad for _, _, grad in group_items]
         if not params:
@@ -1991,7 +1993,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         if not counts_every_rank:
             self._model_parallel_all_reduce(tensor=total_norm_cuda, op=dist.ReduceOp.SUM)
         autoep_ep_group = self._autoep_expert_parallel_group(params)
-        if autoep_ep_group is not None:
+        if pg_utils.is_parallel(autoep_ep_group):
             dist.all_reduce(total_norm_cuda, op=dist.ReduceOp.SUM, group=autoep_ep_group)
 
         total_norm = total_norm_cuda[0]**(1. / norm_type)
@@ -2410,9 +2412,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
     def _model_parallel_all_reduce(self, tensor, op):
         """ Perform all reduce within model parallel group, if any.
         """
-        if self.model_parallel_group is None:
-            pass
-        else:
+        if pg_utils.is_parallel(self.model_parallel_group):
             dist.all_reduce(tensor=tensor, op=op, group=self.model_parallel_group)
 
     @instrument_w_nvtx
@@ -2443,7 +2443,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             # Take max across all GPUs.
             self._model_parallel_all_reduce(tensor=total_norm_cuda, op=dist.ReduceOp.MAX)
             autoep_ep_group = self._autoep_expert_parallel_group(params)
-            if autoep_ep_group is not None:
+            if pg_utils.is_parallel(autoep_ep_group):
                 dist.all_reduce(total_norm_cuda, op=dist.ReduceOp.MAX, group=autoep_ep_group)
             total_norm = total_norm_cuda[0]
         else:
@@ -2471,7 +2471,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             if not counts_every_rank:
                 self._model_parallel_all_reduce(tensor=total_norm_cuda, op=dist.ReduceOp.SUM)
             autoep_ep_group = self._autoep_expert_parallel_group(params)
-            if autoep_ep_group is not None:
+            if pg_utils.is_parallel(autoep_ep_group):
                 dist.all_reduce(total_norm_cuda, op=dist.ReduceOp.SUM, group=autoep_ep_group)
 
             total_norm = total_norm_cuda**(1. / norm_type)
@@ -2589,6 +2589,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         """Orthogonalize full logical gradients before clipping CPU-offloaded updates."""
         if not self.use_muon:
             return
+        from deepspeed.runtime.zero.muon.original_muon import muon_update
 
         accelerator_device = get_accelerator().current_device_name()
         for sub_group_id, params in enumerate(self.fp16_groups):
@@ -3538,9 +3539,10 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
     def _rigid_load_state_dict(self, state_dict, load_optimizer_states=True):
         # I think it should actually be ok to reload the optimizer before the model.
-        self.loss_scaler = state_dict[LOSS_SCALER]
-        self.dynamic_loss_scale = state_dict['dynamic_loss_scale']
-        self.overflow = state_dict['overflow']
+        if load_optimizer_states:
+            self.loss_scaler = state_dict[LOSS_SCALER]
+            self.dynamic_loss_scale = state_dict['dynamic_loss_scale']
+            self.overflow = state_dict['overflow']
         saved_partition_groups = state_dict.get('ds_zero_partition_groups')
         if saved_partition_groups is not None and saved_partition_groups != self._zero3_partition_group_metadata():
             raise RuntimeError("AutoEP ZeRO-3 checkpoints can only be loaded with the same parameter placement "
@@ -3647,7 +3649,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         if load_optimizer_states:
             self.load_hp_checkpoint_state_from_checkpoint_dir_stage3(checkpoint_folder)
         else:
-            self.load_module_checkpoint_state_from_checkpoint_dir_stage3(checkpoint_folder, load_from_fp32_weights)
+            self.load_module_checkpoint_state_from_checkpoint_dir_stage3(checkpoint_folder, True)
 
     def load_hp_checkpoint_state_from_checkpoint_dir_stage3(self, checkpoint_dir):
         """ Load optimizer and model states from the checkpoint directory. """
@@ -3766,7 +3768,12 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         rank = dist.get_rank(group=partition_group)
 
         # Load tensors from files and reshape them to flat vectors
-        ckpt_dict = torch.load(os.path.join(folder, f"{key}.pt"), weights_only=False)
+        ckpt_path = os.path.join(folder, f"{key}.pt")
+        if not os.path.isfile(ckpt_path):
+            if key == "fp32":
+                raise ZeRORuntimeException(f"Saved fp32 weights are required but {ckpt_path} is missing.")
+            raise ZeRORuntimeException(f"Universal checkpoint state {ckpt_path} is missing.")
+        ckpt_dict = torch.load(ckpt_path, weights_only=False)
         loaded_checkpoint_state = ckpt_dict
         if isinstance(ckpt_dict, dict):
             if ckpt_dict.get(EP_IS_EXPERT_PARAM, False):

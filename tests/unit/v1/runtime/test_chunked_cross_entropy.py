@@ -57,6 +57,19 @@ def _ordered_bits(tensor):
     return torch.where(bits < 0, -32768 - bits, bits)
 
 
+def _ulp_distance_statistics(actual, expected, rows_per_chunk):
+    actual_rows = actual.reshape(-1, actual.shape[-1])
+    expected_rows = expected.reshape(-1, expected.shape[-1])
+    max_distance = 0
+    matching = 0
+    for start in range(0, actual_rows.shape[0], rows_per_chunk):
+        distance = (_ordered_bits(actual_rows[start:start + rows_per_chunk]) -
+                    _ordered_bits(expected_rows[start:start + rows_per_chunk])).abs()
+        max_distance = max(max_distance, distance.max().item())
+        matching += (distance == 0).sum().item()
+    return max_distance, matching / actual.numel()
+
+
 @pytest.mark.parametrize("backend, device", BACKEND_DEVICES)
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16, torch.float32])
 @pytest.mark.parametrize("block_rows", [None, 7])
@@ -359,34 +372,70 @@ def test_install_refuses_a_model_that_does_not_use_the_stock_loss():
         install_chunked_causal_lm_loss(model)
 
 
-@pytest.mark.skipif(not _CUDA_AVAILABLE, reason="measures CUDA allocator peaks")
+@pytest.mark.skipif(not _CUDA_AVAILABLE, reason="CUDA is needed to measure peak memory")
 def test_real_vocabulary_backward_peak_drops_by_the_float32_tensors():
-    """At Qwen3's vocabulary, the stock loss holds three FP32 [tokens, vocab] tensors when backward starts."""
+    """A bounded real-vocabulary case preserves accuracy and rejects stock-loss memory use."""
+    import gc
+
     cuda = torch.cuda  #ignore-cuda
-    tokens, vocab = 8192, 151936
+    tokens, vocab = 128, 151936
+    torch_block_rows = 8
     generator = torch.Generator(device="cuda").manual_seed(5)
+
+    gc.collect()
+    cuda.empty_cache()
+    cuda.synchronize()
+    initial_allocated = cuda.memory_allocated()
+    initial_reserved = cuda.memory_reserved()
+
     logits = (torch.randn(1, tokens, vocab, device="cuda", generator=generator) * 3).to(torch.bfloat16)
     labels = torch.randint(0, vocab, (1, tokens), device="cuda", generator=generator)
     float32_logits_bytes = tokens * vocab * 4
 
     def backward_peak(loss_function):
         leaf = logits.clone().requires_grad_(True)
-        cuda.synchronize()
-        cuda.reset_peak_memory_stats()
-        before = cuda.memory_allocated()
-        loss = loss_function(leaf, labels, vocab)
-        loss.backward()
-        cuda.synchronize()
-        return loss.detach(), leaf.grad, cuda.max_memory_allocated() - before
+        loss = None
+        try:
+            gc.collect()
+            cuda.empty_cache()
+            cuda.synchronize()
+            before_allocated = cuda.memory_allocated()
+            cuda.reset_peak_memory_stats()
+            loss = loss_function(leaf, labels, vocab)
+            loss.backward()
+            cuda.synchronize()
+            peak_allocated = cuda.max_memory_allocated() - before_allocated
+            return loss.detach(), leaf.grad, peak_allocated
+        finally:
+            leaf = loss = None
 
-    expected_loss, expected_grad, stock_peak = backward_peak(loss_utils.ForCausalLMLoss)
-    loss, grad, chunked_peak = backward_peak(ChunkedCausalLMLoss(backend="triton" if _TRITON_ON_CUDA else "torch"))
+    expected_loss = expected_grad = loss = grad = candidates = None
+    try:
+        expected_loss, expected_grad, stock_peak = backward_peak(loss_utils.ForCausalLMLoss)
+        required_savings = 2 * float32_logits_bytes
 
-    torch.testing.assert_close(loss, expected_loss, rtol=1e-5, atol=1e-5)
-    distance = (_ordered_bits(grad) - _ordered_bits(expected_grad)).abs()
-    assert distance.max().item() <= 1
-    assert (distance == 0).float().mean().item() >= 0.999
-    assert stock_peak - chunked_peak >= 2 * float32_logits_bytes, (stock_peak, chunked_peak)
+        candidates = [("torch", ChunkedCausalLMLoss(block_rows=torch_block_rows, backend="torch"))]
+        if triton_backend_available():
+            candidates.append(("triton", ChunkedCausalLMLoss(backend="triton")))
+
+        for backend, loss_function in candidates:
+            loss, grad, peak_allocated = backward_peak(loss_function)
+            torch.testing.assert_close(loss, expected_loss, rtol=1e-5, atol=1e-5)
+            max_distance, matching_fraction = _ulp_distance_statistics(grad, expected_grad, rows_per_chunk=8)
+            assert max_distance <= 1
+            assert matching_fraction >= 0.999
+            assert stock_peak - peak_allocated >= required_savings, (stock_peak, peak_allocated, required_savings)
+            loss = grad = None
+    finally:
+        candidates = expected_loss = expected_grad = loss = grad = labels = logits = None
+        gc.collect()
+        cuda.synchronize()
+        cuda.empty_cache()
+        post_allocated = cuda.memory_allocated()
+        post_reserved = cuda.memory_reserved()
+
+    assert post_allocated <= initial_allocated + 1024**2, (initial_allocated, post_allocated)
+    assert post_reserved <= initial_reserved + 1024**2, (initial_reserved, post_reserved)
 
 
 @pytest.mark.skipif(not _CUDA_AVAILABLE, reason="CUDA is needed to check forked initialization")

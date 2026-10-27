@@ -1044,7 +1044,7 @@ def non_reentrant_checkpoint(function, *args):
         return tuple(all_outputs)
 
 
-@compiler.disable  # WA from Pytorch repo for compile + zero 3 accuracy issue
+@compiler.lazy_disable  # WA from Pytorch repo for compile + zero 3 accuracy issue
 def checkpoint(function, *args, **kwargs):
     """Checkpoint a model or part of the model.
     This has been directly copied from torch.utils.checkpoint.
