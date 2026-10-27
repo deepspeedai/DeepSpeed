@@ -89,7 +89,10 @@ class FP16_UnfusedOptimizer(DeepSpeedOptimizer):
                 # Adagrad creates state in its constructor, before parameters become FP32 masters.
                 for fp16_param, fp32_param in zip(self.fp16_groups[i], fp32_group):
                     state = self.optimizer.state.pop(fp16_param)
-                    state['sum'] = state['sum'].to(device=fp32_param.device, dtype=fp32_param.dtype)
+                    for key, value in state.items():
+                        # Keep scalar counters and metadata in their original dtype and device.
+                        if torch.is_tensor(value) and value.dtype == fp16_param.dtype:
+                            state[key] = value.to(device=fp32_param.device, dtype=fp32_param.dtype)
                     self.optimizer.state[fp32_param] = state
             param_group['params'] = self.fp32_groups[i]
 
