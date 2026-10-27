@@ -96,6 +96,14 @@ WORKFLOWS: dict[str, WorkflowConfig] = {
         test_scopes=("tests/unit/v1", ),
         extra_run_all_globs=(".github/workflows/modal*.yml", ),
     ),
+    # PR-level v1 multi-rank CPU suite: same scope as the Modal run, but the
+    # workflow also selects only world_size > 1 tests (DS_MULTIRANK_ONLY).
+    "cpu-torch-latest-v1-multirank":
+    WorkflowConfig(
+        name="cpu-torch-latest-v1-multirank",
+        test_scopes=("tests/unit/v1", ),
+        extra_run_all_globs=(".github/workflows/cpu-torch-latest-v1-multirank.yml", ),
+    ),
 }
 
 DEFAULT_WORKFLOW = "modal-torch-latest"
