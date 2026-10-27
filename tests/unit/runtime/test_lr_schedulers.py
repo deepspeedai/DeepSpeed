@@ -949,3 +949,16 @@ def test_other_schedules_keep_their_config_params():
         assert err is None
         assert expected in config["params"]
         assert lrs.get_lr_from_config(config)[0] == config["params"][expected]
+
+
+def test_one_cycle_keeps_each_groups_beta2():
+    # OneCycle cycles betas[0] only, but it rebuilt every group's betas as (mom, 0.99),
+    # so Adam's default beta2 of 0.999 (or any other value) was replaced on construction.
+    first, second = torch.nn.Parameter(torch.zeros(1)), torch.nn.Parameter(torch.zeros(1))
+    groups = [dict(params=[first]), dict(params=[second], betas=(0.9, 0.95))]
+    optimizer = torch.optim.Adam(groups, lr=0.001, betas=(0.9, 0.999))
+    scheduler = OneCycle(optimizer=optimizer, cycle_min_lr=0.0001, cycle_max_lr=0.001, cycle_first_step_size=4)
+
+    for _ in range(10):
+        assert [group["betas"][1] for group in optimizer.param_groups] == [0.999, 0.95]
+        scheduler.step()
