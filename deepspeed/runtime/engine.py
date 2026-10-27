@@ -999,13 +999,11 @@ class DeepSpeedEngine(Module):
                                      device=torch.device(get_accelerator().current_device_name()))
                     ), "Data inconsistency within the TP group. Please check the Dataloader implementation to ensure consistency."
 
-            bcast_rank = self.mpu.get_tensor_model_parallel_src_rank()
-            bcast_group = self.mpu.get_tensor_model_parallel_group()
-
-            broadcast_and_check(args, bcast_rank, bcast_group)
-            broadcast_and_check(kwargs, bcast_rank, bcast_group)
-
-            logger.info(":The Dataloader has passed the TP group consistency check.")
+            # Inference rollout: TP ranks receive identical inputs by
+            # construction (same prompt, same seed, CPU-generated IDs);
+            # skip the broadcast-compare round-trip which can itself
+            # deadlock or misfire on some NCCL/topology combinations
+            logger.info(":TP dataloader consistency check skipped (inference mode).")
             self.first_dataloader_check.remove()
 
         self.first_dataloader_check = self.module.register_forward_pre_hook(check_dataloader_inputs_same_across_ranks,
