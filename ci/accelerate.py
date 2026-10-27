@@ -18,7 +18,7 @@ CANDIDATE_PATH = Path(os.environ.get("DS_CI_CANDIDATE_ROOT") or ROOT_PATH)
 
 # yapf: disable
 image = (modal.Image
-         .from_registry("pytorch/pytorch:2.9.1-cuda12.8-cudnn9-devel", add_python="3.10")
+         .from_registry("pytorch/pytorch:2.9.1-cuda12.8-cudnn9-devel", add_python="3.12")
          .apt_install("git")
          .pip_install("uv")
          # uv_pip_install already includes --compile-bytecode
