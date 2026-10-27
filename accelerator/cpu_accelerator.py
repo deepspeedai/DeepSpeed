@@ -79,7 +79,8 @@ def _cgroup_mount(controller, membership):
 
     The mount can expose a subtree of the hierarchy (mount root other than "/"), cgroup v1 can co-mount controllers
     under a name such as "cpu,memory", and several mounts can match, e.g. a delegated subtree mounted before the main
-    one. The mount whose root contains the membership is used, the most specific one first.
+    one. The mount whose root contains the membership is used; among those, the shortest root, because it
+    exposes the most ancestors and an ancestor limit still applies.
     """
     candidates = []
     try:
@@ -103,7 +104,7 @@ def _cgroup_mount(controller, membership):
     containing = [(mount_point, mount_root) for mount_point, mount_root in candidates
                   if member_parts[:len(_path_parts(mount_root))] == _path_parts(mount_root)]
     if containing:
-        return max(containing, key=lambda mount: len(_path_parts(mount[1])))
+        return min(containing, key=lambda mount: len(_path_parts(mount[1])))
     if candidates:
         return candidates[0]
     default_mount = _CGROUP_ROOT if controller is None else os.path.join(_CGROUP_ROOT, controller)

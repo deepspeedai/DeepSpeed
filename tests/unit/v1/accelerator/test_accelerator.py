@@ -406,6 +406,36 @@ def test_cpu_memory_picks_the_cgroup_mount_that_contains_the_process(cpu_cgroup,
     assert accel.total_memory() == min(GiB, psutil.virtual_memory().total)
 
 
+@pytest.mark.parametrize("reverse", [False, True])
+def test_cpu_memory_subtree_alias_does_not_hide_a_parent_limit(cpu_cgroup, monkeypatch, tmp_path, reverse):
+    """The full hierarchy and a bind-mounted subtree both contain the process. The full view must win, because the
+    parent limit still applies. Reported by @adenzhou1350 on the equivalent vLLM change."""
+    import psutil
+    from deepspeed.accelerator import cpu_accelerator as cpu_module
+    main, alias = tmp_path / "main", tmp_path / "alias"
+    mounts = [
+        f"40 25 0:30 / {main} rw - cgroup2 cgroup2 rw\n", f"41 25 0:30 /pod/ctr {alias} rw - cgroup2 cgroup2 rw\n"
+    ]
+    mountinfo = tmp_path / "mountinfo"
+    mountinfo.write_text("".join(mounts[::-1] if reverse else mounts))
+    monkeypatch.setattr(cpu_module, "_PROC_SELF_MOUNTINFO", str(mountinfo))
+    files = {
+        main / "memory.max": "max",
+        main / "pod" / "memory.max": str(GiB // 2),
+        main / "pod" / "memory.current": str(GiB // 4),
+        main / "pod" / "ctr" / "memory.max": str(GiB),
+        main / "pod" / "ctr" / "memory.current": "0",
+        alias / "memory.max": str(GiB),
+        alias / "memory.current": "0",
+    }
+    for path, content in files.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content + "\n")
+    accel = cpu_cgroup("0::/pod/ctr", {})
+    assert accel.total_memory() == min(GiB // 2, psutil.virtual_memory().total)
+    assert accel.available_memory() == min(GiB // 4, psutil.virtual_memory().available)
+
+
 def test_cpu_accelerator_exports_cgroup_memory_switch():
     """The launcher forwards env vars listed by export_envs() to every node."""
     from deepspeed.accelerator.cpu_accelerator import CPU_Accelerator
