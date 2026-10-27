@@ -12,6 +12,7 @@ from deepspeed import comm as dist
 from deepspeed.accelerator import get_accelerator
 from deepspeed.runtime.zero.partition_parameters import InsertPostInitMethodToModuleSubClasses
 from deepspeed.runtime.zero.parameter_offload import DeepSpeedZeRoOffload
+from deepspeed.runtime.zero.utils import zero_parameters
 
 from .passes import zero3_compile, prefetch, selective_gather, offload_parameters, offload_activation
 from .backend import make_backend, launch_compile_passes, init_schedule
@@ -130,7 +131,7 @@ def init_z3(engine, backend, compile_config, compile_kwargs, schedule=None):
         group_name = engine.data_parallel_group.group_name
         dist.enable_symm_mem_for_group(group_name)
 
-    for p in engine.module.parameters():
+    for p in zero_parameters(engine.module):
         grad_buffer = torch.Tensor()
         # Frozen params (e.g. the base weights of a LoRA setup) are absent from the optimizer's
         # grad partition map, which is built from the trainable groups only. They keep the empty
