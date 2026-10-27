@@ -34,7 +34,7 @@ AFFINE_MAP_FORMAT_VERSION = 1
 # parameter by s scales its gradient by 1/s, so Adam's first moment carries the inverse and
 # its second moment the inverse square. Shared by conversion and restore so the two cannot
 # disagree about which power a state needs.
-SCALE_POWER_BY_STATE = {'fp32': 1, 'exp_avg': -1, 'exp_avg_sq': -2}
+SCALE_POWER_BY_STATE = {'fp32': 1, 'exp_avg': -1, 'exp_avg_sq': -2, 'momentum_buffer': -1}
 
 
 class AffinePiece:
