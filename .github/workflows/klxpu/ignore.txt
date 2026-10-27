@@ -1,0 +1,34 @@
+# KLXPU (KUNLUNXIN XPU) v1-suite ignore list.
+#
+# Whole files/dirs that hang or wholly fail; merely-slow files are not listed
+# here and run under the per-file wall-clock cap.
+# One path per line, relative to the repo root; blank lines and # comments are
+# ignored by the workflow.
+
+# --- BKCL/XCCL single-communicator constraint: distributed runs deadlock
+#     (overlapping TP/EP collectives, unbatched P2P, or mesh sub-group
+#     all_to_all never progress) ---
+tests/unit/v1/autotp/test_autotp_custom_patterns.py
+tests/unit/v1/autotp/test_autotp_training.py
+tests/unit/v1/autotp/test_tp_plan_e2e.py
+tests/unit/v1/autotp/test_tp_plan_real_models.py
+tests/unit/v1/moe/test_autoep_autotp_sharded_attention.py
+tests/unit/v1/ops/muon/test_muon.py
+tests/unit/v1/ops/muon/test_per_head_muon_accelerator.py
+tests/unit/v1/zero/test_offload_states.py
+# Ulysses builds a 2x2 device mesh (SP + DP sub-groups) and runs
+# all_to_all_single on a size-2 SP sub-communicator; intermittently deadlocks
+# in the KLX comm stack (passes in isolation, hangs in-suite).
+tests/unit/v1/sequence_parallelism/test_ulysses.py
+
+# --- torch.compile intercepted by torch_xmlir (runs eagerly); DeepCompile/
+#     Dynamo paths raise. Granular DeepCompile cases are deselected elsewhere ---
+tests/unit/v1/ops/muon/test_muon_scale_compile.py
+
+# --- Triton unsupported on klxpu: CUDA_ERROR_NOT_SUPPORTED ---
+tests/unit/v1/ops/triton_ops
+tests/unit/v1/moe/test_autoep_fused_parity.py
+tests/unit/v1/moe/test_autoep_permute_rows.py
+
+# --- GDS needs GPUDirect Storage, unavailable here ---
+tests/unit/v1/nvme/test_gds.py
