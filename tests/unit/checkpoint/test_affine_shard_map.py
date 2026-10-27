@@ -537,6 +537,22 @@ def test_strided_destination_outside_the_shard_is_refused():
         affine_map.validate()
 
 
+def test_strided_destination_that_wraps_a_shard_row_round_trips():
+    # In a (3, 3) shard, a (2, 2) view starting at address 2 with the shard's strides writes
+    # addresses 2, 3, 5 and 6. It wraps past the end of row 0 but stays inside the shard, so it
+    # is a valid destination even though it is not a box of the shard's grid.
+    pieces = [
+        AffinePiece((2, 2), 0, (2, 1), 2, (3, 1), [0]),
+        AffinePiece((2, ), 4, (1, ), 0, (1, ), [0]),
+        AffinePiece((1, ), 6, (1, ), 4, (1, ), [0]),
+        AffinePiece((2, ), 7, (1, ), 7, (1, ), [0]),
+    ]
+    affine_map = ParamAffineMap((9, ), {0: (3, 3)}, {0: pieces})
+    affine_map.validate_coverage()
+    full = torch.arange(9.)
+    torch.testing.assert_close(affine_map.rebuild({0: affine_map.extract(full, 0)}), full)
+
+
 def test_full_check_refuses_a_destination_collision_of_any_stride():
     # The first piece writes shard addresses 0 and 2, the second writes 1 and 2, and address 3
     # is never written. Neither piece is a box of the shard's grid, so only walking the

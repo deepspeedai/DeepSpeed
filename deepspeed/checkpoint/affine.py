@@ -184,6 +184,19 @@ def _dest_box(piece, shard_shape):
     return starts, stops
 
 
+def _dest_address_range(piece):
+    """Return the lowest and highest shard address a piece writes."""
+    low = piece.dest_offset
+    high = piece.dest_offset
+    for size, stride in zip(piece.shape, piece.dest_strides):
+        reach = (size - 1) * stride
+        if reach < 0:
+            low += reach
+        else:
+            high += reach
+    return low, high
+
+
 def _first_shared_address(box, other_box, shard_shape):
     """Return the first shard address two boxes both write, or None when they are disjoint."""
     corner = []
@@ -273,17 +286,19 @@ class ParamAffineMap:
             return
         boxes = []
         for piece in pieces:
+            if piece.numel and _dest_interval(piece) is None:
+                low, high = _dest_address_range(piece)
+                if low < 0 or high >= shard_numel:
+                    raise ValueError(f'Rank {rank} piece {piece} writes shard addresses [{low}, {high}], '
+                                     f'outside the shard of {shard_numel} elements.')
             box = _dest_box(piece, shard_shape)
             if box is None:
                 continue
             starts, stops = box
             fits = all(start >= 0 and stop <= dim for start, stop, dim in zip(starts, stops, shard_shape))
             if not fits:
-                if _dest_interval(piece) is None:
-                    raise ValueError(f'Rank {rank} piece {piece} writes outside the shard of shape '
-                                     f'{tuple(shard_shape)}.')
-                # A dense run may wrap past the end of a shard row. Its interval was bounds-checked
-                # above, and it is not a box of the shard's grid, so leave it out of the box pass.
+                # A view may wrap past the end of a shard row while staying inside the shard. It is
+                # not a box of the shard's grid, so the walk in validate_coverage() checks it instead.
                 continue
             boxes.append(box)
         for index, box in enumerate(boxes):
