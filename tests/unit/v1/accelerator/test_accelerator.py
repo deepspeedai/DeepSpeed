@@ -298,6 +298,8 @@ def cpu_cgroup(monkeypatch, tmp_path):
     proc_self_cgroup = tmp_path / "proc_self_cgroup"
     monkeypatch.setattr(cpu_module, "_CGROUP_ROOT", str(root))
     monkeypatch.setattr(cpu_module, "_PROC_SELF_CGROUP", str(proc_self_cgroup))
+    # No mountinfo file: the hierarchy is assumed at _CGROUP_ROOT, mounted at "/".
+    monkeypatch.setattr(cpu_module, "_PROC_SELF_MOUNTINFO", str(tmp_path / "no_mountinfo"))
     monkeypatch.setattr(cpu_module.sys, "platform", "linux")
     monkeypatch.setenv("DS_CPU_RESPECT_CGROUP_MEMORY", "1")
 
@@ -352,3 +354,43 @@ def test_cpu_memory_cgroup_default_and_override(cpu_cgroup, monkeypatch, default
     accel = cpu_cgroup("0::/", {"memory.max": str(GiB), "memory.current": "0"})
     expected = min(GiB, psutil.virtual_memory().total) if capped else psutil.virtual_memory().total
     assert accel.total_memory() == expected
+
+
+def test_cpu_memory_checks_headroom_of_every_limited_ancestor(cpu_cgroup):
+    """A parent limit also counts its other children: an empty 1 GiB child under a 2 GiB parent whose siblings use
+    1.75 GiB can still take only 0.25 GiB."""
+    import psutil
+    accel = cpu_cgroup(
+        "0::/pod/ctr", {
+            "pod/memory.max": str(2 * GiB),
+            "pod/memory.current": str(7 * GiB // 4),
+            "pod/ctr/memory.max": str(GiB),
+            "pod/ctr/memory.current": "0",
+        })
+    assert accel.total_memory() == min(GiB, psutil.virtual_memory().total)
+    assert accel.available_memory() == min(GiB // 4, psutil.virtual_memory().available)
+
+
+@pytest.mark.parametrize("mount_line, cgroup_line, limit_file", [
+    ("30 25 0:27 /docker/abc {mount} rw - cgroup2 cgroup2 rw", "0::/docker/abc/job", "job/memory.max"),
+    ("31 25 0:28 / {mount} rw - cgroup cgroup rw,cpu,memory", "5:cpu,memory:/pod", "pod/memory.limit_in_bytes"),
+])
+def test_cpu_memory_resolves_cgroup_mount_from_mountinfo(cpu_cgroup, monkeypatch, tmp_path, mount_line, cgroup_line,
+                                                         limit_file):
+    """The mount can expose a subtree of the hierarchy, and cgroup v1 can co-mount controllers as "cpu,memory"."""
+    import psutil
+    from deepspeed.accelerator import cpu_accelerator as cpu_module
+    mount = tmp_path / "mnt"
+    mountinfo = tmp_path / "mountinfo"
+    mountinfo.write_text(mount_line.format(mount=mount) + "\n")
+    monkeypatch.setattr(cpu_module, "_PROC_SELF_MOUNTINFO", str(mountinfo))
+    (mount / limit_file).parent.mkdir(parents=True, exist_ok=True)
+    (mount / limit_file).write_text(str(GiB) + "\n")
+    accel = cpu_cgroup(cgroup_line, {})
+    assert accel.total_memory() == min(GiB, psutil.virtual_memory().total)
+
+
+def test_cpu_accelerator_exports_cgroup_memory_switch():
+    """The launcher forwards env vars listed by export_envs() to every node."""
+    from deepspeed.accelerator.cpu_accelerator import CPU_Accelerator
+    assert "DS_CPU_RESPECT_CGROUP_MEMORY" in CPU_Accelerator().export_envs()

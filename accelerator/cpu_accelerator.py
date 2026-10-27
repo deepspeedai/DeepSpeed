@@ -27,6 +27,7 @@ RESPECT_CGROUP_MEMORY_BY_DEFAULT = False
 
 _CGROUP_ROOT = "/sys/fs/cgroup"
 _PROC_SELF_CGROUP = "/proc/self/cgroup"
+_PROC_SELF_MOUNTINFO = "/proc/self/mountinfo"
 # cgroup v1 reports "no limit" as a huge sentinel instead of "max".
 _CGROUP_UNLIMITED = 1 << 62
 
@@ -52,9 +53,36 @@ def _read_memory_stat(path, key):
     return 0
 
 
+def _cgroup_mount(controller):
+    """Returns (mount point, mount root) of the cgroup hierarchy from /proc/self/mountinfo.
+
+    The mount can expose a subtree of the hierarchy (mount root other than "/"), and cgroup v1 can co-mount controllers
+    under a name such as "cpu,memory", so neither the path nor the root can be assumed.
+    """
+    try:
+        with open(_PROC_SELF_MOUNTINFO) as f:
+            for line in f:
+                before, separator, after = line.partition(" - ")
+                mount_fields = before.split()
+                fs_fields = after.split()
+                if not separator or len(mount_fields) < 5 or len(fs_fields) < 3:
+                    continue
+                fs_type = fs_fields[0]
+                super_options = fs_fields[2].split(",")
+                is_v2 = controller is None and fs_type == "cgroup2"
+                is_v1 = controller is not None and fs_type == "cgroup" and controller in super_options
+                if is_v2 or is_v1:
+                    # mountinfo escapes spaces as \040.
+                    return mount_fields[4].replace("\\040", " "), mount_fields[3].replace("\\040", " ")
+    except OSError:
+        pass
+    default_mount = _CGROUP_ROOT if controller is None else os.path.join(_CGROUP_ROOT, controller)
+    return default_mount, "/"
+
+
 def _cgroup_dirs(controller):
-    """Directories of this process's cgroup from /proc/self/cgroup, nearest first, mount root last."""
-    root = _CGROUP_ROOT if controller is None else os.path.join(_CGROUP_ROOT, controller)
+    """Directories of this process's cgroup from /proc/self/cgroup, nearest first, mount point last."""
+    mount_point, mount_root = _cgroup_mount(controller)
     rel_path = ""
     try:
         with open(_PROC_SELF_CGROUP) as f:
@@ -70,17 +98,23 @@ def _cgroup_dirs(controller):
     except OSError:
         pass
     components = [c for c in rel_path.split("/") if c]
+    root_components = [c for c in mount_root.split("/") if c]
     if ".." in components:
         # A cgroup outside this cgroup namespace cannot be resolved from here.
         components = []
-    return [os.path.join(root, *components[:depth]) for depth in range(len(components), 0, -1)] + [root]
+    elif components[:len(root_components)] == root_components:
+        # /proc/self/cgroup is relative to the hierarchy root; the mount starts at mount_root.
+        components = components[len(root_components):]
+    dirs = [os.path.join(mount_point, *components[:depth]) for depth in range(len(components), 0, -1)]
+    return dirs + [mount_point]
 
 
 def _cgroup_memory():
-    """Returns (limit, working_set) in bytes of the cgroup that limits this process, or None.
+    """Returns (limit, available) in bytes for the cgroups that limit this process, or None.
 
-    The limit is the smallest one from the process's cgroup up to the root, which is the one the kernel enforces.
-    The working set is the usage of that same cgroup minus its inactive page cache, which the kernel can reclaim.
+    The limit is the smallest one from the process's cgroup up to the root. Available memory is the smallest headroom
+    over every limited level, because a parent's limit also counts the usage of its other children. Usage excludes the
+    inactive page cache, which the kernel can reclaim. Available is None when no limited level exposes its usage.
     """
     override = os.environ.get("DS_CPU_RESPECT_CGROUP_MEMORY")
     enabled = RESPECT_CGROUP_MEMORY_BY_DEFAULT if override is None else override.strip().lower() in ("1", "true")
@@ -90,16 +124,21 @@ def _cgroup_memory():
         (None, "memory.max", "memory.current", "inactive_file"),
         ("memory", "memory.limit_in_bytes", "memory.usage_in_bytes", "total_inactive_file"),
     ):
-        levels = [(d, _read_cgroup_int(os.path.join(d, limit_file))) for d in _cgroup_dirs(controller)]
-        levels = [(d, limit) for d, limit in levels if limit is not None and limit < _CGROUP_UNLIMITED]
-        if not levels:
-            continue
-        cgroup_dir, limit = min(levels, key=lambda level: level[1])
-        usage = _read_cgroup_int(os.path.join(cgroup_dir, usage_file))
-        if usage is None:
-            return None
-        inactive_file = _read_memory_stat(os.path.join(cgroup_dir, "memory.stat"), inactive_key)
-        return limit, max(0, usage - inactive_file)
+        limit = None
+        available = None
+        for cgroup_dir in _cgroup_dirs(controller):
+            level_limit = _read_cgroup_int(os.path.join(cgroup_dir, limit_file))
+            if level_limit is None or level_limit >= _CGROUP_UNLIMITED:
+                continue
+            limit = level_limit if limit is None else min(limit, level_limit)
+            usage = _read_cgroup_int(os.path.join(cgroup_dir, usage_file))
+            if usage is None:
+                continue
+            inactive_file = _read_memory_stat(os.path.join(cgroup_dir, "memory.stat"), inactive_key)
+            headroom = max(0, level_limit - max(0, usage - inactive_file))
+            available = headroom if available is None else min(available, headroom)
+        if limit is not None:
+            return limit, available
     return None
 
 
@@ -282,7 +321,10 @@ class CPU_Accelerator(DeepSpeedAccelerator):
         import psutil
         available = psutil.virtual_memory().available
         cgroup = _cgroup_memory()
-        return available if cgroup is None else min(available, max(0, cgroup[0] - cgroup[1]))
+        if cgroup is None:
+            return available
+        limit, cgroup_available = cgroup
+        return min(available, limit if cgroup_available is None else cgroup_available)
 
     # Misc
     def is_available(self):
@@ -443,7 +485,8 @@ class CPU_Accelerator(DeepSpeedAccelerator):
         return BuildExtension
 
     def export_envs(self):
-        return []
+        # Forward the cgroup memory switch to every node started by the launcher.
+        return ['DS_CPU_RESPECT_CGROUP_MEMORY']
 
     # TODO: cpu's visible envs is confirmed, keep as CUDA_VISIBLE_DEVICES
     def visible_devices_envs(self):
