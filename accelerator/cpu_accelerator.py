@@ -53,12 +53,35 @@ def _read_memory_stat(path, key):
     return 0
 
 
-def _cgroup_mount(controller):
+def _path_parts(path):
+    return [part for part in path.split("/") if part]
+
+
+def _cgroup_membership(controller):
+    """The cgroup path of this process from /proc/self/cgroup, relative to the hierarchy root."""
+    try:
+        with open(_PROC_SELF_CGROUP) as f:
+            for line in f:
+                parts = line.strip().split(":", 2)
+                if len(parts) != 3:
+                    continue
+                is_v2 = controller is None and parts[0] == "0" and parts[1] == ""
+                is_v1 = controller is not None and controller in parts[1].split(",")
+                if is_v2 or is_v1:
+                    return parts[2]
+    except OSError:
+        pass
+    return ""
+
+
+def _cgroup_mount(controller, membership):
     """Returns (mount point, mount root) of the cgroup hierarchy from /proc/self/mountinfo.
 
-    The mount can expose a subtree of the hierarchy (mount root other than "/"), and cgroup v1 can co-mount controllers
-    under a name such as "cpu,memory", so neither the path nor the root can be assumed.
+    The mount can expose a subtree of the hierarchy (mount root other than "/"), cgroup v1 can co-mount controllers
+    under a name such as "cpu,memory", and several mounts can match, e.g. a delegated subtree mounted before the main
+    one. The mount whose root contains the membership is used, the most specific one first.
     """
+    candidates = []
     try:
         with open(_PROC_SELF_MOUNTINFO) as f:
             for line in f:
@@ -73,32 +96,26 @@ def _cgroup_mount(controller):
                 is_v1 = controller is not None and fs_type == "cgroup" and controller in super_options
                 if is_v2 or is_v1:
                     # mountinfo escapes spaces as \040.
-                    return mount_fields[4].replace("\\040", " "), mount_fields[3].replace("\\040", " ")
+                    candidates.append((mount_fields[4].replace("\\040", " "), mount_fields[3].replace("\\040", " ")))
     except OSError:
         pass
+    member_parts = _path_parts(membership)
+    containing = [(mount_point, mount_root) for mount_point, mount_root in candidates
+                  if member_parts[:len(_path_parts(mount_root))] == _path_parts(mount_root)]
+    if containing:
+        return max(containing, key=lambda mount: len(_path_parts(mount[1])))
+    if candidates:
+        return candidates[0]
     default_mount = _CGROUP_ROOT if controller is None else os.path.join(_CGROUP_ROOT, controller)
     return default_mount, "/"
 
 
 def _cgroup_dirs(controller):
-    """Directories of this process's cgroup from /proc/self/cgroup, nearest first, mount point last."""
-    mount_point, mount_root = _cgroup_mount(controller)
-    rel_path = ""
-    try:
-        with open(_PROC_SELF_CGROUP) as f:
-            for line in f:
-                parts = line.strip().split(":", 2)
-                if len(parts) != 3:
-                    continue
-                is_v2 = controller is None and parts[0] == "0" and parts[1] == ""
-                is_v1 = controller is not None and controller in parts[1].split(",")
-                if is_v2 or is_v1:
-                    rel_path = parts[2]
-                    break
-    except OSError:
-        pass
-    components = [c for c in rel_path.split("/") if c]
-    root_components = [c for c in mount_root.split("/") if c]
+    """Directories of this process's cgroup, nearest first, mount point last."""
+    membership = _cgroup_membership(controller)
+    mount_point, mount_root = _cgroup_mount(controller, membership)
+    components = _path_parts(membership)
+    root_components = _path_parts(mount_root)
     if ".." in components:
         # A cgroup outside this cgroup namespace cannot be resolved from here.
         components = []

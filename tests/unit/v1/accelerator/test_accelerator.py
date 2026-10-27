@@ -390,6 +390,22 @@ def test_cpu_memory_resolves_cgroup_mount_from_mountinfo(cpu_cgroup, monkeypatch
     assert accel.total_memory() == min(GiB, psutil.virtual_memory().total)
 
 
+def test_cpu_memory_picks_the_cgroup_mount_that_contains_the_process(cpu_cgroup, monkeypatch, tmp_path):
+    """An unrelated delegated cgroup2 subtree mounted before the main mount must not hide the process's limit."""
+    import psutil
+    from deepspeed.accelerator import cpu_accelerator as cpu_module
+    delegated, main = tmp_path / "delegated", tmp_path / "main"
+    mountinfo = tmp_path / "mountinfo"
+    mountinfo.write_text(f"40 25 0:30 /user.slice/delegated {delegated} rw - cgroup2 cgroup2 rw\n"
+                         f"41 25 0:30 / {main} rw - cgroup2 cgroup2 rw\n")
+    monkeypatch.setattr(cpu_module, "_PROC_SELF_MOUNTINFO", str(mountinfo))
+    (main / "job").mkdir(parents=True)
+    (main / "job" / "memory.max").write_text(str(GiB) + "\n")
+    delegated.mkdir()
+    accel = cpu_cgroup("0::/job", {})
+    assert accel.total_memory() == min(GiB, psutil.virtual_memory().total)
+
+
 def test_cpu_accelerator_exports_cgroup_memory_switch():
     """The launcher forwards env vars listed by export_envs() to every node."""
     from deepspeed.accelerator.cpu_accelerator import CPU_Accelerator
