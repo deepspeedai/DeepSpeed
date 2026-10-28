@@ -309,6 +309,15 @@ class DeepSpeedStaticCache:
             return self._max_cache_len
         return self._layers[layer_idx].get_max_cache_shape()
 
+    def get_query_offset(self, layer_idx: int = 0) -> int | torch.Tensor:
+        # Newer Transformers builds the causal mask before writing the current
+        # token, so its query offset is the write position, not position + 1.
+        if self._write_position is None:
+            return 0
+        if self._write_position.dim() == 1:
+            return self._write_position.max()
+        return self._write_position
+
     def get_mask_sizes(self, query_length: int, layer_idx: int = 0) -> tuple[int, int]:
         if layer_idx >= len(self._layers):
             return self._max_cache_len, 0
