@@ -1523,7 +1523,18 @@ std::vector<at::Tensor> grouped_linear(at::Tensor x, std::vector<at::Tensor> wei
     // Fused GLU rides the WMMA kernel on EVERY architecture up to the tile
     // row limit: the in-register silu epilogue saves three launches plus an
     // fp32 round-trip vs composite (loop 3 regression: composite -2.3%).
+    // M in (GRP_MT, 2*GRP_MT] chunks into two fused calls — still beats
+    // the 4-kernel composite (bs=64 decodes hit this).
     if (glu_epilogue && n == 2 && M <= GRP_MT) return {dual_gemm_silu_mul(x2, weights[0], weights[1])};
+    if (glu_epilogue && n == 2 && M <= 2 * GRP_MT) {
+        const int64_t half = GRP_MT;
+        at::Tensor out = at::empty({M, weights[0].size(0)}, x2.options());
+        auto o1 = dual_gemm_silu_mul(x2.narrow(0, 0, half), weights[0], weights[1]);
+        auto o2 = dual_gemm_silu_mul(x2.narrow(0, half, M - half), weights[0], weights[1]);
+        out.narrow(0, 0, half).copy_(o1);
+        out.narrow(0, half, M - half).copy_(o2);
+        return {out};
+    }
     if (M > grouped_wmma_threshold()) {
         // large batches: cuBLAS/aten composite (this backend's measured choice)
         std::vector<at::Tensor> outs;
