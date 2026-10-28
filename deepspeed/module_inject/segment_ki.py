@@ -762,10 +762,27 @@ def install_lm_head(model: torch.nn.Module, kernel_op) -> int:
 
     def _lm_forward(self, hidden_states):
         b = hidden_states.shape[0]
-        if (not torch.is_grad_enabled() and hidden_states.dim() == 3 and hidden_states.shape[1] == 1 and 16 <= b <= 32
-                and hidden_states.is_contiguous()):
-            out = self._ki_gemm_op.single_gemm(hidden_states.reshape(b, -1), self.weight)
-            return out.view(b, 1, -1)
+        if hidden_states.dim() == 3 and hidden_states.shape[1] == 1:
+            # Vocab-parallel decode: each rank GEMMs its contiguous half of
+            # the (replicated) weight — half the weight traffic — and the
+            # rank-ordered all-gather reassembles full logits for argmax
+            # and sampling alike; downstream sees identical semantics.
+            import deepspeed.comm as dist
+            tp = dist.get_world_size() if dist.is_initialized() else 1
+            x2 = hidden_states.reshape(b, -1)
+            if tp > 1 and self.weight.shape[0] % tp == 0:
+                half = self.weight.shape[0] // tp
+                w_loc = self.weight[dist.get_rank() * half:(dist.get_rank() + 1) * half]
+                if not torch.is_grad_enabled() and 16 <= b <= 32 and x2.is_contiguous():
+                    loc = self._ki_gemm_op.single_gemm(x2, w_loc)
+                else:
+                    loc = torch.nn.functional.linear(x2, w_loc)
+                parts = [torch.empty_like(loc) for _ in range(tp)]
+                dist.all_gather(parts, loc.contiguous())
+                return torch.cat(parts, dim=-1).view(b, 1, -1)
+            if (not torch.is_grad_enabled() and 16 <= b <= 32 and hidden_states.is_contiguous()):
+                out = self._ki_gemm_op.single_gemm(x2, self.weight)
+                return out.view(b, 1, -1)
         return torch.nn.functional.linear(hidden_states, self.weight, self.bias)
 
     lm._ki_gemm_op = kernel_op
