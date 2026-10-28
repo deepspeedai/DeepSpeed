@@ -1028,3 +1028,19 @@ FLA at TP head counts (H_v=16 per rank) on A100 despite B*H=512 blocks.
 Reverted; the kernel needs retuning for low-H shapes (kernel-track).
 
 Loop 4r (revert verified): 785/2327/3790 = loop 3b level restored.
+
+
+### Loop 5 — per-rank weight concat cache, 6 GEMMs to 2 (+3-6%)
+Cache cat([q_w,k_w,v_w]) and cat([z,b,a]) once per layer (static during
+rollout); apply6's identical-tensor collapse keeps routing through
+grouped_linear (backend owns kernel choice). One wide GEMM per group
+tiles better in cuBLAS than six skinny row-slices.
+
+| bs | 4r baseline | loop 5 | delta |
+|----|-------------|--------|-------|
+| 8  | 785.5       | 832.4  | +6.0% |
+| 32 | 2327.4      | 2447.3 | +5.2% |
+| 64 | 3789.8      | 3898.9 | +2.9% |
+
+vs vLLM: 57.3% / 50.1% / 51.1% — crossed 50% everywhere.
+Cumulative from loop 1: +23% / +19.5% / +3.1%.
