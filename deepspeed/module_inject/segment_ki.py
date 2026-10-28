@@ -671,6 +671,8 @@ def _decode_attn_forward(self,
                   torch.cat([self.q_proj.weight, self.k_proj.weight, self.v_proj.weight]))
             self._ki_attn_cat_w = cw
         fused = qkv_op.grouped_linear(hidden_states.reshape(-1, hidden_states.shape[-1]), [cw[1]], False)[0]
+        if fused.dim() == 1:
+            fused = fused.view(1, -1)  # flat GEMV path returns [N] for M=1
         qn, kn = self.q_proj.weight.shape[0], self.k_proj.weight.shape[0]
         # decode_attn needs contiguous k/v; the tiny materialization (B*k_dims
         # bf16) is far cheaper than the two extra GEMM launches it replaces
