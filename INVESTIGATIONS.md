@@ -967,3 +967,23 @@ correctness.
 - RunPod A100 SXM4: torch 2.13.0+cu129, NCCL 2.29.3, fla + causal_conv1d
   installed via pip (--no-build-isolation)
 - First RunPod attempt (RTX 6000 Ada) had broken NCCL at hardware level
+
+
+## 22. Ampere adaptive tiling — NT=128 NOT better on A100 (Loop 1)
+
+### Result (A100 SXM4, TP=2, C-C-R partition, same prompts)
+| bs | Ada tiles (NT=64) | Ampere tiles (NT=128) | verdict |
+|----|--------------------|-----------------------|---------|
+| 8  | 730.2              | 675.0 (-7.5%)        | Ada better |
+| 32 | 2200.8             | 2048.2 (-6.9%)       | Ada better |
+| 64 | 3791.9             | 3781.2 (-0.3%)       | wash     |
+
+NT=128 halves the grid (under-fills 108 SMs) and doubles smem per block
+(1 resident/SM vs 2). The Ada NT=64 is already near-optimal for A100.
+
+**Conclusion**: the ~50% gap to vLLM on A100 is NOT tile size. The
+arch-adaptive infrastructure (template dispatch by smem size) is proven
+and retained — it's the right mechanism for future tuning, but NT=128
+is not the win. Optimization must target attention/kernels/overlap.
+
+vLLM reference: 1452/4883/7636 @bs8/32/64. segKI vs vLLM: 46%/42%/50%.
