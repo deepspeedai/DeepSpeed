@@ -1457,6 +1457,24 @@ at::Tensor dual_gemm_silu_mul(at::Tensor x, at::Tensor gate_w, at::Tensor up_w)
     return out;
 }
 
+// Arch-adaptive batch routing threshold: on Ada the WMMA grouped kernel
+// beats cuBLAS for M<=32 (launch overhead dominates); on Ampere cuBLAS
+// is fast enough to win at any M>1 (profiled on A100 SXM4: our WMMA at
+// 39.7% of step vs cuBLAS composite scaling better). Same interface,
+// same kernels — only the crossover point moves.
+static int64_t grouped_wmma_threshold()
+{
+    static int64_t thr = -1;
+    if (thr < 0) {
+        int dev;
+        cudaGetDevice(&dev);
+        int smem;
+        cudaDeviceGetAttribute(&smem, cudaDevAttrMaxSharedMemoryPerBlockOptin, dev);
+        thr = (smem > 100 * 1024) ? 1 : GRP_MT;  // Ampere -> 1, Ada -> GRP_MT
+    }
+    return thr;
+}
+
 // Portable segKI interface: one dispatcher routes by weight count and
 // batch size to this backend's private kernels (gemv / WMMA grouped /
 // aten composite), so other accelerators can expose the same entry with
@@ -1502,7 +1520,7 @@ std::vector<at::Tensor> grouped_linear(at::Tensor x, std::vector<at::Tensor> wei
     }
     at::Tensor x2 = x.reshape({-1, K});
     const int64_t M = x2.size(0);
-    if (M > GRP_MT) {
+    if (M > grouped_wmma_threshold()) {
         // large batches: cuBLAS/aten composite (this backend's measured choice)
         std::vector<at::Tensor> outs;
         for (auto& w : weights) outs.push_back(at::matmul(x2, w.t()));
