@@ -41,7 +41,7 @@ def ds_triton_implementation(vals, gamma, beta, epsilon):
 @pytest.mark.inference_ops
 @pytest.mark.parametrize("batch", [1, 32])
 @pytest.mark.parametrize("seq_len", [1, 128])
-@pytest.mark.parametrize("channels", [384, 512, 768, 1024, 2048, 8192, 14432])
+@pytest.mark.parametrize("channels", [96, 128, 384, 512, 768, 1024, 2048, 8192, 14432])
 @pytest.mark.parametrize("dtype", get_dtypes())
 @pytest.mark.parametrize("use_triton_ops", [False, True])
 def test_layer_norm(batch, seq_len, channels, dtype, use_triton_ops):
@@ -154,6 +154,33 @@ def test_layer_norm_residual_store_pre_ln_res(batch, seq_len, channels, dtype):
 
     assert allclose(ds_res_output, norm_res_output)
     assert allclose(ds_norm_output, ref_norm_output)
+
+
+@pytest.mark.inference_ops
+@pytest.mark.parametrize("channels", [96, 128, 1024])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.float32])
+def test_layer_norm_residual_kernels(channels, dtype):
+    # LayerNormOp.layer_norm_residual* are pure-PyTorch classmethods; call the kernels directly.
+    module = LayerNormOp().inference_module
+    device = get_accelerator().current_device_name()
+    vals = torch.randn((2, 32, channels), dtype=dtype, device=device)
+    residual = torch.randn((2, 32, channels), dtype=dtype, device=device)
+    bias = torch.randn((channels), dtype=dtype, device=device)
+    gamma = torch.randn((channels), dtype=dtype, device=device)
+    beta = torch.rand((channels), dtype=dtype, device=device)
+    epsilon = 1e-5
+
+    # Plain layer_norm too: test_layer_norm skips when triton is unsupported.
+    assert allclose(module.layer_norm(vals, gamma, beta, epsilon),
+                    ref_implementation(vals, gamma, beta, epsilon, channels, dtype))
+
+    ref_norm, ref_res = residual_store_ref_implementation(vals, bias, residual, gamma, beta, epsilon, channels, dtype)
+
+    assert allclose(module._layer_norm_residual(vals, bias, residual, gamma, beta, epsilon), ref_norm)
+
+    ds_norm, ds_res = module.layer_norm_residual_store_pre_ln_res(vals, bias, residual, gamma, beta, epsilon)
+    assert allclose(ds_res, ref_res)
+    assert allclose(ds_norm, ref_norm)
 
 
 @pytest.mark.inference_ops

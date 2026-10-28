@@ -24,7 +24,7 @@ def reference_implementation(residual: torch.Tensor, hidden_states: torch.Tensor
 
 
 @pytest.mark.inference_v2_ops
-@pytest.mark.parametrize("tokens, channels", [(1, 4096), (37, 2048), (112, 14432), (1024, 6144)])
+@pytest.mark.parametrize("tokens, channels", [(1, 4096), (37, 2048), (112, 14432), (1024, 6144), (64, 96), (64, 128)])
 @pytest.mark.parametrize("dtype", get_dtypes())
 def test_cuda_post_ln(tokens: int, channels: int, dtype: torch.dtype) -> None:
 
@@ -40,7 +40,7 @@ def test_cuda_post_ln(tokens: int, channels: int, dtype: torch.dtype) -> None:
 
     # New output
     post_ln_kernel = CUDAFPPostLN(hidden_states.size(-1), residual.dtype)
-    ds_output = torch.empty_like(residual)
+    ds_output = torch.full_like(residual, float('nan'))
     post_ln_kernel(ds_output, residual, hidden_states, gamma, beta)
 
     # Check
