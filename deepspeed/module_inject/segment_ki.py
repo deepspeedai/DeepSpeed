@@ -399,11 +399,16 @@ def _fused_gdn_forward(self, hidden_states, *args, **kwargs):
     # composite path rather than raise inside the binding.
     if (gdn_op is not None and get_accelerator().on_accelerator(a) and not torch.is_grad_enabled()
             and a.dtype is torch.bfloat16):
+        # A_log/dt_bias are static across the rollout — cache the fp32
+        # rank slice once instead of re-casting every decode step
         hv = self.num_v_heads
-        a_log_f = self.A_log.detach().reshape(-1)[r * num_v_heads:(r + 1) * num_v_heads].float().contiguous() \
-            if hv > num_v_heads else self.A_log.detach().float().contiguous()
-        dt_f = self.dt_bias.detach().reshape(-1)[r * num_v_heads:(r + 1) * num_v_heads].float().contiguous() \
-            if hv > num_v_heads else self.dt_bias.detach().float().contiguous()
+        cached = getattr(self, "_ki_gates_cache", None)
+        if cached is None or cached[0] is not self.A_log:
+            sl = (lambda t: t.detach().reshape(-1)[r * num_v_heads:(r + 1) * num_v_heads]) if hv > num_v_heads \
+                else (lambda t: t.detach())
+            cached = (self.A_log, sl(self.A_log).float().contiguous(), sl(self.dt_bias).float().contiguous())
+            self._ki_gates_cache = cached
+        a_log_f, dt_f = cached[1], cached[2]
         # gdn_gates accepts row-strided a/b, so the fused-output slices go in
         # without contiguous copies.
         beta, g = gdn_op.gdn_gates(a, b, a_log_f, dt_f)
