@@ -164,3 +164,28 @@ def test_long_running_allocation(test_iters: int) -> None:
 
     assert num_allocs == num_frees + len(all_allocs)
     assert num_blocks_allocated == num_blocks_freed + (TOTAL_BLOCKS - allocator.free_blocks)
+
+
+@pytest.mark.inference_v2
+def test_free_duplicate_block_rejected() -> None:
+    """Freeing the same block twice in one call must be rejected: the
+    pre-validation loop used to pass (blocks are only marked during the
+    mutation loop), corrupting the free list with a duplicate entry that
+    would hand the same KV block to two sequences."""
+    allocator = BlockedAllocator(16)
+
+    allocated = allocator.allocate(4)
+    free_count = allocator.free_blocks
+
+    duplicate = int(allocated[0])
+    with pytest.raises(ValueError):
+        allocator.free([duplicate, duplicate])
+
+    # Allocator state must be unchanged by the failed call.
+    assert allocator.free_blocks == free_count
+
+    # The blocks are still usable exactly once.
+    allocator.free(allocated)
+    assert allocator.free_blocks == 16
+    again = allocator.allocate(16)
+    assert torch.unique(again).numel() == 16
