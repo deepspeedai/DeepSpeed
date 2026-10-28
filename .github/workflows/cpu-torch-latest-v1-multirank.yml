@@ -27,7 +27,6 @@ on:
         default: '2.14.0-cpu'
         type: choice
         options:
-          - '2.10.0-cpu'
           - '2.14.0-cpu'
       # Used only when a manual workflow_dispatch explicitly selects
       # transformers_source=pypi. Pull-request runs and default manual runs
@@ -175,11 +174,6 @@ jobs:
           fi
 
           case "$selected_preset" in
-            '2.10.0-cpu')
-              torch_install_version='2.10.0'
-              torchvision_install_version='0.25.0'
-              torch_test_version='2.10'
-              ;;
             '2.14.0-cpu')
               torch_install_version='2.14.0'
               torchvision_install_version='0.29.0'
