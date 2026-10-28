@@ -1070,3 +1070,21 @@ first-8 bit-identical (same near-tie class).
 
 Night cumulative: 675->864 (+28%), 2048->2511 (+22.6%), 3781->3985 (+5.4%)
 vs vLLM: 59.5% / 51.4% / 52.2%.
+
+
+### Loop 9/9b — attention qkv concat (+1.4/+1.6%, bs64 wash)
+Same static-weight concat as loop 5; k/v slice views materialized for
+decode_attn contiguity (tiny). 875.6 / 2550.4 / 3942.1.
+
+## Night summary (A100 TP=2, loops 1-9)
+| bs | start | final | gain | vs vLLM |
+|----|-------|-------|------|---------|
+| 8  | 675   | 876   | +30% | 60.3%   |
+| 32 | 2048  | 2550  | +24% | 52.2%   |
+| 64 | 3781  | 3942  | +4%  | 51.6%   |
+
+Wins: arch-adaptive WMMA/cuBLAS crossover (loop 2), GDN+attn weight
+concat (5, 9), vocab-parallel lm_head (8), chunked GLU (7).
+Lessons: NT=128 not better on A100 (1), fused GLU wins everywhere (3),
+our recurrent kernel loses at TP head counts (4), cast caching is
+noise-level (6). Opbuilder interface unchanged throughout.
