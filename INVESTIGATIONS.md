@@ -1052,3 +1052,9 @@ within run variance of loop 5 (832/2447/3899). Launch removal was real
 but per-launch cost in-graph is ~0.5us; kept (less work is less work).
 Next: bs=64 GLU runs composite (M=64 > GRP_MT=32 tile limit) — chunk
 into two fused calls instead of 4-kernel composite.
+
+
+### Loop 7 — chunked fused GLU for M in (32,64] (+0.6% at bs=64)
+835/2460/3952. bs=8/32 unaffected (already single fused call); bs=64
+swapped the 4-kernel composite for two row-chunked fused calls.
+vs vLLM: 57.5% / 50.4% / 51.8%.
