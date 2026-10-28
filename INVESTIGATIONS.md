@@ -987,3 +987,20 @@ and retained — it's the right mechanism for future tuning, but NT=128
 is not the win. Optimization must target attention/kernels/overlap.
 
 vLLM reference: 1452/4883/7636 @bs8/32/64. segKI vs vLLM: 46%/42%/50%.
+
+
+### Loop 2 — arch-adaptive WMMA→cuBLAS crossover (+15-17%)
+A100 profile revealed the bottleneck had moved: our WMMA grouped at
+39.7% of step (6.66ms > vLLM entire step 6.55ms) while NCCL dropped to
+9.6% on NVLink. cuBLAS on Ampere beats WMMA at any M>1.
+
+Fix: grouped_wmma_threshold() — device smem query selects the crossover
+(Ampere→M>1 composite, Ada→M<=32 WMMA unchanged). Interface untouched.
+
+| bs | Loop 1 | Loop 2 | delta |
+|----|--------|--------|-------|
+| 8  | 675.0  | 793.4  | +17.5% |
+| 32 | 2048.2 | 2352.8 | +14.9% |
+| 64 | 3781.2 | 3761.4 | wash (already composite) |
+
+vs vLLM: 54.6% / 48.2% / 49.3%.
