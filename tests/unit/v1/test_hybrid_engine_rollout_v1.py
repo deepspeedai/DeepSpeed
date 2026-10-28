@@ -188,3 +188,96 @@ def test_continuous_graph_matches_pretrained_model_when_enabled():
         accelerator.create_graph = original_create_graph
 
     assert capture_count[0] == 1
+
+
+def _tiny_llama(device):
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    torch.manual_seed(0)
+    config = LlamaConfig(vocab_size=64,
+                         hidden_size=64,
+                         intermediate_size=128,
+                         num_hidden_layers=2,
+                         num_attention_heads=4,
+                         num_key_value_heads=2,
+                         max_position_embeddings=128)
+    model = LlamaForCausalLM(config)
+    # A random initialization gives almost uniform next-token distributions, under which sampling from the
+    # wrong distribution is hard to detect. Scaling the output head makes them peaked.
+    with torch.no_grad():
+        model.lm_head.weight.mul_(30)
+    return model.to(device).eval()
+
+
+def _rollout(model, use_graph_capture):
+    # eos -1 never matches, so every row generates the full length.
+    tokenizer = SimpleNamespace(pad_token_id=0, eos_token_id=-1)
+    return HybridEngineRollout(SimpleNamespace(module=model),
+                               tokenizer,
+                               cfg=HybridEngineRolloutConfig(use_graph_capture=use_graph_capture))
+
+
+def _random_request(batch_size, prompt_len, device):
+    generator = torch.Generator().manual_seed(1)
+    prompt_ids = torch.randint(1, 64, (batch_size, prompt_len), generator=generator)
+    return RolloutRequest(prompt_ids.to(device), torch.ones_like(prompt_ids).to(device))
+
+
+def _reference_log_probs(logits, temperature, top_k, top_p):
+    """Log-probs of the distribution ``SamplingConfig`` describes, derived from the raw logits."""
+    scores = logits.float() / temperature
+    if top_k > 0:
+        kth_score = scores.topk(top_k, dim=-1).values[..., -1:]
+        scores = scores.masked_fill(scores < kth_score, float("-inf"))
+    if top_p < 1.0:
+        sorted_probs, order = scores.softmax(dim=-1).sort(dim=-1, descending=True)
+        mass_before = sorted_probs.cumsum(dim=-1) - sorted_probs
+        # A token is kept while the more likely tokens hold less than top_p of the mass. The small margin keeps
+        # tokens on the boundary, where the graph's incremental decode and this full forward can round apart.
+        drop_sorted = mass_before >= top_p + 1e-4
+        drop = drop_sorted.scatter(-1, order, drop_sorted)
+        scores = scores.masked_fill(drop, float("-inf"))
+    return scores.log_softmax(dim=-1)
+
+
+# Plain graph decode, continuous batching with graph capture, and continuous batching without it.
+@pytest.mark.parametrize("use_graph_capture, continuous_batch_size", [(True, None), (True, 8), (False, 8)])
+@pytest.mark.parametrize("temperature, top_k, top_p", [(1.0, -1, 1.0), (0.7, 5, 1.0), (1.0, -1, 0.8)])
+def test_decode_samples_from_the_configured_distribution(temperature, top_k, top_p, use_graph_capture,
+                                                         continuous_batch_size):
+    accelerator = get_accelerator()
+    if not accelerator.is_available() or accelerator.device_name() != "cuda":
+        pytest.skip("CUDA is required for CUDA graph decode coverage")
+
+    device = torch.device(accelerator.device_name())
+    model = _tiny_llama(device)
+    rollout = _rollout(model, use_graph_capture)
+    prompt_len, new_tokens = 8, 32
+    request = _random_request(batch_size=32, prompt_len=prompt_len, device=device)
+    sampling = SamplingConfig(max_new_tokens=new_tokens,
+                              temperature=temperature,
+                              top_k=top_k,
+                              top_p=top_p,
+                              continuous_batch_size=continuous_batch_size)
+
+    torch.manual_seed(2)
+    output = rollout.generate(request, sampling)
+
+    with torch.no_grad():
+        logits = model(output.input_ids).logits
+    # Positions prompt_len - 1 .. end - 2 predict the generated tokens.
+    log_probs = _reference_log_probs(logits[:, prompt_len - 1:-1], temperature, top_k, top_p)
+    tokens = output.input_ids[:, prompt_len:]
+    token_log_probs = log_probs.gather(-1, tokens.unsqueeze(-1)).squeeze(-1)
+    assert torch.isfinite(token_log_probs).all(), "sampled a token outside the top-k / top-p support"
+
+    # Tokens drawn from q satisfy E[log q(x)] = -H(q) and P[x = argmax q] = mean max q.
+    probs = log_probs.exp()
+    entropy = -(probs * log_probs.clamp(min=-1e30)).sum(dim=-1)
+    gap = (token_log_probs + entropy).flatten()
+    gap_z = gap.mean() / (gap.std() / gap.numel()**0.5)
+    max_probs, argmax = probs.max(dim=-1)
+    hits = (tokens == argmax).float()
+    hit_z = (hits.mean() - max_probs.mean()) / ((max_probs * (1 - max_probs)).sum().sqrt() / hits.numel())
+    assert abs(gap_z.item()) < 4, f"log-prob gap z-score {gap_z.item():.2f}"
+    assert abs(hit_z.item()) < 4, f"argmax hit-rate z-score {hit_z.item():.2f}"
