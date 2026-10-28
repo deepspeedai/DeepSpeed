@@ -495,11 +495,20 @@ def _install_gdn_segment(seg: GDNSegment) -> bool:
         # kernel updates the cache buffer directly — no FLA output tensor,
         # no HF copy-back, half the state traffic
         step_op = getattr(parent, "_ki_gdn_op", None)
-        if (init_state is not None and query.shape[1] == 1 and step_op is not None
-                and hasattr(step_op, "gdn_recurrent_step") and not torch.is_grad_enabled()
-                and query.shape[0] >= 16  # below that our block count starves vs FLA's tiling
-                and query.is_contiguous() and key.is_contiguous() and value.is_contiguous()
-                and init_state.is_contiguous() and init_state.dtype is torch.float32):
+        _ok = (init_state is not None and query.shape[1] == 1 and step_op is not None
+               and hasattr(step_op, "gdn_recurrent_step") and not torch.is_grad_enabled()
+               and query.shape[0] >= 16  # below that our block count starves vs FLA's tiling
+               and query.is_contiguous() and key.is_contiguous() and value.is_contiguous()
+               and init_state.is_contiguous() and init_state.dtype is torch.float32)
+        if not _ok and query.shape[1] == 1 and getattr(parent, "_ki_scan_diag", 0) < 1:
+            parent._ki_scan_diag = 1
+            print(f"SCAN-DIAG: state={init_state is not None} q1={query.shape[1]} op={step_op is not None} "
+                  f"has={hasattr(step_op, 'gdn_recurrent_step') if step_op else '?'} "
+                  f"nograd={not torch.is_grad_enabled()} B={query.shape[0]} "
+                  f"qc={query.is_contiguous()} kc={key.is_contiguous()} vc={value.is_contiguous()} "
+                  f"sc={init_state.is_contiguous() if init_state is not None else '?'} "
+                  f"sdtype={init_state.dtype if init_state is not None else '?'}", flush=True)
+        if _ok:
             b_sz, _, h, dk = query.shape
             dv = value.shape[-1]
             out = torch.empty(b_sz, 1, h, dv, dtype=query.dtype, device=query.device)
