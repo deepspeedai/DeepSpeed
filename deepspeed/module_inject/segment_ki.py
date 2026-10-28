@@ -206,11 +206,20 @@ class GDNInputProj(torch.autograd.Function):
     @classmethod
     def apply6(cls, x, q_w, k_w, v_w, z_w, b_w, a_w, kernel_op):
         """TP block-sliced GDN in_proj through the same grouped_linear
-        interface as the fused 4-mat form (path consistency TP=1/TP=2)."""
-        if _native_kernel_ready(kernel_op, x, q_w, k_w, v_w, z_w, b_w, a_w):
+        interface as the fused 4-mat form (path consistency TP=1/TP=2).
+        Callers that pre-concatenated pass the same tensor for q/k/v and
+        for z/b/a: identical weights collapse to a 2-mat group."""
+        if q_w is k_w and k_w is v_w and z_w is b_w and b_w is a_w:
+            ws = [q_w, z_w]
+        else:
+            ws = [q_w, k_w, v_w, z_w, b_w, a_w]
+        if _native_kernel_ready(kernel_op, x, *ws):
             if hasattr(kernel_op, "grouped_linear"):
-                return kernel_op.grouped_linear(x, [q_w, k_w, v_w, z_w, b_w, a_w], False)[0]
-        return torch.cat([torch.nn.functional.linear(x, w) for w in (q_w, k_w, v_w, z_w, b_w, a_w)], dim=-1)
+                out = kernel_op.grouped_linear(x, ws, False)
+                if len(out) == 2:
+                    return torch.cat(out, -1)
+                return out[0]
+        return torch.cat([torch.nn.functional.linear(x, w) for w in ws], dim=-1)
 
     @staticmethod
     def backward(ctx, grad_out):
@@ -330,10 +339,17 @@ def _fused_gdn_forward(self, hidden_states, *args, **kwargs):
         k_w = qkv_w[self.key_dim + r * nq:self.key_dim + (r + 1) * nq]
         v_w = qkv_w[2 * self.key_dim + r * nv:2 * self.key_dim + (r + 1) * nv]
         x2 = hidden_states.reshape(-1, hidden_states.shape[-1])
-        # Same dispatch path as TP=1 (GDNInputProj -> grouped_linear); the
-        # backend routes the block-sliced 6-mat form — no raw aten here.
-        fused = GDNInputProj.apply6(x2, q_w, k_w, v_w, self.in_proj_z.weight, self.in_proj_b.weight,
-                                    self.in_proj_a.weight, gdn_kernel_op).view(batch_size, seq_len, -1)
+        # Cache the per-rank concatenated weights (static during rollout):
+        # one wide GEMM per group lets the backend's cuBLAS tile better
+        # than six skinny row-slice GEMMs. Still routed through
+        # grouped_linear — the backend owns the kernel choice.
+        cw = getattr(self, "_ki_tp_cat_w", None)
+        if cw is None or cw[0] is not self.in_proj_qkv.weight:
+            zba_w = torch.cat([self.in_proj_z.weight, self.in_proj_b.weight, self.in_proj_a.weight])
+            cw = (self.in_proj_qkv.weight, torch.cat([q_w, k_w, v_w]), zba_w)
+            self._ki_tp_cat_w = cw
+        fused = GDNInputProj.apply6(x2, cw[1], cw[1], cw[1], cw[2], cw[2], cw[2], gdn_kernel_op).view(
+            batch_size, seq_len, -1)
     elif batch_size == 1 and seq_len == 1:
         fused = GDNInputProj.apply(
             hidden_states.squeeze(0).squeeze(0), self.in_proj_qkv.weight, self.in_proj_z.weight, self.in_proj_b.weight,
