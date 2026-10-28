@@ -662,11 +662,18 @@ def _decode_attn_forward(self,
     # every branch yields the raw (pre-norm, pre-rope) flat K/V so the
     # fused-K path can hand them to the kernel
     if qkv_op is not None and hasattr(qkv_op, "grouped_linear"):
-        # single dispatcher entry; the backend routes by batch internally
-        q_out, k_flat, v_flat = qkv_op.grouped_linear(hidden_states.reshape(-1, hidden_states.shape[-1]),
-                                                      [self.q_proj.weight, self.k_proj.weight, self.v_proj.weight],
-                                                      False)
-        query_states, gate = torch.chunk(q_out.view(*input_shape, -1, self.head_dim * 2), 2, dim=-1)
+        # single dispatcher entry; the backend routes by batch internally.
+        # The projections are static across the rollout — cache the
+        # concatenated weight so one wide GEMM replaces three skinny ones.
+        cw = getattr(self, "_ki_attn_cat_w", None)
+        if cw is None or cw[0] is not self.q_proj.weight:
+            cw = (self.q_proj.weight,
+                  torch.cat([self.q_proj.weight, self.k_proj.weight, self.v_proj.weight]))
+            self._ki_attn_cat_w = cw
+        fused = qkv_op.grouped_linear(hidden_states.reshape(-1, hidden_states.shape[-1]), [cw[1]], False)[0]
+        qn, kn = self.q_proj.weight.shape[0], self.k_proj.weight.shape[0]
+        q_out, k_flat, v_flat = fused[:, :qn], fused[:, qn:qn + kn], fused[:, qn + kn:]
+        query_states, gate = torch.chunk(q_out.reshape(*input_shape, -1, self.head_dim * 2), 2, dim=-1)
     elif qkv_op is not None and batch == 1:
         # One GEMV launch over q/k/v weights directly — replaces the
         # three separate F.linear launches. q_proj keeps its 2x-wide
