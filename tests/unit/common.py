@@ -3,7 +3,6 @@
 
 # DeepSpeed Team
 
-import faulthandler
 import itertools
 import os
 import re
@@ -330,9 +329,6 @@ class DistributedExec(ABC):
             self._launch_daemonic_procs(num_procs, init_method)
 
     def _dist_run(self, local_rank, num_procs, master_port, init_method, skip_msg=""):
-        # A wedged rank would otherwise block its pool worker forever and take
-        # the whole xdist session down with it; dump the stack and exit instead.
-        faulthandler.dump_traceback_later(self.exec_timeout, exit=True)
         if dist.is_initialized():
             if get_accelerator().is_available():
                 # local_rank might not match the rank in the previous run if you are reusing the environment
