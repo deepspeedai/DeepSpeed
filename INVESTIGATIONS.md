@@ -1004,3 +1004,18 @@ Fix: grouped_wmma_threshold() — device smem query selects the crossover
 | 64 | 3781.2 | 3761.4 | wash (already composite) |
 
 vs vLLM: 54.6% / 48.2% / 49.3%.
+
+
+### Loop 3/3b — GLU routing lesson (regression then fix)
+Loop 3 (GLU→composite): 774/2300/3765 = regression -2.3% vs loop 2.
+The WMMA GLU kernel's in-register silu beats cuBLAS composite on Ampere
+(saves 3 launches + fp32 roundtrip). Loop 3b (GLU exempt from arch
+threshold in the C++ dispatcher): 786/2310/3795 — recovers to loop-2
+level within run variance; bs=64 best so far.
+
+Lesson: only raw multi-output GEMMs benefit from cuBLAS on Ampere;
+fused-epilogue kernels win on both architectures. Routing knowledge
+lives in the backend dispatcher — Python side stays clean.
+
+Progress: 675→793 (bs8, +18%), 2048→2310 (bs32, +13%), 3781→3795 (bs64).
+vs vLLM: 54.1% / 47.3% / 49.7%.
