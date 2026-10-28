@@ -3691,6 +3691,17 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                 else:
                     param_group[key] = value
 
+        for sub_group_id, fp32_param in enumerate(self.fp32_partitioned_groups_flat):
+            param_group_id = self.sub_group_to_group_id.get(sub_group_id, 0)
+            param_group = self.optimizer.param_groups[param_group_id]
+            fused = bool(param_group.get('fused', False)) if param_group is not None else False
+            capturable = bool(param_group.get('capturable', False)) if param_group is not None else False
+            if fp32_param in self.optimizer.state and 'step' in self.optimizer.state[fp32_param]:
+                self.optimizer.state[fp32_param]['step'] = self._normalize_step_tensor(
+                    self.optimizer.state[fp32_param]['step'], fp32_param, fused, capturable)
+
+        self._normalize_step_for_all_param_groups()
+
         if self.swap_optimizer:
             # Purge the swapped optimizer state, it was initialized to the freshly created model and not the checkpoint
             self.optimizer_swapper.purge_state()
