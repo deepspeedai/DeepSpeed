@@ -2381,3 +2381,29 @@ class RMSNormalize(nn.Module):
             hidden_states = hidden_states.to(self.weight.dtype)
 
         return hidden_states * self.weight
+
+
+def shard_untied_input_embedding(model, mp_group, tp_meta=None):
+    """Replace the input embedding of ``model`` by a VocabParallelEmbedding (``tensor_parallel.vocab_parallel_embedding``).
+
+    Returns the replaced module's name, or None when the embedding is already vocabulary-parallel (tied to a
+    vocabulary-parallel output layer).
+    """
+    get_input_embeddings = getattr(model, "get_input_embeddings", None)
+    embedding = get_input_embeddings() if callable(get_input_embeddings) else None
+    if isinstance(embedding, VocabParallelEmbedding):
+        return None
+    if not isinstance(embedding, nn.Embedding):
+        raise ValueError("vocab_parallel_embedding needs a model whose get_input_embeddings() returns nn.Embedding, "
+                         f"got {type(embedding).__name__}")
+    for name, module in model.named_modules():
+        if module is not embedding and getattr(module, "weight", None) is embedding.weight:
+            raise NotImplementedError(f"vocab_parallel_embedding: the embedding weight is shared with {name!r}; a "
+                                      "tied embedding is sharded with vocab_parallel_lm_head instead")
+    name = next(name for name, module in model.named_modules() if module is embedding)
+    parent_name, _, child_name = name.rpartition(".")
+    parent = model.get_submodule(parent_name) if parent_name else model
+    sharded = VocabParallelEmbedding(embedding, mp_group, name=name, tp_meta=tp_meta)
+    setattr(sharded, "replaced", True)
+    setattr(parent, child_name, sharded)
+    return name

@@ -1054,6 +1054,12 @@ class DeepSpeedEngine(Module):
         hf_tp_plan = _get_hf_tp_plan(model)
 
         def finalize_autotp(autotp=None, attach_uc_metadata=False, require_vocab_parallel_lm_head=False):
+            if tp_config.vocab_parallel_embedding:
+                from deepspeed.module_inject.layers import shard_untied_input_embedding
+                sharded = shard_untied_input_embedding(model, tp_config.tensor_parallel.tp_group,
+                                                       getattr(autotp, "tp_meta", None))
+                if sharded is not None:
+                    log_dist(f"AutoTP: vocab_parallel_embedding shards '{sharded}' along the vocabulary", ranks=[0])
             if autotp is not None:
                 autotp.register_replicated_grad_hooks(model)
 

@@ -1922,3 +1922,86 @@ class TestScatterGatherDuality(DistributedTest):
         local_gradient = torch.full_like(local, rank + 1)
         restored.backward(local_gradient)
         torch.testing.assert_close(local.grad, local_gradient)
+
+
+class TestVocabParallelEmbedding(DistributedTest):
+    """tensor_parallel.vocab_parallel_embedding: an untied input embedding is sharded along the vocabulary."""
+    world_size = 2
+    reuse_dist_env = False
+
+    def _model(self, tie_word_embeddings):
+        transformers = pytest.importorskip("transformers")
+        config = transformers.LlamaConfig(vocab_size=64,
+                                          hidden_size=32,
+                                          intermediate_size=64,
+                                          num_hidden_layers=2,
+                                          num_attention_heads=4,
+                                          num_key_value_heads=2,
+                                          max_position_embeddings=32,
+                                          tie_word_embeddings=tie_word_embeddings)
+        torch.manual_seed(0)
+        return transformers.LlamaForCausalLM(config).to(get_accelerator().current_device_name())
+
+    def _config(self, zero_stage, vocab_parallel_lm_head=None):
+        tp_config = {"autotp_size": self.world_size, "vocab_parallel_embedding": True}
+        if vocab_parallel_lm_head is not None:
+            tp_config["vocab_parallel_lm_head"] = vocab_parallel_lm_head
+        return {
+            "train_micro_batch_size_per_gpu": 1,
+            "optimizer": {
+                "type": "SGD",
+                "params": {
+                    "lr": 0.1
+                }
+            },
+            "zero_allow_untested_optimizer": True,
+            # The reference does not clip; DeepSpeed clips the global gradient norm to 1.0 by default.
+            "gradient_clipping": 0.0,
+            "zero_optimization": {
+                "stage": zero_stage
+            },
+            "tensor_parallel": tp_config,
+        }
+
+    @pytest.mark.parametrize("zero_stage", [0, 1])
+    def test_matches_single_device_training(self, zero_stage):
+        skip_on_device()
+        model = self._model(tie_word_embeddings=False)
+        reference = deepcopy(model)
+        reference_optimizer = torch.optim.SGD(reference.parameters(), lr=0.1)
+        engine, _, _, _ = deepspeed.initialize(model=model,
+                                               model_parameters=model.parameters(),
+                                               config=self._config(zero_stage))
+        embedding = engine.module.get_input_embeddings()
+        assert isinstance(embedding, VocabParallelEmbedding)
+        assert embedding.weight.shape[0] == reference.config.vocab_size // self.world_size
+
+        # Tokens from both halves of the vocabulary, so that both ranks' rows are looked up and trained.
+        input_ids = torch.tensor([[0, 5, 33, 63, 17, 40, 2, 31]], device=get_accelerator().current_device_name())
+        for _ in range(2):
+            expected = reference(input_ids=input_ids, labels=input_ids)
+            output = engine(input_ids=input_ids, labels=input_ids)
+            torch.testing.assert_close(output.loss, expected.loss)
+            expected.loss.backward()
+            reference_optimizer.step()
+            reference_optimizer.zero_grad()
+            engine.backward(output.loss)
+            engine.step()
+
+        weight = embedding.weight.detach().clone()
+        embedding.gather_params([weight])
+        torch.testing.assert_close(weight, reference.get_input_embeddings().weight)
+
+    def test_rejects_tied_embedding_without_vocab_parallel_lm_head(self):
+        """Sharding a tied embedding on its own would untie it from the output layer."""
+        skip_on_device()
+        model = self._model(tie_word_embeddings=True)
+        # pytest.raises inside a DistributedTest worker hangs the run when nothing is raised.
+        try:
+            deepspeed.initialize(model=model,
+                                 model_parameters=model.parameters(),
+                                 config=self._config(zero_stage=1, vocab_parallel_lm_head=False))
+            raised = False
+        except NotImplementedError as error:
+            raised = "vocab_parallel_lm_head" in str(error)
+        assert raised

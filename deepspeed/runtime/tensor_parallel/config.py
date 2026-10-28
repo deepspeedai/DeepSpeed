@@ -56,6 +56,13 @@ class TPTrainingConfig(DeepSpeedConfigModel):
     vocab_parallel_ce_backend: Literal["torch", "liger"] = "torch"
     """Optional Liger CE acceleration; the PyTorch reference remains the default."""
 
+    vocab_parallel_embedding: bool = False
+    """
+    Shard an input embedding that is not tied to the output layer along the vocabulary: each rank keeps 1/tp of the
+    rows, looks up the tokens in its part and the partial results are summed over the tensor-parallel group. A tied
+    embedding follows vocab_parallel_lm_head instead.
+    """
+
     tensor_parallel: TPConfig = Field({}, alias="tp")
     """
     Configuration for tensor parallelism used to split the model across several
