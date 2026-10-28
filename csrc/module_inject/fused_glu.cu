@@ -945,6 +945,8 @@ static constexpr int GRP_KT_GLU = 64;   // GLU stages gate+up tiles: smaller KT 
 
 constexpr int GRP_SMEM_BYTES = (2 * GRP_MT * (GRP_KT + 8) + 2 * GRP_NT * (GRP_KT + 8)) * 2 +
                                GRP_MT * (GRP_NT + 8) * 4;
+constexpr int GRP_SMEM_BYTES_AMPERE = (2 * GRP_MT * (GRP_KT + 8) + 2 * GRP_NT_AMPERE * (GRP_KT + 8)) * 2 +
+                                      GRP_MT * (GRP_NT_AMPERE + 8) * 4;
 constexpr int GRP_GLU_SMEM_BYTES = (2 * GRP_MT * (GRP_KT_GLU + 8) + 4 * GRP_NT * (GRP_KT_GLU + 8)) * 2 +
                                    2 * GRP_MT * (GRP_NT + 8) * 4;
 
@@ -1258,10 +1260,12 @@ std::vector<at::Tensor> grouped_gemm_impl(at::Tensor x,
     static bool grp_attr_set = false;
     if (!grp_attr_set) {
         cudaFuncSetAttribute(grouped_linear_kernel<GRP_NT>, cudaFuncAttributeMaxDynamicSharedMemorySize, GRP_SMEM_BYTES);
-        cudaFuncSetAttribute(grouped_linear_kernel<GRP_NT_AMPERE>, cudaFuncAttributeMaxDynamicSharedMemorySize, GRP_SMEM_BYTES);
+        cudaFuncSetAttribute(grouped_linear_kernel<GRP_NT_AMPERE>, cudaFuncAttributeMaxDynamicSharedMemorySize, GRP_SMEM_BYTES_AMPERE);
         grp_attr_set = true;
     }
-    if (_is_ampere) {grouped_linear_kernel<GRP_NT_AMPERE><<<blocks, GRP_TPB, GRP_SMEM_BYTES, stream.stream()>>>(
+    if (_is_ampere) {
+        int blocks_amp = (total + GRP_NT_AMPERE - 1) / GRP_NT_AMPERE;
+        grouped_linear_kernel<GRP_NT_AMPERE><<<blocks_amp, GRP_TPB, GRP_SMEM_BYTES_AMPERE, stream.stream()>>>(
             (const __nv_bfloat16*)x.data_ptr(),
             (const __nv_bfloat16*)(n_mat > 0 ? w0 : dummy).data_ptr(),
             (const __nv_bfloat16*)(n_mat > 1 ? w1 : dummy).data_ptr(),
