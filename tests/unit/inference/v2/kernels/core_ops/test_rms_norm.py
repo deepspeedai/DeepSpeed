@@ -45,7 +45,7 @@ def _rms_norm_testing_helper(rows: int, channels: int, do_residual: bool, dtype:
         ref_residual, ref_output = reference_rms_pre_norm(vals, residual_in, gamma, epsilon)
 
         kernel = CUDARMSPreNorm(channels, t_dtype, epsilon=epsilon)
-        ds_out = torch.empty_like(ds_residual)
+        ds_out = torch.full_like(ds_residual, float('nan'))
 
         kernel(ds_residual, ds_out, residual_in, vals, gamma)
 
@@ -56,7 +56,7 @@ def _rms_norm_testing_helper(rows: int, channels: int, do_residual: bool, dtype:
         ref_output = reference_rms_norm(vals, gamma, epsilon)
 
         kernel = CUDARMSNorm(channels, t_dtype, epsilon=epsilon)
-        ds_out = torch.empty_like(vals)
+        ds_out = torch.full_like(vals, float('nan'))
 
         kernel(ds_out, vals, gamma)
 
@@ -75,3 +75,11 @@ def test_rms_dtypes(dtype: DtypeEnum, do_residual: bool) -> None:
 @pytest.mark.parametrize("do_residual", [True, False])
 def test_rms_shapes(rows: int, cols: int, do_residual: bool) -> None:
     _rms_norm_testing_helper(rows, cols, do_residual, DtypeEnum.fp16)
+
+
+@pytest.mark.inference_v2_ops
+@pytest.mark.parametrize("cols", [72, 96, 128])
+@pytest.mark.parametrize("do_residual", [True, False])
+def test_rms_small_hidden_fp32(cols: int, do_residual: bool) -> None:
+    # fp32 rows of 65-128 elements use 32 threads per row group.
+    _rms_norm_testing_helper(64, cols, do_residual, DtypeEnum.fp32)

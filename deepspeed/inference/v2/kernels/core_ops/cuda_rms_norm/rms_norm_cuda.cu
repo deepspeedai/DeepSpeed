@@ -227,6 +227,8 @@ void launch_rms_norm(T* norm_output,
             LAUNCH_ALL_RMS_NORM(1, 8, maxThreads);
         } else if (threads_per_group == 16) {
             LAUNCH_ALL_RMS_NORM(1, 16, maxThreads);
+        } else if (threads_per_group == 32) {
+            LAUNCH_ALL_RMS_NORM(1, 32, maxThreads);
         }
     } else if (external_unRoll == 1) {
         // 129 - 4096 elems
