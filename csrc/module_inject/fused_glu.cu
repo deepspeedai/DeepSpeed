@@ -1251,42 +1251,22 @@ std::vector<at::Tensor> grouped_gemm_impl(at::Tensor x,
         outs.push_back(o0);
     }
     at::Tensor dummy = o0.defined() ? o0 : x;  // unused slots point at a live buffer
-        static int _smem_per_block = -1;
-    if (_smem_per_block < 0) {
-        int _dev; cudaGetDevice(&_dev);
-        cudaDeviceGetAttribute(&_smem_per_block, cudaDevAttrMaxSharedMemoryPerBlockOptin, _dev);
-    }
-    const bool _is_ampere = (_smem_per_block > 100 * 1024);  // A100=164KB, Ada=99KB
-    static bool grp_attr_set = false;
+        static bool grp_attr_set = false;
     if (!grp_attr_set) {
         cudaFuncSetAttribute(grouped_linear_kernel<GRP_NT>, cudaFuncAttributeMaxDynamicSharedMemorySize, GRP_SMEM_BYTES);
-        cudaFuncSetAttribute(grouped_linear_kernel<GRP_NT_AMPERE>, cudaFuncAttributeMaxDynamicSharedMemorySize, GRP_SMEM_BYTES_AMPERE);
         grp_attr_set = true;
     }
-    if (_is_ampere) {
-        int blocks_amp = (total + GRP_NT_AMPERE - 1) / GRP_NT_AMPERE;
-        grouped_linear_kernel<GRP_NT_AMPERE><<<blocks_amp, GRP_TPB, GRP_SMEM_BYTES_AMPERE, stream.stream()>>>(
-            (const __nv_bfloat16*)x.data_ptr(),
-            (const __nv_bfloat16*)(n_mat > 0 ? w0 : dummy).data_ptr(),
-            (const __nv_bfloat16*)(n_mat > 1 ? w1 : dummy).data_ptr(),
-            (const __nv_bfloat16*)(n_mat > 2 ? w2 : dummy).data_ptr(),
-            (const __nv_bfloat16*)(n_mat > 3 ? w3 : dummy).data_ptr(),
-            (__nv_bfloat16*)(want_separate && o0.defined() ? o0 : o0).data_ptr(),
-            (__nv_bfloat16*)(want_separate && o1.defined() ? o1 : o0).data_ptr(),
-            (__nv_bfloat16*)(want_separate && o2.defined() ? o2 : o0).data_ptr(),
-            (__nv_bfloat16*)(want_separate && o3.defined() ? o3 : o0).data_ptr(),
-            fs[0], fs[1], fs[2], fs[3], M, K, total, want_separate ? 0 : 1);}
-        else {grouped_linear_kernel<GRP_NT><<<blocks, GRP_TPB, GRP_SMEM_BYTES, stream.stream()>>>(
-            (const __nv_bfloat16*)x.data_ptr(),
-            (const __nv_bfloat16*)(n_mat > 0 ? w0 : dummy).data_ptr(),
-            (const __nv_bfloat16*)(n_mat > 1 ? w1 : dummy).data_ptr(),
-            (const __nv_bfloat16*)(n_mat > 2 ? w2 : dummy).data_ptr(),
-            (const __nv_bfloat16*)(n_mat > 3 ? w3 : dummy).data_ptr(),
-            (__nv_bfloat16*)(want_separate && o0.defined() ? o0 : o0).data_ptr(),
-            (__nv_bfloat16*)(want_separate && o1.defined() ? o1 : o0).data_ptr(),
-            (__nv_bfloat16*)(want_separate && o2.defined() ? o2 : o0).data_ptr(),
-            (__nv_bfloat16*)(want_separate && o3.defined() ? o3 : o0).data_ptr(),
-            fs[0], fs[1], fs[2], fs[3], M, K, total, want_separate ? 0 : 1);}
+grouped_linear_kernel<GRP_NT><<<blocks, GRP_TPB, GRP_SMEM_BYTES, stream.stream()>>>(
+        (const __nv_bfloat16*)x.data_ptr(),
+        (const __nv_bfloat16*)(n_mat > 0 ? w0 : dummy).data_ptr(),
+        (const __nv_bfloat16*)(n_mat > 1 ? w1 : dummy).data_ptr(),
+        (const __nv_bfloat16*)(n_mat > 2 ? w2 : dummy).data_ptr(),
+        (const __nv_bfloat16*)(n_mat > 3 ? w3 : dummy).data_ptr(),
+        (__nv_bfloat16*)(want_separate && o0.defined() ? o0 : o0).data_ptr(),
+        (__nv_bfloat16*)(want_separate && o1.defined() ? o1 : o0).data_ptr(),
+        (__nv_bfloat16*)(want_separate && o2.defined() ? o2 : o0).data_ptr(),
+        (__nv_bfloat16*)(want_separate && o3.defined() ? o3 : o0).data_ptr(),
+        fs[0], fs[1], fs[2], fs[3], M, K, total, want_separate ? 0 : 1);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     return outs;
 }
