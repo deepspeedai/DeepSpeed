@@ -144,8 +144,10 @@ class DualWeightGluGEMV(torch.autograd.Function):
                 out = torch.empty(gate_w.shape[0], dtype=hidden.dtype, device=hidden.device)
                 kernel_op.dual_gemv_silu_mul(hidden, gate_w, up_w, out)
                 return out
-            if hidden.dim() == 2 and 1 < hidden.shape[0] <= 32:
-                return kernel_op.dual_gemm_silu_mul(hidden, gate_w, up_w)
+            if hidden.dim() == 2:
+                # Route through grouped_linear: the backend dispatcher owns
+                # the WMMA-vs-composite crossover (arch-adaptive since loop 2)
+                return kernel_op.grouped_linear(hidden, [gate_w, up_w], True)[0]
         from deepspeed.module_inject.kernel_reference import dual_gemv_silu_mul
         return dual_gemv_silu_mul(hidden, gate_w, up_w)
 
