@@ -937,7 +937,8 @@ std::vector<at::Tensor> triple_gemv(at::Tensor hidden,
 // activation tile rides in shared memory). Replaces the separate cuBLAS
 // GEMMs the composite fallback issues per matrix; no weight copies.
 static constexpr int GRP_MT = 32;   // max batch rows
-static constexpr int GRP_NT = 64;   // output columns per block (2 WMMA tiles per warp)
+static constexpr int GRP_NT = 64;        // Ada default (2 WMMA tiles per warp)
+static constexpr int GRP_NT_AMPERE = 128;  // A100: more smem (164KB) + bandwidth
 static constexpr int GRP_KT = 128;  // k-chunk staged through smem
 static constexpr int GRP_TPB = 256;      // threads per block (8 warps, one 16x16 tile each)
 static constexpr int GRP_KT_GLU = 64;   // GLU stages gate+up tiles: smaller KT fits 99KB
@@ -973,6 +974,7 @@ __device__ __forceinline__ GrpSeg grp_map_row(int row, int f0, int f1, int f2, i
     return s;
 }
 
+template<int NT_TILE>
 __global__ void grouped_linear_kernel(const __nv_bfloat16* __restrict__ x,
                                       const __nv_bfloat16* __restrict__ w0,
                                       const __nv_bfloat16* __restrict__ w1,
@@ -997,16 +999,16 @@ __global__ void grouped_linear_kernel(const __nv_bfloat16* __restrict__ x,
     const int XS_STRIDE = GRP_KT + 8;
     __nv_bfloat16* xs = reinterpret_cast<__nv_bfloat16*>(smem_raw);
     __nv_bfloat16* ws = xs + 2 * GRP_MT * XS_STRIDE;
-    float* out_s = reinterpret_cast<float*>(ws + 2 * GRP_NT * XS_STRIDE);
-    __shared__ GrpSeg seg_tab[GRP_NT];
+    float* out_s = reinterpret_cast<float*>(ws + 2 * NT_TILE * XS_STRIDE);
+    __shared__ GrpSeg seg_tab[NT_TILE];
 
     int tid = threadIdx.x;
     int warp = tid >> 5;
     int lane = tid & 31;
-    int n0 = blockIdx.x * GRP_NT;
+    int n0 = blockIdx.x * NT_TILE;
     if (n0 >= total_out) return;
 
-    for (int c = tid; c < GRP_NT; c += GRP_TPB) {
+    for (int c = tid; c < NT_TILE; c += GRP_TPB) {
         seg_tab[c] = (n0 + c < total_out) ? grp_map_row(n0 + c, f0, f1, f2, f3, 4) : GrpSeg{0, 0};
     }
     __syncthreads();
@@ -1026,12 +1028,12 @@ __global__ void grouped_linear_kernel(const __nv_bfloat16* __restrict__ x,
         int kn = min(GRP_KT, K - k0);
         int kn8 = kn >> 3;
         __nv_bfloat16* xbuf = xs + (long)(c & 1) * GRP_MT * XS_STRIDE;
-        __nv_bfloat16* wbuf = ws + (long)(c & 1) * GRP_NT * XS_STRIDE;
+        __nv_bfloat16* wbuf = ws + (long)(c & 1) * NT_TILE * XS_STRIDE;
         for (int idx = tid; idx < M * kn8; idx += GRP_TPB) {
             int m = idx / kn8, j = idx % kn8;
             __pipeline_memcpy_async(xbuf + (long)m * XS_STRIDE + j * 8, x + (long)m * K + k0 + (long)j * 8, 16);
         }
-        for (int idx = tid; idx < GRP_NT * kn8; idx += GRP_TPB) {
+        for (int idx = tid; idx < NT_TILE * kn8; idx += GRP_TPB) {
             int r = idx / kn8, j = idx % kn8;
             if (n0 + r < total_out) {
                 GrpSeg g = seg_tab[r];
@@ -1051,19 +1053,19 @@ __global__ void grouped_linear_kernel(const __nv_bfloat16* __restrict__ x,
         if (kn < GRP_KT) {
             // partial final chunk: zero the tail so wmma sees zeros
             __nv_bfloat16* xbuf = xs + (long)(c & 1) * GRP_MT * XS_STRIDE;
-            __nv_bfloat16* wbuf = ws + (long)(c & 1) * GRP_NT * XS_STRIDE;
+            __nv_bfloat16* wbuf = ws + (long)(c & 1) * NT_TILE * XS_STRIDE;
             for (int idx = tid; idx < GRP_MT * GRP_KT; idx += GRP_TPB) {
                 int r = idx / GRP_KT, cc = idx % GRP_KT;
                 if (cc >= kn && r < M) xbuf[r * XS_STRIDE + cc] = __float2bfloat16_rn(0.f);
             }
-            for (int idx = tid; idx < GRP_NT * GRP_KT; idx += GRP_TPB) {
+            for (int idx = tid; idx < NT_TILE * GRP_KT; idx += GRP_TPB) {
                 int r = idx / GRP_KT, cc = idx % GRP_KT;
                 if (cc >= kn && n0 + r < total_out) wbuf[r * XS_STRIDE + cc] = __float2bfloat16_rn(0.f);
             }
             __syncthreads();
         }
         __nv_bfloat16* xbuf = xs + (long)(c & 1) * GRP_MT * XS_STRIDE;
-        __nv_bfloat16* wbuf = ws + (long)(c & 1) * GRP_NT * XS_STRIDE;
+        __nv_bfloat16* wbuf = ws + (long)(c & 1) * NT_TILE * XS_STRIDE;
 #pragma unroll 4
         for (int kk = 0; kk < GRP_KT; kk += 16) {
             wmma::load_matrix_sync(fa, xbuf + m0w * XS_STRIDE + kk, XS_STRIDE);
@@ -1073,16 +1075,16 @@ __global__ void grouped_linear_kernel(const __nv_bfloat16* __restrict__ x,
         __syncthreads();
     }
 
-    wmma::store_matrix_sync(out_s + m0w * (GRP_NT + 8) + n0w, acc, GRP_NT + 8, wmma::mem_row_major);
+    wmma::store_matrix_sync(out_s + m0w * (NT_TILE + 8) + n0w, acc, NT_TILE + 8, wmma::mem_row_major);
     __syncthreads();
 
     __nv_bfloat16* ogs[4] = {o0, o1, o2, o3};
     int fs2[4] = {f0, f1, f2, f3};
-    for (int idx = tid; idx < M * GRP_NT; idx += GRP_TPB) {
-        int m = idx / GRP_NT, c = idx % GRP_NT;
+    for (int idx = tid; idx < M * NT_TILE; idx += GRP_TPB) {
+        int m = idx / NT_TILE, c = idx % NT_TILE;
         if (n0 + c >= total_out) continue;
         GrpSeg g = seg_tab[c];
-        float v = out_s[m * (GRP_NT + 8) + c];
+        float v = out_s[m * (NT_TILE + 8) + c];
         __nv_bfloat16* o = ogs[g.mat];
         if (concat_mode) {
             int base = 0;
@@ -1097,6 +1099,7 @@ __global__ void grouped_linear_kernel(const __nv_bfloat16* __restrict__ x,
 // Paired-matrix GLU GEMM: out = silu(x@g^T) * (x@u^T). cp.async tile
 // stream: per k-chunk two weight tiles (gate, up) flow through a double
 // buffer while the x tile rides its own pair; compute overlaps loads.
+template<int NT_TILE>
 __global__ void glu_gemm_kernel(const __nv_bfloat16* __restrict__ x,
                                 const __nv_bfloat16* __restrict__ g_w,
                                 const __nv_bfloat16* __restrict__ u_w,
@@ -1112,12 +1115,12 @@ __global__ void glu_gemm_kernel(const __nv_bfloat16* __restrict__ x,
     __nv_bfloat16* xs = reinterpret_cast<__nv_bfloat16*>(smem_raw);
     __nv_bfloat16* ws = xs + 2 * GRP_MT * XS_STRIDE;
     // ws holds 2 slots x (gate,up) tiles = 4*NT rows before the outputs
-    float* out_s = reinterpret_cast<float*>(ws + 4 * GRP_NT * XS_STRIDE);
-    float* out_u = out_s + GRP_MT * (GRP_NT + 8);
+    float* out_s = reinterpret_cast<float*>(ws + 4 * NT_TILE * XS_STRIDE);
+    float* out_u = out_s + GRP_MT * (NT_TILE + 8);
 
     int tid = threadIdx.x;
     int warp = tid >> 5;
-    int n0 = blockIdx.x * GRP_NT;
+    int n0 = blockIdx.x * NT_TILE;
     if (n0 >= N) return;
     int m0w = (warp >> 2) * (GRP_MT / 2);
     int n0w = (warp & 3) * 16;
@@ -1137,13 +1140,13 @@ __global__ void glu_gemm_kernel(const __nv_bfloat16* __restrict__ x,
         int kn = min(GRP_KT_GLU, K - k0);
         int kn8 = kn >> 3;
         __nv_bfloat16* xbuf = xs + (long)(c & 1) * GRP_MT * XS_STRIDE;
-        __nv_bfloat16* gw_buf = ws + (long)(c & 1) * 2 * GRP_NT * XS_STRIDE;
-        __nv_bfloat16* uw_buf = gw_buf + (long)GRP_NT * XS_STRIDE;
+        __nv_bfloat16* gw_buf = ws + (long)(c & 1) * 2 * NT_TILE * XS_STRIDE;
+        __nv_bfloat16* uw_buf = gw_buf + (long)NT_TILE * XS_STRIDE;
         for (int idx = tid; idx < M * kn8; idx += GRP_TPB) {
             int m = idx / kn8, j = idx % kn8;
             __pipeline_memcpy_async(xbuf + (long)m * XS_STRIDE + j * 8, x + (long)m * K + k0 + (long)j * 8, 16);
         }
-        for (int idx = tid; idx < GRP_NT * kn8; idx += GRP_TPB) {
+        for (int idx = tid; idx < NT_TILE * kn8; idx += GRP_TPB) {
             int r = idx / kn8, j = idx % kn8;
             if (n0 + r < N) {
                 __pipeline_memcpy_async(gw_buf + (long)r * XS_STRIDE + j * 8,
@@ -1158,9 +1161,9 @@ __global__ void glu_gemm_kernel(const __nv_bfloat16* __restrict__ x,
                 int r = idx / GRP_KT_GLU, cc = idx % GRP_KT_GLU;
                 if (cc >= kn && r < M) xbuf[r * XS_STRIDE + cc] = __float2bfloat16_rn(0.f);
             }
-            for (int idx = tid; idx < 2 * GRP_NT * GRP_KT_GLU; idx += GRP_TPB) {
+            for (int idx = tid; idx < 2 * NT_TILE * GRP_KT_GLU; idx += GRP_TPB) {
                 int r = idx / GRP_KT_GLU, cc = idx % GRP_KT_GLU;
-                if (cc >= kn && n0 + (r % GRP_NT) < N) gw_buf[r * XS_STRIDE + cc] = __float2bfloat16_rn(0.f);
+                if (cc >= kn && n0 + (r % NT_TILE) < N) gw_buf[r * XS_STRIDE + cc] = __float2bfloat16_rn(0.f);
             }
         }
         __pipeline_commit();
@@ -1172,8 +1175,8 @@ __global__ void glu_gemm_kernel(const __nv_bfloat16* __restrict__ x,
         __pipeline_wait_prior(c + 1 < nchunks ? 1 : 0);
         __syncthreads();
         __nv_bfloat16* xbuf = xs + (long)(c & 1) * GRP_MT * XS_STRIDE;
-        __nv_bfloat16* gw_buf = ws + (long)(c & 1) * 2 * GRP_NT * XS_STRIDE;
-        __nv_bfloat16* uw_buf = gw_buf + (long)GRP_NT * XS_STRIDE;
+        __nv_bfloat16* gw_buf = ws + (long)(c & 1) * 2 * NT_TILE * XS_STRIDE;
+        __nv_bfloat16* uw_buf = gw_buf + (long)NT_TILE * XS_STRIDE;
 #pragma unroll 4
         for (int kk = 0; kk < GRP_KT_GLU; kk += 16) {
             wmma::load_matrix_sync(fa, xbuf + m0w * XS_STRIDE + kk, XS_STRIDE);
@@ -1189,14 +1192,14 @@ __global__ void glu_gemm_kernel(const __nv_bfloat16* __restrict__ x,
         __syncthreads();
     }
 
-    wmma::store_matrix_sync(out_s + m0w * (GRP_NT + 8) + n0w, accg, GRP_NT + 8, wmma::mem_row_major);
-    wmma::store_matrix_sync(out_u + m0w * (GRP_NT + 8) + n0w, accu, GRP_NT + 8, wmma::mem_row_major);
+    wmma::store_matrix_sync(out_s + m0w * (NT_TILE + 8) + n0w, accg, NT_TILE + 8, wmma::mem_row_major);
+    wmma::store_matrix_sync(out_u + m0w * (NT_TILE + 8) + n0w, accu, NT_TILE + 8, wmma::mem_row_major);
     __syncthreads();
 
-    for (int idx = tid; idx < M * GRP_NT; idx += GRP_TPB) {
-        int m = idx / GRP_NT, c = idx % GRP_NT;
+    for (int idx = tid; idx < M * NT_TILE; idx += GRP_TPB) {
+        int m = idx / NT_TILE, c = idx % NT_TILE;
         if (n0 + c < N) {
-            float v = silu_f(out_s[m * (GRP_NT + 8) + c]) * out_u[m * (GRP_NT + 8) + c];
+            float v = silu_f(out_s[m * (NT_TILE + 8) + c]) * out_u[m * (NT_TILE + 8) + c];
             out[(long)m * N + n0 + c] = __float2bfloat16_rn(v);
         }
     }
@@ -1231,7 +1234,7 @@ std::vector<at::Tensor> grouped_gemm_impl(at::Tensor x,
         total += fs[i];
     }
     auto stream = at::cuda::getCurrentCUDAStream();
-    int blocks = (total + GRP_NT - 1) / GRP_NT;
+    int blocks = (total + GRP_NT - 1) / GRP_NT;  // grid covers both variants
     auto opts = x.options();
     std::vector<at::Tensor> outs;
     at::Tensor o0, o1, o2, o3;
@@ -1246,22 +1249,40 @@ std::vector<at::Tensor> grouped_gemm_impl(at::Tensor x,
         outs.push_back(o0);
     }
     at::Tensor dummy = o0.defined() ? o0 : x;  // unused slots point at a live buffer
-        static bool grp_attr_set = false;
+        static int _smem_per_block = -1;
+    if (_smem_per_block < 0) {
+        int _dev; cudaGetDevice(&_dev);
+        cudaDeviceGetAttribute(&_smem_per_block, cudaDevAttrMaxSharedMemoryPerBlockOptin, _dev);
+    }
+    const bool _is_ampere = (_smem_per_block > 100 * 1024);  // A100=164KB, Ada=99KB
+    static bool grp_attr_set = false;
     if (!grp_attr_set) {
-        cudaFuncSetAttribute(grouped_linear_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, GRP_SMEM_BYTES);
+        cudaFuncSetAttribute(grouped_linear_kernel<GRP_NT>, cudaFuncAttributeMaxDynamicSharedMemorySize, GRP_SMEM_BYTES);
+        cudaFuncSetAttribute(grouped_linear_kernel<GRP_NT_AMPERE>, cudaFuncAttributeMaxDynamicSharedMemorySize, GRP_SMEM_BYTES);
         grp_attr_set = true;
     }
-    grouped_linear_kernel<<<blocks, GRP_TPB, GRP_SMEM_BYTES, stream.stream()>>>(
-        (const __nv_bfloat16*)x.data_ptr(),
-        (const __nv_bfloat16*)(n_mat > 0 ? w0 : dummy).data_ptr(),
-        (const __nv_bfloat16*)(n_mat > 1 ? w1 : dummy).data_ptr(),
-        (const __nv_bfloat16*)(n_mat > 2 ? w2 : dummy).data_ptr(),
-        (const __nv_bfloat16*)(n_mat > 3 ? w3 : dummy).data_ptr(),
-        (__nv_bfloat16*)(want_separate && o0.defined() ? o0 : o0).data_ptr(),
-        (__nv_bfloat16*)(want_separate && o1.defined() ? o1 : o0).data_ptr(),
-        (__nv_bfloat16*)(want_separate && o2.defined() ? o2 : o0).data_ptr(),
-        (__nv_bfloat16*)(want_separate && o3.defined() ? o3 : o0).data_ptr(),
-        fs[0], fs[1], fs[2], fs[3], M, K, total, want_separate ? 0 : 1);
+    if (_is_ampere) {grouped_linear_kernel<GRP_NT_AMPERE><<<blocks, GRP_TPB, GRP_SMEM_BYTES, stream.stream()>>>(
+            (const __nv_bfloat16*)x.data_ptr(),
+            (const __nv_bfloat16*)(n_mat > 0 ? w0 : dummy).data_ptr(),
+            (const __nv_bfloat16*)(n_mat > 1 ? w1 : dummy).data_ptr(),
+            (const __nv_bfloat16*)(n_mat > 2 ? w2 : dummy).data_ptr(),
+            (const __nv_bfloat16*)(n_mat > 3 ? w3 : dummy).data_ptr(),
+            (__nv_bfloat16*)(want_separate && o0.defined() ? o0 : o0).data_ptr(),
+            (__nv_bfloat16*)(want_separate && o1.defined() ? o1 : o0).data_ptr(),
+            (__nv_bfloat16*)(want_separate && o2.defined() ? o2 : o0).data_ptr(),
+            (__nv_bfloat16*)(want_separate && o3.defined() ? o3 : o0).data_ptr(),
+            fs[0], fs[1], fs[2], fs[3], M, K, total, want_separate ? 0 : 1);}
+        else {grouped_linear_kernel<GRP_NT><<<blocks, GRP_TPB, GRP_SMEM_BYTES, stream.stream()>>>(
+            (const __nv_bfloat16*)x.data_ptr(),
+            (const __nv_bfloat16*)(n_mat > 0 ? w0 : dummy).data_ptr(),
+            (const __nv_bfloat16*)(n_mat > 1 ? w1 : dummy).data_ptr(),
+            (const __nv_bfloat16*)(n_mat > 2 ? w2 : dummy).data_ptr(),
+            (const __nv_bfloat16*)(n_mat > 3 ? w3 : dummy).data_ptr(),
+            (__nv_bfloat16*)(want_separate && o0.defined() ? o0 : o0).data_ptr(),
+            (__nv_bfloat16*)(want_separate && o1.defined() ? o1 : o0).data_ptr(),
+            (__nv_bfloat16*)(want_separate && o2.defined() ? o2 : o0).data_ptr(),
+            (__nv_bfloat16*)(want_separate && o3.defined() ? o3 : o0).data_ptr(),
+            fs[0], fs[1], fs[2], fs[3], M, K, total, want_separate ? 0 : 1);}
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     return outs;
 }
@@ -1421,10 +1442,10 @@ at::Tensor dual_gemm_silu_mul(at::Tensor x, at::Tensor gate_w, at::Tensor up_w)
     int blocks = (N + GRP_NT - 1) / GRP_NT;
         static bool glu_attr_set = false;
     if (!glu_attr_set) {
-        cudaFuncSetAttribute(glu_gemm_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, GRP_GLU_SMEM_BYTES);
+        cudaFuncSetAttribute(glu_gemm_kernel<GRP_NT>, cudaFuncAttributeMaxDynamicSharedMemorySize, GRP_GLU_SMEM_BYTES);
         glu_attr_set = true;
     }
-    glu_gemm_kernel<<<blocks, GRP_TPB, GRP_GLU_SMEM_BYTES, stream.stream()>>>((const __nv_bfloat16*)x.data_ptr(),
+    glu_gemm_kernel<GRP_NT><<<blocks, GRP_TPB, GRP_GLU_SMEM_BYTES, stream.stream()>>>((const __nv_bfloat16*)x.data_ptr(),
                                                              (const __nv_bfloat16*)gate_w.data_ptr(),
                                                              (const __nv_bfloat16*)up_w.data_ptr(),
                                                              (__nv_bfloat16*)out.data_ptr(), M, N, K);
