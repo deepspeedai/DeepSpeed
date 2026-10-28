@@ -5,6 +5,7 @@
 
 # tests directory-specific settings - this file is run automatically by pytest before any tests are run
 
+import inspect
 import sys
 import pytest
 import os
@@ -109,6 +110,27 @@ def pytest_runtest_teardown(item, nextitem):
         dist_test_class = item.cls()
         for num_procs, pool in dist_test_class._pool_cache.items():
             dist_test_class._close_pool(pool, num_procs, force=True)
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_pycollect_makeitem(collector, name, obj):
+    # Pytest 8 only registers FixtureFunctionDefinition objects. The
+    # _pytestfixturefunction marker on DistributedFixture is ignored, so a test
+    # that requests the class errors with "fixture not found" before the
+    # launcher can skip for an unavailable world size.
+    if not inspect.isclass(obj) or not getattr(obj, "is_dist_fixture", False):
+        return None
+    if obj.__name__ == "DistributedFixture":
+        return None
+
+    def _launch(request, fixture_cls=obj):
+        fixture_cls()(request)
+
+    _launch.__name__ = name
+    fixture_def = pytest.fixture(name=name)(_launch)
+    holder = type("_DistributedFixtureHolder", (), {name: fixture_def})
+    collector.session._fixturemanager.parsefactories(holder, nodeid=collector.nodeid)
+    return None
 
 
 @pytest.hookimpl(tryfirst=True)
