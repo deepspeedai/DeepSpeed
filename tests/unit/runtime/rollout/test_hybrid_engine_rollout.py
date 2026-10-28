@@ -110,8 +110,6 @@ def test_continuous_generation_rejects_unsupported_inputs():
         rollout.generate(empty_request, SamplingConfig(max_new_tokens=2, continuous_batch_size=1))
     with pytest.raises(ValueError, match="positive"):
         rollout.generate(request, SamplingConfig(max_new_tokens=2, continuous_batch_size=0))
-    with pytest.raises(ValueError, match="greedy"):
-        rollout.generate(request, SamplingConfig(max_new_tokens=2, temperature=0.5, continuous_batch_size=1))
 
 
 @pytest.mark.parametrize(
@@ -789,6 +787,10 @@ def test_continuous_generation_refills_padded_prompts_after_trim():
     assert rollout.get_last_continuous_stats()["trim_count"] > 0
 
 
+def _argmax(logits):
+    return logits.argmax(dim=-1, keepdim=True)
+
+
 def test_continuous_generation_applies_repetition_penalty():
     request = RolloutRequest(torch.tensor([[0]]), torch.ones((1, 1), dtype=torch.long))
     responses = {0: [torch.tensor([[0]])]}
@@ -802,6 +804,7 @@ def test_continuous_generation_applies_repetition_penalty():
         {0: request},
         responses,
         module,
+        _argmax,
     )
 
     assert next_tokens.tolist() == [[1]]
@@ -818,9 +821,111 @@ def test_continuous_generation_treats_none_repetition_penalty_as_one():
         {0: request},
         responses,
         module,
+        _argmax,
     )
 
     assert next_tokens.tolist() == [[0]]
+
+
+def test_continuous_sampling_applies_repetition_penalty_before_warpers():
+    request = RolloutRequest(torch.tensor([[0]]), torch.ones((1, 1), dtype=torch.long))
+    responses = {0: [torch.tensor([[0]])]}
+    module = SimpleNamespace(generation_config=SimpleNamespace(repetition_penalty=1.5))
+    select = HybridEngineRollout._token_selector(SamplingConfig(max_new_tokens=1, temperature=1.0, top_k=1))
+
+    # generate() penalizes first: token 0 drops from 6 to 4, so top-k 1 keeps only token 1. Warping first would
+    # keep only token 0.
+    next_tokens = HybridEngineRollout._continuous_next_tokens(
+        torch.tensor([[6.0, 5.0]]),
+        (0, ),
+        {0: request},
+        responses,
+        module,
+        select,
+    )
+
+    assert next_tokens.tolist() == [[1]]
+
+
+def _reference_probs(logits, temperature, top_k, top_p):
+    """The distribution ``SamplingConfig`` describes, derived from ``logits`` independently of the rollout."""
+    scores = logits / temperature
+    if top_k > 0:
+        kth_score = scores.topk(top_k).values[-1]
+        scores = scores.masked_fill(scores < kth_score, float("-inf"))
+    probs = scores.softmax(dim=-1)
+    if top_p < 1.0:
+        sorted_probs, order = probs.sort(descending=True)
+        # A token is kept while the more likely tokens hold less than top_p of the mass.
+        keep_sorted = (sorted_probs.cumsum(dim=-1) - sorted_probs) < top_p
+        keep = torch.zeros_like(keep_sorted).scatter(0, order, keep_sorted)
+        probs = torch.where(keep, probs, torch.zeros_like(probs))
+        probs = probs / probs.sum()
+    return probs
+
+
+@pytest.mark.parametrize("temperature, top_k, top_p", [(1.0, -1, 1.0), (0.5, -1, 1.0), (1.0, 3, 1.0), (1.0, -1, 0.7),
+                                                       (0.7, 4, 0.9)])
+def test_token_selector_samples_the_configured_distribution(temperature, top_k, top_p):
+    logits = torch.tensor([2.0, 1.5, 1.0, 0.5, 0.0, -0.5, -1.0, -2.0])
+    expected = _reference_probs(logits, temperature, top_k, top_p)
+    select = HybridEngineRollout._token_selector(
+        SamplingConfig(max_new_tokens=1, temperature=temperature, top_k=top_k, top_p=top_p))
+    draws = 20000
+
+    torch.manual_seed(0)
+    tokens = select(logits.expand(draws, -1)).squeeze(1)
+
+    observed = torch.bincount(tokens, minlength=logits.numel()).float() / draws
+    assert (observed[expected == 0] == 0).all(), "sampled a token outside the top-k / top-p support"
+    tolerance = 4 * (expected * (1 - expected) / draws).sqrt() + 1e-6
+    assert ((observed - expected).abs() <= tolerance).all(), f"observed {observed}, expected {expected}"
+
+
+def test_token_selector_is_argmax_without_temperature():
+    logits = torch.tensor([[0.1, 3.0, 2.0], [5.0, -1.0, 4.9]])
+    select = HybridEngineRollout._token_selector(SamplingConfig(max_new_tokens=1, temperature=0))
+
+    assert select(logits).tolist() == [[1], [0]]
+
+
+def test_continuous_generation_samples_when_temperature_is_set():
+
+    class TiedLogitsModel(torch.nn.Module):
+        """Tokens 7 and 8 share the top logit at every position, so greedy decoding always picks 7."""
+        _supports_cache_class = True
+
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.zeros(1))
+            self.config = PretrainedConfig(
+                max_position_embeddings=32,
+                num_hidden_layers=1,
+                num_attention_heads=1,
+                num_key_value_heads=1,
+                hidden_size=1,
+                head_dim=1,
+            )
+
+        def forward(self, input_ids, attention_mask, past_key_values=None, use_cache=True, **kwargs):
+            states = input_ids[:, None, :, None].to(dtype=torch.float32)
+            past_key_values.update(states, states, layer_idx=0, cache_kwargs=kwargs)
+            logits = torch.zeros((input_ids.shape[0], input_ids.shape[1], 16))
+            logits[..., 7] = 5.0
+            logits[..., 8] = 5.0
+            return SimpleNamespace(logits=logits, past_key_values=past_key_values)
+
+    rollout = HybridEngineRollout(SimpleNamespace(module=TiedLogitsModel()),
+                                  SimpleNamespace(pad_token_id=0, eos_token_id=2))
+    request = RolloutRequest(torch.tensor([[1, 2, 3]] * 8), torch.ones((8, 3), dtype=torch.long))
+    sampling = SamplingConfig(max_new_tokens=4, temperature=1.0, top_k=2, continuous_batch_size=2)
+
+    torch.manual_seed(0)
+    output = rollout.generate(request, sampling)
+
+    generated = output.input_ids[:, 3:]
+    # Top-k 2 keeps only tokens 7 and 8, each with probability 1/2.
+    assert set(generated.flatten().tolist()) == {7, 8}
 
 
 @patch("deepspeed.runtime.rollout.hybrid_engine_rollout.time.perf_counter")
@@ -1116,9 +1221,10 @@ def test_sync_weights_is_noop():
 # -- generate dispatches correctly -------------------------------------
 
 
+@pytest.mark.parametrize("temperature", [0, 0.7])
 @patch("deepspeed.runtime.rollout.hybrid_engine_rollout.time.perf_counter")
 @patch("deepspeed.runtime.rollout.hybrid_engine_rollout.get_accelerator")
-def test_generate_calls_graph_capture_when_enabled(mock_get_accelerator, mock_perf_counter):
+def test_generate_calls_graph_capture_when_enabled(mock_get_accelerator, mock_perf_counter, temperature):
     engine = _make_engine()
     tok = _make_tokenizer()
     cfg = HybridEngineRolloutConfig(use_graph_capture=True, enable_profiling=True)
@@ -1130,13 +1236,15 @@ def test_generate_calls_graph_capture_when_enabled(mock_get_accelerator, mock_pe
     req.prompt_ids = torch.tensor([[1, 2]])
     req.prompt_attention_mask = torch.ones(1, 2, dtype=torch.long)
     sampling = MagicMock()
-    sampling.temperature = 0
+    sampling.temperature = temperature
     sampling.n_samples_per_prompt = 1
     sampling.max_new_tokens = 3
     sampling.continuous_batch_size = None
 
     rollout.generate(req, sampling)
     rollout._generate_graph.assert_called_once()
+    # Sampling must not fall back to Hugging Face generate().
+    engine.module.generate.assert_not_called()
     profile = rollout.get_last_profile()
     assert profile["prefill_forward_ms"] is None
     assert profile["decode_forward_ms"] is None

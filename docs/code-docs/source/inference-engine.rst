@@ -60,6 +60,21 @@ For benchmark matrices, cases execute from the largest effective batch to the
 smallest because HybridEngine sizes its inference workspace on the first
 forward. Results remain in the user-requested matrix order.
 
+HybridEngine Rollout CUDA Graph Decode
+--------------------------------------
+
+``HybridEngineRolloutConfig(use_graph_capture=True)`` captures the decode
+forward pass in a CUDA graph and replays it for every generated token. Only the
+model forward is captured; the next token is chosen from the graph's output
+logits after each replay. Greedy decoding (``temperature <= 0``) takes the
+argmax. Sampling applies the ``temperature``, ``top_k`` and ``top_p`` settings
+of ``SamplingConfig`` with Hugging Face's logits warpers, in the order
+``generate()`` applies them, so both paths sample from the same distribution.
+Other settings from the model's ``generation_config``, such as a repetition
+penalty, are not applied on the graph path. Continuous batching, with or
+without graph capture, picks tokens the same way and also applies the model's
+repetition penalty before the warpers, as ``generate()`` does.
+
 Shared Prompt Prefill
 ---------------------
 
@@ -102,9 +117,9 @@ configured capacity.
 
 The experimental path intentionally does not implement paged attention or change the
 default generation semantics. It currently requires one padded prompt width for
-all rows, a model with cache-class support, greedy decoding, and one sample per
-prompt. Shared prompt prefill is rejected until the scheduling semantics are
-validated on real workloads. Models that explicitly declare no cache-class
+all rows, a model with cache-class support, and one sample per prompt. Shared
+prompt prefill is rejected until the scheduling semantics are validated on real
+workloads. Models that explicitly declare no cache-class
 support are rejected; models with unknown support should be validated against
 the default ``generate()`` path before use.
 ``align_decode_fronts=False`` is the default equal-width padded-prompt baseline:
