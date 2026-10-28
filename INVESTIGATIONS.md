@@ -1019,3 +1019,12 @@ lives in the backend dispatcher — Python side stays clean.
 
 Progress: 675→793 (bs8, +18%), 2048→2310 (bs32, +13%), 3781→3795 (bs64).
 vs vLLM: 54.1% / 47.3% / 49.7%.
+
+
+### Loop 4 — recurrent step contiguity fix REGRESSED, reverted (lesson)
+Fixing the strided-view rejection let our in-place gdn_recurrent_step
+run at TP — but it regressed -24%/-30% at bs=32/64: the kernel loses to
+FLA at TP head counts (H_v=16 per rank) on A100 despite B*H=512 blocks.
+Reverted; the kernel needs retuning for low-H shapes (kernel-track).
+
+Loop 4r (revert verified): 785/2327/3790 = loop 3b level restored.
