@@ -28,7 +28,7 @@ from deepspeed.runtime.engine import DeepSpeedEngine
 from deepspeed.runtime.bf16_optimizer import BF16_Optimizer
 from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
 from deepspeed.runtime.zero.stage_1_and_2 import split_half_float_double
-from deepspeed.utils.zero_to_fp32 import load_state_dict_from_zero_checkpoint
+from deepspeed.utils.zero_to_fp32 import get_fp32_state_dict_from_zero_checkpoint, load_state_dict_from_zero_checkpoint
 from deepspeed.runtime.zero.utils import ZeRORuntimeException
 from deepspeed.accelerator import get_accelerator
 from deepspeed.utils import safe_get_full_fp32_param, safe_get_full_grad
@@ -427,7 +427,7 @@ class TestZero3RepeatForwardLoop(DistributedTest):
 
 # testing the fix https://github.com/deepspeedai/DeepSpeed/pull/1227
 # also reproduces the https://github.com/deepspeedai/DeepSpeed/pull/1372
-@pytest.mark.parametrize("zero_stage", [2, 3])
+@pytest.mark.parametrize("zero_stage", [1, 2, 3])
 @pytest.mark.parametrize("freeze_params", [True, False])
 class TestZeroToFP32(DistributedTest):
     world_size = 2
@@ -521,6 +521,11 @@ class TestZeroToFP32(DistributedTest):
             for name in orig_state_dict.keys():
                 # float() workaround for torch<1.6
                 assert torch.allclose(orig_state_dict[name].float(), fp32_state_dict[name].float())
+            # load_state_dict_from_zero_checkpoint loads non-strictly, so also check that the
+            # consolidated checkpoint itself has every parameter, frozen ones included
+            consolidated = get_fp32_state_dict_from_zero_checkpoint(tmpdir)
+            for name, param in orig_state_dict.items():
+                assert torch.equal(consolidated[name].to(param.dtype), param)
 
         model.destroy()
 

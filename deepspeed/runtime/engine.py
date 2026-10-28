@@ -5409,7 +5409,7 @@ class DeepSpeedEngine(Module):
                 DeepSpeedEngine.module_state_dict(self, exclude_frozen_parameters=exclude_frozen_parameters))
 
             zero_optimizer_state = self.zero_optimization()
-            save_frozen_param = self.zero_optimization_partition_gradients() and not exclude_frozen_parameters
+            save_frozen_param = self.zero_optimization() and not exclude_frozen_parameters
             zero_param_shapes = self._get_zero_param_shapes() if self.optimizer and zero_optimizer_state else None
             if autoep_layer_info and self.zero_optimization_partition_weights():
                 DeepSpeedEngine._validate_autoep_zero3_partitioned_metadata(autoep_layer_info, model=self.module)
@@ -5491,7 +5491,7 @@ class DeepSpeedEngine(Module):
 
         zero_optimizer_state = self.zero_optimization()
 
-        save_frozen_param = self.zero_optimization_partition_gradients() and not exclude_frozen_parameters
+        save_frozen_param = self.zero_optimization() and not exclude_frozen_parameters
 
         # A hack to save the checkpointing directory. Pipeline parallelism overrides
         # module_state_dict() and uses this path to save the model. module_state_dict()
