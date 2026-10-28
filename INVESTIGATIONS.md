@@ -1088,3 +1088,22 @@ concat (5, 9), vocab-parallel lm_head (8), chunked GLU (7).
 Lessons: NT=128 not better on A100 (1), fused GLU wins everywhere (3),
 our recurrent kernel loses at TP head counts (4), cast caching is
 noise-level (6). Opbuilder interface unchanged throughout.
+
+
+### Final validation (after NT-128 removal + M=1 fix)
+- 186/186 tests pass on A100 (both previously-skipped now run and pass)
+- Final bench: **866.3 / 2565.9 / 3950.9** (bs=32 best of the night)
+- Correctness anchored earlier at loop 8 (0.949, 7/8 rows, first-8
+  bit-identical); both subsequent fixes are correctness-positive.
+
+### Night final (2x A100 SXM4 TP=2, loops 1-9)
+| bs | start | final | gain | vLLM 0.32 | segKI % |
+|----|-------|-------|------|-----------|---------|
+| 8  | 675.0  | 866.3  | +28.3% | 1452.2 | 59.6% |
+| 32 | 2048.2 | 2565.9 | +25.3% | 4883.1 | 52.5% |
+| 64 | 3781.2 | 3950.9 | +4.5%  | 7635.7 | 51.7% |
+
+Post-hoc bug fixes surfaced by the A100 test suite:
+- NT=128 kernel variant had a numerics bug (masked by TP composite
+  routing); removed — no perf loss (loop 1 showed it never won)
+- concatenated attn qkv path mishandled M=1 (flat GEMV returns 1-D)
