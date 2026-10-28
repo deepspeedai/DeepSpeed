@@ -1520,6 +1520,10 @@ std::vector<at::Tensor> grouped_linear(at::Tensor x, std::vector<at::Tensor> wei
     }
     at::Tensor x2 = x.reshape({-1, K});
     const int64_t M = x2.size(0);
+    // Fused GLU rides the WMMA kernel on EVERY architecture up to the tile
+    // row limit: the in-register silu epilogue saves three launches plus an
+    // fp32 round-trip vs composite (loop 3 regression: composite -2.3%).
+    if (glu_epilogue && n == 2 && M <= GRP_MT) return {dual_gemm_silu_mul(x2, weights[0], weights[1])};
     if (M > grouped_wmma_threshold()) {
         // large batches: cuBLAS/aten composite (this backend's measured choice)
         std::vector<at::Tensor> outs;
