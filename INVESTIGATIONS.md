@@ -1044,3 +1044,11 @@ tiles better in cuBLAS than six skinny row-slices.
 
 vs vLLM: 57.3% / 50.1% / 51.1% — crossed 50% everywhere.
 Cumulative from loop 1: +23% / +19.5% / +3.1%.
+
+
+### Loop 6 — static cast caching (wash, keep for correctness)
+A_log/dt_bias fp32 casts cached once per layer: 835/2439/3928 —
+within run variance of loop 5 (832/2447/3899). Launch removal was real
+but per-launch cost in-graph is ~0.5us; kept (less work is less work).
+Next: bs=64 GLU runs composite (M=64 > GRP_MT=32 tile limit) — chunk
+into two fused calls instead of 4-kernel composite.
