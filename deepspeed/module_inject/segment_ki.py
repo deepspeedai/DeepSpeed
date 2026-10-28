@@ -672,7 +672,11 @@ def _decode_attn_forward(self,
             self._ki_attn_cat_w = cw
         fused = qkv_op.grouped_linear(hidden_states.reshape(-1, hidden_states.shape[-1]), [cw[1]], False)[0]
         qn, kn = self.q_proj.weight.shape[0], self.k_proj.weight.shape[0]
-        q_out, k_flat, v_flat = fused[:, :qn], fused[:, qn:qn + kn], fused[:, qn + kn:]
+        # decode_attn needs contiguous k/v; the tiny materialization (B*k_dims
+        # bf16) is far cheaper than the two extra GEMM launches it replaces
+        q_out = fused[:, :qn]
+        k_flat = fused[:, qn:qn + kn].contiguous()
+        v_flat = fused[:, qn + kn:].contiguous()
         query_states, gate = torch.chunk(q_out.reshape(*input_shape, -1, self.head_dim * 2), 2, dim=-1)
     elif qkv_op is not None and batch == 1:
         # One GEMV launch over q/k/v weights directly — replaces the
