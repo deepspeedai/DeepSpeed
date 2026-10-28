@@ -1058,3 +1058,15 @@ into two fused calls instead of 4-kernel composite.
 835/2460/3952. bs=8/32 unaffected (already single fused call); bs=64
 swapped the 4-kernel composite for two row-chunked fused calls.
 vs vLLM: 57.5% / 50.4% / 51.8%.
+
+
+### Loop 8 — vocab-parallel lm_head decode (+3.4/+2.1/+0.8%)
+Each rank GEMMs its contiguous half of the replicated weight; rank-
+ordered all-gather reassembles full logits — argmax/sampling semantics
+unchanged downstream. Halves the ~630MB/rank weight read at bs=32.
+
+863.5 / 2510.5 / 3985.1. Correctness: 0.949 vs eager, 7/8 rows exact,
+first-8 bit-identical (same near-tie class).
+
+Night cumulative: 675->864 (+28%), 2048->2511 (+22.6%), 3781->3985 (+5.4%)
+vs vLLM: 59.5% / 51.4% / 52.2%.
