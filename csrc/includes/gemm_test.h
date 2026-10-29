@@ -6,9 +6,6 @@
 #pragma once
 
 #include <cuda_fp16.h>
-#ifndef __HIP_PLATFORM_AMD__
-#include <cuda_profiler_api.h>
-#endif
 #ifdef __HIP_PLATFORM_AMD__
 #include <rocblas/rocblas.h>
 #endif
