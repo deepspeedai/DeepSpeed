@@ -114,7 +114,7 @@ __global__ void reduce_fp32_kernel(const char* __restrict__ in, char* __restrict
 
 }  // namespace
 
-std::string car_create_buffers()
+py::bytes car_create_buffers()
 {
     // Pure CUDA IPC (vLLM-style): our own cudaMalloc + GetMemHandle, no
     // torch allocator wrappers in the exchange path.
