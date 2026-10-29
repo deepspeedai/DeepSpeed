@@ -75,16 +75,37 @@ __global__ void wait_kernel(const char* __restrict__ peer_base, const int* __res
     __threadfence_system();
 }
 
-template <typename scalar_t>
-__global__ void reduce_kernel(const char* __restrict__ in, char* __restrict__ out, const char* __restrict__ peer_base,
-                              const int* __restrict__ seq_d, size_t numel) {
+__global__ void reduce_bf16_kernel(const char* __restrict__ in, char* __restrict__ out,
+                                   const char* __restrict__ peer_base, const int* __restrict__ seq_d, size_t numel) {
     const int parity = (*seq_d) & 1;
     const char* psrc = peer_base + kBufBase + (size_t)parity * kBufStride;
-    const scalar_t* pin = (const scalar_t*)in;
-    const scalar_t* pp = (const scalar_t*)psrc;
-    scalar_t* pout = (scalar_t*)out;
+    const __nv_bfloat16* pin = (const __nv_bfloat16*)in;
+    const __nv_bfloat16* pp = (const __nv_bfloat16*)psrc;
+    __nv_bfloat16* pout = (__nv_bfloat16*)out;
     for (size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x; i < numel; i += (size_t)gridDim.x * blockDim.x)
-        pout[i] = (scalar_t)((float)pin[i] + (float)pp[i]);
+        pout[i] = __float2bfloat16(__bfloat162float(pin[i]) + __bfloat162float(pp[i]));
+}
+
+__global__ void reduce_fp16_kernel(const char* __restrict__ in, char* __restrict__ out,
+                                   const char* __restrict__ peer_base, const int* __restrict__ seq_d, size_t numel) {
+    const int parity = (*seq_d) & 1;
+    const char* psrc = peer_base + kBufBase + (size_t)parity * kBufStride;
+    const __half* pin = (const __half*)in;
+    const __half* pp = (const __half*)psrc;
+    __half* pout = (__half*)out;
+    for (size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x; i < numel; i += (size_t)gridDim.x * blockDim.x)
+        pout[i] = __float2half(__half2float(pin[i]) + __half2float(pp[i]));
+}
+
+__global__ void reduce_fp32_kernel(const char* __restrict__ in, char* __restrict__ out,
+                                   const char* __restrict__ peer_base, const int* __restrict__ seq_d, size_t numel) {
+    const int parity = (*seq_d) & 1;
+    const char* psrc = peer_base + kBufBase + (size_t)parity * kBufStride;
+    const float* pin = (const float*)in;
+    const float* pp = (const float*)psrc;
+    float* pout = (float*)out;
+    for (size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x; i < numel; i += (size_t)gridDim.x * blockDim.x)
+        pout[i] = pin[i] + pp[i];
 }
 
 }  // namespace
@@ -126,14 +147,17 @@ torch::Tensor car_all_reduce(torch::Tensor t)
     flag_kernel<<<1, 1, 0, stream.stream()>>>(g_state.my_base, g_state.seq_d);
     wait_kernel<<<1, 1, 0, stream.stream()>>>(g_state.peer_base, g_state.seq_d);
     if (t.scalar_type() == at::kBFloat16) {
-        reduce_kernel<__nv_bfloat16><<<rblocks, CAR_THREADS, 0, stream.stream()>>>(
-            (const char*)t.data_ptr(), (char*)t.data_ptr(), g_state.peer_base, g_state.seq_d, (size_t)t.numel());
+        reduce_bf16_kernel<<<rblocks, CAR_THREADS, 0, stream.stream()>>>((const char*)t.data_ptr(),
+                                                                         (char*)t.data_ptr(), g_state.peer_base,
+                                                                         g_state.seq_d, (size_t)t.numel());
     } else if (t.scalar_type() == at::kHalf) {
-        reduce_kernel<__half><<<rblocks, CAR_THREADS, 0, stream.stream()>>>(
-            (const char*)t.data_ptr(), (char*)t.data_ptr(), g_state.peer_base, g_state.seq_d, (size_t)t.numel());
+        reduce_fp16_kernel<<<rblocks, CAR_THREADS, 0, stream.stream()>>>((const char*)t.data_ptr(),
+                                                                         (char*)t.data_ptr(), g_state.peer_base,
+                                                                         g_state.seq_d, (size_t)t.numel());
     } else if (t.scalar_type() == at::kFloat) {
-        reduce_kernel<float><<<rblocks, CAR_THREADS, 0, stream.stream()>>>(
-            (const char*)t.data_ptr(), (char*)t.data_ptr(), g_state.peer_base, g_state.seq_d, (size_t)t.numel());
+        reduce_fp32_kernel<<<rblocks, CAR_THREADS, 0, stream.stream()>>>((const char*)t.data_ptr(),
+                                                                         (char*)t.data_ptr(), g_state.peer_base,
+                                                                         g_state.seq_d, (size_t)t.numel());
     } else {
         TORCH_CHECK(false, "unsupported dtype for custom AR");
     }
