@@ -608,6 +608,28 @@ subset of a parameter combined with a list of ranks holding this subset" — is 
 §2.1's exact `locations` implements, and the same mechanism can later describe normalized
 ZeRO/offload placement without introducing another geometry IR.
 
+At runtime, `AutoEPMoELayer.expert_affine_maps()` returns the maps of the live packed
+expert parameters, and `AutoEPMoELayer.plan_expert_transfer(target_placement)` composes
+them with a target descriptor through `plan_transfer` into shard-to-shard copies. Plan
+ranks are EP-local ranks of the respective placements; the plan is not executed, and ZeRO
+and EDP storage must still be normalized before its offsets apply.
+
+`deepspeed/checkpoint/zero_affine.py` takes the first step for live training storage. It
+describes, in global ranks, where ZeRO keeps each element of a parameter: the low-precision
+copy (`zero_param_storage_affine_map`: replicas under ZeRO-0/1/2, `ds_tensor` partitions
+under ZeRO-3, padding excluded), and the fp32 master copy with its optimizer states
+(`zero_optimizer_storage_affine_maps`: ZeRO-1/2 fragments gathered from each rank's
+`_hp_mapping`, which may cut a parameter mid-row, and the ZeRO-3 fp32 partition). The
+matching `*_storage_shard` accessors return the flat views of ZeRO's own buffers, so a
+plan's writes land in the optimizer. Offloaded states, MiCS and hpZ have no map yet.
+Both parameter storage accessors reject quantized ZeRO-3 storage (`ds_quant_scale`):
+its encoded values and separate quantization scales cannot be treated as ordinary
+parameter elements. They reject NVMe-offloaded ZeRO-3 storage too, whose partition is a
+placeholder while swapped out. `zero_param_storage_shard` also rejects a gathered ZeRO-3
+parameter: the forward reads the gathered copy, which persistent parameters keep between
+steps, so a write to the partition alone would be lost. `engine.empty_partition_cache()`
+releases every gathered copy first.
+
 ---
 
 ## 9. Staging
@@ -623,3 +645,60 @@ ZeRO/offload placement without introducing another geometry IR.
 
 Steps 1–3 change no behaviour: they add a representation and prove it agrees with the
 current one. Only step 4 changes what a checkpoint contains, and only by adding a key.
+
+---
+
+## 10. Phase 2 — live storage maps
+
+Phase 2 plans `M_t ∘ M_s⁻¹` between two live topologies. A live topology is what each process
+actually holds, so its map must describe storage, not only the parallel layout.
+
+**10.1 Two kinds of map.**
+- *Layout map*: the parameter's N-D logical shape, keyed by ranks of the parallel group that
+  defines the layout (TP, EP). The layer builds it from its own semantics, checkpoints persist
+  it, and it remains the only geometry contract.
+- *Storage map*: keyed by global rank; each shard is a process's flat buffer (`param.data`,
+  ZeRO-3 `ds_tensor`, an fp32 or optimizer-state fragment). It exists at runtime only and is
+  never persisted. Built from a layout map (10.3), it keeps the layout's N-D logical shape;
+  without a layout it describes the flattened parameter `(numel,)`.
+
+Both satisfy P1–P5. A plan's endpoints must be the same kind and the same logical shape;
+`plan_transfer` rejects different logical shapes, so a flat storage map cannot be planned
+against an N-D one of the same parameter. Matching rank namespaces is the caller's job.
+
+**10.2 N-D boxes in flat storage.** A ZeRO partition of an N-D layout shard is a contiguous
+interval of its flattened buffer, which is generally not one box of the N-D parameter: it is
+a partial row, then whole rows, then a partial row, recursively over the axes, so at most
+`2 * ndim - 1` boxes. Each box is dense in the buffer (its storage strides are its own
+row-major strides). `plan_transfer` accepts such a piece in a 1-D shard and treats its
+storage as the interval `[dest_offset, dest_offset + numel)`; any other shard must have the
+logical parameter's rank. Describing the flattened parameter instead would cut a column of a
+row-major weight, such as a row-parallel shard, into one piece per row.
+
+**10.3 Derivation.** A storage map is derived, never hand-built:
+`storage = nest_affine_maps(layout, {layout rank: inner})`, where `inner` describes how one
+flattened layout shard is stored over its data-parallel group (`zero_storage_affine_map`:
+replicas, or ZeRO-3 partitions `[d*n, (d+1)*n)` without padding). Nesting keeps P5: layout
+pieces that describe the same block on several layout ranks are one block whose holders are
+the union of every rank's holders, and the block is cut wherever any of those holders'
+storage begins or ends; each resulting interval becomes the boxes of 10.2. A layout piece
+that is not dense within its layout shard, such as a block narrower than the shard's rows,
+cannot be merged across those rows and keeps one piece per row. Callers:
+- `zero_param_storage_affine_map` and `zero_optimizer_storage_affine_maps` describe a dense
+  parameter (no layout, so they are already the storage map).
+- `autotp_storage_affine_maps(model)` nests each parameter's published AutoTP layout map
+  with the storage of every TP shard. A parameter AutoTP leaves whole in a model built under
+  `zero.Init` stays partitioned over the whole world, so every TP rank reports the storage of
+  one shared copy; that storage describes the parameter on its own, without nesting.
+- AutoEP expert storage nests the placement's layout map with each EP rank's EDP storage.
+
+**10.4 Replica choice** stays with the planner (§2.4): every holder appears in `locations`,
+and the planner's default or a `replica_selector` picks one.
+
+**10.5 Plan lifetime.** Maps and plans depend only on layout and partitioning, not on values.
+A caller builds them once and executes the plan for every sync, until either side's
+placement, parallel sizes or ZeRO partitioning changes. A parameter whose buffer is
+reallocated keeps its plan; only the shard views must be fetched again.
+
+**10.6 Not described.** Offload tiers, MiCS / hpZ, expert tensor parallelism, quantized
+ZeRO-3 storage, non-elementwise transforms.

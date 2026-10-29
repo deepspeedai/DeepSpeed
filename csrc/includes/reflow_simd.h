@@ -147,9 +147,7 @@ inline typename std::enable_if_t<!std::is_same_v<T, float> && !std::is_same_v<T,
                                      !std::is_same_v<T, c10::BFloat16>,
                                  void>
 reflow_simd_store_stream(T* dst, AVX_Data* src)
-{
-    simd_store<span, T>(dst, src);
-}
+{ simd_store<span, T>(dst, src); }
 #endif
 
 #if defined(__AVX512__) or defined(__AVX256__)
@@ -170,9 +168,7 @@ template <int span, typename T>
 inline typename std::enable_if_t<!std::is_same_v<T, c10::BFloat16>, void> reflow_simd_store(
     T* dst,
     AVX_Data* src)
-{
-    simd_store<span>(dst, src);
-}
+{ simd_store<span>(dst, src); }
 template <int span, typename T>
 inline typename std::enable_if_t<std::is_same_v<T, c10::BFloat16>, void> reflow_simd_load(
     AVX_Data* dst,
@@ -188,7 +184,5 @@ template <int span, typename T>
 inline typename std::enable_if_t<!std::is_same_v<T, c10::BFloat16>, void> reflow_simd_load(
     AVX_Data* dst,
     T* src)
-{
-    simd_load<span>(dst, src);
-}
+{ simd_load<span>(dst, src); }
 #endif

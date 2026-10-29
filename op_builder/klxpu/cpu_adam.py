@@ -1,12 +1,10 @@
-# Copyright (c) Microsoft Corporation.
 # SPDX-License-Identifier: Apache-2.0
-
 # DeepSpeed Team
 
-from .builder import TorchCPUOpBuilder
+from .builder import KLXPUOpBuilder
 
 
-class CPUAdamBuilder(TorchCPUOpBuilder):
+class CPUAdamBuilder(KLXPUOpBuilder):
     BUILD_VAR = "DS_BUILD_CPU_ADAM"
     NAME = "cpu_adam"
 
@@ -22,9 +20,7 @@ class CPUAdamBuilder(TorchCPUOpBuilder):
             'csrc/adam/reflow_cpu_adam_bindings.cpp'
         ]
 
-    def libraries_args(self):
-        args = super().libraries_args()
-        return args
-
     def include_paths(self):
-        return ['csrc/includes']
+        args = super().include_paths()
+        args += ['csrc/includes']
+        return args

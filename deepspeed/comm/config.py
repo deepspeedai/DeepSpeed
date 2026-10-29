@@ -19,7 +19,5 @@ class CommsLoggerConfig(DeepSpeedConfigModel):
 class DeepSpeedCommsConfig:
 
     def __init__(self, ds_config):
-        self.comms_logger_enabled = 'comms_logger' in ds_config
-
-        if self.comms_logger_enabled:
-            self.comms_logger = CommsLoggerConfig(**ds_config['comms_logger'])
+        self.comms_logger = CommsLoggerConfig(**ds_config.get('comms_logger', {}))
+        self.comms_logger_enabled = self.comms_logger.enabled

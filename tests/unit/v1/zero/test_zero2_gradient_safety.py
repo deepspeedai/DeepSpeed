@@ -87,6 +87,34 @@ def backward_values(opt, param, values, boundaries):
     opt._wait_for_offload_copies()
 
 
+def test_allreduce_and_scatter_accepts_legacy_rank_tensor_buckets():
+    opt = zero.DeepSpeedZeroOptimizer.__new__(zero.DeepSpeedZeroOptimizer)
+    captured = {}
+
+    def capture(small_bucket,
+                communication_data_type,
+                log=None,
+                divide=True,
+                process_group=None,
+                bucket_ranks=None,
+                output_bucket=None):
+        captured["small_bucket"] = small_bucket
+        captured["bucket_ranks"] = bucket_ranks
+        captured["output_bucket"] = output_bucket
+
+    opt.allreduce_and_copy_with_multiple_ranks = capture
+    tensor = torch.ones(2)
+    output = torch.empty_like(tensor)
+
+    opt.allreduce_and_scatter([(0, tensor), (1, tensor, output)], torch.float32)
+
+    assert captured["small_bucket"][0] is tensor
+    assert captured["small_bucket"][1] is tensor
+    assert captured["bucket_ranks"] == [0, 1]
+    assert captured["output_bucket"][0] is None
+    assert captured["output_bucket"][1] is output
+
+
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
 @pytest.mark.parametrize("cpu_offload", [False, True])
 @pytest.mark.parametrize("bucket_size", [4, 8, 16])
@@ -224,7 +252,7 @@ def test_only_buffer_consumers_replace_reuse_event(monkeypatch, bucket_size, ele
     opt.reduce_bucket_size = bucket_size
     opt.is_param_in_current_partition = {0: True}
     opt.average_tensor = lambda *args: None
-    opt.copy_grads_in_partition = lambda param: None
+    opt.copy_grads_in_partition = lambda param, group_idx=None: None
     bucket = opt.ipg_buckets[torch.float32]
     bucket.elements = elements
     previous, consumer = FakeEvent(), FakeStream()

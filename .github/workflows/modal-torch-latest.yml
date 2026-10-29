@@ -337,6 +337,7 @@ jobs:
           exit "$status"
 
       - name: Configure AWS credentials for capacity fallback
+        id: aws-auth
         if: steps.modal.outputs.fallback == 'true'
         env:
           AWS_ROLE_ARN: ${{ secrets.AWS_MODAL_FALLBACK_ROLE_ARN }}
@@ -387,7 +388,7 @@ jobs:
         run: python3 ci/torch_latest.py aws-controller
 
       - name: Reconcile AWS capacity fallback cleanup
-        if: ${{ always() && steps.modal.outputs.fallback == 'true' }}
+        if: ${{ always() && steps.modal.outputs.fallback == 'true' && steps.aws-auth.outcome == 'success' }}
         env:
           AWS_MODAL_FALLBACK_CONFIG: ${{ secrets.AWS_MODAL_FALLBACK_CONFIG }}
           GITHUB_RUN_ID: ${{ github.run_id }}
