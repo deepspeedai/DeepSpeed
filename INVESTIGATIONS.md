@@ -1206,3 +1206,27 @@ cache_params, no closures, no Python objects — and compile those:
 Each compiles to one Triton kernel; boundaries are our registered ops.
 Fusion where it pays, eager where it does not. The registration layer
 from tonight is exactly the prerequisite.
+
+
+### Route C v1 — native repeat_qk (wash; target was too small)
+One native kernel replaces 48 repeat_interleave copies/st (both q and k
+per GDN layer). Correct (rate unchanged) but measured wash-to--1%:
+956.7/2729.9/4195.3 vs 957.6/2759.0/4229.9 baseline — the 48 launches
+were already ~1us each in-graph; the theoretical ceiling (~0.05ms) is
+under run variance.
+
+Profile confirms: elementwise count unchanged (313.3/st) — the repeats
+were never the glue mass. The real remaining glue (elementwise 0.97ms +
+copies ~0.4ms + memcpy 0.97ms) lives in HF's own code paths (gating
+arithmetic, cache state ops) as hundreds of tiny ops — each too small
+to be worth a hand-written kernel individually.
+
+### Route C honest conclusion (after A's lesson)
+Glue fusion economics: vLLM's 2.5ms glue advantage comes from fusing
+the WHOLE residual/norm/gating flow per layer (their fused_add_rms_norm
+Triton kernels cover every layer boundary). Our hand-written equivalents
+(fused_add_norm, gdn_gates) already cover the biggest chains — the
+remaining soup is long-tail. The next meaningful C target is not
+micro-kernels but the two per-layer boundary chains (pre-attn and
+pre-MLP: residual+norm+cast) if HF's flow allows interception — worth
+scoping against actual kernel names before writing code.
