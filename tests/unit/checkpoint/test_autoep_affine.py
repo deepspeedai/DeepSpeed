@@ -9,10 +9,11 @@ import torch
 from deepspeed.checkpoint.affine import AFFINE_MAP_FORMAT_VERSION, ParamAffineMap
 from deepspeed.checkpoint.autoep_affine import (AUTOEP_PLACEMENT_VERSION, autoep_experts_for_rank,
                                                 autoep_metadata_to_affine_map, autoep_placement_to_affine_map,
-                                                extract_autoep_rank_tensor, legacy_uniform_autoep_placement_descriptor,
+                                                autoep_placements_equal, extract_autoep_rank_tensor,
+                                                legacy_uniform_autoep_placement_descriptor,
                                                 make_autoep_placement_descriptor, validate_autoep_placement_descriptor)
 from deepspeed.checkpoint.constants import (AFFINE_MAP, AFFINE_MAP_PARAMS, AFFINE_MAP_VERSION, AUTOEP_AFFINE_MAPS,
-                                            AUTOEP_EXPERT_PLACEMENT)
+                                            AUTOEP_EXPERT_PLACEMENT, AUTOEP_PLACEMENT_RANKS)
 
 
 def _oracle_shards(full_tensor, experts_by_rank):
@@ -236,3 +237,12 @@ def test_extract_target_rank_uses_target_packed_order():
     actual = extract_autoep_rank_tensor(universal_tensor, target_map, 1)
 
     assert torch.equal(actual, expected)
+
+
+def test_placements_equal_identifies_ranks_by_id():
+    descriptor = make_autoep_placement_descriptor(4, [[3, 0], [], [2, 1, 0]])
+    reordered = dict(descriptor)
+    reordered[AUTOEP_PLACEMENT_RANKS] = list(reversed(descriptor[AUTOEP_PLACEMENT_RANKS]))
+
+    assert autoep_placements_equal(descriptor, reordered)
+    assert not autoep_placements_equal(descriptor, make_autoep_placement_descriptor(4, [[0, 3], [], [2, 1, 0]]))

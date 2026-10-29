@@ -89,13 +89,15 @@ def test_cuda_accelerator_uses_nvtx_domain_when_available(monkeypatch, capsys):
         def __init__(self):
             self.domains = {}
 
-        def get_domain(self, name):
-            self.domains.setdefault(name, FakeDomain())
-            return self.domains[name]
+        def push_range(self, message=None, domain=None, category=None):
+            fake_domain = self.domains.setdefault(domain, FakeDomain())
+            return fake_domain.push_range(message=message, category=category)
+
+        def pop_range(self, domain=None):
+            return self.domains[domain].pop_range()
 
     fake_nvtx = FakeNvtx()
     accelerator = CUDA_Accelerator.__new__(CUDA_Accelerator)
-    accelerator._nvtx_domains = {}
     monkeypatch.setattr(cuda_accelerator, "nvtx", fake_nvtx)
 
     assert accelerator.range_push("my_range", domain="DeepSpeed", category="zero") == "domain-push"
