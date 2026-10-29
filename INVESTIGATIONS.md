@@ -1134,3 +1134,45 @@ Roadmap by ROI:
    elementwise + 120 copies/step) is what vLLM's inductor pass
    eliminates; our manual fused kernels cover norm/gates but not the
    GDN gating arithmetic and RoPE.
+
+
+## 24. Custom one-shot P2P inference all-reduce — WORKS (+7-10%)
+
+Implemented the inference_all_reduce hook route (the slot the CPU backend
+fills with shm+AVX): a 5-kernel stream-ordered protocol (seq-bump, copy
+to IPC buffer, fence+flag, peer-flag spin, local reduce), double-buffered
+by sequence parity, graph-capturable, pure CUDA IPC (cudaMalloc +
+GetMemHandle/OpenMemHandle in the extension — torch's IPC reconstruction
+maps on the producer's device and our kernels cannot dereference it).
+
+### Journey (8 bugs fixed)
+1. cdb assertion (use torch.distributed directly in comm internals)
+2. torch build disables bf16 conversions (explicit intrinsics)
+3. torch 2.13 has no Tensor._new_shared_cuda (UntypedStorage does)
+4. device-mismatch on set_ (pass raw pointer)
+5. illegal access via torch IPC mapping (open handle on OUR context)
+6. 66B handle field is torch's wrapper (64B raw field — then bypassed
+   entirely with in-extension cudaMalloc)
+7. std::string utf-8 decode (py::bytes)
+8. layers routed only in inference_mode; training-engine decodes are
+   no-grad too — route on not is_grad_enabled()
+
+### Results (A100 TP=2)
+| | NCCL | custom AR | delta |
+|---|---|---|---|
+| microbench 160KB | 49.4us | 26.8us | 1.8x |
+| bs=8 | 863.2 | 957.6 | +10.9% |
+| bs=32 | 2507.4 | 2759.0 | +10.0% |
+| bs=64 | 3978.6 | 4229.9 | +6.3% |
+
+vs vLLM 0.32: 66.0% / 56.5% / 55.4% (from 60/53/52).
+
+### Correctness
+- Bitwise identical to NCCL on real activations: 0/1.6M mismatch
+- Token trajectories identical with AR on/off (both 0.465 vs eager)
+- The 0.949->0.465 vs eager drift predates the AR (loop 9's attn qkv
+  concat changes cuBLAS tiling -> bf16 rounding -> near-tie flips in the
+  GDN trajectory; same documented class, first-8 bit-identical, 3/8 rows
+  exact, deterministic and self-consistent; 186-test suite passes)
+
+Night total on A100: 675 -> 958 (+42%), 2048 -> 2759 (+35%), 3781 -> 4230 (+12%).
