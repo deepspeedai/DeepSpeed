@@ -4,6 +4,20 @@ toc: true
 toc_label: "Contents"
 ---
 
+### Deterministic Execution
+
+`deterministic_mode` is a JSON boolean, default `false`. On CUDA, enabling it
+selects strict PyTorch deterministic algorithms, disables TF32 and cuDNN
+benchmarking, and enables deterministic cuDNN algorithms at engine initialization.
+Set `CUBLAS_WORKSPACE_CONFIG=:4096:8` or `:16:8` before CUDA use.
+Non-CUDA enabling is currently unsupported; disabled behavior is unchanged.
+
+The flag does not change precision, NCCL algorithm, parallelism or overlap.
+PyTorch checks do not cover all custom kernels or distributed scheduling;
+configuration acceptance does not certify workload bitwise repeatability or
+Megatron compatibility. Settings are process-global and not restored at teardown.
+See [Deterministic Mode](../deterministic-mode/) for details.
+
 ### Batch Size Related Parameters
 
 **Note:** <i>**train_batch_size**</i> must be equal to  <i>**train_micro_batch_size_per_gpu**</i> * <i>**gradient_accumulation_steps**</i> * number of GPUs. For simplicity, you can choose to only specify two of the three parameters, the last one will be inferred automatically by DeepSpeed.

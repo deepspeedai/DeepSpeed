@@ -477,6 +477,8 @@ class DeepSpeedConfig(object):
         param_dict = copy.copy(self._param_dict)
         self._initialize_params(param_dict)
         self._configure_train_batch_size()
+        from .determinism import configure_determinism
+        configure_determinism(self, param_dict)
         self._do_sanity_check()
 
     def _initialize_params(self, param_dict):
