@@ -14,8 +14,7 @@ their native fast path.
 import os
 
 import torch
-
-from deepspeed import comm as dist
+import torch.distributed as tdist  # noqa: F401  (comm-layer internal, mirrors torch.py)
 
 _state = {"op": None, "inited": False}
 _TOTAL_BYTES = 256 + 2 * 4 * 1024 * 1024  # flags + double 4MB buffers (matches csrc)
@@ -51,10 +50,10 @@ def initialize(group=None):
     """
     if _state["inited"] or not torch.cuda.is_available():
         return
-    if not dist.is_initialized():
+    if not tdist.is_initialized():
         return
-    world = dist.get_world_size(group=group)
-    rank = dist.get_rank(group=group)
+    world = tdist.get_world_size(group=group)
+    rank = tdist.get_rank(group=group)
     if world != 2:
         return  # v1 targets the TP=2 pair; bigger worlds fall back to NCCL
     dev = torch.cuda.current_device()
@@ -70,7 +69,7 @@ def initialize(group=None):
     # Share the storage (not just the view) so the peer maps the allocation.
     handle = buf.untyped_storage()._share_cuda_()
     gathered = [None, None]
-    dist.all_gather_object(gathered, handle, group=group)
+    tdist.all_gather_object(gathered, handle, group=group)
     peer_info = gathered[1 - rank]
     peer = torch.Tensor._new_shared_cuda(peer_info[4], bytes.fromhex(peer_info[0].hex())
                                          if isinstance(peer_info[0], str) else peer_info[0], peer_info[1],
