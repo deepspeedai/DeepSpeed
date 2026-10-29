@@ -163,7 +163,7 @@ class DecodeGraphCache:
             # execution would read a stale sequence counter.
             raise RuntimeError(f"HybridEngine graph capture: generation exceeded the declared length "
                                f"({self._max_positions} decode steps). Set hybrid_engine.max_out_tokens "
-                               f"to cover the longest generation, or disable hybrid_engine.enable_cuda_graph.")
+                               f"to cover the longest generation, or disable hybrid_engine.enable_graph_capture.")
 
         if position in self._graphs:
             if self._shapes_match(position, kwargs):

@@ -210,7 +210,7 @@ class TestHybridEngineGraphEquivalence(DistributedTest):
             "hybrid_engine": {
                 "enabled": True,
                 "max_out_tokens": prompt_len + gen_len,
-                "enable_cuda_graph": True,
+                "enable_graph_capture": True,
             },
             "optimizer": {
                 "type": "AdamW",
@@ -247,3 +247,33 @@ class TestHybridEngineGraphEquivalence(DistributedTest):
             eager = engine.generate(**gen_kwargs).clone()
 
         assert torch.equal(graphed, eager), "graph generation diverged from eager generation"
+
+
+# ---------------------------------------------------------------------------
+# Config key rename (#8271 follow-up): enable_graph_capture with a deprecated
+# enable_cuda_graph alias that migrates the value and warns.
+# ---------------------------------------------------------------------------
+
+
+def _hybrid_engine_config(**kwargs):
+    from deepspeed.runtime.config import HybridEngineConfig
+    return HybridEngineConfig(**kwargs)
+
+
+def test_enable_graph_capture_defaults_false():
+    assert _hybrid_engine_config().enable_graph_capture is False
+
+
+def test_enable_graph_capture_direct():
+    assert _hybrid_engine_config(enable_graph_capture=True).enable_graph_capture is True
+
+
+def test_enable_cuda_graph_alias_migrates_value():
+    config = _hybrid_engine_config(enable_cuda_graph=True)
+    assert config.enable_graph_capture is True
+    assert not hasattr(config, "enable_cuda_graph")
+
+
+def test_enable_cuda_graph_alias_and_new_key_conflict():
+    with pytest.raises(AssertionError):
+        _hybrid_engine_config(enable_cuda_graph=True, enable_graph_capture=True)

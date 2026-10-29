@@ -363,7 +363,9 @@ class HybridEngineConfig(DeepSpeedConfigModel):
     release_inference_cache: bool = False
     pin_parameters: bool = True
     tp_gather_partition_size: int = 8
-    enable_cuda_graph: bool = False
+    enable_graph_capture: bool = False
+    # Deprecated alias for enable_graph_capture; the value migrates with a warning.
+    enable_cuda_graph: bool = Field(False, json_schema_extra={"deprecated": True, "new_param": "enable_graph_capture"})
 
 
 def get_hybrid_engine_config(param_dict):

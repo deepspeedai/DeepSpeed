@@ -61,7 +61,7 @@ class DeepSpeedHybridEngine(DeepSpeedEngine):
 
         self._orig_module_forward = None
         self._decode_graphs = None
-        if self._config.hybrid_engine.enable_cuda_graph and len(self._inference_containers) > 0:
+        if self._config.hybrid_engine.enable_graph_capture and len(self._inference_containers) > 0:
             unsupported = validate_graph_capture_support(self._config.hybrid_engine, self._config.zero_config.stage)
             if unsupported is not None:
                 logger.warning(f"HybridEngine: running without graph capture. {unsupported}.")
@@ -203,7 +203,7 @@ class DeepSpeedHybridEngine(DeepSpeedEngine):
             raise RuntimeError("Shared prefill does not support inference tensor parallelism")
         if hybrid_config.release_inference_cache:
             raise RuntimeError("Shared prefill does not support release_inference_cache")
-        if hybrid_config.enable_cuda_graph:
+        if hybrid_config.enable_graph_capture:
             raise RuntimeError("Shared prefill does not support graph capture")
         if len(self._inference_containers) == 0:
             raise RuntimeError("Shared prefill requires HybridEngine inference containers")
