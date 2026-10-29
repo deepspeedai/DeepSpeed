@@ -60,7 +60,7 @@ if hasattr(torch.library, "custom_op"):
             torch.empty(a.shape[0], a.shape[1] if a.dim() > 1 else a.numel(), dtype=a.dtype, device=a.device)
         ]
 
-    @torch.library.custom_op("segki::gated_norm", mutates_args=("out"))
+    @torch.library.custom_op("segki::gated_norm", mutates_args=("out", ))
     def gated_norm(x: torch.Tensor, gate: torch.Tensor, weight: torch.Tensor, out: torch.Tensor, eps: float) -> None:
         _op().gated_norm(x, gate, weight, out, eps)
 
@@ -68,7 +68,7 @@ if hasattr(torch.library, "custom_op"):
     def _(x, gate, weight, out, eps):
         return
 
-    @torch.library.custom_op("segki::fused_add_norm", mutates_args=("residual", "out"))
+    @torch.library.custom_op("segki::fused_add_norm", mutates_args=("residual", "out", ))
     def fused_add_norm(x: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor, out: torch.Tensor,
                        eps: float) -> None:
         _op().fused_add_norm(x, residual, weight, out, eps)
