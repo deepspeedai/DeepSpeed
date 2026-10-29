@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # DeepSpeed Team
 
-import math
-
 from .builder import SUPAOpBuilder
 
 try:
@@ -30,12 +28,8 @@ class SUPAFusedLamb:
                                             weight_decay)
 
         # Pure-PyTorch fallback
-        if bias_correction:
-            bc1 = 1.0 - beta1**step
-            bc2 = 1.0 - beta2**step
-            step_size = lr * math.sqrt(bc2) / bc1
-        else:
-            step_size = lr
+        bc1 = 1.0 - beta1**step if bias_correction else 1.0
+        bc2 = 1.0 - beta2**step if bias_correction else 1.0
 
         g = grad.float() / combined_scale
 
@@ -43,11 +37,11 @@ class SUPAFusedLamb:
         exp_avg_sq.mul_(beta2).addcmul_(g, g, value=1.0 - beta2)
 
         if eps_mode == 0:
-            denom = (exp_avg_sq + eps).sqrt()
+            denom = (exp_avg_sq / bc2 + eps).sqrt()
         else:
-            denom = exp_avg_sq.sqrt().add_(eps)
+            denom = (exp_avg_sq / bc2).sqrt_().add_(eps)
 
-        update = exp_avg / denom
+        update = exp_avg / bc1 / denom
         update.add_(p.float(), alpha=weight_decay)
 
         p_norm = p.float().norm(2)
@@ -57,7 +51,7 @@ class SUPAFusedLamb:
         else:
             lamb_coeff = (p_norm / u_norm).clamp(min_coeff, max_coeff)
 
-        p.data.add_(update, alpha=-step_size * lamb_coeff.item())
+        p.data.add_(update, alpha=-lr * lamb_coeff.item())
         if p_copy.numel() > 0:
             p_copy.copy_(p.data)
 
