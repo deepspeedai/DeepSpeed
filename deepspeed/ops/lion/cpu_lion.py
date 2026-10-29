@@ -4,7 +4,6 @@
 # DeepSpeed Team
 
 import torch
-from cpuinfo import get_cpu_info
 from deepspeed.utils import logger
 from deepspeed.utils.logging import should_log_le
 from deepspeed.ops.op_builder import CPULionBuilder
@@ -39,6 +38,8 @@ class DeepSpeedCPULion(torch.optim.Optimizer):
         default_args = dict(lr=lr, betas=betas, weight_decay=weight_decay)
         super(DeepSpeedCPULion, self).__init__(model_params, default_args)
 
+        # Imported here because importing cpuinfo runs subprocesses (file, uname), which slows down import deepspeed.
+        from cpuinfo import get_cpu_info
         cpu_info = get_cpu_info()
         self.cpu_vendor = cpu_info["vendor_id_raw"].lower() if "vendor_id_raw" in cpu_info else "unknown"
         if "amd" in self.cpu_vendor:

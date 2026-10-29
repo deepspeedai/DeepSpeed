@@ -30,7 +30,8 @@ from deepspeed.accelerator import get_accelerator
 from deepspeed.checkpoint import ds_to_universal
 from deepspeed.module_inject.auto_ep_layer import AutoEPMoELayer
 from deepspeed.module_inject.auto_tp import AutoTP
-from deepspeed.module_inject.layers import LinearAllreduce, LinearLayer, TensorParallel_Layer, VocabParallelLinear
+from deepspeed.module_inject.layers import (HiddenParallelEmbedding, LinearAllreduce, LinearLayer,
+                                            TensorParallel_Layer, VocabParallelLinear)
 from deepspeed.utils import groups, safe_get_full_fp32_param, safe_get_full_grad
 from unit.common import DistributedTest
 
@@ -302,20 +303,19 @@ class TestShardedAttentionFolding(DistributedTest):
         _check_folded_matches_reference(tp_size=tp_size, ep_size=ep_size, zero_stage=zero_stage, zero_init=zero_init)
 
 
+@pytest.mark.sequential
 class TestTiedOutputHead(DistributedTest):
     """Building the model under ``deepspeed.zero.Init`` must not change which layers AutoTP accepts.
 
-    AutoTP cannot shard an output head whose weight is tied to the input embedding by rows, and says
-    so. Under ``zero.Init`` AutoTP first gathers the partitioned head weight into a new parameter; if
-    the embedding keeps the old one, the tie is gone, the head is sharded anyway, and the embedding and
-    head train as two separate copies.
+    AutoTP shards a row-parallel output head tied to the input embedding by replacing the embedding with
+    a ``HiddenParallelEmbedding`` that shares the head's sharded weight. Under ``zero.Init`` AutoTP first
+    gathers the partitioned head weight into a new parameter; if the embedding keeps the old one, the tie
+    is gone and the embedding and head train as two separate copies.
     """
     world_size = 4
 
     @pytest.mark.parametrize("zero_init", [False, True])
-    def test_row_parallel_tied_head_is_refused(self, zero_init):
-        if get_accelerator().device_name() == "cpu":
-            pytest.skip("AutoEP folding runs on an accelerator")
+    def test_row_parallel_tied_head_keeps_the_tie(self, zero_init):
         config = _tiny_glm4_moe_config()
         config.tie_word_embeddings = True
         folded_config = _folded_config(tp_size=2, ep_size=2, zero_stage=3)
@@ -330,14 +330,10 @@ class TestTiedOutputHead(DistributedTest):
             model = transformers.Glm4MoeForCausalLM(config).float()
         assert model.lm_head.weight is model.model.embed_tokens.weight
 
-        # Not pytest.raises: when nothing is raised it raises pytest's Failed, a BaseException that the
-        # DistributedTest pool worker does not report, so the test would hang instead of failing.
-        try:
-            deepspeed.initialize(model=model, config=folded_config)
-        except NotImplementedError as error:
-            assert "tied weight" in str(error), error
-        else:
-            raise AssertionError("AutoTP sharded an output head whose weight is tied to the input embedding")
+        engine, _, _, _ = deepspeed.initialize(model=model, config=folded_config)
+        embedding = engine.module.model.embed_tokens
+        assert isinstance(embedding, HiddenParallelEmbedding)
+        assert engine.module.lm_head.weight is embedding.weight
 
 
 class TestZero3FoldedCheckpoint(DistributedTest):

@@ -23,10 +23,12 @@ from deepspeed.utils import groups
 from contextlib import contextmanager
 from torch import nn
 from deepspeed.module_inject.auto_tp import AutoTP
+from deepspeed.module_inject.fusedqkv_utils import shared_qk_value_head_ids
 from deepspeed.module_inject.layers import (LinearAllreduce, LinearLayer, VocabParallelLinear, VocabParallelEmbedding,
                                             set_autotp_mode, is_autotp_training_mode, GatherFromTensorParallelRegion,
-                                            ScatterToTensorParallelRegion, HiddenParallelEmbedding)
-from deepspeed.module_inject.tp_shard import get_shard_size_list
+                                            ScatterToTensorParallelRegion, HiddenParallelEmbedding,
+                                            Yuan_LinearAllreduce)
+from deepspeed.module_inject.tp_shard import AutoTPMeta, get_shard_size_list
 from unit.checkpoint.common import compare_lr_scheduler_states, compare_optimizer_states
 import os
 from deepspeed.runtime.utils import is_model_parallel_parameter
@@ -1124,6 +1126,56 @@ class TestTpLayerFwdBwd(DistributedTest):
 
     def testUnevenGatheredColumnParallel(self, tp_size: int, tp_overlap_comm: bool):
         run_tp_layer_fwd_bwd(tp_size, tp_overlap_comm, column_parallel=True, gather_output=True, output_dim=129)
+
+
+class TestYuanOutputProjectionBias(DistributedTest):
+    """Yuan's output projection must keep its bias whole across a real tensor-parallel group.
+
+    LinearAllreduce sums the ranks' partial products and adds the bias once afterwards, so the
+    partition has to hand every rank the whole bias. It used to raise on a bias here, and
+    dividing the bias by the world size instead would shrink the output's bias by that factor.
+    This runs the injected layer, its process group and its real forward against the unsharded
+    linear.
+    """
+    world_size = [2, 4]
+    reuse_dist_env = False
+
+    def test_forward_and_backward_match_the_unsharded_layer(self):
+        skip_on_device()
+        tp_group = dist.get_world_group()
+        tp_rank = dist.get_rank(group=tp_group)
+        tp_size = dist.get_world_size(group=tp_group)
+        num_heads, head_dim, out_features = 8, 4, 12
+        device = get_accelerator().current_device_name()
+
+        set_autotp_mode(training=True)
+        try:
+            torch.manual_seed(0)
+            torch_linear = nn.Linear(num_heads * head_dim, out_features, bias=True)
+            layer = Yuan_LinearAllreduce(deepcopy(torch_linear),
+                                         tp_group,
+                                         name='o_proj',
+                                         tp_meta=AutoTPMeta(num_kv_heads=num_heads)).to(device)
+            x = torch.randn(3, num_heads * head_dim)
+            torch_out = torch_linear(x)
+            torch_out.sum().backward()
+
+            # Each rank receives the attention output for its own value heads.
+            columns = torch.cat([
+                torch.arange(head * head_dim, (head + 1) * head_dim)
+                for head in shared_qk_value_head_ids(num_heads, tp_size, tp_rank)
+            ])
+            out = layer(x[:, columns].to(device))
+            out.sum().backward()
+
+            torch.testing.assert_close(out, torch_out.to(device), atol=1e-2, rtol=1e-2)
+            torch.testing.assert_close(layer.bias.grad, torch_linear.bias.grad.to(device), atol=1e-3, rtol=1e-3)
+            torch.testing.assert_close(layer.weight.grad,
+                                       torch_linear.weight.grad[:, columns].to(device),
+                                       atol=1e-3,
+                                       rtol=1e-3)
+        finally:
+            set_autotp_mode(training=False)
 
 
 class TestLegacyLmHeadGatheredTraining(DistributedTest):

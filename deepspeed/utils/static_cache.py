@@ -98,12 +98,9 @@ class DeepSpeedStaticLayer:
             if kv_length != 1:
                 raise ValueError("per-row write positions currently support one decode token at a time")
             cache_position = self._write_position[:key_states.shape[0]].to(self.device)
-            # bounds check needs a host sync; skip it while capturing (the
-            # warmup forwards already validated the positions)
-            capturing = get_accelerator().is_stream_capturing()
-            if not capturing:
-                if (cache_position < 0).any() or (cache_position >= self.max_cache_len).any():
-                    raise ValueError("per-row write positions must be within the cache bounds")
+            is_capturing = get_accelerator().is_current_stream_capturing()
+            if not is_capturing and ((cache_position < 0).any() or (cache_position >= self.max_cache_len).any()):
+                raise ValueError("per-row write positions must be within the cache bounds")
             row_indices = torch.arange(key_states.shape[0], device=self.device)
             self.keys[row_indices, :, cache_position, :] = key_states[:, :, 0, :]
             self.values[row_indices, :, cache_position, :] = value_states[:, :, 0, :]

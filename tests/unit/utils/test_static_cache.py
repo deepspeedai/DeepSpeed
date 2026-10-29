@@ -5,6 +5,7 @@
 import pytest
 import torch
 
+from deepspeed.accelerator import get_accelerator
 from deepspeed.utils.static_cache import DeepSpeedStaticCache, DeepSpeedStaticLayer
 
 
@@ -24,6 +25,47 @@ def test_static_layer_supports_per_row_decode_positions():
     # write_position is the next slot to write (== cached-token count
     # maintained by the caller); update() does not increment it.
     assert torch.equal(layer.get_seq_length(), torch.tensor([1, 3]))
+
+
+def test_static_layer_per_row_positions_support_graph_replay():
+    accelerator = get_accelerator()
+    graph = accelerator.create_graph()
+    if graph is None:
+        pytest.skip("requires graph capture")
+
+    device = accelerator.device_name()
+    layer = DeepSpeedStaticLayer(max_cache_len=4)
+    keys = torch.ones((2, 1, 1, 2), device=device)
+    values = keys * 10
+    positions = torch.tensor([0, 1], dtype=torch.long, device=device)
+    layer.set_write_position(positions)
+    stream = accelerator.Stream()
+    stream.wait_stream(accelerator.current_stream())
+    with accelerator.stream(stream):
+        layer.update(keys, values)
+    accelerator.current_stream().wait_stream(stream)
+
+    with accelerator.capture_to_graph(graph):
+        layer.update(keys, values)
+
+    positions.copy_(torch.tensor([2, 3], dtype=torch.long, device=device))
+    keys.fill_(2)
+    values.fill_(20)
+    accelerator.replay_graph(graph)
+
+    assert layer.keys[0, 0, 2].tolist() == [2.0, 2.0]
+    assert layer.keys[1, 0, 3].tolist() == [2.0, 2.0]
+    assert layer.values[0, 0, 2].tolist() == [20.0, 20.0]
+    assert layer.values[1, 0, 3].tolist() == [20.0, 20.0]
+
+
+@pytest.mark.parametrize("position", [-1, 4])
+def test_static_layer_rejects_out_of_bounds_per_row_positions(position):
+    layer = DeepSpeedStaticLayer(max_cache_len=4)
+    keys = torch.zeros((1, 1, 1, 2))
+    layer.set_write_position(torch.tensor([position], dtype=torch.long))
+    with pytest.raises(ValueError, match="within the cache bounds"):
+        layer.update(keys, keys)
 
 
 def test_static_cache_compact_preserves_rows_and_positions():

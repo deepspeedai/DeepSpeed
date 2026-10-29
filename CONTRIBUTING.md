@@ -53,9 +53,8 @@ make test
 
 ### Diff-based CI test selection
 Some GPU CI workflows (currently `modal-torch-latest`, which runs `tests/unit/v1/`)
-run their GPU tests on AWS for the merge queue entry instead of on every PR push,
-to conserve GPU quota. Modal execution is temporarily disabled while its GPU
-driver issue is unresolved. `ci/tests_fetcher.py` looks at the files your PR
+run their Modal tests on the merge queue entry instead of on every PR push, to
+conserve GPU quota. `ci/tests_fetcher.py` looks at the files your PR
 changes, builds an import graph over `deepspeed/` and the `unit` test helpers,
 and selects only the tests that could be affected. The selection is previewed on
 the PR by a cheap no-secret job and executed once the PR enters the merge queue.

@@ -18,8 +18,6 @@ jobs:
   check-paths:
     name: python / check paths
     uses: ./.github/workflows/check-paths.yml
-    with:
-      pr-ignore: version.txt
 
   unit-tests:
     name: python / install smoke (Python ${{ matrix.pyVersion }})

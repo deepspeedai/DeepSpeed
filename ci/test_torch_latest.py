@@ -864,8 +864,8 @@ def test_aws_scripts_reuse_full_selection_manifest_and_two_gpu_contract():
         assert "/var/lib/devds/runs/123-1" in prepare
         assert "--gpus '\"device=0,1\"'" in prepare
         assert "uv==0.12.7" in prepare
-        assert "uv venv --python 3.10.13 --seed /workspace/python310" in prepare
-        assert "PATH=/workspace/python310/bin:" in prepare
+        assert "uv venv --python 3.12.14 --seed /workspace/python312" in prepare
+        assert "PATH=/workspace/python312/bin:" in prepare
         assert "expected exactly 2 visible GPUs" in prepare
         assert "ci/modal_diagnostics/pr8654_71_nodes.txt" not in prepare + test
         assert "tests/unit/v1" in test
@@ -1657,12 +1657,12 @@ def test_workflow_keeps_github_execution_trusted_and_preserves_modes():
     assert "allow-unsafe-pr-checkout" not in text
     assert "Use base-branch CI scripts" not in text
     assert "HF_TOKEN" not in text
-    assert "modal==1.2.6" not in text
+    assert "modal==1.2.6" in text
     assert "timeout-minutes: 20" in text
     assert "timeout-minutes: 180" in text
-    assert text.count("persist-credentials: false") == 3
-    assert text.count("lfs: false") == 3
-    assert text.count("submodules: false") == 3
+    assert text.count("persist-credentials: false") == 4
+    assert text.count("lfs: false") == 4
+    assert text.count("submodules: false") == 4
     assert "github.event.pull_request.head.repo.full_name" in text
     assert "github.event.pull_request.head.sha" in text
     assert "github.event.pull_request.base.repo.full_name" in text
@@ -1672,11 +1672,11 @@ def test_workflow_keeps_github_execution_trusted_and_preserves_modes():
     assert text.count("modal-torch-latest-test-selection") == 2
     assert "needs.collect-tests.outputs.mode != 'none'" in text
     assert "needs.collect-tests.result != 'success'" in text
-    assert 'python3 ci/torch_latest.py controller' not in text
+    assert 'python3 ci/torch_latest.py controller' in text
     assert 'python3 ci/torch_latest.py aws-controller' in text
     assert 'python3 ci/torch_latest.py cleanup-aws' in text
-    assert "steps.modal.outputs.fallback == 'true'" not in text
-    assert 'if [ "$status" -eq 75 ]' not in text
+    assert "steps.modal.outputs.fallback == 'true'" in text
+    assert 'if [ "$status" -eq 75 ]' in text
     assert "aws-actions/configure-aws-credentials" not in text
     assert "sts assume-role-with-web-identity" in text
     assert "Credentials.[AccessKeyId,SecretAccessKey,SessionToken]" in text
@@ -1688,11 +1688,11 @@ def test_workflow_keeps_github_execution_trusted_and_preserves_modes():
     assert "vars.AWS_MODAL_FALLBACK" not in text
     assert "infrastructure_smoke:" in text
     assert "default: false" in text
-    assert text.count("inputs.infrastructure_smoke == true") == 1
+    assert text.count("inputs.infrastructure_smoke == true") == 2
     assert text.count("inputs.infrastructure_smoke != true") == 2
     assert "region: [us-east-1, us-east-2, us-west-2]" in text
     assert "fail-fast: false" in text
-    assert 'python3 ci/torch_latest.py modal-infrastructure-smoke' not in text
+    assert 'python3 ci/torch_latest.py modal-infrastructure-smoke' in text
     assert 'python3 ci/torch_latest.py aws-infrastructure-smoke --region "${{ matrix.region }}"' in text
     assert "needs: modal-infrastructure-smoke" not in text
     assert "DS_CI_AWS_RUN_SUFFIX: ${{ matrix.region }}" in text
@@ -1705,14 +1705,15 @@ def test_workflow_keeps_github_execution_trusted_and_preserves_modes():
     assert "checkout-candidate" not in deploy
     assert "pull_request.head.sha || github.sha" in deploy
     assert "pull_request.head.repo.full_name || github.repository" in deploy
-    assert "MODAL_TOKEN_ID" not in deploy
-    assert "MODAL_TOKEN_SECRET" not in deploy
-    deploy_auth = deploy.split("- name: Configure AWS credentials for test backend",
-                               1)[1].split("- name: Run tests on AWS backend", 1)[0]
-    deploy_cleanup = deploy.split("- name: Reconcile AWS test cleanup", 1)[1]
+    assert "MODAL_TOKEN_ID" in deploy
+    assert "MODAL_TOKEN_SECRET" in deploy
+    deploy_auth = deploy.split("- name: Configure AWS credentials for capacity fallback",
+                               1)[1].split("- name: Run tests on AWS capacity fallback", 1)[0]
+    deploy_cleanup = deploy.split("- name: Reconcile AWS capacity fallback cleanup", 1)[1]
     assert "id: aws-auth" in deploy_auth
-    assert "if: ${{ always() && steps.aws-auth.outcome == 'success' }}" in deploy_cleanup
-    assert "if: ${{ always() }}" not in deploy_cleanup
+    assert "if: steps.modal.outputs.fallback == 'true'" in deploy_auth
+    assert ("if: ${{ always() && steps.modal.outputs.fallback == 'true' && steps.aws-auth.outcome == 'success' }}"
+            in deploy_cleanup)
 
 
 def test_launcher_source_has_no_local_packaging_or_shell_execution():

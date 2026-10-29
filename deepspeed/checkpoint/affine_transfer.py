@@ -246,7 +246,8 @@ def _frame_of(piece: AffinePiece, rank: int, side: str, logical_shape: Tuple[int
     Both stride vectors must be the row-major strides of the tensor they address, which is what makes
     the box arithmetic below valid and what every builder in ``affine.py`` already emits. An axis the
     piece does not span is absent from storage, so its stride is not compared -- that is also where a
-    permutation would hide, and a permutation is not one box.
+    permutation would hide, and a permutation is not one box. A flat shard is the one exception: it may
+    hold a multi-axis box as a dense run, which is how ZeRO stores a tensor-parallel shard.
     """
     where = f'{side} rank {rank} piece {piece!r}'
     if len(piece.shape) != len(logical_shape):
@@ -271,6 +272,11 @@ def _frame_of(piece: AffinePiece, rank: int, side: str, logical_shape: Tuple[int
     for axis, (got, want, size) in enumerate(zip(piece.source_strides, logical_strides, piece.shape)):
         if size > 1 and got != want:
             raise UnsupportedLayoutError(f'{where}: source axis {axis} strides {got}, expected {want}')
+    flat_storage = len(shard_shape) == 1 and len(piece.shape) != 1
+    if flat_storage:
+        # A flat shard, as ZeRO stores one, holds a box of a multi-axis parameter as one run of
+        # addresses: the box's own row-major strides. Its place in the shard is that run.
+        shard_strides = _row_major_strides(tuple(piece.shape))
     for axis, (got, want, size) in enumerate(zip(piece.dest_strides, shard_strides, piece.shape)):
         if size > 1 and got != want:
             raise UnsupportedLayoutError(f'{where}: dest axis {axis} strides {got}, expected {want}')
@@ -279,7 +285,10 @@ def _frame_of(piece: AffinePiece, rank: int, side: str, logical_shape: Tuple[int
     box = LogicalBox(origin, tuple(piece.shape))
     if not LogicalBox(tuple([0] * len(logical_shape)), logical_shape).contains(box):
         raise InvalidMapError(f'{where}: covers {box!r}, outside the logical parameter of {logical_shape}')
-    local = LogicalBox(_origin(piece.dest_offset, shard_strides, shard_shape, where, 'dest'), tuple(piece.shape))
+    if flat_storage:
+        local = LogicalBox((piece.dest_offset, ), (piece.numel, ))
+    else:
+        local = LogicalBox(_origin(piece.dest_offset, shard_strides, shard_shape, where, 'dest'), tuple(piece.shape))
     if not LogicalBox(tuple([0] * len(shard_shape)), shard_shape).contains(local):
         raise InvalidMapError(f'{where}: writes {local!r}, outside the {shard_shape} shard')
     return _Frame(rank=rank,
@@ -302,7 +311,8 @@ def _normalized(map_: ParamAffineMap, side: str, limits: PlanBudget) -> List[_Fr
     logical_shape = tuple(map_.logical_shape)
     if len(logical_shape) > limits.max_ndim:
         raise UnsupportedLayoutError(f'{side}: {len(logical_shape)} axes exceeds max_ndim {limits.max_ndim}')
-    if any(len(tuple(shape)) != len(logical_shape) for shape in map_.shard_shapes.values()):
+    # A flat shard is flat storage, such as ZeRO's; its pieces carry the axis correspondence.
+    if any(len(tuple(shape)) not in (1, len(logical_shape)) for shape in map_.shard_shapes.values()):
         raise UnsupportedLayoutError(
             f'{side}: a shard is described with a different number of axes than the logical parameter, so '
             'no axis correspondence exists to plan against')
