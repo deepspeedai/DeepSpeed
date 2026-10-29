@@ -77,7 +77,7 @@ def initialize(group=None):
     peer_storage = UntypedStorage._new_shared_cuda(*peer_info)
     # The mapped storage reports the producer's device; only its data
     # pointer crosses into the extension, so no tensor wrap is needed.
-    op.connect(peer_storage.data_ptr())
+    op.connect(peer_storage.data_ptr(), peer_info[0])
     torch.cuda.synchronize()
     _state["op"] = op
     _state["inited"] = True

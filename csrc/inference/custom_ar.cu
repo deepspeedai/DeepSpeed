@@ -121,9 +121,15 @@ void car_initialize(torch::Tensor buf, torch::Tensor seq)
     g_state.ready = true;
 }
 
-void car_connect(int64_t peer_ptr)
+void car_connect(int64_t peer_ptr, int64_t peer_device)
 {
     TORCH_CHECK(g_state.ready, "call car_initialize first");
+    // torch's IPC open may map lazily without enabling direct access —
+    // the flag spin and P2P reads fault without it
+    int cur;
+    cudaGetDevice(&cur);
+    if (peer_device != cur) cudaDeviceEnablePeerAccess((int)peer_device, 0);
+    cudaStreamSynchronize(0);
     g_state.peer_base = (char*)peer_ptr;
     g_state.world = 2;
 }
