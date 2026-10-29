@@ -133,7 +133,7 @@ def timed_op(func):
                     raw_name = func.__name__
                     timers(log_name).stop()
                     time_elapsed = timers(log_name).elapsed(reset=False)
-                    comms_logger.append(raw_name, log_name, time_elapsed, msg_size)
+                    comms_logger.append(raw_name, log_name, time_elapsed, msg_size, group=func_args.get('group'))
 
     return log_wrapper
 

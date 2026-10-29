@@ -29,12 +29,17 @@ def convert_size(size_bytes):
     return "%s %s" % (s, size_name[i])
 
 
-# Helper function to calculate algbw and busbw.
-# See https://gist.github.com/jeffra/b5e80466b4c86be00ea3b6f130fb7a36 and https://github.com/NVIDIA/nccl-tests/blob/master/doc/PERFORMANCE.md
-def calc_bw_log(comm_op, size, duration):
+# Resolve the participating process-group size for bandwidth calculations.
+def _get_group_world_size(group=None):
     import deepspeed.comm as dist
 
-    n = dist.get_world_size()
+    return dist.get_world_size(group=group)
+
+
+# Helper function to calculate algbw and busbw.
+# See https://gist.github.com/jeffra/b5e80466b4c86be00ea3b6f130fb7a36 and https://github.com/NVIDIA/nccl-tests/blob/master/doc/PERFORMANCE.md
+def calc_bw_log(comm_op, size, duration, group=None):
+    n = _get_group_world_size(group)
     tput = 0
     busbw = 0
     if comm_op == "all_to_all_single" or comm_op == "all_to_all":
@@ -101,8 +106,12 @@ class CommsLogger:
         self.prof_ops = [op for op in self.prof_ops if op not in op_name_list]
 
     # Add log entry
-    def append(self, raw_name, record_name, latency, msg_size):
-        algbw, busbw = calc_bw_log(raw_name, msg_size, latency)
+    def append(self, raw_name, record_name, latency, msg_size, group=None):
+        algbw, busbw = calc_bw_log(raw_name, msg_size, latency, group=group)
+        group_size = _get_group_world_size(group)
+        global_size = _get_group_world_size()
+        if group is not None and group_size != global_size:
+            record_name = f'{record_name} | [Group Size: {group_size}]'
         if record_name in self.comms_dict.keys():
             # If this comm_op has already been logged with this message size, just add to existing record
             if msg_size in self.comms_dict[record_name].keys():

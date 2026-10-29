@@ -66,3 +66,6 @@ tests/unit/saved_checkpoint/
 
 # virtual env directory for format
 venv
+
+# Local investigation notebook
+doc/subgroup_bandwidth_investigation.md
