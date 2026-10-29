@@ -150,6 +150,47 @@ void car_connect(const std::string& handle_bytes)
     g_state.world = 2;
 }
 
+__global__ void handshake_kernel(char* __restrict__ my_base, const char* __restrict__ peer_base, int* __restrict__ seq_d,
+                                 int* __restrict__ result)
+{
+    const int seq = *seq_d + 1;  // handshake rides the next sequence number
+    *seq_d = seq;
+    const int parity = seq & 1;
+    char* my_buf = my_base + kBufBase + (size_t)parity * kBufStride;
+    const char* peer_buf = peer_base + kBufBase + (size_t)parity * kBufStride;
+    if (threadIdx.x == 0 && blockIdx.x == 0) {
+        *(int*)(my_buf) = 0x5A5A5A5A;
+        __threadfence_system();
+        *(volatile int*)(my_base + (parity ? kFlagOff1 : kFlagOff0)) = seq;
+    }
+    __syncthreads();
+    if (threadIdx.x == 0 && blockIdx.x == 0) {
+        volatile const int* pflag = (volatile const int*)(peer_base + (parity ? kFlagOff1 : kFlagOff0));
+        long long spins = 0;
+        while (*pflag < seq && spins < 2000000000LL) spins++;  // bounded (~seconds)
+        if (*pflag < seq) {
+            *result = -1;  // peer flag never became visible
+            return;
+        }
+        __threadfence_system();
+        *result = (*(volatile const int*)(peer_buf) == 0x5A5A5A5A) ? 1 : -2;  // flag ok, data?
+    }
+}
+
+bool car_handshake()
+{
+    TORCH_CHECK(g_state.ready && g_state.peer_base, "custom AR not connected");
+    auto result = torch::zeros({1}, torch::TensorOptions().dtype(torch::kInt).device(torch::kCUDA));
+    auto stream = at::cuda::getCurrentCUDAStream();
+    handshake_kernel<<<1, 32, 0, stream.stream()>>>(g_state.my_base, g_state.peer_base, g_state.seq_d,
+                                                    (int*)result.data_ptr());
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    // both ranks must publish before either inspects — a plain NCCL-free
+    // sync is impossible, so the caller synchronizes the stream first
+    cudaStreamSynchronize(stream.stream());
+    return result.cpu().item<int>() == 1;
+}
+
 bool car_ready(int64_t world) { return g_state.ready && g_state.world == world && g_state.peer_base != nullptr; }
 
 int64_t car_max_bytes() { return CAR_MAX_BYTES; }
@@ -191,6 +232,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
 {
     m.def("create_buffers", &car_create_buffers, "allocate IPC buffers, return handle bytes");
     m.def("connect", &car_connect, "map peer buffer (data pointer from CUDA IPC storage)");
+    m.def("handshake", &car_handshake, "bounded probe: is the peer flag visible over this fabric");
     m.def("ready", &car_ready, "is the custom path usable");
     m.def("max_bytes", &car_max_bytes, "max message size");
     m.def("all_reduce", &car_all_reduce, "one-shot P2P all-reduce (in place)");

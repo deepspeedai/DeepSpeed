@@ -68,6 +68,17 @@ def initialize(group=None):
     tdist.all_gather_object(gathered, handle, group=group)
     op.connect(gathered[1 - rank])
     torch.cuda.synchronize()
+    # Publish-and-wait probe with a bounded spin: PCIe P2P fabrics may not
+    # propagate the flag protocol NVLink honors — hang-proof the fast path
+    # by falling back to NCCL where the probe fails.
+    ok = op.handshake()
+    torch.cuda.synchronize()
+    ok = op.handshake() and ok  # second pass exercises the other parity
+    if not ok:
+        import os as _os
+        if _os.environ.get("CUSTOM_AR_DEBUG"):
+            print(f"[custom_ar] handshake FAILED on rank {rank} — NCCL fallback", flush=True)
+        return
     _state["op"] = op
     _state["inited"] = True
 
