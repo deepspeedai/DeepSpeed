@@ -61,22 +61,12 @@ def initialize(group=None):
         return  # no P2P (e.g. cross-CPU PCIe) — NCCL stays the right answer
 
     op = _build()
-    # Python owns the buffers so they can ride torch's CUDA-IPC sharing.
-    buf = torch.zeros(_TOTAL_BYTES, dtype=torch.uint8, device="cuda")
-    seq = torch.zeros(1, dtype=torch.int32, device="cuda")
-    op.initialize(buf, seq)
-
-    # Share the storage (not just the view) so the peer maps the allocation.
-    # _share_cuda_()/​_new_shared_cuda round-trip the full state tuple.
-    info = buf.untyped_storage()._share_cuda_()
+    # Pure CUDA IPC: the extension cudaMallocs its buffers and mints the
+    # handle; only the 64 raw bytes cross the wire.
+    handle = op.create_buffers()
     gathered = [None, None]
-    tdist.all_gather_object(gathered, info, group=group)
-    peer_info = gathered[1 - rank]
-    # _share_cuda_() tuple: the 64-byte field is the raw cudaIpcMemHandle_t
-    # (the 66-byte field is torch's own refcount wrapper). Open it on OUR
-    # device context in the extension — torch's reconstruction would map on
-    # the producer's device instead.
-    op.connect(peer_info[6])
+    tdist.all_gather_object(gathered, handle, group=group)
+    op.connect(gathered[1 - rank])
     torch.cuda.synchronize()
     _state["op"] = op
     _state["inited"] = True
