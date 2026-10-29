@@ -121,10 +121,10 @@ void car_initialize(torch::Tensor buf, torch::Tensor seq)
     g_state.ready = true;
 }
 
-void car_connect(torch::Tensor peer_buf)
+void car_connect(int64_t peer_ptr)
 {
     TORCH_CHECK(g_state.ready, "call car_initialize first");
-    g_state.peer_base = (char*)peer_buf.data_ptr();
+    g_state.peer_base = (char*)peer_ptr;
     g_state.world = 2;
 }
 
@@ -168,7 +168,7 @@ torch::Tensor car_all_reduce(torch::Tensor t)
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
 {
     m.def("initialize", &car_initialize, "bind python-owned IPC buffers");
-    m.def("connect", &car_connect, "map peer buffers (torch CUDA IPC tensor)");
+    m.def("connect", &car_connect, "map peer buffer (data pointer from CUDA IPC storage)");
     m.def("ready", &car_ready, "is the custom path usable");
     m.def("max_bytes", &car_max_bytes, "max message size");
     m.def("all_reduce", &car_all_reduce, "one-shot P2P all-reduce (in place)");
