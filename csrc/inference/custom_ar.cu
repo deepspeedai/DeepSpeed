@@ -17,6 +17,7 @@
 // Double buffering (p = seq & 1) lets call N+1 publish while call N reduces.
 
 #include <torch/extension.h>
+#include <pybind11/pytypes.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <cuda_runtime.h>
 #include <cuda_bf16.h>
@@ -131,7 +132,7 @@ std::string car_create_buffers()
     g_state.own_seq = seq;
     g_state.seq_d = seq;
     g_state.ready = true;
-    return std::string((const char*)&h, sizeof(h));
+    return py::bytes((const char*)&h, sizeof(h));  // raw handle, not utf-8
 }
 
 void car_connect(const std::string& handle_bytes)
