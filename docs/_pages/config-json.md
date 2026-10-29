@@ -334,6 +334,12 @@ Example of <i>**scheduler**</i>
 | ----------- | ------- |
 | When `BF16_Optimizer` is selected, accumulate each completed BF16 gradient in an autograd hook (in FP32 when `data_types.grad_accum_dtype="fp32"`). The consumed `param.grad` is released and may be `None` after backward. In that case, `deepspeed.utils.safe_get_full_grad(param)` reconstructs the accumulated gradient from the optimizer-owned fragments; all data-parallel ranks must call it before `engine.step()` in the same order. The default keeps the existing backward-epilogue accumulation. | `false` |
 
+<i>**bf16:check_grad_overflow**</i>: [boolean]
+
+| Description | Default |
+| ----------- | ------- |
+| With ZeRO stages 1 and 2, check the gradients for Inf/NaN before the optimizer step. When a non-finite gradient is found, the step is skipped: the weights and the learning-rate schedule do not advance, `engine.skipped_steps` is incremented, and a warning is logged on rank 0. With `false`, non-finite gradients reach the optimizer and can turn the parameters into NaN. ZeRO stage 0, ZeRO stage 3 and `BF16_Optimizer` (selected for ZeRO stage 1 with `data_types.grad_accum_dtype="fp32"`) ignore this setting and always skip a step whose gradient norm is not finite. | `true` |
+
 <i>**bf16:bf16_master_weights_and_grads**</i>: [boolean]
 
 | Description | Default |

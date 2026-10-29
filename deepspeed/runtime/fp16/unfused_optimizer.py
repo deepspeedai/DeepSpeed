@@ -14,7 +14,7 @@ from torch._utils import _flatten_dense_tensors
 from deepspeed.runtime.base_optimizer import DeepSpeedOptimizer
 from deepspeed.runtime.utils import (CheckOverflow, get_global_norm, get_weight_norm, is_invalid_grad_norm,
                                      is_optimized_parameter)
-from deepspeed.runtime.fp16.loss_scaler import LossScaleConfig, LossScaleProfile
+from deepspeed.runtime.fp16.loss_scaler import LossScaleConfig, LossScaleProfile, report_skipped_step
 from deepspeed.utils import logger
 from deepspeed.utils.torch import required_torch_version
 from deepspeed.checkpoint.constants import OPTIMIZER_STATE_DICT
@@ -307,7 +307,7 @@ class FP16_UnfusedOptimizer(DeepSpeedOptimizer):
                             f"Increasing dynamic loss scale from {prev_scale} to {self.loss_scale_config.cur_scale}")
         else:
             if skip:
-                logger.info("Grad overflow on iteration %s", self.loss_scale_config.cur_iter)
+                report_skipped_step()
                 logger.info("Using static loss scale of %s", self.loss_scale_config.cur_scale)
         self.loss_scale_config.cur_iter += 1
         return

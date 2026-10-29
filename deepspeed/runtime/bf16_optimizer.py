@@ -16,6 +16,7 @@ from deepspeed.runtime.utils import (get_global_norm_of_tensors, clip_tensors_by
                                      align_dense_tensors, all_gather_dp_groups, is_model_parallel_parameter,
                                      see_memory_usage, get_norm_with_moe_layers, is_invalid_grad_norm,
                                      is_optimized_parameter)
+from deepspeed.runtime.fp16.loss_scaler import report_skipped_step
 from deepspeed.utils import link_hp_params, lazy_init_hp_params_optimizer_state, fragment_address, groups
 from deepspeed.moe.utils import is_moe_param, is_moe_param_group
 from deepspeed.utils.bwc import bwc_tensor_model_parallel_rank
@@ -402,6 +403,7 @@ class BF16_Optimizer(ZeROOptimizer):
         if is_invalid_grad_norm(all_groups_norm):
             self.overflow = True
             self._global_grad_norm = float("inf")
+            report_skipped_step()
             self.clear_hp_grads()
             self.clear_lp_grads()
             return

@@ -13,7 +13,7 @@ from deepspeed.runtime.base_optimizer import DeepSpeedOptimizer
 from deepspeed.runtime.utils import (CheckOverflow, get_flattened_grad_norm, get_global_norm, get_norm_with_moe_layers,
                                      get_weight_norm, is_invalid_grad_norm, is_model_parallel_parameter,
                                      is_optimized_parameter)
-from deepspeed.runtime.fp16.loss_scaler import LossScaleConfig, LossScaleProfile
+from deepspeed.runtime.fp16.loss_scaler import LossScaleConfig, LossScaleProfile, report_skipped_step
 from deepspeed.utils import logger
 from deepspeed.utils.torch import required_torch_version
 from deepspeed.checkpoint.constants import OPTIMIZER_STATE_DICT, CLIP_GRAD
@@ -155,6 +155,8 @@ class FP16_Optimizer(DeepSpeedOptimizer):
             self.has_executed_step = True
         if self.loss_scale_config.use_grad_scaling:
             self._update_scale(self.overflow)
+        else:
+            report_skipped_step()
         self.zero_grad(set_to_none=True)
         for group in self.fp32_groups_flat:
             group.grad = None
@@ -434,7 +436,7 @@ class FP16_Optimizer(DeepSpeedOptimizer):
                             f"Increasing dynamic loss scale from {prev_scale} to {self.loss_scale_config.cur_scale}")
         else:
             if skip:
-                logger.info("Grad overflow on iteration: %s", self.loss_scale_config.cur_iter)
+                report_skipped_step()
                 logger.info("Using static loss scale of: %s", self.loss_scale_config.cur_scale)
         self.loss_scale_config.cur_iter += 1
         return

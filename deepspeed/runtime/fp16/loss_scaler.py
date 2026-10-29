@@ -139,6 +139,14 @@ def to_python_float(t):
     return t[0]
 
 
+def report_skipped_step():
+    # A fixed loss scale does not move on overflow, so without this warning a skipped step is only
+    # visible in engine.skipped_steps.
+    log_dist("[deepspeed] OVERFLOW! Skipping step. Gradients are non-finite, weights were not updated.",
+             ranks=[0],
+             level=logging.WARNING)
+
+
 class LossScalerBase(DeepSpeedConfigObject):
     """LossScalarBase
     Base class for a loss scaler
@@ -158,9 +166,7 @@ class LossScalerBase(DeepSpeedConfigObject):
 
     def update_scale(self, overflow):
         if overflow:
-            log_dist("[deepspeed] OVERFLOW! Skipping step. Gradients are non-finite, weights were not updated.",
-                     ranks=[0],
-                     level=logging.WARNING)
+            report_skipped_step()
 
     def scale_loss(self, loss):
         """ Scales the loss by the current loss scale.
