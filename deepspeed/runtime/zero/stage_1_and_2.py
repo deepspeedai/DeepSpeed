@@ -1052,11 +1052,11 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                         device=get_accelerator().current_device_name(),
                         param_group_idx=i,
                         return_tensor_list=True)
-                    # Clear all_grad_tensors after use. With reentrant checkpointing,
-                    # the epilogue may run multiple times per backward pass. Each time,
-                    # we read the cumulative grad_accum (which PyTorch naturally accumulates)
-                    # and the final phase will have all gradients.
-                    self.all_grad_tensors[i] = None
+                    # grad_accum is cumulative across reentrant checkpoint phases, so
+                    # reread it rather than adding it twice. Otherwise keep the running
+                    # sum until step(): more request boundaries may precede the update.
+                    if self.use_grad_accum_attribute:
+                        self.all_grad_tensors[i] = None
 
         self._release_ipg_buffers()
 
@@ -2159,11 +2159,12 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 self.clear_grad_attribute(param)
             return
         if self.cpu_offload:
-            # Accumulate when there were prior backwards in this step (restore from
-            # CPU buffer) or more will follow (save to CPU buffer). Skipping only
-            # the lone backward of a step preserves the existing fast path for
-            # ga_steps=1 + single backward.
-            if self.micro_step_id > 0 or not self.is_gradient_accumulation_boundary():
+            # A boundary does not guarantee that step() follows. Refresh the host
+            # accumulator on the first backward too, or a later request adds the
+            # previous step's gradients. Low-precision masters already share the
+            # boundary gradient buffer and need no separate first-backward copy.
+            if (not self.low_precision_master_weights_and_grads or self.micro_step_id > 0
+                    or not self.is_gradient_accumulation_boundary()):
                 self.async_accumulate_grad_in_cpu_via_gpu(param)
                 # Record active param so unmanaged finalize skips params unused this window.
                 self._offload_accumulated_param_ids.add(self.get_param_id(param))
