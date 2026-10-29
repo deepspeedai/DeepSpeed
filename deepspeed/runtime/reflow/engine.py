@@ -26,6 +26,15 @@ def reflow_enabled(engine: "DeepSpeedEngine") -> bool:
     return not getattr(engine, "zenflow", False)
 
 
+def reject_optimizer_without_reflow(engine: "DeepSpeedEngine", optimizer):
+    if reflow_enabled(engine):
+        return
+    from deepspeed.runtime.reflow.reflow_cpu_adam import ReflowCPUAdam
+    from deepspeed.runtime.reflow.reflow_cpu_lion import ReflowCPULion
+    if isinstance(optimizer, (ReflowCPUAdam, ReflowCPULion)):
+        raise ZeRORuntimeException("ReflowCPUAdam and ReflowCPULion require zero_optimization.reflow.")
+
+
 def reflow_num_threads(engine: "DeepSpeedEngine"):
     return engine._config.zero_config.reflow.num_threads
 

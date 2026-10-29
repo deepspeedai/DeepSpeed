@@ -2346,6 +2346,7 @@ class DeepSpeedEngine(Module):
                     msg = f'You are using ZeRO-Offload with a client provided optimizer ({type(basic_optimizer)}) which in most cases will yield poor performance. Please either use deepspeed.ops.adam.DeepSpeedCPUAdam or set an optimizer in your ds-config (https://www.deepspeed.ai/docs/config-json/#optimizer-parameters). If you really want to use a custom optimizer w. ZeRO-Offload and understand the performance impacts you can also set <"zero_force_ds_cpu_optimizer": false> in your configuration file.'
                     raise ZeRORuntimeException(msg)
 
+        reflow_engine.reject_optimizer_without_reflow(self, basic_optimizer)
         basic_optimizer.param_groups[:] = [pg for pg in basic_optimizer.param_groups if len(pg["params"]) != 0]
         log_dist("Removing param_group that has no 'params' in the basic Optimizer", ranks=[0])
         # A client optimizer has to become the matching Reflow CPU optimizer; the config-built one already is one.

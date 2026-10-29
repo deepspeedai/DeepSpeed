@@ -712,6 +712,9 @@ class DeepSpeedConfig(object):
             if not (self.bfloat16_config.enabled or self.float16_config.enabled) or self.torch_autocast_enabled:
                 raise ValueError("Reflow requires FP16 or BF16 model parameters; enable 'fp16.enabled' "
                                  "or 'bf16.enabled'. FP32 model parameters and torch_autocast are not supported.")
+            model_dtype = torch.bfloat16 if self.bfloat16_config.enabled else torch.float16
+            if self.grad_accum_dtype is not None and DtypeEnum(self.grad_accum_dtype).value != model_dtype:
+                raise ValueError("Reflow requires data_types.grad_accum_dtype to match the FP16 or BF16 model dtype.")
             if (self.float16_config.fp16_master_weights_and_grads or self.bfloat16_config.bf16_master_weights_and_grads
                     or self.bfloat16_config.bf16_optimizer_states):
                 raise ValueError("Reflow requires FP32 master weights and optimizer states; "

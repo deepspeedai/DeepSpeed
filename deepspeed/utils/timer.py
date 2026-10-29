@@ -231,8 +231,9 @@ class ThroughputTimer:
         if self.logging is None:
             self.logging = logger.info
         self.initialized = False
-        # Reflow auto-enables this: with CPU-offload side streams, sync only the current
-        # stream so the timer does not serialize them. Default preserves the full device sync.
+        # Reflow avoids a device-wide timer sync: waiting for its H2D side stream would delay
+        # the next GPU compute launch and reduce overlap with the CPU optimizer workers.
+        # Other runs keep the original full-device synchronization.
         self.sync_current_stream = sync_current_stream
 
         if self.monitor_memory and importlib.util.find_spec("psutil") is None:

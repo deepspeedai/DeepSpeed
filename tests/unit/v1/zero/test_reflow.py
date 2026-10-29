@@ -144,6 +144,16 @@ def test_requires_stage3_and_cpu_optimizer_offload():
         DeepSpeedConfig(minimal_reflow_config(offload_optimizer=None))
 
 
+@pytest.mark.parametrize("ratio", [0.0, 0.5])
+def test_rejects_partial_optimizer_offload(ratio):
+    config = minimal_reflow_config(offload_optimizer={"device": "cpu", "ratio": ratio})
+    with pytest.raises(ValueError, match="offload_optimizer.ratio must be 1.0"):
+        DeepSpeedConfig(config)
+
+    del config["zero_optimization"]["reflow"]
+    assert DeepSpeedConfig(config).zero_config.offload_optimizer.ratio == ratio
+
+
 def test_rejects_deepcompile():
     config = minimal_reflow_config()
     config["compile"] = {"deepcompile": True}
@@ -195,6 +205,23 @@ def test_rejects_unsupported_precision(precision_config, error):
     config.update(precision_config)
     with pytest.raises(ValueError, match=error):
         DeepSpeedConfig(config)
+
+
+@pytest.mark.parametrize("model_dtype, grad_dtype", [("bf16", "fp32"), ("bf16", "fp16"), ("fp16", "fp32")])
+def test_rejects_mismatched_gradient_accumulation_dtype(model_dtype, grad_dtype):
+    config = minimal_reflow_config()
+    config["bf16"]["enabled"] = model_dtype == "bf16"
+    config["fp16"] = {"enabled": model_dtype == "fp16"}
+    config["data_types"] = {"grad_accum_dtype": grad_dtype}
+    with pytest.raises(ValueError, match="data_types.grad_accum_dtype to match"):
+        DeepSpeedConfig(config)
+
+    config["data_types"]["grad_accum_dtype"] = model_dtype
+    assert DeepSpeedConfig(config).grad_accum_dtype == model_dtype
+
+    del config["zero_optimization"]["reflow"]
+    config["data_types"]["grad_accum_dtype"] = grad_dtype
+    assert DeepSpeedConfig(config).grad_accum_dtype == grad_dtype
 
 
 @pytest.mark.parametrize("precision", ["fp16", "bf16"])
@@ -595,6 +622,34 @@ class TestReflowCPUPlacementMatchesZeroOffload(DistributedTest):
             assert torch.equal(got, want)
         for want, got in zip(expected["fp32_params"], actual["fp32_params"]):
             assert torch.equal(got, want)
+
+
+class TestReflowOptimizerRequiresOptIn(DistributedTest):
+    world_size = 1
+    non_daemonic_procs = True
+
+    def test_regular_optimizer_without_reflow_config(self):
+        model = SimpleModel(hidden_dim=16, nlayers=2)
+        optimizer = torch.optim.Adam(model.parameters())
+        config = {"train_micro_batch_size_per_gpu": 1, "zero_optimization": {"stage": 0}}
+        engine, _, _, _ = deepspeed.initialize(model=model, optimizer=optimizer, config=config)
+        try:
+            assert engine.basic_optimizer is optimizer
+        finally:
+            engine.destroy()
+
+    @pytest.mark.parametrize("optimizer_type, builder", [(ReflowCPUAdam, CPUAdamBuilder),
+                                                         (ReflowCPULion, CPULionBuilder)])
+    def test_rejects_reflow_optimizer_without_reflow_config(self, optimizer_type, builder):
+        if not deepspeed.ops.__compatible_ops__.get(builder.NAME, False):
+            pytest.skip("the CPU optimizer builder is not supported on this accelerator")
+        if builder().simd_width() not in ("-D__AVX512__", "-D__AVX256__"):
+            pytest.skip("the Reflow CPU optimizer requires AVX2 or AVX-512")
+        model = SimpleModel(hidden_dim=16, nlayers=2)
+        optimizer = optimizer_type(model.parameters())
+        config = {"train_micro_batch_size_per_gpu": 1, "zero_optimization": {"stage": 0}}
+        with pytest.raises(ZeRORuntimeException, match="require zero_optimization.reflow"):
+            deepspeed.initialize(model=model, optimizer=optimizer, config=config)
 
 
 class TestReflowPrecisionValidation(DistributedTest):

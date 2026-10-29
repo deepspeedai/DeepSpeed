@@ -130,7 +130,9 @@ to the original optimizer cannot follow the remapping and is rejected.
 }
 ```
 
-Reflow keeps the optimizer state in CPU RAM (`offload_optimizer.device: "cpu"`). It is mutually
+Reflow keeps the optimizer state in CPU RAM (`offload_optimizer.device: "cpu"`). Partial optimizer
+offload (`offload_optimizer.ratio < 1.0`) is not supported. If `data_types.grad_accum_dtype` is set,
+it must match the FP16 or BF16 model dtype. It is mutually
 exclusive with `super_offload` and `zenflow` (the config validator raises a clear error otherwise;
 see `config.reflow_compat_check`), and with DeepCompile, whose ZeRO-3 backward reduces gradients
 without `partition_grads`, where Reflow launches its workers (rejected in `DeepSpeedConfig`). The

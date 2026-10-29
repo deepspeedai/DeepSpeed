@@ -429,6 +429,8 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
             # Reflow runs the optimizer on CPU. device='cpu' keeps its state in CPU memory; device='nvme'
             # additionally swaps that state per subgroup around the CPU step.
             raise ValueError("Reflow requires optimizer offload with device 'cpu' or 'nvme'.")
+        if offload_config.ratio != 1.0:
+            raise ValueError("Reflow does not support partial optimizer offload; offload_optimizer.ratio must be 1.0.")
         if self.zenflow is not None:
             raise ValueError("Reflow is not compatible with ZenFlow; enable only one of them.")
         if offload_config.super_offload:
