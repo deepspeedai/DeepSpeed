@@ -410,8 +410,13 @@ def _fused_gdn_forward(self, hidden_states, *args, **kwargs):
             self._ki_gates_cache = cached
         a_log_f, dt_f = cached[1], cached[2]
         # gdn_gates accepts row-strided a/b, so the fused-output slices go in
-        # without contiguous copies.
-        beta, g = gdn_op.gdn_gates(a, b, a_log_f, dt_f)
+        # without contiguous copies. Routed through the torch.library op so
+        # inductor fuses the glue around it (route A).
+        from deepspeed.module_inject.segki_torchlib import TORCHLIB_READY as _tlr
+        if _tlr:
+            beta, g = torch.ops.segki.gdn_gates(a, b, a_log_f, dt_f)
+        else:
+            beta, g = gdn_op.gdn_gates(a, b, a_log_f, dt_f)
     else:
         beta = b.sigmoid()
         hv = self.num_v_heads
@@ -447,7 +452,10 @@ def _fused_gdn_forward(self, hidden_states, *args, **kwargs):
             and core_attn_out.is_contiguous() and z.is_contiguous() and core_attn_out.dtype is torch.bfloat16):
         normed = torch.empty_like(core_attn_out)
         norm_eps = getattr(self.norm, "variance_epsilon", None) or self.norm.eps
-        gdn2_op.gated_norm(core_attn_out, z, self.norm.weight, normed, norm_eps)
+        if _tlr:
+            torch.ops.segki.gated_norm(core_attn_out, z, self.norm.weight, normed, norm_eps)
+        else:
+            gdn2_op.gated_norm(core_attn_out, z, self.norm.weight, normed, norm_eps)
         core_attn_out = normed
     else:
         core_attn_out = self.norm(core_attn_out, z)
@@ -551,7 +559,17 @@ def _install_gdn_segment(seg: GDNSegment) -> bool:
     parent._ki_gdn_conv_update = conv_update_with_weights
     parent._ki_gdn_conv_fn = conv_fn_with_weights
     parent._ki_gdn_scan = scan
-    parent.forward = _fused_gdn_forward.__get__(parent, type(parent))
+    fwd = _fused_gdn_forward.__get__(parent, type(parent))
+    # Route A glue fusion: torch.library-registered op boundaries let
+    # inductor fuse the eager elementwise glue inside this forward. Opt-in
+    # (DEEPSPEED_SEGKI_COMPILE=1) until validated across accelerators.
+    import os as _os
+    if _os.environ.get("DEEPSPEED_SEGKI_COMPILE") == "1":
+        from deepspeed.module_inject import segki_torchlib
+        if segki_torchlib.TORCHLIB_READY:
+            segki_torchlib.bind_kernel_op(getattr(parent, "_ki_gdn_op", None))
+            fwd = torch.compile(fwd, dynamic=False)
+    parent.forward = fwd
     return True
 
 
