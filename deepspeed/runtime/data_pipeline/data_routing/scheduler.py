@@ -24,7 +24,11 @@ class BaseScheduler(object):
         next_seq = (float(global_steps) / s_state[RANDOM_LTD_REQUIRE_STEP])**(1.0 / root_degree)
         next_seq = math.floor(next_seq * (self.state[RANDOM_LTD_MAX_VALUE] - self.state[RANDOM_LTD_MIN_VALUE]) +
                               self.state[RANDOM_LTD_MIN_VALUE])
-        next_seq -= (next_seq % s_state[RANDOM_LTD_INCREASE_STEP])
+        increment = s_state[RANDOM_LTD_INCREASE_STEP]
+        next_seq -= (next_seq % increment)
+        # Alignment must not drop the retained sequence below the configured minimum.
+        aligned_min = -(-self.state[RANDOM_LTD_MIN_VALUE] // increment) * increment
+        next_seq = max(next_seq, aligned_min)
         next_seq = min(next_seq, self.state[RANDOM_LTD_MAX_VALUE])
         return next_seq
 
