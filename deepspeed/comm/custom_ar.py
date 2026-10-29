@@ -72,12 +72,9 @@ def initialize(group=None):
     gathered = [None, None]
     tdist.all_gather_object(gathered, info, group=group)
     peer_info = gathered[1 - rank]
-    from torch.storage import UntypedStorage
-
-    peer_storage = UntypedStorage._new_shared_cuda(*peer_info)
-    # The mapped storage reports the producer's device; only its data
-    # pointer crosses into the extension, so no tensor wrap is needed.
-    op.connect(peer_storage.data_ptr(), peer_info[0])
+    # The raw IPC handle bytes open on OUR device context in the extension
+    # (torch's reconstruction would map on the producer's device instead).
+    op.connect(peer_info[1])
     torch.cuda.synchronize()
     _state["op"] = op
     _state["inited"] = True

@@ -121,16 +121,19 @@ void car_initialize(torch::Tensor buf, torch::Tensor seq)
     g_state.ready = true;
 }
 
-void car_connect(int64_t peer_ptr, int64_t peer_device)
+void car_connect(const std::string& handle_bytes)
 {
     TORCH_CHECK(g_state.ready, "call car_initialize first");
-    // torch's IPC open may map lazily without enabling direct access —
-    // the flag spin and P2P reads fault without it
-    int cur;
-    cudaGetDevice(&cur);
-    if (peer_device != cur) cudaDeviceEnablePeerAccess((int)peer_device, 0);
-    cudaStreamSynchronize(0);
-    g_state.peer_base = (char*)peer_ptr;
+    // Open the peer's handle on THIS device's context: the resulting
+    // mapping is dereferenceable by our kernels (torch's reconstruction
+    // opens on the producer's device, which our streams cannot read).
+    TORCH_CHECK(handle_bytes.size() >= sizeof(cudaIpcMemHandle_t), "short IPC handle");
+    cudaIpcMemHandle_t h;
+    memcpy(&h, handle_bytes.data(), sizeof(h));
+    void* mapped = nullptr;
+    cudaError_t err = cudaIpcOpenMemHandle(&mapped, h, cudaIpcMemLazyEnablePeerAccess);
+    TORCH_CHECK(err == cudaSuccess, "cudaIpcOpenMemHandle failed: ", cudaGetErrorString(err));
+    g_state.peer_base = (char*)mapped;
     g_state.world = 2;
 }
 
