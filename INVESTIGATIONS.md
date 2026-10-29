@@ -1107,3 +1107,30 @@ Post-hoc bug fixes surfaced by the A100 test suite:
 - NT=128 kernel variant had a numerics bug (masked by TP composite
   routing); removed — no perf loss (loop 1 showed it never won)
 - concatenated attn qkv path mishandled M=1 (flat GEMV returns 1-D)
+
+
+## 23. vLLM 0.32 profile on A100 — where the remaining 2x gap lives
+
+Method: vLLM start_profile (torch profiler in EngineCore workers), trace
+= gzip chrome JSON parsed for GPU kernel events, 188 decode steps at
+bs=32 TP=2.
+
+| component | vLLM | segKI | gap |
+|---|---|---|---|
+| AllReduce | 0.73ms — cross_device_reduce_1stage, 8.9us/call | 1.93ms NCCL 29us/call | 1.2ms |
+| attn decode | 0.22ms — FlashAttention splitkv, 27us/layer | 0.83ms ours 101us/layer | 0.6ms |
+| GEMMs | ~4.2ms, 131 calls/st | ~5.1ms, 141 calls/st | 0.9ms |
+| GDN recurrent | 0.92ms packed_decode 37.8us/layer | 1.03ms FLA 42us/layer | ~0.1ms |
+| glue (norm/gating/elementwise/memcpy) | ~0.6ms torch.compile+triton fused | ~3.5ms eager ops | 2.5ms+ |
+| step total | 5.97ms | ~13.0ms | 7ms |
+
+Roadmap by ROI:
+1. Custom AR one-stage P2P (vLLM's cross_device_reduce_1stage): 1.2ms,
+   9% of our step — P2P works on this machine; the design was scoped
+   earlier (one-shot, small messages).
+2. decode_attn: FlashAttention's splitkv decode is 3.7x faster per
+   layer; our kernel needs split-KV handling for long contexts.
+3. torch.compile-style glue fusion: the eager PyTorch op soup (597
+   elementwise + 120 copies/step) is what vLLM's inductor pass
+   eliminates; our manual fused kernels cover norm/gates but not the
+   GDN gating arithmetic and RoPE.
