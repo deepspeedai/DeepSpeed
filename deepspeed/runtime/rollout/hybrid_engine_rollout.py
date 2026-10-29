@@ -224,12 +224,16 @@ class HybridEngineRollout(RolloutEngine):
                     raise RuntimeError("Shared prefill does not support CUDA graph capture")
                 self.engine.prepare_shared_prefill(B, n, prompt_len)
                 shared_prefill_handles = self._register_shared_prefill_hooks(module, B, n)
-            # Padded prompts ride module.generate instead of the graph path:
-            # the graph prefill feeds per-type None masks, so pad positions
-            # would leak into the KV cache and the GDN recurrent states (and
-            # the first token is read off a pad position). HF generate owns
-            # the full mask semantics for that case.
-            if self.use_graph_capture and not module._ki_prompt_padded:
+            # Padded prompts fall back to module.generate ONLY when our
+            # kernels cannot honor the mask: hybrid prefill feeds GDN a
+            # None mask (pad positions corrupt conv-state init), and the
+            # injected segKI decode kernels attend every cached slot
+            # unconditionally. Standard graph users keep master's padded
+            # behavior — the mask flows through prefill and the decode
+            # static_attn buffer.
+            layer_types = getattr(getattr(module.config, "text_config", module.config), "layer_types", None) or []
+            needs_pad_fallback = module._ki_prompt_padded and ("linear_attention" in layer_types or self.use_segki)
+            if self.use_graph_capture and not needs_pad_fallback:
                 output_ids = self._generate_graph(prompt_ids, prompt_attn, max_new_tokens, pad_token_id, module,
                                                   device, sampling)
             else:
