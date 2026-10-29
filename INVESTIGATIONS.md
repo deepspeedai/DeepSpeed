@@ -1176,3 +1176,33 @@ vs vLLM 0.32: 66.0% / 56.5% / 55.4% (from 60/53/52).
   exact, deterministic and self-consistent; 186-test suite passes)
 
 Night total on A100: 675 -> 958 (+42%), 2048 -> 2759 (+35%), 3781 -> 4230 (+12%).
+
+
+## 25. Route A (torch.library + compile) — infrastructure works, v1 regression
+
+Registered grouped_linear/gdn_gates/gated_norm/fused_add_norm via
+torch.library.custom_op with fake kernels (3 fix iterations: mutates_args
+tuple syntax, fake shapes, dynamic=True for multi-batch). GDN forward
+wrapped in torch.compile behind DEEPSPEED_SEGKI_COMPILE=1.
+
+### Result: -1 to -5.5% (946/2607/4075 vs 958/2759/4230)
+Profile with compile ON shows the kernel distribution IDENTICAL to
+compile OFF — zero Triton kernels generated. The dynamo warning exposes
+why: `cache_params.has_previous_state(...)` (a Python cache object) breaks
+the graph at the top of the forward; fragments between breaks are too
+small to fuse. We paid guard/dispatch overhead for no fusion.
+
+### What was proven
+- torch.library registration of the opbuilder methods works end-to-end
+  (correct results, compile-transparent boundaries)
+- compiled code coexists with our manual CUDA graphs (capture after
+  warmup compiles; replay unaffected)
+
+### The right v2 (kernel-track)
+Extract PURE-TENSOR glue segments into standalone functions — no
+cache_params, no closures, no Python objects — and compile those:
+  def _scan_prep(q, k, ratio) -> repeat_interleave + casts   (48 calls/st)
+  def _rope_chain(q, k, cos, sin) -> mul + add + cast        (32 calls/st)
+Each compiles to one Triton kernel; boundaries are our registered ops.
+Fusion where it pays, eager where it does not. The registration layer
+from tonight is exactly the prerequisite.
