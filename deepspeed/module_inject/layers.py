@@ -224,16 +224,16 @@ class RowParallel(torch.autograd.Function):
         ctx.group = group
         if group == None:
             return input
-        if is_inference_mode:
-            # Latency regime (decode-sized messages): a single one-shot
-            # collective beats the reduce-scatter+all-gather pair; the
-            # inference_all_reduce backend owns the choice and falls back.
-            from deepspeed.comm import custom_ar
-            world = dist.get_world_size(group=group) if group is not None else dist.get_world_size()
-            if (custom_ar.custom_ar_ready(world) and input.numel() * input.element_size() <= custom_ar.custom_ar_max_bytes()):
-                dist.inference_all_reduce(input.contiguous(), group=group)
-            else:
-                RowParallel._rs_ag(input, group)
+        # Latency regime (no-grad decode or inference, small messages): the
+        # one-shot collective beats both plain all-reduce and the RS+AG pair;
+        # the inference_all_reduce backend owns the choice and falls back.
+        from deepspeed.comm import custom_ar
+        world = dist.get_world_size(group=group) if group is not None else dist.get_world_size()
+        if ((is_inference_mode or not torch.is_grad_enabled()) and custom_ar.custom_ar_ready(world)
+                and input.numel() * input.element_size() <= custom_ar.custom_ar_max_bytes()):
+            dist.inference_all_reduce(input.contiguous(), group=group)
+        elif is_inference_mode:
+            RowParallel._rs_ag(input, group)
         else:
             dist.all_reduce(input.contiguous(), group=group)
         return input
