@@ -54,11 +54,8 @@ if hasattr(torch.library, "custom_op"):
 
     @gdn_gates.register_fake
     def _(a, b, a_log, dt_bias):
-        # beta tracks b's head dim, g tracks a's row count (fp32 accumulate)
-        return [
-            torch.empty_like(b, dtype=b.dtype),
-            torch.empty(a.shape[0], a.shape[1] if a.dim() > 1 else a.numel(), dtype=a.dtype, device=a.device)
-        ]
+        # outputs mirror the inputs' shapes (beta ~ b, g ~ a)
+        return [torch.empty_like(b), torch.empty_like(a)]
 
     @torch.library.custom_op("segki::gated_norm", mutates_args=("out", ))
     def gated_norm(x: torch.Tensor, gate: torch.Tensor, weight: torch.Tensor, out: torch.Tensor, eps: float) -> None:
