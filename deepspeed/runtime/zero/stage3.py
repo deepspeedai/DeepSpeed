@@ -2864,8 +2864,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         """Whether _create_fp32_partitions pinned this sub-group's CPU master partition (offload_optimizer.pin_memory;
         NVMe-swapped sub-groups are managed by the optimizer swapper)."""
         master = self.fp32_partitioned_groups_flat[sub_group_id]
-        return (self.offload_optimizer_pin_memory and master.device.type == "cpu"
-                and not self._swappable_optimizer_subgroup(sub_group_id) and get_accelerator().is_pinned(master))
+        return (not self._swappable_optimizer_subgroup(sub_group_id) and get_accelerator().is_pinned(master))
 
     @instrument_w_nvtx
     def _copy_pinned_master_to_device(self, dst, src):
