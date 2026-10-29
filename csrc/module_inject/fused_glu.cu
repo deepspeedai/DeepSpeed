@@ -1542,6 +1542,55 @@ std::vector<at::Tensor> grouped_linear(at::Tensor x, std::vector<at::Tensor> wei
 }
 
 
+namespace {
+// Head-repeat for the GDN scan's v-head layout: out[b,s,hv,d] = in[b,s,hv/ratio,d].
+// One launch covers BOTH q and k (idx space 2*total), replacing two eager
+// repeat_interleave copies per layer.
+__global__ void repeat_qk_kernel(const __nv_bfloat16* __restrict__ q,
+                                 const __nv_bfloat16* __restrict__ k,
+                                 __nv_bfloat16* __restrict__ q_out,
+                                 __nv_bfloat16* __restrict__ k_out,
+                                 long long src_rows,
+                                 int dk,
+                                 int hv,
+                                 int ratio,
+                                 long long total) {
+    long long idx = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    const bool is_k = idx >= total;
+    const long long i = is_k ? idx - total : idx;
+    if (i >= total) return;
+    const int d = (int)(i % dk);
+    long long t = i / dk;
+    const int h = (int)(t % hv);
+    t /= hv;  // flat [B*S] row
+    const long long src = (t * src_rows + h / ratio) * dk + d;
+    if (is_k)
+        k_out[i] = k[src];
+    else
+        q_out[i] = q[src];
+}
+}  // namespace
+
+std::vector<at::Tensor> repeat_qk(at::Tensor q, at::Tensor k, int64_t ratio)
+{
+    const auto sz = q.sizes();
+    TORCH_CHECK(q.is_contiguous() && k.is_contiguous(), "repeat_qk needs contiguous q/k");
+    const long long B = sz[0], S = sz[1], Hk = sz[2];
+    const int dk = (int)sz[3];
+    const int hv = (int)(Hk * ratio);
+    auto q_out = at::empty({B, S, (long long)hv, (long long)dk}, q.options());
+    auto k_out = at::empty_like(q_out);
+    const long long total = B * S * hv * dk;
+    auto stream = at::cuda::getCurrentCUDAStream();
+    const int blocks = (int)((2 * total + 255) / 256);
+    repeat_qk_kernel<<<blocks, 256, 0, stream.stream()>>>(
+        (const __nv_bfloat16*)q.data_ptr(), (const __nv_bfloat16*)k.data_ptr(),
+        (__nv_bfloat16*)q_out.data_ptr(), (__nv_bfloat16*)k_out.data_ptr(), B * S * Hk, dk, hv, (int)ratio,
+        total);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return {q_out, k_out};
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
 {
     // two explicit overloads: at::Tensor() pybind defaults proved fragile
@@ -1594,6 +1643,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
           py::arg("x"),
           py::arg("weights"),
           py::arg("glu_epilogue") = false);
+    m.def("repeat_qk", &repeat_qk, "fused q/k head-repeat for the scan (one launch)");
     m.def("capabilities", &segki_capabilities, "segKI backend capability report");
     m.def("gdn_recurrent_step",
           &gdn_recurrent_step,

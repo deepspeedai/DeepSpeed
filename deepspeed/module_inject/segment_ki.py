@@ -424,8 +424,13 @@ def _fused_gdn_forward(self, hidden_states, *args, **kwargs):
         dt_l = self.dt_bias.reshape(-1)[r * num_v_heads:(r + 1) * num_v_heads] if hv > num_v_heads else self.dt_bias
         g = -a_log_l.float().exp() * F.softplus(a.float() + dt_l)
     if num_v_heads // num_k_heads > 1:
-        query = query.repeat_interleave(num_v_heads // num_k_heads, dim=2)
-        key = key.repeat_interleave(num_v_heads // num_k_heads, dim=2)
+        rep_op = getattr(self, "_ki_gdn_op", None)
+        if (rep_op is not None and hasattr(rep_op, "repeat_qk") and not torch.is_grad_enabled()
+                and query.dtype is torch.bfloat16 and query.is_contiguous() and key.is_contiguous()):
+            query, key = rep_op.repeat_qk(query, key, num_v_heads // num_k_heads)
+        else:
+            query = query.repeat_interleave(num_v_heads // num_k_heads, dim=2)
+            key = key.repeat_interleave(num_v_heads // num_k_heads, dim=2)
 
     recurrent_state = cache_params.layers[self.layer_idx].recurrent_states[0] if use_precomputed_states else None
     # Whitelist the scan inputs: transformers threads unrelated layer kwargs
