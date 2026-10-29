@@ -289,6 +289,115 @@ class TestTopk(DistributedTest):
                             sparse_routes=False)
 
 
+class TestMoEUnevenTokens(DistributedTest):
+    world_size = 2
+
+    @pytest.mark.parametrize("k, drop_policy", [(1, "probs"), (2, "probs"), (4, "probs"), (4, "position")])
+    @pytest.mark.parametrize("drop_tokens", [True, False])
+    @pytest.mark.parametrize("sparse_routes", [True, False])
+    def test_capacity_agreement(self, k, drop_policy, drop_tokens, sparse_routes):
+        device = get_accelerator().current_device_name()
+        num_tokens = (128, 257)[dist.get_rank()]
+        logits = torch.arange(4, device=device, dtype=torch.float32).expand(num_tokens, -1).contiguous()
+        kwargs = dict(drop_tokens=drop_tokens, ep_group=dist.get_world_group(), sparse_routes=sparse_routes)
+        if k == 1:
+            result = top1gating(logits, 1.0, 0, use_rts=False, **kwargs)
+        elif k == 2:
+            result = top2gating(logits, 1.0, 0, top2_2nd_expert_sampling=False, **kwargs)
+        else:
+            result = topkgating(logits, k, 1.0, 0, drop_policy=drop_policy, **kwargs)
+
+        capacity = int(result[1]) if sparse_routes else result[2].shape[-1]
+        # All tokens select the same k experts, so each selected expert needs 257 slots without dropping.
+        expected = (257 * k + 3) // 4 if drop_tokens else 257
+        assert capacity == expected
+        if not sparse_routes and not drop_tokens:
+            assert result[2].sum().item() == num_tokens * k
+
+    @pytest.mark.parametrize("k", [1, 2, 4])
+    @pytest.mark.parametrize("drop_tokens", [True, False])
+    @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+    @pytest.mark.parametrize("token_counts", [(128, 257), (129, 129)], ids=["uneven", "equal"])
+    def test_training(self, k, drop_tokens, dtype, token_counts):
+        if dtype == torch.bfloat16 and not get_accelerator().is_bf16_supported():
+            pytest.skip("bf16 is not supported on this accelerator")
+
+        rank = dist.get_rank()
+        device = get_accelerator().current_device_name()
+        hidden_dim, num_experts = 8, 4
+        capacity = (max(token_counts) * k + num_experts - 1) // num_experts if drop_tokens else max(token_counts)
+        torch.manual_seed(1234)
+        kwargs = dict(hidden_size=hidden_dim,
+                      expert=torch.nn.Linear(hidden_dim, hidden_dim, bias=False),
+                      num_experts=num_experts,
+                      k=k,
+                      drop_tokens=drop_tokens,
+                      use_rts=False,
+                      top2_2nd_expert_sampling=False)
+        # EP=1 with this explicit floor independently fixes the communication capacity for the oracle.
+        reference = MoE(ep_size=1, min_capacity=capacity if drop_tokens else 0, **kwargs).to(device=device,
+                                                                                             dtype=dtype)
+        model = MoE(ep_size=self.world_size, min_capacity=0, **kwargs).to(device=device, dtype=dtype)
+        model.set_deepspeed_parallelism()
+        with torch.no_grad():
+            gate_weight = reference.deepspeed_moe.gate.wg.weight
+            gate_weight.zero_()
+            gate_weight[:, 0] = torch.tensor([2, 1, -1, -2], device=device, dtype=dtype)
+            model.deepspeed_moe.gate.load_state_dict(reference.deepspeed_moe.gate.state_dict())
+            reference_experts = reference.deepspeed_moe.experts.deepspeed_experts
+            local_experts = model.deepspeed_moe.experts.deepspeed_experts
+            for index, expert in enumerate(reference_experts):
+                expert.weight.mul_(1 + index * 0.2)
+            for index, expert in enumerate(local_experts):
+                expert.load_state_dict(reference_experts[rank * model.num_local_experts + index].state_dict())
+
+        def check_capacity(module, inputs, output):
+            # Pin the communication-shape contract before all-to-all, so a regression fails without hanging.
+            value = output[1].reshape(1).to(device)
+            capacities = [torch.empty_like(value) for _ in range(self.world_size)]
+            dist.all_gather(capacities, value, group=model.deepspeed_moe.ep_group)
+            assert all(int(value) == capacity for value in capacities)
+
+        model.deepspeed_moe.gate.register_forward_hook(check_capacity)
+        reference_optimizer = torch.optim.SGD(reference.parameters(), lr=0.1)
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+        reference_inputs, reference_outputs, reference_aux = [], [], []
+        for source_rank, count in enumerate(token_counts):
+            torch.manual_seed(100 + source_rank)
+            inputs = torch.randn(count, hidden_dim, device=device, dtype=dtype)
+            # Send top-1/top-2 routes to the other rank's experts, including their backward gradients.
+            inputs[:, 0] = -1 if source_rank == 0 else 1
+            inputs.requires_grad_()
+            output, aux, _ = reference(inputs)
+            (output.float().square().mean() + 0.01 * aux).backward()
+            reference_inputs.append(inputs)
+            reference_outputs.append(output.detach())
+            reference_aux.append(aux.detach())
+
+        inputs = reference_inputs[rank].detach().clone().requires_grad_()
+        output, aux, _ = model(inputs)
+        tolerance = dict(rtol=0.02, atol=0.002) if dtype == torch.bfloat16 else dict(rtol=1e-5, atol=1e-6)
+        torch.testing.assert_close(output, reference_outputs[rank], **tolerance)
+        torch.testing.assert_close(aux, reference_aux[rank], **tolerance)
+        (output.float().square().mean() + 0.01 * aux).backward()
+        torch.testing.assert_close(inputs.grad, reference_inputs[rank].grad, **tolerance)
+        # Raw MoE does not synchronize the replicated gate parameters; sum source-rank losses as in the oracle.
+        gate = model.deepspeed_moe.gate.wg.weight
+        dist.all_reduce(gate.grad, group=model.deepspeed_moe.ep_group)
+        torch.testing.assert_close(gate.grad, reference.deepspeed_moe.gate.wg.weight.grad, **tolerance)
+        for index, expert in enumerate(local_experts):
+            expected = reference_experts[rank * model.num_local_experts + index]
+            torch.testing.assert_close(expert.weight.grad, expected.weight.grad, **tolerance)
+        before_step = [expert.weight.detach().clone() for expert in local_experts]
+        optimizer.step()
+        reference_optimizer.step()
+        torch.testing.assert_close(gate, reference.deepspeed_moe.gate.wg.weight, **tolerance)
+        for index, expert in enumerate(local_experts):
+            expected = reference_experts[rank * model.num_local_experts + index]
+            torch.testing.assert_close(expert.weight, expected.weight, **tolerance)
+        assert any(not torch.equal(before, expert.weight) for before, expert in zip(before_step, local_experts))
+
+
 class TestMoESingleton(DistributedTest):
     world_size = 2
 
@@ -329,7 +438,8 @@ class TestMoESingleton(DistributedTest):
                                                         (topkgating, (3, 1, 0))],
                              ids=["top1", "top2", "topk"])
     @pytest.mark.parametrize("ep_world_size, expected_calls", [(1, 0), (2, 1)], ids=["single", "multi"])
-    def test_capacity(self, monkeypatch, gate_fn, capacity_args, ep_world_size, expected_calls):
+    @pytest.mark.parametrize("drop_tokens", [True, False])
+    def test_capacity(self, monkeypatch, gate_fn, capacity_args, ep_world_size, expected_calls, drop_tokens):
         if not required_torch_version(min_version=1.8):
             pytest.skip("DeepSpeed MoE tests need torch 1.8 or higher to run correctly")
 
@@ -353,7 +463,7 @@ class TestMoESingleton(DistributedTest):
 
         device = get_accelerator().current_device_name()
         logits = torch.randn(8, 4, device=device)
-        gate_fn(logits, *capacity_args, drop_tokens=False, ep_group=ep_group)
+        gate_fn(logits, *capacity_args, drop_tokens=drop_tokens, ep_group=ep_group)
 
         assert len(all_reduce_calls) == expected_calls
         if all_reduce_calls:
