@@ -12,6 +12,7 @@ import deepspeed
 from unit.common import DistributedTest
 from unit.simple_model import SimpleModel, random_dataloader
 from deepspeed.accelerator import get_accelerator
+from deepspeed.ops.op_builder import CPUAdamBuilder
 
 
 def _base_config(zero_stage, gradient_accumulation_steps=1, cpu_offload=False):
@@ -145,3 +146,62 @@ class TestZeroOffloadMultiBackward(DistributedTest):
                                   hidden_dim,
                                   total_microsteps=ga)
         _assert_params_match(ref, test, label=f"ZeRO-{zero_stage} ga=4")
+
+
+class TestZero2OffloadOverflowRecovery(DistributedTest):
+    world_size = 2
+
+    @pytest.mark.parametrize("precision", ["bf16", "fp16"])
+    @pytest.mark.parametrize("low_precision_master", [True, False])
+    def test_finite_step_after_overflow(self, precision, low_precision_master):
+        if not deepspeed.ops.__compatible_ops__[CPUAdamBuilder.NAME]:
+            pytest.skip("CPUAdam is required for low-precision offloaded master weights")
+        if precision == "bf16" and not get_accelerator().is_bf16_supported():
+            pytest.skip("BF16 is not supported")
+
+        class TwoGroups(torch.nn.Module):
+
+            def __init__(self):
+                super().__init__()
+                self.large = torch.nn.Parameter(torch.ones(12))
+                self.small = torch.nn.Parameter(torch.ones(8))
+
+            def forward(self, overflow):
+                return self.large.sum() + self.small.sum() * (float("nan") if overflow else 1.0)
+
+        config = _base_config(2, cpu_offload=True)
+        config.pop("bf16", None)
+        config.pop("fp16", None)
+        config[precision] = {"enabled": True, f"{precision}_master_weights_and_grads": low_precision_master}
+        if precision == "fp16":
+            config[precision]["loss_scale"] = 1.0
+        config["train_batch_size"] = 2
+        config["managed_gradient_accumulation"] = False
+        config["optimizer"]["params"]["lr"] = 0.1
+        config["zero_optimization"].update({"reduce_bucket_size": 32, "allgather_bucket_size": 32})
+        model = TwoGroups()
+        engine, _, _, _ = deepspeed.initialize(model=model,
+                                               model_parameters=[{
+                                                   "params": [model.large]
+                                               }, {
+                                                   "params": [model.small]
+                                               }],
+                                               config=config)
+        try:
+            initial = _capture_params(engine)
+            engine.backward(engine(True))
+            engine.step()
+            _assert_params_match(initial, _capture_params(engine), "overflow must skip the update", tol=1e-8)
+
+            # Rank 1 owns [6:12] of large and [4:8] of small. The small
+            # group's previous NaNs must not make a later finite step skip.
+            for _ in range(2):
+                before = _capture_params(engine)
+                engine.backward(engine(False))
+                engine.step()
+                after = _capture_params(engine)
+                for name in before:
+                    assert torch.isfinite(after[name]).all()
+                    assert not torch.equal(before[name], after[name]), f"finite step did not update {name}"
+        finally:
+            engine.destroy()
