@@ -80,6 +80,9 @@ def compare_loss(model_cls,
     if dtype == torch.bfloat16 and not bf16_required_version_check():
         pytest.skip("bf16 is not supported in this environment")
 
+    if dtype == torch.float16 and not get_accelerator().is_fp16_supported():
+        pytest.skip("fp16 is not supported in this environment")
+
     config_dict = {
         "train_micro_batch_size_per_gpu": 1,
         "steps_per_print": 1,
@@ -96,7 +99,12 @@ def compare_loss(model_cls,
 
     i = get_accelerator().current_device()
     device = get_accelerator().current_device_name()
-    baseline_model = DDP(deepcopy(model).to(device=device, dtype=torch.float32), device_ids=[i], output_device=i)
+    # Only accelerators that expose per-device handles (cuda:0, xpu:0, ...) take
+    # device_ids/output_device; the ones that map every rank onto a single shared
+    # device (cpu, hpu) do not.
+    indexed_device = get_accelerator().device_name(0) != get_accelerator().device_name()
+    ddp_kwargs = {'device_ids': [i], 'output_device': i} if indexed_device else {}
+    baseline_model = DDP(deepcopy(model).to(device=device, dtype=torch.float32), **ddp_kwargs)
     baseline_optimizer = torch.optim.AdamW(baseline_model.parameters(), lr=lr, weight_decay=0.0)
     baseline_scaler = torch.amp.GradScaler()
 

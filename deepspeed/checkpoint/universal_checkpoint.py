@@ -233,21 +233,31 @@ def _resolve_autotp_partition(current_param, ckpt_dict, full_hp_param, tp_rank, 
     return slice_tensor.flatten()
 
 
-def load_hp_checkpoint_state(self, folder, tp_rank, tp_world_size, ep_rank=0, ep_size=1):
+def load_hp_checkpoint_state(self, folder, tp_rank, tp_world_size, ep_rank=0, ep_size=1, load_optimizer_states=True):
     hp_mapping = self._hp_mapping
     hp_mapping.optim_fragment = {}
 
-    hp_keys = []
+    # Stem to the filename listdir returned. Only an exact "{stem}.pt" file counts.
+    hp_keys = {}
     for file in os.listdir(folder):
         # We expect files named something like "exp_avg.pt", "exp_avg_sq.pt", "fp32.pt"
-        pattern = r'(.+).pt'
-        match = re.search(pattern, file)
-        if match:
-            hp_keys.append(match.group(1))
+        match = re.fullmatch(r'(.+)\.pt', file)
+        if not match or not os.path.isfile(os.path.join(folder, file)):
+            continue
+        key = match.group(1)
+        assert key not in hp_keys, (f"Duplicate universal checkpoint state {key!r} in {folder}: "
+                                    f"{hp_keys[key]} and {file}")
+        hp_keys[key] = file
+    if FP32_WEIGHT_KEY not in hp_keys:
+        from deepspeed.runtime.zero.utils import ZeRORuntimeException
+        raise ZeRORuntimeException(
+            f"Saved fp32 weights are required but {FP32_WEIGHT_KEY}.pt is missing from {folder}")
+    if not load_optimizer_states:
+        hp_keys = {FP32_WEIGHT_KEY: hp_keys[FP32_WEIGHT_KEY]}
 
     step = None
-    for key in hp_keys:
-        ckpt_file = os.path.join(folder, f"{key}.pt")
+    for key, file in hp_keys.items():
+        ckpt_file = os.path.join(folder, file)
         ckpt_dict = torch.load(ckpt_file, weights_only=False)
 
         if key == "step":

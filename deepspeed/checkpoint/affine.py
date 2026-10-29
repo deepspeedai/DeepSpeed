@@ -22,7 +22,7 @@ import torch
 
 __all__ = [
     'AffinePiece', 'ParamAffineMap', 'AFFINE_MAP_FORMAT_VERSION', 'SCALE_POWER_BY_STATE', 'replicated_map',
-    'contiguous_split_map', 'sub_param_map', 'segmented_map', 'block_gather_map'
+    'contiguous_split_map', 'sub_param_map', 'segmented_map', 'block_gather_map', 'nest_affine_maps'
 ]
 
 # Encoding version of the stored map, independent of the universal checkpoint version so
@@ -634,3 +634,222 @@ def block_gather_map(shape, block_ids_by_rank, block_size, partition_dim):
         pieces_by_rank[rank] = pieces
 
     return ParamAffineMap(logical_shape=shape, shard_shapes=shard_shapes, pieces_by_rank=pieces_by_rank)
+
+
+def nest_affine_maps(outer, inner_by_outer_rank):
+    """Compose a layout map with a description of how each of its shards is stored.
+
+    ``outer`` describes the parameter's layout: the shard each layout rank (a tensor- or
+    expert-parallel rank) holds. ``inner_by_outer_rank[r]`` describes how layout shard ``r``,
+    flattened to ``(numel,)``, is spread over the processes that store it, as
+    ``deepspeed.checkpoint.zero_affine.zero_storage_affine_map`` does for ZeRO replicas and
+    partitions. Its pieces must be contiguous intervals.
+
+    The result describes the parameter in its own shape, keyed by the inner ranks, and each shard is
+    what a process stores: a flat run of its layout shard. A stored run is generally not a box of the
+    parameter, since a ZeRO partition may begin or end inside a row, so it is described by a few
+    boxes, each contiguous in storage: a partial row at either end and the whole rows between. A
+    block that is not contiguous in its layout shard, such as one split along a trailing axis inside
+    the shard, is cut further until each box is. An element listed on several layout ranks is held by
+    the union of their holders, so pieces are cut wherever any of those holders' storage begins or
+    ends.
+    """
+    if set(inner_by_outer_rank) != set(outer.shard_shapes):
+        raise ValueError(f'Storage is described for layout ranks {sorted(inner_by_outer_rank)}, but the layout has '
+                         f'ranks {sorted(outer.shard_shapes)}.')
+    storage_shapes = {}
+    for outer_rank, inner in inner_by_outer_rank.items():
+        shard_numel = _product(outer.shard_shapes[outer_rank])
+        if inner.logical_shape != (shard_numel, ):
+            raise ValueError(f'Layout rank {outer_rank} holds {shard_numel} elements, but its storage map describes '
+                             f'shape {inner.logical_shape}.')
+        for storage_rank, shape in inner.shard_shapes.items():
+            if storage_rank in storage_shapes:
+                # One shard per process: a process storing two layout shards would need two buffers.
+                raise ValueError(f'Rank {storage_rank} stores more than one layout shard.')
+            storage_shapes[storage_rank] = shape
+    intervals_by_outer_rank = {rank: _storage_intervals(inner) for rank, inner in inner_by_outer_rank.items()}
+
+    # Replicated layout pieces describe the same block on each of their holders.
+    replicas = {}
+    for outer_rank, pieces in outer.pieces_by_rank.items():
+        for piece in pieces:
+            if piece.numel == 0:
+                continue
+            key = (piece.shape, piece.source_offset, piece.source_strides)
+            replicas.setdefault(key, []).append((outer_rank, piece))
+
+    pieces_by_rank = {rank: [] for rank in storage_shapes}
+    for copies in replicas.values():
+        listed = {outer_rank for outer_rank, _ in copies}
+        for _, piece in copies:
+            if piece.locations != listed:
+                raise ValueError(f'Layout piece {piece} lists holders {sorted(piece.locations)}, but layout ranks '
+                                 f'{sorted(listed)} hold it.')
+        _nest_replicated_block(copies, intervals_by_outer_rank, pieces_by_rank)
+
+    affine_map = ParamAffineMap(logical_shape=outer.logical_shape,
+                                shard_shapes=storage_shapes,
+                                pieces_by_rank=pieces_by_rank)
+    affine_map.validate()
+    return affine_map
+
+
+def _storage_intervals(inner):
+    # (start, stop, storage rank, offset in that rank's shard, scale) for every stored interval.
+    intervals = []
+    for storage_rank, pieces in inner.pieces_by_rank.items():
+        for piece in pieces:
+            if piece.numel == 0:
+                continue
+            if piece.source_strides != (1, ) or piece.dest_strides != (1, ):
+                raise ValueError(f'Storage piece {piece} of rank {storage_rank} is not a contiguous interval.')
+            intervals.append(
+                (piece.source_offset, piece.source_offset + piece.numel, storage_rank, piece.dest_offset, piece.scale))
+    return sorted(intervals)
+
+
+def _nest_replicated_block(copies, intervals_by_outer_rank, pieces_by_rank):
+    # Cuts are row-major element indices of the block. Between two cuts, every copy lies inside one
+    # stored interval of every holder; each range between cuts is then split into boxes that are
+    # contiguous in every copy's shard.
+    block = copies[0][1]
+    cuts = {0, block.numel}
+    for outer_rank, piece in copies:
+        _check_monotone_dest(piece)
+        for start, stop, _, _, _ in intervals_by_outer_rank[outer_rank]:
+            for boundary in (start, stop):
+                cuts.add(_first_index_at_or_after(piece, boundary))
+    cuts = sorted(cuts)
+
+    for low, high in zip(cuts, cuts[1:]):
+        if low == high:
+            continue
+        stored = []
+        for outer_rank, piece in copies:
+            address = _strided_address(piece.shape, piece.dest_offset, piece.dest_strides, low)
+            covering = [
+                interval for interval in intervals_by_outer_rank[outer_rank] if interval[0] <= address < interval[1]
+            ]
+            if not covering:
+                raise ValueError(f'Layout rank {outer_rank} holds shard element {address}, but its storage map '
+                                 'stores it on no rank.')
+            stored.extend((piece, address, interval) for interval in covering)
+        locations = {interval[2] for _, _, interval in stored}
+        # A box must be one run of addresses in every copy, so the most fragmented copy decides.
+        dense_rows = max(_dense_rows(piece) for piece, _, _ in stored)
+        for origin, extent in _row_major_range_boxes(block.shape, low, high, dense_rows):
+            source_offset = block.source_offset + _dot(origin, block.source_strides)
+            for piece, _, (start, _, storage_rank, storage_offset, storage_scale) in stored:
+                address = piece.dest_offset + _dot(origin, piece.dest_strides)
+                pieces_by_rank[storage_rank].append(
+                    AffinePiece(shape=extent,
+                                source_offset=source_offset,
+                                source_strides=block.source_strides,
+                                dest_offset=storage_offset + address - start,
+                                dest_strides=_row_major_strides(extent),
+                                locations=locations,
+                                scale=piece.scale * storage_scale))
+
+
+def _dot(index, strides):
+    return sum(position * stride for position, stride in zip(index, strides))
+
+
+def _dense_rows(piece):
+    # The number of leading axes after which the piece is contiguous in its shard: a box of the piece
+    # that spans every later axis in full, and only those, is one run of shard addresses.
+    run = 1
+    for axis in range(len(piece.shape) - 1, -1, -1):
+        size, stride = piece.shape[axis], piece.dest_strides[axis]
+        if size > 1 and stride != run:
+            return axis + 1
+        run *= size
+    return 0
+
+
+def _row_major_range_boxes(shape, low, high, dense_rows=0):
+    """Split the row-major index range ``[low, high)`` of ``shape`` into ``(origin, extent)`` boxes.
+
+    At most two boxes per axis: a partial run at either end and whole runs between. The first
+    ``dense_rows`` axes are never merged, so a box spans more than one position of such an axis only
+    where the storage is contiguous across it.
+    """
+    if low >= high:
+        return []
+    if not shape:
+        return [((), ())]
+    if len(shape) == 1:
+        return [((low, ), (high - low, ))]
+    inner = _product(shape[1:])
+    first, low_rest = divmod(low, inner)
+    last, high_rest = divmod(high, inner)
+
+    def within(row, start, stop):
+        return [((row, ) + origin, (1, ) + extent)
+                for origin, extent in _row_major_range_boxes(shape[1:], start, stop, dense_rows - 1)]
+
+    if first == last:
+        return within(first, low_rest, high_rest)
+    boxes = []
+    if low_rest:
+        boxes.extend(within(first, low_rest, inner))
+        first += 1
+    if dense_rows > 0:
+        for row in range(first, last):
+            boxes.extend(within(row, 0, inner))
+    elif last > first:
+        boxes.append(((first, ) + (0, ) * (len(shape) - 1), (last - first, ) + tuple(shape[1:])))
+    if high_rest:
+        boxes.extend(within(last, 0, high_rest))
+    return boxes
+
+
+def _check_monotone_dest(piece):
+    # Storage intervals are ranges of shard addresses. A piece whose addresses grow with its
+    # row-major element index meets such a range in one run of indices; any other piece could
+    # interleave with it.
+    later_span = 0
+    for size, stride in reversed(list(zip(piece.shape, piece.dest_strides))):
+        if size > 1:
+            if stride <= later_span:
+                raise NotImplementedError(f'Layout piece {piece} does not store its elements in row-major order, so '
+                                          'its storage cannot be described.')
+            later_span += stride * (size - 1)
+
+
+def _strided_address(shape, offset, strides, index):
+    address = offset
+    for size, stride in reversed(list(zip(shape, strides))):
+        index, position = divmod(index, size)
+        address += position * stride
+    return address
+
+
+def _first_index_at_or_after(piece, address):
+    # The smallest row-major index whose shard address is at least ``address``; ``numel`` if none.
+    remaining = address - piece.dest_offset
+    if remaining <= 0:
+        return 0
+    spans = []
+    later_span = 0
+    for size, stride in reversed(list(zip(piece.shape, piece.dest_strides))):
+        spans.append(later_span)
+        later_span += stride * (size - 1)
+    spans.reverse()
+    if remaining > later_span:
+        return piece.numel
+
+    index = 0
+    for axis, (size, stride) in enumerate(zip(piece.shape, piece.dest_strides)):
+        position = 0
+        if size > 1:
+            # The first position from which the later axes can still reach ``remaining``.
+            position = max(0, -(-(remaining - spans[axis]) // stride))
+        index = index * size + position
+        remaining -= position * stride
+        if remaining <= 0:
+            for later_size in piece.shape[axis + 1:]:
+                index *= later_size
+            return index
+    return index
