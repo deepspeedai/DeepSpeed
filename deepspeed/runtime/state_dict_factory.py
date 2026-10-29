@@ -335,7 +335,7 @@ class MegatronSDLoader(SDLoaderBase):
                         new_client_sd[key] = torch.cat(value_list, axis=0)
                     else:
                         new_client_sd[key] = self.merge_query_key_value(value_list, ckpt_ver)
-            elif "mlp.dense_h_to_4h.weight" in key or "word_embeddings.weight" in key or "mlp.dense_h_to_4h.bias" in key:
+            elif "mlp.dense_h_to_4h.weight" in key or "word_embeddings.weight" in key or "mlp.dense_h_to_4h.bias" in key or "final_linear.weight" in key:
                 if quantize and "mlp.dense_h_to_4h.weight" in key:
                     value_list = quantizer.Quantize(value_list, quantize_bits, groups, key=key)
                 new_client_sd[key] = torch.cat(value_list, axis=0)
