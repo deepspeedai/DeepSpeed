@@ -568,7 +568,9 @@ def _install_gdn_segment(seg: GDNSegment) -> bool:
         from deepspeed.module_inject import segki_torchlib
         if segki_torchlib.TORCHLIB_READY:
             segki_torchlib.bind_kernel_op(getattr(parent, "_ki_gdn_op", None))
-            fwd = torch.compile(fwd, dynamic=False)
+            # dynamic shapes: the rollout generates at several batch sizes through
+            # one compiled artifact; static specialization bakes the first
+            fwd = torch.compile(fwd, dynamic=True)
     parent.forward = fwd
     return True
 
