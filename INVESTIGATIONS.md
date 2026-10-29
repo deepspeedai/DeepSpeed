@@ -1230,3 +1230,27 @@ remaining soup is long-tail. The next meaningful C target is not
 micro-kernels but the two per-layer boundary chains (pre-attn and
 pre-MLP: residual+norm+cast) if HF's flow allows interception — worth
 scoping against actual kernel names before writing code.
+
+
+## 26. phoeenniixx review verification (2xA40, Qwen2.5-0.5B standard model)
+
+### Claim: the _ki_prompt_padded guard is a regression for graph users
+CONFIRMED on hardware: padded batch + use_segki=False + non-hybrid →
+HF generate (graph never invoked). The guard applies to ALL graph users
+instead of only the configs that need it.
+
+### Deeper finding from the bypass test
+Calling _generate_graph directly with a padded batch WORKS (coherent
+tokens) but differs from HF generate (match 0.047): the first token
+comes from logits[:, -1] = a PAD position. Isolation in pure eager HF:
+  pad-position argmax [330, 261, 782, ...]  == our graph path's tokens
+  HF-generate argmax     [358, 50994, 782, ...] (reads last VALID pos)
+Master reads logits[:, -1] too — master's graph path had the SAME
+pad-position approximation. phoeenniixx's "master handled padding
+through the mask" = no cache corruption, not last-valid-token semantics.
+
+### Fix (validated direction)
+Narrow the guard: needs_pad_fallback = padded AND (is_hybrid OR
+segki_active). Standard + non-segki users return to master's exact
+behavior (graph path, pad-position first token — byte-compatible).
+Optional follow-up: mask-aware last-valid first-token read for all paths.
