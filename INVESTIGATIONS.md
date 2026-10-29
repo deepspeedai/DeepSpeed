@@ -1254,3 +1254,25 @@ Narrow the guard: needs_pad_fallback = padded AND (is_hybrid OR
 segki_active). Standard + non-segki users return to master's exact
 behavior (graph path, pad-position first token — byte-compatible).
 Optional follow-up: mask-aware last-valid first-token read for all paths.
+
+
+## 27. RunPod A40 host: NCCL 2.29.x 2-GPU transport broken (host-level)
+
+The planned a+b (custom-AR on PCIe-P2P + TP2 bench vs vLLM) is blocked:
+plain CUDA all_reduce hangs on this host — NCCL debug shows transport
+setup stalls after "Using network Socket" even with P2P and SHM both
+disabled. Both python stacks affected (torch 2.13+cu129 and cu130, each
+bundling nccl 2.29.7); the system libnccl 2.25.1 lacks the symbols
+torch 2.13 links against, so downgrading NCCL breaks import.
+
+IMPORTANT correction: the earlier commit's attribution ("custom AR flag
+protocol hangs on A40 PCIe P2P, watchdog kill at 480s") was WRONG — the
+stepwise probe shows initialize() never got past all_gather_object, so
+our kernel was never reached. The bounded handshake remains a harmless
+safety net, but PCIe-P2P custom-AR behavior is still UNTESTED (needs a
+host where NCCL works).
+
+Pattern so far: RunPod PCIe-P2P hosts (RTX 6000 Ada, this A40, driver
+595 + nccl 2.29) hang at NCCL transport setup; the SXM host worked.
+Next host pick: another SXM pair, or verify NCCL with the 30s plain-
+collective probe before committing to any work on a PCIe host.
