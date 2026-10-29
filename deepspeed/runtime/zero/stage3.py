@@ -1095,6 +1095,9 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         nvme_fp16_num_elems = []
         nvme_fp32_dest_tensors = []
         fp32_element_size = torch.tensor([], dtype=self.master_weights_and_grads_dtype).element_size()
+        # Sub-groups whose master partition is the weight partition itself (no second copy); offload_states and
+        # reload_states move those with lp_params.
+        self.aliased_fp32_sub_groups = set()
 
         # Assign portion of subgroup to cpu, the other to gpu.
         if self.offload_optimizer:
@@ -1160,11 +1163,12 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                     self.fp32_partitioned_groups_flat.append(converted.clone().detach())
                     self._create_momentum_buffer(num_elements, i, ds_id)
                 elif self.fp16_partitioned_groups_flat[i].dtype == self.master_weights_and_grads_dtype and \
-                        self.fp16_partitioned_groups_flat[i].device == self.device:
-                    # When torch autocast is enabled, weights in the provided model (and thus groups in the so-called
-                    # "fp16" partitioned groups) are already in and updated using fp32. In such cases we don't need
-                    # another copy of the weights.
+                        self.fp16_partitioned_groups_flat[i].device == torch.device(self.device):
+                    # When the weights are already in the master dtype (a float32 model, with or without torch
+                    # autocast), the groups in the so-called "fp16" partitioned groups are updated in place and we
+                    # don't need another copy of the weights.
                     self.fp32_partitioned_groups_flat.append(self.fp16_partitioned_groups_flat[i])
+                    self.aliased_fp32_sub_groups.add(i)
                     self._create_momentum_buffer(num_elements, i, ds_id)
                 else:
                     converted = self.fp16_partitioned_groups_flat[i].to(self.device,
@@ -3858,6 +3862,27 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
     def empty_partition_cache(self):
         self.parameter_offload.empty_partition_cache()
 
+    def _fp32_partitions_with_own_storage(self):
+        """The master partitions that are not also a weight partition (see aliased_fp32_sub_groups). An aliased one has
+        no storage of its own, so moving it apart from lp_params would split the two copies."""
+        return [
+            partition for i, partition in enumerate(self.fp32_partitioned_groups_flat)
+            if i not in self.aliased_fp32_sub_groups
+        ]
+
+    def _point_aliased_fp32_partitions_at_lp_buffer(self):
+        """After lp_param_buffer moves, point each aliased master partition at its slice of it again. The master
+        tensor stays the one the optimizer holds, and on the device it is again the sub-group's weight partition."""
+        offset = 0
+        for i, sub_group in enumerate(self.fp16_groups):
+            sub_group_numel = sum(param.partition_numel() for param in sub_group)
+            if i in self.aliased_fp32_sub_groups:
+                master = self.fp32_partitioned_groups_flat[i]
+                master.data = self.lp_param_buffer.narrow(0, offset, sub_group_numel)
+                if i < len(self.fp16_partitioned_groups_flat):
+                    self.fp16_partitioned_groups_flat[i] = master
+            offset += sub_group_numel
+
     def offload_states(self,
                        include: Container[OffloadStateTypeEnum] = None,
                        device: OffloadDeviceEnum = OffloadDeviceEnum.cpu,
@@ -3880,14 +3905,14 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                 if not hasattr(self, "hp_params_pin_buffers"):
                     self.hp_params_pin_buffers = [
                         get_accelerator().pin_memory(torch.empty_like(t, device=device))
-                        for t in self.fp32_partitioned_groups_flat
+                        for t in self._fp32_partitions_with_own_storage()
                     ]
 
-                for src_tensor, dest_buf in zip(self.fp32_partitioned_groups_flat, self.hp_params_pin_buffers):
+                for src_tensor, dest_buf in zip(self._fp32_partitions_with_own_storage(), self.hp_params_pin_buffers):
                     dest_buf.copy_(src_tensor, non_blocking=non_blocking)
                     src_tensor.data = dest_buf
             else:
-                for buf in self.fp32_partitioned_groups_flat:
+                for buf in self._fp32_partitions_with_own_storage():
                     buf.data = buf.data.to(device, non_blocking=non_blocking)
             self.offloaded_states.add(OffloadStateTypeEnum.hp_params)
 
@@ -3908,6 +3933,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                 tensor.data = cpu_buffer.narrow(0, offset, tensor_numel)
 
             self.fp16_partitioned_groups_flat.clear()
+            self._point_aliased_fp32_partitions_at_lp_buffer()
             self.offloaded_states.add(OffloadStateTypeEnum.lp_params)
 
         # LP grad
@@ -3951,10 +3977,10 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         # HP param
         if OffloadStateTypeEnum.hp_params in self.offloaded_states:
             if hasattr(self, "hp_params_pin_buffers"):
-                for src, dest in zip(self.hp_params_pin_buffers, self.fp32_partitioned_groups_flat):
+                for src, dest in zip(self.hp_params_pin_buffers, self._fp32_partitions_with_own_storage()):
                     dest.data = src.to(device, non_blocking=non_blocking)
             else:
-                for buf in self.fp32_partitioned_groups_flat:
+                for buf in self._fp32_partitions_with_own_storage():
                     buf.data = buf.data.to(device, non_blocking=non_blocking)
             self.offloaded_states.remove(OffloadStateTypeEnum.hp_params)
 
@@ -3964,6 +3990,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                 self, "lp_param_contiguous_pin_buffer") else self.lp_param_buffer
             self.lp_param_buffer.data = cpu_buffer.data.to(device, non_blocking=non_blocking)
             self._set_fp16_partitioned_groups_flat()
+            self._point_aliased_fp32_partitions_at_lp_buffer()
 
             parameter_partitions = self._get_parameter_partitions()
             for tensor, offset, tensor_numel in get_mapping_to_flat_buffer(parameter_partitions):

@@ -418,3 +418,90 @@ class TestDynamicOffloadStatesZero3(DistributedTest):
         offloaded_states = None if included_state is None else [included_state]
         run_model_zero3(model, param_groups, config_dict, hidden_dim, torch.bfloat16, offloaded_states, pin_memory,
                         non_blocking)
+
+
+@pytest.mark.parametrize("precision", ["fp32", "autocast"])
+@pytest.mark.parametrize("pin_memory", [False, True])
+class TestOffloadStatesZero3AliasedMaster(DistributedTest):
+    """A float32 model (with or without torch autocast) under ZeRO-3 without optimizer offload uses each weight
+    partition as its own master copy. Offloading and reloading states must keep it one copy: after every round trip
+    the weights are unchanged and training continues exactly as without offloading, and offloading lp_params frees the
+    weights' device memory."""
+    world_size = 2
+
+    def test_round_trips_keep_one_copy(self, precision, pin_memory):
+        hidden_dim = 256
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 1,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 1e-2
+                }
+            },
+            "zero_optimization": {
+                "stage": 3
+            },
+        }
+        if precision == "autocast":
+            config_dict["torch_autocast"] = {"enabled": True, "dtype": "bfloat16"}
+
+        def build():
+            torch.manual_seed(0)
+            model = SimpleModel(hidden_dim, nlayers=2)
+            engine, _, _, _ = deepspeed.initialize(model=model,
+                                                   model_parameters=model.parameters(),
+                                                   config=config_dict)
+            return engine
+
+        def train(engine, batch):
+            loss = engine(batch[0], batch[1])
+            engine.backward(loss)
+            engine.step()
+
+        def one_copy(engine):
+            optimizer = engine.optimizer
+            masters = optimizer.fp32_partitioned_groups_flat
+            weights = optimizer.fp16_partitioned_groups_flat
+            buffer = optimizer.lp_param_buffer.untyped_storage().data_ptr()
+            return (all(master is weight for master, weight in zip(masters, weights))
+                    and all(p.ds_tensor.untyped_storage().data_ptr() == buffer for p in engine.module.parameters()))
+
+        engine = build()
+        reference = build()
+        assert one_copy(engine)
+        batches = list(
+            random_dataloader(model=engine,
+                              total_samples=6,
+                              hidden_dim=hidden_dim,
+                              device=engine.device,
+                              dtype=torch.float32))
+        lp_bytes = engine.optimizer.lp_param_buffer.numel() * engine.optimizer.lp_param_buffer.element_size()
+        # A weight round trip first (the master holds the same storage, which must not keep it on the device), then
+        # a master round trip and a step before the next weight round trip (two copies would part there).
+        rounds = [[OffloadStateTypeEnum.lp_params], [OffloadStateTypeEnum.hp_params], [OffloadStateTypeEnum.lp_params],
+                  [OffloadStateTypeEnum.hp_params, OffloadStateTypeEnum.lp_params], None]
+        for batch, include in zip(batches, rounds):
+            train(engine, batch)
+            train(reference, batch)
+            weights_before = [p.ds_tensor.clone() for p in engine.module.parameters()]
+            # offload_states first releases the gathered parameters ZeRO-3 keeps after a step; release them here so
+            # that only the offload itself is measured.
+            engine.empty_partition_cache()
+            alloc_before = get_accelerator().memory_allocated()
+            engine.offload_states(include=include, device=OffloadDeviceEnum.cpu, pin_memory=pin_memory)
+            freed = alloc_before - get_accelerator().memory_allocated()
+            if allocator_backed_memory_stats and offload_leaves_accelerator and (
+                    include is None or OffloadStateTypeEnum.lp_params in include):
+                assert freed >= lp_bytes, f"offloading lp_params freed {freed} bytes, the weights take {lp_bytes}"
+            engine.reload_states()
+            for before, param in zip(weights_before, engine.module.parameters()):
+                assert torch.equal(before, param.ds_tensor), f"weights changed across offloading {include}"
+            assert one_copy(engine), f"master and weights are two copies after offloading {include}"
+
+        train(engine, batches[-1])
+        train(reference, batches[-1])
+        for param, reference_param in zip(engine.module.parameters(), reference.module.parameters()):
+            assert torch.equal(param.ds_tensor, reference_param.ds_tensor)
+        engine.destroy()
+        reference.destroy()
