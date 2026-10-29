@@ -167,7 +167,7 @@ __global__ void handshake_kernel(char* __restrict__ my_base, const char* __restr
     if (threadIdx.x == 0 && blockIdx.x == 0) {
         volatile const int* pflag = (volatile const int*)(peer_base + (parity ? kFlagOff1 : kFlagOff0));
         long long spins = 0;
-        while (*pflag < seq && spins < 2000000000LL) spins++;  // bounded (~seconds)
+        while (*pflag < seq && spins < 20000000LL) spins++;  // bounded; PCIe reads are ~100ns each
         if (*pflag < seq) {
             *result = -1;  // peer flag never became visible
             return;
