@@ -231,7 +231,11 @@ class RowParallel(torch.autograd.Function):
         world = dist.get_world_size(group=group) if group is not None else dist.get_world_size()
         if ((is_inference_mode or not torch.is_grad_enabled()) and custom_ar.custom_ar_ready(world)
                 and input.numel() * input.element_size() <= custom_ar.custom_ar_max_bytes()):
-            dist.inference_all_reduce(input.contiguous(), group=group)
+            # contiguous() may hand back a copy — the reduction must land in
+            # the caller's tensor, not a discarded temporary
+            red = input.contiguous()
+            dist.inference_all_reduce(red, group=group)
+            if red is not input: input.copy_(red)
         elif is_inference_mode:
             RowParallel._rs_ag(input, group)
         else:
