@@ -568,14 +568,15 @@ def _install_gdn_segment(seg: GDNSegment) -> bool:
     # Route A glue fusion: torch.library-registered op boundaries let
     # inductor fuse the eager elementwise glue inside this forward. Opt-in
     # (DEEPSPEED_SEGKI_COMPILE=1) until validated across accelerators.
+    from deepspeed.module_inject import segki_torchlib
+    if segki_torchlib.TORCHLIB_READY:
+        # the registered ops dispatch to this model's JIT kernel set
+        segki_torchlib.bind_kernel_op(getattr(parent, "_ki_gdn_op", None))
     import os as _os
-    if _os.environ.get("DEEPSPEED_SEGKI_COMPILE") == "1":
-        from deepspeed.module_inject import segki_torchlib
-        if segki_torchlib.TORCHLIB_READY:
-            segki_torchlib.bind_kernel_op(getattr(parent, "_ki_gdn_op", None))
-            # dynamic shapes: the rollout generates at several batch sizes through
-            # one compiled artifact; static specialization bakes the first
-            fwd = torch.compile(fwd, dynamic=True)
+    if _os.environ.get("DEEPSPEED_SEGKI_COMPILE") == "1" and segki_torchlib.TORCHLIB_READY:
+        # dynamic shapes: the rollout generates at several batch sizes through
+        # one compiled artifact; static specialization bakes the first
+        fwd = torch.compile(fwd, dynamic=True)
     parent.forward = fwd
     return True
 
