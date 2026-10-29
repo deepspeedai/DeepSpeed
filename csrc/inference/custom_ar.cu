@@ -30,11 +30,11 @@ namespace {
 struct CarState {
     bool ready = false;
     int world = 0;
-    char* my_base = nullptr;   // python-owned: [flag0|flag1|pad][buf0][buf1]
+    char* my_base = nullptr;   // cudaMalloc'd: [flag0|flag1|pad][buf0][buf1]
     char* peer_base = nullptr;
     int* seq_d = nullptr;
-    torch::Tensor buf_ref;  // keeps the python buffer alive
-    torch::Tensor seq_ref;
+    char* own_base = nullptr;  // our cudaMalloc (never freed; process exit)
+    int* own_seq = nullptr;
 };
 CarState g_state;
 
@@ -42,6 +42,9 @@ constexpr size_t kFlagOff0 = 0;
 constexpr size_t kFlagOff1 = 4;
 constexpr size_t kBufBase = 256;
 constexpr size_t kBufStride = CAR_MAX_BYTES;
+constexpr size_t kTotalBytes = kBufBase + 2 * kBufStride;
+
+#define CUDA_CHECK(expr) TORCH_CHECK((expr) == cudaSuccess, "CUDA: ", cudaGetErrorString(cudaGetLastError()))
 
 __global__ void seq_bump_kernel(int* seq_d) { *seq_d = *seq_d + 1; }
 
@@ -110,27 +113,36 @@ __global__ void reduce_fp32_kernel(const char* __restrict__ in, char* __restrict
 
 }  // namespace
 
-void car_initialize(torch::Tensor buf, torch::Tensor seq)
+std::string car_create_buffers()
 {
+    // Pure CUDA IPC (vLLM-style): our own cudaMalloc + GetMemHandle, no
+    // torch allocator wrappers in the exchange path.
     TORCH_CHECK(!g_state.ready, "custom AR already initialized");
-    TORCH_CHECK(buf.is_cuda() && buf.dtype() == torch::kUInt8, "uint8 CUDA buffer required");
-    g_state.buf_ref = buf;
-    g_state.seq_ref = seq;
-    g_state.my_base = (char*)buf.data_ptr();
-    g_state.seq_d = (int*)seq.data_ptr();
+    void* buf = nullptr;
+    int* seq = nullptr;
+    CUDA_CHECK(cudaMalloc(&buf, kTotalBytes));
+    CUDA_CHECK(cudaMalloc((void**)&seq, sizeof(int)));
+    CUDA_CHECK(cudaMemset(buf, 0, kTotalBytes));
+    CUDA_CHECK(cudaMemset(seq, 0, sizeof(int)));
+    cudaIpcMemHandle_t h;
+    CUDA_CHECK(cudaIpcGetMemHandle(&h, buf));
+    g_state.my_base = (char*)buf;
+    g_state.own_base = (char*)buf;
+    g_state.own_seq = seq;
+    g_state.seq_d = seq;
     g_state.ready = true;
+    return std::string((const char*)&h, sizeof(h));
 }
 
 void car_connect(const std::string& handle_bytes)
 {
-    TORCH_CHECK(g_state.ready, "call car_initialize first");
-    // Open the peer's handle on THIS device's context: the resulting
-    // mapping is dereferenceable by our kernels (torch's reconstruction
-    // opens on the producer's device, which our streams cannot read).
+    TORCH_CHECK(g_state.ready, "call car_create_buffers first");
     TORCH_CHECK(handle_bytes.size() >= sizeof(cudaIpcMemHandle_t), "short IPC handle");
     cudaIpcMemHandle_t h;
     memcpy(&h, handle_bytes.data(), sizeof(h));
     void* mapped = nullptr;
+    // Open on THIS device's context so our kernels can dereference the
+    // mapping over P2P; the lazy flag enables peer access on first touch.
     cudaError_t err = cudaIpcOpenMemHandle(&mapped, h, cudaIpcMemLazyEnablePeerAccess);
     TORCH_CHECK(err == cudaSuccess, "cudaIpcOpenMemHandle failed: ", cudaGetErrorString(err));
     g_state.peer_base = (char*)mapped;
@@ -176,7 +188,7 @@ torch::Tensor car_all_reduce(torch::Tensor t)
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
 {
-    m.def("initialize", &car_initialize, "bind python-owned IPC buffers");
+    m.def("create_buffers", &car_create_buffers, "allocate IPC buffers, return handle bytes");
     m.def("connect", &car_connect, "map peer buffer (data pointer from CUDA IPC storage)");
     m.def("ready", &car_ready, "is the custom path usable");
     m.def("max_bytes", &car_max_bytes, "max message size");

@@ -72,9 +72,11 @@ def initialize(group=None):
     gathered = [None, None]
     tdist.all_gather_object(gathered, info, group=group)
     peer_info = gathered[1 - rank]
-    # The raw IPC handle bytes open on OUR device context in the extension
-    # (torch's reconstruction would map on the producer's device instead).
-    op.connect(peer_info[1])
+    # _share_cuda_() tuple: the 64-byte field is the raw cudaIpcMemHandle_t
+    # (the 66-byte field is torch's own refcount wrapper). Open it on OUR
+    # device context in the extension — torch's reconstruction would map on
+    # the producer's device instead.
+    op.connect(peer_info[6])
     torch.cuda.synchronize()
     _state["op"] = op
     _state["inited"] = True
