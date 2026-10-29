@@ -24,6 +24,13 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Validate package README without installing DeepSpeed
+        run: python scripts/check-readme.py
+
+      # Modal runs these from the base branch, so this is where a PR's own ci/ changes get tested.
+      - name: Self-test CI path gate and test selector
+        run: python ci/test_tests_fetcher.py
+
       - name: environment
         run: |
           which python

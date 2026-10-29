@@ -142,7 +142,7 @@ By default, non-Muon parameters use `FusedAdam`. When optimizer state is offload
     }
   }
 ```
-The Adam optimizer also supports the following two params keys/values in addition to the standard parameters from [torch.optim.Adam](https://pytorch.org/docs/stable/_modules/torch/optim/adam.html#Adam):
+The Adam optimizer also supports the following two params keys/values in addition to the standard parameters from [torch.optim.Adam](https://docs.pytorch.org/docs/stable/generated/torch.optim.Adam.html):
 
 | "params" key  | Description                                                                 | Default |
 | ------------- | --------------------------------------------------------------------------- | ------- |
@@ -328,6 +328,12 @@ Example of <i>**scheduler**</i>
 |--------------------------------------------------------------------| ------- |
 | <i>**enabled**</i> indicates whether BFLOAT16 training is enabled. | `false` |
 
+<i>**bf16:immediate_grad_update**</i>: [boolean]
+
+| Description | Default |
+| ----------- | ------- |
+| When `BF16_Optimizer` is selected, accumulate each completed BF16 gradient in an autograd hook (in FP32 when `data_types.grad_accum_dtype="fp32"`). The consumed `param.grad` is released and may be `None` after backward. In that case, `deepspeed.utils.safe_get_full_grad(param)` reconstructs the accumulated gradient from the optimizer-owned fragments; all data-parallel ranks must call it before `engine.step()` in the same order. The default keeps the existing backward-epilogue accumulation. | `false` |
+
 <i>**bf16:bf16_master_weights_and_grads**</i>: [boolean]
 
 | Description | Default |
@@ -483,8 +489,8 @@ reduction and offload ordering and is not covered; a warning is logged.
 <i>**load_from_fp32_weights**</i>: [boolean]
 
 | Description                                                                                                                                                                                                                          | Default |
-| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------- |
-| Initialize fp32 master weights from fp32 copies in checkpoint (no precision loss) or from model's fp16 copies (with precision loss). This can be used to initialize optimizer state even when checkpoint is missing optimizer state. | `True`  |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| Deprecated and ignored by `DeepSpeedEngine.load_checkpoint`. Full ZeRO checkpoint loads always restore saved fp32 master weights. Module-only loads rebuild ZeRO-1/2 fp32 master weights from the loaded model weights, while ZeRO-3 still reads fp32 weights because its model checkpoint is empty. | `True`  |
 
 ***round_robin_gradients***: [boolean]
 
@@ -1003,6 +1009,12 @@ smoke coverage used for this AutoEP surface produced the following version gates
 | -------------------------------------------------------------------------------------------------------------- | -------- |
 | How the DeepEP route applies one FP32 routing weight to each received row at the existing `score_apply` boundary. `"auto"` resolves to `"eager"`, preserving `(rows.float() * weights).to(rows.dtype)`. `"fused"` is experimental and uses a separate Triton pointwise operator for that per-row product only; it does not perform the top-k reduction or move the BF16/FP16 rounding point. It requires `comm_backend="deepep"`, `autoep_size > 1`, CUDA, Triton, contiguous bfloat16/float16 rows shaped `[N, H]`, and contiguous FP32 weights shaped `[N, 1]` on the same device; DeepEP dispatch currently supports BF16 rows only. Fused weight gradients can differ from eager due to FP32 summation order. Unsupported configurations fail rather than falling back. | `"auto"` |
 
+***gate_up_impl***: [string]
+
+| Description                                                                                                    | Default  |
+| -------------------------------------------------------------------------------------------------------------- | -------- |
+| How the grouped experts compute their gate and up projections. `"separate"` runs two grouped GEMMs. `"fused"` is experimental and runs one `torch._grouped_mm` over the gate and up weights concatenated on each call, followed by an activation that reads the two halves of its output in place; for `swiglu` this is a Triton kernel with first-order gradients only (`create_graph=True` raises). Parameters, checkpoints and optimizer state keep the separate `w1`/`w3` layout. The forward expression and parameter-gradient semantics are unchanged, but exact numerical equality is not guaranteed across GEMM shapes/backends; the input gradient accumulates both projections in one FP32 GEMM instead of adding two rounded results. Requires `use_grouped_mm=true` and the `torch._grouped_mm` path (set `disable_triton_grouped_mm=true` on devices that prefer the Triton grouped GEMM); unsupported configurations fail rather than falling back. | `"separate"` |
+
 ***route_norm***: [boolean]
 
 | Description                                                                                                     | Default |
@@ -1091,7 +1103,7 @@ smoke coverage used for this AutoEP surface produced the following version gates
 
 | Description                                                                                              | Default |
 | -------------------------------------------------------------------------------------------------------- | ------- |
-| How the expert MLP combines its gate and up projections, by a name registered in `deepspeed.moe.ep_experts.EXPERT_ACTIVATIONS`: `"swiglu"` (`silu(gate) * up`), `"geglu_tanh"` (`gelu_tanh(gate) * up`, Gemma-4), `"swiglu_clamped"` (`silu(clamp(gate)) * clamp(up)`, DeepSeek-V4) or `"swiglu_oai"` (`(clamp(up) + 1) * clamp(gate) * sigmoid(alpha * clamp(gate))`, GPT-OSS and MiniMax-M3). `null` = use preset default, which is `"swiglu"` for every built-in preset. AutoEP checks the name against the model: a clamp limit on the experts module or the model config, or an experts `act_fn` that is not the named form's gate function, is an error unless this key is set. The clamp limit and alpha are taken from the model when it states them. `deepspeed.moe.ep_experts.register_expert_activation` adds a form. | `null`  |
+| How the expert MLP combines its gate and up projections, by a name registered in `deepspeed.moe.ep_experts.EXPERT_ACTIVATIONS`: `"swiglu"` (`silu(gate) * up`), `"geglu_tanh"` (`gelu_tanh(gate) * up`, Gemma-4), `"swiglu_clamped"` (`silu(clamp(gate)) * clamp(up)`, DeepSeek-V4) or `"swiglu_oai"` (`(clamp(up) + 1) * clamp(gate) * sigmoid(alpha * clamp(gate))`, GPT-OSS and MiniMax-M3). `null` = use preset default, which is `"swiglu"` for every built-in preset. AutoEP checks the name against the model: a clamp limit on the experts module or the model config, or an experts `act_fn` that is not the named form's gate function, is an error unless this key is set. The clamp limit and alpha are taken from the model when it states them. With Triton on an accelerator, `"swiglu"` and the two clamped forms run a fused Triton kernel (one kernel forward, one backward, only the gate and up projections kept for backward); `"geglu_tanh"`, and every form on the CPU, runs in plain PyTorch. `deepspeed.moe.ep_experts.register_expert_activation` adds a form. | `null`  |
 
 #### Custom Model Example
 
@@ -1136,9 +1148,9 @@ Use a built-in preset but override specific naming/weight fields for a fine-tune
 
 **Constraints:**
 - `autoep_size` must divide `num_experts` for all detected MoE layers
-- AutoEP currently cannot be combined with AutoTP (`tensor_parallel.autotp_size > 1`); support is planned as follow-up work
-- AutoEP with ZeRO Stage 3 is supported only without AutoTP, sequence parallelism, hpZeRO secondary tensor groups, non-1 `expert_tensor_parallel_size`, or quantized gradients
-- ZeRO Stage 3 saves AutoEP checkpoints partition-natively and supports same-topology save/load, module-only loads, optimizer-state-skipping loads, and universal checkpoint conversion. Universal loads can resume at a different data-parallel world size, a different `autoep_size`, or both (when the target `autoep_size` divides the expert count), including weights-only/module-only loads from the converted `fp32.pt` parameter files
+- AutoEP combines with AutoTP (`tensor_parallel.autotp_size > 1`) by folding them onto the same ranks, at ZeRO stages 0 to 3, with `expert_tensor_parallel_size` 1 and without ZeRO offload or DeepCompile
+- AutoEP with ZeRO Stage 3 is supported only without sequence parallelism, hpZeRO secondary tensor groups, non-1 `expert_tensor_parallel_size`, or quantized gradients
+- ZeRO Stage 3 saves AutoEP checkpoints partition-natively and supports same-topology save/load, module-only loads, optimizer-state-skipping loads, and universal checkpoint conversion (not yet with AutoTP folding). Universal loads can resume at a different data-parallel world size, a different `autoep_size`, or both (when the target `autoep_size` divides the expert count), including weights-only/module-only loads from the converted `fp32.pt` parameter files
 
 ### Python cyclic garbage collection
 
@@ -1759,7 +1771,8 @@ The offload pass is **not** in the default DeepCompile schedule; enable it only 
 
 ```json
 "data_types": {
-    "grad_accum_dtype"=["fp32"|"fp16"|"bf16"]
+    "grad_accum_dtype"=["fp32"|"fp16"|"bf16"],
+    "keep_in_fp32_modules"="auto"|[name patterns]
     }
 }
 ```
@@ -1769,3 +1782,9 @@ The offload pass is **not** in the default DeepCompile schedule; enable it only 
 | Description                                                                                                   | Default |
 | --------------------------------------------------------------------------------------------------------------| ------- |
 | Specifies the data type in which to do gradient accumulation. If None the default is to match the model type. |  None   |
+
+<i>**keep_in_fp32_modules**</i>: ["auto" or a list of strings]
+
+| Description | Default |
+| ----------- | ------- |
+| Buffers kept in fp32 while the model trains in bf16 or fp16. `"auto"` uses the model's Hugging Face transformers lists: `_keep_in_fp32_modules_strict`, plus `_keep_in_fp32_modules` under fp16. An example is the MoE routing bias `e_score_correction_bias` of DeepSeek-V3, GLM-4.5 and GLM-5, whose values bf16 cannot tell apart. A list gives name patterns, matched the way transformers matches them: `*` stands for any characters and a pattern may match anywhere in the buffer name. `[]` keeps nothing in fp32. Under ZeRO-3, `deepspeed.zero.Init` converts the buffers when it finishes building each module, before a checkpoint is loaded into them. Listed buffers stay fp32 even when `buffer_dtype` is set. Parameters named by the lists still follow the training dtype. | `"auto"` |

@@ -22,15 +22,19 @@ import torch.nn as nn
 import deepspeed.comm as dist
 from deepspeed.accelerator import get_accelerator
 from deepspeed.checkpoint.autoep_affine import (autoep_experts_for_rank, autoep_placement_to_affine_map,
-                                                legacy_uniform_autoep_placement_descriptor)
+                                                autoep_placements_equal, legacy_uniform_autoep_placement_descriptor,
+                                                plan_autoep_placement_transfer)
+from deepspeed.checkpoint.affine import ParamAffineMap
+from deepspeed.checkpoint.affine_transfer import PlanBudget, TransferPlan
 from deepspeed.checkpoint.constants import (AFFINE_MAP, AUTOEP_EXPERT_PLACEMENT, AUTOEP_PARAM_EP_RANK,
                                             AUTOEP_PARAM_LOCAL_EXPERTS, AUTOEP_PARAM_LOGICAL_SHAPE, DS_AUTOEP_UC_META)
 from deepspeed.module_inject.auto_ep_config import AutoEPConfig, MoELayerSpec, resolve_autoep_config_defaults
 from deepspeed.module_inject.auto_ep_folding import mark_autoep_folding_router_parameter
 from deepspeed.ops.triton_ops import autoep_fused_token_ops as fused_token_ops
 from deepspeed.utils import logger
-from deepspeed.module_inject.auto_ep_comm import (COMM_BACKEND, DEEPEP_BACKEND, assert_dtype_supported, deepep_combine,
-                                                  deepep_dispatch, new_exchange_scope, shared_exchange)
+from deepspeed.module_inject.auto_ep_comm import (COMM_BACKEND, DEEPEP_BACKEND, DeepEPCheckpointReplay,
+                                                  assert_dtype_supported, deepep_combine, deepep_dispatch,
+                                                  new_exchange_scope, shared_exchange)
 from deepspeed.moe.ep_router import TokenChoiceTopKRouter
 from deepspeed.moe.ep_count import count_tokens_per_expert
 from deepspeed.moe.ep_experts import GroupedExperts
@@ -637,6 +641,7 @@ class AutoEPMoELayer(nn.Module):
             activation=spec.expert_activation,
             activation_alpha=spec.expert_activation_alpha,
             activation_limit=spec.expert_activation_limit,
+            gate_up_impl=config.gate_up_impl,
         )
         _copy_parameter_data(self.experts.w1, w1)
         _copy_parameter_data(self.experts.w2, w2)
@@ -646,8 +651,7 @@ class AutoEPMoELayer(nn.Module):
         self.experts.w3.requires_grad_(w3_requires_grad)
         local_experts = autoep_experts_for_rank(self.expert_placement_descriptor, self.ep_rank)
         for param in (self.experts.w1, self.experts.w2, self.experts.w3):
-            physical_shape = getattr(param, 'ds_shape', param.shape)
-            logical_shape = [self.num_experts, *physical_shape[1:]]
+            logical_shape = self._expert_logical_shape(param)
             affine_map = autoep_placement_to_affine_map(self.expert_placement_descriptor, logical_shape)
             setattr(
                 param,
@@ -714,6 +718,8 @@ class AutoEPMoELayer(nn.Module):
         self.comm_num_sm = config.comm_num_sm
         self.comm_qp_margin = config.comm_qp_margin
         self._deepep_exchange = None
+        # Per layer, unlike the shared exchange: a checkpoint recompute must find this layer's forward handle.
+        self._deepep_replay = DeepEPCheckpointReplay()
         self.comm_max_tokens_per_rank = config.comm_max_tokens_per_rank
 
     def _start_async_split_plan(self, num_tokens_per_expert: torch.Tensor) -> _PendingSplitPlan:
@@ -752,6 +758,66 @@ class AutoEPMoELayer(nn.Module):
         plan = pending.wait()
         self._async_split_plan_pending = None
         return plan
+
+    def _expert_logical_shape(self, param: nn.Parameter) -> list[int]:
+        # ZeRO-3 partitions the packed local tensor in place; ds_shape keeps its unpartitioned shape.
+        physical_shape = getattr(param, 'ds_shape', param.shape)
+        return [self.num_experts, *physical_shape[1:]]
+
+    def _live_expert_placement(self) -> dict:
+        # repack_expert_weights packs each rank's experts as one contiguous, uniform range. A
+        # descriptor that says otherwise would address shards the weights do not have.
+        packed_placement = legacy_uniform_autoep_placement_descriptor(self.num_experts, self.num_local_experts,
+                                                                      self.ep_size)
+        if not autoep_placements_equal(self.expert_placement_descriptor, packed_placement):
+            raise NotImplementedError("AutoEP expert weights are packed with the contiguous uniform placement; "
+                                      "the layer's expert placement descriptor does not describe them.")
+        return self.expert_placement_descriptor
+
+    def _live_expert_affine_map(self, name: str, placement: dict) -> ParamAffineMap:
+        param = getattr(self.experts, name)
+        affine_map = autoep_placement_to_affine_map(placement, self._expert_logical_shape(param))
+        # Checkpoints publish this map; planning from a different one would move other elements.
+        published = getattr(param, DS_AUTOEP_UC_META, None)
+        if published is not None:
+            if not autoep_placements_equal(published[AUTOEP_EXPERT_PLACEMENT], placement):
+                raise ValueError(f"AutoEP expert parameter '{name}' publishes a placement that differs from the "
+                                 "layer's expert placement descriptor.")
+            if published[AFFINE_MAP] != affine_map.to_dict():
+                raise ValueError(f"AutoEP expert parameter '{name}' publishes an affine map that differs from its "
+                                 "expert placement descriptor.")
+        return affine_map
+
+    def expert_affine_maps(self) -> dict[str, ParamAffineMap]:
+        """Return the affine map of each live expert parameter (``w1``, ``w2``, ``w3``).
+
+        Map ranks are EP-local ranks; translate them with ``dist.get_global_rank(self.ep_group, rank)``.
+        Each rank's shard is the unpartitioned packed ``[local_experts, ...]`` tensor.
+        """
+        placement = self._live_expert_placement()
+        return {name: self._live_expert_affine_map(name, placement) for name in ("w1", "w2", "w3")}
+
+    def plan_expert_transfer(self,
+                             target_placement: dict,
+                             limits: PlanBudget | None = None,
+                             *,
+                             replica_selector=None) -> dict[str, TransferPlan]:
+        """Plan the copies that move the live expert parameters to ``target_placement``.
+
+        ``target_placement`` is an AutoEP placement descriptor in the target's EP-local ranks. This
+        only plans: it moves no data and does not check that this layer can run with the target.
+        """
+        placement = self._live_expert_placement()
+        plans = {}
+        for name in ("w1", "w2", "w3"):
+            param = getattr(self.experts, name)
+            self._live_expert_affine_map(name, placement)
+            plans[name] = plan_autoep_placement_transfer(placement,
+                                                         target_placement,
+                                                         self._expert_logical_shape(param),
+                                                         limits,
+                                                         replica_selector=replica_selector)
+        return plans
 
     def set_deepspeed_parallelism(
         self,
@@ -836,21 +902,31 @@ class AutoEPMoELayer(nn.Module):
                 "job will produce, normally train_micro_batch_size_per_gpu * maximum padded sequence length, or "
                 'set comm_backend="comm".')
 
-        received, recv_weights, exchange = deepep_dispatch(self._deepep_exchange, tokens, ro.selected_experts,
-                                                           ro.top_scores)
+        received, recv_weights, exchange = deepep_dispatch(self._deepep_exchange,
+                                                           tokens,
+                                                           ro.selected_experts,
+                                                           ro.top_scores,
+                                                           replay=self._deepep_replay)
         handle = exchange.last_handle
 
         # combine reads exactly the rows the handle says arrived, taken from
         # the handle as a Python int rather than off the device prefix sum to
         # avoid a device-to-host sync in front of every layer's expert GEMM.
         arrived = handle.num_expanded_tokens
-        received = received[:arrived]
+        # A fresh dispatch syncs for exact counts, so its buffers usually hold
+        # exactly the rows that arrived. Slicing them anyway changes nothing
+        # forward, but its backward zero-fills a gradient the size of the whole
+        # buffer and copies the real one into it, in every layer.
+        if received.shape[0] != arrived:
+            received = received[:arrived]
+        if recv_weights is not None and recv_weights.shape[0] != arrived:
+            recv_weights = recv_weights[:arrived]
 
         # Applied here, not handed to combine: DeepEP's combine transports and
         # reduces topk_weights but doesn't multiply rows by them. Which side of
         # the experts it lands on must match the collective path, since SwiGLU
         # doesn't commute with the weight.
-        weights = None if recv_weights is None else recv_weights[:arrived].reshape(-1, 1)
+        weights = None if recv_weights is None else recv_weights.reshape(-1, 1)
         if weights is not None and self.score_apply == "pre":
             received = apply_deepep_row_weights(received, weights, self.row_weighting_impl)
             weights = None
@@ -936,6 +1012,13 @@ class AutoEPMoELayer(nn.Module):
 
     def _forward(self, hidden_states: torch.Tensor) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         bsz, seqlen, hdim = hidden_states.shape
+        folded_tp = self.folding_group_handles is not None and self.folding_group_handles.spec.tp_size > 1
+        if folded_tp:
+            # Tensor-parallel layers before this one need the same input gradient on every TP peer;
+            # see average_gradient_over_tp.
+            from deepspeed.moe.ep_tp_dispatch import average_gradient_over_tp
+            hidden_states = average_gradient_over_tp(hidden_states, self.tp_group,
+                                                     self.folding_group_handles.spec.tp_size)
         x = hidden_states.reshape(-1, hdim)  # [T, H]
 
         # Fail all ranks before any collective can stall.
@@ -950,7 +1033,6 @@ class AutoEPMoELayer(nn.Module):
         # Router
         ro: RouterOutput = RouterOutput(*self.router(x, self.expert_bias))
 
-        folded_tp = self.folding_group_handles is not None and self.folding_group_handles.spec.tp_size > 1
         pending_plan = None
         if self.async_split_plan and self.ep_size > 1 and self.comm_backend == COMM_BACKEND:
             if folded_tp:

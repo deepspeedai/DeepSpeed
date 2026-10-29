@@ -103,7 +103,7 @@ configured capacity.
 The experimental path intentionally does not implement paged attention or change the
 default generation semantics. It currently requires one padded prompt width for
 all rows, a model with cache-class support, greedy decoding, and one sample per
-prompt. CUDA Graph capture and shared prompt prefill are rejected until the scheduling semantics are
+prompt. Shared prompt prefill is rejected until the scheduling semantics are
 validated on real workloads. Models that explicitly declare no cache-class
 support are rejected; models with unknown support should be validated against
 the default ``generate()`` path before use.
@@ -138,7 +138,46 @@ measured with accelerator synchronization; otherwise those timing fields are
 statistics remain zero when ``enable_cache_trimming`` is false unless a
 capacity-exhaustion fallback reclaims a dead prefix.
 
+CUDA Graph capture is supported for CUDA inputs with the default
+``align_decode_fronts=False`` and ``enable_cache_trimming=False`` settings. It
+uses a fixed ``continuous_batch_size`` layout, keeps every KV-cache row and
+decode tensor at a stable address, and masks inactive rows while the scheduler
+refills them. Graph state is reused across matching rollout calls and rebuilt
+when the model parameters or static decode shape changes. Aligned decode fronts
+and cache trimming are rejected while graph capture is enabled because they
+move cache rows or columns. ``flash_attention_2`` is also rejected because the
+captured decode uses a four-dimensional additive attention mask.
+
 ``DeepSpeedStaticCache`` accepts one write position per row and can compact
 active rows while preserving its static tensor addresses. This mirrors the
 scheduler/cache separation used by systems such as vLLM and SGLang without
 copying their backend-specific kernels.
+
+OPSD response-token utilities
+-----------------------------
+
+``ResponseTokenBatch.from_rollout`` derives causal training targets and a
+response-only loss mask from a ``RolloutBatch``. The mask excludes prompt and
+padding tokens while retaining an attended EOS token. Use
+``generalized_jsd_loss`` to compare aligned student and teacher logits on that
+mask:
+
+.. code-block:: python
+
+    from deepspeed.runtime.rollout import ResponseTokenBatch, generalized_jsd_loss
+
+    response_batch = ResponseTokenBatch.from_rollout(rollout_batch)
+    student_logits = response_batch.select_causal_logits(student_model(**model_inputs).logits)
+    teacher_logits = aligned_teacher_logits
+    loss_output = generalized_jsd_loss(
+        student_logits,
+        teacher_logits,
+        response_batch.response_mask,
+    )
+    loss = loss_output.loss
+
+The rollout supplies only the student on-policy trajectory. Construct the
+teacher inputs, including any privileged context, separately and align the
+teacher logits with the student causal-logit shape before calling the loss.
+``loss_sum`` and ``valid_token_count`` are available for callers that need
+explicit distributed loss normalization.

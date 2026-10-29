@@ -56,13 +56,16 @@ Transformers build that exposes the matching config/model classes,
 
 **ZeRO compatibility:** Stages 0, 1, and 2, plus constrained Stage 3
 support. Stage 3 requires AutoEP-managed MoE layers and does not support native
-DeepSpeed MoE layers, AutoTP, tensor model parallelism from ``mpu``, sequence
+DeepSpeed MoE layers, tensor model parallelism from ``mpu``, sequence
 parallelism, hpZeRO secondary tensor groups, non-1 expert tensor
-parallelism, or quantized gradients. Stage 3 AutoEP checkpoints are saved
+parallelism, or quantized gradients. AutoTP folding
+(``tensor_parallel.autotp_size > 1``) works at Stage 3 as at stages 0 to 2,
+including models built under ``deepspeed.zero.Init``. Stage 3 AutoEP checkpoints are saved
 partition-natively in the ``zero_pp_rank_*`` shard files and support
 same-topology load, module-only loads (``load_module_only``),
 optimizer-state-free loads (``load_optimizer_states=False``), and Universal
-Checkpoint conversion. Optimizer-including Universal Checkpoint loads can
+Checkpoint conversion, except with AutoTP folding. Optimizer-including
+Universal Checkpoint loads can
 resume with a different data-parallel world size, a different ``autoep_size``,
 or both, when the target ``autoep_size`` divides the model's expert count.
 Weights-only/module-only Universal Checkpoint loads use the converted
@@ -196,6 +199,33 @@ constructed, including when the caller supplied a lazily initialized process
 group. This initialization does not run on subsequent forwards. The standard
 ``comm`` and ``autoep_size=1`` paths are unchanged.
 
+Received rows and routing weights are passed through without a prefix slice
+when their buffers already contain exactly the arrived rows. Overallocated
+buffers are still trimmed independently to the handle's row count. This avoids
+redundant slice-gradient zero-fills and copies during checkpoint recomputation;
+it changes neither row weighting nor DeepEP's communication volume.
+
+Both reentrant and non-reentrant activation checkpointing are supported with
+DeepEP. The order in which DeepEP delivers rows depends on arrival timing, and a
+non-reentrant checkpoint keeps the forward pass's autograd nodes, together with
+the dispatch handle they hold. A non-reentrant recompute therefore repeats the
+forward's dispatch on that handle rather than dispatching afresh, so the expert
+activations it restores are in the order the backward expects. A recompute is
+matched to its forward pass by requiring each micro-batch to run backward before
+the layer's next forward, as gradient accumulation does; a recompute that could
+belong to more than one live forward pass raises an error rather than guessing.
+This also rejects interleaving a retained graph with a newer forward, even if
+the retained graph has already been replayed once. Repeating backward on one
+retained graph without another live forward remains supported. An inner
+non-reentrant checkpoint nested under a reentrant checkpoint records its fresh
+graph-building dispatch during the outer backward and reuses that layout for
+the inner recompute.
+Use reentrant checkpointing for schedules that run several forwards before their
+backwards. With PyTorch's default early stop, a non-reentrant recompute ends once
+the expert activations are restored, so it does not repeat the combine when
+nothing after the combine in the checkpointed region saves activations, for
+example a layer without shared experts.
+
 On 16 H100s across two nodes, replaying routing captured from real training,
 DeepEP reduced payload AllToAll time from roughly 100 ms to 48 ms per step. A
 full SFT step on Qwen3.5-MoE went from roughly 325 ms to 266 ms, a 1.2x speedup
@@ -230,6 +260,66 @@ SMs. The default of 12 was chosen by measuring whole steps: 8 SMs gave a median
 ``comm_qp_margin`` exists because DeepEP's automatic queue-pair count assumes
 it is alone on the fabric, which exhausts the queue pairs ZeRO and the
 data-parallel groups have already claimed in a training step.
+
+**Fused gate and up projections (experimental):**
+
+The grouped experts compute two projections of the same input, ``gate`` with
+``w1`` and ``up`` with ``w3``, before the expert activation. ``gate_up_impl``
+selects whether they run as two grouped GEMMs or as one:
+
+.. code-block:: json
+
+    {
+      "expert_parallel": {
+        "enabled": true,
+        "autoep_size": 8,
+        "gate_up_impl": "fused"
+      }
+    }
+
+``"separate"`` (default) keeps the existing two GEMMs. ``"fused"`` concatenates
+``w1`` and ``w3`` on each call and runs one ``torch._grouped_mm`` with twice the
+output columns. The activation then reads the two halves of that output in
+place: ``swiglu`` uses a Triton kernel, and the other forms run their usual
+expression on views of the halves. The parameters are not changed, so
+checkpoints, universal checkpoints, expert tensor parallelism and optimizer
+state, including Muon's per-expert treatment of ``w1`` and ``w3``, see the same
+layout as before.
+
+The forward expression and parameter-gradient semantics are unchanged. Exact
+output and weight-gradient equality was observed in the tested H100 cases,
+not guaranteed for all GEMM backends, shapes or hardware. In the
+backward pass, one input-gradient GEMM accumulates both projections in FP32,
+where ``"separate"`` adds two results rounded to the input dtype, so the input gradient can differ in
+the last bits. The numerical regression compares relative L2 errors with an
+FP64 reference using the same represented BF16 parameters; it does not claim
+universal bitwise equivalence or accuracy improvement.
+Forward and parameter-gradient checks use the grouped-GEMM tests' existing
+BF16 bound (2% relative plus 2% of the reference tensor's maximum magnitude).
+The clamped activations' parameter gradients use an independent dense BF16
+reference because rounding a projection across the clamp boundary changes
+its derivative discontinuously; smooth forms use the FP64 reference.
+The input-gradient relative-L2 bound is unchanged. Cross-algorithm training
+checks allow the same rounding scale, while reloading each parameter and
+optimizer momentum tensor must still preserve its saved values exactly.
+
+The packed SwiGLU Triton path supports first-order gradients only:
+``create_graph=True`` raises instead of silently dropping its second derivative.
+Forward and backward launch on the input device's current stream, restoring
+the caller's device. Other activations keep their existing eager expression.
+
+Most of the saving is in the backward pass: one input-gradient GEMM instead of
+two, and no separate addition. On Qwen3-30B-A3B with 8 H100s (expert parallel
+size 8, micro-batch 4, 16 accumulation steps, sequence length 4096, DeepEP and
+reentrant activation checkpointing), a full optimizer step went from 22.02 s to
+21.60 s (-1.9%) in two pairs using an equivalent benchmark prototype in the
+same allocation, with unchanged peak
+allocated memory and about 0.4 GB more reserved memory.
+
+``"fused"`` is rejected, rather than silently ignored, when the experts would
+not run ``torch._grouped_mm``: with ``use_grouped_mm=false``, or on devices that
+select the Triton grouped GEMM (compute capability below 9.0) unless
+``disable_triton_grouped_mm=true``.
 
 **DeepEP row weighting implementation (experimental):**
 
@@ -305,6 +395,76 @@ generation-2 collection pauses one rank's Python thread, which is then exposed
 as collective wait time on every expert-parallel rank. The top-level
 ``disable_python_gc`` option addresses this. It is process-wide rather than
 AutoEP-specific, so it is documented with the general configuration options.
+
+**Fused RMSNorm (experimental):**
+
+RMSNorm is a model module rather than an AutoEP expert-parallel component, so
+it is not configured under ``expert_parallel``. DeepSpeed provides an opt-in
+installer that runs Hugging Face RMSNorm modules with fused Triton kernels:
+
+.. code-block:: python
+
+    from deepspeed.ops.triton_ops.fused_rms_norm import replace_rms_norm
+
+    replaced = replace_rms_norm(model)
+
+The installer adds a process-wide class dispatcher, with a per-instance opt-in
+marker. Other instances of those classes keep their original eager forward
+until explicitly selected. Shallow/deep copies and ``torch.nn.DataParallel``
+replicas retain their live opt-in and use their own weights and epsilon rather
+than the original receiver.
+The HF module classes, Parameters and state-dict keys are unchanged.
+Full-model checkpoints saved with ``torch.save(model, ...)`` can be loaded
+with ``torch.load(..., weights_only=False)``. Loading clears the opt-in, so the
+loaded model runs eager until ``replace_rms_norm(model)`` is called again, even
+if this process already has a dispatcher installed for another instance. No
+fused dispatcher needs to be serialized.
+
+The kernels reproduce the RMSNorm expression of Llama-style models: the
+variance and normalization are computed in FP32, the normalized value is cast
+back to the input dtype once, and only then multiplied by the weight (gamma).
+A class name ending in ``RMSNorm`` with a 1-D ``weight`` and a
+``variance_epsilon`` does not imply that order: ``GptOssRMSNorm``, for one,
+multiplies by the weight before the cast, and ``Olmo2RMSNorm`` moved to that
+order between Transformers releases. The installer therefore replaces only
+instances of the classes in ``SUPPORTED_RMS_NORM_CLASSES``: the RMSNorm
+classes of Llama, Mistral, Mixtral, Phi-3, Qwen2, Qwen2-MoE, Qwen3, Qwen3-MoE,
+DeepSeek-V2 and DeepSeek-V3. A module is replaced only if it still runs its
+class's own ``forward`` and is at most 2048 wide, so subclasses, modules whose
+``forward`` was already patched or wrapped (by another kernel installer or by
+an earlier call) and wider norms are left alone. Replaced modules keep their
+own weight Parameter and ``variance_epsilon``. The return value is the number
+of modules replaced: 193 for Qwen3-30B-A3B, four per decoder layer plus the
+final norm.
+
+A replaced module runs the kernels when its input and weight are bfloat16 or
+float16 CUDA tensors of the same dtype and Triton is available. For any other
+input it runs its class's own eager forward, so the result is exactly eager's,
+and logs a warning once. The installer can therefore run before the model is
+moved to the GPU. ``fused_rms_norm(hidden, weight, eps)`` in the same module
+applies the kernels directly and raises on unsupported inputs instead.
+
+Where the kernels run, results are not bitwise identical to eager RMSNorm: the
+kernels' FP32 reductions sum in a different order, so a small fraction of
+outputs and gradients differ in their last bits.
+
+Requirements and limits:
+
+- The kernels need CUDA with Triton. On ROCm or without Triton, replaced
+  modules run eager.
+- bfloat16 or float16, with the input and the weight in the same dtype. Other
+  inputs run eager, including float32 weights under autocast.
+- Norms wider than 2048 are not replaced. That covers the hidden size and head
+  dimension of Qwen3-30B-A3B; in models with a wider hidden size, such as
+  Qwen3-235B-A22B (4096), only the narrower norms, such as the 128-wide query
+  and key norms, are replaced.
+- Any leading shape. Non-contiguous inputs and weights are copied before the
+  kernels run. The output and the input gradient the kernels produce are
+  contiguous, whereas eager RMSNorm follows the strides of its input and of
+  the incoming gradient.
+- First-order gradients for the input and the weight; the epsilon is a
+  constant. Differentiating those gradients again (double backward) raises.
+  ``torch.compile`` and ``torch.func`` transforms are not covered.
 
 **Fused weighted restore (experimental):**
 
@@ -424,9 +584,12 @@ Requirements and limits:
 - ``autoep_size`` must divide ``num_experts`` for all detected MoE layers.
 - ``autoep_size=1`` is valid: all experts remain local (no AllToAll), useful
   for functional testing on a single GPU.
-- AutoEP currently cannot be combined with AutoTP
-  (``tensor_parallel.autotp_size > 1``) or tensor model parallelism from
-  ``mpu``; support is planned as follow-up work.
+- AutoEP combines with AutoTP (``tensor_parallel.autotp_size > 1``) by
+  folding: on the same ranks, AutoTP shards the layers its partition
+  specification names and AutoEP distributes the routed experts. Folding
+  supports ZeRO stages 0 to 3 with ``expert_tensor_parallel_size=1``, and
+  rejects ZeRO optimizer or parameter offload and DeepCompile. Tensor model
+  parallelism from ``mpu`` is not supported.
 - AutoEP with ZeRO Stage 3 is supported only without sequence parallelism,
   hpZeRO secondary tensor groups, non-1 expert tensor parallelism, or
   quantized gradients.
@@ -439,3 +602,97 @@ Requirements and limits:
 - DeepSeek-V2 and DeepSeek-V3 AutoEP do not support load-balance expert bias
   yet. The built-in DeepSeek presets disable it by default; explicit non-null
   values fail.
+
+Chunked causal-LM loss
+----------------------
+
+Long sequences with large vocabularies spend much of their peak memory on the
+language-model loss rather than on the model. Hugging Face's
+``ForCausalLMLoss`` upcasts the full ``[tokens, vocab]`` logits to FP32 and
+keeps an FP32 log-softmax for backward, and backward allocates two more FP32
+tensors of the same size. At 8,192 tokens and Qwen3's 151,936-token
+vocabulary each is about 5 GB, and all of them are live when backward starts,
+which is where AutoEP training memory peaks.
+
+``install_chunked_causal_lm_loss`` replaces that loss with one that computes
+the same FP32 cross entropy without them: forward keeps only the logits it was
+given plus one FP32 value per token, and backward recomputes the softmax and
+writes the gradient directly in the logits' dtype. On CUDA a Triton kernel does
+each pass in a single read of the logits (``backend="triton"``); the PyTorch
+backend (``backend="torch"``) does the same arithmetic in blocks of rows and
+runs anywhere. The default ``"auto"`` picks Triton when it can run; naming a
+backend that cannot run raises. The
+loss, the label shifting, ``ignore_index`` and ``num_items_in_batch``
+normalization follow ``ForCausalLMLoss``; gradients may differ from it by one
+BF16/FP16 rounding step where the FP32 evaluation order lands on a rounding
+boundary. It has no second derivative: backward with ``create_graph=True``
+raises. It is opt-in, and it refuses models whose ``loss_function`` is not
+the stock ``ForCausalLMLoss``:
+
+.. code-block:: python
+
+    from deepspeed.runtime.chunked_cross_entropy import install_chunked_causal_lm_loss
+
+    install_chunked_causal_lm_loss(model)
+    engine, optimizer, _, _ = deepspeed.initialize(model=model, config=ds_config)
+
+Class-index targets must have dtype ``torch.long``. Other dtypes, including
+floating-point and boolean labels, are rejected instead of being converted.
+When ``shift_labels`` is provided, it is the target used by the loss; unused
+``labels`` are not dtype-checked. ``block_rows`` must be a positive integer
+or ``None`` for automatic sizing, even when the selected backend does not use
+row blocking. Invalid settings are rejected before a backend runs. A model
+with a non-writable stock ``loss_function`` raises an actionable error rather
+than being silently left unmodified.
+
+Planning expert placement transfers
+-----------------------------------
+
+An ``AutoEPMoELayer`` can describe where its live expert weights are, and plan
+the copies that would move them to another expert placement, for example one
+with a different EP size. Planning moves no data, does not
+plan optimizer states, and does not change the placement the layer runs with.
+
+.. code-block:: python
+
+    from deepspeed.checkpoint.autoep_affine import make_autoep_placement_descriptor
+
+    # layer: an AutoEPMoELayer after deepspeed.initialize()
+    affine_maps = layer.expert_affine_maps()  # {"w1": ParamAffineMap, "w2": ..., "w3": ...}
+
+    # Move 8 experts onto 2 EP ranks: rank 0 holds experts 0-2, rank 1 holds experts 3-7.
+    target = make_autoep_placement_descriptor(8, [[0, 1, 2], [3, 4, 5, 6, 7]])
+    plans = layer.plan_expert_transfer(target)  # {"w1": TransferPlan, "w2": ..., "w3": ...}
+    for segment in plans["w1"].segments:
+        ...  # copy segment.shape elements from the source shard into the target shard
+
+- ``make_autoep_placement_descriptor(num_experts, experts_by_rank)`` builds the
+  target placement. ``experts_by_rank[r]`` lists the global expert IDs that
+  target rank ``r`` holds, in the order they are packed in its local tensor.
+  Ranks may hold different numbers of experts, non-contiguous experts, no
+  experts, or experts that other ranks also hold, but every expert must be
+  held by at least one rank.
+- Ranks in a plan are EP-local. ``segment.source_rank`` is a rank of the
+  layer's EP group; translate it with
+  ``dist.get_global_rank(layer.ep_group, segment.source_rank)``.
+  ``segment.target_rank`` indexes ``experts_by_rank`` of the target placement;
+  mapping it to a process is up to the caller, since the target EP group may
+  differ from the current one.
+- ``source_offset``/``target_offset`` and the stride vectors count elements of
+  a rank's packed local expert tensor ``[local_experts, ...]`` in row-major
+  order. That tensor is the unpartitioned parameter: under ZeRO-3, gather the
+  parameter (for example with ``deepspeed.zero.GatheredParameters``) before
+  applying the offsets. Ranks are EP-local, so expert-data-parallel replicas
+  are not candidates here.
+- When several source ranks hold an element, the plan reads it from the
+  lowest-ranked holder. Pass ``replica_selector``, a callable that receives a
+  ``ReplicaSelectionRequest`` and returns the ``source_rank`` of one of its
+  ``candidates``, to choose a different holder.
+- ``limits`` takes a ``deepspeed.checkpoint.affine_transfer.PlanBudget``. A plan
+  that exceeds it raises ``AffineTransferError`` instead of being truncated.
+- The runtime packs experts with the contiguous, uniform placement. If the
+  layer's placement descriptor describes anything else, both methods raise
+  ``NotImplementedError``.
+
+The maps and plans use the affine representation that Universal Checkpoint
+uses for expert parameters; see ``deepspeed/checkpoint/affine_ir_spec.md``.

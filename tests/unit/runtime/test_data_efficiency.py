@@ -8,6 +8,8 @@ import os
 import deepspeed
 from deepspeed.accelerator import get_accelerator
 import pytest
+from deepspeed.runtime.data_pipeline.data_sampling.data_analyzer import DataAnalyzer
+from deepspeed.runtime.data_pipeline.data_sampling.indexed_dataset import MMapIndexedDataset
 from unit.common import DistributedTest
 from unit.simple_model import SimpleModel, random_dataset
 from deepspeed.runtime.data_pipeline.curriculum_scheduler import CurriculumScheduler
@@ -177,3 +179,28 @@ class TestDataEfficiency(DistributedTest):
             model.step()
             if n >= 10:
                 break
+
+
+def identity_metric(batch):
+    return batch
+
+
+def test_data_analyzer_runs_only_the_specific_threads(tmp_path):
+    # specific_threads is for rerunning some of the map threads, e.g. the ones that failed.
+    analyzer = DataAnalyzer(torch.arange(20),
+                            num_threads=4,
+                            specific_threads=[2, 3],
+                            batch_size=2,
+                            metric_names=["value"],
+                            metric_functions=[identity_metric],
+                            metric_types=["single_value_per_sample"],
+                            metric_dtypes=[torch.int64],
+                            save_path=str(tmp_path))
+    analyzer.run_map()
+
+    thread_dirs = sorted(d.name for d in (tmp_path / "value").iterdir())
+    assert thread_dirs == ["worker0_thread2", "worker0_thread3"]
+    for thread, expected in [(2, range(10, 15)), (3, range(15, 20))]:
+        fname = tmp_path / "value" / f"worker0_thread{thread}" / "value_sample_to_metric"
+        stored = MMapIndexedDataset(str(fname), skip_warmup=True)
+        assert [int(v[0]) for v in stored] == list(expected)

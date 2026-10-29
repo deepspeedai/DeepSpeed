@@ -7,12 +7,17 @@ Most tests are CPU-only; the native shared-prefill cache test runs only when CUD
 the transformer inference extension are available.
 """
 
+import gc
+import weakref
 from types import SimpleNamespace
+from contextlib import nullcontext
 from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+from transformers import PretrainedConfig
 
+from deepspeed.accelerator import get_accelerator
 from deepspeed.ops.transformer.inference.op_binding.workspace import WorkspaceOp
 from deepspeed.runtime.hybrid_engine import DeepSpeedHybridEngine
 from deepspeed.runtime.rollout.base import RolloutRequest, SamplingConfig
@@ -109,6 +114,205 @@ def test_continuous_generation_rejects_unsupported_inputs():
         rollout.generate(request, SamplingConfig(max_new_tokens=2, temperature=0.5, continuous_batch_size=1))
 
 
+@pytest.mark.parametrize(
+    ("cfg", "message"),
+    [
+        (HybridEngineRolloutConfig(use_graph_capture=True, align_decode_fronts=True), "aligned decode fronts"),
+        (HybridEngineRolloutConfig(use_graph_capture=True, enable_cache_trimming=True), "cache trimming"),
+        (HybridEngineRolloutConfig(use_graph_capture=True, continuous_cache_capacity=4), "must fit"),
+    ],
+)
+def test_continuous_graph_rejects_incompatible_fixed_layout_options(cfg, message):
+    rollout = HybridEngineRollout(_make_engine(), _make_tokenizer(), cfg=cfg)
+    request = RolloutRequest(
+        prompt_ids=torch.tensor([[0, 1, 2]]),
+        prompt_attention_mask=torch.tensor([[0, 1, 1]]),
+    )
+
+    with pytest.raises(ValueError, match=message):
+        rollout.generate(request, SamplingConfig(max_new_tokens=2, temperature=0, continuous_batch_size=1))
+
+
+def test_continuous_graph_rejects_flash_attention():
+    engine = _make_engine()
+    engine.module.config = SimpleNamespace(_attn_implementation="flash_attention_2")
+    rollout = HybridEngineRollout(engine, _make_tokenizer(), cfg=HybridEngineRolloutConfig(use_graph_capture=True))
+    request = RolloutRequest(
+        prompt_ids=torch.tensor([[0, 1, 2]]),
+        prompt_attention_mask=torch.tensor([[0, 1, 1]]),
+    )
+
+    with pytest.raises(ValueError, match="does not support flash_attention_2"):
+        rollout.generate(request, SamplingConfig(max_new_tokens=2, temperature=0, continuous_batch_size=1))
+
+
+def test_continuous_generation_routes_graph_capture_to_fixed_capacity_path():
+    rollout = HybridEngineRollout(
+        _make_engine(),
+        _make_tokenizer(),
+        cfg=HybridEngineRolloutConfig(use_graph_capture=True),
+    )
+    request = _make_request()
+    sampling = SamplingConfig(max_new_tokens=2, temperature=0, continuous_batch_size=4)
+    expected = MagicMock()
+
+    with patch.object(rollout, "_generate_continuous_graph", return_value=expected) as generate_graph:
+        assert rollout.generate(request, sampling) is expected
+
+    generate_graph.assert_called_once()
+    original_request, requests, captured_sampling, max_batch_size = generate_graph.call_args.args
+    assert original_request is request
+    assert len(requests) == request.prompt_ids.shape[0]
+    assert captured_sampling is sampling
+    assert max_batch_size == 4
+
+
+@patch("deepspeed.runtime.rollout.hybrid_engine_rollout.get_accelerator")
+def test_continuous_graph_capture_uses_fixed_capacity_buffers(mock_get_accelerator):
+
+    class DecodeModule(torch.nn.Module):
+
+        def __init__(self):
+            super().__init__()
+            self.calls = []
+
+        def forward(self, input_ids, **_kwargs):
+            self.calls.append(input_ids)
+            return SimpleNamespace(logits=torch.zeros((input_ids.shape[0], 1, 8)))
+
+    stream = MagicMock()
+    accelerator = mock_get_accelerator.return_value
+    accelerator.Stream.return_value = stream
+    accelerator.current_stream.return_value = stream
+    accelerator.stream.side_effect = lambda _stream: nullcontext()
+    accelerator.capture_to_graph.side_effect = lambda _graph: nullcontext()
+
+    module = DecodeModule()
+    static_input = torch.zeros((4, 1), dtype=torch.long)
+    static_attention = torch.zeros((4, 6), dtype=torch.long)
+    static_write_positions = torch.zeros(4, dtype=torch.long)
+    static_cache_position = torch.tensor([5], dtype=torch.long)
+    static_position_ids = torch.zeros((4, 1), dtype=torch.long)
+
+    graph, logits = HybridEngineRollout._capture_continuous_graph(
+        module,
+        MagicMock(),
+        static_input,
+        static_attention,
+        static_write_positions,
+        static_cache_position,
+        static_position_ids,
+    )
+
+    assert graph is accelerator.create_graph.return_value
+    assert logits.shape == (4, 1, 8)
+    assert len(module.calls) == 4
+    assert all(call is static_input for call in module.calls)
+    accelerator.capture_to_graph.assert_called_once_with(graph)
+
+
+@patch("deepspeed.runtime.rollout.hybrid_engine_rollout.get_accelerator")
+def test_continuous_graph_capture_preserves_attention_implementation(mock_get_accelerator):
+
+    class DecodeModule(torch.nn.Module):
+
+        def __init__(self):
+            super().__init__()
+            self.config = SimpleNamespace(_attn_implementation="sdpa")
+            self.attention_implementations = []
+
+        def forward(self, input_ids, **_kwargs):
+            self.attention_implementations.append(self.config._attn_implementation)
+            return SimpleNamespace(logits=torch.zeros((input_ids.shape[0], 1, 8)))
+
+    stream = MagicMock()
+    accelerator = mock_get_accelerator.return_value
+    accelerator.Stream.return_value = stream
+    accelerator.current_stream.return_value = stream
+    accelerator.stream.side_effect = lambda _stream: nullcontext()
+    accelerator.capture_to_graph.side_effect = lambda _graph: nullcontext()
+
+    module = DecodeModule()
+    HybridEngineRollout._capture_continuous_graph(
+        module,
+        MagicMock(),
+        torch.zeros((4, 1), dtype=torch.long),
+        torch.zeros((4, 6), dtype=torch.long),
+        torch.zeros(4, dtype=torch.long),
+        torch.tensor([5], dtype=torch.long),
+        torch.zeros((4, 1), dtype=torch.long),
+    )
+
+    assert module.attention_implementations == ["sdpa"] * 4
+    assert module.config._attn_implementation == "sdpa"
+
+
+def test_continuous_graph_keeps_cache_position_alive_for_replay():
+    accelerator = get_accelerator()
+    if accelerator.device_name() != "cuda" or not accelerator.is_available():
+        pytest.skip("requires CUDA graph capture")
+
+    class DecodeModule(torch.nn.Module):
+
+        def __init__(self):
+            super().__init__()
+            self.config = SimpleNamespace(num_hidden_layers=1, num_attention_heads=1, hidden_size=1)
+            self.cache_position_ref = None
+
+        def forward(self, input_ids, cache_position, **_kwargs):
+            self.cache_position_ref = weakref.ref(cache_position)
+            return SimpleNamespace(logits=(input_ids + cache_position).unsqueeze(-1))
+
+    module = DecodeModule()
+    rollout = HybridEngineRollout(SimpleNamespace(module=module), _make_tokenizer())
+    state = rollout._get_continuous_graph_state(module, 1, 3, 5, torch.device(accelerator.current_device_name()),
+                                                torch.float32, DeepSpeedStaticCache)
+    gc.collect()
+
+    # A captured kernel retains only the device pointer, not the Python tensor.
+    assert module.cache_position_ref() is not None
+    state.static_input.fill_(7)
+    accelerator.replay_graph(state.graph)
+    assert torch.equal(state.static_logits, torch.full_like(state.static_logits, 11))
+
+
+def test_continuous_graph_state_reuses_matching_capture_and_rebuilds_for_weight_updates():
+
+    class GraphCache:
+
+        def __init__(self, *_args, **_kwargs):
+            self.reset_calls = 0
+
+        def set_write_position(self, _write_position):
+            return None
+
+        def reset(self):
+            self.reset_calls += 1
+
+    class DecodeModule(torch.nn.Module):
+
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.zeros(1))
+            self.config = SimpleNamespace()
+
+    module = DecodeModule()
+    rollout = HybridEngineRollout(SimpleNamespace(module=module), _make_tokenizer())
+    graph = MagicMock()
+    logits = torch.empty((1, 1, 8))
+
+    with patch.object(rollout, "_capture_continuous_graph", return_value=(graph, logits)) as capture:
+        first = rollout._get_continuous_graph_state(module, 1, 3, 5, torch.device("cpu"), torch.float32, GraphCache)
+        second = rollout._get_continuous_graph_state(module, 1, 3, 5, torch.device("cpu"), torch.float32, GraphCache)
+        with torch.no_grad():
+            module.weight.add_(1)
+        third = rollout._get_continuous_graph_state(module, 1, 3, 5, torch.device("cpu"), torch.float32, GraphCache)
+
+    assert first is second
+    assert third is not first
+    assert capture.call_count == 2
+
+
 def test_static_cache_constructor_supports_max_batch_keyword():
 
     class MaxBatchStaticCache:
@@ -200,6 +404,7 @@ def test_continuous_generation_reports_cache_capacity_remedies():
 def test_continuous_generation_rejects_legacy_cache_model():
 
     class LegacyModel(torch.nn.Module):
+        _supports_cache_class = False
 
         _supports_cache_class = False
 
@@ -216,6 +421,28 @@ def test_continuous_generation_rejects_legacy_cache_model():
         rollout.generate(request, SamplingConfig(max_new_tokens=2, temperature=0, continuous_batch_size=1))
 
 
+def test_continuous_graph_generation_rejects_legacy_cache_model():
+
+    class LegacyModel(torch.nn.Module):
+        _supports_cache_class = False
+
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.zeros(1))
+            self.config = SimpleNamespace(max_position_embeddings=32)
+
+    model = LegacyModel()
+    rollout = HybridEngineRollout(
+        SimpleNamespace(module=model),
+        SimpleNamespace(eos_token_id=None),
+        cfg=HybridEngineRolloutConfig(use_graph_capture=True),
+    )
+    request = RolloutRequest(torch.tensor([[1, 2, 3]]), torch.ones((1, 3), dtype=torch.long))
+
+    with pytest.raises(ValueError, match="cache-class support"):
+        rollout.generate(request, SamplingConfig(max_new_tokens=2, temperature=0, continuous_batch_size=1))
+
+
 def test_continuous_generation_covers_modern_static_cache_path():
 
     class CacheClassModel(torch.nn.Module):
@@ -226,17 +453,7 @@ def test_continuous_generation_covers_modern_static_cache_path():
             self.weight = torch.nn.Parameter(torch.zeros(1))
             self.calls = []
 
-            class CacheConfig(SimpleNamespace):
-
-                def get_text_config(self, **_kwargs):
-                    return self
-
-                @property
-                def per_layer_config(self):
-                    # StaticCache on current Transformers main reads this before choosing layer types.
-                    return [self]
-
-            self.config = CacheConfig(
+            self.config = PretrainedConfig(
                 max_position_embeddings=32,
                 num_hidden_layers=1,
                 num_attention_heads=1,
@@ -247,9 +464,7 @@ def test_continuous_generation_covers_modern_static_cache_path():
 
         def forward(self, input_ids, attention_mask, past_key_values=None, use_cache=True, **kwargs):
             key_states = input_ids[:, None, :, None].to(dtype=torch.float32)
-            kwargs.pop("cache_position", None)
-            kwargs.pop("position_ids", None)
-            _, cache_values = past_key_values.update(key_states, key_states, layer_idx=0, **kwargs)
+            _, cache_values = past_key_values.update(key_states, key_states, layer_idx=0, cache_kwargs=kwargs)
             cache_sums = cache_values[:, 0].sum(dim=(1, 2))
             next_tokens = torch.where(cache_sums == 6, 2, 7).long()
             self.calls.append((input_ids.shape[0], input_ids.shape[1]))
@@ -272,6 +487,56 @@ def test_continuous_generation_covers_modern_static_cache_path():
     assert output.response_start_idx.tolist() == [3, 3, 3]
     assert model.calls[0] == (2, 3)
     assert (1, 3) in model.calls
+
+
+def test_continuous_prefill_requests_last_logits_only():
+
+    class LastLogitsModel(torch.nn.Module):
+        _supports_cache_class = True
+
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.zeros(1))
+            self.prefill_logits_to_keep = []
+
+            self.config = PretrainedConfig(
+                max_position_embeddings=32,
+                num_hidden_layers=1,
+                num_attention_heads=1,
+                num_key_value_heads=1,
+                hidden_size=1,
+                head_dim=1,
+            )
+
+        # Mirrors the Transformers contract: 0 returns logits for every position, k for the last k.
+        def forward(self,
+                    input_ids,
+                    attention_mask,
+                    past_key_values=None,
+                    use_cache=True,
+                    cache_position=None,
+                    position_ids=None,
+                    logits_to_keep=0):
+            key_states = input_ids[:, None, :, None].to(dtype=torch.float32)
+            past_key_values.update(key_states,
+                                   key_states,
+                                   layer_idx=0,
+                                   cache_kwargs={"cache_position": cache_position})
+            if input_ids.shape[1] > 1:
+                self.prefill_logits_to_keep.append(logits_to_keep)
+            # Each position predicts its own token + 5, so reading any position but the last changes the output.
+            logits = torch.nn.functional.one_hot((input_ids + 5) % 16, num_classes=16).to(torch.float32)
+            if logits_to_keep:
+                logits = logits[:, -logits_to_keep:]
+            return SimpleNamespace(logits=logits, past_key_values=past_key_values)
+
+    model = LastLogitsModel()
+    rollout = HybridEngineRollout(SimpleNamespace(module=model), SimpleNamespace(pad_token_id=0, eos_token_id=2))
+    request = RolloutRequest(torch.tensor([[1, 2, 3], [1, 2, 4]]), torch.ones((2, 3), dtype=torch.long))
+    output = rollout.generate(request, SamplingConfig(max_new_tokens=2, temperature=0, continuous_batch_size=2))
+
+    assert output.input_ids[:, 3:].tolist() == [[8, 13], [9, 14]]
+    assert model.prefill_logits_to_keep == [1]
 
 
 def test_aligned_continuous_generation_supports_mixed_effective_prompt_lengths():
@@ -412,23 +677,13 @@ def test_aligned_continuous_generation_reclaims_dead_prefix_when_cache_would_exh
 
 def test_continuous_generation_trims_cache_after_staggered_eos():
 
-    class CacheConfig(SimpleNamespace):
-
-        def get_text_config(self, **_kwargs):
-            return self
-
-        @property
-        def per_layer_config(self):
-            # StaticCache on current Transformers main reads this before choosing layer types.
-            return [self]
-
     class CacheClassModel(torch.nn.Module):
         _supports_cache_class = True
 
         def __init__(self):
             super().__init__()
             self.weight = torch.nn.Parameter(torch.zeros(1))
-            self.config = CacheConfig(
+            self.config = PretrainedConfig(
                 max_position_embeddings=32,
                 num_hidden_layers=1,
                 num_attention_heads=1,
@@ -439,9 +694,7 @@ def test_continuous_generation_trims_cache_after_staggered_eos():
 
         def forward(self, input_ids, attention_mask, past_key_values=None, use_cache=True, **kwargs):
             states = input_ids[:, None, :, None].to(dtype=torch.float32)
-            kwargs.pop("cache_position", None)
-            kwargs.pop("position_ids", None)
-            _, values = past_key_values.update(states, states, layer_idx=0, **kwargs)
+            _, values = past_key_values.update(states, states, layer_idx=0, cache_kwargs=kwargs)
             cache_sums = values[:, 0].sum(dim=(1, 2))
             eos_rows = (cache_sums == 6) | (cache_sums == 8) | (cache_sums == 10)
             next_tokens = torch.where(eos_rows, 2, 7).long()

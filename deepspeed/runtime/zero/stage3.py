@@ -12,6 +12,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 
 from deepspeed import comm as dist
+from deepspeed.comm import pg_utils
 from deepspeed.utils import groups, z3_leaf_parameter
 
 from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
@@ -20,6 +21,7 @@ from deepspeed.utils import logger
 from deepspeed.utils.torch import register_grad_hook, required_torch_version
 from deepspeed.utils.pin_memory_tracker import pinned_memory_summary
 from deepspeed.runtime.fp16.loss_scaler import CreateLossScaler
+from deepspeed.module_inject.auto_ep_folding import apply_folding_correction_to_grad_buffer
 from deepspeed.runtime.torch_autocast import get_autocast_dtype, get_all_comm_dtypes, is_autocast_initialized, sort_dtypes
 from deepspeed.runtime.comm.coalesced_collectives import reduce_scatter_coalesced, all_to_all_quant_reduce
 from deepspeed.runtime.utils import (combine_grad_norm_groups, count_used_parameters_in_backward, has_inf_or_nan, inf,
@@ -30,7 +32,7 @@ from deepspeed.runtime.zero.config import ZeroStageEnum
 from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum, OffloadStateTypeEnum
 from deepspeed.runtime.zero.parameter_offload import DeepSpeedZeRoOffload
 import deepspeed.runtime.zenflow.engine_stage3 as zf_engine_stage3
-from deepspeed.runtime.zero.utils import get_mapping_to_flat_buffer, defragment, get_norm_dtype
+from deepspeed.runtime.zero.utils import ZeRORuntimeException, get_mapping_to_flat_buffer, defragment, get_norm_dtype
 from deepspeed.runtime.zero.offload_states import (offload_adam_states, reload_adam_states,
                                                    unpin_offloaded_optimizer_states)
 from deepspeed.ops.adam import DeepSpeedCPUAdam
@@ -49,8 +51,6 @@ from deepspeed.checkpoint.constants import (
     LOSS_SCALER,
 )
 from deepspeed.accelerator import get_accelerator
-from deepspeed.runtime.zero.muon.original_muon import muon_update
-from deepspeed.runtime.zero.muon.muon_optimizer import MuonWithAuxAdam
 
 # Toggle this to true to enable correctness test
 # with gradient partitioning and without
@@ -351,6 +351,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         self.all2all_process_group = all2all_process_group
 
         self.reduce_scatter = reduce_scatter
+        # Imported here because importing Muon compiles its kernels, which slows down import deepspeed.
+        from deepspeed.runtime.zero.muon.muon_optimizer import MuonWithAuxAdam
         self.use_muon = isinstance(self.optimizer, MuonWithAuxAdam)
         # Sub-groups whose Muon update was written into the gradient partitions without loss scale.
         self.sub_groups_lacking_loss_scale = set()
@@ -448,6 +450,12 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         # Toggled by DeepSpeedEngine.coalesce_grad_reduction().
         self._coalesce_grad_reduction = False
+
+        # Set by DeepSpeedEngine through configure_autoep_folding_tp_gradient_reduction when AutoEP
+        # and AutoTP share the ranks.
+        self.autoep_folding_tp_group = None
+        self.autoep_folding_spec = None
+        self._partition_group_spans_model_parallel = {}
 
         self.param_reduce_events: Deque[get_accelerator().Event] = collections.deque()
         # TODO. make this configurable via JSON
@@ -682,6 +690,38 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         if self._autoep_expert_parallel_group(params) is None:
             return partition_world_size
         return dist.get_world_size(group=self.dp_process_group)
+
+    def _grad_norm_counts_every_rank(self, params, process_group):
+        """Whether every rank holds a different gradient partition of ``params``, so each rank
+        adds its own to the norm and the model-parallel all-reduce must not add them again.
+
+        The default counts a parameter that is not tensor-parallel only on model-parallel rank 0,
+        because each tensor-parallel rank normally holds its own copy of it, partitioned over the
+        data-parallel group. That does not hold for:
+
+        * routed experts under AutoEP + AutoTP folding: their expert-parallel group spans the
+          tensor-parallel ranks, so the expert-data-parallel and expert-parallel groups already
+          cover every rank;
+        * parameters partitioned over a group that contains the model-parallel peers, as
+          ``deepspeed.zero.Init`` partitions every parameter over all ranks before AutoTP creates
+          the data-parallel group.
+        """
+        if self.model_parallel_group is None:
+            return False
+        if self._autoep_expert_parallel_group(params) is not None:
+            return True
+        key = id(process_group)
+        if key not in self._partition_group_spans_model_parallel:
+            partition_ranks = set(self._global_ranks(process_group))
+            model_parallel_ranks = self._global_ranks(self.model_parallel_group)
+            self._partition_group_spans_model_parallel[key] = partition_ranks.issuperset(model_parallel_ranks)
+        return self._partition_group_spans_model_parallel[key]
+
+    @staticmethod
+    def _global_ranks(group):
+        # Bounded by the group size: dist.get_all_ranks_from_group stops only when get_global_rank
+        # raises, which it never does for the world group, so it never returns for that group.
+        return [dist.get_global_rank(group, rank) for rank in range(dist.get_world_size(group=group))]
 
     def _get_trainable_parameter_groups(self):
         param_groups = []
@@ -1546,7 +1586,35 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         # deal with a use-case of transient grads that will be generated in a loop for the same computation involving some model params - e.g. when performing a tiled memory calculation that shards the normal single sub-module call into a loop over a shards.
         if getattr(param, "ds_grad_is_ready", True):
+            self._apply_autoep_folding_tp_correction(param)
             self.__add_grad_to_ipg_bucket(param)
+
+    def configure_autoep_folding_tp_gradient_reduction(self, folding_spec):
+        if folding_spec is None or folding_spec.tp_size <= 1:
+            self.autoep_folding_tp_group = None
+            self.autoep_folding_spec = None
+            return
+        self.autoep_folding_tp_group = groups.get_tensor_model_parallel_group()
+        self.autoep_folding_spec = folding_spec
+
+    def _apply_autoep_folding_tp_correction(self, param):
+        """Correct one micro-batch gradient for AutoEP + AutoTP folding before it is reduce-scattered.
+
+        The folded MoE layer runs the router on every TP rank and all-gathers the expert outputs
+        across the TP group, so the router's gradient needs an average over the TP group and the
+        routed experts' a division by the TP size (see ``autoep_folding_gradient_reduction_strategy``).
+        Other replicated parameters get the same average, which leaves their already identical
+        gradients unchanged. This is the correction the ZeRO-1/2 optimizer applies in its reduce
+        hook; it runs on every micro-batch because each one is reduce-scattered and added to the
+        partitions separately.
+        """
+        if self.autoep_folding_tp_group is None or param.grad is None:
+            return
+        apply_folding_correction_to_grad_buffer(self.autoep_folding_spec,
+                                                param,
+                                                param.grad,
+                                                tp_group=self.autoep_folding_tp_group,
+                                                use_correction_marker=False)
 
     @instrument_w_nvtx
     @torch.no_grad()
@@ -1635,6 +1703,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         all-gathered, so every rank ends with the full update in `grad` and its own momentum
         partition written back.
         """
+        from deepspeed.runtime.zero.muon.original_muon import muon_update
         params = [param for param, _, _ in group_items]
         grads = [grad for _, _, grad in group_items]
         if not params:
@@ -1906,10 +1975,11 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
     def complete_grad_norm_calculation_for_cpu_offload(self, params):
         self._assert_same_partition_group(params)
         process_group = self._get_param_partition_group(params[0])
+        counts_every_rank = self._grad_norm_counts_every_rank(params, process_group)
         total_norm = 0.0
         norm_type = 2.0
         for p in params:
-            if is_model_parallel_parameter(p) or (self.model_parallel_rank == 0):
+            if counts_every_rank or is_model_parallel_parameter(p) or (self.model_parallel_rank == 0):
                 param_id = self.get_param_id(p)
                 if param_id in self.norm_for_param_grads.keys():
                     param_norm = self.norm_for_param_grads[param_id]
@@ -1920,9 +1990,10 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         dist.all_reduce(total_norm_cuda, op=dist.ReduceOp.SUM, group=process_group)
 
-        self._model_parallel_all_reduce(tensor=total_norm_cuda, op=dist.ReduceOp.SUM)
+        if not counts_every_rank:
+            self._model_parallel_all_reduce(tensor=total_norm_cuda, op=dist.ReduceOp.SUM)
         autoep_ep_group = self._autoep_expert_parallel_group(params)
-        if autoep_ep_group is not None:
+        if pg_utils.is_parallel(autoep_ep_group):
             dist.all_reduce(total_norm_cuda, op=dist.ReduceOp.SUM, group=autoep_ep_group)
 
         total_norm = total_norm_cuda[0]**(1. / norm_type)
@@ -2341,9 +2412,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
     def _model_parallel_all_reduce(self, tensor, op):
         """ Perform all reduce within model parallel group, if any.
         """
-        if self.model_parallel_group is None:
-            pass
-        else:
+        if pg_utils.is_parallel(self.model_parallel_group):
             dist.all_reduce(tensor=tensor, op=op, group=self.model_parallel_group)
 
     @instrument_w_nvtx
@@ -2374,15 +2443,16 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             # Take max across all GPUs.
             self._model_parallel_all_reduce(tensor=total_norm_cuda, op=dist.ReduceOp.MAX)
             autoep_ep_group = self._autoep_expert_parallel_group(params)
-            if autoep_ep_group is not None:
+            if pg_utils.is_parallel(autoep_ep_group):
                 dist.all_reduce(total_norm_cuda, op=dist.ReduceOp.MAX, group=autoep_ep_group)
             total_norm = total_norm_cuda[0]
         else:
             # if dist.get_rank() == 0:
             #    logger.info(f"Total Norm beginning {total_norm}")
+            counts_every_rank = self._grad_norm_counts_every_rank(params, process_group)
             grad_norms = []
             for g, p in zip(gradients, params):
-                if is_model_parallel_parameter(p) or (self.model_parallel_rank == 0):
+                if counts_every_rank or is_model_parallel_parameter(p) or (self.model_parallel_rank == 0):
                     grad_norms.append(
                         g.to(get_accelerator().device_name(), non_blocking=True).to(get_norm_dtype()).norm(norm_type))
 
@@ -2398,9 +2468,10 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
             dist.all_reduce(total_norm_cuda, op=dist.ReduceOp.SUM, group=process_group)
 
-            self._model_parallel_all_reduce(tensor=total_norm_cuda, op=dist.ReduceOp.SUM)
+            if not counts_every_rank:
+                self._model_parallel_all_reduce(tensor=total_norm_cuda, op=dist.ReduceOp.SUM)
             autoep_ep_group = self._autoep_expert_parallel_group(params)
-            if autoep_ep_group is not None:
+            if pg_utils.is_parallel(autoep_ep_group):
                 dist.all_reduce(total_norm_cuda, op=dist.ReduceOp.SUM, group=autoep_ep_group)
 
             total_norm = total_norm_cuda**(1. / norm_type)
@@ -2518,6 +2589,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         """Orthogonalize full logical gradients before clipping CPU-offloaded updates."""
         if not self.use_muon:
             return
+        from deepspeed.runtime.zero.muon.original_muon import muon_update
 
         accelerator_device = get_accelerator().current_device_name()
         for sub_group_id, params in enumerate(self.fp16_groups):
@@ -3467,9 +3539,10 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
     def _rigid_load_state_dict(self, state_dict, load_optimizer_states=True):
         # I think it should actually be ok to reload the optimizer before the model.
-        self.loss_scaler = state_dict[LOSS_SCALER]
-        self.dynamic_loss_scale = state_dict['dynamic_loss_scale']
-        self.overflow = state_dict['overflow']
+        if load_optimizer_states:
+            self.loss_scaler = state_dict[LOSS_SCALER]
+            self.dynamic_loss_scale = state_dict['dynamic_loss_scale']
+            self.overflow = state_dict['overflow']
         saved_partition_groups = state_dict.get('ds_zero_partition_groups')
         if saved_partition_groups is not None and saved_partition_groups != self._zero3_partition_group_metadata():
             raise RuntimeError("AutoEP ZeRO-3 checkpoints can only be loaded with the same parameter placement "
@@ -3576,7 +3649,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         if load_optimizer_states:
             self.load_hp_checkpoint_state_from_checkpoint_dir_stage3(checkpoint_folder)
         else:
-            self.load_module_checkpoint_state_from_checkpoint_dir_stage3(checkpoint_folder, load_from_fp32_weights)
+            self.load_module_checkpoint_state_from_checkpoint_dir_stage3(checkpoint_folder, True)
 
     def load_hp_checkpoint_state_from_checkpoint_dir_stage3(self, checkpoint_dir):
         """ Load optimizer and model states from the checkpoint directory. """
@@ -3695,7 +3768,12 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         rank = dist.get_rank(group=partition_group)
 
         # Load tensors from files and reshape them to flat vectors
-        ckpt_dict = torch.load(os.path.join(folder, f"{key}.pt"), weights_only=False)
+        ckpt_path = os.path.join(folder, f"{key}.pt")
+        if not os.path.isfile(ckpt_path):
+            if key == "fp32":
+                raise ZeRORuntimeException(f"Saved fp32 weights are required but {ckpt_path} is missing.")
+            raise ZeRORuntimeException(f"Universal checkpoint state {ckpt_path} is missing.")
+        ckpt_dict = torch.load(ckpt_path, weights_only=False)
         loaded_checkpoint_state = ckpt_dict
         if isinstance(ckpt_dict, dict):
             if ckpt_dict.get(EP_IS_EXPERT_PARAM, False):

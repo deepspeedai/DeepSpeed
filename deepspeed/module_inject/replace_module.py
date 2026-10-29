@@ -185,7 +185,13 @@ def generic_injection(module, dtype=None, enable_cuda_graph=True):
 container_g = None
 
 
-def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, model_config, training_mode=False):
+def replace_transformer_layer(orig_layer_impl,
+                              model,
+                              checkpoint_dict,
+                              config,
+                              model_config,
+                              training_mode=False,
+                              replacement_sources=None):
     """ Replace bert-style transformer layers with DeepSpeed's transformer layer
     Arguments:
         orig_layer_impl (torch.nn.Module): the original transformer layer implementation to look for,
@@ -194,6 +200,8 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
         checkpoint_dict: Dictionary for checkpoint passed from the Inference Engine
         config: top-level DS Inference config defined in inference/config.py
         model_config: HuggingFace model config passed from the inference/engine.py
+        replacement_sources: optional ReplacementSourceMap that collects the parameters AutoTP replaced
+            (the weights of a model built under zero.Init), so the caller can re-point its optimizer
     Returns:
         Updated nn.module with replaced transformer layers
     """
@@ -312,8 +320,13 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
 
         # 5. Replace modules
         if "lm_head" in all_reduce_linears or "embed_out" in all_reduce_linears:
-            return _autotp._replace_last_linear_module(module)
-        return _autotp._replace_module(module)
+            new_module = _autotp._replace_last_linear_module(module)
+        else:
+            new_module = _autotp._replace_module(module)
+        # Parameters AutoTP replaced (weights of a model built under zero.Init), for the caller's optimizer.
+        if replacement_sources is not None:
+            replacement_sources.update(_autotp.replacement_sources)
+        return new_module
 
     def replace_fn(child, _policy, layer_id=0, prefix="", state_dict=None):
         # copy relevant state from child -> new module

@@ -218,6 +218,9 @@ class TorchBackend(Backend):
         self.init_process_group(backend, timeout, init_method, rank, world_size)
         if self.shm_comm_op != None:
             self.shm_comm_op.initialize(self.get_world_size(), self.get_rank())
+            # bf16/fp16 shm reduce kernels need avx512bw and fp32 needs avx2; without
+            # the ISA the kernel faults and its peers hang on the shm flags.
+            self.shm_vector_kernel_level = self.shm_comm_op.vector_kernel_level()
         # Best-effort SDMA (mori) backend acquisition.  Stays None on
         # non-AMD/ROCm or when mori is unavailable; in that case
         # all_gather_into_tensor below transparently falls through to
@@ -291,6 +294,11 @@ class TorchBackend(Backend):
         world_size = torch.distributed.get_world_size(group=group)
         if world_size <= 1:
             return tensor
+        # The shm kernel's bf16/fp16 paths require avx512bw (level 2) and its fp32
+        # path avx2 (level 1); fall back to the process-group all_reduce otherwise.
+        if use_ds_op:
+            required_level = 1 if tensor.dtype == torch.float32 else 2
+            use_ds_op = getattr(self, 'shm_vector_kernel_level', 0) >= required_level
         if not use_ds_op:
             op = self._reduce_op(op)
             return torch.distributed.all_reduce(tensor=tensor, op=op, group=group, async_op=False)

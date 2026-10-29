@@ -4,7 +4,6 @@
 # DeepSpeed Team
 
 import torch
-from cpuinfo import get_cpu_info
 from deepspeed.utils import logger
 from deepspeed.utils.logging import should_log_le
 from deepspeed.ops.op_builder import CPUAdamBuilder
@@ -72,6 +71,8 @@ class DeepSpeedCPUAdam(torch.optim.Optimizer):
                             amsgrad=amsgrad)
         super(DeepSpeedCPUAdam, self).__init__(model_params, default_args)
 
+        # Imported here because importing cpuinfo runs subprocesses (file, uname), which slows down import deepspeed.
+        from cpuinfo import get_cpu_info
         cpu_info = get_cpu_info()
         self.cpu_vendor = cpu_info["vendor_id_raw"].lower() if "vendor_id_raw" in cpu_info else "unknown"
         if "amd" in self.cpu_vendor:
@@ -88,7 +89,10 @@ class DeepSpeedCPUAdam(torch.optim.Optimizer):
         DeepSpeedCPUAdam.optimizer_id = DeepSpeedCPUAdam.optimizer_id + 1
         self.adam_w_mode = adamw_mode
         self.fp32_optimizer_states = fp32_optimizer_states
-        self.ds_opt_adam = CPUAdamBuilder().load()
+        try:
+            self.ds_opt_adam = CPUAdamBuilder().load()
+        except Exception as e:
+            raise RuntimeError("DeepSpeedCPUAdam requires the cpu_adam op, which failed to build/load.") from e
 
         self.ds_opt_adam.create_adam(self.opt_id, lr, betas[0], betas[1], eps, weight_decay, adamw_mode,
                                      should_log_le("info"))
