@@ -67,13 +67,17 @@ def initialize(group=None):
     op.initialize(buf, seq)
 
     # Share the storage (not just the view) so the peer maps the allocation.
-    handle = buf.untyped_storage()._share_cuda_()
+    # _share_cuda_() -> (device, handle_bytes, size, ...extra state); the
+    # reconstructor needs the first three.
+    info = buf.untyped_storage()._share_cuda_()
     gathered = [None, None]
-    tdist.all_gather_object(gathered, handle, group=group)
+    tdist.all_gather_object(gathered, info, group=group)
     peer_info = gathered[1 - rank]
-    peer = torch.Tensor._new_shared_cuda(peer_info[4], bytes.fromhex(peer_info[0].hex())
-                                         if isinstance(peer_info[0], str) else peer_info[0], peer_info[1],
-                                         peer_info[2], peer_info[3])
+    from torch.storage import UntypedStorage
+
+    peer_storage = UntypedStorage._new_shared_cuda(peer_info[0], peer_info[1], peer_info[2])
+    peer = torch.empty(0, dtype=torch.uint8, device="cuda")
+    peer.set_(peer_storage, 0, (_TOTAL_BYTES, ), (1, ))
     op.connect(peer)
     torch.cuda.synchronize()
     _state["op"] = op
