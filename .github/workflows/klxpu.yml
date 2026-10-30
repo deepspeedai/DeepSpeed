@@ -4,16 +4,6 @@ on:
   workflow_dispatch:
   schedule:
     - cron: "0 0 * * *"
-  push:
-    branches:
-      - 'ci/klxpu-runner'
-  pull_request:
-    paths:
-      - ".github/workflows/klxpu.yml"
-      - ".github/workflows/klxpu/**"
-      - "accelerator/klxpu_accelerator.py"
-      - "op_builder/klxpu/**"
-      - "tests/unit/v1/**"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
