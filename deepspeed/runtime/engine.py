@@ -9,7 +9,7 @@ import stat
 import torch
 import hashlib
 import logging
-from collections import defaultdict, OrderedDict, deque
+from collections import Counter, defaultdict, OrderedDict, deque
 from shutil import copyfile
 import gc
 
@@ -2278,17 +2278,11 @@ class DeepSpeedEngine(Module):
 
     # check if parameters are duplicated in optimizer param_groups
     def _check_for_duplicates(self, optimizer):
+        param_counts = Counter(id(param) for group in optimizer.param_groups for param in group['params'])
         for name, param in self.module.named_parameters():
-            param_id = id(param)
-
-            def ids_list(group):
-                return [id(param) for param in group]
-
-            occurrence = sum([
-                ids_list(group['params']).count(param_id) if param_id in ids_list(group['params']) else 0
-                for group in optimizer.param_groups
-            ])
-            assert occurrence <= 1, f"Parameter with name: {name} occurs multiple times in optimizer.param_groups. Make sure it only appears once to prevent undefined behavior."
+            assert param_counts[id(
+                param
+            )] <= 1, f"Parameter with name: {name} occurs multiple times in optimizer.param_groups. Make sure it only appears once to prevent undefined behavior."
 
     def _do_optimizer_sanity_check(self, basic_optimizer):
         model_dtype, grad_accum_dtype = self.get_data_types()
