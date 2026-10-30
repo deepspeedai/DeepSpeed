@@ -611,7 +611,8 @@ def _install_gdn_segment(seg: GDNSegment) -> bool:
         # (5.19+) no longer bind them per-layer; fall back to the module-level
         # torch_* implementations there.
         single = kw.get("initial_state") is not None and query.shape[1] == 1
-        if single and not torch.is_grad_enabled():
+        import os as _os
+        if single and not torch.is_grad_enabled() and _os.environ.get("FLA_BYPASS", "1") == "1":
             # FLA's wrapper allocates a fresh final_state and the caller
             # copies it back into the graph-static cache slot (~35us x 24
             # layers/step). Call the Triton kernel directly with the cache
