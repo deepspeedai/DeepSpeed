@@ -302,14 +302,14 @@ This API is not yet wired into the HuggingFace forward or
 the `vocab_parallel_lm_head` configuration.
 
 
-### Log-probabilities, Entropy, and KL on Sharded Logits
+### Log-probabilities, Entropy, KL, and JSD on Sharded Logits
 
 RL and on-policy distillation losses can consume the local logits shard
 directly through `deepspeed.sequence.vocab_parallel_ops`, so they never
 all-gather the full vocabulary:
 
 ```python
-from deepspeed.sequence.vocab_parallel_ops import (vocab_parallel_entropy, vocab_parallel_kl_div,
+from deepspeed.sequence.vocab_parallel_ops import (vocab_parallel_entropy, vocab_parallel_jsd, vocab_parallel_kl_div,
                                                    vocab_parallel_logprobs)
 
 head = model.lm_head  # VocabParallelLinear installed by vocab_parallel_lm_head
@@ -323,6 +323,9 @@ token_entropy = vocab_parallel_entropy(student_logits, **shard)
 
 # Dense distillation against an identically sharded teacher.
 token_kl = vocab_parallel_kl_div(student_logits, teacher_logits.detach(), reverse=True, **shard)
+
+# Generalized JSD over the full vocabulary, without gathering its shards.
+token_jsd = vocab_parallel_jsd(student_logits, teacher_logits.detach(), beta=0.5, **shard)
 
 # Distillation from a teacher that only provides top-k (logprob, id) pairs.
 student_topk = vocab_parallel_logprobs(student_logits, teacher_topk_ids, **ids)
@@ -339,16 +342,34 @@ default and `KL(student || teacher)` with `reverse=True`; apply any temperature
 to both logits before calling. Teacher and student logits must use the same TP
 group and vocabulary sharding.
 
+`vocab_parallel_jsd` computes `(1-beta) * KL(student || mixture) + beta * KL(teacher || mixture)`,
+where `mixture = (1-beta) * student + beta * teacher` refers to globally normalized probabilities.
+For compatibility with `generalized_jsd_loss`, `beta=0` instead selects forward KL and `beta=1`
+selects reverse KL; these endpoint conventions are not the continuous limits of the interior
+JSD expression. Gradients flow to both models unless the teacher logits are detached.
+Temperature is applied to the input logits by the caller; no temperature-squared factor is
+added automatically. Top-k restriction and pointwise clipping are not supported.
+
 Each op saves only its inputs and per-token statistics, and recomputes the
 softmax in bounded row chunks during backward. Its peak activation memory is
 therefore a small multiple of the local logits shard instead of the several
 fp32 copies that an equivalent composition of PyTorch ops keeps alive.
-When Triton supports the logits' device, each pass over the logits runs in a
-fused Triton kernel that keeps no fp32 copy of the shard; other devices, or
+When Triton supports the logits' device,
+each pass over the logits runs in a fused Triton kernel that keeps no fp32 copy of the shard; other devices, or
 `deepspeed.HAS_TRITON = False`, use an eager implementation with the same
 semantics. The entropy and KL forward passes read each logit once, and a slice
 along the sequence, such as the next-token shift `logits[:, :-1]`, is read in
 place rather than copied.
+Interior-beta JSD has fused Triton statistics, divergence and backward kernels, with
+bounded eager row chunks as fallback. Its statistics kernel reads student and teacher
+together; after global normalization a second pass computes both KL-to-mixture
+expectations, packed into one SUM all-reduce. Unlike KL, the nonlinear mixture requires
+this second forward pass. Backward recomputes probabilities in registers and writes
+only the requested gradients, without extra TP communication.
+JSD also enables these kernels on XPU when an active Intel Triton backend is installed,
+without changing the accelerator-wide Triton flag or the dispatch of existing ops.
+It still consumes materialized local logits; this is not fused-linear JSD and does not
+automatically integrate with TRL or the OPSD example.
 
 ## Custom Patterns
 

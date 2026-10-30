@@ -267,7 +267,7 @@ def zero_wrapper_for_fp_tensor_constructor(fn: Callable, target_fp_dtype: torch.
         if kwargs.get("device", None) is None and target_device is not None:
             kwargs['device'] = target_device
         tensor: Tensor = fn(*args, **kwargs)
-        if target_fp_dtype is not None and tensor.is_floating_point():
+        if target_fp_dtype is not None and kwargs.get("dtype") is None and tensor.is_floating_point():
             tensor.data = tensor.data.to(target_fp_dtype)
 
         return tensor
@@ -1002,6 +1002,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
             enabled (bool, optional): If ``False``, this context has no
                 effect. Defaults to ``True``.
             dtype (``dtype``, optional): Can be used to change the data type of the parameters.
+                Floating-point tensor constructors without an explicit ``dtype`` use this type.
                 Supported options are ``torch.half`` and ``torch.float``. Defaults to ``None``
             mpu (``object``, optional): A model parallelism unit object that implements get_{model,data}_parallel_{rank,group,world_size}.
             zero_param_parallel_group(``object``, optional): Parallel (comm) group for dual partitioning of ZeRO params.

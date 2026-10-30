@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # DeepSpeed Team
-"""Triton kernels for the vocabulary-parallel log-probability, entropy and KL ops.
+"""Triton kernels for the vocabulary-parallel log-probability, entropy, KL and JSD ops.
 
 Each kernel handles one row of a ``[..., local_vocab]`` logits shard and loops over the local
 vocabulary in blocks, so no ``[rows, local_vocab]`` fp32 temporary is materialized. The kernels
@@ -20,6 +20,8 @@ re-centred on the global max after the MAX all-reduce. Centring keeps a large co
 from cancelling in fp32, as in the eager path.
 """
 
+import math
+
 import torch
 
 from deepspeed.ops.triton_ops._triton import _TRITON_AVAILABLE, triton, tl
@@ -31,6 +33,100 @@ _NUM_WARPS = 16
 _STATS_MAX_BLOCK = 2048
 
 if _TRITON_AVAILABLE:
+
+    @triton.jit
+    def _jsd_softmax_stats_kernel(q_ptr, p_ptr, max_ptr, sum_ptr, num_rows, vocab, q_inner, q_outer, q_row, p_inner,
+                                  p_outer, p_row, BLOCK: tl.constexpr):
+        row = tl.program_id(0).to(tl.int64)
+        q_ptr += _row_start(row, q_inner, q_outer, q_row)
+        p_ptr += _row_start(row, p_inner, p_outer, p_row)
+        q_max = tl.full([BLOCK], float("-inf"), tl.float32)
+        p_max = tl.full([BLOCK], float("-inf"), tl.float32)
+        q_sum = tl.zeros([BLOCK], tl.float32)
+        p_sum = tl.zeros([BLOCK], tl.float32)
+        for start in range(0, vocab, BLOCK):
+            cols = start + tl.arange(0, BLOCK)
+            q = tl.load(q_ptr + cols, mask=cols < vocab, other=float("-inf")).to(tl.float32)
+            p = tl.load(p_ptr + cols, mask=cols < vocab, other=float("-inf")).to(tl.float32)
+            next_q_max = tl.maximum(q_max, q)
+            next_p_max = tl.maximum(p_max, p)
+            q_sum = tl.where(next_q_max == float("-inf"), 0.0,
+                             q_sum * tl.exp(q_max - next_q_max) + tl.exp(q - next_q_max))
+            p_sum = tl.where(next_p_max == float("-inf"), 0.0,
+                             p_sum * tl.exp(p_max - next_p_max) + tl.exp(p - next_p_max))
+            q_max, p_max = next_q_max, next_p_max
+        row_q_max = tl.max(q_max, axis=0)
+        row_p_max = tl.max(p_max, axis=0)
+        q_sum = tl.where(q_max == float("-inf"), 0.0, q_sum * tl.exp(q_max - row_q_max))
+        p_sum = tl.where(p_max == float("-inf"), 0.0, p_sum * tl.exp(p_max - row_p_max))
+        tl.store(max_ptr + row, row_q_max)
+        tl.store(max_ptr + num_rows + row, row_p_max)
+        tl.store(sum_ptr + row, tl.sum(q_sum, axis=0))
+        tl.store(sum_ptr + num_rows + row, tl.sum(p_sum, axis=0))
+
+    @triton.jit
+    def _jsd_ratios(log_q, log_p, log_beta, log_one_minus_beta):
+        a = log_q + log_one_minus_beta
+        b = log_p + log_beta
+        maximum = tl.maximum(a, b)
+        mixture = maximum + tl.log(tl.exp(a - maximum) + tl.exp(b - maximum))
+        return log_q - mixture, log_p - mixture
+
+    @triton.jit
+    def _jsd_forward_kernel(q_ptr, p_ptr, max_ptr, lse_ptr, out_ptr, num_rows, vocab, q_inner, q_outer, q_row, p_inner,
+                            p_outer, p_row, log_beta, log_one_minus_beta, BLOCK: tl.constexpr):
+        row = tl.program_id(0).to(tl.int64)
+        q_ptr += _row_start(row, q_inner, q_outer, q_row)
+        p_ptr += _row_start(row, p_inner, p_outer, p_row)
+        q_max = tl.load(max_ptr + row)
+        p_max = tl.load(max_ptr + num_rows + row)
+        q_lse = tl.load(lse_ptr + row)
+        p_lse = tl.load(lse_ptr + num_rows + row)
+        q_sum = tl.zeros([BLOCK], tl.float32)
+        p_sum = tl.zeros([BLOCK], tl.float32)
+        for start in range(0, vocab, BLOCK):
+            cols = start + tl.arange(0, BLOCK)
+            mask = cols < vocab
+            log_q = _log_probs(q_ptr, cols, mask, q_max, q_lse)
+            log_p = _log_probs(p_ptr, cols, mask, p_max, p_lse)
+            q_ratio, p_ratio = _jsd_ratios(log_q, log_p, log_beta, log_one_minus_beta)
+            q_sum += tl.where(mask & (log_q != float("-inf")), tl.exp(log_q) * q_ratio, 0.0)
+            p_sum += tl.where(mask & (log_p != float("-inf")), tl.exp(log_p) * p_ratio, 0.0)
+        tl.store(out_ptr + row, tl.sum(q_sum, axis=0))
+        tl.store(out_ptr + num_rows + row, tl.sum(p_sum, axis=0))
+
+    @triton.jit
+    def _jsd_backward_kernel(q_ptr, p_ptr, max_ptr, lse_ptr, kl_ptr, grad_out_ptr, q_grad_ptr, p_grad_ptr, num_rows,
+                             vocab, q_inner, q_outer, q_row, p_inner, p_outer, p_row, beta, log_beta,
+                             log_one_minus_beta, NEED_Q_GRAD: tl.constexpr, NEED_P_GRAD: tl.constexpr,
+                             BLOCK: tl.constexpr):
+        row = tl.program_id(0).to(tl.int64)
+        q_ptr += _row_start(row, q_inner, q_outer, q_row)
+        p_ptr += _row_start(row, p_inner, p_outer, p_row)
+        q_grad_ptr += row * vocab
+        p_grad_ptr += row * vocab
+        q_max = tl.load(max_ptr + row)
+        p_max = tl.load(max_ptr + num_rows + row)
+        q_lse = tl.load(lse_ptr + row)
+        p_lse = tl.load(lse_ptr + num_rows + row)
+        q_kl = tl.load(kl_ptr + row)
+        p_kl = tl.load(kl_ptr + num_rows + row)
+        upstream = tl.load(grad_out_ptr + row)
+        undefined = (q_max == float("-inf")) | (p_max == float("-inf"))
+        for start in range(0, vocab, BLOCK):
+            cols = start + tl.arange(0, BLOCK)
+            mask = cols < vocab
+            log_q = _log_probs(q_ptr, cols, mask, q_max, q_lse)
+            log_p = _log_probs(p_ptr, cols, mask, p_max, p_lse)
+            q_ratio, p_ratio = _jsd_ratios(log_q, log_p, log_beta, log_one_minus_beta)
+            if NEED_Q_GRAD:
+                grad = (1 - beta) * tl.exp(log_q) * (q_ratio - q_kl) * upstream
+                grad = tl.where(undefined | (log_q == float("-inf")), 0.0, grad)
+                tl.store(q_grad_ptr + cols, grad.to(q_grad_ptr.dtype.element_ty), mask=mask)
+            if NEED_P_GRAD:
+                grad = beta * tl.exp(log_p) * (p_ratio - p_kl) * upstream
+                grad = tl.where(undefined | (log_p == float("-inf")), 0.0, grad)
+                tl.store(p_grad_ptr + cols, grad.to(p_grad_ptr.dtype.element_ty), mask=mask)
 
     @triton.jit
     def _row_start(row, inner_rows, outer_stride, row_stride):
@@ -364,3 +460,58 @@ def kl_backward(a_logits, b_logits, a_max, a_lse, b_max, b_lse, kl, grad_output,
             NEED_A_GRAD=need_a_grad,
             NEED_B_GRAD=need_b_grad)
     return a_grad, b_grad
+
+
+def jsd_forward(student, teacher, global_max, log_sum_exp, beta):
+    """Local ``[2, rows]`` expectations of log(p / mixture), for one packed TP SUM."""
+    rows = _num_rows(student)
+    stats = torch.empty(2, rows, dtype=torch.float32, device=student.device)
+    _launch(_jsd_forward_kernel, student, student, teacher, global_max, log_sum_exp, stats, rows, student.shape[-1],
+            *row_layout(student), *row_layout(teacher), math.log(beta), math.log1p(-beta))
+    return stats
+
+
+def jsd_softmax_stats(student, teacher):
+    rows = _num_rows(student)
+    maxima = torch.empty(2, rows, dtype=torch.float32, device=student.device)
+    sums = torch.empty_like(maxima)
+    _launch(_jsd_softmax_stats_kernel,
+            student,
+            student,
+            teacher,
+            maxima,
+            sums,
+            rows,
+            student.shape[-1],
+            *row_layout(student),
+            *row_layout(teacher),
+            max_block=_STATS_MAX_BLOCK)
+    return [(maxima[0], sums[0]), (maxima[1], sums[1])]
+
+
+def jsd_backward(student, teacher, global_max, log_sum_exp, kl_to_mixture, grad_output, beta, need_student_grad,
+                 need_teacher_grad):
+    student_grad = torch.empty(student.shape, dtype=student.dtype,
+                               device=student.device) if need_student_grad else None
+    teacher_grad = torch.empty(teacher.shape, dtype=teacher.dtype,
+                               device=teacher.device) if need_teacher_grad else None
+    _launch(_jsd_backward_kernel,
+            student,
+            student,
+            teacher,
+            global_max,
+            log_sum_exp,
+            kl_to_mixture,
+            grad_output,
+            student if student_grad is None else student_grad,
+            teacher if teacher_grad is None else teacher_grad,
+            _num_rows(student),
+            student.shape[-1],
+            *row_layout(student),
+            *row_layout(teacher),
+            beta,
+            math.log(beta),
+            math.log1p(-beta),
+            NEED_Q_GRAD=need_student_grad,
+            NEED_P_GRAD=need_teacher_grad)
+    return student_grad, teacher_grad
