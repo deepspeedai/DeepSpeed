@@ -1313,3 +1313,23 @@ The 24x/step state copy-back is structural with FLA's out-of-place API;
 eliminating it requires the retuned in-place kernel. Glue item closed.
 
 ### Item 3 (decode_attn split-KV) — in progress
+
+
+### Item 3 (decode_attn) — CLOSED: already split-KV; tuning knob washed
+The kernel ALREADY implements split-KV (16 warps/head chunking, online
+softmax, smem merge). Measured 101us/layer = ~620GB/s effective (31% of
+A100 peak) — not bandwidth-saturated. UNROLL 4->8: wash (999/2850/4237)
+— memory-level parallelism is not the limiter. Remaining hypothesis:
+per-position dot reduction (5 shfl rounds each) serializes compute;
+fixing it means batching reductions across positions or a transpose
+layout — real kernel surgery (kernel-track, with the 620GB/s baseline
+recorded as the target metric).
+
+## Item 1-3 final (fresh A100 host)
+| bs | baseline | final (item 1 kept) | vLLM | gap |
+|----|----------|---------------------|------|-----|
+| 8  | 963.0  | 1001.5 | 1466.8 | 68.3% |
+| 32 | 2756.2 | 2856.4 | 4873.8 | 58.6% |
+| 64 | 4255.3 | 4238.4 | 7651.3 | 55.4% |
+Kept: item 1 (+3.6-4.0%). Closed without change: item 2 (kernel retune
+needed, -29% confirmed), item 3 (already split-KV, reduction-bound).
