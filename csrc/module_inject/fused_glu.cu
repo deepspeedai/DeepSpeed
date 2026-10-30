@@ -490,7 +490,7 @@ __global__ void __launch_bounds__(512)
     for (int e = 0; e < EPL; e++) out_reg[e] = 0.0f;
 
     // UNROLL positions in flight so their K loads overlap and hide HBM latency.
-    constexpr int UNROLL = 8;
+    constexpr int UNROLL = 4;
     for (int base = s; base <= pos; base += UNROLL * split) {
         float k_reg[UNROLL][EPL];
         int idx[UNROLL];
