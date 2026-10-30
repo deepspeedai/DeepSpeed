@@ -7,13 +7,13 @@ Copyright NVIDIA/apex
 This file is adapted from FP16_Optimizer in NVIDIA/apex
 """
 
-from deepspeed.moe.utils import split_params_grads_into_shared_and_expert_params
+from deepspeed.moe.utils import split_params_grads_into_shared_and_expert_params, is_moe_param
 import torch
 from torch._utils import _flatten_dense_tensors
 
 from deepspeed.runtime.base_optimizer import DeepSpeedOptimizer
-from deepspeed.runtime.utils import (CheckOverflow, get_global_norm, get_weight_norm, is_invalid_grad_norm,
-                                     is_optimized_parameter)
+from deepspeed.runtime.utils import (CheckOverflow, get_global_norm, get_norm_with_moe_layers, get_weight_norm,
+                                     is_invalid_grad_norm, is_optimized_parameter)
 from deepspeed.runtime.fp16.loss_scaler import LossScaleConfig, LossScaleProfile
 from deepspeed.utils import logger
 from deepspeed.utils.torch import required_torch_version
@@ -40,9 +40,11 @@ class FP16_UnfusedOptimizer(DeepSpeedOptimizer):
                  verbose=True,
                  mpu=None,
                  clip_grad=0.0,
-                 fused_lamb_legacy=False):
+                 fused_lamb_legacy=False,
+                 has_moe_layers=False):
 
         self.fused_lamb_legacy = fused_lamb_legacy
+        self.has_moe_layers = has_moe_layers
         self._global_grad_norm = 0.
 
         if dist.get_rank() == 0:
@@ -161,7 +163,7 @@ class FP16_UnfusedOptimizer(DeepSpeedOptimizer):
         if self.overflow:
             return self._skip_invalid_grad_norm()
 
-        self._global_grad_norm = get_global_norm(norm_list=norm_groups)
+        self._global_grad_norm = self._norm_with_experts(get_global_norm(norm_list=norm_groups))
         if is_invalid_grad_norm(self._global_grad_norm):
             return self._skip_invalid_grad_norm()
         self._update_scale(False)
@@ -221,7 +223,7 @@ class FP16_UnfusedOptimizer(DeepSpeedOptimizer):
                 else:
                     fp32_param.grad = fp16_param.grad.to(fp32_param.dtype)
 
-        self._global_grad_norm = get_global_norm(norm_list=norm_groups)
+        self._global_grad_norm = self._norm_with_experts(get_global_norm(norm_list=norm_groups))
         if is_invalid_grad_norm(self._global_grad_norm):
             return self._skip_invalid_grad_norm()
         self._update_scale(False)
@@ -239,6 +241,32 @@ class FP16_UnfusedOptimizer(DeepSpeedOptimizer):
                 fp16_param.data.copy_(fp32_param.data)
 
         return self.overflow
+
+    def _norm_with_experts(self, shared_norm):
+        """Fold the expert gradients into the norm that clipping is decided from.
+
+        Expert parameters are replicated across the expert-parallel group rather than the data-parallel
+        one, so their norm needs a reduction over that group; `get_weight_norm` above cannot do it and
+        the split that separates them here exists for this. Without the fold, the norm is built from the
+        shared parameters only, so the clip coefficient is too large and every gradient, expert ones
+        included, is under-clipped. `FP16_Optimizer` already folds them the same way.
+
+        Bucketed by each parameter's own `group_name` rather than optimizer-group metadata, since a
+        client optimizer built from `model.parameters()` has one unnamed group mixing both kinds.
+        """
+        if not self.has_moe_layers:
+            return shared_norm
+        expert_tensors = {}
+        for group in self.fp16_groups:
+            for p in group:
+                if p.grad is not None and is_moe_param(p):
+                    expert_tensors.setdefault(p.group_name, []).append(p.grad)
+        if not expert_tensors:
+            return shared_norm
+        return get_norm_with_moe_layers(shared_norm,
+                                        mpu=self.mpu,
+                                        expert_tensors=expert_tensors,
+                                        norm_type=self.norm_type)
 
     def unscale_and_clip_grads(self, total_norm, apply_scale=True):
         # compute combined scale factor for this group
