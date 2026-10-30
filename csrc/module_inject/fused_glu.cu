@@ -1289,9 +1289,13 @@ __global__ void gdn_recurrent_step_kernel(const __nv_bfloat16* __restrict__ q,
                                           int K,
                                           int V)
 {
-    extern __shared__ float smem[];  // state [K*V], then q[K], k[K], v[V]
-    float* h = smem;
-    float* qs = h + (long)K * V;
+    // Only q/k/v stage in shared memory (~1.5KB); the state streams
+    // straight from global. Columns are independent, so the 64KB smem
+    // staging of the original version only capped occupancy at 2
+    // blocks/SM on A100 — removing it raises residency ~8x and lets the
+    // coalesced per-row segments (h[i*V + j..j+31]) saturate bandwidth.
+    extern __shared__ float smem[];  // q[K], k[K], v[V]
+    float* qs = smem;
     float* ks = qs + K;
     float* vs = ks + K;
 
@@ -1299,7 +1303,6 @@ __global__ void gdn_recurrent_step_kernel(const __nv_bfloat16* __restrict__ q,
     const int tid = threadIdx.x;
     const float scale = rsqrtf((float)K);
     float* g_state = state + (long)bh * K * V;
-    for (int idx = tid; idx < K * V; idx += blockDim.x) h[idx] = g_state[idx];
     for (int i = tid; i < K; i += blockDim.x) {
         qs[i] = __bfloat162float(q[(long)bh * K + i]);
         ks[i] = __bfloat162float(k[(long)bh * K + i]);
@@ -1324,30 +1327,29 @@ __global__ void gdn_recurrent_step_kernel(const __nv_bfloat16* __restrict__ q,
     __syncthreads();
     const float inv_qq = rsqrtf(s_red[0] + 1e-6f) * scale;
     const float inv_kk = rsqrtf(s_red[1] + 1e-6f);
-    __syncthreads();
 
     const float decay = __expf(__bfloat162float(g[bh]));
     const float b_beta = __bfloat162float(beta[bh]);
 
     // one thread per state column j: kv = k^T (decay*h), then the
-    // outer-add update and the output dot in a second pass
+    // outer-add update and the output dot, reading/writing the column's
+    // state elements directly (each warp covers one contiguous row
+    // segment per iteration — fully coalesced)
     if (tid < V) {
         const int j = tid;
         float kv = 0.f;
-        for (int i = 0; i < K; i++) kv += ks[i] * h[i * V + j];
+        for (int i = 0; i < K; i++) kv += ks[i] * g_state[i * V + j];
         kv *= decay * inv_kk;
         const float bvj = b_beta * (vs[j] - kv);
         float o = 0.f;
         for (int i = 0; i < K; i++) {
             const float khat = ks[i] * inv_kk;
-            const float hij = decay * h[i * V + j] + khat * bvj;
-            h[i * V + j] = hij;
+            const float hij = decay * g_state[i * V + j] + khat * bvj;
+            g_state[i * V + j] = hij;
             o += qs[i] * inv_qq * hij;
         }
         out[(long)bh * V + j] = __float2bfloat16_rn(o);
     }
-    __syncthreads();
-    for (int idx = tid; idx < K * V; idx += blockDim.x) g_state[idx] = h[idx];
 }
 
 void gdn_recurrent_step(at::Tensor q,
@@ -1366,12 +1368,7 @@ void gdn_recurrent_step(at::Tensor q,
     TORCH_CHECK(state.size(0) == B && state.size(1) == H && state.size(2) == K && state.size(3) == V,
                 "state must be [B,H,K,V]");
     TORCH_CHECK(V <= 1024, "V must fit one-thread-per-column");
-    const int smem = (K * V + 2 * K + V) * 4;
-    static bool attr_set = false;
-    if (!attr_set) {
-        cudaFuncSetAttribute(gdn_recurrent_step_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem);
-        attr_set = true;
-    }
+    const int smem = (2 * K + V) * 4;
     auto stream = at::cuda::getCurrentCUDAStream();
     gdn_recurrent_step_kernel<<<B * H, (V + 31) / 32 * 32, smem, stream.stream()>>>(
         (const __nv_bfloat16*)q.data_ptr(), (const __nv_bfloat16*)k.data_ptr(),
