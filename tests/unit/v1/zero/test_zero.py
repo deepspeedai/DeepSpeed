@@ -1919,6 +1919,188 @@ class TestZeroOffloadOptim(DistributedTest):
             model, _, _, _ = deepspeed.initialize(model=model, optimizer=optimizer, config=config_dict)
 
 
+@pytest.mark.skipif(not get_accelerator().is_bf16_supported(), reason="bf16 is not supported on this accelerator")
+@pytest.mark.parametrize("ratio", [1.0, 0.5])
+class TestZero3OffloadPinnedCopyBack(DistributedTest):
+    """With pin_memory, the updated CPU master partitions must reach the device with the same values as the direct
+    copy from pageable memory (pin_memory False): the parameters after training are compared bitwise. The pinned run
+    must actually go through the staging buffers, or the test would compare the direct copy with itself."""
+    world_size = 2
+
+    def _train(self, pin_memory, ratio):
+        hidden_dim = 256
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 2,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 1e-3
+                }
+            },
+            "bf16": {
+                "enabled": True
+            },
+            "zero_optimization": {
+                "stage": 3,
+                "sub_group_size": 20000,
+                "offload_optimizer": {
+                    "device": "cpu",
+                    "pin_memory": pin_memory,
+                    "ratio": ratio
+                }
+            },
+        }
+        torch.manual_seed(0)
+        model = SimpleModel(hidden_dim, nlayers=4)
+        model, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config_dict)
+        # Pieces much smaller than a sub-group, so the copy refills both staging buffers many times per step: a buffer
+        # refilled before its previous copy finished would change the values.
+        model.optimizer._staging_numel = 1000
+        torch.manual_seed(1)
+        data_loader = random_dataloader(model=model,
+                                        total_samples=6,
+                                        hidden_dim=hidden_dim,
+                                        device=model.device,
+                                        dtype=torch.bfloat16)
+        for batch in data_loader:
+            loss = model(batch[0], batch[1])
+            model.backward(loss)
+            model.step()
+        params = []
+        for p in model.module.parameters():
+            with deepspeed.zero.GatheredParameters([p]):
+                params.append(p.detach().clone().cpu())
+        used_staging = model.optimizer._staging_buffers is not None
+        return params, used_staging
+
+    def test(self, ratio):
+        direct, direct_used_staging = self._train(pin_memory=False, ratio=ratio)
+        staged, staged_used_staging = self._train(pin_memory=True, ratio=ratio)
+        assert not direct_used_staging
+        assert staged_used_staging
+        assert len(direct) == len(staged)
+        for a, b in zip(direct, staged):
+            assert torch.equal(a, b)
+
+
+def _train_zero3_cpu_offload(ratio, clip, staging_numel=None, patch=None):
+    """3 steps of ZeRO-3 with the optimizer offloaded to the CPU (pinned, sub-groups much smaller than the model);
+    ``patch(optimizer)`` runs after initialization. Returns the parameters after training."""
+    hidden_dim = 256
+    config_dict = {
+        "train_micro_batch_size_per_gpu": 2,
+        "gradient_clipping": clip,
+        "optimizer": {
+            "type": "Adam",
+            "params": {
+                "lr": 1e-3
+            }
+        },
+        "bf16": {
+            "enabled": True
+        },
+        "zero_optimization": {
+            "stage": 3,
+            "sub_group_size": 20000,
+            "offload_optimizer": {
+                "device": "cpu",
+                "pin_memory": True,
+                "ratio": ratio
+            }
+        },
+    }
+    torch.manual_seed(0)
+    model = SimpleModel(hidden_dim, nlayers=4)
+    model, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config_dict)
+    if staging_numel is not None:
+        model.optimizer._staging_numel = staging_numel
+    if patch is not None:
+        patch(model.optimizer)
+    torch.manual_seed(1)
+    data_loader = random_dataloader(model=model,
+                                    total_samples=6,
+                                    hidden_dim=hidden_dim,
+                                    device=model.device,
+                                    dtype=torch.bfloat16)
+    for batch in data_loader:
+        loss = model(batch[0], batch[1])
+        model.backward(loss)
+        model.step()
+    params = []
+    for p in model.module.parameters():
+        with deepspeed.zero.GatheredParameters([p]):
+            params.append(p.detach().clone().cpu())
+    return params
+
+
+@pytest.mark.skipif(not get_accelerator().is_bf16_supported(), reason="bf16 is not supported on this accelerator")
+@pytest.mark.parametrize("ratio", [1.0, 0.5])
+@pytest.mark.parametrize("clip", [1e-3, 1e6])
+class TestZero3CpuAdamGradScale(DistributedTest):
+    """For CPU sub-groups, ZeRO-3 passes the clipping factor to DeepSpeedCPUAdam (_grad_scale_for_cpu_adam), which
+    applies it while loading each gradient, instead of multiplying the CPU gradients in place first. The same float
+    multiply, so the parameters after training must be bitwise equal to the in-place path. Clip 1e-3 clips every step
+    (factor below 1); clip 1e6 never does (factor 1)."""
+    world_size = 2
+
+    def test(self, ratio, clip):
+        factors = []
+
+        def in_place(optimizer):
+            optimizer._grad_scale_for_cpu_adam = lambda sub_group_id, total_norm: None
+
+        def record(optimizer):
+            original = optimizer._grad_scale_for_cpu_adam
+
+            def wrapped(sub_group_id, total_norm):
+                factor = original(sub_group_id, total_norm)
+                factors.append(factor)
+                return factor
+
+            optimizer._grad_scale_for_cpu_adam = wrapped
+
+        separate = _train_zero3_cpu_offload(ratio, clip, patch=in_place)
+        fused = _train_zero3_cpu_offload(ratio, clip, patch=record)
+        used = [f for f in factors if f is not None]
+        assert used, "no sub-group took the fused path"
+        assert all(f < 1.0 for f in used) if clip < 1.0 else all(f == 1.0 for f in used)
+        assert len(separate) == len(fused)
+        for a, b in zip(separate, fused):
+            assert torch.equal(a, b)
+
+
+@pytest.mark.skipif(not get_accelerator().is_bf16_supported(), reason="bf16 is not supported on this accelerator")
+@pytest.mark.parametrize("ratio", [1.0, 0.5])
+class TestZero3CpuAdamCopyBack(DistributedTest):
+    """For CPU sub-groups with pinned memory, one DeepSpeedCPUAdam pass (step_pieces) updates the fp32 parameters and
+    writes their bfloat16 copy into the pinned staging buffers (_cpu_adam_step_and_copy_back), instead of an Adam pass
+    followed by a cast pass (_copy_through_pinned_staging). The parameters after training must be bitwise equal to
+    the separate passes. Pieces much smaller than a sub-group reuse both staging buffers many times per step."""
+    world_size = 2
+
+    def test(self, ratio):
+        calls = []
+
+        def in_place(optimizer):
+            optimizer._grad_scale_for_cpu_adam = lambda sub_group_id, total_norm: None
+
+        def record(optimizer):
+            original = optimizer._cpu_adam_step_and_copy_back
+
+            def wrapped(sub_group_id, grad_scale):
+                calls.append(sub_group_id)
+                return original(sub_group_id, grad_scale)
+
+            optimizer._cpu_adam_step_and_copy_back = wrapped
+
+        separate = _train_zero3_cpu_offload(ratio, 1e-3, staging_numel=1000, patch=in_place)
+        fused = _train_zero3_cpu_offload(ratio, 1e-3, staging_numel=1000, patch=record)
+        assert calls, "no sub-group took the fused copy-back path"
+        assert len(separate) == len(fused)
+        for a, b in zip(separate, fused):
+            assert torch.equal(a, b)
+
+
 @pytest.mark.parametrize("training", [True, False])
 class TestZeroPartitionCache(DistributedTest):
     world_size = 1

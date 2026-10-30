@@ -111,6 +111,84 @@ def test_cpu_adam_strict_state_updates(model_size, adamw_mode, weight_decay, bia
         torch.testing.assert_close(state['exp_avg_sq'], ref_exp_avg_sq, rtol=3e-5, atol=2e-6)
 
 
+@pytest.mark.parametrize('model_size', [3, 17, 513, 524289])
+@pytest.mark.parametrize('adamw_mode,weight_decay', [(True, 0.0), (True, 0.07), (False, 0.07)])
+@pytest.mark.parametrize('grad_scale', [0.37, 1.0])
+def test_cpu_adam_grad_scale_matches_scaling_in_place(model_size, adamw_mode, weight_decay, grad_scale):
+    """step(grad_scale=s) multiplies each gradient by s as the kernel loads it: the parameters and moments must be
+    bitwise equal to grad.mul_(s) followed by step(), and the gradient itself must be left unchanged. Sizes cover the
+    vectorized blocks and the scalar remainder."""
+    from deepspeed.ops.adam import DeepSpeedCPUAdam
+
+    generator = torch.Generator().manual_seed(model_size)
+    initial = torch.rand(model_size, generator=generator).mul_(1.5).sub_(0.75)
+    fused_param = torch.nn.Parameter(initial.clone())
+    in_place_param = torch.nn.Parameter(initial.clone())
+    kwargs = dict(lr=7e-4, betas=(0.85, 0.97), eps=1e-7, weight_decay=weight_decay, adamw_mode=adamw_mode)
+    fused = DeepSpeedCPUAdam([fused_param], **kwargs)
+    in_place = DeepSpeedCPUAdam([in_place_param], **kwargs)
+
+    for _ in range(4):
+        grad = torch.rand(model_size, generator=generator).mul_(3.0).sub_(1.5)
+        fused_param.grad = grad.clone()
+        fused.step(grad_scale=grad_scale)
+        assert torch.equal(fused_param.grad, grad)
+        in_place_param.grad = grad.clone().mul_(grad_scale)
+        in_place.step()
+
+        assert torch.equal(fused_param, in_place_param)
+        assert torch.equal(fused.state[fused_param]['exp_avg'], in_place.state[in_place_param]['exp_avg'])
+        assert torch.equal(fused.state[fused_param]['exp_avg_sq'], in_place.state[in_place_param]['exp_avg_sq'])
+
+
+@pytest.mark.parametrize('model_size', [3, 17, 513, 524289])
+@pytest.mark.parametrize('piece_numel', [1000, 1 << 20])
+@pytest.mark.parametrize('grad_scale', [0.37, 1.0])
+def test_cpu_adam_step_pieces_matches_step(model_size, piece_numel, grad_scale):
+    """step_pieces updates in pieces and writes a bfloat16 copy of each updated piece in the same kernel pass: the
+    parameters and moments must be bitwise equal to step(grad_scale=...), and the copy bitwise equal to casting the
+    updated parameters with torch. A requested piece size of 1000 is rounded down to a multiple of the kernel's
+    widest vector block (aligned_piece_numel); the last piece of 524289 elements still ends in the scalar loop."""
+    from deepspeed.ops.adam import DeepSpeedCPUAdam
+
+    generator = torch.Generator().manual_seed(model_size)
+    initial = torch.rand(model_size, generator=generator).mul_(1.5).sub_(0.75)
+    pieces_param = torch.nn.Parameter(initial.clone())
+    step_param = torch.nn.Parameter(initial.clone())
+    kwargs = dict(lr=7e-4, betas=(0.85, 0.97), eps=1e-7, weight_decay=0.07, adamw_mode=True)
+    pieces = DeepSpeedCPUAdam([pieces_param], **kwargs)
+    reference = DeepSpeedCPUAdam([step_param], **kwargs)
+    if not pieces.copy_supported():
+        pytest.skip("this CPU Adam build cannot write the bfloat16 copy")
+
+    for _ in range(3):
+        grad = torch.rand(model_size, generator=generator).mul_(3.0).sub_(1.5)
+        pieces_param.grad = grad.clone()
+        step_param.grad = grad.clone()
+        copy = torch.full((model_size, ), float('nan'), dtype=torch.bfloat16)
+        seen = []
+
+        def before_piece(param, start, count):
+            return torch.empty(count, dtype=torch.bfloat16)
+
+        def after_piece(param, start, count, out):
+            assert param is pieces_param
+            seen.append((start, count))
+            copy[start:start + count] = out
+
+        pieces.step_pieces(piece_numel, before_piece, after_piece, grad_scale=grad_scale)
+        reference.step(grad_scale=grad_scale)
+
+        piece = pieces.aligned_piece_numel(piece_numel)
+        assert piece <= piece_numel or piece == pieces.aligned_piece_numel(1)
+        assert seen == [(s, min(piece, model_size - s)) for s in range(0, model_size, piece)]
+        assert torch.equal(pieces_param.grad, grad)
+        assert torch.equal(pieces_param, step_param)
+        assert torch.equal(pieces.state[pieces_param]['exp_avg'], reference.state[step_param]['exp_avg'])
+        assert torch.equal(pieces.state[pieces_param]['exp_avg_sq'], reference.state[step_param]['exp_avg_sq'])
+        assert torch.equal(copy, step_param.detach().to(torch.bfloat16))
+
+
 def test_cpu_adam_rejects_amsgrad():
     from deepspeed.ops.adam import DeepSpeedCPUAdam
 
