@@ -30,14 +30,17 @@ at::Tensor quantize(torch::Tensor& out,
                     int q_mantisa_bits)
 {
     int total_elems = at::numel(val);
+    TORCH_CHECK(group_size > 0, "group_size must be positive");
+    TORCH_CHECK(group_size % 8 == 0, "group_size must be divisible by 8");
+    TORCH_CHECK(total_elems % group_size == 0,
+                "tensor element count must be divisible by group_size");
     float q_range = q_bits == 8 ? (q_mantisa_bits == 3 ? 480.0 : 114688.0) :  // fp8 ranges
                         (q_bits == 12 ? 510.0 :                               // fp12 range
                              (q_bits == 6 ? 28.0 :                            // fp6 range
                                   6.0));  // fp4 range (using power 2); TODO (Reza): add the power-4
                                           // in case accuracy is not matching!
     int num_groups = total_elems / group_size;
-    // A tensor smaller than one group has a null output buffer. Launching on it
-    // is cudaErrorInvalidValue even when the grid is empty.
+    // Empty tensors have no output storage and require no kernel launch.
     if (num_groups == 0) { return out; }
 
     DISPATCH_QUANTIZE(kHalf, __half, 23, 8);
@@ -67,6 +70,10 @@ void dequantize(torch::Tensor& val,
                 int q_exponent_bits)
 {
     int total_elems = at::numel(val);
+    TORCH_CHECK(group_size > 0, "group_size must be positive");
+    TORCH_CHECK(group_size % 8 == 0, "group_size must be divisible by 8");
+    TORCH_CHECK(total_elems % group_size == 0,
+                "tensor element count must be divisible by group_size");
 
     int num_groups = total_elems / group_size;
     if (num_groups == 0) { return; }
@@ -99,6 +106,10 @@ void selective_dequantize(torch::Tensor& val,
 {
     int total_elems = at::numel(val);
     int num_indexes = indexes.size(0);
+    TORCH_CHECK(group_size > 0, "group_size must be positive");
+    TORCH_CHECK(group_size % 8 == 0, "group_size must be divisible by 8");
+    TORCH_CHECK(total_elems % group_size == 0,
+                "tensor element count must be divisible by group_size");
     int num_groups = total_elems / group_size;
     if (num_groups == 0 || num_indexes == 0) { return; }
 

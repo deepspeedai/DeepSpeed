@@ -132,3 +132,23 @@ def test_fp_quant(dtype, q_bits):
         ds_error = (x_dequantized - ds_x).abs().sum() / x.numel()
 
         assert 0.0004 > abs(qtorch_error.item() - ds_error.item()), f"failed on iteration {i}"
+
+
+@pytest.mark.parametrize("q_bits, mantissa_bits", [(6, 2), (8, 3), (12, 4)])
+def test_fp_quant_preserves_zero_and_subnormal_codes(q_bits, mantissa_bits):
+    device_name = get_accelerator().device_name()
+    exponent_bits = q_bits - mantissa_bits - 1
+    bias = (1 << (exponent_bits - 1)) - 1
+    subnormal_step = 2**(1 - bias - mantissa_bits)
+    q_range = FPQuantizerBuilder.get_quant_range(q_bits)
+    values = [1.0, subnormal_step / q_range, 0.0, -subnormal_step / q_range, -1.0, 0.5, -0.5, 0.0]
+    x = torch.tensor(values * 2, dtype=torch.bfloat16, device=device_name)
+    quant_config = QuantizationConfig(q_bits=q_bits, mantissa_bits=mantissa_bits, group_size=8)
+    fpq = FP_Quantize(quantization_config=quant_config)
+
+    x_dequantized = fpq.dequantize(fpq.quantize(x, q_bits=q_bits), q_bits=q_bits)
+
+    assert x_dequantized[2] == 0
+    assert x_dequantized[7] == 0
+    assert x_dequantized[1] != 0
+    assert x_dequantized[3] != 0

@@ -55,6 +55,15 @@ class FP_Quantize(Quantizer):
         self.input_q = None
         self.scale = None
 
+    def _validate_shape(self, input):
+        if self.group_size <= 0:
+            raise ValueError(f"quantization group_size must be positive, got {self.group_size}")
+        if self.cuda_impl and self.group_size % 8 != 0:
+            raise ValueError(f"quantization group_size must be divisible by 8, got {self.group_size}")
+        if input.numel() % self.group_size != 0:
+            raise ValueError(
+                f"quantized tensor with {input.numel()} elements must be divisible by group_size {self.group_size}")
+
     def quantize(self,
                  input,
                  q_bits=8,
@@ -65,6 +74,7 @@ class FP_Quantize(Quantizer):
         if return_meta_tensor:
             assert q_bits == 8, "meta tensor is only supported with q_bit=8"
 
+        self._validate_shape(input)
         self.orig_dtype = input.dtype
         self.orig_shape = input.shape
 

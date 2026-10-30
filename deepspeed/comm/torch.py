@@ -156,7 +156,7 @@ class StagedWork:
         return result
 
 
-def _needs_cpu_staging(tensor):
+def _needs_cpu_staging(tensor, group=None):
     """Whether this tensor must be copied to CPU before a gloo collective.
 
     Gloo cannot operate on MPS tensors. It also faults (``writev`` EFAULT) when a
@@ -170,7 +170,7 @@ def _needs_cpu_staging(tensor):
     if tensor.device.type != 'cuda' or not torch.distributed.is_initialized():
         return False
     try:
-        return torch.distributed.get_backend() == 'gloo'
+        return torch.distributed.get_backend(group) == 'gloo'
     except Exception:
         return False
 
@@ -195,21 +195,23 @@ def stage_on_cpu(func=None, *, always_async=False, copy_to_cpu=True, copy_from_c
             copy_from_cpu=copy_from_cpu,
         )
 
-    def _stage(arg, pairs):
-        if _needs_cpu_staging(arg):
+    def _stage(arg, pairs, group):
+        if _needs_cpu_staging(arg, group):
             cpu_tensor = arg.to('cpu') if copy_to_cpu else torch.empty_like(arg, device='cpu')
             pairs.append((arg, cpu_tensor))
             return cpu_tensor
-        if isinstance(arg, list) and any(_needs_cpu_staging(t) for t in arg):
-            return [_stage(t, pairs) for t in arg]
+        if isinstance(arg, list) and any(_needs_cpu_staging(t, group) for t in arg):
+            return [_stage(t, pairs, group) for t in arg]
         return arg
 
     signature = inspect.signature(func)
 
     def wrapper(self, *args, **kwargs):
+        bound_args = signature.bind(self, *args, **kwargs)
+        group = bound_args.arguments.get('group')
         pairs = []
-        args = [_stage(arg, pairs) for arg in args]
-        kwargs = {key: _stage(arg, pairs) for key, arg in kwargs.items()}
+        args = [_stage(arg, pairs, group) for arg in args]
+        kwargs = {key: _stage(arg, pairs, group) for key, arg in kwargs.items()}
         if not pairs:
             return func(self, *args, **kwargs)
 
@@ -221,7 +223,6 @@ def stage_on_cpu(func=None, *, always_async=False, copy_to_cpu=True, copy_from_c
                     device_tensor.copy_(cpu_tensor)
 
         # async_op is usually forwarded positionally, so resolve it against the real signature.
-        bound_args = signature.bind(self, *args, **kwargs)
         if always_async or bound_args.arguments.get('async_op', False):
             # torch.distributed returns None for ranks outside the requested group. Without a
             # completion handle, an output-only staging buffer must never be published.

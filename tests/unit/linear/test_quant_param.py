@@ -5,6 +5,7 @@
 
 import pytest
 import torch
+import torch.nn.functional as F
 import deepspeed
 
 from deepspeed.accelerator import get_accelerator
@@ -37,8 +38,8 @@ class TestQuantParam(DistributedTest):
 
     def test_move_to_accelerator(self):
         device = get_accelerator().current_device()
-        data = torch.rand(5, 5, device='cpu', dtype=torch.bfloat16)
-        quantization_config = QuantizationConfig()
+        data = torch.rand(4, 4, device='cpu', dtype=torch.bfloat16)
+        quantization_config = QuantizationConfig(group_size=8)
         quantization_config.q_dtype = FPQuantizerBuilder.get_default_quant_dtype()
         qp = QuantizedParameter(data, quantization_config=quantization_config)
         assert qp.device == torch.device('cpu')
@@ -48,9 +49,9 @@ class TestQuantParam(DistributedTest):
 
     def test_hf_clone(self):
         device = get_accelerator().current_device_name()
-        data = torch.rand(5, 5, device=device, dtype=torch.bfloat16)
+        data = torch.rand(4, 4, device=device, dtype=torch.bfloat16)
 
-        quantization_config = QuantizationConfig(q_bits=6)
+        quantization_config = QuantizationConfig(q_bits=6, group_size=8)
         qp = QuantizedParameter(data, quantization_config=quantization_config)
 
         # should be able to clone parameter via dict, HF expects this to work
@@ -58,3 +59,28 @@ class TestQuantParam(DistributedTest):
 
         assert all(qp.data == qp_copy.data)
         assert qp.quantization_config == qp_copy.quantization_config
+
+    @pytest.mark.parametrize("q_bits", [6, 8, 12])
+    def test_small_parameter_model_output(self, q_bits):
+        device = get_accelerator().current_device_name()
+        weight = torch.tensor([[1, 1, 1, 1], [-1, -1, -1, -1], [1, -1, 1, -1], [0, 0, 0, 0]], dtype=torch.bfloat16)
+        input = torch.tensor([[1, 2, 3, 4]], dtype=torch.bfloat16, device=device)
+        expected = F.linear(input, weight.to(device))
+        quantization_config = QuantizationConfig(q_bits=q_bits, group_size=8)
+        quantization_config.q_dtype = FPQuantizerBuilder.get_default_quant_dtype()
+
+        quantized_weight = QuantizedParameter(weight, quantization_config=quantization_config).to(device)
+        actual = F.linear(input, quantized_weight.dequantized())
+
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+    @pytest.mark.parametrize("shape", [(1, 4), (5, 5)])
+    def test_rejects_incomplete_quantization_group(self, shape):
+        device = get_accelerator().current_device_name()
+        data = torch.rand(shape, dtype=torch.bfloat16)
+        quantization_config = QuantizationConfig(group_size=8)
+        quantization_config.q_dtype = FPQuantizerBuilder.get_default_quant_dtype()
+        quantized_parameter = QuantizedParameter(data, quantization_config=quantization_config)
+
+        with pytest.raises(ValueError, match="must be divisible by group_size"):
+            quantized_parameter.to(device)
