@@ -14,6 +14,76 @@ from unit.checkpoint.common import checkpoint_correctness_verification
 import pytest
 
 
+class TestCheckpointWriterResume(DistributedTest):
+    world_size = [1, 2]
+    non_daemonic_procs = True
+
+    @pytest.mark.parametrize('decoupled', [False, True])
+    @pytest.mark.parametrize('serialization', [False, True])
+    def test_resume_training(self, tmpdir, monkeypatch, decoupled, serialization):
+        # These launcher variables describe the single machine used by DistributedTest.
+        monkeypatch.setenv('CROSS_RANK', '0')
+        monkeypatch.setenv('CROSS_SIZE', '1')
+        config = {
+            'train_micro_batch_size_per_gpu': 1,
+            'zero_allow_untested_optimizer': True,
+            'zero_optimization': {
+                'stage': 3,
+                'reduce_bucket_size': 1000,
+                'stage3_prefetch_bucket_size': 1000,
+            },
+            'checkpoint': {
+                'checkpoint_serialization': serialization,
+                'writer': {
+                    'type': 'python',
+                    'decoupled': decoupled,
+                },
+            },
+        }
+
+        def make_engine():
+            model = torch.nn.Linear(4, 2)
+            optimizer = torch.optim.Adam(model.parameters(), lr=0.1)
+            return deepspeed.initialize(model=model, optimizer=optimizer, config=config)[0]
+
+        def train_step(engine):
+            loss = engine(torch.ones(1, 4, device=engine.device)).square().mean()
+            engine.backward(loss)
+            engine.step()
+
+        def snapshot(engine):
+            with deepspeed.zero.GatheredParameters(list(engine.module.parameters())):
+                return {name: value.detach().clone() for name, value in engine.module.state_dict().items()}
+
+        source = make_engine()
+        target = None
+        try:
+            train_step(source)
+            saved_weights = snapshot(source)
+            saved_steps = source.global_steps
+            source.save_checkpoint(tmpdir, tag='resume', client_state={'label': 'resume'})
+            # The next optimizer step commits pending asynchronous checkpoint writes.
+            train_step(source)
+            target = make_engine()
+            load_path, client_state = target.load_checkpoint(tmpdir, tag='resume')
+            assert load_path is not None
+            assert client_state['label'] == 'resume'
+            assert saved_steps == target.global_steps
+            for name, value in snapshot(target).items():
+                torch.testing.assert_close(value, saved_weights[name], rtol=0, atol=0)
+
+            # The next update checks restoration of Adam's moments and step counter,
+            # not just restoration of model weights.
+            train_step(target)
+            expected = snapshot(source)
+            for name, value in snapshot(target).items():
+                torch.testing.assert_close(value, expected[name], rtol=0, atol=0)
+        finally:
+            if target is not None:
+                target.destroy()
+            source.destroy()
+
+
 class TestOtherOptimizerCheckpoint(DistributedTest):
     world_size = 2
 
