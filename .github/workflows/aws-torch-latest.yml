@@ -48,7 +48,9 @@ jobs:
     needs: check-paths
     if: needs.check-paths.outputs.should_run == 'true'
     runs-on: [self-hosted, gpu-ci, gpu-l40s, l40s-4gpu, aws]
-    timeout-minutes: 180
+    # All of unit/ took 3h17 of pytest on 4x H200. This job runs unit/v1 on L40S.
+    # 360 minutes is the longest a GitHub job can run.
+    timeout-minutes: 360
 
     container:
       image: nvidia/cuda:12.6.3-devel-ubuntu22.04
