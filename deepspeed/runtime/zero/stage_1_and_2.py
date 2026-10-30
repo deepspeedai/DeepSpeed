@@ -742,6 +742,9 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
         self._link_all_hp_params()
         self._hp_optimizer_states_linked = False
+        # Parameter groups whose optimizer state has been linked into the param
+        # fragments. ZeRO-1/2 steps groups one at a time, so this is per group.
+        self._hp_optimizer_states_linked_groups = set()
 
         self._enable_universal_checkpoint()
         self._param_slice_mappings = self._create_param_mapping()
@@ -849,21 +852,41 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                            dp_group=self.real_dp_process_group[i],
                            param_offsets=param_offsets)
 
-    def _lazy_init_hp_params_optimizer_state(self):
+    def _lazy_init_hp_params_optimizer_state(self, group_no=None):
+        """Link lazily created optimizer state into the parameter fragments.
+
+        ZeRO-1/2 updates one parameter group at a time, so a group has no
+        optimizer state until its own update. When ``group_no`` is given, only
+        that group is inspected, which keeps the per-group hook constant time
+        instead of rescanning every group after each update.
+
+        Args:
+            group_no (int, optional): Parameter group that was just updated. When
+                omitted, every group that is still unlinked is retried.
+        """
         if self._hp_optimizer_states_linked:
             return
 
-        linked_groups = 0
-        for i, _ in enumerate(self.optimizer.param_groups):
+        if group_no is None:
+            pending_groups = [
+                i for i in range(len(self.optimizer.param_groups)) if i not in self._hp_optimizer_states_linked_groups
+            ]
+        elif group_no in self._hp_optimizer_states_linked_groups:
+            return
+        else:
+            pending_groups = [group_no]
+
+        for i in pending_groups:
             linked = lazy_init_hp_params_optimizer_state(self.bit16_groups[i], self.single_partition_of_fp32_groups[i],
                                                          self.optimizer.state)
             if linked:
-                linked_groups += 1
+                self._hp_optimizer_states_linked_groups.add(i)
 
-        # Groups are stepped one at a time, so later groups have no optimizer
-        # state until their own update. Keep the flag false until every group
-        # has been linked and retry after the remaining groups update.
-        self._hp_optimizer_states_linked = linked_groups == len(self.optimizer.param_groups)
+        # Only report completion once every group has been linked. A group with
+        # no state yet (either the optimizer populates it lazily, or it keeps no
+        # state at all) is retried the next time that group is updated.
+        self._hp_optimizer_states_linked = len(self._hp_optimizer_states_linked_groups) == len(
+            self.optimizer.param_groups)
 
     def is_moe_group(self, group):
         return 'moe' in group and group['moe']
@@ -2993,7 +3016,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         self.optimizer.param_groups = original_param_groups
 
         # We need to link optimizer state after the first step() call
-        self._lazy_init_hp_params_optimizer_state()
+        self._lazy_init_hp_params_optimizer_state(group_no)
 
     def _muon_staging_momentum(self, flatten_copy, param_group_idx):
         """The buffer `muon_update` writes this step's momentum into.

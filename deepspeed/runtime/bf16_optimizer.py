@@ -355,19 +355,11 @@ class BF16_Optimizer(ZeROOptimizer):
                 lp_param._index_in_param_group = param_index
 
     def _lazy_init_hp_params_optimizer_state(self):
-        if self._hp_optimizer_states_linked:
-            return
-
-        linked_groups = 0
-        for i, _ in enumerate(self.optimizer.param_groups):
-            linked = lazy_init_hp_params_optimizer_state(self.bf16_groups[i], self.fp32_groups_flat_partition[i],
-                                                         self.optimizer.state)
-            if linked:
-                linked_groups += 1
-
-        # A group without optimizer state must not complete linking for the
-        # whole optimizer; retry after its first update creates the state.
-        self._hp_optimizer_states_linked = linked_groups == len(self.optimizer.param_groups)
+        if not self._hp_optimizer_states_linked:
+            for i, _ in enumerate(self.optimizer.param_groups):
+                lazy_init_hp_params_optimizer_state(self.bf16_groups[i], self.fp32_groups_flat_partition[i],
+                                                    self.optimizer.state)
+            self._hp_optimizer_states_linked = True
 
     def _split_flat_tensor(self, flat_tensor, num_elem_list):
         assert sum(num_elem_list) <= flat_tensor.numel()

@@ -21,6 +21,7 @@ from deepspeed.utils import safe_update_full_grad_vectorized
 from deepspeed.utils.mixed_precision_linkage import link_hp_params
 from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum, OffloadStateTypeEnum
 from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer
+from deepspeed.runtime.zero import stage_1_and_2
 from deepspeed.ops.aio import AsyncIOBuilder
 from deepspeed.accelerator import get_accelerator
 from deepspeed.runtime.swap_tensor import MIN_SWAPPABLE_BYTES
@@ -669,3 +670,51 @@ class TestOptimizerStateLinksAllParamGroups(DistributedTest):
             torch.testing.assert_close(exp_avg_sq, (1 - beta2) * grad.square(), rtol=1e-6, atol=1e-8)
 
         engine.destroy()
+
+
+class _StubOptimizer:
+
+    def __init__(self, num_groups, state):
+        self.param_groups = [{"params": []} for _ in range(num_groups)]
+        self.state = state
+
+
+def test_lazy_init_only_inspects_the_group_that_stepped(monkeypatch):
+    """Linking after a per-group update must not rescan every parameter group.
+
+    A stateless optimizer never populates ``optimizer.state``, so completion is
+    driven by the group that just stepped. Scanning all groups on every call
+    would make each training step quadratic in the number of param groups.
+    """
+    partitions = [object(), object()]
+    optimizer = DeepSpeedZeroOptimizer.__new__(DeepSpeedZeroOptimizer)
+    optimizer.optimizer = _StubOptimizer(len(partitions), {partitions[0]: {"exp_avg": torch.zeros(1)}})
+    optimizer.bit16_groups = [[] for _ in partitions]
+    optimizer.single_partition_of_fp32_groups = partitions
+    optimizer._hp_optimizer_states_linked = False
+    optimizer._hp_optimizer_states_linked_groups = set()
+
+    inspected = []
+    real_lazy_init = stage_1_and_2.lazy_init_hp_params_optimizer_state
+
+    def counting_lazy_init(lp_param_list, flat_hp_partition, optimizer_state):
+        inspected.append(flat_hp_partition)
+        return real_lazy_init(lp_param_list, flat_hp_partition, optimizer_state)
+
+    monkeypatch.setattr(stage_1_and_2, "lazy_init_hp_params_optimizer_state", counting_lazy_init)
+
+    # Group 1 has no state yet: only it is inspected, and it stays unlinked.
+    optimizer._lazy_init_hp_params_optimizer_state(1)
+    assert inspected == [partitions[1]]
+    assert optimizer._hp_optimizer_states_linked_groups == set()
+    assert not optimizer._hp_optimizer_states_linked
+
+    # Group 0 links, but linking is not complete while group 1 is pending.
+    optimizer._lazy_init_hp_params_optimizer_state(0)
+    assert inspected == [partitions[1], partitions[0]]
+    assert optimizer._hp_optimizer_states_linked_groups == {0}
+    assert not optimizer._hp_optimizer_states_linked
+
+    # An already linked group is not inspected again.
+    optimizer._lazy_init_hp_params_optimizer_state(0)
+    assert inspected == [partitions[1], partitions[0]]
