@@ -1,6 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # SPDX-License-Identifier: Apache-2.0
 
+# DeepSpeed Team
 """Install Accelerate's test extras without replacing the CI framework stack."""
 
 import argparse
@@ -10,7 +11,6 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
-
 
 ACCELERATE_REPOSITORY = "https://github.com/huggingface/accelerate.git"
 ACCELERATE_REF = "8c83b448d19f6356d4facd65c1d4763bf9fa51b2"
