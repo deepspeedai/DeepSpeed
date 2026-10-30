@@ -11,6 +11,7 @@ from deepspeed.accelerator import get_accelerator
 from deepspeed.runtime.zero import ZeroParamStatus
 from deepspeed.runtime.zero.config import DeepSpeedZeroConfig
 from deepspeed.utils.torch import required_torch_version
+from deepspeed.utils import safe_get_full_fp32_param, safe_get_full_optimizer_state
 
 from unit.common import DistributedTest, DistributedFixture
 from unit.simple_model import *
@@ -45,6 +46,125 @@ class TestZeROCheckpoint(DistributedTest):
             models = [SimpleModel(hidden_dim, empty_grad=False) for _ in range(2)]
 
         checkpoint_correctness_verification(config_dict, models, hidden_dim, tmpdir, load_module_only=True)
+
+    @pytest.mark.parametrize("local_size_variable",
+                             ["LOCAL_WORLD_SIZE", "LOCAL_SIZE", "OMPI_COMM_WORLD_LOCAL_SIZE", None])
+    def test_serial_checkpoint_with_launcher_topology(self, tmpdir, monkeypatch, local_size_variable):
+        config = {
+            "train_micro_batch_size_per_gpu": 1,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "torch_adam": True
+                }
+            },
+            "zero_optimization": {
+                "stage": 3,
+                "pipeline_loading_checkpoint": True
+            },
+        }
+        model = SimpleModel(10, empty_grad=False)
+        saved, _, _, _ = deepspeed.initialize(config=config, model=model, model_parameters=model.parameters())
+        for batch in random_dataloader(model=saved,
+                                       total_samples=2,
+                                       hidden_dim=10,
+                                       device=saved.device,
+                                       dtype=torch.float32):
+            saved.backward(saved(batch[0], batch[1]))
+            saved.step()
+        saved.save_checkpoint(tmpdir, tag="serial")
+        model = SimpleModel(10, empty_grad=False)
+        loaded, _, _, _ = deepspeed.initialize(config=config, model=model, model_parameters=model.parameters())
+        if local_size_variable is None:
+            local_device_count = get_accelerator().device_count()
+            monkeypatch.setattr(get_accelerator(), "device_count", lambda: local_device_count)
+        # Change launcher metadata after device setup; transport remains on a single host.
+        for name in ["LOCAL_WORLD_SIZE", "LOCAL_SIZE", "OMPI_COMM_WORLD_LOCAL_SIZE"]:
+            monkeypatch.delenv(name, raising=False)
+        if local_size_variable is not None:
+            monkeypatch.setenv("LOCAL_RANK", "0")
+            monkeypatch.setenv(local_size_variable, "1")
+        loaded.load_checkpoint(tmpdir, tag="serial")
+        compare_model_states(saved, loaded)
+        compare_optimizer_states(saved, loaded, 10)
+
+    @pytest.mark.world_size(4)
+    def test_serial_checkpoint_with_nondefault_dp_groups(self, tmpdir):
+        rank = dist.get_rank()
+        model_groups = [dist.new_group([0, 1]), dist.new_group([2, 3])]
+        data_groups = [dist.new_group([0, 2]), dist.new_group([1, 3])]
+        model_group = model_groups[rank // 2]
+        data_group = data_groups[rank % 2]
+        # Interleaved DP ranks differ from global ranks, exposing incorrect token destinations.
+        mpu = SimpleNamespace(get_model_parallel_group=lambda: model_group,
+                              get_model_parallel_rank=lambda: dist.get_rank(model_group),
+                              get_model_parallel_world_size=lambda: dist.get_world_size(model_group),
+                              get_data_parallel_group=lambda: data_group,
+                              get_data_parallel_rank=lambda: dist.get_rank(data_group),
+                              get_data_parallel_world_size=lambda: dist.get_world_size(data_group))
+        config = {
+            "train_micro_batch_size_per_gpu": 1,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "torch_adam": True
+                }
+            },
+            "zero_optimization": {
+                "stage": 3,
+                "pipeline_loading_checkpoint": True,
+                "stage3_param_persistence_threshold": 0
+            },
+        }
+
+        def build(seed):
+            torch.manual_seed(seed + mpu.get_model_parallel_rank())
+            model = SimpleModel(10, empty_grad=False)
+            return deepspeed.initialize(config=config, model=model, model_parameters=model.parameters(), mpu=mpu)[0]
+
+        def snapshot(engine):
+            parameters = list(engine.module.parameters())
+            with deepspeed.zero.GatheredParameters(parameters):
+                weights = [parameter.detach().clone() for parameter in parameters]
+            masters = [safe_get_full_fp32_param(parameter).clone() for parameter in parameters]
+            moments = {
+                name: [safe_get_full_optimizer_state(parameter, name).clone() for parameter in parameters]
+                for name in ["exp_avg", "exp_avg_sq"]
+            }
+            return weights, masters, moments, engine.global_steps
+
+        saved = build(23)
+        loaded = None
+        inputs = torch.arange(10, device=saved.device, dtype=torch.float32).reshape(1, 10) / 10
+        labels = torch.tensor([rank // 2], device=saved.device)
+
+        def step(engine):
+            loss = engine(inputs, labels)
+            engine.backward(loss)
+            engine.step()
+            return loss.detach()
+
+        try:
+            step(saved)
+            step(saved)
+            reference = snapshot(saved)
+            saved.save_checkpoint(tmpdir, tag="nondefault-dp")
+            loaded = build(71)
+            step(loaded)
+            load_path, _ = loaded.load_checkpoint(tmpdir, tag="nondefault-dp")
+            assert load_path is not None
+            torch.testing.assert_close(snapshot(loaded), reference, rtol=0, atol=0)
+            compare_optimizer_states(saved, loaded, 10)
+            expected_loss = step(saved)
+            actual_loss = step(loaded)
+            torch.testing.assert_close(actual_loss, expected_loss)
+            updated = snapshot(loaded)
+            torch.testing.assert_close(updated, snapshot(saved))
+            assert any(not torch.equal(before, after) for before, after in zip(reference[1], updated[1]))
+        finally:
+            if loaded is not None:
+                loaded.destroy()
+            saved.destroy()
 
     @pytest.mark.parametrize('zero_stage, use_cpu_offload, adam_optimizer', [(0, False, 'Adam'), (1, False, 'Adam'),
                                                                              (2, False, 'Adam'),

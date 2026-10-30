@@ -4,6 +4,7 @@
 # DeepSpeed Team
 
 import sys
+import os
 import gc
 import collections
 import itertools
@@ -3625,6 +3626,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         if checkpoint_folder:
             self._load_universal_checkpoint(checkpoint_folder, load_optimizer_states, load_from_fp32_weights)
+            self._notify_next_checkpoint_rank(load_serial)
         else:
             self._rigid_load_state_dict(state_dict_list[dist.get_rank(group=self.dp_process_group)],
                                         load_optimizer_states=load_optimizer_states)
@@ -3633,17 +3635,25 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             # delete the temp state_dict_list variable to save memory, then trigger
             # the next rank's loading
             if load_serial is not None:
-                load_serial += 1
                 rank = dist.get_rank(group=self.dp_process_group)
-                local_rank = dist.get_local_rank()
                 del state_dict_list[rank]
-                rank_end = dist.get_world_size() - 1
-                if local_rank != rank_end:
-                    dist.send(tensor=load_serial, dst=rank + 1)
+                self._notify_next_checkpoint_rank(load_serial)
 
             if len(self.persistent_parameters) > 0:
                 self.persistent_parameters[0].partition(self.persistent_parameters)
                 # self.persistent_parameters[0].all_gather(self.persistent_parameters) # this will be done in checkpoint_event_epilogue() so remove it to prevent double all_gather
+
+    def _notify_next_checkpoint_rank(self, load_serial):
+        if load_serial is None:
+            return
+        local_world_size = os.environ.get("LOCAL_WORLD_SIZE",
+                                          os.environ.get("LOCAL_SIZE", os.environ.get("OMPI_COMM_WORLD_LOCAL_SIZE")))
+        if local_world_size is None:
+            local_world_size = get_accelerator().device_count()
+        rank = dist.get_rank()
+        if dist.get_local_rank() + 1 < int(local_world_size) and rank + 1 < dist.get_world_size():
+            load_serial += 1
+            dist.send(tensor=load_serial, dst=rank + 1)
 
     def _load_universal_checkpoint(self, checkpoint_folder, load_optimizer_states, load_from_fp32_weights):
         if load_optimizer_states:

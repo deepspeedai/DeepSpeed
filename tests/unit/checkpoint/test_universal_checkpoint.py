@@ -171,6 +171,10 @@ class _baseline(DistributedFixture):
         train_save_convert(ds_config, hidden_dim, load_optim, use_torch_adam, dtype, tmpdir, self.world_size)
 
 
+class baseline_ws1(_baseline):
+    world_size = 1
+
+
 class baseline_ws2(_baseline):
     world_size = 2
 
@@ -275,3 +279,16 @@ class TestZeROUniversalCheckpointDP(DistributedTest):
     @pytest.mark.world_size(4)
     def test_dp_world_size_2to4(self, baseline_ws2, tmpdir, dtype, ds_config, load_optim, use_torch_adam):
         self._run_test(tmpdir, dtype, ds_config, load_optim, use_torch_adam, 4)
+
+
+@pytest.mark.parametrize('dtype', [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize('zero_stage', [3])
+@pytest.mark.parametrize('use_torch_adam', [True])
+@pytest.mark.parametrize('load_optim', [False, True])
+@pytest.mark.parametrize('sub_group_size', [-1])
+class TestZeRO3SerialUniversalCheckpoint(DistributedTest):
+    world_size = 2
+
+    def test_load(self, baseline_ws1, tmpdir, dtype, ds_config, load_optim, use_torch_adam):
+        ds_config['zero_optimization']['pipeline_loading_checkpoint'] = True
+        TestZeROUniversalCheckpointDP._run_test(self, tmpdir, dtype, ds_config, load_optim, use_torch_adam, 2)
