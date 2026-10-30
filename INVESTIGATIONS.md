@@ -1303,3 +1303,13 @@ against our ~11us.
 1001.5 / 2856.4 / 4238.4 vs baseline 963.0 / 2756.2 / 4255.3.
 vs vLLM: 68.3% / 58.6% / 55.4%. Ampere GLU now rides concat-cached
 cuBLAS + native silu_mul; Ada keeps the WMMA fused path.
+
+
+### Item 2 (glue/memcpy) — CLOSED: structural with FLA's API
+In-place recurrent retry: 1000.7/2022.6/2859.4 = -29/-32.5% vs item 1.
+Loop 4's regression CONFIRMED as the kernel itself (not confounds) —
+gdn_recurrent_step needs retuning for TP head counts (kernel-track).
+The 24x/step state copy-back is structural with FLA's out-of-place API;
+eliminating it requires the retuned in-place kernel. Glue item closed.
+
+### Item 3 (decode_attn split-KV) — in progress
