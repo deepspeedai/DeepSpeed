@@ -650,6 +650,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             self.grad_position = {}
             # Param ids reduced since the last step(); used to finalize only active params in unmanaged mode.
             self._offload_accumulated_param_ids = set()
+            # FP32-master gradients first seen at a boundary stay in the partition until another backward.
+            self._offload_partition_only_param_ids = set()
             self.temp_grad_buffer_for_cpu_offload = torch.zeros(largest_param_numel,
                                                                 device=self.device,
                                                                 dtype=self.dtype)
@@ -1098,6 +1100,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 if not param.requires_grad:
                     continue
                 if self.get_param_id(param) not in self._offload_accumulated_param_ids:
+                    continue
+                if self.get_param_id(param) in self._offload_partition_only_param_ids:
                     continue
                 if self._use_compact_grad_partition_buffer(group_idx):
                     self.copy_grads_in_partition(param, group_idx)
@@ -1829,7 +1833,13 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         #accumulate gradients into param.grad_accum or parts of it that belongs to this partition
         def accumulate_gradients():
             grad_accum = self.get_param_gradient_attribute(param)
-            if not self.low_precision_master_weights_and_grads:
+            if param_id in self._offload_partition_only_param_ids:
+                # Recover only this rank's fragment, converting back to the accumulation dtype.
+                previous = self.single_partition_of_fp32_groups[i].grad.view(-1).narrow(0, dest_offset, num_elements)
+                local_buffer = dest_buffer.narrow(0, source_offset, num_elements)
+                local_buffer.copy_(previous, non_blocking=True)
+                grad_accum.data.view(-1).narrow(0, source_offset, num_elements).add_(local_buffer)
+            elif not self.low_precision_master_weights_and_grads:
                 dest_buffer.copy_(self.accumulated_grads_in_cpu[param_id].view(-1), non_blocking=True)
                 grad_accum.data.view(-1).add_(dest_buffer)
             else:
@@ -1857,6 +1867,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         if param_id in self._offload_accumulated_param_ids:
             accumulate_gradients()
         copy_gradients_to_cpu()
+        self._offload_partition_only_param_ids.discard(param_id)
         self._record_offload_copy()
 
     def set_norm_for_param_grad(self, param):
@@ -2164,16 +2175,16 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             param_id = self.get_param_id(param)
             first_use = param_id not in self._offload_accumulated_param_ids
             boundary = self.is_gradient_accumulation_boundary()
-            if self.low_precision_master_weights_and_grads and first_use and boundary:
-                # Low-precision masters accumulate in the optimizer's partition grad.
-                # The boundary copy below initializes that shared buffer, so only
-                # register its view here; no separate accumulator copy is needed.
-                [i, _, dest_offset, num_elements] = self.grad_position[param_id]
-                self.accumulated_grads_in_cpu[param_id] = self.single_partition_of_fp32_groups[i].grad.view(-1).narrow(
-                    0, dest_offset, num_elements)
+            if first_use and boundary:
+                if self.low_precision_master_weights_and_grads:
+                    # Low-precision masters accumulate in the optimizer's partition grad.
+                    [i, _, dest_offset, num_elements] = self.grad_position[param_id]
+                    self.accumulated_grads_in_cpu[param_id] = self.single_partition_of_fp32_groups[i].grad.view(
+                        -1).narrow(0, dest_offset, num_elements)
+                else:
+                    # The boundary copy is sufficient unless another backward follows before step().
+                    self._offload_partition_only_param_ids.add(param_id)
             else:
-                # FP32 masters have a separate host accumulator, which must be
-                # refreshed on first use even at a boundary: step() may come later.
                 self.async_accumulate_grad_in_cpu_via_gpu(param)
 
             if boundary:
@@ -3028,6 +3039,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         self._wait_for_offload_copies()
         if self.cpu_offload:
             self._offload_accumulated_param_ids = set()
+            self._offload_partition_only_param_ids = set()
 
         if not self.compute_grad_norm:
             self._global_grad_norm = None

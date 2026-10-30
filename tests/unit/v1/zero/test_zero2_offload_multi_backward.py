@@ -215,10 +215,9 @@ def _run_request_boundaries(rank, rendezvous, zero_stage, cpu_offload, accumulat
                                                config=config,
                                                dist_init_required=False)
         calls = ["c0", "c1", "c2", "c3"]
-        windows = [
-            (requests, {})
-            for requests in [[calls], [["ping"], calls], [["c0"], ["c1"]], [["c0"], ["c1"], ["c2", "c3"]], [["c0"]]]
-        ]
+        windows = [(requests, {})
+                   for requests in [[calls], [["ping"], calls], [["c0"], ["c1"]], [["c0"], ["c1"], ["c2", "c3"]],
+                                    [["c0"], ["c1", "c2", "c3"]], [["c0"]]]]
         # Each projection first joins a later backward after contributing to the preceding update.
         for early, late in [(0, 1), (1, 0)]:
             windows.append(([["c0"], ["c1", "c2"], ["c3"]], {"c0": (early, ), "c1": (late, ), "c2": (late, )}))
