@@ -1276,3 +1276,24 @@ Pattern so far: RunPod PCIe-P2P hosts (RTX 6000 Ada, this A40, driver
 595 + nccl 2.29) hang at NCCL transport setup; the SXM host worked.
 Next host pick: another SXM pair, or verify NCCL with the 30s plain-
 collective probe before committing to any work on a PCIe host.
+
+
+## 28. Fresh A100 SXM host: a+b complete, custom AR re-confirmed
+
+Host NCCL healthy (30s probe passed; the RunPod PCIe hosts' transport
+bug does not affect this class). Custom-AR handshake passes on NVLink,
+smoke exact (2.0/1.00).
+
+### Results (same bench, same prompts)
+| bs | segKI (custom AR on) | vLLM 0.32 | segKI % |
+|----|----------------------|-----------|---------|
+| 8  | 963.0  | 1466.8 | 65.6% |
+| 32 | 2756.2 | 4873.8 | 56.6% |
+| 64 | 4255.3 | 7651.3 | 55.6% |
+
+Matches the previous A100 host within variance (957/2759/4230) — the
+night's optimizations reproduce on fresh hardware. Microbench note:
+eager NCCL on this host is faster (25.3 vs 49.4us on the prior host —
+different nccl build), making eager custom-vs-NCCL a wash (26.8 vs
+25.3); the E2E gain persists because in-graph NCCL carries ~29us/call
+against our ~11us.
