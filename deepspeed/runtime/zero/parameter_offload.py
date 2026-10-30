@@ -73,6 +73,9 @@ class ZeROOrderedDict(OrderedDict):
         if hasattr(param, "ds_status") and is_eager_forward:
             from deepspeed.compile.z3_eager_fallback import get_active_z3_eager_fallback, is_dynamo_guard_evaluation
             fallback = get_active_z3_eager_fallback()
+            if fallback is None and FWD_MODULE_STACK[-1] is not self._parent_module:
+                # Discover external dependencies independently of their current residency.
+                register_external_parameter(FWD_MODULE_STACK[-1], param)
             if (fallback is not None and param.ds_status == ZeroParamStatus.AVAILABLE
                     and not is_dynamo_guard_evaluation()):
                 fallback.record_param_access(param)
@@ -85,7 +88,6 @@ class ZeROOrderedDict(OrderedDict):
                     fallback.record_guard_suppressed_param(param)
                     return param
                 if fallback is None:
-                    register_external_parameter(FWD_MODULE_STACK[-1], param)
                     param.all_gather()
                 else:
                     param.all_gather()
@@ -545,7 +547,9 @@ class DeepSpeedZeRoOffload(object):
         if self.zenflow:
             params_to_fetch = set(iter_params(sub_module, recurse=z3_leaf_module(sub_module)))
             for param in params_to_fetch:
-                param.data = param.data.t() if len(param.ds_shape) != 1 else param.data
+                # Nested consumers share the compute layout until the last consumer releases it.
+                if param.ds_active_sub_modules == {sub_module.ds_id}:
+                    param.data = param.data.t() if len(param.ds_shape) != 1 else param.data
 
         see_memory_usage(
             f"Before sub module forward function {sub_module.__class__.__name__} {sub_module.ds_id=} after fetch",
@@ -560,7 +564,8 @@ class DeepSpeedZeRoOffload(object):
         if self.zenflow:
             params_to_fetch = set(iter_params(sub_module, recurse=z3_leaf_module(sub_module)))
             for param in params_to_fetch:
-                param.data = param.data.t() if len(param.ds_shape) != 1 else param.data
+                if param.ds_active_sub_modules == {sub_module.ds_id}:
+                    param.data = param.data.t() if len(param.ds_shape) != 1 else param.data
 
         param_coordinator = self.get_param_coordinator()
         param_coordinator.release_sub_module(sub_module, forward=True)
@@ -584,7 +589,8 @@ class DeepSpeedZeRoOffload(object):
         if self.zenflow:
             params_to_fetch = set(iter_params(sub_module, recurse=z3_leaf_module(sub_module)))
             for param in params_to_fetch:
-                param.data = param.data.t() if len(param.ds_shape) != 1 else param.data
+                if param.ds_active_sub_modules == {sub_module.ds_id}:
+                    param.data = param.data.t() if len(param.ds_shape) != 1 else param.data
 
         see_memory_usage(
             f"Before sub module backward function {sub_module.__class__.__name__} {sub_module.ds_id=} after fetch",
@@ -600,7 +606,8 @@ class DeepSpeedZeRoOffload(object):
         if self.zenflow:
             params_to_fetch = set(iter_params(sub_module, recurse=z3_leaf_module(sub_module)))
             for param in params_to_fetch:
-                param.data = param.data.t() if len(param.ds_shape) != 1 else param.data
+                if param.ds_active_sub_modules == {sub_module.ds_id}:
+                    param.data = param.data.t() if len(param.ds_shape) != 1 else param.data
 
         self.get_param_coordinator().release_sub_module(sub_module, forward=False)
 

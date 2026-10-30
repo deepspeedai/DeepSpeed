@@ -3,6 +3,8 @@
 
 # DeepSpeed Team
 
+import copy
+
 import pytest
 import torch
 import deepspeed.comm as dist
@@ -178,6 +180,74 @@ class TestZenFlowDistributed(DistributedTest, BaseZenFlowTest):
         config_dict = self.get_config_dict(stage, offload_selective_optimizer, select_strategy, select_interval,
                                            update_interval, full_warm_up_rounds)
         self.run_training_distributed(config_dict)
+
+
+class _ExternalWeightModel(torch.nn.Module):
+
+    def __init__(self, access_mode):
+        super().__init__()
+        self.projection = torch.nn.Linear(8, 4, bias=False)
+        self.metadata = torch.nn.Linear(8, 4, bias=False)
+        self.metadata.weight.requires_grad_(False)
+        self.access_mode = access_mode
+
+    def forward(self, value):
+        if self.access_mode == "dtype_only":
+            value = value.to(self.metadata.weight.dtype)
+        elif self.access_mode == "nested_owner":
+            value = value.to(self.projection.weight.dtype)
+        return self.projection(value).square().mean()
+
+
+class TestZenFlowExternalParameter(DistributedTest, BaseZenFlowTest):
+    world_size = 1
+
+    @pytest.mark.parametrize("param_persistence_threshold", [0, 32])
+    @pytest.mark.parametrize("access_mode", ["none", "dtype_only", "nested_owner"])
+    def test_external_weight_preserves_storage_layout(self, param_persistence_threshold, access_mode):
+        """External discovery must not unbalance ZenFlow's compute/storage transposes."""
+        if get_accelerator().device_name() == "cpu":
+            pytest.skip("ZenFlow integration requires an accelerator")
+
+        torch.manual_seed(42)
+        reference = _ExternalWeightModel(access_mode).to(get_accelerator().current_device_name())
+        model = copy.deepcopy(reference)
+        reference_optimizer = torch.optim.AdamW(reference.parameters(), lr=1e-4, weight_decay=0)
+        config = self.get_config_dict(3, False, "step", 10, 1, 10)
+        config.pop("bf16", None)
+        config["zero_optimization"]["stage3_param_persistence_threshold"] = param_persistence_threshold
+        config["zero_optimization"]["stage3_prefetch_bucket_size"] = 0
+        config["zero_optimization"]["stage3_max_reuse_distance"] = 0
+        engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config)
+
+        # Checkpoint restore can leave persistent weights resident before their first external access.
+        for parameter in engine.module.parameters():
+            if parameter.ds_persist:
+                parameter.all_gather()
+
+        for microstep in range(3):
+            value = torch.arange(32, device=engine.device, dtype=torch.float32).reshape(4, 8) / 32
+            value = value + microstep / 100
+            expected_loss = reference(value)
+            loss = engine(value)
+            torch.testing.assert_close(loss, expected_loss)
+
+            # ZenFlow stores each matrix transposed outside its active compute consumers.
+            with deepspeed.zero.GatheredParameters(list(engine.module.parameters())):
+                for parameter, expected in zip(engine.module.parameters(), reference.parameters()):
+                    torch.testing.assert_close(parameter, expected.t())
+
+            expected_loss.backward()
+            engine.backward(loss)
+            engine.step()
+            reference_optimizer.step()
+            reference_optimizer.zero_grad()
+            with deepspeed.zero.GatheredParameters(list(engine.module.parameters())):
+                for parameter, expected in zip(engine.module.parameters(), reference.parameters()):
+                    torch.testing.assert_close(parameter, expected.t())
+
+        assert engine.global_steps == 3
+        engine.destroy()
 
 
 @pytest.mark.parametrize("stage", [1, 2])
