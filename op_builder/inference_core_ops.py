@@ -63,13 +63,16 @@ class InferenceCoreBuilder(CUDAOpBuilder):
     def sources(self):
         sources = [
             "inference/v2/kernels/core_ops/core_ops.cpp",
-            "inference/v2/kernels/core_ops/bias_activations/bias_activation.cpp",
+            # Host translation units cannot share a stem with the matching
+            # *_cuda.cu file. ROCm hipify rewrites both to *_hip, and the
+            # install-time build then emits two rules for one .o.
+            "inference/v2/kernels/core_ops/bias_activations/bias_activation_host.cpp",
             "inference/v2/kernels/core_ops/bias_activations/bias_activation_cuda.cu",
             "inference/v2/kernels/core_ops/cuda_layer_norm/layer_norm.cpp",
             "inference/v2/kernels/core_ops/cuda_layer_norm/layer_norm_cuda.cu",
             "inference/v2/kernels/core_ops/cuda_rms_norm/rms_norm.cpp",
             "inference/v2/kernels/core_ops/cuda_rms_norm/rms_norm_cuda.cu",
-            "inference/v2/kernels/core_ops/gated_activations/gated_activation_kernels.cpp",
+            "inference/v2/kernels/core_ops/gated_activations/gated_activation_kernels_host.cpp",
             "inference/v2/kernels/core_ops/gated_activations/gated_activation_kernels_cuda.cu",
             "inference/v2/kernels/core_ops/cuda_linear/linear_kernels.cpp",
             "inference/v2/kernels/core_ops/cuda_linear/linear_kernels_cuda.cu",
