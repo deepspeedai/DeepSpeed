@@ -27,7 +27,7 @@ from deepspeed.runtime.utils import (empty_cache, see_memory_usage, has_inf_or_n
                                      combine_grad_norm_groups, count_used_parameters_in_backward, is_invalid_grad_norm,
                                      is_optimized_parameter)
 from deepspeed.runtime.zero.config import ZeroStageEnum
-from deepspeed.runtime.zero.utils import get_norm_dtype
+from deepspeed.runtime.zero.utils import ZeRORuntimeException, get_norm_dtype
 from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum, OffloadStateTypeEnum
 from deepspeed.ops.adam import DeepSpeedCPUAdam
 from deepspeed.utils import logger
@@ -3662,7 +3662,9 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             self._load_legacy_checkpoint(state_dict_list, load_optimizer_states, load_from_fp32_weights)
 
     def _load_universal_checkpoint(self, checkpoint_folder, load_optimizer_states, load_from_fp32_weights):
-        self.load_hp_checkpoint_state_from_checkpoint_dir("bit16_groups", checkpoint_folder)
+        self.load_hp_checkpoint_state_from_checkpoint_dir("bit16_groups",
+                                                          checkpoint_folder,
+                                                          load_optimizer_states=load_optimizer_states)
 
     def _load_global_state(self, sd):
         self.loss_scaler = sd.get(LOSS_SCALER, self.loss_scaler)
@@ -3715,10 +3717,18 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
         # I think it should actually be ok to reload the optimizer before the model.
         dp_rank = dist.get_rank(group=self.dp_process_group)
-        current_rank_sd = state_dict_list[dp_rank]
-        self._load_global_state(current_rank_sd)
-
+        dp_size_changed = len(state_dict_list) != dist.get_world_size(group=self.dp_process_group)
+        # A resized load reads every saved partition, so this entry only supplies shared metadata.
+        current_rank_sd = state_dict_list[0 if dp_size_changed else dp_rank]
         ckpt_is_rigid = isinstance(current_rank_sd[BASE_OPTIMIZER_STATE], dict)
+        if dp_size_changed and (load_optimizer_states or ckpt_is_rigid):
+            raise ZeRORuntimeException(
+                f"The checkpoint being loaded has {len(state_dict_list)} ZeRO partitions but the current DP world "
+                f"size is {dist.get_world_size(group=self.dp_process_group)}. Only fp32 weights saved with "
+                "zero_optimization.elastic_checkpoint=true can be repartitioned, and only without optimizer states.")
+        if load_optimizer_states:
+            self._load_global_state(current_rank_sd)
+
         has_param_alignment_layout = PARAM_ALIGNMENT_PADDINGS in current_rank_sd
         unpadded_layout = (not has_param_alignment_layout
                            and any(any(group_padding) for group_padding in self.round_robin_bit16_padding))
@@ -3727,7 +3737,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         if incompatible_param_layout and (load_optimizer_states or load_from_fp32_weights):
             raise RuntimeError("The ZeRO checkpoint parameter-alignment layout does not match the current "
                                "zero_optimization.parameter_alignment setting. Load with the setting used to save "
-                               "the checkpoint, or disable optimizer-state loading for a module-only warm start.")
+                               "the checkpoint, or use load_module_only=True for a module-only warm start.")
 
         # padding is always at the last rank/partition
         # if DP=1024 and param-group elems=16 -> padding will be 1024-16 across all but one rank
@@ -3777,7 +3787,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 self._restore_from_unpadded_local_fp32_weights(current_rank_sd)
             elif unpadded_layout:
                 self._restore_from_unpadded_fp32_weights(state_dict_list)
-            elif self.elastic_checkpoint and not ckpt_is_rigid:
+            elif not ckpt_is_rigid and (self.elastic_checkpoint or dp_size_changed):
                 self._restore_from_elastic_fp32_weights(state_dict_list)
             else:
                 # For non-elastic checkpoint, simply copying from saved weights of current rank is sufficient.

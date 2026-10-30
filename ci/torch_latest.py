@@ -106,7 +106,7 @@ SSM_OUTPUT_TAIL_BYTES = 32 * 1024
 REMOTE_ROOT = "/workspace"
 REMOTE_REPOSITORY = f"{REMOTE_ROOT}/deepspeed"
 REMOTE_TRANSFORMERS = f"{REMOTE_ROOT}/transformers"
-AWS_PYTHON_VERSION = "3.12.12"
+AWS_PYTHON_VERSION = "3.12.14"
 AWS_UV_VERSION = "0.12.7"
 AWS_PYTHON_ROOT = f"{REMOTE_ROOT}/python312"
 AWS_CONTAINER_PATH = f"{AWS_PYTHON_ROOT}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
@@ -751,6 +751,11 @@ def build_remote_commands(inputs: ControllerInputs) -> tuple[RemoteCommand, ...]
                 "-n",
                 "4",
                 "--verbose",
+                # The relay (_single_line) rewrites any ANSI codes to literal
+                # "\x1b" text that neither renders as color in the Actions log
+                # viewer nor matches nightly-triage's FAILED parsing, so keep
+                # the pytest output plain.
+                "--color=no",
                 # GDS tests require GPUDirect Storage support unavailable on these runners.
                 "--ignore=tests/unit/v1/nvme/test_gds.py",
                 f"--torch_ver={preset['torch_test_version']}",
