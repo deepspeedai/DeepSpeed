@@ -138,10 +138,21 @@ def test_oversized_copy_is_independent_and_preserves_routing(dtype, cpu_offload,
     assert opt.ipg_buckets[torch.float32].params == [(0, 0, 0)]
 
 
-def test_default_offload_accumulates_across_nonboundary_backwards():
-    opt, param, master = make_optimizer()
-    backward_values(opt, param, [1, 2, 4], [False, False, True])
+@pytest.mark.parametrize("low_precision", [False, True], ids=["fp32-master", "bf16-master"])
+@pytest.mark.parametrize("first_boundary", [False, True], ids=["nonboundary-first", "boundary-first"])
+def test_default_offload_accumulates_across_nonboundary_backwards(low_precision, first_boundary):
+    opt, param, master = make_optimizer(low_precision=low_precision)
+    backward_values(opt, param, [1, 2, 4], [first_boundary, False, True])
     assert torch.equal(master.grad, torch.full_like(master, 7))
+
+
+@pytest.mark.parametrize("low_precision", [False, True], ids=["fp32-master", "bf16-master"])
+def test_boundary_offload_can_be_finalized_without_another_backward(low_precision):
+    opt, param, master = make_optimizer(low_precision=low_precision)
+    backward_values(opt, param, [3], [True])
+    opt.finalize_gradient_accumulation_boundary()
+    opt._wait_for_offload_copies()
+    assert torch.equal(master.grad, torch.full_like(master, 3))
 
 
 def test_reduction_and_offload_consume_owned_oversized_buffer():
@@ -366,6 +377,35 @@ def test_step_consumes_gradients_after_offload_copies_complete(monkeypatch):
     ref_optimizer.step()
     assert event.synced
     assert not opt.overflow
+    assert torch.equal(master, ref)
+
+
+@pytest.mark.parametrize("low_precision", [False, True], ids=["fp32-master", "bf16-master"])
+@pytest.mark.parametrize("first_boundary", [False, True], ids=["nonboundary-first", "boundary-first"])
+def test_offload_first_use_after_another_backward_starts_fresh(monkeypatch, low_precision, first_boundary):
+    opt, param, master = make_optimizer(low_precision=low_precision)
+    prepare_step(opt, param, master, monkeypatch)
+    ref = torch.nn.Parameter(master.detach().clone())
+    ref_optimizer = torch.optim.Adam([ref], lr=0.01)
+    backward_values(opt, param, [8], [True])
+    opt.step()
+    ref.grad = torch.full_like(ref, 8)
+    ref_optimizer.step()
+    # Other parameters have already contributed to the new window; this one has not.
+    opt.micro_step_id = 1
+    opt.set_gradient_accumulation_boundary(first_boundary)
+    param.grad = torch.full_like(param, 2)
+    opt.copy_grads_in_partition(param)
+    param.grad = None
+    opt.micro_step_id = 2
+    opt.set_gradient_accumulation_boundary(True)
+    param.grad = torch.full_like(param, 4)
+    opt.copy_grads_in_partition(param)
+    opt._wait_for_offload_copies()
+    assert torch.equal(master.grad, torch.full_like(master, 6))
+    opt.step()
+    ref.grad = torch.full_like(ref, 6)
+    ref_optimizer.step()
     assert torch.equal(master, ref)
 
 

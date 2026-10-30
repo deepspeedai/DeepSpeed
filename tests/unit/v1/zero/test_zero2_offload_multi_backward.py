@@ -154,9 +154,10 @@ class RequestBoundaryModel(torch.nn.Module):
         self.projections = torch.nn.ModuleList([torch.nn.Linear(4, 4, bias=False), torch.nn.Linear(4, 2, bias=False)])
         self.checkpointed = checkpointed
 
-    def forward(self, inputs):
+    def forward(self, inputs, projection_indices=(0, 1)):
         loss = inputs.new_zeros(())
-        for projection in self.projections:
+        for projection_index in projection_indices:
+            projection = self.projections[projection_index]
             if self.checkpointed:
                 outputs = checkpoint(projection, inputs, use_reentrant=True)
             else:
@@ -214,8 +215,15 @@ def _run_request_boundaries(rank, rendezvous, zero_stage, cpu_offload, accumulat
                                                config=config,
                                                dist_init_required=False)
         calls = ["c0", "c1", "c2", "c3"]
-        windows = [[calls], [["ping"], calls], [["c0"], ["c1"]], [["c0"], ["c1"], ["c2", "c3"]], [["c0"]]]
-        for step, requests in enumerate(windows):
+        windows = [
+            (requests, {})
+            for requests in [[calls], [["ping"], calls], [["c0"], ["c1"]], [["c0"], ["c1"], ["c2", "c3"]], [["c0"]]]
+        ]
+        # Each projection first joins a later backward after contributing to the preceding update.
+        for early, late in [(0, 1), (1, 0)]:
+            windows.append(([["c0"], ["c1", "c2"], ["c3"]], {"c0": (early, ), "c1": (late, ), "c2": (late, )}))
+        reference_names = list(references)
+        for step, (requests, selections) in enumerate(windows):
             expected = {name: torch.zeros_like(reference) for name, reference in references.items()}
             for request in requests:
                 for index, name in enumerate(request):
@@ -224,10 +232,12 @@ def _run_request_boundaries(rank, rendezvous, zero_stage, cpu_offload, accumulat
                     inputs = (torch.arange(16).reshape(4, 4) + step + rank + offset) / 16
                     engine.set_gradient_accumulation_boundary(index == len(request) - 1)
                     device_inputs = inputs.to(device=engine.device, dtype=torch.bfloat16).requires_grad_(checkpointed)
-                    engine.backward(engine(device_inputs).float() * scale)
+                    projection_indices = selections.get(name, (0, 1))
+                    engine.backward(engine(device_inputs, projection_indices).float() * scale)
                     # Linear sum-loss gradients are input column sums, averaged over the two ranks.
                     rank_mean_inputs = inputs + (0.5 - rank) / 16
-                    for grad in expected.values():
+                    for projection_index in projection_indices:
+                        grad = expected[reference_names[projection_index]]
                         grad.add_(rank_mean_inputs.sum(dim=0).expand_as(grad) * scale)
             for name, param in model.named_parameters():
                 torch.testing.assert_close(safe_get_full_grad(param).float().cpu(),

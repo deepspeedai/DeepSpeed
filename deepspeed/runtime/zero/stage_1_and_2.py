@@ -1852,7 +1852,9 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         if param_id not in self.accumulated_grads_in_cpu:
             self.accumulated_grads_in_cpu[param_id] = buffer_to_accumulate_to_in_cpu()
 
-        if self.micro_step_id > 0:
+        # Other parameters may have run backwards before this parameter's first use.
+        # Only its participation in this window makes the persistent host buffer current.
+        if param_id in self._offload_accumulated_param_ids:
             accumulate_gradients()
         copy_gradients_to_cpu()
         self._record_offload_copy()
@@ -2159,23 +2161,30 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 self.clear_grad_attribute(param)
             return
         if self.cpu_offload:
-            # A boundary does not guarantee that step() follows. Refresh the host
-            # accumulator on the first backward too, or a later request adds the
-            # previous step's gradients. Low-precision masters already share the
-            # boundary gradient buffer and need no separate first-backward copy.
-            if (not self.low_precision_master_weights_and_grads or self.micro_step_id > 0
-                    or not self.is_gradient_accumulation_boundary()):
+            param_id = self.get_param_id(param)
+            first_use = param_id not in self._offload_accumulated_param_ids
+            boundary = self.is_gradient_accumulation_boundary()
+            if self.low_precision_master_weights_and_grads and first_use and boundary:
+                # Low-precision masters accumulate in the optimizer's partition grad.
+                # The boundary copy below initializes that shared buffer, so only
+                # register its view here; no separate accumulator copy is needed.
+                [i, _, dest_offset, num_elements] = self.grad_position[param_id]
+                self.accumulated_grads_in_cpu[param_id] = self.single_partition_of_fp32_groups[i].grad.view(-1).narrow(
+                    0, dest_offset, num_elements)
+            else:
+                # FP32 masters have a separate host accumulator, which must be
+                # refreshed on first use even at a boundary: step() may come later.
                 self.async_accumulate_grad_in_cpu_via_gpu(param)
-                # Record active param so unmanaged finalize skips params unused this window.
-                self._offload_accumulated_param_ids.add(self.get_param_id(param))
 
-            if self.is_gradient_accumulation_boundary():
+            if boundary:
                 self.set_norm_for_param_grad_in_gpu(param)
 
                 self.update_offload_overflow_tracker_for_param_grad(param)
 
                 self.async_inplace_copy_grad_to_fp32_buffer_from_gpu(param)
 
+            # Include the shared-buffer fast path in subsequent accumulation and finalization.
+            self._offload_accumulated_param_ids.add(param_id)
             return
         if self._use_compact_grad_partition_buffer(group_idx):
             if self.use_grad_accum_attribute:
