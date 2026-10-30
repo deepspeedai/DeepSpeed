@@ -14,6 +14,7 @@ from unit.simple_model import random_dataloader, SimpleModel
 import deepspeed
 from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum
 from deepspeed.runtime.zero.partition_parameters import Init
+from deepspeed.runtime.zero.utils import ZeRORuntimeException
 from deepspeed.ops.aio import AsyncIOBuilder
 from deepspeed.accelerator import get_accelerator
 
@@ -145,3 +146,132 @@ class TestNVMeCheckpointing(DistributedTest):
         loss_after = float(model(final_batch[0], final_batch[1]))
 
         assert loss_before == loss_after
+
+    @pytest.mark.parametrize('param_offload_device', [OffloadDeviceEnum.none, OffloadDeviceEnum.nvme])
+    @pytest.mark.parametrize('pipeline', [False, True])
+    @pytest.mark.parametrize('precision', ['bf16', 'fp16'])
+    @pytest.mark.parametrize('load_optimizer_states', [False, True])
+    def test_load_module_only(self, tmpdir, param_offload_device, pipeline, precision, load_optimizer_states):
+        # Catch both empty swapped masters and checkpoint files overwriting refreshed masters (#8890).
+        from deepspeed.utils import safe_get_full_fp32_param, safe_get_full_optimizer_state
+
+        if not getattr(get_accelerator(), f'is_{precision}_supported')():
+            pytest.skip(f'{precision} is not supported')
+        if not deepspeed.ops.__compatible_ops__[AsyncIOBuilder.NAME]:
+            pytest.skip('async-io is not compatible')
+
+        hidden_dim = 1024
+        dtype = torch.bfloat16 if precision == 'bf16' else torch.float16
+        config = {
+            "train_micro_batch_size_per_gpu": 1,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 0.001,
+                    "torch_adam": True
+                }
+            },
+            "zero_force_ds_cpu_optimizer": False,
+            precision: {
+                "enabled": True
+            },
+            "zero_optimization": {
+                "stage": 3,
+                "offload_param": {
+                    "device": param_offload_device,
+                    "max_in_cpu": 0,
+                },
+                "offload_optimizer": {
+                    "device": OffloadDeviceEnum.nvme,
+                    "pipeline_read": pipeline,
+                    "pipeline_write": pipeline,
+                },
+                "sub_group_size": 100,
+                "stage3_param_persistence_threshold": 0,
+            },
+            "aio": {
+                "block_size": 1048576
+            },
+        }
+        if precision == 'fp16':
+            config[precision]['loss_scale'] = 1.0
+
+        def initialize(name):
+            for key in ('offload_param', 'offload_optimizer'):
+                config['zero_optimization'][key]['nvme_path'] = os.path.join(tmpdir, name)
+            with deepspeed.zero.Init(config_dict_or_path=config):
+                module = SimpleModel(hidden_dim, empty_grad=False)
+            engine, _, _, _ = deepspeed.initialize(model=module, model_parameters=module.parameters(), config=config)
+            return engine
+
+        def train_step(engine, batch):
+            loss = engine(*batch)
+            assert torch.isfinite(loss)
+            engine.backward(loss)
+            engine.step()
+
+        torch.manual_seed(17)
+        source = initialize('source')
+        batches = list(
+            random_dataloader(source, total_samples=3, hidden_dim=hidden_dim, device=source.device, dtype=dtype))
+        for batch in batches[:2]:
+            train_step(source, batch)
+        with deepspeed.zero.GatheredParameters(list(source.module.parameters())):
+            expected = [param.detach().clone() for param in source.module.parameters()]
+        checkpoint_dir = os.path.join(tmpdir, 'checkpoint')
+        source.save_checkpoint(checkpoint_dir, tag='module-only')
+        source.destroy()
+        Init.param_id = 0
+
+        target = initialize('target')
+        try:
+            train_step(target, batches[2])
+            parameters = list(target.module.parameters())
+            swappable = [
+                target.optimizer._swappable_optimizer_subgroup(i)
+                for i in range(len(target.optimizer.fp32_partitioned_groups_flat))
+            ]
+            assert any(swappable) and not all(swappable)
+            moments = [safe_get_full_optimizer_state(param, 'exp_avg').clone() for param in parameters]
+            # Reading the states releases the buffers, including for the pipelined swapper.
+            assert any(master.numel() == 0 for master in target.optimizer.fp32_partitioned_groups_flat)
+            for _ in range(2):
+                target.load_checkpoint(checkpoint_dir,
+                                       tag='module-only',
+                                       load_module_only=True,
+                                       load_optimizer_states=load_optimizer_states)
+                with deepspeed.zero.GatheredParameters(parameters):
+                    for param, saved in zip(parameters, expected):
+                        torch.testing.assert_close(param, saved, rtol=0, atol=0)
+                for param, saved, moment in zip(parameters, expected, moments):
+                    torch.testing.assert_close(safe_get_full_fp32_param(param), saved.float(), rtol=0, atol=0)
+                    torch.testing.assert_close(safe_get_full_optimizer_state(param, 'exp_avg'), moment, rtol=0, atol=0)
+            before_step = [safe_get_full_fp32_param(param).clone() for param in parameters]
+            if not load_optimizer_states and precision == 'bf16' and not pipeline:
+                with pytest.raises(ZeRORuntimeException, match='custom_load_fn'):
+                    target.load_checkpoint(checkpoint_dir,
+                                           tag='module-only',
+                                           load_module_only=True,
+                                           custom_load_fn=lambda **kwargs: pytest.fail('callback must not run'))
+                model_path = target._get_ckpt_name(checkpoint_dir, 'module-only')
+                checkpoint = torch.load(model_path, weights_only=False)
+                shapes = checkpoint['param_shapes']
+                checkpoint['param_shapes'] = [{
+                    name + '.renamed': shape
+                    for name, shape in group.items()
+                } for group in shapes]
+                torch.save(checkpoint, model_path)
+                try:
+                    with pytest.raises(ZeRORuntimeException, match='parameter names'):
+                        target.load_checkpoint(checkpoint_dir, tag='module-only', load_module_only=True)
+                finally:
+                    checkpoint['param_shapes'] = shapes
+                    torch.save(checkpoint, model_path)
+                for param, before in zip(parameters, before_step):
+                    torch.testing.assert_close(safe_get_full_fp32_param(param), before, rtol=0, atol=0)
+            train_step(target, batches[0])
+            after_step = [safe_get_full_fp32_param(param) for param in parameters]
+            assert all(torch.isfinite(value).all() for value in after_step)
+            assert any(not torch.equal(before, after) for before, after in zip(before_step, after_step))
+        finally:
+            target.destroy()
