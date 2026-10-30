@@ -5,11 +5,13 @@
 
 import deepspeed
 from types import SimpleNamespace
+from shutil import copyfile
 from deepspeed.ops.op_builder import CPUAdamBuilder
 from deepspeed.checkpoint.utils import clone_tensors_for_torch_save, get_model_ckpt_name_for_rank
 from deepspeed.accelerator import get_accelerator
 from deepspeed.runtime.zero import ZeroParamStatus
 from deepspeed.runtime.zero.config import DeepSpeedZeroConfig
+from deepspeed.runtime.zero.utils import ZeRORuntimeException
 from deepspeed.utils.torch import required_torch_version
 
 from unit.common import DistributedTest, DistributedFixture
@@ -24,11 +26,15 @@ class TestZeROCheckpoint(DistributedTest):
     world_size = 2
 
     @pytest.mark.parametrize('zero_stage', [3])
-    def test_pipeline_checkpoint_loading(self, tmpdir, zero_stage):
+    @pytest.mark.parametrize('load_module_only', [False, True])
+    def test_pipeline_checkpoint_loading(self, tmpdir, zero_stage, load_module_only):
         config_dict = {
             "train_batch_size": 2,
             "optimizer": {
-                "type": 'Adam'
+                "type": 'Adam',
+                "params": {
+                    "torch_adam": True
+                }
             },
             "zero_optimization": {
                 "stage": zero_stage,
@@ -44,7 +50,12 @@ class TestZeROCheckpoint(DistributedTest):
         with deepspeed.zero.Init(config_dict_or_path=config_dict):
             models = [SimpleModel(hidden_dim, empty_grad=False) for _ in range(2)]
 
-        checkpoint_correctness_verification(config_dict, models, hidden_dim, tmpdir, load_module_only=True)
+        checkpoint_correctness_verification(config_dict,
+                                            models,
+                                            hidden_dim,
+                                            tmpdir,
+                                            load_optimizer_states=not load_module_only,
+                                            load_module_only=load_module_only)
 
     @pytest.mark.parametrize('zero_stage, use_cpu_offload, adam_optimizer', [(0, False, 'Adam'), (1, False, 'Adam'),
                                                                              (2, False, 'Adam'),
@@ -180,6 +191,72 @@ class TestZeROCheckpoint(DistributedTest):
             models = [SimpleModel(hidden_dim, empty_grad=False) for _ in range(2)]
 
         checkpoint_correctness_verification(config_dict, models, hidden_dim, tmpdir, load_module_only=True)
+
+
+class ws1_zero3_checkpoint(DistributedFixture):
+    world_size = 1
+
+    def run(self, class_tmpdir, dtype):
+        if dtype == torch.float16 and not get_accelerator().is_fp16_supported():
+            pytest.skip("fp16 is not supported on this accelerator")
+        if dtype == torch.bfloat16 and not get_accelerator().is_bf16_supported():
+            pytest.skip("bf16 is not supported on this accelerator")
+        config = {
+            "train_micro_batch_size_per_gpu": 1,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "torch_adam": True
+                }
+            },
+            "zero_optimization": {
+                "stage": 3
+            },
+        }
+        if dtype != torch.float32:
+            config["bf16" if dtype == torch.bfloat16 else "fp16"] = {"enabled": True}
+        model = SimpleModel(10)
+        engine, _, _, _ = deepspeed.initialize(config=config, model=model, model_parameters=model.parameters())
+        for batch in random_dataloader(model=engine, total_samples=2, hidden_dim=10, device=engine.device,
+                                       dtype=dtype):
+            engine.backward(engine(batch[0], batch[1]))
+            engine.step()
+        engine.save_checkpoint(class_tmpdir, tag="dp1")
+        # Supply the source module metadata to both target ranks so optimizer resizing is checked.
+        checkpoint_dir = os.path.join(class_tmpdir, "dp1")
+        copyfile(os.path.join(checkpoint_dir, "zero_pp_rank_0_mp_rank_00_model_states.pt"),
+                 os.path.join(checkpoint_dir, "zero_pp_rank_1_mp_rank_00_model_states.pt"))
+
+
+class TestZeRO3CheckpointDPChange(DistributedTest):
+    world_size = 2
+
+    @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+    @pytest.mark.parametrize("pipeline_loading", [False, True])
+    @pytest.mark.parametrize("load_optimizer_states", [False, True])
+    def test_reject_checkpoint_resize(self, ws1_zero3_checkpoint, class_tmpdir, pipeline_loading, dtype,
+                                      load_optimizer_states):
+        config = {
+            "train_micro_batch_size_per_gpu": 1,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "torch_adam": True
+                }
+            },
+            "zero_optimization": {
+                "stage": 3,
+                "pipeline_loading_checkpoint": pipeline_loading
+            },
+        }
+        if dtype != torch.float32:
+            config["bf16" if dtype == torch.bfloat16 else "fp16"] = {"enabled": True}
+        model = SimpleModel(10)
+        engine, _, _, _ = deepspeed.initialize(config=config, model=model, model_parameters=model.parameters())
+        with pytest.raises(ZeRORuntimeException, match="world size of 1.*current world size is 2"):
+            engine.load_checkpoint(class_tmpdir, tag="dp1", load_optimizer_states=load_optimizer_states)
+        # Every rank must reject the unsupported resize before entering the serial receive.
+        dist.barrier()
 
 
 class ws4_model_checkpoint(DistributedFixture):
