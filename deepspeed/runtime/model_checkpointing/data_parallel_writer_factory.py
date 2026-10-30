@@ -79,7 +79,7 @@ class DataParallelWriterFactory(object):
             # print(
             #     f'edp_resource_partition: self._uni_parallel_info.global_rank={self._uni_parallel_info.global_rank} expert_resources={expert_resources} slices_per_resource={slices_per_resource} ep_world_size={ep_world_size} slice_partitions={slice_partitions}'
             # )
-            resource_index = ep_info.ep_rank % slice_resources
+            resource_index = ep_info.ep_rank % slices_per_resource
             return slice_partitions[resource_index]
 
         dp_ranks = ep_info.dp_peer_ranks
