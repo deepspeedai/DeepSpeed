@@ -1,0 +1,291 @@
+# SPDX-License-Identifier: Apache-2.0
+# DeepSpeed Team
+name: cpu-torch-latest-v1-multirank
+
+# Pull-request multi-rank CPU suite for tests/unit/v1.
+#
+# The plain cpu-torch-latest run advertises a single device, so its per-device
+# gate skips every world_size > 1 test; the nightly cpu-torch-multi-latest covers
+# multi-rank tests but only for the non-v1 half plus the sequential marker. This
+# workflow fills the remaining gap: the v1 multi-rank tests, executed on CPU.
+#
+# Selection reuses the Modal diff-based picker (ci/tests_fetcher.py), and
+# DS_MULTIRANK_ONLY drops single-rank tests, so a run spends its time on
+# world_size 2-4 CPU tests.
+#
+# Trigger rollout: manual dispatch only for now. Starting as a required
+# pull_request check would put an unvalidated ~1h suite in front of every PR;
+# once this run is green across a few real PRs, add `pull_request:` back to the
+# `on:` block and register the check with branch protection.
+
+on:
+  workflow_dispatch:
+    inputs:
+      torch_preset:
+        description: PyTorch CPU preset to install for manual runs
+        required: false
+        default: '2.14.0-cpu'
+        type: choice
+        options:
+          - '2.14.0-cpu'
+      # Used only when a manual workflow_dispatch explicitly selects
+      # transformers_source=pypi. Pull-request runs and default manual runs
+      # install Transformers from Git and ignore this value.
+      transformers_version:
+        description: Hugging Face Transformers PyPI package version to install
+        required: false
+        default: '4.51.3'
+        type: string
+      transformers_source:
+        description: Hugging Face Transformers source for manual runs
+        required: false
+        default: 'git'
+        type: choice
+        options:
+          - 'pypi'
+          - 'git'
+      transformers_ref:
+        description: Hugging Face Transformers git ref to install when source is git
+        required: false
+        default: 'main'
+        type: string
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # torch 2.14 matches torch-latest CI and ships the CPU wheels the suite expects.
+  DEFAULT_TORCH_PRESET: '2.14.0-cpu'
+  DEFAULT_TRANSFORMERS_SOURCE: 'git'
+  DEFAULT_TRANSFORMERS_VERSION: '4.51.3'
+  DEFAULT_TRANSFORMERS_REF: 'main'
+
+jobs:
+  check-paths:
+    name: cpu-torch-latest-v1-multirank / check paths
+    uses: ./.github/workflows/check-paths.yml
+    with:
+      pr-ignore: |
+        deepspeed/inference/v2/
+        tests/unit/inference/v2/
+
+  collect-tests:
+    name: cpu-torch-latest-v1-multirank / collect tests
+    needs: check-paths
+    if: ${{ !cancelled() && needs.check-paths.outputs.should_run == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      mode: ${{ steps.select.outputs.mode }}
+      count: ${{ steps.select.outputs.count }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The selector diffs against the PR base; a full history keeps the
+          # merge-base available without an extra fetch.
+          fetch-depth: 0
+
+      - name: Select impacted v1 tests
+        id: select
+        env:
+          # Empty base means "no diff available" -> the selector runs the whole
+          # v1 scope, which is the safe direction for manual runs.
+          BASE_SHA: ${{ github.event.pull_request.base.sha || '' }}
+        run: |
+          python3 ci/tests_fetcher.py \
+            --workflow cpu-torch-latest-v1-multirank \
+            --repo-root "$GITHUB_WORKSPACE" \
+            --base "$BASE_SHA"
+
+      - name: Validate test selection
+        env:
+          SELECTION_MODE: ${{ steps.select.outputs.mode }}
+        run: |
+          python3 ci/torch_latest.py validate-selection \
+            --mode "$SELECTION_MODE" \
+            --path ci/.test_selection/test_list.txt
+
+      - name: Upload test selection
+        uses: actions/upload-artifact@v4
+        with:
+          name: cpu-torch-latest-v1-multirank-test-selection
+          path: ci/.test_selection/test_list.txt
+          include-hidden-files: true
+          retention-days: 3
+
+  unit-tests:
+    name: cpu-torch-latest-v1-multirank / unit tests
+    needs: collect-tests
+    if: ${{ !cancelled() && needs.collect-tests.result == 'success' && needs.collect-tests.outputs.mode != 'none' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download test selection
+        uses: actions/download-artifact@v4
+        with:
+          name: cpu-torch-latest-v1-multirank-test-selection
+          path: ci/.test_selection
+
+      - id: setup-venv
+        uses: ./.github/workflows/setup-venv
+
+      - name: Install system packages
+        run: |
+          sudo apt-get install -y numactl pdsh
+
+      - name: Resolve dependency inputs
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          MANUAL_TORCH_PRESET: ${{ github.event.inputs.torch_preset || '' }}
+          MANUAL_TRANSFORMERS_SOURCE: ${{ github.event.inputs.transformers_source || '' }}
+          MANUAL_TRANSFORMERS_VERSION: ${{ github.event.inputs.transformers_version || '' }}
+          MANUAL_TRANSFORMERS_REF: ${{ github.event.inputs.transformers_ref || '' }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = 'workflow_dispatch' ] && [ -n "$MANUAL_TORCH_PRESET" ]; then
+            selected_preset="$MANUAL_TORCH_PRESET"
+          else
+            selected_preset="$DEFAULT_TORCH_PRESET"
+          fi
+
+          if [ "$GITHUB_EVENT_NAME" = 'workflow_dispatch' ] && [ -n "$MANUAL_TRANSFORMERS_SOURCE" ]; then
+            transformers_source="$MANUAL_TRANSFORMERS_SOURCE"
+          else
+            transformers_source="$DEFAULT_TRANSFORMERS_SOURCE"
+          fi
+
+          if [ "$GITHUB_EVENT_NAME" = 'workflow_dispatch' ] && [ -n "$MANUAL_TRANSFORMERS_VERSION" ]; then
+            transformers_version="$MANUAL_TRANSFORMERS_VERSION"
+          else
+            transformers_version="$DEFAULT_TRANSFORMERS_VERSION"
+          fi
+
+          if [ "$GITHUB_EVENT_NAME" = 'workflow_dispatch' ] && [ -n "$MANUAL_TRANSFORMERS_REF" ]; then
+            transformers_ref="$MANUAL_TRANSFORMERS_REF"
+          else
+            transformers_ref="$DEFAULT_TRANSFORMERS_REF"
+          fi
+
+          if [ "$transformers_source" = 'git' ] && [ -z "$transformers_ref" ]; then
+            transformers_ref='main'
+          fi
+
+          case "$selected_preset" in
+            '2.14.0-cpu')
+              torch_install_version='2.14.0'
+              torchvision_install_version='0.29.0'
+              torch_test_version='2.14'
+              ;;
+            *)
+              echo "Unsupported torch_preset: $selected_preset" >&2
+              exit 1
+              ;;
+          esac
+
+          {
+            echo "SELECTED_TORCH_PRESET=$selected_preset"
+            echo "TORCH_INSTALL_VERSION=$torch_install_version"
+            echo "TORCHVISION_INSTALL_VERSION=$torchvision_install_version"
+            echo "TORCH_TEST_VERSION=$torch_test_version"
+            echo "PYTORCH_INDEX_URL=https://download.pytorch.org/whl/cpu"
+            echo "TRANSFORMERS_SOURCE=$transformers_source"
+            echo "TRANSFORMERS_VERSION=$transformers_version"
+            echo "TRANSFORMERS_REF=$transformers_ref"
+          } >> "$GITHUB_ENV"
+
+          echo "Selected PyTorch preset: $selected_preset"
+          echo "Resolved install tuple: torch==$torch_install_version torchvision==$torchvision_install_version"
+          echo "Resolved test expectation: torch=$torch_test_version"
+
+      - name: Install PyTorch
+        run: |
+          pip install \
+            torch=="$TORCH_INSTALL_VERSION" \
+            torchvision=="$TORCHVISION_INSTALL_VERSION" \
+            --index-url "$PYTORCH_INDEX_URL"
+          python -c "import torch; print('torch:', torch.__version__, torch)"
+          python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
+
+      - name: Install Transformers
+        run: |
+          case "$TRANSFORMERS_SOURCE" in
+            'pypi')
+              pip install "transformers==$TRANSFORMERS_VERSION"
+              echo "TRANSFORMERS_RESOLVED_REF=N/A" >> "$GITHUB_ENV"
+              ;;
+            'git')
+              git clone --filter=blob:none https://github.com/huggingface/transformers /tmp/transformers
+              cd /tmp/transformers
+              git checkout "$TRANSFORMERS_REF"
+              resolved_ref="$(git rev-parse HEAD)"
+              echo "TRANSFORMERS_RESOLVED_REF=$resolved_ref" >> "$GITHUB_ENV"
+              echo "Resolved Transformers git ref: $resolved_ref"
+              pip install .
+              ;;
+            *)
+              echo "Unsupported TRANSFORMERS_SOURCE: $TRANSFORMERS_SOURCE" >&2
+              exit 1
+              ;;
+          esac
+          python -c "import transformers; print('transformers:', transformers.__version__, transformers)"
+
+      - name: Install deepspeed
+        run: |
+          pip install .[dev,autotuning]
+          ds_report
+
+      - name: Reinstall selected Transformers
+        run: |
+          case "$TRANSFORMERS_SOURCE" in
+            'pypi')
+              pip install --no-deps --force-reinstall "transformers==$TRANSFORMERS_VERSION"
+              ;;
+            'git')
+              cd /tmp/transformers
+              pip install --no-deps --force-reinstall .
+              ;;
+            *)
+              echo "Unsupported TRANSFORMERS_SOURCE: $TRANSFORMERS_SOURCE" >&2
+              exit 1
+              ;;
+          esac
+          pip list
+
+      - name: Pre-build JIT ops
+        # Rank workers JIT-load the shm comm op on first init_distributed; torch's
+        # build lock has no stale handling, so a leftover baton from a killed
+        # build wedges every later load. Build the hot ops once up front so tests
+        # only hit the disk cache.
+        run: |
+          python -c "
+          from deepspeed.comm.torch import build_shm_op
+          build_shm_op()
+          import torch
+          from deepspeed.ops.adam import DeepSpeedCPUAdam
+          DeepSpeedCPUAdam([torch.nn.Parameter(torch.randn(8))])
+          "
+
+      - name: Pre-download HF test fixtures
+        # Concurrent xdist workers downloading the same model race on the
+        # transformers cache lock and fail with PermissionError; populate the
+        # shared cache once so tests only hit it read-only.
+        run: |
+          HF_HUB_DISABLE_XET=1 HF_HOME=/tmp/hf_home hf download bert-base-uncased
+
+      - name: Unit tests
+        run: |
+          unset TORCH_CUDA_ARCH_LIST # only jit compile for current arch
+          cd tests
+          mapfile -t targets < <(sed 's|^tests/||' ../ci/.test_selection/test_list.txt)
+          if [ "${#targets[@]}" -eq 0 ]; then
+            echo "No v1 tests selected; nothing to run."
+            exit 0
+          fi
+          echo "Selected targets (${#targets[@]}): ${targets[*]}"
+          HF_HOME=/tmp/hf_home \
+            LOCAL_SIZE=4 \
+            DS_MULTIRANK_ONLY=1 \
+            pytest $PYTEST_OPTS --forked -n 4 "${targets[@]}" --torch_ver="$TORCH_TEST_VERSION"

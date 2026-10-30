@@ -1474,6 +1474,36 @@ class fused_LinearLayer(SubParamColumnParallel):
         self._subparam_layout_spec = (fused_qkv_subparam_sizes(kwargs.get('fused_module'), tuple(module.weight.shape),
                                                                kwargs['tp_meta']), None)
         super().__init__(module, mp_group, skip_partition, **kwargs)
+        self._sum_replicated_kv_gradients()
+
+    def _sum_replicated_kv_gradients(self):
+        """Sum the gradient of the key/value block that GPTBigCode gives every rank whole.
+
+        Each rank attends with only its own query heads, so the gradient it computes for the
+        shared key/value rows covers those heads alone. Unless the ranks add those partial
+        gradients, each applies a different update to rows that must stay identical, and
+        training departs from the unsharded model. The input gradient needs no change: the
+        column-parallel backward already sums every rank's contribution to it.
+        """
+        from deepspeed.module_inject.fusedqkv_utils import get_fused_qkv_type
+
+        if get_fused_qkv_type(self.fused_module.module) != 'bigcodetype' or not pg_utils.is_parallel(self.mp_group):
+            return
+        n_embd = self.tp_meta.n_embd
+        if n_embd is None:
+            return
+        # This rank's shard is its query rows followed by the whole key/value block.
+        kv_start = get_shard_size_list(n_embd, self.tp_world_size, self.tp_meta)[self.tp_index]
+        group = self.mp_group
+
+        def sum_kv_rows(grad):
+            grad = grad.clone()
+            dist.all_reduce(grad.narrow(0, kv_start, grad.shape[0] - kv_start), group=group)
+            return grad
+
+        for param in (self.weight, self.bias):
+            if param is not None and param.requires_grad:
+                param.register_hook(sum_kv_rows)
 
     def _freeze_partition_sizes(self, total_size):
         super()._freeze_partition_sizes(total_size)
