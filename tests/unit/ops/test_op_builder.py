@@ -408,3 +408,11 @@ def test_riscv_has_vector_agrees_with_kernel_hwcap():
     # kernel that accepted such a token also sets the HWCAP bit, so the two cannot
     # disagree on real hardware.
     assert make_builder()._riscv_has_vector() is _kernel_hwcap_has_vector()
+
+
+@pytest.mark.parametrize("flags, expected", [(None, "-D__NEON__"), (["fp", "asimd", "sve"], "-D__SVE__")])
+def test_simd_width_handles_cpu_info_without_flags(flags, expected):
+    # py-cpuinfo leaves out 'flags' on Apple Silicon, so simd_width must not index it.
+    cpu_info = {"arch": "ARM_8"} if flags is None else {"arch": "ARM_8", "flags": flags}
+    with patch.dict(sys.modules, {"cpuinfo": MagicMock(get_cpu_info=MagicMock(return_value=cpu_info))}):
+        assert make_builder().simd_width() == expected
