@@ -879,8 +879,9 @@ class SequenceTiledCompute(torch.autograd.Function):
 
         incoming_grad = grads[0]
         # since we perform a reduction of outputs that doesn't get included in `autograd.backward` below we need to pre-adjust the incoming gradient. in the case of "sum" the gradient is 1.0, in the case of "mean" it's 1.0/num_elements, which in this case is 1/shards.
+        # not in place: autograd hands the same gradient tensor to every branch of a summed loss
         if output_reduction == "mean":
-            incoming_grad /= shards
+            incoming_grad = incoming_grad / shards
 
         if grad_requiring_tensor.shape[0] == 1:
             grad_requiring_tensor_grad = torch.zeros_like(grad_requiring_tensor)

@@ -292,6 +292,43 @@ def test_sequence_tiled_compute_shard_boundaries(batch_size, seqlen, shards, out
             torch.testing.assert_close(param, reference_param)
 
 
+@pytest.mark.parametrize("tiled_first", [True, False])
+def test_sequence_tiled_compute_mean_keeps_other_loss_terms_intact(tiled_first):
+    # "mean" divides the incoming gradient by the shard count. A loss that adds a second term hands both terms
+    # the same gradient tensor, so dividing it in place also rescaled the gradient of the other term.
+    device = get_accelerator().device_name()
+    hidden_dim, seqlen, shards = 8, 8, 4
+    torch.manual_seed(42)
+    model = SimpleMLP(hidden_dim).to(device)
+
+    def compute(x):
+        return mlp_forward_orig(model, x).sum()
+
+    x = torch.rand((1, seqlen, hidden_dim), device=device, requires_grad=True)
+    x_reference = x.detach().clone().requires_grad_(True)
+
+    tiled = sequence_tiled_compute(
+        compute,
+        seqlen,
+        shards,
+        kwargs_to_shard={"x": x},
+        kwargs_to_pass={},
+        grad_requiring_tensor_key="x",
+        compute_params=list(model.parameters()),
+        output_unshard_dimension=0,
+        output_reduction="mean",
+    )
+    loss = tiled + x.sum() if tiled_first else x.sum() + tiled
+    loss.backward()
+
+    tile = seqlen // shards
+    reference = sum(compute(x_reference[:, i * tile:(i + 1) * tile]) for i in range(shards)) / shards
+    (reference + x_reference.sum()).backward()
+
+    torch_assert_close(loss, reference + x_reference.sum())
+    torch_assert_close(x.grad, x_reference.grad)
+
+
 @pytest.mark.parametrize("shards", [2, 4])
 @pytest.mark.parametrize("layout", ["transposed", "channel_slice"])
 class TestTiledMLPInputLayout:
