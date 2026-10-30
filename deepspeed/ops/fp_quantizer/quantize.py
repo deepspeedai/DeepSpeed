@@ -98,10 +98,11 @@ class FP_Quantize(Quantizer):
         return out
 
     def to(self, *args, **kwargs):
-        # Intermediate tensors may need to be moved to different devices
-        if hasattr(self, 'input_q'):
+        # These start as None and are only allocated by quantize(). Moving the
+        # parameter to a device calls this before that allocation.
+        if isinstance(self.input_q, torch.Tensor):
             self.input_q = self.input_q.to(*args, **kwargs)
-        if hasattr(self, 'scale'):
+        if isinstance(self.scale, torch.Tensor):
             self.scale = self.scale.to(*args, **kwargs)
 
     def get_scales(self):

@@ -41,25 +41,14 @@ app = modal.App("deepspeedai-accelerate-ci", image=image)
 def pytest():
     import subprocess
 
-    cmd = "git clone https://github.com/huggingface/accelerate"
-    print(f"running: {cmd}")
-    subprocess.run(
-        cmd.split(),
-        check=True,
-        cwd=ROOT_PATH / ".",
-    )
-    cmd = "uv pip install --system --compile-bytecode ./accelerate[testing]"
-    print(f"running: {cmd}")
-    subprocess.run(
-        cmd.split(),
-        check=True,
-        cwd=ROOT_PATH / ".",
-    )
+    cmd = ("python", str(ROOT_PATH / "ci" / "install_accelerate.py"), "--destination", str(ROOT_PATH / "accelerate"))
+    print(f"running: {' '.join(cmd)}")
+    subprocess.run(cmd, check=True, cwd=ROOT_PATH)
 
-    cmd = "pytest ./accelerate/tests/deepspeed"
-    print(f"running: {cmd}")
+    cmd = ("pytest", str(ROOT_PATH / "accelerate" / "tests" / "deepspeed"))
+    print(f"running: {' '.join(cmd)}")
     subprocess.run(
-        cmd.split(),
+        cmd,
         check=True,
-        cwd=ROOT_PATH / ".",
+        cwd=ROOT_PATH,
     )

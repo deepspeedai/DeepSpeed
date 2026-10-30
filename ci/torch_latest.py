@@ -713,6 +713,12 @@ def build_remote_commands(inputs: ControllerInputs) -> tuple[RemoteCommand, ...]
         ])
     commands.extend([
         RemoteCommand("install candidate DeepSpeed", ("python", "-m", "pip", "install", "."), REMOTE_REPOSITORY),
+        RemoteCommand("verify Python dependencies", ("python", "-m", "pip", "check"), REMOTE_REPOSITORY),
+        RemoteCommand(
+            "verify test dependencies",
+            ("python", "-c", "import mup, qtorch"),
+            REMOTE_REPOSITORY,
+        ),
         RemoteCommand(
             "report package versions",
             (

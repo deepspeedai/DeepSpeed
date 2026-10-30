@@ -36,6 +36,9 @@ at::Tensor quantize(torch::Tensor& out,
                                   6.0));  // fp4 range (using power 2); TODO (Reza): add the power-4
                                           // in case accuracy is not matching!
     int num_groups = total_elems / group_size;
+    // A tensor smaller than one group has a null output buffer. Launching on it
+    // is cudaErrorInvalidValue even when the grid is empty.
+    if (num_groups == 0) { return out; }
 
     DISPATCH_QUANTIZE(kHalf, __half, 23, 8);
 #ifdef BF16_AVAILABLE
@@ -66,6 +69,7 @@ void dequantize(torch::Tensor& val,
     int total_elems = at::numel(val);
 
     int num_groups = total_elems / group_size;
+    if (num_groups == 0) { return; }
 
     DISPATCH_DEQUANTIZE(kHalf, __half, 10);
 #ifdef BF16_AVAILABLE
@@ -96,6 +100,7 @@ void selective_dequantize(torch::Tensor& val,
     int total_elems = at::numel(val);
     int num_indexes = indexes.size(0);
     int num_groups = total_elems / group_size;
+    if (num_groups == 0 || num_indexes == 0) { return; }
 
     DISPATCH_DEQUANTIZE_INDEX(kHalf, __half, 10);
 #ifdef BF16_AVAILABLE

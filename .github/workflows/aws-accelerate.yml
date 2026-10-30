@@ -66,6 +66,12 @@ jobs:
           git lfs install
           ln -sf /usr/bin/python3 /usr/bin/python
 
+      - name: Install Python
+        run: |
+          pip3 install uv==0.12.7
+          uv venv --python 3.12.12 --seed /opt/python312
+          echo "/opt/python312/bin" >> "$GITHUB_PATH"
+
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
@@ -80,7 +86,7 @@ jobs:
           pip install --upgrade pip
           pip install -r requirements/requirements.txt
           pip install -r requirements/requirements-dev.txt
-          pip install datasets
+          pip install datasets==3.6.0
 
       - name: Check environment
         run: |
@@ -96,6 +102,8 @@ jobs:
           python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}')"
           python -c "import torch; print(f'CUDA devices: {torch.cuda.device_count()}')"
           python -c "import torch; print(f'BF16 support: {torch.cuda.is_bf16_supported()}')"
+          python -c "import datasets, torchvision, transformers; print(f'datasets: {datasets.__version__}'); print(f'torchvision: {torchvision.__version__}'); print(f'transformers: {transformers.__version__}')"
+          pip check
 
       - name: Install DeepSpeed
         run: |
@@ -109,9 +117,8 @@ jobs:
 
       - name: Clone and install Accelerate
         run: |
-          git clone https://github.com/huggingface/accelerate
-          pip install "./accelerate[testing]"
+          python ci/install_accelerate.py --destination "$RUNNER_TEMP/accelerate"
 
       - name: Run Accelerate DeepSpeed tests
         run: |
-          pytest --verbose ./accelerate/tests/deepspeed
+          pytest --verbose "$RUNNER_TEMP/accelerate/tests/deepspeed"

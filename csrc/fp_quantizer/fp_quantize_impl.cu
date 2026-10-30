@@ -3,6 +3,7 @@
 
 // DeepSpeed Team
 
+#include <cstring>
 #include <stdexcept>
 #include "fp_context.h"
 #include "fp_quantize.h"
@@ -80,6 +81,10 @@ __global__ void apply_quantization(T* val,
     constexpr uint32_t _mantisa_mask = (1 << _mantisa_bits) - 1;
     constexpr uint32_t _exponent_mask = ((1 << _exponent_bits) - 1) << _mantisa_bits;
     constexpr uint32_t _sign_mask = 1U << (_mantisa_bits + _exponent_bits);
+    // Biased (source format) exponent of the smallest normal of the quantized format.
+    constexpr uint32_t q_min_normal_exponent =
+        (1 << (_exponent_bits - 1)) - ((1 << (q_exponent_bits - 1)) - 1);
+    const float q_min_normal = __uint_as_float(q_min_normal_exponent << _mantisa_bits);
     // CG helpers
     cg::thread_block tb = cg::this_thread_block();
     cg::thread_block_tile<hw_warp_size> warp = cg::tiled_partition<hw_warp_size>(tb);
@@ -133,17 +138,29 @@ __global__ void apply_quantization(T* val,
 
                 uint32_t dst_exponent = cur_exponent;
 
-                round<_mantisa_bits, q_mantisa_bits, stochastic_rounding>(
-                    dst_mantisa, dst_exponent, &state);
-                if (cur_exponent != 0)
+                if (cur_exponent < q_min_normal_exponent) {
+                    // Zero and values below the smallest normal use exponent field 0, whose
+                    // steps are uniform like IEEE subnormals. Adding the smallest normal fixes
+                    // the exponent, so the shared rounding lands on that step; a carry means
+                    // the value rounded up to the smallest normal (field 1).
+                    float shifted = fabsf(val_f) + q_min_normal;
+                    dst_mantisa = __float_as_uint(shifted) & _mantisa_mask;
+                    dst_exponent = q_min_normal_exponent;
+                    round<_mantisa_bits, q_mantisa_bits, stochastic_rounding>(
+                        dst_mantisa, dst_exponent, &state);
+                    dst_exponent -= q_min_normal_exponent;
+                } else {
+                    round<_mantisa_bits, q_mantisa_bits, stochastic_rounding>(
+                        dst_mantisa, dst_exponent, &state);
                     clip<_mantisa_bits, _exponent_bits, q_mantisa_bits, q_exponent_bits>(
                         dst_exponent, dst_mantisa);
 
-                dst_mantisa = (dst_mantisa & mantisa_mask) >> (_mantisa_bits - q_mantisa_bits);
+                    if (dst_exponent != (1 << q_exponent_bits) - 1)
+                        dst_exponent = (dst_exponent - ((1 << (_exponent_bits - 1)) - 1)) +
+                                       (1 << (q_exponent_bits - 1)) - 1;
+                }
 
-                if (dst_exponent != (1 << q_exponent_bits) - 1)
-                    dst_exponent = (dst_exponent - ((1 << (_exponent_bits - 1)) - 1)) +
-                                   (1 << (q_exponent_bits - 1)) - 1;
+                dst_mantisa = (dst_mantisa & mantisa_mask) >> (_mantisa_bits - q_mantisa_bits);
                 if (total_q_bits == 8 || total_q_bits == 4 || total_q_bits == 6)
                     q_buf = q_buf |
                             ((uint64_t)((uint8_t)(sign << (q_exponent_bits + q_mantisa_bits) |
@@ -230,11 +247,16 @@ __global__ void apply_dequantization(uint8_t* val, T* q_val, int group_size, int
     constexpr uint32_t vector_size = quantization::access_granularity / sizeof(T);
     int tidx = (blockIdx.x * blockDim.x + threadIdx.x) * vector_size;
 
+    // Packed bits use the quantized exponent width. The restored bf16/fp16 value uses its own.
+    constexpr int dst_exponent_bits = total_q_bits - mantisa_bits - 1;
     constexpr int quantized_bits = q_mantisa_bits + q_exponent_bits + 1;
-    constexpr int q_exponent_bits = total_q_bits - mantisa_bits - 1;
     constexpr uint16_t _mantisa_mask = (1 << q_mantisa_bits) - 1;
     constexpr uint16_t _exponent_mask = ((1 << q_exponent_bits) - 1) << q_mantisa_bits;
     constexpr uint16_t _sign_mask = 1U << (q_mantisa_bits + q_exponent_bits);
+    // Value of one mantissa step at exponent field 0: 2^(1 - bias - q_mantisa_bits).
+    constexpr uint32_t q_subnormal_step_exponent =
+        127 + 1 - ((1 << (q_exponent_bits - 1)) - 1) - q_mantisa_bits;
+    const float q_subnormal_step = __uint_as_float(q_subnormal_step_exponent << 23);
     const uint32_t g_index = (tidx / group_size);
     const uint32_t group_size_bytes = (group_size * quantized_bits / 8);
     const uint8_t* load_base_ptr =
@@ -284,7 +306,6 @@ __global__ void apply_dequantization(uint8_t* val, T* q_val, int group_size, int
             }
         }
         T store_buf[vector_size];
-        uint16_t* q_buf = reinterpret_cast<uint16_t*>(store_buf);
 #pragma unroll
         for (int j = 0; j < vector_size; j++) {
             uint16_t new_data;
@@ -302,14 +323,23 @@ __global__ void apply_dequantization(uint8_t* val, T* q_val, int group_size, int
             uint16_t dst_exponent = (new_data & _exponent_mask) >> q_mantisa_bits;
             uint16_t dst_mantisa = (new_data & _mantisa_mask);
 
-            if (dst_exponent != (1 << q_exponent_bits) - 1)
+            float up_cast;
+            if (dst_exponent == 0) {
+                // Zero and subnormals have no implicit leading one.
+                up_cast = dst_mantisa * q_subnormal_step;
+                if (sign) up_cast = -up_cast;
+            } else {
                 dst_exponent = (dst_exponent - ((1 << (q_exponent_bits - 1)) - 1)) +
-                               (1 << (q_exponent_bits - 1)) - 1;
+                               (1 << (dst_exponent_bits - 1)) - 1;
 
-            q_buf[j] =
-                ((sign << (q_exponent_bits + mantisa_bits)) | (dst_exponent << mantisa_bits) |
-                 (dst_mantisa << (mantisa_bits - q_mantisa_bits)));
-            float up_cast = conversion::to<float>(store_buf[j]);
+                // memcpy keeps the packed bits visible to the typed load. A uint16
+                // overlay of store_buf is not reliable under nvcc 13.
+                uint16_t packed =
+                    ((sign << (dst_exponent_bits + mantisa_bits)) | (dst_exponent << mantisa_bits) |
+                     (dst_mantisa << (mantisa_bits - q_mantisa_bits)));
+                memcpy(&store_buf[j], &packed, sizeof(packed));
+                up_cast = conversion::to<float>(store_buf[j]);
+            }
             store_buf[j] = conversion::to<T>(up_cast * scale);
         }
         mem_access::store_global<quantization::access_granularity>(store_base_ptr, store_buf);
@@ -409,11 +439,14 @@ __global__ void apply_selective_dequantization(uint8_t* val,
     constexpr uint32_t vector_size = quantization::access_granularity / sizeof(T);
     int tidx = (blockIdx.y * blockDim.x + threadIdx.x) * vector_size;
     int input_index = index * total_num_elements + tidx;
+    constexpr int dst_exponent_bits = total_q_bits - mantisa_bits - 1;
     constexpr int quantized_bits = q_mantisa_bits + q_exponent_bits + 1;
-    constexpr int q_exponent_bits = total_q_bits - mantisa_bits - 1;
     constexpr uint16_t _mantisa_mask = (1 << q_mantisa_bits) - 1;
     constexpr uint16_t _exponent_mask = ((1 << q_exponent_bits) - 1) << q_mantisa_bits;
     constexpr uint16_t _sign_mask = 1U << (q_mantisa_bits + q_exponent_bits);
+    constexpr uint32_t q_subnormal_step_exponent =
+        127 + 1 - ((1 << (q_exponent_bits - 1)) - 1) - q_mantisa_bits;
+    const float q_subnormal_step = __uint_as_float(q_subnormal_step_exponent << 23);
     const uint32_t g_index = (input_index / group_size);
     const uint32_t group_size_bytes = (group_size * quantized_bits / 8);
     const uint8_t* load_base_ptr =
@@ -462,7 +495,6 @@ __global__ void apply_selective_dequantization(uint8_t* val,
             }
         }
         T store_buf[vector_size];
-        uint16_t* q_buf = reinterpret_cast<uint16_t*>(store_buf);
 #pragma unroll
         for (int j = 0; j < vector_size; j++) {
             uint16_t new_data;
@@ -480,14 +512,20 @@ __global__ void apply_selective_dequantization(uint8_t* val,
             uint16_t dst_exponent = (new_data & _exponent_mask) >> q_mantisa_bits;
             uint16_t dst_mantisa = (new_data & _mantisa_mask);
 
-            if (dst_exponent != (1 << q_exponent_bits) - 1)
+            float up_cast;
+            if (dst_exponent == 0) {
+                up_cast = dst_mantisa * q_subnormal_step;
+                if (sign) up_cast = -up_cast;
+            } else {
                 dst_exponent = (dst_exponent - ((1 << (q_exponent_bits - 1)) - 1)) +
-                               (1 << (q_exponent_bits - 1)) - 1;
+                               (1 << (dst_exponent_bits - 1)) - 1;
 
-            q_buf[j] =
-                ((sign << (q_exponent_bits + mantisa_bits)) | (dst_exponent << mantisa_bits) |
-                 (dst_mantisa << (mantisa_bits - q_mantisa_bits)));
-            float up_cast = conversion::to<float>(store_buf[j]);
+                uint16_t packed =
+                    ((sign << (dst_exponent_bits + mantisa_bits)) | (dst_exponent << mantisa_bits) |
+                     (dst_mantisa << (mantisa_bits - q_mantisa_bits)));
+                memcpy(&store_buf[j], &packed, sizeof(packed));
+                up_cast = conversion::to<float>(store_buf[j]);
+            }
             store_buf[j] = conversion::to<T>(up_cast * scale);
         }
         mem_access::store_global<quantization::access_granularity>(store_base_ptr, store_buf);

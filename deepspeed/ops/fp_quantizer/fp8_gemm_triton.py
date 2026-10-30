@@ -13,6 +13,10 @@
 import torch
 import triton
 import triton.language as tl
+from triton.runtime.errors import OutOfResources
+
+# Largest num_stages that fits in shared memory, per device and tile configuration.
+_fitting_num_stages = {}
 
 
 @triton.jit
@@ -45,10 +49,11 @@ def matmul_kernel_fp8_bf16(inp_ptr, weight_ptr, out_ptr, scale_ptr, M, N, K, str
         weight = tl.load(weight_data, mask=offs_k[:, None] < K, other=0.0)
         scale = tl.load(scale_ptr + weight_ptrs_offset + ((k * BLOCK_SIZE_K * stride_bk) // quantization_group_size))
         # Dequantize weight (fp8 -> bf16)
+        # The E4M3 bits are laid out as fp16, whose 4 low exponent bits and subnormals line up
+        # with E4M3 (exponent field 0 is zero or subnormal); 2^(15 - 7) then restores the bias.
         w = (weight & 0x80).to(tl.uint16) << 8
-        w = w | ((weight & 0x7f).to(tl.uint16) << 4)
-        w = (w + 0x3C00).to(tl.uint16)
-        w = (w.to(tl.bfloat16, bitcast=True).to(tl.float32) * scale).to(tl.bfloat16)
+        w = w | ((weight & 0x7f).to(tl.uint16) << 7)
+        w = (w.to(tl.float16, bitcast=True).to(tl.float32) * (scale * 256.0)).to(tl.bfloat16)
 
         inp_data += BLOCK_SIZE_K * stride_ak
         weight_data += BLOCK_SIZE_K * stride_bk
@@ -94,9 +99,9 @@ def matmul_kernel_fp8_fp16(inp_ptr, weight_ptr, out_ptr, scale_ptr, M, N, K, str
     for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
         inp = tl.load(inp_data, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0)
         # Dequantize weight (fp8 -> fp16)
-        w = (((weight & 0x80) << 8) | ((weight & 0x7f) << 7)).to(tl.uint16)
-        w = (w + 0x2000).to(tl.uint16)
-        w = (w.to(tl.float16, bitcast=True) * scale).to(tl.float16)
+        w = (weight & 0x80).to(tl.uint16) << 8
+        w = w | ((weight & 0x7f).to(tl.uint16) << 7)
+        w = (w.to(tl.float16, bitcast=True).to(tl.float32) * (scale * 256.0)).to(tl.float16)
 
         inp_data += BLOCK_SIZE_K * stride_ak
         weight_data += BLOCK_SIZE_K * stride_bk
@@ -113,6 +118,26 @@ def matmul_kernel_fp8_fp16(inp_ptr, weight_ptr, out_ptr, scale_ptr, M, N, K, str
     offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
     out_data = out_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
     tl.store(out_data, out, mask=(offs_cm[:, None] < M) & (offs_cn[None, :] < N))
+
+
+def _launch_with_fitting_num_stages(kernel, grid, args, num_stages, num_warps, **tile_config):
+    # Each pipeline stage keeps an input and a weight tile in shared memory, so the preferred
+    # num_stages can exceed the per-block limit, which differs across GPUs (e.g. the large-M
+    # tiles need 263168 bytes with 3 stages but H100/H200 allow 232448). Triton measures the
+    # exact usage of the compiled kernel against the device limit, so fall back to fewer stages
+    # when it does not fit.
+    inp = args[0]
+    cache_key = (inp.device, inp.dtype, num_warps, tuple(sorted(tile_config.items())))
+    num_stages = _fitting_num_stages.get(cache_key, num_stages)
+    while True:
+        try:
+            kernel[grid](*args, num_stages=num_stages, num_warps=num_warps, **tile_config)
+            break
+        except OutOfResources as e:
+            if e.name != "shared memory" or num_stages == 1:
+                raise
+            num_stages -= 1
+    _fitting_num_stages[cache_key] = num_stages
 
 
 def matmul_fp8_triton(inp, weight, scale, quantization_group_size):
@@ -142,24 +167,16 @@ def matmul_fp8_triton(inp, weight, scale, quantization_group_size):
 
     grid = lambda META: (triton.cdiv(M, META['BLOCK_SIZE_M']) * triton.cdiv(N, META['BLOCK_SIZE_N']), )
     kernel = matmul_kernel_fp8_bf16 if inp.dtype == torch.bfloat16 else matmul_kernel_fp8_fp16
-    kernel[grid](inp,
-                 weight,
-                 out,
-                 scale,
-                 M,
-                 N,
-                 K,
-                 inp.stride(0),
-                 inp.stride(1),
-                 weight.stride(0),
-                 weight.stride(1),
-                 out.stride(0),
-                 out.stride(1),
-                 quantization_group_size=quantization_group_size,
-                 BLOCK_SIZE_M=BLOCK_SIZE_M,
-                 BLOCK_SIZE_N=BLOCK_SIZE_N,
-                 BLOCK_SIZE_K=BLOCK_SIZE_K,
-                 GROUP_SIZE_M=GROUP_SIZE_M,
-                 num_stages=num_stages,
-                 num_warps=num_warps)
+    args = (inp, weight, out, scale, M, N, K, inp.stride(0), inp.stride(1), weight.stride(0), weight.stride(1),
+            out.stride(0), out.stride(1))
+    _launch_with_fitting_num_stages(kernel,
+                                    grid,
+                                    args,
+                                    num_stages,
+                                    num_warps,
+                                    quantization_group_size=quantization_group_size,
+                                    BLOCK_SIZE_M=BLOCK_SIZE_M,
+                                    BLOCK_SIZE_N=BLOCK_SIZE_N,
+                                    BLOCK_SIZE_K=BLOCK_SIZE_K,
+                                    GROUP_SIZE_M=GROUP_SIZE_M)
     return out

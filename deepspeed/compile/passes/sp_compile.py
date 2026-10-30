@@ -16,7 +16,7 @@ from torch.fx.experimental.symbolic_shapes import ShapeEnv
 from deepspeed.compile import constants
 
 from ..custom_ops import all_to_all, sp_dp_registry  # noqa: F401
-from ..fx import find_node_by_name, get_node_shape_meta
+from ..fx import find_node_by_name, get_node_shape_meta, is_impure_for_dce
 from ..util import (get_autosp_seq_dim, get_input_id_node, get_label_id_node, get_position_id_node, shard_tensor_node,
                     get_sdpa_nodes)
 
@@ -277,7 +277,7 @@ def pass_insert_attention_all_to_all(gm: GraphModule, real_inputs):
 
 
 def pass_canonicalize(gm: GraphModule, real_inputs):
-    gm.graph.eliminate_dead_code()
+    gm.graph.eliminate_dead_code(is_impure_node=is_impure_for_dce)
     gm.graph.lint()
     gm.recompile()
 

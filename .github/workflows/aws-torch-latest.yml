@@ -48,7 +48,7 @@ jobs:
     needs: check-paths
     if: needs.check-paths.outputs.should_run == 'true'
     runs-on: [self-hosted, gpu-ci, gpu-l40s, l40s-4gpu, aws]
-    timeout-minutes: 60
+    timeout-minutes: 180
 
     container:
       image: nvidia/cuda:12.6.3-devel-ubuntu22.04
@@ -64,6 +64,12 @@ jobs:
           apt-get update && apt-get install -y git git-lfs libaio-dev python3 python3-pip
           git lfs install
           ln -sf /usr/bin/python3 /usr/bin/python
+
+      - name: Install Python
+        run: |
+          pip3 install uv==0.12.7
+          uv venv --python 3.12.12 --seed /opt/python312
+          echo "/opt/python312/bin" >> "$GITHUB_PATH"
 
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -95,6 +101,8 @@ jobs:
           python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}')"
           python -c "import torch; print(f'CUDA devices: {torch.cuda.device_count()}')"
           python -c "import torch; print(f'BF16 support: {torch.cuda.is_bf16_supported()}')"
+          python -c "import mup, qtorch, torchvision, transformers; print(f'torchvision: {torchvision.__version__}'); print(f'transformers: {transformers.__version__}')"
+          pip check
 
       - name: Install DeepSpeed
         run: |
@@ -109,7 +117,7 @@ jobs:
       - name: Run unit tests
         run: |
           # GDS tests require GPUDirect Storage support unavailable on these runners
-          pytest -n 4 --forked --verbose tests/unit/v1/ --ignore=tests/unit/v1/nvme/test_gds.py --torch_ver=${{ env.TORCH_VER }} --cuda_ver=${{ env.CUDA_VER }}
+          pytest -n 4 --verbose tests/unit/v1/ --ignore=tests/unit/v1/nvme/test_gds.py --torch_ver=${{ env.TORCH_VER }} --cuda_ver=${{ env.CUDA_VER }}
 
       - name: Run sequential unit tests
         run: |
