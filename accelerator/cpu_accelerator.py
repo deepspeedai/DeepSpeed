@@ -21,9 +21,10 @@ except ImportError as e:
 import os
 import sys
 
-# Default for capping total_memory() and available_memory() at the cgroup memory limit of the process.
-# Flip this one line to change the default; DS_CPU_RESPECT_CGROUP_MEMORY=1 or =0 overrides it.
-RESPECT_CGROUP_MEMORY_BY_DEFAULT = False
+# Default for capping total_memory() and available_memory() at the cgroup memory limit of the process. On, because
+# the kernel enforces that limit, so host RAM overstates what the process can use; DS_CPU_RESPECT_CGROUP_MEMORY=0 or
+# =1 overrides it.
+RESPECT_CGROUP_MEMORY_BY_DEFAULT = True
 
 _CGROUP_ROOT = "/sys/fs/cgroup"
 _PROC_SELF_CGROUP = "/proc/self/cgroup"

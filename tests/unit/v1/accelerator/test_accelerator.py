@@ -436,6 +436,67 @@ def test_cpu_memory_subtree_alias_does_not_hide_a_parent_limit(cpu_cgroup, monke
     assert accel.available_memory() == min(GiB // 4, psutil.virtual_memory().available)
 
 
+# Captured inside `docker run --privileged --memory=1g` on Ubuntu 24.04 (kernel 6.8.0, cgroup v1, Docker 29.1 with the
+# cgroupfs driver and its default host cgroup namespace), from a process in shared/me (limit 600 MiB) under shared
+# (limit 800 MiB) while a sibling of shared/me held 500 MiB. Only the cgroup lines of mountinfo are kept.
+_V1_DOCKER_PROC_SELF_CGROUP = """\
+13:misc:/docker/121dbb09d8014f1e83e934afac45b4ceec44bfd41edd43f246d6df87148dcea7
+12:freezer:/docker/121dbb09d8014f1e83e934afac45b4ceec44bfd41edd43f246d6df87148dcea7
+11:memory:/docker/121dbb09d8014f1e83e934afac45b4ceec44bfd41edd43f246d6df87148dcea7/shared/me
+10:cpuset:/docker/121dbb09d8014f1e83e934afac45b4ceec44bfd41edd43f246d6df87148dcea7
+9:pids:/docker/121dbb09d8014f1e83e934afac45b4ceec44bfd41edd43f246d6df87148dcea7
+8:rdma:/docker/121dbb09d8014f1e83e934afac45b4ceec44bfd41edd43f246d6df87148dcea7
+7:devices:/docker/121dbb09d8014f1e83e934afac45b4ceec44bfd41edd43f246d6df87148dcea7
+6:perf_event:/docker/121dbb09d8014f1e83e934afac45b4ceec44bfd41edd43f246d6df87148dcea7
+5:cpu,cpuacct:/docker/121dbb09d8014f1e83e934afac45b4ceec44bfd41edd43f246d6df87148dcea7
+4:blkio:/docker/121dbb09d8014f1e83e934afac45b4ceec44bfd41edd43f246d6df87148dcea7
+3:hugetlb:/docker/121dbb09d8014f1e83e934afac45b4ceec44bfd41edd43f246d6df87148dcea7
+2:net_cls,net_prio:/docker/121dbb09d8014f1e83e934afac45b4ceec44bfd41edd43f246d6df87148dcea7
+1:name=systemd:/docker/121dbb09d8014f1e83e934afac45b4ceec44bfd41edd43f246d6df87148dcea7
+0::/docker/121dbb09d8014f1e83e934afac45b4ceec44bfd41edd43f246d6df87148dcea7"""
+_V1_DOCKER_MOUNTINFO = """\
+583 582 0:33 /docker/121dbb09d8014f1e83e934afac45b4ceec44bfd41edd43f246d6df87148dcea7 /sys/fs/cgroup/systemd rw,nosuid,nodev,noexec,relatime master:12 - cgroup cgroup rw,xattr,name=systemd
+584 582 0:36 /docker/121dbb09d8014f1e83e934afac45b4ceec44bfd41edd43f246d6df87148dcea7 /sys/fs/cgroup/net_cls,net_prio rw,nosuid,nodev,noexec,relatime master:16 - cgroup cgroup rw,net_cls,net_prio
+585 582 0:37 /docker/121dbb09d8014f1e83e934afac45b4ceec44bfd41edd43f246d6df87148dcea7 /sys/fs/cgroup/hugetlb rw,nosuid,nodev,noexec,relatime master:17 - cgroup cgroup rw,hugetlb
+586 582 0:38 /docker/121dbb09d8014f1e83e934afac45b4ceec44bfd41edd43f246d6df87148dcea7 /sys/fs/cgroup/blkio rw,nosuid,nodev,noexec,relatime master:18 - cgroup cgroup rw,blkio
+587 582 0:39 /docker/121dbb09d8014f1e83e934afac45b4ceec44bfd41edd43f246d6df87148dcea7 /sys/fs/cgroup/cpu,cpuacct rw,nosuid,nodev,noexec,relatime master:19 - cgroup cgroup rw,cpu,cpuacct
+588 582 0:40 /docker/121dbb09d8014f1e83e934afac45b4ceec44bfd41edd43f246d6df87148dcea7 /sys/fs/cgroup/perf_event rw,nosuid,nodev,noexec,relatime master:20 - cgroup cgroup rw,perf_event
+589 582 0:41 /docker/121dbb09d8014f1e83e934afac45b4ceec44bfd41edd43f246d6df87148dcea7 /sys/fs/cgroup/devices rw,nosuid,nodev,noexec,relatime master:21 - cgroup cgroup rw,devices
+590 582 0:42 /docker/121dbb09d8014f1e83e934afac45b4ceec44bfd41edd43f246d6df87148dcea7 /sys/fs/cgroup/rdma rw,nosuid,nodev,noexec,relatime master:22 - cgroup cgroup rw,rdma
+591 582 0:43 /docker/121dbb09d8014f1e83e934afac45b4ceec44bfd41edd43f246d6df87148dcea7 /sys/fs/cgroup/pids rw,nosuid,nodev,noexec,relatime master:23 - cgroup cgroup rw,pids
+592 582 0:44 /docker/121dbb09d8014f1e83e934afac45b4ceec44bfd41edd43f246d6df87148dcea7 /sys/fs/cgroup/cpuset rw,nosuid,nodev,noexec,relatime master:24 - cgroup cgroup rw,cpuset
+593 582 0:45 /docker/121dbb09d8014f1e83e934afac45b4ceec44bfd41edd43f246d6df87148dcea7 /sys/fs/cgroup/memory rw,nosuid,nodev,noexec,relatime master:25 - cgroup cgroup rw,memory
+594 582 0:46 /docker/121dbb09d8014f1e83e934afac45b4ceec44bfd41edd43f246d6df87148dcea7 /sys/fs/cgroup/freezer rw,nosuid,nodev,noexec,relatime master:26 - cgroup cgroup rw,freezer
+595 582 0:47 /docker/121dbb09d8014f1e83e934afac45b4ceec44bfd41edd43f246d6df87148dcea7 /sys/fs/cgroup/misc rw,nosuid,nodev,noexec,relatime master:27 - cgroup cgroup rw,misc"""
+
+
+def test_cpu_memory_reads_a_real_cgroup_v1_docker_layout(cpu_cgroup, monkeypatch, tmp_path):
+    """The other v1 tests use files written by hand. These come from a real host: /proc/self/cgroup has the host path
+    of the container plus a "0::" line with no cgroup2 mount, and each controller is mounted at the container's own
+    cgroup. Joining the host path to the mount without removing the mount root, stopping at the "0::" line, or
+    reading only the process cgroup each give a wrong value here."""
+    import psutil
+    from deepspeed.accelerator import cpu_accelerator as cpu_module
+    mountinfo = tmp_path / "mountinfo"
+    mountinfo.write_text(_V1_DOCKER_MOUNTINFO.replace(" /sys/fs/cgroup/", f" {tmp_path / 'cgroup'}/") + "\n")
+    monkeypatch.setattr(cpu_module, "_PROC_SELF_MOUNTINFO", str(mountinfo))
+    accel = cpu_cgroup(
+        _V1_DOCKER_PROC_SELF_CGROUP, {
+            "memory/shared/me/memory.limit_in_bytes": "629145600",
+            "memory/shared/me/memory.usage_in_bytes": "843776",
+            "memory/shared/me/memory.stat": "total_inactive_file 16384",
+            "memory/shared/memory.limit_in_bytes": "838860800",
+            "memory/shared/memory.usage_in_bytes": "529813504",
+            "memory/shared/memory.stat": "total_inactive_file 16384",
+            "memory/memory.limit_in_bytes": "1073741824",
+            "memory/memory.usage_in_bytes": "821026816",
+            "memory/memory.stat": "total_inactive_file 103755776",
+        })
+    assert accel.total_memory() == min(629145600, psutil.virtual_memory().total)
+    # The least headroom is in shared: its 800 MiB limit minus the usage of both children, without reclaimable cache.
+    assert accel.available_memory() == min(838860800 - (529813504 - 16384), psutil.virtual_memory().available)
+
+
 def test_cpu_accelerator_exports_cgroup_memory_switch():
     """The launcher forwards env vars listed by export_envs() to every node."""
     from deepspeed.accelerator.cpu_accelerator import CPU_Accelerator
