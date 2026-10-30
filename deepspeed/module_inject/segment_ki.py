@@ -529,15 +529,11 @@ def _install_gdn_segment(seg: GDNSegment) -> bool:
         # kernel updates the cache buffer directly — no FLA output tensor,
         # no HF copy-back, half the state traffic
         step_op = getattr(parent, "_ki_gdn_op", None)
-        # TP block-sliced q/k/v arrive as strided views; materialize them
-        # (tiny: B*H*dk bf16) so the in-place recurrent kernel runs — the
-        # retuned kernel (state streamed from gmem, no 64KB smem staging)
-        # writes the cache directly, eliminating FLA's out-of-place output
-        # and the per-layer copy-back
-        if not value.is_contiguous() and query.shape[1] == 1:
-            value = value.contiguous()
-            query = query.contiguous() if not query.is_contiguous() else query
-            key = key.contiguous() if not key.is_contiguous() else key
+        # TP block-sliced q/k/v arrive as strided views; the in-place
+        # kernel loses to FLA at TP head counts even after the occupancy
+        # retune (smem staging removed: 998/2650/4161 vs 1001/2856/4238)
+        # — keep the strided-view rejection so TP decodes route to FLA;
+        # the retuned kernel still serves the TP=1 path where it wins
         if (init_state is not None and query.shape[1] == 1 and step_op is not None
                 and hasattr(step_op, "gdn_recurrent_step") and not torch.is_grad_enabled()
                 and query.shape[0] >= 16  # below that our block count starves vs FLA's tiling

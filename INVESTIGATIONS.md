@@ -1333,3 +1333,17 @@ recorded as the target metric).
 | 64 | 4255.3 | 4238.4 | 7651.3 | 55.4% |
 Kept: item 1 (+3.6-4.0%). Closed without change: item 2 (kernel retune
 needed, -29% confirmed), item 3 (already split-KV, reduction-bound).
+
+
+### Item 2 execution: recurrent retune attempt — kernel kept, routing stays FLA
+Removed the 64KB smem state staging (state streams from gmem, occupancy
+2->16 blocks/SM): 198/198 tests pass, kernel correctness clean. But TP
+routing still loses to FLA: 998.3/2650.5/4161.4 vs 1001.5/2856.4/4238.4
+(-7.2% at bs32) — occupancy was not the limiter either. Remaining
+suspects: the serial per-column K-loop's dependent latency (each thread
+walks 128 rows twice), or FLA's packed kernel vectorizes the state
+update fundamentally better. Kernel rewrite KEPT (exercises the TP=1
+path where it wins; inert at TP). Item 2 closed: copy-back elimination
+requires a deeper redesign (warp-parallel K reduction per column), on
+the kernel-track with two falsified hypotheses recorded (smem staging,
+occupancy).
