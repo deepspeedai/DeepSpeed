@@ -15,6 +15,8 @@
 #include <cuda_pipeline.h>
 #include <cuda_runtime.h>
 #include <torch/extension.h>
+#include <unordered_map>
+#include <cstdint>
 #include <algorithm>
 
 #define SILU(x) ((x) / (1.0f + expf(-(x))))
@@ -1437,6 +1439,38 @@ at::Tensor dual_gemm_silu_mul(at::Tensor x, at::Tensor gate_w, at::Tensor up_w)
     return out;
 }
 
+namespace {
+// GLU epilogue as a standalone native kernel: bf16 in/out, fp32
+// sigmoid in registers — no dtype round-trip through gmem.
+__global__ void silu_mul_kernel(const __nv_bfloat16* __restrict__ gu, __nv_bfloat16* __restrict__ out,
+                                long long rows,
+                                int n)
+{
+    long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    const long long total = rows * n;
+    for (; i < total; i += (long long)gridDim.x * blockDim.x) {
+        const long long r = i / n;
+        const int j = (int)(i % n);
+        const long long base = r * 2 * n;
+        const float g = __bfloat162float(gu[base + j]);
+        const float u = __bfloat162float(gu[base + n + j]);
+        out[i] = __float2bfloat16(g / (1.0f + __expf(-g)) * u);
+    }
+}
+}  // namespace
+
+at::Tensor silu_mul(at::Tensor gu, int64_t n)
+{
+    auto out = at::empty({gu.size(0), n}, gu.options());
+    const long long total = (long long)gu.size(0) * n;
+    auto stream = at::cuda::getCurrentCUDAStream();
+    const int blocks = (int)((total + 255) / 256);
+    silu_mul_kernel<<<blocks, 256, 0, stream.stream()>>>((const __nv_bfloat16*)gu.data_ptr(),
+                                                         (__nv_bfloat16*)out.data_ptr(), gu.size(0), (int)n);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return out;
+}
+
 // Arch-adaptive batch routing threshold: on Ada the WMMA grouped kernel
 // beats cuBLAS for M<=32 (launch overhead dominates); on Ampere cuBLAS
 // is fast enough to win at any M>1 (profiled on A100 SXM4: our WMMA at
@@ -1500,20 +1534,45 @@ std::vector<at::Tensor> grouped_linear(at::Tensor x, std::vector<at::Tensor> wei
     }
     at::Tensor x2 = x.reshape({-1, K});
     const int64_t M = x2.size(0);
-    // Fused GLU rides the WMMA kernel on EVERY architecture up to the tile
-    // row limit: the in-register silu epilogue saves three launches plus an
-    // fp32 round-trip vs composite (loop 3 regression: composite -2.3%).
-    // M in (GRP_MT, 2*GRP_MT] chunks into two fused calls — still beats
-    // the 4-kernel composite (bs=64 decodes hit this).
-    if (glu_epilogue && n == 2 && M <= GRP_MT) return {dual_gemm_silu_mul(x2, weights[0], weights[1])};
-    if (glu_epilogue && n == 2 && M <= 2 * GRP_MT) {
-        const int64_t half = GRP_MT;
-        at::Tensor out = at::empty({M, weights[0].size(0)}, x2.options());
-        auto o1 = dual_gemm_silu_mul(x2.narrow(0, 0, half), weights[0], weights[1]);
-        auto o2 = dual_gemm_silu_mul(x2.narrow(0, half, M - half), weights[0], weights[1]);
-        out.narrow(0, 0, half).copy_(o1);
-        out.narrow(0, half, M - half).copy_(o2);
-        return {out};
+    // GLU routing by architecture (the dispatcher owns the choice):
+    // - Ampere: one wide cuBLAS GEMM over the concat-cached gate|up weight
+    //   plus the native silu_mul epilogue — cuBLAS tiles [M,2N,K] better
+    //   than our WMMA at these shapes and silu_mul costs one tiny kernel
+    //   (no fp32 round-trip, unlike the composite compared in loop 3).
+    // - Ada: the WMMA fused kernel keeps the in-register epilogue (it wins
+    //   there); M in (GRP_MT, 2*GRP_MT] rides two row-chunked calls.
+    if (glu_epilogue && n == 2) {
+        if (grouped_wmma_threshold() > 1) {
+            if (M <= GRP_MT) return {dual_gemm_silu_mul(x2, weights[0], weights[1])};
+            if (M <= 2 * GRP_MT) {
+                const int64_t half = GRP_MT;
+                at::Tensor out = at::empty({M, weights[0].size(0)}, x2.options());
+                auto o1 = dual_gemm_silu_mul(x2.narrow(0, 0, half), weights[0], weights[1]);
+                auto o2 = dual_gemm_silu_mul(x2.narrow(0, half, M - half), weights[0], weights[1]);
+                out.narrow(0, 0, half).copy_(o1);
+                out.narrow(0, half, M - half).copy_(o2);
+                return {out};
+            }
+        } else {
+            // Ampere: weights are static across the rollout — cache the
+            // concatenated [gate; up] matrix keyed by the weight pointers
+            struct PairKey {
+                uint64_t a, b;
+                bool operator==(const PairKey& o) const { return a == o.a && b == o.b; }
+            };
+            struct PairHash {
+                size_t operator()(const PairKey& k) const { return std::hash<uint64_t>()(k.a ^ (k.b << 1)); }
+            };
+            static std::unordered_map<PairKey, at::Tensor, PairHash> cat_cache;
+            const PairKey key{ (uint64_t)(uintptr_t)weights[0].data_ptr(), (uint64_t)(uintptr_t)weights[1].data_ptr() };
+            auto it = cat_cache.find(key);
+            if (it == cat_cache.end()) {
+                auto cat = at::cat({weights[0], weights[1]}, 0).contiguous();
+                it = cat_cache.emplace(key, cat).first;
+            }
+            auto gu = at::matmul(x2, it->second.t());
+            return {silu_mul(gu, weights[0].size(0))};
+        }
     }
     if (M > grouped_wmma_threshold()) {
         // large batches: cuBLAS/aten composite (this backend's measured choice)
@@ -1644,6 +1703,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
           py::arg("weights"),
           py::arg("glu_epilogue") = false);
     m.def("repeat_qk", &repeat_qk, "fused q/k head-repeat for the scan (one launch)");
+    m.def("silu_mul", &silu_mul, "native GLU epilogue: silu(g)*u from a [M,2N] buffer");
     m.def("capabilities", &segki_capabilities, "segKI backend capability report");
     m.def("gdn_recurrent_step",
           &gdn_recurrent_step,
