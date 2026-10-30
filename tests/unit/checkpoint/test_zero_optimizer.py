@@ -31,7 +31,10 @@ class TestZeROCheckpoint(DistributedTest):
         config_dict = {
             "train_batch_size": 2,
             "optimizer": {
-                "type": 'Adam'
+                "type": 'Adam',
+                "params": {
+                    "torch_adam": True
+                }
             },
             "zero_optimization": {
                 "stage": zero_stage,
@@ -230,7 +233,9 @@ class TestZeRO3CheckpointDPChange(DistributedTest):
 
     @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
     @pytest.mark.parametrize("pipeline_loading", [False, True])
-    def test_reject_optimizer_state_resize(self, ws1_zero3_checkpoint, class_tmpdir, pipeline_loading, dtype):
+    @pytest.mark.parametrize("load_optimizer_states", [False, True])
+    def test_reject_checkpoint_resize(self, ws1_zero3_checkpoint, class_tmpdir, pipeline_loading, dtype,
+                                      load_optimizer_states):
         config = {
             "train_micro_batch_size_per_gpu": 1,
             "optimizer": {
@@ -249,7 +254,7 @@ class TestZeRO3CheckpointDPChange(DistributedTest):
         model = SimpleModel(10)
         engine, _, _, _ = deepspeed.initialize(config=config, model=model, model_parameters=model.parameters())
         with pytest.raises(ZeRORuntimeException, match="world size of 1.*current world size is 2"):
-            engine.load_checkpoint(class_tmpdir, tag="dp1", load_optimizer_states=True)
+            engine.load_checkpoint(class_tmpdir, tag="dp1", load_optimizer_states=load_optimizer_states)
         # Every rank must reject the unsupported resize before entering the serial receive.
         dist.barrier()
 
@@ -397,7 +402,8 @@ class TestZeROElasticCheckpoint(DistributedTest):
 
         # Load checkpoint with dp world size = 2
         model, _, _, _ = deepspeed.initialize(config=config_dict, model=model, model_parameters=model.parameters())
-        if load_optim:
+        # Only elastic fp32 partitions can be repartitioned, and only without optimizer states.
+        if load_optim or not elastic_save:
             with pytest.raises(deepspeed.runtime.zero.utils.ZeRORuntimeException):
                 model.load_checkpoint(class_tmpdir, load_optimizer_states=load_optim)
         else:

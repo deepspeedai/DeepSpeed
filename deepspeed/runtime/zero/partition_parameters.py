@@ -23,7 +23,7 @@ from .linear import zero3_linear_wrap
 
 from deepspeed.utils import groups
 import deepspeed
-from ..utils import see_memory_usage, get_only_unique_item
+from ..utils import see_memory_usage, get_only_unique_item, view_as_uint8
 from deepspeed.runtime.zero.config import DeepSpeedZeroConfig
 from deepspeed.runtime.zero.utils import assert_ints_same_as_other_ranks, is_zero_param
 from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum
@@ -468,7 +468,7 @@ class InsertPostInitMethodToModuleSubClasses(object):
                     fn_to_apply(module_to_apply_fn_to)
 
                     for param in params_to_apply_fn_to:
-                        dist.broadcast(param.data.view(torch.uint8), 0, group=param.ds_process_group)
+                        dist.broadcast(view_as_uint8(param.data), 0, group=param.ds_process_group)
 
                     for param in params_to_apply_fn_to:
                         param.partition(has_been_updated=True)
@@ -1201,9 +1201,9 @@ class Init(InsertPostInitMethodToModuleSubClasses):
         self._convert_to_deepspeed_param(param)
         partition_group = self.get_partition_dp_group(param)
         if dist.get_world_group() == partition_group:
-            dist.broadcast(param.data.view(torch.uint8), 0, partition_group)
+            dist.broadcast(view_as_uint8(param.data), 0, partition_group)
         else:
-            dist.broadcast(param.data.view(torch.uint8), dist.get_global_rank(partition_group, 0), partition_group)
+            dist.broadcast(view_as_uint8(param.data), dist.get_global_rank(partition_group, 0), partition_group)
         param.partition()
 
     def _convert_to_zero_parameters(self, param_list):
@@ -1540,7 +1540,14 @@ class Init(InsertPostInitMethodToModuleSubClasses):
         def all_gather_coalesced(params: Iterable[Parameter],
                                  safe_mode: bool = False,
                                  quantize: bool = False) -> AllGatherCoalescedHandle:
-            params = list(params)
+            # ensure that each rank has params in same order. callers may pass a set, whose
+            # order differs across ranks. the allgather is done by flattening the parameter
+            # list into a single tensor that can be allgathered in a single call - this means
+            # that if each rank gives a list of the same parameters in a different order we
+            # will silently get incorrect parameter values. params of different partition
+            # groups are gathered one group at a time, so a different order would also issue
+            # the per-group collectives in a different order and deadlock.
+            params = sorted(params, key=lambda p: p.ds_id)
             if len(params) == 0:
                 return _no_gather_coalesced(params)
 
@@ -1575,13 +1582,6 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                 world_size = self.num_ranks_in_param_group
 
             #pprint(dir(ds_process_group))
-            # ensure that each rank has params in same order. the allgather
-            # is done by flattening the parameter list into a single tensor that
-            # can be allgathered in a single call - this means that if each rank
-            # gives a list of the same parameters in a different order we will
-            # silently get incorrect parameter values, and have very difficult
-            # to debug correctness issues.
-            params = sorted(params, key=lambda p: p.ds_id)
 
             if logger.isEnabledFor(logging.DEBUG):
                 debug_rank0(f"-allgather_coalesced: {[p.ds_id for p in params]}")
@@ -2557,7 +2557,7 @@ class GatheredParameters:
                     f"the accelerator device. If you don't need to broadcast updates, use modifier_rank=None.")
 
         handles = [
-            dist.broadcast(p.data.view(torch.uint8),
+            dist.broadcast(view_as_uint8(p.data),
                            self.src_rank_by_group[id(p.ds_process_group)],
                            group=p.ds_process_group,
                            async_op=True) for p in self.params
