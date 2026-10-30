@@ -413,29 +413,13 @@ class DeepSpeedZeRoOffload(object):
                                          output,
                                          warning_msg_fn=_bwd_hook_unexpected_inputs_msg)
 
-        #This is an alternate to doing _post_backward_module_hook
-        #it uses tensor.register_hook instead of using torch.autograd.Function
-        def _alternate_post_backward_module_hook(module, inputs):
-            module.ds_grads_remaining = 0
-
-            #print(f"Before Forward {module.__class__.__name__}")
-
-            def _run_after_backward_hook(*unused):
-                module.ds_grads_remaining = module.ds_grads_remaining - 1
-                if module.ds_grads_remaining == 0:
-                    #print(f"After backward {module.__class__.__name__}")
-                    self.post_sub_module_backward_function(module)
-
-            def _run_before_forward_function(input):
-                if input.requires_grad:
-                    module.ds_grads_remaining += 1
-
-            return _apply_forward_and_backward_to_tensors_only(module, _run_before_forward_function,
-                                                               _run_after_backward_hook, inputs)
-
         @torch.compiler.disable
         def _post_backward_module_hook(module, inputs):
-            module.ds_grads_remaining = 0
+            if not hasattr(module, 'ds_grads_remaining'):
+                module.ds_grads_remaining = 0
+            
+            # Reset is not safe here because of potential re-entrant calls/branches
+            # module.ds_grads_remaining = 0
 
             return apply_to_tensors_only(module.post_bwd_fn.apply,
                                          inputs,
@@ -513,6 +497,8 @@ class DeepSpeedZeRoOffload(object):
                         #assert len(module.parameters(recurse=False)), "The input tensor to the module is a view, and autograd Function or register_hook is not triggered with view tensors."
                         #if module.ds_grads_remaining == 0:
                         #    print(f"Before Forward: {ctx.module.__class__.__name__}")
+                        if not hasattr(module, 'ds_grads_remaining'):
+                            module.ds_grads_remaining = 0
                         module.ds_grads_remaining += 1
                         ctx.post_backward_function = _run_after_backward_function
 
