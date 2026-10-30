@@ -468,6 +468,61 @@ def _fused_gdn_forward(self, hidden_states, *args, **kwargs):
     return self.out_proj(core_attn_out)
 
 
+def _fla_recurrent_inplace(query, key, value, **kw):
+    """FLA's fused recurrent with the final state written in place.
+
+    Mirrors fla.ops.gated_delta_rule.fused_recurrent's forward wrapper —
+    same grid, metaparams, and kernel — except ht is the caller's cache
+    slot (== h0) instead of a fresh allocation. Assumes the decode shape
+    (T==1, no cu_seqlens, gating precomputed) of the scan call site.
+    """
+    import triton
+    from fla.ops.gated_delta_rule.fused_recurrent import fused_recurrent_gated_delta_rule_fwd_kernel
+
+    q, k, v = query, key, value
+    g = kw.get("g")
+    beta = kw.get("beta")
+    slot = kw["initial_state"]
+    B, T, H, K = k.shape
+    V = v.shape[-1]
+    HV = v.shape[2]
+    o = torch.empty_like(v)
+    BK = triton.next_power_of_2(K)
+    BV = min(8, triton.next_power_of_2(V))
+    NV = triton.cdiv(V, BV)
+    fused_recurrent_gated_delta_rule_fwd_kernel[(NV * B * HV, )](
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        gk=None,
+        gv=None,
+        beta=beta,
+        A_log=None,
+        dt_bias=None,
+        o=o,
+        h0=slot,
+        ht=slot,  # in-place: each program reads its tile before writing it
+        cu_seqlens=None,
+        scale=kw.get("scale"),
+        T=T,
+        H=H,
+        HV=HV,
+        K=K,
+        V=V,
+        BK=BK,
+        BV=BV,
+        IS_BETA_HEADWISE=beta.ndim != v.ndim,
+        USE_QK_L2NORM_IN_KERNEL=kw.get("use_qk_l2norm_in_kernel", False),
+        APPLY_BETA_SIGMOID=False,
+        ALLOW_NEG_EIGVAL=kw.get("allow_neg_eigval", False),
+        STATE_V_FIRST=False,
+        num_warps=1,
+        num_stages=3,
+    )
+    return o, None  # None: the state is already in the cache slot
+
+
 def _install_gdn_segment(seg: GDNSegment) -> bool:
     """Wire the fused forward onto a GDN block, binding its original helpers.
 
@@ -552,6 +607,18 @@ def _install_gdn_segment(seg: GDNSegment) -> bool:
         # (5.19+) no longer bind them per-layer; fall back to the module-level
         # torch_* implementations there.
         single = kw.get("initial_state") is not None and query.shape[1] == 1
+        if single and not torch.is_grad_enabled():
+            # FLA's wrapper allocates a fresh final_state and the caller
+            # copies it back into the graph-static cache slot (~35us x 24
+            # layers/step). Call the Triton kernel directly with the cache
+            # slot as BOTH h0 and ht — each program reads its state tile
+            # before writing it, so in-place is safe — keeping FLA's math
+            # and dropping the round trip. The caller sees None and skips
+            # its copy (the state is already home).
+            try:
+                return _fla_recurrent_inplace(query, key, value, **kw)
+            except (ImportError, AttributeError):
+                pass  # FLA layout changed — fall through to the wrapper
         fn_name = "recurrent_gated_delta_rule" if single else "chunk_gated_delta_rule"
         fn = getattr(parent, fn_name, None)
         if fn is None:
