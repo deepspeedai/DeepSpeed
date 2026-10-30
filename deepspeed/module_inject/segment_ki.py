@@ -637,7 +637,9 @@ def _install_gdn_segment(seg: GDNSegment) -> bool:
                     _ob = (out[0] == _o2).float().mean().item()
                     _sb = (kw["initial_state"] == _s2).float().mean().item()
                     if _ob < 1.0 or _sb < 1.0:
-                        print(f"FLA-IP-DIVERGE o={_ob:.6f} state={_sb:.6f} layer={parent.layer_idx}",
+                        _md = (out[0].float() - _o2.float()).abs().max().item()
+                        print(f"FLA-IP-DIVERGE o={_ob:.6f} state={_sb:.6f} layer={parent.layer_idx} "
+                              f"maxdiff={_md:.6f} fn={getattr(_fn, '__module__', '?')}.{getattr(_fn, '__name__', '?')}",
                               flush=True)
                 return out
             except (ImportError, AttributeError):
