@@ -358,6 +358,143 @@ def test_validates_inputs():
         vocab_parallel_logprobs(logits, torch.zeros(2, 3, dtype=torch.long), global_vocab_size=11)
 
 
+def _triton_device():
+    from deepspeed.sequence.vocab_parallel_ops import _use_triton
+    device = torch.device(get_accelerator().current_device_name())
+    if not _use_triton(torch.empty(0, device=device)):
+        pytest.skip("the Triton kernels are not used on this device")
+    return device
+
+
+def _triton_edge_case_logits(dtype):
+    torch.manual_seed(9)
+    # 5000 columns span two kernel blocks, so the running max and sum cross a block boundary.
+    student = (torch.randn(6, 5000) * 3).to(dtype)
+    teacher = (torch.randn(6, 5000) * 3).to(dtype)
+    student[1, :2500] = float("-inf")
+    teacher[1, :2500] = float("-inf")
+    student[2] = float("-inf")
+    teacher[3, 4321] = float("-inf")
+    student[3, 4321] = -200.0
+    student[4] += 1000.0
+    teacher[4] += 1000.0
+    return student, teacher
+
+
+def _run_on(device, op, student, teacher, index):
+    student = leaf(student.to(device))
+    teacher = leaf(teacher.to(device))
+    if op == "logprobs":
+        out = vocab_parallel_logprobs(student, index.to(device))
+    elif op == "entropy":
+        out = vocab_parallel_entropy(student)
+    else:
+        out = vocab_parallel_kl_div(student, teacher, reverse=(op == "reverse_kl"))
+    weight = torch.linspace(-1.0, 1.0, out.numel()).view_as(out)
+    finite = torch.isfinite(out.detach())
+    (out.where(finite, 0.0) * weight.to(device)).sum().backward()
+    teacher_grad = teacher.grad.cpu() if teacher.grad is not None else None
+    return out.detach().cpu(), student.grad.cpu(), teacher_grad
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("op", ["logprobs", "entropy", "forward_kl", "reverse_kl"])
+def test_triton_kernels_match_eager_path(op, dtype):
+    device = _triton_device()
+    student, teacher = _triton_edge_case_logits(dtype)
+    index = torch.randint(0, 5000, (6, 4))
+    index[0, 1] = index[0, 0]  # duplicate ids accumulate
+    index[1, 2] = -100
+    index[5] = -100  # a fully ignored row gets zero gradient
+
+    expected = _run_on("cpu", op, student, teacher, index)
+    actual = _run_on(device, op, student, teacher, index)
+
+    rtol, atol = (1e-4, 1e-4) if dtype == torch.float32 else (1.6e-2, 1e-3)
+    for actual_tensor, expected_tensor in zip(actual, expected):
+        if expected_tensor is None:
+            assert actual_tensor is None
+            continue
+        torch.testing.assert_close(actual_tensor, expected_tensor, rtol=rtol, atol=atol, equal_nan=True)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("op", ["entropy", "forward_kl", "reverse_kl"])
+def test_triton_kernels_handle_finite_extreme_logits(op, dtype):
+    # The gap between -3e38 and 3e38 overflows fp32, so rescaling between the two maxima pairs a zero
+    # scale with an infinite shift. Each row is still one-hot: entropy and KL(p || p) are 0 with zero
+    # gradient. The peak sits in the first block in one row and in the last block in the other, so the
+    # maximum is reached before and after the other lanes' running maxima.
+    device = _triton_device()
+    logits = torch.full((2, 5000), -3e38)
+    logits[0, 0] = 3e38
+    logits[1, -1] = 3e38
+    logits = logits.to(dtype)
+    index = torch.zeros(2, 1, dtype=torch.long)
+
+    out, student_grad, teacher_grad = _run_on(device, op, logits, logits.clone(), index)
+
+    assert torch.equal(out, torch.zeros_like(out))
+    assert torch.equal(student_grad, torch.zeros_like(student_grad))
+    if teacher_grad is not None:
+        assert torch.equal(teacher_grad, torch.zeros_like(teacher_grad))
+
+
+@pytest.mark.parametrize("layout", ["sequence_slice", "strided_vocab"])
+@pytest.mark.parametrize("op", ["logprobs", "entropy", "forward_kl", "reverse_kl"])
+def test_triton_kernels_match_eager_path_on_non_contiguous_logits(op, layout):
+    # A next-token shift such as logits[:, :-1] cannot be viewed as [rows, vocab] without a copy, and a
+    # strided vocabulary cannot be read in place at all. Positions outside the view hold NaN, so reading
+    # any of them would show up in the outputs or gradients.
+    device = _triton_device()
+    student, teacher = _triton_edge_case_logits(torch.bfloat16)
+    index = torch.randint(0, 5000, (6, 4))
+    expected = _run_on("cpu", op, student, teacher, index)
+
+    def embed(logits):
+        if layout == "sequence_slice":
+            padded = torch.full((2, 4, 5000), float("nan"), dtype=logits.dtype)
+            padded[:, :-1] = logits.view(2, 3, 5000)
+            padded = leaf(padded.to(device))
+            return padded, padded[:, :-1]
+        padded = torch.full((6, 10000), float("nan"), dtype=logits.dtype)
+        padded[:, ::2] = logits
+        padded = leaf(padded.to(device))
+        return padded, padded[:, ::2]
+
+    padded_student, student_rows = embed(student)
+    padded_teacher, teacher_rows = embed(teacher)
+    if op == "logprobs":
+        out = vocab_parallel_logprobs(student_rows, index.view(*student_rows.shape[:-1], 4).to(device))
+    elif op == "entropy":
+        out = vocab_parallel_entropy(student_rows)
+    else:
+        out = vocab_parallel_kl_div(student_rows, teacher_rows, reverse=(op == "reverse_kl"))
+    weight = torch.linspace(-1.0, 1.0, out.numel()).view_as(out)
+    finite = torch.isfinite(out.detach())
+    (out.where(finite, 0.0) * weight.to(device)).sum().backward()
+
+    def rows_of(padded):
+        grad = padded.grad[:, :-1] if layout == "sequence_slice" else padded.grad[:, ::2]
+        return grad.cpu().reshape(6, 5000)
+
+    expected_out, expected_student_grad, expected_teacher_grad = expected
+    rtol, atol = 1.6e-2, 1e-3
+    torch.testing.assert_close(out.detach().cpu().view_as(expected_out),
+                               expected_out,
+                               rtol=rtol,
+                               atol=atol,
+                               equal_nan=True)
+    # As in the test above, a row whose KL is infinite has NaN gradients under a zero output gradient.
+    torch.testing.assert_close(rows_of(padded_student), expected_student_grad, rtol=rtol, atol=atol, equal_nan=True)
+    if expected_teacher_grad is not None:
+        torch.testing.assert_close(rows_of(padded_teacher),
+                                   expected_teacher_grad,
+                                   rtol=rtol,
+                                   atol=atol,
+                                   equal_nan=True)
+
+
 class TestVocabParallelOpsTP(DistributedTest):
     world_size = 2
 
@@ -394,6 +531,26 @@ class TestVocabParallelOpsTP(DistributedTest):
         (expected * weight).sum().backward()
         torch.testing.assert_close(local_student.grad, full_student.grad[..., start:end])
         torch.testing.assert_close(local_teacher.grad, full_teacher.grad[..., start:end])
+
+    def test_finite_extreme_logits_across_shards(self):
+        # Only rank 1 holds the peak, so rank 0's maximum is rescaled by exp(-6e38) = 0 with an
+        # infinite shift when the shards are combined. The distribution is one-hot: entropy and KL(p || p)
+        # are 0 with zero gradient.
+        device = torch.device(get_accelerator().current_device_name())
+        tp_group = dist.get_world_group()
+        local = torch.full((2, 3), -3e38, device=device)
+        if dist.get_rank() == 1:
+            local[:, 1] = 3e38
+        student, teacher = leaf(local), leaf(local.clone())
+
+        actual = (vocab_parallel_entropy(student, tp_group=tp_group) +
+                  vocab_parallel_kl_div(student, teacher, tp_group=tp_group) +
+                  vocab_parallel_kl_div(student, teacher, reverse=True, tp_group=tp_group))
+        actual.sum().backward()
+
+        assert torch.equal(actual, torch.zeros_like(actual))
+        assert torch.equal(student.grad, torch.zeros_like(student.grad))
+        assert torch.equal(teacher.grad, torch.zeros_like(teacher.grad))
 
     def test_empty_shard_does_not_desynchronize_ranks(self):
         # Rank 0 owns no vocabulary. Entropy and KL need no shard bounds, so they must still match

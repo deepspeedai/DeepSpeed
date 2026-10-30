@@ -343,6 +343,12 @@ Each op saves only its inputs and per-token statistics, and recomputes the
 softmax in bounded row chunks during backward. Its peak activation memory is
 therefore a small multiple of the local logits shard instead of the several
 fp32 copies that an equivalent composition of PyTorch ops keeps alive.
+When Triton supports the logits' device, each pass over the logits runs in a
+fused Triton kernel that keeps no fp32 copy of the shard; other devices, or
+`deepspeed.HAS_TRITON = False`, use an eager implementation with the same
+semantics. The entropy and KL forward passes read each logit once, and a slice
+along the sequence, such as the next-token shift `logits[:, :-1]`, is read in
+place rather than copied.
 
 ## Custom Patterns
 

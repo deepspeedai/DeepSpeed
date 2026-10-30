@@ -211,3 +211,17 @@ class TestGroupCacheTeardown(DistributedTest):
         assert value.item() == 1
         dist.all_reduce(value)
         assert value.item() == self.world_size
+
+    def test_subgroup_destroy_keeps_expert_data_parallel_table(self):
+        groups._create_expert_and_data_parallel(expert_parallel_size_=self.world_size)
+        (group_name, own_group), = groups._EXPERT_DATA_PARALLEL_GROUP.items()
+        expected_table = tuple((rank, ) for rank in range(self.world_size))
+        assert groups._get_expert_data_parallel_group_table(group_name) == expected_table
+
+        # Only the members of a subgroup release it, so a table describing every subgroup must
+        # outlive it on those ranks too, or ranks would disagree about the topology.
+        dist.destroy_process_group(group=own_group)
+
+        assert group_name not in groups._EXPERT_DATA_PARALLEL_GROUP
+        assert groups._get_expert_data_parallel_group_table(group_name) == expected_table
+        dist.barrier()

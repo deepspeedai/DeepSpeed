@@ -505,6 +505,76 @@ def test_destination_validation_does_not_enumerate_elements(monkeypatch):
     affine_map.validate()
 
 
+def _column_split_qkv_map():
+    """Fused QKV split along columns, so every piece writes a few columns of each shard row."""
+    return sub_param_map(shape=(4, 12),
+                         sub_dim_sizes=[4, 4, 4],
+                         shard_widths=[[2, 2], [2, 2], [2, 2]],
+                         partition_dim=1)
+
+
+def _move_destination(affine_map, rank, index, delta):
+    piece = affine_map.pieces_by_rank[rank][index]
+    affine_map.pieces_by_rank[rank][index] = AffinePiece(piece.shape, piece.source_offset, piece.source_strides,
+                                                         piece.dest_offset + delta, piece.dest_strides,
+                                                         piece.locations)
+
+
+def test_strided_destination_overlap_is_refused():
+    # Rank 0's value columns are moved onto its key columns. The element count still matches,
+    # so without a destination check the key block is overwritten and two shard columns are
+    # never written at all.
+    affine_map = _column_split_qkv_map()
+    _move_destination(affine_map, rank=0, index=2, delta=-2)
+    with pytest.raises(ValueError, match='twice'):
+        affine_map.validate()
+
+
+def test_strided_destination_outside_the_shard_is_refused():
+    affine_map = _column_split_qkv_map()
+    _move_destination(affine_map, rank=0, index=2, delta=2)
+    with pytest.raises(ValueError, match='outside the shard'):
+        affine_map.validate()
+
+
+def test_strided_destination_that_wraps_a_shard_row_round_trips():
+    # In a (3, 3) shard, a (2, 2) view starting at address 2 with the shard's strides writes
+    # addresses 2, 3, 5 and 6. It wraps past the end of row 0 but stays inside the shard, so it
+    # is a valid destination even though it is not a box of the shard's grid.
+    pieces = [
+        AffinePiece((2, 2), 0, (2, 1), 2, (3, 1), [0]),
+        AffinePiece((2, ), 4, (1, ), 0, (1, ), [0]),
+        AffinePiece((1, ), 6, (1, ), 4, (1, ), [0]),
+        AffinePiece((2, ), 7, (1, ), 7, (1, ), [0]),
+    ]
+    affine_map = ParamAffineMap((9, ), {0: (3, 3)}, {0: pieces})
+    affine_map.validate_coverage()
+    full = torch.arange(9.)
+    torch.testing.assert_close(affine_map.rebuild({0: affine_map.extract(full, 0)}), full)
+
+
+def test_full_check_refuses_a_destination_collision_of_any_stride():
+    # The first piece writes shard addresses 0 and 2, the second writes 1 and 2, and address 3
+    # is never written. Neither piece is a box of the shard's grid, so only walking the
+    # addresses can see it.
+    pieces = [AffinePiece((2, ), 0, (1, ), 0, (2, ), [0]), AffinePiece((2, ), 2, (1, ), 1, (1, ), [0])]
+    affine_map = ParamAffineMap((4, ), {0: (4, )}, {0: pieces})
+    with pytest.raises(ValueError, match='twice'):
+        affine_map.validate_coverage()
+
+
+def test_strided_destination_validation_does_not_enumerate_elements(monkeypatch):
+    size = 10**9
+    pieces = [AffinePiece((size, 4), column, (8, 1), column, (8, 1), [0]) for column in (0, 4)]
+    affine_map = ParamAffineMap((size, 8), {0: (size, 8)}, {0: pieces})
+
+    def refuse_walk(self, base, strides):
+        raise AssertionError('validation must not enumerate shard elements')
+
+    monkeypatch.setattr(AffinePiece, '_offsets', refuse_walk)
+    affine_map.validate()
+
+
 # Guards added in review. Each one covers a way a map could produce a plausible but wrong
 # parameter rather than failing, which is the failure mode that matters for a checkpoint.
 
@@ -745,6 +815,69 @@ def test_yuan_weight_is_no_longer_refused_by_conversion(layer_name, out_features
 
     assert r"^proj\.weight$" in info.get(AFFINE_MAP, {}).get(AFFINE_MAP_PARAMS, {})
     assert r"^proj\.weight$" not in info.get(AUTOTP_UNSUPPORTED_PARAMETER_PATTERNS, {})
+
+
+@pytest.mark.parametrize('num_heads, mp_size', [(8, 2), (8, 4), (16, 4)])
+def test_yuan_output_projection_keeps_its_bias_whole(num_heads, mp_size):
+    """The output projection's bias must survive partitioning unchanged on every rank.
+
+    LinearAllreduce sums the ranks' partial products first and adds the bias once afterwards,
+    so each rank needs the whole bias. Partitioning used to raise on a bias here, and dividing
+    it by the world size instead would scale the output's bias by the same factor. The
+    unsharded layer is the reference for both.
+    """
+    from deepspeed.module_inject.fusedqkv_utils import shard_value_with_share_qk, shared_qk_value_head_ids
+
+    head_dim, out_features = 4, 12
+    in_features = num_heads * head_dim
+    meta = AutoTPMeta(num_kv_heads=num_heads)
+    torch.manual_seed(0)
+    weight = torch.randn(out_features, in_features, dtype=torch.float64)
+    bias = torch.randn(out_features, dtype=torch.float64)
+    x = torch.randn(3, in_features, dtype=torch.float64)
+
+    reduced = torch.zeros(3, out_features, dtype=torch.float64)
+    bias_shards = []
+    for rank in range(mp_size):
+        weight_shard, bias_shard = shard_value_with_share_qk(weight, torch.nn.Parameter(bias.clone()), rank, mp_size,
+                                                             False, meta)
+        columns = torch.cat([
+            torch.arange(head * head_dim, (head + 1) * head_dim)
+            for head in shared_qk_value_head_ids(num_heads, mp_size, rank)
+        ])
+        reduced += x[:, columns] @ weight_shard.detach().T
+        bias_shards.append(bias_shard.detach())
+
+    for bias_shard in bias_shards:
+        assert torch.equal(bias_shard, bias)
+    assert torch.allclose(reduced + bias_shards[0], x @ weight.T + bias)
+
+
+def test_yuan_output_projection_bias_is_described_as_replicated():
+    """With its bias kept whole, Yuan's output projection has nothing left to refuse.
+
+    The bias was the last parameter in tree published as unsupported whatever the configuration.
+    It is an ordinary replicated piece: every rank holds all of it, unscaled.
+    """
+    from deepspeed.checkpoint.affine import ParamAffineMap
+    from deepspeed.checkpoint.constants import (AFFINE_MAP, AFFINE_MAP_PARAMS, AUTOTP_UNSUPPORTED_PARAMETER_PATTERNS)
+    from deepspeed.module_inject.layers import Yuan_LinearAllreduce, collect_autotp_universal_checkpoint_info
+
+    mp_size = 2
+    layer = Yuan_LinearAllreduce(torch.nn.Linear(8, 8, bias=True), mp_group=None, name='o_proj')
+    layer.tp_world_size = mp_size
+    layer.tp_meta = AutoTPMeta(num_kv_heads=8)
+
+    model = torch.nn.Module()
+    model.o_proj = layer
+    info = collect_autotp_universal_checkpoint_info(model)
+
+    assert info.get(AUTOTP_UNSUPPORTED_PARAMETER_PATTERNS, {}) == {}
+    bias_map = ParamAffineMap.from_dict(info[AFFINE_MAP][AFFINE_MAP_PARAMS][r"^o_proj\.bias$"])
+    for rank in range(mp_size):
+        (piece, ) = bias_map.pieces_by_rank[rank]
+        assert piece.locations == frozenset(range(mp_size))
+        assert piece.scale == 1.0
 
 
 def test_a_layout_without_head_counts_stays_unsupported():
