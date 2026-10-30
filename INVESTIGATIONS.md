@@ -1297,3 +1297,9 @@ eager NCCL on this host is faster (25.3 vs 49.4us on the prior host —
 different nccl build), making eager custom-vs-NCCL a wash (26.8 vs
 25.3); the E2E gain persists because in-graph NCCL carries ~29us/call
 against our ~11us.
+
+
+### Item 1 (GEMM combo) — +3.6-4.0% KEPT
+1001.5 / 2856.4 / 4238.4 vs baseline 963.0 / 2756.2 / 4255.3.
+vs vLLM: 68.3% / 58.6% / 55.4%. Ampere GLU now rides concat-cached
+cuBLAS + native silu_mul; Ada keeps the WMMA fused path.
