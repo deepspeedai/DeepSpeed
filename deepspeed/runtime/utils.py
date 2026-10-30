@@ -915,16 +915,18 @@ def combine_grad_norm_groups(norm_groups, norm_type=2):
 
 def _get_local_norm_contribution(input_tensors, norm_type, device):
     """Compute the FP32 input to the global MAX or SUM reduction."""
-    if not input_tensors and norm_type > 0:
-        return torch.zeros((), dtype=torch.float32, device=device)
-
     all_norms = []
     for tensor in input_tensors:
         if norm_type == inf:
+            if tensor.numel() == 0:
+                continue
             tensor_norm = tensor.detach().abs().max().float()
         else:
             tensor_norm = tensor.detach().float().norm(norm_type)
         all_norms.append(tensor_norm.to(device))
+
+    if not all_norms and norm_type > 0:
+        return torch.zeros((), dtype=torch.float32, device=device)
 
     local_norms = torch.stack(all_norms)
     if norm_type == inf:

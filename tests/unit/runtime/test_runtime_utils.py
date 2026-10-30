@@ -159,7 +159,8 @@ class TestGlobalNormEmptyInput(DistributedTest):
     world_size = 2
 
     @pytest.mark.parametrize("parallelism", ["model", "expert", "none"])
-    @pytest.mark.parametrize("input_case", ["nonempty", "one_empty", "all_empty"])
+    @pytest.mark.parametrize("input_case",
+                             ["nonempty", "one_empty", "all_empty", "one_zero_tensor", "all_zero_tensors", "mixed"])
     def test(self, parallelism, input_case):
         rank = dist.get_rank()
         parallel_group = dist.new_group([0, 1])
@@ -170,15 +171,18 @@ class TestGlobalNormEmptyInput(DistributedTest):
             kwargs["moe_ep_group"] = parallel_group
 
         local_values = [3.0, -4.0] if rank == 0 else [12.0]
-        if input_case == "all_empty" or (input_case == "one_empty" and rank == 1):
+        if input_case in ("all_empty", "all_zero_tensors") or (input_case in ("one_empty", "one_zero_tensor")
+                                                               and rank == 1):
             local_values = []
         tensors = [torch.tensor(local_values, device=get_accelerator().current_device_name())] if local_values else []
+        if input_case in ("one_zero_tensor", "all_zero_tensors", "mixed"):
+            tensors.insert(0, torch.empty(0, device=get_accelerator().current_device_name()))
         expected_norms = [0.0, 0.0, 0.0, 0.0]
         if local_values:
             expected_norms = [7.0, 5.0, 91.0**(1.0 / 3.0), 4.0] if rank == 0 else [12.0] * 4
-        if parallelism != "none" and input_case != "all_empty":
+        if parallelism != "none" and input_case not in ("all_empty", "all_zero_tensors"):
             expected_norms = ([19.0, 13.0, 1819.0**(1.0 / 3.0), 12.0]
-                              if input_case == "nonempty" else [7.0, 5.0, 91.0**(1.0 / 3.0), 4.0])
+                              if input_case in ("nonempty", "mixed") else [7.0, 5.0, 91.0**(1.0 / 3.0), 4.0])
 
         for norm_type, expected in zip([1, 2, 3, float("inf")], expected_norms):
             norm = ds_utils.get_global_norm_of_tensors(tensors, norm_type=norm_type, **kwargs)
@@ -192,14 +196,16 @@ class TestGlobalNormEmptyInput(DistributedTest):
 class TestGlobalNormIterable(DistributedTest):
     world_size = 1
 
-    @pytest.mark.parametrize("input_case", ["nonempty", "empty"])
+    @pytest.mark.parametrize("input_case", ["nonempty", "empty", "zero_tensor", "mixed"])
     def test(self, input_case):
         for device in ["cpu", get_accelerator().current_device_name()]:
             tensors = [torch.tensor([3.0, -4.0], device=device, requires_grad=True)
-                       ] if input_case == "nonempty" else []
+                       ] if input_case in ("nonempty", "mixed") else []
+            if input_case in ("zero_tensor", "mixed"):
+                tensors.insert(0, torch.empty(0, device=device))
             for norm_type, nonempty_expected in [(1, 7.0), (2, 5.0), (3, 91.0**(1.0 / 3.0)), (float("inf"), 4.0)]:
                 norm = ds_utils.get_global_norm_of_tensors((tensor for tensor in tensors), norm_type=norm_type)
-                assert norm.item() == pytest.approx(nonempty_expected if tensors else 0.0)
+                assert norm.item() == pytest.approx(nonempty_expected if input_case in ("nonempty", "mixed") else 0.0)
                 expected_device = tensors[0].device if tensors else torch.device(
                     get_accelerator().current_device_name())
                 assert norm.device == expected_device
