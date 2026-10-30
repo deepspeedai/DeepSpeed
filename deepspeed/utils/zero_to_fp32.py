@@ -689,7 +689,8 @@ def convert_zero_checkpoint_to_state_dict(checkpoint_dir,
 
     Args:
         - ``checkpoint_dir``: path to the desired checkpoint folder. (one that contains the tag-folder, like ``global_step14``)
-        - ``output_dir``: directory for the PyTorch state_dict output files
+        - ``output_dir``: directory for the output files. Previous converter-generated
+          weights, indexes, and shards in either format are replaced; unrelated files are preserved.
         - ``dtype``: output floating-point tensor dtype. Supports float32, float16, and bfloat16 as strings or torch dtypes.
           Non-floating-point buffers retain their dtype.
         - ``max_shard_size``: the maximum size for a checkpoint before being sharded, default value is 5GB
@@ -754,16 +755,34 @@ def convert_zero_checkpoint_to_state_dict(checkpoint_dir,
         gc.collect()
 
     # Save index if sharded
+    output_files = set(state_dict_split.filename_to_tensors)
     if state_dict_split.is_sharded:
         index = {
             "metadata": state_dict_split.metadata,
             "weight_map": state_dict_split.tensor_to_filename,
         }
-        save_index_file = "model.safetensors.index.json" if safe_serialization else "pytorch_model.bin.index.json"
-        save_index_file = os.path.join(output_dir, save_index_file)
-        with open(save_index_file, "w", encoding="utf-8") as f:
+        index_name = "model.safetensors.index.json" if safe_serialization else "pytorch_model.bin.index.json"
+        output_files.add(index_name)
+        with open(os.path.join(output_dir, index_name), "w", encoding="utf-8") as f:
             content = json.dumps(index, indent=2, sort_keys=True) + "\n"
             f.write(content)
+
+    # Retire old exports only after all new shards and their index have been saved.
+    # Both formats must be cleaned up because readers may prefer the other format.
+    weights_files = {
+        "pytorch_model.bin",
+        "pytorch_model.bin.index.json",
+        "model.safetensors",
+        "model.safetensors.index.json",
+    }
+    shard_pattern = re.compile(
+        r"(?:pytorch_model-[0-9]{5,}-of-[0-9]{5,}\.bin|model-[0-9]{5,}-of-[0-9]{5,}\.safetensors)")
+    with os.scandir(output_dir) as entries:
+        for entry in entries:
+            if entry.name in output_files or not entry.is_file():
+                continue
+            if entry.name in weights_files or shard_pattern.fullmatch(entry.name):
+                os.remove(entry.path)
 
 
 def convert_zero_checkpoint_to_fp32_state_dict(checkpoint_dir,
