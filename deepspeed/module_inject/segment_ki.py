@@ -623,24 +623,6 @@ def _install_gdn_segment(seg: GDNSegment) -> bool:
             # its copy (the state is already home).
             try:
                 out = _fla_recurrent_inplace(query, key, value, **kw)
-                if _os.environ.get("FLA_BYPASS_DEBUG") == "2":
-                    # in-situ equivalence probe: rerun the module-bound fn on
-                    # cloned inputs and bitwise-compare both outputs
-                    import sys as _sys
-                    _fn = getattr(parent, "recurrent_gated_delta_rule", None) or getattr(
-                        _sys.modules[type(parent).__module__], "torch_recurrent_gated_delta_rule", None)
-                    _st0 = kw["initial_state"].clone()
-                    _o2, _s2 = _fn(query, key, value, **{
-                        **kw,
-                        "initial_state": _st0,
-                    })
-                    _ob = (out[0] == _o2).float().mean().item()
-                    _sb = (kw["initial_state"] == _s2).float().mean().item()
-                    if _ob < 1.0 or _sb < 1.0:
-                        _md = (out[0].float() - _o2.float()).abs().max().item()
-                        print(f"FLA-IP-DIVERGE o={_ob:.6f} state={_sb:.6f} layer={parent.layer_idx} "
-                              f"maxdiff={_md:.6f} fn={getattr(_fn, '__module__', '?')}.{getattr(_fn, '__name__', '?')}",
-                              flush=True)
                 return out
             except (ImportError, AttributeError):
                 pass  # FLA layout changed — fall through to the wrapper

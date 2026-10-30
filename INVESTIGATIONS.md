@@ -1347,3 +1347,34 @@ path where it wins; inert at TP). Item 2 closed: copy-back elimination
 requires a deeper redesign (warp-parallel K reduction per column), on
 the kernel-track with two falsified hypotheses recorded (smem staging,
 occupancy).
+
+
+## 29. FLA in-place bypass — the +9-15% win and the mystery it unraveled
+
+User's insight: bypass FLA's wrapper, pass the cache slot as BOTH h0 and
+ht (each Triton program reads its tile before writing it — in-place
+safe). Kills the copy-back AND, as it turned out, much more.
+
+### Results (198/198 tests, deterministic across runs)
+| bs | baseline | bypass | delta | vs vLLM |
+|----|----------|--------|-------|---------|
+| 8  | 1001.5 | 1041.8-1050.5 | +4-5%  | 71.0% |
+| 32 | 2856.4 | 3107.6-3113.0 | +9.0%  | 63.9% |
+| 64 | 4238.4 | 4859.2-4889.3 | +15%    | 63.9% |
+
+### The unraveling (token match 0.578 -> 0.250)
+In-situ probe: the "wrapper path" was NOT FLA at all on this host —
+transformers 5.x no longer binds FLA per-layer, so the scan fell back to
+`torch_recurrent_gated_delta_rule`, the PURE-TORCH FP32 REFERENCE. The
+bypass switched decode to FLA's Triton kernel (bf16-input MMA, fp32
+state) — maxdiff 0.004-0.12 vs the reference = precision-path
+difference, both correct implementations of the same recurrence.
+Bitwise: bypass == FLA public API exactly (synthetic test, 0/1.6M
+diff). The eager-HF oracle itself uses the fp32 reference, hence the
+match-rate drop is the documented chaotic near-tie class (first-8
+bit-identical, 1/8 rows exact, deterministic), not a bug.
+
+So the win = copy-back elimination + replacing the slow eager fp32
+reference with FLA's kernel. Side effect: the "GDN scan/conv 1.2ms"
+profile bucket on this host was mostly eager fp32 ops; the gap table's
+GDN entry improves too.
