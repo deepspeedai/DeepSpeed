@@ -20,6 +20,7 @@ from deepspeed.utils import safe_set_local_fp32_param, safe_set_local_grad, safe
 from deepspeed.utils import safe_update_full_grad_vectorized
 from deepspeed.utils.mixed_precision_linkage import link_hp_params
 from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum, OffloadStateTypeEnum
+from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer
 from deepspeed.ops.aio import AsyncIOBuilder
 from deepspeed.accelerator import get_accelerator
 from deepspeed.runtime.swap_tensor import MIN_SWAPPABLE_BYTES
@@ -607,3 +608,64 @@ class TestTensorFragmentUpdate(DistributedTest):
             pass
 
         run_fragmented_model(model, config_dict, hidden_dim, dtype, after_bwd_validate_func, after_step_validate_func)
+
+
+class TestOptimizerStateLinksAllParamGroups(DistributedTest):
+    world_size = 2
+    reuse_dist_env = True
+
+    @pytest.mark.parametrize("zero_stage", [1, 2])
+    def test_all_param_groups_have_moments_after_first_step(self, zero_stage):
+        if not get_accelerator().is_bf16_supported():
+            pytest.skip("requires bf16")
+
+        model = torch.nn.Linear(4, 4, bias=True)
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 1,
+            "steps_per_print": 1,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 1e-3,
+                    "torch_adam": True,
+                },
+            },
+            "bf16": {
+                "enabled": True
+            },
+            "zero_optimization": {
+                "stage": zero_stage,
+                "overlap_comm": False,
+            },
+            "communication_data_type": "fp32",
+            "gradient_clipping": 0.0,
+        }
+        engine, _, _, _ = deepspeed.initialize(model=model,
+                                               model_parameters=[{
+                                                   "params": [model.weight]
+                                               }, {
+                                                   "params": [model.bias]
+                                               }],
+                                               config=config_dict)
+        # BF16_Optimizer updates every group in one call, so it cannot reproduce
+        # the per-group linking order this regression covers.
+        assert isinstance(engine.optimizer, DeepSpeedZeroOptimizer)
+
+        inputs = torch.arange(1, 5, dtype=torch.bfloat16, device=engine.device).unsqueeze(0)
+        engine.backward(engine(inputs).sum())
+        engine.step()
+
+        beta1 = 0.9
+        beta2 = 0.999
+        expected_grads = {
+            "weight": inputs.to(torch.float32).expand(4, 4),
+            "bias": torch.ones(4, dtype=torch.float32, device=engine.device),
+        }
+        for name, param in engine.module.named_parameters():
+            grad = expected_grads[name]
+            exp_avg = safe_get_full_optimizer_state(param, "exp_avg")
+            exp_avg_sq = safe_get_full_optimizer_state(param, "exp_avg_sq")
+            torch.testing.assert_close(exp_avg, (1 - beta1) * grad, rtol=1e-6, atol=1e-8)
+            torch.testing.assert_close(exp_avg_sq, (1 - beta2) * grad.square(), rtol=1e-6, atol=1e-8)
+
+        engine.destroy()

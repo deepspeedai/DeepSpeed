@@ -850,11 +850,20 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                            param_offsets=param_offsets)
 
     def _lazy_init_hp_params_optimizer_state(self):
-        if not self._hp_optimizer_states_linked:
-            for i, _ in enumerate(self.optimizer.param_groups):
-                lazy_init_hp_params_optimizer_state(self.bit16_groups[i], self.single_partition_of_fp32_groups[i],
-                                                    self.optimizer.state)
-            self._hp_optimizer_states_linked = True
+        if self._hp_optimizer_states_linked:
+            return
+
+        linked_groups = 0
+        for i, _ in enumerate(self.optimizer.param_groups):
+            linked = lazy_init_hp_params_optimizer_state(self.bit16_groups[i], self.single_partition_of_fp32_groups[i],
+                                                         self.optimizer.state)
+            if linked:
+                linked_groups += 1
+
+        # Groups are stepped one at a time, so later groups have no optimizer
+        # state until their own update. Keep the flag false until every group
+        # has been linked and retry after the remaining groups update.
+        self._hp_optimizer_states_linked = linked_groups == len(self.optimizer.param_groups)
 
     def is_moe_group(self, group):
         return 'moe' in group and group['moe']
