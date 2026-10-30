@@ -488,6 +488,10 @@ def _fla_recurrent_inplace(query, key, value, **kw):
     HV = v.shape[2]
     o = torch.empty_like(v)
     BK = triton.next_power_of_2(K)
+    # the outer (bypassed) wrapper computes this default; the Triton
+    # kernel cannot branch on a None host value
+    scale = kw.get("scale")
+    if scale is None: scale = K**-0.5
     BV = min(8, triton.next_power_of_2(V))
     NV = triton.cdiv(V, BV)
     fused_recurrent_gated_delta_rule_fwd_kernel[(NV * B * HV, )](
@@ -504,7 +508,7 @@ def _fla_recurrent_inplace(query, key, value, **kw):
         h0=slot,
         ht=slot,  # in-place: each program reads its tile before writing it
         cu_seqlens=None,
-        scale=kw.get("scale"),
+        scale=scale,
         T=T,
         H=H,
         HV=HV,
