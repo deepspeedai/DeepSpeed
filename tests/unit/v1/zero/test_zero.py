@@ -1957,8 +1957,6 @@ class TestZero3OffloadPinnedCopyBack(DistributedTest):
         optimizer = model.optimizer
         cpu_masters = [m for m in optimizer.fp32_partitioned_groups_flat if m.device.type == "cpu" and m.numel() > 0]
         pinned_masters = sum(get_accelerator().is_pinned(m) for m in cpu_masters)
-        # Pieces much smaller than a sub-group, so every sub-group is copied in many pieces per step.
-        optimizer._copy_back_numel = 1000
         pinned_copies = []
         copy_pinned_master = optimizer._copy_pinned_master_to_device
 

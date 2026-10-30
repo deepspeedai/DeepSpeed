@@ -250,9 +250,6 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         self.offload_optimizer = False
         self.offload_optimizer_pin_memory = False
-        # Elements per piece when a pinned CPU master partition is copied back to the device
-        # (_copy_pinned_master_to_device): the device temporary holds one piece, not a whole sub-group.
-        self._copy_back_numel = 2**26
         self.offload_optimizer_fast_init = False
         self.offload_param = False
         self.offload_param_pin_memory = False
@@ -2871,13 +2868,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         """Copy the pinned CPU master partition ``src`` into the low-precision device partition ``dst``.
 
         The master goes to the device in its own dtype and is cast there, the form #5301 introduced in ZeRO-1/2:
-        ``dst.copy_(src)`` would cast on the CPU into a pageable temporary and copy from that at a few GB/s. The copy
-        goes in pieces, so the device temporary holds one piece instead of the whole sub-group."""
-        src = src.view(-1)
-        dst = dst.view(-1)
-        for start in range(0, src.numel(), self._copy_back_numel):
-            end = min(start + self._copy_back_numel, src.numel())
-            dst[start:end].copy_(src[start:end].to(dst.device, non_blocking=True))
+        ``dst.copy_(src)`` would cast on the CPU into a pageable temporary and copy from that at a few GB/s."""
+        dst.copy_(src.to(dst.device, non_blocking=True))
         # Callers expect the partition on the device when this returns: the parameter all-gathers of the next forward
         # run on a stream that does not wait for this one.
         event = get_accelerator().Event()
