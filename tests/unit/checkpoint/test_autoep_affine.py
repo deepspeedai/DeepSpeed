@@ -7,10 +7,11 @@ import pytest
 import torch
 
 from deepspeed.checkpoint.affine import AFFINE_MAP_FORMAT_VERSION, ParamAffineMap
+from deepspeed.checkpoint.affine_transfer import plan_transfer
 from deepspeed.checkpoint.autoep_affine import (AUTOEP_PLACEMENT_VERSION, autoep_experts_for_rank,
                                                 autoep_metadata_to_affine_map, autoep_placement_to_affine_map,
-                                                autoep_placements_equal, extract_autoep_rank_tensor,
-                                                legacy_uniform_autoep_placement_descriptor,
+                                                autoep_placements_equal, autoep_storage_affine_map,
+                                                extract_autoep_rank_tensor, legacy_uniform_autoep_placement_descriptor,
                                                 make_autoep_placement_descriptor, validate_autoep_placement_descriptor)
 from deepspeed.checkpoint.constants import (AFFINE_MAP, AFFINE_MAP_PARAMS, AFFINE_MAP_VERSION, AUTOEP_AFFINE_MAPS,
                                             AUTOEP_EXPERT_PLACEMENT, AUTOEP_PLACEMENT_RANKS)
@@ -239,10 +240,147 @@ def test_extract_target_rank_uses_target_packed_order():
     assert torch.equal(actual, expected)
 
 
-def test_placements_equal_identifies_ranks_by_id():
-    descriptor = make_autoep_placement_descriptor(4, [[3, 0], [], [2, 1, 0]])
+def _oracle_storage(full_tensor, experts_by_rank, holders_by_ep_rank, partition_numel_by_ep_rank=None):
+    """What each global rank stores, built by indexing the full tensor rather than through a map."""
+    storage = {}
+    for ep_rank, packed in _oracle_shards(full_tensor, experts_by_rank).items():
+        flat = packed.reshape(-1)
+        for edp_rank, global_rank in enumerate(holders_by_ep_rank[ep_rank]):
+            if partition_numel_by_ep_rank is None:
+                storage[global_rank] = flat.clone()
+                continue
+            partition_numel = partition_numel_by_ep_rank[ep_rank]
+            # ZeRO-3 pads the flattened tensor at its end; the padding holds no parameter elements.
+            storage[global_rank] = flat[edp_rank * partition_numel:(edp_rank + 1) * partition_numel].clone()
+    return storage
+
+
+def _execute(plan, source_storage, target_storage):
+    writes = {rank: torch.zeros_like(storage, dtype=torch.int64) for rank, storage in target_storage.items()}
+    for segment in plan.segments:
+        source = torch.as_strided(source_storage[segment.source_rank], segment.shape, segment.source_strides,
+                                  segment.source_offset)
+        torch.as_strided(target_storage[segment.target_rank], segment.shape, segment.target_strides,
+                         segment.target_offset).copy_(source)
+        torch.as_strided(writes[segment.target_rank], segment.shape, segment.target_strides,
+                         segment.target_offset).add_(1)
+    return writes
+
+
+# EP=2 x EDP=2 over global ranks 0..3, then EP=3 x EDP=2 with reordered, replicated and empty
+# placements on interleaved global ranks. Partition sizes split experts mid-row and leave padding.
+_SOURCE = ([[0, 1], [2, 3]], {0: [0, 2], 1: [1, 3]}, {0: 23, 1: 23})
+_TARGET = ([[3, 0], [], [2, 1, 0]], {0: [5, 1], 1: [0, 4], 2: [3, 2]}, {0: 30, 1: 0, 2: 38})
+
+
+@pytest.mark.parametrize('zero3', [False, True])
+@pytest.mark.parametrize('layout', [_SOURCE, _TARGET], ids=['uniform', 'replicated_and_empty'])
+def test_storage_map_describes_what_each_global_rank_stores(layout, zero3):
+    experts_by_rank, holders, partitions = layout
+    partitions = partitions if zero3 else None
+    full_tensor = torch.arange(4 * 3 * 5, dtype=torch.float32).reshape(4, 3, 5)
+    descriptor = make_autoep_placement_descriptor(4, experts_by_rank)
+    expected = _oracle_storage(full_tensor, experts_by_rank, holders, partitions)
+
+    affine_map = autoep_storage_affine_map(descriptor, full_tensor.shape, holders, partitions)
+
+    affine_map.validate_coverage()
+    assert affine_map.shard_shapes == {rank: tuple(storage.shape) for rank, storage in expected.items()}
+    for rank, storage in expected.items():
+        torch.testing.assert_close(affine_map.extract(full_tensor, rank), storage, rtol=0, atol=0)
+    torch.testing.assert_close(affine_map.rebuild(expected), full_tensor, rtol=0, atol=0)
+
+
+def test_storage_map_offers_every_edp_replica_to_the_planner():
+    experts_by_rank, holders, _ = _SOURCE
+    full_tensor = torch.arange(4 * 6, dtype=torch.float32).reshape(4, 6)
+    source_map = autoep_storage_affine_map(make_autoep_placement_descriptor(4, experts_by_rank), full_tensor.shape,
+                                           holders)
+    target_experts, target_holders, target_partitions = _TARGET
+    target_map = autoep_storage_affine_map(make_autoep_placement_descriptor(4, target_experts), full_tensor.shape,
+                                           target_holders, target_partitions)
+    source_storage = _oracle_storage(full_tensor, experts_by_rank, holders)
+    replica_sets = {frozenset(ranks) for ranks in holders.values()}
+    offered = []
+
+    def highest_replica(request):
+        offered.append(frozenset(candidate.source_rank for candidate in request.candidates))
+        return max(candidate.source_rank for candidate in request.candidates)
+
+    for selector, used_ranks in ((None, {0, 1}), (highest_replica, {2, 3})):
+        plan = plan_transfer(target_map, source_map, replica_selector=selector)
+        assert {segment.source_rank for segment in plan.segments} == used_ranks
+        target_storage = {rank: torch.full(shape, float('nan')) for rank, shape in target_map.shard_shapes.items()}
+        writes = _execute(plan, source_storage, target_storage)
+        expected = _oracle_storage(full_tensor, target_experts, target_holders, target_partitions)
+        for rank, storage in expected.items():
+            torch.testing.assert_close(target_storage[rank], storage, rtol=0, atol=0)
+            assert torch.all(writes[rank] == 1)
+    assert offered and set(offered) <= replica_sets
+
+
+def test_zero3_storage_plans_directly_into_a_new_placement():
+    full_tensor = torch.arange(4 * 3 * 5, dtype=torch.float32).reshape(4, 3, 5)
+    layouts = []
+    for experts_by_rank, holders, partitions in (_SOURCE, _TARGET):
+        descriptor = make_autoep_placement_descriptor(4, experts_by_rank)
+        layouts.append((autoep_storage_affine_map(descriptor, full_tensor.shape, holders, partitions),
+                        _oracle_storage(full_tensor, experts_by_rank, holders, partitions)))
+    (source_map, source_storage), (target_map, expected) = layouts
+
+    plan = plan_transfer(target_map, source_map)
+
+    target_storage = {rank: torch.full(shape, float('nan')) for rank, shape in target_map.shard_shapes.items()}
+    writes = _execute(plan, source_storage, target_storage)
+    for rank, storage in expected.items():
+        torch.testing.assert_close(target_storage[rank], storage, rtol=0, atol=0)
+        assert torch.all(writes[rank] == 1)
+    # Global ranks 0 and 4 hold the empty EP rank; rank 1's ZeRO-3 partition is all padding.
+    assert target_map.shard_shapes[0] == target_map.shard_shapes[4] == target_map.shard_shapes[1] == (0, )
+    assert not {0, 4, 1} & {segment.target_rank for segment in plan.segments}
+
+
+def test_storage_map_follows_explicit_rank_ids():
+    experts_by_rank, holders, partitions = _TARGET
+    descriptor = make_autoep_placement_descriptor(4, experts_by_rank)
     reordered = dict(descriptor)
     reordered[AUTOEP_PLACEMENT_RANKS] = list(reversed(descriptor[AUTOEP_PLACEMENT_RANKS]))
 
     assert autoep_placements_equal(descriptor, reordered)
     assert not autoep_placements_equal(descriptor, make_autoep_placement_descriptor(4, [[0, 3], [], [2, 1, 0]]))
+    for zero3_partitions in (None, partitions):
+        expected = autoep_storage_affine_map(descriptor, (4, 6), holders, zero3_partitions)
+        actual = autoep_storage_affine_map(reordered, (4, 6), dict(reversed(list(holders.items()))), zero3_partitions)
+        assert actual.to_dict() == expected.to_dict()
+
+
+@pytest.mark.parametrize('holders, partitions, match', [
+    ({
+        0: [0, 2]
+    }, None, 'names EP ranks'),
+    ({
+        0: [0, 2],
+        1: [1, 2]
+    }, None, 'more than one EP rank'),
+    ({
+        0: [0, 2],
+        1: []
+    }, None, 'no global holder'),
+    ({
+        0: [0, 2],
+        1: [1, 3]
+    }, {
+        0: 23,
+        1: 14
+    }, 'cannot store'),
+    ({
+        0: [0, 2],
+        1: [1, 3]
+    }, {
+        0: 23
+    }, 'Partition size'),
+])
+def test_storage_map_rejects_holders_that_do_not_store_the_placement(holders, partitions, match):
+    descriptor = make_autoep_placement_descriptor(4, [[0, 1], [2, 3]])
+    with pytest.raises(ValueError, match=match):
+        autoep_storage_affine_map(descriptor, (4, 3, 5), holders, partitions)
