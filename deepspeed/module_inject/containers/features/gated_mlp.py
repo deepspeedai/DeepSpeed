@@ -36,17 +36,27 @@ class HybridGatedMLPContainer(HybridEngineContainer):
     def mlp_inter_mp(self, mp_replace, reversed_dim=False):
         # Only need to alter behavior if we can't do the normal destructive copy
         if self.module.mlp.inter_w is None:
-            params = [
-                (self.module.mlp.inter_up_w, self.inter_up_w),
-                (self.module.mlp.inter_up_b, self.inter_up_b),
-                (self.module.mlp.inter_gate_w, self.inter_gate_w),
-                (self.module.mlp.inter_gate_b, self.inter_gate_b),
-            ]
-            for dst, src in params:
-                dst = mp_replace.copy(dst[:self.inter_up_w.shape[0] // mp_replace.mp_size],
-                                      src,
-                                      int8=reversed_dim,
-                                      allocate_tensor=reversed_dim) if src is not None else None
+            self.module.mlp.inter_up_w = mp_replace.copy(
+                self.module.mlp.inter_up_w[:self.inter_up_w.shape[0] // mp_replace.mp_size],
+                self.inter_up_w,
+                int8=reversed_dim,
+                allocate_tensor=reversed_dim) if self.inter_up_w is not None else None
+            self.module.mlp.inter_up_b = mp_replace.copy(
+                self.module.mlp.inter_up_b[:self.inter_up_w.shape[0] // mp_replace.mp_size],
+                self.inter_up_b,
+                int8=reversed_dim,
+                allocate_tensor=reversed_dim) if self.inter_up_b is not None else None
+            self.module.mlp.inter_gate_w = mp_replace.copy(
+                self.module.mlp.inter_gate_w[:self.inter_up_w.shape[0] // mp_replace.mp_size],
+                self.inter_gate_w,
+                int8=reversed_dim,
+                allocate_tensor=reversed_dim) if self.inter_gate_w is not None else None
+            self.module.mlp.inter_gate_b = mp_replace.copy(
+                self.module.mlp.inter_gate_b[:self.inter_up_w.shape[0] // mp_replace.mp_size],
+                self.inter_gate_b,
+                int8=reversed_dim,
+                allocate_tensor=reversed_dim) if self.inter_gate_b is not None else None
+
         else:
             self.module.mlp.inter_w = mp_replace.strided_copy(self.module.mlp.inter_w,
                                                               self._h4h_w,
@@ -56,6 +66,18 @@ class HybridGatedMLPContainer(HybridEngineContainer):
                                                               self._h4h_b,
                                                               num_splits=2,
                                                               int8=reversed_dim)
+
+    def mlp_output_mp(self, mp_replace, reversed_dim=False):
+        self.module.mlp.output_w = mp_replace.copy(
+            self.module.mlp.output_w[:, :self._4hh_w.shape[1] // mp_replace.mp_size],
+            self._4hh_w,
+            int8=reversed_dim,
+            allocate_tensor=reversed_dim) if self._4hh_w is not None else None
+        self.module.mlp.output_b = mp_replace.copy(
+            self.module.mlp.output_b[:self._4hh_w.shape[1] // mp_replace.mp_size],
+            self._4hh_b,
+            int8=reversed_dim,
+            allocate_tensor=reversed_dim) if self._4hh_b is not None else None
 
     def release_mlp(self):
         super().release_mlp()
