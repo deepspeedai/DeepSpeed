@@ -607,6 +607,8 @@ def main(args=None):
                 logger.info(f"deepspeed_env file = {environ_file}")
                 with open(environ_file, 'r') as fd:
                     for var in fd.readlines():
+                        if not var.strip() or var.lstrip().startswith('#'):
+                            continue
                         key, val = var.split('=', maxsplit=1)
                         runner.add_export(key, val)
 
