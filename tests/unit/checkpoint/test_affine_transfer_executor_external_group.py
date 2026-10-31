@@ -54,8 +54,15 @@ def _worker(rank, port, tmp):
     sources = {loc: source.extract(full, loc).contiguous() for loc in source.shard_shapes} if rank == 0 else {}
     targets = {loc: torch.full(shape, -1.0) for loc, shape in target.shard_shapes.items()} if rank == 1 else {}
     execute_transfer(plan, sources, targets, endpoints, torch.float32, group=group)
-    for loc, shard in targets.items():
-        assert torch.equal(shard, target.extract(full, loc)), loc
+    mismatched = [loc for loc, shard in targets.items() if not torch.equal(shard, target.extract(full, loc))]
+    # Leave together and tear down before exit. Rank 0 only sends and hosts the store, so without this it can exit
+    # while rank 1 is still on the group, and gloo's threads abort at interpreter exit ("terminate called without
+    # an active exception", SIGABRT in the merge queue).
+    tdist.barrier(group=group)
+    tdist.destroy_process_group(group)
+    tdist.destroy_process_group()
+    del store
+    assert not mismatched, mismatched
 
 
 @pytest.mark.skipif(get_accelerator().device_name() != 'cpu',
