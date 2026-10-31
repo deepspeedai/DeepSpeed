@@ -510,6 +510,32 @@ def test_update_mp_params_uses_group_local_rank(monkeypatch):
     assert child.num_heads == 4
 
 
+def test_update_mp_params_keeps_kv_heads_when_group_count_is_absent(monkeypatch):
+    tp_group = object()
+    autotp = object.__new__(AutoTP)
+    autotp.mp_group = tp_group
+    autotp.mp_size = 2
+    autotp._replicates_kv_block = True
+    child = nn.Module()
+    child.proj = nn.Linear(1, 1, bias=False)
+    setattr(child.proj.weight, DS_AUTOTP_UC_META, {})
+    child.multi_query = True
+    child.num_heads = 8
+    child.kv_heads = 1
+    child.num_key_value_heads = 1
+
+    monkeypatch.setattr(dist, "get_rank", lambda group=None: 1 if group is tp_group else 0)
+    autotp.tp_meta = AutoTPMeta(num_attention_heads=8, num_kv_heads=8)
+    autotp.update_mp_params(child)
+
+    # The query heads follow the local shard, but the copied key/value block does not. A
+    # transformers version that exposes a key/value head alias without num_key_value_groups
+    # must still keep that alias whole; sharding it would give rank 1 zero key/value heads.
+    assert child.num_heads == 4
+    assert child.num_key_value_heads == 1
+    assert not hasattr(child, "num_key_value_groups")
+
+
 def test_update_mp_params_shards_attributes_like_their_weights(monkeypatch):
     tp_group = object()
     autotp = object.__new__(AutoTP)
