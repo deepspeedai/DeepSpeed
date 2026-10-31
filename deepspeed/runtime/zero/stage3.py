@@ -3567,7 +3567,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                 else:
                     self.optimizer.state[p][key] = saved
 
-    def _rigid_load_state_dict(self, state_dict, load_optimizer_states=True):
+    def _rigid_load_state_dict(self, state_dict, load_optimizer_states=True, load_from_fp32_weights=True):
         # I think it should actually be ok to reload the optimizer before the model.
         if load_optimizer_states:
             self.loss_scaler = state_dict[LOSS_SCALER]
@@ -3616,6 +3616,9 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             for partitioned_param, q in zip(self.fp16_partitioned_groups[sub_group_id], updated_params):
                 partitioned_param.data = q.data
 
+        if not load_from_fp32_weights:
+            self.refresh_fp32_params()
+
     # TODO: Support different/changing load/save DP degree.
     def load_state_dict(self,
                         state_dict_list,
@@ -3657,7 +3660,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             self._load_universal_checkpoint(checkpoint_folder, load_optimizer_states, load_from_fp32_weights)
         else:
             self._rigid_load_state_dict(state_dict_list[dist.get_rank(group=self.dp_process_group)],
-                                        load_optimizer_states=load_optimizer_states)
+                                        load_optimizer_states=load_optimizer_states,
+                                        load_from_fp32_weights=load_from_fp32_weights)
 
             # when use loading checkpoint serial, after finish loading, we need to
             # delete the temp state_dict_list variable to save memory, then trigger
@@ -3678,6 +3682,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
     def _load_universal_checkpoint(self, checkpoint_folder, load_optimizer_states, load_from_fp32_weights):
         if load_optimizer_states:
             self.load_hp_checkpoint_state_from_checkpoint_dir_stage3(checkpoint_folder)
+            if not load_from_fp32_weights:
+                self.refresh_fp32_params()
         else:
             self.load_module_checkpoint_state_from_checkpoint_dir_stage3(checkpoint_folder, True)
 
