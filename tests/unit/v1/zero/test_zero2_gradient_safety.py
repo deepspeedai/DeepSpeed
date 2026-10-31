@@ -18,6 +18,7 @@ import deepspeed.comm as dist
 from deepspeed.accelerator import get_accelerator
 from deepspeed.ops import __compatible_ops__
 from deepspeed.runtime.zero import stage_1_and_2 as zero
+from deepspeed.runtime.zenflow.zenflow_stage_1_and_2 import ZenFlowZeroOptimizerParallel
 from deepspeed.runtime.zero.offload_config import DeepSpeedZeroOffloadOptimizerConfig
 from deepspeed.utils.timer import NoopTimer
 
@@ -46,11 +47,13 @@ def make_optimizer(dtype=torch.bfloat16, device=None, low_precision=False, cpu_o
     opt.set_gradient_accumulation_boundary(True)
     opt.compute_grad_norm = True
     opt.averaged_gradients = {}
+    opt.all_grad_tensors = {}
+    opt._completed_request_grads = {}
+    opt._current_backward_grads = {}
     opt._muon_pending_momentum = {}
     opt.micro_step_id = 0
     opt._pending_offload_events = {}
     opt._offload_accumulated_param_ids = set()
-    opt.accumulated_grads_in_cpu = {}
     opt.norm_for_param_grads = {}
     opt.local_overflow = False
     opt.overflow = False
@@ -58,7 +61,6 @@ def make_optimizer(dtype=torch.bfloat16, device=None, low_precision=False, cpu_o
     opt.model_parallel_rank = 0
     opt.model_parallel_group = None
     opt.ignore_unused_parameters = True
-    opt.temp_grad_buffer_for_gpu_offload = torch.zeros(8, dtype=dtype, device=device)
     param = torch.nn.Parameter(torch.zeros(8, dtype=dtype, device=device))
     param.param_idx_in_group = 0
     opt.param_id = {id(param): 0}
@@ -72,6 +74,7 @@ def make_optimizer(dtype=torch.bfloat16, device=None, low_precision=False, cpu_o
     master = torch.nn.Parameter(torch.zeros(8, dtype=opt.master_weights_and_grads_dtype))
     master.grad = torch.zeros_like(master)
     opt.single_partition_of_fp32_groups = [master]
+    opt.temp_grad_buffer_for_cpu_offload = torch.zeros(8, dtype=opt.master_weights_and_grads_dtype)
     opt.get_param_comm_dtype = lambda p: torch.float32
     opt.report_ipg_memory_usage = lambda *args: None
     return opt, param, master
@@ -271,29 +274,10 @@ def test_only_buffer_consumers_replace_reuse_event(monkeypatch, bucket_size, ele
         assert bucket.reuse_events[0] is previous
 
 
-def test_cpu_offload_orders_successive_writes_across_streams(monkeypatch):
+def test_cpu_offload_accumulates_directly_in_host_partition():
     opt, param, master = make_optimizer()
-    first, second = FakeStream(), FakeStream()
-    opt._record_gradient_stream = lambda tensor, stream: None
-    monkeypatch.setattr(zero, "get_accelerator", lambda: fake_accelerator(first))
-    param.grad = torch.ones_like(param)
-    opt.async_inplace_copy_grad_to_fp32_buffer_from_gpu(param)
-    assert not first.waited
-    event = opt._pending_offload_events.get(first)
-
-    original_copy = torch.Tensor.copy_
-
-    def copy_after_wait(destination, source, **kwargs):
-        assert second.waited == [event]
-        return original_copy(destination, source, **kwargs)
-
-    monkeypatch.setattr(zero, "get_accelerator", lambda: fake_accelerator(second))
-    monkeypatch.setattr(torch.Tensor, "copy_", copy_after_wait)
-    param.grad = torch.full_like(param, 3)
-    opt.async_inplace_copy_grad_to_fp32_buffer_from_gpu(param)
-    assert torch.equal(master.grad, torch.full_like(master, 3))
-    assert opt._pending_offload_events[first] is event
-    assert opt._pending_offload_events[second].producer is second
+    backward_values(opt, param, [1, 3], [False, True])
+    assert torch.equal(master.grad, torch.full_like(master, 4))
 
 
 def test_record_stream_is_separate_from_readiness(monkeypatch):
@@ -306,18 +290,20 @@ def test_record_stream_is_separate_from_readiness(monkeypatch):
     assert not stream.waited
 
 
-def test_cpu_accumulator_waits_before_pageable_source_is_read():
+def test_cpu_offload_reset_zeros_host_partition():
     opt, param, master = make_optimizer()
-    backward_values(opt, param, [1], [False])
-    # The earlier copy into the CPU accumulator only lands once its event completes.
-    event = FakeEvent(lambda: opt.accumulated_grads_in_cpu[0].fill_(3))
-    opt._pending_offload_events["producer"] = event
-    opt.micro_step_id = 1
-    opt.set_gradient_accumulation_boundary(True)
-    param.grad = torch.full_like(param, 4)
-    opt.copy_grads_in_partition(param)
-    assert event.synced
-    assert torch.equal(master.grad, torch.full_like(master, 7))
+    backward_values(opt, param, [3], [True])
+    opt.reset_cpu_buffers()
+    assert torch.count_nonzero(master.grad) == 0
+
+
+@pytest.mark.parametrize("low_precision", [False, True], ids=["fp32-master", "low-precision-master"])
+def test_cpu_offload_first_use_after_step_starts_from_zero(low_precision):
+    opt, param, master = make_optimizer(low_precision=low_precision)
+    backward_values(opt, param, [8], [True])
+    opt.reset_cpu_buffers()
+    backward_values(opt, param, [2, 4], [False, True])
+    assert torch.equal(master.grad, torch.full_like(master, 6))
 
 
 class NoopTimers:
@@ -367,6 +353,156 @@ def test_step_consumes_gradients_after_offload_copies_complete(monkeypatch):
     assert event.synced
     assert not opt.overflow
     assert torch.equal(master, ref)
+    assert torch.count_nonzero(master.grad) == 0
+
+
+def test_overflow_step_zeros_host_partition(monkeypatch):
+    opt, param, master = make_optimizer()
+    prepare_step(opt, param, master, monkeypatch)
+    master.grad.fill_(2)
+    opt.check_overflow = lambda **kwargs: setattr(opt, "overflow", True)
+    opt.step()
+    assert opt.overflow
+    assert torch.count_nonzero(master.grad) == 0
+
+
+def test_zero_grad_clears_host_partition_and_prior_requests():
+    opt, param, master = make_optimizer()
+    backward_values(opt, param, [3], [True])
+    opt.all_grad_tensors[0] = [torch.full_like(param, 3)]
+    opt._completed_request_grads[0] = [torch.full_like(param, 3)]
+    finalized = torch.full_like(param, 9)
+    opt.averaged_gradients[0] = [finalized]
+    compact = SimpleNamespace(flat_partition=torch.ones(4))
+    opt.averaged_gradients[1] = compact
+    opt.zero_grad()
+    assert torch.count_nonzero(master.grad) == 0
+    assert torch.count_nonzero(finalized) == 0
+    assert torch.count_nonzero(compact.flat_partition) == 0
+    assert opt.all_grad_tensors[0] is None
+    assert not opt._completed_request_grads
+    assert param.grad is None
+
+
+def test_offload_records_gradient_missing_from_boundary_backward():
+    opt, param, master = make_optimizer()
+    other = torch.nn.Parameter(torch.zeros_like(param))
+    other.param_idx_in_group = 1
+    opt.param_id[id(other)] = 1
+    opt.grad_position[1] = [0, 0, 8, 8]
+    opt.bit16_groups = [[param, other]]
+    opt.params_in_partition = [[param, other]]
+    wide = torch.nn.Parameter(torch.zeros(16, dtype=master.dtype))
+    wide.grad = torch.zeros_like(wide)
+    opt.single_partition_of_fp32_groups = [wide]
+    opt.temp_grad_buffer_for_cpu_offload = torch.zeros(16, dtype=master.dtype)
+    opt.set_gradient_accumulation_boundary(False)
+    param.grad = torch.full_like(param, float("inf"))
+    opt.copy_grads_in_partition(param)
+    opt.set_gradient_accumulation_boundary(True)
+    other.grad = torch.full_like(other, 5)
+    opt.copy_grads_in_partition(other)
+    assert torch.equal(wide.grad[:8], torch.full((8, ), float("inf")))
+    assert torch.equal(wide.grad[8:], torch.full_like(other, 5).to(wide.dtype))
+    assert 0 in opt.norm_for_param_grads
+    assert opt.local_overflow
+
+
+def test_compact_offload_mirrors_early_gradient_and_reset_clears_it(monkeypatch):
+    opt, param, master = make_optimizer()
+    opt.gradient_accumulation_dtype = torch.float32
+    opt.partition_size = [8]
+    opt.real_dp_process_group = [None]
+    opt.grad_start_offset = {0: {0: {0: 0}}}
+    opt.grad_partition_insertion_offset = {0: {0: {0: 0}}}
+    opt.optimizer = type("PlainOptimizer", (), {})()
+    monkeypatch.setattr(zero.dist, "get_rank", lambda **kwargs: 0)
+    compact = opt._get_compact_grad_partition_buffer(0)
+    compact.flat_partition.fill_(4)
+    opt.set_gradient_accumulation_boundary(False)
+    param.grad = torch.ones_like(param)
+    opt.copy_grads_in_partition(param)
+    assert torch.equal(master.grad, torch.full_like(master, 4))
+    opt.reset_cpu_buffers()
+    assert torch.count_nonzero(master.grad) == 0
+    assert torch.count_nonzero(compact.flat_partition) == 0
+
+
+def test_overlap_window_survives_a_flipping_overlap_index():
+    opt, param, master = make_optimizer()
+    master.grad = torch.zeros(8)
+    submitted_later = torch.ones(8)
+    other = torch.full((8, ), 2)
+    master.overlap_grad = [submitted_later, other]
+    state = {"value": 0}
+    opt.get_overlap_step_state = lambda: state["value"]
+    param.grad = torch.full_like(param, 1)
+    opt.copy_grads_in_partition(param)
+    state["value"] = 1
+    param.grad = torch.full_like(param, 2)
+    opt.copy_grads_in_partition(param)
+    assert torch.equal(master.grad, torch.full_like(master.grad, 3))
+    assert torch.equal(submitted_later, torch.ones_like(submitted_later))
+    assert torch.equal(other, torch.full_like(other, 2))
+    ZenFlowZeroOptimizerParallel._publish_cpu_offload_grads_to_overlap(opt, 1)
+    assert torch.equal(other, torch.full_like(other, 3))
+    assert torch.equal(submitted_later, torch.ones_like(submitted_later))
+    assert torch.count_nonzero(master.grad) == 0
+    ZenFlowZeroOptimizerParallel.reset_cpu_buffers(opt)
+    assert torch.equal(other, torch.full_like(other, 3))
+    assert torch.count_nonzero(submitted_later) == 0
+
+
+def test_zero_grad_discards_zenflow_window_without_clearing_inflight_buffer():
+    opt, param, master = make_optimizer()
+    master.grad = torch.full((8, ), 5.0)
+    inflight = torch.full((8, ), 8.0)
+    finished = torch.ones(8)
+    master.overlap_grad = [inflight, finished]
+    opt.get_overlap_step_state = lambda: 0
+    opt.zero_grad()
+    assert torch.count_nonzero(master.grad) == 0
+    assert torch.equal(inflight, torch.full_like(inflight, 8))
+    assert torch.equal(finished, torch.ones_like(finished))
+
+
+def _prepare_nonoffload_epilogue(opt, param):
+    opt.cpu_offload = False
+    opt.gradient_accumulation_dtype = param.dtype
+    opt.first_offset = [0]
+    opt.partition_size = [param.numel()]
+    opt.reduce_ipg_grads = lambda: None
+    opt._release_ipg_buffers = lambda: None
+    opt._clear_param_grad_only = lambda: None
+    opt.get_flat_partition = lambda *args, **kwargs: [grad.detach().clone() for grad in opt.all_grad_tensors[0]]
+    opt._backward_hook_state = SimpleNamespace(epilogue_ran_this_backward=False)
+
+
+def test_nonoffload_retains_gradients_across_true_boundaries():
+    opt, param, _ = make_optimizer()
+    _prepare_nonoffload_epilogue(opt, param)
+    for value in (1, 2):
+        opt.set_gradient_accumulation_boundary(True)
+        param.grad = torch.full_like(param, value)
+        opt.independent_gradient_partition_epilogue()
+    assert torch.equal(opt.all_grad_tensors[0][0], torch.full_like(param, 3))
+    assert torch.equal(opt.averaged_gradients[0][0], torch.full_like(param, 3))
+
+
+def test_reentrant_phases_do_not_drop_or_double_count_requests():
+    opt, param, _ = make_optimizer()
+    _prepare_nonoffload_epilogue(opt, param)
+    opt.use_grad_accum_attribute = True
+    opt.set_gradient_accumulation_boundary(True)
+    param.grad_accum = torch.full_like(param, 1)
+    opt.independent_gradient_partition_epilogue()
+    param.grad_accum.add_(2)
+    opt.independent_gradient_partition_epilogue()
+    assert torch.equal(opt.all_grad_tensors[0][0], torch.full_like(param, 3))
+    opt._commit_current_backward_grads()
+    param.grad_accum = torch.full_like(param, 4)
+    opt.independent_gradient_partition_epilogue()
+    assert torch.equal(opt.all_grad_tensors[0][0], torch.full_like(param, 7))
 
 
 @pytest.mark.parametrize("operation", ["reset", "legacy_load", "universal_load"])
