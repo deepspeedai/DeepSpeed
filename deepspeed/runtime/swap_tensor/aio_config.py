@@ -36,7 +36,8 @@ def get_aio_config(param_dict):
         }
 
         if aio_config[AIO_USE_GDS]:
-            assert get_accelerator().device_name() == 'cuda', 'GDS currently only supported for CUDA accelerator'
+            if get_accelerator().device_name() != 'cuda':
+                raise AssertionError('GDS currently only supported for CUDA accelerator')
 
         return aio_config
 
