@@ -318,7 +318,10 @@ void adamw_rollback_inplace(float* params,
 
         const float grad = grads[i];
         momentum[i] = (momentum[i] - one_minus_beta1 * grad) / beta1;
-        variance[i] = (variance[i] - one_minus_beta2 * grad * grad) / beta2;
+        // exp_avg_sq is a sum of squares, so it is never negative. The inverse can leave a tiny
+        // negative rounding residual (in about half of the elements that were 0 before the step),
+        // and sqrt() of it in the next step makes the parameter NaN.
+        variance[i] = std::max(0.0f, (variance[i] - one_minus_beta2 * grad * grad) / beta2);
     }
 
     --step_count;

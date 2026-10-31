@@ -4,8 +4,12 @@
 # DeepSpeed Team
 
 import time
+from collections import defaultdict
 from typing import List
 
+import torch
+
+from deepspeed.ops.adam import DeepSpeedCPUAdam
 from deepspeed.runtime.superoffload.superoffload_utils import SuperOffloadCPUOptimizer, TaskKeys, ResultKeys, EventTypes
 from deepspeed.runtime.zero.partition_parameters import Parameter, Tensor
 from deepspeed.runtime.zero.stage3 import DeepSpeedZeroOptimizer_Stage3
@@ -24,6 +28,18 @@ def _validate_superoffload_accelerator():
         f"SuperOffload only supports NVIDIA CUDA GPUs, but found accelerator '{accelerator.device_name()}'.")
 
 
+def _cpu_adam_settings(optimizer):
+    """Return (adamw_mode, fp32_optimizer_states) for the DeepSpeedCPUAdam that runs ``optimizer`` in the worker."""
+    if isinstance(optimizer, DeepSpeedCPUAdam):
+        return optimizer.adam_w_mode, optimizer.fp32_optimizer_states
+    if isinstance(optimizer, torch.optim.AdamW):
+        return True, True
+    if isinstance(optimizer, torch.optim.Adam):
+        return optimizer.defaults.get("decoupled_weight_decay", False), True
+    raise ValueError(f"SuperOffload steps the CPU sub-groups with DeepSpeedCPUAdam, so it supports only Adam and "
+                     f"AdamW, but the optimizer is {type(optimizer).__name__}.")
+
+
 class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
 
     def __init__(
@@ -36,10 +52,13 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
         **kwargs,
     ):
         _validate_superoffload_accelerator()
+        adamw_mode, fp32_optimizer_states = _cpu_adam_settings(init_optimizer)
 
         self.sub_group_to_param_num = {}
-        self.sub_group_grad_partition_counts = {}
-        self._submitted_cpu_sub_groups = set()
+        # Per sub-group, the ds_ids of the params whose gradient for this step is in the fp32 gradient buffer.
+        self.sub_group_grads_ready = defaultdict(set)
+        # Sub-groups stepped during backward, mapped to the (lr, grad_scale) of that step for a rollback.
+        self._submitted_cpu_sub_groups = {}
         self.async_cpuadam_num = 0
         self.max_grad_numel = 0
 
@@ -52,13 +71,22 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
                 "betas": pg["betas"],
                 "eps": pg["eps"],
                 "weight_decay": pg["weight_decay"],
+                "bias_correction": pg.get("bias_correction", True),
                 "amsgrad": pg["amsgrad"],
             })
+        # A step taken during backward is undone with adam_rollback, which supports only fp32 AdamW with bias
+        # correction. With other settings, step() runs the CPU sub-groups after the overflow and clipping checks.
+        self.speculative_cpu_step = (adamw_mode and fp32_optimizer_states
+                                     and self.master_weights_and_grads_dtype == torch.float32
+                                     and all(config["bias_correction"] for config in optimizer_configs))
         cpuadam_cores_perc = kwargs.get("cpuadam_cores_perc", 0.8)
         self.superoffload_cpu_optimizer = SuperOffloadCPUOptimizer(optimizer_config=optimizer_configs,
                                                                    cpuadam_cores_perc=cpuadam_cores_perc,
                                                                    max_grad_numel=self.max_grad_numel,
-                                                                   pin_memory=self.offload_optimizer_pin_memory)
+                                                                   pin_memory=self.offload_optimizer_pin_memory,
+                                                                   adamw_mode=adamw_mode,
+                                                                   fp32_optimizer_states=fp32_optimizer_states,
+                                                                   grad_dtype=self.master_weights_and_grads_dtype)
 
     def _create_fp16_sub_groups(self, params_group):
 
@@ -103,14 +131,10 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
 
         cur_device = self.subgroup_to_device[sub_group_id]
         if cur_device != 'cpu':
+            self._sync_backup_optimizer_group(param_group_id)
             self.backup_optimizer.param_groups[param_group_id]['params'] = [fp32_param]
             step_with_gradscaler(self.backup_optimizer)
             self.backup_optimizer.param_groups[param_group_id]['params'] = []
-
-    @instrument_w_nvtx
-    def independent_gradient_partition_epilogue(self):
-        super().independent_gradient_partition_epilogue()
-        self.sub_group_grad_partition_counts.clear()
 
     @instrument_w_nvtx
     def _reassign_or_swap_out_partitioned_parameters(self, sub_group_id):
@@ -142,7 +166,12 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
             # Accumulate gradient into the grad_buffer, mirroring base class logic
             grad_buffer = self._DeepSpeedZeroOptimizer_Stage3__param_id_to_grad_partition[param.ds_id].narrow(
                 0, 0, grad_partition.numel())
-            if self.micro_step_id == 0:
+            # The buffer holds an older step's gradient until the param's first gradient of this step. Testing the
+            # param rather than micro_step_id also keeps both gradients of a param that two reentrant checkpoint
+            # segments use.
+            first_grad = param.ds_id not in self._offload_boundary_param_ids
+            self._offload_boundary_param_ids.add(param.ds_id)
+            if first_grad:
                 grad_buffer.copy_(grad_partition, non_blocking=True)
                 grad_buffer = grad_buffer.to(grad_partition.device, non_blocking=True)
             elif get_accelerator().on_accelerator(grad_buffer):
@@ -154,30 +183,39 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
                 grad_buffer = cuda_grad_buffer
 
             if self.is_gradient_accumulation_boundary():
+                if i in self._submitted_cpu_sub_groups:
+                    # Another gradient for a sub-group that has already stepped: undo that step while the fp32
+                    # buffer still holds the gradient it used.
+                    self._wait_for_async_operations()
+                    self._rollback_cpu_sub_group(i)
                 self.norm_for_param_grads[self.get_param_id(param)] = self._constant_buffered_norm2(grad_buffer)
 
                 fp32_grad_tensor = self.fp32_partitioned_groups_flat[i].grad.narrow(
                     0, dest_offset, grad_buffer.numel())
                 fp32_grad_tensor.copy_(grad_buffer.to(dtype=self.master_weights_and_grads_dtype), non_blocking=True)
 
-            self.sub_group_grad_partition_counts[i] = self.sub_group_grad_partition_counts.get(i, 0) + 1
-            if self.sub_group_grad_partition_counts[i] == self.sub_group_to_param_num[i]:
-                completed_sub_groups.append(i)
+                self.sub_group_grads_ready[i].add(param.ds_id)
+                if len(self.sub_group_grads_ready[i]) == self.sub_group_to_param_num[i]:
+                    completed_sub_groups.append(i)
 
         if self.is_gradient_accumulation_boundary() and completed_sub_groups:
             get_accelerator().current_stream().synchronize()
-            for i in completed_sub_groups:
-                if self.subgroup_to_device[i] == 'cpu' and not self.clip_grad:
+            # A param that gets a second gradient adds its sub-group again.
+            for i in dict.fromkeys(completed_sub_groups):
+                if self.subgroup_to_device[i] == 'cpu' and self.speculative_cpu_step and self._grads_finite(i):
                     param_group_id = self.sub_group_to_group_id[i]
                     fp32_param = self.fp32_partitioned_groups_flat[i]
                     current_lr = self.optimizer.param_groups[param_group_id]['lr']
+                    # The gradients still carry the loss scale, which step() would remove.
+                    grad_scale = 1.0 / self.loss_scale
 
                     self.superoffload_cpu_optimizer.async_step(param_group_id,
                                                                i,
                                                                fp32_param.data,
                                                                fp32_param.grad.data,
-                                                               lr=current_lr)
-                    self._submitted_cpu_sub_groups.add(i)
+                                                               lr=current_lr,
+                                                               grad_scale=grad_scale)
+                    self._submitted_cpu_sub_groups[i] = (current_lr, grad_scale)
                     self.async_cpuadam_num += 1
 
                     result = self.superoffload_cpu_optimizer.get_result()
@@ -198,14 +236,14 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
             Not supporting closure.
         """
         self._wait_for_async_operations()
+        self._complete_grads()
 
         self._pre_step()
         self._partition_all_parameters()
 
         self._overflow_check_and_loss_scale_update(update_scale=False)
         if self.overflow:
-            if not self.clip_grad:
-                self._handle_overflow_rollback()
+            self._rollback_submitted_cpu_sub_groups()
             self._loss_scale_update_and_overflow_cleanup()
             return
 
@@ -213,8 +251,7 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
         scaled_global_grad_norm = combine_grad_norm_groups(norm_groups)
         if is_invalid_grad_norm(scaled_global_grad_norm):
             self.overflow = True
-            if not self.clip_grad:
-                self._handle_overflow_rollback()
+            self._rollback_submitted_cpu_sub_groups()
             self._loss_scale_update_and_overflow_cleanup()
             return
         self._loss_scale_update_and_overflow_cleanup()
@@ -224,35 +261,17 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
         timer_names.add(OPTIMIZER_STEP_TIMER)
         self.timers(OPTIMIZER_STEP_TIMER).start()
 
-        if self.clip_grad:
-            self._step_with_clipping(scaled_global_grad_norm, timer_names)
-        else:
-            self._step_without_clipping(scaled_global_grad_norm, timer_names)
+        if self.check_clip_grads(scaled_global_grad_norm):
+            # The steps taken during backward used the unclipped gradients.
+            self._rollback_submitted_cpu_sub_groups()
 
-        self.timers(OPTIMIZER_STEP_TIMER).stop()
-        self._post_step(timer_names)
-
-    def _post_step(self, timer_names):
-        super()._post_step(timer_names)
-        self._submitted_cpu_sub_groups.clear()
-
-    def _step_without_clipping(self, scaled_global_grad_norm, timer_names):
-        """Fast path: async CPU steps already completed during backward."""
-        for sub_group_id, group in enumerate(self.fp16_groups):
-            self._prepare_sub_group(sub_group_id, timer_names)
-            self.unscale_and_clip_grads(sub_group_id, scaled_global_grad_norm)
-            self._optimizer_step(sub_group_id)
-            self._reassign_or_swap_out_partitioned_parameters(sub_group_id)
-            self._release_sub_group(sub_group_id, timer_names)
-
-    def _step_with_clipping(self, scaled_global_grad_norm, timer_names):
-        """Clipping path: no async steps were done during backward,
-        so we unscale+clip first, then step all sub-groups."""
         for sub_group_id, group in enumerate(self.fp16_groups):
             self._prepare_sub_group(sub_group_id, timer_names)
             self.unscale_and_clip_grads(sub_group_id, scaled_global_grad_norm)
 
-            if self.subgroup_to_device[sub_group_id] == 'cpu':
+            if self.subgroup_to_device[sub_group_id] != 'cpu':
+                self._optimizer_step(sub_group_id)
+            elif sub_group_id not in self._submitted_cpu_sub_groups:
                 param_group_id = self.sub_group_to_group_id[sub_group_id]
                 fp32_param = self.fp32_partitioned_groups_flat[sub_group_id]
                 current_lr = self.optimizer.param_groups[param_group_id]['lr']
@@ -261,11 +280,52 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
                                               fp32_param.data,
                                               fp32_param.grad.data,
                                               lr=current_lr)
-            else:
-                self._optimizer_step(sub_group_id)
 
             self._reassign_or_swap_out_partitioned_parameters(sub_group_id)
             self._release_sub_group(sub_group_id, timer_names)
+
+        self.timers(OPTIMIZER_STEP_TIMER).stop()
+        self._post_step(timer_names)
+
+    def _post_step(self, timer_names):
+        super()._post_step(timer_names)
+        self._submitted_cpu_sub_groups.clear()
+
+    def _complete_grads(self):
+        """Fill the fp32 gradient of the params that got no gradient in the boundary micro-step.
+
+        A param used only in earlier micro-steps has its gradient in the reduce buffer. A param not used in this step
+        gets a zero gradient, as set_none_gradients_to_zero gives it in ZeRO-1/2; zeroing its reduce buffer also keeps
+        an older inf out of the fp16 overflow check. Their sub-groups did not step during backward, so step() runs
+        them.
+        """
+        filled = False
+        for i, group in enumerate(self.fp16_groups):
+            ready = self.sub_group_grads_ready[i]
+            if len(ready) == self.sub_group_to_param_num[i]:
+                continue
+            for param in group:
+                if param.ds_id in ready:
+                    continue
+                _, dest_offset, num_elements = self.grad_position[self.get_param_id(param)]
+                grad_buffer = self._DeepSpeedZeroOptimizer_Stage3__param_id_to_grad_partition[param.ds_id].narrow(
+                    0, 0, num_elements)
+                if param.ds_id not in self._offload_boundary_param_ids:
+                    grad_buffer.zero_()
+                if not get_accelerator().on_accelerator(grad_buffer):
+                    grad_buffer = grad_buffer.to(get_accelerator().current_device_name(), non_blocking=True)
+                self.norm_for_param_grads[self.get_param_id(param)] = self._constant_buffered_norm2(grad_buffer)
+                fp32_grad_tensor = self.fp32_partitioned_groups_flat[i].grad.narrow(0, dest_offset, num_elements)
+                fp32_grad_tensor.copy_(grad_buffer.to(dtype=self.master_weights_and_grads_dtype), non_blocking=True)
+                filled = True
+        if filled:
+            get_accelerator().current_stream().synchronize()
+        self.sub_group_grads_ready.clear()
+
+    def _grads_finite(self, sub_group_id):
+        """Whether the sub-group's gradients are finite. A step on inf or nan cannot be rolled back."""
+        norms = [self.norm_for_param_grads[self.get_param_id(param)] for param in self.fp16_groups[sub_group_id]]
+        return bool(torch.isfinite(torch.stack(norms)).all())
 
     def _wait_for_async_operations(self, timeout_seconds=60):
         """Wait for all pending asynchronous CPU optimizer operations to complete with timeout error.
@@ -334,56 +394,76 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
                                  fp32_grad_data,
                                  rollback: bool = False,
                                  lr: float = None,
-                                 timeout_seconds: int = 60):
+                                 timeout_seconds: int = 60,
+                                 grad_scale: float = 1.0):
         event_type = EventTypes.ROLLBACK if rollback else EventTypes.ADAM_STEP
         self.superoffload_cpu_optimizer.async_step(param_group_id,
                                                    sub_group_id,
                                                    fp32_param_data,
                                                    fp32_grad_data,
                                                    rollback=rollback,
-                                                   lr=lr)
+                                                   lr=lr,
+                                                   grad_scale=grad_scale)
         # Wait for completion
         self._wait_for_single_async_result(event_type, timeout_seconds)
 
-    def _handle_overflow_rollback(self):
-        """Handle gradient overflow by rolling back CPU optimizer states."""
-        for sub_group_id in self._submitted_cpu_sub_groups:
-            param_group_id = self.sub_group_to_group_id[sub_group_id]
-            fp32_param = self.fp32_partitioned_groups_flat[sub_group_id]
-            self._sync_cpu_optimizer_step(param_group_id,
-                                          sub_group_id,
-                                          fp32_param.data,
-                                          fp32_param.grad.data,
-                                          rollback=True)
-        self._submitted_cpu_sub_groups.clear()
+    def _rollback_submitted_cpu_sub_groups(self):
+        """Undo the CPU steps taken during backward, for a skipped step or before redoing them with clipping."""
+        for sub_group_id in list(self._submitted_cpu_sub_groups):
+            self._rollback_cpu_sub_group(sub_group_id)
 
-    def _handle_gradient_clipping(self, scaled_global_grad_norm):
-        """Handle gradient clipping with CPU optimizer rollback and re-optimization."""
-        for sub_group_id, _ in enumerate(self.fp16_groups):
-            if self.subgroup_to_device[sub_group_id] == 'cpu':
-                param_group_id = self.sub_group_to_group_id[sub_group_id]
-                fp32_param = self.fp32_partitioned_groups_flat[sub_group_id]
-
-                # Rollback CPU optimizer states
-                self._sync_cpu_optimizer_step(param_group_id,
-                                              sub_group_id,
-                                              fp32_param.data,
-                                              fp32_param.grad.data,
-                                              rollback=True)
-
-                # Clip gradients and re-optimize
-                self.unscale_and_clip_grads(sub_group_id, scaled_global_grad_norm)
-
-                current_lr = self.optimizer.param_groups[param_group_id]['lr']
-                self._sync_cpu_optimizer_step(param_group_id,
-                                              sub_group_id,
-                                              fp32_param.data,
-                                              fp32_param.grad.data,
-                                              rollback=False,
-                                              lr=current_lr)
+    def _rollback_cpu_sub_group(self, sub_group_id):
+        lr, grad_scale = self._submitted_cpu_sub_groups.pop(sub_group_id)
+        param_group_id = self.sub_group_to_group_id[sub_group_id]
+        fp32_param = self.fp32_partitioned_groups_flat[sub_group_id]
+        self._sync_cpu_optimizer_step(param_group_id,
+                                      sub_group_id,
+                                      fp32_param.data,
+                                      fp32_param.grad.data,
+                                      rollback=True,
+                                      lr=lr,
+                                      grad_scale=grad_scale)
 
     @instrument_w_nvtx
     def check_clip_grads(self, total_norm):
-        """Check if gradients need to be clipped based on the global norm."""
-        unscaled_norm = total_norm / self.loss_scale
-        return self.clip_grad and unscaled_norm > self.clip_grad
+        """Check if unscale_and_clip_grads will scale the gradients down, with the same test."""
+        if not self.clip_grad:
+            return False
+        clip = ((total_norm / self.loss_scale) + 1e-6) / self.clip_grad
+        return bool(clip > 1.0)
+
+    def state_dict(self):
+        # The worker process holds the Adam state of the CPU sub-groups. Save it where ZeRO-3 CPU offload keeps it.
+        self._wait_for_async_operations()
+        cpu_params = []
+        for sub_group_id, state in self.superoffload_cpu_optimizer.get_state().items():
+            fp32_param = self.fp32_partitioned_groups_flat[sub_group_id]
+            self.optimizer.state[fp32_param] = state
+            cpu_params.append(fp32_param)
+        try:
+            return super().state_dict()
+        finally:
+            for fp32_param in cpu_params:
+                del self.optimizer.state[fp32_param]
+
+    def load_state_dict(self,
+                        state_dict_list,
+                        load_optimizer_states=True,
+                        load_from_fp32_weights=False,
+                        checkpoint_folder=None,
+                        load_serial=None,
+                        param_shapes=None):
+        super().load_state_dict(state_dict_list,
+                                load_optimizer_states=load_optimizer_states,
+                                load_from_fp32_weights=load_from_fp32_weights,
+                                checkpoint_folder=checkpoint_folder,
+                                load_serial=load_serial,
+                                param_shapes=param_shapes)
+        if not load_optimizer_states:
+            return
+        # Move the loaded Adam state of the CPU sub-groups to the worker process, which steps them.
+        cpu_state = {}
+        for sub_group_id, fp32_param in enumerate(self.fp32_partitioned_groups_flat):
+            if self.subgroup_to_device[sub_group_id] == 'cpu' and fp32_param in self.optimizer.state:
+                cpu_state[sub_group_id] = self.optimizer.state.pop(fp32_param)
+        self.superoffload_cpu_optimizer.set_state(cpu_state)

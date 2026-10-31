@@ -1239,6 +1239,19 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         return sub_groups
 
+    def _sync_backup_optimizer_group(self, param_group_id):
+        """Copy the hyperparameters of a param group to the optimizer of the sub-groups kept on the device.
+
+        LR schedulers and set_lr() update self.optimizer only. The backup optimizer has its own first param group,
+        and after a checkpoint load its own copy of every group.
+        """
+        backup_group = self.backup_optimizer.param_groups[param_group_id]
+        main_group = self.optimizer.param_groups[param_group_id]
+        if backup_group is main_group:
+            return
+        for key in ("lr", "betas", "eps", "weight_decay"):
+            backup_group[key] = main_group[key]
+
     def _optimizer_step(self, sub_group_id):
         param_group_id = self.sub_group_to_group_id[sub_group_id]
         fp32_param = self.fp32_partitioned_groups_flat[sub_group_id]
@@ -1260,6 +1273,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                 step_with_gradscaler(self.optimizer)
                 self.optimizer.param_groups[param_group_id]['params'] = []
             else:
+                self._sync_backup_optimizer_group(param_group_id)
                 self.backup_optimizer.param_groups[param_group_id]['params'] = [fp32_param]
                 step_with_gradscaler(self.backup_optimizer)
                 self.backup_optimizer.param_groups[param_group_id]['params'] = []
@@ -3440,6 +3454,20 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         for param_group in self.optimizer.param_groups:
             param_group['params'] = []
 
+    def _set_backup_optimizer_param_groups(self):
+        # A new backup optimizer still holds its placeholder param, and after a load a group can share the param list
+        # of a replaced self.optimizer group.
+        self._clear_backup_optimizer_param_groups()
+        for sub_group_id, _ in enumerate(self.fp16_groups):
+            if self.subgroup_to_device[sub_group_id] != 'cpu':
+                param_group_id = self.sub_group_to_group_id[sub_group_id]
+                self.backup_optimizer.param_groups[param_group_id]['params'].append(
+                    self.fp32_partitioned_groups_flat[sub_group_id])
+
+    def _clear_backup_optimizer_param_groups(self):
+        for param_group in self.backup_optimizer.param_groups:
+            param_group['params'] = []
+
     def _zero3_partition_group_metadata(self):
         metadata = []
         has_autoep_expert_group = False
@@ -3473,6 +3501,12 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         state_dict[OPTIMIZER_STATE_DICT] = self.optimizer.state_dict()
         state_dict[FP32_FLAT_GROUPS] = self.fp32_partitioned_groups_flat
         self._clear_fp32_optimizer_param_groups()
+
+        # With partial offload, the sub-groups kept on the device have their Adam state in the backup optimizer.
+        if getattr(self, "backup_optimizer", None) is not None:
+            self._set_backup_optimizer_param_groups()
+            state_dict['backup_optimizer_state_dict'] = self.backup_optimizer.state_dict()
+            self._clear_backup_optimizer_param_groups()
 
         return state_dict
 
@@ -3582,6 +3616,13 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             self._set_fp32_optimizer_param_groups()
             self.optimizer.load_state_dict(state_dict[OPTIMIZER_STATE_DICT])
             self._clear_fp32_optimizer_param_groups()
+
+        # Checkpoints saved without partial offload, or before its state was saved, do not have it.
+        has_backup_state = 'backup_optimizer_state_dict' in state_dict
+        if load_optimizer_states and has_backup_state and getattr(self, "backup_optimizer", None) is not None:
+            self._set_backup_optimizer_param_groups()
+            self.backup_optimizer.load_state_dict(state_dict['backup_optimizer_state_dict'])
+            self._clear_backup_optimizer_param_groups()
 
         if self.swap_optimizer:
             # Purge the swapped optimizer state, it was initialized to the freshly created model and not the checkpoint

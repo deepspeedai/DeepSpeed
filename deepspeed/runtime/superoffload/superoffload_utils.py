@@ -7,6 +7,7 @@ SuperOffload utilities for 1) running CPU optimizers in separate processes.
 
 """
 
+import time
 from typing import Dict, Optional, Any
 import torch
 import torch.multiprocessing as mp
@@ -24,32 +25,44 @@ class TaskKeys:
     SUB_GROUP_ID = "sub_group_id"
     ROLLBACK = "rollback"
     LR = "lr"
+    GRAD_SCALE = "grad_scale"
+    COMMAND = "command"
+    STATE = "state"
 
 
 class ResultKeys:
     UPDATED_PARAM = "updated_param"
     EVENT_TYPE = "event_type"
+    STATE = "state"
 
 
 class EventTypes:
     ADAM_STEP = "adam_step"
     ROLLBACK = "rollback"
+    GET_STATE = "get_state"
+    SET_STATE = "set_state"
 
 
-def _allocate_worker_grad_buffer(max_grad_numel: int, pin_memory: bool) -> torch.Tensor:
+def _allocate_worker_grad_buffer(max_grad_numel: int,
+                                 pin_memory: bool,
+                                 dtype: torch.dtype = torch.float32) -> torch.Tensor:
     # Scratch destination for the GPU->CPU grad copy. Pinning is optional: it
     # speeds DMA but is not required for correctness, so honor
     # offload_optimizer.pin_memory rather than always page-locking.
+    # dtype is the master weights dtype: the optimizer requires the gradient to match the parameter.
     if pin_memory:
-        return get_accelerator().pin_empty(max_grad_numel, dtype=torch.float32, device='cpu')
-    return torch.empty(max_grad_numel, dtype=torch.float32, device='cpu')
+        return get_accelerator().pin_empty(max_grad_numel, dtype=dtype, device='cpu')
+    return torch.empty(max_grad_numel, dtype=dtype, device='cpu')
 
 
 def superoffload_optimizer_worker(param_queue: mp.SimpleQueue,
                                   result_queue: mp.SimpleQueue,
                                   optimizer_config: Dict[str, Any],
                                   max_grad_numel: int,
-                                  pin_memory: bool = True) -> None:
+                                  pin_memory: bool = True,
+                                  adamw_mode: bool = True,
+                                  fp32_optimizer_states: bool = True,
+                                  grad_dtype: torch.dtype = torch.float32) -> None:
     """
     This function runs in a separate process and continuously processes optimization
     tasks from the parameter queue. It creates a DeepSpeedCPUAdam optimizer and
@@ -59,9 +72,12 @@ def superoffload_optimizer_worker(param_queue: mp.SimpleQueue,
         param_queue: Queue for receiving optimization tasks
         result_queue: Queue for sending back optimization results
         optimizer_config: Configuration dictionary for the optimizer containing
-                         lr, betas, eps, weight_decay, and amsgrad parameters
+                         lr, betas, eps, weight_decay, bias_correction, and amsgrad parameters
         max_grad_numel: Maximum number of elements expected in gradient tensors
         pin_memory: Whether to page-lock the reusable grad scratch buffer
+        adamw_mode: Whether the optimizer is AdamW (decoupled weight decay) or Adam
+        fp32_optimizer_states: Whether to keep the optimizer states in fp32 for low-precision parameters
+        grad_dtype: dtype of the master weights and their gradients
     """
     cpu_tensor = torch.randn(1, device="cpu")
     cpu_param = torch.nn.Parameter(cpu_tensor)
@@ -75,10 +91,13 @@ def superoffload_optimizer_worker(param_queue: mp.SimpleQueue,
         first_cfg = pg_configs[0]
         optimizer = DeepSpeedCPUAdam([cpu_param],
                                      lr=first_cfg["lr"],
+                                     bias_correction=first_cfg["bias_correction"],
                                      betas=first_cfg["betas"],
                                      eps=first_cfg["eps"],
                                      weight_decay=first_cfg["weight_decay"],
-                                     amsgrad=first_cfg["amsgrad"])
+                                     amsgrad=first_cfg["amsgrad"],
+                                     adamw_mode=adamw_mode,
+                                     fp32_optimizer_states=fp32_optimizer_states)
         for cfg in pg_configs[1:]:
             dummy = torch.nn.Parameter(torch.randn(1, device="cpu"))
             optimizer.add_param_group({
@@ -87,6 +106,7 @@ def superoffload_optimizer_worker(param_queue: mp.SimpleQueue,
                 "betas": cfg["betas"],
                 "eps": cfg["eps"],
                 "weight_decay": cfg["weight_decay"],
+                "bias_correction": cfg["bias_correction"],
                 "amsgrad": cfg["amsgrad"],
             })
     except KeyError as e:
@@ -96,7 +116,7 @@ def superoffload_optimizer_worker(param_queue: mp.SimpleQueue,
         return
 
     # Pre-allocate reusable host buffer for gradients
-    grad_buffer = _allocate_worker_grad_buffer(max_grad_numel, pin_memory)
+    grad_buffer = _allocate_worker_grad_buffer(max_grad_numel, pin_memory, grad_dtype)
 
     while True:
         try:
@@ -106,12 +126,26 @@ def superoffload_optimizer_worker(param_queue: mp.SimpleQueue,
                 logger.debug("Received termination signal, shutting down worker")
                 break
 
+            # The Adam state lives in this process, so checkpoints get and set it here. Its tensors move to shared
+            # memory when they are sent, without a copy that stays alive.
+            command = task.get(TaskKeys.COMMAND)
+            if command == EventTypes.GET_STATE:
+                state = {sub_group_id: state for sub_group_id, state in optimizer.state.items() if state}
+                result_queue.put({ResultKeys.EVENT_TYPE: EventTypes.GET_STATE, ResultKeys.STATE: state})
+                continue
+            if command == EventTypes.SET_STATE:
+                optimizer.state.clear()
+                optimizer.state.update(task[TaskKeys.STATE])
+                result_queue.put({ResultKeys.EVENT_TYPE: EventTypes.SET_STATE})
+                continue
+
             param_data = task[TaskKeys.PARAM_DATA]
             param_grad = task[TaskKeys.PARAM_GRAD]
             param_group_id = task[TaskKeys.PARAM_GROUP_ID]
             sub_group_id = task[TaskKeys.SUB_GROUP_ID]
             rollback = task.get(TaskKeys.ROLLBACK, False)
             task_lr = task.get(TaskKeys.LR, None)
+            grad_scale = task.get(TaskKeys.GRAD_SCALE, 1.0)
 
             logger.debug(f"Processing param_group_id: {param_group_id}, sub_group_id: {sub_group_id}")
 
@@ -131,7 +165,11 @@ def superoffload_optimizer_worker(param_queue: mp.SimpleQueue,
                 break
 
             param_grad_cpu = grad_buffer[:grad_numel].view_as(param_grad)
-            param_grad_cpu.copy_(param_grad, non_blocking=False)
+            if grad_scale == 1.0:
+                param_grad_cpu.copy_(param_grad, non_blocking=False)
+            else:
+                # A step submitted during backward gets the gradient before the loss scale is removed.
+                torch.mul(param_grad, grad_scale, out=param_grad_cpu)
 
             fp32_param = torch.nn.Parameter(param_data)
             fp32_param.grad = param_grad_cpu
@@ -185,7 +223,10 @@ class SuperOffloadCPUOptimizer:
                  optimizer_config: Dict[str, Any],
                  cpuadam_cores_perc: float = 0.8,
                  max_grad_numel: int = 1000000,
-                 pin_memory: bool = True) -> None:
+                 pin_memory: bool = True,
+                 adamw_mode: bool = True,
+                 fp32_optimizer_states: bool = True,
+                 grad_dtype: torch.dtype = torch.float32) -> None:
         if not 0 < cpuadam_cores_perc <= 1:
             raise ValueError("cpuadam_cores_perc must be between 0 and 1")
 
@@ -196,7 +237,8 @@ class SuperOffloadCPUOptimizer:
 
         self.cpuadam_process = self.mp_context.Process(
             target=superoffload_optimizer_worker,
-            args=(self.param_queue, self.result_queue, optimizer_config, max_grad_numel, pin_memory),
+            args=(self.param_queue, self.result_queue, optimizer_config, max_grad_numel, pin_memory, adamw_mode,
+                  fp32_optimizer_states, grad_dtype),
             daemon=True,
         )
         self.cpuadam_process.start()
@@ -241,7 +283,8 @@ class SuperOffloadCPUOptimizer:
                    fp32_param: torch.Tensor,
                    fp32_grad: torch.Tensor,
                    rollback: bool = False,
-                   lr: float = None) -> None:
+                   lr: float = None,
+                   grad_scale: float = 1.0) -> None:
         """
         Queue parameter for optimization in the worker process.
         """
@@ -257,7 +300,27 @@ class SuperOffloadCPUOptimizer:
         }
         if lr is not None:
             task[TaskKeys.LR] = lr
+        if grad_scale != 1.0:
+            task[TaskKeys.GRAD_SCALE] = grad_scale
         self.param_queue.put(task)
+
+    def _request(self, task: Dict[str, Any], event_type: str) -> Dict[str, Any]:
+        """Send a command to the worker process and wait for its reply. Call it with no step in flight."""
+        self.param_queue.put(task)
+        while self.result_queue.empty():
+            if not self.cpuadam_process.is_alive():
+                raise RuntimeError("Worker process is not alive")
+            time.sleep(0.001)
+        return self.get_result(expected_event_type=event_type)
+
+    def get_state(self) -> Dict[int, Dict[str, Any]]:
+        """Return the Adam state of each sub-group that has taken a step, keyed by sub-group id."""
+        result = self._request({TaskKeys.COMMAND: EventTypes.GET_STATE}, EventTypes.GET_STATE)
+        return result[ResultKeys.STATE]
+
+    def set_state(self, state: Dict[int, Dict[str, Any]]) -> None:
+        """Replace the Adam state of the worker, for example with the state loaded from a checkpoint."""
+        self._request({TaskKeys.COMMAND: EventTypes.SET_STATE, TaskKeys.STATE: state}, EventTypes.SET_STATE)
 
     def get_result(self, expected_event_type: str = None) -> Optional[Dict[str, Any]]:
         """
