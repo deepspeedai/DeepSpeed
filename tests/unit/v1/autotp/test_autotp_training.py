@@ -1353,6 +1353,66 @@ class TestGPTBigCodeMultiQueryTraining(DistributedTest):
     def test_matches_single_device_training_tp4(self):
         self._train_and_compare(4)
 
+    def test_bf16_smoke_tp2(self):
+        skip_on_device()
+        if not get_accelerator().is_bf16_supported():
+            pytest.skip("bf16 is not supported on this accelerator")
+        transformers = pytest.importorskip("transformers")
+        hidden, heads = 32, 4
+        kv_rows = 2 * (hidden // heads)
+        device = torch.device(get_accelerator().current_device_name())
+
+        torch.manual_seed(0)
+        config = transformers.GPTBigCodeConfig(vocab_size=64,
+                                               n_positions=32,
+                                               n_embd=hidden,
+                                               n_layer=2,
+                                               n_head=heads,
+                                               multi_query=True,
+                                               attn_pdrop=0.0,
+                                               resid_pdrop=0.0,
+                                               embd_pdrop=0.0)
+        model = transformers.GPTBigCodeForCausalLM(config).to(dtype=torch.bfloat16)
+        ds_config = {
+            "train_micro_batch_size_per_gpu": 2,
+            "optimizer": {
+                "type": "SGD",
+                "params": {
+                    "lr": 0.5,
+                },
+            },
+            "gradient_clipping": 0.0,
+            "tensor_parallel": {
+                "autotp_size": dist.get_world_size(),
+            },
+            "zero_optimization": {
+                "stage": 0,
+            },
+            "bf16": {
+                "enabled": True,
+            },
+        }
+        try:
+            engine, _, _, _ = deepspeed.initialize(model=model, config=ds_config)
+            c_attn = engine.module.transformer.h[0].attn.c_attn
+            assert c_attn.weight.dtype == torch.bfloat16
+            input_ids = torch.randint(0, 64, (2, 16), generator=torch.Generator().manual_seed(0)).to(device)
+
+            with _count_kv_gradient_all_reduces(kv_rows, hidden) as hook_calls:
+                loss = engine(input_ids=input_ids, labels=input_ids).loss
+                engine.backward(loss)
+            assert torch.isfinite(loss).item()
+            assert hook_calls["weight"] > 0, "the K/V weight gradient hook did not run"
+            if c_attn.bias is not None:
+                assert hook_calls["bias"] > 0, "the K/V bias gradient hook did not run"
+
+            engine.step()
+            kv_on_ranks = [None] * dist.get_world_size()
+            dist.all_gather_object(kv_on_ranks, c_attn.weight.detach()[-kv_rows:].cpu())
+            assert all(torch.equal(kv, kv_on_ranks[0]) for kv in kv_on_ranks)
+        finally:
+            reset_tp_model_init_state()
+
 
 class TestLegacyLmHeadGatheredTraining(DistributedTest):
     world_size = 2
