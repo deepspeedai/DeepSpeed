@@ -50,6 +50,21 @@ class TPTrainingConfig(DeepSpeedConfigModel):
     tp_overlap_comm: bool = False
     """ Whether to overlap communication with computation. Currently, only allreduce supports overlap. """
 
+    sequence_sharding: bool = False
+    """
+    Split the hidden states between the tensor-parallel blocks (attention, MLP) along the sequence over the
+    tensor-parallel ranks, so norms and residual adds run on 1/tp of the tokens (what Megatron-LM calls sequence
+    parallelism; unrelated to Ulysses ``sequence_parallel_size``). The row-parallel all-reduce becomes a
+    reduce-scatter and each block input is all-gathered. Decoder models built from attention and MLP blocks only.
+    """
+
+    sequence_sharding_overlap: bool = True
+    """
+    With sequence_sharding: run the column-parallel linears that read a block input (q/k/v, gate/up) in one
+    autograd node and overlap the reduce-scatter of their input gradient with their weight-gradient GEMMs. Not used
+    for ZeRO-3 partitioned weights.
+    """
+
     vocab_parallel_lm_head: Optional[bool] = None
     """True requires vocabulary sharding, False disables it, and None follows a supported HF tied-embedding plan."""
 

@@ -754,6 +754,7 @@ When a HuggingFace model provides a built-in `tp_plan` (via `model.config.base_m
     "autotp_size": 4,
     "preset_model": "llama",
     "tp_overlap_comm": false,
+    "sequence_sharding": false,
     "vocab_parallel_lm_head": false,
     "partition_config": {
       "use_default_specs": false,
@@ -789,6 +790,18 @@ When a HuggingFace model provides a built-in `tp_plan` (via `model.config.base_m
 | Description                                                                                              | Default |
 | -------------------------------------------------------------------------------------------------------- | ------- |
 | Overlap tensor-parallel allreduce communication with computation (training only).                       | `false` |
+
+***sequence_sharding***: [boolean]
+
+| Description | Default |
+| ----------- | ------- |
+| Split the hidden states between the attention and MLP blocks along the sequence over the tensor-parallel ranks, so norms and residual adds run on 1/tp of the tokens: each block input is all-gathered and each row-parallel output reduce-scattered instead of all-reduced. This is what Megatron-LM calls sequence parallelism; it is unrelated to Ulysses `sequence_parallel_size`. See [Sequence Sharding](/tutorials/autotp-training/#sequence-sharding). | `false` |
+
+***sequence_sharding_overlap***: [boolean]
+
+| Description | Default |
+| ----------- | ------- |
+| With `sequence_sharding`: run the column-parallel linears that read a block input (q/k/v, gate/up) in one autograd node and overlap the reduce-scatter of their input gradient with their weight-gradient GEMMs. Not used for ZeRO-3 partitioned weights. | `true` |
 
 ***vocab_parallel_lm_head***: [boolean or null]
 

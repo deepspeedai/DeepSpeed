@@ -8,6 +8,8 @@ import torch
 import re
 from deepspeed import comm as dist
 from deepspeed.comm import pg_utils
+from deepspeed.module_inject.autotp_sequence_sharding import (reduce_scatter_from_tensor_parallel_block,
+                                                              take_precomputed_column_output)
 from torch import nn
 from torch.nn import functional as F
 from torch.nn.parameter import Parameter
@@ -387,6 +389,11 @@ class TensorParallel_Layer(nn.Module, ABC):
     ##### Runtime Parameter List #####
     tp_overlap_comm: bool = False
     """ Whether to overlap communication with computation. Currently, only allreduce supports overlap. """
+
+    # Set per layer by apply_autotp_sequence_sharding: the layer's input (column) or output (row) is split along
+    # sequence_sharding_dim over the tensor-parallel ranks outside its block.
+    sequence_sharding: bool = False
+    sequence_sharding_dim: int = 1
 
     def __init__(self, mp_group: Optional[dist.ProcessGroup], **kwargs: Any):
         """
@@ -896,7 +903,9 @@ class LinearAllreduce(TensorParallel_Layer):
     def forward(self, input):
         self._assert_compiled_if_deferred()
         output = torch.matmul(input, self.weight.transpose(-1, -2))
-        if not self.defer_collectives_to_compiler:
+        if self.sequence_sharding:
+            output = reduce_scatter_from_tensor_parallel_block(output, self.mp_group, self.sequence_sharding_dim)
+        elif not self.defer_collectives_to_compiler:
             output = RowParallel.apply(self.mp_group, output, not self.is_training_mode())
         if self.bias is not None:
             output = add_bias(output, self.bias)
@@ -990,7 +999,15 @@ class LinearLayer(TensorParallel_Layer):
 
     def forward(self, input):
         self._assert_compiled_if_deferred()
-        if not self.__class__.tp_overlap_comm:
+        if self.sequence_sharding:
+            # The block input was all-gathered along the sequence; the reduce-scatter in that gather's backward
+            # sums this layer's input gradient together with the other column-parallel layers of the block.
+            output = take_precomputed_column_output(self, input)
+            if output is None:
+                output = torch.matmul(input, self.weight.transpose(-1, -2))
+            if self.bias is not None:
+                output = add_bias(output, self.bias)
+        elif not self.__class__.tp_overlap_comm:
             if getattr(self, 'mp_group', None) is not None and not self.defer_collectives_to_compiler:
                 input = ColumnParallel.apply(self.mp_group, input)
             output = torch.matmul(input, self.weight.transpose(-1, -2))
