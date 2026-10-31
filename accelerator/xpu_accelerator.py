@@ -3,6 +3,7 @@
 
 # DeepSpeed Team
 
+import ctypes
 import torch
 from deepspeed.accelerator.abstract_accelerator import DeepSpeedAccelerator
 import functools
@@ -14,6 +15,163 @@ try:
     oneccl_imported_p = True
 except ImportError as e:
     oneccl_imported_p = False
+
+# Host-memory registration on XPU goes through Level Zero's
+# ZE_extension_external_memmap_sysmem extension: zeMemAllocHost with an
+# ze_external_memmap_sysmem_ext_desc_t chained onto the host-alloc descriptor
+# maps an existing page-locked host buffer into the device page tables (the
+# returned pointer equals the input pointer), and zeMemFree releases the
+# mapping without touching the host memory itself. This is the XPU equivalent
+# of cudaHostRegister/cudaHostUnregister.
+#
+# Values from ze_api.h (stable ABI): structure types, result codes, and the
+# descriptor layouts the loader dispatches on.
+_ZE_STRUCTURE_TYPE_CONTEXT_DESC = 0xD
+_ZE_STRUCTURE_TYPE_HOST_MEM_ALLOC_DESC = 0x16
+_ZE_STRUCTURE_TYPE_EXTERNAL_MEMMAP_SYSMEM_EXT_DESC = 0x00020037
+_ZE_STRUCTURE_TYPE_DEVICE_PROPERTIES = 0x4
+_ZE_MAX_EXTENSION_NAME = 256
+_ZE_RESULT_SUCCESS = 0x0
+_ZE_INIT_FLAG_GPU_ONLY = 0x1
+
+
+class _ZeContextDesc(ctypes.Structure):
+
+    _fields_ = [("stype", ctypes.c_uint32), ("pNext", ctypes.c_void_p), ("flags", ctypes.c_uint32)]
+
+
+class _ZeExternalMemmapSysmemDesc(ctypes.Structure):
+
+    _fields_ = [("stype", ctypes.c_uint32), ("pNext", ctypes.c_void_p), ("pSystemMemory", ctypes.c_void_p),
+                ("size", ctypes.c_uint64)]
+
+
+class _ZeHostMemAllocDesc(ctypes.Structure):
+
+    _fields_ = [("stype", ctypes.c_uint32), ("pNext", ctypes.c_void_p), ("flags", ctypes.c_uint32)]
+
+
+class _ZeDriverExtensionProperties(ctypes.Structure):
+
+    _fields_ = [("name", ctypes.c_char * _ZE_MAX_EXTENSION_NAME), ("version", ctypes.c_uint32)]
+
+
+class _ZeDeviceProperties(ctypes.Structure):
+    # The uuid sits at offset 96 and the driver writes the full 368-byte
+    # struct, so keep the leading bytes as an opaque blob and pad the tail.
+    _fields_ = [("stype", ctypes.c_uint32), ("opaque", ctypes.c_uint8 * 92), ("uuid", ctypes.c_uint8 * 16),
+                ("pad", ctypes.c_uint8 * 256)]
+
+
+@functools.lru_cache(maxsize=None)
+def _l0_loader():
+    """(loader, driver) with the registration argtypes wired, or None when unsupported."""
+    try:
+        ze = ctypes.CDLL("libze_loader.so.1")
+    except OSError:
+        return None
+
+    ze.zeInit.argtypes = [ctypes.c_uint32]
+    ze.zeInit.restype = ctypes.c_uint32
+    if ze.zeInit(_ZE_INIT_FLAG_GPU_ONLY) != _ZE_RESULT_SUCCESS:
+        return None
+
+    ze.zeDriverGet.argtypes = [ctypes.POINTER(ctypes.c_uint32), ctypes.POINTER(ctypes.c_void_p)]
+    ze.zeDriverGet.restype = ctypes.c_uint32
+    count = ctypes.c_uint32(0)
+    if ze.zeDriverGet(ctypes.byref(count), None) != _ZE_RESULT_SUCCESS or count.value == 0:
+        return None
+    drivers = (ctypes.c_void_p * count.value)()
+    if ze.zeDriverGet(ctypes.byref(count), drivers) != _ZE_RESULT_SUCCESS:
+        return None
+    driver = drivers[0]
+
+    # zeMemAllocHost-with-descriptor is an optional extension, so probe before
+    # the first registration instead of failing per buffer.
+    ze.zeDriverGetExtensionProperties.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_uint32),
+        ctypes.POINTER(_ZeDriverExtensionProperties)
+    ]
+    ze.zeDriverGetExtensionProperties.restype = ctypes.c_uint32
+    if ze.zeDriverGetExtensionProperties(driver, ctypes.byref(count), None) != _ZE_RESULT_SUCCESS:
+        return None
+    extensions = (_ZeDriverExtensionProperties * count.value)()
+    if ze.zeDriverGetExtensionProperties(driver, ctypes.byref(count), extensions) != _ZE_RESULT_SUCCESS:
+        return None
+    names = [extensions[i].name.decode() for i in range(count.value)]
+    if "ZE_extension_external_memmap_sysmem" not in names:
+        return None
+
+    ze.zeDeviceGet.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32), ctypes.POINTER(ctypes.c_void_p)]
+    ze.zeDeviceGet.restype = ctypes.c_uint32
+    ze.zeDeviceGetProperties.argtypes = [ctypes.c_void_p, ctypes.POINTER(_ZeDeviceProperties)]
+    ze.zeDeviceGetProperties.restype = ctypes.c_uint32
+    ze.zeContextCreateEx.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(_ZeContextDesc), ctypes.c_uint32,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_void_p)
+    ]
+    ze.zeContextCreateEx.restype = ctypes.c_uint32
+    ze.zeMemAllocHost.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(_ZeHostMemAllocDesc), ctypes.c_size_t, ctypes.c_size_t,
+        ctypes.POINTER(ctypes.c_void_p)
+    ]
+    ze.zeMemAllocHost.restype = ctypes.c_uint32
+    ze.zeMemFree.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    ze.zeMemFree.restype = ctypes.c_uint32
+    return ze, driver
+
+
+@functools.lru_cache(maxsize=None)
+def _l0_device_context(device_index):
+    """(loader, context) whose only device is the L0 device matching torch device ``device_index``.
+
+    Registration must happen in a context restricted to the target device: in a
+    multi-device context the driver only maps the range for the context's first
+    device, and device-initiated copies from any other device of that context
+    fail with ZE_RESULT_ERROR_OUT_OF_DEVICE_MEMORY. Device page tables are
+    shared across the driver's contexts, so the mapping is then usable by any
+    context (including torch's runtime) on that device.
+    """
+    base = _l0_loader()
+    if base is None:
+        return None
+    ze, driver = base
+
+    count = ctypes.c_uint32(0)
+    if ze.zeDeviceGet(driver, ctypes.byref(count), None) != _ZE_RESULT_SUCCESS:
+        return None
+    devices = (ctypes.c_void_p * count.value)()
+    if ze.zeDeviceGet(driver, ctypes.byref(count), devices) != _ZE_RESULT_SUCCESS:
+        return None
+
+    # zeDeviceGet order is not guaranteed to match torch's device order, so
+    # match on the device UUID instead of assuming positional identity.
+    torch_uuid = str(torch.xpu.get_device_properties(device_index).uuid)
+    for device in devices:
+        props = _ZeDeviceProperties(stype=_ZE_STRUCTURE_TYPE_DEVICE_PROPERTIES)
+        if ze.zeDeviceGetProperties(device, ctypes.byref(props)) != _ZE_RESULT_SUCCESS:
+            continue
+        raw = bytes(props.uuid)
+        l0_uuid = (f"{raw[0:4].hex()}-{raw[4:6].hex()}-{raw[6:8].hex()}-"
+                   f"{raw[8:10].hex()}-{raw[10:16].hex()}")
+        if l0_uuid != torch_uuid:
+            continue
+        device_ref = ctypes.c_void_p(device)
+        context = ctypes.c_void_p()
+        desc = _ZeContextDesc(stype=_ZE_STRUCTURE_TYPE_CONTEXT_DESC, pNext=None, flags=0)
+        if ze.zeContextCreateEx(driver, ctypes.byref(desc), 1, ctypes.byref(device_ref),
+                                ctypes.byref(context)) != _ZE_RESULT_SUCCESS:
+            return None
+        return ze, context
+    return None
+
+
+# Registrations are freed in the (per-device) context that created them.
+_l0_registrations = {}
 
 
 class XPU_Accelerator(DeepSpeedAccelerator):
@@ -238,6 +396,55 @@ class XPU_Accelerator(DeepSpeedAccelerator):
 
     def _torch_is_pinned(self, tensor):
         return tensor.is_pinned(device=self.current_device_name())
+
+    def register_host_memory(self, address, num_bytes):
+        handles = _l0_device_context(self.current_device())
+        if handles is None:
+            from deepspeed.utils import logger
+            logger.warning_once(
+                "Level Zero host-memory registration is unavailable (libze_loader.so.1 or the "
+                "ZE_extension_external_memmap_sysmem extension is missing); native pinned memory stays mlock-only.")
+            return False
+        ze, context = handles
+        memmap_desc = _ZeExternalMemmapSysmemDesc(stype=_ZE_STRUCTURE_TYPE_EXTERNAL_MEMMAP_SYSMEM_EXT_DESC,
+                                                  pNext=None,
+                                                  pSystemMemory=address,
+                                                  size=num_bytes)
+        host_desc = _ZeHostMemAllocDesc(stype=_ZE_STRUCTURE_TYPE_HOST_MEM_ALLOC_DESC,
+                                        pNext=ctypes.cast(ctypes.byref(memmap_desc), ctypes.c_void_p),
+                                        flags=0)
+        mapped = ctypes.c_void_p()
+        rc = ze.zeMemAllocHost(context, ctypes.byref(host_desc), num_bytes, 0, ctypes.byref(mapped))
+        from deepspeed.utils import logger
+        if rc != _ZE_RESULT_SUCCESS:
+            logger.warning_once(
+                "zeMemAllocHost failed with Level Zero result 0x%x; "
+                "falling back to mlock-only pinned memory.", rc)
+            return False
+        if mapped.value != address:
+            # The spec guarantees the mapping preserves the virtual address; a
+            # non-identity mapping is unusable (callers hold the original
+            # pointer), so release it and report failure so they fall back to mlock.
+            ze.zeMemFree(context, mapped.value)
+            logger.warning_once(
+                "Level Zero returned a non-identity mapping for host registration "
+                "(%#x != %#x); falling back to mlock-only pinned memory.", mapped.value, address)
+            return False
+        _l0_registrations[address] = (ze, context)
+        return True
+
+    def unregister_host_memory(self, address):
+        record = _l0_registrations.pop(address, None)
+        if record is None:
+            return None
+        ze, context = record
+        rc = ze.zeMemFree(context, address)
+        if rc != _ZE_RESULT_SUCCESS:
+            # Raise (like the CUDA path's check_error) so NativePinnedMemory.unpin
+            # keeps the CPU allocation alive instead of freeing pages the driver
+            # may still have mapped.
+            raise RuntimeError(
+                f"zeMemFree failed with Level Zero result 0x{rc:x} while unregistering host memory at {address:#x}")
 
     def op_builder_dir(self):
         try:
