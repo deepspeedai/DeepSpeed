@@ -7,6 +7,7 @@ import math
 import torch
 import torch.nn as nn
 from deepspeed import comm as dist
+from deepspeed.comm import pg_utils
 from deepspeed.utils.types import GATED_ACTIVATION_TYPES
 from deepspeed.accelerator import get_accelerator
 from .op_binding import MLPGemmOp, VectorMatMulOp, GELUGemmOp, ResidualAddOp
@@ -118,7 +119,7 @@ class DeepSpeedMLP(nn.Module):
                                           attention_bias=bias if bias is not None else self.output_b,
                                           final_bias=self.output_b,
                                           residual_add=residual_add)
-        if self.mp_group is not None and dist.get_world_size(group=self.mp_group) > 1:
+        if pg_utils.is_parallel(self.mp_group):
             dist.all_reduce(residual, group=self.mp_group)
 
         return residual

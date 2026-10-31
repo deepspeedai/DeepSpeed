@@ -16,6 +16,7 @@ from unit.common import DistributedTest, preferred_dtype
 from unit.util import torch_assert_equal, torch_assert_close, torch_assert_dicts_of_tensors_equal
 import deepspeed
 import deepspeed.comm as dist
+from deepspeed.accelerator import get_accelerator
 import pytest
 import torch
 
@@ -207,6 +208,10 @@ class TestUlyssesSPHFPEFT(DistributedTest):
         # Create a mock PEFT model object that has config but doesn't inherit from PreTrainedModel
         from transformers import AutoConfig
         hf_config = AutoConfig.from_pretrained(model_name_or_path)
+        # A real PEFT wrapper carries the base model's load-resolved attention implementation;
+        # a bare AutoConfig still holds the unresolved 'eager' default, which would trip the
+        # consistency check in register_with_transformers.
+        hf_config._attn_implementation = "sdpa"
 
         class MockPEFTModel:
             """Mock PEFT model that simulates PeftModel behavior"""
@@ -255,16 +260,16 @@ class TestUlyssesSPHFDisableInEval(DistributedTest):
         micro_batch_size = 1
 
         dtype = preferred_dtype()
-        rank = dist.get_rank()
+        device = get_accelerator().current_device_name()
 
         # Full sequence input (not sharded) - this is what users would pass during eval
         # when they want to bypass SP and process sequences independently per rank
-        input_ids = tensor([[1, 10, 10, 10, 2, 2]], device=f"cuda:{rank}")
-        position_ids = tensor([[0, 1, 2, 3, 4, 5]], device=f"cuda:{rank}")
+        input_ids = tensor([[1, 10, 10, 10, 2, 2]], device=device)
+        position_ids = tensor([[0, 1, 2, 3, 4, 5]], device=device)
 
         # 1. Baseline: model without SP, processing full sequence
         model_baseline = AutoModelForCausalLM.from_pretrained(model_name_or_path, torch_dtype=dtype)
-        model_baseline = model_baseline.to(f"cuda:{rank}")
+        model_baseline = model_baseline.to(device)
         model_baseline.eval()
 
         # Save original attention function for comparison
@@ -294,7 +299,7 @@ class TestUlyssesSPHFDisableInEval(DistributedTest):
             "register_with_transformers should have replaced the attention function"
 
         model_sp = AutoModelForCausalLM.from_pretrained(model_name_or_path, torch_dtype=dtype)
-        model_sp = model_sp.to(f"cuda:{rank}")
+        model_sp = model_sp.to(device)
         model_sp.eval()
 
         with torch.no_grad():
@@ -390,6 +395,7 @@ class TestUlyssesSPHFAttnImplMismatch(DistributedTest):
             )
 
 
+@pytest.mark.skipif(get_accelerator().device_name() != 'cuda', reason="flex_attention requires CUDA")
 @pytest.mark.parametrize("zero_stage", [2, 3])
 class TestUlyssesSPHFFlexAttention(DistributedTest):
     """Separate class for flex_attention tests — requires non_daemonic_procs

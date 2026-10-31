@@ -10,14 +10,13 @@ import triton
 import triton.language as tl
 from deepspeed.accelerator import get_accelerator
 from deepspeed import comm as dist
+from deepspeed.comm import pg_utils
 from deepspeed.ops.transformer.inference.op_binding import LinearOp, VectorMatMulOp, QKVGemmOp
 from deepspeed.ops.transformer.inference.triton import (
     softmax,
     score_4d_matmul,
     context_4d_matmul,
 )
-
-minus_inf = -10000.0
 
 
 class TritonSelfAttention(nn.Module):
@@ -173,7 +172,7 @@ class TritonSelfAttention(nn.Module):
 
         inp_norm = qkv_out[-1]
 
-        if self.config.mlp_after_attn and self.mp_group is not None and dist.get_world_size(group=self.mp_group) > 1:
+        if self.config.mlp_after_attn and pg_utils.is_parallel(self.mp_group):
             dist.all_reduce(output, group=self.mp_group)
 
         return (output, key_layer, value_layer, context_layer, inp_norm)
@@ -297,7 +296,7 @@ def _flash_packed_kernel(
             qk = tl.where(P_SEQ + offs_m[:, None] >= (start_n + offs_n[None, :]), qk, float("-inf"))
 
         qk += tl.dot(q, tl.trans(k), out_dtype=tl.float16)
-        qk += tl.where((start_n + offs_n)[None, :] < N_CTX, 0, minus_inf)
+        qk += tl.where((start_n + offs_n)[None, :] < N_CTX, 0, -10000.0)
         # -- compute scaling constant ---
         m_i_new = tl.maximum(m_i, tl.max(qk, 1))
         alpha = tl.math.exp2(m_i - m_i_new)

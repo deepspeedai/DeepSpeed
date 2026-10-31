@@ -39,7 +39,6 @@ collections:
       - bert-finetuning.md
       - bert-pretraining.md
       - cifar-10.md
-      - curriculum-learning.md
       - data-efficiency.md
       - ds4sci_evoformerattention.md
       - flops-profiler.md
@@ -57,7 +56,6 @@ collections:
       - one-cycle.md
 
       - pipeline.md
-      - progressive_layer_dropping.md
       - transformer_kernel.md
       - zero-offload.md
       - zero.md

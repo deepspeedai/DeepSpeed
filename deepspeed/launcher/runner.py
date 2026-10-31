@@ -87,18 +87,6 @@ def parse_args(args=None):
                         help="Total number of worker nodes to run on, this will use "
                         "the top N hosts from the given hostfile.")
 
-    parser.add_argument("--min_elastic_nodes",
-                        type=int,
-                        default=-1,
-                        help="Minimum number of nodes to run elastic training on. "
-                        "Default is 1 when elastic training is enabled")
-
-    parser.add_argument("--max_elastic_nodes",
-                        type=int,
-                        default=-1,
-                        help="Maximum number of nodes to run elastic training on. "
-                        "Default is num_nodes when elastic training is enabled")
-
     parser.add_argument("--num_gpus",
                         "--num_accelerators",
                         type=int,
@@ -182,10 +170,6 @@ def parse_args(args=None):
                         type=str,
                         help="Run DeepSpeed autotuner to discover optimal configuration parameters "
                         "before running job.")
-
-    parser.add_argument("--elastic_training",
-                        action="store_true",
-                        help="Enable elastic training support in DeepSpeed.")
 
     parser.add_argument("user_script", type=str, help="User script to launch, followed by any required "
                         "arguments.")
@@ -442,21 +426,6 @@ def run_autotuning(args, active_resources):
         tuner.run_after_tuning()
 
 
-def parse_num_nodes(str_num_nodes: str, elastic_training: bool):
-    node_list = str_num_nodes.split(":")
-
-    if len(node_list) == 1:
-        min_nodes, max_nodes = int(node_list[0]), -1
-    elif len(node_list) == 2 and elastic_training:
-        min_nodes, max_nodes = int(node_list[0]), int(node_list[1])
-    elif len(node_list) == 2 and not elastic_training:
-        raise RuntimeError("MIN:MAX format is only supported in elastic training")
-    else:
-        raise RuntimeError("num_nodes {} is not in MIN:MAX format".format(str_num_nodes))
-
-    return min_nodes, max_nodes
-
-
 LAUNCHER_CLASSES = {
     PDSH_LAUNCHER: PDSHRunner,
     OPENMPI_LAUNCHER: OpenMPIRunner,
@@ -473,9 +442,6 @@ def main(args=None):
     if args.quiet:
         args.log_level = "error"
     set_log_level_from_string(args.log_level)
-
-    if args.elastic_training:
-        assert args.master_addr != "", "Master Addr is required when elastic training is enabled"
 
     resource_pool = fetch_hostfile(args.hostfile)
 
@@ -561,9 +527,6 @@ def main(args=None):
     if launcher_cls is not None:
         launcher_cls.validate_active_resources(active_resources)
 
-    if args.elastic_training:
-        assert not args.no_local_rank, "--no_local_rank argument is not supported in Elastic training"
-
     if args.no_ssh:
         assert (0 <= args.node_rank <
                 len(active_resources)), "Launching training without ssh, but --node_rank is not set correctly."
@@ -590,10 +553,6 @@ def main(args=None):
             deepspeed_launch += ["--save_pid", f"{os.getpid()}"]
         if args.enable_each_rank_log:
             deepspeed_launch.append(f"--enable_each_rank_log={args.enable_each_rank_log}")
-        if args.elastic_training:
-            deepspeed_launch.append("--enable_elastic_training")
-            deepspeed_launch.append(f"--max_elastic_nodes={args.max_elastic_nodes}")
-            deepspeed_launch.append(f"--min_elastic_nodes={args.min_elastic_nodes}")
         if args.bind_cores_to_rank:
             deepspeed_launch.append("--bind_cores_to_rank")
         if args.bind_core_list is not None:

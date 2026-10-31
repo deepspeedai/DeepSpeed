@@ -3,9 +3,11 @@
 
 # DeepSpeed Team
 
+import inspect
 import torch
 from deepspeed.inference.config import DeepSpeedInferenceConfig
 from deepspeed.module_inject.replace_policy import replace_policies
+from deepspeed.module_inject.containers.opt import HFOPTLayerPolicy
 from deepspeed.module_inject.utils import policy_to_ds_container
 from .engine import DeepSpeedEngine
 from .utils import TLinear, get_inactive_params
@@ -20,12 +22,6 @@ from deepspeed.utils import logger
 from deepspeed.module_inject.layers import LinearLayer, Normalize, EmbeddingLayer, OPTEmbedding
 from ..ops.transformer.inference.op_binding.workspace import WorkspaceOp
 from .hybrid_engine_graph import (DecodeGraphCache, decode_steps_from_generate_kwargs, validate_cuda_graph_support)
-
-try:
-    import transformers
-    OPTLearnedPositionalEmbedding = transformers.models.opt.modeling_opt.OPTLearnedPositionalEmbedding
-except (ImportError, AttributeError):
-    OPTLearnedPositionalEmbedding = None
 
 
 class DeepSpeedHybridEngine(DeepSpeedEngine):
@@ -129,6 +125,12 @@ class DeepSpeedHybridEngine(DeepSpeedEngine):
         self.inference_policies = {}
         for plcy in replace_policies:
             _ = plcy(None)
+            if plcy is HFOPTLayerPolicy and plcy._orig_layer_class is not None:
+                parameters = inspect.signature(plcy._orig_layer_class.forward).parameters
+                # The injected OPT layer only implements the legacy tuple-cache
+                # contract. Keep modern Cache-based decoders on the native path.
+                if "cache_position" in parameters or "past_key_values" in parameters:
+                    continue
             if isinstance(plcy._orig_layer_class, list):
                 for orig_layer_class in plcy._orig_layer_class:
                     self.inference_policies.update({orig_layer_class: (self.new_inference_container, plcy)})
@@ -146,12 +148,15 @@ class DeepSpeedHybridEngine(DeepSpeedEngine):
             self.inference_policies = {}
             return
 
-        self.inference_policies.update({
+        auxiliary_policies = {
             nn.Linear: (LinearLayer, ),
             nn.Embedding: (EmbeddingLayer, ),
             nn.LayerNorm: (Normalize, ),
-            OPTLearnedPositionalEmbedding: (OPTEmbedding, )
-        })
+        }
+        if HFOPTLayerPolicy._orig_layer_class is not None:
+            from transformers.models.opt.modeling_opt import OPTLearnedPositionalEmbedding
+            auxiliary_policies[OPTLearnedPositionalEmbedding] = (OPTEmbedding, )
+        self.inference_policies.update(auxiliary_policies)
 
     def _fuse_lora_layer(self, layer_id):
         self._inference_containers[layer_id].fuse_lora()

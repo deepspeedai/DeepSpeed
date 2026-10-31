@@ -129,23 +129,6 @@ def get_curriculum_learning_params(param_dict):
         return {}
 
 
-def get_curriculum_enabled_legacy(param_dict):
-    if CURRICULUM_LEARNING_LEGACY in param_dict.keys():
-        return get_scalar_param(param_dict[CURRICULUM_LEARNING_LEGACY], CURRICULUM_ENABLED_LEGACY,
-                                CURRICULUM_ENABLED_DEFAULT_LEGACY)
-    else:
-        return False
-
-
-def get_curriculum_params_legacy(param_dict):
-    if CURRICULUM_LEARNING_LEGACY in param_dict.keys():
-        curriculum_params = copy.copy(param_dict[CURRICULUM_LEARNING_LEGACY])
-        curriculum_params.pop(CURRICULUM_ENABLED_LEGACY)
-        return curriculum_params
-    else:
-        return False
-
-
 def get_data_routing(param_dict):
     output = {}
     output[DATA_ROUTING_ENABLED] = get_data_routing_enabled(param_dict)

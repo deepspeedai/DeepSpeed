@@ -177,6 +177,13 @@ that folds pieces in N dimensions and groups them by source rank — §8.2 state
 normative, because a composer missing either produces a correct map whose size grows with
 model size.
 
+The phase-2 transfer planner validates logical intersections before choosing concrete
+source holders. Its output is a list of resolved shard-to-shard copies, not another
+homogeneous map. Once endpoints are chosen, copies may be folded when both source
+and target address mappings continue exactly along an axis, even if the copies came
+from different logical regions. A folded copy therefore need not have one valid
+logical origin or one `locations` set. This does not relax P5 for input map pieces.
+
 **P5 — Homogeneity.** Every element a piece covers is held by the same set of ranks, and
 that set is the piece's `locations`. This makes `locations` authoritative: if pieces `P`
 (locations `L`) and `Q` (locations `M`) share an element `e`, then P5 gives
@@ -394,13 +401,37 @@ whose name matched a metadata key could never be confused for one.
   size grows with model size instead of block structure; skipping the homogeneity constraint
   gives a map whose `locations` is wrong, which is worse because it still round-trips
   correctly on a single topology and only misleads a phase-2 planner.
+  Resolved transfer copies use their source and target shard addresses for folding;
+  this rule does not require their logical regions to merge into one map piece.
 - **Plain scalars only.** No tensors, no pickled classes, no `SubparamShape` objects. The
   map should be readable without importing DeepSpeed, which matters for external tooling
   and for debugging a checkpoint that will not load.
 - **`locations` is per piece, not per parameter.** This is the field that expresses
   `bigcodetype`, whose kv block is held identically by every rank (§5).
+- **A reader that prefers the map must still account for the categories.** Additivity means
+  both are in the file, so a reader taking the map never consults the category branches —
+  which leaves their patterns looking unused, and a strict conversion rejects them. They are
+  superseded, not unused, and the reader has to say so. This is not cosmetic: it is the
+  difference between a checkpoint that converts and one that aborts.
 
-### 6.4 Size
+### 6.4 Where a map is built
+
+Not where the file is assembled. Collecting model-level metadata sees only the conversion
+schema, which does not carry per-rank extents — those are resolved while a layer is built
+and are not recoverable later from a shape alone. So a map is derived at the point a layer
+records its metadata, and collection gathers what the layers produced.
+
+Two consequences worth stating, because both are easy to get wrong:
+
+- A parameter the tensor-parallel machinery never touches is still describable — one piece
+  held by every rank — but it reaches no layer, so nothing derives its map. It needs the
+  degree of the group, which only the partitioned layers know. Producing a map for it means
+  taking that from elsewhere in the model rather than skipping it: a parameter with no map
+  falls back to its name category, which is what the IR exists to replace.
+- A layout the machinery refuses to describe produces no map, and conversion falls back to
+  the categories. That is the intended escape, not a gap.
+
+### 6.5 Size
 
 Measured on a fused-QKV parameter at TP=8: 96 pieces, 6836 bytes of compact JSON —
 about **71 bytes per piece**. Extrapolated by tensor count:
@@ -538,6 +569,16 @@ count that grows with model size — which looks like evidence the language is i
 Grouping is only legal because a piece carries its own destination offset (§2.1), so pieces
 may be reordered freely.
 
+Map-piece counts here and resolved-copy segment counts are different metrics. For the
+BigCode TP2→TP4 transfer fixture with 48×8 logical elements, the default lowest-holder
+choice yields 7 resolved copies after physical folding. Choosing the source that holds
+each target's private query rows (source 0 for targets 0 and 1, source 1 for targets 2
+and 3) puts the query read next to the KV read in that source shard and yields 6 copies.
+Choosing the highest-ranked KV holder for every target still yields 7. All three plans
+write 768 target elements because the KV block is replicated.
+These counts describe that fixture and policy, not a general minimum or a measured
+communication speedup.
+
 Measured piece counts are bounded by topology and block structure, not model size: across
 an 8× hidden sweep, codegen 4→8 holds at 40, bigcode 2→4 at 7, Yuan o_proj at 4.
 
@@ -546,11 +587,50 @@ and fp16 alike, because dividing by `2^k` only shifts the exponent — so a bias
 bit-exactly at every TP degree in normal use. It is lossy for non-power-of-two `N` (3, 6,
 12), where a converted-and-restored bias may differ in the last bits from the original.
 
-**8.4 ZeRO and offload placement.** delock's extension in #8230 — "a subset of a parameter
-combined with a list of ranks holding this subset" — is what §2.1's `locations` implements.
-ZeRO-1/3 partitions and offload replicas should fall out as pieces whose `locations`
-describe the DP group rather than the TP group, but this spec does not yet work through
-AutoEP's expert placement, where locations are per-expert rather than per-parameter.
+**8.4 AutoEP, ZeRO, and offload placement.** AutoEP persists a versioned
+`ParamAffineMap` for each expert parameter in addition to a versioned placement
+descriptor in EP-local rank coordinates. The persisted map is the geometry execution
+contract for conversion and restore; descriptor lowering is retained only as a legacy
+checkpoint fallback. The descriptor records each rank's ordered global expert IDs,
+including uneven, non-contiguous, replicated, and empty placements, so it remains useful
+for placement provenance and validation rather than scheduling policy. Rank entries are
+identified by their explicit rank IDs, not their list positions. When a checkpoint carries
+both forms, lowering the descriptor must reproduce the persisted map exactly; a conflict
+invalidates the checkpoint. ZeRO and EDP fragments remain outside the map: callers first
+normalize storage to one logical packed expert tensor per EP rank.
+
+This phase does not change the current runtime's uniform contiguous scheduling, choose an
+arbitrary future expert schedule, or implement direct phase-2 shard-to-shard transfer.
+Those remain follow-on work. Phase 2 may derive a target descriptor from runtime
+scheduling and transfer directly between source and target maps; until then extraction
+from the universal full tensor uses the target map. delock's extension in #8230 — "a
+subset of a parameter combined with a list of ranks holding this subset" — is still what
+§2.1's exact `locations` implements, and the same mechanism can later describe normalized
+ZeRO/offload placement without introducing another geometry IR.
+
+At runtime, `AutoEPMoELayer.expert_affine_maps()` returns the maps of the live packed
+expert parameters, and `AutoEPMoELayer.plan_expert_transfer(target_placement)` composes
+them with a target descriptor through `plan_transfer` into shard-to-shard copies. Plan
+ranks are EP-local ranks of the respective placements; the plan is not executed, and ZeRO
+and EDP storage must still be normalized before its offsets apply.
+`AutoEPMoELayer.expert_storage_affine_maps()` describes that storage in global ranks
+(§10).
+
+`deepspeed/checkpoint/zero_affine.py` takes the first step for live training storage. It
+describes, in global ranks, where ZeRO keeps each element of a parameter: the low-precision
+copy (`zero_param_storage_affine_map`: replicas under ZeRO-0/1/2, `ds_tensor` partitions
+under ZeRO-3, padding excluded), and the fp32 master copy with its optimizer states
+(`zero_optimizer_storage_affine_maps`: ZeRO-1/2 fragments gathered from each rank's
+`_hp_mapping`, which may cut a parameter mid-row, and the ZeRO-3 fp32 partition). The
+matching `*_storage_shard` accessors return the flat views of ZeRO's own buffers, so a
+plan's writes land in the optimizer. Offloaded states, MiCS and hpZ have no map yet.
+Both parameter storage accessors reject quantized ZeRO-3 storage (`ds_quant_scale`):
+its encoded values and separate quantization scales cannot be treated as ordinary
+parameter elements. They reject NVMe-offloaded ZeRO-3 storage too, whose partition is a
+placeholder while swapped out. `zero_param_storage_shard` also rejects a gathered ZeRO-3
+parameter: the forward reads the gathered copy, which persistent parameters keep between
+steps, so a write to the partition alone would be lost. `engine.empty_partition_cache()`
+releases every gathered copy first.
 
 ---
 
@@ -567,3 +647,76 @@ AutoEP's expert placement, where locations are per-expert rather than per-parame
 
 Steps 1–3 change no behaviour: they add a representation and prove it agrees with the
 current one. Only step 4 changes what a checkpoint contains, and only by adding a key.
+
+---
+
+## 10. Phase 2 — live storage maps
+
+Phase 2 plans `M_t ∘ M_s⁻¹` between two live topologies. A live topology is what each process
+actually holds, so its map must describe storage, not only the parallel layout.
+
+**10.1 Two kinds of map.**
+- *Layout map*: the parameter's N-D logical shape, keyed by ranks of the parallel group that
+  defines the layout (TP, EP). The layer builds it from its own semantics, checkpoints persist
+  it, and it remains the only geometry contract.
+- *Storage map*: keyed by global rank; each shard is a process's flat buffer (`param.data`,
+  ZeRO-3 `ds_tensor`, an fp32 or optimizer-state fragment). It exists at runtime only and is
+  never persisted. Built from a layout map (10.3), it keeps the layout's N-D logical shape;
+  without a layout it describes the flattened parameter `(numel,)`.
+
+Both satisfy P1–P5. A plan's endpoints must be the same kind and the same logical shape;
+`plan_transfer` rejects different logical shapes, so a flat storage map cannot be planned
+against an N-D one of the same parameter. Matching rank namespaces is the caller's job.
+
+**10.2 N-D boxes in flat storage.** A ZeRO partition of an N-D layout shard is a contiguous
+interval of its flattened buffer, which is generally not one box of the N-D parameter: it is
+a partial row, then whole rows, then a partial row, recursively over the axes, so at most
+`2 * ndim - 1` boxes. Each box is dense in the buffer (its storage strides are its own
+row-major strides). `plan_transfer` accepts such a piece in a 1-D shard and treats its
+storage as the interval `[dest_offset, dest_offset + numel)`; any other shard must have the
+logical parameter's rank. Describing the flattened parameter instead would cut a column of a
+row-major weight, such as a row-parallel shard, into one piece per row.
+
+**10.3 Derivation.** A storage map is derived, never hand-built:
+`storage = nest_affine_maps(layout, {layout rank: inner})`, where `inner` describes how one
+flattened layout shard is stored over its data-parallel group (`zero_storage_affine_map`:
+replicas, or ZeRO-3 partitions `[d*n, (d+1)*n)` without padding). Nesting keeps P5: layout
+pieces that describe the same block on several layout ranks are one block whose holders are
+the union of every rank's holders, and the block is cut wherever any of those holders'
+storage begins or ends; each resulting interval becomes the boxes of 10.2. A layout piece
+that is not dense within its layout shard, such as a block narrower than the shard's rows,
+cannot be merged across those rows and keeps one piece per row. Callers:
+- `zero_param_storage_affine_map` and `zero_optimizer_storage_affine_maps` describe a dense
+  parameter (no layout, so they are already the storage map).
+- `autotp_storage_affine_maps(model)` nests each parameter's published AutoTP layout map
+  with the storage of every TP shard. A parameter AutoTP leaves whole in a model built under
+  `zero.Init` stays partitioned over the whole world, so every TP rank reports the storage of
+  one shared copy; that storage describes the parameter on its own, without nesting. The
+  experts of an AutoEP layer are whole on every TP rank and differ by EP rank; their maps
+  are the layer's `expert_storage_affine_maps()`.
+- AutoEP expert storage nests the placement's layout map with each EP rank's EDP storage.
+  It needs no communication: the placement, the EDP group table and the ZeRO-3 even split
+  are known to every rank.
+
+**10.4 Replica choice** stays with the planner (§2.4): every holder appears in `locations`,
+and the planner's default or a `replica_selector` picks one.
+
+**10.5 Plan lifetime.** Maps and plans depend only on layout and partitioning, not on values.
+A caller builds them once and executes the plan for every sync, until either side's
+placement, parallel sizes or ZeRO partitioning changes. A parameter whose buffer is
+reallocated keeps its plan; only the shard views must be fetched again.
+
+**10.6 Authoritative and derived copies.** A storage map lists only *authoritative* copies:
+storage that the optimizer step updates and the next forward reads, such as `param.data` or
+a ZeRO-3 `ds_tensor`. A write through the map therefore lasts. The runtime also keeps
+*derived* copies that it regenerates from authoritative ones: the gathered copy of a
+persistent ZeRO-3 parameter, ZeRO++ hpZ secondary partitions, fused inference weights.
+Writing a derived copy alone is lost or leaves the authoritative copy stale, so maps leave
+it out and shard accessors refuse it (`zero_param_storage_shard` on a gathered parameter).
+Whether a copy is authoritative depends on the side: the low-precision parameters are
+authoritative for a rollout engine, but on a training engine they are derived from the fp32
+master weights, which the next step casts back over them.
+
+**10.7 Not described.** Offload tiers, MiCS / hpZ, expert tensor parallelism, quantized
+ZeRO-3 storage, non-elementwise transforms, derived copies, and AutoEP expert optimizer
+states.

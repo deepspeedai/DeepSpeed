@@ -216,6 +216,9 @@ class DeepSpeedAccelerator(ABC):
         return False
 
     # Graph operations
+    def is_current_stream_capturing(self) -> bool:
+        return False
+
     @abc.abstractmethod
     def create_graph(self):
         ...
@@ -285,6 +288,10 @@ class DeepSpeedAccelerator(ABC):
     def unregister_host_memory(self, address):
         """Unregister host memory previously registered with the device runtime."""
         return None
+
+    def pin_memory_alignment(self):
+        """Byte alignment required for device-registered host memory; 1 means none."""
+        return 1
 
     # CPU torch pinning is a historical no-op; subclasses that really page-lock
     # keep the default True so tracker accounting matches the docs.
