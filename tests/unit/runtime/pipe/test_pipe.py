@@ -50,6 +50,77 @@ def rel_diff(A, B):
     return abs(A - B) / abs(A)
 
 
+class PassThroughTarget(nn.Module):
+
+    def __init__(self, hidden_size):
+        super().__init__()
+        self.linear = nn.Linear(hidden_size, hidden_size)
+
+    def forward(self, inputs):
+        hidden, target = inputs
+        return self.linear(hidden), target
+
+
+class ConsumeTarget(nn.Module):
+
+    def __init__(self, hidden_size):
+        super().__init__()
+        self.linear = nn.Linear(hidden_size, hidden_size)
+        self.target_requires_grad = []
+
+    def forward(self, inputs):
+        hidden, target = inputs
+        self.target_requires_grad.append(target.requires_grad)
+        return torch.nn.functional.mse_loss(self.linear(hidden), target)
+
+
+@pytest.mark.parametrize("dynamic_shape", [False, True])
+class TestPipeRequiresGradMetadata(DistributedTest):
+    world_size = 2
+    backend = "gloo"
+
+    def test_non_grad_float_survives_pipeline_boundary(self, dynamic_shape):
+        hidden_size = 4
+        config = {
+            "train_batch_size": 2,
+            "train_micro_batch_size_per_gpu": 2,
+            "gradient_accumulation_steps": 1,
+            "optimizer": {
+                "type": "SGD",
+                "params": {
+                    "lr": 0.1
+                }
+            },
+            "pipeline": {
+                "activation_checkpoint_interval": 0
+            },
+        }
+        model = PipelineModule(layers=[PassThroughTarget(hidden_size),
+                                       ConsumeTarget(hidden_size)],
+                               num_stages=2,
+                               dynamic_shape=dynamic_shape)
+        engine, _, _, _ = deepspeed.initialize(config=config, model=model, model_parameters=model.parameters())
+        batch = ((torch.randn(2, hidden_size), torch.randn(2, hidden_size)), torch.zeros(1))
+        data_iter = RepeatingLoader([batch])
+
+        def assert_target_does_not_require_grad():
+            observed = torch.zeros(1, dtype=torch.int32, device=engine.device)
+            if engine.is_last_stage():
+                consumer = next(layer for layer in engine.module.forward_funcs if isinstance(layer, ConsumeTarget))
+                observed.fill_(consumer.target_requires_grad[-1])
+            dist.broadcast(observed, src=1)
+            assert observed.item() == 0
+
+        engine.eval_batch(data_iter=data_iter)
+        assert_target_does_not_require_grad()
+
+        engine.module.train()
+        engine.set_dataiterator(data_iter)
+        for _ in range(2):
+            engine.train_batch()
+            assert_target_does_not_require_grad()
+
+
 class TestPipeGradientAccumulationScaling(DistributedTest):
     world_size = 2
 
