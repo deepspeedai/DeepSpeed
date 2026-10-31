@@ -1942,7 +1942,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             grad_partitions_for_rank = [g.mul(self.gradient_predivide_factor) for g in grad_partitions_for_rank]
 
         partition_world_size = dist.get_world_size(group=process_group)
-        averaging_world_size = self._gradient_averaging_world_size(params_to_reduce, partition_world_size)
+        averaging_world_size = self._gradient_averaging_world_size(
+            params_to_reduce, partition_world_size) / float(self.sequence_parallel_size)
         if averaging_world_size != partition_world_size:
             scale = partition_world_size / float(averaging_world_size)
             grad_partitions_for_rank = [g.mul(scale) for g in grad_partitions_for_rank]
