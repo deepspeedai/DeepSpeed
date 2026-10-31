@@ -119,3 +119,26 @@ class LogicalBox:
 
     def __repr__(self) -> str:
         return f'Box({self.origin}+{self.extent})'
+
+
+def boxes_disjoint(boxes: Sequence[LogicalBox]) -> bool:
+    """Whether no two boxes share an element.
+
+    Sweeps along the axis whose box origins are most varied, so a box is compared only with the boxes
+    still open where it starts. For the grid and run layouts the builders emit that is a handful of
+    boxes, not all of them.
+    """
+    boxes = [box for box in boxes if not box.is_empty]
+    if len(boxes) < 2:
+        return True
+    if not boxes[0].origin:
+        return False
+    axis = max(range(len(boxes[0].origin)), key=lambda a: len({box.origin[a] for box in boxes}))
+    open_boxes: List[LogicalBox] = []
+    for box in sorted(boxes, key=lambda b: b.origin[axis]):
+        start = box.origin[axis]
+        open_boxes = [other for other in open_boxes if other.origin[axis] + other.extent[axis] > start]
+        if any(not box.intersection(other).is_empty for other in open_boxes):
+            return False
+        open_boxes.append(box)
+    return True
