@@ -6,6 +6,7 @@
 import torch
 from deepspeed.ops.op_builder import CPUAdagradBuilder
 from deepspeed.utils.logging import should_log_le
+from deepspeed.utils.torch import restore_optimizer_state_dtype
 
 
 class DeepSpeedCPUAdagrad(torch.optim.Optimizer):
@@ -31,6 +32,12 @@ class DeepSpeedCPUAdagrad(torch.optim.Optimizer):
         # is used multiple times in the same process (notebook or pytest worker)
         if hasattr(self, 'ds_opt_adagrad'):
             self.ds_opt_adagrad.destroy_adagrad(self.opt_id)
+
+    def load_state_dict(self, state_dict):
+        super().load_state_dict(state_dict)
+        # step() keeps the states in fp32 for any parameter dtype, and the kernel is chosen from the state dtype.
+        if self.fp32_optimizer_states:
+            restore_optimizer_state_dtype(self, state_dict, torch.float)
 
     def __setstate__(self, state):
         super(DeepSpeedCPUAdagrad, self).__setstate__(state)

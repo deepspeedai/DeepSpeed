@@ -6,6 +6,7 @@
 import torch
 from deepspeed.utils import logger
 from deepspeed.utils.logging import should_log_le
+from deepspeed.utils.torch import restore_optimizer_state_dtype
 from deepspeed.ops.op_builder import CPUAdamBuilder
 
 
@@ -107,6 +108,12 @@ class DeepSpeedCPUAdam(torch.optim.Optimizer):
         if param_group.get('amsgrad', self.defaults['amsgrad']):
             raise RuntimeError('DeepSpeedCPUAdam does not support the AMSGrad variant.')
         super().add_param_group(param_group)
+
+    def load_state_dict(self, state_dict):
+        super().load_state_dict(state_dict)
+        # step() keeps the states in fp32 for any parameter dtype, and the kernel is chosen from the state dtype.
+        if self.fp32_optimizer_states:
+            restore_optimizer_state_dtype(self, state_dict, torch.float)
 
     def __setstate__(self, state):
         super(DeepSpeedCPUAdam, self).__setstate__(state)
