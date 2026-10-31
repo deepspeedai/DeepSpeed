@@ -10,6 +10,7 @@ from itertools import chain
 import argparse
 import glob
 import itertools
+import logging
 import math
 from concurrent.futures import ProcessPoolExecutor
 import os
@@ -130,6 +131,9 @@ def _save_checkpoint(file_path, chkpt_sd):
     torch.save(chkpt_sd, file_path)
 
 
+logger = logging.getLogger(__name__)
+
+
 def _flat_state(param_group_id, param_group_state, fp32_flat_group):
     """Return a dict of the states this param group carries, keyed by the names the optimizer used.
 
@@ -138,10 +142,11 @@ def _flat_state(param_group_id, param_group_state, fp32_flat_group):
     optimizer actually saved means any optimizer state can be converted without teaching the
     converter its names up front.
 
-    A state goes in the flat dict only if it is shaped like the ZeRO partition. One is not:
-    ZeRO-1/2 replicate Muon's momentum buffer at the size of the whole group so Newton-Schulz
-    can work on the full matrix; slicing that by partition offsets would write fragments that
-    look right and hold the wrong rows, so it is refused instead.
+    A state goes in the flat dict only if it is shaped like the ZeRO partition. States that
+    are not — for example ZeRO-1/2 replicating Muon's momentum buffer at the size of the whole
+    group so Newton-Schulz can work on the full matrix — are skipped with a warning rather than
+    sliced by partition offsets, which would write fragments that look right and hold the
+    wrong rows.
     """
     partition_numel = fp32_flat_group.numel()
     flat_state = {"fp32": fp32_flat_group}
@@ -153,10 +158,18 @@ def _flat_state(param_group_id, param_group_state, fp32_flat_group):
         elif value.numel() == partition_numel:
             flat_state[name] = value
         else:
-            raise ValueError(f"Optimizer state '{name}' of param group {param_group_id} has "
-                             f"{value.numel()} elements, but the group's ZeRO partition has "
-                             f"{partition_numel}. The universal format stores optimizer state in "
-                             f"the partition's layout, so a state of another shape cannot be placed yet.")
+            # Skip states that do not match the partition shape rather than raising.
+            # ZeRO-1/2 replicate Muon's momentum buffer whole per partition so Newton-Schulz
+            # can work on the full matrix; slicing it by partition offsets would silently write
+            # the wrong rows. A proper whole-parameter state layout (see PR #8609) would handle
+            # this, but until then we warn and skip so conversion can still proceed for the
+            # states that do match.
+            logger.warning(
+                "Optimizer state '%s' of param group %d has %d elements but the group's ZeRO "
+                "partition has %d. Skipping this state: the universal format stores optimizer "
+                "state in the partition's layout, so a state of another shape cannot be placed "
+                "without a whole-parameter state layout (see issue #8608 / PR #8609).", name, param_group_id,
+                value.numel(), partition_numel)
     return flat_state
 
 
