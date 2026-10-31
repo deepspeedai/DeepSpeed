@@ -32,6 +32,29 @@ RMS_NORM_CLASSES = (
     "transformers.models.qwen3.modeling_qwen3.Qwen3RMSNorm",
     QWEN3_MOE_RMS_NORM,
 )
+NARROW_TILE_CASES = (
+    (0, 128, None),
+    (1, 1, 1),
+    (3, 1, 4),
+    (1, 7, 1),
+    (3, 16, 4),
+    (1, 64, 1),
+    (1, 96, 1),
+    (1, 128, 1),
+    (3, 128, 4),
+    (15, 128, 16),
+    (16, 128, 16),
+    (17, 128, 32),
+    (31, 128, 32),
+    (32, 128, 32),
+    (33, 128, 32),
+    (255, 16, 256),
+    (256, 16, 256),
+    (257, 16, 256),
+    (8192, 128, 32),
+    (1, 129, None),
+    (3, 2048, None),
+)
 
 
 def _rms_norm():
@@ -96,12 +119,49 @@ def _ulp_stats(actual, expected):
     }
 
 
-def _assert_ulp_close(actual, expected, *, max_ulp, min_frac_within_1, label):
+def _assert_ulp_close(actual, expected, *, max_ulp, min_frac_within_1, label, atol=0.0):
+    assert torch.isfinite(actual).all() and torch.isfinite(expected).all(), f"{label} has non-finite values"
     stats = _ulp_stats(actual, expected)
     message = (f"{label} ULP stats: max={stats['max']}, median={stats['median']}, "
-               f"frac_within_1={stats['frac_within_1']}")
-    assert stats["max"] <= max_ulp, message
+               f"frac_within_1={stats['frac_within_1']}, atol={atol}")
+    max_outside_atol = stats["max"]
+    if atol:
+        outside_atol = (actual.float() - expected.float()).abs() > atol
+        max_outside_atol = _ulp_stats(actual[outside_atol], expected[outside_atol])["max"]
+    assert max_outside_atol <= max_ulp, message
     assert stats["frac_within_1"] >= min_frac_within_1, message
+
+
+def test_dx_tolerance_accepts_ulp_or_small_absolute_error():
+    expected = torch.ones(100, dtype=torch.bfloat16)
+    expected[0] = 2**-26
+    actual = expected.clone()
+    # Near cancellation, 119 BF16 ULPs can be much smaller than 1e-7.
+    actual.view(torch.int16)[0] += 119
+    actual.view(torch.int16)[1] += 8
+
+    assert 0 < (actual[0].float() - expected[0].float()).abs() < 1e-7
+    assert (actual[1].float() - expected[1].float()).abs() > 1e-7
+    _assert_ulp_close(actual, expected, max_ulp=8, min_frac_within_1=0.95, label="dx", atol=1e-7)
+    with pytest.raises(AssertionError, match="dx"):
+        _assert_ulp_close(actual, expected, max_ulp=8, min_frac_within_1=0.95, label="dx")
+
+
+@pytest.mark.parametrize("case", ["above-both-limits", "too-many-outliers", "nan", "infinity"])
+def test_dx_tolerance_still_rejects_large_errors_and_nonfinite_values(case):
+    expected = torch.ones(100, dtype=torch.bfloat16)
+    actual = expected.clone()
+    if case == "above-both-limits":
+        actual.view(torch.int16)[0] += 9
+    elif case == "too-many-outliers":
+        expected[:6] = 2**-26
+        actual.copy_(expected)
+        actual.view(torch.int16)[:6] += 119
+    else:
+        actual[0] = float("nan") if case == "nan" else float("inf")
+
+    with pytest.raises(AssertionError, match="dx"):
+        _assert_ulp_close(actual, expected, max_ulp=8, min_frac_within_1=0.95, label="dx", atol=1e-7)
 
 
 def _check_fused_rms_norm_matches_hf_forward_and_backward(dtype, shape):
@@ -122,8 +182,61 @@ def _check_fused_rms_norm_matches_hf_forward_and_backward(dtype, shape):
     fused_out.backward(upstream)
 
     _assert_ulp_close(fused_out, eager_out, max_ulp=2, min_frac_within_1=0.99, label="forward")
-    _assert_ulp_close(fused_hidden.grad, eager_hidden.grad, max_ulp=8, min_frac_within_1=0.95, label="dx")
+    # A narrow row's two FP32 dx terms can nearly cancel, making a tiny absolute error many low-precision ULPs.
+    dx_atol = 1e-7 if shape[-1] <= 128 else 0.0
+    _assert_ulp_close(fused_hidden.grad,
+                      eager_hidden.grad,
+                      max_ulp=8,
+                      min_frac_within_1=0.95,
+                      label="dx",
+                      atol=dx_atol)
     _assert_ulp_close(fused_weight.grad, eager_weight.grad, max_ulp=8, min_frac_within_1=0.95, label="dgamma")
+
+
+def _check_fused_rms_norm_width_one_has_nonzero_input_gradient(dtype, n_rows=257):
+    device = _device()
+    eps = 0.25
+    hidden = torch.linspace(0.25, 0.75, n_rows, device=device).to(dtype).reshape(-1, 1)
+    weight = torch.ones((1, ), dtype=dtype, device=device)
+    upstream = torch.ones_like(hidden)
+
+    eager_hidden = hidden.clone().requires_grad_(True)
+    eager_weight = weight.clone().requires_grad_(True)
+    eager_out = _hf_rms_norm(eager_hidden, eager_weight, eps)
+    eager_out.backward(upstream)
+
+    fused_hidden = hidden.clone().requires_grad_(True)
+    fused_weight = weight.clone().requires_grad_(True)
+    fused_out = _rms_norm().fused_rms_norm(fused_hidden, fused_weight, eps)
+    fused_out.backward(upstream)
+
+    # Before gamma, d(x / sqrt(x**2 + eps))/dx = eps / (x**2 + eps)**1.5.
+    reference_dx = (eps / (hidden.double().square() + eps).pow(1.5)).to(dtype)
+    assert torch.all(reference_dx > 0)
+    torch.testing.assert_close(fused_hidden.grad, reference_dx, rtol=2 * torch.finfo(dtype).eps, atol=0)
+    _assert_ulp_close(fused_out, eager_out, max_ulp=2, min_frac_within_1=0.99, label="width-one forward")
+    _assert_ulp_close(fused_hidden.grad, eager_hidden.grad, max_ulp=8, min_frac_within_1=0.95, label="width-one dx")
+    _assert_ulp_close(fused_weight.grad,
+                      eager_weight.grad,
+                      max_ulp=8,
+                      min_frac_within_1=0.95,
+                      label="width-one dgamma")
+
+
+def _check_fused_rms_norm_weight_gradient_is_deterministic(width):
+    device = _device()
+    generator = torch.Generator(device=device).manual_seed(7)
+    hidden = torch.randn((8192, width), device=device, dtype=torch.bfloat16, generator=generator)
+    weight = torch.randn((width, ), device=device, dtype=torch.bfloat16, generator=generator)
+    upstream = torch.randn((8192, width), device=device, dtype=torch.bfloat16, generator=generator)
+    grads = []
+    for _ in range(2):
+        leaf_hidden = hidden.clone().requires_grad_(True)
+        leaf_weight = weight.clone().requires_grad_(True)
+        _rms_norm().fused_rms_norm(leaf_hidden, leaf_weight, 1e-6).backward(upstream)
+        grads.append((leaf_hidden.grad, leaf_weight.grad))
+    assert torch.equal(grads[0][0], grads[1][0])
+    assert torch.equal(grads[0][1], grads[1][1])
 
 
 def _check_fused_rms_norm_handles_head_major_non_contiguous_input(dtype):
@@ -627,6 +740,19 @@ def test_replace_rms_norm_model_round_trip_preserves_outputs_and_gradients():
     _check_replace_rms_norm_model_round_trip_preserves_outputs_and_gradients("cpu")
 
 
+@pytest.mark.parametrize("n_rows,n_cols,block_m", NARROW_TILE_CASES)
+def test_fused_rms_norm_narrow_tile_size(monkeypatch, n_rows, n_cols, block_m):
+    rms_norm = _rms_norm()
+    if rms_norm.triton is None:
+        # The scheduling contract is host-side; only Triton's integer helper needs a CPU stand-in.
+        def next_power_of_2(value):
+            return 1 << (value - 1).bit_length()
+
+        monkeypatch.setattr(rms_norm, "triton", types.SimpleNamespace(next_power_of_2=next_power_of_2))
+    # Pin the short-input bug: a single row must not allocate a full 4096-element tile.
+    assert rms_norm._narrow_block_m(n_rows, n_cols) == block_m
+
+
 @pytest.mark.skipif(os.environ.get("DS_ACCELERATOR") == "cpu", reason="fused RMSNorm needs CUDA and Triton")
 class TestFusedRMSNormCUDA(DistributedTest):
     # Fresh workers also tolerate CUDA state created while other test modules are being collected.
@@ -634,10 +760,60 @@ class TestFusedRMSNormCUDA(DistributedTest):
     init_distributed = False
 
     @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
-    @pytest.mark.parametrize("shape", [(0, 2048), (7, 128), (5, 2048), (3, 130)])
+    @pytest.mark.parametrize(
+        "shape",
+        [
+            (0, 2048),
+            (7, 128),
+            (5, 2048),
+            (3, 130),
+            # First width beyond the narrow cutoff: it must retain the wide-path accuracy contract.
+            (3, 129),
+            # Narrow norms run several rows per program; these cover partial last blocks and masked columns.
+            (4099, 128),
+            (2, 300, 32, 128),
+            (1000, 96),
+            (257, 64),
+            (33, 16),
+            (257, 7),
+            (33, 15),
+        ])
     def test_fused_rms_norm_matches_hf_forward_and_backward(self, dtype, shape):
         _require_fused_engine()
         _check_fused_rms_norm_matches_hf_forward_and_backward(dtype, shape)
+
+    @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+    def test_fused_rms_norm_narrow_tiles(self, monkeypatch, dtype):
+        _require_fused_engine()
+        rms_norm = _rms_norm()
+        tiles = []
+
+        def record_launch(run, *args, **kwargs):
+            tiles.append(kwargs["BLOCK_M"])
+            return run(*args, **kwargs)
+
+        # Record real launches so a cap applied to only one pass cannot satisfy the regression.
+        for kernel in (rms_norm._rms_norm_narrow_forward_kernel, rms_norm._rms_norm_narrow_backward_kernel):
+            monkeypatch.setattr(kernel, "run", functools.partial(record_launch, kernel.run))
+
+        for n_rows, n_cols, block_m in NARROW_TILE_CASES:
+            tiles.clear()
+            if n_cols == 1:
+                _check_fused_rms_norm_width_one_has_nonzero_input_gradient(dtype, n_rows)
+            else:
+                _check_fused_rms_norm_matches_hf_forward_and_backward(dtype, (n_rows, n_cols))
+            expected_tiles = [] if block_m is None else [block_m, block_m]
+            assert tiles == expected_tiles, (n_rows, n_cols, tiles)
+
+    @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+    def test_fused_rms_norm_width_one_has_nonzero_input_gradient(self, dtype):
+        _require_fused_engine()
+        _check_fused_rms_norm_width_one_has_nonzero_input_gradient(dtype)
+
+    @pytest.mark.parametrize("width", [128, 2048])
+    def test_fused_rms_norm_weight_gradient_is_deterministic(self, width):
+        _require_fused_engine()
+        _check_fused_rms_norm_weight_gradient_is_deterministic(width)
 
     @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
     def test_fused_rms_norm_handles_head_major_non_contiguous_input(self, dtype):

@@ -448,6 +448,28 @@ Where the kernels run, results are not bitwise identical to eager RMSNorm: the
 kernels' FP32 reductions sum in a different order, so a small fraction of
 outputs and gradients differ in their last bits.
 
+For norms at most 128 wide, the fused kernels schedule several rows per
+program and combine the input- and weight-gradient reads in backward. Small
+inputs cap the row tile at the next power of two of their row count, so a
+single row does not instantiate a full 4096-element tile. Larger inputs keep
+the existing tile size. Wider norms retain the one-row kernels. The numerical
+tests do not require bitwise equality with eager. For narrow input gradients
+they allow at most 8 ULPs or an absolute error of 1e-7 per element, since
+near-zero gradients can have large ULP distances after cancellation. At least
+95% must still be within one ULP; forward, weight-gradient and wide-path
+thresholds are unchanged.
+At width one, the pre-gamma input derivative in exact arithmetic is
+``eps / (x**2 + eps)**(3/2)``, which is nonzero when ``eps > 0``. With a
+very small epsilon and large ``abs(x)``, low-precision rounding can hide this
+gradient; width-one tests use a measurable positive epsilon and an FP64
+reference rather than assuming the derivative is zero.
+
+Performance depends on the GPU and workload. The measured H100 attention
+training cases benefited from this scheduling, but review measurements on an
+RTX PRO 4500 found narrow forward 11-16% slower than the parent row kernels.
+That is a forward-only observation, not an E2E result; this opt-in path does
+not promise a speedup on every supported device or shape.
+
 Requirements and limits:
 
 - The kernels need CUDA with Triton. On ROCm or without Triton, replaced
