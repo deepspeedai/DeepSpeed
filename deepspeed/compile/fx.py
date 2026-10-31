@@ -12,6 +12,18 @@ from torch.fx.node import map_aggregate
 
 from .util import get_last_uses
 
+try:
+    from torch._functorch.predispatch import _vmap_decrement_nesting, _vmap_increment_nesting
+except ImportError:
+    _VMAP_NESTING_OPS = frozenset()
+else:
+    _VMAP_NESTING_OPS = frozenset((_vmap_increment_nesting, _vmap_decrement_nesting))
+
+
+def is_impure_for_dce(node: Node) -> bool:
+    """Keep vmap nesting markers whose side effects are invisible to FX."""
+    return node.target in _VMAP_NESTING_OPS or node.is_impure()
+
 
 def get_output_node(graph: Graph):
     for v in graph.nodes:

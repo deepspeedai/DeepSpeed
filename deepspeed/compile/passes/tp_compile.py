@@ -14,6 +14,7 @@ from deepspeed.module_inject.layers import (LinearAllreduce, LinearLayer, LmHead
                                             SubParamLinearAllreduce, SubParamLinearLayer, TensorParallel_Layer)
 
 from ..custom_ops import tp_collectives  # noqa: F401
+from ..fx import is_impure_for_dce
 
 COLUMN_PARALLEL_OP = torch.ops.autotp.copy_to_tp_region.default
 ROW_PARALLEL_OP = torch.ops.autotp.reduce_from_tp_region.default
@@ -231,7 +232,7 @@ def pass_insert_tp_collectives(gm: GraphModule, real_inputs, deferred_names=None
 def pass_canonicalize(gm: GraphModule, real_inputs, **kwargs):
     for module in gm.modules():
         if isinstance(module, GraphModule):
-            module.graph.eliminate_dead_code()
+            module.graph.eliminate_dead_code(is_impure_node=is_impure_for_dce)
             module.graph.lint()
             module.recompile()
 

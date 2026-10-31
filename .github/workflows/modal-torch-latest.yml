@@ -93,7 +93,7 @@ jobs:
       - name: Install Python
         uses: actions/setup-python@v7
         with:
-          python-version: "3.10"
+          python-version: "3.12"
           cache: 'pip'
 
       - name: Install trusted controller dependency
@@ -133,7 +133,7 @@ jobs:
       - name: Install Python
         uses: actions/setup-python@v7
         with:
-          python-version: "3.10"
+          python-version: "3.12"
 
       - name: Configure AWS credentials for infrastructure smoke
         id: aws-auth
@@ -293,7 +293,7 @@ jobs:
       - name: Install Python
         uses: actions/setup-python@v7
         with:
-          python-version: "3.10"
+          python-version: "3.12"
           cache: 'pip'
 
       - name: Download test selection

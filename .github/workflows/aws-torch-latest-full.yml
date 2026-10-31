@@ -118,6 +118,12 @@ jobs:
           git lfs install
           ln -sf /usr/bin/python3 /usr/bin/python
 
+      - name: Install Python
+        run: |
+          pip3 install uv==0.12.7
+          uv venv --python 3.12.12 --seed /opt/python312
+          echo "/opt/python312/bin" >> "$GITHUB_PATH"
+
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
@@ -307,6 +313,24 @@ jobs:
           python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}')"
           python -c "import torch; print(f'CUDA devices: {torch.cuda.device_count()}')"
           python -c "import torch; print(f'BF16 support: {torch.cuda.is_bf16_supported()}')"
+          python - <<'PY'
+          import comet_ml
+          import mup
+          import pytest
+          import qtorch
+          import torchvision
+          import transformers
+
+          pytest_version = tuple(int(part) for part in pytest.__version__.split(".")[:2])
+          if pytest_version >= (8, 4):
+              raise SystemExit(f"pytest {pytest.__version__} must be < 8.4.0")
+          print(
+              f"pytest={pytest.__version__} torchvision={torchvision.__version__} "
+              f"transformers={transformers.__version__} mup={mup.__name__} "
+              f"qtorch={qtorch.__name__} comet_ml={comet_ml.__version__}"
+          )
+          PY
+          pip check
           echo ""
           echo "=== CUTLASS ==="
           echo "CUTLASS_PATH: $CUTLASS_PATH"
@@ -398,7 +422,7 @@ jobs:
           # - launcher user_args: pdsh requires SSH server
           # - zenflow: Stage 3 tests have pre-existing bugs + CUDA/fork issues
           rm -rf /mnt/aio/pytest
-          pytest --instafail --timeout 600 --forked -n 8 --basetemp=/mnt/aio/pytest unit/ \
+          pytest --instafail --timeout 600 -n "$GPU_COUNT" --basetemp=/mnt/aio/pytest unit/ \
             --ignore=unit/runtime/zero/test_nvme_checkpointing.py \
             --ignore=unit/v1/nvme/test_gds.py \
             --ignore=unit/launcher/test_user_args.py \

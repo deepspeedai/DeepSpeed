@@ -173,6 +173,62 @@ class FakeP2PWork:
         return True
 
 
+@pytest.mark.parametrize(
+    "default_backend, subgroup_backend, group_argument, expected_device",
+    [
+        ("gloo", None, "omitted", "cpu"),
+        ("nccl", None, "omitted", "cuda"),
+        ("nccl", "gloo", "keyword", "cpu"),
+        ("gloo", "nccl", "positional", "cuda"),
+    ],
+)
+def test_cpu_staging_uses_requested_group(monkeypatch, default_backend, subgroup_backend, group_argument,
+                                          expected_device):
+    from types import SimpleNamespace
+    torch_backend = importlib.import_module("deepspeed.comm.torch")
+
+    subgroup = object()
+    backend_queries = []
+    captured = {}
+
+    class FakeTensor:
+
+        def __init__(self, device_type):
+            self.device = SimpleNamespace(type=device_type)
+
+        def to(self, device):
+            return FakeTensor(device)
+
+        def copy_(self, source):
+            return self
+
+    def get_backend(group=None):
+        backend_queries.append(group)
+        return default_backend if group is None else subgroup_backend
+
+    @torch_backend.stage_on_cpu
+    def collective(self, tensor, marker=None, group=None):
+        captured["tensor"] = tensor
+
+    monkeypatch.setattr(torch_backend.torch, "Tensor", FakeTensor)
+    monkeypatch.setattr(torch_backend.torch.distributed, "is_initialized", lambda: True)
+    monkeypatch.setattr(torch_backend.torch.distributed, "get_backend", get_backend)
+    tensor = FakeTensor("cuda")
+
+    if group_argument == "keyword":
+        collective(None, tensor, group=subgroup)
+        expected_group = subgroup
+    elif group_argument == "positional":
+        collective(None, tensor, None, subgroup)
+        expected_group = subgroup
+    else:
+        collective(None, tensor)
+        expected_group = None
+
+    assert captured["tensor"].device.type == expected_device
+    assert backend_queries == [expected_group]
+
+
 @pytest.mark.skipif(get_accelerator().device_name() != 'mps', reason="covers the MPS CPU-staging path")
 class TestMpsStagedP2P:
 
