@@ -19,6 +19,146 @@ except ImportError as e:
     oneccl_imported_p = False
 
 import os
+import sys
+
+# Default for capping total_memory() and available_memory() at the cgroup memory limit of the process. On, because
+# the kernel enforces that limit, so host RAM overstates what the process can use; DS_CPU_RESPECT_CGROUP_MEMORY=0 or
+# =1 overrides it.
+RESPECT_CGROUP_MEMORY_BY_DEFAULT = True
+
+_CGROUP_ROOT = "/sys/fs/cgroup"
+_PROC_SELF_CGROUP = "/proc/self/cgroup"
+_PROC_SELF_MOUNTINFO = "/proc/self/mountinfo"
+# cgroup v1 reports "no limit" as a huge sentinel instead of "max".
+_CGROUP_UNLIMITED = 1 << 62
+
+
+def _read_cgroup_int(path):
+    try:
+        with open(path) as f:
+            value = f.read().strip()
+    except OSError:
+        return None
+    return int(value) if value.isdigit() else None
+
+
+def _read_memory_stat(path, key):
+    try:
+        with open(path) as f:
+            for line in f:
+                name, _, value = line.partition(" ")
+                if name == key:
+                    return int(value)
+    except (OSError, ValueError):
+        pass
+    return 0
+
+
+def _path_parts(path):
+    return [part for part in path.split("/") if part]
+
+
+def _cgroup_membership(controller):
+    """The cgroup path of this process from /proc/self/cgroup, relative to the hierarchy root."""
+    try:
+        with open(_PROC_SELF_CGROUP) as f:
+            for line in f:
+                parts = line.strip().split(":", 2)
+                if len(parts) != 3:
+                    continue
+                is_v2 = controller is None and parts[0] == "0" and parts[1] == ""
+                is_v1 = controller is not None and controller in parts[1].split(",")
+                if is_v2 or is_v1:
+                    return parts[2]
+    except OSError:
+        pass
+    return ""
+
+
+def _cgroup_mount(controller, membership):
+    """Returns (mount point, mount root) of the cgroup hierarchy from /proc/self/mountinfo.
+
+    The mount can expose a subtree of the hierarchy (mount root other than "/"), cgroup v1 can co-mount controllers
+    under a name such as "cpu,memory", and several mounts can match, e.g. a delegated subtree mounted before the main
+    one. The mount whose root contains the membership is used; among those, the shortest root, because it
+    exposes the most ancestors and an ancestor limit still applies.
+    """
+    candidates = []
+    try:
+        with open(_PROC_SELF_MOUNTINFO) as f:
+            for line in f:
+                before, separator, after = line.partition(" - ")
+                mount_fields = before.split()
+                fs_fields = after.split()
+                if not separator or len(mount_fields) < 5 or len(fs_fields) < 3:
+                    continue
+                fs_type = fs_fields[0]
+                super_options = fs_fields[2].split(",")
+                is_v2 = controller is None and fs_type == "cgroup2"
+                is_v1 = controller is not None and fs_type == "cgroup" and controller in super_options
+                if is_v2 or is_v1:
+                    # mountinfo escapes spaces as \040.
+                    candidates.append((mount_fields[4].replace("\\040", " "), mount_fields[3].replace("\\040", " ")))
+    except OSError:
+        pass
+    member_parts = _path_parts(membership)
+    containing = [(mount_point, mount_root) for mount_point, mount_root in candidates
+                  if member_parts[:len(_path_parts(mount_root))] == _path_parts(mount_root)]
+    if containing:
+        return min(containing, key=lambda mount: len(_path_parts(mount[1])))
+    if candidates:
+        return candidates[0]
+    default_mount = _CGROUP_ROOT if controller is None else os.path.join(_CGROUP_ROOT, controller)
+    return default_mount, "/"
+
+
+def _cgroup_dirs(controller):
+    """Directories of this process's cgroup, nearest first, mount point last."""
+    membership = _cgroup_membership(controller)
+    mount_point, mount_root = _cgroup_mount(controller, membership)
+    components = _path_parts(membership)
+    root_components = _path_parts(mount_root)
+    if ".." in components:
+        # A cgroup outside this cgroup namespace cannot be resolved from here.
+        components = []
+    elif components[:len(root_components)] == root_components:
+        # /proc/self/cgroup is relative to the hierarchy root; the mount starts at mount_root.
+        components = components[len(root_components):]
+    dirs = [os.path.join(mount_point, *components[:depth]) for depth in range(len(components), 0, -1)]
+    return dirs + [mount_point]
+
+
+def _cgroup_memory():
+    """Returns (limit, available) in bytes for the cgroups that limit this process, or None.
+
+    The limit is the smallest one from the process's cgroup up to the root. Available memory is the smallest headroom
+    over every limited level, because a parent's limit also counts the usage of its other children. Usage excludes the
+    inactive page cache, which the kernel can reclaim. Available is None when no limited level exposes its usage.
+    """
+    override = os.environ.get("DS_CPU_RESPECT_CGROUP_MEMORY")
+    enabled = RESPECT_CGROUP_MEMORY_BY_DEFAULT if override is None else override.strip().lower() in ("1", "true")
+    if not enabled or not sys.platform.startswith("linux"):
+        return None
+    for controller, limit_file, usage_file, inactive_key in (
+        (None, "memory.max", "memory.current", "inactive_file"),
+        ("memory", "memory.limit_in_bytes", "memory.usage_in_bytes", "total_inactive_file"),
+    ):
+        limit = None
+        available = None
+        for cgroup_dir in _cgroup_dirs(controller):
+            level_limit = _read_cgroup_int(os.path.join(cgroup_dir, limit_file))
+            if level_limit is None or level_limit >= _CGROUP_UNLIMITED:
+                continue
+            limit = level_limit if limit is None else min(limit, level_limit)
+            usage = _read_cgroup_int(os.path.join(cgroup_dir, usage_file))
+            if usage is None:
+                continue
+            inactive_file = _read_memory_stat(os.path.join(cgroup_dir, "memory.stat"), inactive_key)
+            headroom = max(0, level_limit - max(0, usage - inactive_file))
+            available = headroom if available is None else min(available, headroom)
+        if limit is not None:
+            return limit, available
+    return None
 
 
 # accelerator for Intel CPU
@@ -192,11 +332,18 @@ class CPU_Accelerator(DeepSpeedAccelerator):
 
     def total_memory(self, device_index=None):
         import psutil
-        return psutil.virtual_memory().total
+        total = psutil.virtual_memory().total
+        cgroup = _cgroup_memory()
+        return total if cgroup is None else min(total, cgroup[0])
 
     def available_memory(self, device_index=None):
         import psutil
-        return psutil.virtual_memory().available
+        available = psutil.virtual_memory().available
+        cgroup = _cgroup_memory()
+        if cgroup is None:
+            return available
+        limit, cgroup_available = cgroup
+        return min(available, limit if cgroup_available is None else cgroup_available)
 
     # Misc
     def is_available(self):
@@ -357,7 +504,8 @@ class CPU_Accelerator(DeepSpeedAccelerator):
         return BuildExtension
 
     def export_envs(self):
-        return []
+        # Forward the cgroup memory switch to every node started by the launcher.
+        return ['DS_CPU_RESPECT_CGROUP_MEMORY']
 
     # TODO: cpu's visible envs is confirmed, keep as CUDA_VISIBLE_DEVICES
     def visible_devices_envs(self):
