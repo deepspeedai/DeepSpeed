@@ -5,6 +5,8 @@
 
 from abc import abstractmethod
 
+import torch
+
 from .hybrid_engine import HybridEngineContainer
 
 
@@ -37,36 +39,35 @@ class HybridGatedMLPContainer(HybridEngineContainer):
         # Only need to alter behavior if we can't do the normal destructive copy
         if self.module.mlp.inter_w is None:
             params = [
-                (self.module.mlp.inter_up_w, self.inter_up_w),
-                (self.module.mlp.inter_up_b, self.inter_up_b),
-                (self.module.mlp.inter_gate_w, self.inter_gate_w),
-                (self.module.mlp.inter_gate_b, self.inter_gate_b),
+                ("inter_up_w", self.inter_up_w),
+                ("inter_up_b", self.inter_up_b),
+                ("inter_gate_w", self.inter_gate_w),
+                ("inter_gate_b", self.inter_gate_b),
             ]
-            for dst, src in params:
-                dst = mp_replace.copy(dst[:self.inter_up_w.shape[0] // mp_replace.mp_size],
-                                      src,
+            for name, src in params:
+                dst: torch.Tensor | None = getattr(self.module.mlp, name)
+                dst = mp_replace.copy(dst=dst[:src.shape[0] // mp_replace.mp_size],
+                                      src=src,
                                       int8=reversed_dim,
                                       allocate_tensor=reversed_dim) if src is not None else None
+                setattr(self.module.mlp, name, dst)
         else:
-            self.module.mlp.inter_w = mp_replace.strided_copy(self.module.mlp.inter_w,
-                                                              self._h4h_w,
+            inter_w: torch.Tensor = self.module.mlp.inter_w
+            inter_b: torch.Tensor | None = self.module.mlp.inter_b
+            if reversed_dim:
+                inter_w = inter_w[:self._h4h_w.shape[0] // mp_replace.mp_size]
+                if self._h4h_b is not None:
+                    inter_b = inter_b[:self._h4h_b.shape[0] // mp_replace.mp_size]
+            self.module.mlp.inter_w = mp_replace.strided_copy(dst=inter_w,
+                                                              src=self._h4h_w,
                                                               num_splits=2,
-                                                              int8=reversed_dim)
-            self.module.mlp.inter_b = mp_replace.strided_copy(self.module.mlp.inter_b,
-                                                              self._h4h_b,
+                                                              int8=reversed_dim,
+                                                              allocate_tensor=reversed_dim)
+            self.module.mlp.inter_b = mp_replace.strided_copy(dst=inter_b,
+                                                              src=self._h4h_b,
                                                               num_splits=2,
-                                                              int8=reversed_dim)
-
-    def release_mlp(self):
-        super().release_mlp()
-        gated_mlp_params = [
-            (self.module.mlp.inter_up_w, self.inter_up_w),
-            (self.module.mlp.inter_up_b, self.inter_up_b),
-            (self.module.mlp.inter_gate_w, self.inter_gate_w),
-            (self.module.mlp.inter_gate_b, self.inter_gate_b),
-        ]
-
-        self._release_params(gated_mlp_params)
+                                                              int8=reversed_dim,
+                                                              allocate_tensor=reversed_dim)
 
     def reset_mlp(self):
         self._h4h_w.data[:self.inter_up_w.shape[0]] = self.inter_up_w.data

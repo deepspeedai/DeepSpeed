@@ -14,6 +14,8 @@ on:
       - "deepspeed/runtime/zero/stage_1_and_2.py"
       - "deepspeed/runtime/zero/stage3.py"
       - "deepspeed/runtime/hybrid_engine.py"
+      - "deepspeed/module_inject/containers/**"
+      - "tests/unit/hybrid_engine/**"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -24,6 +26,28 @@ permissions:
     issues: write
 
 jobs:
+  legacy-hybrid-inference:
+    name: nv-ds-chat / legacy HybridEngine inference
+    runs-on: [self-hosted, nvidia, cu124, v100]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/workflows/setup-venv
+
+      - name: Install legacy inference runtime
+        run: |
+          pip install --cache-dir $TORCH_CACHE torch --index-url https://download.pytorch.org/whl/cu124
+          pip install '.[inf]' 'transformers==4.43.4' 'pytest>=7.2,<8.4' pytest-forked pytest-xdist pytest-randomly
+
+      - name: Test inference tensor parallelism
+        run: |
+          unset TORCH_CUDA_ARCH_LIST
+          cd tests
+          pytest $PYTEST_OPTS --forked -m seq_inference \
+            unit/hybrid_engine/test_he_all.py::TestHybridEngineTensorParallel \
+            unit/hybrid_engine/test_he_all.py::TestHybridEngineProjectionShards
+
   unit-tests:
     name: nv-ds-chat / DeepSpeed-Chat tests
     runs-on: [self-hosted, nvidia, cu124, v100]
