@@ -448,8 +448,11 @@ def _set_vocab_parallel_loss(model, loss_fn):
     return original_loss_function
 
 
-def validate_vocab_parallel_loss(model):
+def validate_vocab_parallel_loss(model, backend="torch"):
     """Check hook replacement before partitioning weights, then restore the original loss."""
+    if backend == "fused_linear":
+        from deepspeed.sequence.linear_cross_entropy import _reject_logit_postprocessing
+        _reject_logit_postprocessing(model)
     original_loss_function = _set_vocab_parallel_loss(model, VocabParallelCausalLMLoss())
     model.loss_function = original_loss_function
 
@@ -461,13 +464,20 @@ def configure_vocab_parallel_loss(model, vocab_parallel_head, sp_group=None, ign
     sequence-parallel engine: the engine performs the token-count-weighted aggregation
     across SP ranks itself and expects this loss to return the local shard's mean.
     """
-    loss_fn = VocabParallelCausalLMLoss(tp_group=vocab_parallel_head.mp_group,
-                                        sp_group=sp_group,
-                                        vocab_start_index=vocab_parallel_head.vocab_start_index,
-                                        vocab_end_index=vocab_parallel_head.vocab_end_index,
-                                        ignore_index=ignore_index,
-                                        backend=backend)
-    original_loss_function = _set_vocab_parallel_loss(model, loss_fn)
+    if backend == "fused_linear":
+        from deepspeed.sequence.linear_cross_entropy import configure_fused_linear_vocab_parallel_loss
+        original_loss_function = configure_fused_linear_vocab_parallel_loss(model,
+                                                                            vocab_parallel_head,
+                                                                            sp_group=sp_group,
+                                                                            ignore_index=ignore_index)
+    else:
+        loss_fn = VocabParallelCausalLMLoss(tp_group=vocab_parallel_head.mp_group,
+                                            sp_group=sp_group,
+                                            vocab_start_index=vocab_parallel_head.vocab_start_index,
+                                            vocab_end_index=vocab_parallel_head.vocab_end_index,
+                                            ignore_index=ignore_index,
+                                            backend=backend)
+        original_loss_function = _set_vocab_parallel_loss(model, loss_fn)
 
     # Keep the stock loss reachable so callers can restore it when tearing the head down.
     if not hasattr(model, "_deepspeed_original_loss_function"):
