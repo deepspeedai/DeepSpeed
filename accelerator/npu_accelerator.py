@@ -247,6 +247,9 @@ class NPU_Accelerator(DeepSpeedAccelerator):
         return False
 
     # Graph operations
+    def is_current_stream_capturing(self) -> bool:
+        return torch.npu.is_current_stream_capturing()
+
     def create_graph(self):
         return torch.npu.NPUGraph()
 

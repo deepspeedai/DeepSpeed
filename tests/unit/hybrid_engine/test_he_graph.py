@@ -4,11 +4,12 @@
 import os
 import pytest
 import torch
+from unittest.mock import patch
 import deepspeed
 from deepspeed.accelerator import get_accelerator
 from deepspeed.ops.op_builder import InferenceBuilder, OpBuilder
 from deepspeed.runtime.hybrid_engine_graph import (DecodeGraphCache, decode_steps_from_generate_kwargs,
-                                                   validate_cuda_graph_support)
+                                                   validate_graph_capture_support)
 from unit.common import DistributedTest
 
 # ---------------------------------------------------------------------------
@@ -50,18 +51,46 @@ class _StubConfig:
         self.inference_tp_size = inference_tp_size
 
 
-def test_validate_rejects_zero3():
-    assert "ZeRO stage 3" in validate_cuda_graph_support(_StubConfig(), zero_stage=3)
+def _mock_accelerator(mock_get_accelerator, graph_capture=True):
+    """Dress a patched accelerator as graph-capable or not, independent of the real device."""
+    mock_get_accelerator.return_value.is_available.return_value = True
+    mock_get_accelerator.return_value.create_graph.return_value = object() if graph_capture else None
 
 
-def test_validate_rejects_released_cache():
-    reason = validate_cuda_graph_support(_StubConfig(release_inference_cache=True), zero_stage=2)
-    assert reason is not None
+@patch("deepspeed.runtime.hybrid_engine_graph.get_accelerator")
+def test_validate_rejects_zero3(mock_get_accelerator):
+    _mock_accelerator(mock_get_accelerator)
+    assert "ZeRO stage 3" in validate_graph_capture_support(_StubConfig(), zero_stage=3)
 
 
-def test_validate_rejects_inference_tp():
-    reason = validate_cuda_graph_support(_StubConfig(inference_tp_size=2), zero_stage=2)
-    assert reason is not None
+@patch("deepspeed.runtime.hybrid_engine_graph.get_accelerator")
+def test_validate_rejects_released_cache(mock_get_accelerator):
+    _mock_accelerator(mock_get_accelerator)
+    reason = validate_graph_capture_support(_StubConfig(release_inference_cache=True), zero_stage=2)
+    assert "release_inference_cache" in reason
+
+
+@patch("deepspeed.runtime.hybrid_engine_graph.get_accelerator")
+def test_validate_rejects_inference_tp(mock_get_accelerator):
+    _mock_accelerator(mock_get_accelerator)
+    reason = validate_graph_capture_support(_StubConfig(inference_tp_size=2), zero_stage=2)
+    assert "inference_tp_size" in reason
+
+
+@patch("deepspeed.runtime.hybrid_engine_graph.get_accelerator")
+def test_validate_accepts_graph_configuration(mock_get_accelerator):
+    _mock_accelerator(mock_get_accelerator)
+    assert validate_graph_capture_support(_StubConfig(), zero_stage=2) is None
+
+
+@patch("deepspeed.runtime.hybrid_engine_graph.get_accelerator")
+def test_validate_rejects_unsupported_accelerator(mock_get_accelerator):
+    # Backends without graph capture return None from create_graph(); the
+    # device gate rejects first, before the configuration checks, so the
+    # engine degrades to eager decode.
+    _mock_accelerator(mock_get_accelerator, graph_capture=False)
+    assert "graph capture is not supported on the current accelerator" in validate_graph_capture_support(_StubConfig(),
+                                                                                                         zero_stage=2)
 
 
 class _CountingForward:
@@ -108,10 +137,32 @@ def test_prompt_forward_never_uses_graphs():
     assert cache.captured_positions == 0
 
 
+def test_capture_failure_falls_back_to_eager():
+    # A backend graph bug must not crash generation: the cache disables
+    # graphs for good and serves the sequence eagerly.
+    forward = _CountingForward()
+    cache = DecodeGraphCache(forward, max_positions=8)
+    cache.begin_sequence(4)
+
+    with patch("deepspeed.runtime.hybrid_engine_graph.get_accelerator") as mock_get_accelerator:
+        accelerator = mock_get_accelerator.return_value
+        accelerator.create_graph.return_value = object()
+        accelerator.capture_to_graph.side_effect = RuntimeError("backend graph bug")
+
+        first = cache(**_decode_kwargs())
+        second = cache(**_decode_kwargs())
+
+    assert first == "eager"
+    assert second == "eager"
+    assert cache.captured_positions == 0
+    assert cache._disabled is True
+    assert forward.calls == 2
+
+
 def test_changing_generation_length_invalidates_graphs():
     cache = DecodeGraphCache(_CountingForward(), max_positions=64)
     cache.begin_sequence(8)
-    # Populate the cache the way a capture pass would, without touching CUDA.
+    # Populate the cache the way a capture pass would, without touching the device.
     cache._graphs[0] = object()
     cache._static_kwargs[0] = {}
     cache._static_outputs[0] = object()
@@ -135,7 +186,7 @@ if OpBuilder.installed_rocm_version() != (0, 0):
 
 
 @pytest.mark.seq_inference
-class TestHybridEngineCudaGraphEquivalence(DistributedTest):
+class TestHybridEngineGraphEquivalence(DistributedTest):
     world_size = 1
 
     def test_graph_generation_matches_eager(self):
@@ -159,7 +210,7 @@ class TestHybridEngineCudaGraphEquivalence(DistributedTest):
             "hybrid_engine": {
                 "enabled": True,
                 "max_out_tokens": prompt_len + gen_len,
-                "enable_cuda_graph": True,
+                "enable_graph_capture": True,
             },
             "optimizer": {
                 "type": "AdamW",
@@ -172,7 +223,7 @@ class TestHybridEngineCudaGraphEquivalence(DistributedTest):
         model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.half)
         model.config.use_cache = True
         engine, *_ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config)
-        assert engine._decode_graphs is not None, "CUDA graphs should be active for this config"
+        assert engine._decode_graphs is not None, "graph capture should be active for this config"
 
         torch.manual_seed(0)
         input_ids = torch.randint(100, 1000, (bsz, prompt_len), device=device)
@@ -195,4 +246,34 @@ class TestHybridEngineCudaGraphEquivalence(DistributedTest):
         with torch.no_grad():
             eager = engine.generate(**gen_kwargs).clone()
 
-        assert torch.equal(graphed, eager), "CUDA graph generation diverged from eager generation"
+        assert torch.equal(graphed, eager), "graph generation diverged from eager generation"
+
+
+# ---------------------------------------------------------------------------
+# Config key rename (#8271 follow-up): enable_graph_capture with a deprecated
+# enable_cuda_graph alias that migrates the value and warns.
+# ---------------------------------------------------------------------------
+
+
+def _hybrid_engine_config(**kwargs):
+    from deepspeed.runtime.config import HybridEngineConfig
+    return HybridEngineConfig(**kwargs)
+
+
+def test_enable_graph_capture_defaults_false():
+    assert _hybrid_engine_config().enable_graph_capture is False
+
+
+def test_enable_graph_capture_direct():
+    assert _hybrid_engine_config(enable_graph_capture=True).enable_graph_capture is True
+
+
+def test_enable_cuda_graph_alias_migrates_value():
+    config = _hybrid_engine_config(enable_cuda_graph=True)
+    assert config.enable_graph_capture is True
+    assert not hasattr(config, "enable_cuda_graph")
+
+
+def test_enable_cuda_graph_alias_and_new_key_conflict():
+    with pytest.raises(AssertionError):
+        _hybrid_engine_config(enable_cuda_graph=True, enable_graph_capture=True)
