@@ -3,10 +3,32 @@
 
 # DeepSpeed Team
 
+import os
+
 import torch
 from deepspeed.utils import logger
 from deepspeed.utils.logging import should_log_le
 from deepspeed.ops.op_builder import CPUAdamBuilder
+
+
+def single_thread_warning():
+    """Return a warning if the CPU optimizer's OpenMP loop is limited to one thread while this rank has more cores.
+
+    torchrun exports OMP_NUM_THREADS=1 when --nproc_per_node > 1 unless the variable is already set, so ZeRO-Offload
+    jobs started with torchrun step the CPU optimizer on a single thread unless the user overrides it.
+    """
+    if os.environ.get("OMP_NUM_THREADS") != "1":
+        return None
+    try:
+        cores = len(os.sched_getaffinity(0))
+    except AttributeError:  # not available on macOS
+        cores = os.cpu_count() or 1
+    cores_per_rank = cores // max(int(os.environ.get("LOCAL_WORLD_SIZE", "1")), 1)
+    if cores_per_rank < 2:
+        return None
+    return (f"OMP_NUM_THREADS=1, so DeepSpeedCPUAdam steps on one thread although this rank can use {cores_per_rank} "
+            "cores. torchrun sets OMP_NUM_THREADS=1 when --nproc_per_node > 1; set OMP_NUM_THREADS to the number of "
+            "cores per rank, or launch with `deepspeed --bind_cores_to_rank`.")
 
 
 class DeepSpeedCPUAdam(torch.optim.Optimizer):
@@ -87,6 +109,10 @@ class DeepSpeedCPUAdam(torch.optim.Optimizer):
 
         self.opt_id = DeepSpeedCPUAdam.optimizer_id
         DeepSpeedCPUAdam.optimizer_id = DeepSpeedCPUAdam.optimizer_id + 1
+        if self.opt_id == 0:
+            message = single_thread_warning()
+            if message:
+                logger.warning(message)
         self.adam_w_mode = adamw_mode
         self.fp32_optimizer_states = fp32_optimizer_states
         try:

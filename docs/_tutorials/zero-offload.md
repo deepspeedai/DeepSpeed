@@ -82,6 +82,8 @@ ZeRO offload already support multi-gpu training.  If the workload is using CPU o
 1. Divide physical CPU cores evenly among ranks, make each rank to have a dedicated set of CPU cores to run CPU optimizer.
 2. Set OMP_NUM_THREADS environment variable to the number of CPU cores assigned to each rank, so OpenMP code in CPU optimizer will have near optimal performance.
 
+If you launch with `torchrun` instead, note that it sets `OMP_NUM_THREADS=1` for every process when `--nproc_per_node` is larger than 1, unless the variable is already set. The CPU optimizer then runs on a single thread, and `DeepSpeedCPUAdam` logs a warning. Export `OMP_NUM_THREADS` with the number of cores per rank before calling `torchrun`.
+
 ZeRO offload is a hybrid workload that is both heavy on GPU and CPU, and DeepSpeed is optimized for both GPU and CPU performance.  Refer to [How to launch DeepSpeed on Intel Architecture CPU](https://github.com/deepspeedai/DeepSpeed/blob/master/docs/_tutorials/accelerator-setup-guide.md#how-to-launch-deepspeed-on-intel-architecture-cpu) for more details on how to tune core bindings for CPU performance.
 
 Congratulations! You have completed the ZeRO-Offload tutorial.
