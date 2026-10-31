@@ -46,7 +46,9 @@ jobs:
 
       - name: Install PyTorch
         run: |
-          pip install torch torchvision
+          # torch>=2.15 rejects the paravirtual GPU on GitHub-hosted macOS runners
+          # (MTLGPUFamilyApple7 check, pytorch/pytorch#202529); pin until it is fixed.
+          pip install "torch<2.15" torchvision
           python -c "import torch; assert torch.backends.mps.is_available(), 'no MPS device on this runner'; print(torch.__version__)"
 
       - name: Install DeepSpeed
