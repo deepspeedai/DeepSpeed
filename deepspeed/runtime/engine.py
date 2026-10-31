@@ -3874,13 +3874,24 @@ class DeepSpeedEngine(Module):
         return non_expert_grads, expert_grads
 
     def _reduce_non_expert_gradients(self, grads, elements_per_buffer):
-        split_sparse_tensor_buckets, split_dense_tensor_buckets = split_half_float_double_sparse(grads)
         if self.pipeline_parallelism:
             dp_group = self.mpu.get_data_parallel_group()
             dp_world_size = dist.get_world_size(dp_group)
         else:
             dp_group = groups._get_sequence_data_parallel_group()
             dp_world_size = dist.get_world_size(dp_group) / float(self.sequence_parallel_size)
+
+        dp_group_size = dist.get_world_size(group=dp_group)
+        reduction_is_identity = (not self.gradient_average or not self.postscale_gradients()
+                                 or self.gradient_predivide_factor() == 1.0)
+        can_skip_dense_reduction = dp_group_size == 1 and dp_world_size == 1 and reduction_is_identity
+
+        # Avoid even bucketing the common dense-only case when the reduction is an exact identity.
+        if (can_skip_dense_reduction
+                and all(not grad.is_sparse and grad.dtype == self.communication_data_type for grad in grads)):
+            return
+
+        split_sparse_tensor_buckets, split_dense_tensor_buckets = split_half_float_double_sparse(grads)
         for _, sparse_bucket_tuple in enumerate(split_sparse_tensor_buckets):
             if sparse_bucket_tuple:
                 bucket_type, sparse_bucket = sparse_bucket_tuple
@@ -3889,6 +3900,10 @@ class DeepSpeedEngine(Module):
         for _, dense_bucket_tuple in enumerate(split_dense_tensor_buckets):
             if dense_bucket_tuple:
                 bucket_type, dense_bucket = dense_bucket_tuple
+                # Preserve communication-dtype round-tripping and any non-identity gradient scaling.
+                if (can_skip_dense_reduction
+                        and all(grad.dtype == self.communication_data_type for grad in dense_bucket)):
+                    continue
                 self.allreduce_no_retain(dense_bucket,
                                          dp_group=dp_group,
                                          numel_per_bucket=elements_per_buffer,
