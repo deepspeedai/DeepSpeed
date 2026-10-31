@@ -565,9 +565,11 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             accelerator.unpin_memory(buffer)
         unpin_offloaded_optimizer_states(self.optimizer)
         if self.offload_optimizer_pin_memory:
-            for fp32_partition in self.fp32_partitioned_groups_flat:
+            for sub_group_id, fp32_partition in enumerate(self.fp32_partitioned_groups_flat):
                 if fp32_partition.grad is not None:
                     accelerator.unpin_memory(fp32_partition.grad)
+                if self._master_pinned_at_construction(sub_group_id):
+                    accelerator.unpin_memory(fp32_partition)
         if self.zenflow:
             # ZenFlow keeps per-parameter selective-optimizer state and per-subgroup
             # overlap-grad buffers pinned on the host.
@@ -1157,7 +1159,12 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                 elif self.offload_optimizer:
                     converted = self.fp16_partitioned_groups_flat[i].to(self.subgroup_to_device[i],
                                                                         dtype=self.master_weights_and_grads_dtype)
-                    self.fp32_partitioned_groups_flat.append(converted.clone().detach())
+                    master = converted.clone().detach()
+                    if self.offload_optimizer_pin_memory and master.device.type == "cpu":
+                        # As ZeRO-1/2 does: the master is copied to the device after every step, which is fast only
+                        # from pinned memory (_copy_pinned_master_to_device).
+                        master = get_accelerator().pin_memory(master)
+                    self.fp32_partitioned_groups_flat.append(master)
                     self._create_momentum_buffer(num_elements, i, ds_id)
                 elif self.fp16_partitioned_groups_flat[i].dtype == self.master_weights_and_grads_dtype and \
                         self.fp16_partitioned_groups_flat[i].device == self.device:
@@ -2850,13 +2857,36 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         see_memory_usage('After zero_optimizer step', force=False)
         print_rank_0("------------------Finishing Step-----------------------")
 
+    def _master_pinned_at_construction(self, sub_group_id):
+        """Whether _create_fp32_partitions pinned this sub-group's CPU master partition (offload_optimizer.pin_memory;
+        NVMe-swapped sub-groups are managed by the optimizer swapper)."""
+        master = self.fp32_partitioned_groups_flat[sub_group_id]
+        return (not self._swappable_optimizer_subgroup(sub_group_id) and get_accelerator().is_pinned(master))
+
+    @instrument_w_nvtx
+    def _copy_pinned_master_to_device(self, dst, src):
+        """Copy the pinned CPU master partition ``src`` into the low-precision device partition ``dst``.
+
+        The master goes to the device in its own dtype and is cast there, the form #5301 introduced in ZeRO-1/2:
+        ``dst.copy_(src)`` would cast on the CPU into a pageable temporary and copy from that at a few GB/s."""
+        dst.copy_(src.to(dst.device, non_blocking=True))
+        # Callers expect the partition on the device when this returns: the parameter all-gathers of the next forward
+        # run on a stream that does not wait for this one.
+        event = get_accelerator().Event()
+        event.record()
+        event.synchronize()
+
     @instrument_w_nvtx
     def _reassign_or_swap_out_partitioned_parameters(self, sub_group_id):
         if self.fp16_partitioned_groups_flat[sub_group_id] is not None:
             # When torch autocast is enabled, groups in fp16_partitioned_groups are in fp32 already and those in
             # fp32_partitioned_groups are aliases. Calling tensor.data.copy_ will not trigger any copy in that case.
-            self.fp16_partitioned_groups_flat[sub_group_id].data.copy_(
-                self.fp32_partitioned_groups_flat[sub_group_id].data)
+            dst = self.fp16_partitioned_groups_flat[sub_group_id].data
+            src = self.fp32_partitioned_groups_flat[sub_group_id].data
+            if self._master_pinned_at_construction(sub_group_id) and dst.device.type != "cpu":
+                self._copy_pinned_master_to_device(dst, src)
+            else:
+                dst.copy_(src)
 
             #unflatten fp16 parameter subgroup
             self._unflatten_partitioned_parameters(sub_group_id)
