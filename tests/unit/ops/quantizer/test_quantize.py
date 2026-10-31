@@ -59,7 +59,7 @@ def get_scale_zero_point(q_bits, is_symmetric_quant, max, min, absmax, scales=No
     else:
         scale = torch.empty_like(max)
         for i, x in enumerate(max):
-            scale[i] = torch.ones_like(x) if max[i] == min[i] else q_range / (max[i] - min[i])
+            scale[i] = torch.ones_like(x) if max[i] == min[i] else (q_range - 1) / (max[i] - min[i])
         zero_point = q_min - (min * scale)
 
     return scale, zero_point
@@ -150,5 +150,8 @@ def test_float_quantize(num_elems, num_groups, is_symmetric_quant, q_bits, direc
     assert torch.all(torch.isfinite(ds_dequantized_tensor))
 
     ds_quantization_error = torch.sum(torch.abs((activations_ds - ds_dequantized_tensor).to(torch.float64)))
+
+    print("Max error: ", torch.max(torch.abs(activations_ds - ds_dequantized_tensor)))
+    print("Max ref error: ", torch.max(torch.abs(activations_ref - ref_dequantized_tensor)))
 
     assert (ds_quantization_error <= ref_quantization_error * 1.05)
