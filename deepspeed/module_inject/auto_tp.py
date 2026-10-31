@@ -221,7 +221,7 @@ class AutoTP():
                  vocab_parallel_lm_head=False,
                  model_config=None,
                  tp_grain_size: int = 1,
-                 training_mode: bool = False):
+                 training_mode: Optional[bool] = None):
         self.module = module
         self.all_reduce_linears = all_reduce_linears
         self.prefix = prefix
@@ -230,15 +230,16 @@ class AutoTP():
         self.mp_size = None
         self.mp_group = None
         # Per-model TP metadata threaded through every layer / helper so each AutoTP instance
-        # shards by its own model's kv-head / grain values.
-        self.tp_meta = AutoTPMeta.from_model_config(model_config, tp_grain_size)
+        # shards by its own model's kv-head / grain values and keeps its own training mode.
+        # None is kept in the layers so they keep following set_autotp_mode, as before.
+        self.tp_meta = AutoTPMeta.from_model_config(model_config, tp_grain_size, training=training_mode)
         self.linear_layer_setting = linear_layer_setting
         self.orig_layer_impl = orig_layer_impl
         self.linear_policies = None
         self.conv_linear_layer = False
         self.partition_config = partition_config
         self.vocab_parallel_lm_head = vocab_parallel_lm_head
-        self.training_mode = training_mode
+        self._training_mode = training_mode
         self._vocab_parallel_lm_head_candidate = None
         # A tied vocab-parallel lm_head shares its embed_tokens/wte weight with a
         # VocabParallelEmbedding built from the same shard, so the generic embedding-slicing
@@ -392,9 +393,17 @@ class AutoTP():
         if AutoTP.kernel_supported(module_list) else "Not able to determine model policy automatically. Please provide policy."
         return policy_list
 
+    @property
+    def training_mode(self):
+        # None follows the process-wide AutoTP mode at the time of use, so a set_autotp_mode call
+        # between construction and set_tensor_parallel_config still routes to the training group.
+        if self._training_mode is None:
+            return is_autotp_training_mode()
+        return self._training_mode
+
     def set_tensor_parallel_config(self, mp_size, mp_group):
 
-        if is_autotp_training_mode():
+        if self.training_mode:
             self.mp_group = groups.get_tensor_model_parallel_group()
             self.mp_size = groups.get_tensor_model_parallel_world_size()
             return
@@ -937,9 +946,12 @@ class AutoTP():
         first optimizer step. The hook runs when the gradient is computed, before accumulation,
         so it holds under gradient accumulation and under the DeepCompile pass, whose compiled
         backward still accumulates leaf gradients through the autograd engine.
+
+        Returns the ``(name, param)`` pairs skipped because they were frozen, so the engine can
+        reject them if they are unfrozen later and would train without the reduction.
         """
         if self.partition_config is None or self.mp_group is None or self.mp_size <= 1:
-            return
+            return []
 
         def make_grad_allreduce_hook(group):
 
@@ -952,9 +964,15 @@ class AutoTP():
 
         model_type = self._get_model_type()
         registered = []
+        frozen = []
         for param_name, param in model.named_parameters():
             spec = self.partition_config.find_matching_spec(param_name, model_type)
             if spec is None or not spec.grad_allreduce:
+                continue
+            # A frozen parameter, such as one of a distillation teacher, has no gradient to reduce,
+            # and PyTorch refuses hooks on tensors that do not require gradients.
+            if not param.requires_grad:
+                frozen.append((param_name, param))
                 continue
             if getattr(param, "_ds_grad_allreduce_registered", False):
                 continue
@@ -966,6 +984,7 @@ class AutoTP():
                 f"AutoTP: registered tensor-parallel grad all-reduce for {len(registered)} replicated "
                 f"parameters, e.g. {registered[0]!r}",
                 ranks=[0])
+        return frozen
 
     def update_mp_params(self, child, name=None):
         if getattr(child, "replaced", False) == True:

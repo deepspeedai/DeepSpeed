@@ -3,6 +3,7 @@
 
 # DeepSpeed Team
 
+import pytest
 import torch
 import deepspeed.comm as dist
 import deepspeed
@@ -305,6 +306,40 @@ class TestTPPlanEndToEnd(DistributedTest):
         engine.step()
 
 
+@pytest.mark.parametrize("built_by", ["no_tp_meta", "default_autotp"])
+def test_layer_without_explicit_mode_follows_set_autotp_mode(built_by):
+    # Direct callers build layers without tp_meta, or with an AutoTP left at training_mode=None, and
+    # switch modes later with set_autotp_mode. A layer stuck in the inference mode it was built in adds
+    # its bias in place on the RowParallel output, which autograd rejects once training starts.
+    from deepspeed.module_inject.auto_tp import AutoTP
+    from deepspeed.module_inject.layers import LinearAllreduce, is_autotp_training_mode, set_autotp_mode
+
+    previous_mode = is_autotp_training_mode()
+    set_autotp_mode(training=False)
+    try:
+        device = get_accelerator().current_device_name()
+        linear = torch.nn.Linear(8, 4, bias=True)
+        kwargs = {}
+        if built_by == "default_autotp":
+            autotp = AutoTP(module=linear,
+                            all_reduce_linears=[],
+                            prefix="",
+                            state_dict=None,
+                            linear_layer_setting=None,
+                            orig_layer_impl=None)
+            kwargs["tp_meta"] = autotp.tp_meta
+        layer = LinearAllreduce(linear, mp_group=None, name="proj", **kwargs).to(device)
+        layer.requires_grad_(True)
+        set_autotp_mode(training=True)
+        if built_by == "default_autotp":
+            # set_tensor_parallel_config, called after this switch, routes by the AutoTP's mode.
+            assert autotp.training_mode
+        layer(torch.randn(2, 8, device=device)).sum().backward()
+    finally:
+        set_autotp_mode(training=previous_mode)
+    assert layer.bias.grad is not None
+
+
 class TestReplicatedGradAllreduce(DistributedTest):
     """Replicated parameters marked replicated_with_grad_allreduce must not drift across TP ranks.
 
@@ -382,3 +417,188 @@ class TestReplicatedGradAllreduce(DistributedTest):
             for other in gathered[1:]:
                 assert torch.allclose(gathered[0], other, atol=1e-6), \
                     f"gradient of {name} differs across tensor-parallel ranks"
+
+    def test_frozen_qwen3_initializes_and_runs(self):
+        """A frozen model, such as a distillation teacher, has no gradients to reduce.
+
+        Registering the all-reduce hook on a parameter that does not require gradients raises, so
+        initializing a frozen Qwen3 with tensor parallelism used to fail.
+        """
+        if get_accelerator().device_name() == "cpu":
+            import pytest
+            pytest.skip("CPU does not support this test yet")
+        import pytest
+        transformers = pytest.importorskip("transformers")
+        if not hasattr(transformers, "Qwen3ForCausalLM"):
+            pytest.skip("transformers build has no Qwen3")
+
+        config = transformers.Qwen3Config(vocab_size=256,
+                                          hidden_size=64,
+                                          intermediate_size=128,
+                                          num_hidden_layers=2,
+                                          num_attention_heads=8,
+                                          num_key_value_heads=8,
+                                          head_dim=8,
+                                          max_position_embeddings=64,
+                                          use_cache=False,
+                                          tie_word_embeddings=False)
+        config._attn_implementation = "sdpa"
+        torch.manual_seed(42)
+        model = transformers.Qwen3ForCausalLM(config)
+        reference = transformers.Qwen3ForCausalLM(config)
+        reference.load_state_dict(model.state_dict())
+        model.requires_grad_(False)
+
+        ds_config = {
+            "train_micro_batch_size_per_gpu": 1,
+            "tensor_parallel": {
+                "autotp_size": self.world_size
+            },
+            "zero_optimization": {
+                "stage": 0
+            },
+        }
+        engine, _, _, _ = deepspeed.initialize(model=model, config=ds_config)
+
+        device = torch.device(get_accelerator().current_device_name())
+        torch.manual_seed(1234)
+        input_ids = torch.randint(0, 256, (1, 16), device=device)
+        with torch.no_grad():
+            logits = engine(input_ids=input_ids, use_cache=False).logits
+            expected = reference.to(device=device, dtype=logits.dtype)(input_ids=input_ids, use_cache=False).logits
+        torch.testing.assert_close(logits, expected, rtol=2e-2, atol=2e-2)
+
+    def test_unfreezing_replicated_param_after_initialize_raises(self):
+        """A replicated parameter frozen at initialize has no TP gradient all-reduce.
+
+        Training it after unfreezing would let the tensor-parallel ranks drift apart silently, so the
+        engine must refuse the backward instead.
+        """
+        if get_accelerator().device_name() == "cpu":
+            import pytest
+            pytest.skip("CPU does not support this test yet")
+        import pytest
+        transformers = pytest.importorskip("transformers")
+        if not hasattr(transformers, "Qwen3ForCausalLM"):
+            pytest.skip("transformers build has no Qwen3")
+
+        config = transformers.Qwen3Config(vocab_size=256,
+                                          hidden_size=64,
+                                          intermediate_size=128,
+                                          num_hidden_layers=2,
+                                          num_attention_heads=8,
+                                          num_key_value_heads=8,
+                                          head_dim=8,
+                                          max_position_embeddings=64,
+                                          use_cache=False,
+                                          tie_word_embeddings=False)
+        config._attn_implementation = "sdpa"
+        torch.manual_seed(42)
+        model = transformers.Qwen3ForCausalLM(config)
+        for layer in model.model.layers:
+            layer.self_attn.q_norm.requires_grad_(False)
+
+        ds_config = {
+            "train_micro_batch_size_per_gpu": 1,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 1e-3,
+                    "torch_adam": True
+                }
+            },
+            "tensor_parallel": {
+                "autotp_size": self.world_size
+            },
+            "zero_optimization": {
+                "stage": 0
+            },
+        }
+        engine, _, _, _ = deepspeed.initialize(model=model,
+                                               model_parameters=[p for p in model.parameters() if p.requires_grad],
+                                               config=ds_config)
+
+        device = torch.device(get_accelerator().current_device_name())
+        torch.manual_seed(1234)
+        input_ids = torch.randint(0, 256, (1, 16), device=device)
+
+        # Partially frozen models still train.
+        loss = engine(input_ids=input_ids, labels=input_ids, use_cache=False).loss
+        engine.backward(loss)
+        engine.step()
+
+        engine.module.model.layers[0].self_attn.q_norm.weight.requires_grad_(True)
+        loss = engine(input_ids=input_ids, labels=input_ids, use_cache=False).loss
+        with pytest.raises(RuntimeError, match="frozen at deepspeed.initialize"):
+            engine.backward(loss)
+
+
+class TestInferenceTeacherAfterTrainingStudent(DistributedTest):
+    """Distillation builds a training student and an inference teacher in one process.
+
+    deepspeed.initialize switches AutoTP to training mode process-wide; a teacher passed to
+    init_inference afterwards used to be sharded with the student's TP group and left trainable.
+    """
+    world_size = 4
+
+    def test_teacher_uses_its_own_tp_size_and_stays_frozen(self):
+        import pytest
+        transformers = pytest.importorskip("transformers")
+
+        config = transformers.LlamaConfig(vocab_size=128,
+                                          hidden_size=64,
+                                          intermediate_size=128,
+                                          num_hidden_layers=1,
+                                          num_attention_heads=8,
+                                          num_key_value_heads=8,
+                                          use_cache=False)
+        config._attn_implementation = "sdpa"
+        torch.manual_seed(42)
+        student = transformers.LlamaForCausalLM(config)
+        teacher = transformers.LlamaForCausalLM(config)
+        reference = transformers.LlamaForCausalLM(config)
+        reference.load_state_dict(teacher.state_dict())
+
+        ds_config = {
+            "train_micro_batch_size_per_gpu": 1,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 1e-3,
+                    "torch_adam": True
+                }
+            },
+            "tensor_parallel": {
+                "autotp_size": 2
+            },
+            "zero_optimization": {
+                "stage": 0
+            },
+        }
+        engine, _, _, _ = deepspeed.initialize(model=student, model_parameters=student.parameters(), config=ds_config)
+        teacher_engine = deepspeed.init_inference(teacher,
+                                                  tensor_parallel={"tp_size": self.world_size},
+                                                  dtype=torch.float32,
+                                                  replace_with_kernel_inject=False)
+
+        q_proj = teacher_engine.module.model.layers[0].self_attn.q_proj
+        assert q_proj.tp_world_size == self.world_size
+        assert q_proj.weight.shape == (config.hidden_size // self.world_size, config.hidden_size)
+        # Inference-mode AutoTP layers are created frozen; training mode would have left them trainable.
+        o_proj = teacher_engine.module.model.layers[0].self_attn.o_proj
+        assert not q_proj.weight.requires_grad
+        assert not o_proj.weight.requires_grad
+
+        device = torch.device(get_accelerator().current_device_name())
+        torch.manual_seed(1234)
+        input_ids = torch.randint(0, config.vocab_size, (1, 16), device=device)
+        with torch.no_grad():
+            teacher_logits = teacher_engine(input_ids=input_ids).logits
+            expected = reference.to(device)(input_ids=input_ids).logits
+        torch.testing.assert_close(teacher_logits, expected, rtol=2e-2, atol=2e-2)
+
+        # The student must still train with its own TP layout after the teacher was built.
+        loss = engine(input_ids=input_ids, labels=input_ids).loss
+        engine.backward(loss)
+        engine.step()
+        assert engine.module.model.layers[0].self_attn.q_proj.weight.shape[0] == config.hidden_size // 2
