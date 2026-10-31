@@ -6,6 +6,7 @@
 # Automatic Tensor Parallelism
 import logging
 import re
+from dataclasses import replace
 
 from torch import nn
 from .replace_policy import replace_policies
@@ -14,7 +15,7 @@ import torch
 from deepspeed import comm as dist
 from .layers import *
 from deepspeed.accelerator import get_accelerator
-from .fusedqkv_utils import require_tp_fused_qkvw
+from .fusedqkv_utils import require_tp_fused_qkvw, replicates_kv_block
 from deepspeed.module_inject.tp_shard import AutoTPMeta, get_shard_size, get_shard_size_list
 from deepspeed.utils import groups
 from deepspeed.utils.logging import log_dist, print_dist
@@ -232,6 +233,13 @@ class AutoTP():
         # Per-model TP metadata threaded through every layer / helper so each AutoTP instance
         # shards by its own model's kv-head / grain values.
         self.tp_meta = AutoTPMeta.from_model_config(model_config, tp_grain_size)
+        self._replicates_kv_block = replicates_kv_block(self.module)
+        if self._replicates_kv_block and self.tp_meta.num_attention_heads is not None:
+            # The bigcodetype layout gives every rank the whole key/value block, so ranks do not
+            # have to own a key/value head to take part. Splitting by the key/value head count
+            # would leave all but the first few ranks with no query rows and an empty attention
+            # output projection.
+            self.tp_meta = replace(self.tp_meta, num_kv_heads=self.tp_meta.num_attention_heads)
         self.linear_layer_setting = linear_layer_setting
         self.orig_layer_impl = orig_layer_impl
         self.linear_policies = None
@@ -983,6 +991,15 @@ class AutoTP():
         if has_unsharded_high_dimensional_param:
             setattr(child, "replaced", True)
             return
+        # GPTBigCode's multi-query attention keeps the whole key/value block on every rank, so
+        # its query attributes follow the query heads (see the tp_meta adjustment in __init__).
+        # The key/value head attributes stay whole, and the number of query heads per replicated
+        # key/value head follows the local query shard, not the model-wide count. The two
+        # decisions are independent: whether an alias exists, and whether the version publishes
+        # the group count that has to be recomputed from the local shard.
+        replicated_kv_attention = (getattr(self, "_replicates_kv_block", False)
+                                   and getattr(child, "multi_query", False))
+        kv_attrs = ("num_key_value_heads", "num_kv_heads", "kv_n_heads", "num_kv")
         param_list = [
             "n_heads", "inner_dim", "num_heads", "num_kv", "num_attention_heads", "num_attn_heads", "all_head_size",
             "embed_dim", "hidden_size", "num_key_value_heads", "num_kv_heads", "kv_n_heads", "d_model",
@@ -992,10 +1009,14 @@ class AutoTP():
             if "Yuan" in str(child) and 'embed_dim' in param_list:
                 param_list.remove('embed_dim')
             if hasattr(child, param):
+                if replicated_kv_attention and param in kv_attrs:
+                    continue
                 param_val = getattr(child, param)
                 # get_shard_size selects its partitioning strategy from the module name, so the
                 # attributes must be sharded under the same name as the weights they describe.
                 setattr(child, param, get_shard_size(param_val, self.mp_size, self.tp_meta, name, rank=tp_index))
+        if replicated_kv_attention and hasattr(child, "num_key_value_groups"):
+            child.num_key_value_groups = child.num_heads // child.kv_heads
         setattr(child, "replaced", True)
 
     def update_linear_policies(self):
