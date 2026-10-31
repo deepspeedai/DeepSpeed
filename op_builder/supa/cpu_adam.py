@@ -15,7 +15,10 @@ class CPUAdamBuilder(SUPAOpBuilder):
         return f'deepspeed.ops.adam.{self.NAME}_op'
 
     def sources(self):
-        return ['csrc/adam/cpu_adam.cpp', 'csrc/adam/cpu_adam_impl.cpp']
+        return [
+            'csrc/adam/cpu_adam.cpp', 'csrc/adam/cpu_adam_impl.cpp', 'csrc/adam/reflow_cpu_adam_impl.cpp',
+            'csrc/adam/reflow_cpu_adam_bindings.cpp'
+        ]
 
     def include_paths(self):
         args = super().include_paths()
