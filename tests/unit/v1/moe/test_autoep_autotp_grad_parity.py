@@ -40,23 +40,9 @@ from unit.v1.moe.autoep_test_utils import (
     skip_unless_h100_tests_enabled,
 )
 
-from deepspeed.module_inject.auto_ep_config import AutoEPConfig, validate_autoep_config
-
 
 def _folding_spec(mp_mode="tp", tp_size=2):
     return type("Spec", (), {"tp_size": tp_size, "mp_mode": mp_mode})()
-
-
-def test_zero_offload_paths_fail_fast_until_per_family_replica_groups_are_proven():
-    for kwargs in ({"zero_offload_optimizer": True}, {"zero_offload_param": True}):
-        with pytest.raises(ValueError, match="offload"):
-            validate_autoep_config(AutoEPConfig(enabled=True, autoep_size=2),
-                                   world_size=4,
-                                   pp_size=1,
-                                   tp_size=2,
-                                   sp_size=1,
-                                   zero_stage=2,
-                                   **kwargs)
 
 
 def _folded_zero2_config(*, mixed_precision=True):

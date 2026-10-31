@@ -114,8 +114,8 @@ def validate_autoep_config(
     tp_preset_model: str | None = None,
     use_data_before_expert_parallel: bool = False,
     mpu=None,
-    zero_offload_optimizer: bool = False,
-    zero_offload_param: bool = False,
+    offload_optimizer_device: str | None = None,
+    offload_param_device: str | None = None,
 ) -> None:
     """Validate config constraints. Raises ValueError on invalid config."""
     if config.load_balance_coeff is not None:
@@ -168,8 +168,8 @@ def validate_autoep_config(
         autoep_enabled=config.enabled,
         tp_preset=tp_preset_model,
         ep_preset=config.preset_model,
-        zero_offload_optimizer=zero_offload_optimizer,
-        zero_offload_param=zero_offload_param,
+        offload_optimizer_device=offload_optimizer_device,
+        offload_param_device=offload_param_device,
     )
 
     # Validate preset_model if specified

@@ -1601,6 +1601,10 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             self.autoep_folding_tp_group = None
             self.autoep_folding_spec = None
             return
+        if self.offload_optimizer and self.use_muon:
+            # The offloaded Muon update gathers each parameter's full gradient on its own path, which
+            # has not been checked against the folded gradient families.
+            raise ValueError("Muon with ZeRO optimizer offload is not supported with AutoEP+AutoTP folding yet.")
         self.autoep_folding_tp_group = groups.get_tensor_model_parallel_group()
         self.autoep_folding_spec = folding_spec
 
