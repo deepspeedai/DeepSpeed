@@ -43,6 +43,11 @@ if get_accelerator().is_available():
     ...
 ```
 
+Use `get_accelerator().is_current_stream_capturing()` to query whether the current
+stream is being captured into a graph. The base implementation returns `False`;
+graph-capable backends should override it with their runtime's capture-state query.
+The CUDA accelerator delegates to `torch.cuda.is_current_stream_capturing()`.
+
 For most `torch.cuda.<interface>(...)` call, we can literally replace `torch.cuda` with `get_accelerator()`.   However, there are some exceptions that needs attention:
 1. For `torch.cuda.current_device()`, we need to know whether calling this interface is to get device index, or supply the return value as a device.   If we want to use the return value as a device string, we need to call `get_accelerator().current_device_name()`.  For example:
 ```
@@ -68,7 +73,7 @@ CUDA specific tensor operations needs to be converted according to the following
 - When pin a tensor to GPU memory such as `my_tensor.pin_memory()`, we use `get_accelerator().pin_memory(my_tensor)`
 
 ## Communication backend
-When a communication backend string is used, the interface `get_accelerator().communication_backend_name()` is used get get communication backend name. So instead of:
+When a communication backend string is used, the interface `get_accelerator().communication_backend_name()` is used to get the communication backend name. So instead of:
 ```
 torch.distributed.init_process_group('nccl')
 ```

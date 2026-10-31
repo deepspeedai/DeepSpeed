@@ -8,6 +8,7 @@ from torch import nn
 from functools import lru_cache
 
 import deepspeed.comm as dist
+from deepspeed.comm import pg_utils
 from deepspeed.accelerator import get_accelerator
 from deepspeed.utils.logging import logger
 
@@ -67,12 +68,12 @@ class _VocabParallelCrossEntropy(torch.autograd.Function):
 
         local_max = logits.amax(dim=-1)
         global_max = local_max.clone()
-        if tp_group is not None and dist.get_world_size(tp_group) > 1:
+        if pg_utils.is_parallel(tp_group):
             dist.all_reduce(global_max, op=dist.ReduceOp.MAX, group=tp_group)
 
         exp_logits = torch.exp(logits - global_max.unsqueeze(-1))
         global_sum_exp = exp_logits.sum(dim=-1)
-        if tp_group is not None and dist.get_world_size(tp_group) > 1:
+        if pg_utils.is_parallel(tp_group):
             dist.all_reduce(global_sum_exp, op=dist.ReduceOp.SUM, group=tp_group)
 
         valid_target = target != ignore_index
@@ -80,7 +81,7 @@ class _VocabParallelCrossEntropy(torch.autograd.Function):
         local_target = (target - vocab_start_index).clamp(min=0, max=local_vocab_size - 1)
         target_logits = logits.gather(-1, local_target.unsqueeze(-1)).squeeze(-1)
         target_logits = torch.where(target_in_partition, target_logits, torch.zeros_like(target_logits))
-        if tp_group is not None and dist.get_world_size(tp_group) > 1:
+        if pg_utils.is_parallel(tp_group):
             dist.all_reduce(target_logits, op=dist.ReduceOp.SUM, group=tp_group)
 
         loss = torch.log(global_sum_exp) + global_max - target_logits
@@ -131,7 +132,7 @@ class _GatherSequenceLoss(torch.autograd.Function):
 
 
 def _global_sp_sum(local_value, sp_group):
-    if sp_group is None or dist.get_world_size(sp_group) == 1:
+    if not pg_utils.is_parallel(sp_group):
         return local_value
 
     global_value = local_value.detach().clone()
@@ -219,7 +220,7 @@ def vocab_parallel_cross_entropy(vocab_parallel_logits,
         raise ValueError("vocab_parallel_logits and target must have matching non-vocabulary dimensions")
     # With tensor parallelism an empty shard is rejected from the all-gathered shard
     # metadata so every rank fails together; only the single-process case can raise here.
-    if vocab_parallel_logits.shape[-1] == 0 and (tp_group is None or dist.get_world_size(tp_group) == 1):
+    if vocab_parallel_logits.shape[-1] == 0 and not pg_utils.is_parallel(tp_group):
         raise ValueError("vocab_parallel_logits must contain at least one local vocabulary entry")
     if reduction not in ("none", "sum", "mean"):
         raise ValueError(f"Unsupported reduction: {reduction}")
@@ -267,7 +268,7 @@ def vocab_parallel_cross_entropy(vocab_parallel_logits,
         return loss_sum
 
     valid_tokens = (target != ignore_index).sum().to(dtype=loss.dtype)
-    if sp_group is not None and dist.get_world_size(sp_group) > 1:
+    if pg_utils.is_parallel(sp_group):
         dist.all_reduce(valid_tokens, op=dist.ReduceOp.SUM, group=sp_group)
     return loss_sum / valid_tokens.clamp_min(1)
 
@@ -424,6 +425,35 @@ class VocabParallelCausalLMLoss:
         return loss
 
 
+def _set_vocab_parallel_loss(model, loss_fn):
+    if not hasattr(model, "loss_function"):
+        raise ValueError("A no-gather vocab-parallel LM head requires a writable loss_function hook; "
+                         "use gather_output=True for models without one")
+
+    original_loss_function = model.loss_function
+    registered_loss_module = getattr(model, "_modules", {}).pop("loss_function", None)
+
+    # Read-only properties and setters that ignore the new hook cannot be used with
+    # rank-local logits; reject both before the caller commits to vocabulary sharding.
+    try:
+        model.loss_function = loss_fn
+    except (AttributeError, TypeError) as exc:
+        if registered_loss_module is not None:
+            model.loss_function = registered_loss_module
+        raise ValueError("Unable to install the vocab-parallel loss_function hook; use gather_output=True") from exc
+
+    if model.loss_function is not loss_fn:
+        model.loss_function = original_loss_function
+        raise ValueError("Unable to install the vocab-parallel loss_function hook; use gather_output=True")
+    return original_loss_function
+
+
+def validate_vocab_parallel_loss(model):
+    """Check hook replacement before partitioning weights, then restore the original loss."""
+    original_loss_function = _set_vocab_parallel_loss(model, VocabParallelCausalLMLoss())
+    model.loss_function = original_loss_function
+
+
 def configure_vocab_parallel_loss(model, vocab_parallel_head, sp_group=None, ignore_index=-100, backend="torch"):
     """Install the causal-LM loss required by a no-gather vocabulary projection.
 
@@ -431,30 +461,13 @@ def configure_vocab_parallel_loss(model, vocab_parallel_head, sp_group=None, ign
     sequence-parallel engine: the engine performs the token-count-weighted aggregation
     across SP ranks itself and expects this loss to return the local shard's mean.
     """
-    if not hasattr(model, "loss_function"):
-        raise ValueError("A no-gather vocab-parallel LM head requires a writable loss_function hook; "
-                         "use gather_output=True for models without one")
-
     loss_fn = VocabParallelCausalLMLoss(tp_group=vocab_parallel_head.mp_group,
                                         sp_group=sp_group,
                                         vocab_start_index=vocab_parallel_head.vocab_start_index,
                                         vocab_end_index=vocab_parallel_head.vocab_end_index,
                                         ignore_index=ignore_index,
                                         backend=backend)
-    original_loss_function = model.loss_function
-    registered_loss_module = getattr(model, "_modules", {}).pop("loss_function", None)
-
-    # Some model classes expose loss_function as a read-only property, in which case the
-    # assignment raises; the identity check below turns that into an actionable error
-    # instead of leaving the model silently computing loss on rank-local logits.
-    try:
-        model.loss_function = loss_fn
-    except (AttributeError, TypeError):
-        if registered_loss_module is not None:
-            model.add_module("loss_function", registered_loss_module)
-
-    if model.loss_function is not loss_fn:
-        raise ValueError("Unable to install the vocab-parallel loss_function hook; use gather_output=True")
+    original_loss_function = _set_vocab_parallel_loss(model, loss_fn)
 
     # Keep the stock loss reachable so callers can restore it when tearing the head down.
     if not hasattr(model, "_deepspeed_original_loss_function"):

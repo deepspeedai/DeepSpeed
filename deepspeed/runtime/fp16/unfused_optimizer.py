@@ -12,7 +12,8 @@ import torch
 from torch._utils import _flatten_dense_tensors
 
 from deepspeed.runtime.base_optimizer import DeepSpeedOptimizer
-from deepspeed.runtime.utils import get_global_norm, CheckOverflow, get_weight_norm
+from deepspeed.runtime.utils import (CheckOverflow, get_global_norm, get_weight_norm, is_invalid_grad_norm,
+                                     is_optimized_parameter)
 from deepspeed.runtime.fp16.loss_scaler import LossScaleConfig, LossScaleProfile
 from deepspeed.utils import logger
 from deepspeed.utils.torch import required_torch_version
@@ -69,7 +70,7 @@ class FP16_UnfusedOptimizer(DeepSpeedOptimizer):
         # loop to deal with groups
         for i, param_group in enumerate(self.optimizer.param_groups):
             #fp16 weights that represents the actual model weights
-            trainable = [p for p in param_group['params'] if p.requires_grad]
+            trainable = [p for p in param_group['params'] if is_optimized_parameter(p)]
             self.fp16_groups.append(trainable)
 
             #creating a fp32 copy of the weights that will be updated first then
@@ -121,6 +122,16 @@ class FP16_UnfusedOptimizer(DeepSpeedOptimizer):
                         p.grad.detach_()
                         p.grad.zero_()
 
+    def _skip_invalid_grad_norm(self):
+        self.overflow = True
+        self._global_grad_norm = float("inf")
+        self._update_scale(self.overflow)
+        self.zero_grad(set_to_none=True)
+        for group in self.fp32_groups:
+            for param in group:
+                param.grad = None
+        return self.overflow
+
     def step_fused_lamb(self, closure=None):
         """
         Not supporting closure.
@@ -147,16 +158,13 @@ class FP16_UnfusedOptimizer(DeepSpeedOptimizer):
             expert_norm_groups.append(expert_norm_group_value)
 
         self.overflow = self.overflow_checker.check_using_norm(norm_groups + expert_norm_groups)
-        prev_scale = self.loss_scale_config.cur_scale
-
-        self._update_scale(self.overflow)
         if self.overflow:
-            if self.verbose:
-                logger.info("[deepspeed] fp16 dynamic loss scale overflow! Skipping step. Attempted loss "
-                            "scale: {}, reducing to {}".format(prev_scale, self.loss_scale_config.cur_scale))
-            return self.overflow
+            return self._skip_invalid_grad_norm()
 
         self._global_grad_norm = get_global_norm(norm_list=norm_groups)
+        if is_invalid_grad_norm(self._global_grad_norm):
+            return self._skip_invalid_grad_norm()
+        self._update_scale(False)
         combined_scale = self.unscale_and_clip_grads(self._global_grad_norm, apply_scale=False)
         self.optimizer.step(grads=grads_groups, output_params=self.fp16_groups, scale=combined_scale)
 
@@ -195,14 +203,8 @@ class FP16_UnfusedOptimizer(DeepSpeedOptimizer):
             return self.step_fused_lamb()
 
         self.overflow = self.overflow_checker.check()
-        prev_scale = self.loss_scale_config.cur_scale
-
-        self._update_scale(self.overflow)
         if self.overflow:
-            if self.verbose:
-                logger.info("[deepspeed] fp16 dynamic loss scale overflow! Skipping step. Attempted loss "
-                            "scale: {}, reducing to {}".format(prev_scale, self.loss_scale_config.cur_scale))
-            return self.overflow
+            return self._skip_invalid_grad_norm()
 
         norm_groups = []
         for i, group in enumerate(self.fp16_groups):
@@ -220,6 +222,9 @@ class FP16_UnfusedOptimizer(DeepSpeedOptimizer):
                     fp32_param.grad = fp16_param.grad.to(fp32_param.dtype)
 
         self._global_grad_norm = get_global_norm(norm_list=norm_groups)
+        if is_invalid_grad_norm(self._global_grad_norm):
+            return self._skip_invalid_grad_norm()
+        self._update_scale(False)
         self.unscale_and_clip_grads(self._global_grad_norm)
 
         self.optimizer.step()
@@ -273,17 +278,28 @@ class FP16_UnfusedOptimizer(DeepSpeedOptimizer):
         if self.loss_scale_config.dynamic_loss_scale:
             prev_scale = self.loss_scale_config.cur_scale
             if skip:
-                self.loss_scale_config.cur_scale = max(
-                    self.loss_scale_config.cur_scale / self.loss_scale_config.scale_factor,
-                    self.loss_scale_config.min_loss_scale)
+                if self.loss_scale_config.cur_hysteresis > 1:
+                    self.loss_scale_config.cur_hysteresis -= 1
+                else:
+                    self.loss_scale_config.cur_scale = max(
+                        self.loss_scale_config.cur_scale / self.loss_scale_config.scale_factor,
+                        self.loss_scale_config.min_loss_scale)
                 self.loss_scale_config.last_overflow_iter = self.loss_scale_config.cur_iter
                 if self.verbose:
                     logger.info("Grad overflow on iteration: %s", self.loss_scale_config.cur_iter)
-                    logger.info(f"Reducing dynamic loss scale from {prev_scale} to {self.loss_scale_config.cur_scale}")
+                    if self.loss_scale_config.cur_scale == prev_scale:
+                        logger.info(f"Keeping dynamic loss scale at {prev_scale}, "
+                                    f"hysteresis now {self.loss_scale_config.cur_hysteresis}")
+                    else:
+                        logger.info(
+                            f"Reducing dynamic loss scale from {prev_scale} to {self.loss_scale_config.cur_scale}")
             else:
+                if self.loss_scale_config.consecutive_hysteresis:
+                    self.loss_scale_config.cur_hysteresis = self.loss_scale_config.delayed_shift
                 # Ensure self.loss_scale_config.scale_window updates since last overflow
                 stable_interval = (self.loss_scale_config.cur_iter - self.loss_scale_config.last_overflow_iter) - 1
                 if (stable_interval > 0) and (stable_interval % self.loss_scale_config.scale_window == 0):
+                    self.loss_scale_config.cur_hysteresis = self.loss_scale_config.delayed_shift
                     self.loss_scale_config.cur_scale *= self.loss_scale_config.scale_factor
                     if self.verbose:
                         logger.info(f"No Grad overflow for {self.loss_scale_config.scale_window} iterations")
@@ -346,6 +362,7 @@ class FP16_UnfusedOptimizer(DeepSpeedOptimizer):
             state_dict['last_overflow_iter'] = self.loss_scale_config.last_overflow_iter
             state_dict['scale_factor'] = self.loss_scale_config.scale_factor
             state_dict['scale_window'] = self.loss_scale_config.scale_window
+            state_dict['cur_hysteresis'] = self.loss_scale_config.cur_hysteresis
         state_dict[OPTIMIZER_STATE_DICT] = self.optimizer.state_dict()
         state_dict['fp32_groups'] = self.fp32_groups
         return state_dict
@@ -380,6 +397,9 @@ class FP16_UnfusedOptimizer(DeepSpeedOptimizer):
             self.loss_scale_config.last_overflow_iter = state_dict['last_overflow_iter']
             self.loss_scale_config.scale_factor = state_dict['scale_factor']
             self.loss_scale_config.scale_window = state_dict['scale_window']
+            # Checkpoints written before hysteresis was honored here carry no counter.
+            self.loss_scale_config.cur_hysteresis = state_dict.get('cur_hysteresis',
+                                                                   self.loss_scale_config.delayed_shift)
 
         if load_optimizer_states:
             self.optimizer.load_state_dict(state_dict[OPTIMIZER_STATE_DICT])

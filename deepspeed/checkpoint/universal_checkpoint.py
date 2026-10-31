@@ -9,6 +9,7 @@ import torch
 import types
 from typing import List, Tuple, Union
 from dataclasses import dataclass
+from .affine import ParamAffineMap, SCALE_POWER_BY_STATE
 from .constants import (FP32_WEIGHT_KEY, PARAM, VOCAB_TENSOR, CAT_DIM, PARAM_N_SUB_PARAMS, SUB_PARAM_SHAPE,
                         EP_IS_EXPERT_PARAM, EP_NUM_EXPERTS, DS_AUTOEP_UC_META, DS_AUTOTP_UC_META,
                         AUTOEP_EXPERT_PLACEMENT, AUTOEP_PARAM_EP_RANK, AUTOEP_PARAM_LOCAL_EXPERTS,
@@ -144,7 +145,7 @@ def _narrow_sub_params(full_view, partition_dim, sub_dim_sizes, shard_widths, tp
     return slice_tensor.flatten()
 
 
-def _resolve_autotp_partition(current_param, ckpt_dict, full_hp_param, tp_rank, tp_world_size):
+def _resolve_autotp_partition(current_param, ckpt_dict, full_hp_param, tp_rank, tp_world_size, state_key='fp32'):
     meta = _get_param_uc_restore_meta(current_param)
     if not meta:
         return None
@@ -164,6 +165,19 @@ def _resolve_autotp_partition(current_param, ckpt_dict, full_hp_param, tp_rank, 
     unsupported_reason = meta.get('conversion', {}).get('unsupported_reason')
     if unsupported_reason:
         raise RuntimeError(f"Cannot restore a universal checkpoint into this AutoTP parameter: {unsupported_reason}")
+
+    # The layer described its own layout, so take this rank's shard straight from the map.
+    # This is the same piece list conversion used, run in the opposite direction, which is
+    # what keeps the two sides from disagreeing about how a parameter was cut.
+    affine_map = meta.get('conversion', {}).get('affine_map')
+    if affine_map is not None:
+        restored = ParamAffineMap.from_dict(affine_map)
+        if tp_rank in restored.pieces_by_rank and restored.numel == full_hp_param.numel():
+            # Each state needs its own power of a piece's scale, and a scaled optimizer state
+            # is refused rather than rescaled -- passing the parameter's power for a moment
+            # would apply the wrong factor with nothing to signal it.
+            scale_power = SCALE_POWER_BY_STATE.get(state_key, 1)
+            return restored.extract(full_hp_param, tp_rank, scale_power).flatten()
 
     if replicated:
         assert partition_dim is None
@@ -219,21 +233,31 @@ def _resolve_autotp_partition(current_param, ckpt_dict, full_hp_param, tp_rank, 
     return slice_tensor.flatten()
 
 
-def load_hp_checkpoint_state(self, folder, tp_rank, tp_world_size, ep_rank=0, ep_size=1):
+def load_hp_checkpoint_state(self, folder, tp_rank, tp_world_size, ep_rank=0, ep_size=1, load_optimizer_states=True):
     hp_mapping = self._hp_mapping
     hp_mapping.optim_fragment = {}
 
-    hp_keys = []
+    # Stem to the filename listdir returned. Only an exact "{stem}.pt" file counts.
+    hp_keys = {}
     for file in os.listdir(folder):
         # We expect files named something like "exp_avg.pt", "exp_avg_sq.pt", "fp32.pt"
-        pattern = r'(.+).pt'
-        match = re.search(pattern, file)
-        if match:
-            hp_keys.append(match.group(1))
+        match = re.fullmatch(r'(.+)\.pt', file)
+        if not match or not os.path.isfile(os.path.join(folder, file)):
+            continue
+        key = match.group(1)
+        assert key not in hp_keys, (f"Duplicate universal checkpoint state {key!r} in {folder}: "
+                                    f"{hp_keys[key]} and {file}")
+        hp_keys[key] = file
+    if FP32_WEIGHT_KEY not in hp_keys:
+        from deepspeed.runtime.zero.utils import ZeRORuntimeException
+        raise ZeRORuntimeException(
+            f"Saved fp32 weights are required but {FP32_WEIGHT_KEY}.pt is missing from {folder}")
+    if not load_optimizer_states:
+        hp_keys = {FP32_WEIGHT_KEY: hp_keys[FP32_WEIGHT_KEY]}
 
     step = None
-    for key in hp_keys:
-        ckpt_file = os.path.join(folder, f"{key}.pt")
+    for key, file in hp_keys.items():
+        ckpt_file = os.path.join(folder, file)
         ckpt_dict = torch.load(ckpt_file, weights_only=False)
 
         if key == "step":
@@ -300,7 +324,12 @@ def load_hp_checkpoint_state(self, folder, tp_rank, tp_world_size, ep_rank=0, ep
                 padding_size = padded_target_vocab_size - full_hp_param.shape[0]
                 full_hp_param = torch.nn.functional.pad(full_hp_param, (0, 0, 0, padding_size), "constant", 0)
 
-        autotp_tp_hp_slice = _resolve_autotp_partition(self, ckpt_dict, full_hp_param, tp_rank, tp_world_size)
+        autotp_tp_hp_slice = _resolve_autotp_partition(self,
+                                                       ckpt_dict,
+                                                       full_hp_param,
+                                                       tp_rank,
+                                                       tp_world_size,
+                                                       state_key=key)
         if autotp_tp_hp_slice is not None:
             tp_hp_slice = autotp_tp_hp_slice
         else:

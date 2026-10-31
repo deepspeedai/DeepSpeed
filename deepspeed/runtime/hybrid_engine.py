@@ -23,12 +23,6 @@ from deepspeed.module_inject.layers import LinearLayer, Normalize, EmbeddingLaye
 from ..ops.transformer.inference.op_binding.workspace import WorkspaceOp
 from .hybrid_engine_graph import (DecodeGraphCache, decode_steps_from_generate_kwargs, validate_cuda_graph_support)
 
-try:
-    import transformers
-    OPTLearnedPositionalEmbedding = transformers.models.opt.modeling_opt.OPTLearnedPositionalEmbedding
-except (ImportError, AttributeError):
-    OPTLearnedPositionalEmbedding = None
-
 
 class DeepSpeedHybridEngine(DeepSpeedEngine):
     r"""DeepSpeed engine for training and inference."""
@@ -154,12 +148,15 @@ class DeepSpeedHybridEngine(DeepSpeedEngine):
             self.inference_policies = {}
             return
 
-        self.inference_policies.update({
+        auxiliary_policies = {
             nn.Linear: (LinearLayer, ),
             nn.Embedding: (EmbeddingLayer, ),
             nn.LayerNorm: (Normalize, ),
-            OPTLearnedPositionalEmbedding: (OPTEmbedding, )
-        })
+        }
+        if HFOPTLayerPolicy._orig_layer_class is not None:
+            from transformers.models.opt.modeling_opt import OPTLearnedPositionalEmbedding
+            auxiliary_policies[OPTLearnedPositionalEmbedding] = (OPTEmbedding, )
+        self.inference_policies.update(auxiliary_policies)
 
     def _fuse_lora_layer(self, layer_id):
         self._inference_containers[layer_id].fuse_lora()

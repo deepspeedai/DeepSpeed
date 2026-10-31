@@ -216,6 +216,9 @@ class DeepSpeedAccelerator(ABC):
         return False
 
     # Graph operations
+    def is_current_stream_capturing(self) -> bool:
+        return False
+
     @abc.abstractmethod
     def create_graph(self):
         ...
