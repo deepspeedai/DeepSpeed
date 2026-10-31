@@ -27,11 +27,11 @@ and ``_covers_exactly`` states what that argument does and does not buy.
 
 import json
 from dataclasses import dataclass
-from typing import Callable, Dict, FrozenSet, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, FrozenSet, List, Optional, Sequence, Set, Tuple
 
 from .affine import AffinePiece, ParamAffineMap
-from .affine_geometry import (LogicalBox, coordinate as _coordinate, product as _product, row_major_strides as
-                              _row_major_strides)
+from .affine_geometry import (LogicalBox, boxes_disjoint, coordinate as _coordinate, product as _product,
+                              row_major_strides as _row_major_strides)
 
 __all__ = [
     'AffineTransferError', 'InvalidMapError', 'InvalidReplicaPolicyError', 'UnsupportedLayoutError', 'PlanBudget',
@@ -317,7 +317,26 @@ def _shards_tile(frames: List[_Frame], side: str, limits: PlanBudget) -> None:
 
 
 def _validate_holders(frames: List[_Frame], side: str, limits: PlanBudget) -> None:
-    """A piece's declared holders must cover exactly its logical box on every named rank."""
+    """A piece's declared holders must cover exactly its logical box on every named rank.
+
+    Most maps pass without comparing pieces pairwise: when no two distinct boxes overlap, a rank covers
+    a box exactly when it holds that very box, so the holders of each box can be read off a table.
+    Anything else, such as replicas split at different places, takes the pairwise walk, which also
+    names the piece at fault.
+    """
+    holders: Dict[LogicalBox, Set[int]] = {}
+    repeated = False
+    for frame in frames:
+        ranks = holders.setdefault(frame.box, set())
+        repeated = repeated or frame.rank in ranks
+        ranks.add(frame.rank)
+    if not repeated and boxes_disjoint(list(holders)):
+        if all(holders[frame.box] == frame.locations for frame in frames):
+            return
+    _validate_holders_pairwise(frames, side, limits)
+
+
+def _validate_holders_pairwise(frames: List[_Frame], side: str, limits: PlanBudget) -> None:
     if len(frames)**2 > limits.max_pair_checks:
         raise AffineTransferError(f'{side}: holder checks exceed max_pair_checks {limits.max_pair_checks}')
     by_rank: Dict[int, List[_Frame]] = {}
@@ -360,18 +379,20 @@ def _sources(frames: List[_Frame], limits: PlanBudget) -> List[Tuple[LogicalBox,
             by_box.setdefault(frame.box, []).append(frame)
 
     regions = sorted(by_box, key=lambda box: (box.origin, box.extent))
+    if not boxes_disjoint(regions):
+        _name_overlapping_regions(regions, limits)
+    return [(box, tuple(sorted(by_box[box], key=lambda frame: frame.rank))) for box in regions]
+
+
+def _name_overlapping_regions(regions: List[LogicalBox], limits: PlanBudget) -> None:
     if len(regions)**2 > limits.max_pair_checks:
         raise AffineTransferError(f'{len(regions)} source regions would take {len(regions)**2} checks, over '
                                   f'max_pair_checks {limits.max_pair_checks}')
-    grouped = []
     for index, box in enumerate(regions):
-        holders = by_box[box]
         for other in regions[index + 1:]:
             if not box.intersection(other).is_empty:
                 raise UnsupportedLayoutError(f'source: replicas of {box!r} and {other!r} have different '
                                              'piece boundaries')
-        grouped.append((box, tuple(sorted(holders, key=lambda frame: frame.rank))))
-    return grouped
 
 
 def _covers_exactly(region: LogicalBox, parts: Sequence[LogicalBox]) -> bool:

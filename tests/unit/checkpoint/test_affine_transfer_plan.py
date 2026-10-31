@@ -31,6 +31,7 @@ import torch
 
 from deepspeed.checkpoint.affine import (AffinePiece, ParamAffineMap, block_gather_map, contiguous_split_map,
                                          replicated_map, segmented_map, sub_param_map)
+from deepspeed.checkpoint.affine_geometry import LogicalBox, boxes_disjoint
 from deepspeed.checkpoint.affine_transfer import (AffineTransferError, InvalidMapError, PlanBudget, TransferSegment,
                                                   UnsupportedLayoutError, plan_transfer)
 
@@ -664,6 +665,78 @@ def test_merge_comparisons_have_their_own_budget():
     target = ParamAffineMap((rows, 2), {0: (rows, 2)}, {0: pieces})
     with pytest.raises(AffineTransferError, match='max_merge_checks'):
         plan_transfer(target, source, PlanBudget(max_merge_checks=10))
+
+
+def test_many_consistent_pieces_need_no_pairwise_holder_checks():
+    rows, ranks = 1024, 8
+    source = block_gather_map((rows, 2), {rank: list(range(rank, rows, ranks)) for rank in range(ranks)}, 1, 0)
+    target = contiguous_split_map((rows, 2), [rows // ranks] * ranks, 0)
+    assert rows**2 > PlanBudget().max_pair_checks
+    full = torch.arange(rows * 2, dtype=torch.float64).reshape(rows, 2)
+    copied = _apply_plan(plan_transfer(target, source), target, _shards(source, lambda m, r: m.extract(full, r)))
+    for rank, shard in copied.items():
+        torch.testing.assert_close(shard, target.extract(full, rank))
+
+
+def _random_holder_map(rng, rows, cols, ranks):
+    """Row blocks on every rank, sometimes split at a replica's own points, with holders sometimes wrong."""
+    shared = sorted(rng.sample(range(1, rows), rng.randint(0, rows - 1)))
+    blocks_of = {}
+    for rank in range(ranks):
+        cuts = shared if rng.random() < 0.7 else sorted(rng.sample(range(1, rows), rng.randint(0, rows - 1)))
+        bounds = list(zip([0] + cuts, cuts + [rows]))
+        held = [block for block in bounds if rank == 0 or rng.random() < 0.6]
+        if rank and rng.random() < 0.1 and held:
+            low, high = held[0]
+            held.append((low, min(rows, high + 1)))
+        blocks_of[rank] = held
+    pieces, shapes = {}, {}
+    for rank, blocks in blocks_of.items():
+        offset, pieces[rank] = 0, []
+        for low, high in blocks:
+            holders = [other for other, theirs in blocks_of.items() if any(a <= low and high <= b for a, b in theirs)]
+            if rng.random() < 0.15:
+                holders = sorted(set(holders) ^ {rng.randrange(ranks)}) or [rank]
+            shape = (high - low, cols)
+            pieces[rank].append(AffinePiece(shape, low * cols, (cols, 1), offset, (cols, 1), holders))
+            offset += _product(shape)
+        shapes[rank] = (offset, )
+    return ParamAffineMap((rows, cols), shapes, pieces)
+
+
+def _outcome(target, source):
+    try:
+        plan = plan_transfer(target, source, PlanBudget(max_pair_checks=1 << 30))
+    except AffineTransferError as error:
+        return type(error), str(error)
+    return [segment.to_dict() for segment in plan.segments]
+
+
+@pytest.mark.parametrize('seed', range(200))
+def test_holder_check_agrees_with_pairwise_walk(seed, monkeypatch):
+    """The table lookup is a shortcut, so the exhaustive comparison it replaces is the oracle."""
+    from deepspeed.checkpoint import affine_transfer as transfer_module
+
+    rng = random.Random(seed)
+    rows, cols, ranks = rng.randint(1, 6), rng.randint(1, 3), rng.randint(1, 4)
+    mapped = _random_holder_map(rng, rows, cols, ranks)
+    other = replicated_map((rows, cols), 1)
+    target, source = (mapped, other) if seed % 2 else (other, mapped)
+    fast = _outcome(target, source)
+    monkeypatch.setattr(transfer_module, '_validate_holders', transfer_module._validate_holders_pairwise)
+    assert fast == _outcome(target, source)
+
+
+@pytest.mark.parametrize('seed', range(100))
+def test_boxes_disjoint_agrees_with_all_pairs(seed):
+    rng = random.Random(seed)
+    ndim = rng.randint(1, 3)
+    boxes = []
+    for _ in range(rng.randint(0, 8)):
+        origin = tuple(rng.randint(0, 4) for _ in range(ndim))
+        boxes.append(LogicalBox(origin, tuple(rng.randint(0, 3) for _ in range(ndim))))
+    overlapping = any(not a.intersection(b).is_empty for a, b in itertools.combinations(boxes, 2))
+    assert boxes_disjoint(boxes) == (not overlapping)
 
 
 # ---------------------------------------------------------------- never materializing
