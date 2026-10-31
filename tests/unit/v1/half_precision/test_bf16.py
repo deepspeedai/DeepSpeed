@@ -669,3 +669,49 @@ class TestBF16FullGradientReconstruction(DistributedTest):
                                            msg=f"{name} at step {step}")
                 before[name] = after.clone()
         engine.destroy()
+
+
+class TestAdagradLowPrecisionState(DistributedTest):
+    world_size = 1
+
+    @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+    def test(self, dtype):
+        if dtype not in get_accelerator().supported_dtypes():
+            pytest.skip(f"{dtype} is not supported")
+        model = torch.nn.Linear(2, 1, bias=False).to(get_accelerator().current_device_name(), dtype=dtype)
+        torch.nn.init.ones_(model.weight)
+        optimizer = torch.optim.Adagrad(model.parameters(), lr=0.01, initial_accumulator_value=0.125)
+        state = optimizer.state[model.weight]
+        # Additional eager buffers must follow master precision without changing scalar counters or metadata.
+        state["extra_accumulator"] = torch.full_like(model.weight, 0.25)
+        state["mask"] = torch.ones_like(model.weight, dtype=torch.bool)
+        state["updates"] = 0
+        initial_step = state["step"].clone()
+        reference_parameter = torch.nn.Parameter(model.weight.detach().float().clone())
+        reference_optimizer = torch.optim.Adagrad([reference_parameter], lr=0.01, initial_accumulator_value=0.125)
+        config = {"train_micro_batch_size_per_gpu": 1, "gradient_clipping": 0.0}
+        config["fp16" if dtype == torch.float16 else "bf16"] = {"enabled": True}
+        if dtype == torch.float16:
+            config["fp16"]["loss_scale"] = 1.0
+        engine, _, _, _ = deepspeed.initialize(model=model, optimizer=optimizer, config=config)
+        try:
+            from deepspeed.runtime.fp16.unfused_optimizer import FP16_UnfusedOptimizer
+            assert isinstance(engine.optimizer, FP16_UnfusedOptimizer)
+            assert engine.optimizer.optimizer is optimizer
+            master = optimizer.param_groups[0]["params"][0]
+            state = optimizer.state[master]
+            for name, expected in [("sum", 0.125), ("extra_accumulator", 0.25)]:
+                torch.testing.assert_close(state[name], torch.full_like(master, expected), rtol=0, atol=0)
+            torch.testing.assert_close(state["step"], initial_step, rtol=0, atol=0)
+            assert state["updates"] == 0
+            torch.testing.assert_close(state["mask"], torch.ones_like(master, dtype=torch.bool))
+            inputs = torch.tensor([[1.0, 2.0]], device=engine.device, dtype=dtype)
+            engine.backward(engine(inputs).sum())
+            reference_parameter.grad = inputs.float()
+            reference_optimizer.step()
+            engine.step()
+            torch.testing.assert_close(master, reference_parameter)
+            torch.testing.assert_close(engine.module.weight, reference_parameter.to(dtype))
+            assert state["step"].item() == 1
+        finally:
+            engine.destroy()
