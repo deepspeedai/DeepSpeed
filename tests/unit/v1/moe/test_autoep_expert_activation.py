@@ -27,9 +27,11 @@ from deepspeed.module_inject.auto_ep_config import (
     validate_autoep_config,
 )
 from deepspeed.module_inject.auto_ep_layer import AutoEPMoELayer
+from deepspeed.ops.triton_ops import is_triton_available
 from deepspeed.module_inject.auto_ep_presets.registry import resolve_preset_candidates
 from deepspeed.moe.ep_experts import (
     EXPERT_ACTIVATIONS,
+    ExpertWeightGradSlot,
     GroupedExperts,
     apply_expert_activation,
     apply_packed_expert_activation,
@@ -362,6 +364,78 @@ class TestFusedGateUp:
                               disable_triton_grouped_mm=True,
                               gate_up_impl="fused").gate_up_impl == "fused"
 
+    def test_overlap_weight_grad_settings_are_validated(self, monkeypatch):
+
+        def validate(zero_stage=1, **settings):
+            base = {"enabled": True, "autoep_size": 2, "comm_backend": "deepep", "comm_max_tokens_per_rank": 64}
+            config = parse_autoep_config({**base, **settings})
+            validate_autoep_config(config, 2, 1, 1, 1, zero_stage=zero_stage)
+
+        assert parse_autoep_config({"enabled": True}).overlap_weight_grad is False
+        validate(overlap_weight_grad=True, zero_stage=1)
+        validate(overlap_weight_grad=True, zero_stage=2)
+        validate(overlap_weight_grad=False, zero_stage=0)
+        with pytest.raises(ValueError, match="must be true or false"):
+            validate(overlap_weight_grad="yes")
+        with pytest.raises(ValueError, match='Set comm_backend="deepep"'):
+            validate(overlap_weight_grad=True, comm_backend="comm")
+        with pytest.raises(ValueError, match="sequential expert loop"):
+            validate(overlap_weight_grad=True, use_grouped_mm=False)
+        for stage in (0, 3):
+            with pytest.raises(ValueError, match=f"ZeRO stage {stage}"):
+                validate(overlap_weight_grad=True, zero_stage=stage)
+        for name in ("_get_sm_carveout_experimental", "_set_sm_carveout_experimental"):
+            with monkeypatch.context() as missing_api:
+                missing_api.delattr(torch._C, name, raising=False)
+                with pytest.raises(ValueError, match="lacks"):
+                    validate(overlap_weight_grad=True)
+
+    def test_overlap_weight_grad_rejects_the_triton_grouped_gemm(self, monkeypatch):
+        monkeypatch.setattr(type(get_accelerator()), "prefer_triton_grouped_mm", lambda self: True)
+        model = _custom_pattern_model()
+        auto_ep = AutoEP(model,
+                         _runtime_config(moe_layer_pattern=MOE_PATTERN, use_grouped_mm=True, overlap_weight_grad=True))
+        [spec] = auto_ep.ep_parser()
+        with pytest.raises(ValueError, match="disable_triton_grouped_mm=true"):
+            auto_ep.replace_moe_layer(spec, ep_size=1, ep_rank=0)
+
+    @pytest.mark.parametrize("zero_stage", [0, 1, 2, 3])
+    def test_engine_passes_the_actual_zero_stage_to_overlap_validation(self, monkeypatch, zero_stage):
+        from deepspeed.runtime import engine as engine_module
+        from deepspeed.module_inject import auto_ep_config
+
+        class ValidationReached(Exception):
+            pass
+
+        config = parse_autoep_config({
+            "enabled": True,
+            "autoep_size": 2,
+            "comm_backend": "deepep",
+            "comm_max_tokens_per_rank": 64,
+            "overlap_weight_grad": True
+        })
+        shell = SimpleNamespace(_config=SimpleNamespace(expert_parallel_config=config),
+                                mpu=None,
+                                autotp_size=lambda: 1,
+                                _autoep_sequence_parallel_world_size=lambda: 1,
+                                zero_optimization_stage=lambda: zero_stage)
+        validate = auto_ep_config.validate_autoep_config
+
+        def validate_then_stop(*args, **kwargs):
+            validate(*args, **kwargs)
+            raise ValidationReached
+
+        # Exercise the engine wiring before building collectives: its previous omitted keyword treated every
+        # actual optimizer stage as stage 0, even when the direct configuration validation was correct.
+        monkeypatch.setattr(auto_ep_config, "validate_autoep_config", validate_then_stop)
+        monkeypatch.setattr(engine_module.dist, "get_world_size", lambda: 2)
+        if zero_stage in (1, 2):
+            with pytest.raises(ValidationReached):
+                engine_module.DeepSpeedEngine._configure_expert_parallel(shell, nn.Identity())
+        else:
+            with pytest.raises(ValueError, match=f"ZeRO stage {zero_stage}"):
+                engine_module.DeepSpeedEngine._configure_expert_parallel(shell, nn.Identity())
+
     def test_config_reaches_the_replaced_experts(self):
         if not hasattr(torch, "_grouped_mm"):
             pytest.skip("this PyTorch build has no torch._grouped_mm")
@@ -501,6 +575,108 @@ class TestFusedGateUp:
                                                state["optimizer"]["state"][saved_id]["momentum_buffer"],
                                                rtol=0,
                                                atol=0)
+
+
+def _grouped_mm_runs_on(device):
+    try:
+        torch._grouped_mm(torch.zeros(4, 16, device=device),
+                          torch.zeros(1, 16, 8, device=device),
+                          offs=torch.tensor([4], dtype=torch.int32, device=device))
+    except (AttributeError, RuntimeError, NotImplementedError):
+        return False
+    return True
+
+
+class TestDeferredExpertWeightGrad:
+    """Deferred gradients obey the plain path's contract; only their computation schedule changes."""
+
+    def _compare(self, device, dtype, activation, gate_up_impl, deferred):
+        torch.manual_seed(0)
+        kwargs = dict(dim=16,
+                      hidden_dim=8,
+                      num_experts=4,
+                      use_grouped_mm=True,
+                      disable_triton_grouped_mm=True,
+                      activation=activation,
+                      activation_alpha=1.5,
+                      activation_limit=1.0,
+                      gate_up_impl=gate_up_impl)
+        plain = GroupedExperts(**kwargs)
+        for weight in plain.parameters():
+            nn.init.normal_(weight, std=0.4)
+        overlapped = GroupedExperts(**kwargs)
+        overlapped.load_state_dict(plain.state_dict())
+        plain.to(device=device, dtype=dtype)
+        overlapped.to(device=device, dtype=dtype)
+        counts = torch.tensor([5, 0, 7, 12], device=device)
+        x = torch.randn(24, 16, device=device, dtype=dtype)
+        grad_out = torch.randn(24, 16, device=device, dtype=dtype)
+        x_plain, x_overlapped = x.clone().requires_grad_(True), x.clone().requires_grad_(True)
+        out_plain = plain(x_plain, counts)
+        out_plain.backward(grad_out)
+        slot = ExpertWeightGradSlot() if deferred else None
+        out_overlapped = overlapped(x_overlapped, counts, slot)
+        out_overlapped.backward(grad_out)
+        if deferred:
+            assert all(weight.grad is None for weight in overlapped.parameters())
+            for weight, grad in zip((overlapped.w1, overlapped.w2, overlapped.w3), slot.run()):
+                weight.grad = grad
+
+        torch.testing.assert_close(out_overlapped, out_plain, rtol=0, atol=0)
+        torch.testing.assert_close(x_overlapped.grad, x_plain.grad, rtol=0, atol=0)
+        for name in ("w1", "w2", "w3"):
+            torch.testing.assert_close(getattr(overlapped, name).grad, getattr(plain, name).grad, rtol=0, atol=0)
+
+    @pytest.mark.parametrize("deferred", [False, True])
+    @pytest.mark.parametrize("gate_up_impl", ["separate", "fused"])
+    @pytest.mark.parametrize("activation", tuple(EXPERT_ACTIVATIONS))
+    def test_matches_the_plain_path_exactly_on_cpu(self, activation, gate_up_impl, deferred):
+        if not _grouped_mm_runs_on("cpu"):
+            pytest.skip("this PyTorch build has no CPU torch._grouped_mm")
+        if EXPERT_ACTIVATIONS[activation].fused_fn is not None and is_triton_available():
+            pytest.skip("with Triton installed, this form's grouped path needs CUDA tensors")
+        for dtype in (torch.float32, torch.bfloat16):
+            self._compare("cpu", dtype, activation, gate_up_impl, deferred)
+
+    @pytest.mark.parametrize("gate_up_impl", ["separate", "fused"])
+    @pytest.mark.parametrize("activation", tuple(EXPERT_ACTIVATIONS))
+    def test_matches_the_plain_path_exactly_with_the_fused_kernels(self, activation, gate_up_impl):
+        if get_accelerator().device_name() != "cuda" or not hasattr(torch, "_grouped_mm"):
+            pytest.skip("needs CUDA with torch._grouped_mm")
+        self._compare(get_accelerator().current_device_name(), torch.bfloat16, activation, gate_up_impl, True)
+
+    @pytest.mark.parametrize("gate_up_impl", ["separate", "fused"])
+    def test_create_graph_is_rejected(self, gate_up_impl):
+        if not _grouped_mm_runs_on("cpu"):
+            pytest.skip("this PyTorch build has no CPU torch._grouped_mm")
+        experts = GroupedExperts(dim=16,
+                                 hidden_dim=8,
+                                 num_experts=1,
+                                 disable_triton_grouped_mm=True,
+                                 activation="geglu_tanh",
+                                 gate_up_impl=gate_up_impl)
+        for weight in experts.parameters():
+            nn.init.normal_(weight, std=0.1)
+        hidden = torch.ones((4, 16), requires_grad=True)
+        output = experts(hidden, torch.tensor([4]), weight_grad_slot=ExpertWeightGradSlot())
+        with pytest.raises(RuntimeError, match="second derivative"):
+            torch.autograd.grad(output.sum(), hidden, create_graph=True)
+
+    def test_slot_runs_once_after_the_expert_backward(self):
+        slot = ExpertWeightGradSlot()
+        with pytest.raises(RuntimeError, match="did not run before"):
+            slot.run()
+        slot.defer(lambda: (1, 2, 3))
+        with pytest.raises(RuntimeError, match="deferred twice"):
+            slot.defer(lambda: (1, 2, 3))
+        assert slot.run() == (1, 2, 3)
+        with pytest.raises(RuntimeError, match="did not run before"):
+            slot.run()
+
+    def test_deferring_needs_the_grouped_mm_path(self):
+        experts = GroupedExperts(dim=8, hidden_dim=16, num_experts=2, use_grouped_mm=False)
+        with pytest.raises(RuntimeError, match="torch._grouped_mm path"):
+            experts(torch.randn(4, 8), torch.tensor([2, 2]), ExpertWeightGradSlot())
 
 
 class TestPresetAndConfig:

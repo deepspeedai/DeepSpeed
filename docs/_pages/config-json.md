@@ -1009,6 +1009,12 @@ smoke coverage used for this AutoEP surface produced the following version gates
 | -------------------------------------------------------------------------------------------------------------- | -------- |
 | How the grouped experts compute their gate and up projections. `"separate"` runs two grouped GEMMs. `"fused"` is experimental and runs one `torch._grouped_mm` over the gate and up weights concatenated on each call, followed by an activation that reads the two halves of its output in place; for `swiglu` this is a Triton kernel with first-order gradients only (`create_graph=True` raises). Parameters, checkpoints and optimizer state keep the separate `w1`/`w3` layout. The forward expression and parameter-gradient semantics are unchanged, but exact numerical equality is not guaranteed across GEMM shapes/backends; the input gradient accumulates both projections in one FP32 GEMM instead of adding two rounded results. Requires `use_grouped_mm=true` and the `torch._grouped_mm` path (set `disable_triton_grouped_mm=true` on devices that prefer the Triton grouped GEMM); unsupported configurations fail rather than falling back. | `"separate"` |
 
+***overlap_weight_grad***: [boolean]
+
+| Description                                                                                                    | Default  |
+| -------------------------------------------------------------------------------------------------------------- | -------- |
+| Experimental. In the DeepEP backward, send the experts' input gradient back while computing their weight gradients. The expert backward returns its input gradient first and defers its weight-gradient GEMMs to the DeepEP dispatch backward, which launches its combine asynchronously, runs those GEMMs with `comm_num_sm` SMs withheld so the combine can run beside them, and waits before returning, including when weight-gradient computation raises. Parameter-gradient semantics are unchanged; exact cross-backend equality is not guaranteed. First-order gradients only (`create_graph=True` raises). Requires `comm_backend="deepep"` with `autoep_size > 1`, the `torch._grouped_mm` expert path (`use_grouped_mm=true`, and `disable_triton_grouped_mm=true` on devices that prefer the Triton grouped GEMM), ZeRO stage 1 or 2 (not 0 or 3), and PyTorch's SM carveout getter/setter APIs; unsupported configurations fail rather than falling back. | `false` |
+
 ***route_norm***: [boolean]
 
 | Description                                                                                                     | Default |

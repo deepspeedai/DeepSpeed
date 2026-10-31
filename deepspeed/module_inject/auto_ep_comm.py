@@ -347,6 +347,18 @@ class DeepEPExchange:
                                                             num_sms=self.num_sms)
         return combined, combined_weights
 
+    def combine_with_weight_grad_async(self, rows: torch.Tensor, handle, weight_grads=None):
+        """:meth:`combine_with_weight_grad` on DeepEP's stream, returning the event to wait on before reading.
+
+        The current stream does not wait for it, so work queued next runs while the combine is in flight.
+        """
+        combined, combined_weights, event = self.buffer.combine(rows,
+                                                                handle=handle,
+                                                                topk_weights=weight_grads,
+                                                                num_sms=self.num_sms,
+                                                                async_with_compute_stream=True)
+        return combined, combined_weights, event
+
     def combine(self, rows: torch.Tensor, handle) -> torch.Tensor:
         """Reduce expert outputs back to the tokens they came from.
 
@@ -380,6 +392,20 @@ class DeepEPExchange:
         if _SHARED_EXCHANGES.get(self.key) is self:
             del _SHARED_EXCHANGES[self.key]
         self.buffer.destroy()
+
+
+def run_with_sm_carveout(num_sms: int, compute):
+    """Run ``compute`` with ``num_sms`` SMs withheld from the GEMMs it launches.
+
+    torch._grouped_mm launches persistent kernels sized to every SM, which would leave a concurrent communication
+    kernel nowhere to run.
+    """
+    previous = torch._C._get_sm_carveout_experimental()
+    torch._C._set_sm_carveout_experimental(num_sms)
+    try:
+        return compute()
+    finally:
+        torch._C._set_sm_carveout_experimental(previous)
 
 
 def _in_backward() -> bool:
@@ -462,12 +488,22 @@ class _DeepEPDispatch(torch.autograd.Function):
     """Forward dispatch whose backward is the matching combine."""
 
     @staticmethod
-    def forward(ctx, exchange: DeepEPExchange, tokens: torch.Tensor, topk_idx: torch.Tensor,
-                topk_weights: torch.Tensor, recorded_handle):
+    def forward(ctx,
+                exchange: DeepEPExchange,
+                tokens: torch.Tensor,
+                topk_idx: torch.Tensor,
+                topk_weights: torch.Tensor,
+                recorded_handle=None,
+                weight_grad_slot=None,
+                *expert_weights):
         if recorded_handle is None:
             received, recv_weights, handle = exchange.dispatch(tokens, topk_idx, topk_weights)
         else:
             received, recv_weights, handle = exchange.replay_dispatch(tokens, topk_idx, topk_weights, recorded_handle)
+        # With a slot, the experts leave their weight gradients there, and this backward returns them: the expert
+        # weights are inputs here, though the dispatch does not read them.
+        ctx.weight_grad_slot = weight_grad_slot
+        ctx.num_expert_weights = len(expert_weights)
         ctx.exchange = exchange
         ctx.handle = handle
         ctx.tokens_shape = tokens.shape
@@ -480,15 +516,23 @@ class _DeepEPDispatch(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_received, grad_recv_weights):
-        grad_tokens, grad_weights = ctx.exchange.combine_with_weight_grad(
-            grad_received.contiguous(),
-            ctx.handle,
-            None if grad_recv_weights is None else grad_recv_weights.contiguous(),
-        )
+        rows = grad_received.contiguous()
+        row_weights = None if grad_recv_weights is None else grad_recv_weights.contiguous()
+        expert_grads = (None, ) * ctx.num_expert_weights
+        if ctx.weight_grad_slot is None:
+            grad_tokens, grad_weights = ctx.exchange.combine_with_weight_grad(rows, ctx.handle, row_weights)
+        else:
+            # Send the experts' input gradient first, and compute their weight gradients while it is in flight.
+            grad_tokens, grad_weights, event = ctx.exchange.combine_with_weight_grad_async(
+                rows, ctx.handle, row_weights)
+            try:
+                expert_grads = run_with_sm_carveout(ctx.exchange.num_sms, ctx.weight_grad_slot.run)
+            finally:
+                event.current_stream_wait()
         conformed_weights = None
         if grad_weights is not None and ctx.weights_shape is not None:
             conformed_weights = _conform_rows(grad_weights, ctx.weights_shape).reshape(ctx.weights_shape)
-        return None, _conform_rows(grad_tokens, ctx.tokens_shape), None, conformed_weights, None
+        return (None, _conform_rows(grad_tokens, ctx.tokens_shape), None, conformed_weights, None, None, *expert_grads)
 
 
 class _DeepEPCombine(torch.autograd.Function):
@@ -518,15 +562,23 @@ def deepep_dispatch(exchange: DeepEPExchange,
                     tokens: torch.Tensor,
                     topk_idx: torch.Tensor,
                     topk_weights: torch.Tensor,
-                    replay: DeepEPCheckpointReplay | None = None):
+                    replay: DeepEPCheckpointReplay | None = None,
+                    *,
+                    weight_grad_slot=None,
+                    expert_weights=()):
     """Dispatch tokens and their routing weights, keeping both differentiable.
+
+    ``weight_grad_slot`` and ``expert_weights`` overlap the backward: the experts leave the weight gradients of
+    ``expert_weights`` in the slot, and this dispatch's backward computes them while it sends the experts' input
+    gradient back.
 
     ``replay`` is the calling layer's record of its forward dispatches, which
     makes non-reentrant activation checkpointing recompute them faithfully.
     """
     inside_backward = replay is not None and _in_backward()
     recorded_handle = replay.forward_handle() if inside_backward else None
-    received, recv_weights = _DeepEPDispatch.apply(exchange, tokens, topk_idx, topk_weights, recorded_handle)
+    received, recv_weights = _DeepEPDispatch.apply(exchange, tokens, topk_idx, topk_weights, recorded_handle,
+                                                   weight_grad_slot, *expert_weights)
     # An outer reentrant checkpoint can build an inner graph during backward. A fresh grad-enabled dispatch
     # still needs recording there; only a dispatch actually replaying a handle can reuse its existing entry.
     if replay is not None and recorded_handle is None and torch.is_grad_enabled():
