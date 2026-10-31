@@ -1451,6 +1451,38 @@ class SubParamColumnParallel(LinearLayer):
                                     is_bias=True)
 
 
+def _sum_replicated_kv_gradient(grad, kv_start, group):
+    """Sum the gradient rows that every rank holds a copy of.
+
+    Depending on the backend, the weight gradient can have a transposed layout: torch_npu
+    returns one for this matmul, while CUDA returns a contiguous ``[out, in]`` gradient. The
+    original failure comes from NCCL and HCCL rejecting a non-contiguous collective input. This
+    fix does not depend on that contract: it decides from the tensor layout, reducing a
+    contiguous view in place and staging a copy only when the view is not contiguous. A backend
+    that accepted strided input directly would still get the same values, with one extra copy.
+
+    The collective reduces a view of the cloned fused gradient, so the result is copied back and
+    the surrounding query rows and the incoming layout are preserved. Unlike
+    ``register_replicated_grad_hooks``, which reduces the entire gradient and may return a
+    contiguous replacement, this hook reduces only the replicated key/value rows.
+    """
+    grad = grad.clone()
+    kv_grad = grad.narrow(0, kv_start, grad.shape[0] - kv_start)
+    if kv_grad.numel() == 0:
+        # The key/value block is replicated whole, so it is empty on every rank at once.
+        return grad
+    if kv_grad.is_contiguous():
+        # The CUDA layout: reduce the view in place, with no staging allocation.
+        dist.all_reduce(kv_grad, group=group)
+    else:
+        # The torch_npu layout: reduce a contiguous copy, then write it back into the view
+        # that autograd consumes.
+        reduced = kv_grad.contiguous()
+        dist.all_reduce(reduced, group=group)
+        kv_grad.copy_(reduced)
+    return grad
+
+
 class FusedModuleWrapper:
 
     def __init__(self, fused_module: nn.Module):
@@ -1496,14 +1528,9 @@ class fused_LinearLayer(SubParamColumnParallel):
         kv_start = get_shard_size_list(n_embd, self.tp_world_size, self.tp_meta)[self.tp_index]
         group = self.mp_group
 
-        def sum_kv_rows(grad):
-            grad = grad.clone()
-            dist.all_reduce(grad.narrow(0, kv_start, grad.shape[0] - kv_start), group=group)
-            return grad
-
         for param in (self.weight, self.bias):
             if param is not None and param.requires_grad:
-                param.register_hook(sum_kv_rows)
+                param.register_hook(lambda grad: _sum_replicated_kv_gradient(grad, kv_start, group))
 
     def _freeze_partition_sizes(self, total_size):
         super()._freeze_partition_sizes(total_size)

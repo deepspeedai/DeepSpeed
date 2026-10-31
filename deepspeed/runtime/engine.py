@@ -1036,17 +1036,34 @@ class DeepSpeedEngine(Module):
         # from_model_config descends into text_config itself, so multimodal outer configs
         # work here too.
         from deepspeed.module_inject.tp_shard import AutoTPMeta
+        from deepspeed.module_inject.fusedqkv_utils import replicates_kv_block
 
-        num_kv_heads = AutoTPMeta.from_model_config(model_config).num_kv_heads
+        meta = AutoTPMeta.from_model_config(model_config)
+        # The bigcodetype layout keeps the whole key/value block on every rank, so the query
+        # heads bound the useful TP width there instead of the key/value head count.
+        replicated_kv = replicates_kv_block(model)
+        shard_heads = meta.num_attention_heads if replicated_kv else meta.num_kv_heads
 
-        # Ranks beyond the KV head count get no attention shard. This still computes the
-        # correct result because the row-parallel all-reduce sums their empty contribution,
-        # but attention work concentrates on the first num_kv_heads ranks.
-        if num_kv_heads is not None and tp_size > num_kv_heads:
+        if replicated_kv and shard_heads is not None and tp_size > shard_heads:
+            # A rank beyond the query heads has no query rows: its c_attn holds only the
+            # replicated key/value block and its attention output projection is empty. The
+            # model's forward then fails (for example, SDPA rejects zero query heads), so
+            # reject the configuration here instead of only warning about throughput.
+            raise RuntimeError(f"AutoTP cannot shard this replicated key/value attention across {tp_size} ranks: "
+                               f"the model has {shard_heads} query heads, so at least one rank would hold no "
+                               f"query rows and an empty attention output projection. Reduce "
+                               f"tensor_parallel.autotp_size to at most the query head count.")
+
+        # For layouts that do not replicate the key/value block, ranks beyond the head count
+        # get no attention shard. This still computes the correct result because the
+        # row-parallel all-reduce sums their empty contribution, but attention work
+        # concentrates on the first shard_heads ranks.
+        if shard_heads is not None and tp_size > shard_heads:
             log_dist(
-                f"AutoTP: autotp_size ({tp_size}) exceeds the model's key-value head count "
-                f"({num_kv_heads}); ranks beyond the head count hold no attention shard and "
-                "attention throughput will not scale past that point.",
+                f"AutoTP: autotp_size ({tp_size}) exceeds the model's "
+                f"{'query' if replicated_kv else 'key-value'} head count ({shard_heads}); "
+                "ranks beyond the head count hold no attention shard and attention throughput "
+                "will not scale past that point.",
                 ranks=[0],
                 level=logging.WARNING)
 

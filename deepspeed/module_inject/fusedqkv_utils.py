@@ -51,6 +51,22 @@ def get_fused_qkv_type(module):
     return FUSED_QKV_TYPE_DICT[max(module_name_matches, key=len)]
 
 
+_REPLICATED_KV_BLOCK_CLASS_NAMES = tuple(name for name, fused_type in FUSED_QKV_TYPE_DICT.items()
+                                         if fused_type == 'bigcodetype')
+
+
+def replicates_kv_block(module):
+    """Whether this model's fused qkv layout keeps the whole key/value block on every rank.
+
+    Checked on class names rather than ``get_fused_qkv_type(module)``: that helper stringifies
+    each module, and stringifying a container prints its whole subtree, which makes a scan over
+    every module quadratic on large models. The names are derived from ``FUSED_QKV_TYPE_DICT``,
+    so registering a new replicated-key/value layout there is all the maintenance this needs.
+    """
+    return any(
+        any(name in type(child).__name__ for name in _REPLICATED_KV_BLOCK_CLASS_NAMES) for child in module.modules())
+
+
 def fused_qkv_subparam_sizes(module, weight_shape, meta: AutoTPMeta):
     """Sizes of the sub-parameters a fused qkv weight is cut into, or None.
 

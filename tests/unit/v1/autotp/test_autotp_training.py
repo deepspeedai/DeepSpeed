@@ -27,7 +27,7 @@ from deepspeed.module_inject.fusedqkv_utils import shared_qk_value_head_ids
 from deepspeed.module_inject.layers import (LinearAllreduce, LinearLayer, VocabParallelLinear, VocabParallelEmbedding,
                                             set_autotp_mode, is_autotp_training_mode, GatherFromTensorParallelRegion,
                                             ScatterToTensorParallelRegion, HiddenParallelEmbedding,
-                                            Yuan_LinearAllreduce)
+                                            Yuan_LinearAllreduce, _sum_replicated_kv_gradient)
 from deepspeed.module_inject.tp_shard import AutoTPMeta, get_shard_size_list
 from unit.checkpoint.common import compare_lr_scheduler_states, compare_optimizer_states
 import os
@@ -1178,18 +1178,76 @@ class TestYuanOutputProjectionBias(DistributedTest):
             set_autotp_mode(training=False)
 
 
+def test_replicated_kv_gradient_stages_a_non_contiguous_collective(monkeypatch):
+    import deepspeed.module_inject.layers as layers_module
+
+    kv_start = 3
+    # Some backends return the weight gradient in a transposed layout.
+    grad = torch.arange(40.0).reshape(5, 8).t()
+    assert grad.shape == (8, 5) and not grad.is_contiguous()
+
+    collectives = []
+
+    def fake_all_reduce(tensor, group=None):
+        collectives.append((tuple(tensor.shape), tensor.is_contiguous()))
+        tensor.fill_(-1.0)
+
+    # NCCL and HCCL both reject non-contiguous collectives, so the test stands in for that
+    # documented contract and records what actually reaches the backend.
+    monkeypatch.setattr(layers_module.dist, "all_reduce", fake_all_reduce)
+    reduced = _sum_replicated_kv_gradient(grad, kv_start, group=None)
+
+    assert collectives == [((5, 5), True)]
+    torch.testing.assert_close(reduced[:kv_start], grad[:kv_start])
+    torch.testing.assert_close(reduced[kv_start:], torch.full((5, 5), -1.0))
+    assert not reduced.is_contiguous()
+
+
+@contextmanager
+def _count_kv_gradient_all_reduces(kv_rows, hidden):
+    """Count the K/V-row all-reduces issued by the fused c_attn gradient hook.
+
+    The hook runs in the autograd thread, so the test observes it by wrapping the collective it
+    calls. Only the replicated K/V slices have these shapes; the other all-reduces in the step
+    operate on full activations or gradients.
+    """
+    import deepspeed.module_inject.layers as layers_module
+
+    counts = {"weight": 0, "bias": 0}
+    original_all_reduce = layers_module.dist.all_reduce
+
+    def counting_all_reduce(tensor, *args, **kwargs):
+        shape = tuple(tensor.shape)
+        if shape == (kv_rows, hidden):
+            counts["weight"] += 1
+        elif shape == (kv_rows, ):
+            counts["bias"] += 1
+        return original_all_reduce(tensor, *args, **kwargs)
+
+    layers_module.dist.all_reduce = counting_all_reduce
+    try:
+        yield counts
+    finally:
+        layers_module.dist.all_reduce = original_all_reduce
+
+
 class TestGPTBigCodeMultiQueryTraining(DistributedTest):
     """Multi-query GPTBigCode must train the same model under AutoTP as on one device.
 
     Every rank holds the whole shared key/value block of the fused c_attn but attends with only
     its own query heads, so the gradient each rank computes for those rows is partial. Unless the
     ranks sum it, each applies a different update to rows that must stay identical (#8927).
+
+    TP=2 and TP=4 are separate tests so a runner with only two devices still exercises TP=2
+    instead of skipping the whole case when the four-device phase is unavailable.
     """
-    world_size = [2, 4]
+    world_size = 2
     reuse_dist_env = False
 
-    def test_matches_single_device_training(self):
+    def _train_and_compare(self, expected_tp):
         skip_on_device()
+        assert dist.get_world_size() == expected_tp, (
+            f"this case is meant to run with tp={expected_tp}, got {dist.get_world_size()}")
         transformers = pytest.importorskip("transformers")
         hidden, heads, steps, lr = 32, 4, 4, 0.5
         kv_rows = 2 * (hidden // heads)
@@ -1248,20 +1306,107 @@ class TestGPTBigCodeMultiQueryTraining(DistributedTest):
         }
         try:
             engine, _, _, _ = deepspeed.initialize(model=build_model(), config=ds_config)
-            c_attn = engine.module.transformer.h[0].attn.c_attn
+            attn = engine.module.transformer.h[0].attn
+            c_attn = attn.c_attn
+
+            # The regression this guards is a rank with an empty attention shard: every rank
+            # must hold its own query heads, the whole K/V block, and the matching c_proj input.
+            expected_query_width = hidden // expected_tp
+            assert attn.embed_dim == expected_query_width
+            assert attn.num_heads == heads // expected_tp
+            assert attn.kv_heads == 1
+            assert c_attn.weight.shape[0] == expected_query_width + kv_rows
+            assert attn.c_proj.weight.shape[1] == expected_query_width
+            if hasattr(attn, "num_key_value_groups"):
+                assert attn.num_key_value_groups == heads // expected_tp
+
             losses = []
             for step, input_ids in enumerate(batches):
-                loss = engine(input_ids=input_ids, labels=input_ids).loss
-                engine.backward(loss)
                 if step == 0:
+                    with _count_kv_gradient_all_reduces(kv_rows, hidden) as hook_calls:
+                        loss = engine(input_ids=input_ids, labels=input_ids).loss
+                        engine.backward(loss)
+                    assert hook_calls["weight"] > 0, "the K/V weight gradient hook did not run"
+                    if c_attn.bias is not None:
+                        assert hook_calls["bias"] > 0, "the K/V bias gradient hook did not run"
                     # The shared rows' gradient on every rank must be the whole gradient, not
                     # the part from this rank's heads.
                     torch.testing.assert_close(c_attn.weight.grad[-kv_rows:], reference_kv_grads[0])
                     torch.testing.assert_close(c_attn.bias.grad[-kv_rows:], reference_kv_grads[1])
+                else:
+                    loss = engine(input_ids=input_ids, labels=input_ids).loss
+                    engine.backward(loss)
                 engine.step()
                 losses.append(loss.item())
 
             torch.testing.assert_close(torch.tensor(losses), torch.tensor(reference_losses), atol=1e-5, rtol=0)
+            kv_on_ranks = [None] * dist.get_world_size()
+            dist.all_gather_object(kv_on_ranks, c_attn.weight.detach()[-kv_rows:].cpu())
+            assert all(torch.equal(kv, kv_on_ranks[0]) for kv in kv_on_ranks)
+        finally:
+            reset_tp_model_init_state()
+
+    def test_matches_single_device_training_tp2(self):
+        self._train_and_compare(2)
+
+    @pytest.mark.world_size(4)
+    def test_matches_single_device_training_tp4(self):
+        self._train_and_compare(4)
+
+    def test_bf16_smoke_tp2(self):
+        skip_on_device()
+        if not get_accelerator().is_bf16_supported():
+            pytest.skip("bf16 is not supported on this accelerator")
+        transformers = pytest.importorskip("transformers")
+        hidden, heads = 32, 4
+        kv_rows = 2 * (hidden // heads)
+        device = torch.device(get_accelerator().current_device_name())
+
+        torch.manual_seed(0)
+        config = transformers.GPTBigCodeConfig(vocab_size=64,
+                                               n_positions=32,
+                                               n_embd=hidden,
+                                               n_layer=2,
+                                               n_head=heads,
+                                               multi_query=True,
+                                               attn_pdrop=0.0,
+                                               resid_pdrop=0.0,
+                                               embd_pdrop=0.0)
+        model = transformers.GPTBigCodeForCausalLM(config).to(dtype=torch.bfloat16)
+        ds_config = {
+            "train_micro_batch_size_per_gpu": 2,
+            "optimizer": {
+                "type": "SGD",
+                "params": {
+                    "lr": 0.5,
+                },
+            },
+            "gradient_clipping": 0.0,
+            "tensor_parallel": {
+                "autotp_size": dist.get_world_size(),
+            },
+            "zero_optimization": {
+                "stage": 0,
+            },
+            "bf16": {
+                "enabled": True,
+            },
+        }
+        try:
+            engine, _, _, _ = deepspeed.initialize(model=model, config=ds_config)
+            c_attn = engine.module.transformer.h[0].attn.c_attn
+            assert c_attn.weight.dtype == torch.bfloat16
+            input_ids = torch.randint(0, 64, (2, 16), generator=torch.Generator().manual_seed(0)).to(device)
+
+            with _count_kv_gradient_all_reduces(kv_rows, hidden) as hook_calls:
+                loss = engine(input_ids=input_ids, labels=input_ids).loss
+                engine.backward(loss)
+            assert torch.isfinite(loss).item()
+            assert hook_calls["weight"] > 0, "the K/V weight gradient hook did not run"
+            if c_attn.bias is not None:
+                assert hook_calls["bias"] > 0, "the K/V bias gradient hook did not run"
+
+            engine.step()
             kv_on_ranks = [None] * dist.get_world_size()
             dist.all_gather_object(kv_on_ranks, c_attn.weight.detach()[-kv_rows:].cpu())
             assert all(torch.equal(kv, kv_on_ranks[0]) for kv in kv_on_ranks)
