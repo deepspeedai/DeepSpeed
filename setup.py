@@ -322,6 +322,7 @@ setup(name='deepspeed',
           'Programming Language :: Python :: 3.12'
       ],
       license='Apache Software License 2.0',
+      license_files=['LICENSE', 'THIRD_PARTY_NOTICES.md'],
       ext_modules=ext_modules,
       cmdclass=cmdclass)
 

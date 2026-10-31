@@ -50,6 +50,14 @@ Mixture of Experts
    autoep
    moe
 
+Model-Specific Training
+-----------------------
+.. toctree::
+   :maxdepth: 2
+   :glob:
+
+   models/*
+
 Transformer Kernel API
 ----------------------
 .. toctree::
