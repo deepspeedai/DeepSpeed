@@ -194,6 +194,9 @@ class CPU_Accelerator(DeepSpeedAccelerator):
         import psutil
         return psutil.virtual_memory().total
 
+    def is_stream_capturing(self):
+        return False
+
     def available_memory(self, device_index=None):
         import psutil
         return psutil.virtual_memory().available

@@ -189,6 +189,21 @@ class CUDA_Accelerator(DeepSpeedAccelerator):
         else:
             return torch_gpu_id
 
+    def can_graph_capture_comm(self) -> bool:
+        """NCCL >= 2.14 supports CUDA graph capture of collectives."""
+        try:
+            import torch.distributed as dist
+            if not dist.is_nccl_available():
+                return False
+            # torch exposes NCCL version as (major, minor) tuple
+            nccl_ver = torch.cuda.nccl.version()
+            return nccl_ver[0] > 2 or (nccl_ver[0] == 2 and nccl_ver[1] >= 14)
+        except Exception:
+            return False
+
+    def is_stream_capturing(self):
+        return torch.cuda.is_current_stream_capturing()
+
     def available_memory(self, device_index=None):
         if pynvml:
             if device_index is None:

@@ -161,7 +161,20 @@ class DeepSpeedAccelerator(ABC):
     def total_memory(self, device_index=None):
         ...
 
-    @abc.abstractmethod
+    def can_graph_capture_comm(self) -> bool:
+        """Whether collectives (all-reduce, all-gather, etc.) can be captured
+        inside a CUDA graph on this backend. Determines whether the rollout
+        uses a single graph spanning communication points or splits into
+        per-segment graphs with collectives issued between replays."""
+        return False
+
+    def is_stream_capturing(self):
+        """True while a CUDA graph (or backend equivalent) is being captured
+        on the current stream. Callers skip host-syncing validation during
+        capture; graph-safe addresses have already been validated by the
+        warmup forwards."""
+        pass
+
     def available_memory(self, device_index=None):
         ...
 
