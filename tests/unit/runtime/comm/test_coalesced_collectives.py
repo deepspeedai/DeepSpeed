@@ -96,3 +96,38 @@ class TestAllToAllQuantReduceFallback(DistributedTest):
         elif dist.get_rank() == 1:
             assert output.shape == (24, )
             assert torch.allclose(output, torch.zeros_like(output))
+
+
+class TestAllToAllQuantReduceAverage(DistributedTest):
+    world_size = 4
+    backend = "gloo"
+    requires_cuda_env = False
+
+    def _launch_procs(self, num_procs, init_method):
+        # CPU tensors on gloo, so the four ranks do not need four accelerator devices.
+        torch.multiprocessing.set_start_method('forkserver', force=True)
+        self._launch_daemonic_procs(num_procs, init_method)
+
+    def test_matches_reduce_scatter_average(self):
+        # Run the two-stage qgZ path as 2 nodes x 2 devices with the pure-torch quantizer.
+        # Rank r holds -(r + 1) everywhere, which int4 represents exactly at every stage,
+        # so the result must be the plain average -2.5, the same as the 1D fallback.
+        from deepspeed.ops.op_builder.npu.quantizer import NPUQuantizer
+        from deepspeed.runtime.comm import coalesced_collectives
+        from deepspeed.utils import groups
+
+        accelerator = get_accelerator()
+        saved_device_count, saved_module = accelerator.device_count, coalesced_collectives.quantizer_module
+        accelerator.device_count = lambda: 2
+        coalesced_collectives.quantizer_module = NPUQuantizer
+        try:
+            value = -(dist.get_rank() + 1.0)
+            weight = torch.full((8, 16), value, dtype=torch.half)
+            bias = torch.full((16, ), value, dtype=torch.half)
+            outputs = all_to_all_quant_reduce([weight, bias], groups._get_local_all_to_all_group())
+        finally:
+            accelerator.device_count = saved_device_count
+            coalesced_collectives.quantizer_module = saved_module
+
+        for output in outputs:
+            assert torch.equal(output.float(), torch.full_like(output.float(), -2.5))
