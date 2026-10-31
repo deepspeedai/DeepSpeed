@@ -653,20 +653,20 @@ def partition_balanced(weights, num_parts):
     dp_max[0, 0] = 0
     dp_cost[0, 0] = 0
     for i in range(1, n + 1):
+        part_sum = prefix_sum[i] - prefix_sum[:i]
         for j in range(1, min(i, m) + 1):
-            for k in range(i):
-                max_sum = max(dp_max[k, j - 1], prefix_sum[i] - prefix_sum[k])
-                min_sum = min(dp_min[k, j - 1], prefix_sum[i] - prefix_sum[k])
-                cost = max_sum - min_sum
-                if dp_cost[i, j] >= cost:
-                    dp_cost[i, j] = cost
-                    dp_max[i, j] = max_sum
-                    dp_min[i, j] = min_sum
-                    position[i, j] = k
+            max_sum = np.maximum(dp_max[:i, j - 1], part_sum)
+            min_sum = np.minimum(dp_min[:i, j - 1], part_sum)
+            cost = max_sum - min_sum
+            k = i - 1 - int(np.argmin(cost[::-1]))
+            dp_cost[i, j] = cost[k]
+            dp_max[i, j] = max_sum[k]
+            dp_min[i, j] = min_sum[k]
+            position[i, j] = k
 
     parts = [n]
     for i in reversed(range(1, m + 1)):
-        parts.append(position[parts[-1], i])
+        parts.append(int(position[parts[-1], i]))
     parts.reverse()
 
     return parts
