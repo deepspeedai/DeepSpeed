@@ -169,9 +169,11 @@ def test_dualpipev_schedule_runs_to_completion(stages, micro_batches, forward_on
     one-time shape exchange is reached by the two sides in different situations), computes on a
     micro-batch before its data arrived, or sends and receives micro-batches in different orders.
     """
+    # a ForwardBackwardPass computes like its ForwardPass followed by its BackwardPass
     streams = [[
-        cmd for step in schedule.DualPipeVSchedule(micro_batches, stages, rank, forward_only=forward_only)
+        part for step in schedule.DualPipeVSchedule(micro_batches, stages, rank, forward_only=forward_only)
         for cmd in step
+        for part in ([cmd.forward, cmd.backward] if type(cmd) == schedule.ForwardBackwardPass else [cmd])
     ] for rank in range(stages)]
     pos = [0] * stages
     pending = [[] for _ in range(stages)]  # (channel, index, micro-batch) posted since the last CommitP2P
@@ -258,3 +260,16 @@ def test_dualpipev_schedule_runs_to_completion(stages, micro_batches, forward_on
             assert sum(1 for c in streams[rank] if type(c) == schedule.BackwardPass and c.phase == phase) == expected
     for channel, (sent, received) in posted.items():
         assert sent == received, f'{channel}: sends {sent} vs receives {received}'
+
+    # Each WeightPass needs a deferred backward, and none may be left at the optimizer step.
+    for stream in streams:
+        deferred = 0
+        for cmd in stream:
+            if type(cmd) == schedule.BackwardPass and cmd.enable_zb:
+                deferred += 1
+            elif type(cmd) == schedule.WeightPass:
+                assert deferred > 0
+                deferred -= 1
+            elif type(cmd) == schedule.OptimizerStep:
+                assert deferred == 0
+        assert deferred == 0
