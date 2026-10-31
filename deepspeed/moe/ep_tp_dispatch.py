@@ -482,5 +482,68 @@ def restore_combined(local_combined: torch.Tensor,
     return output
 
 
+def restore_combined_fused(local_combined: torch.Tensor,
+                           ctx: RestoreContext,
+                           *,
+                           tp_group,
+                           top_k: int,
+                           validate_coverage: bool = False) -> torch.Tensor:
+    """``restore_combined`` with the weighted top-k reduction done by the fused kernel.
+
+    The rows and the routing weights go through the same differentiable
+    all-gather as ``restore_combined``, so the ``tp_size`` gradient factor that
+    the folded AVERAGE and EXPERT_TP_CANCEL strategies cancel is unchanged. Only
+    the reduction differs: ``fused_weighted_restore`` multiplies each row by its
+    FP32 score and adds a token's top-k products in slot order in FP32, without
+    the reduced-precision product and the per-slot ``index_add_``.
+    """
+    from deepspeed.ops.triton_ops import autoep_fused_token_ops as fused_token_ops
+
+    payload = ctx.original_payload
+    local_token_indices = payload.token_indices.index_select(0, ctx.local_indices)
+    local_capacity_slots = payload.capacity_slots.index_select(0, ctx.local_indices)
+    # Position of each row in the unpartitioned [tokens * top_k] assignment order.
+    local_flat_indices = local_token_indices * top_k + local_capacity_slots
+    # Keep the router dtype: the kernel applies the scores in FP32.
+    local_weights = payload.combine_weights.index_select(0, ctx.local_indices)
+
+    all_outputs = _all_gather_variable_rows(local_combined,
+                                            tp_group,
+                                            ctx.tp_size,
+                                            preserve_grad=local_combined.requires_grad)
+    all_flat_indices = _all_gather_variable_rows(local_flat_indices, tp_group, ctx.tp_size).to(torch.long)
+    all_weights = _all_gather_variable_rows(local_weights,
+                                            tp_group,
+                                            ctx.tp_size,
+                                            preserve_grad=local_weights.requires_grad)
+    if validate_coverage:
+        local_expert_indices = payload.expert_indices.index_select(0, ctx.local_indices)
+        local_assignment_indices = payload.assignment_indices.index_select(0, ctx.local_indices)
+        all_expert_indices = _all_gather_variable_rows(local_expert_indices, tp_group, ctx.tp_size).to(torch.long)
+        all_assignment_indices = _all_gather_variable_rows(local_assignment_indices, tp_group,
+                                                           ctx.tp_size).to(torch.long)
+        _debug_validate_restore_coverage(payload, ctx, all_flat_indices // top_k, all_expert_indices,
+                                         all_assignment_indices, all_flat_indices % top_k)
+
+    if ctx.num_tokens <= 0:
+        ctx.num_tokens = int(payload.token_indices.max().item()) + 1 if payload.token_indices.numel() else 0
+    num_assignments = ctx.num_tokens * top_k
+    # The kernel reads one row for every (token, slot), so a dropped or padded
+    # assignment would leave its source row unset instead of contributing zero.
+    if all_outputs.shape[0] != num_assignments:
+        raise RuntimeError('combine_impl="fused_weighted_sum" needs every (token, top-k slot) assignment after the '
+                           f"AutoEP+AutoTP restore, but gathered {all_outputs.shape[0]} rows for "
+                           f"{ctx.num_tokens} tokens x top_k={top_k}. Leave combine_impl unset.")
+
+    top_scores = all_weights.new_zeros(num_assignments).scatter(0, all_flat_indices, all_weights)
+    hidden = local_combined.shape[-1]
+    output = fused_token_ops.fused_weighted_restore(all_outputs,
+                                                    top_scores=top_scores.view(ctx.num_tokens, top_k),
+                                                    token_indices_sorted=all_flat_indices,
+                                                    top_k=top_k,
+                                                    shape=(1, ctx.num_tokens, hidden))
+    return output.reshape(ctx.num_tokens, hidden)
+
+
 def dispatch_counters(ctx: RestoreContext) -> dict[str, int]:
     return dict(ctx.counters)

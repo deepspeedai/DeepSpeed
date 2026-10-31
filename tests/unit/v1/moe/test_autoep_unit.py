@@ -348,14 +348,14 @@ class TestAutoEPConfig:
         })
         validate_autoep_config(config, world_size=2, pp_size=1, tp_size=1, sp_size=1)
 
-    def test_fused_combine_rejects_folded_tensor_parallelism(self):
+    def test_fused_combine_accepts_folded_tensor_parallelism(self):
         config = parse_autoep_config({
             "enabled": True,
             "autoep_size": 2,
             "combine_impl": "fused_weighted_sum",
         })
-        with pytest.raises(ValueError, match=r"tensor_parallel\.autotp_size=2"):
-            validate_autoep_config(config, world_size=4, pp_size=1, tp_size=2, sp_size=1)
+        validate_autoep_config(config, world_size=4, pp_size=1, tp_size=2, sp_size=1)
+        assert config.combine_impl == "fused_weighted_sum"
 
     def test_fused_combine_rejects_expert_tensor_parallelism(self):
         config = parse_autoep_config({
