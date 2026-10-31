@@ -25,15 +25,17 @@ called: it walks every element of the parameter by design. Coverage is argued ov
 and ``_covers_exactly`` states what that argument does and does not buy.
 """
 
+import collections.abc
 import json
 from dataclasses import dataclass
-from typing import Callable, Dict, FrozenSet, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, FrozenSet, List, Mapping, Optional, Sequence, Tuple, Union
 
 from .affine import AffinePiece, ParamAffineMap
 
 __all__ = [
     'AffineTransferError', 'InvalidMapError', 'InvalidReplicaPolicyError', 'UnsupportedLayoutError', 'PlanBudget',
-    'PlanStatistics', 'ReplicaCandidate', 'ReplicaSelectionRequest', 'TransferSegment', 'TransferPlan', 'plan_transfer'
+    'PlanStatistics', 'ReplicaCandidate', 'ReplicaSelectionRequest', 'ReplicaRequest', 'ReplicaPart',
+    'TransferSegment', 'TransferPlan', 'plan_transfer', 'plan_transfers'
 ]
 
 
@@ -152,6 +154,43 @@ class ReplicaSelectionRequest:
     target_offset: int
     target_strides: Tuple[int, ...]
     candidates: Tuple[ReplicaCandidate, ...]
+
+
+@dataclass(frozen=True)
+class ReplicaRequest:
+    """One region a target piece needs, with every validated holder that can supply it.
+
+    ``target_location`` and each candidate's ``source_rank`` are keys of the target and source maps,
+    not processes: the same number names different processes on the two sides. ``target_process``
+    and ``candidate_processes`` are processes, and are ``None`` unless the caller passed the
+    location-to-process mappings. ``bytes`` is ``None`` unless the caller passed element sizes.
+    """
+    parameter: str
+    target_location: int
+    target_process: Optional[int]
+    logical_origin: Tuple[int, ...]
+    shape: Tuple[int, ...]
+    target_offset: int
+    target_strides: Tuple[int, ...]
+    candidates: Tuple[ReplicaCandidate, ...]
+    candidate_processes: Tuple[Optional[int], ...]
+    bytes: Optional[int]
+
+    @property
+    def numel(self) -> int:
+        return _product(self.shape)
+
+
+@dataclass(frozen=True)
+class ReplicaPart:
+    """A cut of a request's region along axis 0, and the holder location it is read from."""
+    logical_origin: Tuple[int, ...]
+    shape: Tuple[int, ...]
+    source_location: int
+
+
+ReplicaAnswer = Union[int, Sequence[ReplicaPart]]
+ReplicaPolicy = Callable[[Sequence[ReplicaRequest]], Sequence[ReplicaAnswer]]
 
 
 @dataclass(frozen=True)
@@ -485,6 +524,24 @@ def _covers_union(region: LogicalBox, boxes: Sequence[LogicalBox], limits: PlanB
     return not uncovered
 
 
+@dataclass(frozen=True)
+class _Intersection:
+    """One target piece's share of one source region, before a holder is chosen for it."""
+    target: _Frame
+    shared: LogicalBox
+    holders: Tuple[_Frame, ...]
+
+
+@dataclass(frozen=True)
+class _Prepared:
+    """A validated pair of maps, cut into intersections that only lack a choice of holder."""
+    logical_shape: Tuple[int, ...]
+    intersections: Tuple[_Intersection, ...]
+    source_pieces: int
+    target_pieces: int
+    pair_checks: int
+
+
 def plan_transfer(target_map: ParamAffineMap,
                   source_map: ParamAffineMap,
                   limits: Optional[PlanBudget] = None,
@@ -497,6 +554,209 @@ def plan_transfer(target_map: ParamAffineMap,
     have matched by byte count before -- so this checks only that the two geometries compose.
     """
     budget = limits or PlanBudget()
+    prepared = _prepare(target_map, source_map, budget)
+
+    choices: List[Tuple[Tuple[LogicalBox, _Frame], ...]] = []
+    for item in prepared.intersections:
+        target, shared, holders = item.target, item.shared, item.holders
+        source = holders[0]
+        if replica_selector is not None and len(holders) > 1:
+            request = ReplicaSelectionRequest(target_rank=target.rank,
+                                              logical_origin=shared.origin,
+                                              shape=shared.extent,
+                                              target_offset=target.address(shared),
+                                              target_strides=target.strides,
+                                              candidates=tuple(
+                                                  ReplicaCandidate(holder.rank, holder.address(shared), holder.strides)
+                                                  for holder in holders))
+            rank = replica_selector(request)
+            if type(rank) is not int or rank not in {holder.rank for holder in holders}:
+                raise InvalidReplicaPolicyError(f'selector returned invalid source rank {rank!r} '
+                                                f'for target rank {target.rank}')
+            source = next(holder for holder in holders if holder.rank == rank)
+        choices.append(((shared, source), ))
+    return _emit(prepared, choices, budget)
+
+
+def plan_transfers(pairs: Mapping[str, Tuple[ParamAffineMap, ParamAffineMap]],
+                   limits: Optional[PlanBudget] = None,
+                   *,
+                   source_processes: Optional[Mapping[int, int]] = None,
+                   target_processes: Optional[Mapping[int, int]] = None,
+                   element_size: Optional[Mapping[str, int]] = None,
+                   min_split_bytes: Optional[int] = None,
+                   replica_policy: Optional[ReplicaPolicy] = None) -> Dict[str, TransferPlan]:
+    """Plan every parameter of one sync, with one replica policy that sees every request at once.
+
+    ``pairs`` maps a parameter name to its ``(target_map, source_map)``. Each pair is validated
+    exactly as ``plan_transfer`` validates it, and ``limits`` applies to each parameter on its own.
+
+    ``replica_policy`` is then called once, with a ``ReplicaRequest`` for every intersection of a
+    target piece with a source region, in a fixed order: parameter, target location, origin. Regions
+    with a single holder are included, because their load is load the policy cannot move. The policy
+    returns one answer per request: the location of one validated holder for the whole region, or
+    ``ReplicaPart``\\ s that cut the region along axis 0 and name a validated holder for each cut.
+
+    Every answer is checked before any segment is emitted, and a failure raises
+    ``InvalidReplicaPolicyError``. There must be one answer per request, every location must be a
+    validated holder of that request, and the parts must tile the request exactly along axis 0. When
+    ``min_split_bytes`` is given, each part of a split must also be at least that large. So a policy
+    decides where data is read from but not what arrives: when the replicas agree, every accepted
+    answer copies the same data.
+
+    Plan locations are keys of the two maps, not processes. ``source_processes`` and
+    ``target_processes`` say which process holds each location. When given, the requests carry them,
+    so a policy can tell a local copy from a transfer. ``element_size`` gives bytes per element for
+    each parameter, which the maps do not know, and ``min_split_bytes`` requires it. Without a
+    policy, ``affine_replica_policy.local_first_least_loaded`` is used.
+    """
+    budget = limits or PlanBudget()
+    names = sorted(pairs)
+    for which, mapping in (('source_processes', source_processes), ('target_processes', target_processes)):
+        if mapping is not None and any(
+                type(location) is not int or type(process) is not int for location, process in mapping.items()):
+            raise AffineTransferError(f'{which} must map int locations to int processes')
+    if element_size is not None:
+        for name in names:
+            size = element_size.get(name)
+            if type(size) is not int or size <= 0:
+                raise AffineTransferError(f'element_size for {name!r} is {size!r}, not a positive int')
+    if min_split_bytes is not None:
+        if type(min_split_bytes) is not int or min_split_bytes <= 0:
+            raise AffineTransferError(f'min_split_bytes is {min_split_bytes!r}, not a positive int')
+        if element_size is None:
+            raise AffineTransferError('min_split_bytes needs element_size: the maps count elements, not bytes')
+
+    prepared = {}
+    for name in names:
+        target_map, source_map = pairs[name]
+        prepared[name] = _prepare(target_map, source_map, budget)
+
+    entries: List[Tuple[Tuple[object, ...], str, int, _Intersection]] = []
+    for name in names:
+        for index, item in enumerate(prepared[name].intersections):
+            entries.append(((name, item.target.rank, item.shared.origin, item.shared.extent), name, index, item))
+    entries.sort(key=lambda entry: entry[0])
+
+    requests = []
+    for _, name, _, item in entries:
+        requests.append(
+            ReplicaRequest(parameter=name,
+                           target_location=item.target.rank,
+                           target_process=_process(target_processes, item.target.rank, 'target'),
+                           logical_origin=item.shared.origin,
+                           shape=item.shared.extent,
+                           target_offset=item.target.address(item.shared),
+                           target_strides=item.target.strides,
+                           candidates=tuple(
+                               ReplicaCandidate(holder.rank, holder.address(item.shared), holder.strides)
+                               for holder in item.holders),
+                           candidate_processes=tuple(
+                               _process(source_processes, holder.rank, 'source') for holder in item.holders),
+                           bytes=None if element_size is None else item.shared.volume * element_size[name]))
+    requests = tuple(requests)
+
+    if replica_policy is None:
+        from .affine_replica_policy import local_first_least_loaded
+        replica_policy = local_first_least_loaded
+    answers = replica_policy(requests)
+    if not _is_sequence(answers) or len(answers) != len(requests):
+        count = len(answers) if _is_sequence(answers) else type(answers).__name__
+        raise InvalidReplicaPolicyError(f'the policy must return one answer per request: {len(requests)} '
+                                        f'requests, got {count}')
+
+    choices: Dict[str, List[Tuple[Tuple[LogicalBox, _Frame], ...]]] = {
+        name: [()] * len(prepared[name].intersections)
+        for name in names
+    }
+    parts_per_name = {name: 0 for name in names}
+    for (_, name, index, item), request, answer in zip(entries, requests, answers):
+        parts = _resolve(request, item, answer, min_split_bytes, element_size)
+        choices[name][index] = parts
+        parts_per_name[name] += len(parts)
+        if parts_per_name[name] > budget.max_pair_checks:
+            raise AffineTransferError(f'{name!r}: the policy split regions into more than max_pair_checks '
+                                      f'{budget.max_pair_checks} parts')
+    return {name: _emit(prepared[name], choices[name], budget) for name in names}
+
+
+def _is_sequence(value: object) -> bool:
+    """A real sequence: indexable and sized, which a generator is not and a string should not count as."""
+    return isinstance(value, collections.abc.Sequence) and not isinstance(value, (str, bytes))
+
+
+def _process(mapping: Optional[Mapping[int, int]], location: int, side: str) -> Optional[int]:
+    if mapping is None:
+        return None
+    if location not in mapping:
+        raise AffineTransferError(f'{side} location {location} has no process in {side}_processes')
+    return mapping[location]
+
+
+def _resolve(request: ReplicaRequest, item: _Intersection, answer: object, min_split_bytes: Optional[int],
+             element_size: Optional[Mapping[str, int]]) -> Tuple[Tuple[LogicalBox, _Frame], ...]:
+    """Turn one policy answer into (region, holder) pairs, or refuse it.
+
+    The parts are checked against the request, never against each other's claims: each is inside the
+    request's box by construction (it spans every axis but the first in full), and walking them in
+    axis-0 order from the request's first row to its last proves they are disjoint and leave no gap.
+    """
+    where = (f'answer for {request.parameter!r} at {request.logical_origin} on target location '
+             f'{request.target_location}')
+    holders = {holder.rank: holder for holder in item.holders}
+    box = item.shared
+    if type(answer) is int:
+        if answer not in holders:
+            raise InvalidReplicaPolicyError(f'{where}: location {answer} is not a validated holder '
+                                            f'{sorted(holders)}')
+        return ((box, holders[answer]), )
+    if not _is_sequence(answer) or not answer:
+        raise InvalidReplicaPolicyError(f'{where}: expected a holder location or a non-empty sequence of '
+                                        f'ReplicaPart, got {answer!r}')
+
+    ndim = len(box.extent)
+    parts = []
+    for part in answer:
+        if not isinstance(part, ReplicaPart):
+            raise InvalidReplicaPolicyError(f'{where}: {part!r} is not a ReplicaPart')
+        if type(part.source_location) is not int or part.source_location not in holders:
+            raise InvalidReplicaPolicyError(f'{where}: location {part.source_location!r} is not a validated '
+                                            f'holder {sorted(holders)}')
+        origin, shape = tuple(part.logical_origin), tuple(part.shape)
+        if len(origin) != ndim or len(shape) != ndim or any(type(value) is not int for value in origin + shape):
+            raise InvalidReplicaPolicyError(f'{where}: part {origin}+{shape} is not a {ndim}-axis box of ints')
+        if origin[1:] != box.origin[1:] or shape[1:] != box.extent[1:]:
+            raise InvalidReplicaPolicyError(f'{where}: part {origin}+{shape} does not span every axis but the '
+                                            f'first of {box!r}; only cuts along axis 0 are supported')
+        if any(size <= 0 for size in shape):
+            raise InvalidReplicaPolicyError(f'{where}: part {origin}+{shape} is empty')
+        parts.append((LogicalBox(origin, shape), holders[part.source_location]))
+
+    if ndim == 0:
+        if len(parts) != 1:
+            raise InvalidReplicaPolicyError(f'{where}: a scalar cannot be split')
+        return tuple(parts)
+    parts.sort(key=lambda entry: entry[0].origin[0])
+    row = box.origin[0]
+    for part_box, _ in parts:
+        if part_box.origin[0] != row:
+            kind = 'overlap' if part_box.origin[0] < row else 'gap'
+            raise InvalidReplicaPolicyError(f'{where}: parts leave a {kind} at row {min(row, part_box.origin[0])} '
+                                            f'of {box!r}')
+        row += part_box.extent[0]
+    if row != box.origin[0] + box.extent[0]:
+        raise InvalidReplicaPolicyError(f'{where}: parts stop at row {row}, inside or past {box!r}')
+    if len(parts) > 1 and min_split_bytes is not None:
+        for part_box, _ in parts:
+            size = part_box.volume * element_size[request.parameter]
+            if size < min_split_bytes:
+                raise InvalidReplicaPolicyError(f'{where}: part {part_box!r} is {size} bytes, under '
+                                                f'min_split_bytes {min_split_bytes}')
+    return tuple(parts)
+
+
+def _prepare(target_map: ParamAffineMap, source_map: ParamAffineMap, budget: PlanBudget) -> _Prepared:
+    """Validate both maps and cut the target into intersections with the source regions."""
     if tuple(source_map.logical_shape) != tuple(target_map.logical_shape):
         raise InvalidMapError(f'source describes {tuple(source_map.logical_shape)} and target describes '
                               f'{tuple(target_map.logical_shape)}')
@@ -516,7 +776,7 @@ def plan_transfer(target_map: ParamAffineMap,
         raise AffineTransferError(f'{pair_checks} candidate pairs exceeds max_pair_checks '
                                   f'{budget.max_pair_checks}')
 
-    pending: List[Tuple[_Frame, LogicalBox, Tuple[_Frame, ...]]] = []
+    intersections: List[_Intersection] = []
     for frame in sorted(targets, key=lambda frame: (frame.rank, frame.box.origin, frame.box.extent)):
         filled: List[LogicalBox] = []
         for box, holders in sources:
@@ -524,51 +784,47 @@ def plan_transfer(target_map: ParamAffineMap,
             if shared.is_empty:
                 continue
             filled.append(shared)
-            pending.append((frame, shared, holders))
+            intersections.append(_Intersection(frame, shared, holders))
         if not _covers_exactly(frame.box, filled):
             raise InvalidMapError(f'target rank {frame.rank} region {frame.box!r} would receive '
                                   f'{sum(part.volume for part in filled)} of its {frame.box.volume} elements')
+    return _Prepared(logical_shape=logical_shape,
+                     intersections=tuple(intersections),
+                     source_pieces=len(sources),
+                     target_pieces=len(targets),
+                     pair_checks=pair_checks)
 
+
+def _emit(prepared: _Prepared, choices: Sequence[Tuple[Tuple[LogicalBox, _Frame], ...]],
+          budget: PlanBudget) -> TransferPlan:
+    """Turn chosen (region, holder) pairs into merged segments and check the plan's budget."""
     candidates: List[TransferSegment] = []
-    for target, shared, holders in pending:
-        source = holders[0]
-        if replica_selector is not None and len(holders) > 1:
-            request = ReplicaSelectionRequest(target_rank=target.rank,
-                                              logical_origin=shared.origin,
-                                              shape=shared.extent,
-                                              target_offset=target.address(shared),
-                                              target_strides=target.strides,
-                                              candidates=tuple(
-                                                  ReplicaCandidate(holder.rank, holder.address(shared), holder.strides)
-                                                  for holder in holders))
-            rank = replica_selector(request)
-            if type(rank) is not int or rank not in {holder.rank for holder in holders}:
-                raise InvalidReplicaPolicyError(f'selector returned invalid source rank {rank!r} '
-                                                f'for target rank {target.rank}')
-            source = next(holder for holder in holders if holder.rank == rank)
-        candidates.append(
-            TransferSegment(source_rank=source.rank,
-                            source_offset=source.address(shared),
-                            source_strides=source.strides,
-                            target_rank=target.rank,
-                            target_offset=target.address(shared),
-                            target_strides=target.strides,
-                            shape=shared.extent))
+    for item, parts in zip(prepared.intersections, choices):
+        target = item.target
+        for region, source in parts:
+            candidates.append(
+                TransferSegment(source_rank=source.rank,
+                                source_offset=source.address(region),
+                                source_strides=source.strides,
+                                target_rank=target.rank,
+                                target_offset=target.address(region),
+                                target_strides=target.strides,
+                                shape=region.extent))
 
     segments = _coalesce(candidates, budget)
     if len(segments) > budget.max_segments:
         raise AffineTransferError(f'{len(segments)} segments exceeds max_segments {budget.max_segments}')
-    plan_bytes = _plan_bytes(segments, logical_shape)
+    plan_bytes = _plan_bytes(segments, prepared.logical_shape)
     if plan_bytes > budget.max_plan_bytes:
         raise AffineTransferError(f'plan metadata is {plan_bytes} bytes, over max_plan_bytes '
                                   f'{budget.max_plan_bytes}')
 
     return TransferPlan(segments=segments,
-                        logical_shape=tuple(target_map.logical_shape),
+                        logical_shape=prepared.logical_shape,
                         moved_elements=sum(segment.numel for segment in segments),
-                        statistics=PlanStatistics(source_pieces=len(sources),
-                                                  target_pieces=len(targets),
-                                                  pair_checks=pair_checks,
+                        statistics=PlanStatistics(source_pieces=prepared.source_pieces,
+                                                  target_pieces=prepared.target_pieces,
+                                                  pair_checks=prepared.pair_checks,
                                                   segments_before_merge=len(candidates),
                                                   segments=len(segments),
                                                   plan_bytes=plan_bytes))
