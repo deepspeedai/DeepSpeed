@@ -16,6 +16,7 @@ from packaging import version as pkg_version
 from deepspeed.runtime.checkpoint_engine.torch_checkpoint_engine import TorchCheckpointEngine
 from deepspeed.utils.timer import SynchronizedWallClockTimer
 from deepspeed.runtime.compiler import is_compile_supported
+from deepspeed.runtime.keep_in_fp32 import KEEP_IN_FP32_AUTO, keep_in_fp32_pattern
 from ..runtime.state_dict_factory import SDLoaderFactory
 from ..runtime.weight_quantizer import WeightQuantization
 from ..module_inject import replace_transformer_layer, generic_injection
@@ -519,11 +520,41 @@ class InferenceEngine(Module):
             model, self.quantization_scales = quantizer.model_quantize(self.module, self.injection_dict,
                                                                        self.quantize_bits, self.quantize_groups)
         elif config.dtype == torch.half:
+            keep = self._tensors_to_keep_in_fp32(config.dtype)
             self.module.half()
+            self._restore_fp32_tensors(keep)
         elif config.dtype == torch.bfloat16:
+            keep = self._tensors_to_keep_in_fp32(config.dtype)
             self.module.bfloat16()
+            self._restore_fp32_tensors(keep)
         elif config.dtype == torch.float:
             self.module.float()
+
+    def _tensors_to_keep_in_fp32(self, dtype):
+        """The fp32 copies of the tensors the model names for fp32, keyed by name.
+
+        transformers keeps the tensors a model lists in ``_keep_in_fp32_modules`` (under fp16) and
+        ``_keep_in_fp32_modules_strict`` (under fp16 and bf16) in fp32 when it loads the model, because
+        they overflow or lose precision in half precision (T5's ``wo`` projection, MoE routing biases).
+        Casting the whole module to ``dtype`` would undo that, so they are restored after the cast.
+        """
+        pattern = keep_in_fp32_pattern(self.module, KEEP_IN_FP32_AUTO, dtype)
+        if pattern is None:
+            return {}
+        keep = {}
+        for name, tensor in list(self.module.named_parameters()) + list(self.module.named_buffers()):
+            if tensor.is_floating_point() and pattern.search(name):
+                keep[name] = tensor.data if tensor.dtype == torch.float32 else tensor.data.float()
+        if keep:
+            log_dist(f"Keeping {len(keep)} tensors the model names for fp32 in fp32 under {dtype}", [0])
+        return keep
+
+    def _restore_fp32_tensors(self, keep):
+        if not keep:
+            return
+        for name, tensor in list(self.module.named_parameters()) + list(self.module.named_buffers()):
+            if name in keep:
+                tensor.data = keep[name]
 
     def _create_cuda_graph(self, *inputs, **kwargs):
         # warmup to create the workspace and cublas handle
