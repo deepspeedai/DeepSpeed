@@ -46,3 +46,43 @@ zero-copy transport such as GPUDirect RDMA would instead take each round's
 removes the arena copy but needs a registration lifetime this API has no place
 for, so the wire contract (one packed message per peer per round) is expected to
 change when such a path lands.
+
+Calibrating links
+-----------------
+
+``calibrate_links`` measures what moving bytes costs between the processes of
+the default group, so that a cost model or replica policy can price a plan's
+messages with numbers from the machine it runs on. It only measures; it does not
+plan, choose replicas, or fit anything by itself. Every process calls it and
+receives the same raw samples::
+
+    from deepspeed.checkpoint.affine_transfer_calibration import (calibrate_links, fit_links,
+                                                                   node_path_of)
+
+    calibration = calibrate_links(path_of=node_path_of(processes_per_node=8))
+    fits = fit_links(calibration)
+    fits['fan_in']['inter_node']  # {'alpha_seconds', 'bytes_per_second', ...}
+
+Five patterns are sampled at every size, 4 KiB to 256 MiB by default:
+
+- ``local``: a device-local copy on each process.
+- ``peer``: each ordered process pair alone (1 to 1).
+- ``concurrent``: every process sends to ``process + shift`` at once, so links
+  are measured while shared.
+- ``fan_out``: one root sends to ``fan_width`` peers at once (1 to N).
+- ``fan_in``: ``fan_width`` peers send to one root at once (N to 1), measuring
+  receiver contention.
+
+Each message is labelled with ``path_of(from_process, to_process)``. The default
+labels only ``local`` and ``peer``; ``node_path_of`` splits ``peer`` into
+``intra_node`` and ``inter_node``, and any callable can be used, for example one
+that tells NVLink from PCIe pairs. ``fit_links`` pools the samples per label and
+fits ``alpha + bytes / bandwidth`` to the median at each size.
+
+Processes here are default-group ranks. A plan's source and target locations are
+mapped to processes by ``TransferEndpoints``, so translate through it before
+joining a plan's messages with these labels. The pair sweep makes
+``world_size * (world_size - 1)`` barriered samples per size and repeat, and each
+process holds up to ``(2 + fan_width) * max(sizes)`` bytes, so pass shorter
+``sizes`` or a smaller ``fan_width`` on large jobs. The numbers describe the
+transport used for the measurement (torch point-to-point) on that topology.
