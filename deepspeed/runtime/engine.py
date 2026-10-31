@@ -5787,6 +5787,13 @@ class DeepSpeedEngine(Module):
                 f"Currently AutoSP does not compose with ZeRO stage 2 and 3. Falling back to the torch compiler.")
             return None
 
+        autosp_size = self._config._param_dict.get("sequence_parallel_size", 1)
+        if self.sequence_parallel_size != autosp_size:
+            raise ValueError(f"AutoSP shards the sequence over sequence_parallel_size={autosp_size} ranks, "
+                             f"but the engine reduces gradients over a sequence parallel group of "
+                             f"{self.sequence_parallel_size} ranks. Do not pass an mpu or a mesh_param whose "
+                             "sequence parallel dimension differs from sequence_parallel_size.")
+
         compile_config = self._config.compile_config
         compile_kwargs['fullgraph'] = True
         return init_autosp(self._config)
