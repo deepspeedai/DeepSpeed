@@ -210,6 +210,45 @@ class TestSerialContext(DistributedTest):
             y = torch.LongTensor([3, 3])
             assert y.dtype == torch.long
 
+    def test_explicit_tensor_dtype_is_preserved(self):
+        setup_serial_env()
+
+        with deepspeed.zero.Init(dtype=torch.bfloat16):
+            inv_freq = 1.0 / (10_000.0**(torch.arange(0, 8, 2, dtype=torch.float32) / 8))
+            explicit_tensor_dtype = torch.Tensor(4, dtype=torch.float32)
+            default_tensor_dtype = torch.Tensor(4)
+            default_dtype = torch.zeros(4)
+
+        expected = (1.0 / (10_000.0**(torch.arange(0, 8, 2, dtype=torch.float32) / 8))).to(inv_freq.device)
+        assert inv_freq.dtype == torch.float32
+        assert torch.equal(inv_freq, expected)
+        assert explicit_tensor_dtype.dtype == torch.float32
+        assert default_tensor_dtype.dtype == torch.bfloat16
+        assert default_dtype.dtype == torch.bfloat16
+
+    def test_explicit_fp32_param_trains(self):
+        setup_serial_env()
+
+        class ExplicitFp32Param(torch.nn.Module):
+
+            def __init__(self):
+                super().__init__()
+                self.linear = torch.nn.Linear(4, 4)
+                self.scale = torch.nn.Parameter(torch.ones(4, dtype=torch.float32))
+
+            def forward(self, x):
+                return (self.linear(x) * self.scale).pow(2).mean()
+
+        with deepspeed.zero.Init(config_dict_or_path=config):
+            model = ExplicitFp32Param()
+
+        engine, _, _, _ = deepspeed.initialize(config=config, model=model, model_parameters=model.parameters())
+        x = torch.randn(1, 4, device=engine.device, dtype=model.linear.weight.dtype)
+        loss = engine(x)
+        engine.backward(loss)
+        engine.step()
+        assert torch.isfinite(loss)
+
     def test_throughput_calculation(self):
         setup_serial_env()
 
