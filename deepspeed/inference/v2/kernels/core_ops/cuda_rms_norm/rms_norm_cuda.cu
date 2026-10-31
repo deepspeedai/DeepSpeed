@@ -16,7 +16,12 @@ constexpr int granularity = 16;
 }  // namespace rms
 
 template <typename T, int UNROLL, int threadsPerGroup, int maxThreads>
-__global__ void rms_norm(T* output, const T* vals, const T* gamma, float epsilon, int elems_per_row)
+__global__ void rms_norm(T* output,
+                         const T* vals,
+                         const T* gamma,
+                         float epsilon,
+                         int elems_per_row,
+                         int rows)
 {
     constexpr int T_per_load = rms::granularity / sizeof(T);
 
@@ -26,6 +31,9 @@ __global__ void rms_norm(T* output, const T* vals, const T* gamma, float epsilon
     // X-dimension of the block
     const int block_offset = (tb.group_index().x * (maxThreads / threadsPerGroup) * elems_per_row) +
                              (tb.thread_index().y * elems_per_row);
+    // Rows past the end only take part in the reductions; they skip all global loads/stores.
+    const int row = tb.group_index().x * (maxThreads / threadsPerGroup) + tb.thread_index().y;
+    const bool valid_row = row < rows;
     const int thread_offset = tb.thread_index().x * T_per_load;
     const int base_offset = block_offset + thread_offset;
     const int stride = blockDim.x * T_per_load;
@@ -40,9 +48,10 @@ __global__ void rms_norm(T* output, const T* vals, const T* gamma, float epsilon
     for (int i = 0; i < UNROLL; i++) {
         T* iteration_buffer = local_buffer + (i * T_per_load);
 
-        mem_access::load_global<rms::granularity>(iteration_buffer,
-                                                  input_base + (i * stride),
-                                                  thread_offset + (i * stride) < elems_per_row);
+        mem_access::load_global<rms::granularity>(
+            iteration_buffer,
+            input_base + (i * stride),
+            valid_row && thread_offset + (i * stride) < elems_per_row);
 
 #pragma unroll
         for (int j = 0; j < T_per_load; j++) {
@@ -74,7 +83,7 @@ __global__ void rms_norm(T* output, const T* vals, const T* gamma, float epsilon
             iteration_buffer[j] *= gamma_local[j];
         }
 
-        if (do_loads) {
+        if (valid_row && do_loads) {
             mem_access::store_global<rms::granularity>(block_output + iter_idx, iteration_buffer);
         }
     }
@@ -87,7 +96,8 @@ __global__ void pre_rms_norm(T* output,
                              const T* residual,
                              const T* gamma,
                              float epsilon,
-                             int elems_per_row)
+                             int elems_per_row,
+                             int rows)
 {
     constexpr int T_per_load = rms::granularity / sizeof(T);
 
@@ -97,6 +107,9 @@ __global__ void pre_rms_norm(T* output,
     // X-dimension of the block
     const int block_offset = (tb.group_index().x * (maxThreads / threadsPerGroup) * elems_per_row) +
                              (tb.thread_index().y * elems_per_row);
+    // Rows past the end only take part in the reductions; they skip all global loads/stores.
+    const int row = tb.group_index().x * (maxThreads / threadsPerGroup) + tb.thread_index().y;
+    const bool valid_row = row < rows;
     const int thread_offset = tb.thread_index().x * T_per_load;
     const int base_offset = block_offset + thread_offset;
     const int stride = blockDim.x * T_per_load;
@@ -115,7 +128,7 @@ __global__ void pre_rms_norm(T* output,
         T residual_buffer[T_per_load];
 
         const int iter_offset = i * stride + thread_offset;
-        const bool do_loads = (iter_offset < elems_per_row);
+        const bool do_loads = valid_row && (iter_offset < elems_per_row);
 
         mem_access::load_global<rms::granularity>(
             iteration_buffer, input_base + (i * stride), do_loads);
@@ -157,7 +170,7 @@ __global__ void pre_rms_norm(T* output,
             iteration_buffer[j] *= gamma_local[j];
         }
 
-        if (do_loads) {
+        if (valid_row && do_loads) {
             mem_access::store_global<rms::granularity>(block_output + iter_idx, iteration_buffer);
         }
     }
@@ -165,11 +178,11 @@ __global__ void pre_rms_norm(T* output,
 
 #define LAUNCH_RMS_NORM(UNROLL, threadsPerGroup, maxThreads) \
     rms_norm<T, UNROLL, threadsPerGroup, maxThreads>         \
-        <<<grid, block, 0, stream>>>(norm_output, vals, gamma, epsilon, elems_per_row);
+        <<<grid, block, 0, stream>>>(norm_output, vals, gamma, epsilon, elems_per_row, rows);
 
 #define LAUNCH_PRE_RMS_NORM(UNROLL, threadsPerGroup, maxThreads)                      \
     pre_rms_norm<T, UNROLL, threadsPerGroup, maxThreads><<<grid, block, 0, stream>>>( \
-        norm_output, res_output, vals, residual, gamma, epsilon, elems_per_row);
+        norm_output, res_output, vals, residual, gamma, epsilon, elems_per_row, rows);
 
 #define LAUNCH_ALL_RMS_NORM(UNROLL, threadsPerGroup, maxThreads) \
     if (pre_norm) {                                              \
