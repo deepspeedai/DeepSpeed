@@ -20,6 +20,9 @@ See ``deepspeed/checkpoint/affine_ir_spec.md`` for the full specification.
 
 import torch
 
+from .affine_geometry import (dot as _dot, product as _product, row_major_range_boxes as _row_major_range_boxes,
+                              row_major_strides as _row_major_strides, strided_address as _strided_address)
+
 __all__ = [
     'AffinePiece', 'ParamAffineMap', 'AFFINE_MAP_FORMAT_VERSION', 'SCALE_POWER_BY_STATE', 'replicated_map',
     'contiguous_split_map', 'sub_param_map', 'segmented_map', 'block_gather_map', 'nest_affine_maps'
@@ -482,21 +485,6 @@ def _flat_buffer(tensor):
     return flat
 
 
-def _product(shape):
-    count = 1
-    for dim in shape:
-        count *= dim
-    return count
-
-
-def _row_major_strides(shape):
-    """Element stride per axis for a densely packed tensor of this shape."""
-    strides = [1] * len(shape)
-    for axis in range(len(shape) - 2, -1, -1):
-        strides[axis] = strides[axis + 1] * shape[axis + 1]
-    return tuple(strides)
-
-
 def replicated_map(shape, tp_degree, scale=1.0):
     """Every rank holds the whole parameter.
 
@@ -852,10 +840,6 @@ def _nest_replicated_block(copies, intervals_by_outer_rank, pieces_by_rank):
                                 scale=piece.scale * storage_scale))
 
 
-def _dot(index, strides):
-    return sum(position * stride for position, stride in zip(index, strides))
-
-
 def _dense_rows(piece):
     # The number of leading axes after which the piece is contiguous in its shard: a box of the piece
     # that spans every later axis in full, and only those, is one run of shard addresses.
@@ -866,43 +850,6 @@ def _dense_rows(piece):
             return axis + 1
         run *= size
     return 0
-
-
-def _row_major_range_boxes(shape, low, high, dense_rows=0):
-    """Split the row-major index range ``[low, high)`` of ``shape`` into ``(origin, extent)`` boxes.
-
-    At most two boxes per axis: a partial run at either end and whole runs between. The first
-    ``dense_rows`` axes are never merged, so a box spans more than one position of such an axis only
-    where the storage is contiguous across it.
-    """
-    if low >= high:
-        return []
-    if not shape:
-        return [((), ())]
-    if len(shape) == 1:
-        return [((low, ), (high - low, ))]
-    inner = _product(shape[1:])
-    first, low_rest = divmod(low, inner)
-    last, high_rest = divmod(high, inner)
-
-    def within(row, start, stop):
-        return [((row, ) + origin, (1, ) + extent)
-                for origin, extent in _row_major_range_boxes(shape[1:], start, stop, dense_rows - 1)]
-
-    if first == last:
-        return within(first, low_rest, high_rest)
-    boxes = []
-    if low_rest:
-        boxes.extend(within(first, low_rest, inner))
-        first += 1
-    if dense_rows > 0:
-        for row in range(first, last):
-            boxes.extend(within(row, 0, inner))
-    elif last > first:
-        boxes.append(((first, ) + (0, ) * (len(shape) - 1), (last - first, ) + tuple(shape[1:])))
-    if high_rest:
-        boxes.extend(within(last, 0, high_rest))
-    return boxes
 
 
 def _check_monotone_dest(piece):
@@ -916,14 +863,6 @@ def _check_monotone_dest(piece):
                 raise NotImplementedError(f'Layout piece {piece} does not store its elements in row-major order, so '
                                           'its storage cannot be described.')
             later_span += stride * (size - 1)
-
-
-def _strided_address(shape, offset, strides, index):
-    address = offset
-    for size, stride in reversed(list(zip(shape, strides))):
-        index, position = divmod(index, size)
-        address += position * stride
-    return address
 
 
 def _first_index_at_or_after(piece, address):
