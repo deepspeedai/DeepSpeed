@@ -5,13 +5,20 @@ Regression tests for ZeRO-1/2 + cpu_offload with multiple engine.backward()
 calls per optimizer step (ga_steps=1, driven via set_gradient_accumulation_boundary).
 """
 
+import os
+from datetime import timedelta
+
 import pytest
 import torch
+from torch.utils.checkpoint import checkpoint
 import deepspeed
+import deepspeed.comm as dist
 
 from unit.common import DistributedTest
 from unit.simple_model import SimpleModel, random_dataloader
 from deepspeed.accelerator import get_accelerator
+from deepspeed.ops import __compatible_ops__
+from deepspeed.utils import safe_get_full_grad
 
 
 def _base_config(zero_stage, gradient_accumulation_steps=1, cpu_offload=False):
@@ -122,7 +129,7 @@ class TestZeroOffloadMultiBackward(DistributedTest):
         test = _run_multi_backward(_base_config(zero_stage, cpu_offload=True), hidden_dim, num_chunks=3, num_steps=3)
         _assert_params_match(ref, test, label=f"ZeRO-{zero_stage} 3x3")
 
-    def test_single_backward_allocates_no_cpu_accumulator(self, zero_stage):
+    def test_single_backward_clears_host_partition_after_step(self, zero_stage):
         hidden_dim = 8
         engine = _init_engine(_base_config(zero_stage, cpu_offload=True), hidden_dim)
         batch = next(
@@ -131,9 +138,11 @@ class TestZeroOffloadMultiBackward(DistributedTest):
         engine.set_gradient_accumulation_boundary(True)
         engine.backward(loss)
         engine.step()
-        populated = len(engine.optimizer.accumulated_grads_in_cpu)
+        remaining_grads = sum(
+            torch.count_nonzero(partition.grad).item()
+            for partition in engine.optimizer.single_partition_of_fp32_groups)
         engine.destroy()
-        assert populated == 0, f"ZeRO-{zero_stage}: ga=1+N=1 populated accumulated_grads_in_cpu ({populated} entries)"
+        assert remaining_grads == 0, f"ZeRO-{zero_stage}: host partition gradient was not cleared after step"
 
     def test_ga_greater_than_one_offload_unchanged(self, zero_stage):
         hidden_dim = 8
@@ -145,3 +154,130 @@ class TestZeroOffloadMultiBackward(DistributedTest):
                                   hidden_dim,
                                   total_microsteps=ga)
         _assert_params_match(ref, test, label=f"ZeRO-{zero_stage} ga=4")
+
+
+class RequestBoundaryModel(torch.nn.Module):
+
+    def __init__(self, checkpointed):
+        super().__init__()
+        self.projections = torch.nn.ModuleList([torch.nn.Linear(4, 4, bias=False), torch.nn.Linear(4, 2, bias=False)])
+        self.checkpointed = checkpointed
+
+    def forward(self, inputs, projection_indices=(0, 1)):
+        loss = inputs.new_zeros(())
+        for projection_index in projection_indices:
+            projection = self.projections[projection_index]
+            if self.checkpointed:
+                outputs = checkpoint(projection, inputs, use_reentrant=True)
+            else:
+                outputs = projection(inputs)
+            loss = loss + outputs.sum()
+        return loss
+
+
+def _run_request_boundaries(rank, rendezvous, zero_stage, cpu_offload, accumulation_dtype, checkpointed):
+    os.environ["LOCAL_RANK"] = str(rank)
+    accelerator = get_accelerator()
+    accelerator.set_device(rank)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setitem(__compatible_ops__, "deepspeed_shm_comm", False)
+        dist.init_distributed(accelerator.communication_backend_name(),
+                              auto_mpi_discovery=False,
+                              init_method=rendezvous,
+                              rank=rank,
+                              world_size=2,
+                              timeout=timedelta(seconds=60))
+    engine = None
+    try:
+        model = RequestBoundaryModel(checkpointed).to(device=accelerator.device_name(), dtype=torch.bfloat16)
+        with torch.no_grad():
+            for param in model.parameters():
+                param.fill_(0.5)
+        references = {
+            name: torch.nn.Parameter(param.detach().float().cpu().clone())
+            for name, param in model.named_parameters()
+        }
+        reference_optimizer = torch.optim.SGD(references.values(), lr=1 / 32)
+        config = {
+            "train_micro_batch_size_per_gpu": 4,
+            "gradient_accumulation_steps": 1,
+            "gradient_clipping": 0,
+            "bf16": {
+                "enabled": True,
+                "bf16_master_weights_and_grads": False,
+                "bf16_optimizer_states": False,
+            },
+            "data_types": {
+                "grad_accum_dtype": accumulation_dtype
+            },
+            "zero_allow_untested_optimizer": True,
+            "zero_force_ds_cpu_optimizer": False,
+            "zero_optimization": {
+                "stage": zero_stage,
+                "reduce_bucket_size": 8
+            },
+        }
+        if cpu_offload:
+            config["zero_optimization"]["offload_optimizer"] = {"device": "cpu", "pin_memory": False}
+        engine, _, _, _ = deepspeed.initialize(model=model,
+                                               optimizer=torch.optim.SGD(model.parameters(), lr=1 / 32),
+                                               config=config,
+                                               dist_init_required=False)
+        calls = ["c0", "c1", "c2", "c3"]
+        windows = [(requests, {})
+                   for requests in [[calls], [["ping"], calls], [["c0"], ["c1"]], [["c0"], ["c1"], ["c2", "c3"]],
+                                    [["c0"], ["c1", "c2", "c3"]], [["c0"]]]]
+        # Each projection first joins a later backward after contributing to the preceding update.
+        for early, late in [(0, 1), (1, 0)]:
+            windows.append(([["c0"], ["c1", "c2"], ["c3"]], {"c0": (early, ), "c1": (late, ), "c2": (late, )}))
+        reference_names = list(references)
+        for step, (requests, selections) in enumerate(windows):
+            expected = {name: torch.zeros_like(reference) for name, reference in references.items()}
+            for request in requests:
+                for index, name in enumerate(request):
+                    offset = 0 if name == "ping" else calls.index(name)
+                    scale = 0 if name == "ping" else 1
+                    inputs = (torch.arange(16).reshape(4, 4) + step + rank + offset) / 16
+                    engine.set_gradient_accumulation_boundary(index == len(request) - 1)
+                    device_inputs = inputs.to(device=engine.device, dtype=torch.bfloat16).requires_grad_(checkpointed)
+                    projection_indices = selections.get(name, (0, 1))
+                    engine.backward(engine(device_inputs, projection_indices).float() * scale)
+                    # Linear sum-loss gradients are input column sums, averaged over the two ranks.
+                    rank_mean_inputs = inputs + (0.5 - rank) / 16
+                    for projection_index in projection_indices:
+                        grad = expected[reference_names[projection_index]]
+                        grad.add_(rank_mean_inputs.sum(dim=0).expand_as(grad) * scale)
+            for name, param in model.named_parameters():
+                torch.testing.assert_close(safe_get_full_grad(param).float().cpu(),
+                                           expected[name],
+                                           rtol=0,
+                                           atol=0,
+                                           msg=f"{name}: step={step}, requests={requests}")
+                references[name].grad = expected[name]
+            reference_optimizer.step()
+            engine.step()
+            for name, param in model.named_parameters():
+                torch.testing.assert_close(param.detach().cpu(),
+                                           references[name].detach().to(torch.bfloat16),
+                                           rtol=0,
+                                           atol=0,
+                                           msg=f"{name}: update at step={step}, requests={requests}")
+    finally:
+        if engine is not None:
+            engine.destroy()
+        dist.destroy_process_group()
+
+
+@pytest.mark.skipif(get_accelerator().device_name() not in ("cpu", "cuda")
+                    or (get_accelerator().device_name() == "cuda" and get_accelerator().device_count() < 2),
+                    reason="Requires CPU or two CUDA devices")
+@pytest.mark.parametrize("zero_stage", [1, 2])
+@pytest.mark.parametrize("cpu_offload", [False, True], ids=["device-optimizer", "cpu-offload"])
+@pytest.mark.parametrize("accumulation_dtype", ["bf16", "fp32"])
+@pytest.mark.parametrize("checkpointed", [False, True], ids=["plain", "reentrant"])
+def test_multiple_request_boundaries_before_step(tmp_path, zero_stage, cpu_offload, accumulation_dtype, checkpointed):
+    torch.multiprocessing.spawn(_run_request_boundaries,
+                                args=(f"file://{tmp_path / 'rendezvous'}", zero_stage, cpu_offload, accumulation_dtype,
+                                      checkpointed),
+                                nprocs=2,
+                                join=True)

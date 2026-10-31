@@ -3497,6 +3497,9 @@ class DeepSpeedEngine(Module):
         """
         for param_name, param in self.module.named_parameters():
             param.grad = None
+        clear_retained = getattr(self.optimizer, "_clear_retained_gradient_state", None)
+        if callable(clear_retained):
+            clear_retained()
 
     def clip_fp32_gradients(self):
         clip_grad_norm_(parameters=self.module.parameters(), max_norm=self.gradient_clipping(), mpu=self.mpu)

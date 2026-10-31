@@ -636,13 +636,21 @@ class ZenFlowZeroOptimizerParallel(ZenFlowZeroOptimizer):
     def initialize_optimizer_states(self):
 
         for i, group in enumerate(self.bit16_groups):
-            single_grad_partition = torch.zeros(int(self.partition_size[i]),
-                                                dtype=self.single_partition_of_fp32_groups[i].dtype,
-                                                device=self.device)
-            self.single_partition_of_fp32_groups[i].grad = None
-            buffer = get_accelerator().pin_memory(
-                single_grad_partition) if self.cpu_offload_pin_memory else single_grad_partition
-            self.single_partition_of_fp32_groups[i].overlap_grad = [buffer, buffer.clone()]
+
+            def offload_buffer():
+                buffer = torch.zeros(int(self.partition_size[i]),
+                                     dtype=self.single_partition_of_fp32_groups[i].dtype,
+                                     device=self.device)
+                if self.cpu_offload_pin_memory:
+                    buffer = get_accelerator().pin_memory(buffer)
+                return buffer
+
+            # ``grad`` is the window accumulator. The overlap pair is only the
+            # double buffer submitted to the optimizer process, so a changing
+            # overlap index cannot split one window across both buffers.
+            partition = self.single_partition_of_fp32_groups[i]
+            partition.grad = offload_buffer()
+            partition.overlap_grad = [offload_buffer(), offload_buffer()]
 
         # Initialize the optimizer states with the flattened fp32 partition.
         # State initialization for the Adagrad optimizer occurs at construction as opposed to other optimizers
@@ -675,23 +683,31 @@ class ZenFlowZeroOptimizerParallel(ZenFlowZeroOptimizer):
             else:
                 return self.zenflow_state
 
-    def async_inplace_copy_grad_to_fp32_buffer_from_gpu(self, param):
-        param_id = self.get_param_id(param)
-        now_state = self.get_overlap_step_state()
+    def reset_cpu_buffers(self):
+        # The active overlap buffer still holds the gradients about to be submitted.
+        # Zero only the buffer whose optimizer step has already finished. The window
+        # sum lives in ``partition.grad`` and is cleared when that sum is published
+        # or explicitly discarded.
+        self._wait_for_offload_copies()
+        self.norm_for_param_grads = {}
+        self.local_overflow = False
+        self._offload_accumulated_param_ids = set()
+        inactive = 1 - int(self.get_overlap_step_state())
+        for partition in self.single_partition_of_fp32_groups:
+            overlap_grad = getattr(partition, "overlap_grad", None)
+            if overlap_grad:
+                overlap_grad[inactive].zero_()
+        self._zero_compact_grad_partitions()
 
-        [i, source_offset, dest_offset, num_elements] = self.grad_position[param_id]
-
-        dest_tensor = self.single_partition_of_fp32_groups[i].overlap_grad[now_state].view(-1).narrow(
-            0, dest_offset, num_elements)
-
-        grad_accum = self.get_param_gradient_attribute(param)
-        assert grad_accum is not None
-        src_tensor = grad_accum.view(-1).narrow(0, source_offset, num_elements)
-        if src_tensor.dtype != self.master_weights_and_grads_dtype:
-            src_tensor = src_tensor.to(self.master_weights_and_grads_dtype)
-
-        dest_tensor.copy_(src_tensor, non_blocking=True)
-        param.grad = None  #offload only
+    def _publish_cpu_offload_grads_to_overlap(self, now_state):
+        """Copy this window's host sum into the overlap buffer selected for submission."""
+        for partition in self.single_partition_of_fp32_groups:
+            overlap_grad = getattr(partition, "overlap_grad", None)
+            grad = getattr(partition, "grad", None)
+            if not overlap_grad or grad is None:
+                continue
+            overlap_grad[int(now_state)].copy_(grad)
+            grad.zero_()
 
     def _wait_for_optimizer_process(self):
         """Block until the optimizer process signals the submitted step is done.
@@ -758,6 +774,8 @@ class ZenFlowZeroOptimizerParallel(ZenFlowZeroOptimizer):
 
         if not self.process_optimizer_established:
             self.start_optimizer_process()
+
+        self._publish_cpu_offload_grads_to_overlap(now_state)
 
         lr, beta1, beta2, eps, weight_decay, bias_correction = [], [], [], [], [], []
         for group_no, group in enumerate(self.bit16_groups):
