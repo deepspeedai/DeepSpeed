@@ -37,7 +37,8 @@ def test_repeated_profile_restores_operations():
     model = AttentionModel()
     inputs = [torch.randn(2, 4, 16, 8) for _ in range(3)]
     prof = FlopsProfiler(model)
-    original_operations = (torch.nn.functional.scaled_dot_product_attention, torch.Tensor.__matmul__, torch.bmm)
+    original_operations = (torch.nn.functional.scaled_dot_product_attention, torch.Tensor.__matmul__, torch.bmm,
+                           torch.Tensor.__add__, torch.Tensor.__radd__, torch.Tensor.__mul__, torch.Tensor.__rmul__)
 
     profiles = []
     for _ in range(3):
@@ -47,7 +48,9 @@ def test_repeated_profile_restores_operations():
         profiles.append((prof.get_total_flops(), prof.get_total_macs()))
         prof.end_profile()
 
-        restored_operations = (torch.nn.functional.scaled_dot_product_attention, torch.Tensor.__matmul__, torch.bmm)
+        restored_operations = (torch.nn.functional.scaled_dot_product_attention, torch.Tensor.__matmul__, torch.bmm,
+                               torch.Tensor.__add__, torch.Tensor.__radd__, torch.Tensor.__mul__,
+                               torch.Tensor.__rmul__)
         assert restored_operations == original_operations
 
     assert profiles == [(65536, 32768)] * 3
@@ -267,6 +270,65 @@ def test_elementwise_broadcast_flops(lhs_shape, rhs_shape):
     prof.end_profile()
 
     assert flops == result.numel()
+
+
+class Spelled(torch.nn.Module):
+
+    def __init__(self, op):
+        super().__init__()
+        self.op = op
+
+    def forward(self, lhs, rhs):
+        return self.op(lhs, rhs)
+
+
+@pytest.mark.sequential
+@pytest.mark.parametrize("spellings", [
+    (lambda a, b: a + b, lambda a, b: a.add(b), lambda a, b: torch.add(a, b)),
+    (lambda a, b: a * b, lambda a, b: a.mul(b), lambda a, b: torch.mul(a, b)),
+],
+                         ids=["add", "mul"])
+def test_operator_spelling_counts_like_function_spelling(spellings):
+    """One elementwise op costs the same whether it is written as an operator, a tensor
+    method or a torch function, and reaching it through the operator counts it once.
+
+    Regression test for https://github.com/deepspeedai/DeepSpeed/issues/3087."""
+    lhs, rhs = torch.randn(2, 3, 4), torch.randn(2, 3, 4)
+
+    counts = []
+    for op in spellings:
+        prof = FlopsProfiler(Spelled(op))
+        prof.start_profile()
+        prof.model(lhs, rhs)
+        prof.stop_profile()
+        counts.append(prof.get_total_flops())
+        prof.end_profile()
+
+    assert counts == [lhs.numel()] * len(spellings)
+
+
+@pytest.mark.sequential
+@pytest.mark.parametrize("op", [lambda x: 2.0 * x, lambda x: x * 2.0, lambda x: 2.0 + x, lambda x: x + 2.0],
+                         ids=["2*x", "x*2", "2+x", "x+2"])
+def test_scalar_operand_counted_on_either_side(op):
+    """A scalar operand costs one flop per element of the tensor it is applied to, whichever
+    side of the operator it is written on."""
+
+    class Scaled(torch.nn.Module):
+
+        def forward(self, x):
+            return op(x)
+
+    x = torch.randn(2, 3, 4)
+
+    prof = FlopsProfiler(Scaled())
+    prof.start_profile()
+    prof.model(x)
+    prof.stop_profile()
+    flops = prof.get_total_flops()
+    prof.end_profile()
+
+    assert flops == x.numel()
 
 
 class Block(torch.nn.Module):
