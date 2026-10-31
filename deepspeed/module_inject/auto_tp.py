@@ -238,7 +238,9 @@ class AutoTP():
             # The bigcodetype layout gives every rank the whole key/value block, so ranks do not
             # have to own a key/value head to take part. Splitting by the key/value head count
             # would leave all but the first few ranks with no query rows and an empty attention
-            # output projection.
+            # output projection. This override applies to the whole AutoTP instance, which
+            # assumes the model uses one replicated-key/value layout throughout (as GPTBigCode
+            # does); a model mixing block types would need it narrowed per block.
             self.tp_meta = replace(self.tp_meta, num_kv_heads=self.tp_meta.num_attention_heads)
         self.linear_layer_setting = linear_layer_setting
         self.orig_layer_impl = orig_layer_impl
@@ -1015,8 +1017,13 @@ class AutoTP():
                 # get_shard_size selects its partitioning strategy from the module name, so the
                 # attributes must be sharded under the same name as the weights they describe.
                 setattr(child, param, get_shard_size(param_val, self.mp_size, self.tp_meta, name, rank=tp_index))
-        if replicated_kv_attention and hasattr(child, "num_key_value_groups"):
-            child.num_key_value_groups = child.num_heads // child.kv_heads
+        # Recompute the group count from the local query shard only when the model exposes the
+        # key/value head count it is derived from. A version that publishes the group count
+        # without a key/value head attribute keeps its own value rather than failing here.
+        num_heads = getattr(child, "num_heads", None)
+        kv_heads = getattr(child, "kv_heads", None)
+        if (replicated_kv_attention and hasattr(child, "num_key_value_groups") and num_heads is not None and kv_heads):
+            child.num_key_value_groups = num_heads // kv_heads
         setattr(child, "replaced", True)
 
     def update_linear_policies(self):

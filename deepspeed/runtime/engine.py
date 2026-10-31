@@ -1044,9 +1044,20 @@ class DeepSpeedEngine(Module):
         replicated_kv = replicates_kv_block(model)
         shard_heads = meta.num_attention_heads if replicated_kv else meta.num_kv_heads
 
-        # Ranks beyond the head count get no attention shard. This still computes the
-        # correct result because the row-parallel all-reduce sums their empty contribution,
-        # but attention work concentrates on the first shard_heads ranks.
+        if replicated_kv and shard_heads is not None and tp_size > shard_heads:
+            # A rank beyond the query heads has no query rows: its c_attn holds only the
+            # replicated key/value block and its attention output projection is empty. The
+            # model's forward then fails (for example, SDPA rejects zero query heads), so
+            # reject the configuration here instead of only warning about throughput.
+            raise RuntimeError(f"AutoTP cannot shard this replicated key/value attention across {tp_size} ranks: "
+                               f"the model has {shard_heads} query heads, so at least one rank would hold no "
+                               f"query rows and an empty attention output projection. Reduce "
+                               f"tensor_parallel.autotp_size to at most the query head count.")
+
+        # For layouts that do not replicate the key/value block, ranks beyond the head count
+        # get no attention shard. This still computes the correct result because the
+        # row-parallel all-reduce sums their empty contribution, but attention work
+        # concentrates on the first shard_heads ranks.
         if shard_heads is not None and tp_size > shard_heads:
             log_dist(
                 f"AutoTP: autotp_size ({tp_size}) exceeds the model's "

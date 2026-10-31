@@ -1455,9 +1455,16 @@ def _sum_replicated_kv_gradient(grad, kv_start, group):
     """Sum the gradient rows that every rank holds a copy of.
 
     Depending on the backend, the weight gradient can have a transposed layout: torch_npu
-    returns one for this matmul, while CUDA returns a contiguous ``[out, in]`` gradient. Both
-    NCCL and HCCL reject non-contiguous collective inputs, so stage a contiguous copy and write
-    the reduction back into the view autograd consumes.
+    returns one for this matmul, while CUDA returns a contiguous ``[out, in]`` gradient. The
+    original failure comes from NCCL and HCCL rejecting a non-contiguous collective input. This
+    fix does not depend on that contract: it decides from the tensor layout, reducing a
+    contiguous view in place and staging a copy only when the view is not contiguous. A backend
+    that accepted strided input directly would still get the same values, with one extra copy.
+
+    The collective reduces a view of the cloned fused gradient, so the result is copied back and
+    the surrounding query rows and the incoming layout are preserved. Unlike
+    ``register_replicated_grad_hooks``, which reduces the entire gradient and may return a
+    contiguous replacement, this hook reduces only the replicated key/value rows.
     """
     grad = grad.clone()
     kv_grad = grad.narrow(0, kv_start, grad.shape[0] - kv_start)
@@ -1465,8 +1472,11 @@ def _sum_replicated_kv_gradient(grad, kv_start, group):
         # The key/value block is replicated whole, so it is empty on every rank at once.
         return grad
     if kv_grad.is_contiguous():
+        # The CUDA layout: reduce the view in place, with no staging allocation.
         dist.all_reduce(kv_grad, group=group)
     else:
+        # The torch_npu layout: reduce a contiguous copy, then write it back into the view
+        # that autograd consumes.
         reduced = kv_grad.contiguous()
         dist.all_reduce(reduced, group=group)
         kv_grad.copy_(reduced)

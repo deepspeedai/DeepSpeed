@@ -536,6 +536,77 @@ def test_update_mp_params_keeps_kv_heads_when_group_count_is_absent(monkeypatch)
     assert not hasattr(child, "num_key_value_groups")
 
 
+def test_update_mp_params_leaves_groups_alone_without_kv_heads(monkeypatch):
+    tp_group = object()
+    autotp = object.__new__(AutoTP)
+    autotp.mp_group = tp_group
+    autotp.mp_size = 2
+    autotp._replicates_kv_block = True
+    child = nn.Module()
+    child.proj = nn.Linear(1, 1, bias=False)
+    setattr(child.proj.weight, DS_AUTOTP_UC_META, {})
+    child.multi_query = True
+    child.num_heads = 8
+    child.num_key_value_groups = 8
+
+    monkeypatch.setattr(dist, "get_rank", lambda group=None: 1 if group is tp_group else 0)
+    autotp.tp_meta = AutoTPMeta(num_attention_heads=8, num_kv_heads=8)
+    autotp.update_mp_params(child)
+
+    # Without a key/value head attribute there is nothing to recompute the group count from;
+    # the model's own value is left alone instead of raising AttributeError.
+    assert child.num_heads == 4
+    assert child.num_key_value_groups == 8
+
+
+def test_update_mp_params_recomputes_groups_from_local_query_shard(monkeypatch):
+    tp_group = object()
+    autotp = object.__new__(AutoTP)
+    autotp.mp_group = tp_group
+    autotp.mp_size = 2
+    autotp._replicates_kv_block = True
+    child = nn.Module()
+    child.proj = nn.Linear(1, 1, bias=False)
+    setattr(child.proj.weight, DS_AUTOTP_UC_META, {})
+    child.multi_query = True
+    child.num_heads = 8
+    child.kv_heads = 1
+    child.num_key_value_groups = 8
+
+    monkeypatch.setattr(dist, "get_rank", lambda group=None: 1 if group is tp_group else 0)
+    autotp.tp_meta = AutoTPMeta(num_attention_heads=8, num_kv_heads=8)
+    autotp.update_mp_params(child)
+
+    # The key/value block stays whole, so this rank has four query heads per shared key/value
+    # head; the model-wide group count of eight no longer describes the local shard.
+    assert child.num_heads == 4
+    assert child.kv_heads == 1
+    assert child.num_key_value_groups == 4
+
+
+def test_replicated_kv_attention_rejects_tp_beyond_query_heads():
+    from types import SimpleNamespace
+    from deepspeed.runtime.engine import DeepSpeedEngine
+
+    class GPTBigCodeBlock(nn.Module):
+        pass
+
+    class Model(nn.Module):
+
+        def __init__(self):
+            super().__init__()
+            self.h = nn.ModuleList([GPTBigCodeBlock()])
+            self.config = SimpleNamespace(n_embd=32, num_attention_heads=4, num_key_value_heads=1)
+
+    engine = object.__new__(DeepSpeedEngine)
+    engine.local_rank = -1
+    engine.autotp_size = lambda: 8
+    tp_config = SimpleNamespace(tensor_parallel=SimpleNamespace(tp_size=8, tp_group=object()))
+
+    with pytest.raises(RuntimeError, match="4 query heads"):
+        engine._apply_autotp_partitioning(Model(), tp_config)
+
+
 def test_update_mp_params_shards_attributes_like_their_weights(monkeypatch):
     tp_group = object()
     autotp = object.__new__(AutoTP)
