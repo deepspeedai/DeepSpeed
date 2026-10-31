@@ -36,7 +36,7 @@ from deepspeed.accelerator import get_accelerator
 from ..swap_tensor.partitioned_param_swapper import AsyncPartitionedParameterSwapper, PartitionedParamStatus
 from deepspeed.inference.quantization.utils import _quantize_param, WEIGHT_QUANTIZATION_LAYERS, wrap_quantized_functional, wrap_load_from_state_dict
 from deepspeed.runtime.torch_autocast import sort_dtypes, get_comm_dtype, has_comm_dtype
-from deepspeed.runtime.keep_in_fp32 import KEEP_IN_FP32_AUTO, keep_in_fp32_pattern, keep_buffers_in_fp32
+from deepspeed.runtime.keep_in_fp32 import KEEP_IN_FP32_AUTO, keep_in_fp32_pattern, keep_tensors_in_fp32
 
 partitioned_param_data_shape = [0]
 zero_init_context = 0
@@ -1081,7 +1081,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
 
         self.tensor_overrides = tensor_overrides
         super().__init__(enabled=enabled, mem_efficient_linear=mem_efficient_linear, ds_config=_ds_config, dtype=dtype)
-        # Buffers the model names for fp32 (deepspeed/runtime/keep_in_fp32.py).
+        # Parameters and buffers the model names for fp32 (deepspeed/runtime/keep_in_fp32.py).
         self.keep_in_fp32_modules = (_ds_config.keep_in_fp32_modules if _ds_config is not None else KEEP_IN_FP32_AUTO)
         if not dist.is_initialized():
             init_distributed()
@@ -1253,19 +1253,29 @@ class Init(InsertPostInitMethodToModuleSubClasses):
             f"Param count {InsertPostInitMethodToModuleSubClasses.num_module_elements}. After converting and partitioning params in {module.__class__.__name__}",
             force=False)
 
-        # A transformers model's fp32 list is complete once its own __init__ has run, which is now, and
-        # this is before any checkpoint is loaded into the buffers it names.
+        # A transformers model's fp32 list is complete once its own __init__ has run, which is now. Its
+        # submodules were partitioned already, so their partitions are converted in place, before any
+        # checkpoint is loaded into them.
         self._keep_in_fp32(module)
 
     def _keep_in_fp32(self, module):
-        """Convert the buffers of ``module`` that it names for fp32 (keep_in_fp32.py) back to fp32."""
+        """Convert the parameters and buffers of ``module`` that it names for fp32 (keep_in_fp32.py)."""
         pattern = keep_in_fp32_pattern(module, self.keep_in_fp32_modules, self.dtype)
         if pattern is None:
             return
-        converted = keep_buffers_in_fp32(module, pattern)
-        if converted:
-            print_rank_0(f"keep_in_fp32_modules: {converted} buffers of {module.__class__.__name__} kept in fp32",
-                         force=False)
+        # Offloaded parameter partitions live in one flat CPU or NVMe buffer of the training dtype, so
+        # only buffers are kept in fp32 then.
+        params_offloaded = self.remote_device != self.local_device
+        num_params, num_buffers = keep_tensors_in_fp32(module, pattern, include_params=not params_offloaded)
+        if params_offloaded and not getattr(Init, "_warned_keep_in_fp32_offload", False):
+            logger.warning("data_types.keep_in_fp32_modules: parameters offloaded to "
+                           f"{self.remote_device} stay {self.dtype}; only buffers are kept in fp32")
+            Init._warned_keep_in_fp32_offload = True
+        if num_params or num_buffers:
+            print_rank_0(
+                f"keep_in_fp32_modules: {num_params} parameters and {num_buffers} buffers of "
+                f"{module.__class__.__name__} kept in fp32",
+                force=False)
 
     def _convert_to_deepspeed_param(self, param):
 
@@ -1445,6 +1455,15 @@ class Init(InsertPostInitMethodToModuleSubClasses):
 
         def _all_gather_coalesced(params, world_size, rank_in_group, use_secondary_tensor, ds_process_group, quantize):
             if self.use_all_reduce_for_fetch_params and not quantize and not use_secondary_tensor:
+                dtypes = {p.ds_tensor.dtype for p in params}
+                if len(dtypes) > 1:
+                    # Parameters kept in fp32 (data_types.keep_in_fp32_modules) next to bf16/fp16 ones:
+                    # one flat buffer and one all_reduce per dtype.
+                    return MultipleAllGatherHandles([
+                        _all_gather_coalesced([p for p in params if p.ds_tensor.dtype == dtype], world_size,
+                                              rank_in_group, use_secondary_tensor, ds_process_group, quantize)
+                        for dtype in sort_dtypes(dtypes)
+                    ])
 
                 # Use all_reduce instead of all_gather to fetch the module params
                 flat_buffer_size = sum(p.ds_numel_aligned for p in params)

@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # DeepSpeed Team
-"""Keep the buffers a model names for fp32 in fp32 while the rest of the model trains in bf16 or fp16.
+"""Keep the tensors a model names for fp32 in fp32 while the rest of the model trains in bf16 or fp16.
 
 Hugging Face transformers models name these tensors in two class attributes:
 ``_keep_in_fp32_modules_strict`` (kept in fp32 under bf16 and fp16) and ``_keep_in_fp32_modules``
@@ -19,10 +19,12 @@ which experts tokens are sent to.
 
 * ``"auto"`` (default): the model's own transformers lists, if it has them.
 * a list of patterns, matched the way transformers matches them: ``*`` stands for any characters,
-  and a pattern may match anywhere in the full buffer name.
+  and a pattern may match anywhere in the full parameter or buffer name.
 * ``[]``: keep nothing in fp32 (the behavior before this option existed).
 
-Only buffers are kept in fp32 here; parameters named by the lists still follow the training dtype.
+Buffers are kept in fp32 in every configuration. Parameters are kept in fp32 only under ZeRO-3 without
+parameter offload, the one optimizer that holds partitions of more than one dtype; DeepSeek-V4's
+hyper-connection weights, attention sinks and norms, and gpt-oss's attention sinks, are examples.
 """
 
 import re
@@ -58,22 +60,47 @@ def keep_in_fp32_pattern(module, setting, dtype):
     return re.compile("|".join(sorted(patterns)))
 
 
-def buffers_to_keep_in_fp32(module, pattern):
-    """The floating buffers of ``module`` whose full names match ``pattern``."""
+def tensors_to_keep_in_fp32(module, pattern):
+    """(full name, tensor, is_buffer) for every floating parameter and buffer whose full name matches."""
     matches = []
     for module_name, owner in module.named_modules():
         prefix = f"{module_name}." if module_name else ""
+        for name, param in owner.named_parameters(recurse=False):
+            if param.is_floating_point() and pattern.search(prefix + name):
+                matches.append((prefix + name, param, False))
         for name, buf in owner.named_buffers(recurse=False):
             if buf is not None and buf.is_floating_point() and pattern.search(prefix + name):
-                matches.append(buf)
+                matches.append((prefix + name, buf, True))
     return matches
 
 
-def keep_buffers_in_fp32(module, pattern):
-    """Convert the matching buffers of ``module`` to fp32 in place. Returns how many were converted."""
-    converted = 0
-    for buf in buffers_to_keep_in_fp32(module, pattern):
-        if buf.dtype != torch.float32:
-            buf.data = buf.data.float()
-            converted += 1
-    return converted
+def _stored_dtype(tensor):
+    # A ZeRO-3 parameter keeps its values in its partition; tensor.data is a placeholder.
+    partition = getattr(tensor, "ds_tensor", None)
+    return partition.dtype if partition is not None else tensor.dtype
+
+
+def keep_tensors_in_fp32(module, pattern, include_params=True):
+    """Convert the matching parameters and buffers of ``module`` to fp32 in place.
+
+    A ZeRO-3 parameter is converted in its partition, so a later gather returns fp32 and a later
+    checkpoint load writes exact fp32 values into it. With ``include_params=False`` only buffers are
+    converted. Returns (parameters converted, buffers converted).
+    """
+    num_params, num_buffers = 0, 0
+    for _, tensor, is_buffer in tensors_to_keep_in_fp32(module, pattern):
+        if not is_buffer and not include_params:
+            continue
+        if _stored_dtype(tensor) == torch.float32:
+            continue
+        partition = getattr(tensor, "ds_tensor", None)
+        if partition is not None:
+            partition.data = partition.data.float()
+        # For a ZeRO-3 parameter this converts the empty placeholder, or the full tensor when the
+        # parameter is currently gathered, so the next gather and the next free keep fp32.
+        tensor.data = tensor.data.float()
+        if is_buffer:
+            num_buffers += 1
+        else:
+            num_params += 1
+    return num_params, num_buffers

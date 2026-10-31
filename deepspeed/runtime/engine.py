@@ -122,7 +122,8 @@ from deepspeed.runtime.data_pipeline.data_routing.helper import remove_random_lt
 from deepspeed.runtime.data_pipeline.data_routing.basic_layer import RandomLayerTokenDrop
 
 from deepspeed.runtime.torch_autocast import init_autocast_params, get_default_autocast_lower_precision_modules, autocast_if_enabled
-from deepspeed.runtime.keep_in_fp32 import keep_in_fp32_pattern, keep_buffers_in_fp32, buffers_to_keep_in_fp32
+from deepspeed.runtime.keep_in_fp32 import (KEEP_IN_FP32_AUTO, keep_in_fp32_pattern, keep_tensors_in_fp32,
+                                            tensors_to_keep_in_fp32)
 
 from .pipe.module import PipelineModule
 from .utils import get_ma_status
@@ -1847,31 +1848,69 @@ class DeepSpeedEngine(Module):
 
         return param_dtype, buffer_dtype
 
-    def _cast_module_mixed_precision(self, param_dtype, buffer_dtype, is_zero_init_model, keep_pattern=None):
+    def _cast_module_mixed_precision(self,
+                                     param_dtype,
+                                     buffer_dtype,
+                                     is_zero_init_model,
+                                     keep_pattern=None,
+                                     keep_params=False):
         """Cast params to param_dtype; cast buffers only when buffer_dtype is set.
 
-        Buffers whose names match keep_pattern stay in fp32 (data_types.keep_in_fp32_modules,
-        deepspeed/runtime/keep_in_fp32.py).
+        Buffers whose names match keep_pattern stay in fp32, and so do matching parameters when
+        keep_params is True (data_types.keep_in_fp32_modules, deepspeed/runtime/keep_in_fp32.py).
         """
+        keep_params = keep_pattern is not None and keep_params
+        kept = set()
+        if keep_pattern is not None:
+            kept = {
+                id(t)
+                for _, t, is_buffer in tensors_to_keep_in_fp32(self.module, keep_pattern) if is_buffer or keep_params
+            }
+
         # ZeRO-Init params are already at the configured dtype and partitioned, so
         # the per-parameter cast applies only in the non-zero-init path.
         if param_dtype is not None and not is_zero_init_model:
             for p in self.module.parameters(recurse=True):
+                if id(p) in kept:
+                    continue
                 if p.dtype in CASTABLE_DTYPES and p.dtype != param_dtype:
                     p.data = p.data.to(param_dtype)
 
-        # Buffers are never ZeRO-partitioned.
-        kept = set()
         if keep_pattern is not None:
-            kept = {id(b) for b in buffers_to_keep_in_fp32(self.module, keep_pattern)}
-            # Also upcasts a listed buffer that arrives in a lower precision.
-            keep_buffers_in_fp32(self.module, keep_pattern)
+            # Also upcasts what arrives in a lower precision, and ZeRO-Init partitions.
+            keep_tensors_in_fp32(self.module, keep_pattern, include_params=keep_params)
+            if not keep_params:
+                self._warn_listed_params_not_kept(keep_pattern)
+
+        # Buffers are never ZeRO-partitioned.
         if buffer_dtype is not None:
             for b in self.module.buffers(recurse=True):
                 if id(b) in kept:
                     continue
                 if b.dtype in CASTABLE_DTYPES and b.dtype != buffer_dtype:
                     b.data = b.data.to(buffer_dtype)
+
+    def _keeps_params_in_fp32(self):
+        """Whether listed parameters can stay fp32 next to bf16/fp16 ones.
+
+        Only ZeRO-3 without parameter offload holds one partition buffer per dtype. ZeRO-1/2 and the
+        bf16/fp16 optimizers flatten each optimizer parameter group into one buffer of one dtype, and an
+        offloaded ZeRO-3 model keeps its partitions in one CPU or NVMe buffer.
+        """
+        offload = self.zero_offload_param()
+        params_offloaded = offload is not None and offload.device in (OffloadDeviceEnum.cpu, OffloadDeviceEnum.nvme)
+        return self.zero_optimization_partition_weights() and not params_offloaded
+
+    def _warn_listed_params_not_kept(self, keep_pattern):
+        names = [name for name, _, is_buffer in tensors_to_keep_in_fp32(self.module, keep_pattern) if not is_buffer]
+        if not names:
+            return
+        message = (f"data_types.keep_in_fp32_modules names {len(names)} parameters (first: {names[0]}), but "
+                   f"only ZeRO stage 3 without parameter offload can keep parameters in fp32; they are cast "
+                   f"to the training dtype. Buffers stay fp32.")
+        if self._config.keep_in_fp32_modules != KEEP_IN_FP32_AUTO:
+            raise ValueError(message + " Remove the parameter patterns or use ZeRO stage 3.")
+        logger.warning(message)
 
     def _optimizer_has_ckpt_event_prologue(self):
         return self.optimizer is not None and hasattr(self.optimizer, 'checkpoint_event_prologue')
@@ -2084,7 +2123,8 @@ class DeepSpeedEngine(Module):
             # unless buffer_dtype is set. Replaces blanket module.half()/bfloat16().
             param_dtype, buffer_dtype = self._mixed_precision_dtypes()
             keep_pattern = keep_in_fp32_pattern(self.module, self._config.keep_in_fp32_modules, param_dtype)
-            self._cast_module_mixed_precision(param_dtype, buffer_dtype, is_zero_init_model, keep_pattern)
+            self._cast_module_mixed_precision(param_dtype, buffer_dtype, is_zero_init_model, keep_pattern,
+                                              self._keeps_params_in_fp32())
         else:
             self.__check_params(self.module, torch.float)
 

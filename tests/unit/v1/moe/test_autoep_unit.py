@@ -922,6 +922,7 @@ class TestAutoEPConfig:
         optimizer = object.__new__(DeepSpeedZeroOptimizer_Stage3)
         optimizer.dp_process_group = "global_data_parallel"
         optimizer.ipg_buckets = {torch.float32: SimpleNamespace(params=[], process_group="expert_data_parallel")}
+        optimizer.dtype = torch.float32
         optimizer.postscale_gradients = True
         optimizer.gradient_predivide_factor = 1.0
         optimizer.sequence_parallel_size = 1
