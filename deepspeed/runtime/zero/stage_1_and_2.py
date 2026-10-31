@@ -1789,8 +1789,13 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             ]
 
     def update_offload_overflow_tracker(self, grad):
-        if grad is not None and self._has_inf_or_nan(grad.data):
-            self.local_overflow = True
+        # Only has_overflow() reads this flag, and only when check_grad_overflow is set. has_inf_or_nan()
+        # returns a device tensor; OR it into a device flag rather than testing it here, where a Python
+        # ``if`` would synchronize the host once per gradient.
+        if grad is None or not self.check_grad_overflow:
+            return
+        overflow = self._has_inf_or_nan(grad.data).to(get_accelerator().current_device_name(), non_blocking=True)
+        self.local_overflow = overflow if self.local_overflow is False else self.local_overflow | overflow
 
     def update_offload_overflow_tracker_for_param_grad(self, param):
         grad_accum = self.get_param_gradient_attribute(param)
@@ -3235,9 +3240,12 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         return invalid_grad_count.bool()
 
     def has_overflow(self, partition_gradients=True):
-        overflow = self.local_overflow if self.cpu_offload else self.has_overflow_partitioned_grads_serial()
-        overflow_gpu = get_accelerator().ByteTensor([overflow]) if self.cpu_offload else overflow.byte().to(
-            get_accelerator().current_device_name())
+        device = get_accelerator().current_device_name()
+        if self.cpu_offload:
+            # False, or the device flag accumulated by update_offload_overflow_tracker().
+            overflow_gpu = torch.as_tensor(self.local_overflow, device=device).to(torch.uint8).reshape(1)
+        else:
+            overflow_gpu = self.has_overflow_partitioned_grads_serial().byte().to(device)
 
         dist.all_reduce(overflow_gpu, op=dist.ReduceOp.MAX, group=self.dp_process_group)
 

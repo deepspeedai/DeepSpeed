@@ -53,6 +53,7 @@ def make_optimizer(dtype=torch.bfloat16, device=None, low_precision=False, cpu_o
     opt.accumulated_grads_in_cpu = {}
     opt.norm_for_param_grads = {}
     opt.local_overflow = False
+    opt.check_grad_overflow = True
     opt.overflow = False
     opt.dp_process_group = None
     opt.model_parallel_rank = 0
