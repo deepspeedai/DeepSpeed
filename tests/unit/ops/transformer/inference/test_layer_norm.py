@@ -189,3 +189,57 @@ def test_triton_layer_norm(M, N, dtype, residual, input_bias, eps=1e-5, device='
                                            eps).to(dtype)
     # compare
     assert (allclose(y_tri, y_ref))
+
+
+@pytest.mark.inference_ops
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("channels", [96, 128])
+def test_layer_norm_subblock_32_thread_group(channels, dtype):
+    inference_module = InferenceBuilder().load()
+    device = get_accelerator().current_device_name()
+    vals = torch.randn((1, 4, channels), dtype=dtype, device=device)
+    residual = torch.randn_like(vals)
+    bias = torch.randn((channels, ), dtype=dtype, device=device)
+    gamma = torch.randn((channels, ), dtype=dtype, device=device)
+    beta = torch.rand((channels, ), dtype=dtype, device=device)
+    epsilon = 1e-5
+
+    assert allclose(ds_implementation(vals, gamma, beta, epsilon),
+                    ref_implementation(vals, gamma, beta, epsilon, channels, dtype))
+
+    residual_expected = residual_ref_implementation(vals, bias, residual, gamma, beta, epsilon, channels, dtype)
+    assert allclose(inference_module._layer_norm_residual(vals, bias, residual, gamma, beta, epsilon),
+                    residual_expected)
+
+    norm_expected, residual_store_expected = residual_store_ref_implementation(vals, bias, residual, gamma, beta,
+                                                                               epsilon, channels, dtype)
+    norm_output, residual_output = inference_module.layer_norm_residual_store_pre_ln_res(
+        vals, bias, residual, gamma, beta, epsilon)
+    assert allclose(norm_output, norm_expected)
+    assert allclose(residual_output, residual_store_expected)
+
+
+@pytest.mark.inference_ops
+@pytest.mark.parametrize("dtype,rows", [(torch.float32, 17), (torch.float16, 33), (torch.bfloat16, 33)])
+def test_layer_norm_subblock_tail_rows(dtype, rows):
+    inference_module = InferenceBuilder().load()
+    device = get_accelerator().current_device_name()
+    channels, epsilon = 64, 1e-5
+    vals = torch.randn((1, rows, channels), dtype=dtype, device=device)
+    residual = torch.randn_like(vals)
+    bias = torch.randn((channels, ), dtype=dtype, device=device)
+    gamma = torch.randn((channels, ), dtype=dtype, device=device)
+    beta = torch.rand((channels, ), dtype=dtype, device=device)
+
+    assert allclose(ds_implementation(vals, gamma, beta, epsilon),
+                    ref_implementation(vals, gamma, beta, epsilon, channels, dtype))
+
+    expected = residual_ref_implementation(vals, bias, residual, gamma, beta, epsilon, channels, dtype)
+    assert allclose(inference_module._layer_norm_residual(vals, bias, residual, gamma, beta, epsilon), expected)
+
+    norm_expected, residual_expected = residual_store_ref_implementation(vals, bias, residual, gamma, beta, epsilon,
+                                                                         channels, dtype)
+    norm_output, residual_output = inference_module.layer_norm_residual_store_pre_ln_res(
+        vals, bias, residual, gamma, beta, epsilon)
+    assert allclose(norm_output, norm_expected)
+    assert allclose(residual_output, residual_expected)
