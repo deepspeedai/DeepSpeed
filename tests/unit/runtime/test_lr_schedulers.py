@@ -424,27 +424,27 @@ class TestOneCycle(DistributedTest):
         hidden_dim = 10
 
         model = SimpleModel(hidden_dim, empty_grad=False)
-        model, _, _, lr_scheduler = deepspeed.initialize(config=config_dict,
-                                                         model=model,
-                                                         model_parameters=model.parameters())
+        model, optimizer, _, _ = deepspeed.initialize(config=config_dict,
+                                                      model=model,
+                                                      model_parameters=model.parameters())
         data_loader = random_dataloader(model=model,
-                                        total_samples=max(50, step_size * 3),
+                                        total_samples=max(50, step_size * 6 + 2),
                                         hidden_dim=hidden_dim,
                                         device=model.device,
                                         dtype=torch.float)
 
         step_moms = []
         for _, batch in enumerate(data_loader):
-            step_moms.append(lr_scheduler.get_mom())
+            step_moms.append(optimizer.param_groups[0]["betas"][0])
             loss = model(batch[0], batch[1])
             model.backward(loss)
             model.step()
 
-        # Verify starting lr
-        assert step_moms[0][0][0] == max_mom
+        # Verify starting momentum
+        assert step_moms[0] == max_mom
 
-        # Verify peak lr
-        assert step_moms[step_size][0][0] == min_mom
+        # Verify minimum momentum
+        assert step_moms[step_size] == min_mom
 
         # Verify decreasing phase
         _verify_continuous_decrease(step_moms[:step_size])
@@ -455,6 +455,82 @@ class TestOneCycle(DistributedTest):
         # Verify decay phase
         if decay_rate > 0:
             _verify_continuous_increase(step_moms[(step_size * 2):])
+
+    @pytest.mark.parametrize("per_group", [False, True])
+    @pytest.mark.parametrize("cycle_momentum", [False, True])
+    def test_adam_updates(self, per_group, cycle_momentum):
+        # Two updates expose the wrong initial beta1 through Adam's accumulated
+        # moments, even though bias correction can hide it on the first update.
+        scheduler_params = {
+            "cycle_min_lr": [0.01, 0.02] if per_group else 0.01,
+            "cycle_max_lr": [0.05, 0.10] if per_group else 0.05,
+            "cycle_min_mom": [0.7, 0.75] if per_group else 0.7,
+            "cycle_max_mom": [0.9, 0.95] if per_group else 0.9,
+            "cycle_first_step_size": 2,
+            "cycle_second_step_size": 2,
+            "cycle_momentum": cycle_momentum,
+        }
+        config = {
+            "train_batch_size": 1,
+            "gradient_clipping": 0.0,
+            "scheduler": {
+                "type": ONE_CYCLE,
+                "params": scheduler_params
+            },
+        }
+        model = torch.nn.Linear(2, 1)
+        with torch.no_grad():
+            model.weight.copy_(torch.tensor([[0.25, -0.5]]))
+            model.bias.fill_(0.125)
+        optimizer = torch.optim.Adam([{
+            "params": [model.weight]
+        }, {
+            "params": [model.bias]
+        }],
+                                     lr=0.123,
+                                     betas=(0.6, 0.99),
+                                     foreach=False)
+        engine, optimizer, _, _ = deepspeed.initialize(model=model, optimizer=optimizer, config=config)
+        try:
+            reference = torch.nn.Linear(2, 1).to(engine.device)
+            reference.load_state_dict(engine.module.state_dict())
+            reference_optimizer = torch.optim.Adam([{
+                "params": [reference.weight]
+            }, {
+                "params": [reference.bias]
+            }],
+                                                   lr=0.123,
+                                                   betas=(0.6, 0.99),
+                                                   foreach=False)
+            # The first update uses the lower LR and upper momentum bounds;
+            # the second is halfway to the peak LR and minimum momentum.
+            lr_points = [(0.01, 0.02 if per_group else 0.01), (0.03, 0.06 if per_group else 0.03)]
+            beta1_points = [(0.9, 0.95 if per_group else 0.9), (0.8, 0.85 if per_group else 0.8)]
+            for step, (inputs, target) in enumerate([([1.0, -2.0], 0.5), ([-0.5, 1.5], -0.25)]):
+                for group_index, group in enumerate(reference_optimizer.param_groups):
+                    group["lr"] = lr_points[step][group_index]
+                    group["betas"] = (beta1_points[step][group_index] if cycle_momentum else 0.6, 0.99)
+                    actual_group = optimizer.param_groups[group_index]
+                    assert actual_group["lr"] == pytest.approx(group["lr"])
+                    assert actual_group["betas"] == pytest.approx(group["betas"])
+                inputs = torch.tensor([inputs], device=engine.device)
+                target = torch.tensor([[target]], device=engine.device)
+                reference_optimizer.zero_grad()
+                reference_loss = (reference(inputs) - target).square().mean()
+                reference_loss.backward()
+                reference_optimizer.step()
+                loss = (engine(inputs) - target).square().mean()
+                engine.backward(loss)
+                engine.step()
+                for actual, expected in zip(engine.module.parameters(), reference.parameters()):
+                    torch.testing.assert_close(actual, expected, rtol=1e-6, atol=1e-7)
+
+            # Resuming must leave the optimizer's already-applied LR/betas intact.
+            applied = [(group["lr"], group["betas"]) for group in optimizer.param_groups]
+            OneCycle(optimizer, last_batch_iteration=1, **scheduler_params)
+            assert [(group["lr"], group["betas"]) for group in optimizer.param_groups] == applied
+        finally:
+            engine.destroy()
 
 
 class TestWarmupCosineLR(DistributedTest):
@@ -843,7 +919,6 @@ def test_one_cycle_accepts_per_group_lr_and_momentum_lists():
     assert scheduler.min_lrs == pytest.approx([0.001, 0.002])
     assert scheduler.max_lrs == pytest.approx([0.01, 0.02])
     assert [group["lr"] for group in optimizer.param_groups] == pytest.approx([0.001, 0.002])
-    assert [group["betas"][0] for group in optimizer.param_groups] == pytest.approx([0.8, 0.85])
 
     # At the peak of the cycle each group reaches its own cycle_max_lr, and momentum is at
     # its own cycle_min_mom, rather than every group tracking group 0's values.
