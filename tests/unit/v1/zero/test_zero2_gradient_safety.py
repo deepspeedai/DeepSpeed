@@ -348,7 +348,7 @@ def prepare_step(opt, param, master, monkeypatch, mock_collectives=True):
     opt.bit16_groups_flat = [param.detach()]
     opt.nccl_start_alignment_factor = 2
     opt.allgather_bucket_size = 16
-    opt._lazy_init_hp_params_optimizer_state = lambda: None
+    opt._lazy_init_hp_params_optimizer_state = lambda *args, **kwargs: None
     opt._update_model_bit16_weights = lambda index: None
 
 
