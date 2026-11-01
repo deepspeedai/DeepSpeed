@@ -3429,6 +3429,12 @@ class DeepSpeedEngine(Module):
                 # backward_epilogue is not called in a hook when self._support_torch_style_backward is False
                 self._backward_epilogue()
 
+            # Summed over the micro-batches of a step and reported as train_loss in step().
+            # Added only after a successful backward, and in fp32 so low precision losses do not drift.
+            if self.monitor.enabled:
+                mean_loss = gas_scaled_loss.detach().float().mean()
+                self.losses = mean_loss if self.losses is None else self.losses + mean_loss
+
             return gas_scaled_loss
         finally:
             if engine_backward_graph_hook is not None:
@@ -3610,6 +3616,10 @@ class DeepSpeedEngine(Module):
         if self.is_gradient_accumulation_boundary():
             if self.checkpoint_engine.is_decoupled():
                 self._commit_decoupled_checkpoint()
+
+            # Written before _take_model_step() resets self.losses and advances global_samples
+            if self.monitor.enabled and self.global_rank == 0 and self.losses is not None:
+                self.monitor.write_events([("Train/Samples/train_loss", self.losses.item(), self.global_samples)])
 
             self._take_model_step(lr_kwargs)
 
