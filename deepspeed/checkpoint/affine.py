@@ -246,13 +246,17 @@ class ParamAffineMap:
 
     def validate(self):
         """Check shard element counts, and destination bounds and overlap from piece metadata."""
-        for rank, pieces in self.pieces_by_rank.items():
-            held = sum(piece.numel for piece in pieces)
-            expected = _product(self.shard_shapes[rank])
-            if held != expected:
-                raise ValueError(f'Rank {rank} holds a shard of {expected} elements but its pieces '
-                                 f'account for {held}.')
-            self._validate_destinations(rank, pieces, self.shard_shapes[rank])
+        for rank in self.pieces_by_rank:
+            self._validate_rank(rank)
+
+    def _validate_rank(self, rank):
+        pieces = self.pieces_by_rank[rank]
+        held = sum(piece.numel for piece in pieces)
+        expected = _product(self.shard_shapes[rank])
+        if held != expected:
+            raise ValueError(f'Rank {rank} holds a shard of {expected} elements but its pieces '
+                             f'account for {held}.')
+        self._validate_destinations(rank, pieces, self.shard_shapes[rank])
 
     def _validate_destinations(self, rank, pieces, shard_shape):
         """Check that dense intervals and strided boxes stay within the shard and do not overlap."""
@@ -371,26 +375,45 @@ class ParamAffineMap:
         any_shard = next(iter(shards.values()))
         full_param = torch.empty(self.numel, dtype=any_shard.dtype, device=any_shard.device)
 
-        written = {}
+        # validate() reads destinations from metadata and never looks at sources, so a map can
+        # pass it while two ranks claim one block and nothing holds another. Tracking the
+        # elements written, one byte each, catches both for any strides; otherwise the result
+        # would keep whatever torch.empty left behind.
+        covered = torch.zeros(self.numel, dtype=torch.bool, device=full_param.device)
         for rank, pieces in self.pieces_by_rank.items():
             if not pieces:
                 continue
             flat_shard = _flat_buffer(shards[rank])
+            placed = torch.zeros(flat_shard.numel(), dtype=torch.bool, device=flat_shard.device)
             for piece in pieces:
+                _place(placed, piece, rank)
                 target = piece.source_view(full_param)
-                source = piece.dest_view(flat_shard)
-                if len(piece.locations) > 1 and piece.source_offset in written:
+                source = _scaled(piece.dest_view(flat_shard), piece.scale, scale_power)
+                seen = piece.source_view(covered)
+                if seen.any():
+                    if len(piece.locations) < 2:
+                        raise ValueError(f'Rank {rank} piece {piece} names a single holder, but another piece '
+                                         'already wrote part of its block, so one would silently overwrite '
+                                         'the other.')
                     # Every rank holding a replicated piece must agree. Letting the last
                     # writer win would hide rank drift or a corrupt shard, which the
-                    # category-based converter guards against explicitly.
-                    if not torch.equal(target, _scaled(source, piece.scale, scale_power)):
+                    # category-based converter guards against explicitly. Comparing element by
+                    # element also covers replicas that two ranks cut at different boundaries.
+                    if not torch.equal(target[seen], source[seen]):
                         raise ValueError(f'Ranks {sorted(piece.locations)} hold different data for the same '
                                          f'block of a replicated parameter, starting at offset '
                                          f'{piece.source_offset}.')
-                    continue
-                target.copy_(_scaled(source, piece.scale, scale_power))
-                written[piece.source_offset] = True
+                    if seen.all():
+                        continue
+                target.copy_(source)
+                seen.fill_(True)
+            _require_placed(placed, rank)
 
+        if not covered.all():
+            missing = (~covered).nonzero()
+            raise ValueError(f'Affine map for a parameter of shape {self.logical_shape} leaves '
+                             f'{missing.numel()} element(s) uncovered, starting at offset {int(missing[0])}, '
+                             'so the parameter cannot be rebuilt from its shards.')
         return full_param.view(self.logical_shape)
 
     def _reject_scaled_optimizer_state(self, scale_power):
@@ -415,17 +438,21 @@ class ParamAffineMap:
 
     def extract(self, full_param, rank, scale_power=1):
         """Produce one rank's shard from the full parameter. The inverse of ``rebuild``."""
+        self._validate_rank(rank)
         self._reject_scaled_optimizer_state(scale_power)
         flat_param = _flat_buffer(full_param)
         shard_shape = self.shard_shapes[rank]
         shard = torch.empty(_product(shard_shape), dtype=full_param.dtype, device=full_param.device)
 
+        placed = torch.zeros(shard.numel(), dtype=torch.bool, device=shard.device)
         for piece in self.pieces_by_rank[rank]:
+            _place(placed, piece, rank)
             target = piece.dest_view(shard)
             target.copy_(piece.source_view(flat_param))
             factor = piece.scale**scale_power
             if factor != 1.0:
                 target.mul_(factor)
+        _require_placed(placed, rank)
 
         return shard.view(shard_shape)
 
@@ -466,6 +493,29 @@ def _scaled(tensor, scale, scale_power):
     if factor == 1.0:
         return tensor
     return tensor / factor
+
+
+def _place(placed, piece, rank):
+    """Mark the shard addresses ``piece`` occupies in ``placed``, refusing one already taken.
+
+    ``validate()`` checks destinations from metadata, which cannot place a view that wraps past
+    the end of a shard row. A mask of the shard places every stride exactly.
+    """
+    view = piece.dest_view(placed)
+    if view.any():
+        index = view.nonzero()[0].tolist()
+        address = piece.dest_offset + sum(position * stride for position, stride in zip(index, piece.dest_strides))
+        raise ValueError(f'Rank {rank} writes shard address {address} twice, so one piece would '
+                         'silently overwrite another.')
+    view.fill_(True)
+
+
+def _require_placed(placed, rank):
+    """Refuse a shard that its pieces leave partly unplaced, which a self-overlapping piece can do."""
+    if not placed.all():
+        missing = (~placed).nonzero()
+        raise ValueError(f'Rank {rank} pieces leave {missing.numel()} of its {placed.numel()} shard addresses '
+                         f'unwritten, starting at {int(missing[0])}.')
 
 
 def _flat_buffer(tensor):

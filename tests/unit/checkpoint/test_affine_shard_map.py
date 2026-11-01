@@ -553,14 +553,28 @@ def test_strided_destination_that_wraps_a_shard_row_round_trips():
     torch.testing.assert_close(affine_map.rebuild({0: affine_map.extract(full, 0)}), full)
 
 
-def test_full_check_refuses_a_destination_collision_of_any_stride():
+def _colliding_strided_map():
     # The first piece writes shard addresses 0 and 2, the second writes 1 and 2, and address 3
     # is never written. Neither piece is a box of the shard's grid, so only walking the
     # addresses can see it.
     pieces = [AffinePiece((2, ), 0, (1, ), 0, (2, ), [0]), AffinePiece((2, ), 2, (1, ), 1, (1, ), [0])]
-    affine_map = ParamAffineMap((4, ), {0: (4, )}, {0: pieces})
+    return ParamAffineMap((4, ), {0: (4, )}, {0: pieces})
+
+
+def test_full_check_refuses_a_destination_collision_of_any_stride():
     with pytest.raises(ValueError, match='twice'):
-        affine_map.validate_coverage()
+        _colliding_strided_map().validate_coverage()
+
+
+def test_conversion_refuses_a_destination_collision_of_any_stride():
+    # validate() accepts this map, so converting through it would read shard address 2 for two
+    # elements and never read address 3, and restoring would leave address 3 uninitialised.
+    affine_map = _colliding_strided_map()
+    affine_map.validate()
+    with pytest.raises(ValueError, match='twice'):
+        affine_map.extract(torch.arange(4.), 0)
+    with pytest.raises(ValueError, match='twice'):
+        affine_map.rebuild({0: torch.arange(4.)})
 
 
 def test_strided_destination_validation_does_not_enumerate_elements(monkeypatch):
@@ -597,6 +611,111 @@ def test_disagreeing_replicas_are_refused():
     shards = {0: torch.zeros(4, dtype=torch.float64), 1: torch.ones(4, dtype=torch.float64)}
     with pytest.raises(ValueError, match='different data'):
         affine_map.rebuild(shards)
+
+
+def test_replicas_cut_at_different_boundaries_are_compared_in_full():
+    # Rank 0 holds the replicated block as one piece and rank 1 as two halves. Comparing only a
+    # piece that starts where an earlier one did would check rank 1's first half and let its
+    # second half overwrite rank 0's unchecked.
+    pieces_by_rank = {
+        0: [AffinePiece((8, ), 0, (1, ), 0, (1, ), [0, 1])],
+        1: [AffinePiece((4, ), 0, (1, ), 0, (1, ), [0, 1]),
+            AffinePiece((4, ), 4, (1, ), 4, (1, ), [0, 1])],
+    }
+    affine_map = ParamAffineMap((8, ), {0: (8, ), 1: (8, )}, pieces_by_rank)
+    affine_map.validate_coverage()
+    full = torch.arange(8.)
+    torch.testing.assert_close(affine_map.rebuild({0: full, 1: full.clone()}), full)
+    drifted = full.clone()
+    drifted[6] += 1
+    with pytest.raises(ValueError, match='different data'):
+        affine_map.rebuild({0: full, 1: drifted})
+
+
+@pytest.mark.parametrize('logical_shape, source_offsets, match', [((9, ), (0, 4), 'uncovered'),
+                                                                  ((8, ), (0, 0), 'single holder')],
+                         ids=['nothing-holds-the-last-element', 'two-ranks-own-one-block'])
+def test_conversion_refuses_a_map_that_does_not_cover_the_parameter(logical_shape, source_offsets, match):
+    # Each rank fully writes its shard of four, so validate() accepts both maps. Without a check
+    # on the source side, rebuild would keep whatever torch.empty left where no rank writes.
+    pieces_by_rank = {
+        rank: [AffinePiece((4, ), offset, (1, ), 0, (1, ), [rank])]
+        for rank, offset in enumerate(source_offsets)
+    }
+    affine_map = ParamAffineMap(logical_shape, {0: (4, ), 1: (4, )}, pieces_by_rank)
+    affine_map.validate()
+    with pytest.raises(ValueError, match=match):
+        affine_map.rebuild({rank: torch.full((4, ), float(rank + 1)) for rank in (0, 1)})
+
+
+def _random_widths(rng, total, tp_degree):
+    cuts = sorted(rng.sample(range(1, total), tp_degree - 1))
+    return [stop - start for start, stop in zip([0] + cuts, cuts + [total])]
+
+
+def _random_layout(rng):
+    from deepspeed.checkpoint.affine import block_gather_map, segmented_map
+    tp_degree = rng.choice([2, 3, 4])
+    shape = (rng.randint(5, 12), rng.randint(5, 12))
+    axis = rng.choice([0, 1])
+    total = shape[axis]
+    kind = rng.choice(['split', 'replicated', 'segmented', 'blocks'])
+    if kind == 'split':
+        return contiguous_split_map(shape, _random_widths(rng, total, tp_degree), axis)
+    if kind == 'replicated':
+        return replicated_map(shape, tp_degree)
+    if kind == 'segmented':
+        replicated_rows = rng.randint(1, total - tp_degree)
+        split = total - replicated_rows
+        return segmented_map(shape, [(split, False), (replicated_rows, True)], axis, tp_degree,
+                             [_random_widths(rng, split, tp_degree)])
+    blocks = list(range(total))
+    rng.shuffle(blocks)
+    block_ids_by_rank, start = {}, 0
+    for rank, width in enumerate(_random_widths(rng, total, tp_degree)):
+        block_ids_by_rank[rank] = sorted(blocks[start:start + width])
+        start += width
+    return block_gather_map(shape, block_ids_by_rank, 1, axis)
+
+
+def _corrupt_one_piece(affine_map, rng):
+    rank = rng.choice(sorted(affine_map.pieces_by_rank))
+    pieces = affine_map.pieces_by_rank[rank]
+    index = rng.randrange(len(pieces))
+    piece = pieces[index]
+    fields = [piece.source_offset, list(piece.source_strides), piece.dest_offset, list(piece.dest_strides)]
+    which = rng.randrange(4)
+    if which in (0, 2):
+        fields[which] = max(0, fields[which] + rng.choice([-2, -1, 1, 2]))
+    else:
+        axis = rng.randrange(len(piece.shape))
+        fields[which][axis] = max(1, fields[which][axis] + rng.choice([-1, 1]))
+    pieces[index] = AffinePiece(piece.shape, fields[0], fields[1], fields[2], fields[3], piece.locations)
+
+
+def test_a_corrupted_map_is_refused_or_still_exact():
+    """Fixed seed: a map with one corrupted offset or stride either fails conversion or round-trips.
+
+    The conversion path runs only the metadata check, so this is what stands between a wrong map
+    and a universal checkpoint that silently holds the wrong values.
+    """
+    import random
+    rng = random.Random(20261031)
+    refused = 0
+    for _ in range(300):
+        affine_map = _random_layout(rng)
+        _corrupt_one_piece(affine_map, rng)
+        full = torch.arange(1, affine_map.numel + 1, dtype=torch.float32).view(affine_map.logical_shape)
+        try:
+            shards = {rank: affine_map.extract(full, rank) for rank in affine_map.pieces_by_rank}
+            rebuilt = affine_map.rebuild(shards)
+        except (ValueError, RuntimeError):
+            refused += 1
+            continue
+        assert torch.equal(rebuilt, full), affine_map.to_dict()
+    # Most corruptions break the map; the rest still describe a valid layout. Either way the run
+    # must have exercised refusals, or it shows nothing.
+    assert refused > 100
 
 
 def test_shard_that_disagrees_with_the_map_is_refused():
