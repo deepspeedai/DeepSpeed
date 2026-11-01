@@ -163,9 +163,43 @@ class TestMonitorTrainLoss(DistributedTest):
             rows = list(csv.reader(f))
         assert rows[0] == ["step", "train_loss"]
         logged = [float(value) for _, value in rows[1:]]
-        # bf16 loses precision when each micro-batch loss is divided by gas, not when the losses are summed
-        rel = 1e-2 if dtype == torch.bfloat16 else 1e-6
-        assert logged == pytest.approx(expected, rel=rel)
+        # Each micro-batch loss is cast to fp32 before the gas division, so bf16 matches as tightly as fp32
+        assert logged == pytest.approx(expected, rel=1e-6)
+
+    def test_fp16_loss_does_not_underflow_with_large_gas(self, tmpdir):
+        # 1e-5 / 1024 is below the smallest fp16 subnormal, so dividing before the fp32 cast would log 0
+        gas = 1024
+        hidden_dim = 10
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 1,
+            "gradient_accumulation_steps": gas,
+            "csv_monitor": {
+                "enabled": True,
+                "output_path": str(tmpdir),
+                "job_name": "loss"
+            },
+        }
+        model = SimpleModel(hidden_dim)
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+        model, _, _, _ = deepspeed.initialize(config=config_dict, model=model, optimizer=optimizer)
+        data_loader = random_dataloader(model=model,
+                                        total_samples=gas * model.train_micro_batch_size_per_gpu(),
+                                        hidden_dim=hidden_dim,
+                                        device=model.device,
+                                        dtype=torch.float)
+        micro_losses = []
+        for batch in data_loader:
+            loss = model(batch[0], batch[1])
+            small_loss = (loss * (1e-5 / loss.item())).half()
+            micro_losses.append(small_loss.float().item())
+            model.backward(small_loss)
+            model.step()
+
+        csv_path = os.path.join(str(tmpdir), "loss", "Train_Samples_train_loss.csv")
+        with open(csv_path) as f:
+            rows = list(csv.reader(f))
+        logged = [float(value) for _, value in rows[1:]]
+        assert logged == pytest.approx([sum(micro_losses) / gas], rel=1e-6)
 
 
 class TestCometMonitor(DistributedTest):

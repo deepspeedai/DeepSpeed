@@ -3409,6 +3409,13 @@ class DeepSpeedEngine(Module):
             # Set flag to prevent hooks from firing (we'll manually call prologue/epilogue)
             backward_kwargs = {"retain_graph": retain_graph}
 
+            # fp32 copy for the monitor, divided by gas only after the cast so low precision losses do not underflow
+            monitor_loss = None
+            if self.monitor.enabled:
+                monitor_loss = loss.detach().float().mean()
+                if scale_wrt_gas:
+                    monitor_loss = monitor_loss / self.gradient_accumulation_steps()
+
             loss = loss / self.gradient_accumulation_steps() if scale_wrt_gas else loss
             gas_scaled_loss = loss
 
@@ -3430,10 +3437,9 @@ class DeepSpeedEngine(Module):
                 self._backward_epilogue()
 
             # Summed over the micro-batches of a step and reported as train_loss in step().
-            # Added only after a successful backward, and in fp32 so low precision losses do not drift.
-            if self.monitor.enabled:
-                mean_loss = gas_scaled_loss.detach().float().mean()
-                self.losses = mean_loss if self.losses is None else self.losses + mean_loss
+            # Added only after a successful backward.
+            if monitor_loss is not None:
+                self.losses = monitor_loss if self.losses is None else self.losses + monitor_loss
 
             return gas_scaled_loss
         finally:
