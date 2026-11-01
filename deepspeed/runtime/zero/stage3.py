@@ -3537,11 +3537,12 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             state = self.optimizer.state.pop(fp32_param, None)
             self.backup_optimizer.state.pop(fp32_param, None)
             if state:
-                # torch Adam keeps the step count as a float32 tensor, DeepSpeedCPUAdam as an int.
+                # torch Adam keeps the moments in the param dtype and the step count as a float32 tensor;
+                # DeepSpeedCPUAdam keeps an int step and, with fp32_optimizer_states, fp32 moments for bf16 params.
                 self.backup_optimizer.state[fp32_param] = {
                     "step": torch.tensor(float(state["step"])),
-                    "exp_avg": state["exp_avg"],
-                    "exp_avg_sq": state["exp_avg_sq"],
+                    "exp_avg": state["exp_avg"].to(fp32_param.dtype),
+                    "exp_avg_sq": state["exp_avg_sq"].to(fp32_param.dtype),
                 }
 
     def state_dict(self):

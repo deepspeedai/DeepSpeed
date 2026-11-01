@@ -174,6 +174,21 @@ class TestPartialOffloadCheckpointPortability(DistributedTest):
         _train(engine, 1)
         engine.save_checkpoint(str(tmpdir), tag="again")
 
+    def test_resume_with_bf16_master_weights(self, tmpdir):
+        """torch Adam keeps the moments of the device sub-groups in the param dtype, also after a load that returns
+        fp32 moments for bf16 params (DeepSpeedCPUAdam with fp32_optimizer_states)."""
+        config = _config(ratio=0.5)
+        config["bf16"]["bf16_master_weights_and_grads"] = True
+        engine = _engine(config)
+        _train(engine, 2)
+        engine.save_checkpoint(str(tmpdir), tag="t")
+        engine = _engine(config)
+        engine.load_checkpoint(str(tmpdir), tag="t")
+        assert torch.isfinite(_train(engine, 1)[0]).all()
+        for fp32_param in _device_params(engine):
+            state = engine.optimizer.backup_optimizer.state[fp32_param]
+            assert state["exp_avg"].dtype == state["exp_avg_sq"].dtype == fp32_param.dtype
+
     def test_load_checkpoint_without_device_state(self, tmpdir):
         """Checkpoints saved before the state of the sub-groups kept on the device was saved have none for them."""
         engine = _engine(_config(ratio=0.5))
