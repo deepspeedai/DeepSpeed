@@ -1178,6 +1178,97 @@ class TestYuanOutputProjectionBias(DistributedTest):
             set_autotp_mode(training=False)
 
 
+class TestGPTBigCodeMultiQueryTraining(DistributedTest):
+    """Multi-query GPTBigCode must train the same model under AutoTP as on one device.
+
+    Every rank holds the whole shared key/value block of the fused c_attn but attends with only
+    its own query heads, so the gradient each rank computes for those rows is partial. Unless the
+    ranks sum it, each applies a different update to rows that must stay identical (#8927).
+    """
+    world_size = [2, 4]
+    reuse_dist_env = False
+
+    def test_matches_single_device_training(self):
+        skip_on_device()
+        transformers = pytest.importorskip("transformers")
+        hidden, heads, steps, lr = 32, 4, 4, 0.5
+        kv_rows = 2 * (hidden // heads)
+        device = torch.device(get_accelerator().current_device_name())
+
+        def build_model():
+            torch.manual_seed(0)
+            config = transformers.GPTBigCodeConfig(vocab_size=64,
+                                                   n_positions=32,
+                                                   n_embd=hidden,
+                                                   n_layer=2,
+                                                   n_head=heads,
+                                                   multi_query=True,
+                                                   attn_pdrop=0.0,
+                                                   resid_pdrop=0.0,
+                                                   embd_pdrop=0.0)
+            return transformers.GPTBigCodeForCausalLM(config)
+
+        batches = [
+            torch.randint(0, 64, (2, 16), generator=torch.Generator().manual_seed(step)).to(device)
+            for step in range(steps)
+        ]
+
+        reference = build_model().to(device)
+        # Plain SGD: Adam would turn floating-point noise on gradients that are zero in the unsharded
+        # model into visible updates and blur the comparison.
+        reference_optimizer = torch.optim.SGD(reference.parameters(), lr=lr)
+        reference_losses = []
+        reference_kv_grads = None
+        for input_ids in batches:
+            loss = reference(input_ids=input_ids, labels=input_ids).loss
+            loss.backward()
+            if reference_kv_grads is None:
+                c_attn = reference.transformer.h[0].attn.c_attn
+                reference_kv_grads = (c_attn.weight.grad[hidden:].clone(), c_attn.bias.grad[hidden:].clone())
+            reference_optimizer.step()
+            reference_optimizer.zero_grad()
+            reference_losses.append(loss.item())
+
+        ds_config = {
+            "train_micro_batch_size_per_gpu": 2,
+            "optimizer": {
+                "type": "SGD",
+                "params": {
+                    "lr": lr,
+                },
+            },
+            # The reference does not clip, and DeepSpeed clips to norm 1.0 by default.
+            "gradient_clipping": 0.0,
+            "tensor_parallel": {
+                "autotp_size": dist.get_world_size(),
+            },
+            "zero_optimization": {
+                "stage": 0,
+            },
+        }
+        try:
+            engine, _, _, _ = deepspeed.initialize(model=build_model(), config=ds_config)
+            c_attn = engine.module.transformer.h[0].attn.c_attn
+            losses = []
+            for step, input_ids in enumerate(batches):
+                loss = engine(input_ids=input_ids, labels=input_ids).loss
+                engine.backward(loss)
+                if step == 0:
+                    # The shared rows' gradient on every rank must be the whole gradient, not
+                    # the part from this rank's heads.
+                    torch.testing.assert_close(c_attn.weight.grad[-kv_rows:], reference_kv_grads[0])
+                    torch.testing.assert_close(c_attn.bias.grad[-kv_rows:], reference_kv_grads[1])
+                engine.step()
+                losses.append(loss.item())
+
+            torch.testing.assert_close(torch.tensor(losses), torch.tensor(reference_losses), atol=1e-5, rtol=0)
+            kv_on_ranks = [None] * dist.get_world_size()
+            dist.all_gather_object(kv_on_ranks, c_attn.weight.detach()[-kv_rows:].cpu())
+            assert all(torch.equal(kv, kv_on_ranks[0]) for kv in kv_on_ranks)
+        finally:
+            reset_tp_model_init_state()
+
+
 class TestLegacyLmHeadGatheredTraining(DistributedTest):
     world_size = 2
     reuse_dist_env = False
