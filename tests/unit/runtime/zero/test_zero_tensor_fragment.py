@@ -718,3 +718,71 @@ def test_lazy_init_only_inspects_the_group_that_stepped(monkeypatch):
     # An already linked group is not inspected again.
     optimizer._lazy_init_hp_params_optimizer_state(0)
     assert inspected == [partitions[1], partitions[0]]
+
+
+class TestUniversalLoadKeepsOptimizerStateLinked(DistributedTest):
+    world_size = 2
+    reuse_dist_env = True
+
+    @pytest.mark.parametrize("zero_stage", [1, 2])
+    def test_weights_only_load_relinks_state(self, zero_stage):
+        """A universal load clears every hp fragment, so the links must be rebuilt."""
+        if not get_accelerator().is_bf16_supported():
+            pytest.skip("requires bf16")
+
+        model = torch.nn.Linear(4, 4, bias=True)
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 1,
+            "steps_per_print": 1,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 1e-3,
+                    "torch_adam": True,
+                },
+            },
+            "bf16": {
+                "enabled": True
+            },
+            "zero_optimization": {
+                "stage": zero_stage,
+                "overlap_comm": False,
+            },
+            "communication_data_type": "fp32",
+            "gradient_clipping": 0.0,
+        }
+        engine, _, _, _ = deepspeed.initialize(model=model,
+                                               model_parameters=[{
+                                                   "params": [model.weight]
+                                               }, {
+                                                   "params": [model.bias]
+                                               }],
+                                               config=config_dict)
+        inputs = torch.arange(1, 5, dtype=torch.bfloat16, device=engine.device).unsqueeze(0)
+        engine.backward(engine(inputs).sum())
+        engine.step()
+
+        expected = {
+            name: {
+                key: safe_get_full_optimizer_state(param, key).clone()
+                for key in ("exp_avg", "exp_avg_sq")
+            }
+            for name, param in engine.module.named_parameters()
+        }
+
+        # A weights-only universal load rewrites fp32 weights and resets every
+        # hp fragment without touching the optimizer state.
+        for group in engine.optimizer.bit16_groups:
+            for lp in group:
+                if lp._hp_mapping is not None:
+                    lp._hp_mapping.optim_fragment = {}
+        engine.optimizer.load_hp_checkpoint_state_from_checkpoint_dir = lambda *args, **kwargs: None
+        engine.optimizer._load_universal_checkpoint("unused",
+                                                    load_optimizer_states=False,
+                                                    load_from_fp32_weights=False)
+
+        for name, param in engine.module.named_parameters():
+            for key, value in expected[name].items():
+                torch.testing.assert_close(safe_get_full_optimizer_state(param, key), value, rtol=0, atol=0)
+
+        engine.destroy()

@@ -3697,6 +3697,14 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         self.load_hp_checkpoint_state_from_checkpoint_dir("bit16_groups",
                                                           checkpoint_folder,
                                                           load_optimizer_states=load_optimizer_states)
+        # Universal loading rebuilds every hp fragment, which drops the
+        # optimizer-state fragments previously linked to them. Rebuild the links
+        # from the optimizer state still in memory so the state getters keep
+        # working before the next step; with no optimizer state to link, groups
+        # stay pending and are picked up when they are next stepped.
+        self._hp_optimizer_states_linked = False
+        self._hp_optimizer_states_linked_groups.clear()
+        self._lazy_init_hp_params_optimizer_state()
 
     def _load_global_state(self, sd):
         self.loss_scaler = sd.get(LOSS_SCALER, self.loss_scaler)
