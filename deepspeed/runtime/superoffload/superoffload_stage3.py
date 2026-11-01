@@ -3,6 +3,7 @@
 
 # DeepSpeed Team
 
+import os
 import time
 from collections import defaultdict
 from typing import List
@@ -57,7 +58,7 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
         self.sub_group_to_param_num = {}
         # Per sub-group, the ds_ids of the params whose gradient for this step is in the fp32 gradient buffer.
         self.sub_group_grads_ready = defaultdict(set)
-        # Sub-groups stepped during backward, mapped to the (lr, grad_scale) of that step for a rollback.
+        # Sub-groups stepped during backward, mapped to the (hyperparameters, grad_scale) of that step for a rollback.
         self._submitted_cpu_sub_groups = {}
         self.async_cpuadam_num = 0
         self.max_grad_numel = 0
@@ -87,6 +88,29 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
                                                                    adamw_mode=adamw_mode,
                                                                    fp32_optimizer_states=fp32_optimizer_states,
                                                                    grad_dtype=self.master_weights_and_grads_dtype)
+        self._check_shm_size(fp32_optimizer_states)
+
+    def _check_shm_size(self, fp32_optimizer_states):
+        """Warn when /dev/shm is too small for the tensors that SuperOffload shares with its worker process."""
+        try:
+            stat = os.statvfs("/dev/shm")
+        except OSError:
+            return
+        numel = sum(self.fp32_partitioned_groups_flat[i].numel() for i, device in self.subgroup_to_device.items()
+                    if device == 'cpu')
+        weight_size = torch.empty(0, dtype=self.master_weights_and_grads_dtype).element_size()
+        state_size = 4 if fp32_optimizer_states else weight_size
+        # The fp32 weights and gradients move there at the first step, the Adam state at the first checkpoint save
+        # or load.
+        needed = numel * 2 * (weight_size + state_size)
+        local_ranks = int(os.environ.get("LOCAL_WORLD_SIZE", os.environ.get("LOCAL_SIZE", 1)))
+        size = stat.f_blocks * stat.f_frsize
+        if size < needed * local_ranks:
+            logger.warning(
+                f"SuperOffload shares the fp32 weights, gradients and Adam state of the CPU sub-groups with "
+                f"its worker process through /dev/shm: {needed / 2**30:.1f} GiB on this rank, "
+                f"{local_ranks} rank(s) on this node, but /dev/shm has {size / 2**30:.1f} GiB. A checkpoint "
+                f"save or load may fail; increase the size of /dev/shm.")
 
     def _create_fp16_sub_groups(self, params_group):
 
@@ -131,7 +155,6 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
 
         cur_device = self.subgroup_to_device[sub_group_id]
         if cur_device != 'cpu':
-            self._sync_backup_optimizer_group(param_group_id)
             self.backup_optimizer.param_groups[param_group_id]['params'] = [fp32_param]
             step_with_gradscaler(self.backup_optimizer)
             self.backup_optimizer.param_groups[param_group_id]['params'] = []
@@ -205,7 +228,7 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
                 if self.subgroup_to_device[i] == 'cpu' and self.speculative_cpu_step and self._grads_finite(i):
                     param_group_id = self.sub_group_to_group_id[i]
                     fp32_param = self.fp32_partitioned_groups_flat[i]
-                    current_lr = self.optimizer.param_groups[param_group_id]['lr']
+                    hyperparams = self._hyperparams(param_group_id)
                     # The gradients still carry the loss scale, which step() would remove.
                     grad_scale = 1.0 / self.loss_scale
 
@@ -213,9 +236,9 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
                                                                i,
                                                                fp32_param.data,
                                                                fp32_param.grad.data,
-                                                               lr=current_lr,
+                                                               hyperparams=hyperparams,
                                                                grad_scale=grad_scale)
-                    self._submitted_cpu_sub_groups[i] = (current_lr, grad_scale)
+                    self._submitted_cpu_sub_groups[i] = (hyperparams, grad_scale)
                     self.async_cpuadam_num += 1
 
                     result = self.superoffload_cpu_optimizer.get_result()
@@ -261,8 +284,9 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
         timer_names.add(OPTIMIZER_STEP_TIMER)
         self.timers(OPTIMIZER_STEP_TIMER).start()
 
-        if self.check_clip_grads(scaled_global_grad_norm):
-            # The steps taken during backward used the unclipped gradients.
+        # The steps taken during backward used the unclipped gradients, and the loss scale of the backward, which
+        # _loss_scale_update_and_overflow_cleanup may have raised before unscale_and_clip_grads removes it.
+        if self.check_clip_grads(scaled_global_grad_norm) or self._loss_scale_changed():
             self._rollback_submitted_cpu_sub_groups()
 
         for sub_group_id, group in enumerate(self.fp16_groups):
@@ -274,12 +298,11 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
             elif sub_group_id not in self._submitted_cpu_sub_groups:
                 param_group_id = self.sub_group_to_group_id[sub_group_id]
                 fp32_param = self.fp32_partitioned_groups_flat[sub_group_id]
-                current_lr = self.optimizer.param_groups[param_group_id]['lr']
                 self._sync_cpu_optimizer_step(param_group_id,
                                               sub_group_id,
                                               fp32_param.data,
                                               fp32_param.grad.data,
-                                              lr=current_lr)
+                                              hyperparams=self._hyperparams(param_group_id))
 
             self._reassign_or_swap_out_partitioned_parameters(sub_group_id)
             self._release_sub_group(sub_group_id, timer_names)
@@ -326,6 +349,15 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
         """Whether the sub-group's gradients are finite. A step on inf or nan cannot be rolled back."""
         norms = [self.norm_for_param_grads[self.get_param_id(param)] for param in self.fp16_groups[sub_group_id]]
         return bool(torch.isfinite(torch.stack(norms)).all())
+
+    def _hyperparams(self, param_group_id):
+        """The hyperparameters of a param group, which LR, momentum or weight decay schedules change."""
+        group = self.optimizer.param_groups[param_group_id]
+        return {key: group[key] for key in ("lr", "betas", "eps", "weight_decay")}
+
+    def _loss_scale_changed(self):
+        grad_scale = 1.0 / self.loss_scale
+        return any(scale != grad_scale for _, scale in self._submitted_cpu_sub_groups.values())
 
     def _wait_for_async_operations(self, timeout_seconds=60):
         """Wait for all pending asynchronous CPU optimizer operations to complete with timeout error.
@@ -393,7 +425,7 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
                                  fp32_param_data,
                                  fp32_grad_data,
                                  rollback: bool = False,
-                                 lr: float = None,
+                                 hyperparams: dict = None,
                                  timeout_seconds: int = 60,
                                  grad_scale: float = 1.0):
         event_type = EventTypes.ROLLBACK if rollback else EventTypes.ADAM_STEP
@@ -402,7 +434,7 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
                                                    fp32_param_data,
                                                    fp32_grad_data,
                                                    rollback=rollback,
-                                                   lr=lr,
+                                                   hyperparams=hyperparams,
                                                    grad_scale=grad_scale)
         # Wait for completion
         self._wait_for_single_async_result(event_type, timeout_seconds)
@@ -413,7 +445,7 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
             self._rollback_cpu_sub_group(sub_group_id)
 
     def _rollback_cpu_sub_group(self, sub_group_id):
-        lr, grad_scale = self._submitted_cpu_sub_groups.pop(sub_group_id)
+        hyperparams, grad_scale = self._submitted_cpu_sub_groups.pop(sub_group_id)
         param_group_id = self.sub_group_to_group_id[sub_group_id]
         fp32_param = self.fp32_partitioned_groups_flat[sub_group_id]
         self._sync_cpu_optimizer_step(param_group_id,
@@ -421,7 +453,7 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
                                       fp32_param.data,
                                       fp32_param.grad.data,
                                       rollback=True,
-                                      lr=lr,
+                                      hyperparams=hyperparams,
                                       grad_scale=grad_scale)
 
     @instrument_w_nvtx

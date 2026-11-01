@@ -24,7 +24,7 @@ class TaskKeys:
     PARAM_GROUP_ID = "param_group_id"
     SUB_GROUP_ID = "sub_group_id"
     ROLLBACK = "rollback"
-    LR = "lr"
+    HYPERPARAMS = "hyperparams"
     GRAD_SCALE = "grad_scale"
     COMMAND = "command"
     STATE = "state"
@@ -144,7 +144,7 @@ def superoffload_optimizer_worker(param_queue: mp.SimpleQueue,
             param_group_id = task[TaskKeys.PARAM_GROUP_ID]
             sub_group_id = task[TaskKeys.SUB_GROUP_ID]
             rollback = task.get(TaskKeys.ROLLBACK, False)
-            task_lr = task.get(TaskKeys.LR, None)
+            hyperparams = task.get(TaskKeys.HYPERPARAMS, None)
             grad_scale = task.get(TaskKeys.GRAD_SCALE, 1.0)
 
             logger.debug(f"Processing param_group_id: {param_group_id}, sub_group_id: {sub_group_id}")
@@ -153,8 +153,8 @@ def superoffload_optimizer_worker(param_queue: mp.SimpleQueue,
             del task[TaskKeys.PARAM_GRAD]
             task.clear()
 
-            if task_lr is not None:
-                optimizer.param_groups[param_group_id]['lr'] = task_lr
+            if hyperparams is not None:
+                optimizer.param_groups[param_group_id].update(hyperparams)
 
             grad_numel = param_grad.numel()
             if grad_numel > max_grad_numel:
@@ -283,10 +283,12 @@ class SuperOffloadCPUOptimizer:
                    fp32_param: torch.Tensor,
                    fp32_grad: torch.Tensor,
                    rollback: bool = False,
-                   lr: float = None,
+                   hyperparams: Dict[str, Any] = None,
                    grad_scale: float = 1.0) -> None:
         """
         Queue parameter for optimization in the worker process.
+
+        hyperparams (lr, betas, eps, weight_decay) replace those of the param group in the worker before the step.
         """
         if not self.cpuadam_process.is_alive():
             raise RuntimeError("Worker process is not alive")
@@ -298,8 +300,8 @@ class SuperOffloadCPUOptimizer:
             TaskKeys.SUB_GROUP_ID: sub_group_id,
             TaskKeys.ROLLBACK: rollback,
         }
-        if lr is not None:
-            task[TaskKeys.LR] = lr
+        if hyperparams is not None:
+            task[TaskKeys.HYPERPARAMS] = hyperparams
         if grad_scale != 1.0:
             task[TaskKeys.GRAD_SCALE] = grad_scale
         self.param_queue.put(task)

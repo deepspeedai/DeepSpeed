@@ -154,7 +154,7 @@ def test_bf16_optimizer_reports_invalid_step_and_recovers(monkeypatch):
 
 def test_superoffload_rolls_back_only_subgroups_submitted_this_step():
     optimizer = object.__new__(SuperOffloadOptimizer_Stage3)
-    optimizer._submitted_cpu_sub_groups = {1: (0.1, 1.0)}
+    optimizer._submitted_cpu_sub_groups = {1: ({"lr": 0.1}, 1.0)}
     optimizer.sub_group_to_group_id = {0: 10, 1: 11}
     parameter = SimpleNamespace(data=torch.tensor([1.0]), grad=SimpleNamespace(data=torch.tensor([2.0])))
     optimizer.fp32_partitioned_groups_flat = [parameter, parameter]
