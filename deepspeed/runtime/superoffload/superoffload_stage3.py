@@ -225,8 +225,9 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
             get_accelerator().current_stream().synchronize()
             # A param that gets a second gradient adds its sub-group again.
             for i in dict.fromkeys(completed_sub_groups):
-                if self.subgroup_to_device[i] == 'cpu' and self.speculative_cpu_step and self._grads_finite(i):
-                    param_group_id = self.sub_group_to_group_id[i]
+                param_group_id = self.sub_group_to_group_id[i]
+                if (self.subgroup_to_device[i] == 'cpu' and self.speculative_cpu_step
+                        and self._betas_nonzero(param_group_id) and self._grads_finite(i)):
                     fp32_param = self.fp32_partitioned_groups_flat[i]
                     hyperparams = self._hyperparams(param_group_id)
                     # The gradients still carry the loss scale, which step() would remove.
@@ -349,6 +350,11 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
         """Whether the sub-group's gradients are finite. A step on inf or nan cannot be rolled back."""
         norms = [self.norm_for_param_grads[self.get_param_id(param)] for param in self.fp16_groups[sub_group_id]]
         return bool(torch.isfinite(torch.stack(norms)).all())
+
+    def _betas_nonzero(self, param_group_id):
+        """Whether a step of the param group can be rolled back: the rollback divides the moments by beta1 and beta2.
+        Checked at each step, as momentum schedules change the betas."""
+        return all(beta != 0 for beta in self.optimizer.param_groups[param_group_id]["betas"])
 
     def _hyperparams(self, param_group_id):
         """The hyperparameters of a param group, which LR, momentum or weight decay schedules change."""

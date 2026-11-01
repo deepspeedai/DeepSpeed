@@ -149,6 +149,10 @@ CASES = {
     # Clipping undoes the steps taken during backward and redoes them, which is exact up to rounding. In fp32 the
     # rounding stays small; bf16 weights would amplify it.
     "clipping": (dict(clip=0.05, precision="fp32"), lambda unused: _all_used, False),
+    # A step cannot be undone with a beta of 0 (the rollback divides by the betas), so those CPU steps wait for
+    # step() and stay exact.
+    "clipping_beta1_zero": (dict(clip=0.05, precision="fp32", betas=[0.0, 0.999]), lambda unused: _all_used, True),
+    "clipping_beta2_zero": (dict(clip=0.05, precision="fp32", betas=[0.9, 0.0]), lambda unused: _all_used, True),
     # Overflow steps are skipped; the steps taken during backward are undone, exact up to rounding.
     "fp16_overflow": (dict(precision="fp16", sub_group_size=4500), lambda unused: _all_used, False),
 }
