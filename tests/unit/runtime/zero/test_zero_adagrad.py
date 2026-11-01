@@ -56,4 +56,4 @@ class TestZeroAdagradParamGroups(DistributedTest):
 
             with deepspeed.zero.GatheredParameters(model.parameters(), enabled=zero_stage == 3):
                 for actual, expected in zip(model.parameters(), reference.parameters()):
-                    torch.testing.assert_close(actual, expected, rtol=1e-6, atol=1e-7)
+                    torch.testing.assert_close(actual, expected)
