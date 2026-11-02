@@ -75,6 +75,46 @@ one token. It cannot be combined with CUDA graph capture,
 (``SamplingConfig.continuous_batch_size``). Sampling still happens independently
 for every response branch after the shared prompt forward.
 
+Segment-Based Kernel Injection (experimental)
+---------------------------------------------
+
+``HybridEngineRolloutConfig(use_segki=True)`` accelerates greedy decode by
+injecting native CUDA kernels into comm-free segments of the model at rollout
+construction. Segments are detected structurally, by attribute names, so any
+HF family whose gated MLP uses ``gate_proj``/``up_proj``/``down_proj`` with a
+SiLU activation (LLaMA, Qwen, Mistral, DeepSeek, ...) or whose GatedDeltaNet
+block uses the ``in_proj_{qkv,z,b,a}`` set is picked up without per-model code.
+GELU-gated variants (e.g. Gemma) and other unsupported architectures pass
+through silently. The option is disabled by default and
+combines with ``use_graph_capture=True`` for the fastest path.
+
+Scope and semantics
+~~~~~~~~~~~~~~~~~~
+
+- **Throughput numbers** count executed decode steps (all rows step together);
+  tokens produced after a row's EOS are padded, so valid-token rates can be
+  lower at early EOS. Graph warm-up + capture happens per ``generate()`` call
+  (~1–1.5 s on a 4B model) and is excluded from decode-rate measurements.
+- **Graph reuse**: a fresh graph is captured on every ``generate()`` call, so
+  weights updated by training between calls are picked up. Replaying one
+  captured graph across a training step (weight mutation without recapture)
+  is not supported — the capture reads current parameter memory, so stale
+  addresses could otherwise persist.
+- **Packed (varlen) sequences**: the GDN conv/scan wrappers forward the
+  packed-sequence boundary markers (``seq_idx`` / ``cu_seqlens``) exactly as
+  the native forward does; packed *training* (gradients through the packed
+  path) is not exercised by the test suite and not guaranteed.
+
+Injected replacements read the original weight ``Parameter`` objects directly
+with exact backward, so training and generation share one forward path: no
+weight copies and no inject/eject switching between rollout and training
+steps.
+
+Segment injection requires a CUDA accelerator and currently targets
+single-GPU (batch-size 1 gets a fully fused decode step inside the captured
+graph; larger batches keep batched argmax in Python). Fused projections are
+never applied to layers carrying tensor-parallel collectives.
+
 Continuous batching (experimental)
 -----------------------------------
 
