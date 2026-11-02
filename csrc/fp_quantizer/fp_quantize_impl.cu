@@ -267,7 +267,7 @@ __global__ void apply_dequantization(uint8_t* val, T* q_val, int group_size, int
 
     uint8_t* scale_as_int8 = reinterpret_cast<uint8_t*>(&scale);
     if (quantized_bits == 6) {
-        mem_access::load_global<quantization::quanitzed_access_granularity>(
+        mem_access::load_global<quantization::quanitzed_access_granularity_6bits>(
             scale_as_int8, val + g_index * (group_size_bytes + 4) + group_size_bytes);
         mem_access::load_global<quantization::quanitzed_access_granularity_6bits>(
             scale_as_int8 + quantization::quanitzed_access_granularity_6bits,
@@ -457,7 +457,7 @@ __global__ void apply_selective_dequantization(uint8_t* val,
 
     uint8_t* scale_as_int8 = reinterpret_cast<uint8_t*>(&scale);
     if (quantized_bits == 6) {
-        mem_access::load_global<quantization::quanitzed_access_granularity>(
+        mem_access::load_global<quantization::quanitzed_access_granularity_6bits>(
             scale_as_int8, val + g_index * (group_size_bytes + 4) + group_size_bytes);
         mem_access::load_global<quantization::quanitzed_access_granularity_6bits>(
             scale_as_int8 + quantization::quanitzed_access_granularity_6bits,

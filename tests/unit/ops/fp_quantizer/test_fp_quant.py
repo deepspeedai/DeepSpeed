@@ -134,7 +134,7 @@ def test_fp_quant(dtype, q_bits):
         assert 0.0004 > abs(qtorch_error.item() - ds_error.item()), f"failed on iteration {i}"
 
 
-@pytest.mark.parametrize("q_bits, mantissa_bits", [(6, 2), (8, 3), (12, 4)])
+@pytest.mark.parametrize("q_bits, mantissa_bits", [(6, 2), (8, 3), (12, 7)])
 def test_fp_quant_preserves_zero_and_subnormal_codes(q_bits, mantissa_bits):
     device_name = get_accelerator().device_name()
     exponent_bits = q_bits - mantissa_bits - 1

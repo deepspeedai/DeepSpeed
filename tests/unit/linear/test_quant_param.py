@@ -57,7 +57,7 @@ class TestQuantParam(DistributedTest):
         # should be able to clone parameter via dict, HF expects this to work
         qp_copy = QuantizedParameter(qp.data, **qp.__dict__)
 
-        assert all(qp.data == qp_copy.data)
+        assert torch.equal(qp.data, qp_copy.data)
         assert qp.quantization_config == qp_copy.quantization_config
 
     @pytest.mark.parametrize("q_bits", [6, 8, 12])
@@ -70,6 +70,7 @@ class TestQuantParam(DistributedTest):
         quantization_config.q_dtype = FPQuantizerBuilder.get_default_quant_dtype()
 
         quantized_weight = QuantizedParameter(weight, quantization_config=quantization_config).to(device)
+        assert isinstance(quantized_weight, QuantizedParameter)
         actual = F.linear(input, quantized_weight.dequantized())
 
         torch.testing.assert_close(actual, expected, rtol=0, atol=0)

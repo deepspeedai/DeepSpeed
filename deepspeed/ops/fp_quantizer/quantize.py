@@ -81,7 +81,7 @@ class FP_Quantize(Quantizer):
         if q_bits == 8:
             pass
         elif q_bits == 12:
-            q_mantisa_bits = 4
+            q_mantisa_bits = 7
         elif q_bits == 6:
             q_mantisa_bits = 2
         elif q_bits == 4:
@@ -126,7 +126,7 @@ class FP_Quantize(Quantizer):
         if q_bits == 8:
             pass
         elif q_bits == 12:
-            q_mantisa_bits = 4
+            q_mantisa_bits = 7
         elif q_bits == 6:
             q_mantisa_bits = 2
         elif q_bits == 4:
@@ -159,7 +159,7 @@ class FP_Quantize(Quantizer):
         if q_bits == 8:
             pass
         elif q_bits == 12:
-            q_mantisa_bits = 4
+            q_mantisa_bits = 7
         elif q_bits == 6:
             q_mantisa_bits = 2
         elif q_bits == 4:
