@@ -7,9 +7,9 @@ Two generation paths:
   1. **model.generate()** (default): delegates to HuggingFace generate.
      Supports sampling (temperature, top_p) and greedy.
   2. **graph capture + DeepSpeedStaticCache**: only for greedy (temperature=0).
-     Pre-allocates a StaticCache, captures the decode forward pass with a
-     CUDA graph, and replays it for each decode step.  Eliminates kernel
-     launch overhead.
+     Pre-allocates a StaticCache, captures the decode forward pass into a
+     graph, and replays it for each decode step.  Eliminates kernel launch
+     overhead.
   3. **continuous batching (experimental)**: an opt-in bounded greedy path
      selected through ``SamplingConfig.continuous_batch_size``.
 """
@@ -181,7 +181,7 @@ class HybridEngineRollout(RolloutEngine):
         try:
             if self.use_shared_prefill and n > 1:
                 if self.use_graph_capture:
-                    raise RuntimeError("Shared prefill does not support CUDA graph capture")
+                    raise RuntimeError("Shared prefill does not support graph capture")
                 self.engine.prepare_shared_prefill(B, n, prompt_len)
                 shared_prefill_handles = self._register_shared_prefill_hooks(module, B, n)
             if self.use_graph_capture and is_greedy:
@@ -545,7 +545,7 @@ class HybridEngineRollout(RolloutEngine):
 
     @torch.no_grad()
     def _generate_continuous_graph(self, original_request, requests, sampling, max_batch_size):
-        """Run continuous greedy decoding with a fixed-capacity CUDA graph.
+        """Run continuous greedy decoding with a fixed-capacity graph.
 
         Scheduler slots stay attached to physical cache rows for their whole
         lifetime. Retired rows are masked until a new prompt is prefetched into
@@ -559,10 +559,10 @@ class HybridEngineRollout(RolloutEngine):
             raise ValueError("continuous batching requires a model with cache-class support; use the default "
                              "generate() path or upgrade transformers")
         if getattr(module.config, "_attn_implementation", None) == "flash_attention_2":
-            raise ValueError("continuous CUDA graph capture does not support flash_attention_2")
+            raise ValueError("continuous graph capture does not support flash_attention_2")
         device = requests[0].prompt_ids.device
-        if device.type != "cuda":
-            raise ValueError("continuous CUDA graph capture requires CUDA rollout inputs")
+        if get_accelerator().create_graph() is None:
+            raise ValueError("continuous graph capture is not supported on the current accelerator")
 
         from transformers import StaticCache
         from deepspeed.utils.static_cache import DeepSpeedStaticCache
@@ -735,9 +735,9 @@ class HybridEngineRollout(RolloutEngine):
 
     def _validate_continuous_graph_options(self, prompt_len, sampling):
         if self.align_decode_fronts:
-            raise ValueError("continuous CUDA graph capture does not support aligned decode fronts")
+            raise ValueError("continuous graph capture does not support aligned decode fronts")
         if self.enable_cache_trimming:
-            raise ValueError("continuous CUDA graph capture does not support cache trimming")
+            raise ValueError("continuous graph capture does not support cache trimming")
         if (self.continuous_cache_capacity is not None
                 and self.continuous_cache_capacity < prompt_len + sampling.max_new_tokens):
             raise ValueError("continuous_cache_capacity must fit the prompt and all generated tokens")
@@ -1304,7 +1304,7 @@ class HybridEngineRollout(RolloutEngine):
     # ------------------------------------------------------------------
 
     def _generate_graph(self, prompt_ids, prompt_attn, max_new_tokens, pad_token_id, module, device):
-        """Greedy decode with DeepSpeedStaticCache + CUDA graph capture."""
+        """Greedy decode with DeepSpeedStaticCache + graph capture."""
         from transformers import StaticCache
         from deepspeed.utils.static_cache import DeepSpeedStaticCache
 

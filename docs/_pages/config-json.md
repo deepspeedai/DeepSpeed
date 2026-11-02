@@ -489,8 +489,8 @@ reduction and offload ordering and is not covered; a warning is logged.
 <i>**load_from_fp32_weights**</i>: [boolean]
 
 | Description                                                                                                                                                                                                                          | Default |
-| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------- |
-| Initialize fp32 master weights from fp32 copies in checkpoint (no precision loss) or from model's fp16 copies (with precision loss). This can be used to initialize optimizer state even when checkpoint is missing optimizer state. | `True`  |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| Deprecated and ignored by `DeepSpeedEngine.load_checkpoint`. Full ZeRO checkpoint loads always restore saved fp32 master weights. Module-only loads rebuild ZeRO-1/2 fp32 master weights from the loaded model weights, while ZeRO-3 still reads fp32 weights because its model checkpoint is empty. | `True`  |
 
 ***round_robin_gradients***: [boolean]
 
@@ -870,17 +870,17 @@ The Hybrid Engine (`DeepSpeedHybridEngine`) switches a model between training mo
     "release_inference_cache": false,
     "pin_parameters": true,
     "tp_gather_partition_size": 8,
-    "enable_cuda_graph": false
+    "enable_graph_capture": false
   }
 ```
 
-***enable_cuda_graph***: [boolean]
+***enable_graph_capture***: [boolean]
 
 | Description                                                                                                                                                                                                                                                                                                                                        | Default |
 | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| Capture token generation into CUDA graphs. Generation issues on the order of a thousand kernel launches per token and is bound by CPU launch overhead rather than by the GPU, so replaying a captured graph removes most of the per-token cost. One graph is captured per decode position, and generated tokens are unchanged. | `false` |
+| Capture token generation into device graphs. Generation issues on the order of a thousand kernel launches per token and is bound by CPU launch overhead rather than by the accelerator, so replaying a captured graph removes most of the per-token cost. One graph is captured per decode position, and generated tokens are unchanged. The previous key `enable_cuda_graph` is deprecated: its value migrates to this field with a warning, so existing configs keep working. | `false` |
 
-`enable_cuda_graph` requires a pinned generation length (`min_new_tokens` equal to `max_new_tokens`) and `max_out_tokens` large enough to cover the longest generation. It is ignored, with a warning, when any of the following apply, since captured graphs would not stay valid:
+`enable_graph_capture` requires a pinned generation length (`min_new_tokens` equal to `max_new_tokens`) and `max_out_tokens` large enough to cover the longest generation. It is ignored, with a warning, when any of the following apply, since captured graphs would not stay valid:
 
 * ZeRO stage 3, where parameters are gathered into fresh buffers for each generation
 * `release_inference_cache: true`, which frees the buffers the graphs write into
@@ -1097,7 +1097,7 @@ smoke coverage used for this AutoEP surface produced the following version gates
 
 | Description                                                                                              | Default |
 | -------------------------------------------------------------------------------------------------------- | ------- |
-| How the expert MLP combines its gate and up projections, by a name registered in `deepspeed.moe.ep_experts.EXPERT_ACTIVATIONS`: `"swiglu"` (`silu(gate) * up`), `"geglu_tanh"` (`gelu_tanh(gate) * up`, Gemma-4), `"swiglu_clamped"` (`silu(clamp(gate)) * clamp(up)`, DeepSeek-V4) or `"swiglu_oai"` (`(clamp(up) + 1) * clamp(gate) * sigmoid(alpha * clamp(gate))`, GPT-OSS and MiniMax-M3). `null` = use preset default, which is `"swiglu"` for every built-in preset. AutoEP checks the name against the model: a clamp limit on the experts module or the model config, or an experts `act_fn` that is not the named form's gate function, is an error unless this key is set. The clamp limit and alpha are taken from the model when it states them. `deepspeed.moe.ep_experts.register_expert_activation` adds a form. | `null`  |
+| How the expert MLP combines its gate and up projections, by a name registered in `deepspeed.moe.ep_experts.EXPERT_ACTIVATIONS`: `"swiglu"` (`silu(gate) * up`), `"geglu_tanh"` (`gelu_tanh(gate) * up`, Gemma-4), `"swiglu_clamped"` (`silu(clamp(gate)) * clamp(up)`, DeepSeek-V4) or `"swiglu_oai"` (`(clamp(up) + 1) * clamp(gate) * sigmoid(alpha * clamp(gate))`, GPT-OSS and MiniMax-M3). `null` = use preset default, which is `"swiglu"` for every built-in preset. AutoEP checks the name against the model: a clamp limit on the experts module or the model config, or an experts `act_fn` that is not the named form's gate function, is an error unless this key is set. The clamp limit and alpha are taken from the model when it states them. With Triton on an accelerator, `"swiglu"` and the two clamped forms run a fused Triton kernel (one kernel forward, one backward, only the gate and up projections kept for backward); `"geglu_tanh"`, and every form on the CPU, runs in plain PyTorch. `deepspeed.moe.ep_experts.register_expert_activation` adds a form. | `null`  |
 
 #### Custom Model Example
 
