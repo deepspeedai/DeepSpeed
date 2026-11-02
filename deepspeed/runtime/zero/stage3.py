@@ -3931,6 +3931,15 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         # HP param
         if needs_offload(OffloadStateTypeEnum.hp_params):
+            lp_params_stay = (OffloadStateTypeEnum.lp_params not in self.offloaded_states
+                              and not needs_offload(OffloadStateTypeEnum.lp_params))
+            if self.aliased_fp32_sub_groups and lp_params_stay:
+                # A caller offloading hp_params to free device memory would otherwise not learn that these
+                # sub-groups stayed.
+                logger.warning_once(
+                    f"offload_states: the fp32 master copy of {len(self.aliased_fp32_sub_groups)} sub-group(s) is the "
+                    "weight partition itself, so it moves only with lp_params; offloading hp_params without lp_params "
+                    "frees no device memory for it")
             if pin_memory:
                 if not hasattr(self, "hp_params_pin_buffers"):
                     self.hp_params_pin_buffers = [

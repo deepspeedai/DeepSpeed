@@ -430,6 +430,8 @@ class TestOffloadStatesZero3AliasedMaster(DistributedTest):
     world_size = 2
 
     def test_round_trips_keep_one_copy(self, precision, pin_memory):
+        if precision == "autocast" and not get_accelerator().is_bf16_supported():
+            pytest.skip("bfloat16 is not supported on this accelerator")
         hidden_dim = 256
         config_dict = {
             "train_micro_batch_size_per_gpu": 1,
