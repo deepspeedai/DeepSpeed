@@ -18,7 +18,7 @@ transfer group is the default group, ``TransferEndpoints`` maps locations to the
 
 import statistics
 import time
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 import torch
 
@@ -96,7 +96,7 @@ def calibrate_links(sizes: Sequence[int] = DEFAULT_SIZES,
                     repeats: int = 10,
                     warmup: int = 2,
                     path_of: Callable[[int, int], str] = default_path_of,
-                    fan_width: Optional[int] = None) -> Dict:
+                    fan_width: Optional[Union[int, Sequence[int]]] = None) -> Dict:
     """Time local copies, every ordered process pair alone, all processes at once, and fans.
 
     Every process of the default group must call this. It returns the same dictionary on every
@@ -107,20 +107,22 @@ def calibrate_links(sizes: Sequence[int] = DEFAULT_SIZES,
       switches and sockets are each sampled. A sample is the slower of its two endpoints.
     - ``concurrent``: every process sends to ``process + shift`` and receives from
       ``process - shift`` at the same time, for every shift, so links are sampled while sharing.
-    - ``fan_out``: for every root, the root sends one message to each of its ``fan_width`` peers,
-      ``root + 1`` onwards, at once (1 to N), while every other process is idle.
-    - ``fan_in``: for every root, each of its peers sends one message to the root at once (N to 1),
-      so the root's receive side is shared.
+    - ``fan_out``: for every root and fan width, the root sends one message to each of its
+      ``width`` peers, ``root + 1`` onwards, at once (1 to N), while every other process is idle.
+    - ``fan_in``: for every root and fan width, each of its peers sends one message to the root
+      at once (N to 1), so the root's receive side is shared.
 
     ``bytes`` is the size of one message. ``path`` on each sample is
     ``path_of(from_process, to_process)``, so measured times can be joined to a plan's messages by
     the same classification. Fan entries keep the root's time apart from its peers' times, and
     label each peer with the path of its own message.
 
-    ``fan_width`` defaults to every other process; 0 skips the fans. The pair sweep makes
-    ``world_size * (world_size - 1) * len(sizes) * (warmup + repeats)`` barriers, so keep ``sizes``
-    short on large jobs. Each process allocates ``(2 + fan_width) * max(sizes)`` bytes of device
-    memory at most.
+    ``fan_width`` is one width or several, and defaults to every other process; 0 skips the
+    fans. Measuring more than one width shows how a process's send or receive capacity changes
+    with the number of peers sharing it, which a single width cannot. Each fan sample records its
+    ``width``. The pair sweep makes ``world_size * (world_size - 1) * len(sizes) * (warmup +
+    repeats)`` barriers, so keep ``sizes`` short on large jobs. Each process allocates
+    ``(2 + max(widths)) * max(sizes)`` bytes of device memory at most.
     """
     if repeats <= 0 or warmup < 0:
         raise ValueError('repeats must be positive and warmup non-negative')
@@ -131,9 +133,16 @@ def calibrate_links(sizes: Sequence[int] = DEFAULT_SIZES,
     world = dist.get_world_size()
     if fan_width is None:
         fan_width = world - 1
-    if not 0 <= fan_width < world:
-        raise ValueError(f'fan_width must be between 0 and {world - 1}, got {fan_width}')
-    fan_peers = {root: [(root + step) % world for step in range(1, fan_width + 1)] for root in range(world)}
+    requested = [fan_width] if isinstance(fan_width, int) else list(fan_width)
+    for width in requested:
+        if not isinstance(width, int) or not 0 <= width < world:
+            raise ValueError(f'fan widths must be integers between 0 and {world - 1}, got {width!r}')
+    widths = sorted(set(requested) - {0})
+    fan_peers = {
+        (root, width): [(root + step) % world for step in range(1, width + 1)]
+        for root in range(world)
+        for width in widths
+    }
     device = torch.device(get_accelerator().current_device_name())
     local_times: Dict[int, List[float]] = {}
     peer_times: Dict[tuple, List[float]] = {}
@@ -162,22 +171,23 @@ def calibrate_links(sizes: Sequence[int] = DEFAULT_SIZES,
             times = [_timed_exchange(send, to_processes, receives) for _ in range(warmup + repeats)]
             concurrent_times[(size, shift)] = times[warmup:]
 
-        for root in range(world if fan_width else 0):
-            peers = fan_peers[root]
-            if rank == root:
-                to_processes, receives = peers, []
-            else:
-                to_processes, receives = [], ([(recv, root)] if rank in peers else [])
-            times = [_timed_exchange(send, to_processes, receives) for _ in range(warmup + repeats)]
-            fan_times[('fan_out', size, root)] = times[warmup:]
+        for width in widths:
+            for root in range(world):
+                peers = fan_peers[(root, width)]
+                if rank == root:
+                    to_processes, receives = peers, []
+                else:
+                    to_processes, receives = [], ([(recv, root)] if rank in peers else [])
+                times = [_timed_exchange(send, to_processes, receives) for _ in range(warmup + repeats)]
+                fan_times[('fan_out', size, width, root)] = times[warmup:]
 
-            if rank == root:
-                receives = [(torch.empty(size, dtype=torch.uint8, device=device), peer) for peer in peers]
-                to_processes = []
-            else:
-                receives, to_processes = [], ([root] if rank in peers else [])
-            times = [_timed_exchange(send, to_processes, receives) for _ in range(warmup + repeats)]
-            fan_times[('fan_in', size, root)] = times[warmup:]
+                if rank == root:
+                    receives = [(torch.empty(size, dtype=torch.uint8, device=device), peer) for peer in peers]
+                    to_processes = []
+                else:
+                    receives, to_processes = [], ([root] if rank in peers else [])
+                times = [_timed_exchange(send, to_processes, receives) for _ in range(warmup + repeats)]
+                fan_times[('fan_in', size, width, root)] = times[warmup:]
 
     # Samples stay on their own process until every timing is done, so no collective runs inside a timed region.
     gathered = [None] * world
@@ -208,19 +218,21 @@ def calibrate_links(sizes: Sequence[int] = DEFAULT_SIZES,
                 'paths': [path_of(process, (process + shift) % world) for process in range(world)],
                 'seconds_by_process': [gathered[process][2][(size, shift)] for process in range(world)],
             })
-        for root in range(world if fan_width else 0):
-            peers = fan_peers[root]
-            for kind, fans_of_kind in fans.items():
-                key = (kind, size, root)
-                paths = [path_of(root, peer) if kind == 'fan_out' else path_of(peer, root) for peer in peers]
-                fans_of_kind.append({
-                    'bytes': size,
-                    'root': root,
-                    'peers': peers,
-                    'paths': paths,
-                    'root_seconds': gathered[root][3][key],
-                    'seconds_by_peer': [gathered[peer][3][key] for peer in peers],
-                })
+        for width in widths:
+            for root in range(world):
+                peers = fan_peers[(root, width)]
+                for kind, fans_of_kind in fans.items():
+                    key = (kind, size, width, root)
+                    paths = [path_of(root, peer) if kind == 'fan_out' else path_of(peer, root) for peer in peers]
+                    fans_of_kind.append({
+                        'bytes': size,
+                        'width': width,
+                        'root': root,
+                        'peers': peers,
+                        'paths': paths,
+                        'root_seconds': gathered[root][3][key],
+                        'seconds_by_peer': [gathered[peer][3][key] for peer in peers],
+                    })
     return {
         'schema': CALIBRATION_SCHEMA,
         'world_size': world,
@@ -230,7 +242,7 @@ def calibrate_links(sizes: Sequence[int] = DEFAULT_SIZES,
         'local': local,
         'peer': peer,
         'concurrent': concurrent,
-        'fan_width': fan_width,
+        'fan_widths': widths,
         'fan_out': fans['fan_out'],
         'fan_in': fans['fan_in'],
     }
@@ -262,11 +274,11 @@ def _fit(points: List[tuple]) -> Dict:
     }
 
 
-def _fit_groups(groups: Dict[str, Dict[int, List[float]]]) -> Dict[str, Dict]:
+def _fit_groups(groups: Dict[object, Dict[int, List[float]]]) -> Dict[object, Dict]:
     fits = {}
-    for path, seconds_by_size in groups.items():
+    for key, seconds_by_size in groups.items():
         points = [(size, statistics.median(seconds)) for size, seconds in sorted(seconds_by_size.items())]
-        fits[path] = _fit(points)
+        fits[key] = _fit(points)
     return fits
 
 
@@ -274,13 +286,20 @@ def fit_links(calibration: Dict) -> Dict:
     """Summarize a ``calibrate_links`` result as ``alpha + bytes / bandwidth`` per path.
 
     Samples are pooled by path label and by size, and the median at each size is fitted, so a
-    single slow repeat does not move the line. Returns ``{'schema', 'local', 'peer',
-    'concurrent', 'fan_out', 'fan_in'}``; each but the first maps a path label to
-    ``alpha_seconds``, ``bytes_per_second``, ``max_relative_error`` and the ``sizes`` fitted.
-    ``concurrent`` is fitted from what each process saw while every process was sending, i.e.
-    per-link cost under the shift sharing pattern, not in isolation. ``fan_out`` and ``fan_in``
-    are fitted from the peers' times, each under its own message's path, so they give per-link
-    cost while one sender or one receiver is shared; the root's times stay in the raw result.
+    single slow repeat does not move the line. Every fit holds ``alpha_seconds``,
+    ``bytes_per_second``, ``max_relative_error`` and the ``sizes`` fitted. Returns:
+
+    - ``local``, ``peer`` and ``concurrent``: a fit per path label. ``concurrent`` is fitted from
+      what each process saw while every process was sending, i.e. per-link cost under the shift
+      sharing pattern, not in isolation.
+    - ``fan_out`` and ``fan_in``: per fan width, a fit per path label, from the peers' times, each
+      under its own message's path. They give per-link cost while one sender or one receiver is
+      shared by that many peers.
+    - ``send`` and ``receive``: per fan width, a fit per process, from the root's time against all
+      the bytes it sent (fan-out) or received (fan-in). That is the process's aggregate capacity
+      while that many peers share it, which is what pricing a plan's per-process sent and received
+      bytes needs. The width is the only condition recorded: on a fabric where *which* peers share
+      a process matters, as behind PCIe switches, these fits average over the peer sets measured.
     """
     if calibration.get('schema') != CALIBRATION_SCHEMA:
         raise ValueError(f'unsupported calibration schema {calibration.get("schema")!r}')
@@ -304,10 +323,16 @@ def fit_links(calibration: Dict) -> Dict:
         'peer': _fit_groups(peer),
         'concurrent': _fit_groups(concurrent),
     }
-    for kind in ('fan_out', 'fan_in'):
-        fanned: Dict[str, Dict[int, List[float]]] = {}
+    for kind, direction in (('fan_out', 'send'), ('fan_in', 'receive')):
+        fanned: Dict[int, Dict[str, Dict[int, List[float]]]] = {}
+        rooted: Dict[int, Dict[int, Dict[int, List[float]]]] = {}
         for sample in calibration[kind]:
+            width = sample['width']
             for path, seconds in zip(sample['paths'], sample['seconds_by_peer']):
-                fanned.setdefault(path, {}).setdefault(sample['bytes'], []).extend(seconds)
-        fits[kind] = _fit_groups(fanned)
+                fanned.setdefault(width, {}).setdefault(path, {}).setdefault(sample['bytes'], []).extend(seconds)
+            # The root moves one message per peer, so its time covers width times the message size.
+            rooted.setdefault(width, {}).setdefault(sample['root'], {}).setdefault(sample['bytes'] * width,
+                                                                                   []).extend(sample['root_seconds'])
+        fits[kind] = {width: _fit_groups(groups) for width, groups in fanned.items()}
+        fits[direction] = {width: _fit_groups(groups) for width, groups in rooted.items()}
     return fits

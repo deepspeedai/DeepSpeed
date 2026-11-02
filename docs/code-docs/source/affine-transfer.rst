@@ -59,9 +59,10 @@ receives the same raw samples::
     from deepspeed.checkpoint.affine_transfer_calibration import (calibrate_links, fit_links,
                                                                    node_path_of)
 
-    calibration = calibrate_links(path_of=node_path_of(processes_per_node=8))
+    calibration = calibrate_links(path_of=node_path_of(processes_per_node=8), fan_width=[1, 2, 4, 7])
     fits = fit_links(calibration)
-    fits['fan_in']['inter_node']  # {'alpha_seconds', 'bytes_per_second', ...}
+    fits['fan_in'][4]['inter_node']  # per-link cost while 4 senders share a receiver
+    fits['receive'][4][0]            # process 0's aggregate receive capacity with 4 senders
 
 Five patterns are sampled at every size, 4 KiB to 256 MiB by default:
 
@@ -69,20 +70,27 @@ Five patterns are sampled at every size, 4 KiB to 256 MiB by default:
 - ``peer``: each ordered process pair alone (1 to 1).
 - ``concurrent``: every process sends to ``process + shift`` at once, so links
   are measured while shared.
-- ``fan_out``: one root sends to ``fan_width`` peers at once (1 to N).
-- ``fan_in``: ``fan_width`` peers send to one root at once (N to 1), measuring
+- ``fan_out``: one root sends to ``width`` peers at once (1 to N).
+- ``fan_in``: ``width`` peers send to one root at once (N to 1), measuring
   receiver contention.
+
+``fan_width`` takes one width or a list of them; each fan sample records its
+``width``.
 
 Each message is labelled with ``path_of(from_process, to_process)``. The default
 labels only ``local`` and ``peer``; ``node_path_of`` splits ``peer`` into
 ``intra_node`` and ``inter_node``, and any callable can be used, for example one
 that tells NVLink from PCIe pairs. ``fit_links`` pools the samples per label and
-fits ``alpha + bytes / bandwidth`` to the median at each size.
+fits ``alpha + bytes / bandwidth`` to the median at each size. Fan fits are kept
+per width. ``send`` and ``receive`` fit each root's own time against all the
+bytes it moved, giving each process's aggregate capacity while that many peers
+share it, which is what a plan's per-process sent and received bytes are priced
+against.
 
 Processes here are default-group ranks. A plan's source and target locations are
 mapped to processes by ``TransferEndpoints``, so translate through it before
 joining a plan's messages with these labels. The pair sweep makes
 ``world_size * (world_size - 1)`` barriered samples per size and repeat, and each
-process holds up to ``(2 + fan_width) * max(sizes)`` bytes, so pass shorter
-``sizes`` or a smaller ``fan_width`` on large jobs. The numbers describe the
+process holds up to ``(2 + max(widths)) * max(sizes)`` bytes, so pass shorter
+``sizes`` or smaller fan widths on large jobs. The numbers describe the
 transport used for the measurement (torch point-to-point) on that topology.

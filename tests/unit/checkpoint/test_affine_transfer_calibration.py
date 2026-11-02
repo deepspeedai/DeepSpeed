@@ -55,6 +55,7 @@ def _synthetic_calibration(costs, sizes, world=2):
         **{
             kind: [{
                 'bytes': size,
+                'width': world - 1,
                 'root': 0,
                 'peers': list(range(1, world)),
                 'paths': [INTER_NODE] * (world - 1),
@@ -71,15 +72,46 @@ def test_fit_recovers_known_link_costs():
     sizes = [4096, 1 << 16, 1 << 20, 1 << 24]
     fits = fit_links(_synthetic_calibration(costs, sizes))
 
-    for group, path in (('local', LOCAL), ('peer', INTER_NODE), ('concurrent', INTER_NODE), ('fan_out', INTER_NODE),
-                        ('fan_in', INTER_NODE)):
-        fit = fits[group][path]
+    width = 1  # the synthetic fans have one peer, so a root moves one message per fan
+    for fit, path in ((fits['local'][LOCAL], LOCAL), (fits['peer'][INTER_NODE], INTER_NODE),
+                      (fits['concurrent'][INTER_NODE], INTER_NODE), (fits['fan_out'][width][INTER_NODE], INTER_NODE),
+                      (fits['fan_in'][width][INTER_NODE],
+                       INTER_NODE), (fits['send'][width][0], INTER_NODE), (fits['receive'][width][0], INTER_NODE)):
         alpha, bandwidth = costs[path]
         assert fit['alpha_seconds'] == pytest.approx(alpha, rel=1e-6)
         assert fit['bytes_per_second'] == pytest.approx(bandwidth, rel=1e-6)
         assert fit['max_relative_error'] == pytest.approx(0, abs=1e-6)
         assert fit['sizes'] == sizes
     assert set(fits['peer']) == {INTER_NODE}
+
+
+def test_root_fits_give_each_process_its_capacity_at_each_width():
+    """A root's time covers every message of its fan, so its capacity is fitted against all of them.
+
+    Fitting the root's time against one message's bytes would understate the capacity by the
+    width, and pooling widths would blur the capacity's dependence on how many peers share it.
+    """
+    sizes = [4096, 1 << 20, 1 << 24]
+    alpha = 40e-6
+    receive_capacity = {(1, 0): 30e9, (1, 1): 12e9, (3, 0): 20e9, (3, 1): 9e9}
+    calibration = _synthetic_calibration({LOCAL: (1e-6, 100e9), INTER_NODE: (1e-5, 10e9)}, sizes, world=4)
+    calibration['fan_in'] = [{
+        'bytes': size,
+        'width': width,
+        'root': root,
+        'peers': [(root + step) % 4 for step in range(1, width + 1)],
+        'paths': [INTER_NODE] * width,
+        'root_seconds': [alpha + width * size / receive_capacity[(width, root)]] * 3,
+        'seconds_by_peer': [[alpha + size / 10e9] * 3] * width,
+    } for size in sizes for width in (1, 3) for root in (0, 1)]
+
+    fits = fit_links(calibration)
+    assert set(fits['receive']) == set(fits['fan_in']) == {1, 3}
+    for (width, root), capacity in receive_capacity.items():
+        fit = fits['receive'][width][root]
+        assert fit['bytes_per_second'] == pytest.approx(capacity, rel=1e-6)
+        assert fit['alpha_seconds'] == pytest.approx(alpha, rel=1e-6)
+        assert fit['sizes'] == [width * size for size in sizes]
 
 
 def test_fit_reports_error_where_the_line_does_not_hold():
@@ -138,11 +170,12 @@ class TestCalibrateLinks(DistributedTest):
             assert len(seconds) == 3
             assert all(value > 0 for value in seconds)
 
-        assert result['fan_width'] == world - 1
+        assert result['fan_widths'] == [world - 1]
         for kind in ('fan_out', 'fan_in'):
             assert sorted((s['bytes'], s['root']) for s in result[kind]) == sorted(
                 (size, root) for size in sizes for root in range(world))
             for sample in result[kind]:
+                assert sample['width'] == world - 1
                 assert sorted(sample['peers'] + [sample['root']]) == list(range(world))
                 for seconds in [sample['root_seconds']] + sample['seconds_by_peer']:
                     assert len(seconds) == 3
@@ -152,13 +185,15 @@ class TestCalibrateLinks(DistributedTest):
         assert set(fits['local']) == {LOCAL}
         assert set(fits['peer']) == {INTRA_NODE, INTER_NODE}
         assert set(fits['concurrent']) <= {INTRA_NODE, INTER_NODE}
-        assert set(fits['fan_out']) == set(fits['fan_in']) == {INTRA_NODE, INTER_NODE}
+        assert set(fits['fan_out'][world - 1]) == set(fits['fan_in'][world - 1]) == {INTRA_NODE, INTER_NODE}
+        assert set(fits['send'][world - 1]) == set(fits['receive'][world - 1]) == set(range(world))
 
     def test_fans_label_each_message_by_its_direction(self):
         get_accelerator().set_device(int(os.environ.get('LOCAL_RANK', dist.get_rank())))
         world = 4
-        with pytest.raises(ValueError):
-            calibrate_links(sizes=[4096], repeats=1, warmup=0, fan_width=world)
+        for invalid in (world, [1, world], [-1]):
+            with pytest.raises(ValueError):
+                calibrate_links(sizes=[4096], repeats=1, warmup=0, fan_width=invalid)
 
         # A direction-sensitive label, so a fan-in message labeled as root -> peer is caught.
         result = calibrate_links(sizes=[4096],
@@ -166,7 +201,7 @@ class TestCalibrateLinks(DistributedTest):
                                  warmup=0,
                                  path_of=lambda source, target: f'{source}->{target}',
                                  fan_width=2)
-        assert result['fan_width'] == 2
+        assert result['fan_widths'] == [2]
         for sample in result['fan_out']:
             root = sample['root']
             assert sample['peers'] == [(root + 1) % world, (root + 2) % world]
@@ -175,5 +210,14 @@ class TestCalibrateLinks(DistributedTest):
             root = sample['root']
             assert sample['paths'] == [f'{peer}->{root}' for peer in sample['peers']]
 
-        skipped = calibrate_links(sizes=[4096], repeats=1, warmup=0, fan_width=0)
-        assert skipped['fan_out'] == skipped['fan_in'] == []
+        widths = calibrate_links(sizes=[4096], repeats=1, warmup=0, fan_width=[2, 1, 2])
+        assert widths['fan_widths'] == [1, 2]
+        for kind in ('fan_out', 'fan_in'):
+            assert sorted((s['width'], s['root']) for s in widths[kind]) == sorted(
+                (width, root) for width in (1, 2) for root in range(world))
+            for sample in widths[kind]:
+                assert sample['peers'] == [(sample['root'] + step) % world for step in range(1, sample['width'] + 1)]
+
+        for skip in (0, []):
+            skipped = calibrate_links(sizes=[4096], repeats=1, warmup=0, fan_width=skip)
+            assert skipped['fan_out'] == skipped['fan_in'] == []
