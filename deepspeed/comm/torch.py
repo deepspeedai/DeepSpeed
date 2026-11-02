@@ -292,7 +292,7 @@ class TorchBackend(Backend):
     def inference_all_reduce(self, tensor, op, group=None):
         # Latency-optimized CUDA path: the one-shot P2P kernel fills the same
         # hook the CPU backend fills with shm+AVX (see deepspeed/comm/custom_ar.py)
-        if tensor.is_cuda:
+        if get_accelerator().on_accelerator(tensor):
             from deepspeed.comm import custom_ar
             world_sz = torch.distributed.get_world_size(group=group)
             if (custom_ar.custom_ar_ready(world_sz) and tensor.is_contiguous()

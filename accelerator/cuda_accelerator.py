@@ -192,10 +192,8 @@ class CUDA_Accelerator(DeepSpeedAccelerator):
     def can_graph_capture_comm(self) -> bool:
         """NCCL >= 2.14 supports CUDA graph capture of collectives."""
         try:
-            import torch.distributed as dist
-            if not dist.is_nccl_available():
-                return False
-            # torch exposes NCCL version as (major, minor) tuple
+            # torch exposes NCCL version as (major, minor) tuple; the call
+            # raises when NCCL is unavailable, covering the non-NCCL case
             nccl_ver = torch.cuda.nccl.version()
             return nccl_ver[0] > 2 or (nccl_ver[0] == 2 and nccl_ver[1] >= 14)
         except Exception:

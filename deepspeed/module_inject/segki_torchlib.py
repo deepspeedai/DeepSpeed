@@ -1,7 +1,6 @@
 # Copyright (c) Microsoft Corporation.
 # SPDX-License-Identifier: Apache-2.0
 # DeepSpeed Team
-
 """torch.library registration for the segKI ops.
 
 Route A of glue fusion: registering the opbuilder methods as proper custom
@@ -44,9 +43,7 @@ if hasattr(torch.library, "custom_op"):
         # the glu variant folds the epilogue into the first output
         if glu_epilogue:
             return torch.empty(x.shape[0], weights[0].shape[0], dtype=x.dtype, device=x.device)
-        return [
-            torch.empty(x.shape[0], w.shape[0], dtype=x.dtype, device=x.device) for w in weights
-        ]
+        return [torch.empty(x.shape[0], w.shape[0], dtype=x.dtype, device=x.device) for w in weights]
 
     @torch.library.custom_op("segki::gdn_gates", mutates_args=())
     def gdn_gates(a: torch.Tensor, b: torch.Tensor, a_log: torch.Tensor, dt_bias: torch.Tensor) -> List[torch.Tensor]:
@@ -65,7 +62,10 @@ if hasattr(torch.library, "custom_op"):
     def _(x, gate, weight, out, eps):
         return
 
-    @torch.library.custom_op("segki::fused_add_norm", mutates_args=("residual", "out", ))
+    @torch.library.custom_op("segki::fused_add_norm", mutates_args=(
+        "residual",
+        "out",
+    ))
     def fused_add_norm(x: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor, out: torch.Tensor,
                        eps: float) -> None:
         _op().fused_add_norm(x, residual, weight, out, eps)

@@ -16,12 +16,12 @@
 //   k4 out[i] = in[i] + peer_buf[p][i]
 // Double buffering (p = seq & 1) lets call N+1 publish while call N reduces.
 
-#include <torch/extension.h>
-#include <pybind11/pytypes.h>
 #include <ATen/cuda/CUDAContext.h>
-#include <cuda_runtime.h>
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
+#include <cuda_runtime.h>
+#include <pybind11/pytypes.h>
+#include <torch/extension.h>
 
 #define CAR_MAX_BYTES (4 * 1024 * 1024)
 #define CAR_THREADS 256
@@ -31,7 +31,7 @@ namespace {
 struct CarState {
     bool ready = false;
     int world = 0;
-    char* my_base = nullptr;   // cudaMalloc'd: [flag0|flag1|pad][buf0][buf1]
+    char* my_base = nullptr;  // cudaMalloc'd: [flag0|flag1|pad][buf0][buf1]
     char* peer_base = nullptr;
     int* seq_d = nullptr;
     char* own_base = nullptr;  // our cudaMalloc (never freed; process exit)
@@ -45,70 +45,91 @@ constexpr size_t kBufBase = 256;
 constexpr size_t kBufStride = CAR_MAX_BYTES;
 constexpr size_t kTotalBytes = kBufBase + 2 * kBufStride;
 
-#define CUDA_CHECK(expr) TORCH_CHECK((expr) == cudaSuccess, "CUDA: ", cudaGetErrorString(cudaGetLastError()))
+#define CUDA_CHECK(expr) \
+    TORCH_CHECK((expr) == cudaSuccess, "CUDA: ", cudaGetErrorString(cudaGetLastError()))
 
 __global__ void seq_bump_kernel(int* seq_d) { *seq_d = *seq_d + 1; }
 
-__global__ void copy_kernel(const char* __restrict__ in, char* __restrict__ my_base, const int* __restrict__ seq_d,
-                            size_t nbytes) {
+__global__ void copy_kernel(const char* __restrict__ in,
+                            char* __restrict__ my_base,
+                            const int* __restrict__ seq_d,
+                            size_t nbytes)
+{
     const int parity = (*seq_d) & 1;
     char* dst = my_base + kBufBase + (size_t)parity * kBufStride;
     const size_t vec = nbytes / 16;
     const uint4* in4 = (const uint4*)in;
     uint4* dst4 = (uint4*)dst;
-    for (size_t v = (size_t)blockIdx.x * blockDim.x + threadIdx.x; v < vec; v += (size_t)gridDim.x * blockDim.x)
+    for (size_t v = (size_t)blockIdx.x * blockDim.x + threadIdx.x; v < vec;
+         v += (size_t)gridDim.x * blockDim.x)
         dst4[v] = in4[v];
     for (size_t b = vec * 16 + (size_t)blockIdx.x * blockDim.x + threadIdx.x; b < nbytes;
          b += (size_t)gridDim.x * blockDim.x)
         dst[b] = in[b];
 }
 
-__global__ void flag_kernel(char* __restrict__ my_base, const int* __restrict__ seq_d) {
+__global__ void flag_kernel(char* __restrict__ my_base, const int* __restrict__ seq_d)
+{
     const int seq = *seq_d;
     const int parity = seq & 1;
     __threadfence_system();
     *(volatile int*)(my_base + (parity ? kFlagOff1 : kFlagOff0)) = seq;
 }
 
-__global__ void wait_kernel(const char* __restrict__ peer_base, const int* __restrict__ seq_d) {
+__global__ void wait_kernel(const char* __restrict__ peer_base, const int* __restrict__ seq_d)
+{
     const int seq = *seq_d;
     const int parity = seq & 1;
     volatile const int* pflag = (volatile const int*)(peer_base + (parity ? kFlagOff1 : kFlagOff0));
-    while (*pflag < seq) {
-    }
+    while (*pflag < seq) {}
     __threadfence_system();
 }
 
-__global__ void reduce_bf16_kernel(const char* __restrict__ in, char* __restrict__ out,
-                                   const char* __restrict__ peer_base, const int* __restrict__ seq_d, size_t numel) {
+__global__ void reduce_bf16_kernel(const char* __restrict__ in,
+                                   char* __restrict__ out,
+                                   const char* __restrict__ peer_base,
+                                   const int* __restrict__ seq_d,
+                                   size_t numel)
+{
     const int parity = (*seq_d) & 1;
     const char* psrc = peer_base + kBufBase + (size_t)parity * kBufStride;
     const __nv_bfloat16* pin = (const __nv_bfloat16*)in;
     const __nv_bfloat16* pp = (const __nv_bfloat16*)psrc;
     __nv_bfloat16* pout = (__nv_bfloat16*)out;
-    for (size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x; i < numel; i += (size_t)gridDim.x * blockDim.x)
+    for (size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x; i < numel;
+         i += (size_t)gridDim.x * blockDim.x)
         pout[i] = __float2bfloat16(__bfloat162float(pin[i]) + __bfloat162float(pp[i]));
 }
 
-__global__ void reduce_fp16_kernel(const char* __restrict__ in, char* __restrict__ out,
-                                   const char* __restrict__ peer_base, const int* __restrict__ seq_d, size_t numel) {
+__global__ void reduce_fp16_kernel(const char* __restrict__ in,
+                                   char* __restrict__ out,
+                                   const char* __restrict__ peer_base,
+                                   const int* __restrict__ seq_d,
+                                   size_t numel)
+{
     const int parity = (*seq_d) & 1;
     const char* psrc = peer_base + kBufBase + (size_t)parity * kBufStride;
     const __half* pin = (const __half*)in;
     const __half* pp = (const __half*)psrc;
     __half* pout = (__half*)out;
-    for (size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x; i < numel; i += (size_t)gridDim.x * blockDim.x)
+    for (size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x; i < numel;
+         i += (size_t)gridDim.x * blockDim.x)
         pout[i] = __float2half(__half2float(pin[i]) + __half2float(pp[i]));
 }
 
-__global__ void reduce_fp32_kernel(const char* __restrict__ in, char* __restrict__ out,
-                                   const char* __restrict__ peer_base, const int* __restrict__ seq_d, size_t numel) {
+__global__ void reduce_fp32_kernel(const char* __restrict__ in,
+                                   char* __restrict__ out,
+                                   const char* __restrict__ peer_base,
+                                   const int* __restrict__ seq_d,
+                                   size_t numel)
+{
     const int parity = (*seq_d) & 1;
     const char* psrc = peer_base + kBufBase + (size_t)parity * kBufStride;
     const float* pin = (const float*)in;
     const float* pp = (const float*)psrc;
     float* pout = (float*)out;
-    for (size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x; i < numel; i += (size_t)gridDim.x * blockDim.x)
+    for (size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x; i < numel;
+         i += (size_t)gridDim.x * blockDim.x)
         pout[i] = pin[i] + pp[i];
 }
 
@@ -150,7 +171,9 @@ void car_connect(const std::string& handle_bytes)
     g_state.world = 2;
 }
 
-__global__ void handshake_kernel(char* __restrict__ my_base, const char* __restrict__ peer_base, int* __restrict__ seq_d,
+__global__ void handshake_kernel(char* __restrict__ my_base,
+                                 const char* __restrict__ peer_base,
+                                 int* __restrict__ seq_d,
                                  int* __restrict__ result)
 {
     const int seq = *seq_d + 1;  // handshake rides the next sequence number
@@ -165,7 +188,8 @@ __global__ void handshake_kernel(char* __restrict__ my_base, const char* __restr
     }
     __syncthreads();
     if (threadIdx.x == 0 && blockIdx.x == 0) {
-        volatile const int* pflag = (volatile const int*)(peer_base + (parity ? kFlagOff1 : kFlagOff0));
+        volatile const int* pflag =
+            (volatile const int*)(peer_base + (parity ? kFlagOff1 : kFlagOff0));
         long long spins = 0;
         while (*pflag < seq && spins < 20000000LL) spins++;  // bounded; PCIe reads are ~100ns each
         if (*pflag < seq) {
@@ -182,8 +206,8 @@ bool car_handshake()
     TORCH_CHECK(g_state.ready && g_state.peer_base, "custom AR not connected");
     auto result = torch::zeros({1}, torch::TensorOptions().dtype(torch::kInt).device(torch::kCUDA));
     auto stream = at::cuda::getCurrentCUDAStream();
-    handshake_kernel<<<1, 32, 0, stream.stream()>>>(g_state.my_base, g_state.peer_base, g_state.seq_d,
-                                                    (int*)result.data_ptr());
+    handshake_kernel<<<1, 32, 0, stream.stream()>>>(
+        g_state.my_base, g_state.peer_base, g_state.seq_d, (int*)result.data_ptr());
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     // both ranks must publish before either inspects — a plain NCCL-free
     // sync is impossible, so the caller synchronizes the stream first
@@ -191,7 +215,10 @@ bool car_handshake()
     return result.cpu().item<int>() == 1;
 }
 
-bool car_ready(int64_t world) { return g_state.ready && g_state.world == world && g_state.peer_base != nullptr; }
+bool car_ready(int64_t world)
+{
+    return g_state.ready && g_state.world == world && g_state.peer_base != nullptr;
+}
 
 int64_t car_max_bytes() { return CAR_MAX_BYTES; }
 
@@ -205,22 +232,28 @@ torch::Tensor car_all_reduce(torch::Tensor t)
     const int cblocks = (int)((nbytes / 16 + CAR_THREADS - 1) / CAR_THREADS) + 1;
     const int rblocks = (int)((t.numel() + CAR_THREADS - 1) / CAR_THREADS);
     seq_bump_kernel<<<1, 1, 0, stream.stream()>>>(g_state.seq_d);
-    copy_kernel<<<cblocks, CAR_THREADS, 0, stream.stream()>>>((const char*)t.data_ptr(), g_state.my_base, g_state.seq_d,
-                                                              nbytes);
+    copy_kernel<<<cblocks, CAR_THREADS, 0, stream.stream()>>>(
+        (const char*)t.data_ptr(), g_state.my_base, g_state.seq_d, nbytes);
     flag_kernel<<<1, 1, 0, stream.stream()>>>(g_state.my_base, g_state.seq_d);
     wait_kernel<<<1, 1, 0, stream.stream()>>>(g_state.peer_base, g_state.seq_d);
     if (t.scalar_type() == at::kBFloat16) {
         reduce_bf16_kernel<<<rblocks, CAR_THREADS, 0, stream.stream()>>>((const char*)t.data_ptr(),
-                                                                         (char*)t.data_ptr(), g_state.peer_base,
-                                                                         g_state.seq_d, (size_t)t.numel());
+                                                                         (char*)t.data_ptr(),
+                                                                         g_state.peer_base,
+                                                                         g_state.seq_d,
+                                                                         (size_t)t.numel());
     } else if (t.scalar_type() == at::kHalf) {
         reduce_fp16_kernel<<<rblocks, CAR_THREADS, 0, stream.stream()>>>((const char*)t.data_ptr(),
-                                                                         (char*)t.data_ptr(), g_state.peer_base,
-                                                                         g_state.seq_d, (size_t)t.numel());
+                                                                         (char*)t.data_ptr(),
+                                                                         g_state.peer_base,
+                                                                         g_state.seq_d,
+                                                                         (size_t)t.numel());
     } else if (t.scalar_type() == at::kFloat) {
         reduce_fp32_kernel<<<rblocks, CAR_THREADS, 0, stream.stream()>>>((const char*)t.data_ptr(),
-                                                                         (char*)t.data_ptr(), g_state.peer_base,
-                                                                         g_state.seq_d, (size_t)t.numel());
+                                                                         (char*)t.data_ptr(),
+                                                                         g_state.peer_base,
+                                                                         g_state.seq_d,
+                                                                         (size_t)t.numel());
     } else {
         TORCH_CHECK(false, "unsupported dtype for custom AR");
     }

@@ -348,8 +348,8 @@ def _fused_gdn_forward(self, hidden_states, *args, **kwargs):
             zba_w = torch.cat([self.in_proj_z.weight, self.in_proj_b.weight, self.in_proj_a.weight])
             cw = (self.in_proj_qkv.weight, torch.cat([q_w, k_w, v_w]), zba_w)
             self._ki_tp_cat_w = cw
-        fused = GDNInputProj.apply6(x2, cw[1], cw[1], cw[1], cw[2], cw[2], cw[2], gdn_kernel_op).view(
-            batch_size, seq_len, -1)
+        fused = GDNInputProj.apply6(x2, cw[1], cw[1], cw[1], cw[2], cw[2], cw[2],
+                                    gdn_kernel_op).view(batch_size, seq_len, -1)
     elif batch_size == 1 and seq_len == 1:
         fused = GDNInputProj.apply(
             hidden_states.squeeze(0).squeeze(0), self.in_proj_qkv.weight, self.in_proj_z.weight, self.in_proj_b.weight,
@@ -592,7 +592,7 @@ def _install_gdn_segment(seg: GDNSegment) -> bool:
         # kernel loses to FLA at TP head counts even after the occupancy
         # retune (smem staging removed: 998/2650/4161 vs 1001/2856/4238)
         # — keep the strided-view rejection so TP decodes route to FLA;
-        # the retuned kernel still serves the TP=1 path where it wins
+        # the re-tuned kernel still serves the TP=1 path where it wins
         if (init_state is not None and query.shape[1] == 1 and step_op is not None
                 and hasattr(step_op, "gdn_recurrent_step") and not torch.is_grad_enabled()
                 and query.shape[0] >= 16  # below that our block count starves vs FLA's tiling
@@ -768,8 +768,7 @@ def _decode_attn_forward(self,
         # concatenated weight so one wide GEMM replaces three skinny ones.
         cw = getattr(self, "_ki_attn_cat_w", None)
         if cw is None or cw[0] is not self.q_proj.weight:
-            cw = (self.q_proj.weight,
-                  torch.cat([self.q_proj.weight, self.k_proj.weight, self.v_proj.weight]))
+            cw = (self.q_proj.weight, torch.cat([self.q_proj.weight, self.k_proj.weight, self.v_proj.weight]))
             self._ki_attn_cat_w = cw
         fused = qkv_op.grouped_linear(hidden_states.reshape(-1, hidden_states.shape[-1]), [cw[1]], False)[0]
         if fused.dim() == 1:
