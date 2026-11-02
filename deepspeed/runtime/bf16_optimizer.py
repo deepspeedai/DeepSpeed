@@ -509,18 +509,22 @@ class BF16_Optimizer(ZeROOptimizer):
         if lp.grad is None:
             return
 
-        if self.autoep_folding_tp_group is not None and getattr(lp, "ds_grad_is_ready", True):
-            apply_folding_correction_to_grad_buffer(self.autoep_folding_spec,
-                                                    lp,
-                                                    lp.grad,
-                                                    tp_group=self.autoep_folding_tp_group,
-                                                    param_name=self.param_names.get(lp))
-
         hp_grad = self.fp32_groups_gradients[group_idx][param_idx]
         assert hp_grad is not None, \
             f'high precision param has no gradient, lp param_id = {id(lp)} group_info = [{group_idx}][{param_idx}]'
 
-        hp_grad.data.add_(lp.grad.data.to(hp_grad.dtype).view(hp_grad.shape))
+        if self.autoep_folding_tp_group is not None and getattr(lp, "ds_grad_is_ready", True):
+            # Promote to FP32 before folding so the TP reduction result is
+            # accumulated directly without a BF16 round-trip (#8913).
+            fp32_grad = lp.grad.float()
+            apply_folding_correction_to_grad_buffer(self.autoep_folding_spec,
+                                                    lp,
+                                                    fp32_grad,
+                                                    tp_group=self.autoep_folding_tp_group,
+                                                    param_name=self.param_names.get(lp))
+            hp_grad.data.add_(fp32_grad.data.view(hp_grad.shape))
+        else:
+            hp_grad.data.add_(lp.grad.data.to(hp_grad.dtype).view(hp_grad.shape))
         lp._hp_grad = hp_grad
         self.fp32_groups_has_gradients[group_idx][param_idx] = True
 
