@@ -48,7 +48,7 @@ def initialize(group=None):
     here on). Silently no-ops when the topology cannot use the fast path,
     leaving NCCL as the answer.
     """
-    if _state["inited"] or not torch.cuda.is_available():
+    if _state["inited"] or not torch.cuda.is_available():  # ignore-cuda
         return
     if not tdist.is_initialized():
         return
@@ -56,8 +56,8 @@ def initialize(group=None):
     rank = tdist.get_rank(group=group)
     if world != 2:
         return  # v1 targets the TP=2 pair; bigger worlds fall back to NCCL
-    dev = torch.cuda.current_device()
-    if not torch.cuda.can_device_access_peer(dev, 1 - dev):
+    dev = torch.cuda.current_device()  # ignore-cuda
+    if not torch.cuda.can_device_access_peer(dev, 1 - dev):  # ignore-cuda
         return  # no P2P (e.g. cross-CPU PCIe) — NCCL stays the right answer
 
     op = _build()
@@ -67,12 +67,12 @@ def initialize(group=None):
     gathered = [None, None]
     tdist.all_gather_object(gathered, handle, group=group)
     op.connect(gathered[1 - rank])
-    torch.cuda.synchronize()
+    torch.cuda.synchronize()  # ignore-cuda
     # Publish-and-wait probe with a bounded spin: PCIe P2P fabrics may not
     # propagate the flag protocol NVLink honors — hang-proof the fast path
     # by falling back to NCCL where the probe fails.
     ok = op.handshake()
-    torch.cuda.synchronize()
+    torch.cuda.synchronize()  # ignore-cuda
     ok = op.handshake() and ok  # second pass exercises the other parity
     if not ok:
         import os as _os

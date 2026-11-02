@@ -997,6 +997,9 @@ __global__ void grouped_linear_kernel(const __nv_bfloat16* __restrict__ x,
                                       int total_out,
                                       int concat_mode)
 {
+#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 800
+    // bf16 WMMA needs sm80+; see the note above the kernel
+
     using namespace nvcuda;
     // dynamic smem: xs[2][MT][KT+8] | ws[2][NT][KT+8] | out_s[MT][NT+8]
     extern __shared__ char smem_raw[];
@@ -1098,6 +1101,7 @@ __global__ void grouped_linear_kernel(const __nv_bfloat16* __restrict__ x,
             o[(long)m * fs2[g.mat] + g.lrow] = __float2bfloat16_rn(v);
         }
     }
+#endif
 }
 
 // Paired-matrix GLU GEMM: out = silu(x@g^T) * (x@u^T). cp.async tile
@@ -1112,6 +1116,9 @@ __global__ void glu_gemm_kernel(const __nv_bfloat16* __restrict__ x,
                                 int N,
                                 int K)
 {
+#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 800
+    // bf16 WMMA needs sm80+; see the note above the kernel
+
     using namespace nvcuda;
     // dynamic smem: xs[2][MT][KT+8] | ws[2][NT][KT+8] | out_s, out_u [MT][NT+8]
     extern __shared__ char smem_raw[];
@@ -1207,6 +1214,7 @@ __global__ void glu_gemm_kernel(const __nv_bfloat16* __restrict__ x,
             out[(long)m * N + n0 + c] = __float2bfloat16_rn(v);
         }
     }
+#endif
 }
 
 std::vector<at::Tensor> grouped_gemm_impl(at::Tensor x,

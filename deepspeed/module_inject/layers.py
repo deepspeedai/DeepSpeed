@@ -249,8 +249,7 @@ class RowParallel(torch.autograd.Function):
 
         Equivalent to all_reduce in output, but each collective moves
         N/TP bytes per rank instead of N, opening overlap opportunities."""
-        import torch.distributed as td
-        world = td.get_world_size(group=group)
+        world = dist.get_world_size(group=group)
         if world <= 1:
             return
         flat = input.view(-1)
@@ -260,8 +259,8 @@ class RowParallel(torch.autograd.Function):
             dist.inference_all_reduce(input, group=group)
             return
         scattered = torch.empty(chunk, dtype=input.dtype, device=input.device)
-        td.reduce_scatter_tensor(scattered, flat.contiguous(), group=group)
-        td.all_gather_into_tensor(flat, scattered, group=group)
+        dist.reduce_scatter_tensor(scattered, flat.contiguous(), group=group)
+        dist.all_gather_into_tensor(flat, scattered, group=group)
 
     @staticmethod
     def backward(ctx: Any, grad_output: torch.Tensor) -> Tuple[None, torch.Tensor, None]:

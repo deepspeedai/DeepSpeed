@@ -317,7 +317,7 @@ def _fused_gdn_forward(self, hidden_states, *args, **kwargs):
     # is the layer's only collective.
     import deepspeed.comm as dist
     tp_size = dist.get_world_size() if dist.is_initialized() else 1
-    r = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+    r = dist.get_rank() if dist.is_initialized() else 0
     key_dim = self.key_dim // tp_size
     value_dim = self.value_dim // tp_size
     num_v_heads = self.num_v_heads // tp_size
@@ -550,7 +550,7 @@ def _install_gdn_segment(seg: GDNSegment) -> bool:
         tp_sz = dist.get_world_size() if dist.is_initialized() else 1
         if tp_sz == 1:
             return parent.conv1d.weight.squeeze(1), parent.conv1d.bias
-        rk = torch.distributed.get_rank()
+        rk = dist.get_rank()
         nq = parent.key_dim // tp_sz
         nv = parent.value_dim // tp_sz
         w = parent.conv1d.weight.squeeze(1)

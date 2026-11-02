@@ -246,7 +246,9 @@ class HybridEngineRollout(RolloutEngine):
             # unconditionally. Standard graph users keep master's padded
             # behavior — the mask flows through prefill and the decode
             # static_attn buffer.
-            layer_types = getattr(getattr(module.config, "text_config", module.config), "layer_types", None) or []
+            # mock modules in tests carry no config — default to standard
+            _cfg = getattr(module, "config", None)
+            layer_types = getattr(getattr(_cfg, "text_config", _cfg), "layer_types", None) or []
             needs_pad_fallback = module._ki_prompt_padded and ("linear_attention" in layer_types or self.use_segki)
             if self.use_graph_capture and not needs_pad_fallback:
                 output_ids = self._generate_graph(prompt_ids, prompt_attn, max_new_tokens, pad_token_id, module,
