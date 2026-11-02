@@ -4482,7 +4482,9 @@ class DeepSpeedEngine(Module):
                     copyfile(os.path.join(offload_ckpt_dir, os.path.basename(fp32_path)), fp32_path)
             _, _, free = disk_usage(offload_dir)
             logger.info(f"NVMe checkpoint load complete! {free / 1e9:,.2f} GB free on target filesystem")
-            self.optimizer.reset_swap_buffers()
+            # The ZeRO checkpoint has the optimizer step, param groups and loss scaler, and the sub-groups too small
+            # to swap. Loaded after the copy, it also reads the swapped sub-groups from the copied files.
+            self._load_zero_checkpoint(load_dir, tag, load_optimizer_states=load_zero_optimizer_states)
 
         if self._optimizer_has_ckpt_event_epilogue():
             self.optimizer.checkpoint_event_epilogue()

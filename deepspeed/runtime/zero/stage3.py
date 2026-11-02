@@ -2796,6 +2796,41 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                                                                        write_opt_state, write_gradients)
         self.fp32_partitioned_groups_flat[sub_group_id].grad = None
 
+    def _get_in_memory_optimizer_states(self):
+        """By sub-group, the optimizer states that are not swapped (`swappable = False`, as Muon's momentum with
+        save_muon_momentum_buffer_in_memory)."""
+        return {
+            sub_group_id: {
+                key: value
+                for key, value in self.optimizer.state.get(fp32_param, {}).items()
+                if torch.is_tensor(value) and not getattr(value, "swappable", True)
+            }
+            for sub_group_id, fp32_param in enumerate(self.fp32_partitioned_groups_flat)
+        }
+
+    def _prepare_loaded_states_for_swap_in(self, in_memory_states):
+        """Fit the optimizer states that optimizer.load_state_dict() created to the swapper.
+
+        The states of a swapped sub-group are saved empty: their values are in the swap files that load_checkpoint
+        copied from the checkpoint. The swapper takes a state tensor for swapping by its size, so each gets the size of
+        its sub-group, with no memory behind it: swapping the sub-group in replaces it with the values read from the
+        file. A state that is not swapped gets the loaded values in its own tensor, which other code refers to.
+        """
+        for sub_group_id, fp32_param in enumerate(self.fp32_partitioned_groups_flat):
+            state = self.optimizer.state.get(fp32_param)
+            if state is None:
+                continue
+            for key, tensor in in_memory_states[sub_group_id].items():
+                if key in state:
+                    tensor.copy_(state[key])
+                    state[key] = tensor
+            if not self._swappable_optimizer_subgroup(sub_group_id):
+                continue
+            numel = self.fp16_partitioned_groups_flat_numel[sub_group_id]
+            for key, value in state.items():
+                if torch.is_tensor(value) and value.numel() == 0:
+                    state[key] = torch.empty_strided((numel, ), (0, ), dtype=value.dtype)
+
     def _unflatten_partitioned_parameters(self, sub_group_id):
         updated_params = self.unflatten(self.fp16_partitioned_groups_flat[sub_group_id],
                                         self.fp16_partitioned_groups[sub_group_id])
@@ -3579,11 +3614,14 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                                "topology in this release.")
 
         if load_optimizer_states:
+            in_memory_states = self._get_in_memory_optimizer_states() if self.swap_optimizer else None
             self._set_fp32_optimizer_param_groups()
             self.optimizer.load_state_dict(state_dict[OPTIMIZER_STATE_DICT])
             self._clear_fp32_optimizer_param_groups()
 
         if self.swap_optimizer:
+            if load_optimizer_states:
+                self._prepare_loaded_states_for_swap_in(in_memory_states)
             # Purge the swapped optimizer state, it was initialized to the freshly created model and not the checkpoint
             self.optimizer_swapper.purge_state()
 
