@@ -259,7 +259,7 @@ class ScatterToTensorParallelRegion(torch.autograd.Function):
 class AsyncColumnParallel(torch.autograd.Function):
 
     @staticmethod
-    def forward(ctx: Any, group: dist.ProcessGroup, input: torch.Tensor, weight, bias) -> torch.Tensor:
+    def forward(ctx: Any, group: dist.ProcessGroup, input: torch.Tensor, weight, bias, training: bool) -> torch.Tensor:
         """
         Forward pass.
         """
@@ -267,7 +267,7 @@ class AsyncColumnParallel(torch.autograd.Function):
         ctx.group = group
         output = torch.matmul(input, weight.transpose(-1, -2))
         if bias is not None:
-            output = add_bias(output, bias)
+            output = add_bias(output, bias, training)
 
         ctx.save_for_backward(input, weight)
 
@@ -282,7 +282,7 @@ class AsyncColumnParallel(torch.autograd.Function):
         grad_weight = grad_output.view(-1, grad_output.shape[-1]).t().matmul(input.view(-1, input.shape[-1]))
         grad_bias = grad_output.sum(0) if ctx.use_bias else None
         handle.wait()
-        return None, grad_input, grad_weight, grad_bias
+        return None, grad_input, grad_weight, grad_bias, None
 
 
 class ColumnParallel(torch.autograd.Function):
@@ -1000,7 +1000,7 @@ class LinearLayer(TensorParallel_Layer):
             if self.bias is not None:
                 output = add_bias(output, self.bias, self.is_training_mode())
         else:
-            output = AsyncColumnParallel.apply(self.mp_group, input, self.weight, self.bias)
+            output = AsyncColumnParallel.apply(self.mp_group, input, self.weight, self.bias, self.is_training_mode())
 
         if self.gather_output:
             if self.defer_collectives_to_compiler:

@@ -11,6 +11,7 @@ from deepspeed.accelerator import get_accelerator
 from deepspeed.checkpoint.constants import (ORIGINAL_VOCAB_SIZE, PARAMETER_WITH_ROW_PARALLELISM_PATTERNS,
                                             TP_REPLICATED_PARAMETER_PATTERNS, UNIVERSAL_CHECKPOINT_INFO,
                                             VOCABULARY_PARAMETER_PATTERNS)
+from deepspeed.module_inject.layers import LmHeadLinearAllreduce
 from deepspeed.utils import groups
 from deepspeed.runtime.utils import is_model_parallel_parameter
 from unit.common import DistributedTest, preferred_dtype
@@ -353,9 +354,6 @@ class TestReplicatedGradAllreduce(DistributedTest):
     non_daemonic_procs = True
 
     def test_qwen3_norm_grads_match_across_ranks(self):
-        if get_accelerator().device_name() == "cpu":
-            import pytest
-            pytest.skip("CPU does not support this test yet")
         import pytest
         transformers = pytest.importorskip("transformers")
         if not hasattr(transformers, "Qwen3ForCausalLM"):
@@ -582,6 +580,8 @@ class TestInferenceTeacherAfterTrainingStudent(DistributedTest):
         o_proj = teacher_engine.module.model.layers[0].self_attn.o_proj
         assert not q_proj.weight.requires_grad
         assert not o_proj.weight.requires_grad
+        # The LM head is sharded only when the teacher's own inference mode reaches set_lm_head.
+        assert isinstance(teacher_engine.module.lm_head, LmHeadLinearAllreduce)
 
         device = torch.device(get_accelerator().current_device_name())
         torch.manual_seed(1234)
