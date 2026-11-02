@@ -673,9 +673,8 @@ class BF16_Optimizer(ZeROOptimizer):
         assert ckpt_version, "Empty ds_version in checkpoint, not clear how to proceed"
         ckpt_version = pkg_version.parse(ckpt_version)
 
-        self.clip_grad = current_rank_sd.get(CLIP_GRAD, self.clip_grad)
-
         if load_optimizer_states:
+            self.clip_grad = current_rank_sd.get(CLIP_GRAD, self.clip_grad)
             print("_load_legacy_checkpoint current_rank_sd[BASE_OPTIMIZER_STATE]")
             self.optimizer.load_state_dict(current_rank_sd[BASE_OPTIMIZER_STATE])
 
@@ -689,7 +688,9 @@ class BF16_Optimizer(ZeROOptimizer):
             self._link_all_hp_params()
 
     def _load_universal_checkpoint(self, checkpoint_folder, load_optimizer_states, load_from_fp32_weights):
-        self.load_hp_checkpoint_state_from_checkpoint_dir("bf16_groups", checkpoint_folder)
+        self.load_hp_checkpoint_state_from_checkpoint_dir("bf16_groups",
+                                                          checkpoint_folder,
+                                                          load_optimizer_states=load_optimizer_states)
 
     def _load_global_state(self, sd):
         pass

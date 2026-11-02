@@ -263,10 +263,14 @@ jobs:
         run: |
           unset TORCH_CUDA_ARCH_LIST # only jit compile for current arch
           cd tests
+          # setup-venv forces --color=yes in PYTEST_OPTS, but cpu-multi-triage
+          # parses the FAILED summary lines out of this log; plain text keeps
+          # that parsing independent of ANSI stripping (pytest keeps the last
+          # --color flag).
           parallel_exit=0
           sequential_exit=0
-          HF_HOME=/tmp/hf_home timeout 120m pytest $PYTEST_OPTS --maxfail=100000 --forked -n 4 unit/ --ignore=unit/v1 --torch_ver="$TORCH_TEST_VERSION" || parallel_exit=$?
-          HF_HOME=/tmp/hf_home timeout 25m pytest $PYTEST_OPTS --maxfail=100000 --forked -m 'sequential' unit/ --torch_ver="$TORCH_TEST_VERSION" || sequential_exit=$?
+          HF_HOME=/tmp/hf_home timeout 120m pytest $PYTEST_OPTS --color=no --maxfail=100000 --forked -n 4 unit/ --ignore=unit/v1 --torch_ver="$TORCH_TEST_VERSION" || parallel_exit=$?
+          HF_HOME=/tmp/hf_home timeout 25m pytest $PYTEST_OPTS --color=no --maxfail=100000 --forked -m 'sequential' unit/ --torch_ver="$TORCH_TEST_VERSION" || sequential_exit=$?
           # A timeout (124) outranks the other phase's failures: the budget ran
           # out, so more failures may remain undiscovered. Without this, the
           # outcome depended on which phase happened to run last.
