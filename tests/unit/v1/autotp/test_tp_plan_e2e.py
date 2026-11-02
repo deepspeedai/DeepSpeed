@@ -424,9 +424,6 @@ class TestReplicatedGradAllreduce(DistributedTest):
         Registering the all-reduce hook on a parameter that does not require gradients raises, so
         initializing a frozen Qwen3 with tensor parallelism used to fail.
         """
-        if get_accelerator().device_name() == "cpu":
-            import pytest
-            pytest.skip("CPU does not support this test yet")
         import pytest
         transformers = pytest.importorskip("transformers")
         if not hasattr(transformers, "Qwen3ForCausalLM"):
@@ -474,9 +471,6 @@ class TestReplicatedGradAllreduce(DistributedTest):
         Training it after unfreezing would let the tensor-parallel ranks drift apart silently, so the
         engine must refuse the backward instead.
         """
-        if get_accelerator().device_name() == "cpu":
-            import pytest
-            pytest.skip("CPU does not support this test yet")
         import pytest
         transformers = pytest.importorskip("transformers")
         if not hasattr(transformers, "Qwen3ForCausalLM"):
