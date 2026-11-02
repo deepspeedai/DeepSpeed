@@ -148,6 +148,10 @@ class IPGBucketZ3:
 
 INITIAL_MICRO_STEP_ID = -1
 
+# Elements of a pinned master partition that _copy_pinned_master_to_device moves to the device at a time: 0.25 GiB in
+# float32. A sub-group has up to sub_group_size (default 1e9) elements.
+PINNED_MASTER_COPY_NUMEL = 2**26
+
 
 class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
     """
@@ -2868,8 +2872,12 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         """Copy the pinned CPU master partition ``src`` into the low-precision device partition ``dst``.
 
         The master goes to the device in its own dtype and is cast there, the form #5301 introduced in ZeRO-1/2:
-        ``dst.copy_(src)`` would cast on the CPU into a pageable temporary and copy from that at a few GB/s."""
-        dst.copy_(src.to(dst.device, non_blocking=True))
+        ``dst.copy_(src)`` would cast on the CPU into a pageable temporary and copy from that at a few GB/s. It goes in
+        pieces, so that the device temporary is one piece and not the whole sub-group. The pieces run in order on one
+        stream, so each piece can reuse the memory of the previous one."""
+        for start in range(0, src.numel(), PINNED_MASTER_COPY_NUMEL):
+            numel = min(PINNED_MASTER_COPY_NUMEL, src.numel() - start)
+            dst.narrow(0, start, numel).copy_(src.narrow(0, start, numel).to(dst.device, non_blocking=True))
         # Callers expect the partition on the device when this returns: the parameter all-gathers of the next forward
         # run on a stream that does not wait for this one.
         event = get_accelerator().Event()

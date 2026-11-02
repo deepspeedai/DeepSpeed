@@ -1920,6 +1920,59 @@ class TestZeroOffloadOptim(DistributedTest):
 
 
 @pytest.mark.skipif(not get_accelerator().is_bf16_supported(), reason="bf16 is not supported on this accelerator")
+class TestZero3OffloadPinnedCopyBackPieces(DistributedTest):
+    """The pinned copy-back moves the master to the device in pieces of 2**26 elements: step() needs one piece of
+    device memory (0.25 GiB in float32) on top of what it starts with, not the whole sub-group (sub_group_size elements,
+    1e9 by default), and every piece reaches its place in the partition."""
+    world_size = 1
+
+    def test(self):
+        if get_accelerator().device_name() == "cpu":
+            pytest.skip("on the CPU accelerator the master weights never leave the host")
+        # One sub-group of 134M elements: two pieces and a part of a third.
+        hidden_dim = 4096
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 1,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 1e-3
+                }
+            },
+            "bf16": {
+                "enabled": True
+            },
+            "zero_optimization": {
+                "stage": 3,
+                "offload_optimizer": {
+                    "device": "cpu",
+                    "pin_memory": True
+                }
+            },
+        }
+        model = SimpleModel(hidden_dim, nlayers=8)
+        model, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config_dict)
+        data_loader = random_dataloader(model=model,
+                                        total_samples=1,
+                                        hidden_dim=hidden_dim,
+                                        device=model.device,
+                                        dtype=torch.bfloat16)
+        batch = next(iter(data_loader))
+        model.backward(model(batch[0], batch[1]))
+        get_accelerator().synchronize()
+        allocated = get_accelerator().memory_allocated()
+        get_accelerator().reset_peak_memory_stats()
+        model.step()
+        get_accelerator().synchronize()
+        step_memory = get_accelerator().max_memory_allocated() - allocated
+        assert step_memory <= 2**28, f"step() took {step_memory / 2**20:.0f} MiB of device memory, more than one piece"
+
+        optimizer = model.optimizer
+        for master, partition in zip(optimizer.fp32_partitioned_groups_flat, optimizer.fp16_partitioned_groups_flat):
+            assert torch.equal(partition.cpu(), master.to(partition.dtype))
+
+
+@pytest.mark.skipif(not get_accelerator().is_bf16_supported(), reason="bf16 is not supported on this accelerator")
 @pytest.mark.parametrize("ratio", [1.0, 0.5])
 class TestZero3OffloadPinnedCopyBack(DistributedTest):
     """With pin_memory, the CPU master partitions are pinned, as in ZeRO-1/2, and the updated masters must reach the
