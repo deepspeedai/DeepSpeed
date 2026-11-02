@@ -531,3 +531,18 @@ class TestFailedIO(DistributedTest):
         h.free_cpu_locked_tensor(buffer)
 
         self._check_read(h, tmpdir)
+
+    def test_failed_context(self, tmpdir, single_submit, overlap_events):
+        # The kernel refuses an I/O context of queue depth 0, as it does when /proc/sys/fs/aio-max-nr is reached: the
+        # read and the write raise, and leave no file open.
+        aio = AsyncIOBuilder().load()
+        ref_file, _ = _do_ref_write(tmpdir)
+        buffer = torch.empty(IO_SIZE, dtype=torch.uint8)
+        open_files = len(os.listdir("/proc/self/fd"))
+        for io_call in (lambda: aio.aio_read(buffer, ref_file, BLOCK_SIZE, 0, single_submit, overlap_events, False),
+                        lambda: aio.aio_write(buffer, _get_test_write_file(tmpdir, 0), BLOCK_SIZE, 0, single_submit,
+                                              overlap_events, False)):
+            error = _get_io_error(io_call)
+            assert error is not None and "io_queue_init" in error, error
+        left_open = len(os.listdir("/proc/self/fd")) - open_files
+        assert left_open == 0, f"{left_open} files left open"
