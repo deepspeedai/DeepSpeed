@@ -1094,6 +1094,16 @@ class VocabParallelLinear(LinearLayer):
         self.vocab_size = self._orig_weight_shape[0]
         self.vocab_start_index = sum(self._partition_sizes[:self.tp_index])
         self.vocab_end_index = self.vocab_start_index + self._partition_sizes[self.tp_index]
+        # Set by the fused linear cross-entropy loss, which defers this projection into the loss.
+        self.fused_loss_capture = None
+
+    def forward(self, input):
+        capture = self.fused_loss_capture
+        if capture is not None and capture.armed:
+            # The fused loss projects ``input`` itself and reduces its gradient over TP, so the
+            # column-parallel input collective must not run here as well.
+            return capture.take(input)
+        return super().forward(input)
 
 
 class VocabParallelEmbedding(TensorParallel_Layer):
