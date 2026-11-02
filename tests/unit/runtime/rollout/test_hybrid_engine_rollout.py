@@ -1136,6 +1136,7 @@ def test_sync_weights_is_noop():
 @patch("deepspeed.runtime.rollout.hybrid_engine_rollout.time.perf_counter")
 @patch("deepspeed.runtime.rollout.hybrid_engine_rollout.get_accelerator")
 def test_generate_calls_graph_capture_when_enabled(mock_get_accelerator, mock_perf_counter):
+    mock_get_accelerator.return_value.is_graph_capture_supported.return_value = True
     engine = _make_engine()
     tok = _make_tokenizer()
     cfg = HybridEngineRolloutConfig(use_graph_capture=True, enable_profiling=True)
@@ -1159,6 +1160,33 @@ def test_generate_calls_graph_capture_when_enabled(mock_get_accelerator, mock_pe
     assert profile["decode_forward_ms"] is None
     assert profile["generation_overhead_ms"] == pytest.approx(10.0)
     assert profile["num_decode_forwards"] == 0
+
+
+@patch("deepspeed.runtime.rollout.hybrid_engine_rollout.get_accelerator")
+def test_generate_falls_back_to_eager_without_graph_capture_opt_in(mock_get_accelerator):
+    # A backend that exposes a graph API but has not opted in must not have
+    # its unvalidated graph path selected by use_graph_capture.
+    mock_get_accelerator.return_value.is_graph_capture_supported.return_value = False
+    engine = _make_engine()
+    engine.module.generate.return_value = torch.tensor([[10, 11, 5, 6]])
+    rollout = HybridEngineRollout(engine, _make_tokenizer(), cfg=HybridEngineRolloutConfig(use_graph_capture=True))
+    rollout._generate_graph = MagicMock()
+
+    req = MagicMock()
+    req.prompt_ids = torch.tensor([[10, 11]])
+    req.prompt_attention_mask = torch.ones(1, 2, dtype=torch.long)
+    sampling = MagicMock()
+    sampling.temperature = 0
+    sampling.n_samples_per_prompt = 1
+    sampling.max_new_tokens = 2
+    sampling.top_p = 1.0
+    sampling.continuous_batch_size = None
+
+    result = rollout.generate(req, sampling)
+
+    rollout._generate_graph.assert_not_called()
+    engine.module.generate.assert_called_once()
+    assert result.input_ids.tolist() == [[10, 11, 5, 6]]
 
 
 def test_generate_keeps_ranks_in_lockstep_and_pads_after_eos():
