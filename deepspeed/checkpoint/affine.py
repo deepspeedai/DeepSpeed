@@ -256,6 +256,11 @@ class ParamAffineMap:
         if held != expected:
             raise ValueError(f'Rank {rank} holds a shard of {expected} elements but its pieces '
                              f'account for {held}.')
+        for piece in pieces:
+            for side, strides in (('source', piece.source_strides), ('destination', piece.dest_strides)):
+                if _overlaps_itself(piece.shape, strides):
+                    raise ValueError(f'Rank {rank} piece {piece} reaches one {side} address twice within itself, '
+                                     'so one of its elements would silently overwrite another.')
         self._validate_destinations(rank, pieces, self.shard_shapes[rank])
 
     def _validate_destinations(self, rank, pieces, shard_shape):
@@ -376,10 +381,10 @@ class ParamAffineMap:
         full_param = torch.empty(self.numel, dtype=any_shard.dtype, device=any_shard.device)
 
         # validate() reads destinations from metadata and never looks at sources, so a map can
-        # pass it while two ranks claim one block and nothing holds another. Tracking the
-        # elements written, one byte each, catches both for any strides; otherwise the result
-        # would keep whatever torch.empty left behind.
-        covered = torch.zeros(self.numel, dtype=torch.bool, device=full_param.device)
+        # pass it while two ranks claim one block and nothing holds another. Recording who wrote
+        # each element, one byte each, catches both for any strides; otherwise the result would
+        # keep whatever torch.empty left behind.
+        written = torch.zeros(self.numel, dtype=torch.uint8, device=full_param.device)
         for rank, pieces in self.pieces_by_rank.items():
             if not pieces:
                 continue
@@ -389,12 +394,16 @@ class ParamAffineMap:
                 _place(placed, piece, rank)
                 target = piece.source_view(full_param)
                 source = _scaled(piece.dest_view(flat_shard), piece.scale, scale_power)
-                seen = piece.source_view(covered)
+                writer = _REPLICA if len(piece.locations) > 1 else _SINGLE_HOLDER
+                previous = piece.source_view(written)
+                seen = previous != _UNWRITTEN
                 if seen.any():
-                    if len(piece.locations) < 2:
-                        raise ValueError(f'Rank {rank} piece {piece} names a single holder, but another piece '
-                                         'already wrote part of its block, so one would silently overwrite '
-                                         'the other.')
+                    # Only replicas may share an element. Checking the earlier writer as well as this
+                    # piece keeps the answer the same whichever rank is visited first.
+                    if writer != _REPLICA or not (previous[seen] == _REPLICA).all():
+                        raise ValueError(f'Rank {rank} piece {piece} writes part of a block another piece already '
+                                         'wrote, and one of the two names a single holder, so one would silently '
+                                         'overwrite the other.')
                     # Every rank holding a replicated piece must agree. Letting the last
                     # writer win would hide rank drift or a corrupt shard, which the
                     # category-based converter guards against explicitly. Comparing element by
@@ -406,11 +415,11 @@ class ParamAffineMap:
                     if seen.all():
                         continue
                 target.copy_(source)
-                seen.fill_(True)
+                previous.fill_(writer)
             _require_placed(placed, rank)
 
-        if not covered.all():
-            missing = (~covered).nonzero()
+        missing = (written == _UNWRITTEN).nonzero()
+        if missing.numel():
             raise ValueError(f'Affine map for a parameter of shape {self.logical_shape} leaves '
                              f'{missing.numel()} element(s) uncovered, starting at offset {int(missing[0])}, '
                              'so the parameter cannot be rebuilt from its shards.')
@@ -493,6 +502,27 @@ def _scaled(tensor, scale, scale_power):
     if factor == 1.0:
         return tensor
     return tensor / factor
+
+
+# What rebuild records for each element of the full tensor: nobody has written it yet, a piece
+# naming a single holder did, or a replica did.
+_UNWRITTEN, _SINGLE_HOLDER, _REPLICA = 0, 1, 2
+
+
+def _overlaps_itself(shape, strides):
+    """Whether two positions of a view with this shape and these strides share an address.
+
+    Taking the axes that move in order of stride, the view is free of overlap when each stride
+    clears every address the axes before it reach. That holds for every layout the builders here
+    produce. A view that interleaves its axes some other way is refused even where it would not
+    collide, which keeps this to a few comparisons per piece instead of a walk over its elements.
+    """
+    reach = 0
+    for stride, size in sorted((stride, size) for size, stride in zip(shape, strides) if size > 1):
+        if stride <= reach:
+            return True
+        reach += stride * (size - 1)
+    return False
 
 
 def _place(placed, piece, rank):

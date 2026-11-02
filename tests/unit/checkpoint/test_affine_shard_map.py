@@ -648,6 +648,56 @@ def test_conversion_refuses_a_map_that_does_not_cover_the_parameter(logical_shap
         affine_map.rebuild({rank: torch.full((4, ), float(rank + 1)) for rank in (0, 1)})
 
 
+@pytest.mark.parametrize('first', [0, 1])
+def test_a_replica_overlapping_a_single_holder_is_refused_in_either_order(first):
+    # Rank 0 declares the block a replica held by ranks 0 and 1, while rank 1 declares itself its
+    # only holder. Which rank rebuild visits first must not decide whether that is caught.
+    pieces = {
+        0: [AffinePiece((4, ), 0, (1, ), 0, (1, ), [0, 1])],
+        1: [AffinePiece((4, ), 0, (1, ), 0, (1, ), [1])],
+    }
+    affine_map = ParamAffineMap((4, ), {0: (4, ), 1: (4, )}, {rank: pieces[rank] for rank in (first, 1 - first)})
+    with pytest.raises(ValueError, match='single holder'):
+        affine_map.rebuild({0: torch.arange(4.), 1: torch.arange(4.)})
+
+
+_SELF_OVERLAPPING_VIEWS = {
+    # Rank 0's source view reads addresses 0, 1, 1 and 2, so one shard value is lost, and which one
+    # survives depends on the device.
+    'source': ((6, ), {
+        0: (4, ),
+        1: (3, )
+    }, {
+        0: [AffinePiece((2, 2), 0, (1, 1), 0, (2, 1), [0])],
+        1: [AffinePiece((3, ), 3, (1, ), 0, (1, ), [1])]
+    }),
+    # A zero stride repeats one element. extract would copy it twice without complaint.
+    'zero-stride': ((4, ), {
+        0: (2, ),
+        1: (2, )
+    }, {
+        0: [AffinePiece((2, ), 0, (0, ), 0, (1, ), [0])],
+        1: [AffinePiece((2, ), 2, (1, ), 0, (1, ), [1])]
+    }),
+    # The destination view writes shard addresses 0, 1, 1 and 2, and never 3.
+    'destination': ((4, ), {
+        0: (4, )
+    }, {
+        0: [AffinePiece((2, 2), 0, (2, 1), 0, (1, 1), [0])]
+    }),
+}
+
+
+@pytest.mark.parametrize('case', sorted(_SELF_OVERLAPPING_VIEWS))
+def test_a_view_that_overlaps_itself_is_refused(case):
+    logical_shape, shard_shapes, pieces_by_rank = _SELF_OVERLAPPING_VIEWS[case]
+    affine_map = ParamAffineMap(logical_shape, shard_shapes, pieces_by_rank)
+    with pytest.raises(ValueError, match='itself'):
+        affine_map.extract(torch.arange(float(affine_map.numel)), 0)
+    with pytest.raises(ValueError, match='itself'):
+        affine_map.rebuild({rank: torch.zeros(shape) for rank, shape in shard_shapes.items()})
+
+
 def _random_widths(rng, total, tp_degree):
     cuts = sorted(rng.sample(range(1, total), tp_degree - 1))
     return [stop - start for start, stop in zip([0] + cuts, cuts + [total])]
@@ -694,20 +744,20 @@ def _corrupt_one_piece(affine_map, rng):
 
 
 def test_a_corrupted_map_is_refused_or_still_exact():
-    """Fixed seed: a map with one corrupted offset or stride either fails conversion or round-trips.
+    """Fixed seed: converting through a map with one corrupted offset or stride fails or is exact.
 
-    The conversion path runs only the metadata check, so this is what stands between a wrong map
-    and a universal checkpoint that silently holds the wrong values.
+    The shards come from the map before it is corrupted, as a checkpoint's shards were written by
+    the real layout. Extracting and rebuilding through the same wrong map could let an error cancel.
     """
     import random
     rng = random.Random(20261031)
     refused = 0
     for _ in range(300):
         affine_map = _random_layout(rng)
-        _corrupt_one_piece(affine_map, rng)
         full = torch.arange(1, affine_map.numel + 1, dtype=torch.float32).view(affine_map.logical_shape)
+        shards = {rank: affine_map.extract(full, rank) for rank in affine_map.pieces_by_rank}
+        _corrupt_one_piece(affine_map, rng)
         try:
-            shards = {rank: affine_map.extract(full, rank) for rank in affine_map.pieces_by_rank}
             rebuilt = affine_map.rebuild(shards)
         except (ValueError, RuntimeError):
             refused += 1
