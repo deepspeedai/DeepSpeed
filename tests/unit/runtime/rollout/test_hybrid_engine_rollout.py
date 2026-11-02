@@ -148,9 +148,9 @@ def test_continuous_graph_rejects_flash_attention():
 
 @patch("deepspeed.runtime.rollout.hybrid_engine_rollout.get_accelerator")
 def test_continuous_graph_rejects_unsupported_accelerator(mock_get_accelerator):
-    # Backends without graph capture return None from create_graph(); the
-    # continuous path requires real replay semantics and must refuse to run.
-    mock_get_accelerator.return_value.create_graph.return_value = None
+    # Backends without the graph capture opt-in must refuse the continuous
+    # path, which requires real replay semantics.
+    mock_get_accelerator.return_value.is_graph_capture_supported.return_value = False
     engine = _make_engine()
     engine.module.config = SimpleNamespace()
     rollout = HybridEngineRollout(engine, _make_tokenizer(), cfg=HybridEngineRolloutConfig(use_graph_capture=True))
@@ -266,7 +266,7 @@ def test_continuous_graph_capture_preserves_attention_implementation(mock_get_ac
 
 def test_continuous_graph_keeps_cache_position_alive_for_replay():
     accelerator = get_accelerator()
-    if not accelerator.is_available() or accelerator.create_graph() is None:
+    if not accelerator.is_available() or not accelerator.is_graph_capture_supported():
         pytest.skip("requires graph capture")
 
     class DecodeModule(torch.nn.Module):

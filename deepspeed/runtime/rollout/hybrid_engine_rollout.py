@@ -561,7 +561,7 @@ class HybridEngineRollout(RolloutEngine):
         if getattr(module.config, "_attn_implementation", None) == "flash_attention_2":
             raise ValueError("continuous graph capture does not support flash_attention_2")
         device = requests[0].prompt_ids.device
-        if get_accelerator().create_graph() is None:
+        if not get_accelerator().is_graph_capture_supported():
             raise ValueError("continuous graph capture is not supported on the current accelerator")
 
         from transformers import StaticCache
