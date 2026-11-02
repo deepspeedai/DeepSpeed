@@ -7,6 +7,7 @@ import logging
 import torch
 import re
 from deepspeed import comm as dist
+from deepspeed.comm import pg_utils
 from torch import nn
 from torch.nn import functional as F
 from torch.nn.parameter import Parameter
@@ -218,7 +219,7 @@ class RowParallel(torch.autograd.Function):
         Forward pass.
         """
         ctx.group = group
-        if group == None:
+        if not pg_utils.is_parallel(group):
             return input
         if is_inference_mode:
             dist.inference_all_reduce(input, group=group)
@@ -251,7 +252,7 @@ class ScatterToTensorParallelRegion(torch.autograd.Function):
         # layers need the sum of all slices, not this rank's padded gradient.
         grad_input = grad_output.new_zeros(ctx.input_shape)
         grad_input.narrow(-1, ctx.offset, ctx.size).copy_(grad_output)
-        if ctx.group is not None:
+        if pg_utils.is_parallel(ctx.group):
             dist.all_reduce(grad_input, group=ctx.group)
         return None, grad_input, None, None
 
@@ -308,7 +309,7 @@ class ColumnParallel(torch.autograd.Function):
         """
         Backward pass.
         """
-        if ctx.group == None:
+        if not pg_utils.is_parallel(ctx.group):
             return None, grad_output
 
         dist.all_reduce(grad_output.contiguous(), group=ctx.group)
@@ -407,6 +408,8 @@ class TensorParallel_Layer(nn.Module, ABC):
         else:
             self.tp_world_size: int = 1
             self.tp_index: int = 0
+        # Cached once so hot and compiled paths need no process-group query per call.
+        self.is_tp_parallel: bool = pg_utils.is_parallel(mp_group)
 
         # backward compatibility
         self.world_size = self.tp_world_size
@@ -912,7 +915,7 @@ class LinearAllreduce(TensorParallel_Layer):
         if weight is None:
             return
 
-        if self.mp_group is None or self.tp_world_size == 1:
+        if not self.is_tp_parallel:
             weight.data = weight.data.contiguous()
             return
 
@@ -1021,7 +1024,7 @@ class LinearLayer(TensorParallel_Layer):
             if param is None:
                 continue
 
-            if self.mp_group is None or self.tp_world_size == 1:
+            if not self.is_tp_parallel:
                 params_list[idx].data = param.data.contiguous()
                 continue
 
@@ -1169,7 +1172,7 @@ class VocabParallelEmbedding(TensorParallel_Layer):
 
     def forward(self, input):
         self._assert_compiled_if_deferred()
-        if self.mp_group is None or self.tp_world_size == 1:
+        if not self.is_tp_parallel:
             output = F.embedding(input, self.weight, padding_idx=self.padding_idx)
         else:
             # Tokens outside this rank's vocab shard are remapped to index 0 so the local lookup
@@ -1189,7 +1192,7 @@ class VocabParallelEmbedding(TensorParallel_Layer):
         for idx, param in enumerate(params_list):
             if param is None:
                 continue
-            if self.mp_group is None or self.tp_world_size == 1:
+            if not self.is_tp_parallel:
                 params_list[idx].data = param.data.contiguous()
                 continue
             params_list[idx].data = self._all_gather_shards(param, self._partition_sizes, dim=0).contiguous()
@@ -1279,7 +1282,7 @@ class HiddenParallelEmbedding(TensorParallel_Layer):
                              self.weight,
                              padding_idx=self.padding_idx,
                              scale_grad_by_freq=self.scale_grad_by_freq)
-        if self.mp_group is not None and self.tp_world_size > 1:
+        if self.is_tp_parallel:
             output = GatherFromTensorParallelRegion.apply(self.mp_group, output, self._partition_sizes)
         if self.embed_scale is not None:
             output = output * self.embed_scale.to(self.weight.dtype)
@@ -1290,7 +1293,7 @@ class HiddenParallelEmbedding(TensorParallel_Layer):
         for idx, param in enumerate(params_list):
             if param is None:
                 continue
-            if self.mp_group is None or self.tp_world_size == 1:
+            if not self.is_tp_parallel:
                 params_list[idx].data = param.data.contiguous()
                 continue
             params_list[idx].data = self._all_gather_shards(param, self._partition_sizes, dim=1).contiguous()
@@ -1477,6 +1480,36 @@ class fused_LinearLayer(SubParamColumnParallel):
         self._subparam_layout_spec = (fused_qkv_subparam_sizes(kwargs.get('fused_module'), tuple(module.weight.shape),
                                                                kwargs['tp_meta']), None)
         super().__init__(module, mp_group, skip_partition, **kwargs)
+        self._sum_replicated_kv_gradients()
+
+    def _sum_replicated_kv_gradients(self):
+        """Sum the gradient of the key/value block that GPTBigCode gives every rank whole.
+
+        Each rank attends with only its own query heads, so the gradient it computes for the
+        shared key/value rows covers those heads alone. Unless the ranks add those partial
+        gradients, each applies a different update to rows that must stay identical, and
+        training departs from the unsharded model. The input gradient needs no change: the
+        column-parallel backward already sums every rank's contribution to it.
+        """
+        from deepspeed.module_inject.fusedqkv_utils import get_fused_qkv_type
+
+        if get_fused_qkv_type(self.fused_module.module) != 'bigcodetype' or not pg_utils.is_parallel(self.mp_group):
+            return
+        n_embd = self.tp_meta.n_embd
+        if n_embd is None:
+            return
+        # This rank's shard is its query rows followed by the whole key/value block.
+        kv_start = get_shard_size_list(n_embd, self.tp_world_size, self.tp_meta)[self.tp_index]
+        group = self.mp_group
+
+        def sum_kv_rows(grad):
+            grad = grad.clone()
+            dist.all_reduce(grad.narrow(0, kv_start, grad.shape[0] - kv_start), group=group)
+            return grad
+
+        for param in (self.weight, self.bias):
+            if param is not None and param.requires_grad:
+                param.register_hook(sum_kv_rows)
 
     def _freeze_partition_sizes(self, total_size):
         super()._freeze_partition_sizes(total_size)
@@ -1634,16 +1667,17 @@ class Yuan_LinearAllreduce(LinearAllreduce):
                                 affine_map=weight_map,
                                 unsupported_reason=None if weight_map else self._unsupported_uc_reason)
         if self.bias is not None:
-            bias_shape = tuple(self.bias.shape)
-            # The weight is describable but this bias is not. Its partition pre-divides by the
-            # world size and replicates, which would need a scaled piece -- and that path does
-            # not currently produce a usable bias, so there is no layout to describe yet.
+            # Only the weight follows the shared-QK head selection. The bias is added once after
+            # the all-reduce, so every rank holds it whole, exactly as for any LinearAllreduce.
+            bias_shape = self._shape_before_zero3_partition(self.bias)
             self._set_param_uc_meta(self.bias,
                                     partition_type='row',
+                                    partition_dim=None,
                                     logical_shape=bias_shape,
+                                    output_shape=bias_shape,
                                     original_shape=bias_shape,
                                     is_bias=True,
-                                    unsupported_reason=self._unsupported_uc_reason)
+                                    replicated=True)
 
 
 class Yuan_LinearLayer(LinearLayer):
@@ -1740,7 +1774,7 @@ class LmHeadLinearAllreduce(LinearAllreduce):
         input_shard_offset = sum(input_shard_sizes[0:self.tp_index])
         output = torch.matmul(input[:, :, input_shard_offset:input_shard_offset + input_shard_size],
                               self.weight.transpose(-1, -2))
-        if self.mp_group is not None:
+        if pg_utils.is_parallel(self.mp_group):
             dist.inference_all_reduce(output, group=self.mp_group)
         if self.bias is not None:
             output = add_bias(output, self.bias, self.is_training_mode())

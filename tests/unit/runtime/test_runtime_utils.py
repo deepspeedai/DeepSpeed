@@ -101,6 +101,33 @@ class TestClipGradNormPNorm(DistributedTest):
             assert torch.allclose(actual.grad, expected.grad)
 
 
+class TestGlobalNormMoEGroup(DistributedTest):
+    world_size = 2
+
+    @pytest.mark.parametrize("norm_type", [2, float("inf")])
+    @pytest.mark.parametrize("kind", ["pair", "single", "none"])
+    def test(self, norm_type, kind):
+        rank = dist.get_rank()
+        if kind == "none":
+            moe_ep_group = None
+        elif kind == "pair":
+            moe_ep_group = dist.new_group([0, 1])
+        else:
+            moe_ep_group = [dist.new_group([r]) for r in range(self.world_size)][rank]
+        local = 3.0 if rank == 0 else 4.0
+        grads = [torch.tensor([local], device=get_accelerator().device_name())]
+
+        norm = ds_utils.get_global_norm_of_tensors(grads, norm_type=norm_type, moe_ep_group=moe_ep_group)
+
+        # Expert norms combine across the expert-parallel group only: 3-4-5 for the 2-norm, 4 for the
+        # max norm. Without expert parallelism, None must not reduce over the world group.
+        if kind == "pair":
+            expected = 5.0 if norm_type == 2 else 4.0
+        else:
+            expected = local
+        assert norm.item() == pytest.approx(expected)
+
+
 @pytest.mark.parametrize("check_using_norm", [(False), (True)])
 class TestCheckOverflow(DistributedTest):
     world_size = 2

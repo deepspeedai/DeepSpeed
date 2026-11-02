@@ -24,6 +24,7 @@ except ModuleNotFoundError:
     from torch import inf
 from typing import Union, List, Dict, Sequence
 from deepspeed import comm as dist
+from deepspeed.comm import pg_utils
 from deepspeed.moe.utils import is_moe_param
 from deepspeed.utils import groups, logger
 from deepspeed.utils.bwc import (bwc_tensor_model_parallel_rank, bwc_pipeline_parallel_world_size,
@@ -45,6 +46,13 @@ class DummyOptim():
     def __init__(self, params):
         self.param_groups = []
         self.param_groups.append({'params': params})
+
+
+def view_as_uint8(tensor):
+    # PyTorch cannot reinterpret a scalar as a dtype with a different element size.
+    if tensor.ndim == 0:
+        tensor = tensor.unsqueeze(0)
+    return tensor.view(torch.uint8)
 
 
 def filter_empty_parameters(params):
@@ -939,7 +947,7 @@ def get_global_norm_of_tensors(input_tensors, norm_type=2, mpu=None, moe_ep_grou
                 dist.all_reduce(device_total_norm, op=dist.ReduceOp.MAX, group=bwc_pipeline_parallel_group(mpu))
 
         # MoE grads: max across expert parallel group
-        if moe_ep_group is not None:
+        if pg_utils.is_parallel(moe_ep_group):
             dist.all_reduce(device_total_norm, op=dist.ReduceOp.MAX, group=moe_ep_group)
         total_norm = device_total_norm.to(input_tensors[0].device)
     else:
@@ -961,7 +969,7 @@ def get_global_norm_of_tensors(input_tensors, norm_type=2, mpu=None, moe_ep_grou
                 dist.all_reduce(device_total_norm, op=dist.ReduceOp.SUM, group=bwc_pipeline_parallel_group(mpu))
 
         # MoE grads: sum across expert parallel group
-        if moe_ep_group is not None:
+        if pg_utils.is_parallel(moe_ep_group):
             dist.all_reduce(device_total_norm, op=dist.ReduceOp.SUM, group=moe_ep_group)
         total_norm = device_total_norm.to(input_tensors[0].device).pow(1. / norm_type)
 

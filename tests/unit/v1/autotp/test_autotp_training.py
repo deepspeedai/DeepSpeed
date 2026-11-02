@@ -23,10 +23,12 @@ from deepspeed.utils import groups
 from contextlib import contextmanager
 from torch import nn
 from deepspeed.module_inject.auto_tp import AutoTP
+from deepspeed.module_inject.fusedqkv_utils import shared_qk_value_head_ids
 from deepspeed.module_inject.layers import (LinearAllreduce, LinearLayer, VocabParallelLinear, VocabParallelEmbedding,
                                             set_autotp_mode, is_autotp_training_mode, GatherFromTensorParallelRegion,
-                                            ScatterToTensorParallelRegion, HiddenParallelEmbedding)
-from deepspeed.module_inject.tp_shard import get_shard_size_list
+                                            ScatterToTensorParallelRegion, HiddenParallelEmbedding,
+                                            Yuan_LinearAllreduce)
+from deepspeed.module_inject.tp_shard import AutoTPMeta, get_shard_size_list
 from unit.checkpoint.common import compare_lr_scheduler_states, compare_optimizer_states
 import os
 from deepspeed.runtime.utils import is_model_parallel_parameter
@@ -1124,6 +1126,147 @@ class TestTpLayerFwdBwd(DistributedTest):
 
     def testUnevenGatheredColumnParallel(self, tp_size: int, tp_overlap_comm: bool):
         run_tp_layer_fwd_bwd(tp_size, tp_overlap_comm, column_parallel=True, gather_output=True, output_dim=129)
+
+
+class TestYuanOutputProjectionBias(DistributedTest):
+    """Yuan's output projection must keep its bias whole across a real tensor-parallel group.
+
+    LinearAllreduce sums the ranks' partial products and adds the bias once afterwards, so the
+    partition has to hand every rank the whole bias. It used to raise on a bias here, and
+    dividing the bias by the world size instead would shrink the output's bias by that factor.
+    This runs the injected layer, its process group and its real forward against the unsharded
+    linear.
+    """
+    world_size = [2, 4]
+    reuse_dist_env = False
+
+    def test_forward_and_backward_match_the_unsharded_layer(self):
+        skip_on_device()
+        tp_group = dist.get_world_group()
+        tp_rank = dist.get_rank(group=tp_group)
+        tp_size = dist.get_world_size(group=tp_group)
+        num_heads, head_dim, out_features = 8, 4, 12
+        device = get_accelerator().current_device_name()
+
+        set_autotp_mode(training=True)
+        try:
+            torch.manual_seed(0)
+            torch_linear = nn.Linear(num_heads * head_dim, out_features, bias=True)
+            layer = Yuan_LinearAllreduce(deepcopy(torch_linear),
+                                         tp_group,
+                                         name='o_proj',
+                                         tp_meta=AutoTPMeta(num_kv_heads=num_heads)).to(device)
+            x = torch.randn(3, num_heads * head_dim)
+            torch_out = torch_linear(x)
+            torch_out.sum().backward()
+
+            # Each rank receives the attention output for its own value heads.
+            columns = torch.cat([
+                torch.arange(head * head_dim, (head + 1) * head_dim)
+                for head in shared_qk_value_head_ids(num_heads, tp_size, tp_rank)
+            ])
+            out = layer(x[:, columns].to(device))
+            out.sum().backward()
+
+            torch.testing.assert_close(out, torch_out.to(device), atol=1e-2, rtol=1e-2)
+            torch.testing.assert_close(layer.bias.grad, torch_linear.bias.grad.to(device), atol=1e-3, rtol=1e-3)
+            torch.testing.assert_close(layer.weight.grad,
+                                       torch_linear.weight.grad[:, columns].to(device),
+                                       atol=1e-3,
+                                       rtol=1e-3)
+        finally:
+            set_autotp_mode(training=False)
+
+
+class TestGPTBigCodeMultiQueryTraining(DistributedTest):
+    """Multi-query GPTBigCode must train the same model under AutoTP as on one device.
+
+    Every rank holds the whole shared key/value block of the fused c_attn but attends with only
+    its own query heads, so the gradient each rank computes for those rows is partial. Unless the
+    ranks sum it, each applies a different update to rows that must stay identical (#8927).
+    """
+    world_size = [2, 4]
+    reuse_dist_env = False
+
+    def test_matches_single_device_training(self):
+        skip_on_device()
+        transformers = pytest.importorskip("transformers")
+        hidden, heads, steps, lr = 32, 4, 4, 0.5
+        kv_rows = 2 * (hidden // heads)
+        device = torch.device(get_accelerator().current_device_name())
+
+        def build_model():
+            torch.manual_seed(0)
+            config = transformers.GPTBigCodeConfig(vocab_size=64,
+                                                   n_positions=32,
+                                                   n_embd=hidden,
+                                                   n_layer=2,
+                                                   n_head=heads,
+                                                   multi_query=True,
+                                                   attn_pdrop=0.0,
+                                                   resid_pdrop=0.0,
+                                                   embd_pdrop=0.0)
+            return transformers.GPTBigCodeForCausalLM(config)
+
+        batches = [
+            torch.randint(0, 64, (2, 16), generator=torch.Generator().manual_seed(step)).to(device)
+            for step in range(steps)
+        ]
+
+        reference = build_model().to(device)
+        # Plain SGD: Adam would turn floating-point noise on gradients that are zero in the unsharded
+        # model into visible updates and blur the comparison.
+        reference_optimizer = torch.optim.SGD(reference.parameters(), lr=lr)
+        reference_losses = []
+        reference_kv_grads = None
+        for input_ids in batches:
+            loss = reference(input_ids=input_ids, labels=input_ids).loss
+            loss.backward()
+            if reference_kv_grads is None:
+                c_attn = reference.transformer.h[0].attn.c_attn
+                reference_kv_grads = (c_attn.weight.grad[hidden:].clone(), c_attn.bias.grad[hidden:].clone())
+            reference_optimizer.step()
+            reference_optimizer.zero_grad()
+            reference_losses.append(loss.item())
+
+        ds_config = {
+            "train_micro_batch_size_per_gpu": 2,
+            "optimizer": {
+                "type": "SGD",
+                "params": {
+                    "lr": lr,
+                },
+            },
+            # The reference does not clip, and DeepSpeed clips to norm 1.0 by default.
+            "gradient_clipping": 0.0,
+            "tensor_parallel": {
+                "autotp_size": dist.get_world_size(),
+            },
+            "zero_optimization": {
+                "stage": 0,
+            },
+        }
+        try:
+            engine, _, _, _ = deepspeed.initialize(model=build_model(), config=ds_config)
+            c_attn = engine.module.transformer.h[0].attn.c_attn
+            losses = []
+            for step, input_ids in enumerate(batches):
+                loss = engine(input_ids=input_ids, labels=input_ids).loss
+                engine.backward(loss)
+                if step == 0:
+                    # The shared rows' gradient on every rank must be the whole gradient, not
+                    # the part from this rank's heads.
+                    torch.testing.assert_close(c_attn.weight.grad[-kv_rows:], reference_kv_grads[0])
+                    torch.testing.assert_close(c_attn.bias.grad[-kv_rows:], reference_kv_grads[1])
+                engine.step()
+                losses.append(loss.item())
+
+            torch.testing.assert_close(torch.tensor(losses), torch.tensor(reference_losses), atol=1e-5, rtol=0)
+            kv_on_ranks = [None] * dist.get_world_size()
+            dist.all_gather_object(kv_on_ranks, c_attn.weight.detach()[-kv_rows:].cpu())
+            assert all(torch.equal(kv, kv_on_ranks[0]) for kv in kv_on_ranks)
+        finally:
+            reset_tp_model_init_state()
 
 
 class TestLegacyLmHeadGatheredTraining(DistributedTest):
