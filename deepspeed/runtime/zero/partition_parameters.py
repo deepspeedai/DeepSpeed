@@ -268,7 +268,10 @@ def zero_wrapper_for_fp_tensor_constructor(fn: Callable, target_fp_dtype: torch.
             kwargs['device'] = target_device
         tensor: Tensor = fn(*args, **kwargs)
         if target_fp_dtype is not None and tensor.is_floating_point():
-            tensor.data = tensor.data.to(target_fp_dtype)
+            # Respect an explicit dtype: the caller chose a precision for a
+            # reason (e.g. RoPE inv_freq must stay float32).
+            if 'dtype' not in kwargs or kwargs['dtype'] is None:
+                tensor.data = tensor.data.to(target_fp_dtype)
 
         return tensor
 
@@ -286,7 +289,8 @@ def get_new_tensor_fn_for_dtype(target_fp_dtype: torch.dtype, target_device: tor
             tensor = _orig_torch_empty(0, device=target_device).new_empty(*args, **kwargs)
 
         if tensor.is_floating_point() and target_fp_dtype is not None:
-            tensor = tensor.to(target_fp_dtype)
+            if 'dtype' not in kwargs or kwargs['dtype'] is None:
+                tensor = tensor.to(target_fp_dtype)
 
         return tensor
 
