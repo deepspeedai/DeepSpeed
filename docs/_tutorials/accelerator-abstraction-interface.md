@@ -51,7 +51,8 @@ The CUDA accelerator delegates to `torch.cuda.is_current_stream_capturing()`.
 HybridEngine graph capture, including the rollout generation paths, is also gated on
 `get_accelerator().is_graph_capture_supported()`. The base implementation returns `False`;
 a backend opts in by overriding it to return `True`, and should do so only after
-implementing `is_current_stream_capturing()`. The static KV cache uses that query to skip
+implementing `is_current_stream_capturing()`. The opt-in is inherited, so an unvalidated
+subclass of a graph-capable accelerator must override it to `False`. The static KV cache uses that query to skip
 host-side bounds checks while a graph is being recorded, so backends without both hooks
 keep eager generation.
 

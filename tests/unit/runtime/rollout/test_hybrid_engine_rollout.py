@@ -146,21 +146,51 @@ def test_continuous_graph_rejects_flash_attention():
         rollout.generate(request, SamplingConfig(max_new_tokens=2, temperature=0, continuous_batch_size=1))
 
 
-@patch("deepspeed.runtime.rollout.hybrid_engine_rollout.get_accelerator")
-def test_continuous_graph_rejects_unsupported_accelerator(mock_get_accelerator):
-    # Backends without the graph capture opt-in must refuse the continuous
-    # path, which requires real replay semantics.
-    mock_get_accelerator.return_value.is_graph_capture_supported.return_value = False
-    engine = _make_engine()
-    engine.module.config = SimpleNamespace()
-    rollout = HybridEngineRollout(engine, _make_tokenizer(), cfg=HybridEngineRolloutConfig(use_graph_capture=True))
+def test_continuous_generation_falls_back_to_eager_without_graph_capture_opt_in():
+    # The eager continuous path is a full fallback, so a backend without the
+    # graph capture opt-in must use it instead of raising.
+
+    class CacheClassModel(torch.nn.Module):
+        _supports_cache_class = True
+
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.zeros(1))
+            self.config = PretrainedConfig(
+                max_position_embeddings=32,
+                num_hidden_layers=1,
+                num_attention_heads=1,
+                num_key_value_heads=1,
+                hidden_size=1,
+                head_dim=1,
+            )
+
+        def forward(self, input_ids, attention_mask, past_key_values=None, use_cache=True, **kwargs):
+            key_states = input_ids[:, None, :, None].to(dtype=torch.float32)
+            _, cache_values = past_key_values.update(key_states, key_states, layer_idx=0, cache_kwargs=kwargs)
+            next_tokens = torch.where(cache_values[:, 0].sum(dim=(1, 2)) == 6, 2, 7).long()
+            logits = torch.zeros((input_ids.shape[0], input_ids.shape[1], 16))
+            logits.scatter_(2, next_tokens[:, None, None].expand(-1, input_ids.shape[1], 1), 1)
+            return SimpleNamespace(logits=logits, past_key_values=past_key_values)
+
+    rollout = HybridEngineRollout(
+        SimpleNamespace(module=CacheClassModel()),
+        SimpleNamespace(pad_token_id=0, eos_token_id=2),
+        cfg=HybridEngineRolloutConfig(use_graph_capture=True),
+    )
     request = RolloutRequest(
-        prompt_ids=torch.tensor([[0, 1, 2]]),
-        prompt_attention_mask=torch.tensor([[0, 1, 1]]),
+        torch.tensor([[1, 2, 3], [1, 2, 4], [1, 2, 5]]),
+        torch.ones((3, 3), dtype=torch.long),
     )
 
-    with pytest.raises(ValueError, match="not supported on the current accelerator"):
-        rollout.generate(request, SamplingConfig(max_new_tokens=2, temperature=0, continuous_batch_size=1))
+    with patch.object(get_accelerator(), "is_graph_capture_supported", return_value=False), \
+            patch.object(rollout, "_generate_continuous_graph") as generate_graph, \
+            patch("deepspeed.runtime.rollout.hybrid_engine_rollout.logger.warning_once") as warning_once:
+        output = rollout.generate(request, SamplingConfig(max_new_tokens=3, temperature=0, continuous_batch_size=2))
+
+    generate_graph.assert_not_called()
+    warning_once.assert_called_once()
+    assert output.input_ids.tolist() == [[1, 2, 3, 2, 0, 0], [1, 2, 4, 7, 7, 7], [1, 2, 5, 7, 7, 7]]
 
 
 def test_continuous_generation_routes_graph_capture_to_fixed_capacity_path():

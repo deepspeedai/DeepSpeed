@@ -302,7 +302,14 @@ class HybridEngineRollout(RolloutEngine):
             RolloutRequest(request.prompt_ids[index:index + 1], request.prompt_attention_mask[index:index + 1])
             for index in range(request.prompt_ids.shape[0]))
         self._validate_continuous_inputs(requests, sampling, max_batch_size)
-        if self.use_graph_capture:
+        use_graph_capture = self.use_graph_capture
+        if use_graph_capture and not get_accelerator().is_graph_capture_supported():
+            # The eager continuous path is a full fallback, so keep it instead
+            # of aborting when the backend has not opted into graph capture.
+            logger.warning_once("HybridEngineRollout: graph capture is not supported on the current accelerator; "
+                                "falling back to eager continuous batching.")
+            use_graph_capture = False
+        if use_graph_capture:
             return self._generate_continuous_graph(original_request, requests, sampling, max_batch_size)
 
         module = self.engine.module
@@ -570,8 +577,6 @@ class HybridEngineRollout(RolloutEngine):
         if getattr(module.config, "_attn_implementation", None) == "flash_attention_2":
             raise ValueError("continuous graph capture does not support flash_attention_2")
         device = requests[0].prompt_ids.device
-        if not get_accelerator().is_graph_capture_supported():
-            raise ValueError("continuous graph capture is not supported on the current accelerator")
 
         from transformers import StaticCache
         from deepspeed.utils.static_cache import DeepSpeedStaticCache
