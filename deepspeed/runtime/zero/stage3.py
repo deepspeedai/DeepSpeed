@@ -387,6 +387,9 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         self._offload_boundary_param_ids = set()
         # ds_ids whose partition was copied to the offloaded fp32 gradient after their last gradient.
         self._offload_copied_param_ids = set()
+        # ds_ids whose offloaded fp32 gradient a safe_set API wrote after their last gradient: step() applies it, so
+        # the copies at the boundary leave it as it is.
+        self._offload_grad_set_param_ids = set()
         # Params with gradient elements on this rank (see partition_grads); set at the first accumulation boundary.
         self._params_with_grad_partition = None
         self.reduce_bucket_size = int(reduce_bucket_size)
@@ -1480,22 +1483,36 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                                                       gradient_offsets=offload_fp32_offsets[i],
                                                       gradient_tensors=offload_fp32_gradients[i])
 
-    def _finalize_offload_gradient_accumulation(self):
-        # Deferred boundary work for params reduced this window (matches managed offload; skips inactive params).
+    def _offload_grad_partitions_at_boundary(self, params):
+        """Copy the gradient partitions of params to the offloaded fp32 gradients.
+
+        For NVMe-swapped sub-groups, the fp32 copies on the device are swapped out for every reduce_bucket_size param
+        elements, as partition_grads does for each gradient bucket, instead of once for the whole model.
+        """
         offload_fp32_gradients = {}
         offload_fp32_offsets = {}
-        for param_group in self.fp16_groups:
-            for param in param_group:
-                if param.ds_id not in self._offload_boundary_param_ids:
-                    continue
-                if param.ds_id not in self.__param_id_to_grad_partition:
-                    continue
-                grad_buffer = self.__param_id_to_grad_partition[param.ds_id]
-                if not get_accelerator().on_accelerator(grad_buffer):
-                    grad_buffer = grad_buffer.to(get_accelerator().current_device_name(), non_blocking=True)
-                self._offload_grad_partition_at_boundary(param, grad_buffer, offload_fp32_gradients,
-                                                         offload_fp32_offsets)
+        pending_numel = 0
+        for param in params:
+            grad_buffer = self.__param_id_to_grad_partition[param.ds_id]
+            if not get_accelerator().on_accelerator(grad_buffer):
+                grad_buffer = grad_buffer.to(get_accelerator().current_device_name(), non_blocking=True)
+            self._offload_grad_partition_at_boundary(param, grad_buffer, offload_fp32_gradients, offload_fp32_offsets)
+            pending_numel += param.ds_numel
+            if pending_numel >= self.reduce_bucket_size:
+                self._swap_out_offload_fp32_gradients(offload_fp32_gradients, offload_fp32_offsets)
+                offload_fp32_gradients = {}
+                offload_fp32_offsets = {}
+                pending_numel = 0
         self._swap_out_offload_fp32_gradients(offload_fp32_gradients, offload_fp32_offsets)
+
+    def _finalize_offload_gradient_accumulation(self):
+        # Deferred boundary work for params reduced this window (matches managed offload; skips inactive params and
+        # those whose gradient was set with the safe_set APIs after their last gradient).
+        self._offload_grad_partitions_at_boundary([
+            param for param_group in self.fp16_groups for param in param_group
+            if param.ds_id in self._offload_boundary_param_ids and param.ds_id not in self._offload_grad_set_param_ids
+            and param.ds_id in self.__param_id_to_grad_partition
+        ])
 
     @instrument_w_nvtx
     def _fill_missing_grad_partitions(self):
@@ -1510,12 +1527,12 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         # replace it.
         if getattr(self.partition_grads, "__func__", None) is not DeepSpeedZeroOptimizer_Stage3.partition_grads:
             return
+        # partition_grads gets the gradients only through the IPG buckets. DeepCompile clears them and writes the
+        # partitions itself, so they are left as they are.
+        if not self.ipg_buckets:
+            return
         written = self._offload_boundary_param_ids
         copied = self._offload_copied_param_ids
-        # No write recorded: the gradients did not come through partition_grads (DeepCompile writes the partitions
-        # itself), so the partitions are left as they are.
-        if not written:
-            return
         if self._params_with_grad_partition is None:
             # As in partition_grads: a param whose partition on this rank is only padding gets no gradient.
             self._params_with_grad_partition = [
@@ -1527,38 +1544,36 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         if all_written and all_copied:
             return
 
-        offload_fp32_gradients = {}
-        offload_fp32_offsets = {}
+        to_offload = []
         with get_accelerator().stream(self.reduce_and_partition_stream):
             for param in self._params_with_grad_partition:
-                grad_buffer = self.__param_id_to_grad_partition[param.ds_id]
                 if param.ds_id not in written:
-                    grad_buffer.zero_()
+                    self.__param_id_to_grad_partition[param.ds_id].zero_()
                     # A later gradient in this window adds to the zeros.
                     written.add(param.ds_id)
                 elif not self.offload_optimizer or param.ds_id in copied:
                     continue
-                if self.offload_optimizer:
-                    if not get_accelerator().on_accelerator(grad_buffer):
-                        grad_buffer = grad_buffer.to(get_accelerator().current_device_name(), non_blocking=True)
-                    self._offload_grad_partition_at_boundary(param, grad_buffer, offload_fp32_gradients,
-                                                             offload_fp32_offsets)
-            self._swap_out_offload_fp32_gradients(offload_fp32_gradients, offload_fp32_offsets)
+                if self.offload_optimizer and param.ds_id not in self._offload_grad_set_param_ids:
+                    to_offload.append(param)
+            self._offload_grad_partitions_at_boundary(to_offload)
         if not get_accelerator().resolves_data_dependency():
             self.reduce_and_partition_stream.synchronize()
 
-    def _record_grad_set(self, param):
-        """Without optimizer offload, the safe_set APIs write the gradient partition, which the fill then keeps.
+    def _record_grad_set(self, param, value):
+        """Record that the safe_set APIs set param's gradient partition to value, so that the boundary keeps it.
 
-        With offload they write the fp32 gradient, which the boundary replaces with the window's gradient, as for a
-        param that got one.
+        Without optimizer offload they write the gradient partition, which then counts as written. With offload they
+        write the fp32 gradient that step() applies: the copies at the boundary must not overwrite it, and the norm
+        for clipping is value's, as without offload.
         """
-        if self.offload_optimizer:
-            return
         # As in partition_grads: a param whose partition on this rank is only padding has no gradient here.
         if param.partition_numel() * self._get_param_partition_rank(param) >= param.ds_numel:
             return
-        self._offload_boundary_param_ids.add(param.ds_id)
+        if self.offload_optimizer:
+            self._offload_grad_set_param_ids.add(param.ds_id)
+            self.norm_for_param_grads[self.get_param_id(param)] = self._constant_buffered_norm2(value)
+        else:
+            self._offload_boundary_param_ids.add(param.ds_id)
 
     def overlapping_partition_gradients_reduce_epilogue(self):
         self.independent_gradient_partition_epilogue()
@@ -2098,6 +2113,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             # ones, including one from another reentrant checkpoint segment of the same backward, add to it.
             first_grad = param.ds_id not in self._offload_boundary_param_ids
             self._offload_boundary_param_ids.add(param.ds_id)
+            # With offload, the boundary copies a gradient that comes after a safe_set call over the value set.
+            self._offload_grad_set_param_ids.discard(param.ds_id)
 
             # move or accumulate gradient partition to target buffer
             grad_buffer = self.__param_id_to_grad_partition[param.ds_id].narrow(0, 0, grad_partition.numel())
@@ -2458,6 +2475,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         # The next gradient of each param starts a new window (see partition_grads).
         self._offload_boundary_param_ids = set()
         self._offload_copied_param_ids = set()
+        self._offload_grad_set_param_ids = set()
         # Reset the epilogue flag so the next forward doesn't increment micro_step_id.
         # Without this, calling zero_grad() between backward and forward would cause
         # micro_step_id to be incremented at the next forward, leading to incorrect
@@ -2628,6 +2646,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         self.micro_step_id = 0
         self._offload_boundary_param_ids = set()
         self._offload_copied_param_ids = set()
+        self._offload_grad_set_param_ids = set()
         # Also reset the epilogue flag so the next iteration starts fresh.
         # Without this, the flag from the last backward before step() would cause
         # an increment in the next forward(), which is wrong.
@@ -3255,7 +3274,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         my_rank = self._get_param_partition_rank(param)
         value_partition = value.flatten().narrow(0, fp32_grad.numel() * my_rank, fp32_grad.numel())
         fp32_grad.data.copy_(value_partition.data)
-        self._record_grad_set(param)
+        self._record_grad_set(param, value_partition)
 
         if self._swappable_optimizer_subgroup(group_idx):
             self._writeback_swap_state(group_idx, write_opt_state=False, write_gradients=True)
@@ -3339,12 +3358,9 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         # else:
         #     fp32_grad = self.__param_id_to_grad_partition[param.ds_id]
 
-        if self.offload_optimizer:
-            self.norm_for_param_grads[self.get_param_id(param)] = self._constant_buffered_norm2(value)
-
         fp32_grad, group_idx = self._get_fp32_grad_state_partition(param=param, release_swap_buffers=False)
         fp32_grad.data.copy_(value.flatten().data)
-        self._record_grad_set(param)
+        self._record_grad_set(param, value)
 
         if self._swappable_optimizer_subgroup(group_idx):
             self._writeback_swap_state(group_idx, write_opt_state=False, write_gradients=True)
@@ -3414,7 +3430,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                                                                       fp32_grad_part.numel() * my_rank,
                                                                       fp32_grad_part.numel())
                 fp32_grad_part.data.copy_(value_partition.data)
-                self._record_grad_set(param)
+                self._record_grad_set(param, value_partition)
 
             if self._swappable_optimizer_subgroup(group_idx):
                 self._writeback_swap_state(sub_group_id=group_idx, write_opt_state=False, write_gradients=True)

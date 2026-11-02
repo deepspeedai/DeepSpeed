@@ -11,7 +11,7 @@ import deepspeed
 import deepspeed.comm as dist
 from deepspeed.accelerator import get_accelerator
 from deepspeed.ops.op_builder import AsyncIOBuilder, CPUAdamBuilder
-from deepspeed.utils import safe_get_local_fp32_param, safe_set_full_grad
+from deepspeed.utils import safe_get_local_fp32_param, safe_get_local_grad, safe_set_full_grad, safe_set_local_grad
 from deepspeed.utils.torch import required_torch_version
 from unit.common import DistributedTest
 
@@ -36,6 +36,24 @@ class PartlyUsedModel(torch.nn.Module):
         elif use_b == "zero":
             h = h + 0 * torch.tanh(self.b(h))
         return self.c(h).float().pow(2).mean()
+
+
+class ScaleModel(torch.nn.Module):
+    """`b` is used, skipped, or multiplied by 0. `scale` has one element, so when `b` is skipped, the second rank
+    reduces no gradient into a partition of its own."""
+
+    def __init__(self):
+        super().__init__()
+        self.b = torch.nn.Linear(HIDDEN, HIDDEN)
+        self.scale = torch.nn.Parameter(torch.ones(1))
+
+    def forward(self, x, use_b):
+        h = x
+        if use_b == "use":
+            h = h + torch.tanh(self.b(h))
+        elif use_b == "zero":
+            h = h + 0 * torch.tanh(self.b(h))
+        return (self.scale * h).float().pow(2).mean()
 
 
 # The use of `b` in each micro-step of each step: its last gradient of a window comes before the boundary micro-step,
@@ -76,6 +94,8 @@ def _config(offload, gas, nvme_path=None, managed=True, precision="fp32"):
         config["zero_optimization"]["offload_optimizer"] = {"device": "cpu"}
     elif offload == "nvme":
         config["zero_optimization"]["offload_optimizer"] = {"device": "nvme", "nvme_path": nvme_path}
+        # Smaller than the model, so that the gradients go to NVMe in more than one piece at the boundary as well.
+        config["zero_optimization"]["reduce_bucket_size"] = HIDDEN * HIDDEN
     return config
 
 
@@ -86,8 +106,8 @@ def _engine(config, model_class=PartlyUsedModel):
     return engine
 
 
-def _weights(engine):
-    params = list(engine.module.parameters())
+def _weights(engine, params=None):
+    params = list(engine.module.parameters()) if params is None else params
     with deepspeed.zero.GatheredParameters(params):
         return torch.cat([p.detach().flatten().float().cpu() for p in params])
 
@@ -127,31 +147,64 @@ class TestZero3UnusedParamGradient(DistributedTest):
         """With managed_gradient_accumulation false, step() ends the window."""
         self._compare(tmpdir, offload, gas=2, managed=False)
 
-    def test_unmanaged_set_full_grad(self):
-        """With managed_gradient_accumulation false and no optimizer offload, a gradient set with safe_set_full_grad
-        before step() is the gradient of a param that got none."""
-        results = {}
-        for unused in ("zero", "skip"):
-            engine = _engine(_config("none", gas=1, managed=False))
-            generator = torch.Generator().manual_seed(1 + dist.get_rank())
-            results[unused] = []
-            for use_b in ("use", unused):
-                x = torch.randn(2, HIDDEN, generator=generator).to(engine.device)
-                engine.backward(engine(x, use_b))
-                safe_set_full_grad(engine.module.b.weight, torch.full((HIDDEN, HIDDEN), 1e-3, device=engine.device))
-                engine.step()
-                results[unused].append(_weights(engine))
-            engine.destroy()
-        for step, (actual, expected) in enumerate(zip(results["skip"], results["zero"])):
-            assert torch.equal(actual, expected), f"step {step}: max diff {(actual - expected).abs().max().item()}"
+    @pytest.mark.parametrize("offload", ["none", "cpu", "nvme"])
+    def test_padding_rank(self, tmpdir, offload):
+        """When `b` is skipped, the second rank reduces no gradient of its own; its partition of `b` still gets a zero
+        gradient."""
+        self._compare(tmpdir, offload, gas=1, managed=True, model_class=ScaleModel)
 
-    def _compare(self, tmpdir, offload, gas, managed, precision="fp32"):
+    @pytest.mark.parametrize("offload", ["none", "cpu", "nvme"])
+    def test_unmanaged_set_full_grad(self, tmpdir, offload):
+        """With managed_gradient_accumulation false, a gradient set with safe_set_full_grad after the last backward is
+        the one step() applies, whether the param got a gradient, a zero gradient, or none."""
+        _skip_if_unsupported(offload)
+        results = {}
+        for use_b in ("use", "zero", "skip"):
+            config = _config(offload, gas=1, nvme_path=str(tmpdir.join(use_b)), managed=False)
+            # Clipping would scale b's gradient by the norm of all gradients, which differs between the runs.
+            config["gradient_clipping"] = 0.0
+            engine = _engine(config)
+            value = torch.full((HIDDEN, HIDDEN), 1e-3, device=engine.device)
+            generator = torch.Generator().manual_seed(1 + dist.get_rank())
+            # Step 1 uses b in all runs; step 2 sets its gradient after the backward.
+            for step, step_use_b in enumerate(("use", use_b)):
+                x = torch.randn(2, HIDDEN, generator=generator).to(engine.device)
+                engine.backward(engine(x, step_use_b))
+                if step == 1:
+                    safe_set_full_grad(engine.module.b.weight, value)
+                engine.step()
+            results[use_b] = (_weights(engine), _weights(engine, [engine.module.b.weight]))
+            engine.destroy()
+        assert torch.equal(results["skip"][0], results["zero"][0])
+        # b.weight gets the same update in all three runs: the set gradient.
+        for use_b in ("zero", "skip"):
+            actual, expected = results[use_b][1], results["use"][1]
+            assert torch.equal(actual, expected), f"{use_b}: max diff {(actual - expected).abs().max().item()}"
+
+    @pytest.mark.parametrize("managed", [True, False])
+    def test_set_full_grad_norm(self, managed):
+        """The gradient norm of step(), which clipping uses, has a gradient set with safe_set_full_grad in it, with
+        optimizer offload as without."""
+        _skip_if_unsupported("cpu")
+        norms = {}
+        for offload in ("none", "cpu"):
+            engine = _engine(_config(offload, gas=1, managed=managed))
+            generator = torch.Generator().manual_seed(1 + dist.get_rank())
+            x = torch.randn(2, HIDDEN, generator=generator).to(engine.device)
+            engine.backward(engine(x, "use"))
+            safe_set_full_grad(engine.module.b.weight, torch.full((HIDDEN, HIDDEN), 1e-3, device=engine.device))
+            engine.step()
+            norms[offload] = float(engine.get_global_grad_norm())
+            engine.destroy()
+        assert abs(norms["cpu"] - norms["none"]) <= 1e-5 * norms["none"], norms
+
+    def _compare(self, tmpdir, offload, gas, managed, precision="fp32", model_class=PartlyUsedModel):
         _skip_if_unsupported(offload)
         if precision == "bf16" and not get_accelerator().is_bf16_supported():
             pytest.skip("bf16 is not supported")
         results = {}
         for unused in ("zero", "skip"):
-            engine = _engine(_config(offload, gas, str(tmpdir.join(unused)), managed, precision))
+            engine = _engine(_config(offload, gas, str(tmpdir.join(unused)), managed, precision), model_class)
             schedule = [[unused if use_b == "skip" else use_b for use_b in uses] for uses in SCHEDULES[gas]]
             results[unused] = _train(engine, schedule, managed)
             engine.destroy()
@@ -231,8 +284,10 @@ class TestZero3DeepCompileGradients(DistributedTest):
     world_size = 2
     non_daemonic_procs = True
 
-    def test(self):
-        """DeepCompile reduces into the gradient partitions without partition_grads; step() must apply them."""
+    @pytest.mark.parametrize("set_grad", [False, True])
+    def test(self, set_grad):
+        """DeepCompile reduces into the gradient partitions without partition_grads; step() must apply them, also after
+        a safe_set_local_grad call."""
         if not required_torch_version(min_version=2.6):
             pytest.skip("DeepCompile requires PyTorch >= v2.6")
         if get_accelerator().device_name() == "cpu":
@@ -251,14 +306,14 @@ class TestZero3DeepCompileGradients(DistributedTest):
             engine, _, _, _ = deepspeed.initialize(model=model, optimizer=optimizer, config=config)
             if deepcompile:
                 engine.compile()
-            results.append(self._updates(engine))
+            results.append(self._updates(engine, set_grad))
             engine.destroy()
         for step, (actual, expected) in enumerate(zip(results[1], results[0])):
             # Compiled and eager kernels round differently, by far less than the update.
             atol = 1e-3 * expected.abs().max().item()
             torch.testing.assert_close(actual, expected, rtol=1e-3, atol=atol, msg=f"step {step}")
 
-    def _updates(self, engine):
+    def _updates(self, engine, set_grad):
         """The change of this rank's fp32 partitions after each of 3 steps. Gathering the params instead would
         interleave with DeepCompile's own gathers."""
 
@@ -271,6 +326,9 @@ class TestZero3DeepCompileGradients(DistributedTest):
         for _ in range(3):
             x = torch.randn(2, HIDDEN, generator=generator).to(engine.device)
             engine.backward(engine(x, "use"))
+            if set_grad:
+                # Writes back the same gradient.
+                safe_set_local_grad(engine.module.a.weight, safe_get_local_grad(engine.module.a.weight))
             engine.step()
             updates.append(masters() - initial)
         return updates
