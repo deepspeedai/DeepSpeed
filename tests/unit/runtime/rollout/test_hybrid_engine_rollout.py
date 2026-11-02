@@ -864,6 +864,54 @@ def test_continuous_sampling_applies_repetition_penalty_before_warpers():
     assert next_tokens.tolist() == [[1]]
 
 
+def test_continuous_generation_applies_repetition_penalty_in_float32():
+    request = RolloutRequest(torch.tensor([[0]]), torch.ones((1, 1), dtype=torch.long))
+    responses = {0: [torch.tensor([[0]])]}
+    module = SimpleNamespace(generation_config=SimpleNamespace(repetition_penalty=1.5))
+    logits = torch.tensor([[6.03125, 4.03125]], dtype=torch.bfloat16)
+
+    # generate() penalizes in float32: token 0 drops to 4.0208, below token 1. In bf16 it would round up to 4.03125,
+    # tying with token 1, and argmax would keep token 0.
+    next_tokens = HybridEngineRollout._continuous_next_tokens(
+        logits,
+        (0, ),
+        {0: request},
+        responses,
+        module,
+        _argmax,
+    )
+
+    assert next_tokens.tolist() == [[1]]
+    assert logits.tolist() == [[6.03125, 4.03125]]
+
+
+def test_continuous_prefill_applies_repetition_penalty():
+    class Model(torch.nn.Module):
+        _supports_cache_class = True
+        config = PretrainedConfig(num_hidden_layers=1, num_attention_heads=1, hidden_size=1, head_dim=1)
+        generation_config = SimpleNamespace(repetition_penalty=1.5)
+
+        def forward(self, input_ids, **kwargs):
+            # Token 0 is in the prompt and wins before the penalty; token 1 is not in the prompt.
+            logits = torch.tensor([6.0, 5.0]).expand(input_ids.shape[0], 1, 2)
+            return SimpleNamespace(logits=logits)
+
+    rollout = HybridEngineRollout(SimpleNamespace(module=Model()),
+                                  SimpleNamespace(pad_token_id=0, eos_token_id=-1),
+                                  cfg=HybridEngineRolloutConfig())
+    prompt_ids = torch.tensor([[0, 0]])
+
+    tokens, _ = rollout._continuous_prefill_cache(rollout.engine.module,
+                                                  lambda *args, **kwargs: None,
+                                                  prompt_ids,
+                                                  torch.ones_like(prompt_ids),
+                                                  torch.float32,
+                                                  torch.device("cpu"),
+                                                  SamplingConfig(max_new_tokens=1, temperature=0))
+
+    assert tokens.tolist() == [[1]]
+
+
 def _reference_probs(logits, temperature, top_k, top_p):
     """The distribution ``SamplingConfig`` describes, derived from ``logits`` independently of the rollout."""
     scores = logits / temperature

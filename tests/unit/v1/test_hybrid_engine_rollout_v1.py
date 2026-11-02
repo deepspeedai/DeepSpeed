@@ -258,3 +258,45 @@ def test_decode_sampling_matches_hf_generate(temperature, top_k, top_p, use_grap
                                   pad_token_id=0)
 
     assert output.input_ids.tolist() == expected.tolist()
+
+
+@pytest.mark.parametrize("use_graph_capture, continuous_batch_size", [(True, None), (True, 8), (False, 8)])
+@pytest.mark.parametrize("temperature", [0.0, 0.7])
+def test_decode_repetition_penalty_matches_hf_generate(temperature, use_graph_capture, continuous_batch_size):
+    accelerator = get_accelerator()
+    if not accelerator.is_available() or accelerator.device_name() != "cuda":
+        pytest.skip("CUDA is required for CUDA graph decode coverage")
+
+    device = torch.device(accelerator.device_name())
+    model = _tiny_llama(device)
+    new_tokens = 32
+    request = _random_request(batch_size=8, prompt_len=8, device=device)
+    sampling = SamplingConfig(max_new_tokens=new_tokens,
+                              temperature=temperature,
+                              top_k=0,
+                              top_p=1.0,
+                              continuous_batch_size=continuous_batch_size)
+    hf_sampling = {"do_sample": True, "temperature": temperature, "top_k": 0, "top_p": 1.0} if temperature > 0 else {
+        "do_sample": False
+    }
+
+    def hf_generate():
+        torch.manual_seed(2)
+        with torch.no_grad():
+            return model.generate(request.prompt_ids,
+                                  attention_mask=request.prompt_attention_mask,
+                                  max_new_tokens=new_tokens,
+                                  eos_token_id=None,
+                                  pad_token_id=0,
+                                  **hf_sampling).tolist()
+
+    model.generation_config.repetition_penalty = 1.0
+    unpenalized = hf_generate()
+    model.generation_config.repetition_penalty = 1.3
+    expected = hf_generate()
+    assert expected != unpenalized
+
+    torch.manual_seed(2)
+    output = _rollout(model, use_graph_capture).generate(request, sampling)
+
+    assert output.input_ids.tolist() == expected

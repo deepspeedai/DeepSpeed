@@ -1107,21 +1107,40 @@ class HybridEngineRollout(RolloutEngine):
             position_ids=position_ids,
             **self._last_logits_kwargs(module),
         )
-        return self._token_selector(sampling)(prefill_output.logits[:, -1, :]), prefill_cache
+        logits = self._apply_repetition_penalty(prefill_output.logits[:, -1, :], prompt_ids,
+                                                self._repetition_penalty(module))
+        return self._token_selector(sampling)(logits), prefill_cache
 
     @staticmethod
-    def _continuous_next_tokens(logits, request_ids, request_by_id, responses, module, select_next_tokens):
+    def _repetition_penalty(module):
         repetition_penalty = getattr(getattr(module, "generation_config", None), "repetition_penalty", 1.0)
-        if repetition_penalty is None:
-            repetition_penalty = 1.0
+        return 1.0 if repetition_penalty is None else repetition_penalty
+
+    @staticmethod
+    def _apply_repetition_penalty(logits, input_ids, repetition_penalty):
+        """Penalize the tokens of ``input_ids`` in last-position ``logits``, without changing ``logits``.
+
+        generate() applies the penalty in float32, before the sampling warpers, so it shapes the sampled distribution.
+        """
+        if repetition_penalty == 1.0:
+            return logits
+        logits = logits.float()
+        scores = logits.gather(1, input_ids)
+        scores = torch.where(scores < 0, scores * repetition_penalty, scores / repetition_penalty)
+        return logits.scatter(1, input_ids, scores)
+
+    @classmethod
+    def _continuous_next_tokens(cls, logits, request_ids, request_by_id, responses, module, select_next_tokens):
+        repetition_penalty = cls._repetition_penalty(module)
         if repetition_penalty != 1.0:
-            # generate() applies the penalty before the sampling warpers, so it shapes the sampled distribution.
-            logits = logits.clone()
-            for row, request_id in enumerate(request_ids):
-                input_ids = torch.cat((request_by_id[request_id].prompt_ids, *responses[request_id]), dim=1)
-                scores = logits[row:row + 1].gather(1, input_ids)
-                scores = torch.where(scores < 0, scores * repetition_penalty, scores / repetition_penalty)
-                logits[row:row + 1].scatter_(1, input_ids, scores)
+            logits = torch.cat([
+                cls._apply_repetition_penalty(
+                    logits[row:row + 1],
+                    torch.cat((request_by_id[request_id].prompt_ids, *responses[request_id]), dim=1),
+                    repetition_penalty,
+                ) for row, request_id in enumerate(request_ids)
+            ],
+                               dim=0)
         return select_next_tokens(logits)
 
     @staticmethod
@@ -1357,6 +1376,13 @@ class HybridEngineRollout(RolloutEngine):
         eos_token_id = self.tokenizer.eos_token_id
         model_dtype = next(module.parameters()).dtype
         select_next_tokens = self._token_selector(sampling)
+        repetition_penalty = self._repetition_penalty(module)
+        output_ids = [prompt_ids]
+
+        def next_tokens(logits):
+            if repetition_penalty != 1.0:
+                logits = self._apply_repetition_penalty(logits, torch.cat(output_ids, dim=1), repetition_penalty)
+            return select_next_tokens(logits)
 
         # --- Prefill with HF StaticCache (correct attention semantics) ---
         prefill_cache = self._create_static_cache(StaticCache, module.config, batch_size, max_len, device, model_dtype)
@@ -1370,7 +1396,8 @@ class HybridEngineRollout(RolloutEngine):
             cache_position=torch.arange(prompt_len, device=device),
             **self._last_logits_kwargs(module),
         )
-        next_token = select_next_tokens(prefill_out.logits[:, -1, :])
+        next_token = next_tokens(prefill_out.logits[:, -1, :])
+        output_ids.append(next_token)
 
         # --- Copy prefill KV into DeepSpeedStaticCache ---
         write_pos = torch.tensor(prompt_len - 1, dtype=torch.long, device=device)
@@ -1390,8 +1417,6 @@ class HybridEngineRollout(RolloutEngine):
                 ds_layer.lazy_initialization(hf_keys, hf_values)
             ds_layer.keys[:, :, :prompt_len, :].copy_(hf_keys[:, :, :prompt_len, :])
             ds_layer.values[:, :, :prompt_len, :].copy_(hf_values[:, :, :prompt_len, :])
-
-        output_ids = [prompt_ids, next_token]
 
         # --- Static buffers for graph capture ---
         static_token = torch.zeros(batch_size, 1, dtype=torch.long, device=device)
@@ -1460,7 +1485,7 @@ class HybridEngineRollout(RolloutEngine):
 
             # Replay
             get_accelerator().replay_graph(graph)
-            next_token = select_next_tokens(static_logits[:, -1, :])
+            next_token = next_tokens(static_logits[:, -1, :])
             output_ids.append(next_token)
             eos_mask |= (next_token.squeeze(1) == eos_token_id)
 

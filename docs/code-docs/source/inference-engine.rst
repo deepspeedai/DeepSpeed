@@ -70,10 +70,10 @@ logits after each replay. Greedy decoding (``temperature <= 0``) takes the
 argmax. Sampling applies the ``temperature``, ``top_k`` and ``top_p`` settings
 of ``SamplingConfig`` with Hugging Face's logits warpers, in the order
 ``generate()`` applies them, so both paths sample from the same distribution.
-Other settings from the model's ``generation_config``, such as a repetition
-penalty, are not applied on the graph path. Continuous batching, with or
-without graph capture, picks tokens the same way and also applies the model's
-repetition penalty before the warpers, as ``generate()`` does.
+Both greedy decoding and sampling first apply the repetition penalty from the
+model's ``generation_config``, as ``generate()`` does. Other
+``generation_config`` settings are not applied on the graph path. Continuous
+batching, with or without graph capture, picks tokens the same way.
 
 Shared Prompt Prefill
 ---------------------
