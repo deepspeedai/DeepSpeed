@@ -715,3 +715,56 @@ class TestZeroEmptyGrad(DistributedTest):
             model.step()
 
         model.destroy()
+
+
+class TestFP16InitNoSideEffects(DistributedTest):
+    world_size = 1
+
+    def test_adamw_master_weights_unchanged(self):
+        """FP16 init must not apply weight decay to master weights (#8910)."""
+        if not get_accelerator().is_fp16_supported():
+            pytest.skip("fp16 is not supported")
+        config_dict = {
+            "train_batch_size": 1,
+            "steps_per_print": 1,
+            "fp16": {
+                "enabled": True,
+                "loss_scale": 1.0
+            },
+        }
+        hidden_dim = 10
+        model = SimpleModel(hidden_dim)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=0.01, weight_decay=0.1)
+        model_engine, opt, _, _ = deepspeed.initialize(
+            config=config_dict, model=model, optimizer=optimizer)
+
+        for fp32_master, fp16_group in zip(opt.fp32_groups_flat, opt.fp16_groups):
+            expected = torch.cat([p.data.float().reshape(-1) for p in fp16_group])
+            assert torch.equal(fp32_master.data, expected), \
+                "master weights were modified during initialization"
+
+    def test_adamw_step_counter_zero(self):
+        """FP16 init must not advance the optimizer step counter (#8910)."""
+        if not get_accelerator().is_fp16_supported():
+            pytest.skip("fp16 is not supported")
+        config_dict = {
+            "train_batch_size": 1,
+            "steps_per_print": 1,
+            "fp16": {
+                "enabled": True,
+                "loss_scale": 1.0
+            },
+        }
+        hidden_dim = 10
+        model = SimpleModel(hidden_dim)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=0.01, weight_decay=0.1)
+        _, opt, _, _ = deepspeed.initialize(
+            config=config_dict, model=model, optimizer=optimizer)
+
+        base_opt = opt.optimizer
+        for state in base_opt.state.values():
+            if isinstance(state, dict) and 'step' in state:
+                step = state['step']
+                step_val = step.item() if isinstance(step, torch.Tensor) else step
+                assert step_val == 0, \
+                    f"step counter is {step_val} after init, expected 0"

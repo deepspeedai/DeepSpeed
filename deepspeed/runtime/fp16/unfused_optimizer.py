@@ -437,7 +437,27 @@ class FP16_UnfusedOptimizer(DeepSpeedOptimizer):
                                          dtype=param.dtype,
                                          device=get_accelerator().current_device_name())
 
+        # Suppress weight decay so the synthetic step does not modify master
+        # weights.  With zero gradients and zero weight decay the step only
+        # allocates internal state tensors (exp_avg, exp_avg_sq, etc.).
+        saved_weight_decay = []
+        for group in self.optimizer.param_groups:
+            saved_weight_decay.append(group.get('weight_decay', 0))
+            group['weight_decay'] = 0
+
         self.optimizer.step()
+
+        for group, wd in zip(self.optimizer.param_groups, saved_weight_decay):
+            group['weight_decay'] = wd
+
+        # Reset the step counter that the synthetic step advanced, so the
+        # first real update uses the correct bias-correction denominator.
+        for state in self.optimizer.state.values():
+            if isinstance(state, dict) and 'step' in state:
+                if isinstance(state['step'], torch.Tensor):
+                    state['step'].zero_()
+                else:
+                    state['step'] = 0
 
         for i, group in enumerate(self.fp16_groups):
             for param in group:
