@@ -843,7 +843,7 @@ def test_one_cycle_accepts_per_group_lr_and_momentum_lists():
     assert scheduler.min_lrs == pytest.approx([0.001, 0.002])
     assert scheduler.max_lrs == pytest.approx([0.01, 0.02])
     assert [group["lr"] for group in optimizer.param_groups] == pytest.approx([0.001, 0.002])
-    assert [group["betas"][0] for group in optimizer.param_groups] == pytest.approx([0.8, 0.85])
+    assert [group["betas"][0] for group in optimizer.param_groups] == pytest.approx([0.9, 0.95])
 
     # At the peak of the cycle each group reaches its own cycle_max_lr, and momentum is at
     # its own cycle_min_mom, rather than every group tracking group 0's values.
@@ -856,6 +856,24 @@ def test_one_cycle_accepts_per_group_lr_and_momentum_lists():
     scheduler.step(9)
     assert scheduler.get_lr() == pytest.approx([0.001, 0.002])
     assert [group["betas"][0] for group in optimizer.param_groups] == pytest.approx([0.9, 0.95])
+
+
+def test_one_cycle_initial_optimizer_momentum_matches_schedule():
+    param = torch.nn.Parameter(torch.zeros(1))
+    optimizer = torch.optim.Adam([param], lr=0.1, betas=(0.9, 0.99))
+    scheduler = OneCycle(optimizer=optimizer,
+                         cycle_min_lr=0.1,
+                         cycle_max_lr=0.2,
+                         cycle_first_step_size=4,
+                         cycle_second_step_size=4,
+                         cycle_min_mom=0.8,
+                         cycle_max_mom=0.9)
+
+    reported = scheduler.get_mom()[0][0]
+    actual = optimizer.param_groups[0]['betas'][0]
+    assert actual == pytest.approx(reported), (
+        f"optimizer beta1 ({actual}) != scheduler.get_mom() ({reported})")
+    assert actual == pytest.approx(0.9)
 
 
 @pytest.mark.parametrize("kwargs", [{
