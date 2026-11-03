@@ -26,14 +26,15 @@ sys.path.insert(0, "/root/pr8602-wt")
 from deepspeed.runtime.rollout.hybrid_engine_rollout import HybridEngineRollout, HybridEngineRolloutConfig
 from deepspeed.runtime.rollout.base import RolloutRequest, SamplingConfig
 import deepspeed
+from deepspeed.accelerator import get_accelerator
 from deepspeed.module_inject.segment_ki import segki_refresh
 
 MODEL = "Qwen/Qwen3.5-0.8B-Base"
 tok = AutoTokenizer.from_pretrained(MODEL)
 object.__setattr__(tok, "eos_token_id", -1)
 rank = int(os.environ.get("RANK", "0"))
-torch.cuda.set_device(int(os.environ.get("LOCAL_RANK", "0")))  #ignore-cuda
-DEV = f"cuda:{torch.cuda.current_device()}"  #ignore-cuda
+get_accelerator().set_device(int(os.environ.get("LOCAL_RANK", "0")))
+DEV = get_accelerator().current_device_name()
 
 Z3 = {
     "train_batch_size": 2,
@@ -206,7 +207,7 @@ print(f"[r{rank}] refreshed generate done", flush=True)
 
 # --- phase 4: fresh injection over the SAME post-step-2 weights
 del trainer, mt
-torch.cuda.empty_cache()  #ignore-cuda
+get_accelerator().empty_cache()
 ro_c, eng_c = build_tp_rollout()
 write_full_into_sharded(eng_c, w2, rank, 2)
 gen(ro_c)  # fresh caches on w2
