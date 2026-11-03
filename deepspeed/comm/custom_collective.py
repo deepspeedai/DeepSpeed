@@ -53,13 +53,19 @@ def initialize(group=None):
         return
     if not tdist.is_initialized():
         return
+    # Cheap eligibility first: never JIT for topologies the fast path cannot serve
+    if tdist.get_world_size(group=group) != 2:
+        return
     try:
         backend = _build()
     except Exception as e:
-        _state["failed"] = True
+        backend = None
         logger.warning(f"custom_collective JIT build failed ({e}); inference all-reduce stays on the comm library")
-        return
-    if backend is None or not backend.initialize(group):
+    # The backend exchange below is collective; a rank that failed to load must
+    # not strand its peer inside it. Agree on the verdict before proceeding.
+    ok = torch.tensor([int(backend is not None)], dtype=torch.int)
+    tdist.all_reduce(ok, op=tdist.ReduceOp.MIN, group=group)
+    if not bool(ok.item()) or not backend.initialize(group):
         _state["failed"] = True
         return
     _state["op"] = backend

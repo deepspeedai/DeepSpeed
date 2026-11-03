@@ -221,15 +221,6 @@ class TorchBackend(Backend):
             # bf16/fp16 shm reduce kernels need avx512bw and fp32 needs avx2; without
             # the ISA the kernel faults and its peers hang on the shm flags.
             self.shm_vector_kernel_level = self.shm_comm_op.vector_kernel_level()
-        # Best-effort accelerator custom all-reduce for P2P TP=2 pairs: fills the
-        # same inference_all_reduce hook the shm op fills on CPU. No-ops on
-        # other topologies; initialize() itself probes P2P + handshake and
-        # falls back to the comm library where the fabric cannot carry the flag protocol.
-        try:
-            from deepspeed.comm import custom_collective
-            custom_collective.initialize()
-        except Exception:
-            pass  # the comm library remains the answer; initialize() logs build failures
         # Best-effort SDMA (mori) backend acquisition.  Stays None on
         # non-AMD/ROCm or when mori is unavailable; in that case
         # all_gather_into_tensor below transparently falls through to
@@ -300,11 +291,23 @@ class TorchBackend(Backend):
 
     def inference_all_reduce(self, tensor, op, group=None):
         # Latency-optimized accelerator path: the one-shot P2P kernel fills the same
-        # hook the CPU backend fills with shm+AVX (see deepspeed/comm/custom_collective.py)
+        # hook the CPU backend fills with shm+AVX (see deepspeed/comm/custom_collective.py).
+        # Initialized lazily here (not in __init__): at this point the local device
+        # is bound and the real TP group is in hand, so buffers are allocated on the
+        # device the kernels will use, and topologies that can never use the fast
+        # path never pay the JIT build.
         if get_accelerator().on_accelerator(tensor):
             from deepspeed.comm import custom_collective
             world_sz = torch.distributed.get_world_size(group=group)
-            if (custom_collective.custom_collective_ready(world_sz) and tensor.is_contiguous()
+            try:
+                custom_collective.initialize(group)
+            except Exception:
+                pass  # the comm library remains the answer; initialize() logs build failures
+            # the kernel only implements sum over fp16/bf16/fp32; anything else
+            # must take the standard backend, not raise from the fast path
+            if (self._reduce_op(op) == torch.distributed.ReduceOp.SUM
+                    and tensor.dtype in (torch.float16, torch.bfloat16, torch.float32)
+                    and custom_collective.custom_collective_ready(world_sz) and tensor.is_contiguous()
                     and tensor.numel() * tensor.element_size() <= custom_collective.custom_collective_max_bytes()):
                 return custom_collective.all_reduce(tensor)
         use_ds_op = hasattr(torch.ops, 'deepspeed') and hasattr(torch.ops.deepspeed, 'inference_all_reduce_')
