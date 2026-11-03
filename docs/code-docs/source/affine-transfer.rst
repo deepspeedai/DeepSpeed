@@ -98,8 +98,8 @@ sent and received bytes are priced against.
 A fan finishes when the busiest resource it crosses does: a peer's link, the
 root, or a link the peers share. Behind PCIe switches that depends on *which*
 peers share a process more than on how many, which is why fans are not keyed by
-width alone. On 8 B70 cards (xccl, 256 MiB messages) the pairs ranged from 3.6
-to 54 GB/s, depending on the sender and direction, and a root's fan-in
+width alone. On one such 8-GPU node (256 MiB messages) the pairs ranged from
+3.6 to 54 GB/s, depending on the sender and direction, and a root's fan-in
 bandwidth at one width varied with its senders::
 
     width   min ~ max over roots (GB/s)   spread
