@@ -219,21 +219,16 @@ class RowParallel(torch.autograd.Function):
         ctx.group = group
         if not pg_utils.is_parallel(group):
             return input
-        # Latency regime (no-grad decode or inference, small messages): the
-        # one-shot collective beats plain all-reduce; the inference_all_reduce backend owns the choice and falls back.
-        from deepspeed.comm import custom_ar
-        world = dist.get_world_size(group=group) if group is not None else dist.get_world_size()
-        if ((is_inference_mode or not torch.is_grad_enabled()) and custom_ar.custom_ar_ready(world)
-                and input.numel() * input.element_size() <= custom_ar.custom_ar_max_bytes()):
-            # contiguous() may hand back a copy — the reduction must land in
-            # the caller's tensor, not a discarded temporary
-            red = input.contiguous()
+        # contiguous() may hand back a copy — the reduction must land in
+        # the caller's tensor, not a discarded temporary
+        red = input.contiguous()
+        # inference_all_reduce picks the fastest backend available (one-shot
+        # custom AR on TP=2 pairs, shm+AVX on CPU) and falls back on its own
+        if is_inference_mode or not torch.is_grad_enabled():
             dist.inference_all_reduce(red, group=group)
-            if red is not input: input.copy_(red)
         else:
-            red = input.contiguous()
             dist.all_reduce(red, group=group)
-            if red is not input: input.copy_(red)
+        if red is not input: input.copy_(red)
         return input
 
     @staticmethod
