@@ -10,14 +10,18 @@ same weights. Run: DS_RUN_ZERO3_E2E=1 torchrun --nproc_per_node=2 \
     tests/integration/zero3_arena_e2e.py
 Opt-in (needs 2 GPUs + the Qwen3.5 test model cached).
 """
+import os
 import sys
 if __name__ == "__main__" and os.environ.get("DS_RUN_ZERO3_E2E") != "1":
     print("set DS_RUN_ZERO3_E2E=1 to run this integration test", file=sys.stderr)
     sys.exit(0)
 
 import sys, os, torch
-os.environ.setdefault("MASTER_ADDR", "localhost"); os.environ.setdefault("MASTER_PORT", "29710")
+
+os.environ.setdefault("MASTER_ADDR", "localhost")
+os.environ.setdefault("MASTER_PORT", "29710")
 from transformers import AutoModelForCausalLM, AutoTokenizer
+
 sys.path.insert(0, "/root/pr8602-wt")
 from deepspeed.runtime.rollout.hybrid_engine_rollout import HybridEngineRollout, HybridEngineRolloutConfig
 from deepspeed.runtime.rollout.base import RolloutRequest, SamplingConfig
@@ -28,30 +32,84 @@ MODEL = "Qwen/Qwen3.5-0.8B-Base"
 tok = AutoTokenizer.from_pretrained(MODEL)
 object.__setattr__(tok, "eos_token_id", -1)
 rank = int(os.environ.get("RANK", "0"))
-torch.cuda.set_device(int(os.environ.get("LOCAL_RANK", "0")))
-DEV = f"cuda:{torch.cuda.current_device()}"
+torch.cuda.set_device(int(os.environ.get("LOCAL_RANK", "0")))  #ignore-cuda
+DEV = f"cuda:{torch.cuda.current_device()}"  #ignore-cuda
 
 Z3 = {
     "train_batch_size": 2,
-    "bf16": {"enabled": True},
-    "zero_optimization": {"stage": 3},
-    "optimizer": {"type": "AdamW", "params": {"lr": 1e-5}},
+    "bf16": {
+        "enabled": True
+    },
+    "zero_optimization": {
+        "stage": 3
+    },
+    "optimizer": {
+        "type": "AdamW",
+        "params": {
+            "lr": 1e-5
+        }
+    },
 }
 TPSPECS = [
-    {"patterns": [r".*\.linear_attn\.in_proj_z"], "partition_type": "column"},
-    {"patterns": [r".*\.linear_attn\.in_proj_b"], "partition_type": "column"},
-    {"patterns": [r".*\.linear_attn\.in_proj_a"], "partition_type": "column"},
-    {"patterns": [r".*\.linear_attn\.out_proj"], "partition_type": "row"},
-    {"patterns": [r".*\.self_attn\.q_proj"], "partition_type": "column"},
-    {"patterns": [r".*\.self_attn\.k_proj"], "partition_type": "column"},
-    {"patterns": [r".*\.self_attn\.v_proj"], "partition_type": "column"},
-    {"patterns": [r".*\.self_attn\.o_proj"], "partition_type": "row"},
-    {"patterns": [r".*\.mlp\.gate_proj"], "partition_type": "column"},
-    {"patterns": [r".*\.mlp\.up_proj"], "partition_type": "column"},
-    {"patterns": [r".*\.mlp\.down_proj"], "partition_type": "row"},
+    {
+        "patterns": [r".*\.linear_attn\.in_proj_z"],
+        "partition_type": "column"
+    },
+    {
+        "patterns": [r".*\.linear_attn\.in_proj_b"],
+        "partition_type": "column"
+    },
+    {
+        "patterns": [r".*\.linear_attn\.in_proj_a"],
+        "partition_type": "column"
+    },
+    {
+        "patterns": [r".*\.linear_attn\.out_proj"],
+        "partition_type": "row"
+    },
+    {
+        "patterns": [r".*\.self_attn\.q_proj"],
+        "partition_type": "column"
+    },
+    {
+        "patterns": [r".*\.self_attn\.k_proj"],
+        "partition_type": "column"
+    },
+    {
+        "patterns": [r".*\.self_attn\.v_proj"],
+        "partition_type": "column"
+    },
+    {
+        "patterns": [r".*\.self_attn\.o_proj"],
+        "partition_type": "row"
+    },
+    {
+        "patterns": [r".*\.mlp\.gate_proj"],
+        "partition_type": "column"
+    },
+    {
+        "patterns": [r".*\.mlp\.up_proj"],
+        "partition_type": "column"
+    },
+    {
+        "patterns": [r".*\.mlp\.down_proj"],
+        "partition_type": "row"
+    },
 ]
-TP = {"train_batch_size": 2, "tensor_parallel": {"autotp_size": 2, "partition_config": {
-    "use_default_specs": False, "strict_mode": False, "layer_specs": TPSPECS}}, "bf16": {"enabled": True}}
+TP = {
+    "train_batch_size": 2,
+    "tensor_parallel": {
+        "autotp_size": 2,
+        "partition_config": {
+            "use_default_specs": False,
+            "strict_mode": False,
+            "layer_specs": TPSPECS
+        }
+    },
+    "bf16": {
+        "enabled": True
+    }
+}
 
 
 class Shim:
@@ -109,11 +167,11 @@ l0 = train_a_step(trainer, 101)
 print(f"[r{rank}] zero3 step1 loss={l0:.4f}", flush=True)
 w1 = gather_z3_weights(trainer)  # weights AFTER step 1
 
+
 def write_full_into_sharded(eng, full_sd, rank, world):
     """Arena-sync semantics: write FULL weights into the TP-sharded
     rollout storage in place (split dim inferred from shape mismatch —
     the same contract their storage-map reshard implements)."""
-    import deepspeed.comm as dst_comm
     written = 0
     with torch.no_grad():
         for n, p in eng.module.named_parameters():
@@ -148,7 +206,7 @@ print(f"[r{rank}] refreshed generate done", flush=True)
 
 # --- phase 4: fresh injection over the SAME post-step-2 weights
 del trainer, mt
-torch.cuda.empty_cache()
+torch.cuda.empty_cache()  #ignore-cuda
 ro_c, eng_c = build_tp_rollout()
 write_full_into_sharded(eng_c, w2, rank, 2)
 gen(ro_c)  # fresh caches on w2

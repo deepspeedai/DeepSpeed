@@ -545,8 +545,7 @@ class TestArenaWeightViews:
     def _make_rollout(self, tok):
         from deepspeed.runtime.rollout.hybrid_engine_rollout import HybridEngineRollout, HybridEngineRolloutConfig
         from transformers import AutoModelForCausalLM
-        m = AutoModelForCausalLM.from_pretrained(_TEST_MODEL, dtype=torch.bfloat16).to(
-            get_accelerator().device_name())
+        m = AutoModelForCausalLM.from_pretrained(_TEST_MODEL, dtype=torch.bfloat16).to(get_accelerator().device_name())
 
         class Shim:
 
@@ -557,7 +556,12 @@ class TestArenaWeightViews:
         shim = Shim(m)
         if isinstance(getattr(shim.module, "config", None), dict):
             shim.module.config = m.config
-        rollout = HybridEngineRollout(shim, tok, HybridEngineRolloutConfig(use_graph_capture=True, use_segki=True))
+        # graph capture needs a real accelerator: CPU stubs return None streams
+        # and no-op graph replays, so the eager path exercises the same
+        # weight-view contract there
+        graphs_ok = get_accelerator().device_name() != "cpu"
+        rollout = HybridEngineRollout(shim, tok, HybridEngineRolloutConfig(use_graph_capture=graphs_ok,
+                                                                           use_segki=True))
         return rollout, m
 
     def _gen(self, rollout, ids):
@@ -599,9 +603,10 @@ class TestArenaWeightViews:
         self._gen(rollout2, ids)  # builds fresh caches on the right values
         out_fresh = self._gen(rollout2, ids)
 
-        assert torch.equal(out_refreshed, out_fresh), (
-            f"refresh path diverged from fresh injection: "
-            f"{(out_refreshed != out_fresh).sum().item()} of {out_fresh.numel()} tokens differ")
+        assert torch.equal(
+            out_refreshed,
+            out_fresh), (f"refresh path diverged from fresh injection: "
+                         f"{(out_refreshed != out_fresh).sum().item()} of {out_fresh.numel()} tokens differ")
 
     def test_arena_view_binding_survives_inplace_writes(self):
         pytest.importorskip("transformers")

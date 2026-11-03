@@ -682,8 +682,8 @@ def segki_refresh(model: torch.nn.Module) -> None:
                 delattr(module, attr)
                 op = op if op is not None else getattr(module, "_ki_gdn_op", None)
     # the GLU concat cache is process-wide in the backend
-    gdn_op = op or next((getattr(m, "_ki_gdn_op", None) for m in model.modules()
-                         if getattr(m, "_ki_gdn_op", None) is not None), None)
+    gdn_op = op or next(
+        (getattr(m, "_ki_gdn_op", None) for m in model.modules() if getattr(m, "_ki_gdn_op", None) is not None), None)
     if gdn_op is not None and hasattr(gdn_op, "clear_glu_cat_cache"):
         gdn_op.clear_glu_cat_cache()
 

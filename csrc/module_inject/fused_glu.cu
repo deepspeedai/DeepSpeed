@@ -1773,7 +1773,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
           py::arg("glu_epilogue") = false);
     m.def("repeat_qk", &repeat_qk, "fused q/k head-repeat for the scan (one launch)");
     m.def("silu_mul", &silu_mul, "native GLU epilogue: silu(g)*u from a [M,2N] buffer");
-    m.def("clear_glu_cat_cache", &clear_glu_cat_cache, "drop stale concat caches after in-place weight writes");
+    m.def("clear_glu_cat_cache",
+          &clear_glu_cat_cache,
+          "drop stale concat caches after in-place weight writes");
     m.def("capabilities", &segki_capabilities, "segKI backend capability report");
     m.def("gdn_recurrent_step",
           &gdn_recurrent_step,
