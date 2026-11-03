@@ -290,14 +290,26 @@ class TorchBackend(Backend):
         return torch.distributed.all_reduce(tensor=tensor, op=op, group=group, async_op=async_op)
 
     def inference_all_reduce(self, tensor, op, group=None):
-        # Latency-optimized CUDA path: the one-shot P2P kernel fills the same
-        # hook the CPU backend fills with shm+AVX (see deepspeed/comm/custom_ar.py)
+        # Latency-optimized accelerator path: the one-shot P2P kernel fills the same
+        # hook the CPU backend fills with shm+AVX (see deepspeed/comm/custom_collective.py).
+        # Initialized lazily here (not in __init__): at this point the local device
+        # is bound and the real TP group is in hand, so buffers are allocated on the
+        # device the kernels will use, and topologies that can never use the fast
+        # path never pay the JIT build.
         if get_accelerator().on_accelerator(tensor):
-            from deepspeed.comm import custom_ar
+            from deepspeed.comm import custom_collective
             world_sz = torch.distributed.get_world_size(group=group)
-            if (custom_ar.custom_ar_ready(world_sz) and tensor.is_contiguous()
-                    and tensor.numel() * tensor.element_size() <= custom_ar.custom_ar_max_bytes()):
-                return custom_ar.all_reduce(tensor)
+            try:
+                custom_collective.initialize(group)
+            except Exception:
+                pass  # the comm library remains the answer; initialize() logs build failures
+            # the kernel only implements sum over fp16/bf16/fp32; anything else
+            # must take the standard backend, not raise from the fast path
+            if (self._reduce_op(op) == torch.distributed.ReduceOp.SUM
+                    and tensor.dtype in (torch.float16, torch.bfloat16, torch.float32)
+                    and custom_collective.custom_collective_ready(world_sz) and tensor.is_contiguous()
+                    and tensor.numel() * tensor.element_size() <= custom_collective.custom_collective_max_bytes()):
+                return custom_collective.all_reduce(tensor)
         use_ds_op = hasattr(torch.ops, 'deepspeed') and hasattr(torch.ops.deepspeed, 'inference_all_reduce_')
         world_size = torch.distributed.get_world_size(group=group)
         if world_size <= 1:

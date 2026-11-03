@@ -125,8 +125,6 @@ def build_tp_rollout():
     shim = Shim(eng)
     if isinstance(getattr(shim.module, "config", None), dict):
         shim.module.config = m.config
-    from deepspeed.comm import custom_ar
-    custom_ar.initialize()
     ro = HybridEngineRollout(shim, tok, HybridEngineRolloutConfig(use_graph_capture=True, use_segki=True))
     return ro, eng
 

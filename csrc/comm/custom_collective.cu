@@ -56,15 +56,24 @@ __global__ void copy_kernel(const char* __restrict__ in,
 {
     const int parity = (*seq_d) & 1;
     char* dst = my_base + kBufBase + (size_t)parity * kBufStride;
-    const size_t vec = nbytes / 16;
-    const uint4* in4 = (const uint4*)in;
-    uint4* dst4 = (uint4*)dst;
-    for (size_t v = (size_t)blockIdx.x * blockDim.x + threadIdx.x; v < vec;
-         v += (size_t)gridDim.x * blockDim.x)
-        dst4[v] = in4[v];
-    for (size_t b = vec * 16 + (size_t)blockIdx.x * blockDim.x + threadIdx.x; b < nbytes;
-         b += (size_t)gridDim.x * blockDim.x)
-        dst[b] = in[b];
+    // contiguous does not imply 16B alignment (e.g. a sliced view); the
+    // vectorized path is only legal when the source pointer is aligned
+    const bool aligned = (reinterpret_cast<uintptr_t>(in) & 15) == 0;
+    if (aligned) {
+        const size_t vec = nbytes / 16;
+        const uint4* in4 = (const uint4*)in;
+        uint4* dst4 = (uint4*)dst;
+        for (size_t v = (size_t)blockIdx.x * blockDim.x + threadIdx.x; v < vec;
+             v += (size_t)gridDim.x * blockDim.x)
+            dst4[v] = in4[v];
+        for (size_t b = vec * 16 + (size_t)blockIdx.x * blockDim.x + threadIdx.x; b < nbytes;
+             b += (size_t)gridDim.x * blockDim.x)
+            dst[b] = in[b];
+    } else {
+        for (size_t b = (size_t)blockIdx.x * blockDim.x + threadIdx.x; b < nbytes;
+             b += (size_t)gridDim.x * blockDim.x)
+            dst[b] = in[b];
+    }
 }
 
 __global__ void flag_kernel(char* __restrict__ my_base, const int* __restrict__ seq_d)
