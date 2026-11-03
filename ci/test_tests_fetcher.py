@@ -664,3 +664,13 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+def test_registered_workflows_select_from_the_v1_scope() -> None:
+    """Every registered workflow must narrow to the v1 tree it actually runs."""
+    for name in ("modal-torch-latest", "cpu-torch-latest-v1-multirank"):
+        config = tests_fetcher.WORKFLOWS[name]
+        assert config.name == name
+        assert config.test_scopes == ("tests/unit/v1", ), name
+    assert (".github/workflows/cpu-torch-latest-v1-multirank.yml"
+            in tests_fetcher.WORKFLOWS["cpu-torch-latest-v1-multirank"].extra_run_all_globs)

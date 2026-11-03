@@ -106,9 +106,9 @@ SSM_OUTPUT_TAIL_BYTES = 32 * 1024
 REMOTE_ROOT = "/workspace"
 REMOTE_REPOSITORY = f"{REMOTE_ROOT}/deepspeed"
 REMOTE_TRANSFORMERS = f"{REMOTE_ROOT}/transformers"
-AWS_PYTHON_VERSION = "3.10.13"
+AWS_PYTHON_VERSION = "3.12.14"
 AWS_UV_VERSION = "0.12.7"
-AWS_PYTHON_ROOT = f"{REMOTE_ROOT}/python310"
+AWS_PYTHON_ROOT = f"{REMOTE_ROOT}/python312"
 AWS_CONTAINER_PATH = f"{AWS_PYTHON_ROOT}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 GDS_TEST_TARGET = "tests/unit/v1/nvme/test_gds.py"
 AWS_CONFIG_ENV = "AWS_MODAL_FALLBACK_CONFIG"
@@ -564,6 +564,11 @@ def build_sandbox_env() -> dict[str, str]:
         "GIT_LFS_SKIP_SMUDGE": "1",
         "PIP_DISABLE_PIP_VERSION_CHECK": "1",
         "PIP_NO_INPUT": "1",
+        # torch <=2.12 SubprocPool.shutdown() blocks up to 300s when compile
+        # workers are still in flight at process exit (pytorch/pytorch#162199,
+        # fixed by #184038 in 2.13). Serial compile avoids the worker pool
+        # entirely; unit-test graphs are tiny so parallel compile gains nothing.
+        "TORCHINDUCTOR_COMPILE_THREADS": "1",
     }
 
 
@@ -740,6 +745,11 @@ def build_remote_commands(inputs: ControllerInputs) -> tuple[RemoteCommand, ...]
                 "-n",
                 "4",
                 "--verbose",
+                # The relay (_single_line) rewrites any ANSI codes to literal
+                # "\x1b" text that neither renders as color in the Actions log
+                # viewer nor matches nightly-triage's FAILED parsing, so keep
+                # the pytest output plain.
+                "--color=no",
                 # GDS tests require GPUDirect Storage support unavailable on these runners.
                 "--ignore=tests/unit/v1/nvme/test_gds.py",
                 f"--torch_ver={preset['torch_test_version']}",

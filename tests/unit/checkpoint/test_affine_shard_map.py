@@ -505,6 +505,76 @@ def test_destination_validation_does_not_enumerate_elements(monkeypatch):
     affine_map.validate()
 
 
+def _column_split_qkv_map():
+    """Fused QKV split along columns, so every piece writes a few columns of each shard row."""
+    return sub_param_map(shape=(4, 12),
+                         sub_dim_sizes=[4, 4, 4],
+                         shard_widths=[[2, 2], [2, 2], [2, 2]],
+                         partition_dim=1)
+
+
+def _move_destination(affine_map, rank, index, delta):
+    piece = affine_map.pieces_by_rank[rank][index]
+    affine_map.pieces_by_rank[rank][index] = AffinePiece(piece.shape, piece.source_offset, piece.source_strides,
+                                                         piece.dest_offset + delta, piece.dest_strides,
+                                                         piece.locations)
+
+
+def test_strided_destination_overlap_is_refused():
+    # Rank 0's value columns are moved onto its key columns. The element count still matches,
+    # so without a destination check the key block is overwritten and two shard columns are
+    # never written at all.
+    affine_map = _column_split_qkv_map()
+    _move_destination(affine_map, rank=0, index=2, delta=-2)
+    with pytest.raises(ValueError, match='twice'):
+        affine_map.validate()
+
+
+def test_strided_destination_outside_the_shard_is_refused():
+    affine_map = _column_split_qkv_map()
+    _move_destination(affine_map, rank=0, index=2, delta=2)
+    with pytest.raises(ValueError, match='outside the shard'):
+        affine_map.validate()
+
+
+def test_strided_destination_that_wraps_a_shard_row_round_trips():
+    # In a (3, 3) shard, a (2, 2) view starting at address 2 with the shard's strides writes
+    # addresses 2, 3, 5 and 6. It wraps past the end of row 0 but stays inside the shard, so it
+    # is a valid destination even though it is not a box of the shard's grid.
+    pieces = [
+        AffinePiece((2, 2), 0, (2, 1), 2, (3, 1), [0]),
+        AffinePiece((2, ), 4, (1, ), 0, (1, ), [0]),
+        AffinePiece((1, ), 6, (1, ), 4, (1, ), [0]),
+        AffinePiece((2, ), 7, (1, ), 7, (1, ), [0]),
+    ]
+    affine_map = ParamAffineMap((9, ), {0: (3, 3)}, {0: pieces})
+    affine_map.validate_coverage()
+    full = torch.arange(9.)
+    torch.testing.assert_close(affine_map.rebuild({0: affine_map.extract(full, 0)}), full)
+
+
+def test_full_check_refuses_a_destination_collision_of_any_stride():
+    # The first piece writes shard addresses 0 and 2, the second writes 1 and 2, and address 3
+    # is never written. Neither piece is a box of the shard's grid, so only walking the
+    # addresses can see it.
+    pieces = [AffinePiece((2, ), 0, (1, ), 0, (2, ), [0]), AffinePiece((2, ), 2, (1, ), 1, (1, ), [0])]
+    affine_map = ParamAffineMap((4, ), {0: (4, )}, {0: pieces})
+    with pytest.raises(ValueError, match='twice'):
+        affine_map.validate_coverage()
+
+
+def test_strided_destination_validation_does_not_enumerate_elements(monkeypatch):
+    size = 10**9
+    pieces = [AffinePiece((size, 4), column, (8, 1), column, (8, 1), [0]) for column in (0, 4)]
+    affine_map = ParamAffineMap((size, 8), {0: (size, 8)}, {0: pieces})
+
+    def refuse_walk(self, base, strides):
+        raise AssertionError('validation must not enumerate shard elements')
+
+    monkeypatch.setattr(AffinePiece, '_offsets', refuse_walk)
+    affine_map.validate()
+
+
 # Guards added in review. Each one covers a way a map could produce a plausible but wrong
 # parameter rather than failing, which is the failure mode that matters for a checkpoint.
 
