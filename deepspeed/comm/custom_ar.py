@@ -1,4 +1,3 @@
-# Copyright (c) Microsoft Corporation.
 # SPDX-License-Identifier: Apache-2.0
 # DeepSpeed Team
 """Latency-optimized inference all-reduce for P2P-capable CUDA pairs.

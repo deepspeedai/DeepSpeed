@@ -336,9 +336,6 @@ class CPU_Accelerator(DeepSpeedAccelerator):
         cgroup = _cgroup_memory()
         return total if cgroup is None else min(total, cgroup[0])
 
-    def is_stream_capturing(self):
-        return False
-
     def available_memory(self, device_index=None):
         import psutil
         available = psutil.virtual_memory().available

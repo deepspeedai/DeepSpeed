@@ -1,4 +1,3 @@
-# Copyright (c) Microsoft Corporation.
 # SPDX-License-Identifier: Apache-2.0
 # DeepSpeed Team
 """ZeRO-3 trainer -> TP=2 segKI rollout end-to-end (arena-sync contract).
