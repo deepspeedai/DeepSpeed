@@ -18,7 +18,8 @@ from deepspeed.utils import safe_set_full_fp32_param, safe_set_full_grad, safe_s
 from deepspeed.utils import safe_get_local_fp32_param, safe_get_local_grad, safe_get_local_optimizer_state
 from deepspeed.utils import safe_set_local_fp32_param, safe_set_local_grad, safe_set_local_optimizer_state
 from deepspeed.utils import safe_update_full_grad_vectorized
-from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum
+from deepspeed.utils.mixed_precision_linkage import link_hp_params
+from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum, OffloadStateTypeEnum
 from deepspeed.ops.aio import AsyncIOBuilder
 from deepspeed.accelerator import get_accelerator
 from deepspeed.runtime.swap_tensor import MIN_SWAPPABLE_BYTES
@@ -27,6 +28,34 @@ WEIGHT_KEY = 'weight'
 FIRST_ORDER_KEY = 'exp_avg'
 SECOND_ORDER_KEY = 'exp_avg_sq'
 GRADIENT_KEY = 'gradient'
+
+
+@pytest.mark.parametrize("full_accumulation_buffer", [True, False])
+def test_full_gradient_reconstruction_uses_only_the_owned_fragment(monkeypatch, full_accumulation_buffer):
+    reference = torch.tensor([5.5, 11.0, 16.5, 22.0])
+    for rank in range(2):
+        param = torch.nn.Parameter(torch.zeros(4, dtype=torch.bfloat16))
+        local_gradient = reference if full_accumulation_buffer else reference.narrow(0, 2 * rank, 2)
+        link_hp_params(lp_param_list=[param],
+                       flat_hp_partition=torch.zeros(2),
+                       gradient_dict={0: [local_gradient]},
+                       offload_gradient_dict={},
+                       use_offload=False,
+                       param_group_index=0,
+                       partition_start=2 * rank,
+                       partition_size=2,
+                       dp_group=object())
+        peer_contribution = torch.zeros_like(reference)
+        peer_start = 2 * (1 - rank)
+        peer_contribution[peer_start:peer_start + 2] = reference[peer_start:peer_start + 2]
+
+        def sum_peer_fragment(tensor, *, group, _peer=peer_contribution):
+            tensor.add_(_peer)
+
+        monkeypatch.setattr(dist, "all_reduce", sum_peer_fragment)
+        # A full BF16 buffer must not be contributed twice when the parameter spans partitions.
+        actual = safe_get_full_grad(param)
+        torch.testing.assert_close(actual, reference, rtol=0, atol=0)
 
 
 def validate_tensor(model, api_type, opt_states):
@@ -68,6 +97,16 @@ class MyModel(torch.nn.Module):
             x = l(x)
             x = self.act(x)
         return self.cel(x, y)
+
+
+class ScaleModel(torch.nn.Module):
+
+    def __init__(self):
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.ones(4))
+
+    def forward(self, x):
+        return (self.weight * x).sum()
 
 
 def run_fragmented_model(model, config_dict, hidden_dim, dtype, validate_after_bwd, validate_after_step):
@@ -198,6 +237,109 @@ class TestTensorFragmentGet(DistributedTest):
         validate_after_step = lambda model: validate_tensor(model, api_type, opt_states=True)
 
         run_fragmented_model(model, config_dict, hidden_dim, torch.bfloat16, validate_after_bwd, validate_after_step)
+
+
+class TestZeroBf16Fp32GradAccum(DistributedTest):
+    world_size = 2
+
+    @pytest.mark.parametrize(
+        'zero_stage, zero_options',
+        [
+            pytest.param(1, {}, id="stage1"),
+            pytest.param(2, {}, id="stage2"),
+            pytest.param(2, {"offload_optimizer": {
+                "device": "cpu"
+            }}, id="stage2-cpu-offload"),
+            pytest.param(2, {"contiguous_gradients": False}, id="stage2-noncontiguous"),
+            pytest.param(3, {}, id="stage3"),
+        ],
+    )
+    def test_safe_get_full_grad_preserves_fp32_accumulated_average(self, zero_stage, zero_options):
+        # Catches storing or accumulating fp32 communication results in a bf16 partition.
+        if not get_accelerator().is_bf16_supported():
+            pytest.skip("requires bf16")
+
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 1,
+            "gradient_accumulation_steps": 4,
+            "steps_per_print": 1,
+            "communication_data_type": "fp32",
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 1e-6,
+                    "torch_adam": True
+                }
+            },
+            "bf16": {
+                "enabled": True
+            },
+            "data_types": {
+                "grad_accum_dtype": "fp32"
+            },
+            "zero_optimization": {
+                "stage": zero_stage,
+                **zero_options,
+            }
+        }
+
+        model = ScaleModel()
+        engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config_dict)
+
+        rank = dist.get_rank()
+        local_grad = 1.0 if rank == 0 else 1.0078125
+        x = torch.full((4, ), local_grad, dtype=torch.bfloat16, device=engine.device)
+        for micro_step in range(engine.gradient_accumulation_steps()):
+            engine.backward(engine(x))
+            if not engine.is_gradient_accumulation_boundary():
+                engine.step()
+
+        grad = safe_get_full_grad(engine.module.weight)
+        expected = torch.full((4, ), 1.00390625, dtype=torch.float32, device=engine.device)
+        assert grad.dtype == torch.float32
+        torch.testing.assert_close(grad, expected, rtol=0, atol=0)
+
+        engine.destroy()
+
+    def test_dynamic_gradient_offload_preserves_optimizer_input(self):
+        if not get_accelerator().is_bf16_supported():
+            pytest.skip("requires bf16")
+
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 1,
+            "communication_data_type": "fp32",
+            "zero_allow_untested_optimizer": True,
+            "optimizer": {
+                "type": "SGD",
+                "params": {
+                    "lr": 1.0
+                }
+            },
+            "bf16": {
+                "enabled": True
+            },
+            "data_types": {
+                "grad_accum_dtype": "fp32"
+            },
+            "zero_optimization": {
+                "stage": 2,
+            },
+        }
+
+        model = ScaleModel()
+        engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config_dict)
+        x = torch.arange(1, 5, dtype=torch.bfloat16, device=engine.device)
+        engine.backward(engine(x))
+        engine.offload_states(include=[OffloadStateTypeEnum.lp_grads], pin_memory=False)
+        engine.reload_states()
+
+        weight_before = engine.module.weight.detach().clone()
+        replacement_grad = torch.zeros(4, dtype=torch.float32, device=engine.device)
+        safe_set_full_grad(engine.module.weight, replacement_grad)
+        engine.step()
+
+        torch.testing.assert_close(engine.module.weight, weight_before, rtol=0, atol=0)
+        engine.destroy()
 
 
 def create_random_values(model, key_list, group, grad_dtype):

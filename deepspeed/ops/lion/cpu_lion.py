@@ -4,7 +4,6 @@
 # DeepSpeed Team
 
 import torch
-from cpuinfo import get_cpu_info
 from deepspeed.utils import logger
 from deepspeed.utils.logging import should_log_le
 from deepspeed.ops.op_builder import CPULionBuilder
@@ -39,6 +38,8 @@ class DeepSpeedCPULion(torch.optim.Optimizer):
         default_args = dict(lr=lr, betas=betas, weight_decay=weight_decay)
         super(DeepSpeedCPULion, self).__init__(model_params, default_args)
 
+        # Imported here because importing cpuinfo runs subprocesses (file, uname), which slows down import deepspeed.
+        from cpuinfo import get_cpu_info
         cpu_info = get_cpu_info()
         self.cpu_vendor = cpu_info["vendor_id_raw"].lower() if "vendor_id_raw" in cpu_info else "unknown"
         if "amd" in self.cpu_vendor:
@@ -54,14 +55,18 @@ class DeepSpeedCPULion(torch.optim.Optimizer):
         self.opt_id = DeepSpeedCPULion.optimizer_id
         DeepSpeedCPULion.optimizer_id = DeepSpeedCPULion.optimizer_id + 1
         self.fp32_optimizer_states = fp32_optimizer_states
-        self.ds_opt_lion = CPULionBuilder().load()
+        try:
+            self.ds_opt_lion = CPULionBuilder().load()
+        except Exception as e:
+            raise RuntimeError("DeepSpeedCPULion requires the cpu_lion op, which failed to build/load.") from e
 
         self.ds_opt_lion.create_lion(self.opt_id, lr, betas[0], betas[1], weight_decay, should_log_le("info"))
 
     def __del__(self):
         # need to destroy the C++ object explicitly to avoid a memory leak when deepspeed.initialize
         # is used multiple times in the same process (notebook or pytest worker)
-        self.ds_opt_lion.destroy_lion(self.opt_id)
+        if hasattr(self, 'ds_opt_lion'):
+            self.ds_opt_lion.destroy_lion(self.opt_id)
 
     def __setstate__(self, state):
         super(DeepSpeedCPULion, self).__setstate__(state)

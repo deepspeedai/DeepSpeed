@@ -370,11 +370,15 @@ CHECKPOINT_PARALLEL_WRITE_PIPELINE_STAGE_DEFAULT = False
 #   grad_accum_dtype=["bf16"|"fp16"|"fp32"]
 #   param_dtype=["bf16"|"fp16"|"fp32"]
 #   buffer_dtype=["bf16"|"fp16"|"fp32"]
+#   keep_in_fp32_modules="auto"|[name patterns]
 #   }
 # }
 # param_dtype and buffer_dtype mirror FSDP's MixedPrecisionPolicy.
 #   - param_dtype: if None uses the specified mixed precision dtype, otherwise casts the params into the provided dtype
 #   - buffer_dtype: if None uses the buffers' dtype found when the model was loaded (e.g. fp32 rotary inv_freq), otherwise casts the buffers into the provided dtype (which is likely to lead to unintended consequences)
+#   - keep_in_fp32_modules: buffers kept in fp32 under bf16/fp16 training; "auto" uses the model's transformers
+#     _keep_in_fp32_modules_strict (and _keep_in_fp32_modules under fp16), a list gives name patterns, [] keeps
+#     nothing. See deepspeed/runtime/keep_in_fp32.py
 
 DATA_TYPES = "data_types"
 GRAD_ACCUM_DTYPE = "grad_accum_dtype"
@@ -383,6 +387,8 @@ PARAM_DTYPE = "param_dtype"
 PARAM_DTYPE_DEFAULT = None
 BUFFER_DTYPE = "buffer_dtype"
 BUFFER_DTYPE_DEFAULT = None
+KEEP_IN_FP32_MODULES = "keep_in_fp32_modules"
+KEEP_IN_FP32_MODULES_DEFAULT = "auto"
 
 #########################################
 # Drop the last incomplete Batch

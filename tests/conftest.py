@@ -5,6 +5,7 @@
 
 # tests directory-specific settings - this file is run automatically by pytest before any tests are run
 
+import inspect
 import sys
 import pytest
 import os
@@ -22,7 +23,10 @@ sys.path.insert(1, git_repo_path)
 
 
 def pytest_configure(config):
-    config.option.color = "yes"
+    # Force color on for plain invocations, but keep an explicit --color
+    # choice: the CI nightlies pass --color=no so their logs parse cleanly.
+    if config.option.color == "auto":
+        config.option.color = "yes"
     config.option.durations = 0
     config.option.durations_min = 1
     config.option.verbose = True
@@ -61,6 +65,34 @@ def check_environment(pytestconfig):
 
 # Override of pytest "runtest" for DistributedTest class
 # This hook is run before the default pytest_runtest_call
+# The multi-rank-only CI workflow (DS_MULTIRANK_ONLY=1) spends its budget only on
+# the multi-rank tests its LOCAL_SIZE gate admits; single-rank tests are deselected
+# because the plain cpu-torch-latest run already guards them. Per-test world_size
+# marks are honored with the same precedence as the launcher (mark, then class
+# attribute); a fixture-injected world_size falls back to the class attribute.
+def pytest_collection_modifyitems(config, items):
+    if os.environ.get('DS_MULTIRANK_ONLY', '0') != '1':
+        return
+
+    def is_multirank(item):
+        cls = getattr(item, 'cls', None)
+        if not getattr(cls, 'is_dist_test', False):
+            return False
+        mark = item.get_closest_marker('world_size')
+        if mark is not None:
+            world_size = mark.args[0]
+        else:
+            world_size = getattr(cls, 'world_size', None)
+        if isinstance(world_size, (list, tuple)):
+            return any(ws > 1 for ws in world_size)
+        return isinstance(world_size, int) and world_size > 1
+
+    deselected = [item for item in items if not is_multirank(item)]
+    if deselected:
+        config.hook.pytest_deselected(items=deselected)
+    items[:] = [item for item in items if is_multirank(item)]
+
+
 @pytest.hookimpl(tryfirst=True)
 def pytest_runtest_call(item):
     # We want to use our own launching function for distributed tests
@@ -78,6 +110,27 @@ def pytest_runtest_teardown(item, nextitem):
         dist_test_class = item.cls()
         for num_procs, pool in dist_test_class._pool_cache.items():
             dist_test_class._close_pool(pool, num_procs, force=True)
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_pycollect_makeitem(collector, name, obj):
+    # Pytest 8 only registers FixtureFunctionDefinition objects. The
+    # _pytestfixturefunction marker on DistributedFixture is ignored, so a test
+    # that requests the class errors with "fixture not found" before the
+    # launcher can skip for an unavailable world size.
+    if not inspect.isclass(obj) or not getattr(obj, "is_dist_fixture", False):
+        return None
+    if obj.__name__ == "DistributedFixture":
+        return None
+
+    def _launch(request, fixture_cls=obj):
+        fixture_cls()(request)
+
+    _launch.__name__ = name
+    fixture_def = pytest.fixture(name=name)(_launch)
+    holder = type("_DistributedFixtureHolder", (), {name: fixture_def})
+    collector.session._fixturemanager.parsefactories(holder, nodeid=collector.nodeid)
+    return None
 
 
 @pytest.hookimpl(tryfirst=True)

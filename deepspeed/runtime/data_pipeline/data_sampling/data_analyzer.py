@@ -209,10 +209,10 @@ class DataAnalyzer(object):
             p = []
             for thread in threads_to_run:
                 p.append(Process(target=self.run_map_helper, args=(thread, )))
-                p[thread].start()
+                p[-1].start()
 
-            for thread in threads_to_run:
-                p[thread].join()
+            for proc in p:
+                proc.join()
         else:
             assert self.num_threads == 1
             self.run_map_helper(0)

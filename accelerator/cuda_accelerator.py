@@ -33,7 +33,6 @@ class CUDA_Accelerator(DeepSpeedAccelerator):
         self._name = 'cuda'
         self._communication_backend_name = 'nccl' if sys.platform != 'win32' else 'gloo'
         self._compile_backend = "inductor"
-        self._nvtx_domains = {}
         if pynvml is None:
             self._init_pynvml()
 
@@ -233,16 +232,15 @@ class CUDA_Accelerator(DeepSpeedAccelerator):
         return torch.cuda.is_available()
 
     def _get_nvtx_domain(self, domain):
+        # Return the domain name rather than a Domain object for compatibility with older nvtx versions.
         if nvtx is None or domain is None:
             return None
-        if domain not in self._nvtx_domains:
-            self._nvtx_domains[domain] = nvtx.get_domain(domain)
-        return self._nvtx_domains[domain]
+        return domain
 
     def range_push(self, msg, domain=None, category=None):
         nvtx_domain = self._get_nvtx_domain(domain)
         if nvtx_domain is not None:
-            return nvtx_domain.push_range(message=msg, category=category)
+            return nvtx.push_range(message=msg, domain=nvtx_domain, category=category)
         torch_nvtx = getattr(torch.cuda, 'nvtx', None)
         if torch_nvtx is not None and hasattr(torch_nvtx, 'range_push'):
             return torch_nvtx.range_push(msg)
@@ -250,7 +248,7 @@ class CUDA_Accelerator(DeepSpeedAccelerator):
     def range_pop(self, domain=None):
         nvtx_domain = self._get_nvtx_domain(domain)
         if nvtx_domain is not None:
-            return nvtx_domain.pop_range()
+            return nvtx.pop_range(domain=nvtx_domain)
         torch_nvtx = getattr(torch.cuda, 'nvtx', None)
         if torch_nvtx is not None and hasattr(torch_nvtx, 'range_pop'):
             return torch_nvtx.range_pop()
@@ -286,6 +284,9 @@ class CUDA_Accelerator(DeepSpeedAccelerator):
         return major < 9
 
     # Graph operations
+    def is_current_stream_capturing(self) -> bool:
+        return torch.cuda.is_current_stream_capturing()
+
     def create_graph(self):
         return torch.cuda.CUDAGraph()
 
@@ -375,9 +376,14 @@ class CUDA_Accelerator(DeepSpeedAccelerator):
                     for member_name in module.__dir__():
                         if member_name.endswith(
                                 'Builder'
-                        ) and member_name != "OpBuilder" and member_name != "CUDAOpBuilder" and member_name != "TorchCPUOpBuilder":  # avoid abstract classes
+                        ) and member_name != "OpBuilder" and member_name != "CUDAOpBuilder":  # avoid abstract classes
                             if not member_name in self.class_dict:
                                 self.class_dict[member_name] = getattr(module, member_name)
+            # Host-side optimizers run on the CPU wherever the model lives,
+            # so they share their builders with the CPU accelerator.
+            cpu_op_builder_module = importlib.import_module("{}.cpu".format(op_builder_dir))
+            for member_name in ["CPUAdamBuilder", "CPUAdagradBuilder", "CPULionBuilder"]:
+                self.class_dict[member_name] = getattr(cpu_op_builder_module, member_name)
             # end initialize for create_op_builder()
 
     # create an instance of op builder and return, name specified by class_name

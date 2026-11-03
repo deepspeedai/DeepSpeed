@@ -27,7 +27,7 @@ from torch.utils.checkpoint import checkpoint
 import deepspeed
 import deepspeed.comm as dist
 from deepspeed.module_inject import auto_ep_layer
-from deepspeed.module_inject.auto_ep_comm import destroy_exchanges
+from deepspeed.module_inject.auto_ep_comm import DeepEPExchange, destroy_exchanges
 from deepspeed.module_inject.auto_ep_layer import AutoEPMoELayer
 from deepspeed.ops.triton_ops import autoep_fused_token_ops as fused_ops
 from deepspeed.utils import safe_get_full_fp32_param
@@ -132,10 +132,28 @@ def _install_skewed_routing(engine):
         router.forward = skewed_forward
 
 
-def _checkpoint_autoep_layers(engine, *, use_reentrant=False):
+def _checkpoint_autoep_layers(engine, *, use_reentrant=False, nested=False):
     for module in engine.module.modules():
         if isinstance(module, AutoEPMoELayer):
-            module.forward = functools.partial(checkpoint, module.forward, use_reentrant=use_reentrant)
+            if nested:
+                inner = functools.partial(checkpoint, module.forward, use_reentrant=False)
+                module.forward = functools.partial(checkpoint, inner, use_reentrant=True)
+            else:
+                module.forward = functools.partial(checkpoint, module.forward, use_reentrant=use_reentrant)
+
+
+@contextlib.contextmanager
+def _count_deepep_combines():
+    """Counts forward combines; the backward of a dispatch combines through combine_with_weight_grad."""
+    counts = {"combine": 0}
+    original = DeepEPExchange.combine
+
+    def counted(exchange, rows, handle):
+        counts["combine"] += 1
+        return original(exchange, rows, handle)
+
+    with mock.patch.object(DeepEPExchange, "combine", counted):
+        yield counts
 
 
 def _count_autoep_layer_forwards(engine):
@@ -181,17 +199,7 @@ def _snapshot_fp32_parameters(engine):
     return snapshot
 
 
-def _run_one_step(backend,
-                  ep_size,
-                  seed,
-                  *,
-                  cleanup=True,
-                  activation_checkpointing=False,
-                  reentrant_checkpointing=False,
-                  skewed_routing=False,
-                  row_weighting_impl="auto",
-                  score_apply=None):
-    """Build a model on ``backend``, run one step, return its output and grads."""
+def _build_test_engine(backend, ep_size, seed, *, row_weighting_impl="auto", score_apply=None):
     seed_everything(seed)
 
     config = make_autoep_config(ep_size=ep_size)
@@ -225,18 +233,35 @@ def _run_one_step(backend,
             elif name.endswith("experts.down_proj"):
                 parameter.mul_(INTERMEDIATE_SIZE**-0.5)
     engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config)
+    return engine
+
+
+def _run_one_step(backend,
+                  ep_size,
+                  seed,
+                  *,
+                  cleanup=True,
+                  activation_checkpointing=False,
+                  reentrant_checkpointing=False,
+                  nested_checkpointing=False,
+                  skewed_routing=False,
+                  row_weighting_impl="auto",
+                  score_apply=None,
+                  seq_len=SEQ_LEN):
+    """Build a model on ``backend``, run one step, return its output and grads."""
+    engine = _build_test_engine(backend, ep_size, seed, row_weighting_impl=row_weighting_impl, score_apply=score_apply)
     if backend == "deepep" and not cleanup:
         _install_legacy_deepep_prep(engine)
     if skewed_routing:
         _install_skewed_routing(engine)
     forward_counts = _count_autoep_layer_forwards(engine)
     if activation_checkpointing:
-        _checkpoint_autoep_layers(engine, use_reentrant=reentrant_checkpointing)
+        _checkpoint_autoep_layers(engine, use_reentrant=reentrant_checkpointing, nested=nested_checkpointing)
 
     # Reseeded so the input is identical on every rank and across backends: the
     # comparison is of the transport, so nothing else may differ.
     seed_everything(seed)
-    hidden = torch.randn(1, SEQ_LEN, HIDDEN_SIZE, device=engine.device,
+    hidden = torch.randn(1, seq_len, HIDDEN_SIZE, device=engine.device,
                          dtype=engine_input_dtype(engine)).requires_grad_(True)
     parameters_before = _snapshot_fp32_parameters(engine)
     routes = []
@@ -310,7 +335,7 @@ def test_one_step_helper_keeps_original_learning_rate_for_default(row_weighting_
             _run_one_step("deepep", ep_size=4, seed=2468, row_weighting_impl=row_weighting_impl)
 
 
-def _assert_cleanup_results_close(actual, expected, *, compare_score_gradients):
+def _assert_cleanup_results_close(actual, expected, *, compare_score_gradients, extra_route_recomputes=0):
     for name, rtol, atol in (
         ("output", 2e-3, 2e-3),
         ("loss", 2e-3, 2e-3),
@@ -326,10 +351,25 @@ def _assert_cleanup_results_close(actual, expected, *, compare_score_gradients):
                                         f"expected_norm={expected[name].norm().item()}"))
     # DeepEP atomics can change small gradient elements between equivalent runs.
     # The checks below retain exact routes and compare the stable training invariants.
-    assert len(actual["routes"]) == len(expected["routes"])
-    for (actual_name, actual_route), (expected_name, expected_route) in zip(actual["routes"], expected["routes"]):
-        assert actual_name == expected_name
-        assert torch.equal(actual_route, expected_route)
+    if extra_route_recomputes:
+        # Nested checkpointing evaluates the router once more per layer. Every observed route must still match
+        # that layer's reference route, including the extra inner recompute.
+        actual_routes, expected_routes = {}, {}
+        for name, route in actual["routes"]:
+            actual_routes.setdefault(name, []).append(route)
+        for name, route in expected["routes"]:
+            expected_routes.setdefault(name, []).append(route)
+        assert actual_routes.keys() == expected_routes.keys()
+        for name, routes in actual_routes.items():
+            reference_routes = expected_routes[name]
+            assert len(routes) == len(reference_routes) + extra_route_recomputes
+            for route in routes + reference_routes:
+                assert torch.equal(route, reference_routes[0]), f"checkpoint routing changed for {name}"
+    else:
+        assert len(actual["routes"]) == len(expected["routes"])
+        for (actual_name, actual_route), (expected_name, expected_route) in zip(actual["routes"], expected["routes"]):
+            assert actual_name == expected_name
+            assert torch.equal(actual_route, expected_route)
     assert actual["score_gradients"].keys() == expected["score_gradients"].keys()
     for name, actual_grad in actual["score_gradients"].items():
         expected_grad = expected["score_gradients"][name]
@@ -367,6 +407,23 @@ def _assert_cleanup_results_close(actual, expected, *, compare_score_gradients):
                                    rtol=5e-3,
                                    atol=5e-4,
                                    msg=_delta_failure_message(name, actual, expected))
+
+
+def _assert_gradients_match_relatively(actual, expected, *, tolerance):
+    """Relative L2 error of the input and every parameter gradient.
+
+    The absolute tolerances above are larger than these small gradients, so they cannot tell a reordered
+    reduction from gradients scattered onto the wrong rows; the relative error separates the two by orders of
+    magnitude.
+    """
+    pairs = [("input_gradient", actual["input_gradient"], expected["input_gradient"])]
+    pairs += [(name, actual["gradients"][name], expected["gradients"][name]) for name in expected["gradients"]]
+    for name, actual_grad, expected_grad in pairs:
+        reference = expected_grad.norm()
+        if reference == 0:
+            continue
+        error = ((actual_grad - expected_grad).norm() / reference).item()
+        assert error < tolerance, f"{name} relative L2 error {error:.3e} exceeds {tolerance:.0e}"
 
 
 def _assert_native_fused_gradient_close(actual, expected, *, name):
@@ -566,6 +623,79 @@ class TestDeepEPMatchesCollective(DistributedTest):
         all_routes = torch.cat([route.flatten() for _, route in fused["routes"]])
         assert torch.count_nonzero(all_routes == 3) == 0
         assert torch.count_nonzero(all_routes == 1) > torch.count_nonzero(all_routes == 2)
+
+    @pytest.mark.parametrize("skewed_routing", [False, True])
+    @pytest.mark.parametrize("nested", [False, True], ids=["non-reentrant", "nested-in-reentrant"])
+    def test_non_reentrant_checkpointing_replays_the_forward_dispatch_layout(self, skewed_routing, nested):
+        """A non-reentrant recompute keeps the forward's nodes and handle, so it must reuse that layout.
+
+        DeepEP's received order depends on arrival timing. A fresh recompute
+        dispatch feeds the experts rows in another order than combine's
+        backward scatters gradients into. Reentrant recompute rebuilds its own
+        graph and is the reference.
+        """
+        skip_unless_h100_tests_enabled("DeepEP checkpoint parity needs H100s and a DeepEP build")
+        seed = 2468
+        # Enough rows per rank for arrival order to vary between a forward and its recompute.
+        seq_len = 256
+
+        with _count_deepep_combines() as reentrant_combines:
+            reentrant = _run_one_step("deepep",
+                                      self.world_size,
+                                      seed,
+                                      activation_checkpointing=True,
+                                      reentrant_checkpointing=True,
+                                      skewed_routing=skewed_routing,
+                                      seq_len=seq_len)
+        with _count_deepep_combines() as non_reentrant_combines:
+            non_reentrant = _run_one_step("deepep",
+                                          self.world_size,
+                                          seed,
+                                          activation_checkpointing=True,
+                                          reentrant_checkpointing=False,
+                                          nested_checkpointing=nested,
+                                          skewed_routing=skewed_routing,
+                                          seq_len=seq_len)
+
+        _assert_cleanup_results_close(non_reentrant,
+                                      reentrant,
+                                      compare_score_gradients=False,
+                                      extra_route_recomputes=int(nested))
+        # A consistent layout differs from the reference only by reduction order, below 1e-4 relative; gradients
+        # scattered onto another arrival order are off by order one.
+        _assert_gradients_match_relatively(non_reentrant, reentrant, tolerance=1e-2)
+        layers = len(non_reentrant["forward_counts"])
+        assert layers, "the test did not exercise any AutoEP layers"
+        expected_forwards = 3 if nested else 2
+        assert all(count == expected_forwards for count in non_reentrant["forward_counts"].values())
+        # Reentrant recompute repeats every forward combine; non-reentrant early stop skips them, since combine's
+        # backward needs no saved activation.
+        assert reentrant_combines["combine"] == 2 * layers
+        expected_combines = 2 * layers if nested else layers
+        assert non_reentrant_combines["combine"] == expected_combines
+
+    @pytest.mark.parametrize("skewed_routing", [False, True])
+    def test_retained_checkpoint_graph_interleaved_with_new_forward_is_rejected(self, skewed_routing):
+        skip_unless_h100_tests_enabled("DeepEP retained-graph replay needs H100s and a DeepEP build")
+        seed = 2468
+        engine = _build_test_engine("deepep", self.world_size, seed)
+        if skewed_routing:
+            _install_skewed_routing(engine)
+        _checkpoint_autoep_layers(engine, use_reentrant=False)
+        seed_everything(seed)
+        hidden = torch.randn(1, 256, HIDDEN_SIZE, device=engine.device,
+                             dtype=engine_input_dtype(engine)).requires_grad_(True)
+        try:
+            output = engine(hidden)
+            loss = output.float().pow(2).mean()
+            engine.backward(loss, retain_graph=True)
+            newer = engine(hidden)
+            with pytest.raises(RuntimeError, match="autograd graphs are still alive"):
+                engine.backward(loss)
+            assert newer.requires_grad
+        finally:
+            destroy_exchanges(engine.module)
+        dist.barrier()
 
     @pytest.mark.parametrize(
         "activation_checkpointing, skewed_routing",

@@ -648,6 +648,132 @@ class TestAutoEPZero3UniversalCheckpoint(DistributedTest):
         engine.destroy()
 
 
+class TestAutoEPExpertStorageMaps(DistributedTest):
+    world_size = 4
+
+    @pytest.mark.parametrize("zero_stage, autotp_size", [(2, 1), (3, 1), (2, 2), (3, 2)])
+    def test_storage_maps_match_runtime_ownership_and_plan_into_a_new_placement(self, zero_stage, autotp_size):
+        from deepspeed.checkpoint.affine_transfer import plan_transfer
+        from deepspeed.checkpoint.autoep_affine import autoep_storage_affine_map, make_autoep_placement_descriptor
+        from deepspeed.checkpoint.zero_affine import autotp_storage_affine_maps, zero_param_storage_shard
+
+        seed_everything(8800 + zero_stage)
+        config = make_autoep_integration_config(zero_stage=zero_stage, ep_size=2)
+        # The optimizer is irrelevant here; avoid depending on a fused Adam build.
+        config["optimizer"]["params"]["torch_adam"] = True
+        if autotp_size > 1:
+            # Folded AutoTP leaves routed experts whole, so its TP peers are additional EDP holders.
+            config["tensor_parallel"] = {
+                "autotp_size": autotp_size,
+                "partition_config": {
+                    "use_default_specs": False,
+                    "layer_specs": [{
+                        "patterns": [".*\\.weight$"],
+                        "partition_type": "skip",
+                    }],
+                },
+            }
+        engine, _, _, _ = deepspeed.initialize(model=MockMoETransformer(), config=config)
+        rank = dist.get_rank()
+        # Four experts on four ranks, one each, without EDP replicas or ZeRO partitions.
+        target_experts = [[3], [0], [2], [1]]
+        target_placement = make_autoep_placement_descriptor(4, target_experts)
+
+        # Building the maps needs no communication, so one rank can do it while the others wait;
+        # a collective inside would deadlock here.
+        solo_maps = None
+        if rank == 0:
+            solo_maps = [module.expert_storage_affine_maps() for _, module in _autoep_modules(engine)]
+        dist.barrier()
+
+        autotp_maps = None
+        if autotp_size > 1:
+            # A model-wide AutoTP description must describe the experts as their AutoEP layer does.
+            autotp_maps = autotp_storage_affine_maps(engine.module)
+            with pytest.raises(NotImplementedError, match="AutoEP expert optimizer states"):
+                autotp_storage_affine_maps(engine.module, optimizer_states=True)
+            if zero_stage == 3:
+                # Only rank 0 refuses its expert storage; its tensor-parallel peers must raise too
+                # instead of waiting for it in the collective, and other groups are unaffected.
+                from deepspeed.utils import groups
+                storage = _autoep_modules(engine)[0][1].experts.w2.ds_tensor
+                if rank == 0:
+                    storage.ds_quant_scale = torch.ones(1)
+                if 0 in dist.get_all_ranks_from_group(groups.get_tensor_model_parallel_group()):
+                    with pytest.raises((NotImplementedError, RuntimeError), match="storage"):
+                        autotp_storage_affine_maps(engine.module)
+                else:
+                    autotp_storage_affine_maps(engine.module)
+                if rank == 0:
+                    del storage.ds_quant_scale
+
+        for index, (module_name, module) in enumerate(_autoep_modules(engine)):
+            storage_maps = module.expert_storage_affine_maps()
+            if solo_maps is not None:
+                for name in EXPERT_WEIGHT_NAMES:
+                    assert storage_maps[name].shard_shapes == solo_maps[index][name].shard_shapes
+                    assert storage_maps[name].pieces_by_rank == solo_maps[index][name].pieces_by_rank
+            for name in EXPERT_WEIGHT_NAMES:
+                param = getattr(module.experts, name)
+                affine_map = storage_maps[name]
+                if autotp_maps is not None:
+                    autotp_map = autotp_maps[f"{module_name}.experts.{name}"]
+                    assert autotp_map.logical_shape == affine_map.logical_shape
+                    assert autotp_map.shard_shapes == affine_map.shard_shapes
+                    assert autotp_map.pieces_by_rank == affine_map.pieces_by_rank
+                stored = zero_param_storage_shard(param).detach().float().cpu()
+                assert stored.numel() == affine_map.shard_shapes[rank][0]
+                with deepspeed.zero.GatheredParameters([param], enabled=zero_stage == 3):
+                    packed = param.detach().float().cpu()
+
+                records = [None] * dist.get_world_size()
+                dist.all_gather_object(records, (module.ep_rank, packed, stored))
+                # The runtime packs EP rank r's experts as the r-th contiguous block.
+                packed_by_ep_rank = {ep_rank: packed for ep_rank, packed, _ in records}
+                full = torch.cat([packed_by_ep_rank[ep_rank] for ep_rank in sorted(packed_by_ep_rank)])
+                storage = {global_rank: stored for global_rank, (_, _, stored) in enumerate(records)}
+
+                assert affine_map.logical_shape == tuple(full.shape)
+                for global_rank, shard in storage.items():
+                    torch.testing.assert_close(affine_map.extract(full, global_rank), shard, rtol=0, atol=0)
+
+                target_map = autoep_storage_affine_map(target_placement, full.shape,
+                                                       {ep_rank: [ep_rank]
+                                                        for ep_rank in range(4)})
+                plan = plan_transfer(target_map, affine_map)
+                targets = {
+                    ep_rank: torch.full(shape, float("nan"))
+                    for ep_rank, shape in target_map.shard_shapes.items()
+                }
+                for segment in plan.segments:
+                    torch.as_strided(targets[segment.target_rank], segment.shape, segment.target_strides,
+                                     segment.target_offset).copy_(
+                                         torch.as_strided(storage[segment.source_rank], segment.shape,
+                                                          segment.source_strides, segment.source_offset))
+                for ep_rank, experts in enumerate(target_experts):
+                    torch.testing.assert_close(targets[ep_rank], full[experts].reshape(-1), rtol=0, atol=0)
+        engine.destroy()
+
+    @pytest.mark.parametrize("encoding", ["quantized", "nvme"])
+    def test_zero3_storage_maps_refuse_storage_without_plain_elements(self, encoding):
+        from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum
+
+        config = make_autoep_integration_config(zero_stage=3, ep_size=2)
+        config["optimizer"]["params"]["torch_adam"] = True
+        engine, _, _, _ = deepspeed.initialize(model=MockMoETransformer(), config=config)
+        _, module = next(iter(_autoep_modules(engine)))
+        # Stand in for the runtime markers: an encoded partition carries a scale, and a partition
+        # swapped out to NVMe is only a placeholder, so element offsets into either are meaningless.
+        storage = module.experts.w2.ds_tensor
+        if encoding == "quantized":
+            storage.ds_quant_scale = torch.ones(1)
+        else:
+            storage.final_location = OffloadDeviceEnum.nvme
+        with pytest.raises(NotImplementedError, match="ZeRO-3 parameter storage has no affine storage map"):
+            module.expert_storage_affine_maps()
+        engine.destroy()
+
+
 class TestAutoEPZero3UniversalCheckpoint4GPU(DistributedTest):
     world_size = 4
 

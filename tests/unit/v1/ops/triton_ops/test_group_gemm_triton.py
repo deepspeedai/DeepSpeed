@@ -113,15 +113,21 @@ _SHAPES = [
     ([1, 1, 1], 16, 16),  # single-row groups
 ]
 
-# bfloat16 requires compute capability >= 8.0 (Ampere+); include it only there.
-_DTYPES = [torch.float16, torch.float32]
-if torch.cuda.get_device_capability()[0] >= 8:  #ignore-cuda
-    _DTYPES = [torch.bfloat16] + _DTYPES
+_DTYPES = [torch.bfloat16, torch.float16, torch.float32]
+
+
+def _skip_unsupported_dtype(dtype):
+    # bfloat16 requires compute capability >= 8.0 (Ampere+). This runs inside each test instead of at module level,
+    # because querying the device initializes CUDA in the process that collects the tests, and tests forked from that
+    # process (pytest --forked) then cannot use CUDA.
+    if dtype == torch.bfloat16 and torch.cuda.get_device_capability()[0] < 8:  #ignore-cuda
+        pytest.skip("bfloat16 requires compute capability >= 8.0")
 
 
 @pytest.mark.parametrize("counts,K,N", _SHAPES)
 @pytest.mark.parametrize("dtype", _DTYPES)
 def test_forward_matches_reference(counts, K, N, dtype):
+    _skip_unsupported_dtype(dtype)
     dev = get_accelerator().current_device_name()
     torch.manual_seed(0)
     E = len(counts)
@@ -141,6 +147,7 @@ def test_forward_matches_reference(counts, K, N, dtype):
 @pytest.mark.parametrize("counts,K,N", _SHAPES)
 @pytest.mark.parametrize("dtype", _DTYPES)
 def test_backward_matches_reference(counts, K, N, dtype):
+    _skip_unsupported_dtype(dtype)
     dev = get_accelerator().current_device_name()
     torch.manual_seed(1)
     E = len(counts)
@@ -175,6 +182,7 @@ def test_trans_b_matches_reference(counts, K, N, dtype):
     autograd tape so the weight gradient is produced directly in [E,N,K] with no
     materialization copy. Result must equal the explicit-transpose path.
     """
+    _skip_unsupported_dtype(dtype)
     dev = get_accelerator().current_device_name()
     torch.manual_seed(5)
     E = len(counts)

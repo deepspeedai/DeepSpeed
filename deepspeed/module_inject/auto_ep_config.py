@@ -61,6 +61,7 @@ def parse_autoep_config(param_dict: dict) -> AutoEPConfig:
     config.score_apply = param_dict.get("score_apply", "auto")
     config.combine_impl = param_dict.get("combine_impl", "auto")
     config.row_weighting_impl = param_dict.get("row_weighting_impl", "auto")
+    config.gate_up_impl = param_dict.get("gate_up_impl", "separate")
     config.comm_backend = param_dict.get("comm_backend", "comm")
     config.comm_num_sm = param_dict.get("comm_num_sm", 12)
     config.comm_qp_margin = param_dict.get("comm_qp_margin", 4)
@@ -193,6 +194,14 @@ def validate_autoep_config(
     if config.row_weighting_impl not in valid_row_weighting_impl:
         raise ValueError(f"row_weighting_impl must be one of {valid_row_weighting_impl}, "
                          f"got '{config.row_weighting_impl}'")
+
+    valid_gate_up_impl = ("separate", "fused")
+    if config.gate_up_impl not in valid_gate_up_impl:
+        raise ValueError(f"gate_up_impl must be one of {valid_gate_up_impl}, got '{config.gate_up_impl}'")
+    if config.gate_up_impl == "fused" and not config.use_grouped_mm:
+        raise ValueError('gate_up_impl="fused" runs the gate and up projections as one torch._grouped_mm, but '
+                         "use_grouped_mm=false selects the sequential expert loop. Set use_grouped_mm=true, or "
+                         "leave gate_up_impl unset.")
 
     # Validate comm_backend
     valid_comm_backend = ("comm", "deepep")

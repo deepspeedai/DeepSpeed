@@ -1,12 +1,10 @@
-# Copyright (c) Microsoft Corporation.
 # SPDX-License-Identifier: Apache-2.0
-
 # DeepSpeed Team
 
-from .builder import TorchCPUOpBuilder
+from .builder import CPUOpBuilder
 
 
-class CPUAdagradBuilder(TorchCPUOpBuilder):
+class CPUAdagradBuilder(CPUOpBuilder):
     BUILD_VAR = "DS_BUILD_CPU_ADAGRAD"
     NAME = "cpu_adagrad"
 
@@ -18,10 +16,6 @@ class CPUAdagradBuilder(TorchCPUOpBuilder):
 
     def sources(self):
         return ['csrc/adagrad/cpu_adagrad.cpp']
-
-    def libraries_args(self):
-        args = super().libraries_args()
-        return args
 
     def include_paths(self):
         return ['csrc/includes']
