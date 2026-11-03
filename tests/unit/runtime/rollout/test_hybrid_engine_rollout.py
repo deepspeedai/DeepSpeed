@@ -53,6 +53,15 @@ def _make_sampling(n_samples_per_prompt=1):
     return SamplingConfig(max_new_tokens=2, temperature=0, n_samples_per_prompt=n_samples_per_prompt)
 
 
+@pytest.fixture
+def graph_capture_accelerator():
+    # These tests exercise graph-only validation and dispatch. On a CPU
+    # accelerator the opt-in is False, so generate() would take the eager
+    # fallback before reaching the code under test.
+    with patch.object(type(get_accelerator()), "is_graph_capture_supported", return_value=True):
+        yield
+
+
 # -- config defaults ----------------------------------------------------
 
 
@@ -122,7 +131,7 @@ def test_continuous_generation_rejects_unsupported_inputs():
         (HybridEngineRolloutConfig(use_graph_capture=True, continuous_cache_capacity=4), "must fit"),
     ],
 )
-def test_continuous_graph_rejects_incompatible_fixed_layout_options(cfg, message):
+def test_continuous_graph_rejects_incompatible_fixed_layout_options(cfg, message, graph_capture_accelerator):
     rollout = HybridEngineRollout(_make_engine(), _make_tokenizer(), cfg=cfg)
     request = RolloutRequest(
         prompt_ids=torch.tensor([[0, 1, 2]]),
@@ -133,7 +142,7 @@ def test_continuous_graph_rejects_incompatible_fixed_layout_options(cfg, message
         rollout.generate(request, SamplingConfig(max_new_tokens=2, temperature=0, continuous_batch_size=1))
 
 
-def test_continuous_graph_rejects_flash_attention():
+def test_continuous_graph_rejects_flash_attention(graph_capture_accelerator):
     engine = _make_engine()
     engine.module.config = SimpleNamespace(_attn_implementation="flash_attention_2")
     rollout = HybridEngineRollout(engine, _make_tokenizer(), cfg=HybridEngineRolloutConfig(use_graph_capture=True))
@@ -193,7 +202,7 @@ def test_continuous_generation_falls_back_to_eager_without_graph_capture_opt_in(
     assert output.input_ids.tolist() == [[1, 2, 3, 2, 0, 0], [1, 2, 4, 7, 7, 7], [1, 2, 5, 7, 7, 7]]
 
 
-def test_continuous_generation_routes_graph_capture_to_fixed_capacity_path():
+def test_continuous_generation_routes_graph_capture_to_fixed_capacity_path(graph_capture_accelerator):
     rollout = HybridEngineRollout(
         _make_engine(),
         _make_tokenizer(),
