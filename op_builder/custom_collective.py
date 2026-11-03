@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # DeepSpeed Team
 
-import torch
-
-from deepspeed.accelerator import get_accelerator
+# No top-level torch/deepspeed imports: op_builder eagerly imports every
+# top-level module, and torch-less environments (sdist build) must survive it.
+from __future__ import annotations
 
 from .builder import CUDAOpBuilder
 
@@ -75,6 +75,8 @@ class CUDACustomCollective:
         here on). Returns False when the topology cannot use the fast path,
         leaving the standard comm library as the answer.
         """
+        import torch
+        from deepspeed.accelerator import get_accelerator
         import deepspeed.comm as dist  # lazy: avoid import cycle with the comm layer
 
         world = dist.get_world_size(group=group)
@@ -116,5 +118,5 @@ class CUDACustomCollective:
     def max_bytes(self) -> int:
         return self._ext.max_bytes()
 
-    def all_reduce(self, tensor: torch.Tensor) -> torch.Tensor:
+    def all_reduce(self, tensor):
         return self._ext.all_reduce(tensor)
