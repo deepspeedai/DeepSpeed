@@ -140,14 +140,22 @@ class FP16_Optimizer(DeepSpeedOptimizer):
         for group, wd in zip(self.optimizer.param_groups, saved_weight_decay):
             group['weight_decay'] = wd
 
-        # Reset the step counter that the synthetic step advanced, so the
-        # first real update uses the correct bias-correction denominator.
+        # Reset step-dependent state that the synthetic step advanced, so
+        # the first real update behaves identically to a fresh optimizer.
         for state in self.optimizer.state.values():
-            if isinstance(state, dict) and 'step' in state:
+            if not isinstance(state, dict):
+                continue
+            if 'step' in state:
                 if isinstance(state['step'], torch.Tensor):
                     state['step'].zero_()
                 else:
                     state['step'] = 0
+            # NAdam tracks a cumulative momentum product (initial value 1).
+            if 'mu_product' in state:
+                if isinstance(state['mu_product'], torch.Tensor):
+                    state['mu_product'].fill_(1.0)
+                else:
+                    state['mu_product'] = 1.0
 
         for i, group in enumerate(self.fp16_groups):
             self.fp32_groups_flat[i].grad = None

@@ -738,10 +738,17 @@ class TestFP16InitNoSideEffects(DistributedTest):
         model_engine, opt, _, _ = deepspeed.initialize(
             config=config_dict, model=model, optimizer=optimizer)
 
-        for fp32_master, fp16_group in zip(opt.fp32_groups_flat, opt.fp16_groups):
-            expected = torch.cat([p.data.float().reshape(-1) for p in fp16_group])
-            assert torch.equal(fp32_master.data, expected), \
-                "master weights were modified during initialization"
+        # Handle both fused (fp32_groups_flat) and unfused (fp32_groups) wrappers.
+        if hasattr(opt, 'fp32_groups_flat'):
+            for fp32_flat, fp16_group in zip(opt.fp32_groups_flat, opt.fp16_groups):
+                expected = torch.cat([p.data.float().reshape(-1) for p in fp16_group])
+                assert torch.equal(fp32_flat.data, expected), \
+                    "master weights were modified during initialization"
+        else:
+            for fp32_group, fp16_group in zip(opt.fp32_groups, opt.fp16_groups):
+                for fp32_p, fp16_p in zip(fp32_group, fp16_group):
+                    assert torch.equal(fp32_p.data, fp16_p.data.float()), \
+                        "master weights were modified during initialization"
 
     def test_adamw_step_counter_zero(self):
         """FP16 init must not advance the optimizer step counter (#8910)."""
@@ -761,8 +768,7 @@ class TestFP16InitNoSideEffects(DistributedTest):
         _, opt, _, _ = deepspeed.initialize(
             config=config_dict, model=model, optimizer=optimizer)
 
-        base_opt = opt.optimizer
-        for state in base_opt.state.values():
+        for state in opt.optimizer.state.values():
             if isinstance(state, dict) and 'step' in state:
                 step = state['step']
                 step_val = step.item() if isinstance(step, torch.Tensor) else step
