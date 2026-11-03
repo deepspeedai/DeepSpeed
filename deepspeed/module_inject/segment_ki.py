@@ -659,6 +659,30 @@ def _install_gdn_segment(seg: GDNSegment) -> bool:
 _NATIVE_OP_LOAD_WHY = None
 
 
+def segki_refresh(model: torch.nn.Module) -> None:
+    """Drop every derived-weight cache after an in-place weight write.
+
+    The injected forwards cache tensors derived from the weights (concat
+    groups, sliced conv weights, fp32 gate constants) keyed by weight
+    identity/pointer. An arena or reshard sync that updates weights in
+    place keeps those keys valid while the VALUES change, so the caches
+    would serve stale copies mixed with fresh direct reads. Call this
+    after every in-place weight update; a fresh injection rebuilds the
+    same state automatically.
+    """
+    op = None
+    for module in model.modules():
+        for attr in ("_ki_tp_cat_w", "_ki_attn_cat_w", "_ki_conv_w_local", "_ki_gates_cache"):
+            if hasattr(module, attr):
+                delattr(module, attr)
+                op = op if op is not None else getattr(module, "_ki_gdn_op", None)
+    # the GLU concat cache is process-wide in the backend
+    gdn_op = op or next((getattr(m, "_ki_gdn_op", None) for m in model.modules()
+                         if getattr(m, "_ki_gdn_op", None) is not None), None)
+    if gdn_op is not None and hasattr(gdn_op, "clear_glu_cat_cache"):
+        gdn_op.clear_glu_cat_cache()
+
+
 def _load_native_op():
     """Best-effort load of the segment-KI native op; None → composite.
 

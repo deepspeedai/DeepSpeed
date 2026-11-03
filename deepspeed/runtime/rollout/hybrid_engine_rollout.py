@@ -165,6 +165,15 @@ class HybridEngineRollout(RolloutEngine):
         else:
             self._segki_report = None
 
+    def refresh_weights(self) -> None:
+        """Handshake for in-place weight updates (arena / reshard syncs).
+
+        Drops the injected forwards' derived-weight caches; CUDA graphs
+        stay valid (their baked addresses see the new values directly).
+        """
+        from deepspeed.module_inject.segment_ki import segki_refresh
+        segki_refresh(self._rollout_module() if hasattr(self, "_rollout_module") else self.module)
+
     def _apply_segki(self):
         """Apply segment-KI kernel injection to the wrapped module.
 

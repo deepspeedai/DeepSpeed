@@ -533,3 +533,109 @@ class TestRolloutTrainRollout:
                 torch.testing.assert_close(cat.float(), rc.reshape(cat.shape), atol=5e-2, rtol=5e-2)
         caps = op.capabilities()
         assert caps["max_grouped_batch"] >= 32 and "bf16" in list(caps["dtypes"])
+
+
+class TestArenaWeightViews:
+    """Contract for arena/reshard syncs: weights updated IN PLACE (same
+    addresses, new values) with segki_refresh() called afterwards must
+    produce exactly what a fresh injection over the same weights produces
+    — bitwise. Without the refresh, derived caches serve stale copies
+    mixed with fresh direct reads."""
+
+    def _make_rollout(self, tok):
+        from deepspeed.runtime.rollout.hybrid_engine_rollout import HybridEngineRollout, HybridEngineRolloutConfig
+        from transformers import AutoModelForCausalLM
+        m = AutoModelForCausalLM.from_pretrained(_TEST_MODEL, dtype=torch.bfloat16).to(
+            get_accelerator().device_name())
+
+        class Shim:
+
+            def __init__(self, m):
+                self.module = m
+                self._cfg = m.config
+
+        shim = Shim(m)
+        if isinstance(getattr(shim.module, "config", None), dict):
+            shim.module.config = m.config
+        rollout = HybridEngineRollout(shim, tok, HybridEngineRolloutConfig(use_graph_capture=True, use_segki=True))
+        return rollout, m
+
+    def _gen(self, rollout, ids):
+        out = rollout.generate(RolloutRequest(prompt_ids=ids, prompt_attention_mask=torch.ones_like(ids)),
+                               SamplingConfig(max_new_tokens=16, temperature=0.0))
+        return out.input_ids[:, ids.shape[1]:]
+
+    def test_inplace_update_refresh_matches_fresh_injection(self):
+        pytest.importorskip("transformers")
+        try:
+            from transformers import AutoTokenizer
+            tok = AutoTokenizer.from_pretrained(_TEST_MODEL)
+        except Exception as e:
+            pytest.skip(f"model {_TEST_MODEL} unavailable: {e}")
+        object.__setattr__(tok, "eos_token_id", -1)
+        torch.manual_seed(11)
+        ids = torch.randint(1000, 50000, (2, 128), device=get_accelerator().device_name())
+
+        # baseline rollout — its first generate builds the derived caches
+        rollout, m = self._make_rollout(tok)
+        self._gen(rollout, ids)
+
+        # in-place weight update (arena sync semantics: same storage)
+        with torch.no_grad():
+            for p in m.parameters():
+                p.mul_(1.5)
+
+        # the handshake
+        from deepspeed.module_inject.segment_ki import segki_refresh
+        segki_refresh(m)
+        out_refreshed = self._gen(rollout, ids)
+
+        # ground truth: a fresh injection over the SAME updated weights
+        rollout2, m2 = self._make_rollout(tok)
+        with torch.no_grad():
+            for p2, p in zip(m2.parameters(), m.parameters()):
+                p2.copy_(p)
+        self._gen(rollout2, ids)  # builds fresh caches on the right values
+        out_fresh = self._gen(rollout2, ids)
+
+        assert torch.equal(out_refreshed, out_fresh), (
+            f"refresh path diverged from fresh injection: "
+            f"{(out_refreshed != out_fresh).sum().item()} of {out_fresh.numel()} tokens differ")
+
+    def test_arena_view_binding_survives_inplace_writes(self):
+        pytest.importorskip("transformers")
+        try:
+            from transformers import AutoTokenizer
+            tok = AutoTokenizer.from_pretrained(_TEST_MODEL)
+        except Exception as e:
+            pytest.skip(f"model {_TEST_MODEL} unavailable: {e}")
+        object.__setattr__(tok, "eos_token_id", -1)
+        torch.manual_seed(23)
+        ids = torch.randint(1000, 50000, (2, 128), device=get_accelerator().device_name())
+
+        # bind parameter storage to external arena tensors, then update
+        # the ARENA in place — parameters must see the new values without
+        # any rebinding (fixed-address contract)
+        rollout, m = self._make_rollout(tok)
+        arena = {n: p.detach().clone() for n, p in m.named_parameters()}
+        with torch.no_grad():
+            for n, p in m.named_parameters():
+                p.data = arena[n]
+        self._gen(rollout, ids)  # caches built against arena storage
+
+        with torch.no_grad():
+            for t in arena.values():
+                t.mul_(0.75)  # reshard writes NEW values into the SAME arena
+
+        from deepspeed.module_inject.segment_ki import segki_refresh
+        segki_refresh(m)
+        out_after = self._gen(rollout, ids)
+
+        rollout2, m2 = self._make_rollout(tok)
+        with torch.no_grad():
+            for n, p2 in m2.named_parameters():
+                p2.copy_(arena[n])
+        self._gen(rollout2, ids)
+        out_fresh = self._gen(rollout2, ids)
+
+        assert torch.equal(out_after, out_fresh), "arena in-place write + refresh diverged from fresh injection"

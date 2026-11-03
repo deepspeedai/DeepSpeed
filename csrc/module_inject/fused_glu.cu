@@ -1522,6 +1522,20 @@ at::Tensor silu_mul(at::Tensor gu, int64_t n)
     return out;
 }
 
+// Pointer-keyed cache of concatenated GLU weights (see grouped_linear).
+// In-place weight writes (arena/reshard syncs) keep their addresses, so
+// the sync path calls clear_glu_cat_cache() to drop stale concats.
+struct PairKey {
+    uint64_t a, b;
+    bool operator==(const PairKey& o) const { return a == o.a && b == o.b; }
+};
+struct PairHash {
+    size_t operator()(const PairKey& k) const { return std::hash<uint64_t>()(k.a ^ (k.b << 1)); }
+};
+static std::unordered_map<PairKey, at::Tensor, PairHash> g_glu_cat_cache;
+
+void clear_glu_cat_cache() { g_glu_cat_cache.clear(); }
+
 // Arch-adaptive batch routing threshold: on Ada the WMMA grouped kernel
 // beats cuBLAS for M<=32 (launch overhead dominates); on Ampere cuBLAS
 // is fast enough to win at any M>1 (profiled on A100 SXM4: our WMMA at
@@ -1610,23 +1624,14 @@ std::vector<at::Tensor> grouped_linear(at::Tensor x,
         } else {
             // Ampere: weights are static across the rollout — cache the
             // concatenated [gate; up] matrix keyed by the weight pointers
-            struct PairKey {
-                uint64_t a, b;
-                bool operator==(const PairKey& o) const { return a == o.a && b == o.b; }
-            };
-            struct PairHash {
-                size_t operator()(const PairKey& k) const
-                {
-                    return std::hash<uint64_t>()(k.a ^ (k.b << 1));
-                }
-            };
-            static std::unordered_map<PairKey, at::Tensor, PairHash> cat_cache;
+            // (g_glu_cat_cache; cleared by clear_glu_cat_cache() when an
+            // arena/reshard sync writes weights in place)
             const PairKey key{(uint64_t)(uintptr_t)weights[0].data_ptr(),
                               (uint64_t)(uintptr_t)weights[1].data_ptr()};
-            auto it = cat_cache.find(key);
-            if (it == cat_cache.end()) {
+            auto it = g_glu_cat_cache.find(key);
+            if (it == g_glu_cat_cache.end()) {
                 auto cat = at::cat({weights[0], weights[1]}, 0).contiguous();
-                it = cat_cache.emplace(key, cat).first;
+                it = g_glu_cat_cache.emplace(key, cat).first;
             }
             auto gu = at::matmul(x2, it->second.t());
             return {silu_mul(gu, weights[0].size(0))};
@@ -1768,6 +1773,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
           py::arg("glu_epilogue") = false);
     m.def("repeat_qk", &repeat_qk, "fused q/k head-repeat for the scan (one launch)");
     m.def("silu_mul", &silu_mul, "native GLU epilogue: silu(g)*u from a [M,2N] buffer");
+    m.def("clear_glu_cat_cache", &clear_glu_cat_cache, "drop stale concat caches after in-place weight writes");
     m.def("capabilities", &segki_capabilities, "segKI backend capability report");
     m.def("gdn_recurrent_step",
           &gdn_recurrent_step,
