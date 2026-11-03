@@ -22,7 +22,7 @@ Parsing does not change input configuration or process-global PyTorch settings.
 Engine initialization enables strict deterministic algorithms, disables TF32
 and cuDNN benchmarking, and enables deterministic cuDNN algorithms.
 PyTorch raises for recognized nondeterministic operations without an alternative.
-Non-NVIDIA-CUDA enabling currently raises; the disabled flag is a no-op.
+Non-NVIDIA-CUDA enabling currently raises, including a CUDA-compatible accelerator whose DeepSpeed identity is not `cuda`, such as KLXPU. The disabled flag is a no-op.
 
 The flag does not change gradient precision, GAS, TP/EP, overlap, NCCL algorithms
 or AutoEP arithmetic, and does not reject configurations merely because they

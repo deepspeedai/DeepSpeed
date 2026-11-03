@@ -14,12 +14,19 @@ def configure_determinism(config, param_dict):
     config.deterministic_mode = enabled
 
 
+def _is_nvidia_cuda(accelerator):
+    # device_name() is the torch device string. KLXPU inherits it from CUDA
+    # while identifying itself as "klxpu"; ROCm also reports "cuda".
+    return (accelerator.device_name() == "cuda" and getattr(accelerator, "_name", None) == "cuda"
+            and getattr(torch.version, "hip", None) is None)
+
+
 def apply_determinism(config):
     if not config.deterministic_mode:
         return
     from deepspeed.accelerator import get_accelerator
 
-    if get_accelerator().device_name() != "cuda" or getattr(torch.version, "hip", None) is not None:
+    if not _is_nvidia_cuda(get_accelerator()):
         raise ValueError("deterministic_mode currently supports NVIDIA CUDA only")
     # Do not set this here: CUDA may already have initialized cuBLAS workspaces.
     if os.environ.get("CUBLAS_WORKSPACE_CONFIG") not in (":4096:8", ":16:8"):

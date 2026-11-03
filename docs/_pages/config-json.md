@@ -10,7 +10,7 @@ toc_label: "Contents"
 selects strict PyTorch deterministic algorithms, disables TF32 and cuDNN
 benchmarking, and enables deterministic cuDNN algorithms at engine initialization.
 Set `CUBLAS_WORKSPACE_CONFIG=:4096:8` or `:16:8` before CUDA use.
-Non-NVIDIA-CUDA enabling is currently unsupported; disabled behavior is unchanged.
+Enabling it on any accelerator other than NVIDIA CUDA, including a CUDA-compatible accelerator such as KLXPU, is currently unsupported; disabled behavior is unchanged.
 
 The flag does not change precision, NCCL algorithm, parallelism or overlap.
 PyTorch checks do not cover all custom kernels or distributed scheduling;

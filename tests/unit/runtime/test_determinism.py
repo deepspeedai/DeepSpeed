@@ -12,12 +12,13 @@ import torch
 
 from deepspeed.accelerator import get_accelerator
 from deepspeed.runtime.config import DeepSpeedConfig
-from deepspeed.runtime.determinism import apply_determinism
+from deepspeed.runtime.determinism import _is_nvidia_cuda, apply_determinism
 
 
 def test_runtime_rejects_rocm(monkeypatch):
 
     class MockAccelerator:
+        _name = "cuda"
 
         @staticmethod
         def device_name():
@@ -30,10 +31,28 @@ def test_runtime_rejects_rocm(monkeypatch):
         apply_determinism(DeepSpeedConfig({"train_batch_size": 1, "deterministic_mode": True}))
 
 
+def test_runtime_rejects_cuda_compatible_accelerator(monkeypatch):
+
+    class MockAccelerator:
+        _name = "klxpu"
+
+        @staticmethod
+        def device_name():
+            return "cuda"
+
+    monkeypatch.setattr("deepspeed.accelerator.get_accelerator", lambda: MockAccelerator())
+    monkeypatch.setattr(torch.version, "hip", None)
+    monkeypatch.setenv("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+    before = torch.are_deterministic_algorithms_enabled()
+    with pytest.raises(ValueError, match="NVIDIA CUDA"):
+        apply_determinism(DeepSpeedConfig({"train_batch_size": 1, "deterministic_mode": True}))
+    assert torch.are_deterministic_algorithms_enabled() == before
+
+
 @pytest.mark.parametrize("workspace", [None, "", "invalid"])
 def test_runtime_requires_workspace(monkeypatch, workspace):
-    if get_accelerator().device_name() != "cuda":
-        pytest.skip("CUDA policy")
+    if not _is_nvidia_cuda(get_accelerator()):
+        pytest.skip("NVIDIA CUDA policy")
     if workspace is None:
         monkeypatch.delenv("CUBLAS_WORKSPACE_CONFIG", raising=False)
     else:
@@ -68,8 +87,8 @@ def assert_equal(left, right):
 
 @pytest.mark.parametrize("stage", [0, 2, 3])
 def test_independent_cuda_training(stage, tmp_path):
-    if get_accelerator().device_name() != "cuda" or not get_accelerator().is_available():
-        pytest.skip("CUDA training")
+    if not _is_nvidia_cuda(get_accelerator()) or not get_accelerator().is_available():
+        pytest.skip("NVIDIA CUDA training")
     env = dict(os.environ, CUBLAS_WORKSPACE_CONFIG=":4096:8", OMP_NUM_THREADS="1")
     results = []
     for repeat in range(2):
