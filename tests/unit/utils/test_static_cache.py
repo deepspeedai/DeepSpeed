@@ -31,10 +31,11 @@ def test_static_cache_query_offset_precedes_current_write(position, expected):
 def test_static_cache_query_offset_builds_native_causal_mask(position, allowed):
     from transformers import LlamaConfig
     from transformers.cache_utils import Cache
-    from transformers.masking_utils import create_causal_mask
 
     if not hasattr(Cache, "get_query_offset"):
         pytest.skip("requires Transformers cache query-offset API")
+
+    from transformers.masking_utils import create_causal_mask
 
     config = LlamaConfig(num_hidden_layers=1, num_attention_heads=1, num_key_value_heads=1, hidden_size=2)
     config._attn_implementation = "eager"
