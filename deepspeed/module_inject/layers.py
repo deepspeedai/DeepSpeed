@@ -231,7 +231,9 @@ class RowParallel(torch.autograd.Function):
             dist.inference_all_reduce(red, group=group)
             if red is not input: input.copy_(red)
         else:
-            dist.all_reduce(input.contiguous(), group=group)
+            red = input.contiguous()
+            dist.all_reduce(red, group=group)
+            if red is not input: input.copy_(red)
         return input
 
     @staticmethod
