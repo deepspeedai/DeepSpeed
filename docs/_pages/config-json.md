@@ -16,7 +16,7 @@ The flag does not change precision, NCCL algorithm, parallelism or overlap.
 PyTorch checks do not cover all custom kernels or distributed scheduling;
 configuration acceptance does not certify workload bitwise repeatability or
 Megatron compatibility. Settings are process-global and not restored at teardown.
-See [Deterministic Mode](../deterministic-mode/) for details.
+See [Deterministic Mode](/tutorials/deterministic-mode/) for details.
 
 ### Batch Size Related Parameters
 
