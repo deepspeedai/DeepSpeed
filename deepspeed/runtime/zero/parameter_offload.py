@@ -6,10 +6,11 @@
 import sys
 import torch
 from collections import OrderedDict
+from typing import Container
 from deepspeed.utils import z3_leaf_module, set_z3_leaf_module
 from deepspeed.runtime.utils import see_memory_usage
 from deepspeed.runtime.zero.utils import apply_to_tensors_only, is_zero_param
-from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum
+from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum, OffloadStateTypeEnum
 from deepspeed.runtime.zero.partition_parameters import _init_external_params
 from deepspeed.runtime.zero.partition_parameters import *
 from deepspeed.runtime.zero.partitioned_param_coordinator import PartitionedParameterCoordinator, InflightParamRegistry, iter_params
@@ -168,6 +169,7 @@ class DeepSpeedZeRoOffload(object):
         self.dp_process_group = dp_process_group
         self.offload_device = None
         self.offload_param_pin_memory = False
+        self._offloaded_param_partitions = []
         self.zero_param_parallel_group = zero_param_parallel_group
         self.zero_quantized_weights = zero_quantized_weights
         self.zero_quantized_nontrainable_weights = zero_quantized_nontrainable_weights
@@ -255,6 +257,70 @@ class DeepSpeedZeRoOffload(object):
     def empty_partition_cache(self):
         self.partition_all_parameters()
 
+    @torch.no_grad()
+    def offload_states(self,
+                       include: Container[OffloadStateTypeEnum] = None,
+                       device: OffloadDeviceEnum = OffloadDeviceEnum.cpu,
+                       pin_memory: bool = True,
+                       non_blocking: bool = False):
+        if self._offloaded_param_partitions or (include is not None and OffloadStateTypeEnum.lp_params not in include):
+            return
+
+        params = list(dict.fromkeys(iter_params(self.module, recurse=True)))
+        for param in params:
+            if param.ds_zero_param_process_group is not None or param.ds_secondary_tensor is not None:
+                raise NotImplementedError("Dynamic inference offload does not support hpZeRO parameter partitions.")
+            if hasattr(param.ds_tensor, "ds_quant_scale"):
+                raise NotImplementedError("Dynamic inference offload does not support stored quantized parameters.")
+
+        # Persistent parameters and prefetches can retain full copies in addition to the local shards.
+        self.partition_all_parameters()
+        accelerator = get_accelerator()
+        accelerator.synchronize()
+        partitions = list(dict.fromkeys(param.ds_tensor for param in params if param.ds_tensor.device.type != "cpu"))
+        records = []
+        try:
+            for partition in partitions:
+                cpu_buffer = torch.empty_like(partition, device=device.value)
+                if pin_memory:
+                    cpu_buffer = accelerator.pin_memory(cpu_buffer)
+                records.append((partition, partition.device, cpu_buffer))
+                cpu_buffer.copy_(partition, non_blocking=non_blocking)
+        finally:
+            # Keep both the source storage and native pinned roots alive until all copies complete.
+            if non_blocking:
+                accelerator.synchronize()
+
+        for partition, _, cpu_buffer in records:
+            partition.data = cpu_buffer
+        self._offloaded_param_partitions = records
+        accelerator.empty_cache()
+
+    @torch.no_grad()
+    def reload_states(self, non_blocking: bool = False):
+        if not self._offloaded_param_partitions:
+            return
+
+        accelerator = get_accelerator()
+        restored = []
+        try:
+            for _, device, cpu_buffer in self._offloaded_param_partitions:
+                restored.append(cpu_buffer.to(device, non_blocking=non_blocking))
+        finally:
+            if non_blocking:
+                accelerator.synchronize()
+
+        for (partition, _, _), tensor in zip(self._offloaded_param_partitions, restored):
+            partition.data = tensor
+        self._release_offload_buffers()
+
+    def _release_offload_buffers(self):
+        records = self._offloaded_param_partitions
+        self._offloaded_param_partitions = []
+        for _, _, cpu_buffer in records:
+            if get_accelerator().is_pinned(cpu_buffer):
+                get_accelerator().unpin_memory(cpu_buffer)
+
     def _convert_to_zero_parameters(self, ds_config, module, mpu):
         non_zero_params = [p for p in module.parameters() if not is_zero_param(p)]
         if non_zero_params:
@@ -279,6 +345,13 @@ class DeepSpeedZeRoOffload(object):
                      zero_quantized_nontrainable_weights=self.zero_quantized_nontrainable_weights)
 
     def destroy(self):
+        if self._offloaded_param_partitions:
+            get_accelerator().synchronize()
+            for partition, _, cpu_buffer in self._offloaded_param_partitions:
+                if get_accelerator().is_pinned(cpu_buffer):
+                    # The module can outlive the engine; its CPU shards must not alias freed native pins.
+                    partition.data = cpu_buffer.clone()
+            self._release_offload_buffers()
         self._remove_module_hooks()
 
     def _remove_module_hooks(self):
