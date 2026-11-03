@@ -9,6 +9,64 @@ from deepspeed.accelerator import get_accelerator
 from deepspeed.utils.static_cache import DeepSpeedStaticCache, DeepSpeedStaticLayer
 
 
+@pytest.mark.parametrize("position, expected", [(None, 0), (0, 0), (3, 3), ([1, 3, -1], 3)])
+def test_static_cache_query_offset_precedes_current_write(position, expected):
+    config = type("Config", (), {"num_hidden_layers": 2, "num_attention_heads": 1, "hidden_size": 2})()
+    cache = DeepSpeedStaticCache(config, batch_size=3, max_cache_len=6, device="cpu", dtype=torch.float32)
+    if position is not None:
+        cache.set_write_position(torch.tensor(position, dtype=torch.long))
+
+    for layer_idx in range(2):
+        assert cache.get_query_offset(layer_idx) == expected
+        if position is not None:
+            assert cache.get_seq_length(layer_idx) == expected + 1
+    assert cache.get_query_offset(2) == 0
+
+
+@pytest.mark.parametrize("position, allowed", [
+    (None, [[1, 0, 0, 0, 0, 0], [1, 1, 0, 0, 0, 0]]),
+    (2, [[1, 1, 1, 0, 0, 0], [1, 1, 1, 1, 0, 0]]),
+    ([1, 3], [[1, 1, 1, 1, 0, 0]]),
+])
+def test_static_cache_query_offset_builds_native_causal_mask(position, allowed):
+    from transformers import LlamaConfig
+    from transformers.cache_utils import Cache
+    from transformers.masking_utils import create_causal_mask
+
+    if not hasattr(Cache, "get_query_offset"):
+        pytest.skip("requires Transformers cache query-offset API")
+
+    config = LlamaConfig(num_hidden_layers=1, num_attention_heads=1, num_key_value_heads=1, hidden_size=2)
+    config._attn_implementation = "eager"
+    cache = DeepSpeedStaticCache(config, batch_size=2, max_cache_len=6, device="cpu", dtype=torch.float32)
+    if position is not None:
+        cache.set_write_position(torch.tensor(position, dtype=torch.long))
+
+    mask = create_causal_mask(config, torch.zeros((2, len(allowed), 2)), attention_mask=None, past_key_values=cache)
+
+    expected = torch.tensor(allowed, dtype=torch.bool).expand(2, 1, -1, -1)
+    assert torch.equal(mask == 0, expected)
+
+
+def test_static_cache_query_offset_supports_graph_replay():
+    accelerator = get_accelerator()
+    graph = accelerator.create_graph()
+    if graph is None:
+        pytest.skip("requires graph capture")
+
+    config = type("Config", (), {"num_hidden_layers": 1})()
+    cache = DeepSpeedStaticCache(config, max_cache_len=6)
+    positions = torch.tensor([1, 2], device=accelerator.device_name())
+    cache.set_write_position(positions)
+    with accelerator.capture_to_graph(graph):
+        allowed = torch.arange(6, device=positions.device) <= cache.get_query_offset()
+
+    positions.copy_(torch.tensor([3, 4], device=positions.device))
+    accelerator.replay_graph(graph)
+
+    assert allowed.tolist() == [True, True, True, True, True, False]
+
+
 def test_static_layer_supports_per_row_decode_positions():
     layer = DeepSpeedStaticLayer(max_cache_len=4)
     keys = torch.zeros((2, 1, 1, 2))

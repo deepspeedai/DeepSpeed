@@ -153,6 +153,39 @@ active rows while preserving its static tensor addresses. This mirrors the
 scheduler/cache separation used by systems such as vLLM and SGLang without
 copying their backend-specific kernels.
 
+``DeepSpeedStaticCache.get_query_offset(layer_idx)`` supports the causal-mask
+query-offset interface used by Transformers 5.20. It returns zero before a
+write position is supplied, the scalar write position for fixed-batch decoding,
+or the largest per-row write position for continuous batching. Per-row attention
+masks determine which cache entries are valid below that shared frontier.
+The offset excludes the current write, unlike ``get_seq_length()``; querying it
+does not advance the cache or synchronize a device tensor to the host.
+This is a targeted query-offset compatibility fix, not a guarantee of support
+for every Transformers 5.20 cache API.
+
+The cache and rollout regression tests were run on an NVIDIA RTX A4500
+(20 GiB), with PyTorch 2.9.1+cu128 / CUDA 12.8 and FP16 native-model inference:
+
+* Transformers 5.20.1: 76 passed, 1 skipped.
+* Transformers 4.57.6: 73 passed, 4 skipped. Three mask tests require the newer
+  query-offset API; both versions skip the optional pretrained-model test when
+  ``DEEPSPEED_PRETRAINED_ROLLOUT_MODEL`` is unset.
+
+Coverage includes actual CUDA capture/replay and randomly initialized tiny
+Llama models using eager and SDPA attention. Eager and graph continuous rollouts
+match native Hugging Face ``generate()`` tokens, attention masks, and response
+offsets with and without left padding, including slot refill and graph reuse.
+These are synthetic correctness checks, not pretrained-model quality or
+performance measurements. Reproduce with:
+
+.. code-block:: bash
+
+    python -m pytest \
+        tests/unit/utils/test_static_cache.py \
+        tests/unit/runtime/rollout/test_hybrid_engine_rollout.py \
+        tests/unit/runtime/rollout/test_continuous_batching.py \
+        tests/unit/v1/test_hybrid_engine_rollout_v1.py -q
+
 OPSD response-token utilities
 -----------------------------
 
