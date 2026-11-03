@@ -269,20 +269,32 @@ def _run_experts_for_loop(
 class _ZeroEmptyExpertGrad(torch.autograd.Function):
 
     @staticmethod
-    def forward(ctx, weight, active_experts):
-        ctx.save_for_backward(active_experts)
+    def forward(ctx, weight, num_tokens_per_expert):
+        ctx.save_for_backward(num_tokens_per_expert)
         return weight
 
     @staticmethod
     def backward(ctx, grad):
-        (active_experts, ) = ctx.saved_tensors
-        return grad.masked_fill(~active_experts, 0), None
+        if grad is None:
+            return None, None
+        (num_tokens_per_expert, ) = ctx.saved_tensors
+        inactive = num_tokens_per_expert == 0
+        # Every expert is live on the common path. masked_fill would still copy each
+        # weight gradient; return the buffer the grouped GEMM already produced.
+        if not bool(inactive.any()):
+            return grad, None
+        # Zero only the empty-expert rows. A non-contiguous grad cannot be written in place.
+        if not grad.is_contiguous():
+            grad = grad.contiguous()
+        grad[inactive] = 0
+        return grad, None
 
 
 def _zero_empty_expert_grad(weight: torch.Tensor, num_tokens_per_expert: torch.Tensor) -> torch.Tensor:
     # Some grouped-GEMM backends leave the weight gradient for a zero-row group undefined.
-    active_experts = (num_tokens_per_expert != 0).view(-1, 1, 1)
-    return _ZeroEmptyExpertGrad.apply(weight, active_experts)
+    if not weight.requires_grad:
+        return weight
+    return _ZeroEmptyExpertGrad.apply(weight, num_tokens_per_expert)
 
 
 def _run_experts_grouped_mm(

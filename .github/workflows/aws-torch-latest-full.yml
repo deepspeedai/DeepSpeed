@@ -94,7 +94,9 @@ jobs:
       !cancelled() &&
       (github.event_name == 'workflow_dispatch' || needs.check-changes.outputs.has_changes == 'true')
     runs-on: [self-hosted, gpu-ci, gpu-l40s, l40s-4gpu, aws]
-    timeout-minutes: 180
+    # The full unit suite took about 3h54m of pytest on 4x H200, before environment setup,
+    # and this job runs that suite on L40S. 360 minutes is the longest a GitHub job can run.
+    timeout-minutes: 360
 
     container:
       image: nvidia/cuda:12.6.3-devel-ubuntu22.04
