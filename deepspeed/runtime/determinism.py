@@ -19,8 +19,8 @@ def apply_determinism(config):
         return
     from deepspeed.accelerator import get_accelerator
 
-    if get_accelerator().device_name() != "cuda":
-        raise ValueError("deterministic_mode currently supports CUDA only")
+    if get_accelerator().device_name() != "cuda" or getattr(torch.version, "hip", None) is not None:
+        raise ValueError("deterministic_mode currently supports NVIDIA CUDA only")
     # Do not set this here: CUDA may already have initialized cuBLAS workspaces.
     if os.environ.get("CUBLAS_WORKSPACE_CONFIG") not in (":4096:8", ":16:8"):
         raise ValueError("deterministic_mode requires CUBLAS_WORKSPACE_CONFIG=:4096:8 or :16:8 before CUDA use")

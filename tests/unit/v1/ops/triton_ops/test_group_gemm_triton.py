@@ -60,6 +60,36 @@ def test_deterministic_grouped_forward_and_backward(trans_b):
         torch.use_deterministic_algorithms(before[0], warn_only=before[1])
 
 
+def test_deterministic_float32_uses_ieee_precision():
+    deterministic_before = (torch.are_deterministic_algorithms_enabled(),
+                            torch.is_deterministic_algorithms_warn_only_enabled())
+    tf32_before = torch.backends.cuda.matmul.allow_tf32
+    try:
+        torch.use_deterministic_algorithms(True)
+        torch.backends.cuda.matmul.allow_tf32 = False
+        a = torch.full((32, 32), 1.0001, device="cuda", dtype=torch.float32)
+        b = torch.full((1, 32, 32), 1.0001, device="cuda", dtype=torch.float32)
+        offsets = torch.tensor([32], device="cuda", dtype=torch.int32)
+        gradient = torch.full((32, 32), 1.0001, device="cuda", dtype=torch.float32)
+
+        actual_a = a.clone().requires_grad_()
+        actual_b = b.clone().requires_grad_()
+        actual = group_gemm_triton(actual_a, actual_b, offsets)
+        actual.backward(gradient)
+
+        expected_a = a.clone().requires_grad_()
+        expected_b = b.clone().requires_grad_()
+        expected = _ref_grouped_mm(expected_a, expected_b, offsets)
+        expected.backward(gradient)
+
+        torch.testing.assert_close(actual, expected, atol=1e-5, rtol=1e-5)
+        torch.testing.assert_close(actual_a.grad, expected_a.grad, atol=1e-5, rtol=1e-5)
+        torch.testing.assert_close(actual_b.grad, expected_b.grad, atol=1e-5, rtol=1e-5)
+    finally:
+        torch.backends.cuda.matmul.allow_tf32 = tf32_before
+        torch.use_deterministic_algorithms(deterministic_before[0], warn_only=deterministic_before[1])
+
+
 def _ref_grouped_mm(a, b, offs):
     """Pure-PyTorch reference: out[rows_g] = a[rows_g] @ b[g]."""
     outs = []

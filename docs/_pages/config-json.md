@@ -6,11 +6,11 @@ toc_label: "Contents"
 
 ### Deterministic Execution
 
-`deterministic_mode` is a JSON boolean, default `false`. On CUDA, enabling it
+`deterministic_mode` is a JSON boolean, default `false`. On NVIDIA CUDA, enabling it
 selects strict PyTorch deterministic algorithms, disables TF32 and cuDNN
 benchmarking, and enables deterministic cuDNN algorithms at engine initialization.
 Set `CUBLAS_WORKSPACE_CONFIG=:4096:8` or `:16:8` before CUDA use.
-Non-CUDA enabling is currently unsupported; disabled behavior is unchanged.
+Non-NVIDIA-CUDA enabling is currently unsupported; disabled behavior is unchanged.
 
 The flag does not change precision, NCCL algorithm, parallelism or overlap.
 PyTorch checks do not cover all custom kernels or distributed scheduling;

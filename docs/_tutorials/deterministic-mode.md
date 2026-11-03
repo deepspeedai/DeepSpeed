@@ -2,7 +2,7 @@
 title: "Deterministic Mode"
 ---
 
-The JSON boolean `deterministic_mode` selects a CUDA/PyTorch execution policy.
+The JSON boolean `deterministic_mode` selects an NVIDIA CUDA/PyTorch execution policy.
 It defaults to `false` and does not select a Megatron numerical strategy.
 Set the workspace environment before the first CUDA operation:
 
@@ -22,7 +22,7 @@ Parsing does not change input configuration or process-global PyTorch settings.
 Engine initialization enables strict deterministic algorithms, disables TF32
 and cuDNN benchmarking, and enables deterministic cuDNN algorithms.
 PyTorch raises for recognized nondeterministic operations without an alternative.
-Non-CUDA enabling currently raises; the disabled flag is a no-op.
+Non-NVIDIA-CUDA enabling currently raises; the disabled flag is a no-op.
 
 The flag does not change gradient precision, GAS, TP/EP, overlap, NCCL algorithms
 or AutoEP arithmetic, and does not reject configurations merely because they
@@ -43,8 +43,10 @@ Custom paths also consult PyTorch's deterministic setting:
 - Legacy DeepSpeedTransformerLayer rejects stochastic_mode=True at construction
   and execution, including when determinism is enabled after model construction.
 - Triton grouped GEMM bypasses timing autotuning and uses the first fixed
-  configuration for forward, input gradients and weight gradients. Default
-  autotuning remains unchanged when deterministic algorithms are disabled.
+  configuration for forward, input gradients and weight gradients. Deterministic
+  launches also select IEEE `tl.dot` precision, because disabling PyTorch TF32
+  does not control Triton input precision. Default autotuning and TF32 precision
+  remain unchanged when deterministic algorithms are disabled.
 
 Fixed kernel selection is not certification of every shape/backend, and may
 reduce performance. FPDT RNG/communication and full distributed repeatability

@@ -15,6 +15,21 @@ from deepspeed.runtime.config import DeepSpeedConfig
 from deepspeed.runtime.determinism import apply_determinism
 
 
+def test_runtime_rejects_rocm(monkeypatch):
+
+    class MockAccelerator:
+
+        @staticmethod
+        def device_name():
+            return "cuda"
+
+    monkeypatch.setattr("deepspeed.accelerator.get_accelerator", lambda: MockAccelerator())
+    monkeypatch.setattr(torch.version, "hip", "6.0")
+    monkeypatch.setenv("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+    with pytest.raises(ValueError, match="NVIDIA CUDA"):
+        apply_determinism(DeepSpeedConfig({"train_batch_size": 1, "deterministic_mode": True}))
+
+
 @pytest.mark.parametrize("workspace", [None, "", "invalid"])
 def test_runtime_requires_workspace(monkeypatch, workspace):
     if get_accelerator().device_name() != "cuda":

@@ -55,6 +55,7 @@ def test_grouped_kernel_launch_policy(enabled):
         _launch_group_gemm(kernel, [config], (1, 1), "input", NUM_GROUPS=2)
         assert calls == [((1, 1), ("input", ), {
             "NUM_GROUPS": 2,
+            "USE_IEEE": enabled,
             **({
                 "BLOCK_M": 32,
                 "num_warps": 8,
