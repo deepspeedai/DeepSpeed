@@ -645,3 +645,27 @@ class TestArenaWeightViews:
         out_fresh = self._gen(rollout2, ids)
 
         assert torch.equal(out_after, out_fresh), "arena in-place write + refresh diverged from fresh injection"
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="native kernels are CUDA-only")
+class TestAmpereGlueReferences:
+    """Direct reference anchors for the glue kernels that entered after the
+    original ten: the Ampere GLU epilogue and the scan head-repeat."""
+
+    def test_silu_mul_matches_reference(self):
+        from deepspeed.module_inject.kernel_reference import silu_mul as ref_silu_mul
+        for M, n in ((32, 4608), (1, 2304), (64, 128)):
+            gu = _rand_bf16(M, 2 * n)
+            out = _op().silu_mul(gu, n)
+            r = ref_silu_mul(gu.float(), n)
+            torch.testing.assert_close(out.float(), r, atol=5e-2, rtol=5e-2)
+
+    def test_repeat_qk_matches_reference(self):
+        from deepspeed.module_inject.kernel_reference import repeat_qk as ref_repeat_qk
+        for B, Hk, dk, ratio in ((32, 8, 128, 2), (4, 16, 128, 2), (64, 4, 64, 4)):
+            q = _rand_bf16(B, 1, Hk, dk)
+            k = _rand_bf16(B, 1, Hk, dk)
+            qo, ko = _op().repeat_qk(q, k, ratio)
+            qr, kr = ref_repeat_qk(q, k, ratio)
+            torch.testing.assert_close(qo.float(), qr.float(), atol=0, rtol=0)
+            torch.testing.assert_close(ko.float(), kr.float(), atol=0, rtol=0)

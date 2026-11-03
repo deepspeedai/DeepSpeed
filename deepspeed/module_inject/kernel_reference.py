@@ -110,6 +110,18 @@ def decode_attn(q, K, V, pos):
     return out.to(q.dtype)
 
 
+def silu_mul(gu, n):
+    """GLU epilogue on a [M, 2n] buffer: silu(g) * u."""
+    g = gu[:, :n].float()
+    u = gu[:, n:].float()
+    return (g / (1.0 + torch.exp(-g)) * u).to(gu.dtype)
+
+
+def repeat_qk(q, k, ratio):
+    """Head-repeat for the GDN scan's v-head layout: out[...,hv,:] = in[...,hv/ratio,:]."""
+    return q.repeat_interleave(ratio, dim=-2), k.repeat_interleave(ratio, dim=-2)
+
+
 def gated_norm(x, z, weight, eps=1e-5):
     """GDN z-gated output norm: (weight * rms(x)) * silu(z), weight direct."""
     xf = x.float()
