@@ -669,6 +669,11 @@ def segki_refresh(model: torch.nn.Module) -> None:
     would serve stale copies mixed with fresh direct reads. Call this
     after every in-place weight update; a fresh injection rebuilds the
     same state automatically.
+
+    NOTE: this explicit-call contract is PROVISIONAL — the final
+    weight-sync handshake (automatic detection vs explicit call vs a
+    redesigned cache scheme) is still under design; expect this entry
+    point to change.
     """
     op = None
     for module in model.modules():

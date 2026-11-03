@@ -170,6 +170,9 @@ class HybridEngineRollout(RolloutEngine):
 
         Drops the injected forwards' derived-weight caches; CUDA graphs
         stay valid (their baked addresses see the new values directly).
+
+        PROVISIONAL contract — see segki_refresh; the final weight-sync
+        handshake is still under design.
         """
         from deepspeed.module_inject.segment_ki import segki_refresh
         segki_refresh(self._rollout_module() if hasattr(self, "_rollout_module") else self.module)
