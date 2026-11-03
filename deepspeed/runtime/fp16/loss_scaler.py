@@ -261,7 +261,7 @@ class DynamicLossScaler(LossScalerBase):
     def update_scale(self, overflow):
         if overflow:
             # self.cur_scale /= self.scale_factor
-            if self.delayed_shift == 1 or self.cur_hysteresis == 1:
+            if self.delayed_shift <= 1 or self.cur_hysteresis <= 1:
                 if (self.cur_scale == self.min_scale) and self.raise_error_at_min_scale:
                     raise Exception(
                         "Current loss scale already at minimum - cannot decrease scale anymore. Exiting run.")
