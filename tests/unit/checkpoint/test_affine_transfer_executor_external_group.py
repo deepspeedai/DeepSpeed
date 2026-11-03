@@ -40,6 +40,7 @@ def _worker(rank, port, tmp):
 
     from deepspeed.checkpoint.affine import contiguous_split_map
     from deepspeed.checkpoint.affine_transfer import plan_transfer
+    from deepspeed.checkpoint.affine_transfer_calibration import calibrate_links
     from deepspeed.checkpoint.affine_transfer_executor import TransferEndpoints, execute_transfer
 
     full = torch.arange(96, dtype=torch.float32).reshape(8, 12)
@@ -55,6 +56,7 @@ def _worker(rank, port, tmp):
     targets = {loc: torch.full(shape, -1.0) for loc, shape in target.shard_shapes.items()} if rank == 1 else {}
     execute_transfer(plan, sources, targets, endpoints, torch.float32, group=group)
     mismatched = [loc for loc, shard in targets.items() if not torch.equal(shard, target.extract(full, loc))]
+    calibration = calibrate_links(sizes=[4096], repeats=1, warmup=0, group=group)
     # Leave together and tear down before exit. Rank 0 only sends and hosts the store, so without this it can exit
     # while rank 1 is still on the group, and gloo's threads abort at interpreter exit ("terminate called without
     # an active exception", SIGABRT in the merge queue).
@@ -63,6 +65,8 @@ def _worker(rank, port, tmp):
     tdist.destroy_process_group()
     del store
     assert not mismatched, mismatched
+    assert calibration['world_size'] == 2
+    assert sorted((sample['from_process'], sample['to_process']) for sample in calibration['peer']) == [(0, 1), (1, 0)]
 
 
 @pytest.mark.skipif(get_accelerator().device_name() != 'cpu',
