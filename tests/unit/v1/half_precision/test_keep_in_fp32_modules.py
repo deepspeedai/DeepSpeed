@@ -16,7 +16,7 @@ import deepspeed
 from deepspeed.accelerator import get_accelerator
 from deepspeed.runtime.config import DeepSpeedConfig, DeepSpeedConfigError
 from deepspeed.runtime.keep_in_fp32 import keep_in_fp32_pattern
-from deepspeed.utils import safe_get_full_fp32_param
+from deepspeed.utils import safe_get_full_fp32_param, safe_get_full_grad
 from unit.common import DistributedTest
 
 HIDDEN = 64
@@ -227,13 +227,16 @@ def _params_config(stage,
                    offload_param=False,
                    contiguous=True,
                    allreduce_fetch=False,
-                   grad_accum=1):
+                   grad_accum=1,
+                   super_offload=False):
     zero = {"stage": stage, "contiguous_gradients": contiguous}
     if stage == 3:
         # Partition every parameter, including the small ones.
         zero.update({"stage3_param_persistence_threshold": 0, "use_all_reduce_for_fetch_params": allreduce_fetch})
     if offload_optimizer:
         zero["offload_optimizer"] = {"device": "cpu"}
+        if super_offload:
+            zero["offload_optimizer"]["super_offload"] = True
     if offload_param:
         zero["offload_param"] = {"device": "cpu"}
     config = {
@@ -263,6 +266,71 @@ def _gathered(param):
 
 def _stored_dtype(tensor):
     return tensor.ds_tensor.dtype if hasattr(tensor, "ds_tensor") else tensor.dtype
+
+
+def _micro_batches(engine, count):
+    # The same inputs on every rank, so the gradient averaged over the ranks equals one rank's gradient exactly.
+    return [
+        torch.randn(1, HIDDEN, generator=torch.Generator().manual_seed(100 + i)).to(engine.device, torch.bfloat16)
+        for i in range(count)
+    ]
+
+
+def _backward_through_boundary(engine, batches):
+    """Run the micro-batches of one optimizer step and stop after the last backward, before the update. Returns the
+    fp32 reference for the accumulated gradient of `sink` there: the rest of ToyModelWithParams.forward redone in fp32
+    from each forward's `linear` output and `sink` value, with the loss scaled as engine.backward scales it, summed in
+    micro-batch order."""
+    outputs, sinks = [], []
+    hooks = [
+        engine.module.register_forward_pre_hook(lambda module, inputs: sinks.append(module.sink.detach().clone())),
+        engine.module.linear.register_forward_hook(lambda module, inputs, output: outputs.append(output.detach())),
+    ]
+    for i, x in enumerate(batches):
+        engine.backward(engine(x))
+        if i < len(batches) - 1:
+            engine.step()
+    for hook in hooks:
+        hook.remove()
+    expected = None
+    for output, sink in zip(outputs, sinks):
+        sink.requires_grad_(True)
+        loss = ((output * sink + engine.module.router_bias)**2).mean()
+        (loss / len(outputs)).backward()
+        expected = sink.grad if expected is None else expected + sink.grad
+    return expected
+
+
+def _check_kept_param_gradient(offload_optimizer, super_offload, trained):
+    """The kept parameter's gradient is reduced and accumulated in fp32: over two micro-batches it equals the fp32
+    reference exactly. bf16 keeps 8 significant bits, so a reduction or an addition in bf16 changes it.
+    'kept_only' trains only the kept parameter next to a frozen bf16 weight."""
+    config = _params_config(3, offload_optimizer=offload_optimizer, super_offload=super_offload, grad_accum=2)
+    with deepspeed.zero.Init(config_dict_or_path=config):
+        model = ToyModelWithParams()
+    if trained == "kept_only":
+        model.linear.weight.requires_grad_(False)
+        parameters = [model.sink]
+    else:
+        parameters = list(model.parameters())
+    engine, _, _, _ = deepspeed.initialize(config=config, model=model, model_parameters=parameters)
+    expected = _backward_through_boundary(engine, _micro_batches(engine, 2))
+    grad = safe_get_full_grad(engine.module.sink)
+    assert torch.equal(grad, expected.to(grad.device))
+    engine.step()
+
+
+def _assert_kept_update_survives(engine, loss):
+    assert torch.isfinite(loss)
+    sink = engine.module.sink
+    assert _stored_dtype(sink) == torch.float32
+    assert _stored_dtype(engine.module.linear.weight) == torch.bfloat16
+    assert engine.module.router_bias.dtype == torch.float32
+    # Adam moves each element by about the learning rate, 1e-3: invisible in bf16 at 8.0.
+    forward_value = _gathered(sink).float()
+    master_value = safe_get_full_fp32_param(sink).float().to(forward_value.device)
+    assert torch.equal(forward_value, master_value)
+    assert (forward_value - 8.0).abs().max() > 5e-4
 
 
 def _train(engine, steps):
@@ -298,6 +366,29 @@ class TestZeroInitKeepsParamsFp32(DistributedTest):
 
 
 @pytest.mark.skipif(torch.bfloat16 not in get_accelerator().supported_dtypes(), reason="bf16 not supported")
+class TestZeroInitKeepsParamsFp32Hpz(DistributedTest):
+    """With hpZ, the forward's all-gathers read a node-local second copy of each partition while it exists (until
+    the first step), so that copy must keep the fp32 values too. GatheredParameters reads the primary partition, so
+    the check is what the first forward sees."""
+    world_size = 4
+
+    def test_first_forward_sees_loaded_values(self):
+        config = _params_config(3)
+        config["zero_optimization"]["zero_hpz_partition_size"] = 2
+        with deepspeed.zero.Init(config_dict_or_path=config):
+            model = ToyModelWithParams()
+        with deepspeed.zero.GatheredParameters([model.sink], modifier_rank=0):
+            model.sink.data.copy_(EXACT_VALUES)
+        engine, _, _, _ = deepspeed.initialize(config=config, model=model, model_parameters=model.parameters())
+        seen = []
+        engine.module.register_forward_pre_hook(lambda module, inputs: seen.append(module.sink.detach().clone()))
+        engine(_micro_batches(engine, 1)[0])
+
+        assert _stored_dtype(engine.module.sink) == torch.float32
+        assert torch.equal(seen[0].cpu(), EXACT_VALUES)
+
+
+@pytest.mark.skipif(torch.bfloat16 not in get_accelerator().supported_dtypes(), reason="bf16 not supported")
 class TestZero3TrainsKeptParamsInFp32(DistributedTest):
     world_size = 2
 
@@ -313,18 +404,12 @@ class TestZero3TrainsKeptParamsInFp32(DistributedTest):
         else:
             model = ToyModelWithParams()
         engine, _, _, _ = deepspeed.initialize(config=config, model=model, model_parameters=model.parameters())
-        loss = _train(engine, steps=1)
+        _assert_kept_update_survives(engine, _train(engine, steps=1))
 
-        assert torch.isfinite(loss)
-        sink = engine.module.sink
-        assert _stored_dtype(sink) == torch.float32
-        assert _stored_dtype(engine.module.linear.weight) == torch.bfloat16
-        assert engine.module.router_bias.dtype == torch.float32
-        # Adam moves each element by about the learning rate, 1e-3: invisible in bf16 at 8.0.
-        forward_value = _gathered(sink).float()
-        master_value = safe_get_full_fp32_param(sink).float().to(forward_value.device)
-        assert torch.equal(forward_value, master_value)
-        assert (forward_value - 8.0).abs().max() > 5e-4
+    @pytest.mark.parametrize("offload_optimizer", [False, True])
+    @pytest.mark.parametrize("trained", ["all", "kept_only"])
+    def test_kept_param_gradient_is_fp32(self, offload_optimizer, trained):
+        _check_kept_param_gradient(offload_optimizer, super_offload=False, trained=trained)
 
     def test_all_reduce_fetch(self):
         config = _params_config(3, allreduce_fetch=True)
@@ -359,6 +444,28 @@ class TestZero3TrainsKeptParamsInFp32(DistributedTest):
         assert torch.isfinite(_train(engine, steps=1))
         assert _stored_dtype(engine.module.sink) == torch.bfloat16
         assert engine.module.router_bias.dtype == torch.float32
+
+
+@pytest.mark.skipif(torch.bfloat16 not in get_accelerator().supported_dtypes(), reason="bf16 not supported")
+@pytest.mark.skipif(get_accelerator().device_name() == "cpu",
+                    reason="SuperOffload copies the updated weights back to an accelerator")
+class TestSuperOffloadTrainsKeptParamsInFp32(DistributedTest):
+    """One parameter group holds both dtypes, so SuperOffload has to split it into sub groups by dtype."""
+    world_size = 2
+    # SuperOffload starts CPU optimizer worker processes, which a daemonic test process cannot have.
+    non_daemonic_procs = True
+
+    @pytest.mark.parametrize("grad_accum", [1, 2])
+    def test_update_below_bf16_resolution_is_kept(self, grad_accum):
+        config = _params_config(3, offload_optimizer=True, super_offload=True, grad_accum=grad_accum)
+        with deepspeed.zero.Init(config_dict_or_path=config):
+            model = ToyModelWithParams()
+        engine, _, _, _ = deepspeed.initialize(config=config, model=model, model_parameters=model.parameters())
+        _assert_kept_update_survives(engine, _train(engine, steps=1))
+
+    @pytest.mark.parametrize("trained", ["all", "kept_only"])
+    def test_kept_param_gradient_is_fp32(self, trained):
+        _check_kept_param_gradient(offload_optimizer=True, super_offload=True, trained=trained)
 
 
 @pytest.mark.skipif(not get_accelerator().is_fp16_supported(), reason="fp16 not supported")

@@ -96,6 +96,12 @@ def keep_tensors_in_fp32(module, pattern, include_params=True):
         partition = getattr(tensor, "ds_tensor", None)
         if partition is not None:
             partition.data = partition.data.float()
+            # With hpZ, all-gathers read this node-local copy of the partition while it exists, and a later
+            # checkpoint load writes into it. A quantized copy (frozen weights with quantized_nontrainable_weights)
+            # stays as it is.
+            secondary = getattr(tensor, "ds_secondary_tensor", None)
+            if secondary is not None and not hasattr(secondary, "ds_quant_scale"):
+                secondary.data = secondary.data.float()
         # For a ZeRO-3 parameter this converts the empty placeholder, or the full tensor when the
         # parameter is currently gathered, so the next gather and the next free keep fp32.
         tensor.data = tensor.data.float()

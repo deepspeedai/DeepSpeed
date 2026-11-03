@@ -2819,6 +2819,7 @@ class DeepSpeedEngine(Module):
                     gradient_accumulation_steps=self.gradient_accumulation_steps(),
                     aio_config=self.aio_config(),
                     gradient_accumulation_dtype=gradient_accumulation_dtype,
+                    model_dtype=model_dtype,
                     communication_data_type=self.communication_data_type,
                     fp16_master_weights_and_gradients=self.fp16_master_weights_and_gradients(),
                     bf16_master_weights_and_gradients=self.bf16_master_weights_and_gradients(),

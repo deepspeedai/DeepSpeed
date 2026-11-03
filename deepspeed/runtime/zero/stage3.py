@@ -190,6 +190,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         mpu=None,
         clip_grad=0.0,
         gradient_accumulation_dtype=torch.float32,
+        model_dtype=None,
         communication_data_type=torch.float16,
         fp16_master_weights_and_gradients=False,
         bf16_master_weights_and_gradients=False,
@@ -235,10 +236,12 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         # Use torch (un)flatten ops
         self.flatten = _flatten_dense_tensors
         self.unflatten = _unflatten_dense_tensors
-        # The training dtype. Parameters named by data_types.keep_in_fp32_modules stay fp32 next to it
-        # and can come first, so take the first parameter that is not fp32.
-        param_dtypes = [p.dtype for group in self.optimizer.param_groups for p in group['params']]
-        self.dtype = next((d for d in param_dtypes if d != torch.float32), param_dtypes[0])
+        # The training dtype. Parameters named by data_types.keep_in_fp32_modules stay fp32 next to it, so the
+        # optimizer's parameters do not show it when they are all kept ones (for example a frozen bf16 model).
+        if model_dtype is None:
+            param_dtypes = [p.dtype for group in self.optimizer.param_groups for p in group['params']]
+            model_dtype = next((d for d in param_dtypes if d != torch.float32), param_dtypes[0])
+        self.dtype = model_dtype
         self.gradient_accumulation_dtype = gradient_accumulation_dtype
         self._global_grad_norm = 0.
         self._muon_allgather_buffers = collections.OrderedDict()
@@ -1241,17 +1244,18 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         for param_group in self.optimizer.param_groups:
             param_group['params'] = []
 
-    def _create_fp16_sub_groups(self, params_group):
+    def _split_by_partition_dtype(self, params_group):
         # A sub group is flattened into one buffer, so it must hold one dtype. Parameters kept in fp32
         # next to bf16/fp16 ones (data_types.keep_in_fp32_modules) form sub groups of their own.
         params_by_dtype = collections.defaultdict(list)
         for param in params_group:
             params_by_dtype[param.ds_tensor.dtype].append(param)
-        if len(params_by_dtype) > 1:
-            return [
-                sub_group for dtype in sort_dtypes(params_by_dtype.keys())
-                for sub_group in self._create_fp16_sub_groups(params_by_dtype[dtype])
-            ]
+        return [params_by_dtype[dtype] for dtype in sort_dtypes(params_by_dtype.keys())]
+
+    def _create_fp16_sub_groups(self, params_group):
+        dtype_groups = self._split_by_partition_dtype(params_group)
+        if len(dtype_groups) > 1:
+            return [sub_group for params in dtype_groups for sub_group in self._create_fp16_sub_groups(params)]
 
         params_group_numel = sum([param.partition_numel() for param in params_group])
         sub_group_size = self.sub_group_size
