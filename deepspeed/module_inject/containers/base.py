@@ -237,30 +237,62 @@ class BaseTransformerContainer(ABC):
         #self.apply_weight_quantization()
 
     def attention_qkv_mp(self, mp_replace, reversed_dim=False):
-        self.module.attention.attn_qkvw = mp_replace.strided_copy(self.module.attention.attn_qkvw,
-                                                                  self.qkvw,
+        qkvw: torch.Tensor = self.module.attention.attn_qkvw
+        qkvb: torch.Tensor | None = self.module.attention.attn_qkvb
+        if reversed_dim:
+            qkvw = qkvw[:self.qkvw.shape[0] // mp_replace.mp_size]
+            if self.qkvb is not None:
+                qkvb = qkvb[:self.qkvb.shape[0] // mp_replace.mp_size]
+        self.module.attention.attn_qkvw = mp_replace.strided_copy(dst=qkvw,
+                                                                  src=self.qkvw,
                                                                   num_splits=3,
-                                                                  int8=reversed_dim)
-        self.module.attention.attn_qkvb = mp_replace.strided_copy(self.module.attention.attn_qkvb,
-                                                                  self.qkvb,
+                                                                  int8=reversed_dim,
+                                                                  allocate_tensor=reversed_dim)
+        self.module.attention.attn_qkvb = mp_replace.strided_copy(dst=qkvb,
+                                                                  src=self.qkvb,
                                                                   num_splits=3,
-                                                                  int8=reversed_dim)
+                                                                  int8=reversed_dim,
+                                                                  allocate_tensor=reversed_dim)
 
     def attention_o_mp(self, mp_replace, reversed_dim=False):
-        self.module.attention.attn_ow = mp_replace.copy(self.module.attention.attn_ow, self.dense_w, int8=reversed_dim)
-        self.module.attention.attn_ob = mp_replace.copy(self.module.attention.attn_ob,
-                                                        self.dense_b,
+        dense_w: torch.Tensor = self.module.attention.attn_ow
+        if reversed_dim:
+            dense_w = dense_w[:, :self.dense_w.shape[1] // mp_replace.mp_size]
+        self.module.attention.attn_ow = mp_replace.copy(dst=dense_w,
+                                                        src=self.dense_w,
+                                                        int8=reversed_dim,
+                                                        allocate_tensor=reversed_dim)
+        self.module.attention.attn_ob = mp_replace.copy(dst=self.module.attention.attn_ob,
+                                                        src=self.dense_b,
                                                         int8=reversed_dim,
                                                         allocate_tensor=reversed_dim)
 
     def mlp_inter_mp(self, mp_replace, reversed_dim=False):
-        self.module.mlp.inter_w = mp_replace.copy(self.module.mlp.inter_w, self._h4h_w, int8=reversed_dim)
-        self.module.mlp.inter_b = mp_replace.copy(self.module.mlp.inter_b, self._h4h_b, int8=reversed_dim)
+        inter_w: torch.Tensor = self.module.mlp.inter_w
+        inter_b: torch.Tensor | None = self.module.mlp.inter_b
+        if reversed_dim:
+            inter_w = inter_w[:self._h4h_w.shape[0] // mp_replace.mp_size]
+            if self._h4h_b is not None:
+                inter_b = inter_b[:self._h4h_b.shape[0] // mp_replace.mp_size]
+        self.module.mlp.inter_w = mp_replace.copy(dst=inter_w,
+                                                  src=self._h4h_w,
+                                                  int8=reversed_dim,
+                                                  allocate_tensor=reversed_dim)
+        self.module.mlp.inter_b = mp_replace.copy(dst=inter_b,
+                                                  src=self._h4h_b,
+                                                  int8=reversed_dim,
+                                                  allocate_tensor=reversed_dim)
 
     def mlp_output_mp(self, mp_replace, reversed_dim=False):
-        self.module.mlp.output_w = mp_replace.copy(self.module.mlp.output_w, self._4hh_w, int8=reversed_dim)
-        self.module.mlp.output_b = mp_replace.copy(self.module.mlp.output_b,
-                                                   self._4hh_b,
+        output_w: torch.Tensor = self.module.mlp.output_w
+        if reversed_dim:
+            output_w = output_w[:, :self._4hh_w.shape[1] // mp_replace.mp_size]
+        self.module.mlp.output_w = mp_replace.copy(dst=output_w,
+                                                   src=self._4hh_w,
+                                                   int8=reversed_dim,
+                                                   allocate_tensor=reversed_dim)
+        self.module.mlp.output_b = mp_replace.copy(dst=self.module.mlp.output_b,
+                                                   src=self._4hh_b,
                                                    int8=reversed_dim,
                                                    allocate_tensor=reversed_dim)
 

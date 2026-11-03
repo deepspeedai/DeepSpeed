@@ -45,8 +45,20 @@ class DS_BloomContainer(MetaTensorContainer, HybridEngineContainer, BaseTransfor
         return self.module
 
     def attention_qkv_mp(self, mp_replace, reversed_dim=False):
-        self.module.attention.attn_qkvw = mp_replace.copy(self.module.attention.attn_qkvw, self.qkvw)
-        self.module.attention.attn_qkvb = mp_replace.copy(self.module.attention.attn_qkvb, self.qkvb)
+        qkvw: torch.Tensor = self.module.attention.attn_qkvw
+        qkvb: torch.Tensor | None = self.module.attention.attn_qkvb
+        if reversed_dim:
+            qkvw = qkvw[:self.qkvw.shape[0] // mp_replace.mp_size]
+            if self.qkvb is not None:
+                qkvb = qkvb[:self.qkvb.shape[0] // mp_replace.mp_size]
+        self.module.attention.attn_qkvw = mp_replace.copy(dst=qkvw,
+                                                          src=self.qkvw,
+                                                          int8=reversed_dim,
+                                                          allocate_tensor=reversed_dim)
+        self.module.attention.attn_qkvb = mp_replace.copy(dst=qkvb,
+                                                          src=self.qkvb,
+                                                          int8=reversed_dim,
+                                                          allocate_tensor=reversed_dim)
 
     def get_lora_matched_pair(self):
         """
