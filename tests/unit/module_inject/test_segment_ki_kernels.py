@@ -561,6 +561,7 @@ class TestArenaWeightViews:
         return rollout, m
 
     def _gen(self, rollout, ids):
+        from deepspeed.runtime.rollout.base import RolloutRequest, SamplingConfig
         out = rollout.generate(RolloutRequest(prompt_ids=ids, prompt_attention_mask=torch.ones_like(ids)),
                                SamplingConfig(max_new_tokens=16, temperature=0.0))
         return out.input_ids[:, ids.shape[1]:]
