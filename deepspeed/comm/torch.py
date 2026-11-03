@@ -221,6 +221,15 @@ class TorchBackend(Backend):
             # bf16/fp16 shm reduce kernels need avx512bw and fp32 needs avx2; without
             # the ISA the kernel faults and its peers hang on the shm flags.
             self.shm_vector_kernel_level = self.shm_comm_op.vector_kernel_level()
+        # Best-effort CUDA custom all-reduce for P2P TP=2 pairs: fills the
+        # same inference_all_reduce hook the shm op fills on CPU. No-ops on
+        # other topologies; initialize() itself probes P2P + handshake and
+        # falls back to NCCL where the fabric cannot carry the flag protocol.
+        try:
+            from deepspeed.comm import custom_ar
+            custom_ar.initialize()
+        except Exception:
+            pass  # NCCL remains the answer; initialize() logs build failures
         # Best-effort SDMA (mori) backend acquisition.  Stays None on
         # non-AMD/ROCm or when mori is unavailable; in that case
         # all_gather_into_tensor below transparently falls through to
@@ -290,6 +299,14 @@ class TorchBackend(Backend):
         return torch.distributed.all_reduce(tensor=tensor, op=op, group=group, async_op=async_op)
 
     def inference_all_reduce(self, tensor, op, group=None):
+        # Latency-optimized CUDA path: the one-shot P2P kernel fills the same
+        # hook the CPU backend fills with shm+AVX (see deepspeed/comm/custom_ar.py)
+        if get_accelerator().on_accelerator(tensor):
+            from deepspeed.comm import custom_ar
+            world_sz = torch.distributed.get_world_size(group=group)
+            if (custom_ar.custom_ar_ready(world_sz) and tensor.is_contiguous()
+                    and tensor.numel() * tensor.element_size() <= custom_ar.custom_ar_max_bytes()):
+                return custom_ar.all_reduce(tensor)
         use_ds_op = hasattr(torch.ops, 'deepspeed') and hasattr(torch.ops.deepspeed, 'inference_all_reduce_')
         world_size = torch.distributed.get_world_size(group=group)
         if world_size <= 1:

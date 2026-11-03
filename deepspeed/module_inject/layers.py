@@ -204,6 +204,12 @@ def add_bias(input, bias):
 class RowParallel(torch.autograd.Function):
     """
     A custom autograd function for performing row-wise parallelism.
+
+    Inference mode uses reduce-scatter + all-gather instead of a single
+    all-reduce: same total bytes, but the scattered chunks enable
+    downstream compute on 1/TP of the data between the two collectives
+    (sequence-parallel residual/norm), and each collective is smaller
+    for latency-bound small-message decode steps.
     """
 
     @staticmethod
@@ -219,11 +225,42 @@ class RowParallel(torch.autograd.Function):
         ctx.group = group
         if not pg_utils.is_parallel(group):
             return input
-        if is_inference_mode:
-            dist.inference_all_reduce(input, group=group)
+        # Latency regime (no-grad decode or inference, small messages): the
+        # one-shot collective beats both plain all-reduce and the RS+AG pair;
+        # the inference_all_reduce backend owns the choice and falls back.
+        from deepspeed.comm import custom_ar
+        world = dist.get_world_size(group=group) if group is not None else dist.get_world_size()
+        if ((is_inference_mode or not torch.is_grad_enabled()) and custom_ar.custom_ar_ready(world)
+                and input.numel() * input.element_size() <= custom_ar.custom_ar_max_bytes()):
+            # contiguous() may hand back a copy — the reduction must land in
+            # the caller's tensor, not a discarded temporary
+            red = input.contiguous()
+            dist.inference_all_reduce(red, group=group)
+            if red is not input: input.copy_(red)
+        elif is_inference_mode:
+            RowParallel._rs_ag(input, group)
         else:
             dist.all_reduce(input.contiguous(), group=group)
         return input
+
+    @staticmethod
+    def _rs_ag(input: torch.Tensor, group: dist.ProcessGroup) -> None:
+        """Reduce-scatter then all-gather, writing back into ``input``.
+
+        Equivalent to all_reduce in output, but each collective moves
+        N/TP bytes per rank instead of N, opening overlap opportunities."""
+        world = dist.get_world_size(group=group)
+        if world <= 1:
+            return
+        flat = input.view(-1)
+        chunk = flat.numel() // world
+        if chunk * world != flat.numel():
+            # not evenly divisible — fall back to plain all-reduce
+            dist.inference_all_reduce(input, group=group)
+            return
+        scattered = torch.empty(chunk, dtype=input.dtype, device=input.device)
+        dist.reduce_scatter_tensor(scattered, flat.contiguous(), group=group)
+        dist.all_gather_into_tensor(flat, scattered, group=group)
 
     @staticmethod
     def backward(ctx: Any, grad_output: torch.Tensor) -> Tuple[None, torch.Tensor, None]:
@@ -1094,16 +1131,6 @@ class VocabParallelLinear(LinearLayer):
         self.vocab_size = self._orig_weight_shape[0]
         self.vocab_start_index = sum(self._partition_sizes[:self.tp_index])
         self.vocab_end_index = self.vocab_start_index + self._partition_sizes[self.tp_index]
-        # Set by the fused linear cross-entropy loss, which defers this projection into the loss.
-        self.fused_loss_capture = None
-
-    def forward(self, input):
-        capture = self.fused_loss_capture
-        if capture is not None and capture.armed:
-            # The fused loss projects ``input`` itself and reduces its gradient over TP, so the
-            # column-parallel input collective must not run here as well.
-            return capture.take(input)
-        return super().forward(input)
 
 
 class VocabParallelEmbedding(TensorParallel_Layer):
