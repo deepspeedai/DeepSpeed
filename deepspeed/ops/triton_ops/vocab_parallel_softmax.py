@@ -22,7 +22,7 @@ from cancelling in fp32, as in the eager path.
 
 import torch
 
-from deepspeed.ops.triton_ops._triton import _TRITON_AVAILABLE, triton, tl
+from deepspeed.ops.triton_ops._triton import _TRITON_AVAILABLE, dispatch, triton, tl
 
 _MAX_BLOCK = 4096
 _NUM_WARPS = 16
@@ -273,6 +273,7 @@ def _launch(kernel, logits, *args, max_block=None, **kwargs):
     kernel[(_num_rows(logits), )](*args, **kwargs, BLOCK=block, num_warps=_NUM_WARPS)
 
 
+@dispatch("vocab_parallel_softmax")
 def local_softmax_stats(logits):
     """Per-row max of a ``[..., local_vocab]`` shard and ``sum(exp(z - max))`` relative to it."""
     local_max = torch.empty(_num_rows(logits), dtype=torch.float32, device=logits.device)
@@ -281,6 +282,7 @@ def local_softmax_stats(logits):
     return local_max, local_sum
 
 
+@dispatch("vocab_parallel_softmax")
 def entropy_stats(logits):
     """``[3, rows]``: the local max, the sum-exp and the exp-weighted sum of centred logits."""
     num_rows = _num_rows(logits)
@@ -296,6 +298,7 @@ def entropy_stats(logits):
     return stats
 
 
+@dispatch("vocab_parallel_softmax")
 def entropy_backward(logits, global_max, log_sum_exp, entropy, grad_output):
     grad = torch.empty(logits.shape, dtype=logits.dtype, device=logits.device)
     _launch(_entropy_backward_kernel, logits, logits, global_max, log_sum_exp, entropy, grad_output, grad,
@@ -303,6 +306,7 @@ def entropy_backward(logits, global_max, log_sum_exp, entropy, grad_output):
     return grad
 
 
+@dispatch("vocab_parallel_softmax")
 def logprobs_backward(logits, global_max, log_sum_exp, grad_sum, zero_grad_row, local_index, index_grad):
     grad = torch.empty(logits.shape, dtype=logits.dtype, device=logits.device)
     _launch(_logprobs_backward_kernel,
@@ -321,6 +325,7 @@ def logprobs_backward(logits, global_max, log_sum_exp, grad_sum, zero_grad_row, 
     return grad
 
 
+@dispatch("vocab_parallel_softmax")
 def kl_stats(a_logits, b_logits):
     """``[6, rows]`` local statistics of KL(A || B), MAX-reduced rows first, then SUM-reduced rows.
 
@@ -342,6 +347,7 @@ def kl_stats(a_logits, b_logits):
     return stats
 
 
+@dispatch("vocab_parallel_softmax")
 def kl_backward(a_logits, b_logits, a_max, a_lse, b_max, b_lse, kl, grad_output, need_a_grad, need_b_grad):
     a_grad = torch.empty(a_logits.shape, dtype=a_logits.dtype, device=a_logits.device) if need_a_grad else None
     b_grad = torch.empty(b_logits.shape, dtype=b_logits.dtype, device=b_logits.device) if need_b_grad else None

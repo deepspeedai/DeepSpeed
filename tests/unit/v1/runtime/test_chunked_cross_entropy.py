@@ -7,32 +7,39 @@ import importlib.util
 import pytest
 import torch
 
+from deepspeed.accelerator import get_accelerator
+
 loss_utils = pytest.importorskip("transformers.loss.loss_utils")
 
 # NVML-based discovery leaves CUDA uninitialized in the parent before pytest --forked starts workers.
 _CUDA_AVAILABLE = torch.cuda.device_count() > 0  #ignore-cuda
-_TRITON_ON_CUDA = (_CUDA_AVAILABLE and importlib.util.find_spec("triton") is not None
-                   and getattr(torch.version, "hip", None) is None)
-# Each backend on the device it runs on; the Triton one only where CUDA and Triton exist.
+# The Triton backend runs on the active accelerator, whatever its name; checking for one must not
+# initialize anything before pytest --forked starts its workers.
+_ACCELERATOR_AVAILABLE = get_accelerator().is_available() and get_accelerator().device_name() != "cpu"
+_TRITON_ON_ACCELERATOR = (_ACCELERATOR_AVAILABLE and importlib.util.find_spec("triton") is not None
+                          and getattr(torch.version, "hip", None) is None)
+# Each backend on the device it runs on; the Triton one only where an accelerator and Triton exist.
 BACKEND_DEVICES = [
     pytest.param("torch", "cpu", id="torch"),
     pytest.param("triton",
-                 "cuda",
+                 get_accelerator().device_name(),
                  id="triton",
-                 marks=pytest.mark.skipif(not _TRITON_ON_CUDA, reason="the Triton backend needs CUDA and Triton")),
+                 marks=pytest.mark.skipif(not _TRITON_ON_ACCELERATOR,
+                                          reason="the Triton backend needs an accelerator and Triton")),
 ]
 
 
 @pytest.fixture(autouse=True)
 def _load_loss_runtime_in_the_worker(request):
     global ChunkedCausalLMLoss, chunked_cross_entropy, install_chunked_causal_lm_loss, triton_backend_available
-    global _TRITON_ON_CUDA
+    global _TRITON_ON_ACCELERATOR
     # The shared Triton helper probes its driver on import, so load it after pytest has forked its worker.
     from deepspeed.runtime.chunked_cross_entropy import (ChunkedCausalLMLoss, chunked_cross_entropy,
                                                          install_chunked_causal_lm_loss, triton_backend_available)
-    _TRITON_ON_CUDA = _CUDA_AVAILABLE and triton_backend_available()
-    if "backend" in request.fixturenames and request.getfixturevalue("backend") == "triton" and not _TRITON_ON_CUDA:
-        pytest.skip("the Triton backend needs CUDA and Triton")
+    _TRITON_ON_ACCELERATOR = _ACCELERATOR_AVAILABLE and triton_backend_available()
+    if "backend" in request.fixturenames and request.getfixturevalue(
+            "backend") == "triton" and not _TRITON_ON_ACCELERATOR:
+        pytest.skip("the Triton backend needs an accelerator and Triton")
 
 
 def _inputs(batch, seq, vocab, dtype, seed=0, ignore_every=5, device="cpu"):
@@ -68,6 +75,15 @@ def _ulp_distance_statistics(actual, expected, rows_per_chunk):
         max_distance = max(max_distance, distance.max().item())
         matching += (distance == 0).sum().item()
     return max_distance, matching / actual.numel()
+
+
+def _eager_cross_entropy_rejects(logits, target):
+    """Whether this backend's cross_entropy rejects a non-long target, as CUDA does."""
+    try:
+        torch.nn.functional.cross_entropy(logits.reshape(-1, logits.shape[-1]), target.reshape(-1))
+    except RuntimeError:
+        return True
+    return False
 
 
 @pytest.mark.parametrize("backend, device", BACKEND_DEVICES)
@@ -168,18 +184,22 @@ def test_nonlong_class_indices_are_rejected_like_the_stock_loss(backend, device,
     value = 1.5 if dtype == torch.float32 else 1
     bad = torch.full(labels.shape, value, dtype=dtype, device=device)
     loss_function = ChunkedCausalLMLoss(block_rows=3, backend=backend)
-    with pytest.raises(RuntimeError):
-        loss_utils.ForCausalLMLoss(logits, bad, 17)
+    # The chunked loss's own guard must reject non-long indices everywhere, whatever eager does.
     with pytest.raises(RuntimeError):
         loss_function(logits, bad, 17)
     with pytest.raises(RuntimeError):
-        loss_utils.ForCausalLMLoss(logits, labels, 17, shift_labels=bad)
-    with pytest.raises(RuntimeError):
         loss_function(logits, labels, 17, shift_labels=bad)
     with pytest.raises(RuntimeError):
-        torch.nn.functional.cross_entropy(logits.reshape(-1, 17), bad.reshape(-1))
-    with pytest.raises(RuntimeError):
         chunked_cross_entropy(logits.reshape(-1, 17), bad.reshape(-1), backend=backend)
+    # Eager backends that accept a non-long index silently cannot demonstrate the stock-loss
+    # rejection; compare with eager only where eager itself rejects it, as CUDA does.
+    if _eager_cross_entropy_rejects(logits, bad):
+        with pytest.raises(RuntimeError):
+            loss_utils.ForCausalLMLoss(logits, bad, 17)
+        with pytest.raises(RuntimeError):
+            loss_utils.ForCausalLMLoss(logits, labels, 17, shift_labels=bad)
+        with pytest.raises(RuntimeError):
+            torch.nn.functional.cross_entropy(logits.reshape(-1, 17), bad.reshape(-1))
 
 
 def test_torch_20_uses_the_one_argument_async_assert_contract(monkeypatch):
@@ -252,11 +272,11 @@ def test_an_out_of_range_target_raises_on_cpu():
             chunked_cross_entropy(logits, torch.tensor([1, bad, 2, 3]), backend="torch")
 
 
-@pytest.mark.skipif(not _TRITON_ON_CUDA, reason="the Triton backend needs CUDA and Triton")
+@pytest.mark.skipif(not _CUDA_AVAILABLE, reason="CUDA is needed for the device-side assert subprocess")
 def test_an_out_of_range_target_fails_the_triton_backend_instead_of_reading_another_row():
     """A device-side assert poisons the CUDA context, so this runs in its own process."""
-    if not _TRITON_ON_CUDA:
-        pytest.skip("the Triton backend needs CUDA and Triton")
+    if not triton_backend_available():
+        pytest.skip("the Triton backend needs Triton")
     import subprocess
     import sys
     import textwrap
@@ -273,7 +293,7 @@ def test_an_out_of_range_target_fails_the_triton_backend_instead_of_reading_anot
 
 
 def test_a_named_backend_that_cannot_run_raises_instead_of_substituting():
-    with pytest.raises(RuntimeError, match="needs CUDA logits and Triton"):
+    with pytest.raises(RuntimeError, match="needs accelerator logits and Triton"):
         chunked_cross_entropy(torch.randn(4, 8), torch.tensor([1, 2, 3, 4]), backend="triton")
     with pytest.raises(ValueError, match="Unsupported chunked cross-entropy backend"):
         ChunkedCausalLMLoss(backend="fast")

@@ -7,7 +7,9 @@ from __future__ import annotations
 import torch
 from torch.autograd.function import once_differentiable
 
-from deepspeed.ops.triton_ops._triton import _TRITON_AVAILABLE, triton, tl
+from deepspeed.ops.triton_ops import _probes
+from deepspeed.ops.triton_ops._triton import (_TRITON_AVAILABLE, dispatch, is_accelerator_tensor,
+                                              is_triton_kernel_supported, triton, tl)
 from deepspeed.utils import logger
 
 _IS_ROCM_PYTORCH = getattr(torch.version, "hip", None) is not None
@@ -148,8 +150,8 @@ def _assert_supported_device_and_dtype(tensor: torch.Tensor, *, name: str) -> No
     if tensor.dtype not in SUPPORTED_DTYPES:
         raise RuntimeError(
             f"fused RMSNorm supports bfloat16 and float16 tensors, but {name} has dtype {tensor.dtype}.")
-    if tensor.device.type != "cuda":
-        raise RuntimeError(f'fused RMSNorm runs CUDA kernels but {name} is on device "{tensor.device.type}".')
+    if not is_accelerator_tensor(tensor):
+        raise RuntimeError(f'fused RMSNorm runs Triton kernels but {name} is on device "{tensor.device.type}".')
 
 
 def assert_supported(hidden: torch.Tensor, weight: torch.Tensor, eps: float) -> None:
@@ -175,6 +177,10 @@ def assert_supported(hidden: torch.Tensor, weight: torch.Tensor, eps: float) -> 
             f"fused RMSNorm supports normalized dimensions up to {_MAX_FORWARD_BLOCK}, got {hidden.shape[-1]}.")
     if not isinstance(eps, float):
         raise RuntimeError(f"fused RMSNorm needs a float epsilon, got {type(eps).__name__}.")
+    if not is_triton_kernel_supported("fused_rms_norm", hidden.dtype, hidden.device, _probes.fused_rms_norm,
+                                      hidden.dtype, hidden.device):
+        raise RuntimeError("fused RMSNorm's Triton kernels failed this platform's runtime validation; "
+                           "run the eager forward instead.")
 
 
 def _block_n(n_cols: int) -> int:
@@ -246,6 +252,7 @@ class _FusedRMSNorm(torch.autograd.Function):
         return grad_hidden, grad_weight, None
 
 
+@dispatch("fused_rms_norm")
 def fused_rms_norm(hidden: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
     """Apply Hugging Face RMSNorm with fused Triton kernels.
 
