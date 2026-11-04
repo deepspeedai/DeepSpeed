@@ -644,7 +644,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 self.is_param_in_current_partition[self.get_param_id(param)] = False
 
         if self.cpu_offload:
-            self.accumulated_grads_in_cpu = {}
+            # Allocated on the first non-boundary accumulation so GAS=1 training pins no extra host memory.
+            self.accumulated_grads_in_cpu = [None] * len(self.partition_size)
             self.norm_for_param_grads = {}
             self.local_overflow = False
             self.grad_position = {}
@@ -787,6 +788,9 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 accelerator.unpin_memory(fp32_partition.grad)
         for buffer in self.param_buffer_of_bit16_for_cpu_offload_groups:
             accelerator.unpin_memory(buffer)
+        for buffer in self.accumulated_grads_in_cpu:
+            if buffer is not None:
+                accelerator.unpin_memory(buffer)
         temp_grad_buffer = getattr(self, 'temp_grad_buffer_for_cpu_offload', None)
         if temp_grad_buffer is not None:
             accelerator.unpin_memory(temp_grad_buffer)
@@ -1116,16 +1120,12 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         if self._offload_gradient_safety_enabled:
             self._wait_for_offload_copies()
         param_id = self.get_param_id(param)
-        [_, source_offset, dest_offset, num_elements] = self.grad_position[param_id]
+        [_, source_offset, _, num_elements] = self.grad_position[param_id]
         dest_buffer = self.temp_grad_buffer_for_gpu_offload.view(-1).narrow(0, 0, param.numel())
-        if not self.low_precision_master_weights_and_grads:
-            dest_buffer.copy_(self.accumulated_grads_in_cpu[param_id].view(-1), non_blocking=True)
-        else:
-            # Overflow checks read the full restored gradient, including the
-            # unowned region that may still contain a previous step's NaNs.
-            dest_buffer.zero_()
-            dest_buffer.narrow(0, source_offset, num_elements).copy_(self.accumulated_grads_in_cpu[param_id].view(-1),
-                                                                     non_blocking=True)
+        # The overflow scan reads the whole tensor, so scratch data outside this rank's fragment must be cleared.
+        dest_buffer.zero_()
+        dest_buffer.narrow(0, source_offset, num_elements).copy_(self._get_cpu_offload_accumulator_slice(param),
+                                                                 non_blocking=True)
         # Clone so the shared temp buffer can be reused for the next parameter.
         restored = dest_buffer.view_as(param).clone()
         if self.use_grad_accum_attribute:
@@ -1822,69 +1822,41 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
         [i, source_offset, dest_offset, num_elements] = self.grad_position[param_id]
 
-        # copy to a preexisiting buffer to avoid memory allocation penalty
-        dest_buffer = self.temp_grad_buffer_for_gpu_offload.view(-1).narrow(0, 0, param.numel())
-
-        #buffer for storing gradients for this parameter in CPU
-        def buffer_to_accumulate_to_in_cpu():
-            if not self.low_precision_master_weights_and_grads:
-                buffer = torch.zeros(param.numel(), dtype=param.dtype, device=self.device)
-                return get_accelerator().pin_memory(buffer) if self.cpu_offload_pin_memory else buffer
-            else:
-                return self.single_partition_of_fp32_groups[i].grad.view(-1).narrow(0, dest_offset, num_elements)
-
-        #accumulate gradients into param.grad_accum or parts of it that belongs to this partition
-        def accumulate_gradients():
-            grad_accum = self.get_param_gradient_attribute(param)
-            if param_id in self._offload_partition_only_param_ids:
-                # Recover only this rank's fragment, converting back to the accumulation dtype.
-                previous = self.single_partition_of_fp32_groups[i].grad.view(-1).narrow(0, dest_offset, num_elements)
-                local_buffer = dest_buffer.narrow(0, source_offset, num_elements)
-                local_buffer.copy_(previous, non_blocking=True)
-                grad_accum.data.view(-1).narrow(0, source_offset, num_elements).add_(local_buffer)
-            elif not self.low_precision_master_weights_and_grads:
-                dest_buffer.copy_(self.accumulated_grads_in_cpu[param_id].view(-1), non_blocking=True)
-                grad_accum.data.view(-1).add_(dest_buffer)
-            else:
-                dest_buffer.narrow(0, source_offset,
-                                   num_elements).copy_(self.accumulated_grads_in_cpu[param_id].view(-1),
-                                                       non_blocking=True)
-                grad_accum.data.view(-1).narrow(0, source_offset,
-                                                num_elements).add_(dest_buffer.narrow(0, source_offset, num_elements))
-
-        #move accumulated gradients back to CPU
-        def copy_gradients_to_cpu():
-            grad_accum = self.get_param_gradient_attribute(param)
-            if not self.low_precision_master_weights_and_grads:
-                self.accumulated_grads_in_cpu[param_id].data.copy_(grad_accum.data.view(-1), non_blocking=True)
-            else:
-                self.accumulated_grads_in_cpu[param_id].data.copy_(grad_accum.data.view(-1).narrow(
-                    0, source_offset, num_elements),
-                                                                   non_blocking=True)
-
-        if param_id not in self.accumulated_grads_in_cpu:
-            self.accumulated_grads_in_cpu[param_id] = buffer_to_accumulate_to_in_cpu()
+        grad_accum = self.get_param_gradient_attribute(param).data.view(-1).narrow(0, source_offset, num_elements)
+        accumulated = self._get_cpu_offload_accumulator_slice(param)
 
         # Other parameters may have run backwards before this parameter's first use.
-        # Only its participation in this window makes the persistent host buffer current.
+        # Only its participation in this window makes the persistent host slice current.
         if param_id in self._offload_accumulated_param_ids:
-            accumulate_gradients()
-        copy_gradients_to_cpu()
+            # copy to a preexisting buffer to avoid memory allocation penalty
+            dest_buffer = self.temp_grad_buffer_for_gpu_offload.view(-1).narrow(0, 0, num_elements)
+            if param_id in self._offload_partition_only_param_ids:
+                # The running sum so far lives only in the optimizer partition.
+                previous = self.single_partition_of_fp32_groups[i].grad.view(-1).narrow(0, dest_offset, num_elements)
+            else:
+                previous = accumulated
+            dest_buffer.copy_(previous, non_blocking=True)
+            grad_accum.add_(dest_buffer)
+        accumulated.copy_(grad_accum, non_blocking=True)
         self._offload_partition_only_param_ids.discard(param_id)
         self._record_offload_copy()
 
-    def set_norm_for_param_grad(self, param):
-        param_id = self.get_param_id(param)
-        grad_accum = self.get_param_gradient_attribute(param)
-        accumulated_grad = self.accumulated_grads_in_cpu[
-            param_id] if self.gradient_accumulation_steps > 1 else grad_accum
-
-        [i, source_offset, dest_offset, num_elements] = self.grad_position[param_id]
-
-        start = source_offset
-        accumulated_grad = accumulated_grad.view(-1).narrow(0, start, num_elements)
-
-        self.norm_for_param_grads[param_id] = accumulated_grad.data.to(get_norm_dtype()).norm(2)
+    def _get_cpu_offload_accumulator_slice(self, param):
+        """Return the host slice that holds this rank's running sum for ``param``."""
+        [group_idx, _, dest_offset, num_elements] = self.grad_position[self.get_param_id(param)]
+        if self.low_precision_master_weights_and_grads:
+            # Low-precision masters accumulate in the optimizer's partition gradient.
+            buffer = self.single_partition_of_fp32_groups[group_idx].grad
+        else:
+            buffer = self.accumulated_grads_in_cpu[group_idx]
+            if buffer is None:
+                buffer = torch.zeros(int(self.partition_size[group_idx]),
+                                     dtype=self.bit16_groups_flat[group_idx].dtype,
+                                     device=self.device)
+                if self.cpu_offload_pin_memory:
+                    buffer = get_accelerator().pin_memory(buffer)
+                self.accumulated_grads_in_cpu[group_idx] = buffer
+        return buffer.view(-1).narrow(0, dest_offset, num_elements)
 
     def set_norm_for_param_grad_in_gpu(self, param):
         param_id = self.get_param_id(param)
@@ -2179,12 +2151,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             first_use = param_id not in self._offload_accumulated_param_ids
             boundary = self.is_gradient_accumulation_boundary()
             if first_use and boundary:
-                if self.low_precision_master_weights_and_grads:
-                    # Low-precision masters accumulate in the optimizer's partition grad.
-                    [i, _, dest_offset, num_elements] = self.grad_position[param_id]
-                    self.accumulated_grads_in_cpu[param_id] = self.single_partition_of_fp32_groups[i].grad.view(
-                        -1).narrow(0, dest_offset, num_elements)
-                else:
+                if not self.low_precision_master_weights_and_grads:
                     # The boundary copy is sufficient unless another backward follows before step().
                     self._offload_partition_only_param_ids.add(param_id)
             else:
@@ -2948,6 +2915,10 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         self._wait_for_offload_copies()
         self.norm_for_param_grads = {}
         self.local_overflow = False
+        # Adam consumes the partition gradient; a parameter idle in the next window must not reuse it.
+        for fp32_partition in self.single_partition_of_fp32_groups:
+            if fp32_partition.grad is not None:
+                fp32_partition.grad.zero_()
 
     def set_lr(self, lr):
         """Set the learning rate."""
