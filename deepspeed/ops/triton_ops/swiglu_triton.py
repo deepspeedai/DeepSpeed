@@ -294,13 +294,6 @@ def swiglu_packed(gate_up: torch.Tensor) -> torch.Tensor:
     if not _TRITON_AVAILABLE or not _swiglu_packed_supported(gate_up):
         return _swiglu_packed_eager(gate_up)
 
-    # Runtime detection at a regular size: the current backend validates the packed
-    # kernels for itself once per process.
-    if not is_triton_kernel_supported("swiglu_packed", gate_up.dtype, gate_up.device, _probes.swiglu_packed,
-                                      gate_up.dtype, gate_up.device):
-        gate, up = gate_up.chunk(2, dim=-1)
-        return _swiglu_eager(gate, up)
-
     # The packed class resolves through the per-hardware dispatch: a platform
     # that ships its own variant (see the accelerator's triton_ops_dir) answers
     # here, every other platform gets the portable class. The resolution is
