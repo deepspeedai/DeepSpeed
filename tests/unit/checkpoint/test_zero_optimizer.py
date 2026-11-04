@@ -325,7 +325,8 @@ class TestZeROElasticCheckpoint(DistributedTest):
 
         # Load checkpoint with dp world size = 2
         model, _, _, _ = deepspeed.initialize(config=config_dict, model=model, model_parameters=model.parameters())
-        if load_optim:
+        # Only elastic fp32 partitions can be repartitioned, and only without optimizer states.
+        if load_optim or not elastic_save:
             with pytest.raises(deepspeed.runtime.zero.utils.ZeRORuntimeException):
                 model.load_checkpoint(class_tmpdir, load_optimizer_states=load_optim)
         else:

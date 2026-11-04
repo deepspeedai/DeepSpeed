@@ -32,7 +32,7 @@ from deepspeed.runtime.zero.config import ZeroStageEnum
 from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum, OffloadStateTypeEnum
 from deepspeed.runtime.zero.parameter_offload import DeepSpeedZeRoOffload
 import deepspeed.runtime.zenflow.engine_stage3 as zf_engine_stage3
-from deepspeed.runtime.zero.utils import get_mapping_to_flat_buffer, defragment, get_norm_dtype
+from deepspeed.runtime.zero.utils import ZeRORuntimeException, get_mapping_to_flat_buffer, defragment, get_norm_dtype
 from deepspeed.runtime.zero.offload_states import (offload_adam_states, reload_adam_states,
                                                    unpin_offloaded_optimizer_states)
 from deepspeed.ops.adam import DeepSpeedCPUAdam
@@ -565,9 +565,11 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             accelerator.unpin_memory(buffer)
         unpin_offloaded_optimizer_states(self.optimizer)
         if self.offload_optimizer_pin_memory:
-            for fp32_partition in self.fp32_partitioned_groups_flat:
+            for sub_group_id, fp32_partition in enumerate(self.fp32_partitioned_groups_flat):
                 if fp32_partition.grad is not None:
                     accelerator.unpin_memory(fp32_partition.grad)
+                if self._master_pinned_at_construction(sub_group_id):
+                    accelerator.unpin_memory(fp32_partition)
         if self.zenflow:
             # ZenFlow keeps per-parameter selective-optimizer state and per-subgroup
             # overlap-grad buffers pinned on the host.
@@ -1105,7 +1107,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                 if i >= int((1 - self.partial_offload) * sub_group_size):
                     self.subgroup_to_device[i] = 'cpu'
                 else:
-                    self.subgroup_to_device[i] = get_accelerator()._name
+                    self.subgroup_to_device[i] = get_accelerator().device_name()
 
         for i, tensor in enumerate(self.fp16_partitioned_groups_flat):
             num_elements = self.fp16_partitioned_groups_flat_numel[i]
@@ -1157,7 +1159,12 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                 elif self.offload_optimizer:
                     converted = self.fp16_partitioned_groups_flat[i].to(self.subgroup_to_device[i],
                                                                         dtype=self.master_weights_and_grads_dtype)
-                    self.fp32_partitioned_groups_flat.append(converted.clone().detach())
+                    master = converted.clone().detach()
+                    if self.offload_optimizer_pin_memory and master.device.type == "cpu":
+                        # As ZeRO-1/2 does: the master is copied to the device after every step, which is fast only
+                        # from pinned memory (_copy_pinned_master_to_device).
+                        master = get_accelerator().pin_memory(master)
+                    self.fp32_partitioned_groups_flat.append(master)
                     self._create_momentum_buffer(num_elements, i, ds_id)
                 elif self.fp16_partitioned_groups_flat[i].dtype == self.master_weights_and_grads_dtype and \
                         self.fp16_partitioned_groups_flat[i].device == self.device:
@@ -2850,13 +2857,36 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         see_memory_usage('After zero_optimizer step', force=False)
         print_rank_0("------------------Finishing Step-----------------------")
 
+    def _master_pinned_at_construction(self, sub_group_id):
+        """Whether _create_fp32_partitions pinned this sub-group's CPU master partition (offload_optimizer.pin_memory;
+        NVMe-swapped sub-groups are managed by the optimizer swapper)."""
+        master = self.fp32_partitioned_groups_flat[sub_group_id]
+        return (not self._swappable_optimizer_subgroup(sub_group_id) and get_accelerator().is_pinned(master))
+
+    @instrument_w_nvtx
+    def _copy_pinned_master_to_device(self, dst, src):
+        """Copy the pinned CPU master partition ``src`` into the low-precision device partition ``dst``.
+
+        The master goes to the device in its own dtype and is cast there, the form #5301 introduced in ZeRO-1/2:
+        ``dst.copy_(src)`` would cast on the CPU into a pageable temporary and copy from that at a few GB/s."""
+        dst.copy_(src.to(dst.device, non_blocking=True))
+        # Callers expect the partition on the device when this returns: the parameter all-gathers of the next forward
+        # run on a stream that does not wait for this one.
+        event = get_accelerator().Event()
+        event.record()
+        event.synchronize()
+
     @instrument_w_nvtx
     def _reassign_or_swap_out_partitioned_parameters(self, sub_group_id):
         if self.fp16_partitioned_groups_flat[sub_group_id] is not None:
             # When torch autocast is enabled, groups in fp16_partitioned_groups are in fp32 already and those in
             # fp32_partitioned_groups are aliases. Calling tensor.data.copy_ will not trigger any copy in that case.
-            self.fp16_partitioned_groups_flat[sub_group_id].data.copy_(
-                self.fp32_partitioned_groups_flat[sub_group_id].data)
+            dst = self.fp16_partitioned_groups_flat[sub_group_id].data
+            src = self.fp32_partitioned_groups_flat[sub_group_id].data
+            if self._master_pinned_at_construction(sub_group_id) and dst.device.type != "cpu":
+                self._copy_pinned_master_to_device(dst, src)
+            else:
+                dst.copy_(src)
 
             #unflatten fp16 parameter subgroup
             self._unflatten_partitioned_parameters(sub_group_id)
@@ -3539,9 +3569,10 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
     def _rigid_load_state_dict(self, state_dict, load_optimizer_states=True):
         # I think it should actually be ok to reload the optimizer before the model.
-        self.loss_scaler = state_dict[LOSS_SCALER]
-        self.dynamic_loss_scale = state_dict['dynamic_loss_scale']
-        self.overflow = state_dict['overflow']
+        if load_optimizer_states:
+            self.loss_scaler = state_dict[LOSS_SCALER]
+            self.dynamic_loss_scale = state_dict['dynamic_loss_scale']
+            self.overflow = state_dict['overflow']
         saved_partition_groups = state_dict.get('ds_zero_partition_groups')
         if saved_partition_groups is not None and saved_partition_groups != self._zero3_partition_group_metadata():
             raise RuntimeError("AutoEP ZeRO-3 checkpoints can only be loaded with the same parameter placement "
@@ -3648,7 +3679,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         if load_optimizer_states:
             self.load_hp_checkpoint_state_from_checkpoint_dir_stage3(checkpoint_folder)
         else:
-            self.load_module_checkpoint_state_from_checkpoint_dir_stage3(checkpoint_folder, load_from_fp32_weights)
+            self.load_module_checkpoint_state_from_checkpoint_dir_stage3(checkpoint_folder, True)
 
     def load_hp_checkpoint_state_from_checkpoint_dir_stage3(self, checkpoint_dir):
         """ Load optimizer and model states from the checkpoint directory. """
@@ -3767,7 +3798,12 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         rank = dist.get_rank(group=partition_group)
 
         # Load tensors from files and reshape them to flat vectors
-        ckpt_dict = torch.load(os.path.join(folder, f"{key}.pt"), weights_only=False)
+        ckpt_path = os.path.join(folder, f"{key}.pt")
+        if not os.path.isfile(ckpt_path):
+            if key == "fp32":
+                raise ZeRORuntimeException(f"Saved fp32 weights are required but {ckpt_path} is missing.")
+            raise ZeRORuntimeException(f"Universal checkpoint state {ckpt_path} is missing.")
+        ckpt_dict = torch.load(ckpt_path, weights_only=False)
         loaded_checkpoint_state = ckpt_dict
         if isinstance(ckpt_dict, dict):
             if ckpt_dict.get(EP_IS_EXPERT_PARAM, False):
