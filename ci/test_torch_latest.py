@@ -864,8 +864,8 @@ def test_aws_scripts_reuse_full_selection_manifest_and_two_gpu_contract():
         assert "/var/lib/devds/runs/123-1" in prepare
         assert "--gpus '\"device=0,1\"'" in prepare
         assert "uv==0.12.7" in prepare
-        assert "uv venv --python 3.10.13 --seed /workspace/python310" in prepare
-        assert "PATH=/workspace/python310/bin:" in prepare
+        assert "uv venv --python 3.12.14 --seed /workspace/python312" in prepare
+        assert "PATH=/workspace/python312/bin:" in prepare
         assert "expected exactly 2 visible GPUs" in prepare
         assert "ci/modal_diagnostics/pr8654_71_nodes.txt" not in prepare + test
         assert "tests/unit/v1" in test

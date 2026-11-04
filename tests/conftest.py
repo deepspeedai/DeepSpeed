@@ -5,12 +5,21 @@
 
 # tests directory-specific settings - this file is run automatically by pytest before any tests are run
 
+import inspect
 import sys
 import pytest
 import os
 from os.path import abspath, dirname
+
+# NVIDIA containers can force TF32 before PyTorch reads its backend settings.
+# Correctness tests compare independent sharding/offload paths and require IEEE fp32.
+os.environ.pop("TORCH_ALLOW_TF32_CUBLAS_OVERRIDE", None)
+
 import torch
 import warnings
+
+torch.backends.cuda.matmul.allow_tf32 = False
+torch.backends.cudnn.allow_tf32 = False
 
 # Set this environment variable for the T5 inference unittest(s) (e.g. google/t5-v1_1-small)
 os.environ['PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION'] = 'python'
@@ -22,7 +31,10 @@ sys.path.insert(1, git_repo_path)
 
 
 def pytest_configure(config):
-    config.option.color = "yes"
+    # Force color on for plain invocations, but keep an explicit --color
+    # choice: the CI nightlies pass --color=no so their logs parse cleanly.
+    if config.option.color == "auto":
+        config.option.color = "yes"
     config.option.durations = 0
     config.option.durations_min = 1
     config.option.verbose = True
@@ -106,6 +118,27 @@ def pytest_runtest_teardown(item, nextitem):
         dist_test_class = item.cls()
         for num_procs, pool in dist_test_class._pool_cache.items():
             dist_test_class._close_pool(pool, num_procs, force=True)
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_pycollect_makeitem(collector, name, obj):
+    # Pytest 8 only registers FixtureFunctionDefinition objects. The
+    # _pytestfixturefunction marker on DistributedFixture is ignored, so a test
+    # that requests the class errors with "fixture not found" before the
+    # launcher can skip for an unavailable world size.
+    if not inspect.isclass(obj) or not getattr(obj, "is_dist_fixture", False):
+        return None
+    if obj.__name__ == "DistributedFixture":
+        return None
+
+    def _launch(request, fixture_cls=obj):
+        fixture_cls()(request)
+
+    _launch.__name__ = name
+    fixture_def = pytest.fixture(name=name)(_launch)
+    holder = type("_DistributedFixtureHolder", (), {name: fixture_def})
+    collector.session._fixturemanager.parsefactories(holder, nodeid=collector.nodeid)
+    return None
 
 
 @pytest.hookimpl(tryfirst=True)
