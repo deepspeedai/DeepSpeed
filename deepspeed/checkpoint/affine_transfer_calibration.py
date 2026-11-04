@@ -336,6 +336,9 @@ def fit_links(calibration: Dict) -> Dict:
       fan finishes when the busiest resource it crosses does: a peer's link, the root, or a link
       the peers share. Behind PCIe switches that depends on *which* peers share the root, not only
       on how many, so fans are keyed by their peers; the width is ``len(peers)``.
+
+    The returned fits use tuple keys and are not directly JSON-serializable. Persist the raw
+    ``calibrate_links`` result instead, then call ``fit_links`` again after loading it.
     """
     if calibration.get('schema') != CALIBRATION_SCHEMA:
         raise ValueError(f'unsupported calibration schema {calibration.get("schema")!r}')
