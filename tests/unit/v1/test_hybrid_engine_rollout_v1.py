@@ -14,6 +14,113 @@ from deepspeed.runtime.rollout.base import RolloutRequest, SamplingConfig
 from deepspeed.runtime.rollout.hybrid_engine_rollout import HybridEngineRollout, HybridEngineRolloutConfig
 
 
+class _LocalKVModel(torch.nn.Module):
+    """Emits fewer KV heads than its global config, like an AutoTP shard."""
+    _supports_cache_class = True
+
+    def __init__(self, local_heads):
+        super().__init__()
+        self.local_heads = local_heads
+        self.weight = torch.nn.Parameter(torch.zeros(1))
+        self.config = PretrainedConfig(max_position_embeddings=32,
+                                       num_hidden_layers=1,
+                                       num_attention_heads=4,
+                                       num_key_value_heads=4,
+                                       hidden_size=4,
+                                       head_dim=1)
+
+    def forward(self, input_ids, attention_mask, past_key_values=None, cache_position=None, **kwargs):
+        heads = torch.arange(1, self.local_heads + 1, device=input_ids.device)
+        states = input_ids[:, None, :, None].float() * heads[None, :, None, None]
+        _, values = past_key_values.update(states,
+                                           states,
+                                           layer_idx=0,
+                                           cache_kwargs={"cache_position": cache_position})
+        if attention_mask.dim() == 4:
+            valid = attention_mask[:, 0, 0, :] == 0
+        else:
+            valid = torch.zeros((values.shape[0], values.shape[2]), dtype=torch.bool, device=input_ids.device)
+            valid[:, :attention_mask.shape[1]] = attention_mask.bool()
+        cache_sums = (values * valid[:, None, :, None]).sum(dim=(1, 2, 3)).long()
+        next_tokens = cache_sums.remainder(29) + 3
+        logits = torch.zeros((input_ids.shape[0], input_ids.shape[1], 32), device=input_ids.device)
+        logits.scatter_(2, next_tokens[:, None, None].expand(-1, input_ids.shape[1], 1), 1)
+        return SimpleNamespace(logits=logits)
+
+
+def _local_kv_tokens(prompts, new_tokens, local_heads):
+    head_sum = sum(range(1, local_heads + 1))
+    expected = []
+    for prompt in prompts:
+        tokens = list(prompt)
+        for _ in range(new_tokens):
+            tokens.append(sum(tokens) * head_sum % 29 + 3)
+        expected.append(tokens)
+    return expected
+
+
+def _count_replays(monkeypatch, accelerator):
+    counter = {"replays": 0}
+    original_replay = accelerator.replay_graph
+
+    def replay(graph):
+        counter["replays"] += 1
+        return original_replay(graph)
+
+    monkeypatch.setattr(accelerator, "replay_graph", replay)
+    return counter
+
+
+@pytest.mark.parametrize("local_heads", [4, 2, 1])
+def test_static_graph_uses_prefill_kv_shape(local_heads, monkeypatch):
+    accelerator = get_accelerator()
+    if not accelerator.is_available() or accelerator.create_graph() is None:
+        pytest.skip("requires graph capture")
+
+    counter = _count_replays(monkeypatch, accelerator)
+    device = torch.device(accelerator.device_name())
+    model = _LocalKVModel(local_heads).to(device).eval()
+    rollout = HybridEngineRollout(SimpleNamespace(module=model),
+                                  SimpleNamespace(pad_token_id=0, eos_token_id=-1),
+                                  cfg=HybridEngineRolloutConfig(use_graph_capture=True))
+    prompts = [[1, 3, 4], [3, 4, 5]]
+    prompt_ids = torch.tensor(prompts, device=device)
+    new_tokens = 4
+    output = rollout.generate(RolloutRequest(prompt_ids, torch.ones_like(prompt_ids)),
+                              SamplingConfig(max_new_tokens=new_tokens, temperature=0))
+
+    assert output.input_ids.tolist() == _local_kv_tokens(prompts, new_tokens, local_heads)
+    assert counter["replays"] == new_tokens - 1
+    assert model.config.num_key_value_heads == 4
+
+
+@pytest.mark.parametrize("use_graph", [False, True])
+@pytest.mark.parametrize("local_heads", [4, 2, 1])
+def test_continuous_generation_uses_local_kv_shape(local_heads, use_graph, monkeypatch):
+    accelerator = get_accelerator()
+    if use_graph and (not accelerator.is_available() or accelerator.create_graph() is None):
+        pytest.skip("requires graph capture")
+
+    counter = _count_replays(monkeypatch, accelerator)
+    device = torch.device(accelerator.device_name())
+    model = _LocalKVModel(local_heads).to(device).eval()
+    rollout = HybridEngineRollout(SimpleNamespace(module=model),
+                                  SimpleNamespace(pad_token_id=0, eos_token_id=-1),
+                                  cfg=HybridEngineRolloutConfig(use_graph_capture=use_graph))
+    # Three requests on two slots force a refill into an already allocated cache row.
+    prompts = [[1, 3, 4], [3, 4, 5], [2, 2, 6]]
+    prompt_ids = torch.tensor(prompts, device=device)
+    new_tokens = 4
+    output = rollout.generate(RolloutRequest(prompt_ids, torch.ones_like(prompt_ids)),
+                              SamplingConfig(max_new_tokens=new_tokens, temperature=0, continuous_batch_size=2))
+
+    assert output.input_ids.tolist() == _local_kv_tokens(prompts, new_tokens, local_heads)
+    decode_steps = rollout.get_last_continuous_stats()["decode_steps"]
+    assert counter["replays"] == (decode_steps if use_graph else 0)
+    assert decode_steps > 0
+    assert model.config.num_key_value_heads == 4
+
+
 def test_continuous_generation_profile_on_accelerator():
     accelerator = get_accelerator()
     if not accelerator.is_available():
