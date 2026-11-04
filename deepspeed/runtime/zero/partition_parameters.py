@@ -267,7 +267,7 @@ def zero_wrapper_for_fp_tensor_constructor(fn: Callable, target_fp_dtype: torch.
         if kwargs.get("device", None) is None and target_device is not None:
             kwargs['device'] = target_device
         tensor: Tensor = fn(*args, **kwargs)
-        if target_fp_dtype is not None and tensor.is_floating_point():
+        if target_fp_dtype is not None and tensor.is_floating_point() and kwargs.get('dtype') is None:
             tensor.data = tensor.data.to(target_fp_dtype)
 
         return tensor
@@ -285,7 +285,7 @@ def get_new_tensor_fn_for_dtype(target_fp_dtype: torch.dtype, target_device: tor
         else:
             tensor = _orig_torch_empty(0, device=target_device).new_empty(*args, **kwargs)
 
-        if tensor.is_floating_point() and target_fp_dtype is not None:
+        if tensor.is_floating_point() and target_fp_dtype is not None and kwargs.get('dtype') is None:
             tensor = tensor.to(target_fp_dtype)
 
         return tensor
