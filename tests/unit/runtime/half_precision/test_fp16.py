@@ -715,3 +715,133 @@ class TestZeroEmptyGrad(DistributedTest):
             model.step()
 
         model.destroy()
+
+
+class TestOptimizerInitialization(DistributedTest):
+    world_size = 1
+
+    def _make_engine(self, optimizer_name, dtype, weight_decay, legacy_lamb=False):
+        model = SimpleModel(4).to(device=get_accelerator().current_device_name(), dtype=dtype)
+        initial_weights = [parameter.detach().float().clone() for parameter in model.parameters()]
+        kwargs = {"lr": 0.01, "weight_decay": weight_decay}
+        parameters = list(model.parameters())
+        if optimizer_name == "Adagrad":
+            # Eager state must survive replacing the model parameters with master weights.
+            parameters = [{"params": parameters[:1], "lr": 0.02}, {"params": parameters[1:]}]
+            kwargs["initial_accumulator_value"] = 0.125
+            optimizer = torch.optim.Adagrad(parameters, **kwargs)
+        elif optimizer_name == "FusedAdam":
+            optimizer = FusedAdam(parameters, **kwargs)
+        elif optimizer_name == "Lamb":
+            from deepspeed.ops.lamb import FusedLamb
+            optimizer = FusedLamb(parameters, **kwargs)
+        else:
+            optimizer = getattr(torch.optim, optimizer_name)(parameters, **kwargs)
+        config = {"train_micro_batch_size_per_gpu": 1, "steps_per_print": 1000, "gradient_clipping": 0.0}
+        config["fp16" if dtype == torch.float16 else "bf16"] = {"enabled": True}
+        if dtype == torch.float16:
+            config["fp16"]["loss_scale"] = 1.0
+        engine, _, _, _ = deepspeed.initialize(model=model, optimizer=optimizer, config=config)
+        if optimizer_name == "FusedAdam":
+            from deepspeed.runtime.fp16.fused_optimizer import FP16_Optimizer
+            assert isinstance(engine.optimizer, FP16_Optimizer)
+        else:
+            from deepspeed.runtime.fp16.unfused_optimizer import FP16_UnfusedOptimizer
+            assert isinstance(engine.optimizer, FP16_UnfusedOptimizer)
+        if optimizer_name == "Lamb":
+            engine.optimizer.fused_lamb_legacy = legacy_lamb
+        if optimizer_name == "Adagrad":
+            assert engine.optimizer.optimizer is optimizer
+        return engine, initial_weights
+
+    def _master_weights(self, engine):
+        return torch.cat(
+            [parameter.detach().flatten() for group in engine.optimizer.param_groups for parameter in group["params"]])
+
+    def _step(self, engine, step, reference=None):
+        dtype = next(engine.module.parameters()).dtype
+        inputs = torch.tensor([[0.25, -0.5, 0.75, 1.0]], device=engine.device, dtype=dtype)
+        labels = torch.tensor([step % 4], device=engine.device)
+        engine.backward(engine(inputs, labels))
+        if reference is not None:
+            reference_parameters, reference_optimizer = reference
+            # Use the actual low-precision gradients so the oracle isolates optimizer updates.
+            for parameter, reference_parameter in zip(engine.module.parameters(), reference_parameters):
+                reference_parameter.grad = parameter.grad.detach().float().clone()
+            reference_optimizer.step()
+            reference_optimizer.zero_grad()
+        engine.step()
+
+    def _exercise(self, tmpdir, optimizer_name, dtype, weight_decay, legacy_lamb=False):
+        engine, initial_weights = self._make_engine(optimizer_name, dtype, weight_decay, legacy_lamb)
+        try:
+            initial_flat = torch.cat([weight.flatten() for weight in initial_weights])
+            torch.testing.assert_close(self._master_weights(engine), initial_flat, rtol=0, atol=0)
+            for parameter, initial in zip(engine.module.parameters(), initial_weights):
+                torch.testing.assert_close(parameter.float(), initial, rtol=0, atol=0)
+            # Construction must not count as a training update, including with zero decay.
+            initial_state = engine.optimizer.state_dict()["optimizer_state_dict"]["state"]
+            if optimizer_name == "Adagrad":
+                assert all(state["step"] == 0 for state in initial_state.values())
+            else:
+                assert initial_state == {}
+
+            reference = None
+            if optimizer_name != "Lamb":
+                reference_parameters = [torch.nn.Parameter(weight.clone()) for weight in initial_weights]
+                reference_type = "AdamW" if optimizer_name == "FusedAdam" else optimizer_name
+                kwargs = {"lr": 0.01, "weight_decay": weight_decay}
+                parameters = reference_parameters
+                if optimizer_name == "Adagrad":
+                    parameters = [{"params": parameters[:1], "lr": 0.02}, {"params": parameters[1:]}]
+                    kwargs["initial_accumulator_value"] = 0.125
+                reference_optimizer = getattr(torch.optim, reference_type)(parameters, **kwargs)
+                reference = reference_parameters, reference_optimizer
+
+            for step in range(21):
+                restored = None
+                try:
+                    if step in (0, 20):
+                        tag = f"{optimizer_name}-{dtype}-{weight_decay}-{step}"
+                        engine.save_checkpoint(str(tmpdir), tag=tag)
+                        restored, _ = self._make_engine(optimizer_name, dtype, weight_decay, legacy_lamb)
+                        load_path, _ = restored.load_checkpoint(str(tmpdir), tag=tag)
+                        assert load_path is not None
+                        torch.testing.assert_close(restored.optimizer.state_dict(), engine.optimizer.state_dict())
+                    self._step(engine, step, reference)
+                    context = f"{optimizer_name}, {dtype}, weight_decay={weight_decay}, update={step + 1}"
+                    optimizer_state = engine.optimizer.state_dict()["optimizer_state_dict"]["state"]
+                    assert all(state["step"] == step + 1 for state in optimizer_state.values()), context
+                    if reference is not None:
+                        expected = torch.cat([parameter.detach().flatten() for parameter in reference[0]])
+                        torch.testing.assert_close(self._master_weights(engine),
+                                                   expected,
+                                                   rtol=2e-6,
+                                                   atol=2e-6,
+                                                   msg=lambda message: f"{context}\n{message}")
+                    if restored is not None:
+                        self._step(restored, step)
+                        torch.testing.assert_close(restored.optimizer.state_dict(), engine.optimizer.state_dict())
+                        torch.testing.assert_close(restored.module.state_dict(), engine.module.state_dict())
+                finally:
+                    if restored is not None:
+                        restored.destroy()
+        finally:
+            engine.destroy()
+
+    @pytest.mark.parametrize("optimizer_name", ["Adam", "AdamW", "FusedAdam"])
+    @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+    def test_adam_first_update_and_checkpoint(self, tmpdir, optimizer_name, dtype):
+        if dtype not in get_accelerator().supported_dtypes():
+            pytest.skip(f"{dtype} is not supported")
+        for weight_decay in (0.0, 0.1):
+            self._exercise(tmpdir, optimizer_name, dtype, weight_decay)
+
+    def test_adagrad_eager_state_and_checkpoint(self, tmpdir):
+        self._exercise(tmpdir, "Adagrad", torch.float16, 0.1)
+
+    @pytest.mark.parametrize("legacy_lamb", [False, True])
+    @pytest.mark.skipif(not deepspeed.ops.__compatible_ops__[FusedLambBuilder.NAME],
+                        reason="FusedLambBuilder has not been implemented on this system.")
+    def test_lamb_first_update_and_checkpoint(self, tmpdir, legacy_lamb):
+        self._exercise(tmpdir, "Lamb", torch.float16, 0.1, legacy_lamb)

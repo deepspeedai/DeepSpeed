@@ -85,6 +85,15 @@ class FP16_UnfusedOptimizer(DeepSpeedOptimizer):
             #note these are not the weights used by the model
             #the model uses the fp16 version that we added to fp16_group
             self.fp32_groups.append(fp32_group)
+            if isinstance(self.optimizer, torch.optim.Adagrad):
+                # Adagrad creates state in its constructor, before parameters become FP32 masters.
+                for fp16_param, fp32_param in zip(self.fp16_groups[i], fp32_group):
+                    state = self.optimizer.state.pop(fp16_param)
+                    for key, value in state.items():
+                        # Keep scalar counters and metadata in their original dtype and device.
+                        if torch.is_tensor(value) and value.dtype == fp16_param.dtype:
+                            state[key] = value.to(device=fp32_param.device, dtype=fp32_param.dtype)
+                    self.optimizer.state[fp32_param] = state
             param_group['params'] = self.fp32_groups[i]
 
         self.custom_loss_scaler = False
@@ -104,8 +113,6 @@ class FP16_UnfusedOptimizer(DeepSpeedOptimizer):
 
         self.overflow = False
         self.overflow_checker = CheckOverflow(self.fp16_groups, mpu=self.mpu, deepspeed=deepspeed)
-
-        self.initialize_optimizer_states()
 
     def zero_grad(self, set_to_none=True):
         """
@@ -423,26 +430,3 @@ class FP16_UnfusedOptimizer(DeepSpeedOptimizer):
 
     def __repr__(self):
         return repr(self.optimizer)
-
-    def initialize_optimizer_states(self):
-        for i, group in enumerate(self.fp16_groups):
-            for param in group:
-                param.grad = torch.zeros(param.size(),
-                                         dtype=param.dtype,
-                                         device=get_accelerator().current_device_name())
-
-        for i, group in enumerate(self.fp32_groups):
-            for param in group:
-                param.grad = torch.zeros(param.size(),
-                                         dtype=param.dtype,
-                                         device=get_accelerator().current_device_name())
-
-        self.optimizer.step()
-
-        for i, group in enumerate(self.fp16_groups):
-            for param in group:
-                param.grad = None
-
-        for i, group in enumerate(self.fp32_groups):
-            for param in group:
-                param.grad = None
