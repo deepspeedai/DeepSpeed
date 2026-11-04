@@ -50,6 +50,16 @@ class _LeafModel(torch.nn.Module):
         return self.block(self.fc(x))
 
 
+class _PassthroughWrapper(torch.nn.Module):
+
+    def __init__(self, module):
+        super().__init__()
+        self.module = module
+
+    def forward(self, *args, **kwargs):
+        return self.module(*args, **kwargs)
+
+
 class _ModulesToSaveWrapper(torch.nn.Module):
     """Minimal stand-in for PEFT's ``ModulesToSaveWrapper``.
 
@@ -228,6 +238,26 @@ class TestZero3LateParameterPartition(DistributedTest):
         assert len(offload.forward_hooks) == hook_count
         assert not hasattr(model.block.fc, "ds_id")
         assert offload.partition_pending_parameters() == 0
+
+    def test_wrapping_existing_module_refreshes_param_names(self):
+        dtype = torch.float32
+        model = _LateModuleModel()
+        engine, *_ = deepspeed.initialize(model=model,
+                                          optimizer=torch.optim.SGD([p for p in model.parameters() if p.requires_grad],
+                                                                    lr=0.1),
+                                          model_parameters=model.parameters(),
+                                          config=_config())
+
+        # Wrapping an existing module does not add parameters, but it renames
+        # them. The checkpoint registry still has to be refreshed.
+        engine.module.fc = _PassthroughWrapper(engine.module.fc)
+
+        x = torch.randn(2, 8, dtype=dtype, device=engine.device)
+        engine(x)
+
+        names = set(engine.param_names.values())
+        assert "fc.module.weight" in names
+        assert "fc.module.bias" in names
 
     def test_frozen_late_parameter_checkpoint_round_trip(self, tmpdir):
         dtype = torch.float32

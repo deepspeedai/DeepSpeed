@@ -371,10 +371,11 @@ class DeepSpeedZeRoOffload(object):
             print_rank_0(f"Partitioned {len(pending_params)} parameters added after ZeRO-3 initialization.",
                          force=False)
 
-        # Parameters may have been renamed by wrapping existing modules. Refresh
-        # the engine's name registry so checkpoint save/load does not fail on
-        # the one-time snapshot taken at initialization.
-        if pending_params and self._param_registry_refresh is not None:
+        # Modules may have been added or renamed by wrapping existing modules,
+        # even when every parameter was already partitioned. Refresh the
+        # engine's name registry so checkpoint save/load does not use the
+        # one-time snapshot taken at initialization.
+        if self._param_registry_refresh is not None:
             self._param_registry_refresh()
 
         # Refresh the direct-parameter snapshots, including for modules that
