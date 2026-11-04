@@ -190,7 +190,7 @@ def test_continuous_graph_matches_pretrained_model_when_enabled():
     assert capture_count[0] == 1
 
 
-def test_continuous_graph_follows_in_place_weight_updates_without_recapture():
+def test_continuous_graph_recaptures_only_when_parameter_layout_changes():
     accelerator = get_accelerator()
     if not accelerator.is_available() or accelerator.create_graph() is None:
         pytest.skip("graph capture is required for continuous graph rollout coverage")
@@ -235,7 +235,7 @@ def test_continuous_graph_follows_in_place_weight_updates_without_recapture():
     accelerator.capture_to_graph = counted_capture_to_graph
     try:
         outputs = []
-        for step, prompt_ids in enumerate((short_prompts, short_prompts, long_prompts)):
+        for step, prompt_ids in enumerate((short_prompts, short_prompts, long_prompts, short_prompts)):
             if step == 1:
                 # Apply the same in-place update an optimizer step would make.
                 with torch.no_grad():
@@ -243,6 +243,11 @@ def test_continuous_graph_follows_in_place_weight_updates_without_recapture():
                         delta = torch.randn_like(eager_param) * 0.05
                         eager_param.add_(delta)
                         graph_param.add_(delta)
+            if step == 3:
+                # Same address, new strides: replay would read the old layout.
+                with torch.no_grad():
+                    eager_model.lm_head.weight.transpose_(0, 1)
+                    graph_model.lm_head.weight.transpose_(0, 1)
             request = RolloutRequest(prompt_ids, torch.ones_like(prompt_ids))
             expected = eager_rollout.generate(request, eager_sampling)
             output = graph_rollout.generate(request, graph_sampling)
@@ -253,7 +258,7 @@ def test_continuous_graph_follows_in_place_weight_updates_without_recapture():
 
     # The update must change the tokens, otherwise stale weights would also pass.
     assert not torch.equal(outputs[0], outputs[1])
-    assert capture_count[0] == 1
+    assert capture_count[0] == 2
 
     cache_bytes = graph_rollout.get_last_continuous_stats()["cache_memory_bytes"]
     allocated = accelerator.memory_allocated()

@@ -801,10 +801,13 @@ class HybridEngineRollout(RolloutEngine):
 
     @staticmethod
     def _continuous_graph_signature(module, max_batch_size, max_cache_len, device, model_dtype):
-        # Replay reads parameters by address, so in-place training updates need no
-        # recapture; only a moved parameter does. Prefill runs eagerly, so the
-        # prompt width only matters through max_cache_len.
-        parameter_signature = tuple(parameter.data_ptr() for parameter in module.parameters())
+        # Replay reads parameters through the address and layout fixed at capture, so
+        # in-place value updates need no recapture, but a moved or re-laid-out
+        # parameter does. Prefill runs eagerly, so the prompt width only matters
+        # through max_cache_len.
+        parameter_signature = tuple(
+            (parameter.data_ptr(), parameter.device, parameter.dtype, tuple(parameter.shape), parameter.stride())
+            for parameter in module.parameters())
         return (id(module), device.type, device.index, model_dtype, max_batch_size, max_cache_len, parameter_signature)
 
     @staticmethod
