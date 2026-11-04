@@ -650,6 +650,17 @@ class PartitionedParameterCoordinator:
         # are retained, while parameters that are only reused farther away are
         # released and re-gathered on demand.
         #
+        # NVMe parameters are the exception: releasing one also returns its
+        # swap-in buffer. If a skipped use is released early, an intervening
+        # parameterless backward hook can prefetch later queue entries into
+        # that buffer, so the on-demand fetch later reaches `swap_in()` with no
+        # buffer available and hits the "Not enough buffers" assertion. Keep
+        # the skip-based retention for NVMe parameters so the prefetch order
+        # stays aligned with the trace.
+        for param in iter_params(submodule_to_release, recurse=z3_leaf_module(submodule_to_release)):
+            if param.nvme_swapper is not None and self.__most_recent_step_id_param_fetched_for[param] > step_id:
+                params_to_release.discard(param.ds_id)
+
         # examine all modules within `max_reuse_dist_in_numel` of the current step,
         # if we see any of the candidate parameters to be released reoccur while
         # doing this, remove them from the set of parameters to release.
