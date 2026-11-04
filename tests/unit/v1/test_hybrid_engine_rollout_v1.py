@@ -2,16 +2,21 @@
 # DeepSpeed Team
 """Accelerator-backed v1 HybridEngineRollout tests."""
 
+import gc
 import os
 from types import SimpleNamespace
 
 import pytest
 import torch
 from transformers import PretrainedConfig
+from transformers.cache_utils import Cache
 
+import deepspeed
 from deepspeed.accelerator import get_accelerator
 from deepspeed.runtime.rollout.base import RolloutRequest, SamplingConfig
 from deepspeed.runtime.rollout.hybrid_engine_rollout import HybridEngineRollout, HybridEngineRolloutConfig
+from deepspeed.utils.static_cache import DeepSpeedStaticCache
+from unit.common import DistributedTest
 
 
 class _LocalKVModel(torch.nn.Module):
@@ -119,6 +124,74 @@ def test_continuous_generation_uses_local_kv_shape(local_heads, use_graph, monke
     assert counter["replays"] == (decode_steps if use_graph else 0)
     assert decode_steps > 0
     assert model.config.num_key_value_heads == 4
+
+
+class TestAutoTPContinuousRollout(DistributedTest):
+    world_size = 2
+
+    @pytest.mark.parametrize("use_graph", [False, True])
+    def test_matches_generate_on_sharded_llama(self, use_graph):
+        accelerator = get_accelerator()
+        if use_graph and accelerator.create_graph() is None:
+            pytest.skip("requires graph capture")
+        # Eager continuous decode passes a 2-D mask, so newer Transformers query the cache offset.
+        hf_needs_offset = hasattr(Cache, "get_query_offset")
+        cache_has_offset = hasattr(DeepSpeedStaticCache, "get_query_offset")
+        if not use_graph and hf_needs_offset and not cache_has_offset:
+            pytest.skip("DeepSpeedStaticCache lacks get_query_offset for this Transformers version")
+
+        from transformers import AutoModelForCausalLM, LlamaConfig
+
+        config = LlamaConfig(vocab_size=128,
+                             hidden_size=64,
+                             intermediate_size=128,
+                             num_hidden_layers=2,
+                             num_attention_heads=4,
+                             num_key_value_heads=4,
+                             max_position_embeddings=64)
+        torch.manual_seed(0)
+        model = AutoModelForCausalLM.from_config(config)
+        ds_config = {
+            "train_micro_batch_size_per_gpu": 1,
+            "tensor_parallel": {
+                "autotp_size": 2
+            },
+            "zero_optimization": {
+                "stage": 0
+            },
+        }
+        engine, _, _, _ = deepspeed.initialize(model=model, config=ds_config)
+        model.eval()
+        head_dim = config.hidden_size // config.num_attention_heads
+        assert model.model.layers[0].self_attn.k_proj.weight.shape[0] == config.num_key_value_heads * head_dim // 2
+
+        device = torch.device(accelerator.current_device_name())
+        prompt_ids = torch.tensor([[5, 17, 42, 9], [33, 8, 71, 2], [64, 11, 19, 90]], device=device)
+        prompt_attn = torch.ones_like(prompt_ids)
+        new_tokens = 6
+        with torch.no_grad():
+            expected = model.generate(prompt_ids,
+                                      attention_mask=prompt_attn,
+                                      max_new_tokens=new_tokens,
+                                      do_sample=False,
+                                      eos_token_id=None,
+                                      pad_token_id=0)
+
+        rollout = HybridEngineRollout(engine,
+                                      SimpleNamespace(pad_token_id=0, eos_token_id=-1),
+                                      cfg=HybridEngineRolloutConfig(use_graph_capture=use_graph))
+        try:
+            # Three requests on two slots force a refill into an already allocated cache row.
+            output = rollout.generate(
+                RolloutRequest(prompt_ids, prompt_attn),
+                SamplingConfig(max_new_tokens=new_tokens, temperature=0, continuous_batch_size=2))
+            assert torch.equal(output.input_ids, expected)
+            assert model.config.num_key_value_heads == 4
+        finally:
+            # A live graph holding NCCL work hangs process-group teardown.
+            del rollout
+            gc.collect()
+            accelerator.synchronize()
 
 
 def test_continuous_generation_profile_on_accelerator():
