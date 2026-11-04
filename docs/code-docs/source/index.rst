@@ -32,6 +32,7 @@ Checkpointing API
    :maxdepth: 2
 
    model-checkpointing
+   affine-transfer
    activation-checkpointing
 
 

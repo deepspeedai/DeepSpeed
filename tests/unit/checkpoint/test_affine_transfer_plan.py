@@ -397,13 +397,40 @@ def test_two_pieces_claiming_one_shard_range_are_refused():
         plan_transfer(replicated_map((4, 4), 1), source)
 
 
-def test_a_shard_described_with_the_wrong_rank_is_refused():
-    """A flat shard against a matrix parameter has no axis correspondence to plan along."""
-    source = ParamAffineMap(logical_shape=(4, 4),
-                            shard_shapes={0: (16, )},
-                            pieces_by_rank={0: [AffinePiece((4, 4), 0, (4, 1), 0, (4, 1), [0])]})
+def test_a_flat_shard_holds_a_dense_box_of_a_matrix():
+    """Flat storage, as ZeRO keeps it, may hold boxes of a matrix as dense runs of addresses."""
+    full = torch.arange(32.).reshape(4, 8)
+    # Columns [0, 3) then columns [3, 8), each stored densely one after the other.
+    source = ParamAffineMap(logical_shape=(4, 8),
+                            shard_shapes={0: (32, )},
+                            pieces_by_rank={
+                                0: [
+                                    AffinePiece((4, 3), 0, (8, 1), 0, (3, 1), [0]),
+                                    AffinePiece((4, 5), 3, (8, 1), 12, (5, 1), [0]),
+                                ]
+                            })
+    storage = torch.cat([full[:, :3].reshape(-1), full[:, 3:].reshape(-1)])
+    target = contiguous_split_map((4, 8), [2, 3, 3], 1)
 
-    with pytest.raises(UnsupportedLayoutError, match='number of axes'):
+    plan = plan_transfer(target, source)
+
+    written = {rank: torch.full(shape, float('nan')) for rank, shape in target.shard_shapes.items()}
+    for segment in plan.segments:
+        torch.as_strided(written[segment.target_rank], segment.shape, segment.target_strides,
+                         segment.target_offset).copy_(
+                             torch.as_strided(storage, segment.shape, segment.source_strides, segment.source_offset))
+    for rank, shard in written.items():
+        assert torch.equal(shard, target.extract(full, rank))
+
+
+@pytest.mark.parametrize('shard_shape, dest_strides', [((32, ), (8, 1)), ((2, 2, 4), (4, 1))],
+                         ids=['flat_but_not_dense', 'other_rank'])
+def test_a_shard_without_axis_correspondence_is_refused(shard_shape, dest_strides):
+    source = ParamAffineMap(logical_shape=(4, 4),
+                            shard_shapes={0: shard_shape},
+                            pieces_by_rank={0: [AffinePiece((4, 4), 0, (4, 1), 0, dest_strides, [0])]})
+
+    with pytest.raises(UnsupportedLayoutError):
         plan_transfer(replicated_map((4, 4), 1), source)
 
 
