@@ -16,6 +16,7 @@ from deepspeed.ops.triton_ops import autoep_fused_token_ops as fused_ops
 from deepspeed.utils import safe_get_full_grad
 from unit.common import DistributedTest
 from unit.v1.moe.autoep_test_utils import (
+    MockMoEOnlyTransformer,
     MockMoETransformer,
     engine_input_dtype,
     mixed_precision_config,
@@ -71,6 +72,41 @@ def _build_engine(combine_impl, ep_size, reference_state, seed):
     model.load_state_dict(reference_state)
     engine, _, _, _ = deepspeed.initialize(model=model, config=_config(combine_impl, ep_size))
     return engine
+
+
+def _build_folded_engine(combine_impl, zero_stage, reference_state, seed):
+    # FP32: the default folded restore rounds each product and each top-k addition to the
+    # activation dtype, so in fp16 it differs from the FP32 fused sum by about one unit in the
+    # last place of the MoE output, more than PARITY_TOLERANCE allows after the LM head.
+    config = {key: value for key, value in _config(combine_impl, 2).items() if key not in ("fp16", "bf16")}
+    # The per-expert loop does not depend on which dtypes this torch's grouped GEMM accepts.
+    config["expert_parallel"]["use_grouped_mm"] = False
+    config["zero_optimization"] = {"stage": zero_stage}
+    # Keep the dense weights whole so that only the MoE dispatch and restore are folded.
+    config["tensor_parallel"] = {
+        "autotp_size": 2,
+        "partition_config": {
+            "use_default_specs": False,
+            "layer_specs": [{
+                "patterns": [".*\\.weight$"],
+                "partition_type": "skip",
+            }],
+        },
+    }
+    seed_everything(seed)
+    model = _folded_model()
+    model.load_state_dict(reference_state)
+    engine, _, _, _ = deepspeed.initialize(model=model, config=config)
+    return engine
+
+
+def _folded_model():
+    # No attention: the key bias has a zero true gradient, and Adam's first step turns its
+    # rounding noise into +/- lr, which no parameter-update tolerance can compare.
+    return MockMoEOnlyTransformer(num_layers=2,
+                                  num_experts=NUM_EXPERTS,
+                                  hidden_size=HIDDEN_SIZE,
+                                  intermediate_size=2 * HIDDEN_SIZE)
 
 
 def _checkpoint_moe_layers(engine):
@@ -192,5 +228,30 @@ class TestAutoEPFusedParityLocalExperts(DistributedTest):
         fused = _take_one_step(_build_engine("fused_weighted_sum", 1, reference_state, seed),
                                seed,
                                checkpoint_activations=False)
+
+        _assert_step_matches(fused, eager)
+
+
+class TestAutoEPFusedParityFoldedTensorParallel(DistributedTest):
+    world_size = 4
+
+    @pytest.mark.parametrize("zero_stage", [0, 2])
+    @pytest.mark.parametrize("checkpoint_activations", [True, False])
+    def test_fused_matches_eager_with_autotp_folding(self, zero_stage, checkpoint_activations):
+        seed = 2468
+        seed_everything(seed)
+        reference_state = _folded_model().state_dict()
+
+        eager_engine = _build_folded_engine("weighted_sum", zero_stage, reference_state, seed)
+        eager = _take_one_step(eager_engine, seed, checkpoint_activations=checkpoint_activations)
+
+        fused_engine = _build_folded_engine("fused_weighted_sum", zero_stage, reference_state, seed)
+        moe_layers = [module for module in fused_engine.module.modules() if isinstance(module, AutoEPMoELayer)]
+        assert moe_layers
+        assert all(layer.combine_impl == "fused_weighted_sum"
+                   for layer in moe_layers), "the fused reduction was not actually selected"
+        assert all(layer.folding_group_handles is not None and layer.folding_group_handles.spec.tp_size == 2
+                   for layer in moe_layers), "the MoE layers were not folded with tensor parallelism"
+        fused = _take_one_step(fused_engine, seed, checkpoint_activations=checkpoint_activations)
 
         _assert_step_matches(fused, eager)

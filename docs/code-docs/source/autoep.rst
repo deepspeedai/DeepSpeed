@@ -498,11 +498,17 @@ existing numerical tolerances, not bitwise unchanged. Only the forward
 reduction changes: the backward, collectives, router, grouped GEMM and
 expert-major reorder are untouched.
 
+With AutoEP+AutoTP folding (``tensor_parallel.autotp_size`` greater than 1),
+each tensor-parallel peer sends only part of the routed assignments to the
+experts. The restore first all-gathers the rows, their token and top-k slot,
+and their routing weights over the tensor-parallel group, as the default
+restore does, and then reduces the gathered rows with the same kernel. The
+default folded restore multiplies and adds the rows in the activation dtype,
+one top-k slot at a time; the fused restore does both in FP32.
+
 ``"fused_weighted_sum"`` is rejected, rather than quietly ignored, when it would
 have nothing to replace or would change semantics:
 
-- ``tensor_parallel.autotp_size`` greater than 1, which uses folded tensor
-  parallelism and restores combined tokens from assignment metadata instead;
 - ``expert_tensor_parallel_size`` greater than 1;
 - ``comm_backend="deepep"`` with expert parallelism, because DeepEP already
   restores and reduces its routed rows;

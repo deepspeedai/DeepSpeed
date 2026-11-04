@@ -8,6 +8,7 @@ import pytest
 import torch
 
 import deepspeed.comm as dist
+from deepspeed.accelerator import get_accelerator
 from deepspeed.module_inject.auto_ep_layer import combine_from_routed
 from deepspeed.moe.ep_tp_dispatch import (
     RoutedAssignmentPayload,
@@ -16,8 +17,11 @@ from deepspeed.moe.ep_tp_dispatch import (
     dispatch_counters,
     partition_assignments,
     restore_combined,
+    restore_combined_fused,
 )
 import deepspeed.moe.ep_tp_dispatch as dispatch
+from deepspeed.ops.triton_ops import autoep_fused_token_ops as fused_ops
+from unit.common import DistributedTest
 from unit.v1.moe.autoep_test_utils import run_cpu_gloo_test
 
 
@@ -220,6 +224,102 @@ def test_restore_coverage_assertion_detects_missing_assignment():
 
     with pytest.raises(RuntimeError, match="restore coverage mismatch"):
         restore_combined(values, ctx, tp_group=None, validate_coverage=True)
+
+
+def test_restore_combined_fused_rejects_a_missing_assignment():
+    payload, _, _ = _tp_payload_for_backward_parity()
+    _, ctx = partition_assignments(payload, tp_group=None, tp_rank=0, tp_size=1)
+    ctx.local_indices = ctx.local_indices[:-1]
+    values = torch.ones((ctx.local_indices.numel(), 3), dtype=torch.float32)
+
+    # The kernel would read an unset source row for the missing (token, slot).
+    with pytest.raises(RuntimeError, match='combine_impl="fused_weighted_sum"'):
+        restore_combined_fused(values, ctx, tp_group=None, top_k=2)
+
+
+def _fused_restore_available():
+    accelerator = get_accelerator()
+    return accelerator.is_available() and accelerator.device_name().startswith("cuda") and fused_ops.is_available()
+
+
+def _routed_payload(top_scores, selected_experts):
+    """The folded payload the AutoEP layer builds for score_apply="post"."""
+    num_tokens, top_k = selected_experts.shape
+    token_indices_sorted = torch.argsort(selected_experts.reshape(-1), stable=True)
+    expert_indices = selected_experts.reshape(-1).index_select(0, token_indices_sorted)
+    no_assignments = torch.zeros_like(expert_indices, dtype=torch.bool)
+    payload = RoutedAssignmentPayload(
+        token_indices=token_indices_sorted // top_k,
+        expert_indices=expert_indices,
+        assignment_indices=assignment_ordinals_by_expert(expert_indices),
+        capacity_slots=token_indices_sorted % top_k,
+        combine_weights=top_scores.reshape(-1).index_select(0, token_indices_sorted),
+        drop_mask=no_assignments,
+        pad_mask=no_assignments.clone(),
+        input_splits=[expert_indices.numel()],
+        output_splits=[expert_indices.numel()],
+        extra={
+            "destination_ranks": torch.zeros_like(expert_indices),
+            "num_tokens": torch.tensor(num_tokens, dtype=torch.long),
+        },
+    )
+    return payload, token_indices_sorted
+
+
+@pytest.mark.skipif(not _fused_restore_available(), reason="the fused weighted restore needs CUDA and Triton")
+class TestRestoreCombinedFusedTensorParallel(DistributedTest):
+    world_size = 2
+
+    @pytest.mark.parametrize("row_dtype", [torch.float32, torch.bfloat16])
+    def test_matches_the_unpartitioned_fused_restore(self, row_dtype):
+        device = get_accelerator().current_device_name()
+        tp_group = dist.get_world_group()
+        tp_rank = dist.get_rank()
+        num_tokens, top_k, num_experts, hidden = 48, 4, 8, 130
+        generator = torch.Generator(device=device).manual_seed(20261008)
+        router_logits = torch.rand(num_tokens, num_experts, device=device, generator=generator)
+        selected_experts = router_logits.argsort(dim=1)[:, :top_k]
+        top_scores = torch.rand(num_tokens, top_k, device=device, generator=generator)
+        rows = torch.randn(num_tokens * top_k, hidden, device=device, dtype=row_dtype, generator=generator)
+        # Multiples of 1/8, so adding the peers' upstream gradients is exact in every row dtype.
+        upstream = torch.randint(-4, 5, (num_tokens, hidden), device=device, generator=generator).to(row_dtype) / 8
+
+        actual_rows = rows.clone().requires_grad_(True)
+        actual_scores = top_scores.clone().requires_grad_(True)
+        payload, token_indices_sorted = _routed_payload(actual_scores, selected_experts)
+        _, ctx = partition_assignments(payload, tp_group=tp_group, tp_rank=tp_rank, tp_size=self.world_size)
+        # Odd per-expert counts give the peers different row counts, which the padded gather must handle.
+        rows_per_peer = torch.bincount(payload.assignment_indices % self.world_size, minlength=self.world_size)
+        assert rows_per_peer.unique().numel() > 1
+
+        restored = restore_combined_fused(actual_rows.index_select(0, ctx.local_indices),
+                                          ctx,
+                                          tp_group=tp_group,
+                                          top_k=top_k,
+                                          validate_coverage=True)
+        # Each peer back-propagates a different gradient through its replicated copy of the output.
+        restored.backward(upstream * (tp_rank + 1))
+
+        expected_rows = rows.clone().requires_grad_(True)
+        expected_scores = top_scores.clone().requires_grad_(True)
+        expected = fused_ops.fused_weighted_restore(expected_rows,
+                                                    top_scores=expected_scores,
+                                                    token_indices_sorted=token_indices_sorted,
+                                                    top_k=top_k,
+                                                    shape=(1, num_tokens, hidden)).reshape(num_tokens, hidden)
+        expected.backward(upstream * sum(peer + 1 for peer in range(self.world_size)))
+
+        # Same kernel, same rows, same FP32 scores, same slot order.
+        assert torch.equal(restored, expected.detach())
+
+        row_grad = actual_rows.grad.detach().clone()
+        score_grad = actual_scores.grad.detach().clone()
+        dist.all_reduce(row_grad, group=tp_group)
+        dist.all_reduce(score_grad, group=tp_group)
+        row_tolerance = {"rtol": 1e-5, "atol": 1e-6} if row_dtype == torch.float32 else {}
+        torch.testing.assert_close(row_grad, expected_rows.grad, **row_tolerance)
+        # Only the order of the hidden reduction differs in the FP32 score gradients.
+        torch.testing.assert_close(score_grad, expected_scores.grad, rtol=1e-4, atol=1e-5)
 
 
 def test_tp_payload_consistency_detects_divergent_large_payload(monkeypatch):

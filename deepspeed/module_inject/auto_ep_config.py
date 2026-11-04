@@ -136,11 +136,6 @@ def validate_autoep_config(
 
     # Reject configurations that would bypass the requested fused reduction.
     if config.combine_impl == "fused_weighted_sum":
-        if tp_size > 1:
-            raise ValueError('combine_impl="fused_weighted_sum" does not support folded tensor parallelism '
-                             f"(tensor_parallel.autotp_size={tp_size}), which restores combined tokens from "
-                             "assignment metadata instead of the weighted reduction it implements. Set "
-                             'tensor_parallel.autotp_size to 1, or leave combine_impl unset.')
         if config.expert_tensor_parallel_size > 1:
             raise ValueError('combine_impl="fused_weighted_sum" requires expert_tensor_parallel_size=1, but got '
                              f"{config.expert_tensor_parallel_size}. Set expert_tensor_parallel_size to 1, or leave "
