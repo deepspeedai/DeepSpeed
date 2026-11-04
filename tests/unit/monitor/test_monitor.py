@@ -3,10 +3,13 @@
 
 # DeepSpeed Team
 
+import csv
+import pytest
+
 from deepspeed.monitor.tensorboard import TensorBoardMonitor
 from deepspeed.monitor.wandb import WandbMonitor
 from deepspeed.monitor.csv_monitor import csvMonitor
-from deepspeed.monitor.config import DeepSpeedMonitorConfig
+from deepspeed.monitor.config import DeepSpeedMonitorConfig, CSVConfig
 from deepspeed.monitor.comet import CometMonitor
 
 from unit.common import DistributedTest
@@ -101,6 +104,38 @@ class TestCSVMonitor(DistributedTest):
         assert csv_monitor.enabled == defaults.enabled
         assert csv_monitor.output_path == defaults.output_path
         assert csv_monitor.job_name == defaults.job_name
+
+
+class TestCSVMonitorFiles(DistributedTest):
+    world_size = 1
+    requires_cuda_env = False
+
+    @pytest.mark.parametrize("precreate", [False, True])
+    def test_header_for_new_or_empty_file(self, tmp_path, precreate):
+        config = CSVConfig(enabled=True, output_path=str(tmp_path), job_name="test")
+        monitor = csvMonitor(config)
+        output = tmp_path / "test" / "Train_Samples_train_loss.csv"
+        if precreate:
+            output.touch()
+
+        monitor.write_events([("Train/Samples/train_loss", 1.5, 1)])
+        monitor.write_events([("Train/Samples/train_loss", 1.0, 2)])
+
+        with output.open() as stream:
+            assert list(csv.reader(stream)) == [["step", "train_loss"], ["1", "1.5"], ["2", "1.0"]]
+
+    def test_resume_preserves_rows_without_repeating_header(self, tmp_path):
+        config = CSVConfig(enabled=True, output_path=str(tmp_path), job_name="test")
+        monitor = csvMonitor(config)
+        monitor.write_events([("Train/Samples/train_loss", 1.5, 1)])
+
+        resumed_monitor = csvMonitor(config)
+        resumed_monitor.write_events([("Train/Samples/train_loss", 1.0, 2)])
+        resumed_monitor.write_events([("Train/Samples/train_loss", 0.5, 3)])
+
+        output = tmp_path / "test" / "Train_Samples_train_loss.csv"
+        with output.open() as stream:
+            assert list(csv.reader(stream)) == [["step", "train_loss"], ["1", "1.5"], ["2", "1.0"], ["3", "0.5"]]
 
 
 class TestCometMonitor(DistributedTest):
