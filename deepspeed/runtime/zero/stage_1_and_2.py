@@ -9,7 +9,7 @@ from deepspeed.comm import pg_utils
 from packaging import version as pkg_version
 from collections import OrderedDict, defaultdict
 from dataclasses import dataclass, field
-from typing import List, Dict, Set
+from typing import List, Dict, Set, Tuple
 
 from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
 from deepspeed.runtime.zenflow import zenflow_utils
@@ -136,6 +136,55 @@ class IPGBucket:
         self.has_moe_params = False
         self.ready_events.clear()
         self.copy_streams.clear()
+
+
+@dataclass(frozen=True)
+class ZeROFlatParamMetadata:
+    """Describes one original parameter inside a ZeRO-1/2 flat partition.
+
+    ``flat_offset`` is relative to the start of the padded flat parameter group.
+    ``local_offset`` is relative to the local partition exposed to the optimizer,
+    and is ``-1`` when the parameter does not overlap this rank's partition.
+    """
+    original_index: int
+    flat_index: int
+    shape: torch.Size
+    numel: int
+    flat_offset: int
+    padding: int
+    local_offset: int
+    local_numel: int
+    requires_grad: bool
+
+
+@dataclass(frozen=True)
+class ZeROFlatPartitionMetadata:
+    """Original parameter layout behind a ZeRO-1/2 optimizer flat partition.
+
+    ZeRO-1/2 replace each optimizer parameter group with one flat FP32 master
+    partition. This metadata lets custom optimizers recover the original tensor
+    shapes, boundaries, and global offsets without changing the flat layout.
+    """
+    group_index: int
+    global_numel: int
+    partition_start: int
+    partition_numel: int
+    dp_group: object
+    dp_world_size: int
+    params: Tuple[ZeROFlatParamMetadata, ...]
+
+
+def get_zero_flat_partition_metadata(param):
+    """Return the original-layout metadata for a ZeRO-1/2 flat optimizer parameter.
+
+    Args:
+        param (``torch.Tensor``): A parameter from a ZeRO optimizer param group.
+
+    Returns:
+        ``ZeROFlatPartitionMetadata`` or ``None`` if ``param`` is not a ZeRO-1/2
+        flat partition.
+    """
+    return getattr(param, "ds_zero_flat_partition_metadata", None)
 
 
 class GradPartitionBufferGroup(list):
@@ -573,6 +622,41 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                     self.param_buffer_of_bit16_for_cpu_offload_groups.append(temp_pinned)
                 else:
                     self.param_buffer_of_bit16_for_cpu_offload_groups.append(temp_buffer_bit16)
+
+            # Preserve the original parameter layout on the flat optimizer tensor. A
+            # custom optimizer receives only this local partition, so without this
+            # metadata the original shapes, tensor boundaries, and global offsets are
+            # unrecoverable.
+            partition_start = left_boundary
+            partition_end = partition_start + curr_partition_size
+            flat_params = []
+            for flat_index, param in enumerate(round_robin_tensors):
+                meta = meta_tensors[flat_index]
+                offset = param_offsets[flat_index]
+                numel = meta.numel()
+                overlap_start = max(offset, partition_start)
+                overlap_end = min(offset + numel, partition_end)
+                local_numel = max(0, overlap_end - overlap_start)
+                local_offset = overlap_start - partition_start if local_numel else -1
+                flat_params.append(
+                    ZeROFlatParamMetadata(original_index=round_robin_indices[flat_index],
+                                          flat_index=flat_index,
+                                          shape=meta.shape,
+                                          numel=numel,
+                                          flat_offset=offset,
+                                          padding=param_padding[flat_index],
+                                          local_offset=local_offset,
+                                          local_numel=local_numel,
+                                          requires_grad=param.requires_grad))
+            weights_partition.ds_zero_flat_partition = True
+            weights_partition.ds_zero_flat_partition_metadata = ZeROFlatPartitionMetadata(
+                group_index=i,
+                global_numel=self.bit16_groups_flat[i].numel(),
+                partition_start=partition_start,
+                partition_numel=curr_partition_size,
+                dp_group=self.real_dp_process_group[i],
+                dp_world_size=dist.get_world_size(group=self.real_dp_process_group[i]),
+                params=tuple(flat_params))
 
             self.single_partition_of_fp32_groups.append(weights_partition)
 
