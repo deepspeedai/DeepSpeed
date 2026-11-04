@@ -25,12 +25,10 @@ import torch
 from deepspeed.accelerator import get_accelerator
 
 from deepspeed.module_inject.kernel_reference import decode_attn as ref_decode_attn
-from deepspeed.module_inject.kernel_reference import dual_gemv_silu_mul as ref_dual_gemv
 from deepspeed.module_inject.kernel_reference import fused_add_norm as ref_add_norm
 from deepspeed.module_inject.kernel_reference import gdn_gates as ref_gdn_gates
 from deepspeed.module_inject.kernel_reference import gated_norm as ref_gated_norm
-from deepspeed.module_inject.kernel_reference import gdn_input_proj as ref_gdn_proj
-from deepspeed.module_inject.kernel_reference import triple_gemv as ref_triple_gemv
+from deepspeed.module_inject.kernel_reference import grouped_linear as ref_grouped_linear
 
 DEV = get_accelerator().device_name()
 
@@ -52,6 +50,11 @@ def _kernel_op_available() -> bool:
 
 GPU_AVAILABLE = _kernel_op_available()
 
+
+def _as_concat(parts):
+    """Normalize grouped_linear output: some routing paths return
+    concatenated (list of 1), others separate (list of n)."""
+    return torch.cat(parts, dim=-1) if len(parts) > 1 else parts[0]
 
 def _op():
     from deepspeed.ops.module_inject import get_fused_glu_op
@@ -230,15 +233,14 @@ class TestKernelReferenceConsistency:
         uw = _rand_bf16(384, 256)
         out = torch.empty(384, dtype=torch.bfloat16, device=DEV)
         out = _op().grouped_linear(h, [gw, uw], True)[0]
-        expected = ref_dual_gemv(h.float(), gw.float(), uw.float())
+        expected = ref_grouped_linear(h.float(), [gw.float(), uw.float()], True)[0]
         torch.testing.assert_close(out.float(), expected, atol=5e-2, rtol=5e-2)
 
     def test_quad_gemv(self):
         h = _rand_bf16(128)
         ws = [_rand_bf16(rows, 128) for rows in (96, 48, 6, 6)]
-        parts = _op().grouped_linear(h, list(ws), False)
-        cat = torch.cat(parts, dim=-1)
-        expected = ref_gdn_proj(h.float(), *[w.float() for w in ws])
+        cat = _as_concat(_op().grouped_linear(h, list(ws), False))
+        expected = torch.cat(ref_grouped_linear(h.float(), [w.float() for w in ws], False), dim=-1)
         torch.testing.assert_close(cat.float(), expected, atol=5e-2, rtol=5e-2)
 
     def test_gdn_gates(self):
@@ -256,7 +258,7 @@ class TestKernelReferenceConsistency:
         h = _rand_bf16(128)
         qw, kw, vw = (_rand_bf16(64, 128) for _ in range(3))
         q, k, v = _op().grouped_linear(h, [qw, kw, vw], False)
-        ref_q, ref_k, ref_v = ref_triple_gemv(h.float(), qw.float(), kw.float(), vw.float())
+        ref_q, ref_k, ref_v = ref_grouped_linear(h.float(), [qw.float(), kw.float(), vw.float()], False)
         for got, exp in ((q, ref_q), (k, ref_k), (v, ref_v)):
             torch.testing.assert_close(got.float(), exp, atol=5e-2, rtol=5e-2)
 
@@ -366,7 +368,7 @@ class TestInjectionInvariants:
         h = torch.randn(1, 4, 32, dtype=torch.bfloat16)
         ws = [torch.randn(r, 32, dtype=torch.bfloat16) for r in (40, 16, 4, 4)]
         got = GDNInputProj.apply(h, *ws, None)
-        expected = ref_gdn_proj(h, *ws)
+        expected = torch.cat(ref_grouped_linear(h.float(), [w.float() for w in ws], False), dim=-1)
         torch.testing.assert_close(got.float(), expected.float(), atol=1e-2, rtol=1e-2)
 
     def test_composite_backward_scatters_to_original_weights(self):
@@ -455,25 +457,24 @@ class TestRolloutTrainRollout:
             K, fq, fk, fv = 128, 64, 32, 32
             x = _rand_bf16(M, K)
             qw, kw, vw = _rand_bf16(fq, K), _rand_bf16(fk, K), _rand_bf16(fv, K)
-            rq, rk, rv = ref.triple_gemm(x.float(), qw.float(), kw.float(), vw.float())
+            rq, rk, rv = ref.grouped_linear(x.float(), [qw.float(), kw.float(), vw.float()], False)
             q_out, k_out, v_out = _op().grouped_linear(x, [qw, kw, vw], False)
             torch.testing.assert_close(q_out.float(), rq, atol=5e-2, rtol=5e-2)
             torch.testing.assert_close(k_out.float(), rk, atol=5e-2, rtol=5e-2)
             torch.testing.assert_close(v_out.float(), rv, atol=5e-2, rtol=5e-2)
 
             gz_w, b_w, a_w = _rand_bf16(48, K), _rand_bf16(16, K), _rand_bf16(16, K)
-            cat = _op().grouped_linear(x, [qw, gz_w, b_w, a_w], False)[0]
-            torch.testing.assert_close(cat.float(),
-                                       ref.quad_gemm(x.float(), qw.float(), gz_w.float(), b_w.float(), a_w.float()),
-                                       atol=5e-2,
-                                       rtol=5e-2)
+            w4 = [qw, gz_w, b_w, a_w]
+            parts = _op().grouped_linear(x, w4, False)
+            cat = torch.cat(parts, dim=-1) if len(parts) > 1 else parts[0]
+            ref_parts = ref.grouped_linear(x.float(), [w.float() for w in w4], False)
+            ref_cat = torch.cat(ref_parts, dim=-1)
+            torch.testing.assert_close(cat.float(), ref_cat, atol=5e-2, rtol=5e-2)
 
             gw, uw = _rand_bf16(fq, K), _rand_bf16(fq, K)
             glu = _op().grouped_linear(x, [gw, uw], True)[0]
-            torch.testing.assert_close(glu.float(),
-                                       ref.dual_gemm_silu_mul(x.float(), gw.float(), uw.float()),
-                                       atol=5e-2,
-                                       rtol=5e-2)
+            ref_glu = ref.grouped_linear(x.float(), [gw.float(), uw.float()], True)[0]
+            torch.testing.assert_close(glu.float(), ref_glu, atol=5e-2, rtol=5e-2)
 
     def test_grouped_gemm_rejects_out_of_range(self):
         import pytest as _pytest
@@ -493,6 +494,7 @@ class TestRolloutTrainRollout:
             x = _rand_bf16(M, K) if M > 1 else _rand_bf16(K)
             w1 = _rand_bf16(64, K)
             out = op.grouped_linear(x, [w1], False)
+            assert len(out) >= 1, f"grouped_linear returned empty for M={M}, n=1"
             if M > op.capabilities()["max_grouped_batch"]:
                 # composite route: bf16 matmul (same rounding as the route)
                 exp = torch.matmul(x.reshape(-1, K) if M > 1 else x, w1.t())
@@ -507,11 +509,10 @@ class TestRolloutTrainRollout:
             # eager semantics); the fp32 reference skips that rounding, so
             # anchor large batches on the same-dtype reference instead
             if M > op.capabilities()["max_grouped_batch"]:
-                ref_glu = ref.dual_gemm_silu_mul(x if M > 1 else x, gw, uw)
+                ref_glu = ref.grouped_linear(x, [gw, uw], True)[0]
                 torch.testing.assert_close(out[0].float(), ref_glu.float().reshape(out[0].shape), atol=5e-2, rtol=5e-2)
             else:
-                ref_glu = ref.dual_gemm_silu_mul(x.float().reshape(-1, K) if M > 1 else x.float(), gw.float(),
-                                                 uw.float())
+                ref_glu = ref.grouped_linear(x.float().reshape(-1, K) if M > 1 else x.float(), [gw.float(), uw.float()], True)[0]
                 torch.testing.assert_close(out[0].float(), ref_glu.reshape(out[0].shape), atol=5e-2, rtol=5e-2)
 
             kw, vw = _rand_bf16(32, K), _rand_bf16(32, K)
@@ -523,13 +524,15 @@ class TestRolloutTrainRollout:
             torch.testing.assert_close(q.float(), rq.float().reshape(q.shape), atol=5e-2, rtol=5e-2)
 
             z, b, a = _rand_bf16(48, K), _rand_bf16(16, K), _rand_bf16(16, K)
-            cat = op.grouped_linear(x, [w1, z, b, a], False)[0]
+            q_parts = op.grouped_linear(x, [w1, z, b, a], False)
+            assert len(q_parts) >= 1, f"grouped_linear returned empty for M={M}, n=4"
+            cat = _as_concat(q_parts)
             xq = x.reshape(-1, K) if M > 1 else x
             if M > op.capabilities()["max_grouped_batch"]:
-                rc = ref.quad_gemm(xq, w1, z, b, a).float()  # composite: bf16 matmul
+                rc = torch.cat(ref.grouped_linear(xq, [w1, z, b, a], False), dim=-1).float()
                 torch.testing.assert_close(cat.float(), rc.reshape(cat.shape), atol=5e-2, rtol=5e-2)
             else:
-                rc = ref.quad_gemm(xq.float(), w1.float(), z.float(), b.float(), a.float())
+                rc = torch.cat(ref.grouped_linear(xq.float(), [w1.float(), z.float(), b.float(), a.float()], False), dim=-1)
                 torch.testing.assert_close(cat.float(), rc.reshape(cat.shape), atol=5e-2, rtol=5e-2)
         caps = op.capabilities()
         assert caps["max_grouped_batch"] >= 32 and "bf16" in list(caps["dtypes"])

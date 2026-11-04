@@ -148,8 +148,8 @@ class DualWeightGluGEMV(torch.autograd.Function):
                 # Route through grouped_linear: the backend dispatcher owns
                 # the WMMA-vs-composite crossover (arch-adaptive since loop 2)
                 return kernel_op.grouped_linear(hidden, [gate_w, up_w], True)[0]
-        from deepspeed.module_inject.kernel_reference import dual_gemv_silu_mul
-        return dual_gemv_silu_mul(hidden, gate_w, up_w)
+        from deepspeed.module_inject.kernel_reference import grouped_linear
+        return grouped_linear(hidden, [gate_w, up_w], True)[0]
 
     @staticmethod
     def backward(ctx, grad_out):
@@ -198,8 +198,9 @@ class GDNInputProj(torch.autograd.Function):
                 return out.view(hidden.shape[0], 1, -1)
             if hidden.dim() == 2:
                 return kernel_op.grouped_linear(hidden, [w_qkv, w_z, w_b, w_a], False)[0]
-        from deepspeed.module_inject.kernel_reference import gdn_input_proj
-        return gdn_input_proj(hidden, w_qkv, w_z, w_b, w_a)
+        from deepspeed.module_inject.kernel_reference import grouped_linear
+        parts = grouped_linear(hidden, [w_qkv, w_z, w_b, w_a], False)
+        return torch.cat(parts, dim=-1) if len(parts) > 1 else parts[0]
 
     @classmethod
     def apply6(cls, x, q_w, k_w, v_w, z_w, b_w, a_w, kernel_op):
@@ -263,8 +264,9 @@ def _dual_weight_glu_forward(self, input):
         return self.down_proj(out.reshape(*input.shape[:-1], -1))
     # other batches or no kernel: the composite reference (gradients also
     # correct there); measured faster than the batched GEMV kernels
-    from deepspeed.module_inject.kernel_reference import dual_gemv_silu_mul
-    return self.down_proj(dual_gemv_silu_mul(input, self.gate_proj.weight, self.up_proj.weight))
+    from deepspeed.module_inject.kernel_reference import grouped_linear
+    glu = grouped_linear(input, [self.gate_proj.weight, self.up_proj.weight], True)[0]
+    return self.down_proj(glu)
 
 
 @dataclass

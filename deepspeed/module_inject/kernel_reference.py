@@ -3,12 +3,12 @@
 """Reference implementations (executable specifications) for segment-KI kernels.
 
 Each function here defines the mathematically correct output for its
-corresponding custom kernel.  Custom kernels (CUDA today, SYCL/XPU in the
-future) must produce results equivalent to these functions within bf16
-tolerance.  Three roles in one:
+corresponding interface method (the m.def entries on the loaded extension).
+Custom kernels (CUDA today, SYCL/XPU in the future) must produce results
+equivalent to these functions within bf16 tolerance. Three roles in one:
 
 1. **Specification**: an agent porting kernels to a new backend reads these
-   to understand what the kernel must compute.
+   to understand what each interface method must compute.
 2. **Runtime fallback**: the forward paths in segment_ki call these when no
    custom kernel is available (e.g. CPU-only, XPU without compiled kernels).
 3. **Test oracle**: unit tests compare custom kernel output against these
@@ -24,15 +24,20 @@ import torch
 import torch.nn.functional as F
 
 
-def dual_gemv_silu_mul(hidden, gate_w, up_w):
-    """silu(hidden @ gate_w.T) * (hidden @ up_w.T).
+def grouped_linear(x, weights, glu_epilogue=False):
+    """Unified projection: matmul against each weight, optional GLU epilogue.
 
-    Reads gate and up weight matrices directly (no concatenation), so
-    gradients flow to the original Parameters.  Works for any batch size.
+    The portable interface's single entry point for all GEMV/GEMM paths
+    (flat single-row, small-batch grouped, large-batch composite). Returns
+    a list of per-weight outputs; the GLU variant folds silu(gate)*up into
+    the first output.
     """
-    gate_out = torch.matmul(hidden, gate_w.t())
-    up_out = torch.matmul(hidden, up_w.t())
-    return F.silu(gate_out) * up_out
+    outs = [F.linear(x, w) for w in weights]
+    if glu_epilogue:
+        gate = outs[0].float()
+        up = outs[1].float()
+        outs = [(gate / (1.0 + torch.exp(-gate)) * up).to(x.dtype)]
+    return outs
 
 
 def gdn_gates(a, b, a_log, dt_bias):
@@ -40,43 +45,6 @@ def gdn_gates(a, b, a_log, dt_bias):
     beta = torch.sigmoid(b)
     g = -torch.exp(a_log.float()) * F.softplus(a.float() + dt_bias.float())
     return beta, g.to(b.dtype)
-
-
-def gdn_input_proj(hidden, w_qkv, w_z, w_b, w_a):
-    """GDN input projections: cat(h @ Wqkv.T, h @ Wz.T, h @ Wb.T, h @ Wa.T)."""
-    parts = [torch.matmul(hidden, w.t()) for w in (w_qkv, w_z, w_b, w_a)]
-    return torch.cat(parts, dim=-1)
-
-
-def triple_gemv(hidden, q_w, k_w, v_w):
-    """QKV projection: (hidden @ q_w.T, hidden @ k_w.T, hidden @ v_w.T).
-
-    Shape-agnostic: the spec for both the b=1 triple_gemv kernel and the
-    batched triple_gemm grouped kernel (same math, any input shape)."""
-    q = torch.matmul(hidden, q_w.t())
-    k = torch.matmul(hidden, k_w.t())
-    v = torch.matmul(hidden, v_w.t())
-    return q, k, v
-
-
-# Batched aliases — explicit specs for the grouped-GEMM kernels so the
-# kernel-to-reference mapping is nameable. They delegate to the
-# shape-agnostic originals above (identical math).
-
-
-def triple_gemm(x, q_w, k_w, v_w):
-    """Spec for the triple_gemm kernel (decode batches 16..32)."""
-    return triple_gemv(x, q_w, k_w, v_w)
-
-
-def quad_gemm(x, w_qkv, w_z, w_b, w_a):
-    """Spec for the quad_gemm kernel: concatenated GDN input projections."""
-    return gdn_input_proj(x, w_qkv, w_z, w_b, w_a)
-
-
-def dual_gemm_silu_mul(x, gate_w, up_w):
-    """Spec for the dual_gemm_silu_mul kernel: silu(x@g.T) * (x@u.T)."""
-    return dual_gemv_silu_mul(x, gate_w, up_w)
 
 
 def decode_attn(q, K, V, pos):
