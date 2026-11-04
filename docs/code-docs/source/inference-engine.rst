@@ -160,8 +160,8 @@ uses a fixed ``continuous_batch_size`` layout, keeps every KV-cache row and
 decode tensor at a stable address, and masks inactive rows while the scheduler
 refills them. Graph state is reused across rollout calls with the same decode
 batch size, cache length, device and dtype, and is rebuilt when one of these
-changes or when a model parameter is replaced by a tensor at a different
-address. Replays read parameters in place, so in-place optimizer updates between
+changes or when a model parameter changes address, shape, strides, dtype or
+device. Replays read parameters in place, so in-place optimizer updates between
 rollouts are picked up without recapturing. By default, the cache length is the
 prompt width plus ``max_new_tokens``. Set ``continuous_cache_capacity`` to reuse
 one graph across prompt widths that fit within that capacity.
