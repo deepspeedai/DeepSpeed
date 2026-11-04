@@ -285,3 +285,219 @@ def test_is_pinned_handles_storageless_tensors(monkeypatch):
 
     meta_tensor = torch.zeros(2, 8, device="meta")
     assert accel.is_pinned(meta_tensor) is False
+
+
+GiB = 1 << 30
+
+
+@pytest.fixture
+def cpu_cgroup(monkeypatch, tmp_path):
+    """Fake cgroup tree and /proc/self/cgroup for the CPU accelerator's memory queries."""
+    from deepspeed.accelerator import cpu_accelerator as cpu_module
+    root = tmp_path / "cgroup"
+    proc_self_cgroup = tmp_path / "proc_self_cgroup"
+    monkeypatch.setattr(cpu_module, "_CGROUP_ROOT", str(root))
+    monkeypatch.setattr(cpu_module, "_PROC_SELF_CGROUP", str(proc_self_cgroup))
+    # No mountinfo file: the hierarchy is assumed at _CGROUP_ROOT, mounted at "/".
+    monkeypatch.setattr(cpu_module, "_PROC_SELF_MOUNTINFO", str(tmp_path / "no_mountinfo"))
+    monkeypatch.setattr(cpu_module.sys, "platform", "linux")
+    monkeypatch.setenv("DS_CPU_RESPECT_CGROUP_MEMORY", "1")
+
+    def write(cgroup_line, files):
+        proc_self_cgroup.write_text(cgroup_line + "\n")
+        for rel_path, content in files.items():
+            (root / rel_path).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel_path).write_text(content + "\n")
+        return cpu_module.CPU_Accelerator()
+
+    return write
+
+
+def test_cpu_memory_uses_limit_on_parent_cgroup(cpu_cgroup):
+    """Kubernetes sets the pod limit on the parent cgroup; the container's own memory.max is 'max'."""
+    import psutil
+    accel = cpu_cgroup(
+        "0::/pod/ctr", {
+            "memory.max": "max",
+            "pod/memory.max": str(GiB),
+            "pod/memory.current": str(GiB // 2),
+            "pod/memory.stat": f"anon {GiB // 4}\ninactive_file {GiB // 4}",
+            "pod/ctr/memory.max": "max",
+        })
+    assert accel.total_memory() == min(GiB, psutil.virtual_memory().total)
+    # 1 GiB limit - (512 MiB usage - 256 MiB reclaimable page cache)
+    assert accel.available_memory() == min(3 * GiB // 4, psutil.virtual_memory().available)
+
+
+def test_cpu_memory_smallest_limit_and_v1_sentinel(cpu_cgroup):
+    accel = cpu_cgroup(
+        "12:memory:/pod\n3:cpu,cpuacct:/pod", {
+            "memory/memory.limit_in_bytes": "9223372036854771712",
+            "memory/pod/memory.limit_in_bytes": str(GiB),
+            "memory/pod/memory.usage_in_bytes": "0",
+        })
+    import psutil
+    assert accel.total_memory() == min(GiB, psutil.virtual_memory().total)
+
+
+@pytest.mark.parametrize("default, override, capped", [(False, None, False), (True, None, True), (False, "1", True),
+                                                       (True, "0", False)])
+def test_cpu_memory_cgroup_default_and_override(cpu_cgroup, monkeypatch, default, override, capped):
+    """RESPECT_CGROUP_MEMORY_BY_DEFAULT is the one line that flips the behavior; the env var overrides it."""
+    import psutil
+    from deepspeed.accelerator import cpu_accelerator as cpu_module
+    monkeypatch.setattr(cpu_module, "RESPECT_CGROUP_MEMORY_BY_DEFAULT", default)
+    if override is None:
+        monkeypatch.delenv("DS_CPU_RESPECT_CGROUP_MEMORY", raising=False)
+    else:
+        monkeypatch.setenv("DS_CPU_RESPECT_CGROUP_MEMORY", override)
+    accel = cpu_cgroup("0::/", {"memory.max": str(GiB), "memory.current": "0"})
+    expected = min(GiB, psutil.virtual_memory().total) if capped else psutil.virtual_memory().total
+    assert accel.total_memory() == expected
+
+
+def test_cpu_memory_checks_headroom_of_every_limited_ancestor(cpu_cgroup):
+    """A parent limit also counts its other children: an empty 1 GiB child under a 2 GiB parent whose siblings use
+    1.75 GiB can still take only 0.25 GiB."""
+    import psutil
+    accel = cpu_cgroup(
+        "0::/pod/ctr", {
+            "pod/memory.max": str(2 * GiB),
+            "pod/memory.current": str(7 * GiB // 4),
+            "pod/ctr/memory.max": str(GiB),
+            "pod/ctr/memory.current": "0",
+        })
+    assert accel.total_memory() == min(GiB, psutil.virtual_memory().total)
+    assert accel.available_memory() == min(GiB // 4, psutil.virtual_memory().available)
+
+
+@pytest.mark.parametrize("mount_line, cgroup_line, limit_file", [
+    ("30 25 0:27 /docker/abc {mount} rw - cgroup2 cgroup2 rw", "0::/docker/abc/job", "job/memory.max"),
+    ("31 25 0:28 / {mount} rw - cgroup cgroup rw,cpu,memory", "5:cpu,memory:/pod", "pod/memory.limit_in_bytes"),
+])
+def test_cpu_memory_resolves_cgroup_mount_from_mountinfo(cpu_cgroup, monkeypatch, tmp_path, mount_line, cgroup_line,
+                                                         limit_file):
+    """The mount can expose a subtree of the hierarchy, and cgroup v1 can co-mount controllers as "cpu,memory"."""
+    import psutil
+    from deepspeed.accelerator import cpu_accelerator as cpu_module
+    mount = tmp_path / "mnt"
+    mountinfo = tmp_path / "mountinfo"
+    mountinfo.write_text(mount_line.format(mount=mount) + "\n")
+    monkeypatch.setattr(cpu_module, "_PROC_SELF_MOUNTINFO", str(mountinfo))
+    (mount / limit_file).parent.mkdir(parents=True, exist_ok=True)
+    (mount / limit_file).write_text(str(GiB) + "\n")
+    accel = cpu_cgroup(cgroup_line, {})
+    assert accel.total_memory() == min(GiB, psutil.virtual_memory().total)
+
+
+def test_cpu_memory_picks_the_cgroup_mount_that_contains_the_process(cpu_cgroup, monkeypatch, tmp_path):
+    """An unrelated delegated cgroup2 subtree mounted before the main mount must not hide the process's limit."""
+    import psutil
+    from deepspeed.accelerator import cpu_accelerator as cpu_module
+    delegated, main = tmp_path / "delegated", tmp_path / "main"
+    mountinfo = tmp_path / "mountinfo"
+    mountinfo.write_text(f"40 25 0:30 /user.slice/delegated {delegated} rw - cgroup2 cgroup2 rw\n"
+                         f"41 25 0:30 / {main} rw - cgroup2 cgroup2 rw\n")
+    monkeypatch.setattr(cpu_module, "_PROC_SELF_MOUNTINFO", str(mountinfo))
+    (main / "job").mkdir(parents=True)
+    (main / "job" / "memory.max").write_text(str(GiB) + "\n")
+    delegated.mkdir()
+    accel = cpu_cgroup("0::/job", {})
+    assert accel.total_memory() == min(GiB, psutil.virtual_memory().total)
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_cpu_memory_subtree_alias_does_not_hide_a_parent_limit(cpu_cgroup, monkeypatch, tmp_path, reverse):
+    """The full hierarchy and a bind-mounted subtree both contain the process. The full view must win, because the
+    parent limit still applies. Reported by @adenzhou1350 on the equivalent vLLM change."""
+    import psutil
+    from deepspeed.accelerator import cpu_accelerator as cpu_module
+    main, alias = tmp_path / "main", tmp_path / "alias"
+    mounts = [
+        f"40 25 0:30 / {main} rw - cgroup2 cgroup2 rw\n", f"41 25 0:30 /pod/ctr {alias} rw - cgroup2 cgroup2 rw\n"
+    ]
+    mountinfo = tmp_path / "mountinfo"
+    mountinfo.write_text("".join(mounts[::-1] if reverse else mounts))
+    monkeypatch.setattr(cpu_module, "_PROC_SELF_MOUNTINFO", str(mountinfo))
+    files = {
+        main / "memory.max": "max",
+        main / "pod" / "memory.max": str(GiB // 2),
+        main / "pod" / "memory.current": str(GiB // 4),
+        main / "pod" / "ctr" / "memory.max": str(GiB),
+        main / "pod" / "ctr" / "memory.current": "0",
+        alias / "memory.max": str(GiB),
+        alias / "memory.current": "0",
+    }
+    for path, content in files.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content + "\n")
+    accel = cpu_cgroup("0::/pod/ctr", {})
+    assert accel.total_memory() == min(GiB // 2, psutil.virtual_memory().total)
+    assert accel.available_memory() == min(GiB // 4, psutil.virtual_memory().available)
+
+
+# Captured inside `docker run --privileged --memory=1g` on Ubuntu 24.04 (kernel 6.8.0, cgroup v1, Docker 29.1 with the
+# cgroupfs driver and its default host cgroup namespace), from a process in shared/me (limit 600 MiB) under shared
+# (limit 800 MiB) while a sibling of shared/me held 500 MiB. Only the cgroup lines of mountinfo are kept.
+_V1_DOCKER_PROC_SELF_CGROUP = """\
+13:misc:/docker/121dbb09d8014f1e83e934afac45b4ceec44bfd41edd43f246d6df87148dcea7
+12:freezer:/docker/121dbb09d8014f1e83e934afac45b4ceec44bfd41edd43f246d6df87148dcea7
+11:memory:/docker/121dbb09d8014f1e83e934afac45b4ceec44bfd41edd43f246d6df87148dcea7/shared/me
+10:cpuset:/docker/121dbb09d8014f1e83e934afac45b4ceec44bfd41edd43f246d6df87148dcea7
+9:pids:/docker/121dbb09d8014f1e83e934afac45b4ceec44bfd41edd43f246d6df87148dcea7
+8:rdma:/docker/121dbb09d8014f1e83e934afac45b4ceec44bfd41edd43f246d6df87148dcea7
+7:devices:/docker/121dbb09d8014f1e83e934afac45b4ceec44bfd41edd43f246d6df87148dcea7
+6:perf_event:/docker/121dbb09d8014f1e83e934afac45b4ceec44bfd41edd43f246d6df87148dcea7
+5:cpu,cpuacct:/docker/121dbb09d8014f1e83e934afac45b4ceec44bfd41edd43f246d6df87148dcea7
+4:blkio:/docker/121dbb09d8014f1e83e934afac45b4ceec44bfd41edd43f246d6df87148dcea7
+3:hugetlb:/docker/121dbb09d8014f1e83e934afac45b4ceec44bfd41edd43f246d6df87148dcea7
+2:net_cls,net_prio:/docker/121dbb09d8014f1e83e934afac45b4ceec44bfd41edd43f246d6df87148dcea7
+1:name=systemd:/docker/121dbb09d8014f1e83e934afac45b4ceec44bfd41edd43f246d6df87148dcea7
+0::/docker/121dbb09d8014f1e83e934afac45b4ceec44bfd41edd43f246d6df87148dcea7"""
+_V1_DOCKER_MOUNTINFO = """\
+583 582 0:33 /docker/121dbb09d8014f1e83e934afac45b4ceec44bfd41edd43f246d6df87148dcea7 /sys/fs/cgroup/systemd rw,nosuid,nodev,noexec,relatime master:12 - cgroup cgroup rw,xattr,name=systemd
+584 582 0:36 /docker/121dbb09d8014f1e83e934afac45b4ceec44bfd41edd43f246d6df87148dcea7 /sys/fs/cgroup/net_cls,net_prio rw,nosuid,nodev,noexec,relatime master:16 - cgroup cgroup rw,net_cls,net_prio
+585 582 0:37 /docker/121dbb09d8014f1e83e934afac45b4ceec44bfd41edd43f246d6df87148dcea7 /sys/fs/cgroup/hugetlb rw,nosuid,nodev,noexec,relatime master:17 - cgroup cgroup rw,hugetlb
+586 582 0:38 /docker/121dbb09d8014f1e83e934afac45b4ceec44bfd41edd43f246d6df87148dcea7 /sys/fs/cgroup/blkio rw,nosuid,nodev,noexec,relatime master:18 - cgroup cgroup rw,blkio
+587 582 0:39 /docker/121dbb09d8014f1e83e934afac45b4ceec44bfd41edd43f246d6df87148dcea7 /sys/fs/cgroup/cpu,cpuacct rw,nosuid,nodev,noexec,relatime master:19 - cgroup cgroup rw,cpu,cpuacct
+588 582 0:40 /docker/121dbb09d8014f1e83e934afac45b4ceec44bfd41edd43f246d6df87148dcea7 /sys/fs/cgroup/perf_event rw,nosuid,nodev,noexec,relatime master:20 - cgroup cgroup rw,perf_event
+589 582 0:41 /docker/121dbb09d8014f1e83e934afac45b4ceec44bfd41edd43f246d6df87148dcea7 /sys/fs/cgroup/devices rw,nosuid,nodev,noexec,relatime master:21 - cgroup cgroup rw,devices
+590 582 0:42 /docker/121dbb09d8014f1e83e934afac45b4ceec44bfd41edd43f246d6df87148dcea7 /sys/fs/cgroup/rdma rw,nosuid,nodev,noexec,relatime master:22 - cgroup cgroup rw,rdma
+591 582 0:43 /docker/121dbb09d8014f1e83e934afac45b4ceec44bfd41edd43f246d6df87148dcea7 /sys/fs/cgroup/pids rw,nosuid,nodev,noexec,relatime master:23 - cgroup cgroup rw,pids
+592 582 0:44 /docker/121dbb09d8014f1e83e934afac45b4ceec44bfd41edd43f246d6df87148dcea7 /sys/fs/cgroup/cpuset rw,nosuid,nodev,noexec,relatime master:24 - cgroup cgroup rw,cpuset
+593 582 0:45 /docker/121dbb09d8014f1e83e934afac45b4ceec44bfd41edd43f246d6df87148dcea7 /sys/fs/cgroup/memory rw,nosuid,nodev,noexec,relatime master:25 - cgroup cgroup rw,memory
+594 582 0:46 /docker/121dbb09d8014f1e83e934afac45b4ceec44bfd41edd43f246d6df87148dcea7 /sys/fs/cgroup/freezer rw,nosuid,nodev,noexec,relatime master:26 - cgroup cgroup rw,freezer
+595 582 0:47 /docker/121dbb09d8014f1e83e934afac45b4ceec44bfd41edd43f246d6df87148dcea7 /sys/fs/cgroup/misc rw,nosuid,nodev,noexec,relatime master:27 - cgroup cgroup rw,misc"""
+
+
+def test_cpu_memory_reads_a_real_cgroup_v1_docker_layout(cpu_cgroup, monkeypatch, tmp_path):
+    """The other v1 tests use files written by hand. These come from a real host: /proc/self/cgroup has the host path
+    of the container plus a "0::" line with no cgroup2 mount, and each controller is mounted at the container's own
+    cgroup. Joining the host path to the mount without removing the mount root, stopping at the "0::" line, or
+    reading only the process cgroup each give a wrong value here."""
+    import psutil
+    from deepspeed.accelerator import cpu_accelerator as cpu_module
+    mountinfo = tmp_path / "mountinfo"
+    mountinfo.write_text(_V1_DOCKER_MOUNTINFO.replace(" /sys/fs/cgroup/", f" {tmp_path / 'cgroup'}/") + "\n")
+    monkeypatch.setattr(cpu_module, "_PROC_SELF_MOUNTINFO", str(mountinfo))
+    accel = cpu_cgroup(
+        _V1_DOCKER_PROC_SELF_CGROUP, {
+            "memory/shared/me/memory.limit_in_bytes": "629145600",
+            "memory/shared/me/memory.usage_in_bytes": "843776",
+            "memory/shared/me/memory.stat": "total_inactive_file 16384",
+            "memory/shared/memory.limit_in_bytes": "838860800",
+            "memory/shared/memory.usage_in_bytes": "529813504",
+            "memory/shared/memory.stat": "total_inactive_file 16384",
+            "memory/memory.limit_in_bytes": "1073741824",
+            "memory/memory.usage_in_bytes": "821026816",
+            "memory/memory.stat": "total_inactive_file 103755776",
+        })
+    assert accel.total_memory() == min(629145600, psutil.virtual_memory().total)
+    # The least headroom is in shared: its 800 MiB limit minus the usage of both children, without reclaimable cache.
+    assert accel.available_memory() == min(838860800 - (529813504 - 16384), psutil.virtual_memory().available)
+
+
+def test_cpu_accelerator_exports_cgroup_memory_switch():
+    """The launcher forwards env vars listed by export_envs() to every node."""
+    from deepspeed.accelerator.cpu_accelerator import CPU_Accelerator
+    assert "DS_CPU_RESPECT_CGROUP_MEMORY" in CPU_Accelerator().export_envs()
