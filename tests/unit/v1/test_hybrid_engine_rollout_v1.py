@@ -138,10 +138,13 @@ def test_continuous_graph_generation_refills_a_fixed_slot_on_cuda():
 
 @pytest.mark.parametrize("attn_implementation", ["eager", "sdpa"])
 @pytest.mark.parametrize("left_padding", [False, True])
-def test_continuous_rollout_matches_native_llama_generation_on_cuda(attn_implementation, left_padding, monkeypatch):
+def test_continuous_rollout_matches_native_llama_generation_on_accelerator(attn_implementation, left_padding,
+                                                                           monkeypatch):
     accelerator = get_accelerator()
-    if not accelerator.is_available() or accelerator.device_name() != "cuda":
-        pytest.skip("CUDA is required for native-model CUDA graph rollout coverage")
+    if not accelerator.is_available() or accelerator.create_graph() is None:
+        pytest.skip("Graph capture is required for native-model rollout coverage")
+    if not accelerator.is_fp16_supported():
+        pytest.skip("FP16 is required for native-model rollout coverage")
 
     from transformers import LlamaConfig, LlamaForCausalLM
 
