@@ -86,6 +86,7 @@ if _TRITON_AVAILABLE:
         stride_om,
         stride_on,
         NUM_GROUPS: tl.constexpr,
+        USE_IEEE: tl.constexpr,
         BLOCK_M: tl.constexpr,
         BLOCK_N: tl.constexpr,
         BLOCK_K: tl.constexpr,
@@ -143,7 +144,11 @@ if _TRITON_AVAILABLE:
                 mask=mask_k[:, None] & mask_n[None, :],
                 other=0.0,
             )
-            acc += tl.dot(a_tile, b_tile)  # For FP32 inputs, it use TF32 tensor core for better performance on sm8x
+            if USE_IEEE:
+                acc += tl.dot(a_tile, b_tile, input_precision="ieee")
+            else:
+                # The regular FP32 path uses TF32 tensor cores for performance.
+                acc += tl.dot(a_tile, b_tile)
 
         out = acc.to(out_ptr.dtype.element_ty)
         tl.store(
@@ -191,6 +196,7 @@ if _TRITON_AVAILABLE:
         stride_ok,
         stride_on,
         NUM_GROUPS: tl.constexpr,
+        USE_IEEE: tl.constexpr,
         BLOCK_M: tl.constexpr,
         BLOCK_K: tl.constexpr,
         BLOCK_N: tl.constexpr,
@@ -228,9 +234,11 @@ if _TRITON_AVAILABLE:
                 mask=mask_m[:, None] & mask_n[None, :],
                 other=0.0,
             )  # [BLOCK_M, BLOCK_N]
-            acc += tl.dot(
-                tl.trans(a_tile),
-                g_tile)  # [BLOCK_K, BLOCK_N]; For FP32 inputs, it use TF32 tensor core for better performance on sm8x
+            if USE_IEEE:
+                acc += tl.dot(tl.trans(a_tile), g_tile, input_precision="ieee")
+            else:
+                # The regular FP32 path uses TF32 tensor cores for performance.
+                acc += tl.dot(tl.trans(a_tile), g_tile)
 
         out = acc.to(out_ptr.dtype.element_ty)
         out_base = out_ptr + pid_e * stride_oe
@@ -300,6 +308,17 @@ def _validate(mat_a: torch.Tensor, mat_b: torch.Tensor, offs: torch.Tensor, tran
         raise ValueError(f"Contraction dim mismatch: mat_a K={mat_a.shape[1]} vs mat_b K={mat_b_k}.")
 
 
+def _launch_group_gemm(kernel, configs, grid, *args, **kwargs):
+    deterministic = torch.are_deterministic_algorithms_enabled()
+    kwargs["USE_IEEE"] = deterministic
+    if deterministic:
+        # Bypass timing-dependent autotuning without changing its shared cache/configs.
+        config = configs[0]
+        kernel.fn[grid](*args, **kwargs, **config.kwargs, num_warps=config.num_warps, num_stages=config.num_stages)
+    else:
+        kernel[grid](*args, **kwargs)
+
+
 def _group_gemm(mat_a: torch.Tensor, mat_b: torch.Tensor, offs: torch.Tensor) -> torch.Tensor:
     """Forward-style grouped GEMM: a[M,KC] x b[E,KC,NO] -> out[M,NO], grouped over M."""
     M, KC = mat_a.shape
@@ -317,7 +336,10 @@ def _group_gemm(mat_a: torch.Tensor, mat_b: torch.Tensor, offs: torch.Tensor) ->
         max_m_tiles = (M + block_m - 1) // block_m + E
         return (max_m_tiles, triton.cdiv(NO, meta["BLOCK_N"]))
 
-    _group_gemm_kernel[grid](
+    _launch_group_gemm(
+        _group_gemm_kernel,
+        _gmm_configs(),
+        grid,
         mat_a,
         mat_b,
         out,
@@ -358,7 +380,10 @@ def _grouped_dw(mat_a: torch.Tensor, grad_out: torch.Tensor, offs: torch.Tensor,
     def grid(meta):
         return (E, triton.cdiv(K, meta["BLOCK_K"]), triton.cdiv(NO, meta["BLOCK_N"]))
 
-    _group_gemm_dw_kernel[grid](
+    _launch_group_gemm(
+        _group_gemm_dw_kernel,
+        _dw_configs(),
+        grid,
         mat_a,
         grad_out,
         out,

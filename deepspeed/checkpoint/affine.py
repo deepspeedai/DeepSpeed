@@ -103,6 +103,10 @@ class AffinePiece:
         """
         return self._offsets(self.source_offset, self.source_strides)
 
+    def dest_offsets(self):
+        """Yield the offset into the shard of every element this piece covers."""
+        return self._offsets(self.dest_offset, self.dest_strides)
+
     def _offsets(self, base, strides):
         if any(dim == 0 for dim in self.shape):
             # An empty piece covers no elements. Walking it anyway would report offsets it
@@ -157,6 +161,52 @@ def _dest_interval(piece):
     return piece.dest_offset, piece.dest_offset + piece.numel
 
 
+def _dest_box(piece, shard_shape):
+    """Return a piece's destination as per-axis ``(starts, stops)`` in the shard, or None.
+
+    A column split writes each piece into a few columns of every shard row, so its
+    destination is not one interval. It is still a box in the shard's own grid, because its
+    strides are the shard's row-major strides, and a box can be checked for bounds and
+    overlap from its corners without walking any elements.
+    """
+    if piece.numel == 0 or len(piece.shape) != len(shard_shape) or len(piece.dest_strides) != len(shard_shape):
+        return None
+    shard_strides = _row_major_strides(shard_shape)
+    if any(size > 1 and got != want for size, got, want in zip(piece.shape, piece.dest_strides, shard_strides)):
+        return None
+
+    starts = []
+    remainder = piece.dest_offset
+    for stride in shard_strides:
+        start, remainder = divmod(remainder, stride)
+        starts.append(start)
+    stops = [start + size for start, size in zip(starts, piece.shape)]
+    return starts, stops
+
+
+def _dest_address_range(piece):
+    """Return the lowest and highest shard address a piece writes."""
+    low = piece.dest_offset
+    high = piece.dest_offset
+    for size, stride in zip(piece.shape, piece.dest_strides):
+        reach = (size - 1) * stride
+        if reach < 0:
+            low += reach
+        else:
+            high += reach
+    return low, high
+
+
+def _first_shared_address(box, other_box, shard_shape):
+    """Return the first shard address two boxes both write, or None when they are disjoint."""
+    corner = []
+    for start, stop, other_start, other_stop in zip(box[0], box[1], other_box[0], other_box[1]):
+        if max(start, other_start) >= min(stop, other_stop):
+            return None
+        corner.append(max(start, other_start))
+    return sum(position * stride for position, stride in zip(corner, _row_major_strides(shard_shape)))
+
+
 class ParamAffineMap:
     """How one parameter is spread over a tensor-parallel group.
 
@@ -195,21 +245,25 @@ class ParamAffineMap:
         return holders
 
     def validate(self):
-        """Check shard element counts and dense destination bounds and overlap."""
+        """Check shard element counts, and destination bounds and overlap from piece metadata."""
         for rank, pieces in self.pieces_by_rank.items():
             held = sum(piece.numel for piece in pieces)
             expected = _product(self.shard_shapes[rank])
             if held != expected:
                 raise ValueError(f'Rank {rank} holds a shard of {expected} elements but its pieces '
                                  f'account for {held}.')
-            self._validate_destinations(rank, pieces, expected)
+            self._validate_destinations(rank, pieces, self.shard_shapes[rank])
 
-    def _validate_destinations(self, rank, pieces, shard_numel):
-        """Check that dense destination intervals stay within the shard and do not overlap."""
+    def _validate_destinations(self, rank, pieces, shard_shape):
+        """Check that dense intervals and strided boxes stay within the shard and do not overlap."""
+        shard_numel = _product(shard_shape)
         intervals = []
+        has_strided_piece = False
         for piece in pieces:
             span = _dest_interval(piece)
             if span is None:
+                if piece.numel:
+                    has_strided_piece = True
                 continue
             start, stop = span
             if start < 0 or stop > shard_numel:
@@ -225,13 +279,59 @@ class ParamAffineMap:
                                  'silently overwrite another.')
             cursor = stop
 
+        # A column split's pieces have no interval, so the check above skips them. Check them as
+        # boxes against every other box-shaped piece of the rank instead. Ranks whose pieces are
+        # all dense are fully covered above and skip this pairwise pass.
+        if not has_strided_piece:
+            return
+        boxes = []
+        for piece in pieces:
+            if piece.numel and _dest_interval(piece) is None:
+                low, high = _dest_address_range(piece)
+                if low < 0 or high >= shard_numel:
+                    raise ValueError(f'Rank {rank} piece {piece} writes shard addresses [{low}, {high}], '
+                                     f'outside the shard of {shard_numel} elements.')
+            box = _dest_box(piece, shard_shape)
+            if box is None:
+                continue
+            starts, stops = box
+            fits = all(start >= 0 and stop <= dim for start, stop, dim in zip(starts, stops, shard_shape))
+            if not fits:
+                # A view may wrap past the end of a shard row while staying inside the shard. It is
+                # not a box of the shard's grid, so the walk in validate_coverage() checks it instead.
+                continue
+            boxes.append(box)
+        for index, box in enumerate(boxes):
+            for other_box in boxes[index + 1:]:
+                shared = _first_shared_address(box, other_box, shard_shape)
+                if shared is not None:
+                    raise ValueError(f'Rank {rank} writes shard address {shared} twice, so one piece would '
+                                     'silently overwrite another.')
+
     def validate_coverage(self):
-        """Full check: the shards cover the parameter, and every piece is homogeneous.
+        """Full check: each shard address is written once, the shards cover the parameter,
+        and every piece is homogeneous.
 
         This walks the map element by element, so it costs O(numel) and is meant for tests
         and for validating a newly built map, not for every conversion of a large tensor.
         """
         self.validate()
+
+        # validate() reads destinations from piece metadata, which cannot place every strided
+        # layout. Walking each shard address makes this check complete: every address of every
+        # shard is written by exactly one element.
+        for rank, pieces in self.pieces_by_rank.items():
+            shard_numel = _product(self.shard_shapes[rank])
+            written = set()
+            for piece in pieces:
+                for offset in piece.dest_offsets():
+                    if offset < 0 or offset >= shard_numel:
+                        raise ValueError(f'Rank {rank} piece {piece} writes shard address {offset}, outside '
+                                         f'the shard of {shard_numel} elements.')
+                    if offset in written:
+                        raise ValueError(f'Rank {rank} writes shard address {offset} twice, so one piece would '
+                                         'silently overwrite another.')
+                    written.add(offset)
 
         missing = self.uncovered_offsets()
         assert not missing, (f'Affine map for a parameter of shape {self.logical_shape} leaves '
