@@ -282,7 +282,7 @@ def test_continuous_graph_keeps_cache_position_alive_for_replay():
 
     module = DecodeModule()
     rollout = HybridEngineRollout(SimpleNamespace(module=module), _make_tokenizer())
-    state = rollout._get_continuous_graph_state(module, 1, 3, 5, torch.device(accelerator.current_device_name()),
+    state = rollout._get_continuous_graph_state(module, 1, 5, torch.device(accelerator.current_device_name()),
                                                 torch.float32, DeepSpeedStaticCache)
     gc.collect()
 
@@ -293,7 +293,7 @@ def test_continuous_graph_keeps_cache_position_alive_for_replay():
     assert torch.equal(state.static_logits, torch.full_like(state.static_logits, 11))
 
 
-def test_continuous_graph_state_reuses_matching_capture_and_rebuilds_for_weight_updates():
+def test_continuous_graph_state_survives_in_place_weight_updates():
 
     class GraphCache:
 
@@ -317,17 +317,26 @@ def test_continuous_graph_state_reuses_matching_capture_and_rebuilds_for_weight_
     rollout = HybridEngineRollout(SimpleNamespace(module=module), _make_tokenizer())
     graph = MagicMock()
     logits = torch.empty((1, 1, 8))
+    device = torch.device("cpu")
 
     with patch.object(rollout, "_capture_continuous_graph", return_value=(graph, logits)) as capture:
-        first = rollout._get_continuous_graph_state(module, 1, 3, 5, torch.device("cpu"), torch.float32, GraphCache)
-        second = rollout._get_continuous_graph_state(module, 1, 3, 5, torch.device("cpu"), torch.float32, GraphCache)
+        first = rollout._get_continuous_graph_state(module, 1, 5, device, torch.float32, GraphCache)
+        # An optimizer step writes in place, so replay already reads the new values.
         with torch.no_grad():
             module.weight.add_(1)
-        third = rollout._get_continuous_graph_state(module, 1, 3, 5, torch.device("cpu"), torch.float32, GraphCache)
+        updated = rollout._get_continuous_graph_state(module, 1, 5, device, torch.float32, GraphCache)
+        # A replaced parameter lives at an address the captured kernels never read.
+        module.weight = torch.nn.Parameter(torch.zeros(1))
+        moved = rollout._get_continuous_graph_state(module, 1, 5, device, torch.float32, GraphCache)
+        resized = rollout._get_continuous_graph_state(module, 1, 6, device, torch.float32, GraphCache)
+        rollout.shutdown()
+        released = rollout._get_continuous_graph_state(module, 1, 6, device, torch.float32, GraphCache)
 
-    assert first is second
-    assert third is not first
-    assert capture.call_count == 2
+    assert updated is first
+    assert moved is not first
+    assert resized is not moved
+    assert released is not resized
+    assert capture.call_count == 4
 
 
 def test_static_cache_constructor_supports_max_batch_keyword():
