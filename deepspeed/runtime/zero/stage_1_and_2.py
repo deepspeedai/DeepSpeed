@@ -9,7 +9,7 @@ from deepspeed.comm import pg_utils
 from packaging import version as pkg_version
 from collections import OrderedDict, defaultdict
 from dataclasses import dataclass, field
-from typing import List, Dict, Set, Tuple
+from typing import List, Dict, Set
 
 from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
 from deepspeed.runtime.zenflow import zenflow_utils
@@ -27,6 +27,8 @@ from deepspeed.runtime.utils import (empty_cache, see_memory_usage, has_inf_or_n
                                      combine_grad_norm_groups, count_used_parameters_in_backward, is_invalid_grad_norm,
                                      is_optimized_parameter)
 from deepspeed.runtime.zero.config import ZeroStageEnum
+from deepspeed.runtime.zero.flat_param_metadata import (ZeROFlatParamMetadata, ZeROFlatPartitionMetadata)
+from deepspeed.runtime.zero.flat_param_metadata import get_zero_flat_partition_metadata  # noqa: F401
 from deepspeed.runtime.zero.utils import ZeRORuntimeException, get_norm_dtype
 from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum, OffloadStateTypeEnum
 from deepspeed.ops.adam import DeepSpeedCPUAdam
@@ -136,55 +138,6 @@ class IPGBucket:
         self.has_moe_params = False
         self.ready_events.clear()
         self.copy_streams.clear()
-
-
-@dataclass(frozen=True)
-class ZeROFlatParamMetadata:
-    """Describes one original parameter inside a ZeRO-1/2 flat partition.
-
-    ``flat_offset`` is relative to the start of the padded flat parameter group.
-    ``local_offset`` is relative to the local partition exposed to the optimizer,
-    and is ``-1`` when the parameter does not overlap this rank's partition.
-    """
-    original_index: int
-    flat_index: int
-    shape: torch.Size
-    numel: int
-    flat_offset: int
-    padding: int
-    local_offset: int
-    local_numel: int
-    requires_grad: bool
-
-
-@dataclass(frozen=True)
-class ZeROFlatPartitionMetadata:
-    """Original parameter layout behind a ZeRO-1/2 optimizer flat partition.
-
-    ZeRO-1/2 replace each optimizer parameter group with one flat FP32 master
-    partition. This metadata lets custom optimizers recover the original tensor
-    shapes, boundaries, and global offsets without changing the flat layout.
-    """
-    group_index: int
-    global_numel: int
-    partition_start: int
-    partition_numel: int
-    dp_group: object
-    dp_world_size: int
-    params: Tuple[ZeROFlatParamMetadata, ...]
-
-
-def get_zero_flat_partition_metadata(param):
-    """Return the original-layout metadata for a ZeRO-1/2 flat optimizer parameter.
-
-    Args:
-        param (``torch.Tensor``): A parameter from a ZeRO optimizer param group.
-
-    Returns:
-        ``ZeROFlatPartitionMetadata`` or ``None`` if ``param`` is not a ZeRO-1/2
-        flat partition.
-    """
-    return getattr(param, "ds_zero_flat_partition_metadata", None)
 
 
 class GradPartitionBufferGroup(list):
@@ -629,6 +582,15 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             # unrecoverable.
             partition_start = left_boundary
             partition_end = partition_start + curr_partition_size
+            if self.round_robin_gradients:
+                # ``_round_robin_reorder`` maps original index -> flat index, so
+                # invert it before looking up the original index of a flat slot.
+                flat_index_to_original = {
+                    flat_index: original_index
+                    for original_index, flat_index in round_robin_indices.items()
+                }
+            else:
+                flat_index_to_original = {index: index for index in range(len(round_robin_tensors))}
             flat_params = []
             for flat_index, param in enumerate(round_robin_tensors):
                 meta = meta_tensors[flat_index]
@@ -638,8 +600,11 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 overlap_end = min(offset + numel, partition_end)
                 local_numel = max(0, overlap_end - overlap_start)
                 local_offset = overlap_start - partition_start if local_numel else -1
+                original_index = getattr(param, "param_idx_in_group", None)
+                if original_index is None or self.bit16_groups[i][original_index] is not param:
+                    original_index = flat_index_to_original[flat_index]
                 flat_params.append(
-                    ZeROFlatParamMetadata(original_index=round_robin_indices[flat_index],
+                    ZeROFlatParamMetadata(original_index=original_index,
                                           flat_index=flat_index,
                                           shape=meta.shape,
                                           numel=numel,

@@ -2321,8 +2321,9 @@ class DeepSpeedEngine(Module):
                             "The optimizer sees a 1-D tensor instead of the original parameter shapes and "
                             "boundaries. Custom optimizers that depend on tensor shapes or group-global "
                             "statistics can use "
-                            "deepspeed.runtime.zero.stage_1_and_2.get_zero_flat_partition_metadata(param) "
-                            "to recover the original layout.")
+                            "deepspeed.runtime.zero.flat_param_metadata.get_zero_flat_partition_metadata(param) "
+                            "to recover the original layout. This also applies to the BF16 optimizer "
+                            "wrapper used for BF16 parameters with FP32 gradient accumulation.")
             if model_dtype == torch.bfloat16 and grad_accum_dtype == torch.float32 and self.zero_optimization_stage(
             ) == 1 and not self.zero_cpu_offload():
                 if not self.zero_compute_grad_norm():
