@@ -15,7 +15,7 @@ on Ascend; the portable implementation stays unchanged.
 
 import torch
 
-from deepspeed.ops.triton_ops._triton import _TRITON_AVAILABLE, triton, tl
+from deepspeed.ops.triton_ops._triton import _TRITON_AVAILABLE, current_device, triton, tl
 
 _GATHER_ROWS = 4
 
@@ -73,14 +73,15 @@ def gather_rows(src: torch.Tensor, index: torch.Tensor) -> torch.Tensor:
     if not _TRITON_AVAILABLE:
         return _gather_rows_eager(src, index)
     hidden = src.shape[1]
-    _gather_rows_kernel[(triton.cdiv(index.numel(), _GATHER_ROWS), )](
-        src,
-        index,
-        out,
-        index.numel(),
-        src.shape[0],
-        hidden,
-        ROWS=_GATHER_ROWS,
-        BLOCK_H=min(1024, triton.next_power_of_2(hidden)),
-    )
+    with current_device(src):
+        _gather_rows_kernel[(triton.cdiv(index.numel(), _GATHER_ROWS), )](
+            src,
+            index,
+            out,
+            index.numel(),
+            src.shape[0],
+            hidden,
+            ROWS=_GATHER_ROWS,
+            BLOCK_H=min(1024, triton.next_power_of_2(hidden)),
+        )
     return out

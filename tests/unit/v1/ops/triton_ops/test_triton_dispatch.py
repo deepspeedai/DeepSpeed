@@ -66,14 +66,34 @@ def test_missing_feature_raises_after_the_platform_fallback(monkeypatch):
         resolve_triton_ops_impl("no_such_feature")
 
 
-def test_out_of_package_feature_resolves_its_portable_module(monkeypatch):
-    # Triton kernels living outside triton_ops (MoE permute, chunked CE, fp8
-    # GEMM) pass their portable module explicitly; the platform variant still
-    # lives under the accelerator's triton_ops subpackage.
+def test_out_of_package_feature_without_a_platform_variant_resolves_its_portable_module(monkeypatch):
+    # Triton kernels living outside triton_ops pass their portable module
+    # explicitly; a feature the platform subpackage does not override keeps
+    # that portable module.
+    monkeypatch.setattr(deepspeed.accelerator, "get_accelerator",
+                        lambda: _FakeAccelerator("deepspeed.ops.triton_ops.npu"))
+    impl = resolve_triton_ops_impl("fp8_gemm_triton", portable_module="deepspeed.ops.fp_quantizer.fp8_gemm_triton")
+    assert impl.__name__ == "deepspeed.ops.fp_quantizer.fp8_gemm_triton"
+
+
+def test_out_of_package_feature_with_a_platform_variant_resolves_the_platform_module(monkeypatch):
+    # Ascend overrides the MoE gather kernel, so ep_kernels must resolve to the
+    # NPU subpackage rather than the portable module.
     monkeypatch.setattr(deepspeed.accelerator, "get_accelerator",
                         lambda: _FakeAccelerator("deepspeed.ops.triton_ops.npu"))
     impl = resolve_triton_ops_impl("ep_kernels", portable_module="deepspeed.moe.ep_kernels")
-    assert impl.__name__ == "deepspeed.moe.ep_kernels"
+    assert impl.__name__ == "deepspeed.ops.triton_ops.npu.ep_kernels"
+
+
+def test_dispatch_selects_the_platform_gather_variant(monkeypatch):
+    import deepspeed.moe.ep_kernels as ep_kernels
+    import deepspeed.ops.triton_ops.npu.ep_kernels as npu_ep_kernels
+
+    monkeypatch.setattr(deepspeed.accelerator, "get_accelerator",
+                        lambda: _FakeAccelerator("deepspeed.ops.triton_ops.npu"))
+    sentinel = object()
+    monkeypatch.setattr(npu_ep_kernels, "gather_rows", lambda src, index: sentinel)
+    assert ep_kernels.gather_rows(None, None) is sentinel
 
 
 # --- The dispatch decorator ---

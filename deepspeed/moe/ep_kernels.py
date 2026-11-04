@@ -394,8 +394,10 @@ def permute_rows_supported(rows: torch.Tensor) -> bool:
 
     The Triton gather path goes through the per-kernel Triton gate as a static
     declaration: no probe runs (the path is probe-unsafe), and the accelerator
-    answers for the kernel name alone - a backend with a known problem in this
-    specific path falls back to eager without affecting other Triton kernels.
+    answers for the kernel name alone. A backend with a known problem in this
+    specific path can keep the eager fallback or select its own implementation
+    through the triton_ops dispatch (Ascend uses the address-safe variant in
+    ``deepspeed.ops.triton_ops.npu.ep_kernels``).
     """
     if not _TRITON_AVAILABLE or rows.dim() != 2 or not is_accelerator_tensor(rows):
         return False
