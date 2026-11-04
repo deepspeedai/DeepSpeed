@@ -72,7 +72,7 @@ class _ActivationOffloadEngine:
         use_streams: bool = True,
         min_offload_bytes: int = 1024,
         max_fwd_stash_count: int = 2,
-        max_cpu_buffer_pool_count: int = 64,
+        max_cpu_buffer_pool_count: int = 4096,
         keep_last_count: int = 1,
         prefetch: bool = False,
     ) -> None:
@@ -495,7 +495,7 @@ class CheckpointHiddenStatesOffload(_ActivationOffloadEngine, saved_tensors_hook
         use_streams: bool = True,
         min_offload_bytes: int = 1024,
         max_fwd_stash_count: int = 2,
-        max_cpu_buffer_pool_count: int = 64,
+        max_cpu_buffer_pool_count: int = 4096,
         keep_last_count: int = 1,
         prefetch: bool = False,
     ) -> None:
@@ -604,7 +604,7 @@ def get_checkpoint_hidden_states_offloading_ctx_manager(
     use_streams: bool = True,
     min_offload_bytes: int = 1024,
     max_fwd_stash_count: int = 2,
-    max_cpu_buffer_pool_count: int = 64,
+    max_cpu_buffer_pool_count: int = 4096,
     keep_last_count: int = 1,
     prefetch: bool = False,
 ) -> CheckpointHiddenStatesOffload:

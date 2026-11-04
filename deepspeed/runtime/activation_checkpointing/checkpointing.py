@@ -67,6 +67,52 @@ PROFILE_TIME = False
 # keep-last/stash span the whole forward. Built lazily so its stream binds to the
 # selected device.
 _cpu_offload_engine = None
+
+# --- Step-0 probe (opt-in via DS_CKPT_PROBE=1); see plan "Step 0". Counts live recomputed
+# activation bytes across ALL checkpointed layers, so it can distinguish "storage entries
+# retained" from "bytes pinned elsewhere". Zero cost when the env var is unset.
+import os as _probe_os
+
+_PROBE_ON = _probe_os.environ.get("DS_CKPT_PROBE") == "1"
+_PROBE_LIVE_BYTES = 0
+_PROBE_PEAK_BYTES = 0
+_PROBE_FILLS = 0
+_PROBE_PACK_CALLS = 0
+_PROBE_PACK_BYTES = 0
+_PROBE_PACK_SHAPES = {}
+
+
+def _probe_reset():
+    global _PROBE_LIVE_BYTES, _PROBE_PEAK_BYTES, _PROBE_FILLS
+    _PROBE_LIVE_BYTES = 0
+    _PROBE_PEAK_BYTES = 0
+    _PROBE_FILLS = 0
+    global _PROBE_PACK_CALLS, _PROBE_PACK_BYTES
+    _PROBE_PACK_CALLS = 0
+    _PROBE_PACK_BYTES = 0
+    _PROBE_PACK_SHAPES.clear()
+
+
+def _probe_track(tensor):
+    """Count tensor's bytes as live until it is garbage collected."""
+    global _PROBE_LIVE_BYTES, _PROBE_PEAK_BYTES, _PROBE_FILLS
+    import weakref as _wr
+
+    nbytes = tensor.nelement() * tensor.element_size()
+    _PROBE_LIVE_BYTES += nbytes
+    _PROBE_FILLS += 1
+    if _PROBE_LIVE_BYTES > _PROBE_PEAK_BYTES:
+        _PROBE_PEAK_BYTES = _PROBE_LIVE_BYTES
+
+    def _release(_nbytes=nbytes):
+        global _PROBE_LIVE_BYTES
+        _PROBE_LIVE_BYTES -= _nbytes
+
+    try:
+        _wr.finalize(tensor, _release)
+    except TypeError:
+        _PROBE_LIVE_BYTES -= nbytes
+        _PROBE_FILLS -= 1
 _cpu_offload_prefetch = False
 
 # Function.forward always runs with grad disabled, so grad mode is captured in the
@@ -892,6 +938,17 @@ def non_reentrant_checkpoint(function, *args):
         """
         res = Holder()
         weak_holder_list.append(weakref.ref(res))
+        if _PROBE_ON:
+            global _PROBE_PACK_CALLS, _PROBE_PACK_BYTES
+            _PROBE_PACK_CALLS += 1
+            _PROBE_PACK_BYTES += tensor_from_forward.nelement() * tensor_from_forward.element_size()
+            _nb = tensor_from_forward.nelement() * tensor_from_forward.element_size()
+            if _nb >= 64 * 1024 * 1024:
+                _k = str(tuple(tensor_from_forward.shape))
+                _e = _PROBE_PACK_SHAPES.get(_k, [0, 0])
+                _e[0] += 1
+                _e[1] += _nb
+                _PROBE_PACK_SHAPES[_k] = _e
 
         # if this is a leaf tensor, save it for backward progression trace
         # leaf tensor used to be input or parameters, which is not activations and
@@ -919,6 +976,8 @@ def non_reentrant_checkpoint(function, *args):
 
                 detached_activations = tensor_from_replay.detach()
                 storage[weak_holder_list[unpack_counter - 1]()] = detached_activations
+                if _PROBE_ON:
+                    _probe_track(detached_activations)
 
                 return
 
