@@ -28,7 +28,7 @@ Args:
     epsilon: numeric stability
     elems_per_row: number of elements each block will normalize
 */
-template <typename T, int unRoll, int threadsPerGroup, int maxThreads>
+template <typename T, int unRoll, int threadsPerGroup, int maxThreads, int reduceWidth>
 __global__ void fused_ln(T* output,
                          const T* vals,
                          const T* gamma,
@@ -68,7 +68,7 @@ __global__ void fused_ln(T* output,
         }
     }
 
-    reduce::partitioned_block<rop::Add, threadsPerGroup>(tb, warp, sum);
+    reduce::partitioned_block<rop::Add, reduceWidth>(tb, warp, sum);
     const float mean = sum / elems_per_row;
 
     float mean_diff = reduce::init<rop::Add, float>();
@@ -85,7 +85,7 @@ __global__ void fused_ln(T* output,
         }
     }
 
-    reduce::partitioned_block<rop::Add, threadsPerGroup>(tb, warp, mean_diff);
+    reduce::partitioned_block<rop::Add, reduceWidth>(tb, warp, mean_diff);
     const float variance = mean_diff / elems_per_row;
     const float denom = __frsqrt_rn(variance + epsilon);
 
@@ -120,9 +120,25 @@ __global__ void fused_ln(T* output,
     }
 }
 
-#define LAUNCH_FUSED_LN(unRollFactor, threadsPerGroup, maxThreads) \
-    fused_ln<T, unRollFactor, threadsPerGroup, maxThreads>         \
+#define LAUNCH_FUSED_LN(unRollFactor, threadsPerGroup, maxThreads, reduceWidth) \
+    fused_ln<T, unRollFactor, threadsPerGroup, maxThreads, reduceWidth>         \
         <<<grid, block, 0, stream>>>(output, vals, gamma, beta, epsilon, elems_per_row);
+
+// Non-subblock launches keep threadsPerGroup == maxThreads so each block owns one row.
+// reduceWidth must match the launched blockDim.x. On a 64-wide wavefront, a 16- or
+// 32-thread block reduced as if it had maxThreads participants drops the sum.
+#define LAUNCH_LN_MATCHING_WIDTH(LAUNCH_MACRO, unRollFactor)        \
+    if (threadsPerGroup == 16) {                                    \
+        LAUNCH_MACRO(unRollFactor, maxThreads, maxThreads, 16);     \
+    } else if (threadsPerGroup == 32) {                             \
+        LAUNCH_MACRO(unRollFactor, maxThreads, maxThreads, 32);     \
+    } else if (threadsPerGroup == 64) {                             \
+        LAUNCH_MACRO(unRollFactor, maxThreads, maxThreads, 64);     \
+    } else if (threadsPerGroup == 128) {                            \
+        LAUNCH_MACRO(unRollFactor, maxThreads, maxThreads, 128);    \
+    } else if (threadsPerGroup == 256) {                            \
+        LAUNCH_MACRO(unRollFactor, maxThreads, maxThreads, 256);    \
+    }
 
 template <typename T>
 void launch_fused_ln(T* output,
@@ -164,29 +180,33 @@ void launch_fused_ln(T* output,
     if (is_subblock_schedule) {
         // <=128
         if (threadsPerGroup == 1) {
-            LAUNCH_FUSED_LN(1, 1, maxThreads);
+            LAUNCH_FUSED_LN(1, 1, maxThreads, 1);
         } else if (threadsPerGroup == 2) {
-            LAUNCH_FUSED_LN(1, 2, maxThreads);
+            LAUNCH_FUSED_LN(1, 2, maxThreads, 2);
         } else if (threadsPerGroup == 4) {
-            LAUNCH_FUSED_LN(1, 4, maxThreads);
+            LAUNCH_FUSED_LN(1, 4, maxThreads, 4);
         } else if (threadsPerGroup == 8) {
-            LAUNCH_FUSED_LN(1, 8, maxThreads);
+            LAUNCH_FUSED_LN(1, 8, maxThreads, 8);
         } else if (threadsPerGroup == 16) {
-            LAUNCH_FUSED_LN(1, 16, maxThreads);
+            LAUNCH_FUSED_LN(1, 16, maxThreads, 16);
+        } else if (threadsPerGroup == 32) {
+            LAUNCH_FUSED_LN(1, 32, maxThreads, 32);
+        } else if (threadsPerGroup == 64) {
+            LAUNCH_FUSED_LN(1, 64, maxThreads, 64);
         }
     } else if (external_unRoll == 1) {
         // 129 - 4096 elems
         // (this can launch with 1-7 warps as well)
-        LAUNCH_FUSED_LN(1 * internal_unRoll, maxThreads, maxThreads);
+        LAUNCH_LN_MATCHING_WIDTH(LAUNCH_FUSED_LN, 1 * internal_unRoll);
     } else if (external_unRoll == 2) {
         // 4097 - 8192 elems
-        LAUNCH_FUSED_LN(2 * internal_unRoll, maxThreads, maxThreads);
+        LAUNCH_FUSED_LN(2 * internal_unRoll, maxThreads, maxThreads, maxThreads);
     } else if (external_unRoll == 3) {
         // 8193 - 12288 elems
-        LAUNCH_FUSED_LN(3 * internal_unRoll, maxThreads, maxThreads);
+        LAUNCH_FUSED_LN(3 * internal_unRoll, maxThreads, maxThreads, maxThreads);
     } else if (external_unRoll == 4) {
         // 12289 - 16384 elems
-        LAUNCH_FUSED_LN(4 * internal_unRoll, maxThreads, maxThreads);
+        LAUNCH_FUSED_LN(4 * internal_unRoll, maxThreads, maxThreads, maxThreads);
     }
 }
 
@@ -220,7 +240,7 @@ Template arg:
     StoreResidual: controls whether the residual calculation is stored
         or not. When set to false, the input `res_output` is unused.
 */
-template <typename T, int unRoll, int threadsPerGroup, int maxThreads, bool preLnResidual>
+template <typename T, int unRoll, int threadsPerGroup, int maxThreads, int reduceWidth, bool preLnResidual>
 __global__ void fused_residual_ln(T* output,
                                   T* res_output,
                                   const T* vals,
@@ -284,7 +304,7 @@ __global__ void fused_residual_ln(T* output,
         }
     }
 
-    reduce::partitioned_block<rop::Add, threadsPerGroup>(tb, warp, sum);
+    reduce::partitioned_block<rop::Add, reduceWidth>(tb, warp, sum);
     const float mean = sum / elems_per_row;
 
     float mean_diff = reduce::init<rop::Add, float>();
@@ -300,7 +320,7 @@ __global__ void fused_residual_ln(T* output,
         }
     }
 
-    reduce::partitioned_block<rop::Add, threadsPerGroup>(tb, warp, mean_diff);
+    reduce::partitioned_block<rop::Add, reduceWidth>(tb, warp, mean_diff);
     const float variance = mean_diff / elems_per_row;
     const float denom = __frsqrt_rn(variance + epsilon);
 
@@ -335,9 +355,9 @@ __global__ void fused_residual_ln(T* output,
 }
 
 // TODO(cmikeh2): There's a bunch of redundancy here that needs to be removed/simplified.
-#define LAUNCH_FUSED_RES_LN(unRollFactor, threadsPerGroup, maxThreads)     \
-    fused_residual_ln<T, unRollFactor, threadsPerGroup, maxThreads, false> \
-        <<<grid, block, 0, stream>>>(                                      \
+#define LAUNCH_FUSED_RES_LN(unRollFactor, threadsPerGroup, maxThreads, reduceWidth)     \
+    fused_residual_ln<T, unRollFactor, threadsPerGroup, maxThreads, reduceWidth, false> \
+        <<<grid, block, 0, stream>>>(                                                   \
             output, nullptr, vals, residual, bias, gamma, beta, epsilon, elems_per_row);
 
 template <typename T>
@@ -382,35 +402,39 @@ void launch_fused_residual_ln(T* output,
     if (is_subblock_schedule) {
         // <=128
         if (threadsPerGroup == 1) {
-            LAUNCH_FUSED_RES_LN(1, 1, maxThreads);
+            LAUNCH_FUSED_RES_LN(1, 1, maxThreads, 1);
         } else if (threadsPerGroup == 2) {
-            LAUNCH_FUSED_RES_LN(1, 2, maxThreads);
+            LAUNCH_FUSED_RES_LN(1, 2, maxThreads, 2);
         } else if (threadsPerGroup == 4) {
-            LAUNCH_FUSED_RES_LN(1, 4, maxThreads);
+            LAUNCH_FUSED_RES_LN(1, 4, maxThreads, 4);
         } else if (threadsPerGroup == 8) {
-            LAUNCH_FUSED_RES_LN(1, 8, maxThreads);
+            LAUNCH_FUSED_RES_LN(1, 8, maxThreads, 8);
         } else if (threadsPerGroup == 16) {
-            LAUNCH_FUSED_RES_LN(1, 16, maxThreads);
+            LAUNCH_FUSED_RES_LN(1, 16, maxThreads, 16);
+        } else if (threadsPerGroup == 32) {
+            LAUNCH_FUSED_RES_LN(1, 32, maxThreads, 32);
+        } else if (threadsPerGroup == 64) {
+            LAUNCH_FUSED_RES_LN(1, 64, maxThreads, 64);
         }
     } else if (external_unRoll == 1) {
         // 129 - 4096 elems
         // (this can launch with 1-7 warps as well)
-        LAUNCH_FUSED_RES_LN(1 * internal_unRoll, maxThreads, maxThreads);
+        LAUNCH_LN_MATCHING_WIDTH(LAUNCH_FUSED_RES_LN, 1 * internal_unRoll);
     } else if (external_unRoll == 2) {
         // 4097 - 8192 elems
-        LAUNCH_FUSED_RES_LN(2 * internal_unRoll, maxThreads, maxThreads);
+        LAUNCH_FUSED_RES_LN(2 * internal_unRoll, maxThreads, maxThreads, maxThreads);
     } else if (external_unRoll == 3) {
         // 8193 - 12288 elems
-        LAUNCH_FUSED_RES_LN(3 * internal_unRoll, maxThreads, maxThreads);
+        LAUNCH_FUSED_RES_LN(3 * internal_unRoll, maxThreads, maxThreads, maxThreads);
     } else if (external_unRoll == 4) {
         // 12289 - 16384 elems
-        LAUNCH_FUSED_RES_LN(4 * internal_unRoll, maxThreads, maxThreads);
+        LAUNCH_FUSED_RES_LN(4 * internal_unRoll, maxThreads, maxThreads, maxThreads);
     }
 }
 
-#define LAUNCH_FUSED_RES_LN_STORE_PRE_LN_RES(unRollFactor, threadsPerGroup, maxThreads) \
-    fused_residual_ln<T, unRollFactor, threadsPerGroup, maxThreads, true>               \
-        <<<grid, block, 0, stream>>>(                                                   \
+#define LAUNCH_FUSED_RES_LN_STORE_PRE_LN_RES(unRollFactor, threadsPerGroup, maxThreads, reduceWidth) \
+    fused_residual_ln<T, unRollFactor, threadsPerGroup, maxThreads, reduceWidth, true>               \
+        <<<grid, block, 0, stream>>>(                                                                \
             norm_output, res_output, vals, residual, bias, gamma, beta, epsilon, elems_per_row);
 
 template <typename T>
@@ -456,29 +480,33 @@ void launch_fused_residual_ln_store_pre_ln_res(T* norm_output,
     if (is_subblock_schedule) {
         // <=128
         if (threadsPerGroup == 1) {
-            LAUNCH_FUSED_RES_LN_STORE_PRE_LN_RES(1, 1, maxThreads);
+            LAUNCH_FUSED_RES_LN_STORE_PRE_LN_RES(1, 1, maxThreads, 1);
         } else if (threadsPerGroup == 2) {
-            LAUNCH_FUSED_RES_LN_STORE_PRE_LN_RES(1, 2, maxThreads);
+            LAUNCH_FUSED_RES_LN_STORE_PRE_LN_RES(1, 2, maxThreads, 2);
         } else if (threadsPerGroup == 4) {
-            LAUNCH_FUSED_RES_LN_STORE_PRE_LN_RES(1, 4, maxThreads);
+            LAUNCH_FUSED_RES_LN_STORE_PRE_LN_RES(1, 4, maxThreads, 4);
         } else if (threadsPerGroup == 8) {
-            LAUNCH_FUSED_RES_LN_STORE_PRE_LN_RES(1, 8, maxThreads);
+            LAUNCH_FUSED_RES_LN_STORE_PRE_LN_RES(1, 8, maxThreads, 8);
         } else if (threadsPerGroup == 16) {
-            LAUNCH_FUSED_RES_LN_STORE_PRE_LN_RES(1, 16, maxThreads);
+            LAUNCH_FUSED_RES_LN_STORE_PRE_LN_RES(1, 16, maxThreads, 16);
+        } else if (threadsPerGroup == 32) {
+            LAUNCH_FUSED_RES_LN_STORE_PRE_LN_RES(1, 32, maxThreads, 32);
+        } else if (threadsPerGroup == 64) {
+            LAUNCH_FUSED_RES_LN_STORE_PRE_LN_RES(1, 64, maxThreads, 64);
         }
     } else if (external_unRoll == 1) {
         // 129 - 4096 elems
         // (this can launch with 1-7 warps as well)
-        LAUNCH_FUSED_RES_LN_STORE_PRE_LN_RES(1 * internal_unRoll, maxThreads, maxThreads);
+        LAUNCH_LN_MATCHING_WIDTH(LAUNCH_FUSED_RES_LN_STORE_PRE_LN_RES, 1 * internal_unRoll);
     } else if (external_unRoll == 2) {
         // 4097 - 8192 elems
-        LAUNCH_FUSED_RES_LN_STORE_PRE_LN_RES(2 * internal_unRoll, maxThreads, maxThreads);
+        LAUNCH_FUSED_RES_LN_STORE_PRE_LN_RES(2 * internal_unRoll, maxThreads, maxThreads, maxThreads);
     } else if (external_unRoll == 3) {
         // 8193 - 12288 elems
-        LAUNCH_FUSED_RES_LN_STORE_PRE_LN_RES(3 * internal_unRoll, maxThreads, maxThreads);
+        LAUNCH_FUSED_RES_LN_STORE_PRE_LN_RES(3 * internal_unRoll, maxThreads, maxThreads, maxThreads);
     } else if (external_unRoll == 4) {
         // 12289 - 16384 elems
-        LAUNCH_FUSED_RES_LN_STORE_PRE_LN_RES(4 * internal_unRoll, maxThreads, maxThreads);
+        LAUNCH_FUSED_RES_LN_STORE_PRE_LN_RES(4 * internal_unRoll, maxThreads, maxThreads, maxThreads);
     }
 }
 
