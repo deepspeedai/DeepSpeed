@@ -10,8 +10,16 @@ import sys
 import pytest
 import os
 from os.path import abspath, dirname
+
+# NVIDIA containers can force TF32 before PyTorch reads its backend settings.
+# Correctness tests compare independent sharding/offload paths and require IEEE fp32.
+os.environ.pop("TORCH_ALLOW_TF32_CUBLAS_OVERRIDE", None)
+
 import torch
 import warnings
+
+torch.backends.cuda.matmul.allow_tf32 = False
+torch.backends.cudnn.allow_tf32 = False
 
 # Set this environment variable for the T5 inference unittest(s) (e.g. google/t5-v1_1-small)
 os.environ['PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION'] = 'python'
