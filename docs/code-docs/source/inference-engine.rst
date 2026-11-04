@@ -142,11 +142,20 @@ CUDA Graph capture is supported for CUDA inputs with the default
 ``align_decode_fronts=False`` and ``enable_cache_trimming=False`` settings. It
 uses a fixed ``continuous_batch_size`` layout, keeps every KV-cache row and
 decode tensor at a stable address, and masks inactive rows while the scheduler
-refills them. Graph state is reused across matching rollout calls and rebuilt
-when the model parameters or static decode shape changes. Aligned decode fronts
-and cache trimming are rejected while graph capture is enabled because they
-move cache rows or columns. ``flash_attention_2`` is also rejected because the
-captured decode uses a four-dimensional additive attention mask.
+refills them. Graph state is reused across rollout calls with the same decode
+batch size, cache length, device and dtype, and is rebuilt when one of these
+changes or when a model parameter is replaced by a tensor at a different
+address. Replays read parameters in place, so in-place optimizer updates between
+rollouts are picked up without recapturing. By default, the cache length is the
+prompt width plus ``max_new_tokens``. Set ``continuous_cache_capacity`` to reuse
+one graph across prompt widths that fit within that capacity.
+Call ``rollout.shutdown()`` to release the graph and its
+static cache. The rollout stays usable and captures again on its next graph
+call. Under tensor parallelism the graph holds captured collectives, so call
+``shutdown()`` before ``torch.distributed.destroy_process_group()``. Aligned
+decode fronts and cache trimming are rejected while graph capture is enabled
+because they move cache rows or columns. ``flash_attention_2`` is also rejected
+because the captured decode uses a four-dimensional additive attention mask.
 
 ``DeepSpeedStaticCache`` accepts one write position per row and can compact
 active rows while preserving its static tensor addresses. This mirrors the
