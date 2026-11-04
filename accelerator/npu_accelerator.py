@@ -254,12 +254,6 @@ class NPU_Accelerator(DeepSpeedAccelerator):
 
         if not is_triton_available():
             return False
-        if kernel == "permute_rows_gather":
-            # The Triton gather path faults on the device in multi-card runs on
-            # Ascend (reported upstream, being fixed). Keep the eager fallback
-            # until the fix lands; narrow to multi-card here if single-card is
-            # verified first.
-            return False
         if probe is None:
             # Backend-level gate: the backend is installed and active.
             return True
