@@ -133,6 +133,18 @@ def test_continuous_graph_rejects_incompatible_fixed_layout_options(cfg, message
         rollout.generate(request, SamplingConfig(max_new_tokens=2, temperature=0, continuous_batch_size=1))
 
 
+def test_static_graph_rejects_flash_attention():
+    module = torch.nn.Linear(1, 1)
+    module.config = SimpleNamespace(_attn_implementation="flash_attention_2")
+    rollout = HybridEngineRollout(SimpleNamespace(module=module),
+                                  _make_tokenizer(),
+                                  cfg=HybridEngineRolloutConfig(use_graph_capture=True))
+    request = RolloutRequest(torch.tensor([[1, 2]]), torch.ones((1, 2), dtype=torch.long))
+
+    with pytest.raises(ValueError, match="does not support flash_attention_2"):
+        rollout.generate(request, SamplingConfig(max_new_tokens=2, temperature=0))
+
+
 def test_continuous_graph_rejects_flash_attention():
     engine = _make_engine()
     engine.module.config = SimpleNamespace(_attn_implementation="flash_attention_2")

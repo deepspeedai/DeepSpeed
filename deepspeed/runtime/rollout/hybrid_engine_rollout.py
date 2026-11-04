@@ -1308,6 +1308,9 @@ class HybridEngineRollout(RolloutEngine):
         from transformers import StaticCache
         from deepspeed.utils.static_cache import DeepSpeedStaticCache
 
+        if getattr(module.config, "_attn_implementation", None) == "flash_attention_2":
+            raise ValueError("graph capture does not support flash_attention_2")
+
         batch_size = prompt_ids.shape[0]
         prompt_len = prompt_ids.shape[1]
         max_len = prompt_len + max_new_tokens
