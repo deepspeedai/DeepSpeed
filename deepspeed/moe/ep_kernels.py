@@ -396,8 +396,7 @@ def permute_rows_supported(rows: torch.Tensor) -> bool:
     declaration: no probe runs (the path is probe-unsafe), and the accelerator
     answers for the kernel name alone. A backend with a known problem in this
     specific path can keep the eager fallback or select its own implementation
-    through the triton_ops dispatch (Ascend uses the address-safe variant in
-    ``deepspeed.ops.triton_ops.npu.ep_kernels``).
+    through the triton_ops dispatch.
     """
     if not _TRITON_AVAILABLE or rows.dim() != 2 or not is_accelerator_tensor(rows):
         return False

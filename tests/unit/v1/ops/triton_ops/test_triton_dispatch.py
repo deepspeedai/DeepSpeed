@@ -77,8 +77,8 @@ def test_out_of_package_feature_without_a_platform_variant_resolves_its_portable
 
 
 def test_out_of_package_feature_with_a_platform_variant_resolves_the_platform_module(monkeypatch):
-    # Ascend overrides the MoE gather kernel, so ep_kernels must resolve to the
-    # NPU subpackage rather than the portable module.
+    # The platform subpackage overrides the MoE gather kernel, so ep_kernels
+    # must resolve to the platform module rather than the portable one.
     monkeypatch.setattr(deepspeed.accelerator, "get_accelerator",
                         lambda: _FakeAccelerator("deepspeed.ops.triton_ops.npu"))
     impl = resolve_triton_ops_impl("ep_kernels", portable_module="deepspeed.moe.ep_kernels")
@@ -87,12 +87,12 @@ def test_out_of_package_feature_with_a_platform_variant_resolves_the_platform_mo
 
 def test_dispatch_selects_the_platform_gather_variant(monkeypatch):
     import deepspeed.moe.ep_kernels as ep_kernels
-    import deepspeed.ops.triton_ops.npu.ep_kernels as npu_ep_kernels
+    import deepspeed.ops.triton_ops.npu.ep_kernels as platform_ep_kernels
 
     monkeypatch.setattr(deepspeed.accelerator, "get_accelerator",
                         lambda: _FakeAccelerator("deepspeed.ops.triton_ops.npu"))
     sentinel = object()
-    monkeypatch.setattr(npu_ep_kernels, "gather_rows", lambda src, index: sentinel)
+    monkeypatch.setattr(platform_ep_kernels, "gather_rows", lambda src, index: sentinel)
     assert ep_kernels.gather_rows(None, None) is sentinel
 
 
