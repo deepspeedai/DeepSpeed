@@ -2961,6 +2961,13 @@ class DeepSpeedEngine(Module):
         self._start_timers(self.engine_timers.forward_timers)
 
         if self.zero_optimization_partition_weights():
+            # Modules attached after initialization (e.g. PEFT modules_to_save
+            # wrappers) are created outside of deepspeed.zero.Init. Partition
+            # them before the hooks run so they are sharded like the rest of
+            # the model.
+            offload = getattr(self.optimizer, "parameter_offload", self.optimizer)
+            if hasattr(offload, "partition_pending_parameters"):
+                offload.partition_pending_parameters()
             # Enable automated discovery of external parameters by indicating that
             # we are in a forward pass.
             for module in self.module.modules():

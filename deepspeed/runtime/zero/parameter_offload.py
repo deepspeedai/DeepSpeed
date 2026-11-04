@@ -164,6 +164,8 @@ class DeepSpeedZeRoOffload(object):
         self.module = module
         self.timers = timers
         self.zenflow = zenflow
+        self.ds_config = ds_config
+        self.mpu = mpu
         self.dtype = list(module.parameters())[0].dtype
         self.dp_process_group = dp_process_group
         self.offload_device = None
@@ -239,10 +241,83 @@ class DeepSpeedZeRoOffload(object):
         """Partitioning Parameters that were not partitioned usually if parameters
         of modules whose input parameters do not require grad computation do not
         trigger post call and will therefore will remain unpartitioned"""
+        self.partition_pending_parameters(scan_all=True)
         self.get_param_coordinator().release_and_reset_all(self.module)
         for param in iter_params(self.module, recurse=True):
             if param.ds_status != ZeroParamStatus.NOT_AVAILABLE:
                 raise RuntimeError(f"{param.ds_summary()} expected to be released")
+
+    @instrument_w_nvtx
+    def partition_pending_parameters(self, scan_all=False):
+        """Partition parameters that were added after ZeRO-3 initialization.
+
+        Modules attached after ``deepspeed.initialize`` (for example PEFT
+        ``modules_to_save`` wrappers or adapters loaded after the engine was
+        created) are created outside of ``deepspeed.zero.Init``, so their
+        parameters are still full and unsharded. Convert them in place and
+        register the hooks required to gather and release them.
+
+        Args:
+            scan_all (bool): Also scan parameters that were added directly to
+                already-registered modules. The forward path only inspects new
+                modules to keep its per-step overhead low; the optimizer step
+                uses a full scan as a fallback.
+
+        Returns:
+            int: The number of parameters that were converted.
+        """
+        new_modules = [m for m in self.module.modules() if not hasattr(m, "ds_id")]
+        if not new_modules and not scan_all:
+            return 0
+
+        if scan_all:
+            pending_params = [p for p in self.module.parameters() if not is_zero_param(p)]
+        else:
+            pending_params = [p for m in new_modules for p in m.parameters(recurse=False) if not is_zero_param(p)]
+
+        if not pending_params and not new_modules:
+            return 0
+
+        if pending_params:
+            self._convert_to_zero_parameters(self.ds_config, self.module, self.mpu)
+
+        for m in self.module.modules():
+            _init_external_params(m)
+
+        # Register the newly attached submodules. Nodes that were already
+        # registered (including children of the new modules) are skipped so
+        # that their hooks are not duplicated.
+        for m in list(self.module.modules()):
+            if not hasattr(m, "ds_id"):
+                self._register_deepspeed_module(m, skip_existing=True)
+
+        # Keep the persistence policy consistent with parameters that were
+        # present at engine initialization.
+        persisted_numel = sum(p.ds_numel for p in self.persistent_parameters)
+        for param in pending_params:
+            if param.ds_persist:
+                continue
+            if param.ds_numel <= self.param_numel_persistence_threshold and \
+                    persisted_numel + param.ds_numel <= self.model_persistence_threshold:
+                param.ds_persist = True
+                persisted_numel += param.ds_numel
+                self.persistent_parameters.append(param)
+
+        if pending_params:
+            coordinator = self.get_param_coordinator()
+            if coordinator is not None and not coordinator.is_invalid_trace():
+                coordinator._invalidate_trace()
+
+            if any(p.requires_grad for p in pending_params) and dist.get_rank() == 0:
+                utils.logger.warning("ZeRO-3 partitioned parameters that were added after engine initialization. "
+                                     "The ZeRO optimizer created during initialization does not automatically "
+                                     "include these parameters; add them to the optimizer before the first step "
+                                     "if they should be trained.")
+
+        if pending_params:
+            print_rank_0(f"Partitioned {len(pending_params)} parameters added after ZeRO-3 initialization.",
+                         force=False)
+        return len(pending_params)
 
     def release_backward_leftovers(self):
         """Release params of submodules whose post-backward hook never fired (e.g. modules
@@ -334,7 +409,7 @@ class DeepSpeedZeRoOffload(object):
 
         return persistent_params
 
-    def _register_deepspeed_module(self, module, count=[0]):
+    def _register_deepspeed_module(self, module, count=[0], skip_existing=False):
         # re-registering hooks on the root module leaves the coordinator trace stale;
         # invalidate so it re-records on the next forward.
         if module is self.module:
@@ -352,8 +427,10 @@ class DeepSpeedZeRoOffload(object):
                 param.ds_z3_leaf_module = module
         else:
             for child in module.children():
+                if skip_existing and hasattr(child, "ds_id"):
+                    continue
                 count[0] = count[0] + 1
-                self._register_deepspeed_module(child, count=count)
+                self._register_deepspeed_module(child, count=count, skip_existing=skip_existing)
 
         @torch.compiler.disable
         def _pre_forward_module_hook(module, *args):
