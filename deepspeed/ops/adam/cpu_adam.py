@@ -6,11 +6,11 @@
 import torch
 from deepspeed.utils import logger
 from deepspeed.utils.logging import should_log_le
-from deepspeed.utils.torch import restore_optimizer_state_dtype
+from deepspeed.ops.cpu_optimizer import DeepSpeedCPUOptimizer
 from deepspeed.ops.op_builder import CPUAdamBuilder
 
 
-class DeepSpeedCPUAdam(torch.optim.Optimizer):
+class DeepSpeedCPUAdam(DeepSpeedCPUOptimizer):
     optimizer_id = 0
 
     def __init__(self,
@@ -70,7 +70,7 @@ class DeepSpeedCPUAdam(torch.optim.Optimizer):
                             weight_decay=weight_decay,
                             bias_correction=bias_correction,
                             amsgrad=amsgrad)
-        super(DeepSpeedCPUAdam, self).__init__(model_params, default_args)
+        super(DeepSpeedCPUAdam, self).__init__(model_params, default_args, fp32_optimizer_states)
 
         # Imported here because importing cpuinfo runs subprocesses (file, uname), which slows down import deepspeed.
         from cpuinfo import get_cpu_info
@@ -89,7 +89,6 @@ class DeepSpeedCPUAdam(torch.optim.Optimizer):
         self.opt_id = DeepSpeedCPUAdam.optimizer_id
         DeepSpeedCPUAdam.optimizer_id = DeepSpeedCPUAdam.optimizer_id + 1
         self.adam_w_mode = adamw_mode
-        self.fp32_optimizer_states = fp32_optimizer_states
         try:
             self.ds_opt_adam = CPUAdamBuilder().load()
         except Exception as e:
@@ -108,12 +107,6 @@ class DeepSpeedCPUAdam(torch.optim.Optimizer):
         if param_group.get('amsgrad', self.defaults['amsgrad']):
             raise RuntimeError('DeepSpeedCPUAdam does not support the AMSGrad variant.')
         super().add_param_group(param_group)
-
-    def load_state_dict(self, state_dict):
-        super().load_state_dict(state_dict)
-        # step() keeps the states in fp32 for any parameter dtype, and the kernel is chosen from the state dtype.
-        if self.fp32_optimizer_states:
-            restore_optimizer_state_dtype(self, state_dict, torch.float)
 
     def __setstate__(self, state):
         super(DeepSpeedCPUAdam, self).__setstate__(state)
