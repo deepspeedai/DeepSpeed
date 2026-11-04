@@ -913,6 +913,27 @@ def combine_grad_norm_groups(norm_groups, norm_type=2):
     return torch.where(invalid, torch.full_like(combined, float("inf")), combined)
 
 
+def _get_local_norm_contribution(input_tensors, norm_type, device):
+    """Compute the FP32 input to the global MAX or SUM reduction."""
+    all_norms = []
+    for tensor in input_tensors:
+        if norm_type == inf:
+            if tensor.numel() == 0:
+                continue
+            tensor_norm = tensor.detach().abs().max().float()
+        else:
+            tensor_norm = tensor.detach().float().norm(norm_type)
+        all_norms.append(tensor_norm.to(device))
+
+    if not all_norms and norm_type > 0:
+        return torch.zeros((), dtype=torch.float32, device=device)
+
+    local_norms = torch.stack(all_norms)
+    if norm_type == inf:
+        return local_norms.max()
+    return local_norms.pow(norm_type).sum()
+
+
 def get_global_norm_of_tensors(input_tensors, norm_type=2, mpu=None, moe_ep_group=None):
     """Get norm of an iterable of tensors.
 
@@ -928,50 +949,28 @@ def get_global_norm_of_tensors(input_tensors, norm_type=2, mpu=None, moe_ep_grou
         Total norm of the tensors (viewed as a single vector), as a detached float32 scalar tensor.
     """
     assert isinstance(input_tensors, Iterable), f'expected Iterable type not {type(input_tensors)}'
+    input_tensors = list(input_tensors)
     assert all([torch.is_tensor(t) for t in input_tensors]), 'expected list of only tensors'
 
     norm_type = float(norm_type)
-    all_norms = []
-    if norm_type == inf:
-        for t in input_tensors:
-            all_norms.append(t.data.abs().max().float())
-        total_norm = torch.stack(all_norms).max()
-        device_total_norm = total_norm.to(get_accelerator().current_device_name())
-        # Max across model parallel
-        if mpu is not None:
-            # For MoE grads, max over model parallel only if MoE-TP is enabled
-            if moe_ep_group is None or groups._get_expert_model_parallel_world_size() > 1:
-                dist.all_reduce(device_total_norm, op=dist.ReduceOp.MAX, group=mpu.get_model_parallel_group())
-            # If MoE grads and MoE-TP disabled, max over pipeline parallel
-            elif bwc_pipeline_parallel_world_size(mpu) > 1:
-                dist.all_reduce(device_total_norm, op=dist.ReduceOp.MAX, group=bwc_pipeline_parallel_group(mpu))
+    device = get_accelerator().current_device_name()
+    return_device = input_tensors[0].device if input_tensors else device
+    device_total_norm = _get_local_norm_contribution(input_tensors, norm_type, device)
+    reduce_op = dist.ReduceOp.MAX if norm_type == inf else dist.ReduceOp.SUM
 
-        # MoE grads: max across expert parallel group
-        if pg_utils.is_parallel(moe_ep_group):
-            dist.all_reduce(device_total_norm, op=dist.ReduceOp.MAX, group=moe_ep_group)
-        total_norm = device_total_norm.to(input_tensors[0].device)
-    else:
+    if mpu is not None:
+        # For MoE grads, reduce over model parallel only if MoE-TP is enabled.
+        if moe_ep_group is None or groups._get_expert_model_parallel_world_size() > 1:
+            dist.all_reduce(device_total_norm, op=reduce_op, group=mpu.get_model_parallel_group())
+        # If MoE grads and MoE-TP disabled, reduce over pipeline parallel.
+        elif bwc_pipeline_parallel_world_size(mpu) > 1:
+            dist.all_reduce(device_total_norm, op=reduce_op, group=bwc_pipeline_parallel_group(mpu))
 
-        device = get_accelerator().current_device_name()
-        for tensor in input_tensors:
-            tensor_norm = tensor.detach().float().norm(norm_type)
-            all_norms.append(tensor_norm.to(device))
-        norm_powers = torch.stack(all_norms).pow(norm_type)
-        device_total_norm = norm_powers.sum()
-
-        # Sum across model parallel
-        if mpu is not None:
-            # For MoE grads, sum over model parallel only if MoE-TP is enabled
-            if moe_ep_group is None or groups._get_expert_model_parallel_world_size() > 1:
-                dist.all_reduce(device_total_norm, op=dist.ReduceOp.SUM, group=mpu.get_model_parallel_group())
-            # If MoE grads and MoE-TP disabled, sum over pipeline parallel
-            elif bwc_pipeline_parallel_world_size(mpu) > 1:
-                dist.all_reduce(device_total_norm, op=dist.ReduceOp.SUM, group=bwc_pipeline_parallel_group(mpu))
-
-        # MoE grads: sum across expert parallel group
-        if pg_utils.is_parallel(moe_ep_group):
-            dist.all_reduce(device_total_norm, op=dist.ReduceOp.SUM, group=moe_ep_group)
-        total_norm = device_total_norm.to(input_tensors[0].device).pow(1. / norm_type)
+    if pg_utils.is_parallel(moe_ep_group):
+        dist.all_reduce(device_total_norm, op=reduce_op, group=moe_ep_group)
+    total_norm = device_total_norm.to(return_device)
+    if norm_type != inf:
+        total_norm = total_norm.pow(1. / norm_type)
 
     mask_nan_or_inf_with_val_inplace(total_norm, device=total_norm.device)
 
