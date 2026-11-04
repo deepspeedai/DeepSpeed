@@ -563,6 +563,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                 accelerator.unpin_memory(buffer)
         for buffer in getattr(self, 'hp_params_pin_buffers', []):
             accelerator.unpin_memory(buffer)
+        for buffer in getattr(self, 'untrained_lp_param_pin_buffers', {}).values():
+            accelerator.unpin_memory(buffer)
         unpin_offloaded_optimizer_states(self.optimizer)
         if self.offload_optimizer_pin_memory:
             for sub_group_id, fp32_partition in enumerate(self.fp32_partitioned_groups_flat):
@@ -1021,6 +1023,12 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
     def _get_parameter_partitions(self) -> List[Tensor]:
         return [param.ds_tensor for sub_group in self.fp16_groups for param in sub_group]
+
+    def _get_untrained_parameters(self) -> List[Tensor]:
+        """The module's parameters that the optimizer does not train, e.g. frozen ones. lp_param_buffer does not hold
+        their partitions."""
+        trained = {id(param) for sub_group in self.fp16_groups for param in sub_group}
+        return [param for param in self.module.parameters() if id(param) not in trained]
 
     def _swap_in_sub_group_to_flat_buffer(self, flat_buffer, sub_group_id):
         offset = 0
@@ -3933,9 +3941,22 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                 cpu_buffer = self.lp_param_buffer.to(device, non_blocking=non_blocking)
 
             self.lp_param_buffer.data = cpu_buffer
-            for tensor, offset, tensor_numel in get_mapping_to_flat_buffer(
-                [p.ds_tensor for p in self.module.parameters()]):
+            for tensor, offset, tensor_numel in get_mapping_to_flat_buffer(self._get_parameter_partitions()):
                 tensor.data = cpu_buffer.narrow(0, offset, tensor_numel)
+
+            if pin_memory and not hasattr(self, "untrained_lp_param_pin_buffers"):
+                self.untrained_lp_param_pin_buffers = {}
+            for param in self._get_untrained_parameters():
+                partition = param.ds_tensor
+                if pin_memory:
+                    if param.ds_id not in self.untrained_lp_param_pin_buffers:
+                        self.untrained_lp_param_pin_buffers[param.ds_id] = get_accelerator().pin_memory(
+                            torch.empty_like(partition, device=device))
+                    pin_buffer = self.untrained_lp_param_pin_buffers[param.ds_id]
+                    pin_buffer.copy_(partition, non_blocking=non_blocking)
+                    partition.data = pin_buffer
+                else:
+                    partition.data = partition.data.to(device, non_blocking=non_blocking)
 
             self.fp16_partitioned_groups_flat.clear()
             self.offloaded_states.add(OffloadStateTypeEnum.lp_params)
@@ -3978,36 +3999,31 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         device = get_accelerator().current_device_name()
 
+        # Each state is reloaded from where offload_states() put it last: the pinned buffers of an earlier offload
+        # with pin_memory=True are kept for reuse, but are stale after an offload with pin_memory=False.
+
         # HP param
         if OffloadStateTypeEnum.hp_params in self.offloaded_states:
-            if hasattr(self, "hp_params_pin_buffers"):
-                for src, dest in zip(self.hp_params_pin_buffers, self.fp32_partitioned_groups_flat):
-                    dest.data = src.to(device, non_blocking=non_blocking)
-            else:
-                for buf in self.fp32_partitioned_groups_flat:
-                    buf.data = buf.data.to(device, non_blocking=non_blocking)
+            for buf in self.fp32_partitioned_groups_flat:
+                buf.data = buf.data.to(device, non_blocking=non_blocking)
             self.offloaded_states.remove(OffloadStateTypeEnum.hp_params)
 
         # LP Param
         if OffloadStateTypeEnum.lp_params in self.offloaded_states:
-            cpu_buffer = self.lp_param_contiguous_pin_buffer if hasattr(
-                self, "lp_param_contiguous_pin_buffer") else self.lp_param_buffer
-            self.lp_param_buffer.data = cpu_buffer.data.to(device, non_blocking=non_blocking)
+            self.lp_param_buffer.data = self.lp_param_buffer.data.to(device, non_blocking=non_blocking)
             self._set_fp16_partitioned_groups_flat()
 
             parameter_partitions = self._get_parameter_partitions()
             for tensor, offset, tensor_numel in get_mapping_to_flat_buffer(parameter_partitions):
                 tensor.data = self.lp_param_buffer.narrow(0, offset, tensor_numel)
+            for param in self._get_untrained_parameters():
+                param.ds_tensor.data = param.ds_tensor.data.to(device, non_blocking=non_blocking)
             self.offloaded_states.remove(OffloadStateTypeEnum.lp_params)
 
         # LP grad
         if OffloadStateTypeEnum.lp_grads in self.offloaded_states:
-            if hasattr(self, "lp_grad_partitions_flat_pin_buffers"):
-                self.grad_partitions_flat_buffer.data = self.lp_grad_partitions_flat_pin_buffers.to(
-                    device, non_blocking=non_blocking)
-            else:
-                self.grad_partitions_flat_buffer.data = self.grad_partitions_flat_buffer.data.to(
-                    device, non_blocking=non_blocking)
+            self.grad_partitions_flat_buffer.data = self.grad_partitions_flat_buffer.data.to(device,
+                                                                                             non_blocking=non_blocking)
             self.averaged_gradients = {}
 
             offset = 0

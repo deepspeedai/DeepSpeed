@@ -375,6 +375,90 @@ def run_model_zero3(model, param_groups, config_dict, hidden_dim, dtype, offload
     model.destroy()
 
 
+class TestOffloadStatesZero3Reload(DistributedTest):
+    """ZeRO-3 offload_states() and reload_states() with a frozen layer, and a reload after an offload with
+    pin_memory=False that follows one with pin_memory=True."""
+    world_size = 2
+
+    def _engine(self, frozen):
+        hidden_dim = 128
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 1,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 1e-2
+                }
+            },
+            "bf16": {
+                "enabled": True
+            },
+            "zero_optimization": {
+                "stage": 3
+            },
+        }
+        with deepspeed.zero.Init(config_dict_or_path=config_dict):
+            model = SimpleModel(hidden_dim, nlayers=4)
+        if frozen:
+            model.linears[2].requires_grad_(False)
+        model, _, _, _ = deepspeed.initialize(model=model,
+                                              model_parameters=[p for p in model.parameters() if p.requires_grad],
+                                              config=config_dict)
+        data_loader = random_dataloader(model=model,
+                                        total_samples=2,
+                                        hidden_dim=hidden_dim,
+                                        device=model.device,
+                                        dtype=torch.bfloat16)
+        return model, next(iter(data_loader))
+
+    def _train_step(self, model, batch):
+        model.backward(model(batch[0], batch[1]))
+        model.step()
+
+    @pytest.mark.parametrize("pin_memory", [False, True])
+    def test_frozen_parameters(self, pin_memory):
+        model, batch = self._engine(frozen=True)
+        self._train_step(model, batch)
+        trained = [p for p in model.parameters() if p.requires_grad]
+        lp_params_expected = [p.ds_tensor.clone() for p in model.parameters()]
+        hp_params_expected = [safe_get_local_fp32_param(p).clone() for p in trained]
+
+        model.offload_states(pin_memory=pin_memory)
+        if offload_leaves_accelerator:
+            # The frozen layer's partitions are not in the flat buffer of the trained ones; they move too.
+            assert get_state_devices(model, OffloadStateTypeEnum.lp_params) == {torch.device("cpu")}
+        model.reload_states()
+
+        for p, expected in zip(model.parameters(), lp_params_expected):
+            assert p.ds_tensor.device == expected.device
+            assert torch.equal(p.ds_tensor, expected)
+        for p, expected in zip(trained, hp_params_expected):
+            assert torch.equal(safe_get_local_fp32_param(p), expected)
+        self._train_step(model, batch)
+        model.destroy()
+
+    def test_reload_after_unpinned_offload(self):
+        model, batch = self._engine(frozen=False)
+        self._train_step(model, batch)
+        model.offload_states(pin_memory=True)
+        model.reload_states()
+        # The states change; the pinned buffers keep the values of the first offload.
+        self._train_step(model, batch)
+        hp_params_expected = [safe_get_local_fp32_param(p).clone() for p in model.parameters()]
+        lp_params_expected = [p.ds_tensor.clone() for p in model.parameters()]
+        lp_grads_expected = model.optimizer.grad_partitions_flat_buffer.clone()
+
+        model.offload_states(pin_memory=False)
+        model.reload_states()
+
+        for p, expected in zip(model.parameters(), hp_params_expected):
+            assert torch.equal(safe_get_local_fp32_param(p), expected)
+        for p, expected in zip(model.parameters(), lp_params_expected):
+            assert torch.equal(p.ds_tensor, expected)
+        assert torch.equal(model.optimizer.grad_partitions_flat_buffer, lp_grads_expected)
+        model.destroy()
+
+
 @pytest.mark.parametrize("included_state", [
     OffloadStateTypeEnum.hp_params, OffloadStateTypeEnum.lp_params, OffloadStateTypeEnum.optim_states,
     OffloadStateTypeEnum.lp_grads, OffloadStateTypeEnum.contiguous_grad_buffer, None
