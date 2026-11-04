@@ -91,15 +91,19 @@ def is_triton_kernel_supported(kernel: str, dtype, device, probe_fn, *probe_args
 
     ``probe_fn(*probe_args)`` returns the kernel's minimal risky usage (see the
     ``_probes`` library) and is only invoked when the answer is not yet cached, so
-    the probe runs at most once per process and every later call costs one
-    dictionary lookup without even constructing the probe. ``probe_fn`` may be
-    None for a static per-kernel declaration: nothing runs, and the accelerator
-    answers for the kernel name alone (used for probe-unsafe paths). No platform
-    keeps a blacklist, and a backend that gains or fixes support flips the gate
-    automatically. Platforms whose ``is_triton_supported`` predates the per-kernel
-    extension keep their static backend-level answer.
+    the probe runs at most once per kernel, device, and dtype per process and
+    every later call costs one dictionary lookup without even constructing the
+    probe. The dtype belongs to the key because a backend can compile a kernel
+    for one dtype and fail for another, so an answer for one dtype must not open
+    the gate for another. ``probe_fn`` may be None for a static per-kernel
+    declaration: nothing runs, and the accelerator answers for the kernel name
+    alone (used for probe-unsafe paths). No platform keeps a blacklist, and a
+    backend that gains or fixes support flips the gate automatically. Platforms
+    whose ``is_triton_supported`` predates the per-kernel extension keep their
+    static backend-level answer.
     """
-    key = f"triton_kernel:{kernel}:{device.type}:{device.index}"
+    probe_key = f"{kernel}:{device.type}:{device.index}:{dtype}"
+    key = f"triton_kernel:{probe_key}"
     if key in _TRITON_PROBE_CACHE:
         # Steady state: one dictionary lookup per call; no probe construction, no backend query.
         return _TRITON_PROBE_CACHE[key]
@@ -146,7 +150,7 @@ def is_triton_kernel_supported(kernel: str, dtype, device, probe_fn, *probe_args
         # rather than open the gate on a broken probe.
         _TRITON_PROBE_CACHE[key] = False
         return False
-    supported = accelerator.is_triton_supported(kernel=f"{kernel}:{device.type}:{device.index}", probe=probe)
+    supported = accelerator.is_triton_supported(kernel=probe_key, probe=probe)
     _TRITON_PROBE_CACHE[key] = supported
     return supported
 

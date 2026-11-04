@@ -33,7 +33,7 @@ def _dtype_and_device():
 
 
 def _key(name, dtype, device):
-    return f"triton_kernel:{name}:{device.type}:{device.index}"
+    return f"triton_kernel:{name}:{device.type}:{device.index}:{dtype}"
 
 
 def test_probe_runs_once_and_later_calls_answer_from_the_cache():
@@ -74,6 +74,37 @@ def test_failing_probe_closes_the_gate_with_a_cached_false():
     # The cached False stands and the replacement probe is never even constructed.
     assert not is_triton_kernel_supported("unit_probe_fail", dtype, device, counting_probe_fn)
     assert calls["n"] == 0
+
+
+def test_probe_cache_is_scoped_by_dtype():
+    dtype, device = _dtype_and_device()
+    other_dtype = torch.float16 if dtype != torch.float16 else torch.float32
+    name = "unit_probe_dtype"
+    calls = []
+
+    def probe_fn(dt):
+        calls.append(dt)
+
+        def run():
+            if dt != dtype:
+                raise RuntimeError("deliberate per-dtype probe failure")
+            return None
+
+        return run
+
+    _TRITON_PROBE_CACHE.pop(_key(name, dtype, device), None)
+    _TRITON_PROBE_CACHE.pop(_key(name, other_dtype, device), None)
+
+    # A backend can compile a kernel for one dtype and fail for another, so the
+    # second dtype must run its own probe instead of reusing the first answer.
+    assert is_triton_kernel_supported(name, dtype, device, probe_fn, dtype)
+    assert not is_triton_kernel_supported(name, other_dtype, device, probe_fn, other_dtype)
+    assert calls == [dtype, other_dtype]
+
+    # Both answers are now cached under their own dtype-scoped keys.
+    assert is_triton_kernel_supported(name, dtype, device, probe_fn, dtype)
+    assert not is_triton_kernel_supported(name, other_dtype, device, probe_fn, other_dtype)
+    assert calls == [dtype, other_dtype]
 
 
 def test_probe_does_not_advance_the_caller_rng_sequence():
