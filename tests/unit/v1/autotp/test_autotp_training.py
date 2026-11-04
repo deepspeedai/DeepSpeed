@@ -7,6 +7,7 @@ import pytest
 import deepspeed.comm as dist
 import torch
 import math
+import inspect
 import logging
 from copy import deepcopy
 from io import StringIO
@@ -521,7 +522,7 @@ class TestTiedVocabParallelLMHead(DistributedTest):
     world_size = 2
     reuse_dist_env = False
 
-    def _build_tied_model(self, seed, vocab_size, model_type="llama", padding_idx=None):
+    def _build_tied_model(self, seed, vocab_size, model_type="llama", padding_idx=None, tie_word_embeddings=True):
         transformers = pytest.importorskip("transformers")
         torch.manual_seed(seed)
         config_class = transformers.LlamaConfig
@@ -539,12 +540,13 @@ class TestTiedVocabParallelLMHead(DistributedTest):
                                     head_dim=8,
                                     pad_token_id=padding_idx,
                                     use_cache=False,
-                                    tie_word_embeddings=True)
+                                    tie_word_embeddings=tie_word_embeddings)
         model_config.base_model_tp_plan = None
         return model_class(model_config)
 
+    @pytest.mark.parametrize("backend", ["torch", "fused_linear"])
     @pytest.mark.parametrize("model_type,padding_idx", [("llama", 0), ("llama", 19), ("gemma3", 0), ("gemma3", 36)])
-    def test_tied_embedding_training_matches_unsharded_reference(self, model_type, padding_idx):
+    def test_tied_embedding_training_matches_unsharded_reference(self, model_type, padding_idx, backend):
         vocab_size = 37
         ds_config = {
             "train_micro_batch_size_per_gpu": 1,
@@ -552,6 +554,7 @@ class TestTiedVocabParallelLMHead(DistributedTest):
             "tensor_parallel": {
                 "autotp_size": self.world_size,
                 "vocab_parallel_lm_head": True,
+                "vocab_parallel_ce_backend": backend,
             },
             "zero_optimization": {
                 "stage": 0,
@@ -594,6 +597,107 @@ class TestTiedVocabParallelLMHead(DistributedTest):
             full_weight = head.weight.detach().clone()
             head.gather_params([full_weight])
             torch.testing.assert_close(full_weight, reference.lm_head.weight)
+
+    def _fused_linear_engine(self, model, zero_stage=0):
+        ds_config = {
+            "train_micro_batch_size_per_gpu": 1,
+            "gradient_clipping": 0.0,
+            "tensor_parallel": {
+                "autotp_size": self.world_size,
+                "vocab_parallel_lm_head": True,
+                "vocab_parallel_ce_backend": "fused_linear",
+            },
+            "zero_optimization": {
+                "stage": zero_stage,
+            },
+        }
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
+        engine, _, _, _ = deepspeed.initialize(model=model, optimizer=optimizer, config=ds_config)
+        return engine
+
+    @pytest.mark.parametrize("tie_word_embeddings", [True, False])
+    def test_fused_linear_loss_skips_logits_only_when_hf_computes_loss(self, tie_word_embeddings):
+        vocab_size = 37
+        device = torch.device(get_accelerator().current_device_name())
+        model = self._build_tied_model(42, vocab_size, tie_word_embeddings=tie_word_embeddings).to(device)
+        reference = deepcopy(model)
+        engine = self._fused_linear_engine(model)
+        head = engine.module.lm_head
+        local_vocab_size = head.weight.shape[0]
+
+        input_ids = torch.tensor([[3, 1, 19, 0, 36, 5, 2, 3]], device=device)
+        labels = input_ids.clone()
+        labels[0, :3] = -100
+        num_items_in_batch = torch.tensor(7, device=device)
+
+        expected = reference(input_ids=input_ids, labels=labels, num_items_in_batch=num_items_in_batch)
+        output = engine(input_ids=input_ids, labels=labels, num_items_in_batch=num_items_in_batch)
+        # A training forward with labels never materializes the logits.
+        assert output.logits.shape == (1, input_ids.shape[1], 0)
+        torch.testing.assert_close(output.loss, expected.loss)
+        expected.loss.backward()
+        engine.backward(output.loss)
+        full_grad = head.weight.grad.detach().clone()
+        head.gather_params([full_grad])
+        torch.testing.assert_close(full_grad, reference.lm_head.weight.grad)
+
+        # Without labels the caller wants the logits themselves.
+        expected_logits = torch.tensor_split(reference(input_ids=input_ids).logits, self.world_size,
+                                             dim=-1)[dist.get_rank()]
+        torch.testing.assert_close(engine(input_ids=input_ids).logits, expected_logits)
+
+        # Evaluation keeps the rank-local logits for metrics, and still reports the loss.
+        engine.eval()
+        reference.eval()
+        with torch.no_grad():
+            expected = reference(input_ids=input_ids, labels=labels)
+            output = engine(input_ids=input_ids, labels=labels)
+        assert output.logits.shape == (1, input_ids.shape[1], local_vocab_size)
+        torch.testing.assert_close(output.loss, expected.loss)
+
+        # Labels passed positionally arm the fused loss as well.
+        engine.train()
+        parameters = list(inspect.signature(engine.module.forward).parameters)
+        positional = [None] * (parameters.index("labels") + 1)
+        positional[parameters.index("input_ids")] = input_ids
+        positional[-1] = labels
+        output = engine(*positional)
+        assert output.logits.shape == (1, input_ids.shape[1], 0)
+        torch.testing.assert_close(output.loss, reference(input_ids=input_ids, labels=labels).loss)
+
+        # A loss that ignores the capture reads empty logits; the forward names the cause.
+        engine.module.loss_function = lambda logits, labels, **kwargs: logits.sum()
+        log_output = StringIO()
+        handler = logging.StreamHandler(log_output)
+        handler.setLevel(logging.WARNING)
+        ds_logger.addHandler(handler)
+        try:
+            engine(input_ids=input_ids, labels=labels)
+        finally:
+            ds_logger.removeHandler(handler)
+        assert "never consumed the LM-head capture" in log_output.getvalue()
+
+    def test_fused_linear_loss_rejects_unsupported_configurations(self):
+        transformers = pytest.importorskip("transformers")
+        device = torch.device(get_accelerator().current_device_name())
+        model_config = transformers.Gemma2Config(vocab_size=37,
+                                                 hidden_size=32,
+                                                 intermediate_size=64,
+                                                 num_hidden_layers=1,
+                                                 num_attention_heads=4,
+                                                 num_key_value_heads=4,
+                                                 head_dim=8,
+                                                 use_cache=False,
+                                                 tie_word_embeddings=False,
+                                                 final_logit_softcapping=1.0)
+        model_config.base_model_tp_plan = None
+        model = transformers.Gemma2ForCausalLM(model_config).to(device)
+        with pytest.raises(ValueError, match="final_logit_softcapping"):
+            self._fused_linear_engine(model)
+
+        model = self._build_tied_model(42, 37).to(device)
+        with pytest.raises(ValueError, match="ZeRO stage 3"):
+            self._fused_linear_engine(model, zero_stage=3)
 
     @pytest.mark.parametrize("vocab_size", [36, 37])
     def test_universal_checkpoint_reconstructs_tied_weight(self, vocab_size):
