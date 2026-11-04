@@ -1710,7 +1710,7 @@ std::vector<at::Tensor> repeat_qk(at::Tensor q, at::Tensor k, int64_t ratio)
                                                           (const __nv_bfloat16*)k.data_ptr(),
                                                           (__nv_bfloat16*)q_out.data_ptr(),
                                                           (__nv_bfloat16*)k_out.data_ptr(),
-                                                          B * S * Hk,
+                                                          Hk,
                                                           dk,
                                                           hv,
                                                           (int)ratio,
@@ -1787,32 +1787,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
           py::arg("beta"),
           py::arg("state"),
           py::arg("out"));
-    m.def("single_gemm",
-          &single_gemm,
-          "single-matrix GEMM on the grouped kernel (small batches)",
-          py::arg("x"),
-          py::arg("w"));
-    m.def("triple_gemm",
-          &triple_gemm,
-          "grouped q/k/v GEMM for small batches (2..32), no weight copies",
-          py::arg("x"),
-          py::arg("q_w"),
-          py::arg("k_w"),
-          py::arg("v_w"));
-    m.def("quad_gemm",
-          &quad_gemm,
-          "grouped GDN input-projection GEMM (qkv|z|b|a) -> concat, small batches",
-          py::arg("x"),
-          py::arg("w_qkv"),
-          py::arg("w_z"),
-          py::arg("w_b"),
-          py::arg("w_a"));
-    m.def("dual_gemm_silu_mul",
-          &dual_gemm_silu_mul,
-          "grouped gate/up GEMM with silu(g)*u epilogue, small batches",
-          py::arg("x"),
-          py::arg("gate_w"),
-          py::arg("up_w"));
     m.def("decode_attn",
           &decode_attn,
           "batched decode attention (GQA, valid-length, fused q-norm/rope/gate)",
@@ -1836,10 +1810,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
           py::arg("rope_dim"));
     m.def("decode_step_graph", &decode_step_graph, "graph-capturable decode step (CUDA)");
     m.def("gdn_gates", &gdn_gates, "fused GDN beta/g gating (CUDA)");
-    m.def("quad_gemv", &quad_gemv, "b=1 GDN 4-weight input GEMV (qkv|z|b|a), no concat (CUDA)");
-    m.def("dual_gemv_silu_mul",
-          &dual_gemv_silu_mul,
-          "b=1 GEMV reading gate|up weights separately: silu(h*Wg)*(h*Wu) (CUDA)");
     m.def("fused_add_norm",
           &fused_add_norm,
           "fused residual add + RMSNorm, in-place residual update (CUDA)");
@@ -1876,7 +1846,4 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
         py::arg("w"),
         py::arg("out"),
         py::arg("eps"));
-    m.def("triple_gemv",
-          &triple_gemv,
-          "b=1 QKV GEMV reading q/k/v weights directly, no concat (CUDA)");
 }

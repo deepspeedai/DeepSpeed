@@ -141,9 +141,9 @@ class DualWeightGluGEMV(torch.autograd.Function):
         ctx.save_for_backward(hidden, gate_w, up_w)
         if _native_kernel_ready(kernel_op, hidden, gate_w, up_w):
             if hidden.dim() == 1:
-                out = torch.empty(gate_w.shape[0], dtype=hidden.dtype, device=hidden.device)
-                kernel_op.dual_gemv_silu_mul(hidden, gate_w, up_w, out)
-                return out
+                # grouped_linear's flat path dispatches M=1 to the GEMV
+                # kernels internally
+                return kernel_op.grouped_linear(hidden, [gate_w, up_w], True)[0]
             if hidden.dim() == 2:
                 # Route through grouped_linear: the backend dispatcher owns
                 # the WMMA-vs-composite crossover (arch-adaptive since loop 2)
@@ -178,7 +178,7 @@ class DualWeightGluGEMV(torch.autograd.Function):
 class GDNInputProj(torch.autograd.Function):
     """GDN input projections (qkv|z|b|a) reading the four original weights.
 
-    Forward (b=1): quad_gemv kernel — one warp per output row across all
+    Forward (b=1): flat GEMV path (dispatched by grouped_linear); b>1
     four weight matrices, no concatenation.
     Forward (b>1): four GEMMs concatenated on the fly.
     Backward: standard PyTorch ops — gradients flow to the original
@@ -190,16 +190,14 @@ class GDNInputProj(torch.autograd.Function):
         ctx.save_for_backward(hidden, w_qkv, w_z, w_b, w_a)
         if _native_kernel_ready(kernel_op, hidden, w_qkv, w_z, w_b, w_a):
             if hidden.dim() == 1:
-                total = w_qkv.shape[0] + w_z.shape[0] + w_b.shape[0] + w_a.shape[0]
-                out = torch.empty(total, dtype=hidden.dtype, device=hidden.device)
-                kernel_op.quad_gemv(hidden, w_qkv, w_z, w_b, w_a, out)
-                return out
-            if hidden.dim() == 3 and hidden.shape[1] == 1 and 1 < hidden.shape[0] <= 32:
+                return kernel_op.grouped_linear(hidden, [w_qkv, w_z, w_b, w_a], False)[0]
+            if hidden.dim() == 3 and hidden.shape[1] == 1:
                 # decode activations arrive [B,1,H]; flatten for the grouped kernel
-                out = kernel_op.quad_gemm(hidden.reshape(hidden.shape[0], -1), w_qkv, w_z, w_b, w_a)
+                x2 = hidden.reshape(hidden.shape[0], -1)
+                out = kernel_op.grouped_linear(x2, [w_qkv, w_z, w_b, w_a], False)[0]
                 return out.view(hidden.shape[0], 1, -1)
-            if hidden.dim() == 2 and 1 < hidden.shape[0] <= 32:
-                return kernel_op.quad_gemm(hidden, w_qkv, w_z, w_b, w_a)
+            if hidden.dim() == 2:
+                return kernel_op.grouped_linear(hidden, [w_qkv, w_z, w_b, w_a], False)[0]
         from deepspeed.module_inject.kernel_reference import gdn_input_proj
         return gdn_input_proj(hidden, w_qkv, w_z, w_b, w_a)
 
@@ -324,7 +322,7 @@ def _fused_gdn_forward(self, hidden_states, *args, **kwargs):
     num_k_heads = self.num_k_heads // tp_size
 
     # Fused [qkv | z | b | a] projection reading the original weights (b=1
-    # quad_gemv kernel, b>1 on-the-fly concat) — no weight copies.
+    # flat GEMV path, b>1 on-the-fly concat) — no weight copies.
     gdn_kernel_op = getattr(self, "_ki_gdn_op", None)
     if tp_size > 1:
         # The fused [q|k|v] weight cannot be column-sharded head-aligned
@@ -719,7 +717,7 @@ def apply_segment_ki(model: torch.nn.Module) -> dict:
     replaced = 0
     for seg in segments:
         seg.parent._ki_dual_op = kernel_op if kernel_op is not None and hasattr(kernel_op,
-                                                                                "dual_gemv_silu_mul") else None
+                                                                                "grouped_linear") else None
         seg.parent.forward = _dual_weight_glu_forward.__get__(seg.parent, type(seg.parent))
         replaced += 1
     report["fused_glu"] = {"segments_found": len(segments), "segments_replaced": replaced}
@@ -766,7 +764,7 @@ def _decode_attn_forward(self,
     input_shape = hidden_states.shape[:-1]
     hidden_shape = (*input_shape, -1, self.head_dim)
 
-    # b=1: triple_gemv single-vector kernel; 1 < b <= 32: triple_gemm
+    # b=1: flat GEMV; 1 < b <= 32: grouped WMMA (both via grouped_linear)
     # grouped kernel (same weights, one launch); larger batches use the
     # projections as-is.
     batch = hidden_states.shape[0]
@@ -795,12 +793,13 @@ def _decode_attn_forward(self,
         # One GEMV launch over q/k/v weights directly — replaces the
         # three separate F.linear launches. q_proj keeps its 2x-wide
         # query|gate layout, so the gate split below is unchanged from HF.
-        q_out, k_flat, v_flat = qkv_op.triple_gemv(hidden_states.view(-1), self.q_proj.weight, self.k_proj.weight,
-                                                   self.v_proj.weight)
+        q_out, k_flat, v_flat = qkv_op.grouped_linear(
+            hidden_states.view(-1), [self.q_proj.weight, self.k_proj.weight, self.v_proj.weight], False)
         query_states, gate = torch.chunk(q_out.view(*input_shape, -1, self.head_dim * 2), 2, dim=-1)
     elif qkv_op is not None:
-        q_out, k_flat, v_flat = qkv_op.triple_gemm(hidden_states.reshape(-1, hidden_states.shape[-1]),
-                                                   self.q_proj.weight, self.k_proj.weight, self.v_proj.weight)
+        q_out, k_flat, v_flat = qkv_op.grouped_linear(
+            hidden_states.reshape(-1, hidden_states.shape[-1]),
+            [self.q_proj.weight, self.k_proj.weight, self.v_proj.weight], False)
         query_states, gate = torch.chunk(q_out.view(*input_shape, -1, self.head_dim * 2), 2, dim=-1)
     else:
         query_states, gate = torch.chunk(self.q_proj(hidden_states).view(*input_shape, -1, self.head_dim * 2),
@@ -875,7 +874,7 @@ def install_lm_head(model: torch.nn.Module, kernel_op) -> int:
     lm = getattr(model, "lm_head", None)
     if lm is None or not hasattr(lm, "weight"):
         return 0
-    if kernel_op is None or not hasattr(kernel_op, "single_gemm"):
+    if kernel_op is None or not hasattr(kernel_op, "grouped_linear"):
         return 0
     if lm.weight.dtype is not torch.bfloat16 or lm.bias is not None:
         return 0
@@ -898,14 +897,14 @@ def install_lm_head(model: torch.nn.Module, kernel_op) -> int:
                 half = self.weight.shape[0] // tp
                 w_loc = self.weight[dist.get_rank() * half:(dist.get_rank() + 1) * half]
                 if not torch.is_grad_enabled() and 16 <= b <= 32 and x2.is_contiguous():
-                    loc = self._ki_gemm_op.single_gemm(x2, w_loc)
+                    loc = self._ki_gemm_op.grouped_linear(x2, [w_loc], False)[0]
                 else:
                     loc = torch.nn.functional.linear(x2, w_loc)
                 parts = [torch.empty_like(loc) for _ in range(tp)]
                 dist.all_gather(parts, loc.contiguous())
                 return torch.cat(parts, dim=-1).view(b, 1, -1)
             if (not torch.is_grad_enabled() and 16 <= b <= 32 and hidden_states.is_contiguous()):
-                out = self._ki_gemm_op.single_gemm(x2, self.weight)
+                out = self._ki_gemm_op.grouped_linear(x2, [self.weight], False)[0]
                 return out.view(b, 1, -1)
         return torch.nn.functional.linear(hidden_states, self.weight, self.bias)
 
@@ -972,7 +971,7 @@ def install_decode_attention(model: torch.nn.Module,
         module._ki_attn_op = kernel_op
         # The fused QKV kernel consumes weights only; biased projections would lose their bias.
         unbiased_qkv = all(p.bias is None for p in projections[:3])
-        module._ki_qkv_op = kernel_op if (hasattr(kernel_op, "triple_gemv") and unbiased_qkv) else None
+        module._ki_qkv_op = kernel_op if (hasattr(kernel_op, "grouped_linear") and unbiased_qkv) else None
         module._ki_write_pos = write_pos
         module._ki_rope = apply_rotary_pos_emb
         module._ki_num_q_heads = num_q_heads
@@ -999,7 +998,7 @@ def _fused_norm_layer_forward(self,
     pre-attention norm stays native — the HF layer normifies the raw hidden
     state there, with no add to fuse — and the final post-MLP add stays a
     plain add for the same reason. Attention and MLP are called unchanged,
-    so attention-level patches (decode_attn / triple_gemv) still apply."""
+    so attention-level patches (decode_attn / grouped_linear) still apply."""
     if (hidden_states.shape[1] > 1 or hidden_states.dtype is not torch.bfloat16 or not hidden_states.is_contiguous()
             or getattr(self, "_ki_norm_op", None) is None or torch.is_grad_enabled()):
         # Prefill, a non-graph path, or any grad-enabled
