@@ -229,18 +229,17 @@ class TestKernelReferenceConsistency:
         gw = _rand_bf16(384, 256)
         uw = _rand_bf16(384, 256)
         out = torch.empty(384, dtype=torch.bfloat16, device=DEV)
-        _op().dual_gemv_silu_mul(h, gw, uw, out)
+        out = _op().grouped_linear(h, [gw, uw], True)[0]
         expected = ref_dual_gemv(h.float(), gw.float(), uw.float())
         torch.testing.assert_close(out.float(), expected, atol=5e-2, rtol=5e-2)
 
     def test_quad_gemv(self):
         h = _rand_bf16(128)
         ws = [_rand_bf16(rows, 128) for rows in (96, 48, 6, 6)]
-        total = sum(w.shape[0] for w in ws)
-        out = torch.empty(total, dtype=torch.bfloat16, device=DEV)
-        _op().quad_gemv(h, *ws, out)
+        parts = _op().grouped_linear(h, list(ws), False)
+        cat = torch.cat(parts, dim=-1)
         expected = ref_gdn_proj(h.float(), *[w.float() for w in ws])
-        torch.testing.assert_close(out.float(), expected, atol=5e-2, rtol=5e-2)
+        torch.testing.assert_close(cat.float(), expected, atol=5e-2, rtol=5e-2)
 
     def test_gdn_gates(self):
         # a/b are [batch, seq, heads]; a_log/dt are per-head [heads] (real usage shapes)
@@ -256,7 +255,7 @@ class TestKernelReferenceConsistency:
     def test_triple_gemv(self):
         h = _rand_bf16(128)
         qw, kw, vw = (_rand_bf16(64, 128) for _ in range(3))
-        q, k, v = _op().triple_gemv(h, qw, kw, vw)
+        q, k, v = _op().grouped_linear(h, [qw, kw, vw], False)
         ref_q, ref_k, ref_v = ref_triple_gemv(h.float(), qw.float(), kw.float(), vw.float())
         for got, exp in ((q, ref_q), (k, ref_k), (v, ref_v)):
             torch.testing.assert_close(got.float(), exp, atol=5e-2, rtol=5e-2)
@@ -457,20 +456,20 @@ class TestRolloutTrainRollout:
             x = _rand_bf16(M, K)
             qw, kw, vw = _rand_bf16(fq, K), _rand_bf16(fk, K), _rand_bf16(fv, K)
             rq, rk, rv = ref.triple_gemm(x.float(), qw.float(), kw.float(), vw.float())
-            q_out, k_out, v_out = _op().triple_gemm(x, qw, kw, vw)
+            q_out, k_out, v_out = _op().grouped_linear(x, [qw, kw, vw], False)
             torch.testing.assert_close(q_out.float(), rq, atol=5e-2, rtol=5e-2)
             torch.testing.assert_close(k_out.float(), rk, atol=5e-2, rtol=5e-2)
             torch.testing.assert_close(v_out.float(), rv, atol=5e-2, rtol=5e-2)
 
             gz_w, b_w, a_w = _rand_bf16(48, K), _rand_bf16(16, K), _rand_bf16(16, K)
-            cat = _op().quad_gemm(x, qw, gz_w, b_w, a_w)
+            cat = _op().grouped_linear(x, [qw, gz_w, b_w, a_w], False)[0]
             torch.testing.assert_close(cat.float(),
                                        ref.quad_gemm(x.float(), qw.float(), gz_w.float(), b_w.float(), a_w.float()),
                                        atol=5e-2,
                                        rtol=5e-2)
 
             gw, uw = _rand_bf16(fq, K), _rand_bf16(fq, K)
-            glu = _op().dual_gemm_silu_mul(x, gw, uw)
+            glu = _op().grouped_linear(x, [gw, uw], True)[0]
             torch.testing.assert_close(glu.float(),
                                        ref.dual_gemm_silu_mul(x.float(), gw.float(), uw.float()),
                                        atol=5e-2,
@@ -478,10 +477,11 @@ class TestRolloutTrainRollout:
 
     def test_grouped_gemm_rejects_out_of_range(self):
         import pytest as _pytest
-        x = _rand_bf16(33, 64)
+        x = _rand_bf16(32, 64)
         w = _rand_bf16(32, 64)
         with _pytest.raises(RuntimeError):
-            _op().dual_gemm_silu_mul(x, w, w)
+            # 7 weights exceeds the dispatcher's supported range (1..6)
+            _op().grouped_linear(x, [w] * 7, False)
 
     def test_grouped_linear_dispatcher(self):
         """The portable interface entry: weight count x batch routing vs the
