@@ -148,7 +148,7 @@ def install_packed_seq_tiled_rematerialize(model, token_budget=None, shards=None
             packed_seq_tiled_rematerialize_compute, )
     except ImportError as e:
         raise ImportError("packed_seq_tiled_remat requires the sfc-gh-truwase/DeepSpeed fork "
-                          "(docs/cpu-checkpointing-perf-note branch or newer) ahead of the installed "
+                          "(tjruwase/tiled-remat branch or newer) ahead of the installed "
                           "deepspeed on PYTHONPATH, e.g.:\n"
                           '  export PYTHONPATH="<fork checkout>:$PYTHONPATH"\n'
                           f"Original import error: {e}") from e
@@ -405,7 +405,7 @@ def enable_native_activation_checkpoint_offload(model):
         from deepspeed.runtime.activation_checkpointing.offload_activations import _ActivationOffloadEngine
     except ImportError as e:
         raise ImportError("native_activation_checkpoint_cpu_offload requires the sfc-gh-truwase/DeepSpeed "
-                          "fork (docs/cpu-checkpointing-perf-note branch or newer) ahead of the installed "
+                          "fork (tjruwase/tiled-remat branch or newer) ahead of the installed "
                           "deepspeed on PYTHONPATH, e.g.:\n"
                           '  export PYTHONPATH="<fork checkout>:$PYTHONPATH"\n'
                           f"Original import error: {e}") from e
