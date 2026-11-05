@@ -863,7 +863,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         and _link_all_hp_params() rebuilds the fragments without it. Before the first step there is no state yet, and
         step() links it."""
         self._hp_optimizer_states_linked = False
-        if self.optimizer.state:
+        if any(self.optimizer.state.values()):
             self._lazy_init_hp_params_optimizer_state()
 
     def is_moe_group(self, group):
