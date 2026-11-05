@@ -443,6 +443,23 @@ class TestCPUAdamSubgroup(DistributedTest):
         # Verify step count decremented
         assert optimizer.state[subgroup_id]['step'] == 0, "Step count should be decremented after rollback"
 
+    def test_rollback_of_first_step_keeps_exp_avg_sq_non_negative(self):
+        """exp_avg_sq is 0 before the first step. Rolling that step back must not leave it negative, because sqrt()
+        of a negative value in the next step turns the parameter into NaN."""
+        from deepspeed.ops.adam import DeepSpeedCPUAdam
+
+        model_size = 4096
+        param = torch.nn.Parameter(torch.randn(model_size, device='cpu'))
+        optimizer = DeepSpeedCPUAdam([param])
+        param.grad = torch.randn(model_size, device='cpu')
+
+        optimizer.step_subgroup(0)
+        optimizer.rollback_subgroup(0)
+        assert (optimizer.state[0]['exp_avg_sq'] >= 0).all()
+
+        optimizer.step_subgroup(0)
+        assert torch.isfinite(param.data).all()
+
     def test_rollback_subgroup_uninitialized_error(self):
         """Test that rollback_subgroup raises error for uninitialized subgroup."""
         from deepspeed.ops.adam import DeepSpeedCPUAdam
