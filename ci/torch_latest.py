@@ -194,6 +194,31 @@ while True:
         continue
 """.strip()
 
+# `pip check` reports deepspeed-kernels as unsupported on every Python except 3.8: its only file on PyPI is named
+# py3-none-manylinux1_x86_64, but the WHEEL metadata inside it says cp38-cp38-linux_x86_64. Accept that one line so
+# the check still fails on every other dependency problem.
+PIP_CHECK_KNOWN_UNSUPPORTED = ("deepspeed-kernels", )
+PIP_CHECK = r"""
+import subprocess
+import sys
+
+known_unsupported = set(sys.argv[1:])
+result = subprocess.run([sys.executable, "-m", "pip", "check"], capture_output=True, text=True)
+sys.stdout.write(result.stdout)
+sys.stderr.write(result.stderr)
+if result.returncode == 0:
+    raise SystemExit(0)
+problems = []
+for line in result.stdout.splitlines():
+    name = line.split(" ", 1)[0]
+    if name in known_unsupported and line.endswith(" is not supported on this platform"):
+        continue
+    if line.strip():
+        problems.append(line)
+# A failed check that printed nothing is still a failure.
+raise SystemExit(1 if problems or not result.stdout.strip() else 0)
+""".strip()
+
 _REPOSITORY_COMPONENT = r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}"
 _REPOSITORY_RE = re.compile(rf"{_REPOSITORY_COMPONENT}/{_REPOSITORY_COMPONENT}\Z")
 _SHA_RE = re.compile(r"[0-9a-fA-F]{40}\Z")
@@ -619,6 +644,10 @@ def _with_no_progress_watchdog(argv: Sequence[str]) -> tuple[str, ...]:
     return ("python", "-u", "-c", NO_PROGRESS_WATCHDOG, str(NO_PROGRESS_TIMEOUT_SECONDS), *argv)
 
 
+def _pip_check_command() -> tuple[str, ...]:
+    return ("python", "-c", PIP_CHECK, *PIP_CHECK_KNOWN_UNSUPPORTED)
+
+
 def build_remote_commands(inputs: ControllerInputs) -> tuple[RemoteCommand, ...]:
     preset = MODAL_TORCH_PRESETS[inputs.torch_preset]
     repository_url = f"https://github.com/{inputs.repository}.git"
@@ -713,7 +742,7 @@ def build_remote_commands(inputs: ControllerInputs) -> tuple[RemoteCommand, ...]
         ])
     commands.extend([
         RemoteCommand("install candidate DeepSpeed", ("python", "-m", "pip", "install", "."), REMOTE_REPOSITORY),
-        RemoteCommand("verify Python dependencies", ("python", "-m", "pip", "check"), REMOTE_REPOSITORY),
+        RemoteCommand("verify Python dependencies", _pip_check_command(), REMOTE_REPOSITORY),
         RemoteCommand(
             "verify test dependencies",
             ("python", "-c", "import mup, qtorch"),
@@ -1366,7 +1395,7 @@ def _emit_ssm_output(
                 remaining_live[public_line] -= 1
                 continue
             print(f"[aws:{phase}] {public_line}", flush=True)
-        if (phase == "test" and payload.get("Status") != "Success" and len(content) >= inline_limit
+        if (phase in ("prepare", "test") and payload.get("Status") != "Success" and len(content) >= inline_limit
                 and payload.get(url_field)):
             tail = _read_ssm_output_tail(instance, run_identity, phase, command_id, stream, run_command)
             if tail is None:

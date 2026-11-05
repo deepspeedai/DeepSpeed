@@ -173,7 +173,10 @@ class FakeAwsCli:
             )
         if (service, operation) == ("s3api", "get-object"):
             key = argv[argv.index("--key") + 1]
-            stream = self.test_stderr if key.endswith("/stderr") else self.test_stdout
+            if "/prepare/" in key:
+                stream = self.prepare_stdout
+            else:
+                stream = self.test_stderr if key.endswith("/stderr") else self.test_stdout
             Path(argv[-1]).write_bytes(stream.encode("utf-8")[-torch_latest.SSM_OUTPUT_TAIL_BYTES:])
             return _command_result(stdout="{}\n")
         if (service, operation) == ("ec2", "terminate-instances"):
@@ -1108,6 +1111,36 @@ def test_pid_running_treats_linux_zombies_as_terminated():
         shutil.rmtree(root, ignore_errors=True)
 
 
+def test_pip_check_accepts_only_the_known_unsupported_wheel():
+    # A stand-in pip that prints a chosen `pip check` report, so each case runs the real command.
+    root = Path(tempfile.mkdtemp(prefix="ds-pip-check-"))
+    try:
+        (root / "pip").mkdir()
+        (root / "pip" / "__init__.py").write_text("")
+        (root / "pip" / "__main__.py").write_text("import os, sys\n"
+                                                  "sys.stdout.write(os.environ['FAKE_PIP_CHECK_OUTPUT'])\n"
+                                                  "raise SystemExit(int(os.environ['FAKE_PIP_CHECK_CODE']))\n")
+        known = "deepspeed-kernels 0.0.1.dev1698255861 is not supported on this platform\n"
+        cases = (
+            ("No broken requirements found.\n", 0, 0),
+            (known, 1, 0),
+            (known + "foo 1.0 requires bar, which is not installed.\n", 1, 1),
+            ("other-kernels 1.0 is not supported on this platform\n", 1, 1),
+            ("", 1, 1),
+        )
+        argv = torch_latest._pip_check_command()
+        for output, pip_code, expected_code in cases:
+            env = dict(os.environ,
+                       PYTHONPATH=str(root),
+                       FAKE_PIP_CHECK_OUTPUT=output,
+                       FAKE_PIP_CHECK_CODE=str(pip_code))
+            result = subprocess.run((sys.executable, *argv[1:]), env=env, capture_output=True, text=True, timeout=30)
+            assert result.returncode == expected_code, (output, result.stdout, result.stderr)
+            assert result.stdout == output
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def test_no_progress_watchdog_enforces_deadline_after_parent_exit():
     original = torch_latest.NO_PROGRESS_TIMEOUT_SECONDS
     torch_latest.NO_PROGRESS_TIMEOUT_SECONDS = 0.1
@@ -1458,6 +1491,32 @@ def test_aws_test_failure_emits_bounded_s3_tail_for_nightly_triage():
         tail_calls = [call for call, _ in fake.calls if call[2:4] == ("s3api", "get-object")]
         assert len(tail_calls) == 1
         assert tail_calls[0][tail_calls[0].index("--range") + 1] == f"bytes=-{torch_latest.SSM_OUTPUT_TAIL_BYTES}"
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_aws_prepare_failure_emits_bounded_s3_tail():
+    root, path = _selection_file("tests/unit/v1/test_one.py\n")
+    try:
+        late_failure = "deepspeed-kernels 0.0.1.dev1698255861 is not supported on this platform"
+        full_output = "early output\n" * 2500 + f"{late_failure}\n"
+        env = _valid_env(
+            path,
+            DS_TEST_SELECTION_MODE="subset",
+            AWS_MODAL_FALLBACK_CONFIG=_aws_config(),
+            GITHUB_RUN_ID="123",
+            GITHUB_RUN_ATTEMPT="1",
+        )
+        fake = FakeAwsCli(prepare_code=1, prepare_stdout=full_output)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            _expect_error(torch_latest.run_aws_controller, env, fake, exception=torch_latest.AwsControllerError)
+        public_log = output.getvalue()
+        assert late_failure in public_log
+        assert "[aws:prepare:tail] complete stdout" in public_log
+        tail_calls = [call for call, _ in fake.calls if call[2:4] == ("s3api", "get-object")]
+        assert len(tail_calls) == 1
+        assert "/prepare/" in tail_calls[0][tail_calls[0].index("--key") + 1]
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
