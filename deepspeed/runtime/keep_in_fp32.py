@@ -31,6 +31,8 @@ import re
 
 import torch
 
+from deepspeed.utils import logger
+
 KEEP_IN_FP32_AUTO = "auto"
 
 
@@ -84,16 +86,22 @@ def keep_tensors_in_fp32(module, pattern, include_params=True):
     """Convert the matching parameters and buffers of ``module`` to fp32 in place.
 
     A ZeRO-3 parameter is converted in its partition, so a later gather returns fp32 and a later
-    checkpoint load writes exact fp32 values into it. With ``include_params=False`` only buffers are
-    converted. Returns (parameters converted, buffers converted).
+    checkpoint load writes exact fp32 values into it. A ZeRO-3 parameter stored quantized
+    (zero_quantized_nontrainable_weights) stays quantized. With ``include_params=False`` only buffers
+    are converted. Returns (parameters converted, buffers converted).
     """
     num_params, num_buffers = 0, 0
     for _, tensor, is_buffer in tensors_to_keep_in_fp32(module, pattern):
         if not is_buffer and not include_params:
             continue
+        partition = getattr(tensor, "ds_tensor", None)
+        if partition is not None and hasattr(partition, "ds_quant_scale"):
+            # The partition holds int8 codes and their scales; converting the codes would not give the values.
+            logger.warning_once("data_types.keep_in_fp32_modules: parameters stored quantized "
+                                "(zero_quantized_nontrainable_weights) stay quantized")
+            continue
         if _stored_dtype(tensor) == torch.float32:
             continue
-        partition = getattr(tensor, "ds_tensor", None)
         if partition is not None:
             partition.data = partition.data.float()
             # With hpZ, all-gathers read this node-local copy of the partition while it exists, and a later

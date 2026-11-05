@@ -220,6 +220,19 @@ class ToyModelWithParams(torch.nn.Module):
         return ((self.linear(x) * self.sink + self.router_bias)**2).mean()
 
 
+class ToyModelWithFrozenKeptParam(torch.nn.Module):
+    _keep_in_fp32_modules_strict = ["sink"]
+
+    def __init__(self):
+        super().__init__()
+        self.linear = torch.nn.Linear(HIDDEN, HIDDEN, bias=False)
+        # Frozen when deepspeed.zero.Init partitions it, so zero_quantized_nontrainable_weights stores it quantized.
+        self.sink = torch.nn.Parameter(torch.full((HIDDEN, ), 8.0), requires_grad=False)
+
+    def forward(self, x):
+        return ((self.linear(x) * self.sink)**2).mean()
+
+
 def _params_config(stage,
                    keep="auto",
                    dtype="bf16",
@@ -363,6 +376,31 @@ class TestZeroInitKeepsParamsFp32(DistributedTest):
             assert _stored_dtype(model.sink) == torch.bfloat16
             assert torch.equal(_gathered(model.sink).float().cpu(), torch.full((HIDDEN, ), 8.0))
         assert _stored_dtype(model.linear.weight) == torch.bfloat16
+
+
+@pytest.mark.skipif(torch.bfloat16 not in get_accelerator().supported_dtypes(), reason="bf16 not supported")
+@pytest.mark.skipif(get_accelerator().device_name() == "cpu",
+                    reason="the ZeRO-3 weight quantizer needs an accelerator")
+class TestZeroInitKeepsQuantizedParams(DistributedTest):
+    """zero_quantized_nontrainable_weights stores a frozen parameter as int8 codes and their scales. A listed one
+    stays so: converting the codes to fp32 would not give its values, and the scales would no longer match."""
+    world_size = 2
+
+    def test_quantized_frozen_param_stays_quantized(self):
+        config = _params_config(3)
+        config["zero_optimization"]["zero_quantized_nontrainable_weights"] = True
+        with deepspeed.zero.Init(config_dict_or_path=config):
+            model = ToyModelWithFrozenKeptParam()
+        # Checks the stored form directly: the bug fixed here converted the int8 partition to fp32 and kept its
+        # quantization scales.
+        partition = model.sink.ds_tensor
+        assert hasattr(partition, "ds_quant_scale")
+        assert partition.dtype == torch.int8
+        assert _gathered(model.sink).shape == (HIDDEN, )
+
+        engine, _, _, _ = deepspeed.initialize(config=config, model=model, model_parameters=model.parameters())
+        _train(engine, steps=1)
+        assert engine.module.sink.ds_tensor.dtype == torch.int8
 
 
 @pytest.mark.skipif(torch.bfloat16 not in get_accelerator().supported_dtypes(), reason="bf16 not supported")
