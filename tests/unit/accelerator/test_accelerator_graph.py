@@ -65,3 +65,12 @@ def test_graph_ops_run_eagerly_without_graph_support():
 
     accel.replay_graph(graph)  # no-op: must not raise nor touch the value
     assert value.item() == 1.0
+
+
+def test_klxpu_keeps_explicit_graph_capture_opt_out():
+    # KLXPU inherits from the CUDA accelerator but is not validated for graph
+    # capture, so it must not inherit the CUDA opt-in implicitly.
+    from deepspeed.accelerator.klxpu_accelerator import KLXPU_Accelerator
+
+    accelerator = object.__new__(KLXPU_Accelerator)
+    assert accelerator.is_graph_capture_supported() is False
