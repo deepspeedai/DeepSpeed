@@ -19,9 +19,7 @@ from unit.common import DistributedTest, preferred_dtype
 from unit.util import torch_assert_equal, torch_assert_close, CaptureStderr
 import contextlib
 import functools
-import importlib.util
 import inspect
-import os
 import sys
 import deepspeed
 import deepspeed.comm as dist
@@ -1075,28 +1073,14 @@ def _packed_hf_kwargs(sample_lens, device):
                 seq_idx=seq_idx.unsqueeze(0).to(device))
 
 
-def _bench_module():
-    # The HF mixer installer lives in a benchmark script, not a package.
-    name = "bench_qwen3_offload"
-    if name in sys.modules:
-        return sys.modules[name]
-    repo_root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..")
-    path = os.path.join(repo_root, "autorun", "bench_qwen3_offload.py")
-    if not os.path.exists(path):
-        pytest.skip(f"{path} not present")
-    spec = importlib.util.spec_from_file_location(name, path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    sys.modules[name] = module
-    return module
-
-
 @contextlib.contextmanager
 def _packed_mixers_installed(model, token_budget):
+    from deepspeed.runtime.activation_checkpointing.hf_tiled_rematerialization import (
+        install_packed_seq_tiled_rematerialize)
     # The installer patches mixer classes, not instances; undo it for later tests.
     saved_forwards = {cls: cls.forward for cls in (PackedGDNMix, PackedAttnMix)}
     try:
-        yield _bench_module()._install_packed_seq_tiled_rematerialize(model, token_budget=token_budget)
+        yield install_packed_seq_tiled_rematerialize(model, token_budget=token_budget)
     finally:
         for cls, forward in saved_forwards.items():
             cls.forward = forward
