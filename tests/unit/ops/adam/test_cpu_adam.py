@@ -6,6 +6,8 @@
 import math
 import os
 import sys
+import threading
+import time
 import torch
 import numpy as np
 import pytest
@@ -111,6 +113,38 @@ def test_cpu_adam_strict_state_updates(model_size, adamw_mode, weight_decay, bia
         torch.testing.assert_close(state['exp_avg_sq'], ref_exp_avg_sq, rtol=3e-5, atol=2e-6)
 
 
+def test_cpu_adam_step_releases_gil():
+    """A CPU Adam step in another thread lets this thread run, as SuperOffload's worker thread needs."""
+    from deepspeed.ops.adam import DeepSpeedCPUAdam
+
+    # Large enough that a step takes several ms, longer than the wakeups of this thread are apart.
+    param = torch.nn.Parameter(torch.zeros(2**26))
+    param.grad = torch.full_like(param, 0.5)
+    optimizer = DeepSpeedCPUAdam([param])
+    optimizer.step()
+    steps = []
+    done = threading.Event()
+
+    def step():
+        for _ in range(5):
+            start = time.perf_counter()
+            optimizer.step()
+            steps.append((start, time.perf_counter()))
+        done.set()
+
+    thread = threading.Thread(target=step)
+    thread.start()
+    wakeups = []
+    while not done.is_set():
+        time.sleep(0.001)
+        wakeups.append(time.perf_counter())
+    thread.join()
+    # Holding the GIL during a step would keep this thread from waking up until the step is done, so none of its
+    # wakeups would fall inside a step. Being descheduled now and then only loses a few.
+    inside = sum(any(a + 1e-3 < t < b - 1e-3 for a, b in steps) for t in wakeups)
+    assert inside >= 10, f"{inside} wakeups during {len(steps)} steps of {sum(b - a for a, b in steps) * 1e3:.0f} ms"
+
+
 def test_cpu_adam_rejects_amsgrad():
     from deepspeed.ops.adam import DeepSpeedCPUAdam
 
@@ -121,6 +155,40 @@ def test_cpu_adam_rejects_amsgrad():
     with pytest.raises(RuntimeError, match="AMSGrad"):
         optimizer.add_param_group({'params': [torch.nn.Parameter(torch.zeros(4))], 'amsgrad': True})
     assert len(optimizer.param_groups) == 1
+
+
+def test_cpu_adam_steps_fp32_params_on_bf16_grads():
+    """fp32 params step on bf16 gradients as on the same gradients in fp32, and a gradient dtype that has no kernel
+    is rejected instead of being read as the params' dtype."""
+    from deepspeed.ops.adam import DeepSpeedCPUAdam
+
+    op = CPUAdamBuilder().load()
+    opt_id = DeepSpeedCPUAdam.optimizer_id
+    DeepSpeedCPUAdam.optimizer_id += 1
+    lr, beta1, beta2, eps, wd = 1e-3, 0.9, 0.999, 1e-8, 0.01
+    n = 100003  # not a multiple of the SIMD block, so the scalar tail runs too
+    torch.manual_seed(0)
+    params = torch.randn(n)
+    grads = [torch.randn(n).to(torch.bfloat16) for _ in range(3)]
+    results = []
+    for grad_dtype in (torch.bfloat16, torch.float):
+        # A new native optimizer for each, as it carries beta**step over from the steps before.
+        op.create_adam(opt_id, lr, beta1, beta2, eps, wd, True, False)
+        p, m, v = params.clone(), torch.zeros(n), torch.zeros(n)
+        for step, grad in enumerate(grads, 1):
+            op.adam_update(opt_id, step, lr, beta1, beta2, eps, wd, True, p, grad.to(grad_dtype), m, v)
+        results.append((p, m, v))
+        op.destroy_adam(opt_id)
+    for name, a, b in zip(("params", "exp_avg", "exp_avg_sq"), *results):
+        assert torch.equal(a, b), name
+
+    op.create_adam(opt_id, lr, beta1, beta2, eps, wd, True, False)
+    try:
+        with pytest.raises(RuntimeError, match="grad type"):
+            op.adam_update(opt_id, 1, lr, beta1, beta2, eps, wd, True, params.clone(), grads[0].half(), torch.zeros(n),
+                           torch.zeros(n))
+    finally:
+        op.destroy_adam(opt_id)
 
 
 @pytest.mark.parametrize('dtype', [torch.half, torch.bfloat16, torch.float], ids=["fp16", "bf16", "fp32"])

@@ -32,9 +32,11 @@ static std::unordered_map<int, std::shared_ptr<void>> s_optimizers;
 
 // C++ interface
 
-template <typename ds_params_precision_t, typename ds_state_precision_t>
+template <typename ds_params_precision_t,
+          typename ds_state_precision_t,
+          typename ds_grad_precision_t>
 void Adam_Optimizer::Step_1(ds_params_precision_t* _params,
-                            ds_params_precision_t* grads,
+                            ds_grad_precision_t* grads,
                             ds_state_precision_t* _exp_avg,
                             ds_state_precision_t* _exp_avg_sq,
                             size_t _param_size,
@@ -86,9 +88,11 @@ void Adam_Optimizer::Step_1(ds_params_precision_t* _params,
     }
 }
 
-template <typename ds_params_precision_t, typename ds_state_precision_t>
+template <typename ds_params_precision_t,
+          typename ds_state_precision_t,
+          typename ds_grad_precision_t>
 void Adam_Optimizer::Step_4(ds_params_precision_t* _params,
-                            ds_params_precision_t* grads,
+                            ds_grad_precision_t* grads,
                             ds_state_precision_t* _exp_avg,
                             ds_state_precision_t* _exp_avg_sq,
                             size_t _param_size,
@@ -155,9 +159,11 @@ int create_adam_optimizer(int optimizer_id,
     return 0;
 }
 
-template <typename ds_params_precision_t, typename ds_state_precision_t>
+template <typename ds_params_precision_t,
+          typename ds_state_precision_t,
+          typename ds_grad_precision_t>
 void Adam_Optimizer::Step_8(ds_params_precision_t* _params,
-                            ds_params_precision_t* grads,
+                            ds_grad_precision_t* grads,
                             ds_state_precision_t* _exp_avg,
                             ds_state_precision_t* _exp_avg_sq,
                             size_t _param_size,
@@ -180,7 +186,9 @@ void Adam_Optimizer::Step_8(ds_params_precision_t* _params,
                parallel);
 }
 
-template <typename ds_params_precision_t, typename ds_state_precision_t>
+template <typename ds_params_precision_t,
+          typename ds_state_precision_t,
+          typename ds_grad_precision_t>
 void step_invoker(std::shared_ptr<Adam_Optimizer> opt,
                   void* _params,
                   void* grads,
@@ -190,7 +198,7 @@ void step_invoker(std::shared_ptr<Adam_Optimizer> opt,
                   bool parallel)
 {
     opt->Step_8((ds_params_precision_t*)(_params),
-                (ds_params_precision_t*)(grads),
+                (ds_grad_precision_t*)(grads),
                 (ds_state_precision_t*)(_exp_avg),
                 (ds_state_precision_t*)(_exp_avg_sq),
                 _param_size,
@@ -198,17 +206,20 @@ void step_invoker(std::shared_ptr<Adam_Optimizer> opt,
 }
 
 std::map<
-    std::tuple<c10::ScalarType, c10::ScalarType>,
+    std::tuple<c10::ScalarType, c10::ScalarType, c10::ScalarType>,
     std::function<void(std::shared_ptr<Adam_Optimizer>, void*, void*, void*, void*, size_t, bool)>>
     invokers;
 
 // Fill map with template functions for each type
-template <class ds_params_precision_t, class ds_state_precision_t>
+template <class ds_params_precision_t,
+          class ds_state_precision_t,
+          class ds_grad_precision_t = ds_params_precision_t>
 void create_invoker()
 {
     invokers[std::tuple(c10::CppTypeToScalarType<ds_params_precision_t>(),
-                        c10::CppTypeToScalarType<ds_state_precision_t>())] =
-        step_invoker<ds_params_precision_t, ds_state_precision_t>;
+                        c10::CppTypeToScalarType<ds_state_precision_t>(),
+                        c10::CppTypeToScalarType<ds_grad_precision_t>())] =
+        step_invoker<ds_params_precision_t, ds_state_precision_t, ds_grad_precision_t>;
 }
 struct InvokerInitializer {
     InvokerInitializer()
@@ -218,6 +229,8 @@ struct InvokerInitializer {
         create_invoker<c10::BFloat16, float>();
         create_invoker<c10::BFloat16, c10::BFloat16>();
         create_invoker<float, float>();
+        // fp32 weights on bf16 gradients: SuperOffload copies them to the CPU in bf16.
+        create_invoker<float, float, c10::BFloat16>();
     }
 } _invoker_initializer;
 
@@ -231,11 +244,13 @@ void invoke(std::shared_ptr<Adam_Optimizer> opt,
 {
     c10::ScalarType params_type = at::typeMetaToScalarType(params.options().dtype());
     c10::ScalarType state_type = at::typeMetaToScalarType(exp_avg.options().dtype());
+    c10::ScalarType grad_type = at::typeMetaToScalarType(grads.options().dtype());
 
-    auto it = invokers.find(std::tuple(params_type, state_type));
+    auto it = invokers.find(std::tuple(params_type, state_type, grad_type));
     if (it == invokers.end()) {
         throw std::runtime_error("Adam optimizer with param type "s + c10::toString(params_type) +
-                                 " and state type "s + c10::toString(state_type) +
+                                 ", state type "s + c10::toString(state_type) + " and grad type "s +
+                                 c10::toString(grad_type) +
                                  " is not supported on current hardware"s);
     }
 
@@ -604,9 +619,9 @@ private:
             torch::Tensor& M = grp.exp_avg[now_state];
             torch::Tensor& V = grp.exp_avg_sq[now_state];
 
-            auto it = invokers.find(std::tuple(P.scalar_type(), M.scalar_type()));
+            auto it = invokers.find(std::tuple(P.scalar_type(), M.scalar_type(), G.scalar_type()));
             TORCH_CHECK(it != invokers.end(),
-                        "ZenFlowAdam: unsupported param/state dtype combination");
+                        "ZenFlowAdam: unsupported param/state/grad dtype combination");
             auto fn = it->second;
 
             char* pp = static_cast<char*>(P.data_ptr());
@@ -615,13 +630,14 @@ private:
             char* vp = static_cast<char*>(V.data_ptr());
             char* sp = grp.stale.defined() ? static_cast<char*>(grp.stale.data_ptr()) : nullptr;
             const size_t pe = P.element_size();
+            const size_t ge = G.element_size();
             const size_t se = M.element_size();
             const size_t numel = P.numel();
 
             pool_->parallel_for(numel, kZenAdamAlign, [=](size_t b, size_t e) {
                 const size_t len = e - b;
                 // parallel=false: each pinned thread runs its slice serially.
-                fn(opt, pp + b * pe, gp + b * pe, mp + b * se, vp + b * se, len, false);
+                fn(opt, pp + b * pe, gp + b * ge, mp + b * se, vp + b * se, len, false);
                 if (sp) std::memcpy(sp + b * pe, pp + b * pe, len * pe);
             });
         }
