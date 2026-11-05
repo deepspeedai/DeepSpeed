@@ -51,6 +51,19 @@ def get_fused_qkv_type(module):
     return FUSED_QKV_TYPE_DICT[max(module_name_matches, key=len)]
 
 
+_REPLICATED_KV_BLOCK_CLASS_NAMES = tuple(name for name, fused_type in FUSED_QKV_TYPE_DICT.items()
+                                         if fused_type == 'bigcodetype')
+
+
+def replicates_kv_block(module):
+    """Whether this model's fused qkv layout keeps the whole K/V block on every rank.
+
+    Uses class names instead of ``get_fused_qkv_type`` to avoid stringifying every module.
+    """
+    return any(
+        any(name in type(child).__name__ for name in _REPLICATED_KV_BLOCK_CLASS_NAMES) for child in module.modules())
+
+
 def fused_qkv_subparam_sizes(module, weight_shape, meta: AutoTPMeta):
     """Sizes of the sub-parameters a fused qkv weight is cut into, or None.
 
