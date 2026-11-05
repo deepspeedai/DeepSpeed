@@ -129,6 +129,9 @@ def test_continuous_generation_rejects_unsupported_inputs(adaptive_prefill):
         rollout.generate(empty_request, SamplingConfig(max_new_tokens=2, continuous_batch_size=1))
     with pytest.raises(ValueError, match="positive"):
         rollout.generate(request, SamplingConfig(max_new_tokens=2, continuous_batch_size=0))
+    if adaptive_prefill:
+        with pytest.raises(ValueError, match="adaptive prefill.*greedy"):
+            rollout.generate(request, SamplingConfig(max_new_tokens=2, temperature=0.7, continuous_batch_size=1))
 
 
 @pytest.mark.parametrize(
@@ -241,13 +244,6 @@ def test_continuous_generation_routes_graph_capture_to_fixed_capacity_path(graph
     assert len(requests) == request.prompt_ids.shape[0]
     assert captured_sampling is sampling
     assert max_batch_size == 4
-
-
-def test_adaptive_prefill_rejects_graph_capture_without_disabling_manual_graph():
-    rollout = HybridEngineRollout(_make_engine(), _make_tokenizer(),
-                                  HybridEngineRolloutConfig(adaptive_prefill=True, use_graph_capture=True))
-    with pytest.raises(ValueError, match="adaptive prefill.*graph capture"):
-        rollout.generate(_make_request(), SamplingConfig(max_new_tokens=2, temperature=0, continuous_batch_size=2))
 
 
 @patch("deepspeed.runtime.rollout.hybrid_engine_rollout.get_accelerator")
@@ -1309,9 +1305,7 @@ def test_continuous_repetition_penalty_matches_hf_in_bfloat16():
     model = SimpleNamespace(generation_config=SimpleNamespace(repetition_penalty=3.0))
     expected = RepetitionPenaltyLogitsProcessor(3.0)(prompt, logits.float()).argmax(dim=-1, keepdim=True)
     # Pin the BF16 rounding bug: dividing in BF16 ties the scores and incorrectly selects token 0.
-    actual = HybridEngineRollout._continuous_next_tokens(
-        logits, (0, ), {0: request}, {0: ()}, model,
-        HybridEngineRollout._token_selector(SamplingConfig(temperature=0)))
+    actual = HybridEngineRollout._continuous_next_tokens(logits, (0, ), {0: request}, {0: ()}, model, _argmax)
     assert expected.tolist() == [[1]]
     assert torch.equal(actual, expected)
 
