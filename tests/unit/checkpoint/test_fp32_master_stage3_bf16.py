@@ -99,10 +99,19 @@ class TestFp32MastersStage3AndBf16(DistributedTest):
 
         engine = _init_engine(kind)
         saved = _train_and_detach_masters(engine)
+        if kind == "bf16":
+            engine.optimizer.clip_grad = 17.0
+        else:
+            engine.optimizer.overflow = True
+            engine.optimizer.dynamic_loss_scale = not engine.optimizer.dynamic_loss_scale
         load_dir = os.path.join(str(tmpdir), kind)
         engine.save_checkpoint(load_dir, tag=TAG)
 
         loaded = _init_engine(kind)
+        if kind == "bf16":
+            optimizer_globals = (loaded.optimizer.clip_grad, )
+        else:
+            optimizer_globals = (loaded.optimizer.overflow, loaded.optimizer.dynamic_loss_scale)
         loaded.load_checkpoint(load_dir,
                                tag=TAG,
                                load_module_only=False,
@@ -110,6 +119,10 @@ class TestFp32MastersStage3AndBf16(DistributedTest):
                                load_lr_scheduler_states=False)
         assert torch.equal(_masters(loaded).cpu(), saved.cpu())
         assert not _has_moments(loaded)
+        if kind == "bf16":
+            assert (loaded.optimizer.clip_grad, ) == optimizer_globals
+        else:
+            assert (loaded.optimizer.overflow, loaded.optimizer.dynamic_loss_scale) == optimizer_globals
 
         module_only = _init_engine(kind)
         module_only.load_checkpoint(load_dir, tag=TAG, load_module_only=True)
@@ -120,4 +133,16 @@ class TestFp32MastersStage3AndBf16(DistributedTest):
             assert torch.equal(rebuilt, saved.cpu())
         else:
             assert torch.equal(rebuilt, saved.to(torch.bfloat16).to(saved.dtype).cpu())
+        assert not _has_moments(module_only)
+
+        # load_checkpoint always passes load_from_fp32_weights=True. Cover the rebuild
+        # path with a direct load_state_dict after the module-only load.
+        with torch.no_grad():
+            _masters(module_only).add_(2**-12)
+        assert not torch.equal(_masters(module_only).cpu(), saved.to(torch.bfloat16).to(saved.dtype).cpu())
+        zero_sd_list = module_only._get_all_zero_checkpoints(load_dir, TAG)
+        module_only.optimizer.load_state_dict(state_dict_list=zero_sd_list,
+                                              load_optimizer_states=False,
+                                              load_from_fp32_weights=False)
+        assert torch.equal(_masters(module_only).cpu(), saved.to(torch.bfloat16).to(saved.dtype).cpu())
         assert not _has_moments(module_only)

@@ -675,7 +675,6 @@ class BF16_Optimizer(ZeROOptimizer):
 
         if load_optimizer_states:
             self.clip_grad = current_rank_sd.get(CLIP_GRAD, self.clip_grad)
-            print("_load_legacy_checkpoint current_rank_sd[BASE_OPTIMIZER_STATE]")
             self.optimizer.load_state_dict(current_rank_sd[BASE_OPTIMIZER_STATE])
 
         if load_from_fp32_weights:
