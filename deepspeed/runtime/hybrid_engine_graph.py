@@ -197,7 +197,8 @@ def decode_steps_from_generate_kwargs(kwargs):
 
 def validate_graph_capture_support(config, zero_stage):
     """Return the reason graph capture cannot be used, or ``None`` if it can."""
-    if not get_accelerator().is_available() or get_accelerator().create_graph() is None:
+    accelerator = get_accelerator()
+    if not accelerator.is_available() or not accelerator.is_graph_capture_supported():
         return "graph capture is not supported on the current accelerator"
 
     if zero_stage == 3:
