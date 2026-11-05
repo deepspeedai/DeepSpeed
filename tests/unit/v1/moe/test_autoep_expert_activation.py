@@ -31,6 +31,7 @@ from deepspeed.module_inject.auto_ep_presets.registry import resolve_preset_cand
 from deepspeed.moe.ep_experts import (
     EXPERT_ACTIVATIONS,
     GroupedExperts,
+    _zero_empty_expert_grad,
     apply_expert_activation,
     apply_packed_expert_activation,
     register_expert_activation,
@@ -184,6 +185,24 @@ class TestApplyExpertActivation:
 
 
 class TestGroupedExpertsActivation:
+
+    def test_empty_expert_grad_rows_are_cleared_without_copying_a_full_grad(self):
+        # grouped GEMM can leave a zero-token expert's weight gradient undefined. The guard must
+        # clear those rows in the grad it was given, and must return that same buffer when every
+        # expert received tokens instead of allocating a masked copy.
+        weight = torch.arange(24, dtype=torch.float32).reshape(4, 2, 3).requires_grad_(True)
+        guarded = _zero_empty_expert_grad(weight, torch.tensor([2, 0, 1, 3]))
+        upstream = torch.ones_like(guarded)
+        (grad, ) = torch.autograd.grad(guarded, weight, upstream)
+        assert grad.data_ptr() == upstream.data_ptr()
+        assert grad[1].eq(0).all()
+        assert grad[0].eq(1).all() and grad[2].eq(1).all() and grad[3].eq(1).all()
+
+        live = torch.arange(24, dtype=torch.float32).reshape(4, 2, 3).requires_grad_(True)
+        live_out = _zero_empty_expert_grad(live, torch.tensor([1, 1, 1, 1]))
+        live_upstream = torch.randn_like(live_out)
+        (live_grad, ) = torch.autograd.grad(live_out, live, live_upstream)
+        assert live_grad.data_ptr() == live_upstream.data_ptr()
 
     @pytest.mark.parametrize("activation", tuple(EXPERT_ACTIVATIONS))
     def test_for_loop_matches_dense_reference(self, activation):

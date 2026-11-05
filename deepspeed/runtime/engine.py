@@ -542,6 +542,9 @@ class DeepSpeedEngine(Module):
         self.warn_unscaled_loss = True
         self.config = config
         self._config = config_class
+        if self._config.deterministic_mode:
+            from .determinism import apply_determinism
+            apply_determinism(self._config)
         self.loaded_checkpoint_mp_world_size = None
         self.loaded_checkpoint_dp_world_size = None
         self.enable_backward_allreduce = True
@@ -1005,6 +1008,14 @@ class DeepSpeedEngine(Module):
                                                                             prepend=True,
                                                                             with_kwargs=True)
 
+    def _check_fused_linear_vocab_parallel_loss(self):
+        if self.zero_optimization_stage() == ZeroStageEnum.weights:
+            # The fused loss runs after the LM head's forward, when ZeRO-3 has already released
+            # the head's gathered weight.
+            raise ValueError("vocab_parallel_ce_backend='fused_linear' does not support ZeRO stage 3")
+        if self.is_deepcompile_enabled() and self.compile_autotp():
+            raise ValueError("vocab_parallel_ce_backend='fused_linear' does not support the DeepCompile 'autotp' pass")
+
     def _apply_autotp_partitioning(self, model, tp_config):
         """Shard the model with AutoTP. Returns the ``ReplacementSourceMap`` of the parameters AutoTP
         replaced instead of resharding in place (weights of a model built under zero.Init)."""
@@ -1055,7 +1066,7 @@ class DeepSpeedEngine(Module):
 
         def finalize_autotp(autotp=None, attach_uc_metadata=False, require_vocab_parallel_lm_head=False):
             if autotp is not None:
-                autotp.register_replicated_grad_hooks(model)
+                self._autotp_frozen_replicated_params = autotp.register_replicated_grad_hooks(model)
 
             from deepspeed.module_inject.layers import VocabParallelLinear
             vocab_parallel_heads = [module for module in model.modules() if isinstance(module, VocabParallelLinear)]
@@ -1063,6 +1074,8 @@ class DeepSpeedEngine(Module):
                 raise ValueError("Unable to choose a loss for multiple no-gather vocab-parallel LM heads")
             if vocab_parallel_heads:
                 from deepspeed.sequence.cross_entropy import configure_vocab_parallel_loss
+                if tp_config.vocab_parallel_ce_backend == "fused_linear":
+                    self._check_fused_linear_vocab_parallel_loss()
                 configure_vocab_parallel_loss(model,
                                               vocab_parallel_heads[0],
                                               backend=tp_config.vocab_parallel_ce_backend)
@@ -1072,7 +1085,8 @@ class DeepSpeedEngine(Module):
                 raise ValueError(
                     "vocab_parallel_lm_head requires a supported nn.Linear named 'lm_head' or 'embed_out'")
             elif tp_config.vocab_parallel_ce_backend != "torch":
-                raise ValueError("vocab_parallel_ce_backend='liger' requires a no-gather vocabulary-parallel LM head")
+                raise ValueError(f"vocab_parallel_ce_backend='{tp_config.vocab_parallel_ce_backend}' requires a "
+                                 "no-gather vocabulary-parallel LM head")
 
             if attach_uc_metadata:
                 setattr(model, UNIVERSAL_CHECKPOINT_INFO, collect_autotp_universal_checkpoint_info(model))
@@ -1165,7 +1179,7 @@ class DeepSpeedEngine(Module):
                     # replacement has mutated the shared weights or installed collectives.
                     try:
                         autotp._resolve_vocab_parallel_lm_head()
-                        validate_vocab_parallel_loss(model)
+                        validate_vocab_parallel_loss(model, backend=tp_config.vocab_parallel_ce_backend)
                     except (ValueError, NotImplementedError) as exc:
                         if not auto_vocab_parallel_lm_head:
                             raise
@@ -3118,10 +3132,22 @@ class DeepSpeedEngine(Module):
                 continue
             reduce_autoep_folding_gradient(folding_spec, param, param.grad, tp_group=tp_group, param_name=param_name)
 
+    def _check_autotp_frozen_replicated_params(self):
+        # A replicated parameter frozen at initialize got no tensor-parallel gradient all-reduce, so
+        # training it now would let the ranks drift apart silently instead of failing.
+        unfrozen = [
+            name for name, param in getattr(self, "_autotp_frozen_replicated_params", ()) if param.requires_grad
+        ]
+        if unfrozen:
+            raise RuntimeError(f"AutoTP replicated parameters {unfrozen} were frozen at deepspeed.initialize and "
+                               "have no tensor-parallel gradient all-reduce. Set requires_grad before "
+                               "deepspeed.initialize instead of unfreezing them afterwards.")
+
     def _backward_prologue(self):
         if is_functorch_transforming():
             return
         self._start_timers(self.engine_timers.backward_timers)
+        self._check_autotp_frozen_replicated_params()
 
         # When necessary internal APIs are not available, we disable direct calls to tensor.backward()
         # and limit to engine.backward(loss) only.
