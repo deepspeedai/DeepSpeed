@@ -860,8 +860,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
     def _relink_hp_params_optimizer_state(self):
         """Link the optimizer state into the params' fragments again: reload_states() moves the state to new tensors,
-        and _link_all_hp_params() rebuilds the fragments without it. Before the first step there is no state yet, and
-        step() links it."""
+        and _link_all_hp_params() rebuilds the fragments without it. Before the first step the state is empty (with
+        elastic checkpointing, state_dict() adds an empty one per group), and step() links it."""
         self._hp_optimizer_states_linked = False
         if any(self.optimizer.state.values()):
             self._lazy_init_hp_params_optimizer_state()

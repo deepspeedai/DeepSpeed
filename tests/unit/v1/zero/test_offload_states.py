@@ -273,7 +273,7 @@ class TestOffloadStatesZero12OptimizerStateFragments(DistributedTest):
     each rank's own fragments: safe_get_full_optimizer_state() is a collective and would hang if one rank failed."""
     world_size = 2
 
-    def _engine(self, zero_stage):
+    def _engine(self, zero_stage, elastic_checkpoint):
         config_dict = {
             "train_micro_batch_size_per_gpu": 1,
             "optimizer": {
@@ -286,7 +286,8 @@ class TestOffloadStatesZero12OptimizerStateFragments(DistributedTest):
                 "enabled": True
             },
             "zero_optimization": {
-                "stage": zero_stage
+                "stage": zero_stage,
+                "elastic_checkpoint": elastic_checkpoint
             },
         }
         torch.manual_seed(0)
@@ -299,15 +300,25 @@ class TestOffloadStatesZero12OptimizerStateFragments(DistributedTest):
         engine.step()
 
     def test_optimizer_state_fragments(self, zero_stage, included_state):
-        model, reference = self._engine(zero_stage), self._engine(zero_stage)
+        self._check_offload(zero_stage, included_state, before_first_step=False)
+
+    def test_offload_before_first_step(self, zero_stage, included_state):
+        # With elastic checkpointing, state_dict() adds an empty optimizer state per group, which must not be linked.
+        self._check_offload(zero_stage, included_state, before_first_step=True)
+
+    def _check_offload(self, zero_stage, included_state, before_first_step):
+        model, reference = self._engine(zero_stage, before_first_step), self._engine(zero_stage, before_first_step)
         data_loader = random_dataloader(model=model,
                                         total_samples=2,
                                         hidden_dim=1024,
                                         device=model.device,
                                         dtype=torch.bfloat16)
         batch = next(iter(data_loader))
-        for engine in (model, reference):
-            self._train_step(engine, batch)
+        if before_first_step:
+            model.optimizer.state_dict()
+        else:
+            for engine in (model, reference):
+                self._train_step(engine, batch)
 
         moments = sum(state[key].numel() * state[key].element_size()
                       for state in model.optimizer.optimizer.state.values() for key in ("exp_avg", "exp_avg_sq")
