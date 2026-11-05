@@ -1,5 +1,0 @@
-setup.py
-pre_commit_placeholder_package.egg-info/PKG-INFO
-pre_commit_placeholder_package.egg-info/SOURCES.txt
-pre_commit_placeholder_package.egg-info/dependency_links.txt
-pre_commit_placeholder_package.egg-info/top_level.txt
