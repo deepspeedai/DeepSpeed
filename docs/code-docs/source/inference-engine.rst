@@ -125,7 +125,7 @@ from that pre-sorted pending queue. Cache trimming remains disabled unless
 span with ``continuous_cache_capacity``; if the span is exhausted, the rollout
 raises an error that names both remedies.
 
-Set ``HybridEngineRolloutConfig(adaptive_prefill=True)`` to choose ordinary
+For eager decode, set ``HybridEngineRolloutConfig(adaptive_prefill=True)`` to choose ordinary
 batched generation or aligned CB with cost-based prefill buckets. Auto is
 opt-in and takes precedence over ``align_decode_fronts`` without modifying the
 caller's configuration. A length-sorted O(n²) dynamic program minimizes the
@@ -208,9 +208,14 @@ active-row capacity or cache capacity when needed.
 
 Automatic selection currently requires single-process greedy rollout with one
 sample per prompt and a supported cache-class model.
-CUDA Graph capture remains available with Auto disabled; combining it with
-adaptive prefill is currently rejected because the graph uses fixed physical
-slots while Auto requires aligned, bucketed prefill.
+With both ``adaptive_prefill=True`` and ``use_graph_capture=True``, supported
+accelerators use eager bucketed prefill for newly admitted prompts and replay
+decode in fixed physical slots. Each surviving request keeps its KV row across
+refills. The graph capacity and position limits use the physical input width.
+Graph capture is explicitly selected by the caller; the cost model chooses the
+prefill buckets. Profiling reports ``generation_strategy="bucketed_graph"``.
+The graph restrictions on explicit aligned fronts and cache trimming still apply.
+Accelerators without graph support use the eager adaptive policy.
 
 Other non-default generation settings beyond repetition penalty, token IDs and the supported length/sampling
 settings are rejected; for example, beam search, no-repeat n-grams, forced tokens
@@ -221,7 +226,7 @@ penalty retains the original padded prompt history even when bucket model input
 is trimmed.
 
 With profiling, ``get_last_profile()["generation_strategy"]`` reports
-``"batched"`` or ``"bucketed"`` for Auto; ``num_prefill_forwards`` counts actual
+``"batched"``, ``"bucketed"``, or ``"bucketed_graph"`` for Auto; ``num_prefill_forwards`` counts actual
 bucket Forwards on the CB path. End-to-end time includes initial route planning
 and result normalization. Ordinary generation has no static-cache snapshot,
 so ``get_last_continuous_stats()`` returns ``None`` for that call. Across Auto

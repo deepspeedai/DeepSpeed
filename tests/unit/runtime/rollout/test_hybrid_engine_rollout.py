@@ -228,13 +228,6 @@ def test_continuous_generation_routes_graph_capture_to_fixed_capacity_path(graph
     assert max_batch_size == 4
 
 
-def test_adaptive_prefill_rejects_graph_capture_without_disabling_manual_graph():
-    rollout = HybridEngineRollout(_make_engine(), _make_tokenizer(),
-                                  HybridEngineRolloutConfig(adaptive_prefill=True, use_graph_capture=True))
-    with pytest.raises(ValueError, match="adaptive prefill.*graph capture"):
-        rollout.generate(_make_request(), SamplingConfig(max_new_tokens=2, temperature=0, continuous_batch_size=2))
-
-
 @patch("deepspeed.runtime.rollout.hybrid_engine_rollout.get_accelerator")
 def test_continuous_graph_capture_uses_fixed_capacity_buffers(mock_get_accelerator):
 

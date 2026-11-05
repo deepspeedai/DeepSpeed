@@ -344,12 +344,6 @@ class HybridEngineRollout(RolloutEngine):
             logger.warning_once("HybridEngineRollout: graph capture is not supported on the current accelerator; "
                                 "falling back to eager continuous batching.")
             use_graph_capture = False
-        if use_graph_capture:
-            requests = tuple(
-                RolloutRequest(request.prompt_ids[index:index + 1], request.prompt_attention_mask[index:index + 1])
-                for index in range(batch_size))
-            return self._generate_continuous_graph(original_request, requests, sampling, max_batch_size)
-
         module = self.engine.module
         prepared_generation_config = None
         if self.adaptive_prefill and dist.is_initialized() and dist.get_world_size() > 1:
@@ -397,6 +391,20 @@ class HybridEngineRollout(RolloutEngine):
         else:
             prompt_lengths = dict.fromkeys(range(batch_size), request.prompt_ids.shape[1])
         prompt_len = max(prompt_lengths.values())
+        if self.adaptive_prefill and self.prefill_max_tokens is not None and prompt_len > self.prefill_max_tokens:
+            raise ValueError("a prompt exceeds the prefill token limit; increase the configured limit")
+        if use_graph_capture:
+            requests = tuple(
+                RolloutRequest(request.prompt_ids[index:index + 1], request.prompt_attention_mask[index:index + 1])
+                for index in range(batch_size))
+            return self._generate_continuous_graph(original_request,
+                                                   requests,
+                                                   sampling,
+                                                   max_batch_size,
+                                                   prompt_lengths=prompt_lengths,
+                                                   generation_config=prepared_generation_config,
+                                                   profile=profile)
+
         max_positions = getattr(module.config, "max_position_embeddings", None)
         if max_positions is not None:
             if any(length + sampling.max_new_tokens > max_positions for length in prompt_lengths.values()):
@@ -417,8 +425,6 @@ class HybridEngineRollout(RolloutEngine):
 
         use_batched = False
         if self.adaptive_prefill:
-            if self.prefill_max_tokens is not None and prompt_len > self.prefill_max_tokens:
-                raise ValueError("a prompt exceeds the prefill token limit; increase the configured limit")
             full_width = request.prompt_ids.shape[1]
             full_tokens_fit = self.prefill_max_tokens is None or request.prompt_ids.numel() <= self.prefill_max_tokens
             full_positions_fit = max_positions is None or full_width + sampling.max_new_tokens <= max_positions
@@ -694,7 +700,8 @@ class HybridEngineRollout(RolloutEngine):
         return output
 
     @torch.no_grad()
-    def _generate_continuous_graph(self, original_request, requests, sampling, max_batch_size):
+    def _generate_continuous_graph(self, original_request, requests, sampling, max_batch_size, *, prompt_lengths,
+                                   generation_config, profile):
         """Run continuous greedy decoding with a fixed-capacity graph.
 
         Scheduler slots stay attached to physical cache rows for their whole
@@ -715,7 +722,8 @@ class HybridEngineRollout(RolloutEngine):
         from transformers import StaticCache
         from deepspeed.utils.static_cache import DeepSpeedStaticCache
 
-        profile = self._start_continuous_profile() if self.enable_profiling else None
+        if self.enable_profiling and profile is None:
+            profile = self._start_continuous_profile()
         profile_accelerator = profile["accelerator"] if profile is not None else None
         profile_start = profile["start"] if profile is not None else None
         minimum_cache_len = prompt_len + sampling.max_new_tokens
@@ -728,7 +736,6 @@ class HybridEngineRollout(RolloutEngine):
             raise ValueError("continuous batching cache exceeds the model maximum position embeddings")
         model_dtype = next(module.parameters()).dtype
         scheduler = ContinuousBatchScheduler(max_batch_size, sampling.max_new_tokens)
-        prompt_lengths = {request_id: prompt_len for request_id in range(len(requests))}
         request_by_id = {}
         responses = {}
         for request_id, request in enumerate(requests):
@@ -793,8 +800,11 @@ class HybridEngineRollout(RolloutEngine):
                 write_positions[request_id] = prompt_len
                 admitted_slots.append(slot)
 
-            cache_start = self._profile_start(profile)
             if admitted_ids:
+                # A full-width admission that fits the token limit is already the optimal single bucket.
+                bucket_prefill = self.adaptive_prefill and (
+                    any(prompt_lengths[i] != prompt_len for i in admitted_ids) or
+                    (self.prefill_max_tokens is not None and len(admitted_ids) * prompt_len > self.prefill_max_tokens))
                 admitted_tokens = self._continuous_prefill(
                     module,
                     StaticCache,
@@ -808,10 +818,11 @@ class HybridEngineRollout(RolloutEngine):
                     model_dtype,
                     device,
                     profile=profile,
+                    align_decode_fronts=bucket_prefill,
                     target_slots=tuple(admitted_slots),
+                    generation_config=generation_config,
                 )
                 next_tokens.update(admitted_tokens)
-            self._profile_end(profile, "cache_management_overhead_ms", cache_start)
 
             decode_ids = tuple(request_id for request_id in update.active_ids if request_id not in admitted_ids)
             static_input.zero_()
@@ -842,6 +853,7 @@ class HybridEngineRollout(RolloutEngine):
                     request_by_id,
                     responses,
                     module,
+                    generation_config=generation_config,
                 )
                 for request_id, token in zip(decode_ids, decoded.split(1, dim=0)):
                     decoded_tokens[request_id] = token
@@ -879,6 +891,8 @@ class HybridEngineRollout(RolloutEngine):
         if profile is not None:
             self._finish_continuous_profile(profile, original_request, responses, max_batch_size, prompt_len,
                                             generation_end, post_processing_end)
+            if self.adaptive_prefill:
+                self._last_profile["generation_strategy"] = "bucketed_graph"
         return output
 
     def _validate_continuous_graph_options(self, prompt_len, sampling):
@@ -1038,8 +1052,6 @@ class HybridEngineRollout(RolloutEngine):
         return max_cache_len
 
     def _validate_continuous_inputs(self, request, sampling, max_batch_size):
-        if self.adaptive_prefill and self.use_graph_capture:
-            raise ValueError("adaptive prefill does not yet support CUDA graph capture")
         if request.prompt_ids.shape[0] == 0:
             raise ValueError("continuous batching requires at least one request")
         if max_batch_size <= 0:
@@ -1087,12 +1099,12 @@ class HybridEngineRollout(RolloutEngine):
         if not update.admitted:
             return {}
 
+        if target_slots is None:
+            target_slots = update.admitted_slots
+        if len(target_slots) != len(update.admitted):
+            raise ValueError("continuous prefill needs one target slot per admitted request")
         if not align_decode_fronts:
             admitted_ids = tuple(request.request_id for request in update.admitted)
-            if target_slots is None:
-                target_slots = update.admitted_slots
-            if len(target_slots) != len(admitted_ids):
-                raise ValueError("continuous prefill needs one target slot per admitted request")
             prompt_ids = torch.cat([request_by_id[request_id].prompt_ids for request_id in admitted_ids], dim=0)
             prompt_attention = torch.cat(
                 [request_by_id[request_id].prompt_attention_mask for request_id in admitted_ids], dim=0)
@@ -1125,7 +1137,7 @@ class HybridEngineRollout(RolloutEngine):
             return dict(zip(admitted_ids, prefill_tokens.split(1, dim=0)))
 
         admitted_tokens = {}
-        admitted = list(zip(update.admitted, update.admitted_slots))
+        admitted = list(zip(update.admitted, target_slots))
         if self.adaptive_prefill:
             lengths = [prompt_lengths[item.request_id] for item, _ in admitted]
             buckets, _ = plan_prefill_buckets(lengths, self._prefill_cost_function(module), self.prefill_max_tokens)
