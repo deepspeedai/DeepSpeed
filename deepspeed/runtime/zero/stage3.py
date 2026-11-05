@@ -314,16 +314,25 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             backup_gpu_tensor = torch.randn(1, device=get_accelerator().device_name()).to(self.dtype)
             backup_gpu_param = torch.nn.Parameter(backup_gpu_tensor)
             assert type(init_optimizer) == DeepSpeedCPUAdam, 'Hybrid Optimizer Only Supports DeepSpeedCPUAdam'
-            self.backup_optimizer = torch.optim.AdamW([backup_gpu_param],
-                                                      lr=self.optimizer.param_groups[0]["lr"],
-                                                      betas=self.optimizer.param_groups[0]["betas"],
-                                                      eps=self.optimizer.param_groups[0]["eps"],
-                                                      weight_decay=self.optimizer.param_groups[0]["weight_decay"],
-                                                      amsgrad=self.optimizer.param_groups[0]["amsgrad"])
-            # Multiple param_groups configs for back-up optimizer
-            if len(self.optimizer.param_groups) > 1:
-                for i in range(1, len(self.optimizer.param_groups)):
-                    self.backup_optimizer.add_param_group(self.optimizer.param_groups[i])
+            if not all(group.get("bias_correction", True) for group in self.optimizer.param_groups):
+                raise ValueError(
+                    "offload_optimizer.ratio < 1 steps the sub-groups kept on the device with torch Adam, "
+                    "which always applies bias correction; bias_correction=False is not supported.")
+            # The same update as DeepSpeedCPUAdam: decoupled weight decay, or L2 when adam_w_mode is off.
+            backup_optimizer_class = torch.optim.AdamW if init_optimizer.adam_w_mode else torch.optim.Adam
+            self.backup_optimizer = backup_optimizer_class([backup_gpu_param],
+                                                           lr=self.optimizer.param_groups[0]["lr"],
+                                                           betas=self.optimizer.param_groups[0]["betas"],
+                                                           eps=self.optimizer.param_groups[0]["eps"],
+                                                           weight_decay=self.optimizer.param_groups[0]["weight_decay"],
+                                                           amsgrad=self.optimizer.param_groups[0]["amsgrad"])
+            # Each param group gets its own dict; _sync_backup_optimizer_group copies the hyperparameters before a
+            # step. A dict shared with self.optimizer would also get the CPU sub-groups that
+            # _set_fp32_optimizer_param_groups adds for a checkpoint, and keep them after a load replaces
+            # self.optimizer's dicts.
+            for group in self.optimizer.param_groups[1:]:
+                backup_group = {key: value for key, value in group.items() if key != "params"}
+                self.backup_optimizer.add_param_group(dict(backup_group, params=[]))
 
         self._initialize_zenflow_stage3_epilogue(zenflow_config, overlap_comm)
 
@@ -1239,6 +1248,23 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         return sub_groups
 
+    def _sync_backup_optimizer_group(self, param_group_id):
+        """Copy the hyperparameters of a param group to the optimizer of the sub-groups kept on the device.
+
+        LR, momentum and weight decay schedules, set_lr() and checkpoint loads change self.optimizer's groups only.
+        """
+        backup_group = self.backup_optimizer.param_groups[param_group_id]
+        main_group = self.optimizer.param_groups[param_group_id]
+        for key in ("lr", "betas", "eps", "weight_decay"):
+            backup_group[key] = main_group[key]
+
+    def _sub_group_optimizer(self, sub_group_id):
+        """The optimizer that steps a sub-group and holds its state."""
+        if (self.offload_optimizer and self.subgroup_to_device[sub_group_id] != 'cpu'
+                and not (self.use_muon and self.sub_groups_using_muon[sub_group_id])):
+            return self.backup_optimizer
+        return self.optimizer
+
     def _optimizer_step(self, sub_group_id):
         param_group_id = self.sub_group_to_group_id[sub_group_id]
         fp32_param = self.fp32_partitioned_groups_flat[sub_group_id]
@@ -1260,6 +1286,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                 step_with_gradscaler(self.optimizer)
                 self.optimizer.param_groups[param_group_id]['params'] = []
             else:
+                self._sync_backup_optimizer_group(param_group_id)
                 self.backup_optimizer.param_groups[param_group_id]['params'] = [fp32_param]
                 step_with_gradscaler(self.backup_optimizer)
                 self.backup_optimizer.param_groups[param_group_id]['params'] = []
@@ -3192,7 +3219,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         if optim_state_key is None:
             fp32_opt_state = fp32_param.narrow(0, dest_offset, num_elements)
         else:
-            fp32_opt_state = self.optimizer.state[fp32_param][optim_state_key].narrow(0, dest_offset, num_elements)
+            optimizer = self._sub_group_optimizer(group_idx)
+            fp32_opt_state = optimizer.state[fp32_param][optim_state_key].narrow(0, dest_offset, num_elements)
 
         if self._swappable_optimizer_subgroup(group_idx) and release_swap_buffers:
             self._release_swap_buffers(group_idx)
@@ -3472,11 +3500,52 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             state_dict['ds_zero_partition_groups'] = zero3_partition_group_metadata
 
         self._set_fp32_optimizer_param_groups()
-        state_dict[OPTIMIZER_STATE_DICT] = self.optimizer.state_dict()
+        # The sub-groups kept on the device have their state in the backup optimizer. Save it with the other
+        # sub-groups', as DeepSpeedCPUAdam keeps it, so that the checkpoint does not depend on offload_optimizer.ratio.
+        backup_state_params = self._add_backup_optimizer_state()
+        try:
+            state_dict[OPTIMIZER_STATE_DICT] = self.optimizer.state_dict()
+        finally:
+            for fp32_param in backup_state_params:
+                del self.optimizer.state[fp32_param]
         state_dict[FP32_FLAT_GROUPS] = self.fp32_partitioned_groups_flat
         self._clear_fp32_optimizer_param_groups()
 
         return state_dict
+
+    def _add_backup_optimizer_state(self):
+        """Put the Adam state of the sub-groups kept on the device into self.optimizer.state; return their params."""
+        added = []
+        if getattr(self, "backup_optimizer", None) is None:
+            return added
+        for sub_group_id, fp32_param in enumerate(self.fp32_partitioned_groups_flat):
+            state = self.backup_optimizer.state.get(fp32_param)
+            if state and self._sub_group_optimizer(sub_group_id) is self.backup_optimizer:
+                self.optimizer.state[fp32_param] = {
+                    "step": int(state["step"]),
+                    "exp_avg": state["exp_avg"],
+                    "exp_avg_sq": state["exp_avg_sq"],
+                }
+                added.append(fp32_param)
+        return added
+
+    def _move_state_to_backup_optimizer(self):
+        """Move the loaded Adam state of the sub-groups kept on the device to the backup optimizer."""
+        if getattr(self, "backup_optimizer", None) is None:
+            return
+        for sub_group_id, fp32_param in enumerate(self.fp32_partitioned_groups_flat):
+            if self._sub_group_optimizer(sub_group_id) is not self.backup_optimizer:
+                continue
+            state = self.optimizer.state.pop(fp32_param, None)
+            self.backup_optimizer.state.pop(fp32_param, None)
+            if state:
+                # torch Adam keeps the moments in the param dtype and the step count as a float32 tensor;
+                # DeepSpeedCPUAdam keeps an int step and, with fp32_optimizer_states, fp32 moments for bf16 params.
+                self.backup_optimizer.state[fp32_param] = {
+                    "step": torch.tensor(float(state["step"])),
+                    "exp_avg": state["exp_avg"].to(fp32_param.dtype),
+                    "exp_avg_sq": state["exp_avg_sq"].to(fp32_param.dtype),
+                }
 
     def state_dict(self):
         """
@@ -3584,6 +3653,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             self._set_fp32_optimizer_param_groups()
             self.optimizer.load_state_dict(state_dict[OPTIMIZER_STATE_DICT])
             self._clear_fp32_optimizer_param_groups()
+            self._move_state_to_backup_optimizer()
 
         if self.swap_optimizer:
             # Purge the swapped optimizer state, it was initialized to the freshly created model and not the checkpoint
@@ -3714,6 +3784,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                     self.optimizer.state[fp32_param]['step'] = state_step
                 else:
                     self.optimizer.state[fp32_param][key] = key_tensor
+        self._move_state_to_backup_optimizer()
 
         for param_group in self.optimizer.param_groups:
             # Generally, the hyperparameters of each parameter should be the same, we can obtain from any parameter.
