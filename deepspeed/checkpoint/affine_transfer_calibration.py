@@ -118,6 +118,8 @@ def calibrate_links(sizes: Sequence[int] = DEFAULT_SIZES,
       switches and sockets are each sampled. A sample is the slower of its two endpoints.
     - ``concurrent``: every process sends to ``process + shift`` and receives from
       ``process - shift`` at the same time, for every shift, so links are sampled while sharing.
+      A process's time covers both its send and its receive, so each sample records ``paths``
+      for the sends and ``receive_paths`` for the receives.
     - ``fan_out``: for every root and fan width, the root sends one message to each of its
       ``width`` peers at once (1 to N), while every other process is idle.
     - ``fan_in``: for every root and fan width, each of its peers sends one message to the root
@@ -244,10 +246,12 @@ def calibrate_links(sizes: Sequence[int] = DEFAULT_SIZES,
                     'seconds': seconds
                 })
         for shift in range(1, world):
+            senders = [(process - shift) % world for process in range(world)]
             concurrent.append({
                 'bytes': size,
                 'shift': shift,
                 'paths': [path_of(process, (process + shift) % world) for process in range(world)],
+                'receive_paths': [path_of(sender, process) for process, sender in enumerate(senders)],
                 'seconds_by_process': [gathered[process][2][(size, shift)] for process in range(world)],
             })
         for width in widths:
@@ -323,7 +327,8 @@ def fit_links(calibration: Dict) -> Dict:
 
     - ``local``, ``peer`` and ``concurrent``: a fit per path label. ``concurrent`` is fitted from
       what each process saw while every process was sending, i.e. per-link cost under the shift
-      sharing pattern, not in isolation.
+      sharing pattern, not in isolation. It uses only processes whose send and receive took the
+      same path, since a process's time covers both; a path no such process saw has no fit.
     - ``peer_pairs``: a fit per ordered ``(from_process, to_process)`` pair, from the ``peer``
       samples. It keeps the sender and direction asymmetry that pooling by path label averages
       away, as between cards behind PCIe switches.
@@ -356,8 +361,10 @@ def fit_links(calibration: Dict) -> Dict:
 
     concurrent: Dict[str, Dict[int, List[float]]] = {}
     for sample in calibration['concurrent']:
-        for path, seconds in zip(sample['paths'], sample['seconds_by_process']):
-            concurrent.setdefault(path, {}).setdefault(sample['bytes'], []).extend(seconds)
+        for path, receive_path, seconds in zip(sample['paths'], sample['receive_paths'], sample['seconds_by_process']):
+            # Across nodes, an intra-node send paired with an inter-node receive takes the inter-node time.
+            if path == receive_path:
+                concurrent.setdefault(path, {}).setdefault(sample['bytes'], []).extend(seconds)
 
     fits = {
         'schema': CALIBRATION_SCHEMA,
