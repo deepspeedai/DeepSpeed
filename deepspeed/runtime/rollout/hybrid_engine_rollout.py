@@ -7,9 +7,9 @@ Two generation paths:
   1. **model.generate()** (default): delegates to HuggingFace generate.
      Supports sampling (temperature, top_p) and greedy.
   2. **graph capture + DeepSpeedStaticCache**: only for greedy (temperature=0).
-     Pre-allocates a StaticCache, captures the decode forward pass with a
-     CUDA graph, and replays it for each decode step.  Eliminates kernel
-     launch overhead.
+     Pre-allocates a StaticCache, captures the decode forward pass into a
+     graph, and replays it for each decode step.  Eliminates kernel launch
+     overhead.
   3. **continuous batching (experimental)**: an opt-in bounded greedy path
      selected through ``SamplingConfig.continuous_batch_size``.
 """
@@ -25,6 +25,7 @@ import torch
 from deepspeed.accelerator import get_accelerator
 from deepspeed.runtime.rollout.base import RolloutBatch, RolloutEngine, RolloutRequest, SamplingConfig
 from deepspeed.runtime.rollout.continuous_batching import ContinuousBatchRequest, ContinuousBatchScheduler
+from deepspeed.utils import logger
 
 
 class _ForwardProfiler:
@@ -170,10 +171,18 @@ class HybridEngineRollout(RolloutEngine):
             expansion_end = time.perf_counter()
 
         is_greedy = sampling.temperature <= 0.0
+        use_graph_capture = self.use_graph_capture and is_greedy
+        if use_graph_capture and not get_accelerator().is_graph_capture_supported():
+            # Same opt-in as the HybridEngine graph cache and the continuous
+            # rollout path: falling back keeps backends that only expose a
+            # graph API on the eager path.
+            logger.warning_once("HybridEngineRollout: graph capture is not supported on the current accelerator; "
+                                "falling back to eager generation.")
+            use_graph_capture = False
 
         forward_profiler = None
         forward_profile_handles = []
-        if self.enable_profiling and not (self.use_graph_capture and is_greedy):
+        if self.enable_profiling and not use_graph_capture:
             forward_profiler = _ForwardProfiler(accelerator)
             forward_profile_handles = forward_profiler.register(module)
 
@@ -181,10 +190,10 @@ class HybridEngineRollout(RolloutEngine):
         try:
             if self.use_shared_prefill and n > 1:
                 if self.use_graph_capture:
-                    raise RuntimeError("Shared prefill does not support CUDA graph capture")
+                    raise RuntimeError("Shared prefill does not support graph capture")
                 self.engine.prepare_shared_prefill(B, n, prompt_len)
                 shared_prefill_handles = self._register_shared_prefill_hooks(module, B, n)
-            if self.use_graph_capture and is_greedy:
+            if use_graph_capture:
                 output_ids = self._generate_graph(prompt_ids, prompt_attn, max_new_tokens, pad_token_id, module,
                                                   device)
             else:
@@ -293,7 +302,14 @@ class HybridEngineRollout(RolloutEngine):
             RolloutRequest(request.prompt_ids[index:index + 1], request.prompt_attention_mask[index:index + 1])
             for index in range(request.prompt_ids.shape[0]))
         self._validate_continuous_inputs(requests, sampling, max_batch_size)
-        if self.use_graph_capture:
+        use_graph_capture = self.use_graph_capture
+        if use_graph_capture and not get_accelerator().is_graph_capture_supported():
+            # The eager continuous path is a full fallback, so keep it instead
+            # of aborting when the backend has not opted into graph capture.
+            logger.warning_once("HybridEngineRollout: graph capture is not supported on the current accelerator; "
+                                "falling back to eager continuous batching.")
+            use_graph_capture = False
+        if use_graph_capture:
             return self._generate_continuous_graph(original_request, requests, sampling, max_batch_size)
 
         module = self.engine.module
@@ -545,7 +561,7 @@ class HybridEngineRollout(RolloutEngine):
 
     @torch.no_grad()
     def _generate_continuous_graph(self, original_request, requests, sampling, max_batch_size):
-        """Run continuous greedy decoding with a fixed-capacity CUDA graph.
+        """Run continuous greedy decoding with a fixed-capacity graph.
 
         Scheduler slots stay attached to physical cache rows for their whole
         lifetime. Retired rows are masked until a new prompt is prefetched into
@@ -559,10 +575,8 @@ class HybridEngineRollout(RolloutEngine):
             raise ValueError("continuous batching requires a model with cache-class support; use the default "
                              "generate() path or upgrade transformers")
         if getattr(module.config, "_attn_implementation", None) == "flash_attention_2":
-            raise ValueError("continuous CUDA graph capture does not support flash_attention_2")
+            raise ValueError("continuous graph capture does not support flash_attention_2")
         device = requests[0].prompt_ids.device
-        if device.type != "cuda":
-            raise ValueError("continuous CUDA graph capture requires CUDA rollout inputs")
 
         from transformers import StaticCache
         from deepspeed.utils.static_cache import DeepSpeedStaticCache
@@ -735,9 +749,9 @@ class HybridEngineRollout(RolloutEngine):
 
     def _validate_continuous_graph_options(self, prompt_len, sampling):
         if self.align_decode_fronts:
-            raise ValueError("continuous CUDA graph capture does not support aligned decode fronts")
+            raise ValueError("continuous graph capture does not support aligned decode fronts")
         if self.enable_cache_trimming:
-            raise ValueError("continuous CUDA graph capture does not support cache trimming")
+            raise ValueError("continuous graph capture does not support cache trimming")
         if (self.continuous_cache_capacity is not None
                 and self.continuous_cache_capacity < prompt_len + sampling.max_new_tokens):
             raise ValueError("continuous_cache_capacity must fit the prompt and all generated tokens")
@@ -1304,7 +1318,7 @@ class HybridEngineRollout(RolloutEngine):
     # ------------------------------------------------------------------
 
     def _generate_graph(self, prompt_ids, prompt_attn, max_new_tokens, pad_token_id, module, device):
-        """Greedy decode with DeepSpeedStaticCache + CUDA graph capture."""
+        """Greedy decode with DeepSpeedStaticCache + graph capture."""
         from transformers import StaticCache
         from deepspeed.utils.static_cache import DeepSpeedStaticCache
 

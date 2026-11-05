@@ -136,6 +136,69 @@ def test_continuous_graph_generation_refills_a_fixed_slot_on_cuda():
     assert stats["trim_frequency"] == 0.0
 
 
+@pytest.mark.parametrize("attn_implementation", ["eager", "sdpa"])
+@pytest.mark.parametrize("left_padding", [False, True])
+def test_continuous_rollout_matches_native_llama_generation_on_accelerator(attn_implementation, left_padding,
+                                                                           monkeypatch):
+    accelerator = get_accelerator()
+    if not accelerator.is_available() or accelerator.create_graph() is None:
+        pytest.skip("Graph capture is required for native-model rollout coverage")
+    if not accelerator.is_fp16_supported():
+        pytest.skip("FP16 is required for native-model rollout coverage")
+
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    torch.manual_seed(1234)
+    config = LlamaConfig(vocab_size=32,
+                         hidden_size=32,
+                         intermediate_size=64,
+                         num_hidden_layers=2,
+                         num_attention_heads=4,
+                         num_key_value_heads=2,
+                         max_position_embeddings=64,
+                         pad_token_id=0,
+                         eos_token_id=None)
+    config._attn_implementation = attn_implementation
+    device = torch.device(accelerator.device_name())
+    model = LlamaForCausalLM(config).to(device=device, dtype=torch.float16).eval()
+    prompt_ids = torch.tensor([[1, 3, 4, 5], [1, 6, 7, 8], [1, 9, 10, 11]], device=device)
+    if left_padding:
+        prompt_ids[0, :2] = 0
+        prompt_ids[1, :1] = 0
+    attention_mask = (prompt_ids != 0).long()
+    request = RolloutRequest(prompt_ids, attention_mask)
+    sampling = SamplingConfig(max_new_tokens=5, temperature=0, continuous_batch_size=2)
+    tokenizer = SimpleNamespace(pad_token_id=0, eos_token_id=None)
+    eager_rollout = HybridEngineRollout(SimpleNamespace(module=model), tokenizer)
+    graph_rollout = HybridEngineRollout(SimpleNamespace(module=model),
+                                        tokenizer,
+                                        cfg=HybridEngineRolloutConfig(use_graph_capture=True))
+    with torch.no_grad():
+        reference = model.generate(input_ids=prompt_ids,
+                                   attention_mask=attention_mask,
+                                   max_new_tokens=sampling.max_new_tokens,
+                                   do_sample=False)
+    expected_attention = torch.cat((attention_mask, torch.ones_like(reference[:, 4:])), dim=1)
+    expected_response_start = torch.full((3, ), 4, device=device, dtype=torch.long)
+
+    original_capture_to_graph = accelerator.capture_to_graph
+    capture_count = 0
+
+    def counted_capture_to_graph(*args, **kwargs):
+        nonlocal capture_count
+        capture_count += 1
+        return original_capture_to_graph(*args, **kwargs)
+
+    monkeypatch.setattr(accelerator, "capture_to_graph", counted_capture_to_graph)
+    # Three requests and two slots force refill; the second call also exercises graph reuse.
+    for rollout in (eager_rollout, graph_rollout, graph_rollout):
+        output = rollout.generate(request, sampling)
+        assert torch.equal(output.input_ids, reference)
+        assert torch.equal(output.attention_mask, expected_attention)
+        assert torch.equal(output.response_start_idx, expected_response_start)
+    assert capture_count == 1
+
+
 def test_continuous_graph_matches_pretrained_model_when_enabled():
     model_name = os.getenv("DEEPSPEED_PRETRAINED_ROLLOUT_MODEL")
     if not model_name:

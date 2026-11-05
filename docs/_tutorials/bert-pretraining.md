@@ -26,7 +26,7 @@ We work from adaptations of
 [huggingface/transformers](https://github.com/huggingface/transformers) and
 [NVIDIA/DeepLearningExamples](https://github.com/NVIDIA/DeepLearningExamples).
 We have forked this repo under
-[DeepSpeedExamples/bing_bert](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/bing_bert)
+[DeepSpeedExamples/bing_bert](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/training/bing_bert)
 and made several modifications in their script:
 
   * We adopted the modeling code from NVIDIA's BERT under `bing_bert/nvidia/`.
@@ -360,7 +360,7 @@ the scripts/json configs in our DeepSpeedExamples repo. Below is a table contain
 summary of the configurations. Specifically see the
 `ds_train_bert_bsz64k_seq128.sh` and `ds_train_bert_bsz32k_seq512.sh` scripts
 for more details in
-[DeepSpeedExamples](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/bing_bert).
+[DeepSpeedExamples](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/training/bing_bert).
 
 
 | Parameters               | 128 Sequence              | 512 Sequence              |

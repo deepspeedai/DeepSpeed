@@ -8,7 +8,7 @@ tags: training large-model
 DeepSpeed has been used to train or is in the process of training some of the largest dense models in existence. These include but not limited to:
 
 * [Megatron-Turing NLG 530B](https://www.microsoft.com/en-us/research/blog/using-deepspeed-and-megatron-to-train-megatron-turing-nlg-530b-the-worlds-largest-and-most-powerful-generative-language-model/) language model trained in collaboration with NVIDIA
-* [Big Science](https://bigscience.huggingface.co/) (near 200 billion parameter) model, in collaboration with Hugging Face and hundreds of researchers around the world.
+* [Big Science](https://huggingface.co/bigscience) (near 200 billion parameter) model, in collaboration with Hugging Face and hundreds of researchers around the world.
 * [Turing-NLG](https://www.microsoft.com/en-us/research/blog/turing-nlg-a-17-billion-parameter-language-model-by-microsoft/) (17.2 billion parameters) trained by Microsoft
 
 DeepSpeed offers a collection of system technologies, that has made it possible to train models at these scales. The best technology to train your large model depends on various factors such as the model architecture, batch size, inter-connect bandwidth, etc. Given the number of available choices, this can be confusing and outright daunting. This page is meant as a starting guide to help you navigate your journey towards training your large model.

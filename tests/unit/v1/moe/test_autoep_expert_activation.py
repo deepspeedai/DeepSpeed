@@ -31,6 +31,7 @@ from deepspeed.module_inject.auto_ep_presets.registry import resolve_preset_cand
 from deepspeed.moe.ep_experts import (
     EXPERT_ACTIVATIONS,
     GroupedExperts,
+    _zero_empty_expert_grad,
     apply_expert_activation,
     apply_packed_expert_activation,
     register_expert_activation,
@@ -185,6 +186,24 @@ class TestApplyExpertActivation:
 
 class TestGroupedExpertsActivation:
 
+    def test_empty_expert_grad_rows_are_cleared_without_copying_a_full_grad(self):
+        # grouped GEMM can leave a zero-token expert's weight gradient undefined. The guard must
+        # clear those rows in the grad it was given, and must return that same buffer when every
+        # expert received tokens instead of allocating a masked copy.
+        weight = torch.arange(24, dtype=torch.float32).reshape(4, 2, 3).requires_grad_(True)
+        guarded = _zero_empty_expert_grad(weight, torch.tensor([2, 0, 1, 3]))
+        upstream = torch.ones_like(guarded)
+        (grad, ) = torch.autograd.grad(guarded, weight, upstream)
+        assert grad.data_ptr() == upstream.data_ptr()
+        assert grad[1].eq(0).all()
+        assert grad[0].eq(1).all() and grad[2].eq(1).all() and grad[3].eq(1).all()
+
+        live = torch.arange(24, dtype=torch.float32).reshape(4, 2, 3).requires_grad_(True)
+        live_out = _zero_empty_expert_grad(live, torch.tensor([1, 1, 1, 1]))
+        live_upstream = torch.randn_like(live_out)
+        (live_grad, ) = torch.autograd.grad(live_out, live, live_upstream)
+        assert live_grad.data_ptr() == live_upstream.data_ptr()
+
     @pytest.mark.parametrize("activation", tuple(EXPERT_ACTIVATIONS))
     def test_for_loop_matches_dense_reference(self, activation):
         torch.manual_seed(0)
@@ -255,6 +274,32 @@ class TestGroupedExpertsActivation:
         for name in ("w1", "w2", "w3"):
             _assert_bf16_gemm_close(getattr(grouped, name).grad, getattr(loop, name).grad)
 
+    @pytest.mark.parametrize("activation", [name for name, entry in EXPERT_ACTIVATIONS.items() if entry.fused_fn])
+    def test_fused_kernel_matches_plain_pytorch(self, activation):
+        # What the grouped-GEMM expert paths get on the accelerator (fused=True) must be the same
+        # function as the plain-PyTorch form, to within one rounding of the low-precision dtype: the
+        # reference is the plain form evaluated in float32 on the same inputs and rounded once.
+        if get_accelerator().device_name() == "cpu":
+            pytest.skip("needs an accelerator")
+        device = get_accelerator().current_device_name()
+        torch.manual_seed(0)
+        # scale 4 with limit 7 puts about 8 % of the values past a clamp
+        gate = (4 * torch.randn(256, 3072, device=device)).to(torch.bfloat16).requires_grad_(True)
+        up = (4 * torch.randn(256, 3072, device=device)).to(torch.bfloat16).requires_grad_(True)
+        grad_out = torch.randn_like(gate)
+        out = apply_expert_activation(gate, up, activation, 1.702, 7.0, fused=True)
+        out.backward(grad_out)
+
+        gate32 = gate.detach().float().requires_grad_(True)
+        up32 = up.detach().float().requires_grad_(True)
+        out32 = apply_expert_activation(gate32, up32, activation, 1.702, 7.0, fused=False)
+        out32.backward(grad_out.float())
+
+        close = dict(rtol=1.2e-2, atol=1e-3)  # about one bf16 ulp at the output magnitude
+        torch.testing.assert_close(out, out32.to(out.dtype), **close)
+        torch.testing.assert_close(gate.grad, gate32.grad.to(out.dtype), **close)
+        torch.testing.assert_close(up.grad, up32.grad.to(out.dtype), **close)
+
     def test_for_loop_path_does_not_need_the_triton_kernel(self, monkeypatch):
         # The for-loop path is the reference path and runs on CPU tensors. It must not reach the
         # Triton kernel, which exists whenever Triton is installed.
@@ -300,9 +345,10 @@ class TestFusedGateUp:
         packed.backward(grad)
         torch.testing.assert_close(gate_up.grad, torch.cat([gate.grad, up.grad], dim=-1))
 
-    def test_only_swiglu_has_a_packed_kernel(self):
-        # The other forms run their plain expression on views of the two halves, so none of them needs one.
-        assert [name for name, entry in EXPERT_ACTIVATIONS.items() if entry.packed_fused_fn] == ["swiglu"]
+    def test_packed_kernels_are_registered(self):
+        # geglu_tanh runs its plain expression on views of the two halves; the SwiGLU forms read them in place.
+        assert [name for name, entry in EXPERT_ACTIVATIONS.items()
+                if entry.packed_fused_fn] == ["swiglu", "swiglu_clamped", "swiglu_oai"]
 
     def test_default_keeps_the_separate_projections(self):
         assert parse_autoep_config({"enabled": True}).gate_up_impl == "separate"
