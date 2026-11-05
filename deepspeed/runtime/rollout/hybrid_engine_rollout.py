@@ -6,26 +6,39 @@
 Two generation paths:
   1. **model.generate()** (default): delegates to HuggingFace generate.
      Supports sampling (temperature, top_p) and greedy.
-  2. **graph capture + DeepSpeedStaticCache**: only for greedy (temperature=0).
-     Pre-allocates a StaticCache, captures the decode forward pass into a
-     graph, and replays it for each decode step.  Eliminates kernel launch
-     overhead.
-  3. **continuous batching (experimental)**: an opt-in bounded greedy path
+  2. **graph capture + DeepSpeedStaticCache**: greedy, or sampling with
+     temperature, top_k and top_p. Pre-allocates a StaticCache, captures
+     the decode forward pass with a CUDA graph, and replays it for each decode
+     step.  Eliminates kernel launch overhead.
+  3. **continuous batching (experimental)**: an opt-in bounded path, greedy or sampled like the graph path,
      selected through ``SamplingConfig.continuous_batch_size``.
 """
 
+import asyncio
+import concurrent.futures
+import threading
 import time
+from collections import deque
 from copy import copy
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from inspect import signature
 from typing import Optional
 
 import torch
 
 from deepspeed.accelerator import get_accelerator
-from deepspeed.runtime.rollout.base import RolloutBatch, RolloutEngine, RolloutRequest, SamplingConfig
-from deepspeed.runtime.rollout.continuous_batching import ContinuousBatchRequest, ContinuousBatchScheduler
 from deepspeed.utils import logger
+from deepspeed.runtime.rollout.base import RolloutBatch, RolloutEngine, RolloutRecord, RolloutRequest, SamplingConfig
+from deepspeed.runtime.rollout.continuous_batching import ContinuousBatchRequest, ContinuousBatchScheduler
+from deepspeed.runtime.rollout.tool import TOOL_CALL_PARSERS, ToolSet
+from deepspeed.runtime.rollout.utils import (
+    expand_samples,
+    left_pad_samples,
+    masked_lists,
+    render_prompts,
+    tokenize_tool_responses,
+    update_sample_from_response,
+)
 
 
 class _ForwardProfiler:
@@ -76,6 +89,86 @@ class _ForwardProfiler:
         return start.elapsed_time(end)
 
 
+def _sampled_log_prob_recorder(temperature: float = 1.0):
+    """Return ``(processor, finish)`` that record each sampled token's log-probability."""
+    steps = []
+    previous = []
+
+    def processor(input_ids, scores):
+        if previous:
+            steps.append(previous.pop().gather(1, input_ids[:, -1:]))
+        previous.append(torch.log_softmax(scores.float() / temperature, dim=-1))
+        return scores
+
+    def finish(last_tokens):
+        steps.append(previous.pop().gather(1, last_tokens))
+        return torch.cat(steps, dim=1)
+
+    return processor, finish
+
+
+def _chosen_log_probs(logits, tokens):
+    return torch.log_softmax(logits.float(), dim=-1).gather(1, tokens)
+
+
+def _token_selector(sampling):
+    """A function picking the next tokens ``[B, 1]`` from logits ``[B, V]``, returning them with their log-probs.
+
+    Tokens are picked outside any captured graph. Sampling applies temperature, top-k and top-p in the order
+    ``generate()`` applies them, in float32 as it does, so every path draws from the same distribution.
+    """
+    if sampling.temperature <= 0.0:
+
+        def select_greedy(logits):
+            tokens = logits.argmax(dim=-1, keepdim=True)
+            return tokens, _chosen_log_probs(logits, tokens)
+
+        return select_greedy
+
+    warpers = []
+    if sampling.top_k > 0 or sampling.top_p < 1.0:
+        from transformers.generation.logits_process import TopKLogitsWarper, TopPLogitsWarper
+        if sampling.top_k > 0:
+            warpers.append(TopKLogitsWarper(top_k=sampling.top_k))
+        if sampling.top_p < 1.0:
+            warpers.append(TopPLogitsWarper(top_p=sampling.top_p))
+
+    def select_sampled(logits):
+        scores = logits.float() / sampling.temperature
+        for warper in warpers:
+            # The warpers read only the scores, not the generated ids.
+            scores = warper(None, scores)
+        tokens = torch.multinomial(torch.softmax(scores, dim=-1), num_samples=1)
+        return tokens, torch.log_softmax(scores, dim=-1).gather(1, tokens)
+
+    return select_sampled
+
+
+def _repetition_penalty(sampling, module):
+    """``sampling``'s penalty, else the one in the model's ``generation_config``, as ``generate()`` does; else 1.0."""
+    if sampling.repetition_penalty is not None:
+        return sampling.repetition_penalty
+    penalty = getattr(getattr(module, "generation_config", None), "repetition_penalty", None)
+    return penalty if isinstance(penalty, (int, float)) else 1.0
+
+
+def _penalize_repeats(logits, input_ids, repetition_penalty):
+    """``logits`` with the tokens of ``input_ids`` penalized, in float32 and before any warper, as ``generate()`` does."""
+    if repetition_penalty == 1.0:
+        return logits
+    logits = logits.float()
+    scores = logits.gather(1, input_ids)
+    scores = torch.where(scores < 0, scores * repetition_penalty, scores / repetition_penalty)
+    return logits.scatter(1, input_ids, scores)
+
+
+@dataclass
+class _PromptRow:
+    """One left-padded prompt."""
+    prompt_ids: torch.Tensor
+    prompt_attention_mask: torch.Tensor
+
+
 @dataclass
 class HybridEngineRolloutConfig:
     """Configuration for HybridEngineRollout.
@@ -95,7 +188,28 @@ class HybridEngineRolloutConfig:
     use_shared_prefill: bool = False
     align_decode_fronts: bool = False
     enable_cache_trimming: bool = False
+    multi_turn: bool = False
     continuous_cache_capacity: Optional[int] = None
+    # Multi-turn continuous batching: decode steps between host checks for finished turns. A turn that ends
+    # in between idles in its row until the check.
+    continuous_poll_steps: int = 16
+    # Experiment: rows without a turn read one cached slot instead of their last turn's whole context.
+    continuous_idle_row_reset: bool = False
+    max_turns: Optional[int] = None
+    # Most prompt + response tokens a multi-turn trajectory may hold; None means no cap.
+    max_context_len: Optional[int] = None
+    # Extra arguments for ``tokenizer.apply_chat_template``, e.g. {"enable_thinking": False} for Qwen3.
+    chat_template_kwargs: dict = field(default_factory=dict)
+    # Format of the model's tool calls, a key of TOOL_CALL_PARSERS: "hermes" (Qwen2.5, Qwen3) or
+    # "qwen3_coder" (Qwen3-Coder, Qwen3.5).
+    tool_call_parser: str = "hermes"
+
+    def __post_init__(self) -> None:
+        if self.multi_turn and not self.max_turns:
+            raise ValueError("Max turns not specified when using multi-turn rollout")
+        if self.tool_call_parser not in TOOL_CALL_PARSERS:
+            raise ValueError(f"unknown tool_call_parser {self.tool_call_parser!r}; "
+                             f"choose from {', '.join(TOOL_CALL_PARSERS)}")
 
 
 @dataclass
@@ -119,38 +233,50 @@ class HybridEngineRollout(RolloutEngine):
         engine: DeepSpeed engine wrapping the model.
         tokenizer: HuggingFace tokenizer (must have pad_token_id or eos_token_id).
         cfg: Optional HybridEngineRolloutConfig.
+        tools: Optional ToolSet the model may call in multi-turn rollout.
     """
 
-    def __init__(self, engine, tokenizer, cfg=None):
+    def __init__(self, engine, tokenizer, cfg=None, tools: Optional[ToolSet] = None):
         self.engine = engine
         self.tokenizer = tokenizer
+        self.tools = tools if tools is not None else ToolSet([])
         self.use_graph_capture = getattr(cfg, 'use_graph_capture', False) if cfg else False
         self.enable_profiling = getattr(cfg, 'enable_profiling', False) if cfg else False
         self.use_shared_prefill = getattr(cfg, 'use_shared_prefill', False) if cfg else False
         self.align_decode_fronts = getattr(cfg, 'align_decode_fronts', False) if cfg else False
         self.enable_cache_trimming = getattr(cfg, 'enable_cache_trimming', False) if cfg else False
         self.continuous_cache_capacity = getattr(cfg, 'continuous_cache_capacity', None) if cfg else None
+        self.continuous_poll_steps = getattr(cfg, 'continuous_poll_steps', 16) if cfg else 16
+        self.continuous_idle_row_reset = getattr(cfg, 'continuous_idle_row_reset', False) if cfg else False
+        self.multi_turn = getattr(cfg, 'multi_turn', False) if cfg else False
+        self.max_turns = getattr(cfg, 'max_turns', None) if cfg else None
+        self.max_context_len = getattr(cfg, 'max_context_len', None) if cfg else None
+        self.chat_template_kwargs = (getattr(cfg, 'chat_template_kwargs', None) if cfg else None) or {}
+        self.parse_tool_calls = TOOL_CALL_PARSERS[getattr(cfg, 'tool_call_parser', 'hermes') if cfg else 'hermes']
         self._last_profile = None
         self._continuous_graph_state = None
         self._last_continuous_stats = None
 
     @torch.no_grad()
     def generate(self, request: RolloutRequest, sampling: SamplingConfig) -> RolloutBatch:
+        if self.multi_turn:
+            return self._generate_multi_turn(request, sampling)
+        return self._generate_single_turn(request, sampling)
+
+    @torch.no_grad()
+    def _generate_single_turn(self, request: RolloutRequest, sampling: SamplingConfig) -> RolloutBatch:
+        samples = request.samples
+        if not samples:
+            return RolloutBatch(samples=[])
+        self._check_sampling(sampling)
+        if sampling.max_new_tokens_per_turn is not None:
+            max_new_tokens = min(sampling.max_new_tokens, sampling.max_new_tokens_per_turn)
+            sampling = replace(sampling, max_new_tokens=max_new_tokens, max_new_tokens_per_turn=None)
         if sampling.continuous_batch_size is not None:
-            return self._generate_continuous(request, sampling, sampling.continuous_batch_size)
-
-        device = request.prompt_ids.device
-        B = request.prompt_ids.shape[0]
+            return self._generate_continuous(samples, sampling, sampling.continuous_batch_size)
+        device = get_accelerator().current_device_name()
         n = sampling.n_samples_per_prompt
-        total = B * n
-        prompt_len = request.prompt_ids.shape[1]
-        max_new_tokens = sampling.max_new_tokens
         pad_token_id = self.tokenizer.pad_token_id
-        if pad_token_id is None:
-            pad_token_id = self.tokenizer.eos_token_id
-        if pad_token_id is None:
-            raise ValueError("The tokenizer must define pad_token_id or eos_token_id")
-
         module = self.engine.module
 
         if self.enable_profiling:
@@ -158,31 +284,21 @@ class HybridEngineRollout(RolloutEngine):
             accelerator.synchronize()
             profile_start = time.perf_counter()
 
-        # Expand prompts for n samples per prompt
-        if n > 1:
-            prompt_ids = request.prompt_ids.repeat_interleave(n, dim=0)
-            prompt_attn = request.prompt_attention_mask.repeat_interleave(n, dim=0)
-        else:
-            prompt_ids = request.prompt_ids
-            prompt_attn = request.prompt_attention_mask
+        samples = render_prompts(samples, self.tokenizer, self.tools.specs, pad_token_id, self.chat_template_kwargs)
+        # Copies of a prompt are adjacent, the layout shared prefill expects.
+        trajectories = expand_samples(samples, n)
+        prompt_ids, prompt_attn = left_pad_samples(trajectories, pad_token_id)
+        prompt_len = prompt_ids.shape[1]
+        prompt_ids = prompt_ids.to(device)
+        prompt_attn = prompt_attn.to(device)
 
         if self.enable_profiling:
             accelerator.synchronize()
             expansion_end = time.perf_counter()
 
-        is_greedy = sampling.temperature <= 0.0
-        use_graph_capture = self.use_graph_capture and is_greedy
-        if use_graph_capture and not get_accelerator().is_graph_capture_supported():
-            # Same opt-in as the HybridEngine graph cache and the continuous
-            # rollout path: falling back keeps backends that only expose a
-            # graph API on the eager path.
-            logger.warning_once("HybridEngineRollout: graph capture is not supported on the current accelerator; "
-                                "falling back to eager generation.")
-            use_graph_capture = False
-
         forward_profiler = None
         forward_profile_handles = []
-        if self.enable_profiling and not use_graph_capture:
+        if self.enable_profiling and not self._graph_capture_enabled():
             forward_profiler = _ForwardProfiler(accelerator)
             forward_profile_handles = forward_profiler.register(module)
 
@@ -191,28 +307,10 @@ class HybridEngineRollout(RolloutEngine):
             if self.use_shared_prefill and n > 1:
                 if self.use_graph_capture:
                     raise RuntimeError("Shared prefill does not support graph capture")
-                self.engine.prepare_shared_prefill(B, n, prompt_len)
-                shared_prefill_handles = self._register_shared_prefill_hooks(module, B, n)
-            if use_graph_capture:
-                output_ids = self._generate_graph(prompt_ids, prompt_attn, max_new_tokens, pad_token_id, module,
-                                                  device)
-            else:
-                temperature = max(sampling.temperature, 1e-8)
-                do_sample = not is_greedy
-                generate_kwargs = {
-                    "attention_mask": prompt_attn,
-                    "max_new_tokens": max_new_tokens,
-                    # ZeRO-3 gathers parameters during each decode forward, so every
-                    # data-parallel rank must execute the same number of iterations.
-                    "eos_token_id": None,
-                    "do_sample": do_sample,
-                    "temperature": temperature if do_sample else 1.0,
-                    "top_p": sampling.top_p if do_sample else 1.0,
-                    "pad_token_id": pad_token_id,
-                }
-                if do_sample:
-                    generate_kwargs["top_k"] = max(sampling.top_k, 0)
-                output_ids = module.generate(prompt_ids, **generate_kwargs)
+                self.engine.prepare_shared_prefill(len(samples), n, prompt_len)
+                shared_prefill_handles = self._register_shared_prefill_hooks(module, len(samples), n)
+            output_ids, log_probs = self._generate_tokens(prompt_ids, prompt_attn, sampling.max_new_tokens, sampling,
+                                                          pad_token_id)
         finally:
             for handle in shared_prefill_handles:
                 handle.remove()
@@ -223,31 +321,26 @@ class HybridEngineRollout(RolloutEngine):
             accelerator.synchronize()
             generation_end = time.perf_counter()
 
-        # Generation deliberately ignores EOS above so ZeRO-3 ranks execute
-        # the same number of parameter-gather collectives. Restore the usual
-        # generation semantics before returning: retain the first EOS in each
-        # response and replace every later token with padding.
+        # Keep each response up to its first EOS: under ZeRO-3, generation
+        # ran past it, and rows that stopped early are padded either way.
         output_ids, response_attn = self._pad_after_eos(
             output_ids,
             response_start=prompt_len,
             eos_token_id=self.tokenizer.eos_token_id,
             pad_token_id=pad_token_id,
         )
+        responses = masked_lists(output_ids[:, prompt_len:], response_attn)
+        response_log_probs = masked_lists(log_probs, response_attn) if sampling.return_log_probs else None
 
-        # Build attention mask: pad positions (both left padding from prompt
-        # and right padding from EOS / shorter sequences) are 0.
-        response_start = prompt_len
-        attention_mask = (output_ids != pad_token_id).long()
-        attention_mask[:, response_start:] = response_attn
-        for i in range(total):
-            prompt_valid = request.prompt_attention_mask[i // n if B > 1 else 0]
-            attention_mask[i, :prompt_len] = prompt_valid
-
-        rollout_batch = RolloutBatch(
-            input_ids=output_ids,
-            attention_mask=attention_mask,
-            response_start_idx=torch.full((total, ), response_start, dtype=torch.long, device=device),
-        )
+        for row, sample in enumerate(trajectories):
+            response = responses[row]
+            # A response that did not reach EOS was cut by max_new_tokens.
+            if response and response[-1] == self.tokenizer.eos_token_id:
+                sample.status = RolloutRecord.Status.COMPLETED
+            else:
+                sample.status = RolloutRecord.Status.TRUNCATED
+            row_log_probs = response_log_probs[row] if response_log_probs is not None else None
+            update_sample_from_response(sample, response, row_log_probs, [], self.tokenizer)
 
         if self.enable_profiling:
             accelerator.synchronize()
@@ -281,38 +374,647 @@ class HybridEngineRollout(RolloutEngine):
                 "total_ms": total_ms,
                 "num_generated_tokens": num_generated_tokens,
                 "tokens_per_second": tokens_per_second,
-                "batch_size": B,
+                "batch_size": len(samples),
                 "num_samples_per_prompt": n,
                 "prompt_length": prompt_len,
                 "response_length": response_length,
             }
 
-        return rollout_batch
+        return RolloutBatch(samples=trajectories)
 
     @torch.no_grad()
-    def _generate_continuous(self, request, sampling, max_batch_size):
-        """Generate independent greedy requests in an experimental continuous batch.
+    def _generate_multi_turn(self, request: RolloutRequest, sampling: SamplingConfig) -> RolloutBatch:
+        if sampling.continuous_batch_size is not None:
+            return self._generate_multi_turn_continuous(request, sampling)
 
-        Continuous batching currently requires one prompt row per request and
-        greedy decoding. Completed rows retire immediately and pending prompts
+        samples = request.samples
+        if not samples:
+            return RolloutBatch(samples=[])
+        self._check_sampling(sampling)
+        device = get_accelerator().current_device_name()
+        n = sampling.n_samples_per_prompt
+        max_new_tokens = sampling.max_new_tokens
+        return_log_probs = sampling.return_log_probs
+        pad_token_id = self.tokenizer.pad_token_id
+        module = self.engine.module
+
+        if self.enable_profiling:
+            accelerator = get_accelerator()
+            accelerator.synchronize()
+            call_start = time.perf_counter()
+            # Summed over turns, so the profile covers the whole multi-turn rollout.
+            profile = {
+                "prompt_expansion_ms": 0.0,
+                "generation_ms": 0.0,
+                "prefill_forward_ms": 0.0,
+                "decode_forward_ms": 0.0,
+                "num_decode_forwards": 0,
+                "tool_ms": 0.0,
+                "post_processing_ms": 0.0,
+                "num_generated_tokens": 0,
+                "num_turns": 0,
+            }
+
+        samples = render_prompts(samples, self.tokenizer, self.tools.specs, pad_token_id, self.chat_template_kwargs)
+        trajectories = expand_samples(samples, n)
+        generated = [0] * len(trajectories)
+        active = list(range(len(trajectories)))
+
+        for _turn in range(self.max_turns):
+            # Each trajectory may generate up to its remaining token budget, the
+            # per-turn cap and the room left in its context; one with no room
+            # stops before generating.
+            room = {}
+            for i in active:
+                room[i] = max_new_tokens - generated[i]
+                if sampling.max_new_tokens_per_turn is not None:
+                    room[i] = min(room[i], sampling.max_new_tokens_per_turn)
+                if self.max_context_len is not None:
+                    room[i] = min(room[i], self.max_context_len - sum(trajectories[i].attention_mask))
+                if room[i] <= 0:
+                    trajectories[i].status = RolloutRecord.Status.TRUNCATED
+            active = [i for i in active if room[i] > 0]
+            if not active:
+                break
+            turn_samples = [trajectories[i] for i in active]
+            budgets = [room[i] for i in active]
+
+            if self.enable_profiling:
+                accelerator.synchronize()
+                turn_start = time.perf_counter()
+
+            prompt_ids, prompt_attn = left_pad_samples(turn_samples, pad_token_id)
+            prompt_len = prompt_ids.shape[1]
+            prompt_ids = prompt_ids.to(device)
+            prompt_attn = prompt_attn.to(device)
+
+            if self.enable_profiling:
+                accelerator.synchronize()
+                expansion_end = time.perf_counter()
+
+            forward_profiler = None
+            forward_profile_handles = []
+            if self.enable_profiling and not self._graph_capture_enabled():
+                forward_profiler = _ForwardProfiler(accelerator)
+                forward_profile_handles = forward_profiler.register(module)
+
+            # One generate call serves all active trajectories, so it runs to the
+            # largest remaining budget; each row is cut back to its own below.
+            turn_max_new_tokens = max(budgets)
+            try:
+                output_ids, log_probs = self._generate_tokens(prompt_ids, prompt_attn, turn_max_new_tokens, sampling,
+                                                              pad_token_id)
+            finally:
+                for handle in forward_profile_handles:
+                    handle.remove()
+
+            if self.enable_profiling:
+                accelerator.synchronize()
+                generation_end = time.perf_counter()
+
+            # Keep each response up to its first EOS: under ZeRO-3, generation
+            # ran past it, and rows that stopped early are padded either way.
+            output_ids, response_attn = self._pad_after_eos(
+                output_ids,
+                response_start=prompt_len,
+                eos_token_id=self.tokenizer.eos_token_id,
+                pad_token_id=pad_token_id,
+            )
+            responses = masked_lists(output_ids[:, prompt_len:], response_attn)
+            response_log_probs = masked_lists(log_probs, response_attn) if return_log_probs else None
+
+            # A trajectory continues only if it has budget left and asked for a
+            # tool. The last turn runs no tools: no later turn would read them.
+            turn_responses = []
+            turn_log_probs = []
+            turn_calls = {}
+            for row, i in enumerate(active):
+                response = responses[row][:budgets[row]]
+                turn_responses.append(response)
+                turn_log_probs.append(response_log_probs[row][:budgets[row]] if return_log_probs else None)
+                generated[i] += len(response)
+                # A turn that did not reach EOS was cut by the token or context budget.
+                if not response or response[-1] != self.tokenizer.eos_token_id:
+                    trajectories[i].status = RolloutRecord.Status.TRUNCATED
+                    continue
+                # Keep special tokens when decoding: tool-call tags can be special tokens.
+                calls = self.parse_tool_calls(self.tokenizer.decode(response), self.tools)
+                if not calls:
+                    trajectories[i].status = RolloutRecord.Status.COMPLETED
+                    continue
+                # It asked for a tool but has no budget or turn left to read the result.
+                if generated[i] >= max_new_tokens or _turn == self.max_turns - 1:
+                    trajectories[i].status = RolloutRecord.Status.TRUNCATED
+                    continue
+                turn_calls[row] = calls
+            tool_start = time.perf_counter()
+            tool_outputs = asyncio.run(self._run_tool_calls(turn_calls))
+            tool_ms = (time.perf_counter() - tool_start) * 1000.0
+
+            tool_active = []
+            for row, i in enumerate(active):
+                tool_response = []
+                if row in turn_calls:
+                    tool_messages = [{
+                        "role": "tool",
+                        "name": call.name or "unknown",
+                        "content": output
+                    } for call, output in zip(turn_calls[row], tool_outputs[row])]
+                    tool_response = tokenize_tool_responses(tool_messages, self.tokenizer, self.chat_template_kwargs)
+                    tool_active.append(i)
+                update_sample_from_response(trajectories[i], turn_responses[row], turn_log_probs[row], tool_response,
+                                            self.tokenizer)
+            active = tool_active
+
+            if self.enable_profiling:
+                accelerator.synchronize()
+                turn_end = time.perf_counter()
+                profile["prompt_expansion_ms"] += (expansion_end - turn_start) * 1000.0
+                profile["generation_ms"] += (generation_end - expansion_end) * 1000.0
+                profile["tool_ms"] += tool_ms
+                profile["post_processing_ms"] += (turn_end - generation_end) * 1000.0 - tool_ms
+                profile["num_generated_tokens"] += int(output_ids.shape[0] * (output_ids.shape[1] - prompt_len))
+                profile["num_turns"] += 1
+                prefill_ms, decode_ms, num_decodes = (None, None, 0)
+                if forward_profiler is not None:
+                    prefill_ms, decode_ms, num_decodes = forward_profiler.get_stage_times()
+                # Forward times are reported only when every turn measured them.
+                if prefill_ms is None or profile["prefill_forward_ms"] is None:
+                    profile["prefill_forward_ms"] = None
+                    profile["decode_forward_ms"] = None
+                else:
+                    profile["prefill_forward_ms"] += prefill_ms
+                    profile["decode_forward_ms"] += decode_ms
+                profile["num_decode_forwards"] += num_decodes
+
+        if self.enable_profiling:
+            accelerator.synchronize()
+            total_ms = (time.perf_counter() - call_start) * 1000.0
+            generation_overhead_ms = profile["generation_ms"]
+            if profile["prefill_forward_ms"] is not None:
+                forward_ms = profile["prefill_forward_ms"] + profile["decode_forward_ms"]
+                generation_overhead_ms = max(0.0, generation_overhead_ms - forward_ms)
+            tokens_per_second = 0.0
+            if total_ms > 0.0:
+                tokens_per_second = profile["num_generated_tokens"] / (total_ms / 1000.0)
+            profile.update({
+                "generation_overhead_ms": generation_overhead_ms,
+                "total_ms": total_ms,
+                "tokens_per_second": tokens_per_second,
+                "batch_size": len(trajectories),
+                "num_samples_per_prompt": n,
+                "prompt_length": len(samples[0].tokens),
+                "response_length": max(sample.response_length for sample in trajectories),
+            })
+            self._last_profile = profile
+
+        return RolloutBatch(samples=trajectories)
+
+    @torch.no_grad()
+    def _generate_multi_turn_continuous(self, request: RolloutRequest, sampling: SamplingConfig) -> RolloutBatch:
+        """Multi-turn rollout with continuous batching over ``sampling.continuous_batch_size`` decode rows.
+
+        The scheduling unit is one turn of one trajectory. A turn waits for a free row, is prefilled into it
+        with the whole conversation so far (unpadded, as in ``_prefill_rows``) and decodes there until
+        EOS or its budget. The row is released as soon as the turn ends. If the trajectory called tools, they
+        run on a background event loop while the row serves other turns, and the next turn joins the queue when
+        they return. Every row decodes at its own position in one step (a captured graph with
+        ``use_graph_capture``); rows without a turn decode throwaway tokens. Finished turns are collected every
+        ``continuous_poll_steps`` steps.
+
+        Turn budgets, statuses and the returned samples follow ``_generate_multi_turn``.
+        """
+        samples = request.samples
+        if not samples:
+            return RolloutBatch(samples=[])
+        self._check_sampling(sampling)
+        module = self.engine.module
+        num_rows = sampling.continuous_batch_size
+        capacity = self.continuous_cache_capacity or self.max_context_len
+        self._validate_multi_turn_continuous(module, num_rows, capacity)
+
+        from deepspeed.utils.static_cache import DeepSpeedStaticCache
+
+        accelerator = get_accelerator()
+        call_start = time.perf_counter()
+        device = accelerator.current_device_name()
+        pad_token_id = self.tokenizer.pad_token_id
+        eos_token_id = self.tokenizer.eos_token_id
+        select_next_tokens = _token_selector(sampling)
+        repetition_penalty = _repetition_penalty(sampling, module)
+        # With a repetition penalty, which tokens each row's trajectory holds, so a decode step needs no host read.
+        seen_tokens = None
+        max_new_tokens = sampling.max_new_tokens
+        stats = {"prefill_ms": 0.0, "decode_ms": 0.0, "tool_ms": 0.0, "steps": 0, "polls": 0, "turns": 0}
+
+        samples = render_prompts(samples, self.tokenizer, self.tools.specs, pad_token_id, self.chat_template_kwargs)
+        trajectories = expand_samples(samples, sampling.n_samples_per_prompt)
+        generated = [0] * len(trajectories)
+        turns_done = [0] * len(trajectories)
+        # Trajectories whose next turn waits for a row; a turn that follows a tool call goes first.
+        pending = deque(range(len(trajectories)))
+        row_owner = [None] * num_rows
+        # Trajectory -> (response, log-probs, calls, future, submit time) while its tools run.
+        tools_in_flight = {}
+
+        def turn_budget(i):
+            context_len = sum(trajectories[i].attention_mask)
+            budget = max_new_tokens - generated[i]
+            if sampling.max_new_tokens_per_turn is not None:
+                budget = min(budget, sampling.max_new_tokens_per_turn)
+            if self.max_context_len is not None:
+                budget = min(budget, self.max_context_len - context_len)
+            return min(budget, capacity - context_len)
+
+        model_dtype = next(module.parameters()).dtype
+        rows = torch.arange(num_rows, device=device)
+        slots = torch.arange(capacity, device=device)
+        ds_cache = DeepSpeedStaticCache(module.config,
+                                        batch_size=num_rows,
+                                        max_cache_len=capacity,
+                                        device=device,
+                                        dtype=model_dtype)
+        write_pos = torch.zeros(num_rows, dtype=torch.long, device=device)
+        ds_cache.set_write_position(write_pos)
+        static_token = torch.zeros(num_rows, 1, dtype=torch.long, device=device)
+        static_attn = torch.zeros(num_rows, 1, 1, capacity, dtype=torch.bool, device=device)
+        # A row that never held a turn still attends one slot, so its throwaway logits stay finite.
+        static_attn[:, 0, 0, 0] = True
+        decode_mask = static_attn
+        static_cache_pos = write_pos[:1]
+        static_pos_ids = write_pos.unsqueeze(1)
+        # Each row's turn on the device, so decode steps never wait for the host.
+        active = torch.zeros(num_rows, dtype=torch.bool, device=device)
+        num_generated = torch.zeros(num_rows, dtype=torch.long, device=device)
+        turn_limit = torch.zeros(num_rows, dtype=torch.long, device=device)
+        turn_len = max(1, min(capacity, max_new_tokens, sampling.max_new_tokens_per_turn or max_new_tokens))
+        token_buf = torch.zeros(num_rows, turn_len, dtype=torch.long, device=device)
+        log_prob_buf = torch.zeros(num_rows, turn_len, dtype=torch.float32, device=device)
+        stop_token = eos_token_id if eos_token_id is not None else -1
+        # With profiling, one entry per poll shows how the rows were used over the call (the drain at its end).
+        poll_trace = [] if self.enable_profiling else None
+        decoded = torch.zeros((), dtype=torch.long, device=device)
+        logits_kwargs = self._last_logits_kwargs(module)
+
+        def penalize_seen(logits, seen):
+            logits = logits.float()
+            penalized = torch.where(logits < 0, logits * repetition_penalty, logits / repetition_penalty)
+            return torch.where(seen, penalized, logits)
+
+        def admit():
+            nonlocal seen_tokens
+            free_rows = [row for row, owner in enumerate(row_owner) if owner is None]
+            admitted = []
+            while free_rows and pending:
+                i = pending.popleft()
+                budget = turn_budget(i)
+                if budget <= 0:
+                    # No room left to generate: the trajectory ends without another turn.
+                    trajectories[i].status = RolloutRecord.Status.TRUNCATED
+                    continue
+                admitted.append((free_rows.pop(0), i, budget))
+            if not admitted:
+                return False
+            prefill_start = self._sync_time(accelerator)
+            target = torch.tensor([row for row, _, _ in admitted], device=device)
+            prompt_ids, prompt_attn = left_pad_samples([trajectories[i] for _, i, _ in admitted], pad_token_id)
+            lengths = prompt_attn.sum(dim=1).to(device)
+            logits = self._prefill_rows(module, prompt_ids.to(device), lengths, ds_cache, logits_kwargs, model_dtype,
+                                        device, target, num_rows)
+            if repetition_penalty != 1.0:
+                if seen_tokens is None:
+                    seen_tokens = torch.zeros(num_rows, logits.shape[-1], dtype=torch.bool, device=device)
+                seen_tokens[target] = False
+                for row, i, _ in admitted:
+                    sample = trajectories[i]
+                    real = [token for token, keep in zip(sample.tokens, sample.attention_mask) if keep]
+                    seen_tokens[row, torch.tensor(real, device=device)] = True
+                logits = penalize_seen(logits, seen_tokens[target])
+            first, first_log_probs = select_next_tokens(logits)
+            if repetition_penalty != 1.0:
+                seen_tokens[target] = seen_tokens[target].scatter(1, first, True)
+            limits = torch.tensor([budget for _, _, budget in admitted], device=device)
+            # The turn's context, and the slot its first decode input is written to.
+            static_attn[target, 0, 0, :] = slots.unsqueeze(0) <= lengths.unsqueeze(1)
+            write_pos[target] = lengths
+            static_token[target] = first
+            token_buf[target, 0] = first[:, 0]
+            log_prob_buf[target, 0] = first_log_probs[:, 0]
+            num_generated[target] = 1
+            turn_limit[target] = limits
+            active[target] = (first[:, 0] != stop_token) & (limits > 1)
+            for row, i, _ in admitted:
+                row_owner[row] = i
+            stats["turns"] += len(admitted)
+            stats["prefill_ms"] += (self._sync_time(accelerator) - prefill_start) * 1000.0
+            return True
+
+        def forward():
+            return module(static_token,
+                          attention_mask=decode_mask,
+                          past_key_values=ds_cache,
+                          use_cache=True,
+                          cache_position=static_cache_pos,
+                          position_ids=static_pos_ids)
+
+        def capture():
+            # The KV writes of the warmup and capture forwards land in the slots the first real step overwrites.
+            # Forward hooks synchronize, which is illegal during graph capture.
+            saved_pre = dict(module._forward_pre_hooks)
+            saved_post = dict(module._forward_hooks)
+            module._forward_pre_hooks.clear()
+            module._forward_hooks.clear()
+            try:
+                stream = accelerator.Stream()
+                stream.wait_stream(accelerator.current_stream())
+                with accelerator.stream(stream):
+                    for _ in range(3):
+                        forward()
+                accelerator.current_stream().wait_stream(stream)
+                graph = accelerator.create_graph()
+                with accelerator.capture_to_graph(graph):
+                    logits = forward().logits
+            finally:
+                module._forward_pre_hooks.update(saved_pre)
+                module._forward_hooks.update(saved_post)
+            return graph, logits
+
+        graph = None
+        static_logits = None
+
+        def decode_step():
+            if graph is not None:
+                accelerator.replay_graph(graph)
+                logits = static_logits[:, -1, :]
+            else:
+                logits = forward().logits[:, -1, :]
+            if repetition_penalty != 1.0:
+                logits = penalize_seen(logits, seen_tokens)
+            tokens, log_probs = select_next_tokens(logits)
+            if repetition_penalty != 1.0:
+                seen_tokens.scatter_(1, tokens, True)
+            # Record each decoding row's token at its next position; other rows keep their buffers.
+            position = num_generated.clamp(max=turn_len - 1).unsqueeze(1)
+            recording = active.unsqueeze(1)
+            token_buf.scatter_(1, position, torch.where(recording, tokens, token_buf.gather(1, position)))
+            log_prob_buf.scatter_(1, position, torch.where(recording, log_probs, log_prob_buf.gather(1, position)))
+            num_generated.add_(active.long())
+            if poll_trace is not None:
+                decoded.add_(active.sum())
+            ended = (tokens[:, 0] == stop_token) | (num_generated >= turn_limit)
+            active.logical_and_(~ended)
+            # The sampled token is each row's next input, written to the following slot.
+            static_token.copy_(tokens)
+            write_pos.add_(active.long())
+            static_attn[rows, 0, 0, write_pos] |= active
+
+        def finish_turn(i, response, response_log_probs):
+            sample = trajectories[i]
+            turn = turns_done[i]
+            turns_done[i] += 1
+            generated[i] += len(response)
+            log_probs = response_log_probs if sampling.return_log_probs else None
+            # A turn that did not reach EOS was cut by the token or context budget.
+            if not response or response[-1] != eos_token_id:
+                sample.status = RolloutRecord.Status.TRUNCATED
+                update_sample_from_response(sample, response, log_probs, [], self.tokenizer)
+                return
+            # Keep special tokens when decoding: tool-call tags can be special tokens.
+            calls = self.parse_tool_calls(self.tokenizer.decode(response), self.tools)
+            if not calls:
+                sample.status = RolloutRecord.Status.COMPLETED
+                update_sample_from_response(sample, response, log_probs, [], self.tokenizer)
+                return
+            # It asked for a tool but has no budget or turn left to read the result.
+            if generated[i] >= max_new_tokens or turn == self.max_turns - 1:
+                sample.status = RolloutRecord.Status.TRUNCATED
+                update_sample_from_response(sample, response, log_probs, [], self.tokenizer)
+                return
+            future = asyncio.run_coroutine_threadsafe(self._run_tool_calls({i: calls}), tool_loop)
+            tools_in_flight[i] = (response, log_probs, calls, future, time.perf_counter())
+
+        def collect_finished_turns(still_active):
+            finished = [row for row, owner in enumerate(row_owner) if owner is not None and not still_active[row]]
+            if not finished:
+                return
+            finished_rows = torch.tensor(finished, device=device)
+            counts = num_generated[finished_rows].tolist()
+            width = max(counts)
+            tokens = token_buf[finished_rows, :width].tolist()
+            log_probs = log_prob_buf[finished_rows, :width].tolist()
+            for row, count, row_tokens, row_log_probs in zip(finished, counts, tokens, log_probs):
+                i = row_owner[row]
+                row_owner[row] = None
+                finish_turn(i, row_tokens[:count], row_log_probs[:count])
+            if self.continuous_idle_row_reset:
+                write_pos[finished_rows] = 0
+                static_attn[finished_rows] = False
+                static_attn[finished_rows, 0, 0, 0] = True
+
+        def collect_tool_results():
+            for i in [i for i, entry in tools_in_flight.items() if entry[3].done()]:
+                response, log_probs, calls, future, submitted = tools_in_flight.pop(i)
+                stats["tool_ms"] += (time.perf_counter() - submitted) * 1000.0
+                outputs = future.result()[i]
+                tool_messages = [{
+                    "role": "tool",
+                    "name": call.name or "unknown",
+                    "content": output
+                } for call, output in zip(calls, outputs)]
+                tool_response = tokenize_tool_responses(tool_messages, self.tokenizer, self.chat_template_kwargs)
+                update_sample_from_response(trajectories[i], response, log_probs, tool_response, self.tokenizer)
+                pending.appendleft(i)
+
+        use_graph_capture = self._graph_capture_enabled()
+        tool_loop = asyncio.new_event_loop()
+        tool_thread = threading.Thread(target=tool_loop.run_forever, name="rollout-tools", daemon=True)
+        tool_thread.start()
+        try:
+            while any(owner is not None for owner in row_owner) or pending or tools_in_flight:
+                if admit() and use_graph_capture and graph is None:
+                    graph, static_logits = capture()
+                rows_held = sum(owner is not None for owner in row_owner)
+                if rows_held:
+                    decode_start = time.perf_counter()
+                    for _ in range(self.continuous_poll_steps):
+                        decode_step()
+                    still_active = active.tolist()
+                    stats["decode_ms"] += (time.perf_counter() - decode_start) * 1000.0
+                    stats["steps"] += self.continuous_poll_steps
+                    stats["polls"] += 1
+                    collect_finished_turns(still_active)
+                    if poll_trace is not None:
+                        poll_trace.append((stats["steps"], round(time.perf_counter() - call_start, 3), rows_held,
+                                           sum(still_active), decoded.item(), len(pending), len(tools_in_flight)))
+                elif tools_in_flight and not pending:
+                    # Nothing to decode or admit until a tool returns.
+                    concurrent.futures.wait([entry[3] for entry in tools_in_flight.values()],
+                                            return_when=concurrent.futures.FIRST_COMPLETED)
+                collect_tool_results()
+        finally:
+            tool_loop.call_soon_threadsafe(tool_loop.stop)
+            tool_thread.join()
+            tool_loop.close()
+
+        if self.enable_profiling:
+            total_ms = (self._sync_time(accelerator) - call_start) * 1000.0
+            num_generated_tokens = sum(generated)
+            self._last_profile = {
+                "generation_ms":
+                stats["prefill_ms"] + stats["decode_ms"],
+                "prefill_forward_ms":
+                stats["prefill_ms"],
+                "decode_forward_ms":
+                stats["decode_ms"],
+                "num_decode_forwards":
+                stats["steps"],
+                "tool_ms":
+                stats["tool_ms"],
+                "num_generated_tokens":
+                num_generated_tokens,
+                "num_turns":
+                stats["turns"],
+                "total_ms":
+                total_ms,
+                "tokens_per_second":
+                num_generated_tokens / (total_ms / 1000.0) if total_ms > 0.0 else 0.0,
+                "batch_size":
+                len(trajectories),
+                "num_samples_per_prompt":
+                sampling.n_samples_per_prompt,
+                "continuous_rows":
+                num_rows,
+                "continuous_polls":
+                stats["polls"],
+                # Decode slots used: tokens after each turn's first (which comes from its prefill) per row-step.
+                "continuous_decode_occupancy":
+                ((num_generated_tokens - stats["turns"]) / (stats["steps"] * num_rows) if stats["steps"] else 0.0),
+                # Per poll: (decode steps so far, seconds since the call started, rows holding a turn during the
+                # poll's steps, rows still decoding after them, tokens decoded so far, turns queued, trajectories
+                # waiting on tools).
+                "continuous_poll_trace":
+                poll_trace,
+            }
+        return RolloutBatch(samples=trajectories)
+
+    @staticmethod
+    def _sync_time(accelerator):
+        accelerator.synchronize()
+        return time.perf_counter()
+
+    def _validate_multi_turn_continuous(self, module, num_rows, capacity):
+        if num_rows <= 0:
+            raise ValueError("continuous_batch_size must be positive")
+        if capacity is None:
+            raise ValueError("multi-turn continuous batching sizes its rows by max_context_len or "
+                             "continuous_cache_capacity; set one of them")
+        max_positions = getattr(module.config, "max_position_embeddings", None)
+        if max_positions is not None and capacity > max_positions:
+            raise ValueError("continuous batching cache exceeds the model maximum position embeddings")
+        if self.use_shared_prefill:
+            raise ValueError("continuous batching does not support shared prompt prefill")
+        partitions_weights = getattr(self.engine, "zero_optimization_partition_weights", None)
+        if partitions_weights is not None and partitions_weights():
+            # ZeRO-3 gathers parameters inside each forward, which neither a captured graph nor rows that
+            # finish at different steps allow.
+            raise ValueError("multi-turn continuous batching does not support ZeRO-3")
+        if getattr(module, "_supports_cache_class", None) is False:
+            raise ValueError("continuous batching requires a model with cache-class support")
+        if getattr(module.config, "_attn_implementation", None) == "flash_attention_2":
+            raise ValueError("multi-turn continuous batching does not support flash_attention_2")
+
+    def _check_sampling(self, sampling: SamplingConfig) -> None:
+        if sampling.max_new_tokens_per_turn is not None and sampling.max_new_tokens_per_turn <= 0:
+            raise ValueError("max_new_tokens_per_turn must be positive")
+        return_log_probs = sampling.return_log_probs
+        if return_log_probs and sampling.temperature > 0.0 and (sampling.top_p < 1.0 or sampling.top_k > 0):
+            raise ValueError("return_log_probs requires top_p=1 and top_k<=0 when sampling")
+        if sampling.repetition_penalty is not None and sampling.repetition_penalty <= 0:
+            raise ValueError("repetition_penalty must be positive")
+        repetition_penalty = _repetition_penalty(sampling, self.engine.module)
+        if return_log_probs and repetition_penalty != 1.0:
+            # The penalty depends on the context and is applied before the
+            # log-probs are recorded; a training forward pass cannot reproduce it.
+            logger.warning_once(f"return_log_probs with repetition_penalty={repetition_penalty}: a training forward "
+                                "pass cannot reproduce the recorded log-probs")
+
+    def _graph_capture_enabled(self):
+        """Whether to decode with a captured graph; a backend that only exposes a graph API has not opted in."""
+        if not self.use_graph_capture:
+            return False
+        if get_accelerator().is_graph_capture_supported():
+            return True
+        logger.warning_once("HybridEngineRollout: graph capture is not supported on the current accelerator; "
+                            "falling back to eager generation.")
+        return False
+
+    def _generate_tokens(self, prompt_ids, prompt_attn, max_new_tokens, sampling, pad_token_id):
+        module = self.engine.module
+        if self._graph_capture_enabled():
+            return self._generate_graph(prompt_ids, prompt_attn, max_new_tokens, pad_token_id, sampling, module,
+                                        prompt_ids.device)
+
+        # ZeRO-3 gathers parameters during each decode forward, so every
+        # data-parallel rank must run the same number of decode steps and
+        # generation cannot stop at EOS. Other stages stop once every row ends.
+        stop_at_eos = not self.engine.zero_optimization_partition_weights()
+        temperature = max(sampling.temperature, 1e-8)
+        do_sample = sampling.temperature > 0.0
+        generate_kwargs = {
+            "attention_mask": prompt_attn,
+            "max_new_tokens": max_new_tokens,
+            "eos_token_id": self.tokenizer.eos_token_id if stop_at_eos else None,
+            "do_sample": do_sample,
+            "temperature": temperature if do_sample else 1.0,
+            "top_p": sampling.top_p if do_sample else 1.0,
+            "pad_token_id": pad_token_id,
+        }
+        if do_sample:
+            generate_kwargs["top_k"] = max(sampling.top_k, 0)
+        if sampling.repetition_penalty is not None:
+            generate_kwargs["repetition_penalty"] = sampling.repetition_penalty
+        finish_log_probs = None
+        if sampling.return_log_probs:
+            from transformers import LogitsProcessorList
+            # Greedy decoding picks from the raw logits, i.e. temperature 1.
+            processor, finish_log_probs = _sampled_log_prob_recorder(temperature if do_sample else 1.0)
+            generate_kwargs["logits_processor"] = LogitsProcessorList([processor])
+        output_ids = module.generate(prompt_ids, **generate_kwargs)
+        log_probs = finish_log_probs(output_ids[:, -1:]) if finish_log_probs is not None else None
+        return output_ids, log_probs
+
+    async def _run_tool_calls(self, calls_by_row):
+        """Run every row's calls concurrently; returns each row's outputs in call order."""
+        rows = list(calls_by_row)
+        outputs = await asyncio.gather(*(asyncio.gather(*(self.tools.run(call) for call in calls_by_row[row]))
+                                         for row in rows))
+        return dict(zip(rows, outputs))
+
+    @torch.no_grad()
+    def _generate_continuous(self, samples, sampling, max_batch_size):
+        """Generate independent responses for ``samples`` in an experimental continuous batch.
+
+        Continuous batching currently requires one sample
+        per prompt. Completed rows retire immediately and pending prompts
         prefill into the released rows before the next decode step.
         """
-        original_request = request
-        requests = tuple(
-            RolloutRequest(request.prompt_ids[index:index + 1], request.prompt_attention_mask[index:index + 1])
-            for index in range(request.prompt_ids.shape[0]))
-        self._validate_continuous_inputs(requests, sampling, max_batch_size)
-        use_graph_capture = self.use_graph_capture
-        if use_graph_capture and not get_accelerator().is_graph_capture_supported():
-            # The eager continuous path is a full fallback, so keep it instead
-            # of aborting when the backend has not opted into graph capture.
-            logger.warning_once("HybridEngineRollout: graph capture is not supported on the current accelerator; "
-                                "falling back to eager continuous batching.")
-            use_graph_capture = False
-        if use_graph_capture:
-            return self._generate_continuous_graph(original_request, requests, sampling, max_batch_size)
-
+        self._validate_continuous_inputs(sampling, max_batch_size)
+        pad_token_id = self.tokenizer.pad_token_id
+        samples = render_prompts(samples, self.tokenizer, self.tools.specs, pad_token_id, self.chat_template_kwargs)
+        trajectories = expand_samples(samples, 1)
+        if not all(any(sample.attention_mask) for sample in trajectories):
+            raise ValueError("continuous batching requires at least one prompt token per request")
+        prompt_ids, prompt_attention_mask = left_pad_samples(trajectories, pad_token_id)
         module = self.engine.module
+        device = next(module.parameters()).device
+        prompt_ids = prompt_ids.to(device)
+        prompt_attention_mask = prompt_attention_mask.to(device)
+        requests = tuple(
+            _PromptRow(prompt_ids[index:index + 1], prompt_attention_mask[index:index + 1])
+            for index in range(len(trajectories)))
+        if self._graph_capture_enabled():
+            return self._generate_continuous_graph(trajectories, requests, sampling, max_batch_size)
+
         profile = self._start_continuous_profile() if self.enable_profiling else None
         profile_accelerator = profile["accelerator"] if profile is not None else None
         profile_start = profile["start"] if profile is not None else None
@@ -343,13 +1045,15 @@ class HybridEngineRollout(RolloutEngine):
         from transformers import StaticCache
         from deepspeed.utils.static_cache import DeepSpeedStaticCache
 
-        device = requests[0].prompt_ids.device
         model_dtype = next(module.parameters()).dtype
 
         scheduler_start = self._profile_start(profile)
         scheduler = ContinuousBatchScheduler(max_batch_size, sampling.max_new_tokens)
         request_by_id = {}
         responses = {}
+        select_next_tokens = _token_selector(sampling)
+        # Each response token's log-prob under the distribution it was picked from.
+        response_log_probs = {}
         request_order = (sorted(range(len(requests)), key=lambda request_id: -prompt_lengths[request_id])
                          if self.align_decode_fronts else range(len(requests)))
         for request_id in request_order:
@@ -357,6 +1061,7 @@ class HybridEngineRollout(RolloutEngine):
             scheduler.submit(ContinuousBatchRequest(request_id))
             request_by_id[request_id] = request
             responses[request_id] = []
+            response_log_probs[request_id] = []
         self._profile_end(profile, "scheduler_overhead_ms", scheduler_start)
 
         cache_start = self._profile_start(profile)
@@ -389,6 +1094,7 @@ class HybridEngineRollout(RolloutEngine):
             0,
         }
         next_tokens = {}
+        next_log_probs = {}
         logical_positions = dict(prompt_lengths)
         cache_position = prompt_len
         span_starts = [0] * max_batch_size
@@ -467,7 +1173,7 @@ class HybridEngineRollout(RolloutEngine):
             self._profile_end(profile, "cache_management_overhead_ms", cache_start)
             if survivor_count and cache_position >= max_cache_len:
                 raise self._continuous_cache_exhaustion_error(max_cache_len)
-            admitted_tokens = self._continuous_prefill(
+            admitted_tokens, admitted_log_probs = self._continuous_prefill(
                 module,
                 StaticCache,
                 cache,
@@ -479,6 +1185,7 @@ class HybridEngineRollout(RolloutEngine):
                 prompt_lengths,
                 model_dtype,
                 device,
+                sampling,
                 self.align_decode_fronts,
                 profile,
             )
@@ -487,6 +1194,7 @@ class HybridEngineRollout(RolloutEngine):
                     span_starts[target_row] = cache_position - prompt_lengths[admitted.request_id]
 
             decoded_tokens = {}
+            decoded_log_probs = {}
             if survivor_count:
                 survivor_ids = update.active_ids[:survivor_count]
                 decode_input = torch.cat([next_tokens[request_id] for request_id in survivor_ids], dim=0)
@@ -511,23 +1219,28 @@ class HybridEngineRollout(RolloutEngine):
                     position_ids=position_ids,
                 )
                 self._profile_end(profile, "decode_forward_ms", decode_start, count="num_decode_forwards")
-                decoded = self._continuous_next_tokens(
+                decoded, decoded_log_probs_all = self._continuous_next_tokens(
                     output.logits[:, -1, :],
                     survivor_ids,
                     request_by_id,
                     responses,
-                    module,
+                    _repetition_penalty(sampling, module),
+                    select_next_tokens,
                 )
                 stats["decode_steps"] += 1
                 decoded_tokens = dict(zip(survivor_ids, decoded.split(1, dim=0)))
+                decoded_log_prob_rows = decoded_log_probs_all.split(1, dim=0)
+                decoded_log_probs = dict(zip(survivor_ids, decoded_log_prob_rows))
                 for request_id in survivor_ids:
                     logical_positions[request_id] += 1
 
             next_tokens = decoded_tokens | admitted_tokens
+            next_log_probs = decoded_log_probs | admitted_log_probs
             finished_ids = []
             for request_id in update.active_ids:
                 token = next_tokens[request_id]
                 responses[request_id].append(token)
+                response_log_probs[request_id].append(next_log_probs[request_id])
                 if self._is_eos(token):
                     finished_ids.append(request_id)
 
@@ -540,7 +1253,7 @@ class HybridEngineRollout(RolloutEngine):
 
         generation_end = self._profile_start(profile)
         post_processing_start = generation_end
-        output = self._build_continuous_batch(original_request, responses)
+        output = self._build_continuous_batch(trajectories, responses, response_log_probs, sampling.return_log_probs)
         post_processing_end = self._profile_end(profile, None, post_processing_start)
         if profile_accelerator is not None:
             profile_accelerator.synchronize()
@@ -555,13 +1268,13 @@ class HybridEngineRollout(RolloutEngine):
         stats["trim_frequency"] = (stats["trim_count"] / stats["decode_steps"] if stats["decode_steps"] else 0.0)
         self._last_continuous_stats = stats
         if profile is not None:
-            self._finish_continuous_profile(profile, original_request, responses, max_batch_size, prompt_len,
+            self._finish_continuous_profile(profile, len(trajectories), responses, max_batch_size, prompt_len,
                                             generation_end, post_processing_end)
         return output
 
     @torch.no_grad()
-    def _generate_continuous_graph(self, original_request, requests, sampling, max_batch_size):
-        """Run continuous greedy decoding with a fixed-capacity graph.
+    def _generate_continuous_graph(self, trajectories, requests, sampling, max_batch_size):
+        """Run continuous decoding with a fixed-capacity CUDA graph.
 
         Scheduler slots stay attached to physical cache rows for their whole
         lifetime. Retired rows are masked until a new prompt is prefetched into
@@ -597,10 +1310,14 @@ class HybridEngineRollout(RolloutEngine):
         prompt_lengths = {request_id: prompt_len for request_id in range(len(requests))}
         request_by_id = {}
         responses = {}
+        select_next_tokens = _token_selector(sampling)
+        # Each response token's log-prob under the distribution it was picked from.
+        response_log_probs = {}
         for request_id, request in enumerate(requests):
             scheduler.submit(ContinuousBatchRequest(request_id))
             request_by_id[request_id] = request
             responses[request_id] = []
+            response_log_probs[request_id] = []
 
         state = self._get_continuous_graph_state(module, max_batch_size, prompt_len, max_cache_len, device,
                                                  model_dtype, DeepSpeedStaticCache)
@@ -639,6 +1356,7 @@ class HybridEngineRollout(RolloutEngine):
         slot_by_request = {}
         write_positions = {}
         next_tokens = {}
+        next_log_probs = {}
         update = scheduler.schedule()
         while update.active:
             if profile is not None:
@@ -649,6 +1367,7 @@ class HybridEngineRollout(RolloutEngine):
                 slot_by_request.pop(request_id, None)
                 write_positions.pop(request_id, None)
                 next_tokens.pop(request_id, None)
+                next_log_probs.pop(request_id, None)
 
             free_slots = [slot for slot in range(max_batch_size) if slot not in slot_by_request.values()]
             admitted_ids = tuple(request.request_id for request in update.admitted)
@@ -661,7 +1380,7 @@ class HybridEngineRollout(RolloutEngine):
 
             cache_start = self._profile_start(profile)
             if admitted_ids:
-                admitted_tokens = self._continuous_prefill(
+                admitted_tokens, admitted_log_probs = self._continuous_prefill(
                     module,
                     StaticCache,
                     cache,
@@ -673,10 +1392,12 @@ class HybridEngineRollout(RolloutEngine):
                     prompt_lengths,
                     model_dtype,
                     device,
+                    sampling,
                     profile=profile,
                     target_slots=tuple(admitted_slots),
                 )
                 next_tokens.update(admitted_tokens)
+                next_log_probs.update(admitted_log_probs)
             self._profile_end(profile, "cache_management_overhead_ms", cache_start)
 
             decode_ids = tuple(request_id for request_id in update.active_ids if request_id not in admitted_ids)
@@ -702,15 +1423,18 @@ class HybridEngineRollout(RolloutEngine):
                 decode_logits = torch.cat(
                     [static_logits[slot_by_request[request_id], -1, :].unsqueeze(0) for request_id in decode_ids],
                     dim=0)
-                decoded = self._continuous_next_tokens(
+                decoded, decoded_log_probs_all = self._continuous_next_tokens(
                     decode_logits,
                     decode_ids,
                     request_by_id,
                     responses,
-                    module,
+                    _repetition_penalty(sampling, module),
+                    select_next_tokens,
                 )
-                for request_id, token in zip(decode_ids, decoded.split(1, dim=0)):
+                decoded_log_prob_rows = decoded_log_probs_all.split(1, dim=0)
+                for request_id, token, log_prob in zip(decode_ids, decoded.split(1, dim=0), decoded_log_prob_rows):
                     decoded_tokens[request_id] = token
+                    next_log_probs[request_id] = log_prob
                     write_positions[request_id] += 1
                 stats["decode_steps"] += 1
                 next_tokens.update(decoded_tokens)
@@ -719,6 +1443,7 @@ class HybridEngineRollout(RolloutEngine):
             for request_id in update.active_ids:
                 token = next_tokens[request_id]
                 responses[request_id].append(token)
+                response_log_probs[request_id].append(next_log_probs[request_id])
                 if self._is_eos(token):
                     finished_ids.append(request_id)
 
@@ -729,7 +1454,7 @@ class HybridEngineRollout(RolloutEngine):
                 stats["peak_cache_length"] = max(stats["peak_cache_length"], max(write_positions.values()))
 
         generation_end = self._profile_start(profile)
-        output = self._build_continuous_batch(original_request, responses)
+        output = self._build_continuous_batch(trajectories, responses, response_log_probs, sampling.return_log_probs)
         post_processing_end = self._profile_end(profile, None, generation_end)
         if profile_accelerator is not None:
             profile_accelerator.synchronize()
@@ -743,7 +1468,7 @@ class HybridEngineRollout(RolloutEngine):
         stats["trim_frequency"] = 0.0
         self._last_continuous_stats = stats
         if profile is not None:
-            self._finish_continuous_profile(profile, original_request, responses, max_batch_size, prompt_len,
+            self._finish_continuous_profile(profile, len(trajectories), responses, max_batch_size, prompt_len,
                                             generation_end, post_processing_end)
         return output
 
@@ -903,31 +1628,15 @@ class HybridEngineRollout(RolloutEngine):
 
         return max_cache_len
 
-    def _validate_continuous_inputs(self, requests, sampling, max_batch_size):
-        if not requests:
-            raise ValueError("continuous batching requires at least one request")
+    def _validate_continuous_inputs(self, sampling, max_batch_size):
         if max_batch_size <= 0:
             raise ValueError("max_batch_size must be positive")
         if self.use_shared_prefill:
             raise ValueError("continuous batching does not support shared prompt prefill")
-
-        prompt_len = requests[0].prompt_ids.shape[1]
-        device = requests[0].prompt_ids.device
         if sampling.max_new_tokens <= 0:
             raise ValueError("max_new_tokens must be positive")
-        if sampling.temperature > 0:
-            raise ValueError("continuous batching currently supports greedy decoding only")
         if sampling.n_samples_per_prompt != 1:
             raise ValueError("continuous batching currently supports one sample per prompt")
-        for request in requests:
-            if request.prompt_ids.shape[0] != 1:
-                raise ValueError("continuous batching requires one prompt row per request")
-            if request.prompt_ids.shape[1] != prompt_len:
-                raise ValueError("continuous batching currently requires equal padded prompt widths")
-            if request.prompt_ids.device != device:
-                raise ValueError("continuous batching requests must use the same device")
-            if not request.prompt_attention_mask.any():
-                raise ValueError("continuous batching requires at least one prompt token per request")
 
     @staticmethod
     def _continuous_dead_prefix(attention_mask, active_count):
@@ -950,11 +1659,12 @@ class HybridEngineRollout(RolloutEngine):
                             prompt_lengths,
                             model_dtype,
                             device,
+                            sampling,
                             align_decode_fronts=False,
                             profile=None,
                             target_slots=None):
         if not update.admitted:
-            return {}
+            return {}, {}
 
         if not align_decode_fronts:
             admitted_ids = tuple(request.request_id for request in update.admitted)
@@ -967,13 +1677,14 @@ class HybridEngineRollout(RolloutEngine):
                 [request_by_id[request_id].prompt_attention_mask for request_id in admitted_ids], dim=0)
             prompt_len = prompt_ids.shape[1]
             prefill_start = self._profile_start(profile)
-            prefill_tokens, prefill_cache = self._continuous_prefill_cache(
+            prefill_tokens, prefill_log_probs, prefill_cache = self._continuous_prefill_cache(
                 module,
                 static_cache_type,
                 prompt_ids,
                 prompt_attention,
                 model_dtype,
                 device,
+                sampling,
             )
             self._profile_end(profile, "prefill_forward_ms", prefill_start, count="num_prefill_forwards")
             cache_copy_start = self._profile_start(profile)
@@ -990,9 +1701,12 @@ class HybridEngineRollout(RolloutEngine):
                 attention_mask[target_row, cache_start:cache_position].copy_(prompt_attention[source_row])
                 write_positions[target_row] = cache_position
             self._profile_end(profile, "cache_management_overhead_ms", cache_copy_start)
-            return dict(zip(admitted_ids, prefill_tokens.split(1, dim=0)))
+            admitted_tokens = dict(zip(admitted_ids, prefill_tokens.split(1, dim=0)))
+            admitted_log_probs = dict(zip(admitted_ids, prefill_log_probs.split(1, dim=0)))
+            return admitted_tokens, admitted_log_probs
 
         admitted_tokens = {}
+        admitted_log_probs = {}
         for admitted, target_row in zip(update.admitted, update.admitted_slots):
             request_id = admitted.request_id
             request = request_by_id[request_id]
@@ -1001,17 +1715,19 @@ class HybridEngineRollout(RolloutEngine):
             prompt_ids = request.prompt_ids[:, valid]
             prompt_attention = torch.ones_like(prompt_ids)
             prefill_start = self._profile_start(profile)
-            prefill_tokens, prefill_cache = self._continuous_prefill_cache(
+            prefill_tokens, prefill_log_probs, prefill_cache = self._continuous_prefill_cache(
                 module,
                 static_cache_type,
                 prompt_ids,
                 prompt_attention,
                 model_dtype,
                 device,
+                sampling,
             )
             self._profile_end(profile, "prefill_forward_ms", prefill_start, count="num_prefill_forwards")
             cache_copy_start = self._profile_start(profile)
             admitted_tokens[request_id] = prefill_tokens
+            admitted_log_probs[request_id] = prefill_log_probs
             cache_start = cache_position - prompt_len
             if cache_start < 0:
                 raise ValueError("continuous batching prompt does not fit behind the decode front")
@@ -1023,7 +1739,7 @@ class HybridEngineRollout(RolloutEngine):
             attention_mask[target_row, cache_start:cache_position].fill_(1)
             write_positions[target_row] = cache_position
             self._profile_end(profile, "cache_management_overhead_ms", cache_copy_start)
-        return admitted_tokens
+        return admitted_tokens, admitted_log_probs
 
     def _start_continuous_profile(self):
         accelerator = get_accelerator()
@@ -1059,7 +1775,7 @@ class HybridEngineRollout(RolloutEngine):
             profile[count] += 1
         return end
 
-    def _finish_continuous_profile(self, profile, request, responses, max_batch_size, prompt_len, generation_end,
+    def _finish_continuous_profile(self, profile, batch_size, responses, max_batch_size, prompt_len, generation_end,
                                    post_processing_end):
         total_ms = (post_processing_end - profile["start"]) * 1000.0
         generation_ms = (generation_end - profile["start"]) * 1000.0
@@ -1081,7 +1797,7 @@ class HybridEngineRollout(RolloutEngine):
             "total_ms": total_ms,
             "num_generated_tokens": num_generated_tokens,
             "tokens_per_second": num_generated_tokens / (total_ms / 1000.0) if total_ms > 0.0 else 0.0,
-            "batch_size": request.prompt_ids.shape[0],
+            "batch_size": batch_size,
             "num_samples_per_prompt": 1,
             "prompt_length": prompt_len,
             "response_length": max(response_lengths, default=0),
@@ -1089,7 +1805,8 @@ class HybridEngineRollout(RolloutEngine):
             "continuous_batch_size": max_batch_size,
         }
 
-    def _continuous_prefill_cache(self, module, static_cache_type, prompt_ids, prompt_attention, model_dtype, device):
+    def _continuous_prefill_cache(self, module, static_cache_type, prompt_ids, prompt_attention, model_dtype, device,
+                                  sampling):
         position_ids = self._prefill_position_ids(prompt_attention)
         if getattr(module, "_supports_cache_class", None) is None:
             pad_token_id = self.tokenizer.pad_token_id
@@ -1100,12 +1817,17 @@ class HybridEngineRollout(RolloutEngine):
                 attention_mask=prompt_attention,
                 position_ids=position_ids,
                 max_new_tokens=1,
-                do_sample=False,
                 eos_token_id=None,
                 pad_token_id=pad_token_id,
                 return_dict_in_generate=True,
+                output_logits=True,
+                **self._hf_sampling_kwargs(sampling),
             )
-            return prefill_output.sequences[:, -1:], prefill_output.past_key_values
+            tokens = prefill_output.sequences[:, -1:]
+            # output_logits holds the raw logits; return_log_probs rules out every other setting that changes them.
+            scale = sampling.temperature if sampling.temperature > 0.0 else 1.0
+            log_probs = _chosen_log_probs(prefill_output.logits[-1] / scale, tokens)
+            return tokens, log_probs, prefill_output.past_key_values
 
         prompt_len = prompt_ids.shape[1]
         prefill_cache = self._create_static_cache(static_cache_type, module.config, prompt_ids.shape[0], prompt_len,
@@ -1120,25 +1842,37 @@ class HybridEngineRollout(RolloutEngine):
             position_ids=position_ids,
             **self._last_logits_kwargs(module),
         )
-        return prefill_output.logits[:, -1, :].argmax(dim=-1, keepdim=True), prefill_cache
+        last_logits = _penalize_repeats(prefill_output.logits[:, -1, :], prompt_ids,
+                                        _repetition_penalty(sampling, module))
+        tokens, log_probs = _token_selector(sampling)(last_logits)
+        return tokens, log_probs, prefill_cache
 
     @staticmethod
-    def _continuous_next_tokens(logits, request_ids, request_by_id, responses, module):
-        repetition_penalty = getattr(getattr(module, "generation_config", None), "repetition_penalty", 1.0)
-        if repetition_penalty is None:
-            repetition_penalty = 1.0
+    def _continuous_next_tokens(logits, request_ids, request_by_id, responses, repetition_penalty, select_next_tokens):
         if repetition_penalty == 1.0:
-            return logits.argmax(dim=-1, keepdim=True)
+            return select_next_tokens(logits)
 
-        next_tokens = []
+        penalized = []
         for row, request_id in enumerate(request_ids):
             input_ids = torch.cat((request_by_id[request_id].prompt_ids, *responses[request_id]), dim=1)
-            row_logits = logits[row:row + 1].clone()
-            scores = row_logits.gather(1, input_ids)
-            scores = torch.where(scores < 0, scores * repetition_penalty, scores / repetition_penalty)
-            row_logits.scatter_(1, input_ids, scores)
-            next_tokens.append(row_logits.argmax(dim=-1, keepdim=True))
-        return torch.cat(next_tokens, dim=0)
+            penalized.append(_penalize_repeats(logits[row:row + 1], input_ids, repetition_penalty))
+        return select_next_tokens(torch.cat(penalized, dim=0))
+
+    @staticmethod
+    def _hf_sampling_kwargs(sampling):
+        """Hugging Face ``generate()`` arguments for ``sampling``; ``temperature <= 0`` is greedy."""
+        if sampling.temperature <= 0.0:
+            kwargs = {"do_sample": False, "temperature": 1.0, "top_p": 1.0}
+        else:
+            kwargs = {
+                "do_sample": True,
+                "temperature": sampling.temperature,
+                "top_p": sampling.top_p,
+                "top_k": max(sampling.top_k, 0),
+            }
+        if sampling.repetition_penalty is not None:
+            kwargs["repetition_penalty"] = sampling.repetition_penalty
+        return kwargs
 
     @staticmethod
     def _prefill_position_ids(attention_mask):
@@ -1203,47 +1937,19 @@ class HybridEngineRollout(RolloutEngine):
             return layer.keys, layer.values
         return cache.key_cache[layer_idx], cache.value_cache[layer_idx]
 
-    def _build_continuous_batch(self, request, responses):
-        response_ids = [torch.cat(responses[index], dim=1) for index in range(request.prompt_ids.shape[0])]
-        max_response_len = max(response.shape[1] for response in response_ids)
-        pad_token_id = self.tokenizer.pad_token_id
-        if pad_token_id is None:
-            pad_token_id = self.tokenizer.eos_token_id
-        if pad_token_id is None:
-            raise ValueError("The tokenizer must define pad_token_id or eos_token_id")
-        input_rows = []
-        attention_rows = []
-        for index, response in enumerate(response_ids):
-            padding = max_response_len - response.shape[1]
-            if padding:
-                response_padding = torch.full((1, padding), pad_token_id, dtype=response.dtype, device=response.device)
-                attention_padding = torch.zeros((1, padding),
-                                                dtype=request.prompt_attention_mask.dtype,
-                                                device=response.device)
-                response = torch.cat((response, response_padding), dim=1)
+    def _build_continuous_batch(self, trajectories, responses, response_log_probs, return_log_probs):
+        """Append each request's response, which stops at its EOS or ``max_new_tokens``, to its sample."""
+        for request_id, sample in enumerate(trajectories):
+            response = torch.cat(responses[request_id], dim=1)
+            if self._is_eos(response[:, -1]):
+                sample.status = RolloutRecord.Status.COMPLETED
             else:
-                attention_padding = torch.empty((1, 0),
-                                                dtype=request.prompt_attention_mask.dtype,
-                                                device=response.device)
-            input_rows.append(torch.cat((request.prompt_ids[index:index + 1], response), dim=1))
-            response_attention = torch.ones((1, response_ids[index].shape[1]),
-                                            dtype=request.prompt_attention_mask.dtype,
-                                            device=response.device)
-            attention_rows.append(
-                torch.cat((request.prompt_attention_mask[index:index + 1], response_attention, attention_padding),
-                          dim=1))
-
-        input_ids = torch.cat(input_rows, dim=0)
-        attention_mask = torch.cat(attention_rows, dim=0)
-        response_start = request.prompt_ids.shape[1]
-        return RolloutBatch(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            response_start_idx=torch.full((request.prompt_ids.shape[0], ),
-                                          response_start,
-                                          dtype=torch.long,
-                                          device=input_ids.device),
-        )
+                sample.status = RolloutRecord.Status.TRUNCATED
+            log_probs = None
+            if return_log_probs:
+                log_probs = torch.cat(response_log_probs[request_id], dim=1)[0].tolist()
+            update_sample_from_response(sample, response[0].tolist(), log_probs, [], self.tokenizer)
+        return RolloutBatch(samples=trajectories)
 
     def get_last_profile(self):
         """Return the most recent profiling snapshot for this rollout instance."""
@@ -1292,12 +1998,15 @@ class HybridEngineRollout(RolloutEngine):
 
     @staticmethod
     def _pad_after_eos(output_ids, response_start, eos_token_id, pad_token_id):
-        """Retain the first response EOS and pad every subsequent position."""
-        response_ids = output_ids[:, response_start:]
-        response_attn = (response_ids != pad_token_id)
+        """Retain the first response EOS and pad every subsequent position.
 
+        Only positions after a row's first EOS are padding: generation pads a
+        row only once it has ended, so a token equal to ``pad_token_id`` before
+        that was generated and stays part of the response.
+        """
+        response_ids = output_ids[:, response_start:]
         if eos_token_id is None or response_ids.shape[1] == 0:
-            return output_ids, response_attn.long()
+            return output_ids, torch.ones_like(response_ids)
 
         eos_ids = torch.as_tensor(eos_token_id, device=response_ids.device, dtype=response_ids.dtype).flatten()
         is_eos = (response_ids.unsqueeze(-1) == eos_ids).any(dim=-1)
@@ -1305,21 +2014,64 @@ class HybridEngineRollout(RolloutEngine):
         first_eos_idx = is_eos.long().argmax(dim=-1)
         positions = torch.arange(response_ids.shape[1], device=response_ids.device).unsqueeze(0)
         after_first_eos = has_eos.unsqueeze(1) & (positions > first_eos_idx.unsqueeze(1))
-        first_eos = has_eos.unsqueeze(1) & (positions == first_eos_idx.unsqueeze(1))
 
         output_ids = output_ids.clone()
         output_ids[:, response_start:].masked_fill_(after_first_eos, pad_token_id)
-        # EOS is a valid generated token even when pad_token_id == eos_token_id.
-        response_attn = ((response_ids != pad_token_id) | first_eos) & ~after_first_eos
-        return output_ids, response_attn.long()
+        return output_ids, (~after_first_eos).long()
 
     # ------------------------------------------------------------------
-    # Graph capture decode loop (greedy only)
+    # Graph capture decode loop
     # ------------------------------------------------------------------
 
-    def _generate_graph(self, prompt_ids, prompt_attn, max_new_tokens, pad_token_id, module, device):
-        """Greedy decode with DeepSpeedStaticCache + graph capture."""
+    def _prefill_rows(self, module, prompt_ids, row_lengths, ds_cache, logits_kwargs, model_dtype, device, target_rows,
+                      cache_rows):
+        """Prefill left-padded prompts without their padding; returns the last-position logits.
+
+        Each group of equally long rows is prefilled on its own, unpadded, into a prompt-sized HF cache, and its KV
+        lands in slots ``0..len-1`` of rows ``target_rows`` of ``ds_cache``, which has ``cache_rows`` rows. Newly
+        admitted turns thereby fill free rows of a cache that outlives the call.
+        """
         from transformers import StaticCache
+
+        batch_size, prompt_len = prompt_ids.shape
+        last_logits = None
+        lengths = row_lengths.tolist()
+        for length in sorted(set(lengths)):
+            group = torch.tensor([row for row, n in enumerate(lengths) if n == length], device=device)
+            targets = target_rows[group]
+            group_cache = self._create_static_cache(StaticCache, module.config, group.numel(), length, device,
+                                                    model_dtype)
+            prefill_out = module(
+                prompt_ids[group, prompt_len - length:],
+                attention_mask=None,
+                past_key_values=group_cache,
+                use_cache=True,
+                cache_position=torch.arange(length, device=device),
+                **logits_kwargs,
+            )
+            if last_logits is None:
+                last_logits = prefill_out.logits.new_empty(batch_size, prefill_out.logits.shape[-1])
+            last_logits[group] = prefill_out.logits[:, -1, :]
+
+            for layer_idx, ds_layer in enumerate(ds_cache.layers):
+                hf_keys, hf_values = self._cache_layer_tensors(group_cache, layer_idx)
+                if not ds_layer.is_initialized:
+                    ds_layer.lazy_initialization(hf_keys.new_empty(cache_rows, *hf_keys.shape[1:]),
+                                                 hf_values.new_empty(cache_rows, *hf_values.shape[1:]))
+                ds_layer.keys[targets, :, :length, :] = hf_keys
+                ds_layer.values[targets, :, :length, :] = hf_values
+            # Its rows are copied out; dropping the group's cache frees its KV before the next group runs.
+            del prefill_out, group_cache
+        return last_logits
+
+    def _generate_graph(self, prompt_ids, prompt_attn, max_new_tokens, pad_token_id, sampling, module, device):
+        """Decode with DeepSpeedStaticCache + CUDA graph capture, greedy or sampled per ``sampling``.
+
+        Only the decode forward is captured. Tokens are chosen eagerly from the
+        graph's output logits after each replay, so sampling draws fresh random
+        numbers every step instead of replaying the captured ones. Rows keep the
+        left-padded layout and the mask hides their pad slots.
+        """
         from deepspeed.utils.static_cache import DeepSpeedStaticCache
 
         batch_size = prompt_ids.shape[0]
@@ -1327,52 +2079,76 @@ class HybridEngineRollout(RolloutEngine):
         max_len = prompt_len + max_new_tokens
         eos_token_id = self.tokenizer.eos_token_id
         model_dtype = next(module.parameters()).dtype
+        # AutoTP wraps module.config as a dict after sharding; restore the
+        # original config object so cache creation and mask logic work
+        if isinstance(getattr(module, "config", None), dict):
+            from types import SimpleNamespace
+            module.config = SimpleNamespace(**module.config)
+        if getattr(module.config, "_attn_implementation", None) == "flash_attention_2":
+            raise ValueError("graph capture does not support flash_attention_2")
+        rows = torch.arange(batch_size, device=device)
 
-        # --- Prefill with HF StaticCache (correct attention semantics) ---
-        prefill_cache = self._create_static_cache(StaticCache, module.config, batch_size, max_len, device, model_dtype)
-        prefill_attn = torch.ones(batch_size, prompt_len, dtype=torch.long, device=device)
-        prefill_attn[:, :prompt_len] = prompt_attn
-        prefill_out = module(
-            prompt_ids,
-            attention_mask=prefill_attn,
-            past_key_values=prefill_cache,
-            use_cache=True,
-            cache_position=torch.arange(prompt_len, device=device),
-            **self._last_logits_kwargs(module),
-        )
-        next_token = prefill_out.logits[:, -1, :].argmax(dim=-1, keepdim=True)
-
-        # --- Copy prefill KV into DeepSpeedStaticCache ---
-        write_pos = torch.tensor(prompt_len - 1, dtype=torch.long, device=device)
+        ds_tp_config = module.config
+        import deepspeed.comm as dist
+        if dist.is_initialized() and dist.get_world_size() > 1:
+            ds_tp_config = copy(module.config)
+            ds_tp_config.num_key_value_heads = max(1, module.config.num_key_value_heads // dist.get_world_size())
+            ds_tp_config.num_attention_heads = max(1, module.config.num_attention_heads // dist.get_world_size())
         ds_cache = DeepSpeedStaticCache(
-            module.config,
+            ds_tp_config,
             batch_size=batch_size,
             max_cache_len=max_len,
             device=device,
             dtype=model_dtype,
         )
-        ds_cache.set_write_position(write_pos)
-        # Trigger lazy init then copy real data
-        for layer_idx in range(self._cache_layer_count(ds_cache)):
-            ds_layer = ds_cache.layers[layer_idx]
-            hf_keys, hf_values = self._cache_layer_tensors(prefill_cache, layer_idx)
-            if not ds_layer.is_initialized:
-                ds_layer.lazy_initialization(hf_keys, hf_values)
-            ds_layer.keys[:, :, :prompt_len, :].copy_(hf_keys[:, :, :prompt_len, :])
-            ds_layer.values[:, :, :prompt_len, :].copy_(hf_values[:, :, :prompt_len, :])
+        logits_kwargs = self._last_logits_kwargs(module)
+        # --- Prefill straight into the cache the graph decodes from ---
+        # A second full-length cache for the prefill alone would double the KV memory of the call.
+        # The prompt fills slots 0..prompt_len-1.
+        ds_cache.set_write_position(torch.tensor(0, dtype=torch.long, device=device))
+        prefill_out = module(
+            prompt_ids,
+            attention_mask=prompt_attn,
+            past_key_values=ds_cache,
+            use_cache=True,
+            # Explicit positions: HF otherwise derives them from the cache, which syncs with the host and
+            # aborts stream capture on some model/cache combinations.
+            cache_position=torch.arange(prompt_len, device=device),
+            position_ids=torch.arange(prompt_len, device=device).expand(batch_size, -1),
+            **logits_kwargs,
+        )
+        prefill_logits = prefill_out.logits[:, -1, :]
+        # Left-padded rows all decode from the end of the padded prompt; the mask hides their pad slots.
+        decode_start = torch.full((batch_size, ), prompt_len, dtype=torch.long, device=device)
+        prompt_slots = prompt_attn.bool()
+        select_next_tokens = _token_selector(sampling)
+        repetition_penalty = _repetition_penalty(sampling, module)
+        # generate() penalizes the sequence so far, prompt included.
+        next_token, first_log_probs = select_next_tokens(
+            _penalize_repeats(prefill_logits, prompt_ids, repetition_penalty))
+        log_probs = [first_log_probs]
 
         output_ids = [prompt_ids, next_token]
 
+        # Decoding writes one slot per row per step.
+        write_pos = decode_start.clone()
+        ds_cache.set_write_position(write_pos)
+
         # --- Static buffers for graph capture ---
         static_token = torch.zeros(batch_size, 1, dtype=torch.long, device=device)
-        static_attn = torch.zeros(batch_size, max_len, dtype=torch.long, device=device)
-        static_attn[:, :prompt_len] = prompt_attn
-        static_attn[:, prompt_len] = 1  # first decode position
-        static_pos = torch.tensor(prompt_len, dtype=torch.long, device=device)
-        static_cache_pos = static_pos.unsqueeze(0)  # [1] for cache_position
-        static_pos_ids = static_pos.reshape(1, 1).expand(batch_size, 1)  # [batch, 1]
+        # Full-width mask, revealed one position per decode step by in-place writes (graph-replay safe).
+        static_attn = torch.zeros(batch_size, 1, 1, max_len, dtype=torch.bool, device=device)
+        static_attn[:, 0, 0, :prompt_len] = prompt_slots
+        static_attn[rows, 0, 0, decode_start] = True
+        # Views of write_pos, not copies: the captured forwards read this memory, so replays see the new position
+        # without host-side updates.
+        static_cache_pos = write_pos[:1]
+        static_pos_ids = write_pos.unsqueeze(1)
 
-        write_pos.fill_(prompt_len)
+        # A pre-built 4-D additive mask: Transformers checks a 2-D mask on the host during capture, and eager attention
+        # adds its mask to the attention weights, so a boolean one would be wrong.
+        static_causal_attn = torch.zeros((batch_size, 1, 1, max_len), dtype=model_dtype, device=device)
+        self._update_static_causal_attention(static_attn[:, 0, 0], static_causal_attn)
 
         # Remove forward hooks (they synchronize — illegal during graph capture)
         saved_pre = dict(module._forward_pre_hooks)
@@ -1389,7 +2165,7 @@ class HybridEngineRollout(RolloutEngine):
                 for _ in range(3):
                     out = module(
                         static_token,
-                        attention_mask=static_attn,
+                        attention_mask=static_causal_attn,
                         past_key_values=ds_cache,
                         use_cache=True,
                         cache_position=static_cache_pos,
@@ -1402,39 +2178,53 @@ class HybridEngineRollout(RolloutEngine):
             with get_accelerator().capture_to_graph(graph):
                 out = module(
                     static_token,
-                    attention_mask=static_attn,
+                    attention_mask=static_causal_attn,
                     past_key_values=ds_cache,
                     use_cache=True,
                     cache_position=static_cache_pos,
                     position_ids=static_pos_ids,
                 )
-            static_logits = out.logits
+                static_logits = out.logits
+            # The capture run consumed static_token: restore the write position, so decoding starts right after
+            # prefill.
+            write_pos.copy_(decode_start)
+            static_token.copy_(next_token)
         finally:
             module._forward_pre_hooks.update(saved_pre)
             module._forward_hooks.update(saved_post)
 
         # --- Decode loop ---
-        eos_mask = torch.zeros(batch_size, dtype=torch.bool, device=device)
+        # Checking for EOS reads the device from the host, which stalls the queued steps, so it runs every few
+        # steps. Rows that end in between keep decoding; callers cut each response at its first EOS.
+        eos_check_every = 16
+        eos_mask = next_token.squeeze(1) == eos_token_id
         for step in range(max_new_tokens - 1):
-            if eos_mask.all():
-                output_ids.append(torch.full((batch_size, 1), pad_token_id, dtype=torch.long, device=device))
-                continue
+            if step % eos_check_every == 0 and bool(eos_mask.all().item()):
+                break
 
-            # Update static inputs
+            # Update static inputs. Only the current token's own slot is revealed: later slots still hold warmup
+            # and capture leftovers.
             static_token.copy_(next_token)
-            pos = prompt_len + step
-            write_pos.fill_(pos)
-            static_cache_pos.fill_(pos)
-            static_pos_ids.fill_(pos)
-            static_attn[:, pos] = 1
+            torch.add(decode_start, step, out=write_pos)
+            static_attn[rows, 0, 0, write_pos] = True
+            self._update_static_causal_attention(static_attn[:, 0, 0], static_causal_attn)
 
             # Replay
             get_accelerator().replay_graph(graph)
-            next_token = static_logits[:, -1, :].argmax(dim=-1, keepdim=True)
+            step_logits = static_logits[:, -1, :]
+            if repetition_penalty != 1.0:
+                step_logits = _penalize_repeats(step_logits, torch.cat(output_ids, dim=1), repetition_penalty)
+            next_token, step_log_probs = select_next_tokens(step_logits)
             output_ids.append(next_token)
+            log_probs.append(step_log_probs)
             eos_mask |= (next_token.squeeze(1) == eos_token_id)
 
-        return torch.cat(output_ids, dim=1)
+        # Every row ended: the rest of the response is padding.
+        remaining = max_new_tokens - (len(output_ids) - 1)
+        if remaining > 0:
+            output_ids.append(torch.full((batch_size, remaining), pad_token_id, dtype=torch.long, device=device))
+            log_probs.append(torch.zeros((batch_size, remaining), device=device))
+        return torch.cat(output_ids, dim=1), torch.cat(log_probs, dim=1)
 
     def sync_weights(self, step: int) -> None:  # noqa: ARG002
         """No-op: hybrid engine reads model weights live."""

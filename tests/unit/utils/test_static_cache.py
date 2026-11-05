@@ -199,3 +199,53 @@ def test_static_layer_accepts_active_prefix_of_cache_rows():
     layer.update(active_keys, active_keys)
 
     assert layer.keys[:2, 0, 1:3].sum().item() == 4
+
+
+def test_static_cache_decode_matches_a_full_forward():
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    torch.manual_seed(0)
+    config = LlamaConfig(vocab_size=128,
+                         hidden_size=64,
+                         intermediate_size=128,
+                         num_hidden_layers=2,
+                         num_attention_heads=4,
+                         num_key_value_heads=2,
+                         max_position_embeddings=64)
+    model = LlamaForCausalLM(config).eval()
+    batch_size, prompt_len, max_len = 2, 4, 7
+    tokens = torch.randint(1, config.vocab_size, (batch_size, max_len))
+    attention_mask = torch.ones_like(tokens)
+    attention_mask[1, :2] = 0  # a left-padded row
+
+    cache = DeepSpeedStaticCache(config,
+                                 batch_size=batch_size,
+                                 max_cache_len=max_len,
+                                 device=torch.device("cpu"),
+                                 dtype=torch.float32)
+    write_position = torch.tensor(0)
+    cache.set_write_position(write_position)
+    static_mask = torch.zeros_like(tokens)
+    static_mask[:, :prompt_len] = attention_mask[:, :prompt_len]
+    decode_logits = []
+    with torch.no_grad():
+        model(tokens[:, :prompt_len],
+              attention_mask=static_mask[:, :prompt_len],
+              past_key_values=cache,
+              use_cache=True,
+              cache_position=torch.arange(prompt_len),
+              position_ids=torch.arange(prompt_len).expand(batch_size, -1))
+        for position in range(prompt_len, max_len):
+            write_position.fill_(position)
+            static_mask[:, position] = 1
+            output = model(tokens[:, position:position + 1],
+                           attention_mask=static_mask,
+                           past_key_values=cache,
+                           use_cache=True,
+                           cache_position=torch.tensor([position]),
+                           position_ids=torch.full((batch_size, 1), position))
+            decode_logits.append(output.logits[:, -1])
+        # Oracle: one forward over the whole sequence, without a cache.
+        expected = model(tokens, attention_mask=attention_mask).logits[:, prompt_len:]
+
+    torch.testing.assert_close(torch.stack(decode_logits, dim=1), expected, atol=1e-5, rtol=1e-5)
