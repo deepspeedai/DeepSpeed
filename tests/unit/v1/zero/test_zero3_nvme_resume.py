@@ -140,7 +140,27 @@ class TestZero3NVMeResume(DistributedTest):
     def test(self, tmpdir, precision, pipeline, offload_param):
         """The resumed run has the saved weights, lr, loss scale and Adam state, so it continues bit for bit."""
         _skip_if_unsupported(precision)
-        config = _config(str(tmpdir.join("nvme")), precision, pipeline, offload_param)
+        self._check_resume(tmpdir, _config(str(tmpdir.join("nvme")), precision, pipeline, offload_param))
+
+    def test_params_on_nvme(self, tmpdir):
+        """With max_in_cpu=0, the swapped parameters have no flat buffer in memory, so loading writes their weights
+        to the parameter swap files."""
+        _skip_if_unsupported("bf16")
+        config = _config(str(tmpdir.join("nvme")), "bf16", offload_param=True)
+        config["zero_optimization"]["offload_param"]["max_in_cpu"] = 0
+        # The NVMe parameter prefetch can swap in a parameter twice (#4072).
+        config["zero_optimization"]["stage3_prefetch_bucket_size"] = 0
+        self._check_resume(tmpdir, config)
+
+    def test_pipeline_loading_checkpoint(self, tmpdir):
+        """The ranks of a node load one after another, so loading must not wait for the other ranks, e.g. to gather
+        the persistent parameters (the biases)."""
+        _skip_if_unsupported("bf16")
+        config = _config(str(tmpdir.join("nvme")), "bf16")
+        config["zero_optimization"]["pipeline_loading_checkpoint"] = True
+        self._check_resume(tmpdir, config)
+
+    def _check_resume(self, tmpdir, config):
         ckpt_dir = str(tmpdir.join("ckpt"))
 
         engine = _engine(config, seed=0)

@@ -3625,34 +3625,37 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             # Purge the swapped optimizer state, it was initialized to the freshly created model and not the checkpoint
             self.optimizer_swapper.purge_state()
 
+        # restore fp32 partitions
+        for curr_param, saved_param in zip(self.fp32_partitioned_groups_flat, state_dict[FP32_FLAT_GROUPS]):
+            curr_param.data.copy_(saved_param.data)
+
         if self.swap_optimizer:
-            # Touch all parameters to synchronize all buffers
+            # Copy the fp32 partitions to the parameters, as step() does: the swapped sub-groups are read from the
+            # copied swap files, and parameters without a flat buffer (offload_param.max_in_cpu) are swapped out.
             timer_names = set()
             self._partition_all_parameters()
             for sub_group_id, group in enumerate(self.fp16_groups):
                 self._prepare_sub_group(sub_group_id, timer_names)
                 self._reassign_or_swap_out_partitioned_parameters(sub_group_id)
                 self._release_sub_group(sub_group_id, timer_names)
-            self._post_step(timer_names)
+            # Not _post_step(): its all-gather of the persistent parameters would hang with pipeline_loading_checkpoint,
+            # where the other ranks of the node load later. checkpoint_event_epilogue() gathers them.
+            self.reset_cpu_buffers()
+        else:
+            # restore fp16 partitions from fp32
+            for sub_group_id in range(len(self.fp32_partitioned_groups_flat)):
+                fp32_param = self.fp32_partitioned_groups_flat[sub_group_id]
+                if sum(fp32_param.size()) > 0:
+                    fp16_param = self.fp16_partitioned_groups_flat[sub_group_id]
+                    fp16_param.data.copy_(fp32_param.data)
 
-        # restore fp32 partitions
-        for curr_param, saved_param in zip(self.fp32_partitioned_groups_flat, state_dict[FP32_FLAT_GROUPS]):
-            curr_param.data.copy_(saved_param.data)
+            # update fp16 unflattened params
+            for sub_group_id in range(len(self.fp16_partitioned_groups_flat)):
+                updated_params = self.unflatten(self.fp16_partitioned_groups_flat[sub_group_id],
+                                                self.fp16_partitioned_groups[sub_group_id])
 
-        # restore fp16 partitions from fp32
-        for sub_group_id in range(len(self.fp32_partitioned_groups_flat)):
-            fp32_param = self.fp32_partitioned_groups_flat[sub_group_id]
-            if sum(fp32_param.size()) > 0:
-                fp16_param = self.fp16_partitioned_groups_flat[sub_group_id]
-                fp16_param.data.copy_(fp32_param.data)
-
-        # update fp16 unflattened params
-        for sub_group_id in range(len(self.fp16_partitioned_groups_flat)):
-            updated_params = self.unflatten(self.fp16_partitioned_groups_flat[sub_group_id],
-                                            self.fp16_partitioned_groups[sub_group_id])
-
-            for partitioned_param, q in zip(self.fp16_partitioned_groups[sub_group_id], updated_params):
-                partitioned_param.data = q.data
+                for partitioned_param, q in zip(self.fp16_partitioned_groups[sub_group_id], updated_params):
+                    partitioned_param.data = q.data
 
     # TODO: Support different/changing load/save DP degree.
     def load_state_dict(self,
