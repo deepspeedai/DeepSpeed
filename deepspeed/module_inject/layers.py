@@ -1467,6 +1467,39 @@ class SubParamColumnParallel(LinearLayer):
                                     is_bias=True)
 
 
+def _sum_replicated_kv_gradient(grad, kv_start, group):
+    """Sum the K/V gradient rows that every rank holds a copy of.
+
+    Some backends return this gradient non-contiguously, which collectives reject; reduce a
+    contiguous copy in that case and preserve the original layout for autograd.
+    """
+    grad = grad.clone()
+    kv_grad = grad.narrow(0, kv_start, grad.shape[0] - kv_start)
+    if kv_grad.numel() == 0:
+        # The key/value block is replicated whole, so it is empty on every rank at once.
+        return grad
+    if kv_grad.is_contiguous():
+        # Contiguous: reduce the view in place.
+        dist.all_reduce(kv_grad, group=group)
+    else:
+        # Non-contiguous: reduce a copy, then write it back.
+        reduced = kv_grad.contiguous()
+        dist.all_reduce(reduced, group=group)
+        kv_grad.copy_(reduced)
+    return grad
+
+
+def _make_replicated_kv_grad_hook(param, kv_start, group):
+
+    def hook(*_unused):
+        # Both hook forms leave the gradient on the parameter; the pre-2.1
+        # AccumulateGrad hook also passes (grad_inputs, grad_outputs).
+        if param.grad is not None:
+            param.grad = _sum_replicated_kv_gradient(param.grad, kv_start, group)
+
+    return hook
+
+
 class FusedModuleWrapper:
 
     def __init__(self, fused_module: nn.Module):
@@ -1512,14 +1545,13 @@ class fused_LinearLayer(SubParamColumnParallel):
         kv_start = get_shard_size_list(n_embd, self.tp_world_size, self.tp_meta)[self.tp_index]
         group = self.mp_group
 
-        def sum_kv_rows(grad):
-            grad = grad.clone()
-            dist.all_reduce(grad.narrow(0, kv_start, grad.shape[0] - kv_start), group=group)
-            return grad
+        from deepspeed.utils.torch import register_grad_hook
 
+        # Route through ZeRO's post-accumulate helper; torch_npu skipped the plain hook
+        # under ZeRO 1/2, while CUDA ran it in our tests.
         for param in (self.weight, self.bias):
             if param is not None and param.requires_grad:
-                param.register_hook(sum_kv_rows)
+                register_grad_hook(param, _make_replicated_kv_grad_hook(param, kv_start, group))
 
     def _freeze_partition_sizes(self, total_size):
         super()._freeze_partition_sizes(total_size)
