@@ -461,6 +461,42 @@ def _fused_gdn_forward(self, hidden_states, *args, **kwargs):
     return self.out_proj(core_attn_out)
 
 
+def _bypass_parity_ok(query, key, value, kw):
+    """One-shot behavioral gate for the in-place recurrent launch.
+
+    Runs the wrapper and the direct launch on clones of the live decode
+    tensors and compares outputs and final states. Any FLA build whose
+    kernel contract differs (packing, grid layout) fails here once per
+    process and per shape, and the scan keeps using the wrapper. The probe
+    writes only to clones, never to the cache slot."""
+    import logging
+    try:
+        from fla.ops.gated_delta_rule import fused_recurrent_gated_delta_rule
+        h0 = kw.get("initial_state")
+        if h0 is None:
+            return False
+        common = dict(g=kw.get("g"),
+                      beta=kw.get("beta"),
+                      use_qk_l2norm_in_kernel=kw.get("use_qk_l2norm_in_kernel", False))
+        with torch.no_grad():
+            o_ref, ht_ref = fused_recurrent_gated_delta_rule(query,
+                                                             key,
+                                                             value,
+                                                             initial_state=h0.clone(),
+                                                             output_final_state=True,
+                                                             **common)
+            slot = h0.clone()
+            o_b, _ = _fla_recurrent_inplace(query, key, value, initial_state=slot, **common)
+        ok = (torch.allclose(o_b.float(), o_ref.float(), atol=1e-2, rtol=1e-2)
+              and torch.allclose(slot.float(), ht_ref.float(), atol=1e-2, rtol=1e-2))
+        if not ok:
+            logging.getLogger(__name__).warning(
+                "segKI FLA recurrent bypass disabled: parity probe failed on this FLA build; using the wrapper")
+        return ok
+    except Exception:
+        return False
+
+
 def _fla_recurrent_inplace(query, key, value, **kw):
     """FLA's fused recurrent with the final state written in place.
 
@@ -472,9 +508,18 @@ def _fla_recurrent_inplace(query, key, value, **kw):
     import triton
     from fla.ops.gated_delta_rule.fused_recurrent import fused_recurrent_gated_delta_rule_fwd_kernel
 
-    q, k, v = query, key, value
+    # input_guard equivalent: the kernel indexes packed layouts only, and the
+    # decode q/k/v arrive as strided views of the fused projection (batch
+    # stride = full fused width). Pack without copying already-dense inputs.
+    q = query if query.is_contiguous() else query.contiguous()
+    k = key if key.is_contiguous() else key.contiguous()
+    v = value if value.is_contiguous() else value.contiguous()
     g = kw.get("g")
     beta = kw.get("beta")
+    if g is not None and not g.is_contiguous():
+        g = g.contiguous()
+    if beta is not None and not beta.is_contiguous():
+        beta = beta.contiguous()
     slot = kw["initial_state"]
     B, T, H, K = k.shape
     V = v.shape[-1]
@@ -605,20 +650,34 @@ def _install_gdn_segment(seg: GDNSegment) -> bool:
         # torch_* implementations there.
         single = kw.get("initial_state") is not None and query.shape[1] == 1
         import os as _os
-        _dbg = _os.environ.get("FLA_BYPASS", "1") == "1"
-        if single and not torch.is_grad_enabled() and _dbg:
-            # FLA's wrapper allocates a fresh final_state and the caller
-            # copies it back into the graph-static cache slot (~35us x 24
-            # layers/step). Call the Triton kernel directly with the cache
-            # slot as BOTH h0 and ht — each program reads its state tile
-            # before writing it, so in-place is safe — keeping FLA's math
-            # and dropping the round trip. The caller sees None and skips
-            # its copy (the state is already home).
-            try:
-                out = _fla_recurrent_inplace(query, key, value, **kw)
-                return out
-            except (ImportError, AttributeError):
-                pass  # FLA layout changed — fall through to the wrapper
+        # The raw-kernel launch must not trust its own view of FLA's kernel
+        # contract: the wrapper packs strided inputs (the decode q/k/v are
+        # views of the fused projection with a wider batch stride) and FLA
+        # releases have changed the kernel's grid layout (0.5.2 reads a 2-D
+        # grid, 0.6.0 a flattened 1-D). _fla_recurrent_inplace therefore
+        # packs its inputs itself, and a one-time parity probe against the
+        # wrapper gates the bypass per shape: the direct launch must
+        # reproduce the wrapper on live tensors before it may replace it,
+        # which silently rejects incompatible FLA builds. FLA_BYPASS=0
+        # forces the wrapper path.
+        _bypass = _os.environ.get("FLA_BYPASS", "1") == "1"
+        if single and not torch.is_grad_enabled() and _bypass:
+            shape_key = (query.shape[-2], value.shape[-2], query.shape[-1], value.shape[-1])
+            verdicts = getattr(parent, "_ki_bypass_verdicts", None)
+            if verdicts is None:
+                verdicts = parent._ki_bypass_verdicts = {}
+            if shape_key not in verdicts:
+                verdicts[shape_key] = _bypass_parity_ok(query, key, value, kw)
+            if verdicts[shape_key]:
+                # The verified in-place launch writes the cache slot directly
+                # (h0 == ht: each program reads its state tile before writing
+                # it), dropping the wrapper's fresh-allocation + copy-back
+                # round trip (~35us/layer/step).
+                try:
+                    out = _fla_recurrent_inplace(query, key, value, **kw)
+                    return out
+                except (ImportError, AttributeError):
+                    pass  # FLA layout changed — fall through to the wrapper
         fn_name = "recurrent_gated_delta_rule" if single else "chunk_gated_delta_rule"
         fn = getattr(parent, fn_name, None)
         if fn is None:
@@ -718,8 +777,7 @@ def apply_segment_ki(model: torch.nn.Module) -> dict:
     segments = find_glu_segments(model)
     replaced = 0
     for seg in segments:
-        seg.parent._ki_dual_op = kernel_op if kernel_op is not None and hasattr(kernel_op,
-                                                                                "grouped_linear") else None
+        seg.parent._ki_dual_op = kernel_op if kernel_op is not None and hasattr(kernel_op, "grouped_linear") else None
         seg.parent.forward = _dual_weight_glu_forward.__get__(seg.parent, type(seg.parent))
         replaced += 1
     report["fused_glu"] = {"segments_found": len(segments), "segments_replaced": replaced}
@@ -795,13 +853,14 @@ def _decode_attn_forward(self,
         # One GEMV launch over q/k/v weights directly — replaces the
         # three separate F.linear launches. q_proj keeps its 2x-wide
         # query|gate layout, so the gate split below is unchanged from HF.
-        q_out, k_flat, v_flat = qkv_op.grouped_linear(
-            hidden_states.view(-1), [self.q_proj.weight, self.k_proj.weight, self.v_proj.weight], False)
+        q_out, k_flat, v_flat = qkv_op.grouped_linear(hidden_states.view(-1),
+                                                      [self.q_proj.weight, self.k_proj.weight, self.v_proj.weight],
+                                                      False)
         query_states, gate = torch.chunk(q_out.view(*input_shape, -1, self.head_dim * 2), 2, dim=-1)
     elif qkv_op is not None:
-        q_out, k_flat, v_flat = qkv_op.grouped_linear(
-            hidden_states.reshape(-1, hidden_states.shape[-1]),
-            [self.q_proj.weight, self.k_proj.weight, self.v_proj.weight], False)
+        q_out, k_flat, v_flat = qkv_op.grouped_linear(hidden_states.reshape(-1, hidden_states.shape[-1]),
+                                                      [self.q_proj.weight, self.k_proj.weight, self.v_proj.weight],
+                                                      False)
         query_states, gate = torch.chunk(q_out.view(*input_shape, -1, self.head_dim * 2), 2, dim=-1)
     else:
         query_states, gate = torch.chunk(self.q_proj(hidden_states).view(*input_shape, -1, self.head_dim * 2),
