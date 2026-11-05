@@ -4,7 +4,7 @@
 """Hugging Face integration for packed-sequence tiled rematerialization and native CPU
 activation offload.
 
-``install_packed_seq_tiled_rematerialize(model, token_budget)`` patches the
+``install_packed_seq_tiled_rematerialize(model, token_budget=None, shards=None)`` patches the
 ``self_attn`` / ``linear_attn`` mixer classes of a transformers causal LM so that, for a
 packed row (batch 1, samples separated by ``position_ids`` resets), each mixer forward runs
 through ``packed_seq_tiled_rematerialize_compute``: the row is split into tiles of whole
@@ -129,7 +129,7 @@ def _install_top_level_position_ids_capture(model):
     model._at_position_ids_capture_installed = True
 
 
-def install_packed_seq_tiled_rematerialize(model, token_budget):
+def install_packed_seq_tiled_rematerialize(model, token_budget=None, shards=None):
     """Install token-axis tiled rematerialization on every decoder layer's self_attn/
     linear_attn forward, for packed-sequence training.
 
@@ -137,6 +137,9 @@ def install_packed_seq_tiled_rematerialize(model, token_budget):
     (shared across all instances of that class), so it must run before the model is
     instantiated via `self.config.model.factory(self)()`.
     """
+    if token_budget is None and shards is None:
+        raise ValueError("install_packed_seq_tiled_rematerialize needs token_budget or shards")
+
     global _logged_position_ids_fallback
 
     try:
@@ -361,7 +364,7 @@ def install_packed_seq_tiled_rematerialize(model, token_budget):
                     _fn,
                     hidden_states_2d,
                     cu_seqlens,
-                    shards=None,
+                    shards=shards,
                     token_budget=cls_budget,
                     compute_params=params,
                     kwargs_to_token_shard=to_shard,
@@ -379,7 +382,7 @@ def install_packed_seq_tiled_rematerialize(model, token_budget):
 
     n = sum(1 for m in model.modules() if type(m) in patched)
     print(
-        f"[deepspeed] packed_seq_tiled_remat token_budget={token_budget} "
+        f"[deepspeed] packed_seq_tiled_remat token_budget={token_budget} shards={shards} "
         f"classes={[c.__name__ for c in patched]} modules={n}",
         file=sys.stderr,
     )
