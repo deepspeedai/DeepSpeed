@@ -53,6 +53,15 @@ def _make_sampling(n_samples_per_prompt=1):
     return SamplingConfig(max_new_tokens=2, temperature=0, n_samples_per_prompt=n_samples_per_prompt)
 
 
+@pytest.fixture
+def graph_capture_accelerator():
+    # These tests exercise graph-only validation and dispatch. On a CPU
+    # accelerator the opt-in is False, so generate() would take the eager
+    # fallback before reaching the code under test.
+    with patch.object(type(get_accelerator()), "is_graph_capture_supported", return_value=True):
+        yield
+
+
 # -- config defaults ----------------------------------------------------
 
 
@@ -122,7 +131,7 @@ def test_continuous_generation_rejects_unsupported_inputs():
         (HybridEngineRolloutConfig(use_graph_capture=True, continuous_cache_capacity=4), "must fit"),
     ],
 )
-def test_continuous_graph_rejects_incompatible_fixed_layout_options(cfg, message):
+def test_continuous_graph_rejects_incompatible_fixed_layout_options(cfg, message, graph_capture_accelerator):
     rollout = HybridEngineRollout(_make_engine(), _make_tokenizer(), cfg=cfg)
     request = RolloutRequest(
         prompt_ids=torch.tensor([[0, 1, 2]]),
@@ -133,7 +142,7 @@ def test_continuous_graph_rejects_incompatible_fixed_layout_options(cfg, message
         rollout.generate(request, SamplingConfig(max_new_tokens=2, temperature=0, continuous_batch_size=1))
 
 
-def test_continuous_graph_rejects_flash_attention():
+def test_continuous_graph_rejects_flash_attention(graph_capture_accelerator):
     engine = _make_engine()
     engine.module.config = SimpleNamespace(_attn_implementation="flash_attention_2")
     rollout = HybridEngineRollout(engine, _make_tokenizer(), cfg=HybridEngineRolloutConfig(use_graph_capture=True))
@@ -146,7 +155,54 @@ def test_continuous_graph_rejects_flash_attention():
         rollout.generate(request, SamplingConfig(max_new_tokens=2, temperature=0, continuous_batch_size=1))
 
 
-def test_continuous_generation_routes_graph_capture_to_fixed_capacity_path():
+def test_continuous_generation_falls_back_to_eager_without_graph_capture_opt_in():
+    # The eager continuous path is a full fallback, so a backend without the
+    # graph capture opt-in must use it instead of raising.
+
+    class CacheClassModel(torch.nn.Module):
+        _supports_cache_class = True
+
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.zeros(1))
+            self.config = PretrainedConfig(
+                max_position_embeddings=32,
+                num_hidden_layers=1,
+                num_attention_heads=1,
+                num_key_value_heads=1,
+                hidden_size=1,
+                head_dim=1,
+            )
+
+        def forward(self, input_ids, attention_mask, past_key_values=None, use_cache=True, **kwargs):
+            key_states = input_ids[:, None, :, None].to(dtype=torch.float32)
+            _, cache_values = past_key_values.update(key_states, key_states, layer_idx=0, cache_kwargs=kwargs)
+            next_tokens = torch.where(cache_values[:, 0].sum(dim=(1, 2)) == 6, 2, 7).long()
+            logits = torch.zeros((input_ids.shape[0], input_ids.shape[1], 16))
+            logits.scatter_(2, next_tokens[:, None, None].expand(-1, input_ids.shape[1], 1), 1)
+            return SimpleNamespace(logits=logits, past_key_values=past_key_values)
+
+    rollout = HybridEngineRollout(
+        SimpleNamespace(module=CacheClassModel()),
+        SimpleNamespace(pad_token_id=0, eos_token_id=2),
+        cfg=HybridEngineRolloutConfig(use_graph_capture=True),
+    )
+    request = RolloutRequest(
+        torch.tensor([[1, 2, 3], [1, 2, 4], [1, 2, 5]]),
+        torch.ones((3, 3), dtype=torch.long),
+    )
+
+    with patch.object(get_accelerator(), "is_graph_capture_supported", return_value=False), \
+            patch.object(rollout, "_generate_continuous_graph") as generate_graph, \
+            patch("deepspeed.runtime.rollout.hybrid_engine_rollout.logger.warning_once") as warning_once:
+        output = rollout.generate(request, SamplingConfig(max_new_tokens=3, temperature=0, continuous_batch_size=2))
+
+    generate_graph.assert_not_called()
+    warning_once.assert_called_once()
+    assert output.input_ids.tolist() == [[1, 2, 3, 2, 0, 0], [1, 2, 4, 7, 7, 7], [1, 2, 5, 7, 7, 7]]
+
+
+def test_continuous_generation_routes_graph_capture_to_fixed_capacity_path(graph_capture_accelerator):
     rollout = HybridEngineRollout(
         _make_engine(),
         _make_tokenizer(),
@@ -249,8 +305,8 @@ def test_continuous_graph_capture_preserves_attention_implementation(mock_get_ac
 
 def test_continuous_graph_keeps_cache_position_alive_for_replay():
     accelerator = get_accelerator()
-    if accelerator.device_name() != "cuda" or not accelerator.is_available():
-        pytest.skip("requires CUDA graph capture")
+    if not accelerator.is_available() or not accelerator.is_graph_capture_supported():
+        pytest.skip("requires graph capture")
 
     class DecodeModule(torch.nn.Module):
 
@@ -1066,7 +1122,7 @@ def test_shared_prefill_rejects_graph_capture():
     config = HybridEngineRolloutConfig(use_graph_capture=True, use_shared_prefill=True)
     rollout = HybridEngineRollout(engine, _make_tokenizer(), config)
 
-    with pytest.raises(RuntimeError, match="does not support CUDA graph capture"):
+    with pytest.raises(RuntimeError, match="does not support graph capture"):
         rollout.generate(_make_request(), _make_sampling(n_samples_per_prompt=2))
 
 
@@ -1119,6 +1175,7 @@ def test_sync_weights_is_noop():
 @patch("deepspeed.runtime.rollout.hybrid_engine_rollout.time.perf_counter")
 @patch("deepspeed.runtime.rollout.hybrid_engine_rollout.get_accelerator")
 def test_generate_calls_graph_capture_when_enabled(mock_get_accelerator, mock_perf_counter):
+    mock_get_accelerator.return_value.is_graph_capture_supported.return_value = True
     engine = _make_engine()
     tok = _make_tokenizer()
     cfg = HybridEngineRolloutConfig(use_graph_capture=True, enable_profiling=True)
@@ -1142,6 +1199,33 @@ def test_generate_calls_graph_capture_when_enabled(mock_get_accelerator, mock_pe
     assert profile["decode_forward_ms"] is None
     assert profile["generation_overhead_ms"] == pytest.approx(10.0)
     assert profile["num_decode_forwards"] == 0
+
+
+@patch("deepspeed.runtime.rollout.hybrid_engine_rollout.get_accelerator")
+def test_generate_falls_back_to_eager_without_graph_capture_opt_in(mock_get_accelerator):
+    # A backend that exposes a graph API but has not opted in must not have
+    # its unvalidated graph path selected by use_graph_capture.
+    mock_get_accelerator.return_value.is_graph_capture_supported.return_value = False
+    engine = _make_engine()
+    engine.module.generate.return_value = torch.tensor([[10, 11, 5, 6]])
+    rollout = HybridEngineRollout(engine, _make_tokenizer(), cfg=HybridEngineRolloutConfig(use_graph_capture=True))
+    rollout._generate_graph = MagicMock()
+
+    req = MagicMock()
+    req.prompt_ids = torch.tensor([[10, 11]])
+    req.prompt_attention_mask = torch.ones(1, 2, dtype=torch.long)
+    sampling = MagicMock()
+    sampling.temperature = 0
+    sampling.n_samples_per_prompt = 1
+    sampling.max_new_tokens = 2
+    sampling.top_p = 1.0
+    sampling.continuous_batch_size = None
+
+    result = rollout.generate(req, sampling)
+
+    rollout._generate_graph.assert_not_called()
+    engine.module.generate.assert_called_once()
+    assert result.input_ids.tolist() == [[10, 11, 5, 6]]
 
 
 def test_generate_keeps_ranks_in_lockstep_and_pads_after_eos():

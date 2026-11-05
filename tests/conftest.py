@@ -10,8 +10,16 @@ import sys
 import pytest
 import os
 from os.path import abspath, dirname
+
+# NVIDIA containers can force TF32 before PyTorch reads its backend settings.
+# Correctness tests compare independent sharding/offload paths and require IEEE fp32.
+os.environ.pop("TORCH_ALLOW_TF32_CUBLAS_OVERRIDE", None)
+
 import torch
 import warnings
+
+torch.backends.cuda.matmul.allow_tf32 = False
+torch.backends.cudnn.allow_tf32 = False
 
 # Set this environment variable for the T5 inference unittest(s) (e.g. google/t5-v1_1-small)
 os.environ['PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION'] = 'python'
@@ -23,7 +31,10 @@ sys.path.insert(1, git_repo_path)
 
 
 def pytest_configure(config):
-    config.option.color = "yes"
+    # Force color on for plain invocations, but keep an explicit --color
+    # choice: the CI nightlies pass --color=no so their logs parse cleanly.
+    if config.option.color == "auto":
+        config.option.color = "yes"
     config.option.durations = 0
     config.option.durations_min = 1
     config.option.verbose = True
