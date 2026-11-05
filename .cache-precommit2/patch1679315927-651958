@@ -1,0 +1,29 @@
+diff --git a/op_builder/cpu/builder.py b/op_builder/cpu/builder.py
+index 8f9e9134..ab0fe593 100644
+--- a/op_builder/cpu/builder.py
++++ b/op_builder/cpu/builder.py
+@@ -2,11 +2,9 @@
+ Copyright 2020 The Microsoft DeepSpeed Team
+ """
+ import os
+-import time
+-import importlib
+ import shutil
+ from pathlib import Path
+-from deepspeed.ops.op_builder.builder import OpBuilder, TORCH_MAJOR, TORCH_MINOR
++from deepspeed.ops.op_builder.builder import OpBuilder
+ 
+ 
+ class CPUOpBuilder(OpBuilder):
+diff --git a/op_builder/cpu/transformer_inference.py b/op_builder/cpu/transformer_inference.py
+index 4b7e6cf7..4f601da7 100644
+--- a/op_builder/cpu/transformer_inference.py
++++ b/op_builder/cpu/transformer_inference.py
+@@ -1,6 +1,6 @@
+ '''Copyright The Microsoft DeepSpeed Team'''
+ 
+-from .builder import CPUOpBuilder, cpu_kernel_path, cpu_kernel_include
++from .builder import CPUOpBuilder, cpu_kernel_path
+ 
+ 
+ class InferenceBuilder(CPUOpBuilder):

@@ -1,0 +1,13 @@
+diff --git a/accelerator/cpu_accelerator.py b/accelerator/cpu_accelerator.py
+index 55ee8e66..6d84be23 100644
+--- a/accelerator/cpu_accelerator.py
++++ b/accelerator/cpu_accelerator.py
+@@ -2,7 +2,7 @@
+ 
+ import torch
+ from deepspeed.accelerator.abstract_accelerator import DeepSpeedAccelerator
+-import oneccl_bindings_for_pytorch  #noqa: F401
++import oneccl_bindings_for_pytorch  #flake8: noqa: F401
+ import psutil
+ 
+ 

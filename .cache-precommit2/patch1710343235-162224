@@ -1,0 +1,9 @@
+diff --git a/requirements.txt b/requirements.txt
+index 24adb41..2cb57ab 100644
+--- a/requirements.txt
++++ b/requirements.txt
+@@ -2,3 +2,4 @@ clang-format
+ flake8
+ pre-commit
+ pytest
++yapf

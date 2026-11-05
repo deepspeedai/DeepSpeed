@@ -1,0 +1,19 @@
+diff --git a/deepspeed/runtime/rollout/hybrid_engine_rollout.py b/deepspeed/runtime/rollout/hybrid_engine_rollout.py
+index cbbab16ed..1059995d6 100644
+--- a/deepspeed/runtime/rollout/hybrid_engine_rollout.py
++++ b/deepspeed/runtime/rollout/hybrid_engine_rollout.py
+@@ -366,10 +366,10 @@ class HybridEngineRollout(RolloutEngine):
+ 
+             # === Phase 2: Build batch static cache + static buffers ===
+             static_cache = DeepSpeedStaticCache(module.config,
+-                                       batch_size=batch_size,
+-                                       max_cache_len=max_cache_len,
+-                                       device=device,
+-                                       dtype=model_dtype)
++                                                batch_size=batch_size,
++                                                max_cache_len=max_cache_len,
++                                                device=device,
++                                                dtype=model_dtype)
+ 
+             static_input_ids = torch.zeros(batch_size, 1, dtype=torch.long, device=device)
+             static_cache_position = torch.zeros(1, dtype=torch.long, device=device)

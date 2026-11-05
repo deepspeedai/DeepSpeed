@@ -1,0 +1,1288 @@
+diff --git a/deepspeed/checkpoint/ds_to_universal.py b/deepspeed/checkpoint/ds_to_universal.py
+index c639ae9a5..25625f391 100755
+--- a/deepspeed/checkpoint/ds_to_universal.py
++++ b/deepspeed/checkpoint/ds_to_universal.py
+@@ -733,7 +733,15 @@ def _group_per_tp_shapes(slice_shapes_by_tp, pp_degree, tp_degree):
+     for tp in range(tp_degree):
+         tp_dict = {}
+         for pp in range(pp_degree):
+-            tp_dict.update(slice_shapes_by_tp[pp * tp_degree + tp])
++            stage_shapes = slice_shapes_by_tp[pp * tp_degree + tp]
++            for name in tp_dict.keys() & stage_shapes.keys():
++                # A parameter tied across pipeline stages is stored in every stage's file.
++                # The replicas must agree, otherwise the tie was partitioned inconsistently
++                # and the update below would silently keep the stage that was read last.
++                assert tp_dict[name] == stage_shapes[name], (
++                    f"Pipeline replicas of {name} on tp rank {tp} disagree on shape: "
++                    f"{tp_dict[name]} vs {stage_shapes[name]}.")
++            tp_dict.update(stage_shapes)
+         per_tp.append(tp_dict)
+     all_names = set()
+     for d in per_tp:
+diff --git a/deepspeed/checkpoint/universal_checkpoint.py b/deepspeed/checkpoint/universal_checkpoint.py
+index f057393ec..487b5f632 100644
+--- a/deepspeed/checkpoint/universal_checkpoint.py
++++ b/deepspeed/checkpoint/universal_checkpoint.py
+@@ -40,6 +40,7 @@ def _resolve_autotp_partition(current_param, ckpt_dict, full_hp_param, tp_rank,
+     logical_shape = meta.get('logical_shape')
+     sub_param_shape = meta.get('sub_param_shape')
+     sub_param_sizes = meta.get('sub_param_sizes')
++    partition_sizes = meta.get('partition_sizes')
+     replicated = meta.get('replicated', False)
+ 
+     if replicated:
+@@ -92,6 +93,12 @@ def _resolve_autotp_partition(current_param, ckpt_dict, full_hp_param, tp_rank,
+         slice_tensor = torch.cat(merged_chunks, dim=partition_dim)
+         return slice_tensor.flatten()
+ 
++    if partition_sizes is not None:
++        shard_offset = sum(partition_sizes[:tp_rank])
++        shard_size = partition_sizes[tp_rank]
++        slice_tensor = full_view.narrow(partition_dim, shard_offset, shard_size)
++        return slice_tensor.flatten()
++
+     slice_tensor = full_view.chunk(tp_world_size, dim=partition_dim)[tp_rank]
+     return slice_tensor.flatten()
+ 
+@@ -156,7 +163,10 @@ def load_hp_checkpoint_state(self, folder, tp_rank, tp_world_size, ep_rank=0, ep
+         # the converter to universal currently strips the original padding completely so the saved
+         # weight is padding-free and we just need to add new padding depending on the target TP
+         # degree
+-        is_vocab_tensor = ckpt_dict.get(VOCAB_TENSOR, False) and not is_expert_param
++        # AutoTP restore metadata already describes the exact (possibly uneven) partition layout,
++        # so the legacy tp-degree-derived vocab padding must not be applied on top of it.
++        has_autotp_meta = _get_param_uc_restore_meta(self) is not None
++        is_vocab_tensor = ckpt_dict.get(VOCAB_TENSOR, False) and not is_expert_param and not has_autotp_meta
+         if is_vocab_tensor:
+             # In the absence of data passed from the user wrt new padded vocab specific to tp degree
+             # we can again derive that data by reverse engineering the target shapes like so:
+diff --git a/deepspeed/module_inject/auto_tp.py b/deepspeed/module_inject/auto_tp.py
+index 783a00d08..abc3875f8 100755
+--- a/deepspeed/module_inject/auto_tp.py
++++ b/deepspeed/module_inject/auto_tp.py
+@@ -4,6 +4,7 @@
+ # DeepSpeed Team
+ 
+ # Automatic Tensor Parallelism
++import logging
+ import re
+ 
+ from torch import nn
+@@ -16,7 +17,7 @@ from deepspeed.accelerator import get_accelerator
+ from .fusedqkv_utils import require_tp_fused_qkvw
+ from deepspeed.module_inject.tp_shard import get_shard_size, get_shard_size_list
+ from deepspeed.utils import groups
+-from deepspeed.utils.logging import print_dist
++from deepspeed.utils.logging import log_dist
+ from deepspeed.module_inject.layers import is_autotp_training_mode
+ from .autotp_config import TPLayerSpec, AutoTPConfig, PartitionType
+ 
+@@ -427,17 +428,6 @@ class AutoTP():
+         model_type = self._get_model_type()
+         spec = self.partition_config.find_matching_spec(param_name, model_type)
+ 
+-        if any(part in ("lm_head", "embed_out") for part in name.split('.')):
+-            spec_details = None
+-            if spec is not None:
+-                spec_details = {
+-                    "patterns": spec.patterns,
+-                    "partition_type": spec.partition_type.value,
+-                    "gather_output": spec.gather_output,
+-                }
+-            print_dist(f"AutoTP lm_head spec match: parameter={param_name!r}; matched_spec={spec_details!r}",
+-                       ranks=[0])
+-
+         if spec is None:
+             # No matching spec found
+             if self.partition_config.strict_mode:
+@@ -475,21 +465,6 @@ class AutoTP():
+ 
+     def _create_column_parallel_layer(self, module, spec: TPLayerSpec, name: str):
+         """Create column-parallel layer (AllReduce in backward)."""
+-        if spec.gather_output and self.mp_size is not None and self.mp_size > 1:
+-            output_dim = module.weight.shape[0]
+-            if output_dim % self.mp_size != 0:
+-                if any(part in ("lm_head", "embed_out") for part in name.split('.')):
+-                    print_dist(
+-                        f"AutoTP: '{name}' uses gather_output with uneven output dim {output_dim} and tp_size="
+-                        f"{self.mp_size}; falling back to legacy LmHeadLinearAllreduce for checkpoint-safe "
+-                        "consolidation.",
+-                        ranks=[0],
+-                    )
+-                    return LmHeadLinearAllreduce(module, self.mp_group)
+-                raise NotImplementedError(
+-                    f"AutoTP gather_output requires output dimension divisible by tp_size. Layer '{name}' has "
+-                    f"output dim {output_dim} with tp_size={self.mp_size}.")
+-
+         if self.conv_linear_layer:
+             return conv_LinearLayer(module, self.mp_group, name=name, gather_output=spec.gather_output)
+         # Only use fused-QKV heuristics when no partition_config is provided.
+@@ -506,8 +481,6 @@ class AutoTP():
+                 partition_dim=spec.get_partition_dim(),
+                 name=name,
+             )
+-        if spec.gather_output:
+-            print_dist(f"AutoTP: replacing '{name}' with LinearLayer(gather_output=True)", ranks=[0])
+         return LinearLayer(module, self.mp_group, name=name, gather_output=spec.gather_output)
+ 
+     def _configure_gathered_column_tie_fallbacks(self):
+@@ -550,10 +523,11 @@ class AutoTP():
+                 continue
+ 
+             self._tied_gathered_column_module_names.update((module_name, tied_embedding_name))
+-            print_dist(
++            log_dist(
+                 f"AutoTP: '{module_name}.weight' is tied to '{tied_embedding_name}.weight'; leaving both modules "
+                 "replicated because coupled vocabulary-parallel embedding is not supported yet.",
+                 ranks=[0],
++                level=logging.WARNING,
+             )
+ 
+         self._gathered_column_tie_fallbacks_configured = True
+diff --git a/deepspeed/module_inject/layers.py b/deepspeed/module_inject/layers.py
+index 0f2ee671b..62600057e 100644
+--- a/deepspeed/module_inject/layers.py
++++ b/deepspeed/module_inject/layers.py
+@@ -64,6 +64,7 @@ def _build_param_uc_restore_meta(*,
+                                  output_shape=None,
+                                  sub_param_shape=None,
+                                  sub_param_sizes=None,
++                                 partition_sizes=None,
+                                  target_partition_shape=None,
+                                  original_shape=None,
+                                  is_bias=False,
+@@ -86,6 +87,8 @@ def _build_param_uc_restore_meta(*,
+         _normalize_uc_shape(sub_param_shape),
+         'sub_param_sizes':
+         _normalize_uc_shape(sub_param_sizes),
++        'partition_sizes':
++        _normalize_uc_shape(partition_sizes),
+         'target_partition_shape':
+         _normalize_uc_shape(target_partition_shape),
+         'original_shape':
+@@ -232,42 +235,49 @@ class GatherFromTensorParallelRegion(torch.autograd.Function):
+     """Gather last-dimension shards while keeping the output replicated."""
+ 
+     @staticmethod
+-    def forward(ctx: Any, group: dist.ProcessGroup, input: torch.Tensor) -> torch.Tensor:
++    def forward(ctx: Any, group: dist.ProcessGroup, input: torch.Tensor, partition_sizes: Tuple[int,
++                                                                                                ...]) -> torch.Tensor:
++        """Gather the shards of a column parallel output described by ``partition_sizes``.
++
++        The widths were resolved when the layer was built, so they need neither an extra
++        collective nor a second lookup of the tensor parallel globals. Uneven shards are zero
++        padded to a common width, which keeps the uniform (and faster)
++        ``all_gather_into_tensor`` collective usable, and are then trimmed back.
++        """
+         ctx.group = group
+-        if group is None:
+-            ctx.partition_sizes = (input.shape[-1], )
+-            ctx.tp_index = 0
+-            return input
++        ctx.partition_sizes = partition_sizes
++        ctx.tp_index = 0
+ 
+-        tp_world_size = dist.get_world_size(group=group)
+-        ctx.tp_index = dist.get_rank(group=group)
+-        if tp_world_size == 1:
+-            ctx.partition_sizes = (input.shape[-1], )
++        tp_world_size = len(partition_sizes)
++        if group is None or tp_world_size == 1:
+             return input
+ 
+-        local_size = torch.tensor([input.shape[-1]], dtype=torch.long, device=input.device)
+-        gathered_sizes = [torch.empty_like(local_size) for _ in range(tp_world_size)]
+-        dist.all_gather(gathered_sizes, local_size, group=group)
+-        ctx.partition_sizes = tuple(int(size.item()) for size in gathered_sizes)
++        ctx.tp_index = dist.get_rank(group=group)
++        local_size = partition_sizes[ctx.tp_index]
++        assert local_size == input.shape[-1], (
++            f"Rank {ctx.tp_index} produced {input.shape[-1]} output features, but the partition "
++            f"scheme {partition_sizes} frozen at construction expects {local_size}.")
+ 
+-        max_partition_size = max(ctx.partition_sizes)
+-        if input.shape[-1] == max_partition_size:
++        max_partition_size = max(partition_sizes)
++        if local_size == max_partition_size:
+             input_padded = input.contiguous()
+         else:
+             padded_shape = (*input.shape[:-1], max_partition_size)
+             input_padded = input.new_zeros(padded_shape)
+-            input_padded[..., :input.shape[-1]].copy_(input)
++            input_padded[..., :local_size].copy_(input)
++
++        buffer = input.new_empty((tp_world_size * input_padded.shape[0], *input_padded.shape[1:]))
++        dist.all_gather_into_tensor(buffer, input_padded, group=group)
+ 
+-        gathered = [torch.empty_like(input_padded) for _ in range(tp_world_size)]
+-        dist.all_gather(gathered, input_padded, group=group)
+-        return torch.cat([shard[..., :size] for shard, size in zip(gathered, ctx.partition_sizes)], dim=-1)
++        shards = buffer.view(tp_world_size, *input_padded.shape)
++        return torch.cat([shards[i].narrow(-1, 0, size) for i, size in enumerate(partition_sizes)], dim=-1)
+ 
+     @staticmethod
+-    def backward(ctx: Any, grad_output: torch.Tensor) -> Tuple[None, torch.Tensor]:
++    def backward(ctx: Any, grad_output: torch.Tensor) -> Tuple[None, torch.Tensor, None]:
+         shard_offset = sum(ctx.partition_sizes[:ctx.tp_index])
+         shard_size = ctx.partition_sizes[ctx.tp_index]
+         grad_input = grad_output.narrow(-1, shard_offset, shard_size).contiguous()
+-        return None, grad_input
++        return None, grad_input, None
+ 
+ 
+ class TensorParallel_Layer(nn.Module, ABC):
+@@ -389,6 +399,7 @@ class TensorParallel_Layer(nn.Module, ABC):
+                            output_shape=None,
+                            sub_param_shape=None,
+                            sub_param_sizes=None,
++                           partition_sizes=None,
+                            target_partition_shape=None,
+                            original_shape=None,
+                            is_bias=False,
+@@ -403,6 +414,7 @@ class TensorParallel_Layer(nn.Module, ABC):
+                                          output_shape=output_shape,
+                                          sub_param_shape=sub_param_shape,
+                                          sub_param_sizes=sub_param_sizes,
++                                         partition_sizes=partition_sizes,
+                                          target_partition_shape=target_partition_shape,
+                                          original_shape=original_shape,
+                                          is_bias=is_bias,
+@@ -421,6 +433,51 @@ class TensorParallel_Layer(nn.Module, ABC):
+         global DEEPSPEED_AUTOTP_MODE
+         return DEEPSPEED_AUTOTP_MODE == AUTOTP_MODE.TRAINING
+ 
++    def _freeze_partition_sizes(self, total_size):
++        """Resolve the tensor parallel split of this layer once, while the layer is built.
++
++        ``get_shard_size_list`` reads the process-wide tp_shard globals (``num_kv_heads``,
++        ``tp_grain_size``), which a later ``init_inference`` call or a second AutoTP model
++        overwrites. The split is part of the checkpoint contract, so it is resolved here and
++        every later consumer -- the forward gather, the parameter gather and the checkpoint
++        metadata -- reads the cached value rather than querying those globals again.
++        """
++        self._partition_sizes = tuple(get_shard_size_list(total_size, self.tp_world_size, self.name))
++        return self._partition_sizes
++
++    @torch.no_grad()
++    def _all_gather_shards(self, shard, partition_sizes, dim):
++        """Reassemble a parameter from its tensor parallel shards along ``dim``.
++
++        ``partition_sizes`` is derived locally from the same deterministic split used to
++        create the shards, so no extra collective is needed to discover the remote sizes.
++        Uneven shards are zero padded to a common size, which keeps the uniform (and
++        faster) ``all_gather_into_tensor`` collective usable, and are then trimmed back.
++        """
++        world_size = len(partition_sizes)
++        assert partition_sizes[self.tp_index] == shard.shape[dim], (
++            f"Rank {self.tp_index} holds {shard.shape[dim]} elements along dim {dim} of "
++            f"{self.name}, but the partition scheme expects {partition_sizes[self.tp_index]}.")
++
++        max_size = max(partition_sizes)
++        padded_shape = list(shard.shape)
++        padded_shape[dim] = max_size
++        if shard.shape[dim] == max_size:
++            padded = shard.contiguous()
++        else:
++            padded = shard.new_zeros(padded_shape)
++            padded.narrow(dim, 0, shard.shape[dim]).copy_(shard)
++
++        buffer = shard.new_empty((world_size * padded_shape[0], *padded_shape[1:]))
++        dist.all_gather_into_tensor(buffer, padded, group=self.mp_group)
++
++        if dim == 0 and min(partition_sizes) == max_size:
++            # Shards are uniform and concatenated along dim 0, so the flat buffer is the result.
++            return buffer
++
++        shards = buffer.view(world_size, *padded_shape)
++        return torch.cat([shards[i].narrow(dim, 0, size) for i, size in enumerate(partition_sizes)], dim=dim)
++
+     def __deepcopy__(self, memo):
+         # This function is designed for
+         # 'mp_group' (a 'ProcessGroup') cannot be pickled during deepcopy in some usage.
+@@ -631,6 +688,8 @@ class LinearAllreduce(TensorParallel_Layer):
+         super(LinearAllreduce, self).__init__(mp_group, **kwargs)
+         self.weight = module.weight
+         self.bias = module.bias
++        self._orig_weight_shape = tuple(module.weight.shape)
++        self._freeze_partition_sizes(self._orig_weight_shape[1])
+ 
+         if self._should_materialize_tp_partition():
+             self._tp_partition([self.weight, self.bias])
+@@ -650,65 +709,46 @@ class LinearAllreduce(TensorParallel_Layer):
+ 
+     @torch.no_grad()
+     def gather_params(self, params_list):
+-
+-        for idx, param in enumerate(params_list):
+-            if param is None or idx > 0:
+-                # don't gather bias
+-                return
+-            param = param.transpose(0, 1).contiguous()
+-
+-            output_param = torch.empty(self.tp_world_size * param.shape[0],
+-                                       param.shape[1],
+-                                       dtype=param.dtype,
+-                                       device=param.device)
+-            dist.all_gather_into_tensor(output_param, param, group=self.mp_group)
+-            params_list[idx].data = output_param.transpose(0, 1).contiguous()
+-        return
+-
+-    @torch.no_grad()
+-    def _tp_partition(self, params_list):
+-
+-        if not self.is_training_mode():
+-            self.uneven_partition(params_list)
++        # Row parallelism only shards the weight; the bias is replicated across ranks.
++        weight = params_list[0]
++        if weight is None:
+             return
+ 
+-        else:
+-            for idx, param in enumerate(params_list):
+-                if param is None:
+-                    # don't slipt bias
+-                    return
+-                if idx > 0:  # move bias to device at initialization
+-                    _partition = self.move(param).detach()
+-                    params_list[idx].data = _partition
+-                    return
++        if self.mp_group is None or self.tp_world_size == 1:
++            weight.data = weight.data.contiguous()
++            return
+ 
+-                _partition = torch.chunk(param, self.tp_world_size, dim=-1)[self.tp_index]
++        weight.data = self._all_gather_shards(weight, self._partition_sizes, dim=1).contiguous()
+ 
+-                _partition = self.move(_partition).detach()
++    @torch.no_grad()
++    def _tp_partition(self, params_list):
++        # Row parallelism shards the weight's input dimension; the bias stays replicated.
++        self.uneven_partition(params_list)
+ 
+-                params_list[idx].data = _partition
++        bias = params_list[1] if len(params_list) > 1 else None
++        if bias is not None and self.is_training_mode():
++            # Training materializes the replicated bias on the target device.
++            bias.data = self.move(bias).detach()
+ 
+     def uneven_partition(self, params_list):
+         for idx, param in enumerate(params_list):
+             if param is None or idx > 0:
+                 # don't slipt bias
+                 return
+-            assert self.name is not None, "The module name must be provided in the initialization."
+-            _partition = params_list[idx].split(get_shard_size_list(params_list[idx].shape[1], self.tp_world_size,
+-                                                                    self.name),
+-                                                dim=1)[self.tp_index]
++            _partition = params_list[idx].split(self._partition_sizes, dim=1)[self.tp_index]
+ 
+             _partition = self.move(_partition).detach()
+             params_list[idx].data = _partition
+ 
+     def _mark_uc_metadata(self):
+-        original_weight_shape = (self.weight.shape[0], self.weight.shape[1] * self.tp_world_size)
+         self._set_param_uc_meta(self.weight,
+                                 partition_type='row',
+                                 partition_dim=1,
+-                                logical_shape=original_weight_shape,
+-                                output_shape=(original_weight_shape[0], ),
+-                                original_shape=original_weight_shape)
++                                logical_shape=self._orig_weight_shape,
++                                output_shape=(self._orig_weight_shape[0], ),
++                                partition_sizes=self._partition_sizes,
++                                target_partition_shape=tuple(self.weight.shape),
++                                original_shape=self._orig_weight_shape)
+         if self.bias is not None:
+             self._set_param_uc_meta(self.bias,
+                                     partition_type='row',
+@@ -728,6 +768,9 @@ class LinearLayer(TensorParallel_Layer):
+         self.weight = module.weight
+         self.bias = module.bias
+         self.gather_output = gather_output
++        self._orig_weight_shape = tuple(module.weight.shape)
++        self._orig_bias_shape = tuple(module.bias.shape) if self.bias is not None else None
++        self._freeze_partition_sizes(self._orig_weight_shape[0])
+         if not skip_partition and self._should_materialize_tp_partition():
+             self._tp_partition([self.weight, self.bias])
+         self.support_training = True
+@@ -747,36 +790,27 @@ class LinearLayer(TensorParallel_Layer):
+             output = AsyncColumnParallel.apply(self.mp_group, input, self.weight, self.bias)
+ 
+         if self.gather_output:
+-            output = GatherFromTensorParallelRegion.apply(self.mp_group, output)
++            output = GatherFromTensorParallelRegion.apply(self.mp_group, output, self._partition_sizes)
+ 
+         return output
+ 
+     @torch.no_grad()
+     def gather_params(self, params_list):
+-        #  Does not support uneven shard.
+         for idx, param in enumerate(params_list):
++            if param is None:
++                continue
++
++            if self.mp_group is None or self.tp_world_size == 1:
++                params_list[idx].data = param.data.contiguous()
++                continue
+ 
+-            output_param = torch.empty((self.tp_world_size * param.shape[0], *param.shape[1:]),
+-                                       dtype=param.dtype,
+-                                       device=param.device)
+-            dist.all_gather_into_tensor(output_param, param, group=self.mp_group)
+-            params_list[idx].data = output_param.contiguous()
++            # Column parallelism shards dim 0 of both the weight and the bias, so gathering
++            # along dim 0 restores the original shape.
++            params_list[idx].data = self._all_gather_shards(param, self._partition_sizes, dim=0).contiguous()
+ 
+     @torch.no_grad()
+     def _tp_partition(self, params_list):
+-
+-        if not self.is_training_mode():
+-            self.uneven_partition(params_list)
+-            return
+-        for idx, param in enumerate(params_list):
+-            if param is None:
+-                return
+-            #split bias if provide
+-            _partition = torch.chunk(param, self.tp_world_size, dim=0)[self.tp_index]
+-
+-            _partition = self.move(_partition).detach()
+-
+-            params_list[idx].data = _partition
++        self.uneven_partition(params_list)
+ 
+     def uneven_partition(self, params_list):
+ 
+@@ -784,32 +818,31 @@ class LinearLayer(TensorParallel_Layer):
+             if param is None:
+                 #split bias if provide
+                 return
+-            assert self.name is not None, "The module name must be provided in the initialization."
+-            _partition = params_list[idx].split(get_shard_size_list(params_list[idx].shape[0], self.tp_world_size,
+-                                                                    self.name),
+-                                                dim=0)[self.tp_index]
++            _partition = params_list[idx].split(self._partition_sizes, dim=0)[self.tp_index]
+ 
+             _partition = self.move(_partition).detach()
+ 
+             params_list[idx].data = _partition
+ 
+     def _mark_uc_metadata(self):
+-        original_out_dim = self.weight.shape[0] * self.tp_world_size
+-        original_weight_shape = (original_out_dim, self.weight.shape[1])
++        original_out_dim = self._orig_weight_shape[0]
+         self._set_param_uc_meta(self.weight,
+                                 partition_type='column',
+                                 partition_dim=0,
+-                                logical_shape=original_weight_shape,
++                                logical_shape=self._orig_weight_shape,
+                                 output_shape=(original_out_dim, ),
+-                                original_shape=original_weight_shape)
++                                partition_sizes=self._partition_sizes,
++                                target_partition_shape=tuple(self.weight.shape),
++                                original_shape=self._orig_weight_shape)
+         if self.bias is not None:
+-            original_bias_shape = (self.bias.shape[0] * self.tp_world_size, )
+             self._set_param_uc_meta(self.bias,
+                                     partition_type='column',
+                                     partition_dim=0,
+-                                    logical_shape=original_bias_shape,
+-                                    output_shape=original_bias_shape,
+-                                    original_shape=original_bias_shape,
++                                    logical_shape=self._orig_bias_shape,
++                                    output_shape=self._orig_bias_shape,
++                                    partition_sizes=self._partition_sizes,
++                                    target_partition_shape=tuple(self.bias.shape),
++                                    original_shape=self._orig_bias_shape,
+                                     is_bias=True)
+ 
+     # for bwc
+diff --git a/deepspeed/module_inject/tp_shard.py b/deepspeed/module_inject/tp_shard.py
+index f1dbaae43..cd48d7990 100644
+--- a/deepspeed/module_inject/tp_shard.py
++++ b/deepspeed/module_inject/tp_shard.py
+@@ -61,8 +61,14 @@ def get_shard_size(total_size, mp_size, name=None, rank=None):
+         return total_size * my_slices // num_kv_heads
+     else:
+         if total_size >= tp_grain_size:
+-            grain_size = total_size // tp_grain_size
+-            return (grain_size // mp_size + (1 if rank < (grain_size % mp_size) else 0)) * tp_grain_size
++            grain_size, remainder = divmod(total_size, tp_grain_size)
++            shard_size = (grain_size // mp_size + (1 if rank < (grain_size % mp_size) else 0)) * tp_grain_size
++            if rank == mp_size - 1:
++                # Quantizing to tp_grain_size would otherwise drop total_size % tp_grain_size
++                # and silently truncate the dimension. Giving that tail to the last rank keeps
++                # every other rank aligned for the compute kernels.
++                shard_size += remainder
++            return shard_size
+         else:
+             return total_size // mp_size + (1 if rank < (total_size % mp_size) else 0)
+ 
+@@ -76,4 +82,10 @@ def get_shard_size_list(total_size, mp_size, name=None):
+     shard_sizes = []
+     for i in range(mp_size):
+         shard_sizes.append(get_shard_size(total_size, mp_size, name, i))
++    # Shards must tile the dimension exactly, otherwise the partitioned weights no longer
++    # reconstruct the original tensor.
++    assert sum(shard_sizes) == total_size, (
++        f"AutoTP shard sizes {shard_sizes} for layer '{name}' do not sum to the dimension size "
++        f"{total_size} with tp_size={mp_size}, tp_grain_size={tp_grain_size} and "
++        f"num_kv_heads={num_kv_heads}.")
+     return shard_sizes
+diff --git a/deepspeed/runtime/engine.py b/deepspeed/runtime/engine.py
+index 42dbd8ad7..316226f56 100755
+--- a/deepspeed/runtime/engine.py
++++ b/deepspeed/runtime/engine.py
+@@ -135,7 +135,7 @@ from ..moe.utils import is_moe_param, configure_moe_param_groups
+ from ..git_version_info import version
+ 
+ from deepspeed.profiling.flops_profiler.profiler import FlopsProfiler
+-from deepspeed.utils.logging import print_dist, print_json_dist, print_configuration, set_log_level_from_string
++from deepspeed.utils.logging import print_json_dist, print_configuration, set_log_level_from_string
+ 
+ from deepspeed.accelerator import get_accelerator
+ 
+@@ -710,42 +710,9 @@ class DeepSpeedEngine(Module):
+             partition_config = tp_config.get_partition_config_object()
+ 
+         model_config = getattr(model, "config", None)
+-        base_tp_plan = getattr(model_config, "base_model_tp_plan", None) if model_config is not None else None
+-        class_tp_plan = getattr(type(model), "_tp_plan", None)
+-        runtime_tp_plan = getattr(model, "__dict__", {}).get("_tp_plan")
+         from deepspeed.runtime.tensor_parallel.config import _get_hf_tp_plan
+         hf_tp_plan = _get_hf_tp_plan(model)
+ 
+-        def lm_head_entries(tp_plan):
+-            if not isinstance(tp_plan, dict):
+-                return {}
+-            return {
+-                pattern: style
+-                for pattern, style in tp_plan.items()
+-                if any(part in ("lm_head", "embed_out") for part in pattern.split('.'))
+-            }
+-
+-        lm_head_modules = [
+-            name for name, _ in model.named_modules()
+-            if name and any(part in ("lm_head", "embed_out") for part in name.split('.'))
+-        ]
+-        selected_route = "custom partition_config" if partition_config is not None else "HuggingFace tp_plan or AutoTP"
+-        model_class = f"{type(model).__module__}.{type(model).__qualname__}"
+-        print_dist(
+-            f"AutoTP tp_plan diagnostics: model_class={model_class}; route={selected_route}; "
+-            f"base_model_tp_plan={base_tp_plan!r}; type(model)._tp_plan={class_tp_plan!r}; "
+-            f"instance_tp_plan={runtime_tp_plan!r}; "
+-            f"effective_tp_plan={hf_tp_plan!r}",
+-            ranks=[0],
+-        )
+-        print_dist(
+-            f"AutoTP lm_head diagnostics: modules={lm_head_modules!r}; "
+-            f"base_entries={lm_head_entries(base_tp_plan)!r}; class_entries={lm_head_entries(class_tp_plan)!r}; "
+-            f"runtime_entries={lm_head_entries(runtime_tp_plan)!r}; "
+-            f"effective_entries={lm_head_entries(hf_tp_plan)!r}",
+-            ranks=[0],
+-        )
+-
+         if partition_config is not None:
+             autotp = AutoTP(module=model,
+                             all_reduce_linears=(),
+@@ -777,7 +744,7 @@ class DeepSpeedEngine(Module):
+                     pattern for pattern, style in hf_tp_plan.items()
+                     if style.lower() in ("colwise_rep", "colwise_gather_output")
+                 ]
+-                print_dist(
++                log_dist(
+                     f"Using HuggingFace tp_plan with {len(layer_specs)} layer specifications; "
+                     f"gathered column output patterns={gathered_output_patterns}",
+                     ranks=[0],
+@@ -799,14 +766,14 @@ class DeepSpeedEngine(Module):
+                 setattr(model, UNIVERSAL_CHECKPOINT_INFO, collect_autotp_universal_checkpoint_info(model))
+                 setattr(model, "ds_autotp_parsed", True)
+                 return
+-            print_dist(
++            log_dist(
+                 f"AutoTP: effective HuggingFace tp_plan could not be converted; falling back to heuristic AutoTP. "
+                 f"styles={sorted(set(hf_tp_plan.values()))!r}",
+                 ranks=[0],
+             )
+         else:
+-            print_dist("AutoTP: no effective HuggingFace tp_plan was found; falling back to heuristic AutoTP.",
+-                       ranks=[0])
++            log_dist("AutoTP: no effective HuggingFace tp_plan was found; falling back to heuristic AutoTP.",
++                     ranks=[0])
+ 
+         parser_dict = AutoTP.tp_parser(model)
+         for client_module, injection_policy in parser_dict:
+diff --git a/docs/_tutorials/autotp-training.md b/docs/_tutorials/autotp-training.md
+index 281a4c0f0..2930510b3 100644
+--- a/docs/_tutorials/autotp-training.md
++++ b/docs/_tutorials/autotp-training.md
+@@ -121,7 +121,10 @@ DeepSpeed will read the model's `tp_plan` at initialization and convert it to
+ internal partition rules. The supported types are `colwise`, `rowwise`,
+ and `colwise_gather_output`(`colwise_rep`). The gathered column styles shard
+ the linear weight along its output dimension and AllGather the local output
+-shards so every tensor-parallel rank receives the complete output.
++shards so every tensor-parallel rank receives the complete output. For untied
++output layers, the output dimension does not need to be divisible by
++`autotp_size`; DeepSpeed uses uneven local shards and gathers back to the
++original logical output size.
+ 
+ Gathered column parallelism currently supports untied output layers. If an
+ output layer such as `lm_head` shares the same runtime `Parameter` object with
+diff --git a/docs/code-docs/source/training.rst b/docs/code-docs/source/training.rst
+index 9cb67f794..d0844d46f 100644
+--- a/docs/code-docs/source/training.rst
++++ b/docs/code-docs/source/training.rst
+@@ -497,10 +497,13 @@ The resolution priority is:
+ 2. HuggingFace ``tp_plan`` (from model config)
+ 3. AutoTP heuristics / ``preset_model`` (lowest priority)
+ 
+-Currently only ``colwise`` and ``rowwise`` partition types from the HuggingFace
+-``tp_plan`` are supported. Other types (``colwise_rep``, ``local_colwise``,
+-``local_rowwise``, ``local_packed_rowwise``, ``gather``, ``sequence_parallel``)
+-are not yet handled and will raise an error.
++Currently ``colwise``, ``rowwise``, and gathered column styles
++(``colwise_gather_output`` / ``colwise_rep``) from the HuggingFace ``tp_plan``
++are supported. Gathered column output layers may have output dimensions that are
++not divisible by ``autotp_size``; DeepSpeed uses uneven local shards and gathers
++back to the original logical output size. Other types (``local_colwise``,
++``local_rowwise``, ``local_packed_rowwise``, ``gather``,
++``sequence_parallel``) are not yet handled and will raise an error.
+ 
+ Heuristic rules
+ ^^^^^^^^^^^^^^^
+diff --git a/tests/unit/checkpoint/test_autotp_uc_checkpoint.py b/tests/unit/checkpoint/test_autotp_uc_checkpoint.py
+index dab53a634..4dc26573e 100644
+--- a/tests/unit/checkpoint/test_autotp_uc_checkpoint.py
++++ b/tests/unit/checkpoint/test_autotp_uc_checkpoint.py
+@@ -8,6 +8,7 @@ import os
+ import types
+ from types import SimpleNamespace
+ 
++import pytest
+ import torch
+ import torch.nn as nn
+ 
+@@ -153,6 +154,46 @@ def test_resolve_autotp_partition_subparam_sizes_uneven_gqa_like():
+     assert torch.equal(slice_flat, expected)
+ 
+ 
++def test_resolve_autotp_partition_uses_uneven_partition_sizes():
++    full_hp_param = torch.arange(101 * 4, dtype=torch.float32).view(101, 4)
++    param = _make_param(
++        (50, 4), {
++            'partition_type': 'column',
++            'partition_dim': 0,
++            'logical_shape': (101, 4),
++            'output_shape': (101, ),
++            'partition_sizes': (51, 50),
++            'original_shape': (101, 4),
++            'is_bias': False,
++            'replicated': False,
++        })
++
++    slice_flat = _resolve_autotp_partition(param, {PARAM: full_hp_param}, full_hp_param, tp_rank=1, tp_world_size=2)
++
++    expected = full_hp_param.narrow(0, 51, 50).flatten()
++    assert torch.equal(slice_flat, expected)
++
++
++def test_resolve_autotp_partition_uses_uneven_partition_sizes_for_bias():
++    full_hp_param = torch.arange(101, dtype=torch.float32)
++    param = _make_param(
++        (50, ), {
++            'partition_type': 'column',
++            'partition_dim': 0,
++            'logical_shape': (101, ),
++            'output_shape': (101, ),
++            'partition_sizes': (51, 50),
++            'original_shape': (101, ),
++            'is_bias': True,
++            'replicated': False,
++        })
++
++    slice_flat = _resolve_autotp_partition(param, {PARAM: full_hp_param}, full_hp_param, tp_rank=1, tp_world_size=2)
++
++    expected = full_hp_param.narrow(0, 51, 50).flatten()
++    assert torch.equal(slice_flat, expected)
++
++
+ def test_resolve_autotp_partition_replicated_bias():
+     full_hp_param = torch.arange(8, dtype=torch.float32)
+     param = _make_param(
+@@ -254,8 +295,9 @@ def test_merge_tp_slices_uses_row_parallel_cat_dim(tmp_path):
+     output_dir = tmp_path / "out"
+     param_name = "module.proj.weight"
+ 
+-    tp0 = torch.arange(16, dtype=torch.float32).view(4, 4)
+-    tp1 = torch.arange(16, 32, dtype=torch.float32).view(4, 4)
++    # Uneven row-parallel shards: rank 0 owns 3 input columns, rank 1 owns 2.
++    tp0 = torch.arange(12, dtype=torch.float32).view(4, 3)
++    tp1 = torch.arange(12, 20, dtype=torch.float32).view(4, 2)
+     _write_tp_states(slice_dir, param_name, 0, tp0)
+     _write_tp_states(slice_dir, param_name, 1, tp1)
+ 
+@@ -266,7 +308,7 @@ def test_merge_tp_slices_uses_row_parallel_cat_dim(tmp_path):
+     }
+ 
+     merge_tp_slices(uc_info, str(output_dir), str(slice_dir), 2,
+-                    (param_name, [torch.Size([4, 4]), torch.Size([4, 4])]))
++                    (param_name, [torch.Size([4, 3]), torch.Size([4, 2])]))
+ 
+     ckpt = torch.load(output_dir / param_name / "fp32.pt", weights_only=False)
+     assert ckpt[CAT_DIM] == 1
+@@ -527,6 +569,29 @@ def test_group_per_tp_shapes_handles_pp_local_params():
+     assert result['layer1.weight'] == [(2, 4), (2, 4)]
+ 
+ 
++def test_group_per_tp_shapes_rejects_disagreeing_pipeline_replicas():
++    # A tied parameter is stored in every PP stage's file. Replicas that disagree mean the
++    # tie was partitioned inconsistently, which must not be papered over by keeping the
++    # stage that happened to be read last.
++    slice_shapes_by_tp = [
++        {
++            'tied_modules.embed.weight': (3, 4)
++        },  # pp0_tp0
++        {
++            'tied_modules.embed.weight': (2, 4)
++        },  # pp0_tp1
++        {
++            'tied_modules.embed.weight': (1, 4)
++        },  # pp1_tp0 disagrees with pp0_tp0
++        {
++            'tied_modules.embed.weight': (2, 4)
++        },  # pp1_tp1
++    ]
++
++    with pytest.raises(AssertionError, match='disagree on shape'):
++        _group_per_tp_shapes(slice_shapes_by_tp, pp_degree=2, tp_degree=2)
++
++
+ class TestRealCheckpointUniversalConversionTPxPP(DistributedTest):
+     # Generate a real ZeRO-1 checkpoint with TP=2, PP=2 on CPU (gloo) using the
+     # production DeepSpeed writer, then convert it to a universal checkpoint.
+@@ -617,3 +682,205 @@ class TestRealCheckpointUniversalConversionTPxPP(DistributedTest):
+             convert_to_universal(args)
+             assert os.path.isdir(os.path.join(out_dir, "zero")), "universal 'zero' dir not written"
+         dist.barrier()
++
++
++CP_TAG = "uneven_tp"
++UNIVERSAL_TAG = f"{CP_TAG}_universal"
++
++
++class UnevenVocabLmHeadModel(torch.nn.Module):
++
++    def __init__(self, hidden_dim, vocab_size):
++        super().__init__()
++        self.lm_head = torch.nn.Linear(hidden_dim, vocab_size)
++
++    def forward(self, x):
++        return self.lm_head(x).sum()
++
++
++class GQAAttentionModel(torch.nn.Module):
++    """Column-parallel q/k/v feeding a row-parallel o_proj, sharded on kv-head boundaries."""
++
++    class Config:
++
++        def __init__(self, hidden_dim, num_heads):
++            self.hidden_size = hidden_dim
++            self.num_attention_heads = num_heads
++            self.num_key_value_heads = num_heads
++
++    class Attention(torch.nn.Module):
++
++        def __init__(self, hidden_dim):
++            super().__init__()
++            self.q_proj = torch.nn.Linear(hidden_dim, hidden_dim, bias=False)
++            self.k_proj = torch.nn.Linear(hidden_dim, hidden_dim, bias=False)
++            self.v_proj = torch.nn.Linear(hidden_dim, hidden_dim, bias=False)
++            self.o_proj = torch.nn.Linear(hidden_dim, hidden_dim, bias=False)
++
++        def forward(self, x):
++            return self.o_proj(self.q_proj(x) + self.k_proj(x) + self.v_proj(x))
++
++    class Layer(torch.nn.Module):
++
++        def __init__(self, hidden_dim):
++            super().__init__()
++            self.self_attn = GQAAttentionModel.Attention(hidden_dim)
++
++        def forward(self, x):
++            return self.self_attn(x)
++
++    def __init__(self, hidden_dim, num_heads):
++        super().__init__()
++        self.layers = torch.nn.ModuleList([GQAAttentionModel.Layer(hidden_dim)])
++        self.config = GQAAttentionModel.Config(hidden_dim, num_heads)
++
++    def forward(self, x):
++        for layer in self.layers:
++            x = layer(x)
++        return x.sum()
++
++
++def _convert_to_universal(checkpoint_dir, universal_dir):
++    convert_to_universal(
++        SimpleNamespace(input_folder=checkpoint_dir,
++                        output_folder=universal_dir,
++                        num_extract_workers=1,
++                        num_merge_workers=1,
++                        keep_temp_folder=False,
++                        strict=True,
++                        inject_missing_state=False))
++
++
++def _train_steps(engine, hidden_dim, steps=3):
++    for _ in range(steps):
++        batch = torch.randn(2, hidden_dim, device=engine.device)
++        dist.broadcast(batch, src=0)
++        engine.backward(engine(batch))
++        engine.step()
++
++
++def _save_and_convert(engine, tmpdir):
++    engine.save_checkpoint(tmpdir, tag=CP_TAG, client_state={"iteration": 3})
++    dist.barrier()
++    if dist.get_rank() == 0:
++        _convert_to_universal(os.path.join(tmpdir, CP_TAG), os.path.join(tmpdir, UNIVERSAL_TAG))
++    dist.barrier()
++
++
++class TestUnevenColumnUniversalCheckpoint(DistributedTest):
++    world_size = 2
++    reuse_dist_env = False
++
++    def test_save_convert_load_uneven_lm_head(self, tmpdir):
++        hidden_dim = 12
++        vocab_size = 101  # Not divisible by the two TP ranks, giving shards of 51 and 50.
++        config_dict = {
++            "train_micro_batch_size_per_gpu": 1,
++            "optimizer": {
++                "type": "Adam",
++                "params": {
++                    "lr": 1e-3
++                }
++            },
++            "tensor_parallel": {
++                "autotp_size": self.world_size,
++                "partition_config": {
++                    "use_default_specs":
++                    False,
++                    "layer_specs": [{
++                        "patterns": [r".*lm_head\.weight$"],
++                        "partition_type": "column",
++                        "gather_output": True,
++                    }],
++                },
++            },
++            "zero_optimization": {
++                "stage": 1
++            },
++        }
++
++        torch.manual_seed(42)
++        model = UnevenVocabLmHeadModel(hidden_dim, vocab_size)
++        engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config_dict)
++        assert engine.module.lm_head.weight.shape[0] in (51, 50)
++
++        _train_steps(engine, hidden_dim)
++        expected_weight = engine.module.lm_head.weight.detach().cpu().clone()
++        expected_bias = engine.module.lm_head.bias.detach().cpu().clone()
++        _save_and_convert(engine, tmpdir)
++
++        if dist.get_rank() == 0:
++            merged = torch.load(os.path.join(tmpdir, UNIVERSAL_TAG, "zero", "lm_head.weight", "fp32.pt"),
++                                weights_only=False)
++            assert tuple(merged[PARAM].shape) == (vocab_size, hidden_dim)
++
++        config_dict["checkpoint"] = {"load_universal": True}
++        torch.manual_seed(123)
++        restored = UnevenVocabLmHeadModel(hidden_dim, vocab_size)
++        restored_engine, _, _, _ = deepspeed.initialize(model=restored,
++                                                        model_parameters=restored.parameters(),
++                                                        config=config_dict)
++        restored_engine.load_checkpoint(tmpdir, tag=UNIVERSAL_TAG, load_optimizer_states=True)
++
++        torch.testing.assert_close(restored_engine.module.lm_head.weight.detach().cpu(), expected_weight)
++        torch.testing.assert_close(restored_engine.module.lm_head.bias.detach().cpu(), expected_bias)
++
++        # The optimizer must be usable after the restore.
++        _train_steps(restored_engine, hidden_dim, steps=1)
++
++
++class TestUnevenRowUniversalCheckpoint(DistributedTest):
++    world_size = 4
++    reuse_dist_env = False
++
++    def test_save_convert_load_uneven_row_parallel(self, tmpdir):
++        hidden_dim = 384
++        num_heads = 6  # Not divisible by the four TP ranks, giving shards of 128/128/64/64.
++        config_dict = {
++            "train_micro_batch_size_per_gpu": 1,
++            "optimizer": {
++                "type": "Adam",
++                "params": {
++                    "lr": 1e-3
++                }
++            },
++            "tensor_parallel": {
++                "autotp_size": self.world_size
++            },
++            "zero_optimization": {
++                "stage": 1
++            },
++        }
++
++        torch.manual_seed(42)
++        model = GQAAttentionModel(hidden_dim, num_heads)
++        engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config_dict)
++
++        attn = engine.module.layers[0].self_attn
++        # Column and row parallelism must shard the same dimension identically.
++        assert attn.q_proj.weight.shape[0] == attn.o_proj.weight.shape[1]
++
++        _train_steps(engine, hidden_dim)
++        expected_q = attn.q_proj.weight.detach().cpu().clone()
++        expected_o = attn.o_proj.weight.detach().cpu().clone()
++        _save_and_convert(engine, tmpdir)
++
++        if dist.get_rank() == 0:
++            merged = torch.load(os.path.join(tmpdir, UNIVERSAL_TAG, "zero", "layers.0.self_attn.o_proj.weight",
++                                             "fp32.pt"),
++                                weights_only=False)
++            assert tuple(merged[PARAM].shape) == (hidden_dim, hidden_dim)
++
++        config_dict["checkpoint"] = {"load_universal": True}
++        torch.manual_seed(123)
++        restored = GQAAttentionModel(hidden_dim, num_heads)
++        restored_engine, _, _, _ = deepspeed.initialize(model=restored,
++                                                        model_parameters=restored.parameters(),
++                                                        config=config_dict)
++        restored_engine.load_checkpoint(tmpdir, tag=UNIVERSAL_TAG, load_optimizer_states=True)
++
++        restored_attn = restored_engine.module.layers[0].self_attn
++        torch.testing.assert_close(restored_attn.q_proj.weight.detach().cpu(), expected_q)
++        torch.testing.assert_close(restored_attn.o_proj.weight.detach().cpu(), expected_o)
++
++        _train_steps(restored_engine, hidden_dim, steps=1)
+diff --git a/tests/unit/model_parallelism/test_autotp_training.py b/tests/unit/model_parallelism/test_autotp_training.py
+index 9fb571ffb..f694ef18e 100644
+--- a/tests/unit/model_parallelism/test_autotp_training.py
++++ b/tests/unit/model_parallelism/test_autotp_training.py
+@@ -16,8 +16,8 @@ from unit.simple_model import SimpleModel, random_dataloader
+ from deepspeed.utils import groups
+ from contextlib import contextmanager
+ from torch import nn
+-from deepspeed.module_inject.layers import (LinearAllreduce, LinearLayer, LmHeadLinearAllreduce, set_autotp_mode,
+-                                            is_autotp_training_mode)
++from deepspeed.module_inject.layers import LinearAllreduce, LinearLayer, set_autotp_mode, is_autotp_training_mode
++from deepspeed.module_inject.tp_shard import get_shard_size_list
+ from unit.checkpoint.common import compare_lr_scheduler_states, compare_optimizer_states
+ import os
+ from deepspeed.runtime.utils import is_model_parallel_parameter
+@@ -416,10 +416,12 @@ class TestTpDataloaderCorrectness(DistributedTest):
+             model(batch[0], batch[1])
+ 
+ 
+-def process_linear_layer(hidden_dim, input):
++def process_linear_layer(hidden_dim, input, output_dim=None):
+     torch.manual_seed(42)
++    if output_dim is None:
++        output_dim = hidden_dim
+     torch_linear = nn.Linear(hidden_dim,
+-                             hidden_dim,
++                             output_dim,
+                              dtype=preferred_dtype(),
+                              device=get_accelerator().current_device())
+     torch_out = torch_linear(input)
+@@ -428,7 +430,12 @@ def process_linear_layer(hidden_dim, input):
+     return torch_linear, torch_out
+ 
+ 
+-def run_tp_layer_fwd_bwd(tp_size, tp_overlap_comm, column_parallel, use_tp_model_init=False, gather_output=False):
++def run_tp_layer_fwd_bwd(tp_size,
++                         tp_overlap_comm,
++                         column_parallel,
++                         use_tp_model_init=False,
++                         gather_output=False,
++                         output_dim=None):
+     skip_on_device()
+     hidden_dim = 128
+     batch_size_per_device = 1
+@@ -485,7 +492,7 @@ def run_tp_layer_fwd_bwd(tp_size, tp_overlap_comm, column_parallel, use_tp_model
+ 
+     # Note: correctness checks below use standalone TP wrappers and do not
+     # rely on the model's AutoTP-partitioned parameters.
+-    torch_linear, torch_out = process_linear_layer(hidden_dim, input)
++    torch_linear, torch_out = process_linear_layer(hidden_dim, input, output_dim=output_dim)
+     if column_parallel:
+         linear = LinearLayer(deepcopy(torch_linear),
+                              groups.get_tensor_model_parallel_group(),
+@@ -495,10 +502,13 @@ def run_tp_layer_fwd_bwd(tp_size, tp_overlap_comm, column_parallel, use_tp_model
+         loss.backward()
+ 
+         expected_out = torch_out
++        output_partition_sizes = get_shard_size_list(torch_out.shape[-1], tp_size, linear.name)
++        tp_rank = groups.get_tensor_model_parallel_rank()
+         if not gather_output:
+-            expected_out = torch.chunk(torch_out, tp_size, dim=-1)[groups.get_tensor_model_parallel_rank()]
+-        torch_grad = torch.chunk(torch_linear.weight.grad, tp_size, dim=0)[groups.get_tensor_model_parallel_rank()]
+-        torch_bias_grad = torch.chunk(torch_linear.bias.grad, tp_size, dim=0)[groups.get_tensor_model_parallel_rank()]
++            shard_offset = sum(output_partition_sizes[:tp_rank])
++            expected_out = torch_out.narrow(-1, shard_offset, output_partition_sizes[tp_rank])
++        torch_grad = torch_linear.weight.grad.split(output_partition_sizes, dim=0)[tp_rank]
++        torch_bias_grad = torch_linear.bias.grad.split(output_partition_sizes, dim=0)[tp_rank]
+ 
+         torch.testing.assert_close(linear.bias.grad,
+                                    torch_bias_grad.to(get_accelerator().current_device()),
+@@ -548,6 +558,9 @@ class TestTpLayerFwdBwd(DistributedTest):
+     def testGatheredColumnParallel(self, tp_size: int, tp_overlap_comm: bool):
+         run_tp_layer_fwd_bwd(tp_size, tp_overlap_comm, column_parallel=True, gather_output=True)
+ 
++    def testUnevenGatheredColumnParallel(self, tp_size: int, tp_overlap_comm: bool):
++        run_tp_layer_fwd_bwd(tp_size, tp_overlap_comm, column_parallel=True, gather_output=True, output_dim=129)
++
+ 
+ # @pytest.mark.sequential
+ class TestParamsGather(DistributedTest):
+@@ -636,6 +649,68 @@ class TestParamsGather(DistributedTest):
+ 
+         assert expected_tp_params == tp_params2
+ 
++    def test_uneven_linear_gather_params(self):
++        skip_on_device()
++        tp_size = 4
++        hidden_dim = 128
++        output_dim = 129
++        config_dict = {
++            "train_micro_batch_size_per_gpu": 1,
++            "optimizer": {
++                "type": "Adam",
++                "params": {
++                    "lr": 1e-6
++                }
++            },
++            "tensor_parallel": {
++                "autotp_size": tp_size,
++                "partition_config": {
++                    "use_default_specs": False,
++                    "layer_specs": [{
++                        "patterns": [".*\\.weight$"],
++                        "partition_type": "skip",
++                    }],
++                }
++            },
++            "zero_optimization": {
++                "stage": 0,
++            }
++        }
++        if preferred_dtype() is torch.float16:
++            config_dict["fp16"] = {"enabled": True}
++        elif preferred_dtype() is torch.bfloat16:
++            config_dict["bf16"] = {"enabled": True}
++
++        torch.manual_seed(42)
++        model = SequentialLinearModel(hidden_dim=hidden_dim)
++        model, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config_dict)
++
++        torch_linear = nn.Linear(hidden_dim, output_dim, dtype=preferred_dtype(), device="cpu")
++        total_params = sum(p.numel() for p in torch_linear.parameters())
++        tp_layer = LinearLayer(deepcopy(torch_linear), groups.get_tensor_model_parallel_group())
++        tp_rank = groups.get_tensor_model_parallel_rank()
++        output_partition_sizes = get_shard_size_list(output_dim, tp_size, tp_layer.name)
++        expected_tp_params = output_partition_sizes[tp_rank] * (hidden_dim + 1)
++
++        assert expected_tp_params == sum(p.numel() for p in tp_layer.parameters())
++
++        for name, param in tp_layer.named_parameters(recurse=False):
++            if is_model_parallel_parameter(param):
++                param.gather_params([param])
++
++        torch_linear = torch_linear.to(get_accelerator().current_device())
++        is_same_weights = all(
++            torch.equal(param1, param2) for param1, param2 in zip(tp_layer.parameters(), torch_linear.parameters()))
++
++        assert is_same_weights
++        assert total_params == sum(p.numel() for p in tp_layer.parameters())
++
++        for name, param in tp_layer.named_parameters(recurse=False):
++            if is_model_parallel_parameter(param):
++                param._tp_partition([param])
++
++        assert expected_tp_params == sum(p.numel() for p in tp_layer.parameters())
++
+ 
+ def dummy_init_engine(config):
+     # This is a dummy initialization function for the DeepSpeed engine.
+@@ -702,8 +777,11 @@ class TestUnevenVocabLmHeadCheckpoint(DistributedTest):
+ 
+         engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config_dict)
+ 
+-        assert isinstance(engine.module.lm_head, LmHeadLinearAllreduce)
+-        assert engine.module.lm_head.weight.shape == (vocab_size, hidden_dim // self.world_size)
++        tp_rank = groups.get_tensor_model_parallel_rank()
++        output_partition_sizes = get_shard_size_list(vocab_size, self.world_size, "lm_head")
++        assert isinstance(engine.module.lm_head, LinearLayer)
++        assert engine.module.lm_head.gather_output
++        assert engine.module.lm_head.weight.shape == (output_partition_sizes[tp_rank], hidden_dim)
+ 
+         checkpoint = engine._consolidated_16bit_state_dict()
+ 
+diff --git a/tests/unit/model_parallelism/test_tp_plan_real_models.py b/tests/unit/model_parallelism/test_tp_plan_real_models.py
+index 0268ed4cf..d65b09a63 100644
+--- a/tests/unit/model_parallelism/test_tp_plan_real_models.py
++++ b/tests/unit/model_parallelism/test_tp_plan_real_models.py
+@@ -9,6 +9,7 @@ import deepspeed.comm as dist
+ import deepspeed
+ from deepspeed.accelerator import get_accelerator
+ from deepspeed.module_inject.layers import LinearLayer
++from deepspeed.module_inject.tp_shard import get_shard_size_list
+ from deepspeed.runtime.tensor_parallel.config import _get_hf_tp_plan
+ from deepspeed.utils import groups
+ from unit.common import DistributedTest
+@@ -93,6 +94,57 @@ class TestTPPlanRealHFModels(DistributedTest):
+ 
+             assert not torch.isnan(outputs.loss)
+ 
++    def test_qwen2_tp_plan_with_uneven_vocab(self):
++        """Test an untied Qwen2 LM head with an uneven gathered vocabulary size."""
++        skip_on_device()
++
++        try:
++            from transformers import AutoModelForCausalLM, Qwen2Config
++        except ImportError:
++            pytest.skip("transformers not installed")
++
++        config = Qwen2Config(
++            vocab_size=1001,
++            hidden_size=128,
++            intermediate_size=256,
++            num_hidden_layers=1,
++            num_attention_heads=4,
++            num_key_value_heads=4,
++            tie_word_embeddings=False,
++        )
++
++        model = AutoModelForCausalLM.from_config(config)
++        assert model.lm_head.weight is not model.model.embed_tokens.weight
++
++        ds_config = {
++            "train_micro_batch_size_per_gpu": 1,
++            "tensor_parallel": {
++                "autotp_size": 2
++            },
++            "zero_optimization": {
++                "stage": 0
++            },
++        }
++
++        engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=ds_config)
++
++        tp_rank = groups.get_tensor_model_parallel_rank()
++        output_partition_sizes = get_shard_size_list(config.vocab_size, 2, "lm_head")
++        assert engine.autotp_size() == 2
++        assert isinstance(model.lm_head, LinearLayer)
++        assert model.lm_head.gather_output
++        assert model.lm_head.weight.shape == (output_partition_sizes[tp_rank], config.hidden_size)
++        assert model.model.embed_tokens.weight.shape == (config.vocab_size, config.hidden_size)
++
++        input_ids = torch.randint(0, config.vocab_size, (1, 16)).to(get_accelerator().current_device_name())
++        dist.broadcast(
++            input_ids,
++            src=groups.get_tensor_model_parallel_src_rank(),
++            group=groups.get_tensor_model_parallel_group(),
++        )
++        outputs = engine(input_ids)
++        assert outputs.logits.shape == (1, 16, config.vocab_size)
++
+     def test_qwen2_tied_lm_head_falls_back_to_replicated(self):
+         """Test that an actual Qwen2 Parameter tie remains replicated."""
+         skip_on_device()
+diff --git a/tests/unit/module_inject/test_tp_partition_config_path.py b/tests/unit/module_inject/test_tp_partition_config_path.py
+index 3e952e439..c86dc71af 100644
+--- a/tests/unit/module_inject/test_tp_partition_config_path.py
++++ b/tests/unit/module_inject/test_tp_partition_config_path.py
+@@ -12,7 +12,7 @@ import pytest
+ import torch.nn as nn
+ 
+ from deepspeed.module_inject.auto_tp import AutoTP, AutoTPConfig, PartitionType, TPLayerSpec
+-from deepspeed.module_inject.layers import LinearLayer, LmHeadLinearAllreduce
++from deepspeed.module_inject.layers import LinearLayer
+ 
+ 
+ class SubAttn(nn.Module):
+@@ -176,13 +176,14 @@ def test_gathered_lm_head_falls_back_for_runtime_parameter_tie():
+     assert model.lm_head.weight is model.embed_tokens.weight
+ 
+ 
+-def test_gathered_lm_head_falls_back_to_legacy_allreduce_when_output_dim_is_uneven():
++def test_gathered_lm_head_uses_column_parallel_layer_when_output_dim_is_uneven():
+     model = OutputModel(tied=False)
+     model.lm_head = nn.Linear(32, 101, bias=False)
+ 
+     _build_gathered_lm_head_autotp(model, mp_size=2)._replace_module(model)
+ 
+-    assert isinstance(model.lm_head, LmHeadLinearAllreduce)
++    assert isinstance(model.lm_head, LinearLayer)
++    assert model.lm_head.gather_output
+ 
+ 
+ if __name__ == "__main__":
+diff --git a/tests/unit/runtime/tensor_parallel/test_autotp_universal_checkpoint.py b/tests/unit/runtime/tensor_parallel/test_autotp_universal_checkpoint.py
+index 009b98dd7..e7d7ccf27 100644
+--- a/tests/unit/runtime/tensor_parallel/test_autotp_universal_checkpoint.py
++++ b/tests/unit/runtime/tensor_parallel/test_autotp_universal_checkpoint.py
+@@ -80,6 +80,28 @@ def test_subparam_layer_marks_standardized_param_metadata():
+     assert tuple(bias_meta["target_partition_shape"]) == tuple(layer.bias.shape)
+ 
+ 
++def test_linear_layer_marks_uneven_column_metadata():
++    layer = LinearLayer(torch.nn.Linear(8, 101, bias=True), mp_group=None, name="lm_head")
++    # Stand in for a layer built under tp=2; the split is normally frozen during construction.
++    layer.tp_world_size = 2
++    layer._freeze_partition_sizes(101)
++    layer.weight.data = layer.weight.data[:51].contiguous()
++    layer.bias.data = layer.bias.data[:51].contiguous()
++    layer._mark_uc_metadata()
++
++    weight_meta = getattr(layer.weight, DS_AUTOTP_UC_META)
++    bias_meta = getattr(layer.bias, DS_AUTOTP_UC_META)
++
++    assert weight_meta["logical_shape"] == (101, 8)
++    assert weight_meta["output_shape"] == (101, )
++    assert weight_meta["partition_sizes"] == (51, 50)
++    assert weight_meta["target_partition_shape"] == (51, 8)
++    assert weight_meta["original_shape"] == (101, 8)
++    assert bias_meta["logical_shape"] == (101, )
++    assert bias_meta["partition_sizes"] == (51, 50)
++    assert bias_meta["target_partition_shape"] == (51, )
++
++
+ def test_universal_checkpoint_info_excludes_param_level_recovery_fields():
+     layer = SubParamLinearLayer(torch.nn.Linear(12, 12, bias=True),
+                                 mp_group=None,
+@@ -96,6 +118,7 @@ def test_universal_checkpoint_info_excludes_param_level_recovery_fields():
+     assert "partition_dim" in subparam_entry
+     assert "patterns" in subparam_entry
+     assert "sub_param_sizes" not in subparam_entry
++    assert "partition_sizes" not in subparam_entry
+     assert "target_partition_shape" not in subparam_entry
+ 
+ 
+@@ -126,6 +149,7 @@ def test_param_uc_restore_builder_normalizes_shapes_and_nests_conversion_view():
+                                                 output_shape=[12],
+                                                 sub_param_shape=[3, -1],
+                                                 sub_param_sizes=[4, 4, 4],
++                                                partition_sizes=[6, 6],
+                                                 target_partition_shape=torch.Size([4, 8]),
+                                                 original_shape=torch.Size([12, 8]),
+                                                 is_bias=False,
+@@ -135,6 +159,7 @@ def test_param_uc_restore_builder_normalizes_shapes_and_nests_conversion_view():
+     assert restore_meta["output_shape"] == (12, )
+     assert restore_meta["sub_param_shape"] == (3, -1)
+     assert restore_meta["sub_param_sizes"] == (4, 4, 4)
++    assert restore_meta["partition_sizes"] == (6, 6)
+     assert restore_meta["target_partition_shape"] == (4, 8)
+     assert restore_meta["original_shape"] == (12, 8)
+     assert restore_meta["conversion"] == {

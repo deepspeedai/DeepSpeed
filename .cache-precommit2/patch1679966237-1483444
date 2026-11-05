@@ -1,0 +1,1876 @@
+diff --git a/accelerator/abstract_accelerator.py b/accelerator/abstract_accelerator.py
+index df5080a3..910fea48 100644
+--- a/accelerator/abstract_accelerator.py
++++ b/accelerator/abstract_accelerator.py
+@@ -10,6 +10,10 @@ class DeepSpeedAccelerator(ABC):
+         self._name = None
+         self._communication_backend_name = None
+ 
++    @abc.abstractmethod
++    def is_synchronized_device(self):
++        ...
++
+     # Device APIs
+     @abc.abstractmethod
+     def device_name(self, device_index):
+diff --git a/accelerator/cuda_accelerator.py b/accelerator/cuda_accelerator.py
+index 3e0d1e13..96d1d940 100644
+--- a/accelerator/cuda_accelerator.py
++++ b/accelerator/cuda_accelerator.py
+@@ -26,7 +26,7 @@ class CUDA_Accelerator(DeepSpeedAccelerator):
+ 
+         for _, module_name, _ in pkgutil.iter_modules([os.path.dirname(op_builder_module.__file__)]):
+             # avoid self references
+-            if module_name != 'all_ops' and module_name != 'builder':
++            if module_name != 'all_ops' and module_name != 'builder' and module_name != 'cpu':
+                 module = importlib.import_module("{}.{}".format(op_builder_dir, module_name))
+                 for member_name in module.__dir__():
+                     if member_name.endswith(
+@@ -36,6 +36,9 @@ class CUDA_Accelerator(DeepSpeedAccelerator):
+                             self.class_dict[member_name] = getattr(module, member_name)
+         # end initialize for create_op_builder()
+ 
++    def is_synchronized_device(self):
++        return False
++
+     # Device APIs
+     def device_name(self, device_index=None):
+         if device_index == None:
+@@ -165,7 +168,11 @@ class CUDA_Accelerator(DeepSpeedAccelerator):
+         return None
+ 
+     def is_available(self):
+-        return torch.cuda.is_available()
++        try:
++            import torch
++            return torch.cuda.is_available()
++        except ImportError:
++            return True
+ 
+     def range_push(self, msg):
+         if hasattr(torch.cuda.nvtx, 'range_push'):
+diff --git a/accelerator/real_accelerator.py b/accelerator/real_accelerator.py
+index adf49139..ab99b74b 100644
+--- a/accelerator/real_accelerator.py
++++ b/accelerator/real_accelerator.py
+@@ -41,17 +41,41 @@ def get_accelerator():
+         else:
+             ds_accelerator = XPU_Accelerator()
+             _validate_accelerator(ds_accelerator)
++            print(f"Setting ds_accelerator to {ds_accelerator._name} (auto-detect)")
+             return ds_accelerator
+ 
+-        from .cuda_accelerator import CUDA_Accelerator
+-        ds_accelerator = CUDA_Accelerator()
+-        _validate_accelerator(ds_accelerator)
+-    return ds_accelerator
++        # We need a way to choose between CUDA_Accelerator and CPU_Accelerator
++        # Currently we detect whether intel_etension_for_pytorch is installed
++        # in the environment and use CPU_Accelerator if the answewr is True.
++        # An alternative might be detect whether CUDA device is installed on
++        # the system but this comes with two pitfalls:
++        # 1. the system may not have torch pre-installed, so
++        #    get_accelerator().is_avaiable() may not work.
++        # 2. Some scenario like install on login node (without CUDA device)
++        #    and run on compute node (with CUDA device) may cause mismatch
++        #    between installation time and runtime.
++        try:
++            import intel_extension_for_pytorch  # noqa: F401
++        except ImportError as e:
++            from .cuda_accelerator import CUDA_Accelerator
++            ds_accelerator = CUDA_Accelerator()
++            _validate_accelerator(ds_accelerator)
++            print(f"Setting ds_accelerator to {ds_accelerator._name} (auto-detect)")
++            return ds_accelerator
++        else:
++            from .cpu_accelerator import CPU_Accelerator
++            ds_accelerator = CPU_Accelerator()
++            _validate_accelerator(ds_accelerator)
++            print(f"Setting ds_accelerator to {ds_accelerator._name} (auto-detect)")
++            return ds_accelerator
++    else:
++        return ds_accelerator
+ 
+ 
+ def set_accelerator(accel_obj):
+     global ds_accelerator
+     _validate_accelerator(accel_obj)
++    print(f"Setting ds_accelerator to {accel_obj._name}")
+     ds_accelerator = accel_obj
+ 
+ 
+diff --git a/deepspeed/comm/comm.py b/deepspeed/comm/comm.py
+index 26dffa81..52c89326 100644
+--- a/deepspeed/comm/comm.py
++++ b/deepspeed/comm/comm.py
+@@ -25,26 +25,14 @@
+         -- deepspeed groups API should be brought into ds.comm
+ """
+ 
+-from enum import Enum
+ import torch
+ import os
+ 
+ from ..constants import TORCH_DISTRIBUTED_DEFAULT_PORT, default_pg_timeout
+ from .constants import *
++from .reduce_op import *
+ from deepspeed.accelerator import get_accelerator
+-
+-
+-class ReduceOp(Enum):
+-    SUM = 0
+-    PRODUCT = 1
+-    MIN = 2
+-    MAX = 3
+-    BAND = 4
+-    BOR = 5
+-    BXOR = 6
+-    AVG = 7
+-    UNUSED = 8
+-
++from deepspeed.comm.ccl import CCLBackend
+ 
+ from deepspeed.utils.comms_logging import CommsLogger
+ from deepspeed.utils import timer, get_caller_func
+@@ -54,7 +42,6 @@ from deepspeed import utils
+ from datetime import timedelta
+ 
+ # Current deepspeed.comm backend (cdb) global object for simple access by client code
+-use_ds_backend = False
+ cdb = None
+ 
+ # Create global timer for ops
+@@ -66,11 +53,20 @@ comms_logger = CommsLogger()
+ # Maintain objects of all initialized ds backends and assign them using the API functions in this file
+ nccl_backend = None
+ mpi_backend = None
++ccl_backend = None
+ 
+ # This should be set here so all rank/size information from the launcher can be propagated
+ from deepspeed.comm.utils import *
+ 
+ 
++class ProcessGroup():
++
++    def __init__(self, comm_id, ranks=[]):
++        self.ranks = ranks
++        self.comm_id = comm_id
++        self.size = len(ranks)
++
++
+ def _configure_using_config_file(config):
+     if config.comms_logger_enabled:
+         comms_logger.configure(config)
+@@ -151,7 +147,6 @@ def init_deepspeed_backend(ds_backend):
+     global cdb
+     global nccl_backend
+     global mpi_backend
+-    global use_ds_backend
+ 
+     if ds_backend == NCCL_BACKEND:
+         utils.logger.warn("NCCL backend in DeepSpeed not yet implemented")
+@@ -159,6 +154,8 @@ def init_deepspeed_backend(ds_backend):
+         utils.logger.warn("MPI backend in DeepSpeed not yet implemented")
+     elif ds_backend == GLOO_BACKEND:
+         utils.logger.warn("Gloo backend in DeepSpeed not yet implemented")
++    elif ds_backend == CCL_BACKEND:
++        utils.logger.warn("CCL backend in DeepSpeed not yet implemented")
+     else:
+         utils.logger.warn(f"DeepSpeed does not support {ds_backend} backend")
+ 
+@@ -193,26 +190,34 @@ def is_available() -> bool:
+     return True
+ 
+ 
+-def set_backend(backend):
+-    if not use_ds_backend:
+-        utils.logger.error(
+-            "DeepSpeed communication backend is required. Please use deepspeed.comm.init_distributed(backend, use_deepspeed=True) to use this functionality"
+-        )
+-        raise RuntimeError('Error: Custom DeepSpeed backend called without initializing DeepSpeed distributed.')
++def set_backend(timeout=None, init_method=None):
++    # if user specific --prefer_deepspeed_comm when launching deepspeed, will load cdb to
++    # DeepSpeed backend, otherwise fallback to torch distributed backend
+ 
+     global cdb
+     global nccl_backend
+     global mpi_backend
+-
+-    try:
+-        if backend_name == NCCL_BACKEND:
+-            if nccl_backend is not None and nccl_backend.is_initialized():
+-                cdb = nccl_backend
+-        elif backend_name == MPI_BACKEND:
+-            if mpi_backend is not None and mpi_backend.is_initialized():
+-                cdb = mpi_backend
+-    except Exception as inst:
+-        print(inst)
++    global ccl_backend
++
++    backend_name = get_accelerator().communication_backend_name()
++
++    if backend_name == NCCL_BACKEND:
++        if nccl_backend is not None and nccl_backend.is_initialized():
++            cdb = nccl_backend
++    elif backend_name == MPI_BACKEND:
++        if mpi_backend is not None and mpi_backend.is_initialized():
++            cdb = mpi_backend
++    elif backend_name == CCL_BACKEND:
++        if ccl_backend is None:
++            prefer_deepspeed_comm = os.environ.get("PREFER_DEEPSPEED_COMM")
++            # if launch from DeepSpeed launcher, prefer_deepspeed_comm would only be "False" or "True", but
++            # we want to be more robust
++            if prefer_deepspeed_comm == "True" or prefer_deepspeed_comm == "true" or prefer_deepspeed_comm == "1":
++                rank = int(os.environ["RANK"])
++                size = int(os.environ["WORLD_SIZE"])
++                ccl_backend = CCLBackend(rank=rank, world_size=size, timeout=timeout, init_method=init_method)
++                print("Using CCLBackend instead of TorchBackend")
++        cdb = ccl_backend
+ 
+ 
+ @timed_op
+@@ -397,7 +402,7 @@ def scatter(tensor,
+ @timed_op
+ def barrier(group=None, async_op=False, device_ids=None, prof=False, log_name='barrier', debug=get_caller_func()):
+     global cdb
+-    return cdb.barrier(group=group, async_op=async_op, device_ids=device_ids)
++    return cdb.barrier(group=group, async_op=async_op)
+ 
+ 
+ @timed_op
+@@ -558,6 +563,10 @@ def init_distributed(dist_backend=None,
+     if dist_init_required is None:
+         dist_init_required = cdb is None or not cdb.is_initialized()
+ 
++    if cdb is None:
++        # check whether can set backend to deepspeed backend
++        set_backend(timeout, init_method)
++        print(f'cdb={cdb}')
+     if cdb is None and torch.distributed.is_initialized():
+         # The user initialized torch.dist themselves, create cdb and short-circuit
+         cdb = TorchBackend(dist_backend, timeout, init_method)
+diff --git a/deepspeed/comm/constants.py b/deepspeed/comm/constants.py
+index 45fd5ac7..01b91295 100644
+--- a/deepspeed/comm/constants.py
++++ b/deepspeed/comm/constants.py
+@@ -1,6 +1,7 @@
+ '''Copyright The Microsoft DeepSpeed Team'''
+ 
+ NCCL_BACKEND = 'nccl'
++CCL_BACKEND = 'ccl'
+ MPI_BACKEND = 'mpi'
+ GLOO_BACKEND = 'gloo'
+ SCCL_BACKEND = 'sccl'
+diff --git a/deepspeed/inference/config.py b/deepspeed/inference/config.py
+index 94719d1f..ea6951d0 100644
+--- a/deepspeed/inference/config.py
++++ b/deepspeed/inference/config.py
+@@ -14,9 +14,8 @@ class DtypeEnum(Enum):
+     fp16 = torch.float16, "torch.float16", "fp16", "float16", "half"
+     fp32 = torch.float32, "torch.float32", "fp32", "float32", "float"
+     int8 = torch.int8, "torch.int8", "int8"
+-
+-    # bf16 not supported
+-    # bf16 = torch.bfloat16, "torch.bfloat16", "bf16", "bfloat16"
++    # BFloat16 is primary 16 bit datatype for CPU
++    bf16 = torch.bfloat16, "torch.bfloat16", "bf16", "bfloat16"
+ 
+     # Copied from https://stackoverflow.com/a/43210118
+     # Allows us to use multiple values for each Enum index and returns first
+diff --git a/deepspeed/inference/engine.py b/deepspeed/inference/engine.py
+index d15f73a1..10ea518b 100755
+--- a/deepspeed/inference/engine.py
++++ b/deepspeed/inference/engine.py
+@@ -32,6 +32,58 @@ from torch import nn
+ INFERENCE_MODEL_TIMER = "model-forward-inference"
+ 
+ 
++def build_bloom_alibi_tensor(attention_mask: torch.Tensor, num_heads: int, dtype: torch.dtype) -> torch.Tensor:
++    """
++    Link to paper: https://arxiv.org/abs/2108.12409 Alibi tensor is not causal as the original paper mentions, it
++    relies on a translation invariance of softmax for quick implementation: with l being a tensor, and a fixed value
++    `softmax(l+a) = softmax(l)`. Based on
++    https://github.com/ofirpress/attention_with_linear_biases/blob/a35aaca144e0eb6b789dfcb46784c4b8e31b7983/fairseq/models/transformer.py#L742
++    TODO @thomasw21 this doesn't work as nicely due to the masking strategy, and so masking varies slightly.
++
++    Args:
++    Returns tensor shaped (batch_size * num_heads, 1, max_seq_len)
++        attention_mask (`torch.Tensor`):
++            Token-wise attention mask, this should be of shape (batch_size, max_seq_len).
++        num_heads (`int`, *required*):
++            number of heads
++        dtype (`torch.dtype`, *optional*, default=`torch.bfloat16`):
++            dtype of the output tensor
++    """
++    import math
++    batch_size, seq_length = attention_mask.shape
++    closest_power_of_2 = 2**math.floor(math.log2(num_heads))
++    base = torch.tensor(2**(-(2**-(math.log2(closest_power_of_2) - 3))),
++                        device=attention_mask.device,
++                        dtype=torch.float32)
++    powers = torch.arange(1, 1 + closest_power_of_2, device=attention_mask.device, dtype=torch.int32)
++    slopes = torch.pow(base, powers)
++
++    if closest_power_of_2 != num_heads:
++        extra_base = torch.tensor(2**(-(2**-(math.log2(2 * closest_power_of_2) - 3))),
++                                  device=attention_mask.device,
++                                  dtype=torch.float32)
++        num_remaining_heads = min(closest_power_of_2, num_heads - closest_power_of_2)
++        extra_powers = torch.arange(1, 1 + 2 * num_remaining_heads, 2, device=attention_mask.device, dtype=torch.int32)
++        slopes = torch.cat([slopes, torch.pow(extra_base, extra_powers)], dim=0)
++
++    # Note: alibi will added to the attention bias that will be applied to the query, key product of attention
++    # => therefore alibi will have to be of shape (batch_size, num_heads, query_length, key_length)
++    # => here we set (batch_size=1, num_heads=num_heads, query_length=1, key_length=max_length)
++    # => the query_length dimension will then be broadcasted correctly
++    # This is more or less identical to T5's relative position bias:
++    # https://github.com/huggingface/transformers/blob/f681437203baa7671de3174b0fa583c349d9d5e1/src/transformers/models/t5/modeling_t5.py#L527
++    arange_tensor = ((attention_mask.cumsum(dim=-1) - 1) * attention_mask)[:, None, :]
++    alibi = slopes[..., None] * arange_tensor
++    if dist.is_initialized():
++        num_heads_per_rank = int(num_heads / dist.get_world_size())
++        offset = dist.get_rank() * num_heads_per_rank
++        alibi = alibi.view(batch_size, num_heads, 1, seq_length)
++        alibi = alibi[:, offset:num_heads_per_rank + offset, :, :]
++        return alibi.reshape(batch_size * num_heads_per_rank, 1, seq_length).to(dtype)
++    else:
++        return alibi.reshape(batch_size * num_heads, 1, seq_length).to(dtype)
++
++
+ class InferenceEngine(Module):
+     inference_mp_group = None
+     inference_ep_group = None
+@@ -84,16 +136,18 @@ class InferenceEngine(Module):
+         self.model_profile_enabled = False
+         self._model_times = []
+ 
+-        # This is a hack to remove the prepare_mask function on HF side for BLOOM architecture
+-        self.remove_mask_prepare_for_bloom()
++        if not self.injection_dict and config.replace_with_kernel_inject:
++            # This is a hack to remove the prepare_mask function on HF side for BLOOM architecture
++            self.remove_mask_prepare_for_bloom()
++
++        if self.injection_dict or not config.replace_with_kernel_inject:
++            # This is a hack to redefine the alibi func due to TP
++            self.build_alibi_tensor()
+ 
+         if get_accelerator().device_name() == 'cuda' and config.enable_cuda_graph:
+             assert pkg_version.parse(torch.__version__) >= pkg_version.parse("1.10"), \
+                 "If you want to use cuda graph, please upgrade torch to at least v1.10"
+ 
+-        if config.checkpoint and not config.replace_with_kernel_inject:
+-            self._load_checkpoint(config.checkpoint)
+-
+         # convert model to intended dtype
+         if config.dtype:
+             self._convert_to_dtype(config)
+@@ -113,10 +167,6 @@ class InferenceEngine(Module):
+         if moe and dist.get_world_size() > 1:
+             self._create_ep_parallel_group(config.moe.moe_experts)
+ 
+-        # retain this from the old conditional argument being passed to apply_injection_policy()
+-        if not config.replace_with_kernel_inject:
+-            config.checkpoint = None
+-
+         # We only support three modes: 1) user specified policy for tensor-parallelism, 2) kernel injection (replace_with_kernel_inject), and 3) automatic tensor parallelism.
+         if self.injection_dict:
+             # 1. User specified Tensor Parallelism
+@@ -176,6 +226,11 @@ class InferenceEngine(Module):
+             if hasattr(self.module.transformer, '_prepare_attn_mask'):
+                 self.module.transformer._prepare_attn_mask = lambda attention_mask, *args, **kwargs: attention_mask
+ 
++    def build_alibi_tensor(self):
++        if hasattr(self.module, 'transformer'):
++            if hasattr(self.module.transformer, 'build_alibi_tensor'):
++                self.module.transformer.build_alibi_tensor = build_bloom_alibi_tensor
++
+     def _pre_forward_hook(self, module, *inputs, **kwargs):
+         if self.use_cuda_events:
+             self.timers(INFERENCE_MODEL_TIMER).start()
+@@ -278,16 +333,36 @@ class InferenceEngine(Module):
+         def load(module, state_dict, prefix):
+             args = (state_dict, prefix, {}, True, [], [], error_msgs)
+             if hasattr(module, 'weight'):
++                if module.weight.data.is_meta:
++                    # meta tensor cannot be casted or copied to, so we need to replace it with a normal tensor here
++                    module.weight = torch.nn.parameter.Parameter(data=torch.empty_like(module.weight.data,
++                                                                                       device="cpu"),
++                                                                 requires_grad=module.weight.data.requires_grad)
+                 if 'query_key_value' in prefix:
+                     module.weight = self.mp_replace.qkv_copy(module.weight.data, state_dict[prefix + 'weight'])
+                 else:
+                     module.weight = self.mp_replace.copy(module.weight.data, state_dict[prefix + 'weight'])
+             else:
++                if module.norm.weight.data.is_meta:
++                    # meta tensor cannot be casted or copied to, so we need to replace it with a normal tensor here
++                    module.norm.weight = torch.nn.parameter.Parameter(
++                        data=torch.empty_like(module.norm.weight.data, device="cpu"),
++                        requires_grad=module.norm.weight.data.requires_grad)
+                 module.norm.weight = self.mp_replace.copy(module.norm.weight.data, state_dict[prefix + 'weight'])
+             if prefix + 'bias' in self.key_list:
+                 if hasattr(module, 'norm'):
++                    if module.norm.bias.data.is_meta:
++                        # meta tensor cannot be casted or copied to, so we need to replace it with a normal tensor here
++                        module.norm.bias = torch.nn.parameter.Parameter(
++                            data=torch.empty_like(module.norm.bias.data, device="cpu"),
++                            requires_grad=module.norm.bias.data.requires_grad)
+                     module.norm.bias = self.mp_replace.copy(module.norm.bias, state_dict[prefix + 'bias'])
+                 else:
++                    if module.bias.data.is_meta:
++                        # meta tensor cannot be casted or copied to, so we need to replace it with a normal tensor here
++                        module.bias = torch.nn.parameter.Parameter(data=torch.empty_like(module.bias.data,
++                                                                                         device="cpu"),
++                                                                   requires_grad=module.bias.data.requires_grad)
+                     data = state_dict[prefix + 'bias']
+                     data = data.to(get_accelerator().current_device_name())
+                     module.bias = self.mp_replace.copy(module.bias, data)
+@@ -316,6 +391,14 @@ class InferenceEngine(Module):
+ 
+         load_module_recursive(r_module)
+ 
++        embedding_weight = None
++
++        for n, p in r_module.named_parameters():
++            if "word_embeddings." in n or "embed_tokens." in n or "wte." in n:
++                embedding_weight = p
++        if embedding_weight is not None and r_module.lm_head.weight.is_meta:
++            r_module.lm_head.weight = embedding_weight
++
+     def _apply_injection_policy(self, config, client_module=None):
+         # client_module is only passed when using the injection_dict method.
+         checkpoint_dir = config.checkpoint
+@@ -324,6 +407,7 @@ class InferenceEngine(Module):
+ 
+         generic_injection(self.module,
+                           fp16=(config.dtype == torch.half) or (config.dtype == torch.int8),
++                          bf16=(config.dtype == torch.bfloat16),
+                           enable_cuda_graph=config.enable_cuda_graph)
+ 
+         if isinstance(self.module, torch.nn.Module):
+@@ -367,16 +451,18 @@ class InferenceEngine(Module):
+         else:
+             sd_loader = SDLoaderFactory.get_sd_loader_json(load_dir, self.checkpoint_engine)
+ 
+-        if type(sd_loader) is list:
+-            self.sd = torch.load(sd_loader[0], map_location='cpu')
++        checkpoint = sd_loader['checkpoints']
++
++        if type(checkpoint) is list:
++            self.sd = torch.load(checkpoint[0], map_location='cpu')
+             self.key_list = list(self.sd.keys())
+ 
+             self.load_model_with_checkpoint(self.module)
+ 
+-            for i in range(1, len(sd_loader)):
++            for i in range(1, len(checkpoint)):
+                 if not dist.is_initialized() or dist.get_rank() == 0:
+                     print(f"loading checkpoint ({i})")
+-                self.sd = torch.load(sd_loader[i], map_location=get_accelerator().device_name())
++                self.sd = torch.load(checkpoint[i], map_location=get_accelerator().device_name())
+                 self.key_list = list(self.sd.keys())
+                 self.load_model_with_checkpoint(self.module)
+         else:
+diff --git a/deepspeed/launcher/launch.py b/deepspeed/launcher/launch.py
+index 12b1d790..720cb5f4 100755
+--- a/deepspeed/launcher/launch.py
++++ b/deepspeed/launcher/launch.py
+@@ -86,6 +86,21 @@ def parse_args():
+                         type=str,
+                         help="redirect the stdout and stderr from each rank into different log files")
+ 
++    parser.add_argument("--bind_cores_to_rank",
++                        action="store_true",
++                        help="Bind each rank to different cores of the host. "
++                        "This improves host efficiency especially for CPU backend")
++
++    parser.add_argument("--bind_core_list",
++                        type=str,
++                        default=None,
++                        help="List of cores to bind to with comma separated list of "
++                        "numbers and range. i.e. 1,3-5,7 => [1,3,4,5,7].  When not "
++                        "specified, all cores on system would be used rank binding")
++
++    parser.add_argument("--prefer_deepspeed_comm",
++                        action="store_true",
++                        help="Use DeepSpeed builtin communication backend instead of torch distributed")
+     # positional
+     parser.add_argument("training_script",
+                         type=str,
+@@ -114,6 +129,67 @@ def terminate_process_tree(pid):
+         p.kill()
+ 
+ 
++def parse_range(rng):
++    try:
++        value = int(rng)
++        return range(value, value + 1)
++    except ValueError:
++        # value is not a single number
++        parts = rng.split('-')
++        if len(parts) != 2:
++            raise ValueError("Bad range: '%s', range must be either a number or two number separated by dash" %
++                             (rng, ))
++        start = int(parts[0])
++        end = int(parts[1])
++        if start > end:
++            raise ValueError("Bad range: '%s', range end must larger than or equal to start" % (rng, ))
++        return range(start, end + 1)
++
++
++# parse comma and dash separated range list into list
++# i.e. "0,2-4,6" --> [0, 2, 3, 4, 6]
++# rules:
++# 1. Range list numser be comma sepeaated, each item are either a single number,
++#    or a range marked by two numbers (both number are included in the range)
++# 2. Sub ranges must be in ascend order and not overlap with each other
++# 3. No space in the range expression
++def parse_range_list(range_str):
++    number_list = []
++    last = -1
++    range_list = range_str.split(',')
++    for sub_range in range_list:
++        sub_number_list = parse_range(sub_range)
++        if sub_number_list[0] <= last:
++            raise ValueError(
++                "Bad range: '%s', sub ranges must not overlap with each other and should be in ascend order" %
++                (range_str, ))
++        last = sub_number_list[-1]
++        number_list.extend(sub_number_list)
++    return number_list
++
++
++# return a list of list for cores to numa mapping
++# [
++#     [ cores for numa 0 ]
++#     [ cores belong to numa 1 ]
++#     ...
++# ]
++def get_numa_cores():
++    ret = []
++    output = subprocess.check_output(['numactl', '--hardware']).decode("utf-8")
++    lines = output.split('\n')
++    for line in lines:
++        if line.startswith('available:'):
++            num_numas = int(line.split(' ')[1])
++            break
++    for numa in range(num_numas):
++        for line in lines:
++            if line.startswith(f'node {numa} cpus:'):
++                cores = line.split(' ')[3:]
++                ret.append([int(core) for core in cores])
++    return ret
++
++
+ def main():
+     args = parse_args()
+     current_env = os.environ.copy()
+@@ -156,6 +232,7 @@ def main():
+     current_env["CROSS_RANK"] = str(args.node_rank)
+     current_env["CROSS_SIZE"] = str(args.nnodes)
+     current_env["LOCAL_SIZE"] = str(num_local_procs)
++    current_env["PREFER_DEEPSPEED_COMM"] = str(args.prefer_deepspeed_comm)
+ 
+     if args.save_pid:
+         print(f"launcher pid: {os.getpid()}")
+@@ -208,8 +285,42 @@ def main():
+ 
+             # spawn the processes
+             cmd = []
++            if args.bind_cores_to_rank:
++                if 'KMP_AFFINITY' in os.environ.keys():
++                    raise ValueError("Environment variable KMP_AFFINITY conflicts with numactl "
++                                     "because it interfere with how many CPU cores numactl can set. "
++                                     "Unset KMP_AFFINITY before launching deepspeed.\n\n"
++                                     "\t$ unset KMP_AFFINITY\n"
++                                     "\t$ deepspeed <deepspeed command parameters>")
++                if args.bind_core_list != None:
++                    core_list = parse_range_list(args.bind_core_list)
++                    total_cores = len(core_list)
++                else:
++                    total_cores = psutil.cpu_count(logical=False)
++                    core_list = range(total_cores)
++                cores_per_rank = total_cores // num_local_procs
++                assert cores_per_rank >= 1, "At least one core needs to be assigned to each rank"
++                core_list_for_rank = core_list[cores_per_rank * local_rank:cores_per_rank * (local_rank + 1)]
++                current_env["OMP_NUM_THREADS"] = f"{cores_per_rank}"
++                cmd.append("numactl")
++
++                # check if all cores belong to same numa, if true, bind process to that numa domain with -m parameter
++                numa_cores = get_numa_cores()
++                num_numas = len(numa_cores)
++                for i in range(num_numas):
++                    if set(core_list_for_rank) <= set(numa_cores[i]):
++                        cmd.append("-m")
++                        cmd.append(f"{i}")
++                        break
++
++                cmd.append("-C")
++                core_list_str = f"{core_list_for_rank[0]}"
++                for core_id in core_list_for_rank[1:]:
++                    core_list_str = f"{core_list_str},{core_id}"
++                cmd.append(f"{core_list_str}")
+             if not args.no_python:
+-                cmd = [sys.executable, "-u"]
++                cmd.append(sys.executable)
++                cmd.append("-u")
+                 if args.module:
+                     cmd.append("-m")
+             else:
+diff --git a/deepspeed/launcher/runner.py b/deepspeed/launcher/runner.py
+index 4f3a7ac6..7755c699 100755
+--- a/deepspeed/launcher/runner.py
++++ b/deepspeed/launcher/runner.py
+@@ -91,6 +91,7 @@ def parse_args(args=None):
+                         "Default is num_nodes when elastic training is enabled")
+ 
+     parser.add_argument("--num_gpus",
++                        "--num_accelerators",
+                         type=int,
+                         default=-1,
+                         help="Max number of GPUs to use on each node, will use "
+@@ -170,6 +171,18 @@ def parse_args(args=None):
+     parser.add_argument("user_script", type=str, help="User script to launch, followed by any required "
+                         "arguments.")
+     parser.add_argument('user_args', nargs=argparse.REMAINDER)
++    parser.add_argument("--bind_cores_to_rank",
++                        action="store_true",
++                        help="Bind each rank to different cores of the host")
++    parser.add_argument("--bind_core_list",
++                        type=str,
++                        default=None,
++                        help="List of cores to bind to with comma separated list of "
++                        "numbers and range. i.e. 1,3-5,7 => [1,3,4,5,7].  When not "
++                        "specified, all cores on system would be used rank binding")
++    parser.add_argument("--prefer_deepspeed_comm",
++                        action="store_true",
++                        help="Use DeepSpeed builtin communication backend instead of torch distributed")
+     return parser.parse_args(args=args)
+ 
+ 
+@@ -478,6 +491,12 @@ def main(args=None):
+             deepspeed_launch.append("--enable_elastic_training")
+             deepspeed_launch.append(f"--max_elastic_nodes={args.max_elastic_nodes}")
+             deepspeed_launch.append(f"--min_elastic_nodes={args.min_elastic_nodes}")
++        if args.bind_cores_to_rank:
++            deepspeed_launch.append("--bind_cores_to_rank")
++        if args.bind_core_list != None:
++            deepspeed_launch.append(f"--bind_core_list={args.bind_core_list}")
++        if args.prefer_deepspeed_comm:
++            deepspeed_launch.append(f"--prefer_deepspeed_comm")
+         cmd = deepspeed_launch + [args.user_script] + args.user_args
+     else:
+         args.launcher = args.launcher.lower()
+diff --git a/deepspeed/model_implementations/transformers/ds_transformer.py b/deepspeed/model_implementations/transformers/ds_transformer.py
+index 2a5f7b19..6838c547 100644
+--- a/deepspeed/model_implementations/transformers/ds_transformer.py
++++ b/deepspeed/model_implementations/transformers/ds_transformer.py
+@@ -12,7 +12,7 @@ from deepspeed.ops.transformer.inference.ds_attention import DeepSpeedSelfAttent
+ from deepspeed.accelerator import get_accelerator
+ from deepspeed.ops.op_builder import InferenceBuilder
+ 
+-inference_cuda_module = None
++inference_module = None
+ 
+ 
+ class DeepSpeedTransformerInference(nn.Module):
+@@ -46,11 +46,11 @@ class DeepSpeedTransformerInference(nn.Module):
+         self.config.layer_id = DeepSpeedTransformerInference.layer_id
+         DeepSpeedTransformerInference.layer_id += 1
+ 
+-        data_type = torch.half if config.fp16 else torch.float
+-        global inference_cuda_module
+-        if inference_cuda_module is None:
++        data_type = torch.half if config.fp16 else torch.bfloat16 if config.bf16 else torch.float
++        global inference_module
++        if inference_module is None:
+             builder = InferenceBuilder()
+-            inference_cuda_module = builder.load()
++            inference_module = builder.load()
+ 
+         if DeepSpeedTransformerInference.layer_id == 1:
+             log_dist(f"DeepSpeed-Inference config: {self.config.__dict__}", [0])
+@@ -69,13 +69,20 @@ class DeepSpeedTransformerInference(nn.Module):
+         self.norm_b = nn.Parameter(torch.empty(self.config.hidden_size, dtype=data_type, device=device),
+                                    requires_grad=False)
+         self.layer_past = None
+-        self.allocate_workspace = inference_cuda_module.allocate_workspace_fp32 if (not config.fp16) else \
+-                                inference_cuda_module.allocate_workspace_fp16
++        try:
++            if config.fp16:
++                self.allocate_workspace = inference_module.allocate_workspace_fp16
++            elif config.bf16:
++                self.allocate_workspace = inference_module.allocate_workspace_bf16
++            else:
++                self.allocate_workspace = inference_module.allocate_workspace_fp32
++        except AttributeError:
++            self.allocate_workspace = None
+ 
+     @classmethod
+     def reset_cache(cls):
+-        if inference_cuda_module is not None:
+-            inference_cuda_module.reset_cache()
++        if inference_module is not None:
++            inference_module.reset_cache()
+ 
+     def forward(
+             self,
+@@ -110,11 +117,12 @@ class DeepSpeedTransformerInference(nn.Module):
+ 
+         # Allocate memory only on first layer forward
+         if self.config.layer_id == 0:
+-            self.allocate_workspace(self.config.hidden_size, self.config.heads,
+-                                    input.size()[1],
+-                                    input.size()[0], DeepSpeedTransformerInference.layer_id, self.config.mp_size,
+-                                    self.config.bigscience_bloom,
+-                                    dist.get_rank() if dist.is_initialized() else 0, self.config.max_out_tokens)
++            if self.allocate_workspace != None:
++                self.allocate_workspace(self.config.hidden_size, self.config.heads,
++                                        input.size()[1],
++                                        input.size()[0], DeepSpeedTransformerInference.layer_id, self.config.mp_size,
++                                        self.config.bigscience_bloom,
++                                        dist.get_rank() if dist.is_initialized() else 0, self.config.max_out_tokens)
+ 
+         get_present = (get_present or get_key_value or use_cache)
+         input_mask = input_mask if attention_mask is None else attention_mask
+@@ -153,7 +161,7 @@ class DeepSpeedTransformerInference(nn.Module):
+             output = self.mlp(attention_output, input, inp_norm, self.attention.attn_ob)
+ 
+             if not self.config.pre_layer_norm:
+-                output = inference_cuda_module.layer_norm(output, self.norm_w, self.norm_b, self.config.epsilon)
++                output = inference_module.layer_norm(output, self.norm_w, self.norm_b, self.config.epsilon)
+ 
+             output = output.to(input_type)
+         if get_present:
+diff --git a/deepspeed/module_inject/auto_tp.py b/deepspeed/module_inject/auto_tp.py
+index b6907081..0fb583af 100644
+--- a/deepspeed/module_inject/auto_tp.py
++++ b/deepspeed/module_inject/auto_tp.py
+@@ -29,7 +29,7 @@ class AutoTP():
+         return mlist
+ 
+     def supported(model):
+-        unsupported = ['bloom', 'codegen', 'deberta', 'flaubert', 'fsmt', 'gpt2', 'led', 'longformer', 'xlm', 'xlnet']
++        unsupported = ['codegen', 'deberta', 'flaubert', 'fsmt', 'gpt2', 'led', 'longformer', 'xlm', 'xlnet']
+         model = str(model)
+         key = re.search(r": (.*?)Model", model)
+         if key is None:
+@@ -101,6 +101,10 @@ class AutoTP():
+                         gem_list = gem_list + [layer_list[i - 1]]
+                 elif 'out_proj' in layer:
+                     gem_list = gem_list + [layer]
++                elif 'o_proj' in layer:
++                    gem_list = gem_list + [layer]
++                elif 'down_proj' in layer:
++                    gem_list = gem_list + [layer]
+             layer_list = []
+             if gem_list != []:
+                 gem_list = list(set(gem_list))
+diff --git a/deepspeed/module_inject/containers/base.py b/deepspeed/module_inject/containers/base.py
+index aa077dd0..7f8044f2 100644
+--- a/deepspeed/module_inject/containers/base.py
++++ b/deepspeed/module_inject/containers/base.py
+@@ -83,6 +83,7 @@ class BaseTransformerContainer(ABC):
+             heads=self.num_attention_heads,
+             layer_norm_eps=self.layer_norm_eps,
+             fp16=self.fp16,
++            bf16=self.bf16,
+             pre_layer_norm=self.pre_layer_norm,
+             mp_size=self.mp_size,
+             q_int8=self.quantize,
+@@ -111,18 +112,19 @@ class BaseTransformerContainer(ABC):
+ 
+     def convert_to_required_dtype(self, dtype):
+         # Note: converting tensors to fp16 requires that we do it in-place using self.__dict__ and not make a list/dict copy
+-        if dtype == torch.half:
++        if dtype == torch.half or dtype == torch.bfloat16:
+             for k, v in self.__dict__.items():
+                 # The list comprehension is used for MoE tensor lists
+                 if isinstance(v, list) and all((isinstance(tensor, torch.Tensor) \
+                    or isinstance(tensor, torch.nn.Parameter)) for tensor in v):
+-                    self.__dict__[k] = [moe_tensor.half() for moe_tensor in v]
++                    self.__dict__[k] = [moe_tensor.to(dtype) for moe_tensor in v]
+ 
+                 if isinstance(v, torch.Tensor) or isinstance(v, torch.nn.Parameter):
+-                    self.__dict__[k] = v.half()
++                    self.__dict__[k] = v.to(dtype)
+ 
+-    def set_dtype(self, fp16=False):
++    def set_dtype(self, fp16=False, bf16=False):
+         self.fp16 = fp16
++        self.bf16 = bf16
+ 
+     def set_moe(self, moe=False):
+         self.moe = moe
+diff --git a/deepspeed/module_inject/replace_module.py b/deepspeed/module_inject/replace_module.py
+index 9b038f39..954cd1a3 100644
+--- a/deepspeed/module_inject/replace_module.py
++++ b/deepspeed/module_inject/replace_module.py
+@@ -21,6 +21,8 @@ import time
+ 
+ from .utils import policy_to_ds_container
+ 
++import gc
++
+ 
+ class ReplaceWithTensorSlicing:
+ 
+@@ -176,7 +178,7 @@ def _module_match(module):
+     return None
+ 
+ 
+-def generic_injection(module, fp16=False, enable_cuda_graph=True):
++def generic_injection(module, fp16=False, bf16=False, enable_cuda_graph=True):
+ 
+     def replace_attn(child, policy):
+         policy_attn = policy.attention(child)
+@@ -191,6 +193,7 @@ def generic_injection(module, fp16=False, enable_cuda_graph=True):
+             hidden_size=hidden_size,
+             heads=heads,
+             fp16=fp16,
++            bf16=bf16,
+             triangular_masking=False,
+             max_out_tokens=4096,
+         )
+@@ -223,8 +226,8 @@ def generic_injection(module, fp16=False, enable_cuda_graph=True):
+     if isinstance(module, torch.nn.Module):
+         pass
+     else:
+-        if fp16 is False:
+-            raise ValueError("Generic injection only supported with FP16")
++        if fp16 is False and bf16 is False:
++            raise ValueError("Generic injection only supported with FP16 or BF16")
+ 
+         try:
+             import diffusers
+@@ -282,6 +285,7 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
+     """
+     # defining globals as internally defined functions inherit these everywhere
+     fp16 = (config.dtype == torch.float16 or config.dtype == torch.int8)
++    bf16 = (config.dtype == torch.bfloat16)
+     quantize = (config.dtype == torch.int8)
+     # todo: Refactor later. In future, let's minimize the style used above and use config.** instead
+ 
+@@ -314,7 +318,7 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
+                                             model_config=model_config,
+                                             layer_id=layer_id,
+                                             child=child)
+-        _container.set_dtype(fp16)
++        _container.set_dtype(fp16, bf16)
+         _container.set_moe(moe)
+ 
+         # 2. Set the tensor parallelism config
+@@ -326,6 +330,8 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
+         # 4. deal with data types -- needs refactor to use dtype instead of fp16
+         if fp16:
+             _container.convert_to_required_dtype(dtype=torch.half)
++        if bf16:
++            _container.convert_to_required_dtype(dtype=torch.bfloat16)
+ 
+         # 5. Set the quantization config
+         quantizer = GroupQuantizer(q_int8=quantize)
+@@ -354,11 +360,13 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
+ 
+         return _container.module
+ 
+-    def replace_wo_policy(module, all_reduce_linears):
++    def replace_wo_policy(module, all_reduce_linears, prefix="", state_dict=None):
+         mp_size = config.tensor_parallel.tp_size
+         mp_group = config.tensor_parallel.tp_group
+ 
+         def _replace(child, name, conv_linear_layer):
++            if getattr(child, "replaced", False) == True:
++                return
+             mp_replace = ReplaceWithTensorSlicing(mp_group=mp_group)
+             weight_shape = child.weight.shape
+             if name in all_reduce_linears:
+@@ -374,6 +382,7 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
+                 new_bias = torch.empty((weight_shape[0]), device=child.weight.device, dtype=child.weight.dtype)
+                 if child.bias is not None:
+                     new_bias.data.copy_(child.bias.data)
++                setattr(child, "replaced", True)
+                 return LinearAllreduce(data, child.bias if child.bias is None else \
+                             torch.nn.parameter.Parameter(new_bias.to(get_accelerator().current_device_name())), mp_group)
+             else:
+@@ -392,9 +401,12 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
+                                        dtype=child.weight.dtype)
+                 bias_data = None if child.bias is None else mp_replace.copy(new_bias, child.bias.data).to(
+                     get_accelerator().current_device_name())
++                setattr(child, "replaced", True)
+                 return LinearLayer(weight=data.to(get_accelerator().current_device_name()), bias=bias_data)
+ 
+         def _slice_embedding(child, name, conv_linear_layer):
++            if getattr(child, "replaced", False) == True:
++                return
+             mp_replace = ReplaceWithTensorSlicing(mp_group=mp_group)
+             new_weight = torch.empty((child.weight.shape[0], child.weight.shape[1] // mp_size),
+                                      device=child.weight.device,
+@@ -404,9 +416,12 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
+                                    child.weight.data)
+             new_embedding = nn.Embedding(child.weight.shape[0], child.weight.shape[1] // mp_size)
+             new_embedding.weight.data.copy_(data)
++            setattr(child, "replaced", True)
+             return new_embedding
+ 
+         def update_mp_params(child):
++            if getattr(child, "replaced", False) == True:
++                return
+             if hasattr(child, 'n_heads'):
+                 assert child.n_heads % mp_size == 0, "n_heads ({}) must be divisible by mp_size ({})".format(
+                     child.n_heads, mp_size)
+@@ -439,6 +454,7 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
+                 assert child.hidden_size % mp_size == 0, "hidden_size ({}) must be divisible by mp_size ({})".format(
+                     child.hidden_size, mp_size)
+                 child.hidden_size = child.hidden_size // mp_size
++            setattr(child, "replaced", True)
+ 
+         conv_linear_layer = False
+         if linear_layer_setting is not None:
+@@ -458,6 +474,12 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
+ 
+         def _replace_module(r_module, prev_name=''):
+             for name, child in r_module.named_children():
++                if child.__class__ in [nn.Linear, nn.Embedding, nn.LayerNorm] and state_dict != None:
++                    full_prefix = prefix + '.' + prev_name + '.' + name + '.' if prev_name != "" else prefix + '.' + name + '.'
++                    if prefix_check(full_prefix, state_dict):
++                        load(child, state_dict, full_prefix, mp_group)
++                    else:
++                        continue
+                 if child.__class__ in linear_policies:
+                     setattr(r_module, name, linear_policies[child.__class__](child, prev_name + '.' + name,
+                                                                              conv_linear_layer))
+@@ -468,7 +490,7 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
+ 
+         return _replace_module(module)
+ 
+-    def replace_fn(child, _policy, layer_id=0):
++    def replace_fn(child, _policy, layer_id=0, prefix="", state_dict=None):
+         training = False  # todo: refactor this part to go in the config
+         if training:
+             # copy relevant state from child -> new module
+@@ -483,19 +505,32 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
+                                                  inference=True,
+                                                  layer_id=layer_id)
+             else:
+-                new_module = replace_wo_policy(child, _policy)
++                new_module = replace_wo_policy(child, _policy, prefix=prefix, state_dict=state_dict)
+ 
+         return new_module
+ 
+-    replaced_module = replace_module(model=model,
+-                                     orig_class=orig_layer_impl,
+-                                     replace_fn=replace_fn,
+-                                     _replace_policy=config.injection_policy_tuple)
++    if checkpoint_dict != None and not config.replace_with_kernel_inject:
++        # AutoTP shard loading
++        checkpoint = checkpoint_dict["checkpoints"]
++        pbar = tqdm.tqdm(total=len(checkpoint), desc=f"Loading {len(checkpoint)} checkpoint shards")
++        for i in range(len(checkpoint)):
++            replaced_module = replace_module(model=model,
++                                             orig_class=orig_layer_impl,
++                                             replace_fn=replace_fn,
++                                             _replace_policy=config.injection_policy_tuple,
++                                             checkpoint=checkpoint[i])
++            pbar.update(1)
++            gc.collect()
++    else:
++        replaced_module = replace_module(model=model,
++                                         orig_class=orig_layer_impl,
++                                         replace_fn=replace_fn,
++                                         _replace_policy=config.injection_policy_tuple)
+ 
+     quantizer = GroupQuantizer(q_int8=quantize)
+     world_size = dist.get_world_size() if dist.is_initialized() else 1
+     rank = dist.get_rank() if dist.is_initialized() else 0
+-    if checkpoint_dict is not None:
++    if checkpoint_dict is not None and config.replace_with_kernel_inject:
+         assert container_g.ckpt_load_enabled, \
+                f"Meta Tensor checkpoint loading not supported in {container_g.__class__.__name__} container"
+         start_time = time.time()
+@@ -520,7 +555,6 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
+                                            container=container_g)
+                 pbar.update(1)
+         else:
+-            import gc
+             num_checkpoints = len(ckpt_list) // ckpt_mp_size
+             tp_split_size = (world_size / ckpt_mp_size)
+             sd_offset = int(rank / tp_split_size)
+@@ -595,16 +629,22 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
+                              for k, v in dict(replaced_module.state_dict()).items()
+                              if transformer_name not in k}), f'{config.save_mp_checkpoint_path}/{non_tp_ckpt_name}')
+             ckpt_config = json.dumps({
+-                'type': ckpt_name,
+-                'base_dir': f'{config.save_mp_checkpoint_path}',
++                'type':
++                ckpt_name,
++                'base_dir':
++                f'{config.save_mp_checkpoint_path}',
+                 'checkpoints': {
+                     "non_tp": ckpt_files,
+                     "tp": [f'tp_{r:0>2d}_{m:0>2d}.pt' for m in range(num_partitions) for r in range(world_size)]
+                 },
+-                'version': 1.0,
+-                'parallelization': 'tp',
+-                'tp_size': world_size,
+-                'dtype': 'int8' if quantize else ('float16' if fp16 else 'float32')
++                'version':
++                1.0,
++                'parallelization':
++                'tp',
++                'tp_size':
++                world_size,
++                'dtype':
++                'int8' if quantize else ('float16' if fp16 else 'bfloat16' if bf16 else 'float32')
+             })
+             with open(f"{config.save_mp_checkpoint_path}/ds_inference_config.json", "w") as cfg:
+                 cfg.write(ckpt_config)
+@@ -694,7 +734,7 @@ def revert_transformer_layer(orig_layer_impl, model, config, preln=False):
+                           _replace_policy=None)
+ 
+ 
+-def replace_module(model, orig_class, replace_fn, _replace_policy):
++def replace_module(model, orig_class, replace_fn, _replace_policy, checkpoint=None):
+     """ Scan the model for instances of ``orig_clas:`` to replace using ``replace_fn``.
+     Arguments:
+         model (torch.nn.Module): the model to augment
+@@ -704,6 +744,9 @@ def replace_module(model, orig_class, replace_fn, _replace_policy):
+     Returns:
+         A modified ``model``.
+     """
++    sd = None
++    if checkpoint != None:
++        sd = torch.load(checkpoint, map_location='cpu')
+     policy = {}
+     if orig_class is not None:
+         policy.update({orig_class: (replace_fn, _replace_policy)})
+@@ -720,14 +763,30 @@ def replace_module(model, orig_class, replace_fn, _replace_policy):
+         "No default policy found! Please specify your policy injection_policy (like {BertLayer:HFBEertLayerPolicy})." +\
+         "You can find some samples here: https://github.com/microsoft/DeepSpeed/blob/master/deepspeed/module_inject/replace_policy.py"
+ 
+-    replaced_module, _ = _replace_module(model, policy)
++    replaced_module, _ = _replace_module(model, policy, state_dict=sd)
++
++    for n, p in replaced_module.named_parameters():
++        if "word_embeddings." in n or "embed_tokens." in n or "wte." in n:
++            embedding_weight = p
++    if embedding_weight is not None and replaced_module.lm_head.weight.is_meta:
++        replaced_module.lm_head.weight = embedding_weight
+     return replaced_module
+ 
+ 
+ from ..pipe import PipelineModule
+ 
++import re
++
++
++def prefix_check(name, checkpoint_dict):
++    # if keys start with 'model.', don't skip level 0 prefix
++    for key in checkpoint_dict.keys():
++        if re.match(name, key):
++            return True
++    return False
++
+ 
+-def _replace_module(model, policies, layer_id=0):
++def _replace_module(model, policies, prefix='', layer_id=0, level_id=0, state_dict=None):
+     """ Traverse model's children recursively and apply any transformations in ``policies``.
+     Arguments:
+         model (torch.nn.Module): model to augment
+@@ -735,9 +794,14 @@ def _replace_module(model, policies, layer_id=0):
+     Returns:
+         Modified ``model``.
+     """
++    load_layers = [nn.Linear, nn.Embedding, nn.LayerNorm]
+     for name, child in model.named_children():
+         if child.__class__ in policies:
+-            replaced_module = policies[child.__class__][0](child, policies[child.__class__][-1], layer_id)
++            replaced_module = policies[child.__class__][0](child,
++                                                           policies[child.__class__][-1],
++                                                           layer_id,
++                                                           prefix=prefix + name,
++                                                           state_dict=state_dict)
+             setattr(model, name, replaced_module)
+             if isinstance(model, PipelineModule):
+                 assert hasattr(model, 'forward_funcs'),\
+@@ -745,8 +809,58 @@ def _replace_module(model, policies, layer_id=0):
+                 model.forward_funcs[model.fwd_map[name]] = replaced_module
+             layer_id += 1
+         else:
+-            _, layer_id = _replace_module(child, policies, layer_id=layer_id)
++            if child.__class__ in load_layers and state_dict != None:
++                if prefix_check(prefix + name + '.', state_dict):
++                    load(
++                        child,
++                        state_dict,
++                        prefix + name + '.',
++                    )
++                else:
++                    continue
++            _, layer_id = _replace_module(child,
++                                          policies,
++                                          prefix if level_id == 0 else prefix + name + '.',
++                                          layer_id=layer_id,
++                                          level_id=level_id + 1,
++                                          state_dict=state_dict)
+ 
+     # Add the reset_cache func to the model, so that it can be called in the beginning of text-generation.
+     model.reset_cache = transformer_inference.DeepSpeedTransformerInference.reset_cache
+     return model, layer_id
++
++
++def load(module, state_dict, prefix, mp_group=None):
++    mp_replace = ReplaceWithTensorSlicing(mp_group=mp_group)
++    if hasattr(module, 'weight'):
++        if module.weight.data.is_meta:
++            # meta tensor cannot be casted or copied to, so we need to replace it with a normal tensor here
++            module.weight = torch.nn.parameter.Parameter(data=torch.empty_like(module.weight.data, device="cpu"),
++                                                         requires_grad=module.weight.data.requires_grad)
++            if 'query_key_value' in prefix:
++                module.weight = mp_replace.qkv_copy(module.weight.data, state_dict[prefix + 'weight'])
++            else:
++                module.weight = mp_replace.copy(module.weight.data, state_dict[prefix + 'weight'])
++    else:
++        if hasattr(module, 'norm') and hasattr(module.norm, 'weight'):
++            if module.norm.weight.data.is_meta:
++                # meta tensor cannot be casted or copied to, so we need to replace it with a normal tensor here
++                module.norm.weight = torch.nn.parameter.Parameter(data=torch.empty_like(module.norm.weight.data,
++                                                                                        device="cpu"),
++                                                                  requires_grad=module.norm.weight.data.requires_grad)
++            module.norm.weight = mp_replace.copy(module.norm.weight.data, state_dict[prefix + 'weight'])
++
++    if hasattr(module, 'bias'):
++        if module.bias.data.is_meta:
++            # meta tensor cannot be casted or copied to, so we need to replace it with a normal tensor here
++            module.bias = torch.nn.parameter.Parameter(data=torch.empty_like(module.bias.data, device="cpu"),
++                                                       requires_grad=module.bias.data.requires_grad)
++        module.bias = mp_replace.copy(module.bias, state_dict[prefix + 'bias'])
++    else:
++        if hasattr(module, 'norm') and hasattr(module.norm, 'bias'):
++            if module.norm.bias.data.is_meta:
++                # meta tensor cannot be casted or copied to, so we need to replace it with a normal tensor here
++                module.norm.bias = torch.nn.parameter.Parameter(data=torch.empty_like(module.norm.bias.data,
++                                                                                      device="cpu"),
++                                                                requires_grad=module.norm.bias.data.requires_grad)
++            module.norm.bias = mp_replace.copy(module.norm.bias, state_dict[prefix + 'bias'])
+diff --git a/deepspeed/ops/transformer/inference/config.py b/deepspeed/ops/transformer/inference/config.py
+index e9cd78fc..45b74a1b 100644
+--- a/deepspeed/ops/transformer/inference/config.py
++++ b/deepspeed/ops/transformer/inference/config.py
+@@ -30,6 +30,7 @@ class DeepSpeedInferenceConfig(TransformerConfig):
+                 using model-parallel architecture. If the client model already takes care of this, there is no
+                 need to pass this argument.
+             fp16: Enable half-precision computation
++            bf16: Enable bf16 floating point computation
+             pre_layer_norm: Select between Pre-LN or Post-LN transformer architecture
+             stochastic_mode:  Enable for high performance, please note that this flag has some level of
+                 non-determinism and can produce different results on different runs.  However, we have seen
+@@ -51,6 +52,7 @@ class DeepSpeedInferenceConfig(TransformerConfig):
+                  local_rank=-1,
+                  mp_size=1,
+                  fp16=False,
++                 bf16=False,
+                  q_int8=False,
+                  pre_layer_norm=True,
+                  stochastic_mode=False,
+@@ -75,6 +77,7 @@ class DeepSpeedInferenceConfig(TransformerConfig):
+               self).__init__(hidden_size, (intermediate_size if intermediate_size > 0 else 4 * hidden_size), heads,
+                              num_hidden_layers)
+         self.fp16 = fp16
++        self.bf16 = bf16
+         self.pre_layer_norm = pre_layer_norm
+         self.local_rank = local_rank
+         self.stochastic_mode = stochastic_mode
+diff --git a/deepspeed/ops/transformer/inference/diffusers_attention.py b/deepspeed/ops/transformer/inference/diffusers_attention.py
+index 63a444ba..43a01919 100644
+--- a/deepspeed/ops/transformer/inference/diffusers_attention.py
++++ b/deepspeed/ops/transformer/inference/diffusers_attention.py
+@@ -11,7 +11,7 @@ from deepspeed.accelerator import get_accelerator
+ from deepspeed.ops.op_builder import InferenceBuilder
+ 
+ # Cuda modules will be imported if needed
+-inference_cuda_module = None
++inference_module = None
+ minus_inf = -10000.0
+ triton_flash_attn = None
+ 
+@@ -75,8 +75,7 @@ class DeepSpeedDiffusersAttentionFunction(Function):
+                     query = query.contiguous()
+                     key = key.contiguous()
+                     value = value.contiguous()
+-                query, key, value = inference_cuda_module.pad_transform_fp16(query, key, value, config.heads,
+-                                                                             do_flash_attn)
++                query, key, value = inference_module.pad_transform_fp16(query, key, value, config.heads, do_flash_attn)
+                 attention_scores = (torch.matmul(query, key.transpose(-1, -2)) * scale).softmax(dim=-1)
+                 context_layer = _transpose_for_context(torch.matmul(attention_scores, value))
+ 
+@@ -114,12 +113,12 @@ class DeepSpeedDiffusersAttention(nn.Module):
+         device = get_accelerator().current_device_name() if config.bigscience_bloom else 'cpu'
+         qkv_size_per_partition = (self.config.hidden_size // self.config.mp_size) * 3
+ 
+-        data_type = torch.int8 if config.q_int8 else torch.half if config.fp16 else torch.float
+-        data_type_fp = torch.half if config.fp16 else torch.float
+-        global inference_cuda_module
+-        if inference_cuda_module is None:
++        data_type = torch.int8 if config.q_int8 else torch.half if config.fp16 else torch.bfloat16 if config.bf16 else torch.float
++        data_type_fp = torch.half if config.fp16 else torch.bfloat16 if config.bf16 else torch.float
++        global inference_module
++        if inference_module is None:
+             builder = InferenceBuilder()
+-            inference_cuda_module = builder.load()
++            inference_module = builder.load()
+ 
+         if DeepSpeedDiffusersAttention.layer_id == 1:
+             log_dist(f"DeepSpeed-Attention config: {self.config.__dict__}", [0])
+@@ -170,12 +169,12 @@ class DeepSpeedDiffusersAttention(nn.Module):
+             self.norm_factor *= math.sqrt(self.config.layer_id + 1)
+             # https://github.com/huggingface/transformers/blob/v4.24.0/src/transformers/models/gpt2/modeling_gpt2.py#L191
+ 
+-        self.score_context_func = inference_cuda_module.softmax_context_fp32 if (not config.fp16) else \
+-                                    inference_cuda_module.softmax_context_fp16
+-        self.linear_func = inference_cuda_module.linear_layer_fp16 if config.fp16 else \
+-                                    inference_cuda_module.linear_layer_fp32
+-        self.allocate_workspace = inference_cuda_module.allocate_workspace_fp32 if not (config.fp16) else \
+-                                    inference_cuda_module.allocate_workspace_fp16
++        self.score_context_func = inference_module.softmax_context_fp32 if (not config.fp16) else \
++                                    inference_module.softmax_context_fp16
++        self.linear_func = inference_module.linear_layer_fp16 if config.fp16 else \
++                                    inference_module.linear_layer_fp32
++        self.allocate_workspace = inference_module.allocate_workspace_fp32 if not (config.fp16) else \
++                                    inference_module.allocate_workspace_fp16
+ 
+     def forward(self, input, context=None, input_mask=None):
+         if self.config.layer_id == 0:
+diff --git a/deepspeed/ops/transformer/inference/ds_attention.py b/deepspeed/ops/transformer/inference/ds_attention.py
+index 851ffdc9..77022b7b 100644
+--- a/deepspeed/ops/transformer/inference/ds_attention.py
++++ b/deepspeed/ops/transformer/inference/ds_attention.py
+@@ -18,8 +18,8 @@ class DeepSpeedSelfAttention(nn.Module):
+     def __init__(self, config, mp_group=None, q_scales=None, q_groups=1, merge_count=1):
+         super(DeepSpeedSelfAttention, self).__init__()
+         self.config = config
+-        data_type = torch.int8 if config.q_int8 else torch.half if config.fp16 else torch.float
+-        data_type_fp = torch.half if config.fp16 else torch.float
++        data_type = torch.int8 if config.q_int8 else torch.half if config.fp16 else torch.bfloat16 if config.bf16 else torch.float
++        data_type_fp = torch.half if config.fp16 else torch.bfloat16 if config.bf16 else torch.float
+         self.config.layer_id = DeepSpeedSelfAttention.num_layers
+         DeepSpeedSelfAttention.num_layers = DeepSpeedSelfAttention.num_layers + 1
+         device = get_accelerator().current_device_name()  #if config.bigscience_bloom else 'cpu'
+diff --git a/deepspeed/ops/transformer/inference/ds_mlp.py b/deepspeed/ops/transformer/inference/ds_mlp.py
+index 1f398a16..75bc00ea 100644
+--- a/deepspeed/ops/transformer/inference/ds_mlp.py
++++ b/deepspeed/ops/transformer/inference/ds_mlp.py
+@@ -16,8 +16,8 @@ class DeepSpeedMLP(nn.Module):
+         super(DeepSpeedMLP, self).__init__()
+ 
+         self.config = config
+-        data_type = torch.int8 if config.q_int8 else torch.half if config.fp16 else torch.float
+-        data_type_fp = torch.half if config.fp16 else torch.float
++        data_type = torch.int8 if config.q_int8 else torch.half if config.fp16 else torch.bfloat16 if config.bf16 else torch.float
++        data_type_fp = torch.half if config.fp16 else torch.bfloat16 if config.bf16 else torch.float
+         device = get_accelerator().current_device_name()
+         self.attn_nw = nn.Parameter(torch.empty(self.config.hidden_size, dtype=data_type_fp, device=device),
+                                     requires_grad=False)
+diff --git a/deepspeed/ops/transformer/inference/moe_inference.py b/deepspeed/ops/transformer/inference/moe_inference.py
+index 0fcb0084..2c85e3ea 100644
+--- a/deepspeed/ops/transformer/inference/moe_inference.py
++++ b/deepspeed/ops/transformer/inference/moe_inference.py
+@@ -5,9 +5,8 @@ import json
+ import math
+ import torch
+ from torch.autograd import Function
+-#from ...inference.engine import inference_cuda_module, specialized_mode
+-# Cuda modules will be imported if needed
+-inference_cuda_module = None
++# accelerator modules will be imported if needed
++inference_module = None
+ specialized_mode = None
+ import torch.nn as nn
+ from .ds_attention import DeepSpeedSelfAttention
+@@ -33,6 +32,7 @@ class DeepSpeedMoEInferenceConfig(DeepSpeedInferenceConfig):
+                 using model-parallel architecture. If the client model already takes care of this, there is no
+                 need to pass this argument.
+             fp16: Enable half-precision computation
++            bf16: Enable bf16 floating point computation
+             pre_layer_norm: Select between Pre-LN or Post-LN transformer architecture
+             stochastic_mode:  Enable for high performance, please note that this flag has some level of
+                 non-determinism and can produce different results on different runs.  However, we have seen
+@@ -53,6 +53,7 @@ class DeepSpeedMoEInferenceConfig(DeepSpeedInferenceConfig):
+                  local_rank=-1,
+                  mp_size=1,
+                  fp16=False,
++                 bf16=False,
+                  q_int8=False,
+                  pre_layer_norm=True,
+                  stochastic_mode=False,
+@@ -74,9 +75,9 @@ class DeepSpeedMoEInferenceConfig(DeepSpeedInferenceConfig):
+                  scale_attn_by_inverse_layer_idx=False):
+         super(DeepSpeedMoEInferenceConfig,
+               self).__init__(hidden_size, (intermediate_size if intermediate_size > 0 else 4 * hidden_size), heads,
+-                             num_hidden_layers, layer_norm_eps, local_rank, mp_size, fp16, q_int8, pre_layer_norm,
+-                             stochastic_mode, scale_attention, triangular_masking, local_attention, window_size,
+-                             return_tuple)
++                             num_hidden_layers, layer_norm_eps, local_rank, mp_size, fp16, bf16, q_int8,
++                             pre_layer_norm, stochastic_mode, scale_attention, triangular_masking, local_attention,
++                             window_size, return_tuple)
+         self.moe_experts = moe_experts
+         self.k = k
+         self.capacity_factor = capacity_factor
+@@ -109,14 +110,12 @@ class DeepSpeedMLPFunction(Function):
+     def forward(ctx, input, inter_w, inter_b, config, output_b, output_w, q_scales, q_groups, merge_count, mp_group,
+                 async_op):
+         if config.q_int8:
+-            intermediate = inference_cuda_module.fused_gemm_gelu_int8(input, inter_w, inter_b, config.epsilon,
+-                                                                      q_scales[2], (q_groups * (2**merge_count)),
+-                                                                      config.pre_layer_norm)
+-            output = inference_cuda_module.vector_matmul_int8(intermediate, output_w, q_scales[3], q_groups,
+-                                                              (merge_count))
++            intermediate = inference_module.fused_gemm_gelu_int8(input, inter_w, inter_b, config.epsilon, q_scales[2],
++                                                                 (q_groups * (2**merge_count)), config.pre_layer_norm)
++            output = inference_module.vector_matmul_int8(intermediate, output_w, q_scales[3], q_groups, (merge_count))
+         else:
+-            mlp_gemm_func = inference_cuda_module.fused_gemm_gelu_fp16 if config.fp16 else \
+-                                    inference_cuda_module.fused_gemm_gelu_fp32
++            mlp_gemm_func = inference_module.fused_gemm_gelu_fp16 if config.fp16 else \
++                                    inference_module.fused_gemm_gelu_fp32
+ 
+             output = mlp_gemm_func(input, inter_w, inter_b, output_w, config.epsilon, config.pre_layer_norm, async_op)
+         if mp_group is not None and dist.get_world_size(group=mp_group) > 1:
+@@ -186,17 +185,17 @@ class DeepSpeedMoEInference(nn.Module):
+ 
+         self.config = config
+         self.config.layer_id = DeepSpeedMoEInference.layer_id
+-        global inference_cuda_module
++        global inference_module
+         global specialized_mode
+-        if inference_cuda_module is None:
++        if inference_module is None:
+             specialized_mode = False
+             # InferenceSpecializedBuilder is not among DeepSpeed provided builder yet, so we infer by builder name string
+             builder = get_accelerator().create_op_builder("InferenceSpecializedBuilder")
+             if builder != None and builder.is_compatible():
+-                inference_cuda_module = builder.load()
++                inference_module = builder.load()
+                 specialized_mode = True
+             else:
+-                inference_cuda_module = InferenceBuilder().load()
++                inference_module = InferenceBuilder().load()
+         self.config.specialized_mode = specialized_mode
+ 
+         DeepSpeedMoEInference.layer_id += 1
+@@ -211,10 +210,10 @@ class DeepSpeedMoEInference(nn.Module):
+             self.res_mlp = DeepSpeedMoEMLP(config, quantize_scales, quantize_groups, merge_count, mlp_extra_grouping,
+                                            mp_group)
+             self.res_coef = nn.Parameter(torch.Tensor(self.config.hidden_size, 2))
+-            self.coef_func = inference_cuda_module.softmax_fp16 if self.config.fp16 or self.config.q_int8 else \
+-                                        inference_cuda_module.softmax_fp32
+-            self.vector_matmul_func = inference_cuda_module.vector_matmul_fp16 if config.fp16 else \
+-                                    inference_cuda_module.vector_matmul_fp32
++            self.coef_func = inference_module.softmax_fp16 if self.config.fp16 or self.config.q_int8 else \
++                                        inference_module.softmax_fp32
++            self.vector_matmul_func = inference_module.vector_matmul_fp16 if config.fp16 else \
++                                    inference_module.vector_matmul_fp32
+ 
+         config.mp_size = 1
+         self.mlp = nn.ModuleList(
+@@ -232,12 +231,12 @@ class DeepSpeedMoEInference(nn.Module):
+ 
+         print("DeepSpeed MoE Transformer Inference config is ", self.config.__dict__)
+ 
+-        self.bias_residual_func = inference_cuda_module.bias_residual_fp16 if config.fp16 or config.q_int8 else \
+-                                        inference_cuda_module.bias_residual_fp32
+-        self.ds_layernorm = inference_cuda_module.layer_norm_fp16 if self.config.fp16 or self.config.q_int8 else \
+-                                        inference_cuda_module.layer_norm_fp32
+-        self.einsum_sec_sm_ecm = inference_cuda_module.einsum_sec_sm_ecm_fp16 if self.config.fp16 or self.config.q_int8 else \
+-                                        inference_cuda_module.einsum_sec_sm_ecm_fp32
++        self.bias_residual_func = inference_module.bias_residual_fp16 if config.fp16 or config.q_int8 else \
++                                        inference_module.bias_residual_fp32
++        self.ds_layernorm = inference_module.layer_norm_fp16 if self.config.fp16 or self.config.q_int8 else \
++                                        inference_module.layer_norm_fp32
++        self.einsum_sec_sm_ecm = inference_module.einsum_sec_sm_ecm_fp16 if self.config.fp16 or self.config.q_int8 else \
++                                        inference_module.einsum_sec_sm_ecm_fp32
+ 
+     def res_coef_func(self, inp, async_op):
+         inp = self.vector_matmul_func(inp, self.res_coef, async_op)
+@@ -345,7 +344,7 @@ class DeepSpeedMoEInference(nn.Module):
+                                       dim=0)[dist.get_rank(group=self.expert_mp_group)]
+ 
+             if self.config.mlp_type == 'residual':
+-                inference_cuda_module.moe_res_matmul(res_mlp_out, res_coef_out, output)
++                inference_module.moe_res_matmul(res_mlp_out, res_coef_out, output)
+ 
+             output = self.bias_residual_func(output, residual_add, torch.empty(1))
+ 
+diff --git a/deepspeed/ops/transformer/inference/op_binding/base.py b/deepspeed/ops/transformer/inference/op_binding/base.py
+index ad29e0f7..52a8ba42 100644
+--- a/deepspeed/ops/transformer/inference/op_binding/base.py
++++ b/deepspeed/ops/transformer/inference/op_binding/base.py
+@@ -7,11 +7,11 @@ from deepspeed.ops.op_builder import InferenceBuilder
+ 
+ 
+ class BaseOp(torch.nn.Module):
+-    inference_cuda_module = None
++    inference_module = None
+ 
+     def __init__(self, config: DeepSpeedInferenceConfig):
+         super(BaseOp, self).__init__()
+         self.config = config
+-        if BaseOp.inference_cuda_module is None:
++        if BaseOp.inference_module is None:
+             builder = InferenceBuilder()
+-            BaseOp.inference_cuda_module = builder.load()
++            BaseOp.inference_module = builder.load()
+diff --git a/deepspeed/ops/transformer/inference/op_binding/gelu_gemm.py b/deepspeed/ops/transformer/inference/op_binding/gelu_gemm.py
+index d5ecc54d..fbee8351 100644
+--- a/deepspeed/ops/transformer/inference/op_binding/gelu_gemm.py
++++ b/deepspeed/ops/transformer/inference/op_binding/gelu_gemm.py
+@@ -9,10 +9,15 @@ class GELUGemmOp(BaseOp):
+ 
+     def __init__(self, config: DeepSpeedInferenceConfig):
+         super(GELUGemmOp, self).__init__(config)
+-        if self.config.fp16:
+-            self.fused_gemm_gelu = self.inference_cuda_module.fused_gemm_gelu_fp16
+-        else:
+-            self.fused_gemm_gelu = self.inference_cuda_module.fused_gemm_gelu_fp32
++        try:
++            if self.config.fp16:
++                self.fused_gemm_gelu = self.inference_module.fused_gemm_gelu_fp16
++            elif self.config.bf16:
++                self.fused_gemm_gelu = self.inference_module.fused_gemm_gelu_bf16
++            else:
++                self.fused_gemm_gelu = self.inference_module.fused_gemm_gelu_fp32
++        except AttributeError:
++            self.fused_gemm_gelu = None
+ 
+     def forward(self,
+                 input: torch.Tensor,
+@@ -20,6 +25,11 @@ class GELUGemmOp(BaseOp):
+                 bias: torch.Tensor,
+                 weight_out: torch.Tensor,
+                 async_op: bool = False):
+-        output = self.fused_gemm_gelu(input, weight, weight.scale, bias, weight_out, weight_out.scale,
+-                                      self.config.epsilon, self.config.pre_layer_norm, self.config.q_int8, async_op)
++        if self.fused_gemm_gelu != None:
++            output = self.fused_gemm_gelu(input, weight, weight.scale, bias, weight_out, weight_out.scale,
++                                          self.config.epsilon, self.config.pre_layer_norm, self.config.q_int8,
++                                          async_op)
++        else:
++            # fallback
++            raise NotImplementedError
+         return output
+diff --git a/deepspeed/ops/transformer/inference/op_binding/linear.py b/deepspeed/ops/transformer/inference/op_binding/linear.py
+index f08268ef..88339b99 100644
+--- a/deepspeed/ops/transformer/inference/op_binding/linear.py
++++ b/deepspeed/ops/transformer/inference/op_binding/linear.py
+@@ -9,10 +9,15 @@ class LinearOp(BaseOp):
+ 
+     def __init__(self, config: DeepSpeedInferenceConfig):
+         super(LinearOp, self).__init__(config)
+-        if self.config.fp16:
+-            self.linear_func = self.inference_cuda_module.linear_layer_fp16
+-        else:
+-            self.linear_func = self.inference_cuda_module.linear_layer_fp32
++        try:
++            if self.config.fp16:
++                self.linear_func = self.inference_module.linear_layer_fp16
++            elif self.config.bf16:
++                self.linear_func = self.inference_module.linear_layer_bf16
++            else:
++                self.linear_func = self.inference_module.linear_layer_fp32
++        except AttributeError:
++            self.linear_func = None
+ 
+     def forward(self,
+                 input: torch.Tensor,
+@@ -23,5 +28,9 @@ class LinearOp(BaseOp):
+                 num_heads: int,
+                 external_cache: bool = None,
+                 num_layers: int = None):
+-        qkv_out = self.linear_func(input, weight, bias, add_bias, do_flash_attn, num_heads)
++        if self.linear_func != None:
++            qkv_out = self.linear_func(input, weight, bias, add_bias, do_flash_attn, num_heads)
++        else:
++            # fallback
++            raise NotImplementedError
+         return qkv_out
+diff --git a/deepspeed/ops/transformer/inference/op_binding/mlp_gemm.py b/deepspeed/ops/transformer/inference/op_binding/mlp_gemm.py
+index c89c0220..91015204 100644
+--- a/deepspeed/ops/transformer/inference/op_binding/mlp_gemm.py
++++ b/deepspeed/ops/transformer/inference/op_binding/mlp_gemm.py
+@@ -1,6 +1,7 @@
+ '''Copyright The Microsoft DeepSpeed Team'''
+ 
+ import torch
++import torch.nn.functional as F
+ from ..config import DeepSpeedInferenceConfig
+ from .base import BaseOp
+ 
+@@ -9,16 +10,33 @@ class MLPGemmOp(BaseOp):
+ 
+     def __init__(self, config: DeepSpeedInferenceConfig):
+         super(MLPGemmOp, self).__init__(config)
+-        if self.config.fp16:
+-            self.mlp_gemm_func = self.inference_cuda_module.mlp_gemm_fp16
+-        else:
+-            self.mlp_gemm_func = self.inference_cuda_module.mlp_gemm_fp32
++        try:
++            if self.config.fp16:
++                self.mlp_gemm_func = self.inference_module.mlp_gemm_fp16
++            elif self.config.bf16:
++                self.mlp_gemm_func = self.inference_module.mlp_gemm_bf16
++            else:
++                self.mlp_gemm_func = self.inference_module.mlp_gemm_fp32
++        except AttributeError:
++            self.mlp_gemm_func = None
+ 
+     def forward(self, input: torch.Tensor, residual: torch.Tensor, input_bias: torch.Tensor,
+                 weight_interm: torch.Tensor, weight_out: torch.Tensor, bias: torch.Tensor, gamma: torch.Tensor,
+                 beta: torch.Tensor):
+-        output, residual_add = self.mlp_gemm_func(input, residual, input_bias, weight_interm, weight_out, bias, gamma,
+-                                                  beta, self.config.epsilon, self.config.pre_layer_norm,
+-                                                  self.config.mlp_after_attn, weight_interm.scale, weight_out.scale,
+-                                                  self.config.q_int8, self.config.mlp_act_func_type)
++        if self.mlp_gemm_func != None:
++            output, residual_add = self.mlp_gemm_func(input, residual, input_bias, weight_interm, weight_out, bias,
++                                                      gamma, beta, self.config.epsilon, self.config.pre_layer_norm,
++                                                      self.config.mlp_after_attn, weight_interm.scale,
++                                                      weight_out.scale, self.config.q_int8,
++                                                      self.config.mlp_act_func_type)
++        else:
++            # fallback
++            if self.config.mlp_after_attn:
++                residual_add = F.layer_norm(input + residual + input_bias, (input.shape[2], ), gamma, beta,
++                                            self.config.epsilon)
++                tmp = torch.matmul(residual_add, weight_interm)
++                tmp = F.gelu(tmp + bias)
++                output = torch.matmul(tmp, weight_out)
++            else:
++                raise NotImplementedError
+         return output, residual_add
+diff --git a/deepspeed/ops/transformer/inference/op_binding/qkv_gemm.py b/deepspeed/ops/transformer/inference/op_binding/qkv_gemm.py
+index cf1b979d..fe175585 100644
+--- a/deepspeed/ops/transformer/inference/op_binding/qkv_gemm.py
++++ b/deepspeed/ops/transformer/inference/op_binding/qkv_gemm.py
+@@ -1,6 +1,7 @@
+ '''Copyright The Microsoft DeepSpeed Team'''
+ 
+ import torch
++import torch.nn.functional as F
+ from ..config import DeepSpeedInferenceConfig
+ from .base import BaseOp
+ from deepspeed import comm as dist
+@@ -10,10 +11,15 @@ class QKVGemmOp(BaseOp):
+ 
+     def __init__(self, config: DeepSpeedInferenceConfig):
+         super(QKVGemmOp, self).__init__(config)
+-        if self.config.fp16:
+-            self.qkv_gemm_func = self.inference_cuda_module.qkv_gemm_fp16
+-        else:
+-            self.qkv_gemm_func = self.inference_cuda_module.qkv_gemm_fp32
++        try:
++            if self.config.fp16:
++                self.qkv_gemm_func = self.inference_module.qkv_gemm_fp16
++            elif self.config.bf16:
++                self.qkv_gemm_func = self.inference_module.qkv_gemm_bf16
++            else:
++                self.qkv_gemm_func = self.inference_module.qkv_gemm_fp32
++        except AttributeError:
++            self.qkv_gemm_func = None
+ 
+     def forward(self,
+                 input: torch.Tensor,
+@@ -29,6 +35,15 @@ class QKVGemmOp(BaseOp):
+         external_cache = self.config.bigscience_bloom
+         rank = dist.get_rank() if dist.is_initialized() else 0
+         q_int8 = self.config.q_int8
+-        output = self.qkv_gemm_func(input, weight, q_scale, bias, gamma, beta, self.config.epsilon, add_bias,
+-                                    num_layers, external_cache, self.config.mp_size, rank, q_int8)
++        if self.qkv_gemm_func != None:
++            output = self.qkv_gemm_func(input, weight, q_scale, bias, gamma, beta, self.config.epsilon, add_bias,
++                                        num_layers, external_cache, self.config.mp_size, rank, q_int8)
++        else:
++            # fallback
++            inp_norm = F.layer_norm(input, (input.shape[2], ), gamma, beta, self.config.epsilon)
++            tmp = torch.matmul(inp_norm, weight)
++            if add_bias:
++                tmp += bias
++            output = [tmp, inp_norm]
++
+         return output
+diff --git a/deepspeed/ops/transformer/inference/op_binding/residual_add.py b/deepspeed/ops/transformer/inference/op_binding/residual_add.py
+index 808ead4c..38f79e45 100644
+--- a/deepspeed/ops/transformer/inference/op_binding/residual_add.py
++++ b/deepspeed/ops/transformer/inference/op_binding/residual_add.py
+@@ -9,10 +9,15 @@ class ResidualAddOp(BaseOp):
+ 
+     def __init__(self, config: DeepSpeedInferenceConfig):
+         super(ResidualAddOp, self).__init__(config)
+-        if self.config.fp16 or self.config.q_int8:
+-            self.residual_add_func = self.inference_cuda_module.residual_add_bias_fp16
+-        else:
+-            self.residual_add_func = self.inference_cuda_module.residual_add_bias_fp32
++        try:
++            if self.config.fp16 or self.config.q_int8:
++                self.residual_add_func = self.inference_module.residual_add_bias_fp16
++            elif self.config.bf16:
++                self.residual_add_func = self.inference_module.residual_add_bias_bf16
++            else:
++                self.residual_add_func = self.inference_module.residual_add_bias_fp32
++        except AttributeError:
++            self.residual_add_func = None
+ 
+     def forward(self, hidden_state: torch.Tensor, residual: torch.Tensor, attention_output: torch.Tensor,
+                 attention_bias: torch.Tensor, final_bias: torch.Tensor, add_bias: bool, residual_add: torch.Tensor):
+@@ -21,6 +26,21 @@ class ResidualAddOp(BaseOp):
+             # only use residual add if its set and we are not pre layer norm
+             residual = residual_add
+ 
+-        self.residual_add_func(hidden_state, residual, attention_output, attention_bias, final_bias,
+-                               self.config.mp_size, self.config.mlp_after_attn, add_bias, self.config.pre_layer_norm)
++        if self.residual_add_func != None:
++            self.residual_add_func(hidden_state, residual, attention_output, attention_bias, final_bias,
++                                   self.config.mp_size, self.config.mlp_after_attn, add_bias,
++                                   self.config.pre_layer_norm)
++        else:
++            # fallback
++            if self.config.mlp_after_attn:
++                if self.config.pre_layer_norm:
++                    tmp = (residual.float() + attention_output.float() + attention_bias.float() +
++                           final_bias.float()) / self.config.mp_size + hidden_state.float()
++                else:
++                    tmp = residual.float() + hidden_state.float() + final_bias.float()
++
++                input_dtype = hidden_state.dtype
++                residual = tmp.to(input_dtype)
++            else:
++                raise NotImplementedError
+         return residual
+diff --git a/deepspeed/ops/transformer/inference/op_binding/softmax.py b/deepspeed/ops/transformer/inference/op_binding/softmax.py
+index 1c11eab0..f6f269a8 100644
+--- a/deepspeed/ops/transformer/inference/op_binding/softmax.py
++++ b/deepspeed/ops/transformer/inference/op_binding/softmax.py
+@@ -1,6 +1,7 @@
+ '''Copyright The Microsoft DeepSpeed Team'''
+ 
+ import torch
++import torch.nn.functional as F
+ from ..config import DeepSpeedInferenceConfig
+ from .base import BaseOp
+ 
+@@ -9,17 +10,36 @@ class SoftmaxOp(BaseOp):
+ 
+     def __init__(self, config: DeepSpeedInferenceConfig):
+         super(SoftmaxOp, self).__init__(config)
+-        if self.config.fp16:
+-            self.softmax_func = self.inference_cuda_module.softmax_fp16
+-        else:
+-            self.softmax_func = self._not_implemented
+-
+-    def _not_implemented(self, *args, **kwargs):
+-        raise NotImplementedError
++        self.num_attention_heads_per_partition = config.heads // config.mp_size
++        try:
++            if self.config.fp16:
++                self.softmax_func = self.inference_module.softmax_fp16
++            elif self.config.bf16:
++                self.softmax_func = self.inference_module.softmax_bf16
++            else:
++                self.softmax_func = self.inference_module.softmax_fp32
++        except AttributeError:
++            self.softmax_func = None
+ 
+     def forward(self, attn_scores: torch.Tensor, attn_mask: torch.Tensor, alibi: torch.Tensor, triangular: bool,
+                 recompute: bool, local_attention: bool, window_size: int, async_op: bool, layer_scale: float,
+                 head_offset: int):
+-        output = self.softmax_func(attn_scores, attn_mask, alibi, triangular, recompute, local_attention, window_size,
+-                                   async_op, layer_scale, head_offset, self.config.mp_size)
++        if self.softmax_func != None:
++            output = self.softmax_func(attn_scores, attn_mask, alibi, triangular, recompute, local_attention,
++                                       window_size, async_op, layer_scale, head_offset, self.config.mp_size)
++        else:
++            # fallback
++            alibi = alibi[head_offset:head_offset + self.num_attention_heads_per_partition]
++            input_dtype = attn_scores.dtype
++            if (triangular):
++                tri = ~torch.tril(torch.ones(attn_scores.size(), device=attn_scores.device)).to(bool)
++                attn_scores = torch.masked_fill(attn_scores * layer_scale, tri, torch.finfo(input_dtype).min)
++            if alibi is not None:
++                attn_scores += alibi
++            if attn_mask is not None:
++                # expand atten_mask from two dim into 4 dim, insert two dims in the middle
++                attn_mask = attn_mask[:, None, None, :]
++                attn_scores += attn_mask
++            output = F.softmax(attn_scores, dim=-1, dtype=torch.float32).to(input_dtype)
++
+         return output
+diff --git a/deepspeed/ops/transformer/inference/op_binding/softmax_context.py b/deepspeed/ops/transformer/inference/op_binding/softmax_context.py
+index b2ebbe13..0bf9c201 100644
+--- a/deepspeed/ops/transformer/inference/op_binding/softmax_context.py
++++ b/deepspeed/ops/transformer/inference/op_binding/softmax_context.py
+@@ -10,10 +10,15 @@ class SoftmaxContextOp(BaseOp):
+ 
+     def __init__(self, config: DeepSpeedInferenceConfig):
+         super(SoftmaxContextOp, self).__init__(config)
+-        if self.config.fp16:
+-            self.softmax_context_func = self.inference_cuda_module.softmax_context_fp16
+-        else:
+-            self.softmax_context_func = self.inference_cuda_module.softmax_context_fp32
++        try:
++            if self.config.fp16:
++                self.softmax_context_func = self.inference_module.softmax_context_fp16
++            elif self.config.bf16:
++                self.softmax_context_func = self.inference_module.softmax_context_bf16
++            else:
++                self.softmax_context_func = self.inference_module.softmax_context_fp32
++        except AttributeError:
++            self.softmax_context_func = None
+ 
+     def forward(self, query_key_value: torch.Tensor, attn_mask: torch.Tensor, heads: int, norm_factor: float,
+                 no_masking: bool, layer_id: int, num_layers: int, alibi: torch.Tensor):
+@@ -25,8 +30,14 @@ class SoftmaxContextOp(BaseOp):
+         else:
+             alibi = torch.empty(1)
+ 
+-        output = self.softmax_context_func(query_key_value, attn_mask, self.config.rotary_dim, self.config.rotate_half,
+-                                           self.config.rotate_every_two, heads, norm_factor,
+-                                           self.config.triangular_masking, self.config.local_attention,
+-                                           self.config.window_size, no_masking, layer_id, num_layers, alibi)
++        if self.softmax_context_func != None:
++            output = self.softmax_context_func(query_key_value, attn_mask, self.config.rotary_dim,
++                                               self.config.rotate_half, self.config.rotate_every_two, heads,
++                                               norm_factor, self.config.triangular_masking,
++                                               self.config.local_attention, self.config.window_size, no_masking,
++                                               layer_id, num_layers, alibi)
++        else:
++            # fallback
++            raise NotImplementedError
++
+         return output
+diff --git a/deepspeed/ops/transformer/inference/op_binding/vector_matmul.py b/deepspeed/ops/transformer/inference/op_binding/vector_matmul.py
+index f2939855..3e22fe9b 100644
+--- a/deepspeed/ops/transformer/inference/op_binding/vector_matmul.py
++++ b/deepspeed/ops/transformer/inference/op_binding/vector_matmul.py
+@@ -9,13 +9,22 @@ class VectorMatMulOp(BaseOp):
+ 
+     def __init__(self, config: DeepSpeedInferenceConfig):
+         super(VectorMatMulOp, self).__init__(config)
+-        if self.config.fp16:
+-            self.vector_matmul_func = self.inference_cuda_module.vector_matmul_fp16
+-        else:
+-            self.vector_matmul_func = self.inference_cuda_module.vector_matmul_fp32
++        try:
++            if self.config.fp16:
++                self.vector_matmul_func = self.inference_module.vector_matmul_fp16
++            elif self.config.bf16:
++                self.vector_matmul_func = self.inference_module.vector_matmul_bf16
++            else:
++                self.vector_matmul_func = self.inference_module.vector_matmul_fp32
++        except AttributeError:
++            self.vector_matmul_func = None
+ 
+     def forward(self, input: torch.Tensor, weight: torch.Tensor, async_op: bool = False):
+         q_scale = weight.scale
+         q_int8 = self.config.q_int8
+-        output = self.vector_matmul_func(input, weight, async_op, q_scale, q_int8)
++        if self.vector_matmul_func != None:
++            output = self.vector_matmul_func(input, weight, async_op, q_scale, q_int8)
++        else:
++            # fallback
++            output = torch.matmul(input, weight)
+         return output
+diff --git a/deepspeed/utils/timer.py b/deepspeed/utils/timer.py
+index 4212a821..baf968ac 100755
+--- a/deepspeed/utils/timer.py
++++ b/deepspeed/utils/timer.py
+@@ -41,25 +41,40 @@ class SynchronizedWallClockTimer:
+             self.event_timers = []
+             self.start_event = None
+             self.elapsed_records = None
++            self.start_time = 0.0
++            self.end_time = 0.0
+ 
+         def start(self):
+             """Start the timer."""
+             assert not self.started_, f"{self.name_} timer has already been started"
+-            self.start_event = get_accelerator().Event(enable_timing=True)
+-            self.start_event.record()
++            if get_accelerator().is_synchronized_device():
++                self.start_time = time.time()
++            else:
++                event_class = get_accelerator().Event
++                self.start_event = event_class(enable_timing=True)
++                self.start_event.record()
+             self.started_ = True
+ 
+         def stop(self, reset=False, record=False):
+             """Stop the timer."""
+             assert self.started_, "timer is not started"
+-            end_event = get_accelerator().Event(enable_timing=True)
+-            end_event.record()
+-            self.event_timers.append(CudaEventTimer(self.start_event, end_event))
+-            self.start_event = None
++            event_class = get_accelerator().Event
++            if get_accelerator().is_synchronized_device():
++                self.end_time = time.time()
++                self.event_timers.append(self.end_time - self.start_time)
++            else:
++                event_class = get_accelerator().Event
++                end_event = event_class(enable_timing=True)
++                end_event.record()
++                self.event_timers.append(CudaEventTimer(self.start_event, end_event))
++                self.start_event = None
+             self.started_ = False
+ 
+         def _get_elapsed_msec(self):
+-            self.elapsed_records = [et.get_elapsed_msec() for et in self.event_timers]
++            if get_accelerator().is_synchronized_device():
++                self.elapsed_records = [et * 1000.0 for et in self.event_timers]
++            else:
++                self.elapsed_records = [et.get_elapsed_msec() for et in self.event_timers]
+             self.event_timers.clear()
+             return sum(self.elapsed_records)
+ 
+diff --git a/op_builder/builder.py b/op_builder/builder.py
+index bf67eb3f..a5c560c1 100644
+--- a/op_builder/builder.py
++++ b/op_builder/builder.py
+@@ -435,7 +435,7 @@ class OpBuilder(ABC):
+ 
+     def load(self, verbose=True):
+         from deepspeed.git_version_info import installed_ops, torch_info
+-        if installed_ops[self.name]:
++        if self.name in installed_ops.keys() and installed_ops[self.name]:
+             # Ensure the op we're about to load was compiled with the same
+             # torch/cuda versions we are currently using at runtime.
+             self.validate_torch_version(torch_info)
+diff --git a/setup.py b/setup.py
+index 1e39b26c..908effd8 100755
+--- a/setup.py
++++ b/setup.py
+@@ -277,6 +277,7 @@ setup(name='deepspeed',
+           'Documentation': 'https://deepspeed.readthedocs.io',
+           'Source': 'https://github.com/microsoft/DeepSpeed',
+       },
++      dependency_links=['https://developer.intel.com/ipex-whl-stable-cpu'],
+       install_requires=install_requires,
+       extras_require=extras_require,
+       packages=find_packages(include=['deepspeed', 'deepspeed.*']),
+diff --git a/tests/unit/launcher/test_ds_arguments.py b/tests/unit/launcher/test_ds_arguments.py
+index 505d906d..2df5c040 100644
+--- a/tests/unit/launcher/test_ds_arguments.py
++++ b/tests/unit/launcher/test_ds_arguments.py
+@@ -3,6 +3,7 @@
+ import argparse
+ import pytest
+ import deepspeed
++from deepspeed.launcher.launch import parse_range_list
+ 
+ 
+ def basic_parser():
+@@ -95,3 +96,8 @@ def test_core_deepscale_arguments():
+     assert hasattr(args, 'deepspeed_config')
+     assert type(args.deepspeed_config) == str
+     assert args.deepspeed_config == 'foo.json'
++
++
++def test_core_binding_arguments():
++    core_list = parse_range_list("0,2-4,6,8-9")
++    assert core_list == [0, 2, 3, 4, 6, 8, 9]

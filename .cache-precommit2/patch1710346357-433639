@@ -1,0 +1,20 @@
+diff --git a/chat.py b/chat.py
+index b0197bd..63c4a60 100644
+--- a/chat.py
++++ b/chat.py
+@@ -33,11 +33,11 @@ def talk(prompt, history):
+ 
+ def profile(log, identity, expect=False, old_profile=None, history=None):
+     if expect:
+-        prompt = f"下面是User和Agent之间的聊天记录，请对用户希望{identity}拥有的人格进行侧写，两百字左右。\n"\
+-                  "对话开始\n{log}\n对话结束。\n用户期待{identity}的人格是"
++        prompt = f"下面是User和Agent之间的聊天记录，请对用户希望{identity}拥有的人格进行画像。\n"\
++                  f"对话开始\n{log}\n对话结束。\n用户期待{identity}的人格是："
+     else:
+-        prompt = f"下面是User和Agent之间的聊天记录，请对{identity}进行人格侧写，两百字左右。\n"\
+-                  "对话开始\n{log}\n对话结束。\n{identity}的人格是"
++        prompt = f"下面是User和Agent之间的聊天记录，请对{identity}进行人格画像，两百字左右。\n"\
++                  f"对话开始\n{log}\n对话结束。\n{identity}的人格是："
+     response = client.completions.create(model="gpt-4", prompt=prompt)
+     log = response.choices[0].text or ""
+     return log

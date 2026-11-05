@@ -1,0 +1,522 @@
+diff --git a/tests/unit/model_parallelism/test_tp_plan_e2e.py b/tests/unit/model_parallelism/test_tp_plan_e2e.py
+index 02504f77..e403697e 100644
+--- a/tests/unit/model_parallelism/test_tp_plan_e2e.py
++++ b/tests/unit/model_parallelism/test_tp_plan_e2e.py
+@@ -20,46 +20,45 @@ class TestTPPlanEndToEnd(DistributedTest):
+ 
+     def test_tp_plan_basic_training(self):
+         skip_on_device()
+-        
++
+         class SimpleHFModel(torch.nn.Module):
++
+             def __init__(self, hidden_size=64):
+                 super().__init__()
+-                self.config = type('Config', (), {
+-                    'base_model_tp_plan': {
++                self.config = type(
++                    'Config', (), {'base_model_tp_plan': {
+                         'layers.*.q_proj': 'colwise',
+                         'layers.*.o_proj': 'rowwise'
+-                    }
+-                })()
+-                self.layers = torch.nn.ModuleList([
+-                    torch.nn.Linear(hidden_size, hidden_size * 2),
+-                    torch.nn.Linear(hidden_size * 2, hidden_size)
+-                ])
+-            
++                    }})()
++                self.layers = torch.nn.ModuleList(
++                    [torch.nn.Linear(hidden_size, hidden_size * 2),
++                     torch.nn.Linear(hidden_size * 2, hidden_size)])
++
+             def forward(self, x):
+                 return self.layers[1](self.layers[0](x))
+-        
++
+         model = SimpleHFModel()
+-        
++
+         ds_config = {
+             "train_micro_batch_size_per_gpu": 1,
+-            "tensor_parallel": {"autotp_size": 2},
+-            "zero_optimization": {"stage": 0},
++            "tensor_parallel": {
++                "autotp_size": 2
++            },
++            "zero_optimization": {
++                "stage": 0
++            },
+             "steps_per_print": 1,
+         }
+-        
++
+         if preferred_dtype() == torch.float16:
+             ds_config["fp16"] = {"enabled": True}
+         elif preferred_dtype() == torch.bfloat16:
+             ds_config["bf16"] = {"enabled": True}
+-        
+-        engine, _, _, _ = deepspeed.initialize(
+-            model=model,
+-            model_parameters=model.parameters(),
+-            config=ds_config
+-        )
+-        
++
++        engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=ds_config)
++
+         assert engine.autotp_size() == 2
+-        
++
+         input_tensor = torch.randn(2, 4, 64).to(get_accelerator().current_device_name())
+         output = engine(input_tensor)
+         loss = output.mean()
+@@ -68,98 +67,96 @@ class TestTPPlanEndToEnd(DistributedTest):
+ 
+     def test_tp_plan_with_zero1(self):
+         skip_on_device()
+-        
++
+         class SimpleHFModel(torch.nn.Module):
++
+             def __init__(self, hidden_size=64):
+                 super().__init__()
+-                self.config = type('Config', (), {
+-                    'base_model_tp_plan': {
++                self.config = type(
++                    'Config', (), {'base_model_tp_plan': {
+                         'layers.*.q_proj': 'colwise',
+                         'layers.*.o_proj': 'rowwise'
+-                    }
+-                })()
+-                self.layers = torch.nn.ModuleList([
+-                    torch.nn.Linear(hidden_size, hidden_size * 2),
+-                    torch.nn.Linear(hidden_size * 2, hidden_size)
+-                ])
+-            
++                    }})()
++                self.layers = torch.nn.ModuleList(
++                    [torch.nn.Linear(hidden_size, hidden_size * 2),
++                     torch.nn.Linear(hidden_size * 2, hidden_size)])
++
+             def forward(self, x):
+                 return self.layers[1](self.layers[0](x))
+-        
++
+         model = SimpleHFModel()
+-        
++
+         ds_config = {
+             "train_micro_batch_size_per_gpu": 1,
+-            "tensor_parallel": {"autotp_size": 2},
+-            "zero_optimization": {"stage": 1},
++            "tensor_parallel": {
++                "autotp_size": 2
++            },
++            "zero_optimization": {
++                "stage": 1
++            },
+             "steps_per_print": 1,
+         }
+-        
++
+         if preferred_dtype() == torch.float16:
+             ds_config["fp16"] = {"enabled": True}
+         elif preferred_dtype() == torch.bfloat16:
+             ds_config["bf16"] = {"enabled": True}
+-        
+-        engine, _, _, _ = deepspeed.initialize(
+-            model=model,
+-            model_parameters=model.parameters(),
+-            config=ds_config
+-        )
+-        
++
++        engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=ds_config)
++
+         assert engine.autotp_size() == 2
+-        
++
+         for _ in range(3):
+             input_tensor = torch.randn(2, 4, 64).to(get_accelerator().current_device_name())
+             output = engine(input_tensor)
+             loss = output.mean()
+             engine.backward(loss)
+             engine.step()
+-            
++
+             for p in engine.parameters():
+                 assert not torch.isnan(p).any()
+ 
+     def test_tp_plan_with_zero2(self):
+         skip_on_device()
+-        
++
+         class SimpleHFModel(torch.nn.Module):
++
+             def __init__(self, hidden_size=64):
+                 super().__init__()
+-                self.config = type('Config', (), {
+-                    'base_model_tp_plan': {
++                self.config = type(
++                    'Config', (), {'base_model_tp_plan': {
+                         'layers.*.q_proj': 'colwise',
+                         'layers.*.o_proj': 'rowwise'
+-                    }
+-                })()
+-                self.layers = torch.nn.ModuleList([
+-                    torch.nn.Linear(hidden_size, hidden_size * 2),
+-                    torch.nn.Linear(hidden_size * 2, hidden_size)
+-                ])
+-            
++                    }})()
++                self.layers = torch.nn.ModuleList(
++                    [torch.nn.Linear(hidden_size, hidden_size * 2),
++                     torch.nn.Linear(hidden_size * 2, hidden_size)])
++
+             def forward(self, x):
+                 return self.layers[1](self.layers[0](x))
+-        
++
+         model = SimpleHFModel()
+-        
++
+         ds_config = {
+             "train_micro_batch_size_per_gpu": 1,
+-            "tensor_parallel": {"autotp_size": 2},
+-            "zero_optimization": {"stage": 2},
++            "tensor_parallel": {
++                "autotp_size": 2
++            },
++            "zero_optimization": {
++                "stage": 2
++            },
+             "steps_per_print": 1,
+         }
+-        
++
+         if preferred_dtype() == torch.float16:
+             ds_config["fp16"] = {"enabled": True}
+         elif preferred_dtype() == torch.bfloat16:
+             ds_config["bf16"] = {"enabled": True}
+-        
+-        engine, _, _, _ = deepspeed.initialize(
+-            model=model,
+-            model_parameters=model.parameters(),
+-            config=ds_config
+-        )
+-        
++
++        engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=ds_config)
++
+         assert engine.autotp_size() == 2
+-        
++
+         input_tensor = torch.randn(2, 4, 64).to(get_accelerator().current_device_name())
+         output = engine(input_tensor)
+         loss = output.mean()
+@@ -172,48 +169,47 @@ class TestTPPlanCorrectness(DistributedTest):
+ 
+     def test_tp_plan_correctness_basic(self):
+         skip_on_device()
+-        
++
+         class SimpleHFModel(torch.nn.Module):
++
+             def __init__(self, hidden_size=64):
+                 super().__init__()
+-                self.config = type('Config', (), {
+-                    'base_model_tp_plan': {
++                self.config = type(
++                    'Config', (), {'base_model_tp_plan': {
+                         'layers.*.q_proj': 'colwise',
+                         'layers.*.o_proj': 'rowwise'
+-                    }
+-                })()
+-                self.layers = torch.nn.ModuleList([
+-                    torch.nn.Linear(hidden_size, hidden_size * 2),
+-                    torch.nn.Linear(hidden_size * 2, hidden_size)
+-                ])
+-            
++                    }})()
++                self.layers = torch.nn.ModuleList(
++                    [torch.nn.Linear(hidden_size, hidden_size * 2),
++                     torch.nn.Linear(hidden_size * 2, hidden_size)])
++
+             def forward(self, x):
+                 return self.layers[1](self.layers[0](x))
+-        
++
+         torch.manual_seed(42)
+         model = SimpleHFModel()
+-        
++
+         ds_config = {
+             "train_micro_batch_size_per_gpu": 1,
+-            "tensor_parallel": {"autotp_size": 2},
+-            "zero_optimization": {"stage": 0},
++            "tensor_parallel": {
++                "autotp_size": 2
++            },
++            "zero_optimization": {
++                "stage": 0
++            },
+         }
+-        
++
+         if preferred_dtype() == torch.float16:
+             ds_config["fp16"] = {"enabled": True}
+         elif preferred_dtype() == torch.bfloat16:
+             ds_config["bf16"] = {"enabled": True}
+-        
+-        engine, _, _, _ = deepspeed.initialize(
+-            model=model,
+-            model_parameters=model.parameters(),
+-            config=ds_config
+-        )
+-        
++
++        engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=ds_config)
++
+         torch.manual_seed(123)
+         input_tensor = torch.randn(2, 4, 64).to(get_accelerator().current_device_name())
+         output = engine(input_tensor)
+-        
++
+         assert output.shape == (2, 4, 64)
+         assert not torch.isnan(output).any()
+         assert not torch.isinf(output).any()
+diff --git a/tests/unit/model_parallelism/test_tp_plan_real_models.py b/tests/unit/model_parallelism/test_tp_plan_real_models.py
+index 16628c4b..5884d316 100644
+--- a/tests/unit/model_parallelism/test_tp_plan_real_models.py
++++ b/tests/unit/model_parallelism/test_tp_plan_real_models.py
+@@ -22,12 +22,12 @@ class TestTPPlanRealHFModels(DistributedTest):
+     def test_llama_tp_plan_with_zero1(self):
+         """测试 Llama 模型 + tp_plan + ZeRO1"""
+         skip_on_device()
+-        
++
+         try:
+             from transformers import AutoModelForCausalLM, AutoConfig
+         except ImportError:
+             pytest.skip("transformers not installed")
+-        
++
+         # 创建小型 Llama 配置（节省内存）
+         config = AutoConfig.from_pretrained(
+             "meta-llama/Llama-2-7b-hf",
+@@ -38,44 +38,46 @@ class TestTPPlanRealHFModels(DistributedTest):
+             num_attention_heads=4,
+             num_key_value_heads=4,
+         )
+-        
++
+         # 使用 config 初始化模型（不加载预训练权重）
+         model = AutoModelForCausalLM.from_config(config)
+-        
++
+         ds_config = {
+             "train_micro_batch_size_per_gpu": 1,
+-            "tensor_parallel": {"autotp_size": 2},
+-            "zero_optimization": {"stage": 1},
+-            "bf16": {"enabled": True},
++            "tensor_parallel": {
++                "autotp_size": 2
++            },
++            "zero_optimization": {
++                "stage": 1
++            },
++            "bf16": {
++                "enabled": True
++            },
+             "steps_per_print": 1,
+         }
+-        
+-        engine, _, _, _ = deepspeed.initialize(
+-            model=model,
+-            model_parameters=model.parameters(),
+-            config=ds_config
+-        )
+-        
++
++        engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=ds_config)
++
+         # 验证 tp_plan 被自动提取并应用
+         assert engine.autotp_size() == 2
+-        
++
+         # 简单训练步骤
+         input_ids = torch.randint(0, 1000, (1, 16)).to(get_accelerator().current_device_name())
+         outputs = engine(input_ids, labels=input_ids)
+         engine.backward(outputs.loss)
+         engine.step()
+-        
++
+         assert not torch.isnan(outputs.loss)
+ 
+     def test_qwen2_tp_plan_with_zero2(self):
+         """测试 Qwen2 模型 + tp_plan + ZeRO2"""
+         skip_on_device()
+-        
++
+         try:
+             from transformers import AutoModelForCausalLM, AutoConfig
+         except ImportError:
+             pytest.skip("transformers not installed")
+-        
++
+         # 创建小型 Qwen2 配置
+         config = AutoConfig.from_pretrained(
+             "Qwen/Qwen2-7B",
+@@ -86,69 +88,74 @@ class TestTPPlanRealHFModels(DistributedTest):
+             num_attention_heads=4,
+             num_key_value_heads=4,
+         )
+-        
++
+         model = AutoModelForCausalLM.from_config(config)
+-        
++
+         ds_config = {
+             "train_micro_batch_size_per_gpu": 1,
+-            "tensor_parallel": {"autotp_size": 2},
+-            "zero_optimization": {"stage": 2},
+-            "bf16": {"enabled": True},
++            "tensor_parallel": {
++                "autotp_size": 2
++            },
++            "zero_optimization": {
++                "stage": 2
++            },
++            "bf16": {
++                "enabled": True
++            },
+             "steps_per_print": 1,
+         }
+-        
+-        engine, _, _, _ = deepspeed.initialize(
+-            model=model,
+-            model_parameters=model.parameters(),
+-            config=ds_config
+-        )
+-        
++
++        engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=ds_config)
++
+         assert engine.autotp_size() == 2
+-        
++
+         # 训练几个步骤
+         for _ in range(3):
+             input_ids = torch.randint(0, 1000, (1, 16)).to(get_accelerator().current_device_name())
+             outputs = engine(input_ids, labels=input_ids)
+             engine.backward(outputs.loss)
+             engine.step()
+-            
++
+             assert not torch.isnan(outputs.loss)
+ 
+     def test_custom_model_with_custom_tp_plan(self):
+         """测试自定义模型 + 自定义 tp_plan"""
+         skip_on_device()
+-        
++
+         class CustomTransformerModel(torch.nn.Module):
++
+             def __init__(self, hidden_size=64):
+                 super().__init__()
+-                self.config = type('Config', (), {
+-                    'base_model_tp_plan': {
+-                        'encoder.*.attention.query': 'colwise',
+-                        'encoder.*.attention.key': 'colwise',
+-                        'encoder.*.attention.value': 'colwise',
+-                        'encoder.*.attention.output': 'rowwise',
+-                        'encoder.*.ffn.intermediate': 'colwise',
+-                        'encoder.*.ffn.output': 'rowwise',
+-                    }
+-                })()
+-                
++                self.config = type(
++                    'Config', (), {
++                        'base_model_tp_plan': {
++                            'encoder.*.attention.query': 'colwise',
++                            'encoder.*.attention.key': 'colwise',
++                            'encoder.*.attention.value': 'colwise',
++                            'encoder.*.attention.output': 'rowwise',
++                            'encoder.*.ffn.intermediate': 'colwise',
++                            'encoder.*.ffn.output': 'rowwise',
++                        }
++                    })()
++
+                 # 简单的 encoder 层
+                 self.encoder = torch.nn.ModuleList([
+                     torch.nn.ModuleDict({
+-                        'attention': torch.nn.ModuleDict({
++                        'attention':
++                        torch.nn.ModuleDict({
+                             'query': torch.nn.Linear(hidden_size, hidden_size),
+                             'key': torch.nn.Linear(hidden_size, hidden_size),
+                             'value': torch.nn.Linear(hidden_size, hidden_size),
+                             'output': torch.nn.Linear(hidden_size, hidden_size),
+                         }),
+-                        'ffn': torch.nn.ModuleDict({
++                        'ffn':
++                        torch.nn.ModuleDict({
+                             'intermediate': torch.nn.Linear(hidden_size, hidden_size * 4),
+                             'output': torch.nn.Linear(hidden_size * 4, hidden_size),
+                         })
+-                    })
+-                    for _ in range(2)
++                    }) for _ in range(2)
+                 ])
+-            
++
+             def forward(self, x):
+                 for layer in self.encoder:
+                     # 简化的 attention
+@@ -156,29 +163,31 @@ class TestTPPlanRealHFModels(DistributedTest):
+                     k = layer.attention.key(x)
+                     v = layer.attention.value(x)
+                     attn_out = layer.attention.output(q + k + v)
+-                    
++
+                     # FFN
+                     intermediate = torch.relu(layer.ffn.intermediate(attn_out))
+                     x = layer.ffn.output(intermediate)
+                 return x
+-        
++
+         model = CustomTransformerModel(hidden_size=64)
+-        
++
+         ds_config = {
+             "train_micro_batch_size_per_gpu": 1,
+-            "tensor_parallel": {"autotp_size": 2},
+-            "zero_optimization": {"stage": 0},
+-            "bf16": {"enabled": True},
++            "tensor_parallel": {
++                "autotp_size": 2
++            },
++            "zero_optimization": {
++                "stage": 0
++            },
++            "bf16": {
++                "enabled": True
++            },
+         }
+-        
+-        engine, _, _, _ = deepspeed.initialize(
+-            model=model,
+-            model_parameters=model.parameters(),
+-            config=ds_config
+-        )
+-        
++
++        engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=ds_config)
++
+         assert engine.autotp_size() == 2
+-        
++
+         # 训练步骤
+         input_tensor = torch.randn(2, 4, 64).to(get_accelerator().current_device_name())
+         output = engine(input_tensor)
