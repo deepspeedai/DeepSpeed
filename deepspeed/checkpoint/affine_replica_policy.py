@@ -10,7 +10,9 @@ checks every answer before it emits a segment, so a policy decides only where da
 what arrives is fixed by the maps. Policies live here, not in the planner, so cost-aware ones can
 grow without the planner growing with them.
 
-A policy that keeps state across syncs can be any callable object; the planner holds none.
+A policy that keeps state across syncs can be any callable object; the planner holds none. Its
+answers must agree across every rank of a sync, so cost inputs must come from data every rank
+shares, never from a rank-local measurement.
 """
 
 from typing import Callable, Dict, Hashable, List, Sequence

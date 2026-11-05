@@ -60,7 +60,11 @@ class UnsupportedLayoutError(AffineTransferError):
 
 
 class InvalidReplicaPolicyError(AffineTransferError):
-    """A selector chose a rank outside the validated source candidates."""
+    """A policy answer that the planner cannot accept.
+
+    A location outside the validated candidates, parts that do not tile the request, fields that
+    are not coordinates, or more parts than the pair budget allows.
+    """
 
 
 @dataclass(frozen=True)
@@ -604,6 +608,12 @@ def plan_transfers(pairs: Mapping[str, Tuple[ParamAffineMap, ParamAffineMap]],
     decides where data is read from but not what arrives: when the replicas agree, every accepted
     answer copies the same data.
 
+    Every rank of a sync must return the same answers, because each rank emits its own half of the
+    same schedule; a mismatch is refused by the executor ("ranks disagree about the transfer
+    schedule (batch schedule)"). Cost inputs must therefore come from data every rank shares, such
+    as ``fit_links`` on a calibration gathered across ranks (#8966), never from a rank-local
+    measurement.
+
     Plan locations are keys of the two maps, not processes. ``source_processes`` and
     ``target_processes`` say which process holds each location. When given, the requests carry them,
     so a policy can tell a local copy from a transfer. ``element_size`` gives bytes per element for
@@ -671,18 +681,26 @@ def plan_transfers(pairs: Mapping[str, Tuple[ParamAffineMap, ParamAffineMap]],
     }
     parts_per_name = {name: 0 for name in names}
     for (_, name, index, item), request, answer in zip(entries, requests, answers):
+        # The budget bounds the planner's own work, so an over-long answer is refused on its length
+        # before _resolve expands every part into a box.
+        if _is_sequence(answer):
+            _check_pair_budget(name, parts_per_name[name] + len(answer), budget)
         parts = _resolve(request, item, answer, min_split_bytes, element_size)
         choices[name][index] = parts
         parts_per_name[name] += len(parts)
-        if parts_per_name[name] > budget.max_pair_checks:
-            raise AffineTransferError(f'{name!r}: the policy split regions into more than max_pair_checks '
-                                      f'{budget.max_pair_checks} parts')
+        _check_pair_budget(name, parts_per_name[name], budget)
     return {name: _emit(prepared[name], choices[name], budget) for name in names}
 
 
 def _is_sequence(value: object) -> bool:
     """A real sequence: indexable and sized, which a generator is not and a string should not count as."""
     return isinstance(value, collections.abc.Sequence) and not isinstance(value, (str, bytes))
+
+
+def _check_pair_budget(name: str, parts: int, budget: PlanBudget) -> None:
+    if parts > budget.max_pair_checks:
+        raise InvalidReplicaPolicyError(f'{name!r}: the policy split regions into more than max_pair_checks '
+                                        f'{budget.max_pair_checks} parts')
 
 
 def _process(mapping: Optional[Mapping[int, int]], location: int, side: str) -> Optional[int]:
@@ -722,7 +740,10 @@ def _resolve(request: ReplicaRequest, item: _Intersection, answer: object, min_s
         if type(part.source_location) is not int or part.source_location not in holders:
             raise InvalidReplicaPolicyError(f'{where}: location {part.source_location!r} is not a validated '
                                             f'holder {sorted(holders)}')
-        origin, shape = tuple(part.logical_origin), tuple(part.shape)
+        try:
+            origin, shape = tuple(part.logical_origin), tuple(part.shape)
+        except TypeError:
+            raise InvalidReplicaPolicyError(f'{where}: part {part!r} is not a {ndim}-axis box of ints') from None
         if len(origin) != ndim or len(shape) != ndim or any(type(value) is not int for value in origin + shape):
             raise InvalidReplicaPolicyError(f'{where}: part {origin}+{shape} is not a {ndim}-axis box of ints')
         if origin[1:] != box.origin[1:] or shape[1:] != box.extent[1:]:

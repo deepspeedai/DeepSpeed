@@ -7,12 +7,14 @@
 The planner validates every policy answer before it emits a segment: one answer per request, only
 validated holders, and parts that tile each request exactly along axis 0. If that check is right,
 then whenever the replicas agree, every accepted answer moves the same data -- which is what the
-correctness argument for the affine IR (#8252, Theorem 3 of the proof draft) needs from a policy.
+correctness argument for the affine IR (#8252, the "Any consistent plan is exact" theorem of the
+proof draft) needs from a policy.
 The randomized test below is that statement as a check: many random policies, including random
 splits, all producing the same target shards. The rejection tests make sure an answer that would
 break it is refused rather than planned.
 """
 
+import collections.abc
 import dataclasses
 import random
 
@@ -276,6 +278,8 @@ def _answering(answer):
         [ReplicaPart((0, 0), (0, 4), 0), ReplicaPart((0, 0), (6, 4), 1)],  # an empty part
         [ReplicaPart((0, ), (6, ), 0)],  # wrong number of axes
         [ReplicaPart((0, 0), (6.0, 4), 0)],
+        [ReplicaPart(None, (6, 4), 0)],  # a field tuple() would raise on
+        [ReplicaPart((0, 0), None, 0)],
     ])
 def test_answers_that_could_change_what_arrives_are_refused(answer):
     with pytest.raises(InvalidReplicaPolicyError):
@@ -335,8 +339,38 @@ def test_splits_count_against_the_budget():
     pairs = {'w': (contiguous_split_map((64, 1), [64], 0), replicated_map((64, 1), 2))}
     rows = _answering([ReplicaPart((row, 0), (1, 1), row % 2) for row in range(64)])
     plan_transfers(pairs, PlanBudget(max_pair_checks=64), replica_policy=rows)
-    with pytest.raises(AffineTransferError):
+    with pytest.raises(InvalidReplicaPolicyError):
         plan_transfers(pairs, PlanBudget(max_pair_checks=63), replica_policy=rows)
+
+
+def test_parts_count_against_the_budget_across_requests():
+    # Two requests of 60 rows each: either answer alone fits the budget, the running total does not.
+    pairs = {'w': (contiguous_split_map((120, 1), [60, 60], 0), replicated_map((120, 1), 2))}
+
+    def rows(requests):
+        return [[
+            ReplicaPart((request.logical_origin[0] + row, 0), (1, 1), row % 2) for row in range(request.shape[0])
+        ] for request in requests]
+
+    plan_transfers(pairs, PlanBudget(max_pair_checks=120), replica_policy=rows)
+    with pytest.raises(InvalidReplicaPolicyError):
+        plan_transfers(pairs, PlanBudget(max_pair_checks=119), replica_policy=rows)
+
+
+def test_the_pair_budget_is_checked_before_the_parts_are_read():
+    # The budget bounds the planner's own work, so an over-long answer is refused on its length,
+    # not after every part has been expanded into a box.
+    class Parts(collections.abc.Sequence):
+
+        def __len__(self):
+            return 65
+
+        def __getitem__(self, index):
+            raise AssertionError('the planner read the parts before checking the budget')
+
+    pairs = {'w': (contiguous_split_map((64, 1), [64], 0), replicated_map((64, 1), 2))}
+    with pytest.raises(InvalidReplicaPolicyError):
+        plan_transfers(pairs, PlanBudget(max_pair_checks=64), replica_policy=_answering(Parts()))
 
 
 def test_maps_are_validated_before_the_policy_runs():
