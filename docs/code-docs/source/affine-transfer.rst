@@ -70,8 +70,11 @@ Five patterns are sampled at every size, 4 KiB to 256 MiB by default:
 
 - ``local``: a device-local copy on each process.
 - ``peer``: each ordered process pair alone (1 to 1).
-- ``concurrent``: every process sends to ``process + shift`` at once, so links
-  are measured while shared.
+- ``concurrent``: every process sends to ``process + shift`` and receives from
+  ``process - shift`` at once, so links are measured while shared. A process's
+  time covers both, so ``fit_links`` fits a path only from processes whose send
+  and receive both took it; with few processes per node, ``intra_node`` may have
+  no such process and no ``concurrent`` fit.
 - ``fan_out``: one root sends to ``width`` peers at once (1 to N).
 - ``fan_in``: ``width`` peers send to one root at once (N to 1), measuring
   receiver contention.
@@ -123,3 +126,8 @@ process holds up to ``(2 + max(widths)) * max(sizes)`` bytes, 2.25 GiB with the
 default width at 8 processes per node and 256 MiB, so pass shorter
 ``sizes`` or smaller fan widths on large jobs. The numbers describe the
 transport used for the measurement (torch point-to-point) on that topology.
+
+Calibrate on the group and communication settings the transfer will use: the
+same links can measure very differently in another group. On two 8-GPU H20
+nodes, one NVLink pair moved 275 GB/s in an 8-process group but 54 GB/s in the
+16-process group over RoCE.
