@@ -266,6 +266,37 @@ def _run_experts_for_loop(
 # ---------------------------------------------------------------------------
 
 
+class _ZeroEmptyExpertGrad(torch.autograd.Function):
+
+    @staticmethod
+    def forward(ctx, weight, num_tokens_per_expert):
+        ctx.save_for_backward(num_tokens_per_expert)
+        return weight
+
+    @staticmethod
+    def backward(ctx, grad):
+        if grad is None:
+            return None, None
+        (num_tokens_per_expert, ) = ctx.saved_tensors
+        inactive = num_tokens_per_expert == 0
+        # Every expert is live on the common path. masked_fill would still copy each
+        # weight gradient; return the buffer the grouped GEMM already produced.
+        if not bool(inactive.any()):
+            return grad, None
+        # Zero only the empty-expert rows. A non-contiguous grad cannot be written in place.
+        if not grad.is_contiguous():
+            grad = grad.contiguous()
+        grad[inactive] = 0
+        return grad, None
+
+
+def _zero_empty_expert_grad(weight: torch.Tensor, num_tokens_per_expert: torch.Tensor) -> torch.Tensor:
+    # Some grouped-GEMM backends leave the weight gradient for a zero-row group undefined.
+    if not weight.requires_grad:
+        return weight
+    return _ZeroEmptyExpertGrad.apply(weight, num_tokens_per_expert)
+
+
 def _run_experts_grouped_mm(
     w1: torch.Tensor,
     w2: torch.Tensor,
@@ -294,6 +325,9 @@ def _run_experts_grouped_mm(
     offsets = torch.cumsum(num_tokens_per_expert, dim=0, dtype=torch.int32)
 
     cast_dtype = x.dtype
+    w1 = _zero_empty_expert_grad(w1, num_tokens_per_expert)
+    w2 = _zero_empty_expert_grad(w2, num_tokens_per_expert)
+    w3 = _zero_empty_expert_grad(w3, num_tokens_per_expert)
     gate = torch._grouped_mm(
         x.to(cast_dtype),
         w1.to(cast_dtype).transpose(-2, -1),
@@ -337,6 +371,9 @@ def _run_experts_grouped_mm_fused_gate_up(
     offsets = torch.cumsum(num_tokens_per_expert, dim=0, dtype=torch.int32)
 
     cast_dtype = x.dtype
+    w1 = _zero_empty_expert_grad(w1, num_tokens_per_expert)
+    w2 = _zero_empty_expert_grad(w2, num_tokens_per_expert)
+    w3 = _zero_empty_expert_grad(w3, num_tokens_per_expert)
     w13 = torch.cat([w1.to(cast_dtype), w3.to(cast_dtype)], dim=1)
     gate_up = torch._grouped_mm(
         x.to(cast_dtype),
