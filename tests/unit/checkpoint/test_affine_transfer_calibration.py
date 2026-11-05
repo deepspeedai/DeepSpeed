@@ -47,13 +47,6 @@ def _synthetic_calibration(costs, sizes, world=2):
             'path': path_of(s, t),
             'seconds': seconds(path_of(s, t), size)
         } for size in sizes for s in range(world) for t in range(world) if s != t],
-        'concurrent': [{
-            'bytes': size,
-            'shift': 1,
-            'paths': [path_of(p, (p + 1) % world) for p in range(world)],
-            'receive_paths': [path_of((p - 1) % world, p) for p in range(world)],
-            'seconds_by_process': [seconds(INTER_NODE, size) for _ in range(world)],
-        } for size in sizes],
         **{
             kind: [{
                 'bytes': size,
@@ -75,8 +68,7 @@ def test_fit_recovers_known_link_costs():
     fits = fit_links(_synthetic_calibration(costs, sizes))
 
     fan = (0, (1, ))  # the synthetic fans have one peer, so a root moves one message per fan
-    checks = [(fits['local'][LOCAL], LOCAL), (fits['peer'][INTER_NODE], INTER_NODE),
-              (fits['concurrent'][INTER_NODE], INTER_NODE)]
+    checks = [(fits['local'][LOCAL], LOCAL), (fits['peer'][INTER_NODE], INTER_NODE)]
     checks += [(fits[kind][fan][INTER_NODE], INTER_NODE) for kind in ('fan_out', 'fan_in')]
     checks += [(fits[direction][fan], INTER_NODE) for direction in ('send', 'receive')]
     for fit, path in checks:
@@ -143,34 +135,6 @@ def test_peer_pair_fits_keep_each_direction():
         assert fits['peer_pairs'][pair]['bytes_per_second'] == pytest.approx(expected, rel=1e-6)
 
 
-def test_concurrent_fits_ignore_processes_with_a_mixed_send_and_receive():
-    """A process sending within its node while receiving across nodes waits on the slower link.
-
-    Pooling that process's time under its send path would charge the inter-node cost to
-    ``intra_node``, as on two 8-GPU nodes over TCP (7.5 GB/s fitted vs 65 GB/s clean).
-    """
-    sizes = [4096, 1 << 20, 1 << 24]
-    costs = {INTRA_NODE: (5e-5, 60e9), INTER_NODE: (1e-4, 5e9)}
-    calibration = _synthetic_calibration({LOCAL: (1e-6, 100e9), **costs}, sizes, world=4)
-
-    def exact(path, size):
-        alpha, bandwidth = costs[path]
-        return [alpha + size / bandwidth] * 3
-
-    calibration['concurrent'] = [{
-        'bytes': size,
-        'shift': 1,
-        'paths': [INTRA_NODE, INTRA_NODE, INTER_NODE, INTER_NODE],
-        'receive_paths': [INTRA_NODE, INTER_NODE, INTRA_NODE, INTER_NODE],
-        'seconds_by_process': [exact(INTRA_NODE, size)] + [exact(INTER_NODE, size)] * 3,
-    } for size in sizes]
-
-    fits = fit_links(calibration)['concurrent']
-    for path, (alpha, bandwidth) in costs.items():
-        assert fits[path]['alpha_seconds'] == pytest.approx(alpha, rel=1e-6)
-        assert fits[path]['bytes_per_second'] == pytest.approx(bandwidth, rel=1e-6)
-
-
 def test_fit_rejects_unknown_schema_and_single_size():
     with pytest.raises(ValueError):
         fit_links({'schema': CALIBRATION_SCHEMA + 1})
@@ -200,20 +164,14 @@ class TestCalibrateLinks(DistributedTest):
         assert sorted((s['bytes'], s['from_process'], s['to_process']) for s in result['peer']) == sorted(
             (size, source, target) for size in sizes for source in range(world) for target in range(world)
             if source != target)
-        assert sorted((s['bytes'], s['shift']) for s in result['concurrent']) == sorted(
-            (size, shift) for size in sizes for shift in range(1, world))
 
         for sample in result['local']:
             assert sample['path'] == LOCAL
         for sample in result['peer']:
             expected = INTRA_NODE if sample['from_process'] // 2 == sample['to_process'] // 2 else INTER_NODE
             assert sample['path'] == expected
-        for sample in result['concurrent']:
-            assert sample['paths'] == [node_path_of(2)(p, (p + sample['shift']) % world) for p in range(world)]
-            assert len(sample['seconds_by_process']) == world
 
         samples = [s['seconds'] for s in result['local'] + result['peer']]
-        samples += [seconds for s in result['concurrent'] for seconds in s['seconds_by_process']]
         for seconds in samples:
             assert len(seconds) == 3
             assert all(value > 0 for value in seconds)
@@ -232,7 +190,6 @@ class TestCalibrateLinks(DistributedTest):
         fits = fit_links(result)
         assert set(fits['local']) == {LOCAL}
         assert set(fits['peer']) == {INTRA_NODE, INTER_NODE}
-        assert set(fits['concurrent']) <= {INTRA_NODE, INTER_NODE}
         every_fan = {(root, tuple(sorted(set(range(world)) - {root}))) for root in range(world)}
         assert set(fits['fan_out']) == set(fits['fan_in']) == set(fits['send']) == set(fits['receive']) == every_fan
         for kind in ('fan_out', 'fan_in'):
@@ -272,10 +229,6 @@ class TestCalibrateLinks(DistributedTest):
         for sample in result['fan_in']:
             root = sample['root']
             assert sample['paths'] == [f'{peer}->{root}' for peer in sample['peers']]
-        for sample in result['concurrent']:
-            shift = sample['shift']
-            assert sample['paths'] == [f'{p}->{(p + shift) % world}' for p in range(world)]
-            assert sample['receive_paths'] == [f'{(p - shift) % world}->{p}' for p in range(world)]
 
         widths = calibrate_links(sizes=[4096], repeats=1, warmup=0, fan_width=[2, 1, 2])
         assert widths['fan_widths'] == [1, 2]
