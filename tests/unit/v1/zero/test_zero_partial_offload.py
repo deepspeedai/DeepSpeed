@@ -87,8 +87,8 @@ def _train(engine, steps, first_step=0):
 
 
 def _close(engine):
-    if hasattr(engine.optimizer, "superoffload_cpu_optimizer"):
-        engine.optimizer.superoffload_cpu_optimizer.close()
+    if hasattr(engine.optimizer, "cpu_adam"):
+        engine.optimizer.cpu_adam.close()
 
 
 def _device_params(engine):
@@ -106,8 +106,6 @@ def _adam_state(engine):
 
 class TestPartialOffloadHyperparameters(DistributedTest):
     world_size = 1
-    # SuperOffload starts its CPU worker process, which a daemonic test process cannot do.
-    non_daemonic_procs = True
 
     @pytest.mark.parametrize("super_offload", [False, True])
     def test_first_step_at_zero_lr(self, super_offload):

@@ -132,20 +132,3 @@ def test_reload_states_holds_pin_buffers_until_sync(monkeypatch):
     gc.collect()
     # Released once the copies are known to have completed.
     assert begin not in manager._ranges
-
-
-def test_superoffload_grad_buffer_unpinned_when_disabled():
-    """offload_optimizer.pin_memory=False must allocate a regular CPU buffer."""
-    from deepspeed.runtime.superoffload.superoffload_utils import _allocate_worker_grad_buffer
-    buffer = _allocate_worker_grad_buffer(32, pin_memory=False)
-    assert get_accelerator().is_pinned(buffer) is False
-
-
-def test_superoffload_grad_buffer_pinned_when_enabled(monkeypatch):
-    """offload_optimizer.pin_memory=True keeps the current pinned allocation."""
-    _require_native(monkeypatch)
-    from deepspeed.runtime.superoffload.superoffload_utils import _allocate_worker_grad_buffer
-    accel = get_accelerator()
-    buffer = _allocate_worker_grad_buffer(32, pin_memory=True)
-    assert accel.is_pinned(buffer) is True
-    assert accel.unpin_memory(buffer) is True
