@@ -47,14 +47,21 @@ def test_scale_grads_applies_tensor_scale_at_full_precision(dtype, monkeypatch):
     assert torch.equal(grad, expected)
 
 
-def test_scale_grads_keeps_plain_mul_for_full_precision_grads():
-    scale = torch.tensor(1 / TOTAL_NORM, device=_device())
+@pytest.mark.parametrize("scale_dtype", [torch.float32, torch.float64])
+def test_scale_grads_keeps_plain_mul_for_full_precision_grads(scale_dtype):
+    scale = torch.tensor(1 / TOTAL_NORM, device=_device(), dtype=scale_dtype)
     grad = _grad(torch.float32)
     expected = grad * scale
     ds_utils.scale_grads_(grad, scale)
     assert torch.equal(grad, expected)
 
 
+# On the CPU accelerator a 0-dim CPU tensor is applied as a full-precision scalar, so master already matches.
+requires_accelerator = pytest.mark.skipif(get_accelerator().device_name() == "cpu",
+                                          reason="the bf16 rounding of a 0-dim scale only happens on device tensors")
+
+
+@requires_accelerator
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 def test_zero_1_2_clips_low_precision_grads_with_full_precision_coefficient(dtype):
     total_norm = torch.tensor(TOTAL_NORM, device=_device())
@@ -65,6 +72,7 @@ def test_zero_1_2_clips_low_precision_grads_with_full_precision_coefficient(dtyp
     assert torch.equal(sub_partition, expected)
 
 
+@requires_accelerator
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 def test_zero_3_clips_low_precision_grads_with_full_precision_coefficient(dtype):
     total_norm = torch.tensor(TOTAL_NORM, device=_device())

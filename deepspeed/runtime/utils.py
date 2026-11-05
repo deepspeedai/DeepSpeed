@@ -248,14 +248,14 @@ def scale_grads_(grad, scale):
     """In-place ``grad.mul_(scale)`` that applies a tensor ``scale`` at its own precision.
 
     Elementwise ops cast a 0-dim device tensor to the other operand's dtype, so ``bf16_grad.mul_(fp32_scale)``
-    multiplies by a bf16-rounded scale (a clip coefficient up to 0.39% off). A lower-precision ``grad`` is
-    multiplied in ``scale``'s dtype instead, in bounded chunks and without a host sync.
+    multiplies by a bf16-rounded scale (a clip coefficient up to 0.39% off). A bf16/fp16 ``grad`` is
+    multiplied in fp32 instead, in bounded chunks and without a host sync. Other gradients use ``mul_``.
     """
-    if (not torch.is_tensor(scale) or not grad.is_floating_point() or grad.element_size() >= scale.element_size()
+    if (not torch.is_tensor(scale) or grad.dtype not in (torch.bfloat16, torch.float16)
             or not grad.is_contiguous()):
         return grad.mul_(scale)
     for chunk in grad.view(-1).split(_SCALE_CHUNK_NUMEL):
-        chunk.copy_(chunk.to(scale.dtype).mul_(scale))
+        chunk.copy_(chunk.float().mul_(scale))
     return grad
 
 
