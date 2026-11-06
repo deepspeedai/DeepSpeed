@@ -16,6 +16,7 @@ from deepspeed.runtime.zenflow import zenflow_utils
 
 import gc
 import math
+from contextlib import contextmanager
 from typing import Container
 from deepspeed.runtime.zero.offload_states import (offload_optimizer_states, reload_optimizer_states,
                                                    unpin_offloaded_optimizer_states)
@@ -28,6 +29,7 @@ from deepspeed.runtime.utils import (empty_cache, see_memory_usage, has_inf_or_n
                                      is_optimized_parameter)
 from deepspeed.runtime.zero.config import ZeroStageEnum
 from deepspeed.runtime.zero.utils import ZeRORuntimeException, get_norm_dtype
+from deepspeed.runtime.zero import optimizer_state_swap as state_swap
 from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum, OffloadStateTypeEnum
 from deepspeed.ops.adam import DeepSpeedCPUAdam
 from deepspeed.utils import logger
@@ -167,6 +169,13 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
     """
 
+    # Defaults of the options __init__ sets, for objects made without it.
+    _optimizer_state_swap_config = None  # zero_optimization.optimizer_state_swap
+    _optimizer_state_swap = None
+    _optimizer_state_hold_depth = 0
+    _optimizer_state_hold_reselect = False
+    _optimizer_state_masters_on_host = False
+
     def __init__(self,
                  init_optimizer,
                  param_names,
@@ -206,7 +215,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                  elastic_checkpoint=False,
                  check_grad_overflow=True,
                  compute_grad_norm=True,
-                 retain_gpu_grad_partition_until_step=False):
+                 retain_gpu_grad_partition_until_step=False,
+                 optimizer_state_swap=None):
 
         super().__init__()
 
@@ -225,6 +235,15 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         else:
             self.cpu_offload = False
             self.cpu_offload_pin_memory = False
+
+        self._optimizer_state_swap_config = optimizer_state_swap
+        if optimizer_state_swap is not None:
+            if self.cpu_offload:
+                raise ValueError(
+                    "zero_optimization.optimizer_state_swap replaces zero_optimization.offload_optimizer; "
+                    "set one of them")
+            if zenflow_config is not None:
+                raise ValueError("zero_optimization.optimizer_state_swap does not support ZenFlow")
 
         # TODO: Remove zenflow-specific call from vanilla ZeroOptimizer, try to isolate zenflow-specific code into sub-class zenflow_zero_optimizer
         self.zenflow = True if zenflow_config is not None else False
@@ -759,6 +778,14 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
         self.offloaded_states: Set[OffloadStateTypeEnum] = set()
 
+        if optimizer_state_swap is not None:
+            # The masters exist from here on: off the GPU before the first forward.
+            self._optimizer_state_swap = state_swap.build(self, optimizer_state_swap)
+            self._optimizer_state_swap.install()
+            if dist.get_rank() == 0:
+                logger.info(f"ZeRO FP32 optimizer state in pinned host memory outside the step: fraction "
+                            f"{optimizer_state_swap.fraction}, {state_swap.describe(optimizer_state_swap)}")
+
     def destroy(self):
         self._wait_for_offload_copies()
         for i, _ in enumerate(self.optimizer.param_groups):
@@ -869,6 +896,10 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 lazy_init_hp_params_optimizer_state(self.bit16_groups[i], self.single_partition_of_fp32_groups[i],
                                                     self.optimizer.state)
             self._hp_optimizer_states_linked = True
+
+    def _relink_optimizer_state(self):
+        """A load replaced the optimizer state: link the fragments again at the next step."""
+        self._hp_optimizer_states_linked = False
 
     def is_moe_group(self, group):
         return 'moe' in group and group['moe']
@@ -1250,6 +1281,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
     def overlapping_partition_gradients_reduce_epilogue(self):
         self.independent_gradient_partition_epilogue()
+        if self._optimizer_state_swap is not None:
+            self._optimizer_state_swap.after_backward_epilogue(self)
 
     def configure_autoep_folding_tp_gradient_reduction(self, folding_spec):
         if folding_spec is None or folding_spec.tp_size <= 1:
@@ -3130,6 +3163,15 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         """
         Not supporting closure.
         """
+        swap = self._optimizer_state_swap
+        if swap is None:
+            return self._step(closure)
+        swap.before_step()
+        result = self._step(closure)
+        swap.after_step()
+        return result
+
+    def _step(self, closure=None):
         self.micro_step_id = INITIAL_MICRO_STEP_ID
         self._wait_for_offload_copies()
         if self.cpu_offload:
@@ -3290,6 +3332,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         return
 
     @torch.no_grad()
+    @state_swap.holds_state()
     def update_lp_params(self):
         for i, (bit16_partitions, fp32_partition) in enumerate(
                 zip(self.parallel_partitioned_bit16_groups, self.single_partition_of_fp32_groups)):
@@ -3411,6 +3454,65 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
     def _update_scale(self, has_overflow=False):
         self.loss_scaler.update_scale(has_overflow)
 
+    @contextmanager
+    def optimizer_state_resident(self, reselect=False):
+        """The FP32 masters and optimizer state on the GPU for the body (optimizer_state_swap), evicted again after it;
+        a no-op without the swap. For code that needs the state on the GPU outside the step, such as
+        ``safe_get_full_fp32_param``; it brings the whole state back at once. Checkpoint saves and loads serve the state
+        from the host copies instead. ``reselect``: the body may replace the optimizer's state tensors (a load)."""
+        with self._optimizer_state_hold(on_device=True, reselect=reselect):
+            yield
+
+    @contextmanager
+    def _optimizer_state_hold(self, on_device=False, reselect=False):
+        """The swapped state held for code outside the step: on the GPU (``on_device``), or served from the pinned host
+        copies, each evicted master's ``.data`` and state entry being its host copy, so nothing comes back to the GPU.
+        Nests: only the outermost hold acts; a GPU hold inside a host hold is refused."""
+        swap = self._optimizer_state_swap
+        if swap is None:
+            yield
+            return
+        outermost = self._optimizer_state_hold_depth == 0
+        if outermost:
+            self._optimizer_state_hold_reselect = False
+            if on_device:
+                swap.begin_hold()
+                held = None
+            else:
+                held = swap.begin_host_hold()
+                self._optimizer_state_masters_on_host = any(key is None for _, key, _, _ in held[0])
+        elif on_device and self._optimizer_state_masters_on_host:
+            raise RuntimeError("the FP32 state is served from the host copies here (a checkpoint save or load); code "
+                               "that needs it on the GPU runs outside that")
+        self._optimizer_state_hold_depth += 1
+        self._optimizer_state_hold_reselect = self._optimizer_state_hold_reselect or reselect
+        try:
+            yield
+        finally:
+            self._optimizer_state_hold_depth -= 1
+            if outermost:
+                reselect = self._optimizer_state_hold_reselect
+                if held is None:
+                    if reselect:  # everything is on the GPU: link the loaded state now
+                        self._relink_optimizer_state()
+                        self._lazy_init_hp_params_optimizer_state()
+                    swap.end_hold(reselect)
+                else:
+                    self._optimizer_state_masters_on_host = False
+                    swap.end_host_hold(held, reselect)
+                    if reselect:
+                        self._relink_optimizer_state()
+
+    def _check_optimizer_state_resident(self, caller):
+        """The swapped state, read while evicted, would be the freed storage: refuse rather than return it."""
+        swap = self._optimizer_state_swap
+        if swap is None or swap.all_resident() or self._optimizer_state_hold_depth > 0:
+            return
+        raise RuntimeError(
+            f"{caller}() reads the FP32 state that zero_optimization.optimizer_state_swap keeps in host "
+            "memory outside the step; DeepSpeedEngine.save_checkpoint serves it from the host copies, and "
+            "optimizer.optimizer_state_resident() holds it on the GPU")
+
     # Promote state so it can be retrieved or set via "fp16_optimizer_instance.state"
     def _get_state(self):
         return self.optimizer.state
@@ -3487,6 +3589,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             checkpoint['optimizer'] = optimizer.state_dict()
             torch.save(checkpoint, "saved.pth")
         """
+        self._check_optimizer_state_resident("state_dict")
         state_dict = {}
         state_dict[LOSS_SCALER] = self.loss_scaler
         state_dict['dynamic_loss_scale'] = self.dynamic_loss_scale
@@ -3665,6 +3768,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             current.data.copy_(saved.data)
 
     # Restore base optimizer fp32 weights from ZeRO fp16 or bfloat16 weights
+    @state_swap.holds_state()
     def _restore_from_bit16_weights(self):
         for group_id, (bit16_partitions, fp32_partition) in enumerate(
                 zip(self.parallel_partitioned_bit16_groups, self.single_partition_of_fp32_groups)):
@@ -3672,6 +3776,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             fp32_partition.data.copy_(bit16_partitions[partition_id].data)
 
     # Refresh the fp32 master params from the fp16 or bfloat16 copies.
+    @state_swap.holds_state()
     def refresh_fp32_params(self):
         self._restore_from_bit16_weights()
 
@@ -3721,9 +3826,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                         src_tensor = _get_padded_tensor(saved, dst_tensor.numel())
                         self.optimizer.state[p][key].data.copy_(src_tensor.data)
                     else:
-                        self.optimizer.state[p][key] = _pad_tensor_by_size(
-                            saved, padding, torch.float32,
-                            torch.device('cpu') if self.cpu_offload else self.device)
+                        self.optimizer.state[p][key] = _pad_tensor_by_size(saved, padding, torch.float32, p.device)
                 else:
                     self.optimizer.state[p][key] = saved
 
@@ -3776,11 +3879,13 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                         checkpoint_folder=None,
                         load_serial=None,
                         param_shapes=None):
-        self._wait_for_offload_copies()
-        if checkpoint_folder:
-            self._load_universal_checkpoint(checkpoint_folder, load_optimizer_states, load_from_fp32_weights)
-        else:
-            self._load_legacy_checkpoint(state_dict_list, load_optimizer_states, load_from_fp32_weights)
+        # A universal checkpoint loads through the hp fragments, which view the masters on the GPU.
+        with self._optimizer_state_hold(on_device=bool(checkpoint_folder), reselect=True):
+            self._wait_for_offload_copies()
+            if checkpoint_folder:
+                self._load_universal_checkpoint(checkpoint_folder, load_optimizer_states, load_from_fp32_weights)
+            else:
+                self._load_legacy_checkpoint(state_dict_list, load_optimizer_states, load_from_fp32_weights)
 
     def _load_universal_checkpoint(self, checkpoint_folder, load_optimizer_states, load_from_fp32_weights):
         self.load_hp_checkpoint_state_from_checkpoint_dir("bit16_groups",
@@ -3920,7 +4025,9 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             # option 1 from above
             self._restore_from_bit16_weights()
 
-        if load_optimizer_states:
+        # The swap's checkpoint hold sets evicted masters' data to their host copies; the links into their GPU
+        # storage stay valid.
+        if load_optimizer_states and not self._optimizer_state_masters_on_host:
             self._link_all_hp_params()
 
     def _clear_hp_buffer_references(self):
@@ -3987,6 +4094,9 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             non_blocking (bool, optional):
                 If True, attempts to perform offload operations asynchronously. Defaults to False.
         """
+        if self._optimizer_state_swap is not None:
+            raise ValueError("offload_states does not support zero_optimization.optimizer_state_swap, which keeps the "
+                             "FP32 state in host memory outside the step already")
         device = device.value
 
         def needs_offload(target):

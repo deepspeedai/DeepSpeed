@@ -419,6 +419,9 @@ Enabling and configuring ZeRO memory optimizations
     "offload_optimizer": {
       ...
     },
+    "optimizer_state_swap": {
+      ...
+    },
     "stage3_max_live_parameters" : 1e9,
     "stage3_max_reuse_distance" : 1e9,
     "stage3_prefetch_bucket_size" : 5e8,
@@ -716,6 +719,20 @@ Note that if the value of "device" is not specified or not supported, an asserti
 | Description                                                   | Default |
 | ------------------------------------------------------------- | ------- |
 | Enable fast optimizer initialization when offloading to NVMe. | `false` |
+
+
+### Optimizer-state swap
+Stage 1 and 2: keep the FP32 master weights and optimizer state (Adam's moments) in pinned host memory outside the optimizer step, so the forward and backward run without them. The tensors are fetched back on a side stream from the end of the last backward before a step and evicted after it; the step itself runs on the GPU, unchanged. Muon's momentum stays on the GPU (ZeRO reads it in the backward); its masters move. It replaces `offload_optimizer`, which moves the step to the CPU; the two cannot be set together. `DeepSpeedEngine.save_checkpoint` and `load_checkpoint` save from and load into the pinned host copies, so the evicted state does not come back to the GPU (a universal checkpoint load holds it on the GPU); other code that needs the state on the GPU outside the step runs inside `engine.optimizer.optimizer_state_resident()`.
+```json
+  "optimizer_state_swap": {
+    "fraction": 1.0
+  }
+```
+***fraction***: [float]
+
+| Description | Default |
+| ----------- | ------- |
+| Required, in (0, 1]: the share of the masters and optimizer state, by bytes and in whole tensors in the optimizer's order, kept on the host outside the step; the rest stays on the GPU. | |
 
 
 ### Asynchronous I/O

@@ -32,6 +32,7 @@ from deepspeed.runtime.utils import see_memory_usage, DummyOptim, register_outpu
 from .zero.offload_config import OffloadDeviceEnum, OffloadStateTypeEnum
 from deepspeed.runtime.base_optimizer import ZeROOptimizer
 from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer
+from deepspeed.runtime.zero import optimizer_state_swap as state_swap
 from deepspeed.runtime.zenflow.zenflow_stage_1_and_2 import ZenFlowZeroOptimizer
 from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
 from deepspeed.runtime.zero.utils import is_zero_supported_optimizer, ZeRORuntimeException
@@ -1651,6 +1652,9 @@ class DeepSpeedEngine(Module):
     def zero_retain_gpu_grad_partition_until_step(self):
         return self._config.zero_config.retain_gpu_grad_partition_until_step
 
+    def zero_optimizer_state_swap(self):
+        return self._config.zero_config.optimizer_state_swap
+
     def zero_optimization_partition_gradients(self):
         return self.zero_optimization_stage() >= ZeroStageEnum.gradients
 
@@ -2385,6 +2389,9 @@ class DeepSpeedEngine(Module):
                 if not self.zero_compute_grad_norm():
                     raise ValueError("zero_optimization.compute_grad_norm=false does not support ZeRO Stage 1 with "
                                      "BF16 parameters and FP32 gradient accumulation")
+                if self.zero_optimizer_state_swap() is not None:
+                    raise ValueError("zero_optimization.optimizer_state_swap does not support ZeRO Stage 1 with BF16 "
+                                     "parameters and FP32 gradient accumulation")
                 return BFLOAT16
             return ZERO_OPTIMIZATION
         # data type checks
@@ -2782,7 +2789,8 @@ class DeepSpeedEngine(Module):
                 elastic_checkpoint=self.zero_elastic_checkpoint(),
                 check_grad_overflow=check_grad_overflow,
                 compute_grad_norm=self.zero_compute_grad_norm(),
-                retain_gpu_grad_partition_until_step=self.zero_retain_gpu_grad_partition_until_step())
+                retain_gpu_grad_partition_until_step=self.zero_retain_gpu_grad_partition_until_step(),
+                optimizer_state_swap=self.zero_optimizer_state_swap())
 
         elif zero_stage == ZeroStageEnum.weights:
             self._validate_zero3_moe_compatibility()
@@ -4514,6 +4522,19 @@ class DeepSpeedEngine(Module):
         before ``load_checkpoint()``.
 
         """
+        # The optimizer-state swap's hold, as a context rather than a decorator: callers verify this method's source.
+        with state_swap.held(self.optimizer, reselect=True, on_device=self.load_universal_checkpoint()):
+            return self._load_checkpoint_held(load_dir, tag, load_module_strict, load_optimizer_states,
+                                              load_lr_scheduler_states, load_module_only, custom_load_fn)
+
+    def _load_checkpoint_held(self,
+                              load_dir,
+                              tag=None,
+                              load_module_strict=True,
+                              load_optimizer_states=True,
+                              load_lr_scheduler_states=True,
+                              load_module_only=False,
+                              custom_load_fn=None):
 
         if tag is None:
             latest_tag = "latest_universal" if self.load_universal_checkpoint() else "latest"
@@ -4993,6 +5014,12 @@ class DeepSpeedEngine(Module):
         process with rank 0.
 
         """
+        # The optimizer-state swap's hold, as a context rather than a decorator: callers verify this method's source.
+        with state_swap.held(self.optimizer):
+            return self._save_checkpoint_held(save_dir, tag, client_state, save_latest, exclude_frozen_parameters)
+
+    def _save_checkpoint_held(self, save_dir, tag=None, client_state={}, save_latest=True,
+                              exclude_frozen_parameters=False):
         if not save_dir:
             raise ValueError(f"save_dir must be a non-empty string, got {save_dir!r}")
 
