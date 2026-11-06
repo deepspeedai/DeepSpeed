@@ -108,14 +108,21 @@ def calibrate_links(sizes: Sequence[int] = DEFAULT_SIZES,
                     fan_width: Optional[Union[int, Sequence[int]]] = None,
                     fan_peers: Optional[Callable[[int, int], Sequence[int]]] = None,
                     group: Optional[object] = None) -> Dict:
-    """Time local copies, every ordered process pair alone, and fans.
+    """Time local copies, process pairs one way and both ways, relays, and fans.
 
     Every process of ``group`` (the default group unless given) must call this. It returns the
     same dictionary on every process, with ``repeats`` samples per entry and no aggregation:
 
     - ``local``: a device-local copy on each process.
-    - ``peer``: each ordered pair with every other process idle, so that links through different
-      switches and sockets are each sampled. A sample is the slower of its two endpoints.
+    - ``peer``: each pair with every other process idle, so that links through different
+      switches and sockets are each sampled. A sample is the slower of its two endpoints. With
+      ``both_ways`` false, one ordered pair sends one way; with it true, the pair sends to each
+      other at once, as in colocated resharding, and each direction gets a sample labeled with
+      its own path, carrying the time until both endpoints had sent and received.
+    - ``relay``: every process receives from ``process - shift`` while sending to
+      ``process + shift``, for every shift, as the processes of a pipelined relay or an
+      all-gather do. A sample is one process's own time, labeled with the ``receive_path`` and
+      ``send_path`` it used, since that time covers both.
     - ``fan_out``: for every root and fan width, the root sends one message to each of its
       ``width`` peers at once (1 to N), while every other process is idle.
     - ``fan_in``: for every root and fan width, each of its peers sends one message to the root
@@ -135,8 +142,9 @@ def calibrate_links(sizes: Sequence[int] = DEFAULT_SIZES,
     behind one PCIe switch or across a socket; it must return the same peers on every process.
     Nodes are told apart by host name.
 
-    The pair sweep makes ``world_size * (world_size - 1) * len(sizes) * (warmup + repeats)``
-    barriers, so keep ``sizes`` short on large jobs. Each process allocates
+    The pair and relay sweeps make
+    ``(1.5 * world_size + 1) * (world_size - 1) * len(sizes) * (warmup + repeats)`` barriers,
+    so keep ``sizes`` short on large jobs. Each process allocates
     ``(2 + max(widths)) * max(sizes)`` bytes of device memory at most, 2.25 GiB with the default
     width at 8 processes per node and 256 MiB messages.
     """
@@ -176,6 +184,8 @@ def calibrate_links(sizes: Sequence[int] = DEFAULT_SIZES,
     device = torch.device(get_accelerator().current_device_name())
     local_times: Dict[int, List[float]] = {}
     peer_times: Dict[tuple, List[float]] = {}
+    both_ways_times: Dict[tuple, List[float]] = {}
+    relay_times: Dict[tuple, List[float]] = {}
     fan_times: Dict[tuple, List[float]] = {}
     for size in sizes:
         send = torch.ones(size, dtype=torch.uint8, device=device)
@@ -193,6 +203,21 @@ def calibrate_links(sizes: Sequence[int] = DEFAULT_SIZES,
                 times = [_timed_exchange(send, to_processes, receives, group) for _ in range(warmup + repeats)]
                 if rank in (source, target):
                     peer_times[(size, source, target)] = times[warmup:]
+
+        for first in range(world):
+            for second in range(first + 1, world):
+                other = {first: second, second: first}.get(rank)
+                to_processes = [other] if other is not None else []
+                receives = [(recv, other)] if other is not None else []
+                times = [_timed_exchange(send, to_processes, receives, group) for _ in range(warmup + repeats)]
+                if other is not None:
+                    both_ways_times[(size, first, second)] = times[warmup:]
+
+        for shift in range(1, world):
+            to_processes = [(rank + shift) % world]
+            receives = [(recv, (rank - shift) % world)]
+            times = [_timed_exchange(send, to_processes, receives, group) for _ in range(warmup + repeats)]
+            relay_times[(size, shift)] = times[warmup:]
 
         for width in widths:
             for root in range(world):
@@ -214,9 +239,9 @@ def calibrate_links(sizes: Sequence[int] = DEFAULT_SIZES,
 
     # Samples stay on their own process until every timing is done, so no collective runs inside a timed region.
     gathered = [None] * world
-    dist.all_gather_object(gathered, (local_times, peer_times, fan_times), group=group)
+    dist.all_gather_object(gathered, (local_times, peer_times, fan_times, both_ways_times, relay_times), group=group)
 
-    local, peer = [], []
+    local, peer, relay = [], [], []
     fans = {'fan_out': [], 'fan_in': []}
     for size in sizes:
         for process in range(world):
@@ -231,8 +256,35 @@ def calibrate_links(sizes: Sequence[int] = DEFAULT_SIZES,
                     'bytes': size,
                     'from_process': source,
                     'to_process': target,
+                    'both_ways': False,
                     'path': path_of(source, target),
                     'seconds': seconds
+                })
+        for first in range(world):
+            for second in range(first + 1, world):
+                key = (size, first, second)
+                seconds = [max(pair) for pair in zip(gathered[first][3][key], gathered[second][3][key])]
+                for source, target in ((first, second), (second, first)):
+                    peer.append({
+                        'bytes': size,
+                        'from_process': source,
+                        'to_process': target,
+                        'both_ways': True,
+                        'path': path_of(source, target),
+                        'seconds': list(seconds)
+                    })
+        for shift in range(1, world):
+            for process in range(world):
+                source = (process - shift) % world
+                target = (process + shift) % world
+                relay.append({
+                    'bytes': size,
+                    'process': process,
+                    'from_process': source,
+                    'to_process': target,
+                    'receive_path': path_of(source, process),
+                    'send_path': path_of(process, target),
+                    'seconds': gathered[process][4][(size, shift)]
                 })
         for width in widths:
             for root in range(world):
@@ -257,6 +309,7 @@ def calibrate_links(sizes: Sequence[int] = DEFAULT_SIZES,
         'warmup': warmup,
         'local': local,
         'peer': peer,
+        'relay': relay,
         'fan_widths': widths,
         'fan_out': fans['fan_out'],
         'fan_in': fans['fan_in'],
@@ -304,10 +357,15 @@ def fit_links(calibration: Dict) -> Dict:
     single slow repeat does not move the line. Every fit holds ``alpha_seconds``,
     ``bytes_per_second``, ``max_relative_error`` and the ``sizes`` fitted. Returns:
 
-    - ``local`` and ``peer``: a fit per path label.
-    - ``peer_pairs``: a fit per ordered ``(from_process, to_process)`` pair, from the ``peer``
-      samples. It keeps the sender and direction asymmetry that pooling by path label averages
-      away, as between cards behind PCIe switches.
+    - ``local`` and ``peer``: a fit per path label, ``peer`` from the one-way samples.
+    - ``peer_pairs``: a fit per ordered ``(from_process, to_process)`` pair, from the one-way
+      ``peer`` samples. It keeps the sender and direction asymmetry that pooling by path label
+      averages away, as between cards behind PCIe switches.
+    - ``peer_both_ways`` and ``peer_both_ways_pairs``: the same, from the ``both_ways`` samples,
+      i.e. the per-direction cost while the reverse direction is busy too. Compare with ``peer``
+      and ``peer_pairs`` to see what a link loses when used both ways at once.
+    - ``relay``: a fit per ``(receive_path, send_path)``, from each process's time to receive one
+      message and send another at once while every process does the same.
     - ``fan_out`` and ``fan_in``: per fan, keyed by ``(root, peers)`` with the peers sorted, a fit
       per path label, from the peers' times, each under its own message's path. They give
       per-link cost while those peers share one sender or one receiver.
@@ -328,19 +386,24 @@ def fit_links(calibration: Dict) -> Dict:
     for sample in calibration['local']:
         local.setdefault(sample['path'], {}).setdefault(sample['bytes'], []).extend(sample['seconds'])
 
-    peer: Dict[str, Dict[int, List[float]]] = {}
-    peer_pairs: Dict[Tuple[int, int], Dict[int, List[float]]] = {}
-    for sample in calibration['peer']:
-        peer.setdefault(sample['path'], {}).setdefault(sample['bytes'], []).extend(sample['seconds'])
-        pair = (sample['from_process'], sample['to_process'])
-        peer_pairs.setdefault(pair, {}).setdefault(sample['bytes'], []).extend(sample['seconds'])
+    fits = {'schema': CALIBRATION_SCHEMA, 'local': _fit_groups(local)}
+    for both_ways, name in ((False, 'peer'), (True, 'peer_both_ways')):
+        by_path: Dict[str, Dict[int, List[float]]] = {}
+        by_pair: Dict[Tuple[int, int], Dict[int, List[float]]] = {}
+        for sample in calibration['peer']:
+            if sample['both_ways'] != both_ways:
+                continue
+            by_path.setdefault(sample['path'], {}).setdefault(sample['bytes'], []).extend(sample['seconds'])
+            pair = (sample['from_process'], sample['to_process'])
+            by_pair.setdefault(pair, {}).setdefault(sample['bytes'], []).extend(sample['seconds'])
+        fits[name] = _fit_groups(by_path)
+        fits[f'{name}_pairs'] = _fit_groups(by_pair)
 
-    fits = {
-        'schema': CALIBRATION_SCHEMA,
-        'local': _fit_groups(local),
-        'peer': _fit_groups(peer),
-        'peer_pairs': _fit_groups(peer_pairs),
-    }
+    relay: Dict[Tuple[str, str], Dict[int, List[float]]] = {}
+    for sample in calibration['relay']:
+        paths = (sample['receive_path'], sample['send_path'])
+        relay.setdefault(paths, {}).setdefault(sample['bytes'], []).extend(sample['seconds'])
+    fits['relay'] = _fit_groups(relay)
     for kind, direction in (('fan_out', 'send'), ('fan_in', 'receive')):
         fanned: Dict[tuple, Dict[str, Dict[int, List[float]]]] = {}
         rooted: Dict[tuple, Dict[int, List[float]]] = {}

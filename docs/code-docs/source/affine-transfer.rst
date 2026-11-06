@@ -63,13 +63,22 @@ receives the same raw samples::
     calibration = calibrate_links(path_of=node_path_of(processes_per_node=8), fan_width=[1, 2, 4, 7])
     fits = fit_links(calibration)
     fits['peer_pairs'][(0, 1)]       # the link from process 0 to process 1 alone
+    fits['peer_both_ways_pairs'][(0, 1)]  # the same direction while 1 also sends to 0
+    fits['relay'][('intra_node', 'inter_node')]      # receiving within a node while sending out of it
     fits['fan_in'][(0, (1, 2, 3, 4))]['inter_node']  # per-link cost while 1-4 send to 0 at once
     fits['receive'][(0, (1, 2, 3, 4))]               # process 0's aggregate rate receiving from 1-4
 
-Four patterns are sampled at every size, 4 KiB to 256 MiB by default:
+Five patterns are sampled at every size, 4 KiB to 256 MiB by default:
 
 - ``local``: a device-local copy on each process.
-- ``peer``: each ordered process pair alone (1 to 1).
+- ``peer``: each process pair alone (1 to 1), one way, and both ways at once
+  (``both_ways``), as when a process sends and receives together in colocated
+  resharding. A two-way exchange gives a sample per direction, labelled with
+  that direction's path.
+- ``relay``: every process receives from ``process - shift`` while sending to
+  ``process + shift``, for every shift, as in a pipelined relay or the
+  all-gather stage of one. Each sample is one process's time, labelled with
+  both its ``receive_path`` and its ``send_path``.
 - ``fan_out``: one root sends to ``width`` peers at once (1 to N).
 - ``fan_in``: ``width`` peers send to one root at once (N to 1), measuring
   receiver contention.
@@ -87,7 +96,11 @@ labels only ``local`` and ``peer``; ``node_path_of`` splits ``peer`` into
 ``intra_node`` and ``inter_node``, and any callable can be used, for example one
 that tells NVLink from PCIe pairs. ``fit_links`` pools the samples per label and
 fits ``alpha + bytes / bandwidth`` to the median at each size, and
-``peer_pairs`` fits each ordered pair alone. Fan fits are keyed by
+``peer_pairs`` fits each ordered pair alone, both from one-way samples;
+``peer_both_ways`` and ``peer_both_ways_pairs`` do the same for the two-way
+samples, so comparing them with ``peer`` shows what a link loses per direction
+when both directions are busy. ``relay`` is fitted per
+``(receive_path, send_path)``. Fan fits are keyed by
 ``(root, peers)``, with the peers sorted; the width is ``len(peers)``. ``send``
 and ``receive`` fit each root's own time against all the bytes it moved, giving
 the root's aggregate rate with those peers, which is what a plan's per-process
@@ -107,8 +120,8 @@ fitting. On a uniform fabric, fits of one width can be pooled by
 Processes here are ranks of ``group``; pass the group the transfer runs on. A
 plan's source and target locations are
 mapped to processes by ``TransferEndpoints``, so translate through it before
-joining a plan's messages with these labels. The pair sweep makes
-``world_size * (world_size - 1)`` barriered samples per size and repeat, and each
+joining a plan's messages with these labels. The pair and relay sweeps make
+``(1.5 * world_size + 1) * (world_size - 1)`` barriered samples per size and repeat, and each
 process holds up to ``(2 + max(widths)) * max(sizes)`` bytes, 2.25 GiB with the
 default width at 8 processes per node and 256 MiB, so pass shorter
 ``sizes`` or smaller fan widths on large jobs. The numbers describe the
