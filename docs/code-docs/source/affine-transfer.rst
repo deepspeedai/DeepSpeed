@@ -46,3 +46,23 @@ zero-copy transport such as GPUDirect RDMA would instead take each round's
 removes the arena copy but needs a registration lifetime this API has no place
 for, so the wire contract (one packed message per peer per round) is expected to
 change when such a path lands.
+
+Inspecting a schedule
+---------------------
+
+``schedule_transfers`` returns the schedule ``execute_transfers`` would run for
+a batch, without buffers or communication, so a replica policy or cost model can
+price a plan before running it::
+
+    from deepspeed.checkpoint.affine_transfer_executor import schedule_transfers
+
+    schedules = schedule_transfers([request.plan for request in requests],
+                                   endpoints, budget, element_size)
+
+Pass the plans in request order, since that order fixes how chunks are packed
+into rounds. Each ``ProcessSchedule`` lists, per peer and direction, the rounds
+with their element and chunk counts and whether the round is sent or received in
+place, the staging arena each peer direction allocates, the local copies, and the
+round count that ``TransferStats.rounds`` reports. ``execute_transfers`` builds
+its rounds and arenas from the same computation, so the two cannot drift apart.
+The schedule follows the current transport described above and changes with it.
