@@ -13,10 +13,9 @@ name: cpu-torch-latest-v1-multirank
 # DS_MULTIRANK_ONLY drops single-rank tests, so a run spends its time on
 # world_size 2-4 CPU tests.
 #
-# Trigger rollout: manual dispatch only for now. Starting as a required
-# pull_request check would put an unvalidated ~1h suite in front of every PR;
-# once this run is green across a few real PRs, add `pull_request:` back to the
-# `on:` block and register the check with branch protection.
+# Trigger rollout: manual dispatch validated the suite on master, so it now
+# also runs on pull requests and in the merge queue; register the unit-tests
+# check with branch protection to make it required.
 
 on:
   workflow_dispatch:
@@ -49,6 +48,9 @@ on:
         required: false
         default: 'main'
         type: string
+  pull_request:
+  merge_group:
+    branches: [ master ]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
