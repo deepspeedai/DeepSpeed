@@ -405,6 +405,22 @@ class DeepSpeedStaticCache:
     def update_conv_state(self, conv_state, layer_idx: int = 0, **kwargs):
         return self._layers[layer_idx].update_conv_state(conv_state, state_idx=0, **kwargs)
 
+    def get_conv_state(self, layer_idx: int, state_idx: int = 0):
+        """HF >= 5.19 GDN cache protocol bridge: the native (non-segKI)
+        forward fetches conv/recurrent state through these top-level
+        entries; pre-5.19 builds poke layer attributes directly, which the
+        slot's attribute forwarding already serves."""
+        layer = self._layers[layer_idx]
+        return layer.conv_states[state_idx]
+
+    def get_recurrent_state(self, layer_idx: int, state_idx: int = 0):
+        layer = self._layers[layer_idx]
+        return layer.recurrent_states[state_idx]
+
+    def is_recording_past(self, layer_idx: int, state_idx: int = 0) -> bool:
+        layer = self._layers[layer_idx]
+        return layer.is_recording_past(state_idx) if hasattr(layer, "is_recording_past") else False
+
     def has_previous_state(self, layer_idx: int = 0, state_idx: int = 0) -> bool:
         # transformers cache protocol: GDN blocks ask the container whether a
         # previous recurrent state exists before reading it.

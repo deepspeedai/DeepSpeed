@@ -56,6 +56,7 @@ def _as_concat(parts):
     concatenated (list of 1), others separate (list of n)."""
     return torch.cat(parts, dim=-1) if len(parts) > 1 else parts[0]
 
+
 def _op():
     from deepspeed.ops.module_inject import get_fused_glu_op
     return get_fused_glu_op()
@@ -390,6 +391,50 @@ _TEST_MODEL = os.environ.get("DS_SEGMENT_KI_TEST_MODEL", "Qwen/Qwen3.5-0.8B")
 
 
 @pytest.mark.skipif(not GPU_AVAILABLE, reason="non-CPU device required")
+class TestGraphPathWithoutSegki:
+    """The graph-capture path with use_segki=False drives the *native* HF
+    GDN forward, which reads conv/recurrent state through the cache's
+    top-level protocol entries. A missing delegation crashes (and silently
+    untested halves of the path rot); the outputs must also stay
+    token-identical to plain generate."""
+
+    def test_graph_decode_without_segki_matches_hf(self):
+        pytest.importorskip("transformers")
+        try:
+            from transformers import AutoModelForCausalLM, AutoTokenizer
+            tokenizer = AutoTokenizer.from_pretrained(_TEST_MODEL)
+            model = AutoModelForCausalLM.from_pretrained(_TEST_MODEL,
+                                                         dtype=torch.bfloat16).to(get_accelerator().device_name())
+        except Exception as e:
+            pytest.skip(f"model {_TEST_MODEL} unavailable: {e}")
+
+        object.__setattr__(tokenizer, "eos_token_id", -1)
+        from deepspeed.runtime.rollout.hybrid_engine_rollout import HybridEngineRollout, HybridEngineRolloutConfig
+        from deepspeed.runtime.rollout.base import RolloutRequest, SamplingConfig
+
+        class Shim:
+
+            def __init__(self, m):
+                self.module = m
+
+        rollout = HybridEngineRollout(Shim(model), tokenizer,
+                                      HybridEngineRolloutConfig(use_graph_capture=True, use_segki=False))
+        ids = torch.randint(1000, 50000, (1, 128), device=get_accelerator().device_name())
+        attn = torch.ones_like(ids)
+        greedy = SamplingConfig(max_new_tokens=16, temperature=0.0)
+
+        got = rollout.generate(RolloutRequest(prompt_ids=ids, prompt_attention_mask=attn), greedy)
+        with torch.no_grad():
+            ref = model.generate(ids,
+                                 attention_mask=attn,
+                                 max_new_tokens=16,
+                                 do_sample=False,
+                                 pad_token_id=tokenizer.eos_token_id)
+        assert got.input_ids[0].tolist() == ref[0].tolist(), \
+            "graph path without segKI diverged from plain generate"
+
+
+@pytest.mark.skipif(not GPU_AVAILABLE, reason="non-CPU device required")
 class TestRolloutTrainRollout:
 
     def test_rl_loop_needs_no_switch_or_sync(self):
@@ -512,7 +557,8 @@ class TestRolloutTrainRollout:
                 ref_glu = ref.grouped_linear(x, [gw, uw], True)[0]
                 torch.testing.assert_close(out[0].float(), ref_glu.float().reshape(out[0].shape), atol=5e-2, rtol=5e-2)
             else:
-                ref_glu = ref.grouped_linear(x.float().reshape(-1, K) if M > 1 else x.float(), [gw.float(), uw.float()], True)[0]
+                ref_glu = ref.grouped_linear(x.float().reshape(-1, K) if M > 1 else x.float(),
+                                             [gw.float(), uw.float()], True)[0]
                 torch.testing.assert_close(out[0].float(), ref_glu.reshape(out[0].shape), atol=5e-2, rtol=5e-2)
 
             kw, vw = _rand_bf16(32, K), _rand_bf16(32, K)
@@ -532,7 +578,9 @@ class TestRolloutTrainRollout:
                 rc = torch.cat(ref.grouped_linear(xq, [w1, z, b, a], False), dim=-1).float()
                 torch.testing.assert_close(cat.float(), rc.reshape(cat.shape), atol=5e-2, rtol=5e-2)
             else:
-                rc = torch.cat(ref.grouped_linear(xq.float(), [w1.float(), z.float(), b.float(), a.float()], False), dim=-1)
+                rc = torch.cat(ref.grouped_linear(
+                    xq.float(), [w1.float(), z.float(), b.float(), a.float()], False),
+                               dim=-1)
                 torch.testing.assert_close(cat.float(), rc.reshape(cat.shape), atol=5e-2, rtol=5e-2)
         caps = op.capabilities()
         assert caps["max_grouped_batch"] >= 32 and "bf16" in list(caps["dtypes"])
@@ -650,7 +698,7 @@ class TestArenaWeightViews:
         assert torch.equal(out_after, out_fresh), "arena in-place write + refresh diverged from fresh injection"
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="native kernels are CUDA-only")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="native kernels are CUDA-only")  #ignore-cuda
 class TestAmpereGlueReferences:
     """Direct reference anchors for the glue kernels that entered after the
     original ten: the Ampere GLU epilogue and the scan head-repeat."""
