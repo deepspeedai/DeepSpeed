@@ -14,17 +14,20 @@ Two generation paths:
      selected through ``SamplingConfig.continuous_batch_size``.
 """
 
+import math
 import time
 from copy import copy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from inspect import signature
 from typing import Optional
 
 import torch
 
 from deepspeed.accelerator import get_accelerator
+import deepspeed.comm as dist
 from deepspeed.runtime.rollout.base import RolloutBatch, RolloutEngine, RolloutRequest, SamplingConfig
-from deepspeed.runtime.rollout.continuous_batching import ContinuousBatchRequest, ContinuousBatchScheduler
+from deepspeed.runtime.rollout.continuous_batching import (ContinuousBatchRequest, ContinuousBatchScheduler,
+                                                           plan_prefill_buckets)
 from deepspeed.utils import logger
 
 
@@ -96,6 +99,13 @@ class HybridEngineRolloutConfig:
     align_decode_fronts: bool = False
     enable_cache_trimming: bool = False
     continuous_cache_capacity: Optional[int] = None
+    adaptive_prefill: bool = False
+    prefill_fixed_cost_ms: float = 25.0
+    prefill_token_cost_ms: float = 0.1
+    prefill_attention_cost_ms: float = 0.01
+    prefill_kv_cost_ms: float = 0.04
+    continuous_decode_cost_ms: float = 10.0
+    prefill_max_tokens: Optional[int] = 65536
 
 
 @dataclass
@@ -128,17 +138,53 @@ class HybridEngineRollout(RolloutEngine):
         self.enable_profiling = getattr(cfg, 'enable_profiling', False) if cfg else False
         self.use_shared_prefill = getattr(cfg, 'use_shared_prefill', False) if cfg else False
         self.align_decode_fronts = getattr(cfg, 'align_decode_fronts', False) if cfg else False
+        self.adaptive_prefill = getattr(cfg, 'adaptive_prefill', False) if cfg else False
+        for name, default in (("prefill_fixed_cost_ms", 25.0), ("prefill_token_cost_ms", 0.1),
+                              ("prefill_attention_cost_ms", 0.01), ("prefill_kv_cost_ms",
+                                                                    0.04), ("continuous_decode_cost_ms", 10.0)):
+            value = getattr(cfg, name, default) if cfg else default
+            if not math.isfinite(value) or value < 0:
+                raise ValueError(f"{name} must be finite and non-negative")
+            setattr(self, name, value)
+        self.prefill_max_tokens = getattr(cfg, 'prefill_max_tokens', 65536) if cfg else 65536
+        if self.prefill_max_tokens is not None:
+            if not isinstance(self.prefill_max_tokens, int) or self.prefill_max_tokens <= 0:
+                raise ValueError("prefill_max_tokens must be a positive integer or None")
         self.enable_cache_trimming = getattr(cfg, 'enable_cache_trimming', False) if cfg else False
         self.continuous_cache_capacity = getattr(cfg, 'continuous_cache_capacity', None) if cfg else None
         self._last_profile = None
         self._continuous_graph_state = None
         self._last_continuous_stats = None
+        self._generation_defaults = None
 
     @torch.no_grad()
     def generate(self, request: RolloutRequest, sampling: SamplingConfig) -> RolloutBatch:
         if sampling.continuous_batch_size is not None:
             return self._generate_continuous(request, sampling, sampling.continuous_batch_size)
+        return self._generate_batched(request, sampling)
 
+    @staticmethod
+    def _generation_kwargs(sampling, attention_mask, pad_token_id, module=None):
+        do_sample = not (sampling.temperature <= 0.0)
+        kwargs = {
+            "attention_mask": attention_mask,
+            "max_new_tokens": sampling.max_new_tokens,
+            # ZeRO-3 ranks must execute the same number of parameter-gather iterations.
+            "eos_token_id": None,
+            "do_sample": do_sample,
+            "temperature": max(sampling.temperature, 1e-8) if do_sample else 1.0,
+            "top_p": sampling.top_p if do_sample else 1.0,
+            "pad_token_id": pad_token_id,
+        }
+        if do_sample:
+            kwargs["top_k"] = max(sampling.top_k, 0)
+        if module is not None:
+            prepare = getattr(module, "_prepare_generation_config", None)
+            if callable(prepare) and "use_model_defaults" in signature(prepare).parameters:
+                kwargs["use_model_defaults"] = False
+        return kwargs
+
+    def _generate_batched(self, request, sampling, generation_config=None, mask_padding=True):
         device = request.prompt_ids.device
         B = request.prompt_ids.shape[0]
         n = sampling.n_samples_per_prompt
@@ -197,21 +243,10 @@ class HybridEngineRollout(RolloutEngine):
                 output_ids = self._generate_graph(prompt_ids, prompt_attn, max_new_tokens, pad_token_id, module,
                                                   device)
             else:
-                temperature = max(sampling.temperature, 1e-8)
-                do_sample = not is_greedy
-                generate_kwargs = {
-                    "attention_mask": prompt_attn,
-                    "max_new_tokens": max_new_tokens,
-                    # ZeRO-3 gathers parameters during each decode forward, so every
-                    # data-parallel rank must execute the same number of iterations.
-                    "eos_token_id": None,
-                    "do_sample": do_sample,
-                    "temperature": temperature if do_sample else 1.0,
-                    "top_p": sampling.top_p if do_sample else 1.0,
-                    "pad_token_id": pad_token_id,
-                }
-                if do_sample:
-                    generate_kwargs["top_k"] = max(sampling.top_k, 0)
+                generate_kwargs = self._generation_kwargs(sampling, prompt_attn, pad_token_id,
+                                                          module if generation_config is not None else None)
+                if generation_config is not None:
+                    generate_kwargs["generation_config"] = generation_config
                 output_ids = module.generate(prompt_ids, **generate_kwargs)
         finally:
             for handle in shared_prefill_handles:
@@ -232,6 +267,7 @@ class HybridEngineRollout(RolloutEngine):
             response_start=prompt_len,
             eos_token_id=self.tokenizer.eos_token_id,
             pad_token_id=pad_token_id,
+            mask_padding=mask_padding,
         )
 
         # Build attention mask: pad positions (both left padding from prompt
@@ -297,11 +333,10 @@ class HybridEngineRollout(RolloutEngine):
         greedy decoding. Completed rows retire immediately and pending prompts
         prefill into the released rows before the next decode step.
         """
+        profile = self._start_continuous_profile() if self.adaptive_prefill and self.enable_profiling else None
         original_request = request
-        requests = tuple(
-            RolloutRequest(request.prompt_ids[index:index + 1], request.prompt_attention_mask[index:index + 1])
-            for index in range(request.prompt_ids.shape[0]))
-        self._validate_continuous_inputs(requests, sampling, max_batch_size)
+        batch_size = request.prompt_ids.shape[0]
+        effective_lengths = self._validate_continuous_inputs(request, sampling, max_batch_size)
         use_graph_capture = self.use_graph_capture
         if use_graph_capture and not get_accelerator().is_graph_capture_supported():
             # The eager continuous path is a full fallback, so keep it instead
@@ -309,19 +344,67 @@ class HybridEngineRollout(RolloutEngine):
             logger.warning_once("HybridEngineRollout: graph capture is not supported on the current accelerator; "
                                 "falling back to eager continuous batching.")
             use_graph_capture = False
-        if use_graph_capture:
-            return self._generate_continuous_graph(original_request, requests, sampling, max_batch_size)
-
         module = self.engine.module
-        profile = self._start_continuous_profile() if self.enable_profiling else None
-        profile_accelerator = profile["accelerator"] if profile is not None else None
-        profile_start = profile["start"] if profile is not None else None
-        prompt_lengths = {
-            request_id: (int(request.prompt_attention_mask.sum().item())
-                         if self.align_decode_fronts else request.prompt_ids.shape[1])
-            for request_id, request in enumerate(requests)
-        }
+        prepared_generation_config = None
+        if self.adaptive_prefill and dist.is_initialized() and dist.get_world_size() > 1:
+            raise ValueError("adaptive prefill currently supports single-process rollouts only")
+        align_decode_fronts = self.adaptive_prefill or self.align_decode_fronts
+        if self.adaptive_prefill:
+            generation_config = getattr(module, "generation_config", None)
+            if generation_config is not None:
+                from transformers import GenerationConfig, GenerationMixin
+                # HF can refresh untouched defaults from legacy model settings during generate().
+                prepare_config = getattr(module, "_prepare_generation_config", None)
+                if callable(prepare_config):
+                    native_prepare = getattr(prepare_config, "__func__",
+                                             None) is GenerationMixin._prepare_generation_config
+                    needs_prepare = not native_prepare or getattr(generation_config, "cache_implementation",
+                                                                  None) == "hybrid"
+                    if getattr(generation_config, "_from_model_config", False):
+                        legacy_settings = getattr(module.config, "_get_non_default_generation_parameters", None)
+                        needs_prepare = needs_prepare or not callable(legacy_settings) or bool(legacy_settings())
+                    if needs_prepare:
+                        pad_token_id = self.tokenizer.pad_token_id
+                        if pad_token_id is None:
+                            pad_token_id = self.tokenizer.eos_token_id
+                        overrides = self._generation_kwargs(sampling, request.prompt_attention_mask, pad_token_id,
+                                                            module)
+                        generation_config, model_kwargs = prepare_config(None, **overrides)
+                        if any(name != "attention_mask" for name in model_kwargs):
+                            raise ValueError("adaptive prefill does not support custom generation model kwargs")
+                    prepared_generation_config = generation_config
+                if self._generation_defaults is None:
+                    self._generation_defaults = GenerationConfig()
+                defaults = self._generation_defaults
+                supported_settings = {
+                    "max_length", "max_new_tokens", "do_sample", "temperature", "top_p", "top_k", "bos_token_id",
+                    "eos_token_id", "pad_token_id", "repetition_penalty", "transformers_version"
+                }
+                # CB implements repetition penalty; other HF processors can change tokens across routes.
+                for name, value in vars(generation_config).items():
+                    if name.startswith("_") or name in supported_settings:
+                        continue
+                    if not hasattr(defaults, name) or value != getattr(defaults, name):
+                        raise ValueError(f"adaptive prefill does not support non-default generation setting: {name}")
+        if align_decode_fronts:
+            prompt_lengths = dict(enumerate(map(int, effective_lengths)))
+        else:
+            prompt_lengths = dict.fromkeys(range(batch_size), request.prompt_ids.shape[1])
         prompt_len = max(prompt_lengths.values())
+        if self.adaptive_prefill and self.prefill_max_tokens is not None and prompt_len > self.prefill_max_tokens:
+            raise ValueError("a prompt exceeds the prefill token limit; increase the configured limit")
+        if use_graph_capture:
+            requests = tuple(
+                RolloutRequest(request.prompt_ids[index:index + 1], request.prompt_attention_mask[index:index + 1])
+                for index in range(batch_size))
+            return self._generate_continuous_graph(original_request,
+                                                   requests,
+                                                   sampling,
+                                                   max_batch_size,
+                                                   prompt_lengths=prompt_lengths,
+                                                   generation_config=prepared_generation_config,
+                                                   profile=profile)
+
         max_positions = getattr(module.config, "max_position_embeddings", None)
         if max_positions is not None:
             if any(length + sampling.max_new_tokens > max_positions for length in prompt_lengths.values()):
@@ -331,18 +414,71 @@ class HybridEngineRollout(RolloutEngine):
                 raise ValueError("continuous_cache_capacity must be at least the padded prompt length")
             max_cache_len = self.continuous_cache_capacity
         else:
-            max_cache_len = (prompt_len + sampling.max_new_tokens if self.align_decode_fronts else
-                             self._estimate_continuous_cache_len(prompt_len, [sampling.max_new_tokens] *
-                                                                 len(requests), max_batch_size))
+            max_cache_len = (prompt_len +
+                             sampling.max_new_tokens if align_decode_fronts else self._estimate_continuous_cache_len(
+                                 prompt_len, [sampling.max_new_tokens] * batch_size, max_batch_size))
         if max_positions is not None and max_cache_len > max_positions:
             raise ValueError("continuous batching cache exceeds the model maximum position embeddings")
         if getattr(module, "_supports_cache_class", None) is False:
             raise ValueError("continuous batching requires a model with cache-class support; use the default "
                              "generate() path or upgrade transformers")
 
+        use_batched = False
+        if self.adaptive_prefill:
+            full_width = request.prompt_ids.shape[1]
+            full_tokens_fit = self.prefill_max_tokens is None or request.prompt_ids.numel() <= self.prefill_max_tokens
+            full_positions_fit = max_positions is None or full_width + sampling.max_new_tokens <= max_positions
+            if (batch_size <= max_batch_size and full_tokens_fit and full_positions_fit
+                    and self.continuous_cache_capacity is None and not self.enable_cache_trimming):
+                prefill_cost = self._prefill_cost_function(module)
+                batched_cost = prefill_cost(batch_size, full_width, include_kv=False)
+                decode_cost = self.continuous_decode_cost_ms * (sampling.max_new_tokens - 1)
+                # Every partition pays at least one Forward plus each request's unpadded work.
+                # If ordinary generation already beats that bound, there is no reason to run DP.
+                if min(prompt_lengths.values()) == prompt_len:
+                    lower_bound = prefill_cost(batch_size, prompt_len)
+                else:
+                    lower_bound = self.prefill_fixed_cost_ms + sum(
+                        prefill_cost(1, length) - self.prefill_fixed_cost_ms for length in prompt_lengths.values())
+                use_batched = batched_cost <= lower_bound + decode_cost
+                if not use_batched:
+                    _, bucket_cost = plan_prefill_buckets(list(prompt_lengths.values()), prefill_cost,
+                                                          self.prefill_max_tokens)
+                    use_batched = batched_cost <= bucket_cost + decode_cost
+        if use_batched:
+            # A bounded rollout with no pending rows can use the existing batch path.
+            output = self._generate_batched(request,
+                                            replace(sampling, continuous_batch_size=None),
+                                            generation_config=prepared_generation_config,
+                                            mask_padding=False)
+            self._last_continuous_stats = None
+            if self.enable_profiling:
+                total_ms = (self._profile_start(profile) - profile["start"]) * 1000
+                profile = self._last_profile
+                routing_ms = total_ms - profile["total_ms"]
+                profile["generation_ms"] += routing_ms
+                profile["generation_overhead_ms"] += routing_ms
+                profile["total_ms"] = total_ms
+                profile["generation_strategy"] = "batched"
+                generated_tokens = int(output.attention_mask[:, request.prompt_ids.shape[1]:].sum().item())
+                profile["num_generated_tokens"] = generated_tokens
+                total_ms = profile["total_ms"]
+                profile["tokens_per_second"] = generated_tokens * 1000 / total_ms if total_ms > 0 else 0.0
+                profile["active_batch_size"] = batch_size
+                profile["continuous_batch_size"] = max_batch_size
+            return output
+
+        if self.enable_profiling and profile is None:
+            profile = self._start_continuous_profile()
+        profile_accelerator = profile["accelerator"] if profile is not None else None
+        profile_start = profile["start"] if profile is not None else None
+
         from transformers import StaticCache
         from deepspeed.utils.static_cache import DeepSpeedStaticCache
 
+        requests = tuple(
+            RolloutRequest(request.prompt_ids[index:index + 1], request.prompt_attention_mask[index:index + 1])
+            for index in range(batch_size))
         device = requests[0].prompt_ids.device
         model_dtype = next(module.parameters()).dtype
 
@@ -351,7 +487,7 @@ class HybridEngineRollout(RolloutEngine):
         request_by_id = {}
         responses = {}
         request_order = (sorted(range(len(requests)), key=lambda request_id: -prompt_lengths[request_id])
-                         if self.align_decode_fronts else range(len(requests)))
+                         if align_decode_fronts else range(len(requests)))
         for request_id in request_order:
             request = requests[request_id]
             scheduler.submit(ContinuousBatchRequest(request_id))
@@ -412,13 +548,13 @@ class HybridEngineRollout(RolloutEngine):
                         survivor_attention = attention_mask.index_select(0, keep_slots).clone()
                         attention_mask[:survivor_count].copy_(survivor_attention)
                     attention_mask[survivor_count:].zero_()
-                    if self.align_decode_fronts:
+                    if align_decode_fronts:
                         span_starts[:survivor_count] = [span_starts[index] for index in update.keep_slots]
                         span_starts[survivor_count:] = [0] * (max_batch_size - survivor_count)
 
                 dead_prefix = 0
                 if self.enable_cache_trimming:
-                    if self.align_decode_fronts:
+                    if align_decode_fronts:
                         dead_prefix = min(span_starts[:survivor_count])
                     else:
                         trim_threshold = max(1, prompt_len)
@@ -426,7 +562,7 @@ class HybridEngineRollout(RolloutEngine):
                         if dead_prefix < trim_threshold and cache_position < max_cache_len - trim_threshold:
                             dead_prefix = 0
                 elif cache_position >= max_cache_len:
-                    if self.align_decode_fronts:
+                    if align_decode_fronts:
                         dead_prefix = min(span_starts[:survivor_count])
                     else:
                         dead_prefix = self._continuous_dead_prefix(attention_mask, survivor_count)
@@ -455,7 +591,7 @@ class HybridEngineRollout(RolloutEngine):
                     if profile_accelerator is not None:
                         profile_accelerator.synchronize()
                         stats["trim_latency_ms"] += (time.perf_counter() - trim_start) * 1000.0
-                    if self.align_decode_fronts:
+                    if align_decode_fronts:
                         span_starts[:survivor_count] = [start - dead_prefix for start in span_starts[:survivor_count]]
             else:
                 cache.reset()
@@ -479,10 +615,11 @@ class HybridEngineRollout(RolloutEngine):
                 prompt_lengths,
                 model_dtype,
                 device,
-                self.align_decode_fronts,
+                align_decode_fronts,
                 profile,
+                generation_config=prepared_generation_config,
             )
-            if self.align_decode_fronts:
+            if align_decode_fronts:
                 for admitted, target_row in zip(update.admitted, update.admitted_slots):
                     span_starts[target_row] = cache_position - prompt_lengths[admitted.request_id]
 
@@ -493,7 +630,7 @@ class HybridEngineRollout(RolloutEngine):
                 if cache_position >= max_cache_len:
                     raise self._continuous_cache_exhaustion_error(max_cache_len)
                 write_positions[:survivor_count].fill_(cache_position)
-                if self.align_decode_fronts:
+                if align_decode_fronts:
                     position_ids = torch.tensor([logical_positions[request_id] for request_id in survivor_ids],
                                                 dtype=torch.long,
                                                 device=device).unsqueeze(1)
@@ -517,6 +654,7 @@ class HybridEngineRollout(RolloutEngine):
                     request_by_id,
                     responses,
                     module,
+                    generation_config=prepared_generation_config,
                 )
                 stats["decode_steps"] += 1
                 decoded_tokens = dict(zip(survivor_ids, decoded.split(1, dim=0)))
@@ -557,10 +695,13 @@ class HybridEngineRollout(RolloutEngine):
         if profile is not None:
             self._finish_continuous_profile(profile, original_request, responses, max_batch_size, prompt_len,
                                             generation_end, post_processing_end)
+            self._last_profile["generation_strategy"] = ("bucketed" if self.adaptive_prefill else
+                                                         "aligned" if align_decode_fronts else "equal_width")
         return output
 
     @torch.no_grad()
-    def _generate_continuous_graph(self, original_request, requests, sampling, max_batch_size):
+    def _generate_continuous_graph(self, original_request, requests, sampling, max_batch_size, *, prompt_lengths,
+                                   generation_config, profile):
         """Run continuous greedy decoding with a fixed-capacity graph.
 
         Scheduler slots stay attached to physical cache rows for their whole
@@ -581,7 +722,8 @@ class HybridEngineRollout(RolloutEngine):
         from transformers import StaticCache
         from deepspeed.utils.static_cache import DeepSpeedStaticCache
 
-        profile = self._start_continuous_profile() if self.enable_profiling else None
+        if self.enable_profiling and profile is None:
+            profile = self._start_continuous_profile()
         profile_accelerator = profile["accelerator"] if profile is not None else None
         profile_start = profile["start"] if profile is not None else None
         minimum_cache_len = prompt_len + sampling.max_new_tokens
@@ -594,7 +736,6 @@ class HybridEngineRollout(RolloutEngine):
             raise ValueError("continuous batching cache exceeds the model maximum position embeddings")
         model_dtype = next(module.parameters()).dtype
         scheduler = ContinuousBatchScheduler(max_batch_size, sampling.max_new_tokens)
-        prompt_lengths = {request_id: prompt_len for request_id in range(len(requests))}
         request_by_id = {}
         responses = {}
         for request_id, request in enumerate(requests):
@@ -659,8 +800,11 @@ class HybridEngineRollout(RolloutEngine):
                 write_positions[request_id] = prompt_len
                 admitted_slots.append(slot)
 
-            cache_start = self._profile_start(profile)
             if admitted_ids:
+                # A full-width admission that fits the token limit is already the optimal single bucket.
+                bucket_prefill = self.adaptive_prefill and (
+                    any(prompt_lengths[i] != prompt_len for i in admitted_ids) or
+                    (self.prefill_max_tokens is not None and len(admitted_ids) * prompt_len > self.prefill_max_tokens))
                 admitted_tokens = self._continuous_prefill(
                     module,
                     StaticCache,
@@ -674,10 +818,11 @@ class HybridEngineRollout(RolloutEngine):
                     model_dtype,
                     device,
                     profile=profile,
+                    align_decode_fronts=bucket_prefill,
                     target_slots=tuple(admitted_slots),
+                    generation_config=generation_config,
                 )
                 next_tokens.update(admitted_tokens)
-            self._profile_end(profile, "cache_management_overhead_ms", cache_start)
 
             decode_ids = tuple(request_id for request_id in update.active_ids if request_id not in admitted_ids)
             static_input.zero_()
@@ -708,6 +853,7 @@ class HybridEngineRollout(RolloutEngine):
                     request_by_id,
                     responses,
                     module,
+                    generation_config=generation_config,
                 )
                 for request_id, token in zip(decode_ids, decoded.split(1, dim=0)):
                     decoded_tokens[request_id] = token
@@ -745,6 +891,8 @@ class HybridEngineRollout(RolloutEngine):
         if profile is not None:
             self._finish_continuous_profile(profile, original_request, responses, max_batch_size, prompt_len,
                                             generation_end, post_processing_end)
+            if self.adaptive_prefill:
+                self._last_profile["generation_strategy"] = "bucketed_graph"
         return output
 
     def _validate_continuous_graph_options(self, prompt_len, sampling):
@@ -903,31 +1051,25 @@ class HybridEngineRollout(RolloutEngine):
 
         return max_cache_len
 
-    def _validate_continuous_inputs(self, requests, sampling, max_batch_size):
-        if not requests:
+    def _validate_continuous_inputs(self, request, sampling, max_batch_size):
+        if request.prompt_ids.shape[0] == 0:
             raise ValueError("continuous batching requires at least one request")
         if max_batch_size <= 0:
             raise ValueError("max_batch_size must be positive")
         if self.use_shared_prefill:
             raise ValueError("continuous batching does not support shared prompt prefill")
 
-        prompt_len = requests[0].prompt_ids.shape[1]
-        device = requests[0].prompt_ids.device
         if sampling.max_new_tokens <= 0:
             raise ValueError("max_new_tokens must be positive")
         if sampling.temperature > 0:
             raise ValueError("continuous batching currently supports greedy decoding only")
         if sampling.n_samples_per_prompt != 1:
             raise ValueError("continuous batching currently supports one sample per prompt")
-        for request in requests:
-            if request.prompt_ids.shape[0] != 1:
-                raise ValueError("continuous batching requires one prompt row per request")
-            if request.prompt_ids.shape[1] != prompt_len:
-                raise ValueError("continuous batching currently requires equal padded prompt widths")
-            if request.prompt_ids.device != device:
-                raise ValueError("continuous batching requests must use the same device")
-            if not request.prompt_attention_mask.any():
-                raise ValueError("continuous batching requires at least one prompt token per request")
+        # Rollout masks contain 0/1; validate and read all lengths in one device-to-host transfer.
+        lengths = request.prompt_attention_mask.sum(dim=1).tolist()
+        if any(length <= 0 for length in lengths):
+            raise ValueError("continuous batching requires at least one prompt token per request")
+        return lengths
 
     @staticmethod
     def _continuous_dead_prefix(attention_mask, active_count):
@@ -952,16 +1094,17 @@ class HybridEngineRollout(RolloutEngine):
                             device,
                             align_decode_fronts=False,
                             profile=None,
-                            target_slots=None):
+                            target_slots=None,
+                            generation_config=None):
         if not update.admitted:
             return {}
 
+        if target_slots is None:
+            target_slots = update.admitted_slots
+        if len(target_slots) != len(update.admitted):
+            raise ValueError("continuous prefill needs one target slot per admitted request")
         if not align_decode_fronts:
             admitted_ids = tuple(request.request_id for request in update.admitted)
-            if target_slots is None:
-                target_slots = update.admitted_slots
-            if len(target_slots) != len(admitted_ids):
-                raise ValueError("continuous prefill needs one target slot per admitted request")
             prompt_ids = torch.cat([request_by_id[request_id].prompt_ids for request_id in admitted_ids], dim=0)
             prompt_attention = torch.cat(
                 [request_by_id[request_id].prompt_attention_mask for request_id in admitted_ids], dim=0)
@@ -974,6 +1117,7 @@ class HybridEngineRollout(RolloutEngine):
                 prompt_attention,
                 model_dtype,
                 device,
+                generation_config=generation_config,
             )
             self._profile_end(profile, "prefill_forward_ms", prefill_start, count="num_prefill_forwards")
             cache_copy_start = self._profile_start(profile)
@@ -993,37 +1137,75 @@ class HybridEngineRollout(RolloutEngine):
             return dict(zip(admitted_ids, prefill_tokens.split(1, dim=0)))
 
         admitted_tokens = {}
-        for admitted, target_row in zip(update.admitted, update.admitted_slots):
-            request_id = admitted.request_id
-            request = request_by_id[request_id]
-            prompt_len = prompt_lengths[request_id]
-            valid = request.prompt_attention_mask[0].bool()
-            prompt_ids = request.prompt_ids[:, valid]
-            prompt_attention = torch.ones_like(prompt_ids)
+        admitted = list(zip(update.admitted, target_slots))
+        if self.adaptive_prefill:
+            lengths = [prompt_lengths[item.request_id] for item, _ in admitted]
+            buckets, _ = plan_prefill_buckets(lengths, self._prefill_cost_function(module), self.prefill_max_tokens)
+        else:
+            buckets = tuple((row, ) for row in range(len(admitted)))
+        pad_token_id = self.tokenizer.pad_token_id
+        if pad_token_id is None:
+            pad_token_id = self.tokenizer.eos_token_id
+        for bucket in buckets:
+            width = max(prompt_lengths[admitted[row][0].request_id] for row in bucket)
+            prompt_ids = torch.full((len(bucket), width), pad_token_id, dtype=torch.long, device=device)
+            prompt_attention = torch.zeros_like(prompt_ids)
+            prompt_requests = {}
+            for source_row, row in enumerate(bucket):
+                item, _ = admitted[row]
+                request = request_by_id[item.request_id]
+                length = prompt_lengths[item.request_id]
+                prompt_ids[source_row, -length:] = request.prompt_ids[0, request.prompt_attention_mask[0].bool()]
+                prompt_attention[source_row, -length:] = 1
+                prompt_requests[source_row] = request
             prefill_start = self._profile_start(profile)
-            prefill_tokens, prefill_cache = self._continuous_prefill_cache(
-                module,
-                static_cache_type,
-                prompt_ids,
-                prompt_attention,
-                model_dtype,
-                device,
-            )
+            prefill_tokens, prefill_cache = self._continuous_prefill_cache(module,
+                                                                           static_cache_type,
+                                                                           prompt_ids,
+                                                                           prompt_attention,
+                                                                           model_dtype,
+                                                                           device,
+                                                                           prompt_requests=prompt_requests,
+                                                                           generation_config=generation_config)
             self._profile_end(profile, "prefill_forward_ms", prefill_start, count="num_prefill_forwards")
             cache_copy_start = self._profile_start(profile)
-            admitted_tokens[request_id] = prefill_tokens
-            cache_start = cache_position - prompt_len
-            if cache_start < 0:
-                raise ValueError("continuous batching prompt does not fit behind the decode front")
-            for layer_idx in range(self._cache_layer_count(prefill_cache)):
-                prefill_keys, prefill_values = self._cache_layer_tensors(prefill_cache, layer_idx)
-                target_layer = cache.layers[layer_idx]
-                target_layer.keys[target_row, :, cache_start:cache_position].copy_(prefill_keys[0])
-                target_layer.values[target_row, :, cache_start:cache_position].copy_(prefill_values[0])
-            attention_mask[target_row, cache_start:cache_position].fill_(1)
-            write_positions[target_row] = cache_position
+            for source_row, row in enumerate(bucket):
+                item, target_row = admitted[row]
+                length = prompt_lengths[item.request_id]
+                cache_start = cache_position - length
+                if cache_start < 0:
+                    raise ValueError("continuous batching prompt does not fit behind the decode front")
+                admitted_tokens[item.request_id] = prefill_tokens[source_row:source_row + 1]
+                for layer_idx in range(self._cache_layer_count(prefill_cache)):
+                    keys, values = self._cache_layer_tensors(prefill_cache, layer_idx)
+                    target_layer = cache.layers[layer_idx]
+                    target_layer.keys[target_row, :, cache_start:cache_position].copy_(keys[source_row, :, -length:])
+                    target_layer.values[target_row, :, cache_start:cache_position].copy_(values[source_row, :,
+                                                                                                -length:])
+                attention_mask[target_row, cache_start:cache_position].fill_(1)
+                write_positions[target_row] = cache_position
             self._profile_end(profile, "cache_management_overhead_ms", cache_copy_start)
         return admitted_tokens
+
+    def _prefill_cost_function(self, module):
+        """Read model geometry once; DP candidates use only scalar arithmetic."""
+        config = getattr(module.config, "text_config", module.config)
+        layers = getattr(config, "num_hidden_layers", 1)
+        heads = getattr(config, "num_attention_heads", 1)
+        head_dim = getattr(config, "head_dim", None)
+        if head_dim is None:
+            head_dim = getattr(config, "hidden_size", heads) // heads
+        kv_heads = getattr(config, "num_key_value_heads", None) or heads
+        attention_cost = self.prefill_attention_cost_ms * 4 * layers * heads * head_dim / 1e9
+        element_size = next(module.parameters()).element_size()
+        kv_cost = self.prefill_kv_cost_ms * 2 * layers * kv_heads * head_dim * element_size / (1024 * 1024)
+
+        def cost(count, width, include_kv=True):
+            tokens = count * width
+            return self.prefill_fixed_cost_ms + tokens * (self.prefill_token_cost_ms + attention_cost * width +
+                                                          (kv_cost if include_kv else 0))
+
+        return cost
 
     def _start_continuous_profile(self):
         accelerator = get_accelerator()
@@ -1089,7 +1271,15 @@ class HybridEngineRollout(RolloutEngine):
             "continuous_batch_size": max_batch_size,
         }
 
-    def _continuous_prefill_cache(self, module, static_cache_type, prompt_ids, prompt_attention, model_dtype, device):
+    def _continuous_prefill_cache(self,
+                                  module,
+                                  static_cache_type,
+                                  prompt_ids,
+                                  prompt_attention,
+                                  model_dtype,
+                                  device,
+                                  prompt_requests=None,
+                                  generation_config=None):
         position_ids = self._prefill_position_ids(prompt_attention)
         if getattr(module, "_supports_cache_class", None) is None:
             pad_token_id = self.tokenizer.pad_token_id
@@ -1104,32 +1294,55 @@ class HybridEngineRollout(RolloutEngine):
                 eos_token_id=None,
                 pad_token_id=pad_token_id,
                 return_dict_in_generate=True,
+                **({
+                    "output_logits": True
+                } if self.adaptive_prefill else {}),
             )
-            return prefill_output.sequences[:, -1:], prefill_output.past_key_values
-
-        prompt_len = prompt_ids.shape[1]
-        prefill_cache = self._create_static_cache(static_cache_type, module.config, prompt_ids.shape[0], prompt_len,
-                                                  device, model_dtype)
-        prefill_output = self._call_model(
-            module,
-            prompt_ids,
-            attention_mask=prompt_attention,
-            past_key_values=prefill_cache,
-            use_cache=True,
-            cache_position=torch.arange(prompt_len, device=device),
-            position_ids=position_ids,
-            **self._last_logits_kwargs(module),
-        )
-        return prefill_output.logits[:, -1, :].argmax(dim=-1, keepdim=True), prefill_cache
+            prefill_cache = prefill_output.past_key_values
+            if not self.adaptive_prefill:
+                return prefill_output.sequences[:, -1:], prefill_cache
+            logits = prefill_output.logits[-1]
+        else:
+            prompt_len = prompt_ids.shape[1]
+            prefill_cache = self._create_static_cache(static_cache_type, module.config, prompt_ids.shape[0],
+                                                      prompt_len, device, model_dtype)
+            prefill_output = self._call_model(
+                module,
+                prompt_ids,
+                attention_mask=prompt_attention,
+                past_key_values=prefill_cache,
+                use_cache=True,
+                cache_position=torch.arange(prompt_len, device=device),
+                position_ids=position_ids,
+                **self._last_logits_kwargs(module),
+            )
+            logits = prefill_output.logits[:, -1, :]
+        request_ids = range(prompt_ids.shape[0])
+        if prompt_requests is None:
+            prompt_requests = {
+                row: RolloutRequest(prompt_ids[row:row + 1], prompt_attention[row:row + 1])
+                for row in request_ids
+            }
+        # Trimming model input must not trim HF's repetition-penalty history.
+        next_tokens = self._continuous_next_tokens(logits,
+                                                   request_ids,
+                                                   prompt_requests,
+                                                   dict.fromkeys(request_ids, ()),
+                                                   module,
+                                                   generation_config=generation_config)
+        return next_tokens, prefill_cache
 
     @staticmethod
-    def _continuous_next_tokens(logits, request_ids, request_by_id, responses, module):
-        repetition_penalty = getattr(getattr(module, "generation_config", None), "repetition_penalty", 1.0)
+    def _continuous_next_tokens(logits, request_ids, request_by_id, responses, module, generation_config=None):
+        if generation_config is None:
+            generation_config = getattr(module, "generation_config", None)
+        repetition_penalty = getattr(generation_config, "repetition_penalty", 1.0)
         if repetition_penalty is None:
             repetition_penalty = 1.0
         if repetition_penalty == 1.0:
             return logits.argmax(dim=-1, keepdim=True)
 
+        logits = logits.float()
         next_tokens = []
         for row, request_id in enumerate(request_ids):
             input_ids = torch.cat((request_by_id[request_id].prompt_ids, *responses[request_id]), dim=1)
@@ -1291,10 +1504,11 @@ class HybridEngineRollout(RolloutEngine):
         return pre_handle, post_handle
 
     @staticmethod
-    def _pad_after_eos(output_ids, response_start, eos_token_id, pad_token_id):
+    def _pad_after_eos(output_ids, response_start, eos_token_id, pad_token_id, mask_padding=True):
         """Retain the first response EOS and pad every subsequent position."""
         response_ids = output_ids[:, response_start:]
-        response_attn = (response_ids != pad_token_id)
+        response_attn = (response_ids != pad_token_id) if mask_padding else torch.ones_like(response_ids,
+                                                                                            dtype=torch.bool)
 
         if eos_token_id is None or response_ids.shape[1] == 0:
             return output_ids, response_attn.long()
@@ -1310,7 +1524,7 @@ class HybridEngineRollout(RolloutEngine):
         output_ids = output_ids.clone()
         output_ids[:, response_start:].masked_fill_(after_first_eos, pad_token_id)
         # EOS is a valid generated token even when pad_token_id == eos_token_id.
-        response_attn = ((response_ids != pad_token_id) | first_eos) & ~after_first_eos
+        response_attn = (response_attn | first_eos) & ~after_first_eos
         return output_ids, response_attn.long()
 
     # ------------------------------------------------------------------
