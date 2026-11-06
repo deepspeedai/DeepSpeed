@@ -19,6 +19,9 @@ from deepspeed.utils import logger
 from deepspeed.accelerator import get_accelerator
 
 OPTIMIZER_STEP_TIMER = 'optimizer_step'
+# Larger gradients go to the CPU in pieces of this size (see _copy_grad_to_cpu). On B200 over PCIe Gen5, 16 MiB pieces
+# copy at 98% of the rate of whole gradients; smaller ones lose more to the switches between pieces.
+_GRAD_COPY_PIECE_BYTES = 16 << 20
 
 
 def _validate_superoffload_accelerator():
@@ -105,6 +108,10 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
                         self.fp32_partitioned_groups_flat[sub_group_id].numel(), dtype=torch.bfloat16)
         self._pin_cpu_buffers()
         self._grad_copy_stream = get_accelerator().Stream()
+        # The pieces of a large gradient take turns on the copy stream and a second one, each with an event
+        # (_copy_grad_to_cpu).
+        self._grad_copy_streams = (self._grad_copy_stream, get_accelerator().Stream())
+        self._grad_copy_events = (get_accelerator().Event(), get_accelerator().Event())
         if self.speculative_cpu_step and self._cpu_sub_group_weights_pinned():
             # Default priority is the lowest, so the conversions never delay the backward kernels.
             self._lp_staging_stream = get_accelerator().Stream()
@@ -341,12 +348,7 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
 
                 cpu_grad_tensor = self._worker_grad(i).narrow(0, dest_offset, grad_buffer.numel())
                 grad_to_copy = grad_buffer.to(dtype=cpu_grad_tensor.dtype)
-                copy_stream = self._grad_copy_stream
-                copy_stream.wait_stream(get_accelerator().current_stream())
-                with get_accelerator().stream(copy_stream):
-                    cpu_grad_tensor.copy_(grad_to_copy, non_blocking=True)
-                # The copy reads the gradient later, so keep the allocator from handing its memory out before then.
-                grad_to_copy.record_stream(copy_stream)
+                self._copy_grad_to_cpu(cpu_grad_tensor, grad_to_copy)
 
                 self.sub_group_grads_ready[i].add(param.ds_id)
                 if len(self.sub_group_grads_ready[i]) == self.sub_group_to_param_num[i]:
@@ -394,6 +396,39 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
                 if param.grad is not None:
                     param.grad.record_stream(get_accelerator().current_stream())
             param.grad = None
+
+    def _copy_grad_to_cpu(self, cpu_grad_tensor, grad_to_copy):
+        """Queue the copy of a gradient to the CPU on the gradient copy stream, behind the kernels that computed it.
+
+        The copy engine keeps serving a stream while it has a copy ready, so a copy to the CPU on another stream, such
+        as the one .item() makes in backward, waits behind all the gradient copies queued before it: up to 28 ms with
+        OPT-30B. A large gradient goes in pieces that take turns on two streams, each waiting for the one before, so
+        that neither stream has a copy ready while a piece runs and the copies of other streams go in between.
+        """
+        copy_stream = self._grad_copy_stream
+        copy_stream.wait_stream(get_accelerator().current_stream())
+        piece = _GRAD_COPY_PIECE_BYTES // grad_to_copy.element_size()
+        if grad_to_copy.numel() <= piece:
+            with get_accelerator().stream(copy_stream):
+                cpu_grad_tensor.copy_(grad_to_copy, non_blocking=True)
+            # The copy reads the gradient later, so keep the allocator from handing its memory out before then.
+            grad_to_copy.record_stream(copy_stream)
+            return
+        streams = self._grad_copy_streams
+        events = self._grad_copy_events
+        previous = None
+        for turn, start in enumerate(range(0, grad_to_copy.numel(), piece)):
+            stream = streams[turn % 2]
+            if previous is not None:
+                stream.wait_event(previous)
+            with get_accelerator().stream(stream):
+                cpu_grad_tensor[start:start + piece].copy_(grad_to_copy[start:start + piece], non_blocking=True)
+            previous = events[turn % 2]
+            previous.record(stream)
+        # What waits for the copy stream, as step() and the CPU steps do, then waits for the last piece too.
+        copy_stream.wait_event(previous)
+        for stream in streams:
+            grad_to_copy.record_stream(stream)
 
     @instrument_w_nvtx
     def step(self, closure=None):

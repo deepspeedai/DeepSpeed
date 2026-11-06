@@ -26,11 +26,12 @@ class PartlyUsedModel(torch.nn.Module):
     """`a` is always used. `b` and `c` are used, skipped, multiplied by 0, which gives them a zero gradient, or used
     twice, which gives them two gradients in one step."""
 
-    def __init__(self):
+    def __init__(self, hidden=HIDDEN):
         super().__init__()
-        self.a = torch.nn.Linear(HIDDEN, HIDDEN)
-        self.b = torch.nn.Linear(HIDDEN, HIDDEN)
-        self.c = torch.nn.Linear(HIDDEN, HIDDEN)
+        self.hidden = hidden
+        self.a = torch.nn.Linear(hidden, hidden)
+        self.b = torch.nn.Linear(hidden, hidden)
+        self.c = torch.nn.Linear(hidden, hidden)
 
     def forward(self, x, uses):
         h = torch.nn.functional.gelu(self.a(x))
@@ -94,9 +95,9 @@ def _config(super_offload,
     return config
 
 
-def _engine(config, two_groups=False):
+def _engine(config, two_groups=False, hidden=HIDDEN):
     torch.manual_seed(0)
-    model = PartlyUsedModel()
+    model = PartlyUsedModel(hidden)
     params = model.parameters()
     if two_groups:
         # Weights with weight decay and biases without, as most training scripts set them up.
@@ -135,7 +136,7 @@ def _train(engine, steps, uses_for, first_step=0, before_step=None):
         if before_step is not None:
             before_step(engine, step)
         for micro_step in range(engine.gradient_accumulation_steps()):
-            x = torch.randn(4, HIDDEN, generator=generator).to(engine.device, dtype)
+            x = torch.randn(4, engine.module.hidden, generator=generator).to(engine.device, dtype)
             loss = engine(x, uses_for(step, micro_step))
             engine.backward(loss)
             engine.step()
@@ -234,6 +235,19 @@ class TestSuperOffloadFollowsZeRO3(DistributedTest):
         for super_offload in (False, True):
             engine = _engine(_config(super_offload=super_offload), two_groups=True)
             results.append(_train(engine, 6, _all_used, before_step=_change_hyperparams))
+            _close(engine)
+        _assert_same(results[1], results[0], exact=True)
+
+    def test_large_grads(self):
+        """The bf16 gradient of a 4090 x 4090 weight, 31.9 MiB, goes to the CPU in two pieces of at most 16 MiB. A CPU
+        step that did not wait for the second piece would read part of the previous gradient. Only to pinned memory
+        are the copies asynchronous."""
+        results = []
+        for super_offload in (False, True):
+            config = _config(super_offload=super_offload)
+            config["zero_optimization"]["offload_optimizer"]["pin_memory"] = True
+            engine = _engine(config, hidden=4090)
+            results.append(_train(engine, 3, _all_used))
             _close(engine)
         _assert_same(results[1], results[0], exact=True)
 
