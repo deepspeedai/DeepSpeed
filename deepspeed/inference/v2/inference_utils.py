@@ -102,4 +102,6 @@ def ceil_div(a: int, b: int) -> int:
     """
     Return ceil(a / b).
     """
+    if b == 0:
+        raise ValueError(f"ceil_div divisor must be non-zero (got a={a}, b={b})")
     return -(-a // b)
