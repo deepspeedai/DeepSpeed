@@ -1322,6 +1322,9 @@ class HybridEngineRollout(RolloutEngine):
         from transformers import StaticCache
         from deepspeed.utils.static_cache import DeepSpeedStaticCache
 
+        if getattr(module.config, "_attn_implementation", None) == "flash_attention_2":
+            raise ValueError("graph capture does not support flash_attention_2")
+
         batch_size = prompt_ids.shape[0]
         prompt_len = prompt_ids.shape[1]
         max_len = prompt_len + max_new_tokens
@@ -1368,6 +1371,12 @@ class HybridEngineRollout(RolloutEngine):
         static_attn = torch.zeros(batch_size, max_len, dtype=torch.long, device=device)
         static_attn[:, :prompt_len] = prompt_attn
         static_attn[:, prompt_len] = 1  # first decode position
+        # Transformers builds its SDPA mask from a 2-D attention_mask with host-side checks
+        # (``padding_mask.all()`` in ``_ignore_causal_mask_sdpa``). Those synchronize the stream and
+        # invalidate CUDA graph capture, so the captured forward receives a pre-built 4-D additive
+        # mask instead, as the continuous graph path does; each decode step unmasks one more column.
+        static_causal_attn = torch.zeros((batch_size, 1, 1, max_len), dtype=model_dtype, device=device)
+        self._update_static_causal_attention(static_attn, static_causal_attn)
         static_pos = torch.tensor(prompt_len, dtype=torch.long, device=device)
         static_cache_pos = static_pos.unsqueeze(0)  # [1] for cache_position
         static_pos_ids = static_pos.reshape(1, 1).expand(batch_size, 1)  # [batch, 1]
@@ -1389,7 +1398,7 @@ class HybridEngineRollout(RolloutEngine):
                 for _ in range(3):
                     out = module(
                         static_token,
-                        attention_mask=static_attn,
+                        attention_mask=static_causal_attn,
                         past_key_values=ds_cache,
                         use_cache=True,
                         cache_position=static_cache_pos,
@@ -1402,7 +1411,7 @@ class HybridEngineRollout(RolloutEngine):
             with get_accelerator().capture_to_graph(graph):
                 out = module(
                     static_token,
-                    attention_mask=static_attn,
+                    attention_mask=static_causal_attn,
                     past_key_values=ds_cache,
                     use_cache=True,
                     cache_position=static_cache_pos,
@@ -1427,6 +1436,7 @@ class HybridEngineRollout(RolloutEngine):
             static_cache_pos.fill_(pos)
             static_pos_ids.fill_(pos)
             static_attn[:, pos] = 1
+            self._update_static_causal_attention(static_attn, static_causal_attn)
 
             # Replay
             get_accelerator().replay_graph(graph)

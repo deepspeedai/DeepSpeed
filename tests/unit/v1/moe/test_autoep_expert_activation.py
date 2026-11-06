@@ -36,6 +36,7 @@ from deepspeed.moe.ep_experts import (
     apply_packed_expert_activation,
     register_expert_activation,
 )
+from deepspeed.ops.triton_ops import is_triton_available
 from unit.v1.moe.autoep_test_utils import MockMoETransformer
 
 MOE_PATTERN = r"model\.layers\.\d+\.mlp"
@@ -242,6 +243,8 @@ class TestGroupedExpertsActivation:
             pytest.skip("needs an accelerator")
         if path in ("grouped_mm", "fused_gate_up") and not hasattr(torch, "_grouped_mm"):
             pytest.skip("this PyTorch build has no torch._grouped_mm")
+        if path == "triton_grouped_mm" and not (is_triton_available() and get_accelerator().is_triton_supported()):
+            pytest.skip("the Triton grouped GEMM needs Triton and an accelerator that supports it")
         device = get_accelerator().current_device_name()
         torch.manual_seed(0)
         shape = dict(dim=64, hidden_dim=128, num_experts=4)

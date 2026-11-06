@@ -102,9 +102,13 @@ def _reference_config():
     return config
 
 
-def _folded_config(tp_size, ep_size, zero_stage):
+def _folded_config(tp_size, ep_size, zero_stage, offload=False):
     config = _common_config()
     config["zero_optimization"] = {"stage": zero_stage, "overlap_comm": True, "reduce_scatter": True}
+    if offload:
+        config["zero_optimization"]["offload_optimizer"] = {"device": "cpu"}
+        # SGD then steps the offloaded fp32 partitions on the CPU; DeepSpeedCPUAdam is not needed.
+        config["zero_force_ds_cpu_optimizer"] = False
     config["expert_parallel"] = {
         "enabled": True,
         "autoep_size": ep_size,
@@ -146,32 +150,35 @@ def _gather_tp_shards(tensor, dim):
     return torch.cat(shards, dim=dim)
 
 
-def _gather_expert_grads(layer, param):
-    grad = safe_get_full_grad(param)
+def _gather_expert_grads(layer, param, get=safe_get_full_grad):
+    grad = get(param)
     assert grad is not None
     shards = [torch.empty_like(grad) for _ in range(dist.get_world_size(group=layer.ep_group))]
     dist.all_gather(shards, grad.contiguous(), group=layer.ep_group)
     return torch.cat(shards, dim=0)
 
 
-def _folded_grads(model):
-    """Every gradient of the folded model, rebuilt at the reference model's names and shapes."""
+def _folded_grads(model, get=safe_get_full_grad):
+    """Every gradient of the folded model, rebuilt at the reference model's names and shapes.
+
+    With ``get=safe_get_full_fp32_param`` it rebuilds the fp32 parameters the same way.
+    """
     grads = {}
     for module_name, module in model.named_modules():
         prefix = f"{module_name}." if module_name else ""
         if isinstance(module, AutoEPMoELayer):
-            w1 = _gather_expert_grads(module, module.experts.w1)
-            w2 = _gather_expert_grads(module, module.experts.w2)
-            w3 = _gather_expert_grads(module, module.experts.w3)
+            w1 = _gather_expert_grads(module, module.experts.w1, get)
+            w2 = _gather_expert_grads(module, module.experts.w2, get)
+            w3 = _gather_expert_grads(module, module.experts.w3, get)
             grads[f"{prefix}experts.gate_up_proj"] = torch.cat([w1, w3], dim=1)
             grads[f"{prefix}experts.down_proj"] = w2
-            grads[f"{prefix}gate.weight"] = safe_get_full_grad(module.router.gate.weight)
+            grads[f"{prefix}gate.weight"] = get(module.router.gate.weight)
             continue
         for name, param in module.named_parameters(recurse=False):
             if any(isinstance(owner, AutoEPMoELayer) for owner in _owners(model, module_name)):
                 if ".shared_experts." not in f".{prefix}":
                     continue
-            grad = safe_get_full_grad(param)
+            grad = get(param)
             assert grad is not None, f"{prefix}{name} has no gradient"
             if isinstance(module, LinearAllreduce) and name == "weight":
                 grad = _gather_tp_shards(grad, dim=1)
@@ -196,6 +203,10 @@ def _reference_grads(model):
     return {name: param.grad.detach().float().cpu() for name, param in model.named_parameters()}
 
 
+def _reference_params(model):
+    return {name: param.detach().float().cpu() for name, param in model.named_parameters()}
+
+
 def _assert_structure(model):
     """AutoTP shards the attention projections only; AutoEP owns every MoE block."""
     for name, module in model.named_modules():
@@ -207,13 +218,19 @@ def _assert_structure(model):
     assert len(moe_layers) == model.config.num_hidden_layers - model.config.first_k_dense_replace
 
 
-def _grad_mismatches(folded, reference):
-    """Name, relative error and scale of every gradient that differs from the reference."""
+def _grad_mismatches(folded, reference, rounding=None):
+    """Name, relative error and scale of every gradient that differs from the reference.
+
+    ``rounding`` adds a per-element allowance for rounding that happened outside the computation
+    being compared, such as recovering an update as ``after - before`` in fp32.
+    """
     mismatches = []
     for name, want in reference.items():
         got = folded[name]
-        tolerance = 1e-5 * max(want.abs().max().item(), 1e-6)
-        if torch.allclose(got, want, rtol=1e-4, atol=tolerance):
+        bound = 1e-4 * want.abs() + 1e-5 * max(want.abs().max().item(), 1e-6)
+        if rounding is not None:
+            bound = bound + rounding[name]
+        if ((got - want).abs() <= bound).all():
             continue
         want_norm_sq = want.square().sum().item()
         scale = got.mul(want).sum().item() / want_norm_sq if want_norm_sq else float("nan")
@@ -222,12 +239,24 @@ def _grad_mismatches(folded, reference):
     return mismatches
 
 
-def _check_folded_matches_reference(tp_size, ep_size, zero_stage, zero_init):
+def _check_folded_matches_reference(tp_size, ep_size, zero_stage, zero_init, offload=False, clip=None):
+    """Compare a folded run with the unfolded reference: losses, gradients and the global norm.
+
+    With ``clip`` both runs clip to that norm and take one optimizer step, and every parameter's
+    update must match too; the clipped update depends on the global norm the optimizer computed.
+    """
     torch.manual_seed(1234)
     config = _tiny_glm4_moe_config()
     reference_model = transformers.Glm4MoeForCausalLM(config).float()
     reference_state = copy.deepcopy(reference_model.state_dict())
-    folded_config = _folded_config(tp_size, ep_size, zero_stage)
+    folded_config = _folded_config(tp_size, ep_size, zero_stage, offload=offload)
+    reference_config = _reference_config()
+    if clip is not None:
+        # The clipped SGD step then moves the parameters by a vector of norm lr * clip = 1, so each
+        # update stays far above the fp32 rounding of the parameter it is added to.
+        for run_config in (folded_config, reference_config):
+            run_config["gradient_clipping"] = clip
+            run_config["optimizer"]["params"]["lr"] = 1.0 / clip
 
     if zero_init:
         # How a large model is built: every parameter partitioned over all ranks from the start.
@@ -241,7 +270,7 @@ def _check_folded_matches_reference(tp_size, ep_size, zero_stage, zero_init):
         folded_model = transformers.Glm4MoeForCausalLM(config).float()
         folded_model.load_state_dict(reference_state)
 
-    reference_engine, _, _, _ = deepspeed.initialize(model=reference_model, config=_reference_config())
+    reference_engine, _, _, _ = deepspeed.initialize(model=reference_model, config=reference_config)
     folded_engine, _, _, _ = deepspeed.initialize(model=folded_model, config=folded_config)
     _assert_structure(folded_engine.module)
 
@@ -262,16 +291,37 @@ def _check_folded_matches_reference(tp_size, ep_size, zero_stage, zero_init):
     # The optimizer computes the norm of the gradients it holds during step(); the reference norm
     # is taken directly from the full, data-parallel averaged reference gradients.
     reference_norm = torch.sqrt(sum(grad.double().square().sum() for grad in reference.values())).item()
+    if clip is not None:
+        reference_before = _reference_params(reference_engine.module)
+        folded_before = _folded_grads(folded_engine.module, get=safe_get_full_fp32_param)
     folded_engine.step()
     folded_norm = float(folded_engine.get_global_grad_norm())
     if dist.get_rank() == 0:
         print(f"GRAD_NORM zero_stage={zero_stage} zero_init={zero_init} tp={tp_size} ep={ep_size} "
-              f"folded={folded_norm:.6f} reference={reference_norm:.6f}")
+              f"offload={offload} folded={folded_norm:.6f} reference={reference_norm:.6f}")
     # ZeRO-2 takes a different, approximate norm for MoE parameter groups: it averages each
     # expert group's norm over the expert-data-parallel group (_average_expert_grad_norms)
     # instead of adding the squared norms across expert-parallel ranks, with or without folding.
     if zero_stage == 3:
         assert folded_norm == pytest.approx(reference_norm, rel=1e-4), (folded_norm, reference_norm)
+
+    if clip is not None:
+        assert reference_norm > clip, f"clip {clip} does not engage at norm {reference_norm}"
+        reference_engine.step()
+        reference_after = _reference_params(reference_engine.module)
+        folded_after = _folded_grads(folded_engine.module, get=safe_get_full_fp32_param)
+        reference_update = {name: reference_after[name] - reference_before[name] for name in reference_after}
+        folded_update = {name: folded_after[name] - folded_before[name] for name in folded_after}
+        # SGD stores fl(p - lr * g), so each recovered update carries up to half an ulp of the new
+        # parameter; two exact steps can therefore differ by one ulp, i.e. eps * |p|.
+        eps = torch.finfo(torch.float32).eps
+        rounding = {name: 2 * eps * after.abs() for name, after in reference_after.items()}
+        mismatches = _grad_mismatches(folded_update, reference_update, rounding)
+        summary = f"{len(mismatches)} of {len(reference_update)} updates differ:\n"
+        assert not mismatches, summary + "\n".join(mismatches)
+        # The rounding allowance must not hide a wrong norm: a clip coefficient 0.1% off is still caught.
+        scaled = {name: update * 1.001 for name, update in reference_update.items()}
+        assert _grad_mismatches(scaled, reference_update, rounding), "update comparison cannot see a 0.1% error"
 
 
 STAGES = [(2, False), (3, False), (3, True)]  # (ZeRO stage, model built under zero.Init)
@@ -301,6 +351,32 @@ class TestShardedAttentionFolding(DistributedTest):
             pytest.skip("AutoEP folding runs on an accelerator")
         assert dist.get_world_size() == world_size
         _check_folded_matches_reference(tp_size=tp_size, ep_size=ep_size, zero_stage=zero_stage, zero_init=zero_init)
+
+
+# Clipping norm below the gradient norm of the tiny model, so the step depends on the norm.
+CLIP = 1e-2
+
+
+@pytest.mark.parametrize("world_size, tp_size, ep_size", SHAPES[:4])
+@pytest.mark.parametrize("zero_init", [False, True])
+@pytest.mark.parametrize("offload", [False, True])
+class TestFoldedZero3ClippedUpdate(DistributedTest):
+    """ZeRO-3 folding applies the reference's clipped update, with the optimizer offloaded to the CPU or not.
+
+    Offload keeps the fp32 partitions, their gradients and the norm on a different path, so the
+    gradients, the norm and the clipped update are all compared with the unfolded reference.
+    """
+
+    def test_clipped_update_matches_reference(self, world_size, tp_size, ep_size, zero_init, offload):
+        if get_accelerator().device_name() == "cpu":
+            pytest.skip("AutoEP folding runs on an accelerator")
+        assert dist.get_world_size() == world_size
+        _check_folded_matches_reference(tp_size=tp_size,
+                                        ep_size=ep_size,
+                                        zero_stage=3,
+                                        zero_init=zero_init,
+                                        offload=offload,
+                                        clip=CLIP)
 
 
 @pytest.mark.sequential
