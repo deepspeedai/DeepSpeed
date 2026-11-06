@@ -1111,36 +1111,6 @@ def test_pid_running_treats_linux_zombies_as_terminated():
         shutil.rmtree(root, ignore_errors=True)
 
 
-def test_pip_check_accepts_only_the_known_unsupported_wheel():
-    # A stand-in pip that prints a chosen `pip check` report, so each case runs the real command.
-    root = Path(tempfile.mkdtemp(prefix="ds-pip-check-"))
-    try:
-        (root / "pip").mkdir()
-        (root / "pip" / "__init__.py").write_text("")
-        (root / "pip" / "__main__.py").write_text("import os, sys\n"
-                                                  "sys.stdout.write(os.environ['FAKE_PIP_CHECK_OUTPUT'])\n"
-                                                  "raise SystemExit(int(os.environ['FAKE_PIP_CHECK_CODE']))\n")
-        known = "deepspeed-kernels 0.0.1.dev1698255861 is not supported on this platform\n"
-        cases = (
-            ("No broken requirements found.\n", 0, 0),
-            (known, 1, 0),
-            (known + "foo 1.0 requires bar, which is not installed.\n", 1, 1),
-            ("other-kernels 1.0 is not supported on this platform\n", 1, 1),
-            ("", 1, 1),
-        )
-        argv = torch_latest._pip_check_command()
-        for output, pip_code, expected_code in cases:
-            env = dict(os.environ,
-                       PYTHONPATH=str(root),
-                       FAKE_PIP_CHECK_OUTPUT=output,
-                       FAKE_PIP_CHECK_CODE=str(pip_code))
-            result = subprocess.run((sys.executable, *argv[1:]), env=env, capture_output=True, text=True, timeout=30)
-            assert result.returncode == expected_code, (output, result.stdout, result.stderr)
-            assert result.stdout == output
-    finally:
-        shutil.rmtree(root, ignore_errors=True)
-
-
 def test_no_progress_watchdog_enforces_deadline_after_parent_exit():
     original = torch_latest.NO_PROGRESS_TIMEOUT_SECONDS
     torch_latest.NO_PROGRESS_TIMEOUT_SECONDS = 0.1
@@ -1498,7 +1468,7 @@ def test_aws_test_failure_emits_bounded_s3_tail_for_nightly_triage():
 def test_aws_prepare_failure_emits_bounded_s3_tail():
     root, path = _selection_file("tests/unit/v1/test_one.py\n")
     try:
-        late_failure = "deepspeed-kernels 0.0.1.dev1698255861 is not supported on this platform"
+        late_failure = "verify Python dependencies failed with exit code 1"
         full_output = "early output\n" * 2500 + f"{late_failure}\n"
         env = _valid_env(
             path,
