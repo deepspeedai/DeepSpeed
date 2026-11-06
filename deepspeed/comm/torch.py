@@ -296,7 +296,13 @@ class TorchBackend(Backend):
         # is bound and the real TP group is in hand, so buffers are allocated on the
         # device the kernels will use, and topologies that can never use the fast
         # path never pay the JIT build.
-        if get_accelerator().on_accelerator(tensor):
+        # The custom collective targets device accelerators for now; the CPU
+        # accelerator's fast path stays with the shm op handled further below
+        # (whose init would otherwise be preceded by this route's extra
+        # build-verdict all_reduce). Temporary exclusion: once the CPU shm
+        # backend implements the custom-collective contract, it joins this
+        # same route and the special case below is removed.
+        if get_accelerator().on_accelerator(tensor) and get_accelerator()._name != 'cpu':
             from deepspeed.comm import custom_collective
             world_sz = torch.distributed.get_world_size(group=group)
             try:

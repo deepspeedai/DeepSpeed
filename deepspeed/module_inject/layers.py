@@ -204,12 +204,6 @@ def add_bias(input, bias):
 class RowParallel(torch.autograd.Function):
     """
     A custom autograd function for performing row-wise parallelism.
-
-    Inference mode uses reduce-scatter + all-gather instead of a single
-    all-reduce: same total bytes, but the scattered chunks enable
-    downstream compute on 1/TP of the data between the two collectives
-    (sequence-parallel residual/norm), and each collective is smaller
-    for latency-bound small-message decode steps.
     """
 
     @staticmethod

@@ -30,6 +30,8 @@ namespace {
 struct CarState {
     bool ready = false;
     int world = 0;
+    int dev = 0;              // our CUDA device ordinal (recorded at create_buffers)
+    int peer_dev = 0;         // peer GPU's ordinal in our enumeration (from connect)
     char* my_base = nullptr;  // cudaMalloc'd: [flag0|flag1|pad][buf0][buf1]
     char* peer_base = nullptr;
     int* seq_d = nullptr;
@@ -156,6 +158,7 @@ py::bytes car_create_buffers()
     CUDA_CHECK(cudaMemset(seq, 0, sizeof(int)));
     cudaIpcMemHandle_t h;
     CUDA_CHECK(cudaIpcGetMemHandle(&h, buf));
+    CUDA_CHECK(cudaGetDevice(&g_state.dev));
     g_state.my_base = (char*)buf;
     g_state.own_base = (char*)buf;
     g_state.own_seq = seq;
@@ -164,7 +167,7 @@ py::bytes car_create_buffers()
     return py::bytes((const char*)&h, sizeof(h));  // raw handle, not utf-8
 }
 
-void car_connect(const std::string& handle_bytes)
+void car_connect(const std::string& handle_bytes, int64_t peer_dev)
 {
     TORCH_CHECK(g_state.ready, "call car_create_buffers first");
     TORCH_CHECK(handle_bytes.size() >= sizeof(cudaIpcMemHandle_t), "short IPC handle");
@@ -176,7 +179,57 @@ void car_connect(const std::string& handle_bytes)
     cudaError_t err = cudaIpcOpenMemHandle(&mapped, h, cudaIpcMemLazyEnablePeerAccess);
     TORCH_CHECK(err == cudaSuccess, "cudaIpcOpenMemHandle failed: ", cudaGetErrorString(err));
     g_state.peer_base = (char*)mapped;
+    g_state.peer_dev = (int)peer_dev;
     g_state.world = 2;
+}
+
+bool car_api_probe()
+{
+    // Stage 1+2 of the link probe, run before any kernel dereferences the peer
+    // mapping: on fabrics where cudaIpcOpenMemHandle produced a mapping that was
+    // never populated, the first SM-side access faults with Xid 31 and kills the
+    // CUDA context unrecoverably. The copy engine walks the same page tables, so
+    // the broken mapping fails here too -- but as a recoverable API error.
+    TORCH_CHECK(g_state.ready && g_state.peer_base, "custom AR not connected");
+    // Explicit enable: without it cudaMemcpyPeerAsync may silently fall back to a
+    // host-staged bounce copy, which would "pass" without proving direct P2P.
+    cudaError_t err = cudaDeviceEnablePeerAccess(g_state.peer_dev, 0);
+    if (err != cudaSuccess && err != cudaErrorPeerAccessAlreadyEnabled) {
+        cudaGetLastError();
+        return false;
+    }
+    const int64_t magic = 0x5A5A5A5A5A5A5A5ALL;
+    auto opts = torch::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA);
+    auto token = torch::full({1}, magic, opts);
+    auto verify = torch::zeros({1}, opts);
+    auto stream = at::cuda::getCurrentCUDAStream();
+    // write direction: our token -> peer's buffer
+    err = cudaMemcpyPeerAsync(g_state.peer_base + kBufBase,
+                              g_state.peer_dev,
+                              token.data_ptr(),
+                              g_state.dev,
+                              sizeof(int64_t),
+                              stream.stream());
+    if (err != cudaSuccess) {
+        cudaGetLastError();
+        return false;
+    }
+    // read direction: peer's buffer -> local verify
+    err = cudaMemcpyPeerAsync(verify.data_ptr(),
+                              g_state.dev,
+                              g_state.peer_base + kBufBase,
+                              g_state.peer_dev,
+                              sizeof(int64_t),
+                              stream.stream());
+    if (err != cudaSuccess) {
+        cudaGetLastError();
+        return false;
+    }
+    if (cudaStreamSynchronize(stream.stream()) != cudaSuccess) {
+        cudaGetLastError();
+        return false;
+    }
+    return verify.cpu().item<int64_t>() == magic;
 }
 
 __global__ void handshake_kernel(char* __restrict__ my_base,
@@ -273,6 +326,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
 {
     m.def("create_buffers", &car_create_buffers, "allocate IPC buffers, return handle bytes");
     m.def("connect", &car_connect, "map peer buffer (data pointer from CUDA IPC storage)");
+    m.def("api_probe", &car_api_probe, "copy-engine probe: is the peer mapping usable at all");
     m.def("handshake", &car_handshake, "bounded probe: is the peer flag visible over this fabric");
     m.def("ready", &car_ready, "is the custom path usable");
     m.def("max_bytes", &car_max_bytes, "max message size");
