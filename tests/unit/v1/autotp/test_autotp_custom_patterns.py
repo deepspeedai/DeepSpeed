@@ -510,6 +510,114 @@ def test_update_mp_params_uses_group_local_rank(monkeypatch):
     assert child.num_heads == 4
 
 
+class _GPTBigCodeLikeConfig:
+    n_embd = 32
+    n_head = 8
+    num_key_value_heads = 1
+
+
+class _GPTBigCodeBlockStub(nn.Module):
+
+    def __init__(self):
+        super().__init__()
+        self.attn = nn.Module()
+        self.attn.multi_query = True
+
+
+def _autotp_stub(*, tp_meta=None, partition_config=None, mp_group=None, mp_size=2):
+    autotp = object.__new__(AutoTP)
+    autotp.mp_group = mp_group
+    autotp.mp_size = mp_size
+    autotp.partition_config = partition_config
+    autotp._replicates_kv_block = True
+    autotp._training_mode = None
+    autotp.tp_meta = tp_meta if tp_meta is not None else AutoTPMeta(num_attention_heads=8, num_kv_heads=8)
+    return autotp
+
+
+def _kv_attention_stub(monkeypatch, **attrs):
+    tp_group = object()
+    child = nn.Module()
+    child.proj = nn.Linear(1, 1, bias=False)
+    setattr(child.proj.weight, DS_AUTOTP_UC_META, {})
+    child.multi_query = True
+    for name, value in attrs.items():
+        setattr(child, name, value)
+    monkeypatch.setattr(dist, "get_rank", lambda group=None: 1 if group is tp_group else 0)
+    return _autotp_stub(mp_group=tp_group), child
+
+
+def test_explicit_partition_config_rejects_replicated_kv_attention():
+    # The heuristic attribute sharding cannot follow an arbitrary explicit config yet.
+    with pytest.raises(NotImplementedError, match="explicit partition_config"):
+        AutoTP(module=_GPTBigCodeBlockStub(),
+               all_reduce_linears=(),
+               prefix="",
+               state_dict=None,
+               linear_layer_setting=(nn.Linear, nn.Embedding),
+               orig_layer_impl=None,
+               partition_config=AutoTPConfig(tp_size=2),
+               model_config=_GPTBigCodeLikeConfig(),
+               training_mode=True)
+
+
+def test_explicit_partition_config_keeps_non_mqa_layout(monkeypatch):
+    # Non-MQA explicit configs are still supported: no heuristic tp_meta override and no
+    # width rejection.
+    monkeypatch.setattr("deepspeed.module_inject.auto_tp.replicates_kv_block", lambda module: True)
+    autotp = AutoTP(module=nn.Linear(1, 1),
+                    all_reduce_linears=(),
+                    prefix="",
+                    state_dict=None,
+                    linear_layer_setting=(nn.Linear, nn.Embedding),
+                    orig_layer_impl=None,
+                    partition_config=AutoTPConfig(tp_size=8),
+                    model_config=_GPTBigCodeLikeConfig(),
+                    training_mode=False)
+
+    assert autotp.tp_meta.num_kv_heads == 1
+    autotp.set_tensor_parallel_config(8, None)
+    assert autotp.mp_size == 8
+
+
+@pytest.mark.parametrize("attrs, expected, error", [
+    (dict(num_heads=8, kv_heads=1,
+          num_key_value_heads=1), dict(num_heads=4, num_key_value_heads=1, num_key_value_groups=None), None),
+    (dict(num_heads=8, num_key_value_heads=1,
+          num_key_value_groups=8), dict(num_heads=4, num_key_value_heads=1, num_key_value_groups=4), None),
+    (dict(num_heads=8, num_key_value_groups=8), {}, "neither kv_heads nor num_key_value_heads"),
+    (dict(num_heads=8, kv_heads=1, num_key_value_groups=8), dict(num_heads=4, kv_heads=1,
+                                                                 num_key_value_groups=4), None),
+])
+def test_update_mp_params_replicated_kv_attributes(monkeypatch, attrs, expected, error):
+    autotp, child = _kv_attention_stub(monkeypatch, **attrs)
+    if error:
+        with pytest.raises(RuntimeError, match=error):
+            autotp.update_mp_params(child)
+        return
+    autotp.update_mp_params(child)
+    for name, value in expected.items():
+        if value is None:
+            assert not hasattr(child, name)
+        else:
+            assert getattr(child, name) == value
+
+
+@pytest.mark.parametrize("training", [False, True])
+def test_replicated_kv_attention_rejects_tp_beyond_query_heads(monkeypatch, training):
+    autotp = _autotp_stub(tp_meta=AutoTPMeta(num_attention_heads=4, num_kv_heads=4))
+    monkeypatch.setattr("deepspeed.module_inject.auto_tp.is_autotp_training_mode", lambda: training)
+    if training:
+        monkeypatch.setattr("deepspeed.module_inject.auto_tp.groups.get_tensor_model_parallel_group", lambda: None)
+        monkeypatch.setattr("deepspeed.module_inject.auto_tp.groups.get_tensor_model_parallel_world_size", lambda: 8)
+        mp_size = 1
+    else:
+        mp_size = 8
+
+    with pytest.raises(RuntimeError, match="4 query heads"):
+        autotp.set_tensor_parallel_config(mp_size, None)
+
+
 def test_update_mp_params_shards_attributes_like_their_weights(monkeypatch):
     tp_group = object()
     autotp = object.__new__(AutoTP)
