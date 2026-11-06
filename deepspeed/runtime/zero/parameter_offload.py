@@ -435,7 +435,6 @@ class DeepSpeedZeRoOffload(object):
 
         @torch.compiler.disable
         def _post_backward_module_hook(module, inputs):
-            module.ds_grads_remaining = 0
 
             return apply_to_tensors_only(module.post_bwd_fn.apply,
                                          inputs,
@@ -504,7 +503,7 @@ class DeepSpeedZeRoOffload(object):
                 def setup_context(ctx, inputs, output):
                     (output_in, ) = inputs
                     ctx.module = module
-                    if output_in.requires_grad:
+                    if output_in.requires_grad and torch._C._current_graph_task_id() == -1: # hooks only in really forward phase
                         #TODO SOME TIMES post backward does not seem to be triggered debug in detail
                         #Should only cause increase in memory not correctness issue
                         #if output.grad_fn.__class__.__name__ == 'ViewBackward':
@@ -513,6 +512,8 @@ class DeepSpeedZeRoOffload(object):
                         #assert len(module.parameters(recurse=False)), "The input tensor to the module is a view, and autograd Function or register_hook is not triggered with view tensors."
                         #if module.ds_grads_remaining == 0:
                         #    print(f"Before Forward: {ctx.module.__class__.__name__}")
+                        if "ds_grads_remaining" not in module.__dict__:
+                            module.ds_grads_remaining = 0
                         module.ds_grads_remaining += 1
                         ctx.post_backward_function = _run_after_backward_function
 
