@@ -1903,7 +1903,11 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                                                elems_to_copy).copy_(one_dim_param.narrow(0, start, elems_to_copy))
 
             # Quantize after the copy so the storage holds the real weights.
-            if not param.requires_grad and self.quantized_nontrainable_weights:
+            # NVMe partitions point into the swapper's buffer; rebinding .data
+            # would leave that buffer unquantized for swap-out and corrupt the
+            # next swap-in, so they stay unquantized as before this change.
+            if (not param.requires_grad and self.quantized_nontrainable_weights
+                    and param.ds_tensor.final_location != OffloadDeviceEnum.nvme):
                 with torch.no_grad():
                     quantized_storage, scale = self.quantizer_module.quantize(param.ds_tensor.data)
                 param.ds_tensor.data = quantized_storage
