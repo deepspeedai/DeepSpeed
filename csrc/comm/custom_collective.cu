@@ -30,8 +30,8 @@ namespace {
 struct CarState {
     bool ready = false;
     int world = 0;
-    int dev = 0;       // our CUDA device ordinal (recorded at create_buffers)
-    int peer_dev = 0;  // peer GPU's ordinal in our enumeration (from connect)
+    int dev = 0;              // our CUDA device ordinal (recorded at create_buffers)
+    int peer_dev = 0;         // peer GPU's ordinal in our enumeration (from connect)
     char* my_base = nullptr;  // cudaMalloc'd: [flag0|flag1|pad][buf0][buf1]
     char* peer_base = nullptr;
     int* seq_d = nullptr;
@@ -204,14 +204,27 @@ bool car_api_probe()
     auto verify = torch::zeros({1}, opts);
     auto stream = at::cuda::getCurrentCUDAStream();
     // write direction: our token -> peer's buffer
-    err = cudaMemcpyPeerAsync(g_state.peer_base + kBufBase, g_state.peer_dev,
-                              token.data_ptr(), g_state.dev, sizeof(int64_t), stream.stream());
-    if (err != cudaSuccess) { cudaGetLastError(); return false; }
+    err = cudaMemcpyPeerAsync(g_state.peer_base + kBufBase,
+                              g_state.peer_dev,
+                              token.data_ptr(),
+                              g_state.dev,
+                              sizeof(int64_t),
+                              stream.stream());
+    if (err != cudaSuccess) {
+        cudaGetLastError();
+        return false;
+    }
     // read direction: peer's buffer -> local verify
-    err = cudaMemcpyPeerAsync(verify.data_ptr(), g_state.dev,
-                              g_state.peer_base + kBufBase, g_state.peer_dev,
-                              sizeof(int64_t), stream.stream());
-    if (err != cudaSuccess) { cudaGetLastError(); return false; }
+    err = cudaMemcpyPeerAsync(verify.data_ptr(),
+                              g_state.dev,
+                              g_state.peer_base + kBufBase,
+                              g_state.peer_dev,
+                              sizeof(int64_t),
+                              stream.stream());
+    if (err != cudaSuccess) {
+        cudaGetLastError();
+        return false;
+    }
     if (cudaStreamSynchronize(stream.stream()) != cudaSuccess) {
         cudaGetLastError();
         return false;
