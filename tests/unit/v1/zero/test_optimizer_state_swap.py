@@ -172,6 +172,17 @@ def test_the_streamed_step_holds_one_group_and_the_next_and_matches_the_resident
         assert all(torch.equal(a, b) for a, b in zip(_snapshot(reference), _snapshot(streamed)))
 
 
+def test_the_streamed_step_skips_the_initial_fp32_zero_gradients_where_they_do_nothing():
+    stream = DeepSpeedZeroOptimizerStateSwapConfig(fraction=1, stream=True)
+    whole = DeepSpeedZeroOptimizerStateSwapConfig(fraction=1)
+    adam = torch.optim.AdamW([torch.zeros(1, requires_grad=True)])
+    adagrad = torch.optim.Adagrad([torch.zeros(1, requires_grad=True)])
+    assert swap_mod.skips_initial_zero_grads(stream, adam, cpu_offload=False)
+    assert not swap_mod.skips_initial_zero_grads(whole, adam, cpu_offload=False)
+    assert not swap_mod.skips_initial_zero_grads(None, adam, cpu_offload=False)
+    assert not swap_mod.skips_initial_zero_grads(stream, adagrad, cpu_offload=False)  # Adagrad's state is built there
+
+
 # ---------------------------------------------------------------------------------------------------------------------
 # Through deepspeed.initialize, on one rank
 

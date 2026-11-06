@@ -32,6 +32,8 @@ nothing else in the step blocks the host, so without the wait it queues every sl
 of the slices still being copied out cannot be reused yet, and the caching allocator grows until the GPU is full, then
 retries by unmapping its whole cache, which the next forward and backward map again. With the wait, three slices are on
 the GPU at once and each fetch reuses the blocks of the slice two before it.
+The streamed step also builds the optimizer without the all-groups FP32 zero gradients of
+``initialize_optimizer_states`` (``skips_initial_zero_grads``).
 
 The tensors are freed by resizing their storage to 0 and restored by resizing it back, not by replacing them: DeepSpeed
 keeps views into the masters (the ``_hp_mapping`` fragments), which must stay valid. The caching allocator holds a freed
@@ -187,6 +189,18 @@ def group_max_bytes(config: Any) -> int:
     """The streamed step's slice size in bytes of FP32 master: ``group_gib``, 2 GiB when unset."""
     gib = config.group_gib if config.group_gib is not None else DEFAULT_GROUP_GIB
     return int(float(gib) * (1 << 30))
+
+
+def skips_initial_zero_grads(config: Any, optimizer: Any, cpu_offload: bool) -> bool:
+    """Whether ZeRO builds its optimizer without ``initialize_optimizer_states``' all-groups FP32 zero gradients.
+
+    ``initialize_optimizer_states`` gives every group an FP32 zero gradient at once and drops them again unless the step
+    runs on the CPU; only Adagrad builds its state from them (Adam's is created at the first step). Next to the masters
+    that doubles the FP32 footprint while the optimizer is built, before the swap can evict anything, so the streamed
+    step, which is for state that does not fit, skips it where it does nothing. The whole-state swap keeps DeepSpeed's
+    initialization."""
+    return (config is not None and config.stream and not cpu_offload
+            and not isinstance(optimizer, torch.optim.Adagrad))
 
 
 class AcceleratorStreams:

@@ -998,6 +998,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         self.ready_for_gradients = False
 
     def initialize_optimizer_states(self):
+        if state_swap.skips_initial_zero_grads(self._optimizer_state_swap_config, self.optimizer, self.cpu_offload):
+            return
 
         for i, group in enumerate(self.bit16_groups):
             single_grad_partition = torch.zeros(int(self.partition_size[i]),

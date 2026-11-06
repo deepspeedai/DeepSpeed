@@ -740,7 +740,7 @@ Stage 1 and 2: keep the FP32 master weights and optimizer state (Adam's moments)
 
 | Description | Default |
 | ----------- | ------- |
-| Stream the step: the param groups are split into slices of at most `group_gib` GiB of FP32 master, and each slice's state is on the GPU only around its own step, fetched while the previous slice steps, with copies in and out on two side streams. The host waits for the copies out of the slice two before each fetch, so three slices are on the GPU at once. For state that does not fit on the GPU next to the step's FP32 gradients. | `false` |
+| Stream the step: the param groups are split into slices of at most `group_gib` GiB of FP32 master, and each slice's state is on the GPU only around its own step, fetched while the previous slice steps, with copies in and out on two side streams. The host waits for the copies out of the slice two before each fetch, so three slices are on the GPU at once. The optimizer is built without the all-groups FP32 zero gradients. For state that does not fit on the GPU next to the step's FP32 gradients. | `false` |
 
 ***group_gib***: [float]
 
