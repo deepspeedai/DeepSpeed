@@ -262,7 +262,8 @@ def fake_accelerator(current):
     return SimpleNamespace(resolves_data_dependency=lambda: False,
                            current_stream=lambda: current,
                            Event=FakeEvent,
-                           stream=lambda stream: nullcontext())
+                           stream=lambda stream: nullcontext(),
+                           on_accelerator=lambda tensor: False)
 
 
 @pytest.mark.parametrize("overlap", [False, True])

@@ -1697,6 +1697,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
     def average_tensor(self, tensor: torch.Tensor, communication_data_type: torch.dtype):
         # Imported here because importing Muon compiles its kernels, which slows down import deepspeed.
         from deepspeed.runtime.zero.muon.muon_optimizer import MuonWithAuxAdam
+        self._record_reduction_input(tensor)
         if self._offload_gradient_safety_enabled:
             stream = self.reduction_stream if self.overlap_comm else get_accelerator().current_stream()
             for event in self.ipg_buckets[communication_data_type].ready_events.values():
@@ -1823,6 +1824,18 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                                              divide=False,
                                              process_group=process_group,
                                              output_bucket=grad_partition_outputs)
+
+    def _record_reduction_input(self, tensor):
+        """With overlap_comm the bucket is reduced on the reduction stream. A parameter larger than reduce_bucket_size
+        is reduced straight from its gradient, which autograd allocated on the compute stream, and on the ranks that
+        own none of it ZeRO-2 frees that gradient on the host right after queuing the reduction (reduce_ipg_grads ->
+        clear_grad_attribute); the multi-rank reduction records the reduction stream only on the slices it copies back
+        to this rank. Record the whole input, so the caching allocator does not hand its memory to the compute stream
+        before the reduction has read it."""
+        if not self.overlap_comm or get_accelerator().resolves_data_dependency():
+            return
+        if get_accelerator().on_accelerator(tensor):
+            tensor.record_stream(self.reduction_stream)
 
     ##############################################################################
     ############################# CPU Offload Methods#############################

@@ -3,6 +3,7 @@
 
 # DeepSpeed Team
 from contextlib import nullcontext
+from types import SimpleNamespace
 
 import torch
 
@@ -44,6 +45,9 @@ class _FakeAccelerator:
 
     def synchronize(self):
         return None
+
+    def on_accelerator(self, tensor):
+        return getattr(tensor, "on_device", False)
 
 
 def _build_overlap_optimizer(monkeypatch, *, resolves_data_dependency):
@@ -177,6 +181,18 @@ def test_average_tensor_falls_back_to_current_stream_without_producers(monkeypat
     optimizer.average_tensor(torch.zeros(4), comm_dtype)
 
     assert optimizer.reduction_stream.waited_on == [current]
+
+
+def test_average_tensor_records_its_input_on_the_reduction_stream(monkeypatch):
+    # A gradient reduced straight from param.grad can be freed right after queuing: the record keeps it until read.
+    optimizer, comm_dtype, _, _ = _build_average_tensor_optimizer(monkeypatch, copy_streams=[])
+    log = []
+    optimizer.gradient_reduction_w_predivide = lambda tensor, dt: log.append(("reduce", dt))
+    gradient = SimpleNamespace(on_device=True, record_stream=lambda stream: log.append(("record", stream)))
+
+    optimizer.average_tensor(gradient, comm_dtype)
+
+    assert log == [("record", optimizer.reduction_stream), ("reduce", comm_dtype)]
 
 
 def test_ipg_bucket_clear_resets_copy_streams():
