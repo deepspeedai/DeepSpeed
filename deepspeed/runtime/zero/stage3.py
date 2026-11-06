@@ -26,7 +26,7 @@ from deepspeed.runtime.torch_autocast import get_autocast_dtype, get_all_comm_dt
 from deepspeed.runtime.comm.coalesced_collectives import reduce_scatter_coalesced, all_to_all_quant_reduce
 from deepspeed.runtime.utils import (combine_grad_norm_groups, count_used_parameters_in_backward, has_inf_or_nan, inf,
                                      is_invalid_grad_norm, is_model_parallel_parameter, is_optimized_parameter,
-                                     mask_nan_or_inf_with_val_inplace)
+                                     mask_nan_or_inf_with_val_inplace, scale_grads_)
 from deepspeed.runtime.zero.partition_parameters import *
 from deepspeed.runtime.zero.config import ZeroStageEnum
 from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum, OffloadStateTypeEnum
@@ -3025,7 +3025,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             clip = torch.clamp(clip, min=1.0)
             combined_scale = clip * self.loss_scale
 
-        self.fp32_partitioned_groups_flat[sub_group_id].grad.mul_(1. / combined_scale)
+        scale_grads_(self.fp32_partitioned_groups_flat[sub_group_id].grad, 1. / combined_scale)
 
     def _check_overflow(self, partition_gradients=True):
         self.overflow = self.has_overflow(partition_gradients)
