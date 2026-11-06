@@ -44,9 +44,19 @@ def _synthetic_calibration(costs, sizes, world=2):
             'bytes': size,
             'from_process': s,
             'to_process': t,
+            'both_ways': both_ways,
             'path': path_of(s, t),
             'seconds': seconds(path_of(s, t), size)
-        } for size in sizes for s in range(world) for t in range(world) if s != t],
+        } for size in sizes for s in range(world) for t in range(world) if s != t for both_ways in (False, True)],
+        'relay': [{
+            'bytes': size,
+            'process': p,
+            'from_process': (p - shift) % world,
+            'to_process': (p + shift) % world,
+            'receive_path': path_of((p - shift) % world, p),
+            'send_path': path_of(p, (p + shift) % world),
+            'seconds': seconds(path_of(p, (p + shift) % world), size)
+        } for size in sizes for shift in range(1, world) for p in range(world)],
         **{
             kind: [{
                 'bytes': size,
@@ -68,7 +78,8 @@ def test_fit_recovers_known_link_costs():
     fits = fit_links(_synthetic_calibration(costs, sizes))
 
     fan = (0, (1, ))  # the synthetic fans have one peer, so a root moves one message per fan
-    checks = [(fits['local'][LOCAL], LOCAL), (fits['peer'][INTER_NODE], INTER_NODE)]
+    checks = [(fits['local'][LOCAL], LOCAL), (fits['peer'][INTER_NODE], INTER_NODE),
+              (fits['peer_both_ways'][INTER_NODE], INTER_NODE), (fits['relay'][(INTER_NODE, INTER_NODE)], INTER_NODE)]
     checks += [(fits[kind][fan][INTER_NODE], INTER_NODE) for kind in ('fan_out', 'fan_in')]
     checks += [(fits[direction][fan], INTER_NODE) for direction in ('send', 'receive')]
     for fit, path in checks:
@@ -135,6 +146,49 @@ def test_peer_pair_fits_keep_each_direction():
         assert fits['peer_pairs'][pair]['bytes_per_second'] == pytest.approx(expected, rel=1e-6)
 
 
+def test_two_way_fits_are_kept_apart_from_one_way_fits():
+    """Pooling two-way samples into ``peer`` would hide what a link loses per direction when both
+    directions are busy, which a policy pricing a colocated resharding needs.
+    """
+    sizes = [4096, 1 << 20, 1 << 24]
+    alpha, one_way, both_ways = 1e-5, 20e9, 12e9
+    calibration = _synthetic_calibration({LOCAL: (1e-6, 100e9), INTER_NODE: (alpha, one_way)}, sizes)
+    for sample in calibration['peer']:
+        if sample['both_ways']:
+            sample['seconds'] = [alpha + sample['bytes'] / both_ways] * 3
+
+    fits = fit_links(calibration)
+    assert fits['peer'][INTER_NODE]['bytes_per_second'] == pytest.approx(one_way, rel=1e-6)
+    assert fits['peer_both_ways'][INTER_NODE]['bytes_per_second'] == pytest.approx(both_ways, rel=1e-6)
+    for pair in ((0, 1), (1, 0)):
+        assert fits['peer_pairs'][pair]['bytes_per_second'] == pytest.approx(one_way, rel=1e-6)
+        assert fits['peer_both_ways_pairs'][pair]['bytes_per_second'] == pytest.approx(both_ways, rel=1e-6)
+
+
+def test_relay_fits_are_keyed_by_receive_and_send_path():
+    """A relay's time covers a receive and a send, so fitting it under either path alone would
+    mix processes that received over a slow link with ones that only sent over it.
+    """
+    sizes = [4096, 1 << 20, 1 << 24]
+    alpha = 1e-5
+    rate = {(INTRA_NODE, INTRA_NODE): 40e9, (INTRA_NODE, INTER_NODE): 15e9, (INTER_NODE, INTRA_NODE): 8e9}
+    calibration = _synthetic_calibration({LOCAL: (1e-6, 100e9), INTER_NODE: (alpha, 10e9)}, sizes)
+    calibration['relay'] = [{
+        'bytes': size,
+        'process': 0,
+        'from_process': 1,
+        'to_process': 2,
+        'receive_path': receive_path,
+        'send_path': send_path,
+        'seconds': [alpha + size / bandwidth] * 3,
+    } for size in sizes for (receive_path, send_path), bandwidth in rate.items()]
+
+    fits = fit_links(calibration)
+    assert set(fits['relay']) == set(rate)
+    for paths, bandwidth in rate.items():
+        assert fits['relay'][paths]['bytes_per_second'] == pytest.approx(bandwidth, rel=1e-6)
+
+
 def test_fit_rejects_unknown_schema_and_single_size():
     with pytest.raises(ValueError):
         fit_links({'schema': CALIBRATION_SCHEMA + 1})
@@ -161,17 +215,28 @@ class TestCalibrateLinks(DistributedTest):
         assert result['world_size'] == world
         assert sorted((s['bytes'], s['process']) for s in result['local']) == sorted(
             (size, process) for size in sizes for process in range(world))
-        assert sorted((s['bytes'], s['from_process'], s['to_process']) for s in result['peer']) == sorted(
-            (size, source, target) for size in sizes for source in range(world) for target in range(world)
-            if source != target)
+        every_ordered_pair = sorted((size, source, target) for size in sizes for source in range(world)
+                                    for target in range(world) if source != target)
+        for both_ways in (False, True):
+            assert sorted((s['bytes'], s['from_process'], s['to_process']) for s in result['peer']
+                          if s['both_ways'] == both_ways) == every_ordered_pair
+        assert sorted(
+            (s['bytes'], s['process'], s['from_process'], s['to_process']) for s in result['relay']) == sorted(
+                (size, process, (process - shift) % world, (process + shift) % world) for size in sizes
+                for shift in range(1, world) for process in range(world))
+
+        def path_between(source, target):
+            return INTRA_NODE if source // 2 == target // 2 else INTER_NODE
 
         for sample in result['local']:
             assert sample['path'] == LOCAL
         for sample in result['peer']:
-            expected = INTRA_NODE if sample['from_process'] // 2 == sample['to_process'] // 2 else INTER_NODE
-            assert sample['path'] == expected
+            assert sample['path'] == path_between(sample['from_process'], sample['to_process'])
+        for sample in result['relay']:
+            assert sample['receive_path'] == path_between(sample['from_process'], sample['process'])
+            assert sample['send_path'] == path_between(sample['process'], sample['to_process'])
 
-        samples = [s['seconds'] for s in result['local'] + result['peer']]
+        samples = [s['seconds'] for s in result['local'] + result['peer'] + result['relay']]
         for seconds in samples:
             assert len(seconds) == 3
             assert all(value > 0 for value in seconds)
@@ -190,6 +255,11 @@ class TestCalibrateLinks(DistributedTest):
         fits = fit_links(result)
         assert set(fits['local']) == {LOCAL}
         assert set(fits['peer']) == {INTRA_NODE, INTER_NODE}
+        assert set(fits['peer_both_ways']) == {INTRA_NODE, INTER_NODE}
+        assert set(fits['peer_both_ways_pairs']) == set(fits['peer_pairs'])
+        assert set(fits['relay']) == {(receive, send)
+                                      for receive in (INTRA_NODE, INTER_NODE)
+                                      for send in (INTRA_NODE, INTER_NODE)} - {(INTRA_NODE, INTRA_NODE)}
         every_fan = {(root, tuple(sorted(set(range(world)) - {root}))) for root in range(world)}
         assert set(fits['fan_out']) == set(fits['fan_in']) == set(fits['send']) == set(fits['receive']) == every_fan
         for kind in ('fan_out', 'fan_in'):
@@ -229,6 +299,11 @@ class TestCalibrateLinks(DistributedTest):
         for sample in result['fan_in']:
             root = sample['root']
             assert sample['paths'] == [f'{peer}->{root}' for peer in sample['peers']]
+        for sample in result['peer']:
+            assert sample['path'] == f'{sample["from_process"]}->{sample["to_process"]}'
+        for sample in result['relay']:
+            assert sample['receive_path'] == f'{sample["from_process"]}->{sample["process"]}'
+            assert sample['send_path'] == f'{sample["process"]}->{sample["to_process"]}'
 
         widths = calibrate_links(sizes=[4096], repeats=1, warmup=0, fan_width=[2, 1, 2])
         assert widths['fan_widths'] == [1, 2]
