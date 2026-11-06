@@ -725,15 +725,28 @@ Note that if the value of "device" is not specified or not supported, an asserti
 Stage 1 and 2: keep the FP32 master weights and optimizer state (Adam's moments) in pinned host memory outside the optimizer step, so the forward and backward run without them. The tensors are fetched back on a side stream from the end of the last backward before a step and evicted after it; the step itself runs on the GPU, unchanged. Muon's momentum stays on the GPU (ZeRO reads it in the backward); its masters move. It replaces `offload_optimizer`, which moves the step to the CPU; the two cannot be set together. `DeepSpeedEngine.save_checkpoint` and `load_checkpoint` save from and load into the pinned host copies, so the evicted state does not come back to the GPU (a universal checkpoint load holds it on the GPU); other code that needs the state on the GPU outside the step runs inside `engine.optimizer.optimizer_state_resident()`.
 ```json
   "optimizer_state_swap": {
-    "fraction": 1.0
+    "fraction": 1.0,
+    "stream": false,
+    "group_gib": 2
   }
 ```
 ***fraction***: [float]
 
 | Description | Default |
 | ----------- | ------- |
-| Required, in (0, 1]: the share of the masters and optimizer state, by bytes and in whole tensors in the optimizer's order, kept on the host outside the step; the rest stays on the GPU. | |
+| Required, in (0, 1]: the share of the masters and optimizer state, by bytes and in whole tensors in the optimizer's order (with `stream`, in whole param-group slices), kept on the host outside the step; the rest stays on the GPU. | |
 
+***stream***: [boolean]
+
+| Description | Default |
+| ----------- | ------- |
+| Stream the step: the param groups are split into slices of at most `group_gib` GiB of FP32 master, and each slice's state is on the GPU only around its own step, fetched while the previous slice steps, with copies in and out on two side streams. The host waits for the copies out of the slice two before each fetch, so three slices are on the GPU at once. For state that does not fit on the GPU next to the step's FP32 gradients. | `false` |
+
+***group_gib***: [float]
+
+| Description | Default |
+| ----------- | ------- |
+| With `stream`: the most FP32 master per param-group slice, in GiB. Changing `stream` or `group_gib` changes the number of param groups, so a checkpoint does not load across that change. | `2` |
 
 ### Asynchronous I/O
 Configuring the asynchronous I/O module for offloading parameter and optimizer states to persistent (NVMe) storage. This module uses Linux native asynchronous I/O (libaio).

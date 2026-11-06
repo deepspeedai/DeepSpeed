@@ -1969,6 +1969,10 @@ class DeepSpeedEngine(Module):
             else:
                 log_dist('DeepSpeed using client LR scheduler', ranks=[0])
                 self.lr_scheduler = self.client_lr_scheduler
+                # Built on the optimizer's param groups before the streamed optimizer-state swap split them.
+                remap = getattr(self.optimizer, "remap_lr_scheduler", None)
+                if remap is not None:
+                    remap(self.lr_scheduler)
         else:
             # load lr scheduler from json configuration if lr scheduler is not defined and passed in
             lr_scheduler = self._scheduler_from_config(self.optimizer)

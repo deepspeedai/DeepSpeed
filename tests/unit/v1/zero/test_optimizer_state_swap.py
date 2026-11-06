@@ -151,6 +151,28 @@ def test_the_step_evicts_and_frees_the_storage_then_the_epilogue_fetches_it_back
 
 
 # ---------------------------------------------------------------------------------------------------------------------
+# The streamed step
+
+
+def test_the_streamed_step_holds_one_group_and_the_next_and_matches_the_resident_step():
+    reference, streamed = _FakeZero([4, 6, 4, 6]), _FakeZero([4, 6, 4, 6])
+    stream, _ = _install(streamed, stream=True)
+    kept = stream.kept
+    assert all(_resident(m) == (i in kept) for i, m in enumerate(streamed.single_partition_of_fp32_groups))
+    for _ in range(3):
+        reference.step()
+        streamed.step()
+        swapped = [i for i in range(4) if i not in kept]
+        assert all(not _resident(t) for i in swapped for t in stream.tensors(i))
+        assert all(_resident(t) for i in kept for t in stream.tensors(i))
+    for during in streamed.resident_during:  # at most the stepping group, the prefetched next, and the kept ones
+        assert len(during - kept) <= 2
+    assert all(torch.equal(a, b) for a, b in zip(reference.bit16, streamed.bit16))
+    with streamed.optimizer_state_resident():
+        assert all(torch.equal(a, b) for a, b in zip(_snapshot(reference), _snapshot(streamed)))
+
+
+# ---------------------------------------------------------------------------------------------------------------------
 # Through deepspeed.initialize, on one rank
 
 
@@ -191,6 +213,9 @@ def _device_streams():
         yield
     finally:
         swap_mod.AcceleratorStreams = original
+
+
+SPLIT_GIB = 64 * 256 * 4 / (1 << 30)  # one slice per weight matrix of the test model
 
 
 def _model():
@@ -268,3 +293,44 @@ class TestOptimizerStateSwapEngine(DistributedTest):
         assert all(n > 0 for n in off_device), off_device
         for a, b in zip(_weights(reference), _weights(restored)):
             assert torch.equal(a, b), (swap, (a - b).abs().max())
+
+    def test_every_slice_links_its_optimizer_state_fragments(self):
+        from deepspeed.utils import safe_get_full_fp32_param, safe_get_full_optimizer_state
+
+        with _device_streams():
+            engines = []
+            for swap in (None, STREAM):
+                model = _model()
+                engines.append(_client_engine(model, [{"params": list(model.parameters())}], swap=swap))
+                _train(engines[-1], 2)
+            reference, streamed = engines
+            with streamed.optimizer.optimizer_state_resident():
+                for p, q in zip(reference.module.parameters(), streamed.module.parameters()):
+                    for key in ("exp_avg", "exp_avg_sq"):
+                        assert torch.equal(safe_get_full_optimizer_state(p, key),
+                                           safe_get_full_optimizer_state(q, key))
+                    assert torch.equal(safe_get_full_fp32_param(p), safe_get_full_fp32_param(q))
+
+
+def _client_engine(model, groups, swap=None, gas=2):
+    """A client optimizer over ``groups``, without gradient clipping."""
+    zero = {"stage": 2, "overlap_comm": True}
+    if swap is not None:
+        zero["optimizer_state_swap"] = swap
+    config = {
+        "train_micro_batch_size_per_gpu": 4,
+        "gradient_accumulation_steps": gas,
+        "gradient_clipping": 0.0,
+        "bf16": {
+            "enabled": True
+        },
+        "zero_optimization": zero,
+        "zero_allow_untested_optimizer": True,
+    }
+    optimizer_class = _HostAdamW if get_accelerator().device_name() == "cpu" else torch.optim.AdamW
+    optimizer = optimizer_class(groups, lr=1e-3, weight_decay=0.0)
+    engine, *_ = deepspeed.initialize(model=model, optimizer=optimizer, config=config)
+    return engine
+
+
+STREAM = {"fraction": 1.0, "stream": True, "group_gib": SPLIT_GIB}

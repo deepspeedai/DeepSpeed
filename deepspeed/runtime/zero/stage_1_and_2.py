@@ -175,6 +175,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
     _optimizer_state_hold_depth = 0
     _optimizer_state_hold_reselect = False
     _optimizer_state_masters_on_host = False
+    _param_group_sources = None  # the streamed step's split: each param group's index before it
 
     def __init__(self,
                  init_optimizer,
@@ -244,6 +245,12 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                     "set one of them")
             if zenflow_config is not None:
                 raise ValueError("zero_optimization.optimizer_state_swap does not support ZenFlow")
+            # The streamed step fetches and steps one param group at a time, so ZeRO has to flatten each slice on
+            # its own: split the groups before anything below reads them.
+            if optimizer_state_swap.stream and not init_optimizer.state:
+                self._groups_before_split = len(init_optimizer.param_groups)
+                init_optimizer.param_groups, self._param_group_sources = state_swap.split_param_groups_with_sources(
+                    init_optimizer.param_groups, state_swap.group_max_bytes(optimizer_state_swap))
 
         # TODO: Remove zenflow-specific call from vanilla ZeroOptimizer, try to isolate zenflow-specific code into sub-class zenflow_zero_optimizer
         self.zenflow = True if zenflow_config is not None else False
@@ -770,6 +777,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
         self._link_all_hp_params()
         self._hp_optimizer_states_linked = False
+        self._hp_optimizer_states_linked_groups = set()
 
         self._enable_universal_checkpoint()
         self._param_slice_mappings = self._create_param_mapping()
@@ -891,15 +899,28 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                            param_offsets=param_offsets)
 
     def _lazy_init_hp_params_optimizer_state(self):
-        if not self._hp_optimizer_states_linked:
-            for i, _ in enumerate(self.optimizer.param_groups):
-                lazy_init_hp_params_optimizer_state(self.bit16_groups[i], self.single_partition_of_fp32_groups[i],
-                                                    self.optimizer.state)
-            self._hp_optimizer_states_linked = True
+        # Each group once it has state: _optimizer_step steps the groups one at a time, so after the first group's
+        # first step the later groups have none yet. Linking narrows the state, so a group whose state the
+        # optimizer-state swap holds on the host waits for its next step.
+        if self._hp_optimizer_states_linked:
+            return
+        linked = self._hp_optimizer_states_linked_groups
+        for i, master in enumerate(self.single_partition_of_fp32_groups):
+            state = self.optimizer.state.get(master)
+            if i in linked or not state:
+                continue
+            if any(
+                    torch.is_tensor(v) and v.untyped_storage().nbytes() < v.numel() * v.element_size()
+                    for v in state.values()):
+                continue
+            lazy_init_hp_params_optimizer_state(self.bit16_groups[i], master, self.optimizer.state)
+            linked.add(i)
+        self._hp_optimizer_states_linked = len(linked) == len(self.single_partition_of_fp32_groups)
 
     def _relink_optimizer_state(self):
-        """A load replaced the optimizer state: link the fragments again at the next step."""
+        """A load replaced the optimizer state: link each group's fragments again at its next step."""
         self._hp_optimizer_states_linked = False
+        self._hp_optimizer_states_linked_groups.clear()
 
     def is_moe_group(self, group):
         return 'moe' in group and group['moe']
@@ -3114,6 +3135,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         return [bit16_partitions[dist.get_rank(group=self.real_dp_process_group[group_no])]]
 
     def _optimizer_step(self, group_no):
+        if self._optimizer_state_swap is not None:
+            self._optimizer_state_swap.before_group_step(group_no)
         original_param_groups = self.optimizer.param_groups
         self.optimizer.param_groups = [original_param_groups[group_no]]
         # Disabling this as the C++ side copy & synchronize is not working correctly
@@ -3502,6 +3525,13 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                     swap.end_host_hold(held, reselect)
                     if reselect:
                         self._relink_optimizer_state()
+
+    def remap_lr_scheduler(self, scheduler):
+        """An LR scheduler built on the param groups before the streamed step split them drives every slice as its
+        group (``optimizer_state_swap.remap_lr_scheduler``); others are left alone."""
+        if self._param_group_sources is None or getattr(scheduler, "optimizer", None) is not self.optimizer:
+            return
+        state_swap.remap_lr_scheduler(scheduler, self._param_group_sources, self._groups_before_split)
 
     def _check_optimizer_state_resident(self, caller):
         """The swapped state, read while evicted, would be the freed storage: refuse rather than return it."""

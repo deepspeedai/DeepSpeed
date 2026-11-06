@@ -6,7 +6,7 @@
 import sys
 from typing import Optional
 from enum import Enum
-from pydantic import Field, model_validator
+from pydantic import Field, StrictBool, model_validator
 from deepspeed.runtime.config_utils import get_scalar_param, pp_int, DeepSpeedConfigModel
 from deepspeed.utils import logger
 from .offload_config import DeepSpeedZeroOffloadParamConfig, DeepSpeedZeroOffloadOptimizerConfig, OffloadDeviceEnum
@@ -50,7 +50,7 @@ ZeRO optimization should be enabled as:
     "override_module_apply": [true|false],
     "log_trace_cache_warnings" : [true|false],
     "enable_sanity_checks": [true|false],
-    "optimizer_state_swap": {"fraction": (0, 1]},
+    "optimizer_state_swap": {"fraction": (0, 1], "stream": [true|false], "group_gib": 2.0},
     }
 }
 """
@@ -98,9 +98,28 @@ class DeepSpeedZeroOptimizerStateSwapConfig(DeepSpeedConfigModel):
     fraction: float = Field(gt=0, le=1)
     """
     Fraction of the FP32 masters and optimizer state, by bytes and in whole tensors in the optimizer's order, kept in
-    pinned host memory outside the step: fetched back from the end of the backward, evicted after the step. The rest
-    stay on the GPU.
+    pinned host memory outside the step: fetched back from the end of the backward, evicted after the step. With
+    ``stream``, the fraction of the streamed param groups; the rest stay on the GPU.
     """
+
+    stream: StrictBool = False
+    """
+    Stream the step group by group: the param groups are split into slices of at most ``group_gib`` GiB of FP32
+    master, each slice's state on the GPU only around its own step, for state that cannot be resident all at once.
+    """
+
+    group_gib: Optional[float] = Field(None, gt=0)
+    """
+    With ``stream``: the most FP32 master per param-group slice, in GiB (2 when unset). Changing ``stream`` or
+    ``group_gib`` changes the number of param groups, so a checkpoint does not load across that change.
+    """
+
+    @model_validator(mode="after")
+    def modes_valid(self):
+        if self.group_gib is not None and not self.stream:
+            raise ValueError("optimizer_state_swap.group_gib sizes the streamed step's param groups; set "
+                             "optimizer_state_swap.stream too")
+        return self
 
 
 class DeepSpeedZeroConfig(DeepSpeedConfigModel):
