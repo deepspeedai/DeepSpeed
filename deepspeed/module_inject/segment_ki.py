@@ -345,7 +345,14 @@ def _fused_gdn_forward(self, hidden_states, *args, **kwargs):
         # grouped_linear — the backend owns the kernel choice.
         cw = getattr(self, "_ki_tp_cat_w", None)
         if cw is None or cw[0] is not self.in_proj_qkv.weight:
-            zba_w = torch.cat([self.in_proj_z.weight, self.in_proj_b.weight, self.in_proj_a.weight])
+            # z/b/a stay replicated as well; slice this rank's head range out
+            # of the full [v-head | per-head scalar | per-head scalar] blocks
+            # so the fused layout matches the local endpoint arithmetic.
+            vz = value_dim
+            z_w = self.in_proj_z.weight[r * vz:(r + 1) * vz]
+            b_w = self.in_proj_b.weight[r * num_v_heads:(r + 1) * num_v_heads]
+            a_w = self.in_proj_a.weight[r * num_v_heads:(r + 1) * num_v_heads]
+            zba_w = torch.cat([z_w, b_w, a_w])
             cw = (self.in_proj_qkv.weight, torch.cat([q_w, k_w, v_w]), zba_w)
             self._ki_tp_cat_w = cw
         fused = GDNInputProj.apply6(x2, cw[1], cw[1], cw[1], cw[2], cw[2], cw[2],
@@ -686,6 +693,31 @@ def _install_gdn_segment(seg: GDNSegment) -> bool:
         if fn is None:
             raise AttributeError(f"GDN scan unavailable: neither {fn_name} nor torch_{fn_name}")
         return fn(query, key, value, **kw)
+
+    # The TP branch slices per-rank head ranges out of the FULL [q|k|v]
+    # blocks, which requires all four GDN input projections to have stayed
+    # replicated. AutoTP's generic column split lands mid-block (no rank
+    # holds a valid local layout); refuse loudly instead of computing on a
+    # garbage layout.
+    import deepspeed.comm as dist
+    tp_size = dist.get_world_size() if dist.is_initialized() else 1
+    if tp_size > 1:
+        expected = {
+            "in_proj_qkv": 2 * parent.key_dim + parent.value_dim,
+            "in_proj_z": parent.value_dim,
+            "in_proj_b": parent.num_v_heads,
+            "in_proj_a": parent.num_v_heads,
+        }
+        expected["conv1d"] = 2 * parent.key_dim + parent.value_dim
+        bad = [n for n, rows in expected.items() if getattr(parent, n).weight.shape[0] != rows]
+        if bad:
+            raise RuntimeError(f"segKI GDN injection requires the GDN input projections "
+                               f"replicated under TP (its forward slices per-rank head ranges "
+                               f"out of the full blocks); sharded weights found for {bad}. "
+                               f"Exclude linear_attn.in_proj_* from AutoTP sharding with SKIP "
+                               f"layer specs (patterns like "
+                               fr"r'.*\.linear_attn\.in_proj_qkv\.weight$', "
+                               f"partition_type=skip).")
 
     parent._ki_gdn_op = _load_native_op()
     parent._ki_gdn_conv_update = conv_update_with_weights
