@@ -304,7 +304,8 @@ class IMPIRunner(MultiNodeRunner):
             export_cmd += ['-genv', f'{k}', f'{v}']
 
         if self.args.bind_cores_to_rank:
-            cores_per_rank, _ = get_numactl_cmd(self.args.bind_core_list, process_per_node, 0)
+            # MPI runs numactl on the workers, not necessarily on this login node.
+            cores_per_rank, _ = get_numactl_cmd(self.args.bind_core_list, process_per_node, 0, validate_numactl=False)
             export_cmd += ['-genv', 'OMP_NUM_THREADS', str(cores_per_rank)]
 
         export_cmd += ['-genv', 'MASTER_ADDR', str(self.args.master_addr)]
@@ -330,7 +331,10 @@ class IMPIRunner(MultiNodeRunner):
             local_rank = i % process_per_node
             python_exec = []
             if self.args.bind_cores_to_rank:
-                _, numactl_cmd = get_numactl_cmd(self.args.bind_core_list, process_per_node, local_rank)
+                _, numactl_cmd = get_numactl_cmd(self.args.bind_core_list,
+                                                 process_per_node,
+                                                 local_rank,
+                                                 validate_numactl=False)
                 python_exec += numactl_cmd
 
             if not self.args.no_python:
