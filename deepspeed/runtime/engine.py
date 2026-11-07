@@ -2623,6 +2623,7 @@ class DeepSpeedEngine(Module):
                 mpu=self.mpu,
                 clip_grad=clip_grad,
                 fused_lamb_legacy=self.optimizer_name() == LAMB_OPTIMIZER,
+                has_moe_layers=self.has_moe_layers,
             )
 
         return optimizer
