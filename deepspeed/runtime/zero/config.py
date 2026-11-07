@@ -396,7 +396,8 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
     def offload_ratio_check(self):
         offload_config = self.offload_optimizer
         if offload_config and offload_config.ratio < 1.0:
-            assert self.stage == ZeroStageEnum.weights, "Partial offloading only supported for ZeRO Stage 3."
+            if self.stage != ZeroStageEnum.weights:
+                raise AssertionError("Partial offloading only supported for ZeRO Stage 3.")
         return self
 
     @model_validator(mode="after")

@@ -24,8 +24,8 @@ def _validate_config_values(config_name, config_dict, valid_values):
         if value is None:
             continue
         if key in valid_values.keys():
-            assert value in valid_values[key], \
-                f"{config_name} contains invalid value {value} for {key}, expecting one of {valid_values[key]}"
+            if value not in valid_values[key]:
+                raise AssertionError(f"{config_name} contains invalid value {value} for {key}, expecting one of {valid_values[key]}")
 
 
 def _make_upper_case(value):
