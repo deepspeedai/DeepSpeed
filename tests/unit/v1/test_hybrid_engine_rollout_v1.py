@@ -14,6 +14,47 @@ from deepspeed.runtime.rollout.base import RolloutRequest, SamplingConfig
 from deepspeed.runtime.rollout.hybrid_engine_rollout import HybridEngineRollout, HybridEngineRolloutConfig
 
 
+@pytest.mark.parametrize("attn_implementation", ["eager", "sdpa"])
+def test_static_graph_matches_native_llama_generation(attn_implementation):
+    accelerator = get_accelerator()
+    if not accelerator.is_available() or accelerator.create_graph() is None:
+        pytest.skip("requires graph capture")
+
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    torch.manual_seed(1234)
+    config = LlamaConfig(vocab_size=64,
+                         hidden_size=64,
+                         intermediate_size=128,
+                         num_hidden_layers=2,
+                         num_attention_heads=4,
+                         num_key_value_heads=2,
+                         max_position_embeddings=128)
+    config._attn_implementation = attn_implementation
+    device = torch.device(accelerator.device_name())
+    model = LlamaForCausalLM(config).to(device).eval()
+    assert model.config._attn_implementation == attn_implementation
+    prompt_ids = torch.randint(1, 64, (4, 8), generator=torch.Generator().manual_seed(1)).to(device)
+    attention_mask = torch.ones_like(prompt_ids)
+    new_tokens = 16
+    with torch.no_grad():
+        expected = model.generate(prompt_ids,
+                                  attention_mask=attention_mask,
+                                  max_new_tokens=new_tokens,
+                                  do_sample=False,
+                                  eos_token_id=None,
+                                  pad_token_id=0)
+
+    # eos -1 never matches, so every row generates the full length.
+    rollout = HybridEngineRollout(SimpleNamespace(module=model),
+                                  SimpleNamespace(pad_token_id=0, eos_token_id=-1),
+                                  cfg=HybridEngineRolloutConfig(use_graph_capture=True))
+    output = rollout.generate(RolloutRequest(prompt_ids, attention_mask),
+                              SamplingConfig(max_new_tokens=new_tokens, temperature=0))
+
+    assert output.input_ids.tolist() == expected.tolist()
+
+
 def test_continuous_generation_profile_on_accelerator():
     accelerator = get_accelerator()
     if not accelerator.is_available():
