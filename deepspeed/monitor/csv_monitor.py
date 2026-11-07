@@ -13,7 +13,6 @@ class csvMonitor(Monitor):
 
     def __init__(self, csv_config):
         super().__init__(csv_config)
-        self.filenames = []
         self.enabled = csv_config.enabled
         self.output_path = csv_config.output_path
         self.job_name = csv_config.job_name
@@ -61,7 +60,6 @@ class csvMonitor(Monitor):
                 # Open file and record event. Insert header if this is the first time writing
                 with open(fname, 'a+') as csv_monitor_file:
                     csv_monitor_writer = csv.writer(csv_monitor_file)
-                    if filename not in self.filenames:
-                        self.filenames.append(filename)
+                    if csv_monitor_file.tell() == 0:
                         csv_monitor_writer.writerow(['step', header])
                     csv_monitor_writer.writerow([step, value])
