@@ -9,6 +9,7 @@ from deepspeed.launcher import runner as ds_runner
 from deepspeed.launcher.runner import (encode_world_info, parse_args, parse_inclusion_exclusion,
                                        apply_num_nodes_and_gpus)
 import os
+import sys
 import pytest
 
 
@@ -69,6 +70,20 @@ def test_slurm_runner(runner_info):
     cmd = runner.get_cmd(env, active_resources)
     assert cmd[0] == 'srun'
     assert cmd[cmd.index('-n') + 1] == '8'
+
+
+@pytest.mark.parametrize('launch_flags, expected_prefix', [(['--module'], [sys.executable, '-u', '-m']),
+                                                           (['--no_python'], [])])
+def test_slurm_runner_module_and_no_python(runner_info, launch_flags, expected_prefix):
+    # srun starts the user program itself, so the interpreter prefix it gets has to follow
+    # --module and --no_python the way the MPI backends do.
+    env, resource_pool, world_info, _ = runner_info
+    args = parse_args(launch_flags + ['test_launcher.py'])
+    active_resources = parse_inclusion_exclusion(resource_pool, args.include, args.exclude)
+    runner = mnrunner.SlurmRunner(args, world_info, resource_pool)
+    cmd = runner.get_cmd(env, active_resources)
+    export_index = next(i for i, token in enumerate(cmd) if token.startswith('--export='))
+    assert cmd[export_index + 1:cmd.index('test_launcher.py')] == expected_prefix
 
 
 @pytest.mark.parametrize('resource_filter, expected_hosts, expected_node_count, expected_process_count',
