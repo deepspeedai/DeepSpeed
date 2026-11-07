@@ -163,6 +163,32 @@ does not advance the cache or synchronize a device tensor to the host.
 This is a targeted query-offset compatibility fix, not a guarantee of support
 for every Transformers 5.20 cache API.
 
+AutoTP Rollout (experimental)
+-----------------------------
+
+``AutoTPRollout`` generates with a separate tensor-parallel copy of the training
+model, sharded across all ranks with AutoTP (``init_inference`` without kernel
+injection). Select it with ``build_rollout`` and ``engine="autotp"``.
+
+The training engine keeps its ZeRO layout. Call ``rollout.sync_weights(step)``
+after each optimizer step and before generating: it gathers each parameter's
+full fp32 master weight from ZeRO and copies this rank's AutoTP shard into the
+inference copy, in memory. Shards are cut with the layout metadata each AutoTP
+layer records, the same metadata used to restore a universal checkpoint into
+AutoTP. The constructor runs one sync, so the copy never generates with its
+initial weights.
+
+All ranks form one tensor-parallel group, so they generate together: each
+rank's prompts are gathered, the union is generated once, and each rank gets
+back only its own rows, in its own ``[B', T_p + T_r]`` layout. Every rank samples
+from the same seed, and generation raises an error if the ranks' tokens differ.
+
+The inference copy costs roughly one more model's worth of memory on top of
+training, divided by the number of ranks. Only the ``generate()`` path is
+supported; ``use_graph_capture``, ``use_shared_prefill`` and continuous batching
+are rejected. Models with tied input and output embeddings fail the first sync,
+because AutoTP shards the output head separately. Contact: OkoroAchraf on GitHub.
+
 OPSD response-token utilities
 -----------------------------
 
