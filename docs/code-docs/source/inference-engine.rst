@@ -168,6 +168,16 @@ active rows while preserving its static tensor addresses. This mirrors the
 scheduler/cache separation used by systems such as vLLM and SGLang without
 copying their backend-specific kernels.
 
+``DeepSpeedStaticCache.get_query_offset(layer_idx)`` supports the causal-mask
+query-offset interface used by Transformers 5.20. It returns zero before a
+write position is supplied, the scalar write position for fixed-batch decoding,
+or the largest per-row write position for continuous batching. Per-row attention
+masks determine which cache entries are valid below that shared frontier.
+The offset excludes the current write, unlike ``get_seq_length()``; querying it
+does not advance the cache or synchronize a device tensor to the host.
+This is a targeted query-offset compatibility fix, not a guarantee of support
+for every Transformers 5.20 cache API.
+
 OPSD response-token utilities
 -----------------------------
 

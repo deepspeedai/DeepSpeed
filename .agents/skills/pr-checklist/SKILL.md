@@ -195,9 +195,8 @@ wrong for another. Walk the axes that your change touches:
   expert parallel
 - **Other interacting features**: activation checkpointing, gradient accumulation,
   `torch.compile`, ZenFlow / SuperOffload, flops profiler, monitors
-- **Integrations**: HF Transformers, Accelerate, Lightning, MII — the `nv-transformers-v100`,
-  `nv-accelerate-v100`, `nv-lightning-v100`, `nv-mii`, and `nv-ds-chat` workflows exist because
-  these break in practice
+- **Integrations**: HF Transformers, Accelerate, Lightning, and MII break in practice. Accelerate
+  coverage is `modal-accelerate` and `aws-accelerate`.
 
 Three contracts deserve explicit attention because breaking them hurts users silently:
 
@@ -344,17 +343,15 @@ so check the file rather than trusting its name:
   PR except documentation-only changes (`docs/`, `blogs/`, and Markdown files, as decided by
   `ci/check_paths.py`). `no-torch` (torch-free import of the sdist) runs on PRs that touch
   `accelerator/` or `op_builder/`.
-- The remaining NVIDIA workflows are path-filtered: `nv-inference` (inference v1), `nv-a6000`
-  (inference v2), `nv-flash-attn` (sequence parallelism), `nv-sd` (stable diffusion), and
-  `nv-ds-chat` (ZeRO + hybrid engine) each run only on PRs that touch their declared paths. The
-  `*-v100` workflows (`nv-torch-latest-v100`, `nv-torch-nightly-v100`, `nv-transformers-v100`,
-  `nv-accelerate-v100`, `nv-mii`, `nv-lightning-v100`) have no triggers and provide no coverage.
+- The remaining NVIDIA workflows are path-filtered: `nv-a6000` (inference v2), `nv-flash-attn`
+  (sequence parallelism), and `nv-sd` (stable diffusion) each run only on PRs that touch their
+  declared paths.
 - **Vendor accelerator workflows are path-filtered, and most also run nightly.** `hpu-gaudi2`,
   `xpu-max1100`, `xpu-compile`, `amd-mi200`, and `mps-torch-latest` run on PRs that touch their
-  declared paths and otherwise on a nightly schedule; `nv-a6000` and `nv-ds-chat` have no schedule,
-  so a change outside their filter gets no automatic coverage at all. If your change can affect a
-  vendor path but does not match the filter, it gets **no** PR coverage — consider whether the
-  filter should be extended, and say what you validated instead.
+  declared paths and otherwise on a nightly schedule; `nv-a6000` has no schedule, so a change
+  outside its filter gets no automatic coverage at all. If your change can affect a vendor path
+  but does not match the filter, it gets **no** PR coverage — consider whether the filter should
+  be extended, and say what you validated instead.
 - **`modal-torch-latest` and `modal-accelerate` do not run their GPU tests on a plain PR push.**
   They preview a diff-selected test list cheaply on the PR and execute in the merge queue, to
   conserve GPU quota. See [`TEST_SELECTION.md`](../../../.github/workflows/TEST_SELECTION.md).
