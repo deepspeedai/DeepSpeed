@@ -210,6 +210,10 @@ int ds_lion_step(int optimizer_id,
 
     invoke(opt, params_c, grads_c, exp_avg_c, params_c.numel());
 
+    // contiguous() copies a non-contiguous tensor, so write the result back.
+    if (!params.is_same(params_c)) params.copy_(params_c);
+    if (!exp_avg.is_same(exp_avg_c)) exp_avg.copy_(exp_avg_c);
+
     return 0;
 }
 
