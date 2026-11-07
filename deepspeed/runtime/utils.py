@@ -458,18 +458,22 @@ def clip_grad_norm_(parameters, max_norm, norm_type=2, mpu=None):
     else:
         total_norm = 0
         for p in norm_parameters:
-            if mpu is not None:
-                if (mpu.get_model_parallel_rank() == 0) or is_model_parallel_parameter(p):
-                    param_norm = p.grad.data.detach().float().norm(norm_type)
-                    all_norms.append(param_norm)
+            model_parallel = is_model_parallel_parameter(p)
+            if mpu is not None and mpu.get_model_parallel_rank() != 0 and not model_parallel:
+                continue
+            grad = p.grad.data.detach().float()
+            replicated_rows = getattr(p, 'ds_tp_replicated_rows', None)
+            if mpu is not None and model_parallel and replicated_rows is not None:
+                kv_start, num_rows, tp_size = replicated_rows
+                # The model-parallel sum must count the already-reduced K/V gradient once.
+                prefix_power = grad.narrow(0, 0, kv_start).norm(norm_type).pow(norm_type) if kv_start else 0
+                kv_power = grad.narrow(0, kv_start, num_rows).norm(norm_type).pow(norm_type)
+                param_power = prefix_power + kv_power / tp_size
             else:
-                param_norm = p.grad.data.detach().float().norm(norm_type)
-                all_norms.append(param_norm)
+                param_power = grad.norm(norm_type).pow(norm_type)
+            all_norms.append(param_power)
         if len(all_norms) > 0:
-            # The p-norm over every gradient is (sum_i ||g_i||_p ** p) ** (1/p), and the
-            # 1/norm_type root is taken below, so each per-parameter norm has to be raised
-            # to norm_type here. Squaring only matches that for norm_type == 2.
-            total_norm = torch.stack(all_norms).pow(norm_type).sum().float()
+            total_norm = torch.stack(all_norms).sum().float()
         else:
             total_norm = get_accelerator().FloatTensor([0.0])
         total_norm = total_norm.to(get_accelerator().current_device_name())

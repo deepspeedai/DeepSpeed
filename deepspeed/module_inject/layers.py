@@ -35,6 +35,7 @@ __all__ = [
 DEEPSPEED_AUTOTP_MODE = AUTOTP_MODE.INFERENCE
 DS_IS_REPLACED_MODULE = 'ds_is_replaced_module'
 DS_TENSOR_MODEL_PARALLEL = 'tensor_model_parallel'
+DS_TP_REPLICATED_ROWS = 'ds_tp_replicated_rows'
 
 
 def _normalize_uc_shape(value):
@@ -1519,6 +1520,7 @@ class fused_LinearLayer(SubParamColumnParallel):
 
         for param in (self.weight, self.bias):
             if param is not None and param.requires_grad:
+                setattr(param, DS_TP_REPLICATED_ROWS, (kv_start, param.shape[0] - kv_start, self.tp_world_size))
                 param.register_hook(sum_kv_rows)
 
     def _freeze_partition_sizes(self, total_size):
