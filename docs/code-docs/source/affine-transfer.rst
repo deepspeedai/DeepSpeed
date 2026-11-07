@@ -46,3 +46,100 @@ zero-copy transport such as GPUDirect RDMA would instead take each round's
 removes the arena copy but needs a registration lifetime this API has no place
 for, so the wire contract (one packed message per peer per round) is expected to
 change when such a path lands.
+
+Calibrating links
+-----------------
+
+``calibrate_links`` measures what moving bytes costs between the processes of
+a process group, the default group unless ``group`` is given, so that a cost
+model or replica policy can price a plan's
+messages with numbers from the machine it runs on. It only measures; it does not
+plan, choose replicas, or fit anything by itself. Every process calls it and
+receives the same raw samples::
+
+    from deepspeed.checkpoint.affine_transfer_calibration import (calibrate_links, fit_links,
+                                                                   node_path_of)
+
+    calibration = calibrate_links(path_of=node_path_of(processes_per_node=8), fan_width=[1, 2, 4, 7])
+    fits = fit_links(calibration)
+    fits['peer_pairs'][(0, 1)]       # the link from process 0 to process 1 alone
+    fits['fan_in'][(0, (1, 2, 3, 4))]['inter_node']  # per-link cost while 1-4 send to 0 at once
+    fits['receive'][(0, (1, 2, 3, 4))]               # process 0's aggregate rate receiving from 1-4
+
+Four patterns are sampled at every size, 4 KiB to 256 MiB by default:
+
+- ``local``: a device-local copy on each process.
+- ``peer``: each ordered process pair alone (1 to 1).
+- ``fan_out``: one root sends to ``width`` peers at once (1 to N).
+- ``fan_in``: ``width`` peers send to one root at once (N to 1), measuring
+  receiver contention.
+
+``fan_width`` takes one width or a list of them; each fan sample records its
+``width``. It defaults to one less than the fewest processes on any node, and at
+least 1, so the default fans fit in a node however large the job is. A root's
+default peers are taken from ``root + 1`` onwards, those on its node (by host
+name) first. ``fan_peers(root, width)`` picks other peers, for example the
+senders behind one PCIe switch or across a socket, and must return the same
+peers on every process.
+
+Each message is labelled with ``path_of(from_process, to_process)``. The default
+labels only ``local`` and ``peer``; ``node_path_of`` splits ``peer`` into
+``intra_node`` and ``inter_node``, and any callable can be used, for example one
+that tells NVLink from PCIe pairs. ``fit_links`` pools the samples per label and
+fits ``alpha + bytes / bandwidth`` to the median at each size, and
+``peer_pairs`` fits each ordered pair alone. Fan fits are keyed by
+``(root, peers)``, with the peers sorted; the width is ``len(peers)``. ``send``
+and ``receive`` fit each root's own time against all the bytes it moved, giving
+the root's aggregate rate with those peers, which is what a plan's per-process
+sent and received bytes are priced against.
+
+A fan finishes when the busiest resource it crosses does: a peer's link, the
+root, or a link the peers share. Behind PCIe switches that depends on *which*
+peers share a process more than on how many, which is why fans are not keyed by
+width alone.
+
+There, use ``peer_pairs``, label paths by topology, and choose the sender sets
+to measure with ``fan_peers``; to compare several sets of one width, calibrate
+once per set and concatenate the ``fan_out`` and ``fan_in`` samples before
+fitting. On a uniform fabric, fits of one width can be pooled by
+``len(peers)``.
+
+Processes here are ranks of ``group``; pass the group the transfer runs on. A
+plan's source and target locations are
+mapped to processes by ``TransferEndpoints``, so translate through it before
+joining a plan's messages with these labels. The pair sweep makes
+``world_size * (world_size - 1)`` barriered samples per size and repeat, and each
+process holds up to ``(2 + max(widths)) * max(sizes)`` bytes, 2.25 GiB with the
+default width at 8 processes per node and 256 MiB, so pass shorter
+``sizes`` or smaller fan widths on large jobs. The numbers describe the
+transport used for the measurement (torch point-to-point) on that topology.
+
+Analyzing a plan
+----------------
+
+``analyze_transfers`` reports what an ``execute_transfers`` batch will do,
+without running it or communicating. It takes the same plans, endpoints,
+element size and ``StagingBudget`` and replays the executor's own operation
+building and round packing, so it can be called on one process, for example to
+compare two candidate plans or budgets before choosing one::
+
+    from deepspeed.checkpoint.affine_transfer_analysis import (analyze_transfers, expected_stats,
+                                                                report_to_dict)
+    from deepspeed.checkpoint.affine_transfer_calibration import node_path_of
+    from deepspeed.checkpoint.affine_transfer_executor import StagingBudget
+
+    report = analyze_transfers(plans, endpoints, element_size=2, budget=StagingBudget(256 << 20),
+                               path_of=node_path_of(processes_per_node=8))
+    summary = report_to_dict(report)
+
+The report covers volume (logical, moved, local-copy and remote bytes), the
+distribution of segment, chunk and message sizes, the number of rounds, every
+process's sent and received bytes, peers, messages, pack and unpack bytes and
+staging arena size, and bytes per process pair and per path label. Each message
+is labelled with ``path_of(from_process, to_process)``, the same hook
+``calibrate_links`` uses, so per-path totals can be priced with ``fit_links``
+results. ``expected_stats(report, process)`` gives the ``TransferStats`` that
+process will return, which makes the prediction checkable after a run.
+
+The report only describes a plan. It does not choose replicas, rank plans or
+estimate time; those decisions belong to the caller.
