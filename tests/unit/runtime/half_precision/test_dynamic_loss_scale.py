@@ -12,7 +12,7 @@ from unit.common import DistributedTest
 from unit.simple_model import SimpleModel
 from deepspeed.ops.op_builder import FusedLambBuilder
 from deepspeed.runtime.fp16.fused_optimizer import FP16_Optimizer
-from deepspeed.runtime.fp16.loss_scaler import LossScaleConfig, LossScaleProfile
+from deepspeed.runtime.fp16.loss_scaler import CreateLossScaler, LossScaleConfig, LossScaleProfile
 from deepspeed.runtime.fp16.unfused_optimizer import FP16_UnfusedOptimizer
 from deepspeed.runtime.precision_config import DeepSpeedFP16Config
 
@@ -377,3 +377,20 @@ class TestZeroStage0Hysteresis(DistributedTest):
         restored_optim.load_state_dict(optim.state_dict())
         run_model_step(restored_model, [float('inf')])
         assert restored_optim.loss_scale_config.cur_scale == 2**7
+
+
+class TestZeroScalerHysteresis(DistributedTest):
+    world_size = 1
+
+    @pytest.mark.parametrize("hysteresis", [1, 0, -1])
+    def test_no_delay_lowers_the_scale(self, hysteresis):
+        # The scaler used by ZeRO must back off on every overflow when no delay is configured,
+        # as the stage 0 optimizers do.
+        fp16 = DeepSpeedFP16Config(enabled=True, loss_scale=0, initial_scale_power=8, hysteresis=hysteresis)
+        scaler = CreateLossScaler(dtype=torch.half,
+                                  static_loss_scale=0,
+                                  dynamic_scaling=True,
+                                  dynamic_loss_args=fp16.dynamic_loss_scale_args())
+        for _ in range(3):
+            scaler.update_scale(True)
+        assert scaler.loss_scale == 2**5
