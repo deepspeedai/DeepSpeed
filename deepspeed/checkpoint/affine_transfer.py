@@ -27,9 +27,11 @@ and ``_covers_exactly`` states what that argument does and does not buy.
 
 import json
 from dataclasses import dataclass
-from typing import Callable, Dict, FrozenSet, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, FrozenSet, List, Optional, Sequence, Set, Tuple
 
 from .affine import AffinePiece, ParamAffineMap
+from .affine_geometry import (LogicalBox, boxes_disjoint, coordinate as _coordinate, product as _product,
+                              row_major_strides as _row_major_strides)
 
 __all__ = [
     'AffineTransferError', 'InvalidMapError', 'InvalidReplicaPolicyError', 'UnsupportedLayoutError', 'PlanBudget',
@@ -88,36 +90,6 @@ class PlanStatistics:
     segments_before_merge: int
     segments: int
     plan_bytes: int
-
-
-@dataclass(frozen=True)
-class LogicalBox:
-    """An axis-aligned block of the logical parameter: its first coordinate and its extents."""
-    origin: Tuple[int, ...]
-    extent: Tuple[int, ...]
-
-    @property
-    def volume(self) -> int:
-        return _product(self.extent)
-
-    @property
-    def is_empty(self) -> bool:
-        return any(size == 0 for size in self.extent)
-
-    def upper(self) -> Tuple[int, ...]:
-        return tuple(low + size for low, size in zip(self.origin, self.extent))
-
-    def intersection(self, other: 'LogicalBox') -> 'LogicalBox':
-        low = tuple(max(a, b) for a, b in zip(self.origin, other.origin))
-        high = tuple(min(a, b) for a, b in zip(self.upper(), other.upper()))
-        return LogicalBox(low, tuple(max(0, h - l) for h, l in zip(high, low)))
-
-    def contains(self, other: 'LogicalBox') -> bool:
-        return all(other_low >= low and other_high <= high
-                   for low, high, other_low, other_high in zip(self.origin, self.upper(), other.origin, other.upper()))
-
-    def __repr__(self) -> str:
-        return f'Box({self.origin}+{self.extent})'
 
 
 @dataclass(frozen=True)
@@ -210,33 +182,6 @@ class TransferPlan:
             'logical_shape': list(self.logical_shape),
             'segments': [segment.to_dict() for segment in self.segments],
         }
-
-
-def _product(shape: Sequence[int]) -> int:
-    count = 1
-    for size in shape:
-        count *= size
-    return count
-
-
-def _row_major_strides(shape: Sequence[int]) -> Tuple[int, ...]:
-    strides = [1] * len(shape)
-    for axis in range(len(shape) - 2, -1, -1):
-        strides[axis] = strides[axis + 1] * shape[axis + 1]
-    return tuple(strides)
-
-
-def _coordinate(offset: int, strides: Tuple[int, ...], shape: Tuple[int, ...]) -> Optional[Tuple[int, ...]]:
-    """The grid coordinate a storage offset names, or None when it names nothing."""
-    coordinates = []
-    rest = offset
-    for stride, size in zip(strides, shape):
-        coordinate, remainder = divmod(rest, stride)
-        if coordinate >= size:
-            return None
-        coordinates.append(coordinate)
-        rest = remainder
-    return tuple(coordinates) if rest == 0 else None
 
 
 def _frame_of(piece: AffinePiece, rank: int, side: str, logical_shape: Tuple[int, ...],
@@ -372,7 +317,26 @@ def _shards_tile(frames: List[_Frame], side: str, limits: PlanBudget) -> None:
 
 
 def _validate_holders(frames: List[_Frame], side: str, limits: PlanBudget) -> None:
-    """A piece's declared holders must cover exactly its logical box on every named rank."""
+    """A piece's declared holders must cover exactly its logical box on every named rank.
+
+    Most maps pass without comparing pieces pairwise: when no two distinct boxes overlap, a rank covers
+    a box exactly when it holds that very box, so the holders of each box can be read off a table.
+    Anything else, such as replicas split at different places, takes the pairwise walk, which also
+    names the piece at fault.
+    """
+    holders: Dict[LogicalBox, Set[int]] = {}
+    repeated = False
+    for frame in frames:
+        ranks = holders.setdefault(frame.box, set())
+        repeated = repeated or frame.rank in ranks
+        ranks.add(frame.rank)
+    if not repeated and boxes_disjoint(list(holders)):
+        if all(holders[frame.box] == frame.locations for frame in frames):
+            return
+    _validate_holders_pairwise(frames, side, limits)
+
+
+def _validate_holders_pairwise(frames: List[_Frame], side: str, limits: PlanBudget) -> None:
     if len(frames)**2 > limits.max_pair_checks:
         raise AffineTransferError(f'{side}: holder checks exceed max_pair_checks {limits.max_pair_checks}')
     by_rank: Dict[int, List[_Frame]] = {}
@@ -415,18 +379,20 @@ def _sources(frames: List[_Frame], limits: PlanBudget) -> List[Tuple[LogicalBox,
             by_box.setdefault(frame.box, []).append(frame)
 
     regions = sorted(by_box, key=lambda box: (box.origin, box.extent))
+    if not boxes_disjoint(regions):
+        _name_overlapping_regions(regions, limits)
+    return [(box, tuple(sorted(by_box[box], key=lambda frame: frame.rank))) for box in regions]
+
+
+def _name_overlapping_regions(regions: List[LogicalBox], limits: PlanBudget) -> None:
     if len(regions)**2 > limits.max_pair_checks:
         raise AffineTransferError(f'{len(regions)} source regions would take {len(regions)**2} checks, over '
                                   f'max_pair_checks {limits.max_pair_checks}')
-    grouped = []
     for index, box in enumerate(regions):
-        holders = by_box[box]
         for other in regions[index + 1:]:
             if not box.intersection(other).is_empty:
                 raise UnsupportedLayoutError(f'source: replicas of {box!r} and {other!r} have different '
                                              'piece boundaries')
-        grouped.append((box, tuple(sorted(holders, key=lambda frame: frame.rank))))
-    return grouped
 
 
 def _covers_exactly(region: LogicalBox, parts: Sequence[LogicalBox]) -> bool:
