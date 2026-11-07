@@ -103,6 +103,10 @@ def main(args=None):
     result = subprocess.Popen(cmd, env=env, close_fds=False)
     result.wait()
 
+    # mpirun only sees this process' exit status, so pass the user script's failure on to it
+    if result.returncode != 0:
+        sys.exit(result.returncode)
+
 
 if __name__ == "__main__":
     main()
