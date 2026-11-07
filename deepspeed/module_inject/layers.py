@@ -221,10 +221,16 @@ class RowParallel(torch.autograd.Function):
         ctx.group = group
         if not pg_utils.is_parallel(group):
             return input
-        if is_inference_mode:
-            dist.inference_all_reduce(input, group=group)
+        # contiguous() may hand back a copy — the reduction must land in
+        # the caller's tensor, not a discarded temporary
+        red = input.contiguous()
+        # inference_all_reduce picks the fastest backend available (one-shot
+        # custom AR on TP=2 pairs, shm+AVX on CPU) and falls back on its own
+        if is_inference_mode or not torch.is_grad_enabled():
+            dist.inference_all_reduce(red, group=group)
         else:
-            dist.all_reduce(input.contiguous(), group=group)
+            dist.all_reduce(red, group=group)
+        if red is not input: input.copy_(red)
         return input
 
     @staticmethod
