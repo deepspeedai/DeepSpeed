@@ -412,6 +412,8 @@ The routines for modifying parameters and optimizer states can be used at any po
 
 The routines for modifying gradients can be used after ``backward`` but before ``step`` as shown in the following snippet.
 
+With ``BF16_Optimizer``, ``safe_set_full_grad`` and ``safe_update_full_grad_vectorized`` update the gradient accumulation buffer used by the optimizer, whether or not ``bf16.immediate_grad_update`` is enabled. Call these routines on every data-parallel rank with the same full gradient, using the configured gradient accumulation dtype. The vectorized callback receives the full gradient returned by ``safe_get_full_grad``; pass parameters in the same order on every rank so the gradient reconstruction collectives match.
+
 .. code-block:: python
 
     backward(loss)

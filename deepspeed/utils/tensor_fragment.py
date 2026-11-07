@@ -245,7 +245,9 @@ def safe_set_full_grad(param, value):
             param (``torch.nn.Parameter``): A model parameter
             value (``torch.Tensor``): The un-partitioned new gradient value.
     """
-    if param.grad is not None:
+    if getattr(param, '_hp_grad', None) is not None:
+        param._hp_grad.copy_(value.reshape_as(param._hp_grad))
+    elif param.grad is not None:
         param.grad.copy_(value)
     elif hasattr(param, 'ds_id'):
         # ZeRO stage 3 param
@@ -352,7 +354,11 @@ def safe_update_full_grad_vectorized(param_list: List[torch.nn.Parameter], updat
     """
     partitioned_grad_params = []
     for p in param_list:
-        if p.grad is not None:
+        if getattr(p, '_hp_grad', None) is not None:
+            old_grad = safe_get_full_grad(p)
+            new_grad = update_func(old_grad, p)
+            p._hp_grad.copy_(new_grad.reshape_as(p._hp_grad))
+        elif p.grad is not None:
             p.grad.copy_(update_func(p.grad, p))
         elif p.requires_grad:
             partitioned_grad_params.append(p)
