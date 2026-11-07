@@ -192,10 +192,14 @@ def validate_folding_global(
     autoep_enabled: bool = True,
     tp_preset: str | None = None,
     ep_preset: str | None = None,
-    zero_offload_optimizer: bool = False,
-    zero_offload_param: bool = False,
+    offload_optimizer_device: str | None = None,
+    offload_param_device: str | None = None,
 ) -> None:
-    """Validate global folding policy before any process group is created."""
+    """Validate global folding policy before any process group is created.
+
+    ``offload_optimizer_device`` and ``offload_param_device`` are the ZeRO offload devices
+    (``"cpu"``, ``"nvme"``, or ``None``/``"none"`` when offload is off).
+    """
     if not autoep_enabled:
         return
 
@@ -245,9 +249,19 @@ def validate_folding_global(
         raise ValueError("expert_parallel with use_data_before_expert_parallel_ is not supported with "
                          "AutoEP+AutoTP folding. Disable use_data_before_expert_parallel_.")
 
-    if spec.tp_size > 1 and (zero_offload_optimizer or zero_offload_param):
-        raise ValueError("ZeRO optimizer/parameter offload with AutoEP+AutoTP folding is not validated yet. "
-                         "Disable offload or run a follow-up proof for per-family replica groups.")
+    if spec.tp_size > 1 and offload_param_device not in (None, "none"):
+        raise ValueError("ZeRO parameter offload with AutoEP+AutoTP folding is not supported yet. "
+                         'Set zero_optimization.offload_param.device to "none".')
+
+    # ZeRO-3 applies the folded per-family gradient correction before each reduce-scatter and takes
+    # the folding-aware norm from the partitions, wherever the optimizer keeps them, so CPU offload
+    # leaves the gradients, norm and update unchanged. ZeRO-1/2 compute the offloaded norm on a
+    # separate path that has not been validated under folding, and NVMe swapping has not been tested.
+    offload_optimizer = offload_optimizer_device not in (None, "none")
+    if spec.tp_size > 1 and offload_optimizer and (zero_stage != 3 or offload_optimizer_device != "cpu"):
+        raise ValueError("AutoEP+AutoTP folding supports ZeRO optimizer offload only with ZeRO stage 3 and "
+                         f'offload_optimizer.device "cpu" (got ZeRO stage {zero_stage}, device '
+                         f'"{offload_optimizer_device}").')
 
     mpu_tp = _mpu_world_size(mpu, "get_tensor_model_parallel_world_size", "get_model_parallel_world_size")
     if mpu_tp not in (None, 1, spec.tp_size):

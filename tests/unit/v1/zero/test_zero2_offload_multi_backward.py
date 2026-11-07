@@ -285,6 +285,8 @@ class TestZero2OffloadOverflowRecovery(DistributedTest):
             pytest.skip("CPUAdam is required for low-precision offloaded master weights")
         if precision == "bf16" and not get_accelerator().is_bf16_supported():
             pytest.skip("BF16 is not supported")
+        if precision == "fp16" and not get_accelerator().is_fp16_supported():
+            pytest.skip("FP16 is not supported")
 
         class TwoGroups(torch.nn.Module):
 
