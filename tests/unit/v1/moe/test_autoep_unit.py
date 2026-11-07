@@ -455,12 +455,13 @@ class TestAutoEPConfig:
 
         observed = {}
 
-        def record_validate(config, world_size, pp_size, tp_size, sp_size):
+        def record_validate(config, world_size, pp_size, tp_size, sp_size, zero_stage=None):
             observed["validate"] = {
                 "world_size": world_size,
                 "pp_size": pp_size,
                 "tp_size": tp_size,
                 "sp_size": sp_size,
+                "zero_stage": zero_stage,
             }
 
         def record_create(**kwargs):
@@ -489,6 +490,7 @@ class TestAutoEPConfig:
 
         assert groups.mpu is None
         assert observed["validate"]["sp_size"] == 2
+        assert observed["validate"]["zero_stage"] == 0
         assert observed["create"]["mp_size"] == 2
         assert observed["create"]["mp_mode"] == "sp"
 

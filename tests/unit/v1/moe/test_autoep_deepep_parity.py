@@ -30,7 +30,7 @@ from deepspeed.module_inject import auto_ep_layer
 from deepspeed.module_inject.auto_ep_comm import DeepEPExchange, destroy_exchanges
 from deepspeed.module_inject.auto_ep_layer import AutoEPMoELayer
 from deepspeed.ops.triton_ops import autoep_fused_token_ops as fused_ops
-from deepspeed.utils import safe_get_full_fp32_param
+from deepspeed.utils import safe_get_full_fp32_param, safe_get_full_grad
 
 from unit.common import DistributedTest
 from unit.v1.moe.autoep_test_utils import (
@@ -199,7 +199,14 @@ def _snapshot_fp32_parameters(engine):
     return snapshot
 
 
-def _build_test_engine(backend, ep_size, seed, *, row_weighting_impl="auto", score_apply=None):
+def _build_test_engine(backend,
+                       ep_size,
+                       seed,
+                       *,
+                       row_weighting_impl="auto",
+                       score_apply=None,
+                       zero_stage=1,
+                       **expert_parallel):
     seed_everything(seed)
 
     config = make_autoep_config(ep_size=ep_size)
@@ -208,6 +215,7 @@ def _build_test_engine(backend, ep_size, seed, *, row_weighting_impl="auto", sco
     # dtype anyway for the comparison to mean anything.
     config.pop("fp16", None)
     config["bf16"] = {"enabled": True}
+    config["zero_optimization"]["stage"] = zero_stage
     config["expert_parallel"]["comm_backend"] = backend
     if row_weighting_impl != "auto":
         # The original cleanup/legacy comparisons keep the fixture's lr=1e-4. Only the new eager/fused
@@ -216,6 +224,7 @@ def _build_test_engine(backend, ep_size, seed, *, row_weighting_impl="auto", sco
         config["expert_parallel"]["row_weighting_impl"] = row_weighting_impl
     if score_apply is not None:
         config["expert_parallel"]["score_apply"] = score_apply
+    config["expert_parallel"].update(expert_parallel)
     if backend == "deepep":
         # Sized explicitly rather than from the first batch, so both backends
         # see identical shapes whatever that batch turns out to be.
@@ -247,9 +256,17 @@ def _run_one_step(backend,
                   skewed_routing=False,
                   row_weighting_impl="auto",
                   score_apply=None,
-                  seq_len=SEQ_LEN):
+                  seq_len=SEQ_LEN,
+                  zero_stage=1,
+                  **expert_parallel):
     """Build a model on ``backend``, run one step, return its output and grads."""
-    engine = _build_test_engine(backend, ep_size, seed, row_weighting_impl=row_weighting_impl, score_apply=score_apply)
+    engine = _build_test_engine(backend,
+                                ep_size,
+                                seed,
+                                row_weighting_impl=row_weighting_impl,
+                                score_apply=score_apply,
+                                zero_stage=zero_stage,
+                                **expert_parallel)
     if backend == "deepep" and not cleanup:
         _install_legacy_deepep_prep(engine)
     if skewed_routing:
@@ -284,10 +301,13 @@ def _run_one_step(backend,
     loss = output.float().pow(2).mean()
     engine.backward(loss)
 
-    gradients = {
-        name: parameter.grad.detach().float().clone()
-        for name, parameter in engine.module.named_parameters() if parameter.grad is not None
-    }
+    gradients = {}
+    for name, parameter in engine.module.named_parameters():
+        if not parameter.requires_grad:
+            continue
+        gradient = safe_get_full_grad(parameter)
+        assert gradient is not None, f"Expected accumulated gradient for {name} before clipping"
+        gradients[name] = gradient.detach().float().clone()
     score_gradient_parts = {}
     for name, scores in score_tensors:
         if scores.grad is not None:
@@ -623,6 +643,37 @@ class TestDeepEPMatchesCollective(DistributedTest):
         all_routes = torch.cat([route.flatten() for _, route in fused["routes"]])
         assert torch.count_nonzero(all_routes == 3) == 0
         assert torch.count_nonzero(all_routes == 1) > torch.count_nonzero(all_routes == 2)
+
+    @pytest.mark.parametrize("gate_up_impl", ["separate", "fused"])
+    @pytest.mark.parametrize("skewed_routing", [False, True])
+    @pytest.mark.parametrize("zero_stage", [1, 2])
+    def test_overlapped_weight_gradients_match_the_serial_backward(self, gate_up_impl, skewed_routing, zero_stage):
+        """overlap_weight_grad changes when the experts' weight gradients are computed, not their values.
+
+        The two runs dispatch separately, so DeepEP's arrival order can differ between them and change summation
+        order; gradients a backward mismatched by the overlap would be off by order one rather than by rounding.
+        """
+        skip_unless_h100_tests_enabled("DeepEP backward overlap needs H100s and a DeepEP build")
+        seed = 4321
+        common = dict(skewed_routing=skewed_routing,
+                      zero_stage=zero_stage,
+                      activation_checkpointing=True,
+                      reentrant_checkpointing=True,
+                      gate_up_impl=gate_up_impl,
+                      use_grouped_mm=True,
+                      disable_triton_grouped_mm=True)
+
+        serial = _run_one_step("deepep", self.world_size, seed, **common)
+        overlapped = _run_one_step("deepep", self.world_size, seed, overlap_weight_grad=True, **common)
+
+        _assert_cleanup_results_close(overlapped, serial, compare_score_gradients=False)
+        pairs = [("input_gradient", overlapped["input_gradient"], serial["input_gradient"])]
+        pairs += [(name, overlapped["gradients"][name], grad) for name, grad in serial["gradients"].items()]
+        for name, actual, expected in pairs:
+            if expected.norm() > 0:
+                error = ((actual - expected).norm() / expected.norm()).item()
+                assert error < 1e-2, f"{name} relative L2 error {error:.3e}"
+        assert torch._C._get_sm_carveout_experimental() is None, "the SM carveout leaked out of the backward"
 
     @pytest.mark.parametrize("skewed_routing", [False, True])
     @pytest.mark.parametrize("nested", [False, True], ids=["non-reentrant", "nested-in-reentrant"])
