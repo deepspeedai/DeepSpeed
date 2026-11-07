@@ -1,0 +1,64 @@
+diff --git a/csrc/module_inject/fused_glu.cu b/csrc/module_inject/fused_glu.cu
+index 9b33fe8f6..9a6f257f0 100644
+--- a/csrc/module_inject/fused_glu.cu
++++ b/csrc/module_inject/fused_glu.cu
+@@ -364,6 +364,7 @@ __global__ void __launch_bounds__(512)
+                        int num_q_heads,
+                        int num_kv_heads,
+                        long q_hs,
++                       long q_rs,
+                        int max_len,
+                        float scale,
+                        int pos_stride,
+@@ -397,8 +398,11 @@ __global__ void __launch_bounds__(512)
+ 
+     __nv_bfloat16* Kg = K + ((long)(row * num_kv_heads + kv_head)) * max_len * HEAD_DIM;
+     __nv_bfloat16* Vg = V + ((long)(row * num_kv_heads + kv_head)) * max_len * HEAD_DIM;
+-    const __nv_bfloat16* q_row = q + (long)row * num_q_heads * q_hs + (long)q_head * q_hs;
+-    const __nv_bfloat16* g_row = gate + (long)row * num_q_heads * q_hs + (long)q_head * q_hs;
++    // q/gate may be sliced out of a wider fused row block (e.g. fused[:, :qn]
++    // of a q|k|v concat), so rows advance by the caller-provided row stride,
++    // not the packed num_q_heads * q_hs
++    const __nv_bfloat16* q_row = q + (long)row * q_rs + (long)q_head * q_hs;
++    const __nv_bfloat16* g_row = gate + (long)row * q_rs + (long)q_head * q_hs;
+ 
+     float q_reg[EPL];
+ #pragma unroll
+@@ -590,7 +594,12 @@ void decode_attn(at::Tensor q,
+     // head stride (the kernel indexes through q_hs)
+     TORCH_CHECK(q.stride(-1) == 1, "q last dim must be dense");
+     const long q_hs = q.stride(-2);
+-    TORCH_CHECK(gate.defined() ? (gate.stride(-1) == 1 && gate.stride(-2) == q_hs) : true,
++    // row stride: [B, H, D] carries it in stride(0); a packed 2-D view's
++    // rows are already num_q_heads * q_hs apart
++    const long q_rs = (q.dim() == 3) ? q.stride(0) : num_q_heads * q_hs;
++    TORCH_CHECK(gate.defined() ? (gate.stride(-1) == 1 && gate.stride(-2) == q_hs &&
++                                  (gate.dim() != 3 || gate.stride(0) == q_rs))
++                               : true,
+                 "gate layout must match q");
+     TORCH_CHECK(K.is_contiguous() && V.is_contiguous(), "K/V must be contiguous");
+     TORCH_CHECK(write_pos.is_cuda() && write_pos.scalar_type() == at::ScalarType::Long,
+@@ -664,6 +673,7 @@ void decode_attn(at::Tensor q,
+                 (int)num_q_heads,
+                 (int)num_kv_heads,
+                 q_hs,
++                q_rs,
+                 (int)max_len,
+                 scale,
+                 pos_stride,
+@@ -688,6 +698,7 @@ void decode_attn(at::Tensor q,
+                     (int)num_q_heads,
+                     (int)num_kv_heads,
+                     q_hs,
++                    q_rs,
+                     (int)max_len,
+                     scale,
+                     pos_stride,
+@@ -712,6 +723,7 @@ void decode_attn(at::Tensor q,
+                     (int)num_q_heads,
+                     (int)num_kv_heads,
+                     q_hs,
++                    q_rs,
+                     (int)max_len,
+                     scale,
+                     pos_stride,

@@ -26,6 +26,7 @@ import torch
 from deepspeed.accelerator import get_accelerator
 from deepspeed.runtime.rollout.base import RolloutBatch, RolloutEngine, RolloutRequest, SamplingConfig
 from deepspeed.runtime.rollout.continuous_batching import ContinuousBatchRequest, ContinuousBatchScheduler
+from deepspeed.utils import logger
 
 
 class _ForwardProfiler:
@@ -237,10 +238,18 @@ class HybridEngineRollout(RolloutEngine):
             expansion_end = time.perf_counter()
 
         is_greedy = sampling.temperature <= 0.0
+        use_graph_capture = self.use_graph_capture and is_greedy
+        if use_graph_capture and not get_accelerator().is_graph_capture_supported():
+            # Same opt-in as the HybridEngine graph cache and the continuous
+            # rollout path: falling back keeps backends that only expose a
+            # graph API on the eager path.
+            logger.warning_once("HybridEngineRollout: graph capture is not supported on the current accelerator; "
+                                "falling back to eager generation.")
+            use_graph_capture = False
 
         forward_profiler = None
         forward_profile_handles = []
-        if self.enable_profiling and not (self.use_graph_capture and is_greedy):
+        if self.enable_profiling and not use_graph_capture:
             forward_profiler = _ForwardProfiler(accelerator)
             forward_profile_handles = forward_profiler.register(module)
 
@@ -262,7 +271,7 @@ class HybridEngineRollout(RolloutEngine):
             _cfg = getattr(module, "config", None)
             layer_types = getattr(getattr(_cfg, "text_config", _cfg), "layer_types", None) or []
             needs_pad_fallback = module._ki_prompt_padded and ("linear_attention" in layer_types or self.use_segki)
-            if self.use_graph_capture and not needs_pad_fallback:
+            if use_graph_capture and not needs_pad_fallback:
                 output_ids = self._generate_graph(prompt_ids, prompt_attn, max_new_tokens, pad_token_id, module,
                                                   device, sampling)
             else:
@@ -371,7 +380,14 @@ class HybridEngineRollout(RolloutEngine):
             RolloutRequest(request.prompt_ids[index:index + 1], request.prompt_attention_mask[index:index + 1])
             for index in range(request.prompt_ids.shape[0]))
         self._validate_continuous_inputs(requests, sampling, max_batch_size)
-        if self.use_graph_capture:
+        use_graph_capture = self.use_graph_capture
+        if use_graph_capture and not get_accelerator().is_graph_capture_supported():
+            # The eager continuous path is a full fallback, so keep it instead
+            # of aborting when the backend has not opted into graph capture.
+            logger.warning_once("HybridEngineRollout: graph capture is not supported on the current accelerator; "
+                                "falling back to eager continuous batching.")
+            use_graph_capture = False
+        if use_graph_capture:
             return self._generate_continuous_graph(original_request, requests, sampling, max_batch_size)
 
         module = self.engine.module
@@ -639,8 +655,6 @@ class HybridEngineRollout(RolloutEngine):
         if getattr(module.config, "_attn_implementation", None) == "flash_attention_2":
             raise ValueError("continuous graph capture does not support flash_attention_2")
         device = requests[0].prompt_ids.device
-        if get_accelerator().create_graph() is None:
-            raise ValueError("continuous graph capture is not supported on the current accelerator")
 
         from transformers import StaticCache
         from deepspeed.utils.static_cache import DeepSpeedStaticCache
@@ -1394,6 +1408,9 @@ class HybridEngineRollout(RolloutEngine):
         from transformers import StaticCache
         from deepspeed.utils.static_cache import DeepSpeedStaticCache
 
+        if getattr(module.config, "_attn_implementation", None) == "flash_attention_2":
+            raise ValueError("graph capture does not support flash_attention_2")
+
         batch_size = prompt_ids.shape[0]
         prompt_len = prompt_ids.shape[1]
         max_len = prompt_len + max_new_tokens
@@ -1474,8 +1491,18 @@ class HybridEngineRollout(RolloutEngine):
         static_attn[:, :, :, prompt_len] = True
 
         # Decode-step mask argument: the per-type dict for hybrid models, the
-        # plain 4-D tensor for standard full-attention ones.
+        # plain 4-D tensor for standard full-attention ones. The segKI decode
+        # kernels consume the bool mask directly; standard-model captures
+        # additionally get master's pre-built additive SDPA mask (#9004) to
+        # bypass the host-side mask checks that abort stream capture.
         decode_mask = {"full_attention": static_attn, "linear_attention": None} if is_hybrid else static_attn
+        if not is_hybrid:
+            _2d = torch.zeros(batch_size, max_len, dtype=torch.long, device=device)
+            _2d[:, :prompt_len] = prompt_attn
+            _2d[:, prompt_len] = 1
+            static_causal_attn = torch.zeros((batch_size, 1, 1, max_len), dtype=model_dtype, device=device)
+            self._update_static_causal_attention(_2d, static_causal_attn)
+            decode_mask = static_causal_attn
 
         # Persistent decode position tensors as VIEWS of write_pos: the
         # captured forwards read this memory, and the in-graph step kernel
@@ -1664,6 +1691,10 @@ class HybridEngineRollout(RolloutEngine):
             pos = prompt_len + step
             write_pos.fill_(pos)
             static_attn[:, :, :, pos] = True
+            if not is_hybrid:
+                static_causal_attn[:, :, :, :pos + 1] = 0
+
+            # Replay
             get_accelerator().replay_graph(graph)
             if is_greedy:
                 next_token = static_logits[:, -1, :].argmax(dim=-1, keepdim=True)
