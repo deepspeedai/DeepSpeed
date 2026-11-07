@@ -602,8 +602,8 @@ class HybridEngineRollout(RolloutEngine):
             request_by_id[request_id] = request
             responses[request_id] = []
 
-        state = self._get_continuous_graph_state(module, max_batch_size, prompt_len, max_cache_len, device,
-                                                 model_dtype, DeepSpeedStaticCache)
+        state = self._get_continuous_graph_state(module, max_batch_size, max_cache_len, device, model_dtype,
+                                                 DeepSpeedStaticCache)
         cache = state.cache
         static_input = state.static_input
         static_attention = state.static_attention
@@ -756,12 +756,13 @@ class HybridEngineRollout(RolloutEngine):
                 and self.continuous_cache_capacity < prompt_len + sampling.max_new_tokens):
             raise ValueError("continuous_cache_capacity must fit the prompt and all generated tokens")
 
-    def _get_continuous_graph_state(self, module, max_batch_size, prompt_len, max_cache_len, device, model_dtype,
-                                    cache_type):
-        signature = self._continuous_graph_signature(module, max_batch_size, prompt_len, max_cache_len, device,
-                                                     model_dtype)
+    def _get_continuous_graph_state(self, module, max_batch_size, max_cache_len, device, model_dtype, cache_type):
+        signature = self._continuous_graph_signature(module, max_batch_size, max_cache_len, device, model_dtype)
         state = self._continuous_graph_state
         if state is None or state.signature != signature:
+            # Free the stale cache and graph pool before allocating replacements.
+            self._continuous_graph_state = None
+            state = None
             cache = cache_type(
                 module.config,
                 batch_size=max_batch_size,
@@ -813,10 +814,15 @@ class HybridEngineRollout(RolloutEngine):
         return state
 
     @staticmethod
-    def _continuous_graph_signature(module, max_batch_size, prompt_len, max_cache_len, device, model_dtype):
-        parameter_signature = tuple((parameter.data_ptr(), parameter._version) for parameter in module.parameters())
-        return (id(module), device.type, device.index, model_dtype, max_batch_size, prompt_len, max_cache_len,
-                parameter_signature)
+    def _continuous_graph_signature(module, max_batch_size, max_cache_len, device, model_dtype):
+        # Replay reads parameters through the address and layout fixed at capture, so
+        # in-place value updates need no recapture, but a moved or re-laid-out
+        # parameter does. Prefill runs eagerly, so the prompt width only matters
+        # through max_cache_len.
+        parameter_signature = tuple(
+            (parameter.data_ptr(), parameter.device, parameter.dtype, tuple(parameter.shape), parameter.stride())
+            for parameter in module.parameters())
+        return (id(module), device.type, device.index, model_dtype, max_batch_size, max_cache_len, parameter_signature)
 
     @staticmethod
     def _update_static_causal_attention(static_attention, static_causal_attention):
@@ -1449,3 +1455,15 @@ class HybridEngineRollout(RolloutEngine):
     def sync_weights(self, step: int) -> None:  # noqa: ARG002
         """No-op: hybrid engine reads model weights live."""
         return None
+
+    def shutdown(self) -> None:
+        """Release the captured continuous decode graph and its static cache.
+
+        The rollout stays usable and captures again on the next graph rollout.
+        Under tensor parallelism the graph holds captured collectives, so release
+        it before destroying the process group.
+        """
+        if self._continuous_graph_state is None:
+            return
+        get_accelerator().synchronize()
+        self._continuous_graph_state = None

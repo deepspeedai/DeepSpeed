@@ -292,3 +292,79 @@ def test_continuous_graph_matches_pretrained_model_when_enabled():
         accelerator.create_graph = original_create_graph
 
     assert capture_count[0] == 1
+
+
+def test_continuous_graph_recaptures_only_when_parameter_layout_changes():
+    accelerator = get_accelerator()
+    if not accelerator.is_available() or accelerator.create_graph() is None:
+        pytest.skip("graph capture is required for continuous graph rollout coverage")
+
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    device = torch.device(accelerator.device_name())
+    torch.manual_seed(0)
+    config = LlamaConfig(vocab_size=64,
+                         hidden_size=64,
+                         intermediate_size=128,
+                         num_hidden_layers=2,
+                         num_attention_heads=4,
+                         num_key_value_heads=2,
+                         max_position_embeddings=64)
+    config._attn_implementation = "sdpa"
+    eager_model = LlamaForCausalLM(config).to(device).eval()
+    graph_model = LlamaForCausalLM(config).to(device).eval()
+    graph_model.load_state_dict(eager_model.state_dict())
+    tokenizer = SimpleNamespace(pad_token_id=0, eos_token_id=-1)
+    eager_rollout = HybridEngineRollout(SimpleNamespace(module=eager_model), tokenizer)
+    # A pinned capacity keeps the decode shape fixed across prompt widths.
+    graph_rollout = HybridEngineRollout(
+        SimpleNamespace(module=graph_model),
+        tokenizer,
+        cfg=HybridEngineRolloutConfig(use_graph_capture=True, continuous_cache_capacity=24),
+    )
+    eager_sampling = SamplingConfig(max_new_tokens=8, temperature=0)
+    graph_sampling = SamplingConfig(max_new_tokens=8, temperature=0, continuous_batch_size=2)
+    generator = torch.Generator().manual_seed(1)
+    short_prompts = torch.randint(1, 64, (3, 8), generator=generator).to(device)
+    long_prompts = torch.randint(1, 64, (3, 12), generator=generator).to(device)
+
+    # The continuous path also calls create_graph() as a support probe, so count captures instead.
+    original_capture_to_graph = accelerator.capture_to_graph
+    capture_count = [0]
+
+    def counted_capture_to_graph(*args, **kwargs):
+        capture_count[0] += 1
+        return original_capture_to_graph(*args, **kwargs)
+
+    accelerator.capture_to_graph = counted_capture_to_graph
+    try:
+        outputs = []
+        for step, prompt_ids in enumerate((short_prompts, short_prompts, long_prompts, short_prompts)):
+            if step == 1:
+                # Apply the same in-place update an optimizer step would make.
+                with torch.no_grad():
+                    for eager_param, graph_param in zip(eager_model.parameters(), graph_model.parameters()):
+                        delta = torch.randn_like(eager_param) * 0.05
+                        eager_param.add_(delta)
+                        graph_param.add_(delta)
+            if step == 3:
+                # Same address, new strides: replay would read the old layout.
+                with torch.no_grad():
+                    eager_model.lm_head.weight.transpose_(0, 1)
+                    graph_model.lm_head.weight.transpose_(0, 1)
+            request = RolloutRequest(prompt_ids, torch.ones_like(prompt_ids))
+            expected = eager_rollout.generate(request, eager_sampling)
+            output = graph_rollout.generate(request, graph_sampling)
+            assert torch.equal(output.input_ids, expected.input_ids)
+            outputs.append(output.input_ids)
+    finally:
+        accelerator.capture_to_graph = original_capture_to_graph
+
+    # The update must change the tokens, otherwise stale weights would also pass.
+    assert not torch.equal(outputs[0], outputs[1])
+    assert capture_count[0] == 2
+
+    cache_bytes = graph_rollout.get_last_continuous_stats()["cache_memory_bytes"]
+    allocated = accelerator.memory_allocated()
+    graph_rollout.shutdown()
+    assert accelerator.memory_allocated() <= allocated - cache_bytes
