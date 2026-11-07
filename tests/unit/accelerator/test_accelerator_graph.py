@@ -74,3 +74,12 @@ def test_klxpu_keeps_explicit_graph_capture_opt_out():
 
     accelerator = object.__new__(KLXPU_Accelerator)
     assert accelerator.is_graph_capture_supported() is False
+
+
+def test_xpu_opt_in_matches_torch_xpu_stream_capture_capability():
+    import torch.xpu
+    from deepspeed.accelerator.xpu_accelerator import XPU_Accelerator
+
+    accelerator = object.__new__(XPU_Accelerator)
+    torch_can_capture = torch.xpu.is_available() and hasattr(torch.xpu, 'is_current_stream_capturing')
+    assert accelerator.is_graph_capture_supported() == torch_can_capture
