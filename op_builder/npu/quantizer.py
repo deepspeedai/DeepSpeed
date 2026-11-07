@@ -18,12 +18,11 @@ class NPUQuantizer:
     Wire format, per group:
         scale   = 2**num_bits / (2 * max(|x|))   (1.0 when max == 0)
         params  = 1 / scale                      (fp32, the value that is sent)
-        q       = trunc(x * scale), clamped to [-2**(b-1), 2**(b-1)-1]
+        q       = round(x * scale), clamped to [-2**(b-1), 2**(b-1)-1]
 
-    Truncation is toward zero: the reference implementation casts to an
-    integer type, so a round-to-nearest "simplification" would silently
-    change every quantized value. tests/unit/ops/quantizer/test_npu_quantizer.py
-    pins this against an independent per-group reference.
+    Rounding is half to even, like the reference kernel's __float2int_rn.
+    tests/unit/ops/quantizer/test_npu_quantizer.py pins this against the
+    torch.round reference that the CUDA quantizer test uses.
 
     Known deviation: fp32/fp64 division on this accelerator is approximate
     (1 ulp off on ~5% of values), so params can differ from a correctly
@@ -32,10 +31,9 @@ class NPUQuantizer:
     five orders below the quantization error (~1e-2), and the wire format is
     transient (checkpoints store unquantized weights).
 
-    Native operators: torch_npu's npu_quantize family rounds half-to-even
-    and exposes no truncation mode, so no native op can honor the wire
-    format today. If CANN later adds one, _quantize_groups is the single
-    swap point.
+    Native operators: torch_npu's npu_quantize family also rounds
+    half-to-even, so _quantize_groups is the single swap point if a native
+    op is adopted later.
     """
 
     Symmetric = 0
@@ -66,11 +64,11 @@ class NPUQuantizer:
         # The stored/sent value is the reciprocal of the scale; dequantize
         # multiplies it back, so the round trip is q * (1/scale) == q * scale.
         stored = scale.reciprocal().view(-1)
-        # Truncate toward zero, then clamp into the representable range.
+        # Round half to even, then clamp into the representable range.
         # Chained in-place form: xg is always a fresh float() copy here.
         q_min = -(1 << (num_bits - 1))
         q_max = (1 << (num_bits - 1)) - 1
-        xg.mul_(scale.view(-1, 1)).trunc_().clamp_(q_min, q_max)
+        xg.mul_(scale.view(-1, 1)).round_().clamp_(q_min, q_max)
         return xg, stored
 
     @staticmethod
