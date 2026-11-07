@@ -57,6 +57,13 @@ class TPTrainingConfig(DeepSpeedConfigModel):
     """Optional Liger CE acceleration, or ``fused_linear`` to fuse the LM-head projection into the loss;
     the PyTorch reference remains the default."""
 
+    vocab_parallel_embedding: bool = False
+    """
+    Shard an input embedding that is not tied to the output layer along the vocabulary: each rank keeps 1/tp of the
+    rows, looks up the tokens in its part and the partial results are summed over the tensor-parallel group. A tied
+    embedding follows vocab_parallel_lm_head instead.
+    """
+
     tensor_parallel: TPConfig = Field({}, alias="tp")
     """
     Configuration for tensor parallelism used to split the model across several
