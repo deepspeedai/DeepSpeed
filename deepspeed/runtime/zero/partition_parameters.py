@@ -267,7 +267,7 @@ def zero_wrapper_for_fp_tensor_constructor(fn: Callable, target_fp_dtype: torch.
         if kwargs.get("device", None) is None and target_device is not None:
             kwargs['device'] = target_device
         tensor: Tensor = fn(*args, **kwargs)
-        if target_fp_dtype is not None and tensor.is_floating_point():
+        if target_fp_dtype is not None and kwargs.get("dtype") is None and tensor.is_floating_point():
             tensor.data = tensor.data.to(target_fp_dtype)
 
         return tensor
@@ -285,7 +285,7 @@ def get_new_tensor_fn_for_dtype(target_fp_dtype: torch.dtype, target_device: tor
         else:
             tensor = _orig_torch_empty(0, device=target_device).new_empty(*args, **kwargs)
 
-        if tensor.is_floating_point() and target_fp_dtype is not None:
+        if tensor.is_floating_point() and target_fp_dtype is not None and kwargs.get("dtype") is None:
             tensor = tensor.to(target_fp_dtype)
 
         return tensor
@@ -1002,6 +1002,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
             enabled (bool, optional): If ``False``, this context has no
                 effect. Defaults to ``True``.
             dtype (``dtype``, optional): Can be used to change the data type of the parameters.
+                Floating-point tensor constructors without an explicit ``dtype`` use this type.
                 Supported options are ``torch.half`` and ``torch.float``. Defaults to ``None``
             mpu (``object``, optional): A model parallelism unit object that implements get_{model,data}_parallel_{rank,group,world_size}.
             zero_param_parallel_group(``object``, optional): Parallel (comm) group for dual partitioning of ZeRO params.
@@ -1241,6 +1242,11 @@ class Init(InsertPostInitMethodToModuleSubClasses):
             if not is_zero_param(param):
                 if not get_accelerator().on_accelerator(param):
                     param.data = param.data.to(self.local_device)
+
+                # Constructors keep an explicit dtype, but ZeRO-3 flattens parameters into buffers of one dtype.
+                if (self.tensor_overrides and DeepSpeedTensorOverride.dtype in self.tensor_overrides
+                        and param.is_floating_point() and param.dtype != self.dtype):
+                    param.data = param.data.to(self.dtype)
 
                 if name == 'weight' and self.quantized_initialization and type(module) in WEIGHT_QUANTIZATION_LAYERS:
                     _quantize_param(param, self.quantized_initialization)
