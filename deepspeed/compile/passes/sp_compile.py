@@ -12,6 +12,7 @@ from torch._subclasses.fake_tensor import FakeTensorMode, maybe_get_fake_mode
 from torch.fx import GraphModule, Node
 from torch.fx.passes.fake_tensor_prop import FakeTensorProp
 from torch.fx.experimental.symbolic_shapes import ShapeEnv
+from torch.nn._reduction import legacy_get_string
 
 from deepspeed.compile import constants
 
@@ -135,9 +136,88 @@ def pass_shard_input_ids(gm: GraphModule, example_inputs):
     shard_tensor_node(gm, input_ids_node)
 
 
+def _get_cross_entropy_arg(loss_node: Node, name: str, position: int, default):
+    if name in loss_node.kwargs:
+        return loss_node.kwargs[name]
+    if len(loss_node.args) > position:
+        return loss_node.args[position]
+    return default
+
+
 def pass_shard_label_ids(gm: GraphModule, example_inputs):
+    """
+    Shard the labels and make every cross entropy on them return the loss of the full sequence.
+
+    Each cross entropy is summed per shard and combined over the SP group, which weights shards
+    with different numbers of valid tokens correctly.
+    """
     label_ids_node = get_label_id_node(gm)
+
+    label_users = set()
+    worklist = [label_ids_node]
+    while worklist:
+        node = worklist.pop()
+        if node not in label_users:
+            label_users.add(node)
+            worklist.extend(node.users)
+
+    loss_nodes = [
+        node for node in gm.graph.nodes if node.target is torch.nn.functional.cross_entropy
+        and _get_cross_entropy_arg(node, "target", 1, None) in label_users
+    ]
     shard_tensor_node(gm, label_ids_node)
+
+    for loss_node in loss_nodes:
+        weight = _get_cross_entropy_arg(loss_node, "weight", 2, None)
+        if weight is not None:
+            raise RuntimeError("AutoSP does not support class-weighted cross entropy on sequence-sharded labels")
+        reduction = _get_cross_entropy_arg(loss_node, "reduction", 6, "mean")
+        size_average = _get_cross_entropy_arg(loss_node, "size_average", 3, None)
+        reduce = _get_cross_entropy_arg(loss_node, "reduce", 5, None)
+        if size_average is not None or reduce is not None:
+            # The deprecated arguments override reduction inside cross entropy.
+            reduction = legacy_get_string(size_average, reduce, emit_warning=False)
+        if reduction not in ("mean", "sum"):
+            raise RuntimeError(f"AutoSP supports cross entropy with reduction 'mean' or 'sum', got {reduction!r}")
+        ignore_index = _get_cross_entropy_arg(loss_node, "ignore_index", 4, -100)
+
+        target_node = _get_cross_entropy_arg(loss_node, "target", 1, None)
+        if get_node_shape_meta(target_node).dtype.is_floating_point:
+            # Class probability targets have no ignore_index, so counting valid tokens does not apply.
+            raise RuntimeError("AutoSP supports cross entropy with class index targets only, not class probabilities")
+        # Under autocast, cross entropy returns FP32 even for half-precision logits.
+        loss_dtype = get_node_shape_meta(loss_node).dtype
+        with gm.graph.inserting_after(target_node):
+            valid_mask = gm.graph.call_function(operator.ne, args=(target_node, ignore_index))
+        with gm.graph.inserting_after(valid_mask):
+            valid_tokens = gm.graph.call_function(torch.sum, args=(valid_mask, ))
+
+        # Sum the per-token losses in FP32: a half-precision sum over a long shard overflows even
+        # where the mean the model asked for would not.
+        if "reduction" in loss_node.kwargs or len(loss_node.args) <= 6:
+            loss_node.update_kwarg("reduction", "none")
+        else:
+            loss_node.update_arg(6, "none")
+        for name, position in (("size_average", 3), ("reduce", 5)):
+            if name in loss_node.kwargs:
+                loss_node.update_kwarg(name, None)
+            elif len(loss_node.args) > position:
+                loss_node.update_arg(position, None)
+
+        with gm.graph.inserting_after(loss_node):
+            token_losses = gm.graph.call_method("float", args=(loss_node, ))
+        with gm.graph.inserting_after(token_losses):
+            local_loss_sum = gm.graph.call_function(torch.sum, args=(token_losses, ))
+        with gm.graph.inserting_after(local_loss_sum):
+            aggregated = gm.graph.call_function(torch.ops.autosp.aggregate_loss.default,
+                                                args=(local_loss_sum, valid_tokens, reduction == "mean"))
+        with gm.graph.inserting_after(aggregated):
+            global_loss = gm.graph.call_function(operator.getitem, args=(aggregated, 0))
+        with gm.graph.inserting_after(global_loss):
+            # Return the loss in the dtype cross entropy would have produced.
+            output_loss = gm.graph.call_method("to", args=(global_loss, loss_dtype))
+        loss_node.replace_all_uses_with(output_loss)
+        token_losses.update_arg(0, loss_node)
 
 
 def pass_shard_position_ids(gm: GraphModule, example_inputs):
