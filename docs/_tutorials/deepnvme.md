@@ -232,8 +232,8 @@ Running DeepNVMe performance tuning on ['/local_nvme/']
 Best performance (GB/sec): read =  3.69, write =  3.18
 {
    "aio": {
-      "single_submit": "false",
-      "overlap_events": "true",
+      "single_submit": false,
+      "overlap_events": true,
       "intra_op_parallelism": 8,
       "queue_depth": 32,
       "block_size": 1048576
