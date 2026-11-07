@@ -489,7 +489,7 @@ class MMapIndexedDataset(torch.utils.data.Dataset):
         return self._path
 
     def __setstate__(self, state):
-        self._do_init(state)
+        self._do_init(state, skip_warmup=True)
 
     def _do_init(self, path, skip_warmup):
         self._path = path
