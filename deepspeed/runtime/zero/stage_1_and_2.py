@@ -946,7 +946,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         # State initialization for the Adagrad optimizer occurs at construction as opposed to other optimizers
         # which do lazy initialization of the state at the first call to step.
         if isinstance(self.optimizer, torch.optim.Adagrad):
-            self.optimizer = torch.optim.Adagrad(self.single_partition_of_fp32_groups, **self.optimizer.defaults)
+            self.optimizer = torch.optim.Adagrad(self.optimizer.param_groups, **self.optimizer.defaults)
 
         if not self.cpu_offload:
             for group in self.single_partition_of_fp32_groups:
@@ -1121,6 +1121,9 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         if not self.low_precision_master_weights_and_grads:
             dest_buffer.copy_(self.accumulated_grads_in_cpu[param_id].view(-1), non_blocking=True)
         else:
+            # Overflow checks read the full restored gradient, including the
+            # unowned region that may still contain a previous step's NaNs.
+            dest_buffer.zero_()
             dest_buffer.narrow(0, source_offset, num_elements).copy_(self.accumulated_grads_in_cpu[param_id].view(-1),
                                                                      non_blocking=True)
         # Clone so the shared temp buffer can be reused for the next parameter.

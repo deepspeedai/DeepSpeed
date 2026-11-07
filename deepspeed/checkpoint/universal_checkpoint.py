@@ -235,7 +235,8 @@ def _resolve_autotp_partition(current_param, ckpt_dict, full_hp_param, tp_rank, 
 
 def load_hp_checkpoint_state(self, folder, tp_rank, tp_world_size, ep_rank=0, ep_size=1, load_optimizer_states=True):
     hp_mapping = self._hp_mapping
-    hp_mapping.optim_fragment = {}
+    if load_optimizer_states:
+        hp_mapping.optim_fragment = {}
 
     # Stem to the filename listdir returned. Only an exact "{stem}.pt" file counts.
     hp_keys = {}

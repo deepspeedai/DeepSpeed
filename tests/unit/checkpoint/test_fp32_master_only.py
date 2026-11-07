@@ -6,6 +6,7 @@
 import argparse
 import glob
 import os
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -14,7 +15,9 @@ import deepspeed
 import deepspeed.comm as dist
 from deepspeed.accelerator import get_accelerator
 from deepspeed.checkpoint.constants import UNIVERSAL_CHECKPOINT_INFO
+from deepspeed.runtime.engine import DeepSpeedEngine
 from deepspeed.runtime.zero.utils import ZeRORuntimeException
+from deepspeed.utils import safe_get_full_optimizer_state, safe_set_full_optimizer_state
 from unit.common import DistributedTest, get_master_port
 
 TAG = "fp32-masters"
@@ -221,6 +224,73 @@ def test_elastic_dp_change_repartitions_masters_and_drops_moments(dp2_checkpoint
     _spawn(_load_dp1_elastic, dp2_checkpoint, get_master_port())
 
 
+def test_pipeline_load_checks_shards_before_serial_wait(monkeypatch):
+    recv_called = False
+
+    def recv(*args, **kwargs):
+        nonlocal recv_called
+        recv_called = True
+
+    monkeypatch.setattr(dist, "recv", recv)
+    engine = SimpleNamespace(load_universal_checkpoint=lambda: False,
+                             seq_dp_world_size=1,
+                             loaded_checkpoint_dp_world_size=1,
+                             bfloat16_enabled=lambda: True,
+                             _get_all_zero_checkpoint_names=lambda load_dir, tag, bf16_mode: None,
+                             _config=SimpleNamespace(zero_config=SimpleNamespace(pipeline_loading_checkpoint=True)))
+
+    with pytest.raises(ZeRORuntimeException, match="Saved fp32 weights are required"):
+        DeepSpeedEngine._load_zero_checkpoint(engine, "/missing", TAG, load_optimizer_states=False)
+    assert not recv_called
+
+
+def test_nvme_master_only_load_copies_only_fp32_swap_files(tmpdir):
+    load_dir = os.path.join(str(tmpdir), "checkpoint")
+    source_dir = os.path.join(load_dir, TAG, "offloaded_tensors", "rank00")
+    target_dir = os.path.join(str(tmpdir), "offload")
+    os.makedirs(source_dir)
+    os.makedirs(target_dir)
+
+    names = ["master.swp", "exp_avg.swp", "exp_avg_sq.swp"]
+    source_paths = [os.path.join(source_dir, name) for name in names]
+    target_paths = [os.path.join(target_dir, name) for name in names]
+    for path in source_paths:
+        with open(path, "wb") as checkpoint_file:
+            checkpoint_file.write(b"saved")
+    for path in target_paths:
+        with open(path, "wb") as swap_file:
+            swap_file.write(b"fresh")
+
+    reset_called = False
+
+    def reset_swap_buffers():
+        nonlocal reset_called
+        reset_called = True
+
+    swap_info = SimpleNamespace(get_swap_paths=lambda: target_paths)
+    optimizer_swapper = SimpleNamespace(swap_folder=target_dir, swap_params_info={0: swap_info})
+    optimizer = SimpleNamespace(optimizer_swapper=optimizer_swapper, reset_swap_buffers=reset_swap_buffers)
+    engine = SimpleNamespace(load_universal_checkpoint=lambda: False,
+                             _optimizer_has_ckpt_event_prologue=lambda: False,
+                             _load_checkpoint=lambda *args, **kwargs: ("model.pt", {}),
+                             zero_optimization_partition_weights=lambda: True,
+                             zero_optimization=lambda: True,
+                             zero_nvme_offload_optimizer=lambda: True,
+                             use_node_local_storage=lambda: False,
+                             global_rank=0,
+                             optimizer=optimizer,
+                             _optimizer_has_ckpt_event_epilogue=lambda: False)
+
+    DeepSpeedEngine.load_checkpoint(engine, load_dir, tag=TAG, load_optimizer_states=False)
+
+    with open(target_paths[0], "rb") as swap_file:
+        assert swap_file.read() == b"saved"
+    for path in target_paths[1:]:
+        with open(path, "rb") as swap_file:
+            assert swap_file.read() == b"fresh"
+    assert reset_called
+
+
 class TestFp32MasterOnlyLoad(DistributedTest):
     world_size = 1
     backend = "gloo"
@@ -232,6 +302,9 @@ class TestFp32MasterOnlyLoad(DistributedTest):
 
         engine = _init_engine()
         saved = _train_and_detach_masters(engine)
+        engine.optimizer.clip_grad = 17.0
+        engine.optimizer.overflow = True
+        engine.optimizer.dynamic_loss_scale = not engine.optimizer.dynamic_loss_scale
         load_dir = os.path.join(str(tmpdir), "legacy")
         engine.save_checkpoint(load_dir, tag=TAG)
 
@@ -243,6 +316,8 @@ class TestFp32MasterOnlyLoad(DistributedTest):
         assert not _has_moments(module_only)
 
         loaded = _init_engine()
+        optimizer_globals = (loaded.optimizer.clip_grad, loaded.optimizer.overflow,
+                             loaded.optimizer.dynamic_loss_scale)
         loaded.load_checkpoint(load_dir,
                                tag=TAG,
                                load_module_only=False,
@@ -250,6 +325,8 @@ class TestFp32MasterOnlyLoad(DistributedTest):
                                load_lr_scheduler_states=False)
         assert torch.equal(_masters(loaded).cpu(), saved.cpu())
         assert not _has_moments(loaded)
+        assert (loaded.optimizer.clip_grad, loaded.optimizer.overflow,
+                loaded.optimizer.dynamic_loss_scale) == optimizer_globals
 
     def test_universal_load_keeps_masters_and_drops_moments(self, tmpdir):
         if not get_accelerator().is_bf16_supported():
@@ -288,6 +365,20 @@ class TestFp32MasterOnlyLoad(DistributedTest):
         expected = saved.to(torch.bfloat16).to(saved.dtype).cpu()
         assert torch.equal(rebuilt, expected)
         assert not _has_moments(module_only)
+
+        stepped = _init_engine(load_universal=True)
+        _train_and_detach_masters(stepped)
+        param = stepped.module.weight
+        exp_avg = safe_get_full_optimizer_state(param, "exp_avg").clone()
+        stepped.load_checkpoint(os.path.join(str(tmpdir), "universal"),
+                                tag=TAG,
+                                load_module_only=False,
+                                load_optimizer_states=False,
+                                load_lr_scheduler_states=False)
+        assert torch.equal(safe_get_full_optimizer_state(param, "exp_avg"), exp_avg)
+        replacement = torch.full_like(exp_avg, 0.25)
+        safe_set_full_optimizer_state(param, replacement, "exp_avg")
+        assert torch.equal(safe_get_full_optimizer_state(param, "exp_avg"), replacement)
 
     def test_missing_fp32_shards_only_allows_module_only_load(self, tmpdir):
         if not get_accelerator().is_bf16_supported():

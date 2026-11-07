@@ -1097,6 +1097,9 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         nvme_fp16_num_elems = []
         nvme_fp32_dest_tensors = []
         fp32_element_size = torch.tensor([], dtype=self.master_weights_and_grads_dtype).element_size()
+        # Sub-groups whose master partition is the weight partition itself (no second copy); offload_states and
+        # reload_states move those with lp_params.
+        self.aliased_fp32_sub_groups = set()
 
         # Assign portion of subgroup to cpu, the other to gpu.
         if self.offload_optimizer:
@@ -1167,11 +1170,12 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                     self.fp32_partitioned_groups_flat.append(master)
                     self._create_momentum_buffer(num_elements, i, ds_id)
                 elif self.fp16_partitioned_groups_flat[i].dtype == self.master_weights_and_grads_dtype and \
-                        self.fp16_partitioned_groups_flat[i].device == self.device:
-                    # When torch autocast is enabled, weights in the provided model (and thus groups in the so-called
-                    # "fp16" partitioned groups) are already in and updated using fp32. In such cases we don't need
-                    # another copy of the weights.
+                        self.fp16_partitioned_groups_flat[i].device == torch.device(self.device):
+                    # When the weights are already in the master dtype (a float32 model, with or without torch
+                    # autocast), the groups in the so-called "fp16" partitioned groups are updated in place and we
+                    # don't need another copy of the weights.
                     self.fp32_partitioned_groups_flat.append(self.fp16_partitioned_groups_flat[i])
+                    self.aliased_fp32_sub_groups.add(i)
                     self._create_momentum_buffer(num_elements, i, ds_id)
                 else:
                     converted = self.fp16_partitioned_groups_flat[i].to(self.device,
@@ -1362,7 +1366,9 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         # Initialize the optimizer states with the flattened fp32 partition.
         if is_adagrad:
-            self.optimizer = torch.optim.Adagrad(self.fp32_partitioned_groups_flat, **self.optimizer.defaults)
+            self._set_fp32_optimizer_param_groups()
+            self.optimizer = torch.optim.Adagrad(self.optimizer.param_groups, **self.optimizer.defaults)
+            self._clear_fp32_optimizer_param_groups()
 
         self.timers(INIT_OPTIMIZER_TIMER).stop()
         self.timers.log(timer_names)
@@ -1601,6 +1607,10 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             self.autoep_folding_tp_group = None
             self.autoep_folding_spec = None
             return
+        if self.offload_optimizer and self.use_muon:
+            # The offloaded Muon update gathers each parameter's full gradient on its own path, which
+            # has not been checked against the folded gradient families.
+            raise ValueError("Muon with ZeRO optimizer offload is not supported with AutoEP+AutoTP folding yet.")
         self.autoep_folding_tp_group = groups.get_tensor_model_parallel_group()
         self.autoep_folding_spec = folding_spec
 
@@ -3567,7 +3577,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                 else:
                     self.optimizer.state[p][key] = saved
 
-    def _rigid_load_state_dict(self, state_dict, load_optimizer_states=True):
+    def _rigid_load_state_dict(self, state_dict, load_optimizer_states=True, load_from_fp32_weights=True):
         # I think it should actually be ok to reload the optimizer before the model.
         if load_optimizer_states:
             self.loss_scaler = state_dict[LOSS_SCALER]
@@ -3616,6 +3626,9 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             for partitioned_param, q in zip(self.fp16_partitioned_groups[sub_group_id], updated_params):
                 partitioned_param.data = q.data
 
+        if not load_from_fp32_weights:
+            self.refresh_fp32_params()
+
     # TODO: Support different/changing load/save DP degree.
     def load_state_dict(self,
                         state_dict_list,
@@ -3657,7 +3670,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             self._load_universal_checkpoint(checkpoint_folder, load_optimizer_states, load_from_fp32_weights)
         else:
             self._rigid_load_state_dict(state_dict_list[dist.get_rank(group=self.dp_process_group)],
-                                        load_optimizer_states=load_optimizer_states)
+                                        load_optimizer_states=load_optimizer_states,
+                                        load_from_fp32_weights=load_from_fp32_weights)
 
             # when use loading checkpoint serial, after finish loading, we need to
             # delete the temp state_dict_list variable to save memory, then trigger
@@ -3678,6 +3692,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
     def _load_universal_checkpoint(self, checkpoint_folder, load_optimizer_states, load_from_fp32_weights):
         if load_optimizer_states:
             self.load_hp_checkpoint_state_from_checkpoint_dir_stage3(checkpoint_folder)
+            if not load_from_fp32_weights:
+                self.refresh_fp32_params()
         else:
             self.load_module_checkpoint_state_from_checkpoint_dir_stage3(checkpoint_folder, True)
 
@@ -3888,6 +3904,27 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
     def empty_partition_cache(self):
         self.parameter_offload.empty_partition_cache()
 
+    def _fp32_partitions_with_own_storage(self):
+        """The master partitions that are not also a weight partition (see aliased_fp32_sub_groups). An aliased one has
+        no storage of its own, so moving it apart from lp_params would split the two copies."""
+        return [
+            partition for i, partition in enumerate(self.fp32_partitioned_groups_flat)
+            if i not in self.aliased_fp32_sub_groups
+        ]
+
+    def _point_aliased_fp32_partitions_at_lp_buffer(self):
+        """After lp_param_buffer moves, point each aliased master partition at its slice of it again. The master
+        tensor stays the one the optimizer holds, and on the device it is again the sub-group's weight partition."""
+        offset = 0
+        for i, sub_group in enumerate(self.fp16_groups):
+            sub_group_numel = sum(param.partition_numel() for param in sub_group)
+            if i in self.aliased_fp32_sub_groups:
+                master = self.fp32_partitioned_groups_flat[i]
+                master.data = self.lp_param_buffer.narrow(0, offset, sub_group_numel)
+                if i < len(self.fp16_partitioned_groups_flat):
+                    self.fp16_partitioned_groups_flat[i] = master
+            offset += sub_group_numel
+
     def offload_states(self,
                        include: Container[OffloadStateTypeEnum] = None,
                        device: OffloadDeviceEnum = OffloadDeviceEnum.cpu,
@@ -3906,18 +3943,27 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         # HP param
         if needs_offload(OffloadStateTypeEnum.hp_params):
+            lp_params_stay = (OffloadStateTypeEnum.lp_params not in self.offloaded_states
+                              and not needs_offload(OffloadStateTypeEnum.lp_params))
+            if self.aliased_fp32_sub_groups and lp_params_stay:
+                # A caller offloading hp_params to free device memory would otherwise not learn that these
+                # sub-groups stayed.
+                logger.warning_once(
+                    f"offload_states: the fp32 master copy of {len(self.aliased_fp32_sub_groups)} sub-group(s) is the "
+                    "weight partition itself, so it moves only with lp_params; offloading hp_params without lp_params "
+                    "frees no device memory for it")
             if pin_memory:
                 if not hasattr(self, "hp_params_pin_buffers"):
                     self.hp_params_pin_buffers = [
                         get_accelerator().pin_memory(torch.empty_like(t, device=device))
-                        for t in self.fp32_partitioned_groups_flat
+                        for t in self._fp32_partitions_with_own_storage()
                     ]
 
-                for src_tensor, dest_buf in zip(self.fp32_partitioned_groups_flat, self.hp_params_pin_buffers):
+                for src_tensor, dest_buf in zip(self._fp32_partitions_with_own_storage(), self.hp_params_pin_buffers):
                     dest_buf.copy_(src_tensor, non_blocking=non_blocking)
                     src_tensor.data = dest_buf
             else:
-                for buf in self.fp32_partitioned_groups_flat:
+                for buf in self._fp32_partitions_with_own_storage():
                     buf.data = buf.data.to(device, non_blocking=non_blocking)
             self.offloaded_states.add(OffloadStateTypeEnum.hp_params)
 
@@ -3938,6 +3984,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                 tensor.data = cpu_buffer.narrow(0, offset, tensor_numel)
 
             self.fp16_partitioned_groups_flat.clear()
+            self._point_aliased_fp32_partitions_at_lp_buffer()
             self.offloaded_states.add(OffloadStateTypeEnum.lp_params)
 
         # LP grad
@@ -3981,10 +4028,10 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         # HP param
         if OffloadStateTypeEnum.hp_params in self.offloaded_states:
             if hasattr(self, "hp_params_pin_buffers"):
-                for src, dest in zip(self.hp_params_pin_buffers, self.fp32_partitioned_groups_flat):
+                for src, dest in zip(self.hp_params_pin_buffers, self._fp32_partitions_with_own_storage()):
                     dest.data = src.to(device, non_blocking=non_blocking)
             else:
-                for buf in self.fp32_partitioned_groups_flat:
+                for buf in self._fp32_partitions_with_own_storage():
                     buf.data = buf.data.to(device, non_blocking=non_blocking)
             self.offloaded_states.remove(OffloadStateTypeEnum.hp_params)
 
@@ -3994,6 +4041,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                 self, "lp_param_contiguous_pin_buffer") else self.lp_param_buffer
             self.lp_param_buffer.data = cpu_buffer.data.to(device, non_blocking=non_blocking)
             self._set_fp16_partitioned_groups_flat()
+            self._point_aliased_fp32_partitions_at_lp_buffer()
 
             parameter_partitions = self._get_parameter_partitions()
             for tensor, offset, tensor_numel in get_mapping_to_flat_buffer(parameter_partitions):
