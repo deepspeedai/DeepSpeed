@@ -81,3 +81,20 @@ def test_pre_norm(batch, seq_len, channels, dtype):
 
     assert allclose(new_output[0], ref_output[0])
     #assert allclose(new_output[1], ref_output[1])
+
+
+@pytest.mark.inference_ops
+@pytest.mark.parametrize("shape", [(0, 128), (0, 1, 1024), (1, 0, 1024)])
+@pytest.mark.parametrize("pre_norm", [False, True])
+def test_empty_rms_norm_launcher(shape, pre_norm):
+    device = get_accelerator().current_device_name()
+    vals = torch.empty(shape, dtype=torch.float16, device=device)
+    gamma = torch.ones(shape[-1], dtype=vals.dtype, device=device)
+    module = InferenceBuilder().load()
+    if pre_norm:
+        outputs = module.pre_rms_norm(vals, vals, gamma, 1e-5)
+    else:
+        outputs = (module.rms_norm(vals, gamma, 1e-5), )
+    get_accelerator().synchronize()
+    assert len(outputs) == (2 if pre_norm else 1)
+    assert all(output.shape == vals.shape and output.numel() == 0 for output in outputs)
