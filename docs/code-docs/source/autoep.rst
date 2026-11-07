@@ -587,9 +587,12 @@ Requirements and limits:
 - AutoEP combines with AutoTP (``tensor_parallel.autotp_size > 1``) by
   folding: on the same ranks, AutoTP shards the layers its partition
   specification names and AutoEP distributes the routed experts. Folding
-  supports ZeRO stages 0 to 3 with ``expert_tensor_parallel_size=1``, and
-  rejects ZeRO optimizer or parameter offload and DeepCompile. Tensor model
-  parallelism from ``mpu`` is not supported.
+  supports ZeRO stages 0 to 3 with ``expert_tensor_parallel_size=1``. With
+  ZeRO stage 3 the optimizer can be offloaded to the CPU
+  (``offload_optimizer.device: "cpu"``); folding rejects optimizer offload
+  with ZeRO stages 1 and 2 or to NVMe, Muon with optimizer offload, parameter
+  offload, and DeepCompile. Tensor model parallelism from ``mpu`` is not
+  supported.
 - AutoEP with ZeRO Stage 3 is supported only without sequence parallelism,
   hpZeRO secondary tensor groups, non-1 expert tensor parallelism, or
   quantized gradients.

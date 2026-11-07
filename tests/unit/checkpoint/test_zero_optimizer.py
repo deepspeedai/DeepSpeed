@@ -87,6 +87,44 @@ class TestZeROCheckpoint(DistributedTest):
 
         checkpoint_correctness_verification(config_dict, models, hidden_dim, tmpdir, load_optimizer_states=True)
 
+    @pytest.mark.parametrize('zero_stage', [1, 2, 3])
+    def test_load_fp32_optimizer_states_with_bf16_master_weights(self, tmpdir, zero_stage):
+        """With bf16 master weights CPU Adam keeps fp32 moments, and a resume must get them back unrounded."""
+        if not deepspeed.ops.__compatible_ops__[CPUAdamBuilder.NAME]:
+            pytest.skip("cpu-adam is not compatible")
+        if not get_accelerator().is_bf16_supported():
+            pytest.skip("bf16 is not supported")
+
+        config_dict = {
+            "train_batch_size": 2,
+            "steps_per_print": 1,
+            "optimizer": {
+                "type": 'Adam',
+                "params": {
+                    "lr": 0.00015
+                }
+            },
+            "bf16": {
+                "enabled": True,
+                "bf16_master_weights_and_grads": True
+            },
+            "zero_optimization": {
+                "stage": zero_stage,
+                "offload_optimizer": {
+                    "device": "cpu"
+                }
+            }
+        }
+        hidden_dim = 10
+
+        if zero_stage == 3:
+            with deepspeed.zero.Init(config_dict_or_path=config_dict):
+                models = [SimpleModel(hidden_dim, empty_grad=False) for _ in range(2)]
+        else:
+            models = [SimpleModel(hidden_dim, empty_grad=False) for _ in range(2)]
+
+        checkpoint_correctness_verification(config_dict, models, hidden_dim, tmpdir, load_optimizer_states=True)
+
     @pytest.mark.parametrize('zero_stage, use_cpu_offload, adam_optimizer', [(1, False, "Adam"), (2, False, "Adam"),
                                                                              (2, True, 'deepspeed_adam'),
                                                                              (3, False, 'Adam'),
