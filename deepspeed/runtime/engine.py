@@ -2321,6 +2321,15 @@ class DeepSpeedEngine(Module):
 
                 if self.global_rank == 0:
                     logger.warning("**** You are using ZeRO with an untested optimizer, proceed with caution *****")
+                    if self.zero_optimization_stage() in (ZeroStageEnum.optimizer_states, ZeroStageEnum.gradients):
+                        logger.warning(
+                            "ZeRO-1/2 replace each optimizer parameter group with one flat local FP32 partition. "
+                            "The optimizer sees a 1-D tensor instead of the original parameter shapes and "
+                            "boundaries. Custom optimizers that depend on tensor shapes or group-global "
+                            "statistics can use "
+                            "deepspeed.runtime.zero.flat_param_metadata.get_zero_flat_partition_metadata(param) "
+                            "to recover the original layout. This also applies to the BF16 optimizer "
+                            "wrapper used for BF16 parameters with FP32 gradient accumulation.")
             if model_dtype == torch.bfloat16 and grad_accum_dtype == torch.float32 and self.zero_optimization_stage(
             ) == 1 and not self.zero_cpu_offload():
                 if not self.zero_compute_grad_norm():
