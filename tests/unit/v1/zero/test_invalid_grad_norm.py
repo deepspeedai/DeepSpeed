@@ -154,18 +154,19 @@ def test_bf16_optimizer_reports_invalid_step_and_recovers(monkeypatch):
 
 def test_superoffload_rolls_back_only_subgroups_submitted_this_step():
     optimizer = object.__new__(SuperOffloadOptimizer_Stage3)
-    optimizer._submitted_cpu_sub_groups = {1}
+    optimizer._submitted_cpu_sub_groups = {1: SimpleNamespace(hyperparams={"lr": 0.1}, grad_scale=1.0)}
+    optimizer._half_cpu_grads = {}
     optimizer.sub_group_to_group_id = {0: 10, 1: 11}
     parameter = SimpleNamespace(data=torch.tensor([1.0]), grad=SimpleNamespace(data=torch.tensor([2.0])))
     optimizer.fp32_partitioned_groups_flat = [parameter, parameter]
     rollbacks = []
-    optimizer._sync_cpu_optimizer_step = lambda *args, **kwargs: rollbacks.append((args, kwargs))
+    optimizer._cpu_step_and_wait = lambda *args, **kwargs: rollbacks.append((args, kwargs))
 
-    optimizer._handle_overflow_rollback()
+    optimizer._rollback_submitted_cpu_sub_groups()
 
-    assert [args[1] for args, _ in rollbacks] == [1]
+    assert [args[0] for args, _ in rollbacks] == [1]
     assert rollbacks[0][1]["rollback"]
-    assert optimizer._submitted_cpu_sub_groups == set()
+    assert optimizer._submitted_cpu_sub_groups == {}
 
 
 class TestZeROBFloat16Stage3InvalidNormRecovery(DistributedTest):

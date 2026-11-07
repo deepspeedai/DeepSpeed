@@ -8,8 +8,16 @@
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
 {
     using namespace pybind11::literals;
-    m.def("adam_update", &ds_adam_step, "DeepSpeed CPU Adam update (C++)");
-    m.def("adam_rollback", &ds_adam_rollback, "DeepSpeed CPU Adam rollback (C++)");
+    // The update and the rollback release the GIL, so that a CPU Adam step in another thread lets
+    // the training thread run.
+    m.def("adam_update",
+          &ds_adam_step,
+          "DeepSpeed CPU Adam update (C++)",
+          pybind11::call_guard<pybind11::gil_scoped_release>());
+    m.def("adam_rollback",
+          &ds_adam_rollback,
+          "DeepSpeed CPU Adam rollback (C++)",
+          pybind11::call_guard<pybind11::gil_scoped_release>());
     m.def("create_adam", &create_adam_optimizer, "DeepSpeed CPU Adam (C++)");
     m.def("destroy_adam", &destroy_adam_optimizer, "DeepSpeed CPU Adam destroy (C++)");
 

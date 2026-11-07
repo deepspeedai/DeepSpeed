@@ -3,313 +3,119 @@
 
 # DeepSpeed Team
 """
-SuperOffload utilities for 1) running CPU optimizers in separate processes.
-
+SuperOffload's CPU Adam, which steps the CPU sub-groups in a thread of the training process.
 """
 
-from typing import Dict, Optional, Any
+import os
+from concurrent.futures import Future, ThreadPoolExecutor
+from typing import Any, Callable, Dict, List
+
 import torch
-import torch.multiprocessing as mp
-import psutil
 
 from deepspeed.ops.adam import DeepSpeedCPUAdam
-from deepspeed.accelerator import get_accelerator
+from deepspeed.ops.op_builder import CPUAdamBuilder
 from deepspeed.utils import logger
+from deepspeed.utils.logging import should_log_le
 
 
-class TaskKeys:
-    PARAM_DATA = "param_data"
-    PARAM_GRAD = "param_grad"
-    PARAM_GROUP_ID = "param_group_id"
-    SUB_GROUP_ID = "sub_group_id"
-    ROLLBACK = "rollback"
-    LR = "lr"
-
-
-class ResultKeys:
-    UPDATED_PARAM = "updated_param"
-    EVENT_TYPE = "event_type"
-
-
-class EventTypes:
-    ADAM_STEP = "adam_step"
-    ROLLBACK = "rollback"
-
-
-def _allocate_worker_grad_buffer(max_grad_numel: int, pin_memory: bool) -> torch.Tensor:
-    # Scratch destination for the GPU->CPU grad copy. Pinning is optional: it
-    # speeds DMA but is not required for correctness, so honor
-    # offload_optimizer.pin_memory rather than always page-locking.
-    if pin_memory:
-        return get_accelerator().pin_empty(max_grad_numel, dtype=torch.float32, device='cpu')
-    return torch.empty(max_grad_numel, dtype=torch.float32, device='cpu')
-
-
-def superoffload_optimizer_worker(param_queue: mp.SimpleQueue,
-                                  result_queue: mp.SimpleQueue,
-                                  optimizer_config: Dict[str, Any],
-                                  max_grad_numel: int,
-                                  pin_memory: bool = True) -> None:
-    """
-    This function runs in a separate process and continuously processes optimization
-    tasks from the parameter queue. It creates a DeepSpeedCPUAdam optimizer and
-    applies optimization steps to parameters received from the main process.
-
-    Args:
-        param_queue: Queue for receiving optimization tasks
-        result_queue: Queue for sending back optimization results
-        optimizer_config: Configuration dictionary for the optimizer containing
-                         lr, betas, eps, weight_decay, and amsgrad parameters
-        max_grad_numel: Maximum number of elements expected in gradient tensors
-        pin_memory: Whether to page-lock the reusable grad scratch buffer
-    """
-    cpu_tensor = torch.randn(1, device="cpu")
-    cpu_param = torch.nn.Parameter(cpu_tensor)
-
-    try:
-        if isinstance(optimizer_config, list):
-            pg_configs = optimizer_config
-        else:
-            pg_configs = [optimizer_config]
-
-        first_cfg = pg_configs[0]
-        optimizer = DeepSpeedCPUAdam([cpu_param],
-                                     lr=first_cfg["lr"],
-                                     betas=first_cfg["betas"],
-                                     eps=first_cfg["eps"],
-                                     weight_decay=first_cfg["weight_decay"],
-                                     amsgrad=first_cfg["amsgrad"])
-        for cfg in pg_configs[1:]:
-            dummy = torch.nn.Parameter(torch.randn(1, device="cpu"))
-            optimizer.add_param_group({
-                "params": [dummy],
-                "lr": cfg["lr"],
-                "betas": cfg["betas"],
-                "eps": cfg["eps"],
-                "weight_decay": cfg["weight_decay"],
-                "amsgrad": cfg["amsgrad"],
-            })
-    except KeyError as e:
-        error_msg = f"Missing required optimizer config key: {e}"
-        logger.error(error_msg)
-        result_queue.put({"error": error_msg})
+def _bind_thread(cores: List[int]) -> None:
+    """Run the calling thread on these cores; the threads it starts later, such as its OpenMP threads, inherit them."""
+    if not cores:
         return
-
-    # Pre-allocate reusable host buffer for gradients
-    grad_buffer = _allocate_worker_grad_buffer(max_grad_numel, pin_memory)
-
-    while True:
-        try:
-            task = param_queue.get()
-
-            if task is None:
-                logger.debug("Received termination signal, shutting down worker")
-                break
-
-            param_data = task[TaskKeys.PARAM_DATA]
-            param_grad = task[TaskKeys.PARAM_GRAD]
-            param_group_id = task[TaskKeys.PARAM_GROUP_ID]
-            sub_group_id = task[TaskKeys.SUB_GROUP_ID]
-            rollback = task.get(TaskKeys.ROLLBACK, False)
-            task_lr = task.get(TaskKeys.LR, None)
-
-            logger.debug(f"Processing param_group_id: {param_group_id}, sub_group_id: {sub_group_id}")
-
-            del task[TaskKeys.PARAM_DATA]
-            del task[TaskKeys.PARAM_GRAD]
-            task.clear()
-
-            if task_lr is not None:
-                optimizer.param_groups[param_group_id]['lr'] = task_lr
-
-            grad_numel = param_grad.numel()
-            if grad_numel > max_grad_numel:
-                error_msg = (
-                    f"Gradient size {grad_numel} exceeds pre-allocated buffer size {max_grad_numel}. "
-                    f"This indicates insufficient buffer allocation. Please increase max_grad_numel parameter.")
-                result_queue.put({"error": error_msg})
-                break
-
-            param_grad_cpu = grad_buffer[:grad_numel].view_as(param_grad)
-            param_grad_cpu.copy_(param_grad, non_blocking=False)
-
-            fp32_param = torch.nn.Parameter(param_data)
-            fp32_param.grad = param_grad_cpu
-
-            optimizer.param_groups[param_group_id]['params'] = [fp32_param]
-
-            if rollback:
-                logger.debug(f"Rolling back optimizer state for sub_group_id: {sub_group_id}")
-                optimizer.rollback_subgroup(sub_group_id)
-            else:
-                optimizer.step_subgroup(sub_group_id)
-
-            # Send result back to main process
-            event_type = EventTypes.ROLLBACK if rollback else EventTypes.ADAM_STEP
-            result_queue.put({
-                TaskKeys.PARAM_GROUP_ID: param_group_id,
-                TaskKeys.SUB_GROUP_ID: sub_group_id,
-                ResultKeys.UPDATED_PARAM: fp32_param.data,
-                ResultKeys.EVENT_TYPE: event_type,
-            })
-
-            # Clean up references to free memory
-            optimizer.param_groups[param_group_id]['params'] = []
-            del param_grad_cpu, fp32_param.grad, fp32_param, param_grad, param_data
-
-        except KeyError as e:
-            error_msg = f"Missing required task key: {e}"
-            logger.error(error_msg)
-            result_queue.put({"error": error_msg})
-            break
-        except Exception as e:
-            error_msg = f"Unexpected error in worker process: {e}"
-            logger.error(error_msg)
-            result_queue.put({"error": error_msg})
-            break
-
-    # Clean up the reusable host buffer. unpin_memory is a no-op on torch and
-    # frees immediately on the native backend.
-    if 'grad_buffer' in locals():
-        if pin_memory:
-            get_accelerator().unpin_memory(grad_buffer)
-        del grad_buffer
-        logger.debug("Cleaned up worker grad buffer")
-
-    logger.debug("Worker process terminated")
+    try:
+        os.sched_setaffinity(0, cores)
+    except (AttributeError, OSError) as e:
+        logger.debug(f"Could not set the CPU affinity of a SuperOffload thread: {e}")
 
 
-class SuperOffloadCPUOptimizer:
+def _kernel_args(hyperparams: Dict[str, Any]):
+    beta1, beta2 = hyperparams["betas"]
+    return (hyperparams["lr"], beta1, beta2, hyperparams["eps"], hyperparams["weight_decay"],
+            hyperparams["bias_correction"])
 
-    def __init__(self,
-                 optimizer_config: Dict[str, Any],
-                 cpuadam_cores_perc: float = 0.8,
-                 max_grad_numel: int = 1000000,
-                 pin_memory: bool = True) -> None:
+
+class SuperOffloadCPUAdam:
+    """DeepSpeed's CPU Adam for the CPU sub-groups, run by one thread of the training process on the cores given to
+    CPU Adam.
+
+    The native kernels release the GIL, so the training thread goes on queueing backward kernels while a sub-group
+    steps. The thread runs what is submitted in order. The caller keeps the Adam state of each sub-group and passes it
+    to each step.
+    """
+
+    def __init__(self, defaults: Dict[str, Any], adamw_mode: bool, fp32_optimizer_states: bool,
+                 cpuadam_cores_perc: float) -> None:
+        """defaults: lr, betas, eps and weight_decay to create the native optimizer with; each step passes its own."""
         if not 0 < cpuadam_cores_perc <= 1:
             raise ValueError("cpuadam_cores_perc must be between 0 and 1")
-
-        self.max_grad_numel = max_grad_numel
-        self.mp_context = mp.get_context('spawn')
-        self.param_queue = self.mp_context.SimpleQueue()
-        self.result_queue = self.mp_context.SimpleQueue()
-
-        self.cpuadam_process = self.mp_context.Process(
-            target=superoffload_optimizer_worker,
-            args=(self.param_queue, self.result_queue, optimizer_config, max_grad_numel, pin_memory),
-            daemon=True,
-        )
-        self.cpuadam_process.start()
-
-        # Set CPU affinity for better performance isolation
-        self._set_cpu_affinity(cpuadam_cores_perc)
-
-    def _set_cpu_affinity(self, cpuadam_cores_perc: float) -> None:
-        """
-        Set CPU affinity for the main (Pytorch) process and worker (CPU Adam) process.
-
-        Args:
-            cpuadam_cores_perc: Percentage of cores to allocate to the worker (CPU Adam) process
-        """
         try:
-            current_process = psutil.Process()
-            all_cores = current_process.cpu_affinity()
-            num_cores = len(all_cores)
+            cores = sorted(os.sched_getaffinity(0))
+        except AttributeError:  # not Linux
+            cores = []
+        split = int((1 - cpuadam_cores_perc) * len(cores))
+        # The training thread keeps the first cores and CPU Adam gets the others, so they do not compete.
+        _bind_thread(cores[:split])
+        self._thread = ThreadPoolExecutor(max_workers=1,
+                                          thread_name_prefix="SuperOffloadCPUAdam",
+                                          initializer=_bind_thread,
+                                          initargs=(cores[split:], ))
 
-            split_idx = int((1 - cpuadam_cores_perc) * num_cores)
-            pt_cores = all_cores[:split_idx]
-            cpuadam_cores = all_cores[split_idx:]
+        self.fp32_optimizer_states = fp32_optimizer_states
+        self._ops = CPUAdamBuilder().load()
+        self._opt_id = DeepSpeedCPUAdam.optimizer_id
+        DeepSpeedCPUAdam.optimizer_id += 1
+        self._ops.create_adam(self._opt_id, defaults["lr"], defaults["betas"][0], defaults["betas"][1],
+                              defaults["eps"], defaults["weight_decay"], adamw_mode, should_log_le("info"))
+        # Holds a gradient with the loss scale removed, or one in fp32 for adam_rollback.
+        self._grad_buffer = None
 
-            # Set affinity for main process (PyTorch)
-            current_process.cpu_affinity(pt_cores)
+    def submit(self, fn: Callable, *args) -> Future:
+        """Run fn(*args) in the CPU Adam thread, after what was submitted before it."""
+        return self._thread.submit(fn, *args)
 
-            # Set affinity for optimizer process (CPU Adam)
-            optimizer_process = psutil.Process(self.cpuadam_process.pid)
-            optimizer_process.cpu_affinity(cpuadam_cores)
+    def step(self,
+             state: Dict[str, Any],
+             weights: torch.Tensor,
+             grad: torch.Tensor,
+             hyperparams: Dict[str, Any],
+             grad_scale: float = 1.0) -> None:
+        """Step the weights on grad * grad_scale, as DeepSpeedCPUAdam does; state starts empty."""
+        if not state:
+            state["step"] = 0
+            state_dtype = torch.float if self.fp32_optimizer_states else weights.dtype
+            state["exp_avg"] = torch.zeros_like(weights, dtype=state_dtype)
+            state["exp_avg_sq"] = torch.zeros_like(weights, dtype=state_dtype)
+        state["step"] += 1
+        if grad_scale != 1.0:
+            grad = self._unscaled(grad, weights.dtype, grad_scale)
+        # adam_update reads bf16 gradients of fp32 weights as they are, so they go to the CPU at half the bytes.
+        self._ops.adam_update(self._opt_id, state["step"], *_kernel_args(hyperparams), weights, grad, state["exp_avg"],
+                              state["exp_avg_sq"])
 
-            logger.debug(f"Set CPU affinity - PyTorch cores: {pt_cores}, "
-                         f"Optimizer cores: {cpuadam_cores}")
+    def rollback(self,
+                 state: Dict[str, Any],
+                 weights: torch.Tensor,
+                 grad: torch.Tensor,
+                 hyperparams: Dict[str, Any],
+                 grad_scale: float = 1.0) -> None:
+        """Undo the last step of the weights, which used this gradient, grad_scale and these hyperparameters."""
+        # adam_rollback reads gradients in the weights' dtype only.
+        self._ops.adam_rollback(self._opt_id, state["step"], *_kernel_args(hyperparams), weights,
+                                self._unscaled(grad, weights.dtype, grad_scale), state["exp_avg"], state["exp_avg_sq"])
+        state["step"] -= 1
 
-        except (psutil.AccessDenied, psutil.NoSuchProcess, AttributeError) as e:
-            logger.debug(f"Could not set CPU affinities for superoffload optimizer process: {e}")
-        except Exception as e:
-            logger.warning(f"Unexpected error setting CPU affinity: {e}")
-
-    def async_step(self,
-                   param_group_id: int,
-                   sub_group_id: int,
-                   fp32_param: torch.Tensor,
-                   fp32_grad: torch.Tensor,
-                   rollback: bool = False,
-                   lr: float = None) -> None:
-        """
-        Queue parameter for optimization in the worker process.
-        """
-        if not self.cpuadam_process.is_alive():
-            raise RuntimeError("Worker process is not alive")
-
-        task = {
-            TaskKeys.PARAM_DATA: fp32_param,
-            TaskKeys.PARAM_GRAD: fp32_grad,
-            TaskKeys.PARAM_GROUP_ID: param_group_id,
-            TaskKeys.SUB_GROUP_ID: sub_group_id,
-            TaskKeys.ROLLBACK: rollback,
-        }
-        if lr is not None:
-            task[TaskKeys.LR] = lr
-        self.param_queue.put(task)
-
-    def get_result(self, expected_event_type: str = None) -> Optional[Dict[str, Any]]:
-        """
-        Get result from worker process with optional event type validation.
-
-        Args:
-            expected_event_type (str, optional): Expected event type ('adam_step' or 'rollback').
-                                                If provided, validates that the result matches.
-        """
-        if self.result_queue.empty():
-            return None
-
-        result = self.result_queue.get()
-
-        if "error" in result:
-            raise RuntimeError(f"Error in worker process: {result['error']}")
-
-        # Validate event type if expected_event_type is provided
-        if expected_event_type is not None:
-            result_event_type = result.get(ResultKeys.EVENT_TYPE)
-            if result_event_type != expected_event_type:
-                raise RuntimeError(f"Event type mismatch: expected '{expected_event_type}', got '{result_event_type}'")
-
-        return result
+    def _unscaled(self, grad: torch.Tensor, dtype: torch.dtype, grad_scale: float) -> torch.Tensor:
+        if grad_scale == 1.0 and grad.dtype == dtype:
+            return grad
+        buffer = self._grad_buffer
+        if buffer is None or buffer.dtype != dtype or buffer.numel() < grad.numel():
+            buffer = self._grad_buffer = torch.empty(grad.numel(), dtype=dtype)
+        unscaled = buffer[:grad.numel()].view_as(grad)
+        # A step submitted during backward gets the gradient before the loss scale is removed.
+        torch.mul(grad, grad_scale, out=unscaled)
+        return unscaled
 
     def close(self) -> None:
-        """
-        Shutdown the worker process gracefully.
-
-        Sends termination signal to worker and waits for clean shutdown.
-        If the process doesn't terminate within the timeout, it will be forcefully killed.
-        """
-        if not self.cpuadam_process.is_alive():
-            logger.debug("Worker process already terminated")
-            return
-
-        # Send termination signal
-        self.param_queue.put(None)
-
-        # Wait for graceful shutdown
-        self.cpuadam_process.join(timeout=5)
-
-        if self.cpuadam_process.is_alive():
-            logger.warning("Optimizer process did not terminate cleanly within timeout, "
-                           "forcefully terminating")
-            self.cpuadam_process.terminate()
-            self.cpuadam_process.join(timeout=2)
-
-            # Last resort: kill the process
-            if self.cpuadam_process.is_alive():
-                logger.error("Failed to terminate optimizer process, killing it")
-                self.cpuadam_process.kill()
-                self.cpuadam_process.join()
-
-        logger.debug("SuperOffload CPU optimizer closed successfully")
+        """Finish what was submitted, stop the thread and free the native optimizer."""
+        self._thread.shutdown()
+        self._ops.destroy_adam(self._opt_id)
