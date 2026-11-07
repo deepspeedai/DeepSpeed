@@ -140,6 +140,35 @@ def test_runner_main_rejects_unsupported_filter(tmp_path, monkeypatch, force_mul
         ds_runner.main(argv)
 
 
+def test_runner_main_skips_blank_and_comment_lines_in_env_file(tmp_path, monkeypatch):
+    # .deepspeed_env is a list of VAR=VAL lines. Blank lines and "#" comments are not entries,
+    # so main() must skip them instead of failing to unpack them into a key and a value.
+    launched = []
+
+    class FakeProc:
+        returncode = 0
+
+        def wait(self):
+            pass
+
+    monkeypatch.setattr(ds_runner.subprocess, 'Popen', lambda cmd, **kw: launched.append(cmd) or FakeProc())
+    monkeypatch.setattr(mnrunner.OpenMPIRunner, 'backend_exists', lambda self: True)
+    env_file = tmp_path / ds_runner.DEEPSPEED_ENVIRONMENT_NAME
+    env_file.write_text('# NCCL_DEBUG=INFO\n\nFOO=bar\n   \n  # indented\nBAZ=a=b\n')
+    monkeypatch.setattr(ds_runner, 'DEEPSPEED_ENVIRONMENT_PATHS', [str(tmp_path)])
+    hostfile = tmp_path / 'hostfile'
+    hostfile.write_text('worker-0 slots=4\nworker-1 slots=4\n')
+    ds_runner.main([
+        '--hostfile',
+        str(hostfile), '--no_ssh_check', '--master_addr', '127.0.0.1', '--launcher', 'openmpi', 'test_launcher.py'
+    ])
+    cmd = launched[0]
+    exported = [cmd[i + 1] for i, arg in enumerate(cmd) if arg == '-x']
+    assert 'FOO=bar' in exported
+    assert 'BAZ=a=b' in exported
+    assert not any(arg.startswith('#') for arg in exported)
+
+
 def test_validate_active_resources_default_is_a_no_op():
     # Only the slurm backend constrains which filters it can express. The others place tasks
     # per device id themselves, so the hook stays a no-op for them and main() lets them through.
