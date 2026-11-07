@@ -25,11 +25,15 @@ def _tp_group(kind):
 class TestTensorParallelBackwardReduce(DistributedTest):
     world_size = 2
 
+    @pytest.mark.parametrize("contiguous", [True, False])
     @pytest.mark.parametrize("kind", ["pair", "single", "none"])
-    def test_row_parallel_forward(self, kind):
+    def test_row_parallel_forward(self, kind, contiguous):
         group = _tp_group(kind)
         rank = dist.get_rank()
-        x = torch.full((3, ), rank + 1.0, device=get_accelerator().device_name())
+        x = torch.full((3, 2), rank + 1.0, device=get_accelerator().device_name())
+        if not contiguous:
+            # Reducing a temporary from x.contiguous() would silently drop the result.
+            x = x.t()
 
         out = RowParallel.apply(group, x, False)
 
@@ -37,13 +41,18 @@ class TestTensorParallelBackwardReduce(DistributedTest):
         expected = 3.0 if kind == "pair" else rank + 1.0
         assert torch.all(out == expected)
 
+    @pytest.mark.parametrize("contiguous", [True, False])
     @pytest.mark.parametrize("kind", ["pair", "single", "none"])
-    def test_column_parallel(self, kind):
+    def test_column_parallel(self, kind, contiguous):
         group = _tp_group(kind)
         rank = dist.get_rank()
-        x = torch.ones(3, device=get_accelerator().device_name(), requires_grad=True)
+        x = torch.ones(3, 2, device=get_accelerator().device_name(), requires_grad=True)
 
-        (ColumnParallel.apply(group, x) * (rank + 1)).sum().backward()
+        out = ColumnParallel.apply(group, x)
+        if not contiguous:
+            # The transpose makes the incoming gradient non-contiguous.
+            out = out.t()
+        (out * (rank + 1)).sum().backward()
 
         # Only a multi-rank TP group sums the replicated input gradient (1 + 2); without TP each
         # rank keeps its own, and None must not fall back to reducing over the world group.
