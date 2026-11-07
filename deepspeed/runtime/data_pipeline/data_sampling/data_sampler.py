@@ -321,7 +321,7 @@ class DeepSpeedDataSampler(object):
             CURRICULUM_LEARNING_CURRENT_DIFFICULTIES: self.current_difficulties,
             CURRICULUM_LEARNING_DATA_CLUSTER_PATHS: self.data_cluster_paths,
             CURRICULUM_LEARNING_DATA_CLUSTER_CURRENT_POSITION: self.data_cluster_current_position,
-            CURRICULUM_LEARNING_NP_RNG_STATE: np.random.get_state()
+            CURRICULUM_LEARNING_NP_RNG_STATE: self.np_rng.bit_generator.state
         }
 
     def load_state_dict(self, state_dict):
@@ -331,7 +331,14 @@ class DeepSpeedDataSampler(object):
         self.current_difficulties = state_dict[CURRICULUM_LEARNING_CURRENT_DIFFICULTIES]
         self.data_cluster_paths = state_dict[CURRICULUM_LEARNING_DATA_CLUSTER_PATHS]
         self.data_cluster_current_position = state_dict[CURRICULUM_LEARNING_DATA_CLUSTER_CURRENT_POSITION]
-        np.random.set_state(state_dict[CURRICULUM_LEARNING_NP_RNG_STATE])
+        rng_state = state_dict[CURRICULUM_LEARNING_NP_RNG_STATE]
+        if isinstance(rng_state, tuple):
+            # Legacy checkpoints saved the global numpy RandomState instead of
+            # self.np_rng; restore the global state for backward compatibility
+            # but self.np_rng will restart from its seed on resume.
+            np.random.set_state(rng_state)
+        else:
+            self.np_rng.bit_generator.state = rng_state
         cluster_root_path = self.data_efficiency_config[DATA_SAMPLING][CURRICULUM_LEARNING][
             CURRICULUM_LEARNING_CLUSTER_PATH]
         # Backward compatibility: previously data_cluster_paths were stored as
