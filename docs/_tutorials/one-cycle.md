@@ -70,6 +70,10 @@ range test](/tutorials/lrrt/) feature of DeepSpeed to configure them.
 2. `cycle_max_mom`: Maximum momentum in cycle phase.
 3. `decay_mom_rate`: Decay rate for momentum in decay phase.
 
+With momentum cycling enabled, the first optimizer update uses `cycle_min_lr`
+and `cycle_max_mom`. Momentum decreases as the learning rate increases, then
+increases as the learning rate decreases.
+
 ## Required Model Configuration Changes
 
 To illustrate the required model configuration changes to use 1-Cycle schedule
