@@ -45,6 +45,8 @@ void Adam_Optimizer::Step_1(ds_params_precision_t* _params,
     Step_AVX<1>(&rounded_size, _params, grads, _exp_avg, _exp_avg_sq, _param_size, parallel);
 #elif defined(__SVE__) && defined(__ARM_FEATURE_SVE)
     Step_SVE<1>(&rounded_size, _params, grads, _exp_avg, _exp_avg_sq, _param_size, parallel);
+#elif defined(__RVV__) && defined(__riscv_v_intrinsic) && __riscv_v_intrinsic >= 12000
+    Step_RVV<1>(&rounded_size, _params, grads, _exp_avg, _exp_avg_sq, _param_size, parallel);
 #endif
     if (_param_size > rounded_size) {
         float betta1_minus1 = 1 - _betta1;
@@ -100,6 +102,8 @@ void Adam_Optimizer::Step_4(ds_params_precision_t* _params,
     Step_AVX<4>(&rounded_size, _params, grads, _exp_avg, _exp_avg_sq, _param_size, parallel);
 #elif defined(__SVE__) && defined(__ARM_FEATURE_SVE)
     Step_SVE<4>(&rounded_size, _params, grads, _exp_avg, _exp_avg_sq, _param_size, parallel);
+#elif defined(__RVV__) && defined(__riscv_v_intrinsic) && __riscv_v_intrinsic >= 12000
+    Step_RVV<4>(&rounded_size, _params, grads, _exp_avg, _exp_avg_sq, _param_size, parallel);
 #endif
     if (_param_size > rounded_size)
         Step_1((_params + rounded_size),
@@ -132,6 +136,8 @@ int create_adam_optimizer(int optimizer_id,
         vectorization = "AVX2";
 #elif defined(__SVE__) && defined(__ARM_FEATURE_SVE)
         vectorization = "SVE";
+#elif defined(__RVV__) && defined(__riscv_v_intrinsic) && __riscv_v_intrinsic >= 12000
+        vectorization = "RVV";
 #elif defined(__NEON__)
         vectorization = "NEON";
 #else
@@ -165,6 +171,8 @@ void Adam_Optimizer::Step_8(ds_params_precision_t* _params,
     Step_AVX<8>(&rounded_size, _params, grads, _exp_avg, _exp_avg_sq, _param_size, parallel);
 #elif defined(__SVE__) && defined(__ARM_FEATURE_SVE)
     Step_SVE<8>(&rounded_size, _params, grads, _exp_avg, _exp_avg_sq, _param_size, parallel);
+#elif defined(__RVV__) && defined(__riscv_v_intrinsic) && __riscv_v_intrinsic >= 12000
+    Step_RVV<8>(&rounded_size, _params, grads, _exp_avg, _exp_avg_sq, _param_size, parallel);
 #endif
     if (_param_size > rounded_size)
         Step_4((_params + rounded_size),
@@ -273,13 +281,25 @@ int ds_adam_step(int optimizer_id,
 
 bool ds_adam_copy_supported()
 {
-    // The vectorized loop needs a bfloat16 store (AVX512 or NEON); the SVE kernel does not write
-    // the copy.
+    // The vectorized loop needs a bfloat16 store (AVX512 or NEON); the SVE and RVV kernels do not
+    // write the copy.
 #if defined(__AVX512__) or defined(__NEON__)
     return true;
 #elif defined(__AVX256__)
     return false;
 #elif defined(__SVE__) && defined(__ARM_FEATURE_SVE)
+    return false;
+#elif defined(__RVV__) && defined(__riscv_v_intrinsic) && __riscv_v_intrinsic >= 12000
+    return false;
+#else
+    return true;
+#endif
+}
+
+bool ds_adam_grad_scale_supported()
+{
+    // Step_RVV does not apply _grad_scale.
+#if defined(__RVV__) && defined(__riscv_v_intrinsic) && __riscv_v_intrinsic >= 12000
     return false;
 #else
     return true;
@@ -361,6 +381,8 @@ int ds_adam_step_scaled(int optimizer_id,
                         torch::Tensor& exp_avg_sq,
                         float grad_scale)
 {
+    TORCH_CHECK(ds_adam_grad_scale_supported(),
+                "adam_update_scaled: the RVV kernel does not apply grad_scale");
     std::shared_ptr<Adam_Optimizer> opt =
         std::static_pointer_cast<Adam_Optimizer>(s_optimizers[optimizer_id]);
     opt->set_grad_scale(grad_scale);

@@ -5,6 +5,7 @@
 
 import os
 import re
+import struct
 import sys
 import time
 import importlib
@@ -13,10 +14,6 @@ import subprocess
 import shlex
 import shutil
 import tempfile
-import distutils.ccompiler
-import distutils.log
-import distutils.sysconfig
-from distutils.errors import CompileError, LinkError
 from abc import ABC, abstractmethod
 from typing import List
 
@@ -343,6 +340,12 @@ class OpBuilder(ABC):
         and then distutils is used to compile that program and link it with the specified libraries.
         Returns True if both the compile and link are successful, False otherwise.
         '''
+        # Imported here because distutils pulls in setuptools, which slows down import deepspeed.
+        import distutils.ccompiler
+        import distutils.log
+        import distutils.sysconfig
+        from distutils.errors import CompileError, LinkError
+
         tempdir = None  # we create a temporary directory to hold various files
         filestderr = None  # handle to open file to which we redirect stderr
         oldstderr = None  # file descriptor for stderr
@@ -442,19 +445,13 @@ class OpBuilder(ABC):
         if cpu_info['arch'].startswith('PPC_'):
             # gcc does not provide -march on PowerPC, use -mcpu instead
             return '-mcpu=native'
-        elif cpu_info['arch'].startswith('riscv64'):
-            return '-march=rv64gc'
+        elif (cpu_info['arch'] or '').lower().replace('_', '').startswith('riscv64'):
+            # The vector extension must be in -march for the RVV kernels to compile.
+            # py-cpuinfo on riscv64 reports "RISCV_64" (uppercase, underscore), but
+            # the lscpu fallback path and platform.uname().machine both report
+            # "riscv64" (lowercase, no separator); normalize both forms.
+            return '-march=rv64gcv' if self._riscv_has_vector() else '-march=rv64gc'
         return '-march=native'
-
-    def get_cuda_compile_flag(self):
-        try:
-            if not self.is_rocm_pytorch():
-                assert_no_cuda_mismatch(self.name)
-                return "-D__ENABLE_CUDA__"
-        except MissingCUDAException:
-            print(f"{WARNING} {self.name} cuda is missing or is incompatible with installed torch, "
-                  "only cpu ops can be compiled!")
-        return '-D__DISABLE_CUDA__'
 
     def _backup_cpuinfo(self):
         # Construct cpu_info dict from lscpu that is similar to what py-cpuinfo provides
@@ -488,6 +485,47 @@ class OpBuilder(ABC):
 
         return cpu_info
 
+    def _riscv_hwcap(self):
+        # AT_HWCAP from the auxiliary vector, the same source getauxval(3) serves.
+        # The kernel builds ELF_HWCAP from the extensions its own ISA parsing
+        # accepted, so unlike a raw ISA string the V bit does not mirror draft
+        # tokens. None means the kernel provided no AT_HWCAP at all.
+        try:
+            with open('/proc/self/auxv', 'rb') as f:
+                auxv = f.read()
+        except OSError:
+            return None
+        at_hwcap = 16  # <linux/auxvec.h>
+        for offset in range(0, len(auxv) - 15, 16):
+            a_type, value = struct.unpack('=QQ', auxv[offset:offset + 16])
+            if a_type == at_hwcap:
+                return value
+        return None
+
+    def _riscv_has_vector(self):
+        # A bare "v" in the ISA line is not evidence of ratified V 1.0: T-Head C906
+        # (Allwinner D1) devicetrees report unversioned rv64imafdcv while the core
+        # implements incompatible draft V 0.7.1, and -march=rv64gcv would emit
+        # encodings such a CPU cannot execute. An explicitly versioned token is
+        # authoritative ("v1p0" qualifies, "v0p7" never does); anything else defers
+        # to the kernel's HWCAP V bit, the availability interface the kernel's own
+        # vector documentation defines. Only the base segment before the first
+        # underscore carries single-letter V (zvl*b, zvfh, ... can never match), and
+        # there each letter is its own token, optionally versioned ("i2p0" style).
+        try:
+            with open('/proc/cpuinfo') as f:
+                for line in f:
+                    if line.startswith('isa'):
+                        base = line.split(':', 1)[1].split('_', 1)[0].strip()[4:]
+                        for token in re.findall(r'[a-z](?:\d+p\d+)?', base):
+                            if token[0] == 'v' and token[1:]:
+                                return int(token[1:].partition('p')[0]) >= 1
+                        break
+        except OSError:
+            pass
+        hwcap = self._riscv_hwcap()
+        return hwcap is not None and hwcap & (1 << (ord('V') - ord('A'))) != 0  # COMPAT_HWCAP_ISA_V
+
     def simd_width(self):
         try:
             from cpuinfo import get_cpu_info
@@ -516,6 +554,8 @@ class OpBuilder(ABC):
             # NEON is baseline on AArch64; vdivq/vsqrtq used by simd.h are A64-only,
             # so do not advertise it for 32-bit ARM.
             return '-D__NEON__'
+        elif (cpu_info['arch'] or '').lower().replace('_', '').startswith('riscv64') and self._riscv_has_vector():
+            return '-D__RVV__'
         return '-D__SCALAR__'
 
     def command_exists(self, cmd):
@@ -924,53 +964,3 @@ class CUDAOpBuilder(OpBuilder):
             return ['cublas', 'curand']
         else:
             return []
-
-
-class TorchCPUOpBuilder(CUDAOpBuilder):
-
-    def get_cuda_lib64_path(self):
-        import torch
-        if not self.is_rocm_pytorch():
-            CUDA_LIB64 = os.path.join(torch.utils.cpp_extension.CUDA_HOME, "lib64")
-            if not os.path.exists(CUDA_LIB64):
-                CUDA_LIB64 = os.path.join(torch.utils.cpp_extension.CUDA_HOME, "lib")
-        else:
-            CUDA_LIB64 = os.path.join(torch.utils.cpp_extension.ROCM_HOME, "lib")
-        return CUDA_LIB64
-
-    def extra_ldflags(self):
-        if self.build_for_cpu:
-            return ['-fopenmp']
-
-        if not self.is_rocm_pytorch():
-            ld_flags = ['-lcurand']
-            if not self.build_for_cpu:
-                ld_flags.append(f'-L{self.get_cuda_lib64_path()}')
-            return ld_flags
-
-        return []
-
-    def cxx_args(self):
-        args = []
-        if not self.build_for_cpu:
-            CUDA_LIB64 = self.get_cuda_lib64_path()
-
-            args += super().cxx_args()
-            args += [
-                f'-L{CUDA_LIB64}',
-                '-lcudart',
-                '-lcublas',
-                '-g',
-            ]
-
-        CPU_ARCH = self.cpu_arch()
-        SIMD_WIDTH = self.simd_width()
-        CUDA_ENABLE = self.get_cuda_compile_flag()
-        args += [
-            CPU_ARCH,
-            '-fopenmp',
-            SIMD_WIDTH,
-            CUDA_ENABLE,
-        ]
-
-        return args

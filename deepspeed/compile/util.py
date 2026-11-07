@@ -25,8 +25,6 @@ from deepspeed.utils.torch import required_torch_version
 from deepspeed.ops.op_builder.dc import DeepCompileBuilder
 from deepspeed.compile import constants
 
-from .custom_ops import sp_dp_registry
-
 
 def is_deepcompile_supported() -> bool:
     return required_torch_version(min_version=2.6) and get_accelerator().device_name() == "cuda"
@@ -538,6 +536,8 @@ def pad_tensors(specs: List[Tuple[torch.Tensor, int, int]]) -> List[torch.Tensor
 
 
 def create_shard_offsets(gm: GraphModule, s0_node: Node) -> Tuple[Node, Node]:
+    # Imported here because custom_ops registers torch custom ops, which slows down import deepspeed.
+    from .custom_ops import sp_dp_registry
     sp_size: int = sp_dp_registry.sp_size()
     sp_rank: int = dist.get_rank() % sp_dp_registry.sp_size()
     # The sequence length is dynamic, so its divisibility can only be checked when the graph runs.

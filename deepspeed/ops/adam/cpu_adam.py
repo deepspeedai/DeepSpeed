@@ -4,13 +4,13 @@
 # DeepSpeed Team
 
 import torch
-from cpuinfo import get_cpu_info
 from deepspeed.utils import logger
 from deepspeed.utils.logging import should_log_le
+from deepspeed.ops.cpu_optimizer import DeepSpeedCPUOptimizer
 from deepspeed.ops.op_builder import CPUAdamBuilder
 
 
-class DeepSpeedCPUAdam(torch.optim.Optimizer):
+class DeepSpeedCPUAdam(DeepSpeedCPUOptimizer):
     optimizer_id = 0
 
     def __init__(self,
@@ -70,8 +70,10 @@ class DeepSpeedCPUAdam(torch.optim.Optimizer):
                             weight_decay=weight_decay,
                             bias_correction=bias_correction,
                             amsgrad=amsgrad)
-        super(DeepSpeedCPUAdam, self).__init__(model_params, default_args)
+        super(DeepSpeedCPUAdam, self).__init__(model_params, default_args, fp32_optimizer_states)
 
+        # Imported here because importing cpuinfo runs subprocesses (file, uname), which slows down import deepspeed.
+        from cpuinfo import get_cpu_info
         cpu_info = get_cpu_info()
         self.cpu_vendor = cpu_info["vendor_id_raw"].lower() if "vendor_id_raw" in cpu_info else "unknown"
         if "amd" in self.cpu_vendor:
@@ -87,8 +89,10 @@ class DeepSpeedCPUAdam(torch.optim.Optimizer):
         self.opt_id = DeepSpeedCPUAdam.optimizer_id
         DeepSpeedCPUAdam.optimizer_id = DeepSpeedCPUAdam.optimizer_id + 1
         self.adam_w_mode = adamw_mode
-        self.fp32_optimizer_states = fp32_optimizer_states
-        self.ds_opt_adam = CPUAdamBuilder().load()
+        try:
+            self.ds_opt_adam = CPUAdamBuilder().load()
+        except Exception as e:
+            raise RuntimeError("DeepSpeedCPUAdam requires the cpu_adam op, which failed to build/load.") from e
 
         self.ds_opt_adam.create_adam(self.opt_id, lr, betas[0], betas[1], eps, weight_decay, adamw_mode,
                                      should_log_le("info"))
@@ -110,7 +114,7 @@ class DeepSpeedCPUAdam(torch.optim.Optimizer):
             group.setdefault('amsgrad', False)
 
     @torch.no_grad()
-    def step(self, closure=None, grad_scale=1.0):
+    def step(self, closure=None, grad_scale=1.0, bf16_copy=None):
         """Update the model parameters.
 
         .. note::
@@ -126,10 +130,24 @@ class DeepSpeedCPUAdam(torch.optim.Optimizer):
                 factor as the kernel loads it, the same float multiply as
                 ``grad.mul_(grad_scale)`` before the step but without a separate
                 pass over the gradients (which are left unchanged). Defaults to 1.
+            bf16_copy (tuple, optional): ``(piece_numel, before_piece, after_piece)``
+                to also write a bfloat16 copy of the updated float32 parameters in
+                the same kernel pass. Each parameter is updated in pieces of
+                ``aligned_piece_numel(piece_numel)`` elements: ``out =
+                before_piece(param, start, count)`` returns a contiguous bfloat16
+                CPU tensor of ``count`` elements, the kernel updates the piece and
+                writes it into ``out`` rounded to nearest even (as ``out.copy_``
+                would), then ``after_piece(param, start, count, out)`` is called.
+                Parameters and moments are bitwise equal to a call without it.
+                Needs ``copy_supported()``. Defaults to ``None``.
 
         Returns:
             loss: if ``closure`` is provided. Otherwise ``None``.
         """
+        if bf16_copy is not None:
+            assert self.copy_supported(), "bf16_copy needs AVX512, NEON or the scalar CPU Adam kernel"
+        if grad_scale != 1.0:
+            assert self.grad_scale_supported(), "grad_scale is not supported by this CPU Adam build (RVV)"
 
         loss = None
         if closure is not None:
@@ -167,7 +185,9 @@ class DeepSpeedCPUAdam(torch.optim.Optimizer):
                 state['step'] += 1
                 beta1, beta2 = group['betas']
 
-                if grad_scale != 1.0:
+                if bf16_copy is not None:
+                    self._step_in_pieces_with_copy(p, state, group, grad_scale, *bf16_copy)
+                elif grad_scale != 1.0:
                     self.ds_opt_adam.adam_update_scaled(self.opt_id, state['step'], group['lr'], beta1, beta2,
                                                         group['eps'], group['weight_decay'], group['bias_correction'],
                                                         p.data, p.grad.data, state['exp_avg'], state['exp_avg_sq'],
@@ -179,56 +199,36 @@ class DeepSpeedCPUAdam(torch.optim.Optimizer):
         return loss
 
     def copy_supported(self):
-        """Whether step_pieces can write a bfloat16 copy of the updated parameters (needs AVX512, NEON or the
+        """Whether step(bf16_copy=...) can write a bfloat16 copy of the updated parameters (needs AVX512, NEON or the
         scalar kernel)."""
         return bool(self.ds_opt_adam.adam_copy_supported())
 
+    def grad_scale_supported(self):
+        """Whether step(grad_scale=...) is available (every kernel but RVV)."""
+        return bool(self.ds_opt_adam.adam_grad_scale_supported())
+
     def aligned_piece_numel(self, piece_numel):
-        """The piece size step_pieces uses for ``piece_numel``: rounded down to a multiple of the kernel's widest
-        vector block (at least one block), so every element goes through the same code, with the same rounding, as in
-        one step() call on the whole parameter."""
+        """The piece size step(bf16_copy=...) uses for ``piece_numel``: rounded down to a multiple of the kernel's
+        widest vector block (at least one block), so every element goes through the same code, with the same rounding,
+        as in one call on the whole parameter."""
         block = int(self.ds_opt_adam.adam_block_numel())
         return max(block, piece_numel - piece_numel % block)
 
-    @torch.no_grad()
-    def step_pieces(self, piece_numel, before_piece, after_piece, grad_scale=1.0):
-        """step(grad_scale=...) for float32 parameters, done in pieces of ``piece_numel`` elements, with a bfloat16
-        copy of each updated piece written by the same kernel pass.
-
-        Pieces are ``aligned_piece_numel(piece_numel)`` elements (the last one may be shorter).
-        For each piece of each parameter: ``out = before_piece(param, start, count)`` returns a contiguous bfloat16
-        CPU tensor of ``count`` elements; the kernel updates the piece and writes it, rounded to nearest even (as
-        ``out.copy_(param[start:start + count])`` would), into ``out``; then ``after_piece(param, start, count, out)``.
-        The parameters and moments are bitwise equal to step(grad_scale=...).
-        """
-        assert self.copy_supported(), "step_pieces needs AVX512, NEON or the scalar CPU Adam kernel"
+    def _step_in_pieces_with_copy(self, p, state, group, grad_scale, piece_numel, before_piece, after_piece):
+        assert p.dtype == torch.float32, f"bf16_copy needs float32 parameters, got {p.dtype}"
         piece_numel = self.aligned_piece_numel(piece_numel)
-        device = torch.device('cpu')
-        for group in self.param_groups:
-            for p in group['params']:
-                if p.grad is None:
-                    continue
-                assert p.device == device and p.dtype == torch.float32, \
-                    f"step_pieces needs float32 CPU parameters, got {p.dtype} on {p.device}"
-                state = self.state[p]
-                if len(state) == 0:
-                    state['step'] = 0
-                    state_dtype = torch.float if self.fp32_optimizer_states else p.dtype
-                    state['exp_avg'] = torch.zeros_like(p.data, dtype=state_dtype, device=device)
-                    state['exp_avg_sq'] = torch.zeros_like(p.data, dtype=state_dtype, device=device)
-                state['step'] += 1
-                beta1, beta2 = group['betas']
-                param, grad = p.data.view(-1), p.grad.data.view(-1)
-                exp_avg, exp_avg_sq = state['exp_avg'].view(-1), state['exp_avg_sq'].view(-1)
-                for start in range(0, param.numel(), piece_numel):
-                    count = min(piece_numel, param.numel() - start)
-                    out = before_piece(p, start, count)
-                    piece = slice(start, start + count)
-                    self.ds_opt_adam.adam_update_scaled_copy(self.opt_id, state['step'], group['lr'], beta1, beta2,
-                                                             group['eps'], group['weight_decay'],
-                                                             group['bias_correction'], param[piece], grad[piece],
-                                                             exp_avg[piece], exp_avg_sq[piece], grad_scale, out)
-                    after_piece(p, start, count, out)
+        beta1, beta2 = group['betas']
+        param, grad = p.data.view(-1), p.grad.data.view(-1)
+        exp_avg, exp_avg_sq = state['exp_avg'].view(-1), state['exp_avg_sq'].view(-1)
+        for start in range(0, param.numel(), piece_numel):
+            count = min(piece_numel, param.numel() - start)
+            out = before_piece(p, start, count)
+            piece = slice(start, start + count)
+            self.ds_opt_adam.adam_update_scaled_copy(self.opt_id, state['step'], group['lr'], beta1, beta2,
+                                                     group['eps'], group['weight_decay'], group['bias_correction'],
+                                                     param[piece], grad[piece], exp_avg[piece], exp_avg_sq[piece],
+                                                     grad_scale, out)
+            after_piece(p, start, count, out)
 
     @torch.no_grad()
     def step_subgroup(self, subgroup_id: int, closure=None):

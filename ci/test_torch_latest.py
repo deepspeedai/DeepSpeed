@@ -173,7 +173,10 @@ class FakeAwsCli:
             )
         if (service, operation) == ("s3api", "get-object"):
             key = argv[argv.index("--key") + 1]
-            stream = self.test_stderr if key.endswith("/stderr") else self.test_stdout
+            if "/prepare/" in key:
+                stream = self.prepare_stdout
+            else:
+                stream = self.test_stderr if key.endswith("/stderr") else self.test_stdout
             Path(argv[-1]).write_bytes(stream.encode("utf-8")[-torch_latest.SSM_OUTPUT_TAIL_BYTES:])
             return _command_result(stdout="{}\n")
         if (service, operation) == ("ec2", "terminate-instances"):
@@ -864,8 +867,8 @@ def test_aws_scripts_reuse_full_selection_manifest_and_two_gpu_contract():
         assert "/var/lib/devds/runs/123-1" in prepare
         assert "--gpus '\"device=0,1\"'" in prepare
         assert "uv==0.12.7" in prepare
-        assert "uv venv --python 3.10.13 --seed /workspace/python310" in prepare
-        assert "PATH=/workspace/python310/bin:" in prepare
+        assert "uv venv --python 3.12.14 --seed /workspace/python312" in prepare
+        assert "PATH=/workspace/python312/bin:" in prepare
         assert "expected exactly 2 visible GPUs" in prepare
         assert "ci/modal_diagnostics/pr8654_71_nodes.txt" not in prepare + test
         assert "tests/unit/v1" in test
@@ -1462,6 +1465,32 @@ def test_aws_test_failure_emits_bounded_s3_tail_for_nightly_triage():
         shutil.rmtree(root, ignore_errors=True)
 
 
+def test_aws_prepare_failure_emits_bounded_s3_tail():
+    root, path = _selection_file("tests/unit/v1/test_one.py\n")
+    try:
+        late_failure = "verify Python dependencies failed with exit code 1"
+        full_output = "early output\n" * 2500 + f"{late_failure}\n"
+        env = _valid_env(
+            path,
+            DS_TEST_SELECTION_MODE="subset",
+            AWS_MODAL_FALLBACK_CONFIG=_aws_config(),
+            GITHUB_RUN_ID="123",
+            GITHUB_RUN_ATTEMPT="1",
+        )
+        fake = FakeAwsCli(prepare_code=1, prepare_stdout=full_output)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            _expect_error(torch_latest.run_aws_controller, env, fake, exception=torch_latest.AwsControllerError)
+        public_log = output.getvalue()
+        assert late_failure in public_log
+        assert "[aws:prepare:tail] complete stdout" in public_log
+        tail_calls = [call for call, _ in fake.calls if call[2:4] == ("s3api", "get-object")]
+        assert len(tail_calls) == 1
+        assert "/prepare/" in tail_calls[0][tail_calls[0].index("--key") + 1]
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def test_aws_s3_tail_timeout_preserves_test_timeout_and_cleanup():
     root, path = _selection_file("tests/unit/v1/test_one.py\n")
     try:
@@ -1705,6 +1734,15 @@ def test_workflow_keeps_github_execution_trusted_and_preserves_modes():
     assert "checkout-candidate" not in deploy
     assert "pull_request.head.sha || github.sha" in deploy
     assert "pull_request.head.repo.full_name || github.repository" in deploy
+    assert "MODAL_TOKEN_ID" in deploy
+    assert "MODAL_TOKEN_SECRET" in deploy
+    deploy_auth = deploy.split("- name: Configure AWS credentials for capacity fallback",
+                               1)[1].split("- name: Run tests on AWS capacity fallback", 1)[0]
+    deploy_cleanup = deploy.split("- name: Reconcile AWS capacity fallback cleanup", 1)[1]
+    assert "id: aws-auth" in deploy_auth
+    assert "if: steps.modal.outputs.fallback == 'true'" in deploy_auth
+    assert ("if: ${{ always() && steps.modal.outputs.fallback == 'true' && steps.aws-auth.outcome == 'success' }}"
+            in deploy_cleanup)
 
 
 def test_launcher_source_has_no_local_packaging_or_shell_execution():

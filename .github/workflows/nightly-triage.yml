@@ -181,11 +181,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           NIGHTLY_RUN_ID: ${{ github.event.workflow_run.id }}
         run: |
-          # The nightly pytest prints failures as "FAILED unit/v1/..." (its working
-          # directory is tests/), so re-prefix each unique file with tests/.
+          # The nightly runs pytest from the repo root with --color=no, so
+          # failures print as plain "FAILED tests/unit/v1/..." lines and no
+          # color-marker filtering is needed before matching.
           gh run view "$NIGHTLY_RUN_ID" --log \
-            | grep -o 'FAILED unit/v1/[^ \t]*\.py' | sort -u \
-            | sed 's|^|tests/|' > failing-tests.txt
+            | grep -oE 'FAILED tests/unit/v1/[^[:space:]]*\.py' | sort -u \
+            | sed 's|^FAILED ||' > failing-tests.txt
           if [ ! -s failing-tests.txt ]; then
             echo "no FAILED test files found in the nightly log" >&2
             exit 1

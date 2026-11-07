@@ -23,6 +23,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
     m.def("adam_copy_supported",
           &ds_adam_copy_supported,
           "whether adam_update_scaled_copy is available in this build (C++)");
+    m.def("adam_grad_scale_supported",
+          &ds_adam_grad_scale_supported,
+          "whether adam_update_scaled is available in this build (C++)");
     m.def("adam_rollback", &ds_adam_rollback, "DeepSpeed CPU Adam rollback (C++)");
     m.def("create_adam", &create_adam_optimizer, "DeepSpeed CPU Adam (C++)");
     m.def("destroy_adam", &destroy_adam_optimizer, "DeepSpeed CPU Adam destroy (C++)");

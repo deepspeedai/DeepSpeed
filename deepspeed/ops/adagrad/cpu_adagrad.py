@@ -6,27 +6,31 @@
 import torch
 from deepspeed.ops.op_builder import CPUAdagradBuilder
 from deepspeed.utils.logging import should_log_le
+from deepspeed.ops.cpu_optimizer import DeepSpeedCPUOptimizer
 
 
-class DeepSpeedCPUAdagrad(torch.optim.Optimizer):
+class DeepSpeedCPUAdagrad(DeepSpeedCPUOptimizer):
     optimizer_id = 0
 
     def __init__(self, model_params, lr=1e-2, eps=1e-10, weight_decay=0, amsgrad=False, fp32_optimizer_states=True):
 
         default_args = dict(lr=lr, eps=eps, weight_decay=weight_decay, amsgrad=amsgrad)
-        super(DeepSpeedCPUAdagrad, self).__init__(model_params, default_args)
+        super(DeepSpeedCPUAdagrad, self).__init__(model_params, default_args, fp32_optimizer_states)
 
         self.opt_id = DeepSpeedCPUAdagrad.optimizer_id
         DeepSpeedCPUAdagrad.optimizer_id = DeepSpeedCPUAdagrad.optimizer_id + 1
-        self.fp32_optimizer_states = fp32_optimizer_states
-        self.ds_opt_adagrad = CPUAdagradBuilder().load()
+        try:
+            self.ds_opt_adagrad = CPUAdagradBuilder().load()
+        except Exception as e:
+            raise RuntimeError("DeepSpeedCPUAdagrad requires the cpu_adagrad op, which failed to build/load.") from e
 
         self.ds_opt_adagrad.create_adagrad(self.opt_id, lr, eps, weight_decay, should_log_le("info"))
 
     def __del__(self):
         # need to destroy the C++ object explicitly to avoid a memory leak when deepspeed.initialize
         # is used multiple times in the same process (notebook or pytest worker)
-        self.ds_opt_adagrad.destroy_adagrad(self.opt_id)
+        if hasattr(self, 'ds_opt_adagrad'):
+            self.ds_opt_adagrad.destroy_adagrad(self.opt_id)
 
     def __setstate__(self, state):
         super(DeepSpeedCPUAdagrad, self).__setstate__(state)
