@@ -457,6 +457,7 @@ def clip_grad_norm_(parameters, max_norm, norm_type=2, mpu=None):
             dist.all_reduce(total_norm, op=dist.ReduceOp.MAX, group=mpu.get_model_parallel_group())
     else:
         total_norm = 0
+        replicated_powers = []
         for p in norm_parameters:
             model_parallel = is_model_parallel_parameter(p)
             if mpu is not None and mpu.get_model_parallel_rank() != 0 and not model_parallel:
@@ -468,12 +469,16 @@ def clip_grad_norm_(parameters, max_norm, norm_type=2, mpu=None):
                 # The model-parallel sum must count the already-reduced K/V gradient once.
                 prefix_power = grad.narrow(0, 0, kv_start).norm(norm_type).pow(norm_type) if kv_start else 0
                 kv_power = grad.narrow(0, kv_start, num_rows).norm(norm_type).pow(norm_type)
-                param_power = prefix_power + kv_power / tp_size
+                replicated_powers.append(prefix_power + kv_power / tp_size)
             else:
-                param_power = grad.norm(norm_type).pow(norm_type)
-            all_norms.append(param_power)
-        if len(all_norms) > 0:
-            total_norm = torch.stack(all_norms).sum().float()
+                all_norms.append(grad.norm(norm_type))
+        if len(all_norms) > 0 or len(replicated_powers) > 0:
+            # The p-norm over every gradient is (sum_i ||g_i||_p ** p) ** (1/p), and the
+            # 1/norm_type root is taken below, so each per-parameter norm has to be raised
+            # to norm_type here. Squaring only matches that for norm_type == 2. Unmarked
+            # norms are raised in one batched op so the common path adds no per-parameter kernels.
+            powers = [torch.stack(all_norms).pow(norm_type).sum()] if all_norms else []
+            total_norm = torch.stack(powers + replicated_powers).sum().float()
         else:
             total_norm = get_accelerator().FloatTensor([0.0])
         total_norm = total_norm.to(get_accelerator().current_device_name())
