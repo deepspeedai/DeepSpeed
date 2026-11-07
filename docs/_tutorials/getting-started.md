@@ -327,3 +327,13 @@ deepspeed --include localhost:0,1 ...
 ```bash
 CUDA_VISIBLE_DEVICES=0,1 deepspeed ...
 ```
+
+Full GPU and MIG UUIDs are also accepted by CUDA and by DeepSpeed's NVML-backed
+memory queries. For example:
+
+```bash
+CUDA_VISIBLE_DEVICES=GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee deepspeed ...
+```
+
+Use the complete UUID reported by `nvidia-smi -L`; abbreviated UUID prefixes are
+not supported by DeepSpeed's NVML memory query.
