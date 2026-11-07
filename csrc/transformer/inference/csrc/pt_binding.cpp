@@ -2051,6 +2051,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
     // The following functions handle type dispatching internally
     m.def("gated_activation", &ds_gated_activation, "DeepSpeed Bias GEGLU (CUDA)");
     m.def("layer_norm", &ds_layer_norm, "DeepSpeed layer norm (CUDA)");
+    m.def("layer_norm_fp16", &ds_layer_norm, "DeepSpeed layer norm fp16 (CUDA)");
+    m.def("layer_norm_fp32", &ds_layer_norm, "DeepSpeed layer norm fp32 (CUDA)");
     m.def(
         "_layer_norm_residual", &ds_layer_norm_residual, "DeepSpeed layer norm + residual (CUDA)");
     m.def("layer_norm_residual_store_pre_ln_res",
