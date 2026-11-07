@@ -84,13 +84,23 @@ class BlockedAllocator:
         if isinstance(blocks, int):
             blocks = [blocks]
 
+        seen_blocks = set()
         for block in blocks:
             # Parse all blocks for validity before mutating the list.
+            # Normalize to int: callers may pass tensors (e.g. all_block_ids),
+            # and 0-dim tensors hash by identity, which would defeat
+            # duplicate detection below.
+            block = int(block)
             if block < 0 or block >= self._num_blocks:
                 raise ValueError(f'Invalid block {block} provided to free')
 
+            if block in seen_blocks:
+                raise ValueError(f'Block {block} provided multiple times to free')
+
             if self._blocks[block] != -1:
                 raise ValueError(f'Block {block} is already free')
+
+            seen_blocks.add(block)
 
         for block in blocks:
             self._blocks[block] = self._head
