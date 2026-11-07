@@ -2806,6 +2806,41 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                                                                        write_opt_state, write_gradients)
         self.fp32_partitioned_groups_flat[sub_group_id].grad = None
 
+    def _get_in_memory_optimizer_states(self):
+        """By sub-group, the optimizer states that are not swapped (`swappable = False`, as Muon's momentum with
+        save_muon_momentum_buffer_in_memory)."""
+        return {
+            sub_group_id: {
+                key: value
+                for key, value in self.optimizer.state.get(fp32_param, {}).items()
+                if torch.is_tensor(value) and not getattr(value, "swappable", True)
+            }
+            for sub_group_id, fp32_param in enumerate(self.fp32_partitioned_groups_flat)
+        }
+
+    def _prepare_loaded_states_for_swap_in(self, in_memory_states):
+        """Fit the optimizer states that optimizer.load_state_dict() created to the swapper.
+
+        The states of a swapped sub-group are saved empty: their values are in the swap files that load_checkpoint
+        copied from the checkpoint. The swapper takes a state tensor for swapping by its size, so each gets the size of
+        its sub-group, with no memory behind it: swapping the sub-group in replaces it with the values read from the
+        file. A state that is not swapped gets the loaded values in its own tensor, which other code refers to.
+        """
+        for sub_group_id, fp32_param in enumerate(self.fp32_partitioned_groups_flat):
+            state = self.optimizer.state.get(fp32_param)
+            if state is None:
+                continue
+            for key, tensor in in_memory_states[sub_group_id].items():
+                if key in state:
+                    tensor.copy_(state[key])
+                    state[key] = tensor
+            if not self._swappable_optimizer_subgroup(sub_group_id):
+                continue
+            numel = self.fp16_partitioned_groups_flat_numel[sub_group_id]
+            for key, value in state.items():
+                if torch.is_tensor(value) and value.numel() == 0:
+                    state[key] = torch.empty_strided((numel, ), (0, ), dtype=value.dtype)
+
     def _unflatten_partitioned_parameters(self, sub_group_id):
         updated_params = self.unflatten(self.fp16_partitioned_groups_flat[sub_group_id],
                                         self.fp16_partitioned_groups[sub_group_id])
@@ -3589,42 +3624,48 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                                "topology in this release.")
 
         if load_optimizer_states:
+            in_memory_states = self._get_in_memory_optimizer_states() if self.swap_optimizer else None
             self._set_fp32_optimizer_param_groups()
             self.optimizer.load_state_dict(state_dict[OPTIMIZER_STATE_DICT])
             self._clear_fp32_optimizer_param_groups()
 
         if self.swap_optimizer:
+            if load_optimizer_states:
+                self._prepare_loaded_states_for_swap_in(in_memory_states)
             # Purge the swapped optimizer state, it was initialized to the freshly created model and not the checkpoint
             self.optimizer_swapper.purge_state()
 
+        # restore fp32 partitions
+        for curr_param, saved_param in zip(self.fp32_partitioned_groups_flat, state_dict[FP32_FLAT_GROUPS]):
+            curr_param.data.copy_(saved_param.data)
+
         if self.swap_optimizer:
-            # Touch all parameters to synchronize all buffers
+            # Copy the fp32 partitions to the parameters, as step() does: the swapped sub-groups are read from the
+            # copied swap files, and parameters without a flat buffer (offload_param.max_in_cpu) are swapped out.
             timer_names = set()
             self._partition_all_parameters()
             for sub_group_id, group in enumerate(self.fp16_groups):
                 self._prepare_sub_group(sub_group_id, timer_names)
                 self._reassign_or_swap_out_partitioned_parameters(sub_group_id)
                 self._release_sub_group(sub_group_id, timer_names)
-            self._post_step(timer_names)
+            # Not _post_step(): its all-gather of the persistent parameters would hang with pipeline_loading_checkpoint,
+            # where the other ranks of the node load later. checkpoint_event_epilogue() gathers them.
+            self.reset_cpu_buffers()
+        else:
+            # restore fp16 partitions from fp32
+            for sub_group_id in range(len(self.fp32_partitioned_groups_flat)):
+                fp32_param = self.fp32_partitioned_groups_flat[sub_group_id]
+                if sum(fp32_param.size()) > 0:
+                    fp16_param = self.fp16_partitioned_groups_flat[sub_group_id]
+                    fp16_param.data.copy_(fp32_param.data)
 
-        # restore fp32 partitions
-        for curr_param, saved_param in zip(self.fp32_partitioned_groups_flat, state_dict[FP32_FLAT_GROUPS]):
-            curr_param.data.copy_(saved_param.data)
+            # update fp16 unflattened params
+            for sub_group_id in range(len(self.fp16_partitioned_groups_flat)):
+                updated_params = self.unflatten(self.fp16_partitioned_groups_flat[sub_group_id],
+                                                self.fp16_partitioned_groups[sub_group_id])
 
-        # restore fp16 partitions from fp32
-        for sub_group_id in range(len(self.fp32_partitioned_groups_flat)):
-            fp32_param = self.fp32_partitioned_groups_flat[sub_group_id]
-            if sum(fp32_param.size()) > 0:
-                fp16_param = self.fp16_partitioned_groups_flat[sub_group_id]
-                fp16_param.data.copy_(fp32_param.data)
-
-        # update fp16 unflattened params
-        for sub_group_id in range(len(self.fp16_partitioned_groups_flat)):
-            updated_params = self.unflatten(self.fp16_partitioned_groups_flat[sub_group_id],
-                                            self.fp16_partitioned_groups[sub_group_id])
-
-            for partitioned_param, q in zip(self.fp16_partitioned_groups[sub_group_id], updated_params):
-                partitioned_param.data = q.data
+                for partitioned_param, q in zip(self.fp16_partitioned_groups[sub_group_id], updated_params):
+                    partitioned_param.data = q.data
 
         if not load_from_fp32_weights:
             self.refresh_fp32_params()
