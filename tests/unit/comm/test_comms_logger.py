@@ -253,3 +253,19 @@ def test_calc_bw_log_supports_object_and_list_collectives(monkeypatch, comm_op, 
         expected_busbw *= (world_size - 1) / world_size
     assert tput == pytest.approx(expected_tput)
     assert busbw == pytest.approx(expected_busbw)
+
+
+@pytest.mark.parametrize('comm_op', ['all_gather_object', 'monitored_barrier'])
+def test_calc_bw_log_supports_every_timed_op(monkeypatch, comm_op):
+    # all_gather_object and monitored_barrier are wrapped in timed_op but had no
+    # branch in calc_bw_log, which printed "wrong comm_op specified" and called
+    # exit(0), silently ending the training process when comms profiling was on.
+    import deepspeed.comm as dist
+    from deepspeed.utils.comms_logging import calc_bw_log
+
+    monkeypatch.setattr(dist, 'get_world_size', lambda group=None: 2)
+    monkeypatch.setattr(dist, 'get_rank', lambda group=None: 0)
+
+    tput, busbw = calc_bw_log(comm_op, 0, 2.0)
+    assert tput == 0
+    assert busbw == 0
