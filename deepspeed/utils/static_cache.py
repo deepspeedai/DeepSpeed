@@ -57,10 +57,15 @@ class DeepSpeedStaticLayer:
             raise ValueError("write position must use an integer dtype")
         self._write_position = pos
 
-    def lazy_initialization(self, key_states: torch.Tensor, value_states: torch.Tensor) -> None:
+    def lazy_initialization(self,
+                            key_states: torch.Tensor,
+                            value_states: torch.Tensor,
+                            max_batch_size: int | None = None) -> None:
         self.dtype = key_states.dtype
         self.device = key_states.device
-        max_batch_size, num_heads = key_states.shape[:2]
+        num_heads = key_states.shape[1]
+        if max_batch_size is None:
+            max_batch_size = key_states.shape[0]
         self.max_batch_size = max_batch_size
         self.num_heads = num_heads
         self.k_head_dim = key_states.shape[-1]
