@@ -730,8 +730,8 @@ class WarmupLR(object):
                  warmup_type: str = WARMUP_LOG_RATE,
                  last_batch_iteration: int = -1):
 
-        if not isinstance(warmup_num_steps, int) or warmup_num_steps <= 0:
-            raise ValueError(f"warmup_num_steps must be a positive integer, got {warmup_num_steps}")
+        if not isinstance(warmup_num_steps, int) or warmup_num_steps < 0:
+            raise ValueError(f"warmup_num_steps must be a non-negative integer, got {warmup_num_steps}")
 
         self.optimizer = get_torch_optimizer(optimizer)
 
@@ -871,8 +871,8 @@ class WarmupCosineLR(object):
                  warmup_type: str = WARMUP_LOG_RATE,
                  last_batch_iteration: int = -1):
 
-        if not isinstance(warmup_num_steps, int) or warmup_num_steps <= 0:
-            raise ValueError(f"warmup_num_steps must be a positive integer, got {warmup_num_steps}")
+        if not isinstance(warmup_num_steps, int) or warmup_num_steps < 0:
+            raise ValueError(f"warmup_num_steps must be a non-negative integer, got {warmup_num_steps}")
 
         self.optimizer = get_torch_optimizer(optimizer)
 
