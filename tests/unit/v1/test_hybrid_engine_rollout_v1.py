@@ -380,7 +380,12 @@ def test_decode_repetition_penalty_matches_hf_generate(temperature, use_graph_ca
                               top_k=0,
                               top_p=1.0,
                               continuous_batch_size=continuous_batch_size)
-    hf_sampling = {"do_sample": True, "temperature": temperature, "top_k": 0, "top_p": 1.0} if temperature > 0 else {
+    hf_sampling = {
+        "do_sample": True,
+        "temperature": temperature,
+        "top_k": 0,
+        "top_p": 1.0
+    } if temperature > 0 else {
         "do_sample": False
     }
 

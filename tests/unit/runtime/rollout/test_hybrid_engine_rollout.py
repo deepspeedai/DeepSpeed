@@ -937,6 +937,7 @@ def test_continuous_generation_applies_repetition_penalty_in_float32():
 
 
 def test_continuous_prefill_applies_repetition_penalty():
+
     class Model(torch.nn.Module):
         _supports_cache_class = True
         config = PretrainedConfig(num_hidden_layers=1, num_attention_heads=1, hidden_size=1, head_dim=1)
@@ -952,12 +953,8 @@ def test_continuous_prefill_applies_repetition_penalty():
                                   cfg=HybridEngineRolloutConfig())
     prompt_ids = torch.tensor([[0, 0]])
 
-    tokens, _ = rollout._continuous_prefill_cache(rollout.engine.module,
-                                                  lambda *args, **kwargs: None,
-                                                  prompt_ids,
-                                                  torch.ones_like(prompt_ids),
-                                                  torch.float32,
-                                                  torch.device("cpu"),
+    tokens, _ = rollout._continuous_prefill_cache(rollout.engine.module, lambda *args, **kwargs: None, prompt_ids,
+                                                  torch.ones_like(prompt_ids), torch.float32, torch.device("cpu"),
                                                   SamplingConfig(max_new_tokens=1, temperature=0))
 
     assert tokens.tolist() == [[1]]
