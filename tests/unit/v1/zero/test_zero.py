@@ -105,6 +105,47 @@ class TestGradientAllreduceOp(DistributedTest):
         engine.destroy()
 
 
+@pytest.mark.parametrize("contiguous_gradients", [True, False])
+@pytest.mark.parametrize("gradient_predivide_factor", [1.0, 2.0, 4.0])
+class TestZero3GradientPredivide(DistributedTest):
+    world_size = 2
+
+    def test(self, contiguous_gradients, gradient_predivide_factor):
+
+        class LinearLoss(Module):
+
+            def __init__(self):
+                super().__init__()
+                self.weight = Parameter(torch.zeros(2))
+
+            def forward(self, inputs):
+                return (self.weight * inputs).sum()
+
+        model = LinearLoss()
+        optimizer = torch.optim.SGD(model.parameters(), lr=1.0)
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 1,
+            "gradient_clipping": 0.0,
+            "zero_allow_untested_optimizer": True,
+            "gradient_predivide_factor": gradient_predivide_factor,
+            "zero_optimization": {
+                "stage": 3,
+                "reduce_scatter": False,
+                "contiguous_gradients": contiguous_gradients,
+            },
+        }
+        engine, _, _, _ = deepspeed.initialize(model=model, optimizer=optimizer, config=config_dict)
+
+        inputs = torch.tensor([1.0, 2.0], device=engine.device)
+        engine.backward(engine(inputs))
+        engine.step()
+
+        # Every rank sees the same inputs, so the averaged gradient is `inputs` whatever the predivide factor.
+        actual = safe_get_full_fp32_param(engine.module.weight).detach().cpu()
+        torch.testing.assert_close(actual, -inputs.cpu())
+        engine.destroy()
+
+
 @pytest.mark.parametrize(
     "optimizer_name,zero_stage",
     [
