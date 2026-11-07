@@ -105,6 +105,149 @@ class TestGradientAllreduceOp(DistributedTest):
         engine.destroy()
 
 
+class TestSingleRankGradientAllreduce(DistributedTest):
+    world_size = 1
+
+    @pytest.mark.parametrize("communication_data_type", ["fp32", "bf16"])
+    @pytest.mark.parametrize("gradient_predivide_factor", [1.0, 2.0])
+    def test_dense_gradient_reduction_preserves_update(self, communication_data_type, gradient_predivide_factor,
+                                                       monkeypatch):
+
+        class LinearLoss(Module):
+
+            def __init__(self):
+                super().__init__()
+                self.weight = Parameter(torch.tensor([1.0, -2.0], dtype=torch.float32))
+
+            def forward(self, inputs):
+                return (self.weight * inputs).sum()
+
+        model = LinearLoss()
+        optimizer = torch.optim.SGD(model.parameters(), lr=1.0)
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 1,
+            "gradient_accumulation_steps": 1,
+            "gradient_clipping": 0.0,
+            "communication_data_type": communication_data_type,
+            "gradient_predivide_factor": gradient_predivide_factor,
+            "zero_optimization": {
+                "stage": 0
+            },
+            "zero_allow_untested_optimizer": True,
+        }
+        engine, _, _, _ = deepspeed.initialize(model=model, optimizer=optimizer, config=config_dict)
+        inputs = torch.tensor([3.1234, 4.5678], device=engine.device)
+        dense_reduction_calls = []
+        original_reduction = engine.allreduce_no_retain
+
+        def track_dense_reduction(*args, **kwargs):
+            dense_reduction_calls.append((args, kwargs))
+            return original_reduction(*args, **kwargs)
+
+        monkeypatch.setattr(engine, "allreduce_no_retain", track_dense_reduction)
+        try:
+            engine.backward(engine(inputs))
+            engine.step()
+            rounded_grad = inputs.to(engine.communication_data_type)
+            if gradient_predivide_factor != 1.0:
+                rounded_grad.mul_(1.0 / gradient_predivide_factor)
+                rounded_grad.mul_(gradient_predivide_factor)
+            rounded_grad = rounded_grad.to(torch.float32)
+            expected_weight = torch.tensor([1.0, -2.0], device=engine.device) - rounded_grad
+            torch.testing.assert_close(engine.module.weight, expected_weight)
+            assert len(dense_reduction_calls) == (communication_data_type == "bf16"
+                                                  or gradient_predivide_factor != 1.0)
+        finally:
+            engine.destroy()
+
+
+class TestSequenceParallelGradientReductionGroupSize(DistributedTest):
+    world_size = 2
+
+    def test_adjusted_dp_world_size_does_not_skip_multirank_group(self, monkeypatch):
+
+        class LinearLoss(Module):
+
+            def __init__(self):
+                super().__init__()
+                self.weight = Parameter(torch.ones(1))
+
+            def forward(self, inputs):
+                return (self.weight * inputs).sum()
+
+        model = LinearLoss()
+        optimizer = torch.optim.SGD(model.parameters(), lr=1.0)
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 1,
+            "zero_optimization": {
+                "stage": 0
+            },
+            "zero_allow_untested_optimizer": True,
+        }
+        engine, _, _, _ = deepspeed.initialize(model=model, optimizer=optimizer, config=config_dict)
+        engine.sequence_parallel_size = 2
+        reductions = []
+
+        def record_dense_reduction(grads, dp_group, numel_per_bucket, dp_world_size):
+            reductions.append((dp_group, dp_world_size))
+
+        monkeypatch.setattr(engine, "allreduce_no_retain", record_dense_reduction)
+        try:
+            engine._reduce_non_expert_gradients([torch.ones(1, device=engine.device)], elements_per_buffer=1)
+            assert len(reductions) == 1
+            assert dist.get_world_size(group=reductions[0][0]) == 2
+            assert reductions[0][1] == 1
+        finally:
+            engine.destroy()
+
+
+class TestSingletonDataParallelGroup(DistributedTest):
+    world_size = 2
+
+    def test_singleton_dp_group_skips_reduction_with_other_ranks(self, monkeypatch):
+
+        class LinearLoss(Module):
+
+            def __init__(self):
+                super().__init__()
+                self.weight = Parameter(torch.tensor([1.0, -2.0]))
+
+            def forward(self, inputs):
+                return (self.weight * inputs).sum()
+
+        model = LinearLoss()
+        optimizer = torch.optim.SGD(model.parameters(), lr=1.0)
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 1,
+            "train_batch_size": self.world_size,
+            "gradient_clipping": 0.0,
+            "zero_optimization": {
+                "stage": 0
+            },
+            "zero_allow_untested_optimizer": True,
+        }
+        engine, _, _, _ = deepspeed.initialize(model=model, optimizer=optimizer, config=config_dict)
+        singleton_dp_groups = [dist.new_group([rank]) for rank in range(self.world_size)]
+        dp_group = singleton_dp_groups[dist.get_rank()]
+        monkeypatch.setattr("deepspeed.runtime.engine.groups._get_sequence_data_parallel_group", lambda: dp_group)
+        dense_reduction_calls = []
+        original_reduction = engine.allreduce_no_retain
+
+        def track_dense_reduction(*args, **kwargs):
+            dense_reduction_calls.append((args, kwargs))
+            return original_reduction(*args, **kwargs)
+
+        monkeypatch.setattr(engine, "allreduce_no_retain", track_dense_reduction)
+        inputs = torch.tensor([3.0, 4.0], device=engine.device)
+        try:
+            engine.backward(engine(inputs))
+            engine.step()
+            torch.testing.assert_close(engine.module.weight, torch.tensor([-2.0, -6.0], device=engine.device))
+            assert not dense_reduction_calls
+        finally:
+            engine.destroy()
+
+
 @pytest.mark.parametrize(
     "optimizer_name,zero_stage",
     [
