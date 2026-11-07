@@ -322,6 +322,8 @@ Important notes:
 
 .. autofunction:: deepspeed.utils.safe_get_full_grad
 
+.. autofunction:: deepspeed.utils.safe_get_full_model_grads
+
 .. autofunction:: deepspeed.utils.safe_get_full_optimizer_state
 
 .. autofunction:: deepspeed.utils.safe_get_local_fp32_param
@@ -361,6 +363,19 @@ These routines can be used in a training loop as shown in the following snippet.
 
     [...]
     optimizer.step()
+
+For efficient model-wide gradient access, collect all gradients in one call after
+``backward`` and before ``step``. Call this on every data-parallel rank with the
+same model. ZeRO-1/2 uses one coalesced reduction per data-parallel group when
+supported by the communication backend, and otherwise reduces each parameter.
+ZeRO-3 uses the existing per-parameter accessor. The returned gradients cover
+ZeRO data-parallel partitions on the current tensor/expert-parallel rank;
+AutoTP/AutoEP shards remain local.
+
+.. code-block:: python
+
+    from deepspeed.utils import safe_get_full_model_grads
+    full_grads = safe_get_full_model_grads(model)
 
 
 
