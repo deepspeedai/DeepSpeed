@@ -32,10 +32,17 @@ class RolloutConfig:
     # Format of the model's tool calls, a key of TOOL_CALL_PARSERS: "hermes" (Qwen2.5, Qwen3) or
     # "qwen3_coder" (Qwen3-Coder, Qwen3.5).
     tool_call_parser: str = "hermes"
+    # Decode rows for continuous batching; None keeps static batching. It sizes the KV cache and the captured
+    # graph, so it belongs to the engine, not to a generate call.
+    continuous_batch_size: Optional[int] = None
+    # Record each generated token's log-prob under the sampling distribution in RolloutRecord.rollout_log_probs.
+    return_log_probs: bool = False
 
     def __post_init__(self) -> None:
         if self.multi_turn and not self.max_turns:
             raise ValueError("max_turns must be set when multi_turn is enabled")
+        if self.continuous_batch_size is not None and self.continuous_batch_size < 1:
+            raise ValueError("continuous_batch_size must be positive")
         if self.tool_call_parser not in TOOL_CALL_PARSERS:
             raise ValueError(f"unknown tool_call_parser {self.tool_call_parser!r}; "
                              f"choose from {', '.join(TOOL_CALL_PARSERS)}")
@@ -55,8 +62,6 @@ class SamplingConfig:
     top_p: float = 1.0
     top_k: int = -1
     n_samples_per_prompt: int = 1
-    continuous_batch_size: Optional[int] = None
-    return_log_probs: bool = False
     repetition_penalty: Optional[float] = None
 
 

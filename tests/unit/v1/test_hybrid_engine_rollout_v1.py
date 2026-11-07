@@ -46,14 +46,14 @@ def test_continuous_generation_profile_on_accelerator():
     rollout = HybridEngineRollout(
         SimpleNamespace(module=model),
         SimpleNamespace(pad_token_id=0, eos_token_id=2, decode=lambda ids, **_kwargs: ""),
-        cfg=HybridEngineRolloutConfig(enable_profiling=True),
+        cfg=HybridEngineRolloutConfig(continuous_batch_size=1, enable_profiling=True),
     )
     request = RolloutRequest(samples=[
         RolloutRecord(tokens=[1, 2, 3], attention_mask=[1, 1, 1]),
         RolloutRecord(tokens=[1, 2, 4], attention_mask=[1, 1, 1]),
     ])
 
-    output = rollout.generate(request, SamplingConfig(max_new_tokens=2, temperature=0, continuous_batch_size=1))
+    output = rollout.generate(request, SamplingConfig(max_new_tokens=2, temperature=0))
 
     profile = rollout.get_last_profile()
     assert [sample.tokens[3:] for sample in output.samples] == [[7, 7], [7, 7]]
@@ -111,9 +111,11 @@ def test_continuous_graph_generation_refills_a_fixed_slot_on_cuda():
     graph_rollout = HybridEngineRollout(
         SimpleNamespace(module=CacheClassModel().to(device)),
         tokenizer,
-        cfg=HybridEngineRolloutConfig(use_graph_capture=True),
+        cfg=HybridEngineRolloutConfig(use_graph_capture=True, continuous_batch_size=2),
     )
-    eager_rollout = HybridEngineRollout(SimpleNamespace(module=CacheClassModel().to(device)), tokenizer)
+    eager_rollout = HybridEngineRollout(SimpleNamespace(module=CacheClassModel().to(device)),
+                                        tokenizer,
+                                        cfg=HybridEngineRolloutConfig(continuous_batch_size=2))
 
     def make_request():
         return RolloutRequest(samples=[
@@ -122,7 +124,7 @@ def test_continuous_graph_generation_refills_a_fixed_slot_on_cuda():
             RolloutRecord(tokens=[3, 3, 3], attention_mask=[1, 1, 1]),
         ])
 
-    sampling = SamplingConfig(max_new_tokens=2, temperature=0, continuous_batch_size=2)
+    sampling = SamplingConfig(max_new_tokens=2, temperature=0)
     eager_output = eager_rollout.generate(make_request(), sampling)
     graph_output = graph_rollout.generate(make_request(), sampling)
 
@@ -170,12 +172,14 @@ def test_continuous_rollout_matches_native_llama_generation_on_accelerator(attn_
         prompt_ids[1, :1] = 0
     attention_mask = (prompt_ids != 0).long()
     request = _records(prompt_ids, attention_mask)
-    sampling = SamplingConfig(max_new_tokens=5, temperature=0, continuous_batch_size=2)
+    sampling = SamplingConfig(max_new_tokens=5, temperature=0)
     tokenizer = SimpleNamespace(pad_token_id=0, eos_token_id=None, decode=lambda ids, **_kwargs: "")
-    eager_rollout = HybridEngineRollout(SimpleNamespace(module=model), tokenizer)
+    eager_rollout = HybridEngineRollout(SimpleNamespace(module=model),
+                                        tokenizer,
+                                        cfg=HybridEngineRolloutConfig(continuous_batch_size=2))
     graph_rollout = HybridEngineRollout(SimpleNamespace(module=model),
                                         tokenizer,
-                                        cfg=HybridEngineRolloutConfig(use_graph_capture=True))
+                                        cfg=HybridEngineRolloutConfig(use_graph_capture=True, continuous_batch_size=2))
     with torch.no_grad():
         reference = model.generate(input_ids=prompt_ids,
                                    attention_mask=attention_mask,
@@ -228,12 +232,13 @@ def _peaked_llama(device):
     return model.to(device).eval()
 
 
-def _decode_rollout(model, use_graph_capture):
+def _decode_rollout(model, use_graph_capture, continuous_batch_size=None):
     # eos -1 never matches, so every row generates the full length.
     tokenizer = SimpleNamespace(pad_token_id=0, eos_token_id=-1, decode=lambda ids, **_kwargs: "")
     return HybridEngineRollout(SimpleNamespace(module=model),
                                tokenizer,
-                               cfg=HybridEngineRolloutConfig(use_graph_capture=use_graph_capture))
+                               cfg=HybridEngineRolloutConfig(use_graph_capture=use_graph_capture,
+                                                             continuous_batch_size=continuous_batch_size))
 
 
 def _random_prompts(device):
@@ -257,18 +262,15 @@ def test_decode_paths_match_hf_generate(temperature, top_k, top_p, repetition_pe
     prompt_ids, attention_mask = _random_prompts(device)
     # Every prompt gets its own continuous batching slot, so each step draws the tokens of all rows in one call, as
     # generate() does, and the same seed gives both the same random numbers.
-    sampling = SamplingConfig(max_new_tokens=new_tokens,
-                              temperature=temperature,
-                              top_k=top_k,
-                              top_p=top_p,
-                              continuous_batch_size=continuous_batch_size)
+    sampling = SamplingConfig(max_new_tokens=new_tokens, temperature=temperature, top_k=top_k, top_p=top_p)
     model.generation_config.repetition_penalty = repetition_penalty
     hf_sampling = {"do_sample": True, "temperature": temperature, "top_k": top_k, "top_p": top_p}
     if temperature <= 0.0:
         hf_sampling = {"do_sample": False}
 
     torch.manual_seed(2)
-    output = _decode_rollout(model, use_graph_capture).generate(_records(prompt_ids, attention_mask), sampling)
+    output = _decode_rollout(model, use_graph_capture,
+                             continuous_batch_size).generate(_records(prompt_ids, attention_mask), sampling)
 
     torch.manual_seed(2)
     with torch.no_grad():
@@ -326,12 +328,14 @@ def test_continuous_graph_matches_pretrained_model_when_enabled():
     graph_model = AutoModelForCausalLM.from_pretrained(model_name, dtype=torch.float16).to(device).eval()
     graph_model.load_state_dict(eager_model.state_dict())
 
-    sampling = SamplingConfig(max_new_tokens=32, temperature=0, continuous_batch_size=1)
-    eager_rollout = HybridEngineRollout(SimpleNamespace(module=eager_model), tokenizer)
+    sampling = SamplingConfig(max_new_tokens=32, temperature=0)
+    eager_rollout = HybridEngineRollout(SimpleNamespace(module=eager_model),
+                                        tokenizer,
+                                        cfg=HybridEngineRolloutConfig(continuous_batch_size=1))
     graph_rollout = HybridEngineRollout(
         SimpleNamespace(module=graph_model),
         tokenizer,
-        cfg=HybridEngineRolloutConfig(use_graph_capture=True),
+        cfg=HybridEngineRolloutConfig(use_graph_capture=True, continuous_batch_size=1),
     )
     original_create_graph = accelerator.create_graph
     capture_count = [0]

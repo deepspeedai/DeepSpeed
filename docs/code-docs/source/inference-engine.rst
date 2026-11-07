@@ -72,7 +72,7 @@ Shared prefill currently requires HybridEngine kernel injection, ZeRO stage 0,
 inference tensor-parallel size 1, an internal KV cache, and a prompt longer than
 one token. It cannot be combined with CUDA graph capture,
 ``release_inference_cache``, or continuous batching
-(``SamplingConfig.continuous_batch_size``). Sampling still happens independently
+(``continuous_batch_size``). Sampling still happens independently
 for every response branch after the shared prompt forward.
 
 Sampling on the Decode Paths
@@ -82,16 +82,18 @@ The graph path, and continuous batching with or without graphs, apply
 ``temperature``, ``top_k``, ``top_p`` and ``repetition_penalty`` from
 ``SamplingConfig`` in the order ``generate()`` applies them. A
 ``repetition_penalty`` of ``None`` uses the value in the model's
-``generation_config``, and 1.0 disables the penalty. ``return_log_probs`` warns
-about a penalty other than 1.0, since a training forward pass cannot reproduce
-those log-probs.
+``generation_config``, and 1.0 disables the penalty. With ``return_log_probs``,
+``generate()`` warns about a penalty other than 1.0, since a training forward
+pass cannot reproduce those log-probs.
 
 Continuous batching (experimental)
 -----------------------------------
 
-Continuous batching is enabled through ``SamplingConfig.continuous_batch_size``
-on the regular ``HybridEngineRollout.generate(request, sampling)`` entry point.
-When unset, generation keeps its existing behavior. When set to a positive
+Continuous batching is enabled through ``continuous_batch_size`` in
+``RolloutConfig`` or ``HybridEngineRolloutConfig``. It sizes the KV cache and
+the captured graph, so it is fixed for the rollout engine rather than passed
+with each ``generate(request, sampling)`` call. When unset, generation keeps
+its existing behavior. When set to a positive
 value, at most that many prompt rows are active at once; completed rows retire
 and pending rows are prefetched into the released slots. The returned
 ``RolloutBatch`` remains in the original ``RolloutRequest`` row order.
@@ -186,7 +188,7 @@ model tokens, 0 on tool output), ``rollout_log_probs``, ``reward`` and
 from one prompt share its ``group_index``. A record without ``tokens`` is
 rendered with the tokenizer's chat template.
 
-``SamplingConfig(return_log_probs=True)`` records each generated token's
+``RolloutConfig(return_log_probs=True)`` records each generated token's
 log-probability under ``softmax(logits / temperature)``, the distribution a
 training forward pass can reproduce. ``generate()`` therefore rejects
 ``return_log_probs`` combined with ``top_k`` or ``top_p`` when sampling, and
@@ -225,10 +227,10 @@ exceptions are returned to the model as text instead of failing the rollout.
         async def execute(self, arguments):
             return str(evaluate(arguments["expression"]))
 
-    rollout = build_rollout(RolloutConfig(multi_turn=True, max_turns=8), engine, tokenizer, tools=[Calculator()])
+    rollout = build_rollout(RolloutConfig(multi_turn=True, max_turns=8, return_log_probs=True), engine, tokenizer,
+                            tools=[Calculator()])
     request = RolloutRequest(samples=[RolloutRecord(prompt=[{"role": "user", "content": question}])])
-    sampling = SamplingConfig(max_new_tokens=8192, max_new_tokens_per_turn=2048, n_samples_per_prompt=8,
-                              return_log_probs=True)
+    sampling = SamplingConfig(max_new_tokens=8192, max_new_tokens_per_turn=2048, n_samples_per_prompt=8)
     records = rollout.generate(request, sampling).samples
 
 ``max_new_tokens`` caps a record's generated tokens over all turns,
@@ -237,7 +239,7 @@ exceptions are returned to the model as text instead of failing the rollout.
 ``RolloutConfig.chat_template_kwargs`` is passed to every chat-template call,
 for example ``{"enable_thinking": False}``.
 
-``SamplingConfig.continuous_batch_size`` schedules a multi-turn rollout by turn
+``RolloutConfig.continuous_batch_size`` schedules a multi-turn rollout by turn
 instead of by record. It sets the number of decode rows, which needs
 ``max_context_len`` or ``HybridEngineRolloutConfig.continuous_cache_capacity`` to
 size the cache. A row is freed when a turn ends; the tools run on the host while

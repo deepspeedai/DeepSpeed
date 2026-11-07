@@ -56,7 +56,8 @@ def old_log_probs_from_rollout(rollout: RolloutBatch, device: Optional[torch.dev
         if record.response_length == 0:
             continue
         if record.rollout_log_probs is None:
-            raise ValueError(f"samples[{row}] has no rollout_log_probs; generate with return_log_probs=True")
+            raise ValueError(
+                f"samples[{row}] has no rollout_log_probs; set return_log_probs=True in the rollout config")
         if len(record.rollout_log_probs) != record.response_length:
             raise ValueError(f"samples[{row}] rollout_log_probs length {len(record.rollout_log_probs)} does not "
                              f"match response_length {record.response_length}")

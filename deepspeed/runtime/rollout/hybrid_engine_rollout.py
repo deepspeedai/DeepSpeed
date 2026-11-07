@@ -11,7 +11,7 @@ Two generation paths:
      the decode forward pass with a CUDA graph, and replays it for each decode
      step.  Eliminates kernel launch overhead.
   3. **continuous batching (experimental)**: an opt-in bounded path, greedy or sampled like the graph path,
-     selected through ``SamplingConfig.continuous_batch_size``.
+     selected through ``HybridEngineRolloutConfig.continuous_batch_size``.
 """
 
 import asyncio
@@ -193,8 +193,6 @@ class HybridEngineRolloutConfig:
     # Multi-turn continuous batching: decode steps between host checks for finished turns. A turn that ends
     # in between idles in its row until the check.
     continuous_poll_steps: int = 16
-    # Experiment: rows without a turn read one cached slot instead of their last turn's whole context.
-    continuous_idle_row_reset: bool = False
     max_turns: Optional[int] = None
     # Most prompt + response tokens a multi-turn trajectory may hold; None means no cap.
     max_context_len: Optional[int] = None
@@ -203,10 +201,17 @@ class HybridEngineRolloutConfig:
     # Format of the model's tool calls, a key of TOOL_CALL_PARSERS: "hermes" (Qwen2.5, Qwen3) or
     # "qwen3_coder" (Qwen3-Coder, Qwen3.5).
     tool_call_parser: str = "hermes"
+    # Decode rows for continuous batching; None keeps static batching. It sizes the KV cache and the captured
+    # graph, so it belongs to the engine, not to a generate call.
+    continuous_batch_size: Optional[int] = None
+    # Record each generated token's log-prob under the sampling distribution in RolloutRecord.rollout_log_probs.
+    return_log_probs: bool = False
 
     def __post_init__(self) -> None:
         if self.multi_turn and not self.max_turns:
             raise ValueError("Max turns not specified when using multi-turn rollout")
+        if self.continuous_batch_size is not None and self.continuous_batch_size < 1:
+            raise ValueError("continuous_batch_size must be positive")
         if self.tool_call_parser not in TOOL_CALL_PARSERS:
             raise ValueError(f"unknown tool_call_parser {self.tool_call_parser!r}; "
                              f"choose from {', '.join(TOOL_CALL_PARSERS)}")
@@ -247,7 +252,8 @@ class HybridEngineRollout(RolloutEngine):
         self.enable_cache_trimming = getattr(cfg, 'enable_cache_trimming', False) if cfg else False
         self.continuous_cache_capacity = getattr(cfg, 'continuous_cache_capacity', None) if cfg else None
         self.continuous_poll_steps = getattr(cfg, 'continuous_poll_steps', 16) if cfg else 16
-        self.continuous_idle_row_reset = getattr(cfg, 'continuous_idle_row_reset', False) if cfg else False
+        self.continuous_batch_size = getattr(cfg, 'continuous_batch_size', None) if cfg else None
+        self.return_log_probs = getattr(cfg, 'return_log_probs', False) if cfg else False
         self.multi_turn = getattr(cfg, 'multi_turn', False) if cfg else False
         self.max_turns = getattr(cfg, 'max_turns', None) if cfg else None
         self.max_context_len = getattr(cfg, 'max_context_len', None) if cfg else None
@@ -272,8 +278,8 @@ class HybridEngineRollout(RolloutEngine):
         if sampling.max_new_tokens_per_turn is not None:
             max_new_tokens = min(sampling.max_new_tokens, sampling.max_new_tokens_per_turn)
             sampling = replace(sampling, max_new_tokens=max_new_tokens, max_new_tokens_per_turn=None)
-        if sampling.continuous_batch_size is not None:
-            return self._generate_continuous(samples, sampling, sampling.continuous_batch_size)
+        if self.continuous_batch_size is not None:
+            return self._generate_continuous(samples, sampling, self.continuous_batch_size)
         device = get_accelerator().current_device_name()
         n = sampling.n_samples_per_prompt
         pad_token_id = self.tokenizer.pad_token_id
@@ -330,7 +336,7 @@ class HybridEngineRollout(RolloutEngine):
             pad_token_id=pad_token_id,
         )
         responses = masked_lists(output_ids[:, prompt_len:], response_attn)
-        response_log_probs = masked_lists(log_probs, response_attn) if sampling.return_log_probs else None
+        response_log_probs = masked_lists(log_probs, response_attn) if self.return_log_probs else None
 
         for row, sample in enumerate(trajectories):
             response = responses[row]
@@ -384,7 +390,7 @@ class HybridEngineRollout(RolloutEngine):
 
     @torch.no_grad()
     def _generate_multi_turn(self, request: RolloutRequest, sampling: SamplingConfig) -> RolloutBatch:
-        if sampling.continuous_batch_size is not None:
+        if self.continuous_batch_size is not None:
             return self._generate_multi_turn_continuous(request, sampling)
 
         samples = request.samples
@@ -394,7 +400,7 @@ class HybridEngineRollout(RolloutEngine):
         device = get_accelerator().current_device_name()
         n = sampling.n_samples_per_prompt
         max_new_tokens = sampling.max_new_tokens
-        return_log_probs = sampling.return_log_probs
+        return_log_probs = self.return_log_probs
         pad_token_id = self.tokenizer.pad_token_id
         module = self.engine.module
 
@@ -572,7 +578,7 @@ class HybridEngineRollout(RolloutEngine):
 
     @torch.no_grad()
     def _generate_multi_turn_continuous(self, request: RolloutRequest, sampling: SamplingConfig) -> RolloutBatch:
-        """Multi-turn rollout with continuous batching over ``sampling.continuous_batch_size`` decode rows.
+        """Multi-turn rollout with continuous batching over ``continuous_batch_size`` decode rows.
 
         The scheduling unit is one turn of one trajectory. A turn waits for a free row, is prefilled into it
         with the whole conversation so far (unpadded, as in ``_prefill_rows``) and decodes there until
@@ -589,7 +595,7 @@ class HybridEngineRollout(RolloutEngine):
             return RolloutBatch(samples=[])
         self._check_sampling(sampling)
         module = self.engine.module
-        num_rows = sampling.continuous_batch_size
+        num_rows = self.continuous_batch_size
         capacity = self.continuous_cache_capacity or self.max_context_len
         self._validate_multi_turn_continuous(module, num_rows, capacity)
 
@@ -773,7 +779,7 @@ class HybridEngineRollout(RolloutEngine):
             turn = turns_done[i]
             turns_done[i] += 1
             generated[i] += len(response)
-            log_probs = response_log_probs if sampling.return_log_probs else None
+            log_probs = response_log_probs if self.return_log_probs else None
             # A turn that did not reach EOS was cut by the token or context budget.
             if not response or response[-1] != eos_token_id:
                 sample.status = RolloutRecord.Status.TRUNCATED
@@ -806,10 +812,6 @@ class HybridEngineRollout(RolloutEngine):
                 i = row_owner[row]
                 row_owner[row] = None
                 finish_turn(i, row_tokens[:count], row_log_probs[:count])
-            if self.continuous_idle_row_reset:
-                write_pos[finished_rows] = 0
-                static_attn[finished_rows] = False
-                static_attn[finished_rows, 0, 0, 0] = True
 
         def collect_tool_results():
             for i in [i for i, entry in tools_in_flight.items() if entry[3].done()]:
@@ -926,7 +928,7 @@ class HybridEngineRollout(RolloutEngine):
     def _check_sampling(self, sampling: SamplingConfig) -> None:
         if sampling.max_new_tokens_per_turn is not None and sampling.max_new_tokens_per_turn <= 0:
             raise ValueError("max_new_tokens_per_turn must be positive")
-        return_log_probs = sampling.return_log_probs
+        return_log_probs = self.return_log_probs
         if return_log_probs and sampling.temperature > 0.0 and (sampling.top_p < 1.0 or sampling.top_k > 0):
             raise ValueError("return_log_probs requires top_p=1 and top_k<=0 when sampling")
         if sampling.repetition_penalty is not None and sampling.repetition_penalty <= 0:
@@ -974,7 +976,7 @@ class HybridEngineRollout(RolloutEngine):
         if sampling.repetition_penalty is not None:
             generate_kwargs["repetition_penalty"] = sampling.repetition_penalty
         finish_log_probs = None
-        if sampling.return_log_probs:
+        if self.return_log_probs:
             from transformers import LogitsProcessorList
             # Greedy decoding picks from the raw logits, i.e. temperature 1.
             processor, finish_log_probs = _sampled_log_prob_recorder(temperature if do_sample else 1.0)
@@ -1253,7 +1255,7 @@ class HybridEngineRollout(RolloutEngine):
 
         generation_end = self._profile_start(profile)
         post_processing_start = generation_end
-        output = self._build_continuous_batch(trajectories, responses, response_log_probs, sampling.return_log_probs)
+        output = self._build_continuous_batch(trajectories, responses, response_log_probs, self.return_log_probs)
         post_processing_end = self._profile_end(profile, None, post_processing_start)
         if profile_accelerator is not None:
             profile_accelerator.synchronize()
@@ -1454,7 +1456,7 @@ class HybridEngineRollout(RolloutEngine):
                 stats["peak_cache_length"] = max(stats["peak_cache_length"], max(write_positions.values()))
 
         generation_end = self._profile_start(profile)
-        output = self._build_continuous_batch(trajectories, responses, response_log_probs, sampling.return_log_probs)
+        output = self._build_continuous_batch(trajectories, responses, response_log_probs, self.return_log_probs)
         post_processing_end = self._profile_end(profile, None, generation_end)
         if profile_accelerator is not None:
             profile_accelerator.synchronize()

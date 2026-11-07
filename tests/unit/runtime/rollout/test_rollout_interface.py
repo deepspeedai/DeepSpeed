@@ -60,7 +60,8 @@ def test_sampling_config_defaults():
     assert cfg.top_p == 1.0
     assert cfg.top_k == -1
     assert cfg.n_samples_per_prompt == 1
-    assert cfg.continuous_batch_size is None
+    assert not hasattr(cfg, "continuous_batch_size")
+    assert not hasattr(cfg, "return_log_probs")
 
 
 def test_continuous_batching_details_are_not_public_exports():

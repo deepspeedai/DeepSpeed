@@ -10,7 +10,6 @@ only when CUDA is available.
 
 import gc
 import weakref
-from dataclasses import replace
 from types import SimpleNamespace
 from contextlib import contextmanager, nullcontext
 from unittest.mock import MagicMock, patch
@@ -101,6 +100,13 @@ def test_config_defaults():
     assert cfg.align_decode_fronts is False
     assert cfg.enable_cache_trimming is False
     assert cfg.continuous_cache_capacity is None
+    assert cfg.continuous_batch_size is None
+    assert cfg.return_log_probs is False
+
+
+def test_config_rejects_non_positive_continuous_batch_size():
+    with pytest.raises(ValueError, match="continuous_batch_size must be positive"):
+        HybridEngineRolloutConfig(continuous_batch_size=0)
 
 
 # -- constructor --------------------------------------------------------
@@ -138,27 +144,27 @@ def test_constructor_defaults_without_cfg():
 def test_continuous_generation_rejects_unsupported_inputs():
     engine = _make_engine()
     engine.module = torch.nn.Linear(1, 1)
-    rollout = HybridEngineRollout(engine, _make_tokenizer())
+    rollout = HybridEngineRollout(engine, _make_tokenizer(), cfg=HybridEngineRolloutConfig(continuous_batch_size=1))
     request = RolloutRequest(samples=[_prompt([0, 1, 2], [0, 1, 1])])
 
-    empty = rollout.generate(RolloutRequest(samples=[]), SamplingConfig(max_new_tokens=2, continuous_batch_size=1))
+    empty = rollout.generate(RolloutRequest(samples=[]), SamplingConfig(max_new_tokens=2))
     assert empty.samples == []
-    with pytest.raises(ValueError, match="positive"):
-        rollout.generate(request, SamplingConfig(max_new_tokens=2, continuous_batch_size=0))
     with pytest.raises(ValueError, match="one sample per prompt"):
-        rollout.generate(
-            request, SamplingConfig(max_new_tokens=2, temperature=0, n_samples_per_prompt=2, continuous_batch_size=1))
+        rollout.generate(request, SamplingConfig(max_new_tokens=2, temperature=0, n_samples_per_prompt=2))
     with pytest.raises(ValueError, match="at least one prompt token"):
         rollout.generate(RolloutRequest(samples=[_prompt([0, 0], [0, 0])]),
-                         SamplingConfig(max_new_tokens=2, temperature=0, continuous_batch_size=1))
+                         SamplingConfig(max_new_tokens=2, temperature=0))
 
 
 @pytest.mark.parametrize(
     ("cfg", "message"),
     [
-        (HybridEngineRolloutConfig(use_graph_capture=True, align_decode_fronts=True), "aligned decode fronts"),
-        (HybridEngineRolloutConfig(use_graph_capture=True, enable_cache_trimming=True), "cache trimming"),
-        (HybridEngineRolloutConfig(use_graph_capture=True, continuous_cache_capacity=4), "must fit"),
+        (HybridEngineRolloutConfig(use_graph_capture=True, continuous_batch_size=1,
+                                   align_decode_fronts=True), "aligned decode fronts"),
+        (HybridEngineRolloutConfig(use_graph_capture=True, continuous_batch_size=1,
+                                   enable_cache_trimming=True), "cache trimming"),
+        (HybridEngineRolloutConfig(use_graph_capture=True, continuous_batch_size=1,
+                                   continuous_cache_capacity=4), "must fit"),
     ],
 )
 def test_continuous_graph_rejects_incompatible_fixed_layout_options(cfg, message, graph_capture_accelerator):
@@ -166,17 +172,19 @@ def test_continuous_graph_rejects_incompatible_fixed_layout_options(cfg, message
     request = _tensor_request(torch.tensor([[0, 1, 2]]), torch.tensor([[0, 1, 1]]))
 
     with pytest.raises(ValueError, match=message):
-        rollout.generate(request, SamplingConfig(max_new_tokens=2, temperature=0, continuous_batch_size=1))
+        rollout.generate(request, SamplingConfig(max_new_tokens=2, temperature=0))
 
 
 def test_continuous_graph_rejects_flash_attention(graph_capture_accelerator):
     engine = _make_engine_on_cpu()
     engine.module.config = SimpleNamespace(_attn_implementation="flash_attention_2")
-    rollout = HybridEngineRollout(engine, _make_tokenizer(), cfg=HybridEngineRolloutConfig(use_graph_capture=True))
+    rollout = HybridEngineRollout(engine,
+                                  _make_tokenizer(),
+                                  cfg=HybridEngineRolloutConfig(continuous_batch_size=1, use_graph_capture=True))
     request = _tensor_request(torch.tensor([[0, 1, 2]]), torch.tensor([[0, 1, 1]]))
 
     with pytest.raises(ValueError, match="does not support flash_attention_2"):
-        rollout.generate(request, SamplingConfig(max_new_tokens=2, temperature=0, continuous_batch_size=1))
+        rollout.generate(request, SamplingConfig(max_new_tokens=2, temperature=0))
 
 
 def test_continuous_generation_falls_back_to_eager_without_graph_capture_opt_in():
@@ -209,7 +217,7 @@ def test_continuous_generation_falls_back_to_eager_without_graph_capture_opt_in(
     rollout = HybridEngineRollout(
         SimpleNamespace(module=CacheClassModel()),
         SimpleNamespace(pad_token_id=0, eos_token_id=2, decode=lambda ids, **_kwargs: ""),
-        cfg=HybridEngineRolloutConfig(use_graph_capture=True),
+        cfg=HybridEngineRolloutConfig(continuous_batch_size=2, use_graph_capture=True),
     )
     request = _tensor_request(
         torch.tensor([[1, 2, 3], [1, 2, 4], [1, 2, 5]]),
@@ -219,7 +227,7 @@ def test_continuous_generation_falls_back_to_eager_without_graph_capture_opt_in(
     with patch.object(get_accelerator(), "is_graph_capture_supported", return_value=False), \
             patch.object(rollout, "_generate_continuous_graph") as generate_graph, \
             patch("deepspeed.runtime.rollout.hybrid_engine_rollout.logger.warning_once") as warning_once:
-        output = rollout.generate(request, SamplingConfig(max_new_tokens=3, temperature=0, continuous_batch_size=2))
+        output = rollout.generate(request, SamplingConfig(max_new_tokens=3, temperature=0))
 
     generate_graph.assert_not_called()
     warning_once.assert_called_once()
@@ -230,10 +238,10 @@ def test_continuous_generation_routes_graph_capture_to_fixed_capacity_path(graph
     rollout = HybridEngineRollout(
         _make_engine_on_cpu(),
         _make_tokenizer(),
-        cfg=HybridEngineRolloutConfig(use_graph_capture=True),
+        cfg=HybridEngineRolloutConfig(continuous_batch_size=4, use_graph_capture=True),
     )
     request = _make_request()
-    sampling = SamplingConfig(max_new_tokens=2, temperature=0, continuous_batch_size=4)
+    sampling = SamplingConfig(max_new_tokens=2, temperature=0)
     expected = MagicMock()
 
     with patch.object(rollout, "_generate_continuous_graph", return_value=expected) as generate_graph:
@@ -427,11 +435,13 @@ def test_continuous_generation_validates_each_request_length():
             self.config = SimpleNamespace(max_position_embeddings=4)
 
     model = LimitedModel()
-    rollout = HybridEngineRollout(SimpleNamespace(module=model), SimpleNamespace(pad_token_id=0, eos_token_id=None))
+    rollout = HybridEngineRollout(SimpleNamespace(module=model),
+                                  SimpleNamespace(pad_token_id=0, eos_token_id=None),
+                                  cfg=HybridEngineRolloutConfig(continuous_batch_size=1))
     request = _tensor_request(torch.tensor([[1, 2, 3]]), torch.ones((1, 3), dtype=torch.long))
 
     with pytest.raises(ValueError, match="request exceeds"):
-        rollout.generate(request, SamplingConfig(max_new_tokens=2, temperature=0, continuous_batch_size=1))
+        rollout.generate(request, SamplingConfig(max_new_tokens=2, temperature=0))
 
 
 def test_continuous_generation_reports_cache_capacity_remedies():
@@ -473,12 +483,12 @@ def test_continuous_generation_reports_cache_capacity_remedies():
     rollout = HybridEngineRollout(
         SimpleNamespace(module=CacheClassModel()),
         _make_tokenizer(),
-        cfg=HybridEngineRolloutConfig(align_decode_fronts=True, continuous_cache_capacity=2),
+        cfg=HybridEngineRolloutConfig(continuous_batch_size=1, align_decode_fronts=True, continuous_cache_capacity=2),
     )
     request = _tensor_request(torch.tensor([[1], [3]]), torch.ones((2, 1), dtype=torch.long))
 
     with pytest.raises(ValueError, match=r"capacity \(2\).*continuous_cache_capacity.*enable_cache_trimming"):
-        rollout.generate(request, SamplingConfig(max_new_tokens=3, temperature=0, continuous_batch_size=1))
+        rollout.generate(request, SamplingConfig(max_new_tokens=3, temperature=0))
 
 
 def test_continuous_generation_rejects_legacy_cache_model():
@@ -494,11 +504,13 @@ def test_continuous_generation_rejects_legacy_cache_model():
             self.config = SimpleNamespace(max_position_embeddings=32)
 
     model = LegacyModel()
-    rollout = HybridEngineRollout(SimpleNamespace(module=model), SimpleNamespace(pad_token_id=0, eos_token_id=None))
+    rollout = HybridEngineRollout(SimpleNamespace(module=model),
+                                  SimpleNamespace(pad_token_id=0, eos_token_id=None),
+                                  cfg=HybridEngineRolloutConfig(continuous_batch_size=1))
     request = _tensor_request(torch.tensor([[1, 2, 3]]), torch.ones((1, 3), dtype=torch.long))
 
     with pytest.raises(ValueError, match="cache-class support"):
-        rollout.generate(request, SamplingConfig(max_new_tokens=2, temperature=0, continuous_batch_size=1))
+        rollout.generate(request, SamplingConfig(max_new_tokens=2, temperature=0))
 
 
 def test_continuous_graph_generation_rejects_legacy_cache_model():
@@ -515,12 +527,12 @@ def test_continuous_graph_generation_rejects_legacy_cache_model():
     rollout = HybridEngineRollout(
         SimpleNamespace(module=model),
         SimpleNamespace(pad_token_id=0, eos_token_id=None),
-        cfg=HybridEngineRolloutConfig(use_graph_capture=True),
+        cfg=HybridEngineRolloutConfig(continuous_batch_size=1, use_graph_capture=True),
     )
     request = _tensor_request(torch.tensor([[1, 2, 3]]), torch.ones((1, 3), dtype=torch.long))
 
     with pytest.raises(ValueError, match="cache-class support"):
-        rollout.generate(request, SamplingConfig(max_new_tokens=2, temperature=0, continuous_batch_size=1))
+        rollout.generate(request, SamplingConfig(max_new_tokens=2, temperature=0))
 
 
 def test_continuous_generation_covers_modern_static_cache_path():
@@ -553,12 +565,14 @@ def test_continuous_generation_covers_modern_static_cache_path():
             return SimpleNamespace(logits=logits, past_key_values=past_key_values)
 
     model = CacheClassModel()
-    rollout = HybridEngineRollout(SimpleNamespace(module=model), _make_tokenizer())
+    rollout = HybridEngineRollout(SimpleNamespace(module=model),
+                                  _make_tokenizer(),
+                                  cfg=HybridEngineRolloutConfig(continuous_batch_size=2))
     request = _tensor_request(
         torch.tensor([[1, 2, 3], [1, 2, 4], [1, 2, 5]]),
         torch.ones((3, 3), dtype=torch.long),
     )
-    output = rollout.generate(request, SamplingConfig(max_new_tokens=3, temperature=0, continuous_batch_size=2))
+    output = rollout.generate(request, SamplingConfig(max_new_tokens=3, temperature=0))
 
     assert [sample.tokens for sample in output.samples] == [[1, 2, 3, 2], [1, 2, 4, 7, 7, 7], [1, 2, 5, 7, 7, 7]]
     assert [sample.loss_mask for sample in output.samples] == [[1], [1, 1, 1], [1, 1, 1]]
@@ -611,9 +625,11 @@ def test_continuous_prefill_requests_last_logits_only():
             return SimpleNamespace(logits=logits, past_key_values=past_key_values)
 
     model = LastLogitsModel()
-    rollout = HybridEngineRollout(SimpleNamespace(module=model), _make_tokenizer())
+    rollout = HybridEngineRollout(SimpleNamespace(module=model),
+                                  _make_tokenizer(),
+                                  cfg=HybridEngineRolloutConfig(continuous_batch_size=2))
     request = _tensor_request(torch.tensor([[1, 2, 3], [1, 2, 4]]), torch.ones((2, 3), dtype=torch.long))
-    output = rollout.generate(request, SamplingConfig(max_new_tokens=2, temperature=0, continuous_batch_size=2))
+    output = rollout.generate(request, SamplingConfig(max_new_tokens=2, temperature=0))
 
     assert [sample.tokens[3:] for sample in output.samples] == [[8, 13], [9, 14]]
     assert model.prefill_logits_to_keep == [1]
@@ -669,14 +685,14 @@ def test_aligned_continuous_generation_supports_mixed_effective_prompt_lengths()
     rollout = HybridEngineRollout(
         SimpleNamespace(module=model),
         _make_tokenizer(),
-        cfg=HybridEngineRolloutConfig(align_decode_fronts=True, enable_cache_trimming=True),
+        cfg=HybridEngineRolloutConfig(continuous_batch_size=2, align_decode_fronts=True, enable_cache_trimming=True),
     )
     request = _tensor_request(
         torch.tensor([[0, 1, 2, 3], [1, 2, 3, 4], [0, 0, 1, 2]]),
         torch.tensor([[0, 1, 1, 1], [1, 1, 1, 1], [0, 0, 1, 1]]),
     )
 
-    output = rollout.generate(request, SamplingConfig(max_new_tokens=2, temperature=0, continuous_batch_size=2))
+    output = rollout.generate(request, SamplingConfig(max_new_tokens=2, temperature=0))
 
     assert [sample.tokens for sample in output.samples] == [
         [0, 1, 2, 3, 2],
@@ -741,14 +757,14 @@ def test_aligned_continuous_generation_reclaims_dead_prefix_when_cache_would_exh
     rollout = HybridEngineRollout(
         SimpleNamespace(module=CacheClassModel()),
         _make_tokenizer(),
-        cfg=HybridEngineRolloutConfig(align_decode_fronts=True),
+        cfg=HybridEngineRolloutConfig(continuous_batch_size=2, align_decode_fronts=True),
     )
     request = _tensor_request(
         torch.tensor([[1, 2, 3], [1, 2, 4], [1, 2, 5]]),
         torch.ones((3, 3), dtype=torch.long),
     )
 
-    output = rollout.generate(request, SamplingConfig(max_new_tokens=4, temperature=0, continuous_batch_size=2))
+    output = rollout.generate(request, SamplingConfig(max_new_tokens=4, temperature=0))
 
     assert [sample.tokens[3:] for sample in output.samples] == [[7, 7, 2], [7, 7, 7, 7], [7, 7, 7, 7]]
     assert [sample.attention_mask[3:] for sample in output.samples] == [[1, 1, 1], [1, 1, 1, 1], [1, 1, 1, 1]]
@@ -786,14 +802,14 @@ def test_continuous_generation_trims_cache_after_staggered_eos():
     rollout = HybridEngineRollout(
         SimpleNamespace(module=model),
         _make_tokenizer(),
-        cfg=HybridEngineRolloutConfig(enable_cache_trimming=True),
+        cfg=HybridEngineRolloutConfig(continuous_batch_size=2, enable_cache_trimming=True),
     )
     request = _tensor_request(
         torch.tensor([[1, 2, 3], [1, 2, 4], [1, 2, 5], [1, 2, 6], [1, 2, 7], [1, 2, 8]]),
         torch.ones((6, 3), dtype=torch.long),
     )
 
-    output = rollout.generate(request, SamplingConfig(max_new_tokens=4, temperature=0, continuous_batch_size=2))
+    output = rollout.generate(request, SamplingConfig(max_new_tokens=4, temperature=0))
 
     assert [sample.tokens[3:] for sample in output.samples] == [[2], [7, 7, 7, 7]] * 3
     assert [sample.status
@@ -842,13 +858,13 @@ def test_continuous_generation_refills_padded_prompts_after_trim():
     rollout = HybridEngineRollout(
         SimpleNamespace(module=model),
         _make_tokenizer(),
-        cfg=HybridEngineRolloutConfig(enable_cache_trimming=True),
+        cfg=HybridEngineRolloutConfig(continuous_batch_size=8, enable_cache_trimming=True),
     )
     prompts = torch.tensor([[0, 1, 2, 3], [0, 0, 1, 2]] * 16)
     attention_mask = torch.tensor([[0, 1, 1, 1], [0, 0, 1, 1]] * 16)
     request = _tensor_request(prompts, attention_mask)
 
-    output = rollout.generate(request, SamplingConfig(max_new_tokens=3, temperature=0, continuous_batch_size=8))
+    output = rollout.generate(request, SamplingConfig(max_new_tokens=3, temperature=0))
 
     assert len(output.samples) == 32
     assert all(sample.response_length > 0 for sample in output.samples)
@@ -923,10 +939,12 @@ def _next_token_logits(previous):
 
 def test_continuous_generation_records_greedy_log_probs():
     model = _LastTokenModel(lambda input_ids: _next_token_logits(input_ids[..., None].float()))
-    rollout = HybridEngineRollout(SimpleNamespace(module=model), _make_tokenizer())
+    rollout = HybridEngineRollout(SimpleNamespace(module=model),
+                                  _make_tokenizer(),
+                                  cfg=HybridEngineRolloutConfig(return_log_probs=True, continuous_batch_size=1))
     request = RolloutRequest(samples=[_prompt([3, 4]), _prompt([0, 5], [0, 1]), _prompt([7, 8])])
     # One row at a time, so later prompts are admitted as earlier ones retire.
-    sampling = SamplingConfig(max_new_tokens=3, temperature=0, return_log_probs=True, continuous_batch_size=1)
+    sampling = SamplingConfig(max_new_tokens=3, temperature=0)
 
     samples = rollout.generate(request, sampling).samples
 
@@ -955,8 +973,10 @@ def test_continuous_generation_reads_repetition_penalty_from_the_checkpoint():
 
     def generate(checkpoint_repetition_penalty):
         model = _LastTokenModel(_repeat_preferring_logits, checkpoint_repetition_penalty=checkpoint_repetition_penalty)
-        rollout = HybridEngineRollout(SimpleNamespace(module=model), _make_tokenizer())
-        sampling = SamplingConfig(max_new_tokens=3, temperature=0, continuous_batch_size=1)
+        rollout = HybridEngineRollout(SimpleNamespace(module=model),
+                                      _make_tokenizer(),
+                                      cfg=HybridEngineRolloutConfig(continuous_batch_size=1))
+        sampling = SamplingConfig(max_new_tokens=3, temperature=0)
         return rollout.generate(request, sampling).samples[0].tokens
 
     assert generate(1.0) == [5, 6, 6, 6, 6]
@@ -968,11 +988,10 @@ def test_sampling_repetition_penalty_overrides_the_checkpoint():
 
     def generate(checkpoint_repetition_penalty, repetition_penalty):
         model = _LastTokenModel(_repeat_preferring_logits, checkpoint_repetition_penalty=checkpoint_repetition_penalty)
-        rollout = HybridEngineRollout(SimpleNamespace(module=model), _make_tokenizer())
-        sampling = SamplingConfig(max_new_tokens=3,
-                                  temperature=0,
-                                  continuous_batch_size=1,
-                                  repetition_penalty=repetition_penalty)
+        rollout = HybridEngineRollout(SimpleNamespace(module=model),
+                                      _make_tokenizer(),
+                                      cfg=HybridEngineRolloutConfig(continuous_batch_size=1))
+        sampling = SamplingConfig(max_new_tokens=3, temperature=0, repetition_penalty=repetition_penalty)
         return rollout.generate(request, sampling).samples[0].tokens
 
     # 1.0 turns off a checkpoint's penalty, and a set value applies over a checkpoint without one.
@@ -991,8 +1010,10 @@ def test_repetition_penalty_must_be_positive():
 @patch("deepspeed.runtime.rollout.hybrid_engine_rollout.logger")
 def test_return_log_probs_warns_about_a_checkpoint_repetition_penalty(mock_logger):
     model = _LastTokenModel(_repeat_preferring_logits, checkpoint_repetition_penalty=1.5)
-    rollout = HybridEngineRollout(SimpleNamespace(module=model), _make_tokenizer())
-    sampling = SamplingConfig(max_new_tokens=2, temperature=0, continuous_batch_size=1, return_log_probs=True)
+    rollout = HybridEngineRollout(SimpleNamespace(module=model),
+                                  _make_tokenizer(),
+                                  cfg=HybridEngineRolloutConfig(continuous_batch_size=1, return_log_probs=True))
+    sampling = SamplingConfig(max_new_tokens=2, temperature=0)
 
     samples = rollout.generate(RolloutRequest(samples=[_prompt([5, 6])]), sampling).samples
 
@@ -1414,7 +1435,9 @@ def test_graph_capture_samples_with_temperature_and_scores_the_sampled_distribut
                          max_position_embeddings=64)
     model = LlamaForCausalLM(config).to(device).eval()
     # An EOS id that is never generated keeps every row decoding to max_new_tokens.
-    rollout = HybridEngineRollout(SimpleNamespace(module=model), SimpleNamespace(pad_token_id=0, eos_token_id=-1))
+    rollout = HybridEngineRollout(SimpleNamespace(module=model),
+                                  SimpleNamespace(pad_token_id=0, eos_token_id=-1),
+                                  cfg=HybridEngineRolloutConfig(return_log_probs=True))
     num_rows, prompt_len, max_new_tokens, temperature = 8, 4, 6, 0.7
     prompt_ids = torch.tensor([[5, 6, 7, 8]], device=device).repeat(num_rows, 1)
     prompt_attn = torch.ones_like(prompt_ids)
@@ -1426,8 +1449,7 @@ def test_graph_capture_samples_with_temperature_and_scores_the_sampled_distribut
     with torch.no_grad():
         output_ids, log_probs = rollout._generate_graph(
             prompt_ids, prompt_attn, max_new_tokens, 0,
-            SamplingConfig(max_new_tokens=max_new_tokens, temperature=temperature, return_log_probs=True), model,
-            device)
+            SamplingConfig(max_new_tokens=max_new_tokens, temperature=temperature), model, device)
         # Oracle: an ordinary full forward over the generated sequences, scored the way training scores them.
         attention_mask = torch.cat((prompt_attn, torch.ones_like(output_ids[:, prompt_len:])), dim=1)
         logits = model(output_ids, attention_mask=attention_mask).logits.float()
@@ -1750,7 +1772,8 @@ def test_graph_generation_matches_hf_greedy_and_samples_with_temperature(batch_s
     module = _tiny_llama(device)
     tok = MagicMock()
     tok.eos_token_id = -1  # never generated: every row decodes all tokens
-    rollout = HybridEngineRollout(_make_engine(), tok, HybridEngineRolloutConfig(use_graph_capture=True))
+    rollout = HybridEngineRollout(_make_engine(), tok,
+                                  HybridEngineRolloutConfig(return_log_probs=True, use_graph_capture=True))
     prompt_ids = torch.tensor([[5, 9, 13, 17]], device=device).repeat(batch_size, 1)
     prompt_attn = torch.ones_like(prompt_ids)
     max_new_tokens = 8
@@ -1759,8 +1782,7 @@ def test_graph_generation_matches_hf_greedy_and_samples_with_temperature(batch_s
         with torch.no_grad():
             output_ids, _ = rollout._generate_graph(
                 prompt_ids, prompt_attn, max_new_tokens, 0,
-                SamplingConfig(max_new_tokens=max_new_tokens, temperature=temperature, return_log_probs=True), module,
-                device)
+                SamplingConfig(max_new_tokens=max_new_tokens, temperature=temperature), module, device)
         return output_ids[:, prompt_ids.shape[1]:]
 
     greedy = run(0.0)
@@ -1818,7 +1840,7 @@ def test_graph_capture_decodes_left_padded_rows_as_if_alone(dtype):
     model = _tiny_qwen3(device, dtype)
     # An EOS id that is never generated keeps every row decoding to max_new_tokens.
     rollout = HybridEngineRollout(SimpleNamespace(module=model), SimpleNamespace(pad_token_id=0, eos_token_id=-1),
-                                  HybridEngineRolloutConfig(use_graph_capture=True))
+                                  HybridEngineRolloutConfig(return_log_probs=True, use_graph_capture=True))
     torch.manual_seed(1)
     prompts = [torch.randint(1, 128, (length, )).tolist() for length in (9, 5, 7, 9, 3)]
     prompt_ids, prompt_attn = _left_pad(prompts, device)
@@ -1827,8 +1849,7 @@ def test_graph_capture_decodes_left_padded_rows_as_if_alone(dtype):
     with torch.no_grad():
         output_ids, log_probs = rollout._generate_graph(
             prompt_ids, prompt_attn, max_new_tokens, 0,
-            SamplingConfig(max_new_tokens=max_new_tokens, temperature=temperature, return_log_probs=True), model,
-            device)
+            SamplingConfig(max_new_tokens=max_new_tokens, temperature=temperature), model, device)
         responses = output_ids[:, width:]
         for row, prompt in enumerate(prompts):
             # Oracle: a plain forward over the row alone, unpadded, scored the way training scores it.
@@ -1839,9 +1860,9 @@ def test_graph_capture_decodes_left_padded_rows_as_if_alone(dtype):
             torch.testing.assert_close(log_probs[row], expected.squeeze(1), atol=atol, rtol=0)
 
         if dtype == torch.float32:
-            greedy, _ = rollout._generate_graph(
-                prompt_ids, prompt_attn, max_new_tokens, 0,
-                SamplingConfig(max_new_tokens=max_new_tokens, temperature=0.0, return_log_probs=True), model, device)
+            greedy, _ = rollout._generate_graph(prompt_ids, prompt_attn, max_new_tokens, 0,
+                                                SamplingConfig(max_new_tokens=max_new_tokens, temperature=0.0), model,
+                                                device)
             for row, prompt in enumerate(prompts):
                 alone = torch.tensor([prompt], device=device)
                 reference = model.generate(alone, max_new_tokens=max_new_tokens, do_sample=False, pad_token_id=0)
@@ -1926,9 +1947,9 @@ def test_single_turn_records_log_probs_of_the_sampled_distribution():
     device = torch.device(get_accelerator().current_device_name())
     model = LlamaForCausalLM(config).to(device).eval()
     engine = SimpleNamespace(module=model, zero_optimization_partition_weights=lambda: False)
-    rollout = HybridEngineRollout(engine, _make_tokenizer())
+    rollout = HybridEngineRollout(engine, _make_tokenizer(), cfg=HybridEngineRolloutConfig(return_log_probs=True))
     request = RolloutRequest(samples=[_prompt([5, 6, 7]), _prompt([0, 8, 9], [0, 1, 1])])
-    sampling = SamplingConfig(max_new_tokens=4, temperature=0.7, n_samples_per_prompt=2, return_log_probs=True)
+    sampling = SamplingConfig(max_new_tokens=4, temperature=0.7, n_samples_per_prompt=2)
 
     samples = rollout.generate(request, sampling).samples
 
@@ -2046,40 +2067,36 @@ def _check_as_if_alone(model, prompts, samples, n_samples_per_prompt, eos, tool_
 
 
 @pytest.mark.parametrize(
-    "model_name, dtype, use_graph_capture, temperature, idle_row_reset",
+    "model_name, dtype, use_graph_capture, temperature, poll_steps",
     [
-        ("qwen3", torch.float32, True, 0.0, False),
-        ("qwen3", torch.float32, False, 0.0, False),
-        ("qwen3", torch.bfloat16, True, 0.8, False),
-        ("llama", None, True, 0.0, False),
-        # Real training samples through reset rows, which are then reused by later turns.
-        ("qwen3", torch.bfloat16, True, 1.0, True),
-        ("qwen3", torch.float32, True, 1.0, True),
+        ("qwen3", torch.float32, True, 0.0, 16),
+        ("qwen3", torch.float32, False, 0.0, 16),
+        ("qwen3", torch.bfloat16, True, 0.8, 16),
+        ("llama", None, True, 0.0, 16),
+        # Checking every step admits turns into rows as soon as they free up.
+        ("qwen3", torch.bfloat16, True, 1.0, 1),
+        ("qwen3", torch.float32, True, 1.0, 1),
     ])
 @patch("deepspeed.runtime.rollout.hybrid_engine_rollout.tokenize_tool_responses", return_value=_TOOL_TOKENS)
 def test_multi_turn_continuous_batching_generates_each_turn_as_if_alone(_tokenize_tool_responses, model_name, dtype,
-                                                                        use_graph_capture, temperature,
-                                                                        idle_row_reset):
+                                                                        use_graph_capture, temperature, poll_steps):
     """With fewer decode rows than trajectories, every turn waits for a row, is prefilled with its whole
     conversation, and must decode exactly as the trajectory would alone."""
     if not torch.cuda.is_available():  #ignore-cuda
         pytest.skip("multi-turn continuous batching runs on CUDA")
     model_factory = _tiny_qwen3 if model_name == "qwen3" else _tiny_llama
     model, prompts, eos, tool_length = _continuous_case(model_factory, dtype)
-    rollout = _continuous_rollout(
-        model,
-        eos,
-        tool_length,
-        use_graph_capture=use_graph_capture,
-        # Checking every step resets rows while others still decode.
-        continuous_poll_steps=1 if idle_row_reset else 16,
-        continuous_idle_row_reset=idle_row_reset)
+    rollout = _continuous_rollout(model,
+                                  eos,
+                                  tool_length,
+                                  use_graph_capture=use_graph_capture,
+                                  continuous_poll_steps=poll_steps,
+                                  continuous_batch_size=3,
+                                  return_log_probs=True)
     sampling = SamplingConfig(max_new_tokens=24,
                               max_new_tokens_per_turn=8,
                               temperature=temperature,
-                              n_samples_per_prompt=2,
-                              continuous_batch_size=3,
-                              return_log_probs=True)
+                              n_samples_per_prompt=2)
 
     torch.manual_seed(2)
     samples = rollout.generate(RolloutRequest(samples=[_prompt(prompt) for prompt in prompts]), sampling).samples
@@ -2104,8 +2121,8 @@ def test_multi_turn_continuous_repetition_penalty_matches_generate(_tokenize_too
     device = next(model.parameters()).device
     # eos -1 never matches, so each trajectory is one turn of the full length.
     model.generation_config.repetition_penalty = 1.3
-    rollout = _continuous_rollout(model, -1, 0, use_graph_capture=True)
-    sampling = SamplingConfig(max_new_tokens=8, temperature=0, continuous_batch_size=2)
+    rollout = _continuous_rollout(model, -1, 0, use_graph_capture=True, continuous_batch_size=2)
+    sampling = SamplingConfig(max_new_tokens=8, temperature=0)
 
     samples = rollout.generate(RolloutRequest(samples=[_prompt(prompt) for prompt in prompts]), sampling).samples
 
@@ -2127,16 +2144,18 @@ def test_multi_turn_continuous_batching_matches_static_batching(_tokenize_tool_r
         pytest.skip("multi-turn continuous batching runs on CUDA")
     model, prompts, eos, tool_length = _continuous_case(_tiny_qwen3, torch.float32)
     request = RolloutRequest(samples=[_prompt(prompt) for prompt in prompts])
-    sampling = SamplingConfig(max_new_tokens=24,
-                              max_new_tokens_per_turn=8,
-                              temperature=0,
-                              n_samples_per_prompt=2,
-                              return_log_probs=True)
+    sampling = SamplingConfig(max_new_tokens=24, max_new_tokens_per_turn=8, temperature=0, n_samples_per_prompt=2)
 
-    continuous_sampling = replace(sampling, continuous_batch_size=3)
-    static = _continuous_rollout(model, eos, tool_length, use_graph_capture=True).generate(request, sampling)
-    continuous_rollout = _continuous_rollout(model, eos, tool_length, use_graph_capture=True, enable_profiling=True)
-    continuous = continuous_rollout.generate(request, continuous_sampling)
+    static = _continuous_rollout(model, eos, tool_length, use_graph_capture=True,
+                                 return_log_probs=True).generate(request, sampling)
+    continuous_rollout = _continuous_rollout(model,
+                                             eos,
+                                             tool_length,
+                                             use_graph_capture=True,
+                                             enable_profiling=True,
+                                             continuous_batch_size=3,
+                                             return_log_probs=True)
+    continuous = continuous_rollout.generate(request, sampling)
 
     assert sum(0 in sample.loss_mask for sample in continuous.samples) >= 2
     # The poll trace accounts for every decoded token (each turn's first comes from its prefill), and never counts
@@ -2152,41 +2171,10 @@ def test_multi_turn_continuous_batching_matches_static_batching(_tokenize_tool_r
         torch.testing.assert_close(actual.rollout_log_probs, expected.rollout_log_probs, atol=1e-4, rtol=0)
 
 
-@patch("deepspeed.runtime.rollout.hybrid_engine_rollout.tokenize_tool_responses", return_value=_TOOL_TOKENS)
-def test_multi_turn_continuous_idle_row_reset_keeps_the_trajectories(_tokenize_tool_responses):
-    """Idle rows read one slot instead of their last context; decoding rows must not notice."""
-    if not torch.cuda.is_available():  #ignore-cuda
-        pytest.skip("multi-turn continuous batching runs on CUDA")
-    model, prompts, eos, tool_length = _continuous_case(_tiny_qwen3, torch.bfloat16)
-    request = RolloutRequest(samples=[_prompt(prompt) for prompt in prompts])
-    sampling = SamplingConfig(max_new_tokens=24,
-                              max_new_tokens_per_turn=8,
-                              temperature=0,
-                              n_samples_per_prompt=2,
-                              continuous_batch_size=3)
-    runs = []
-    for reset in (False, True):
-        # Turns are shorter than the default 16 steps between checks, so every row would finish in the same check
-        # and no row would ever be reset beside one still decoding.
-        rollout = _continuous_rollout(model,
-                                      eos,
-                                      tool_length,
-                                      use_graph_capture=True,
-                                      enable_profiling=True,
-                                      continuous_poll_steps=1,
-                                      continuous_idle_row_reset=reset)
-        runs.append(rollout.generate(request, sampling).samples)
-    trace = rollout.get_last_profile()["continuous_poll_trace"]
-    assert any(0 < decoding < held for _, _, held, decoding, *_ in trace)
-    for expected, actual in zip(*runs):
-        assert actual.tokens == expected.tokens
-        assert actual.status == expected.status
-
-
 def test_multi_turn_continuous_batching_needs_a_row_capacity():
     rollout = HybridEngineRollout(_make_engine(), _make_tokenizer(),
-                                  HybridEngineRolloutConfig(multi_turn=True, max_turns=2))
-    sampling = SamplingConfig(max_new_tokens=4, temperature=0, continuous_batch_size=2)
+                                  HybridEngineRolloutConfig(continuous_batch_size=2, multi_turn=True, max_turns=2))
+    sampling = SamplingConfig(max_new_tokens=4, temperature=0)
     with pytest.raises(ValueError, match="max_context_len or continuous_cache_capacity"):
         rollout.generate(RolloutRequest(samples=[_prompt([1, 2])]), sampling)
 
