@@ -26,6 +26,7 @@ Args:
     beta: bias for normalization
     epsilon: numeric stability
     elems_per_row: number of elements each block will normalize
+    rows: number of rows
 */
 template <typename T, int unRoll, int threadsPerGroup, int maxThreads>
 __global__ void fused_ln(T* output,
@@ -33,7 +34,8 @@ __global__ void fused_ln(T* output,
                          const T* gamma,
                          const T* beta,
                          float epsilon,
-                         int elems_per_row)
+                         int elems_per_row,
+                         int rows)
 {
     constexpr int T_per_load = ln::granularity / sizeof(T);
 
@@ -43,6 +45,9 @@ __global__ void fused_ln(T* output,
     // X-dimension of the block
     const int block_offset = (tb.group_index().x * (maxThreads / threadsPerGroup) * elems_per_row) +
                              (tb.thread_index().y * elems_per_row);
+    // Rows past the end only take part in the reductions; they skip all global loads/stores.
+    const int row = tb.group_index().x * (maxThreads / threadsPerGroup) + tb.thread_index().y;
+    const bool valid_row = row < rows;
     const int thread_offset = tb.thread_index().x * T_per_load;
     const int base_offset = block_offset + thread_offset;
     const int stride = blockDim.x * T_per_load;
@@ -58,7 +63,9 @@ __global__ void fused_ln(T* output,
         T* iteration_buffer = local_buffer + i * T_per_load;
 
         mem_access::load_global<ln::granularity>(
-            iteration_buffer, input_base + i * stride, thread_offset + i * stride < elems_per_row);
+            iteration_buffer,
+            input_base + i * stride,
+            valid_row && thread_offset + i * stride < elems_per_row);
 
 #pragma unRoll
         for (int j = 0; j < T_per_load; j++) {
@@ -110,7 +117,7 @@ __global__ void fused_ln(T* output,
             iteration_buffer[j] = conversion::to<T>(val);
         }
 
-        if (do_loads) {
+        if (valid_row && do_loads) {
             mem_access::store_global<ln::granularity>(block_output + iter_idx, iteration_buffer);
         }
     }
@@ -118,7 +125,7 @@ __global__ void fused_ln(T* output,
 
 #define LAUNCH_FUSED_LN(unRollFactor, threadsPerGroup, maxThreads) \
     fused_ln<T, unRollFactor, threadsPerGroup, maxThreads>         \
-        <<<grid, block, 0, stream>>>(output, vals, gamma, beta, epsilon, elems_per_row);
+        <<<grid, block, 0, stream>>>(output, vals, gamma, beta, epsilon, elems_per_row, rows);
 
 template <typename T>
 void launch_fused_ln(T* output,
@@ -212,6 +219,7 @@ Args:
     beta: bias for normalization
     epsilon: numeric stability
     elems_per_row: number of elements each block will normalize
+    rows: number of rows
 Template arg:
     StoreResidual: controls whether the residual calculation is stored
         or not. When set to false, the input `res_output` is unused.
@@ -224,7 +232,8 @@ __global__ void fused_residual_ln(T* output,
                                   const T* gamma,
                                   const T* beta,
                                   float epsilon,
-                                  int elems_per_row)
+                                  int elems_per_row,
+                                  int rows)
 {
     constexpr int T_per_load = ln::granularity / sizeof(T);
 
@@ -234,6 +243,9 @@ __global__ void fused_residual_ln(T* output,
     // X-dimension of the block
     const int block_offset = (tb.group_index().x * (maxThreads / threadsPerGroup) * elems_per_row) +
                              (tb.thread_index().y * elems_per_row);
+    // Rows past the end only take part in the reductions; they skip all global loads/stores.
+    const int row = tb.group_index().x * (maxThreads / threadsPerGroup) + tb.thread_index().y;
+    const bool valid_row = row < rows;
     const int thread_offset = tb.thread_index().x * T_per_load;
     const int base_offset = block_offset + thread_offset;
     const int stride = tb.size() * T_per_load;
@@ -254,10 +266,13 @@ __global__ void fused_residual_ln(T* output,
         T residual_buffer[T_per_load];
 
         mem_access::load_global<ln::granularity>(
-            iteration_buffer, input_base + i * stride, thread_offset + i * stride < elems_per_row);
-        mem_access::load_global<ln::granularity>(residual_buffer,
-                                                 residual_base + i * stride,
-                                                 thread_offset + i * stride < elems_per_row);
+            iteration_buffer,
+            input_base + i * stride,
+            valid_row && thread_offset + i * stride < elems_per_row);
+        mem_access::load_global<ln::granularity>(
+            residual_buffer,
+            residual_base + i * stride,
+            valid_row && thread_offset + i * stride < elems_per_row);
 
 #pragma unRoll
         for (int j = 0; j < T_per_load; j++) {
@@ -268,7 +283,7 @@ __global__ void fused_residual_ln(T* output,
             iteration_buffer[j] = conversion::to<T>(vals_up_cast);
         }
 
-        if (preLnResidual && (thread_offset + i * stride < elems_per_row)) {
+        if (preLnResidual && valid_row && (thread_offset + i * stride < elems_per_row)) {
             mem_access::store_global<ln::granularity>(res_output + base_offset + i * stride,
                                                       iteration_buffer);
         }
@@ -316,7 +331,7 @@ __global__ void fused_residual_ln(T* output,
             iteration_buffer[j] = conversion::to<T>(val);
         }
 
-        if (do_loads) {
+        if (valid_row && do_loads) {
             mem_access::store_global<ln::granularity>(block_output + iter_idx, iteration_buffer);
         }
     }
@@ -326,7 +341,7 @@ __global__ void fused_residual_ln(T* output,
 #define LAUNCH_FUSED_RES_LN(unRollFactor, threadsPerGroup, maxThreads)     \
     fused_residual_ln<T, unRollFactor, threadsPerGroup, maxThreads, false> \
         <<<grid, block, 0, stream>>>(                                      \
-            output, nullptr, vals, residual, gamma, beta, epsilon, elems_per_row);
+            output, nullptr, vals, residual, gamma, beta, epsilon, elems_per_row, rows);
 
 template <typename T>
 void launch_fused_post_ln(T* output,
@@ -398,7 +413,7 @@ void launch_fused_post_ln(T* output,
 #define LAUNCH_FUSED_RES_LN_STORE_PRE_LN_RES(unRollFactor, threadsPerGroup, maxThreads) \
     fused_residual_ln<T, unRollFactor, threadsPerGroup, maxThreads, true>               \
         <<<grid, block, 0, stream>>>(                                                   \
-            norm_output, res_output, vals, residual, gamma, beta, epsilon, elems_per_row);
+            norm_output, res_output, vals, residual, gamma, beta, epsilon, elems_per_row, rows);
 
 template <typename T>
 void launch_fused_pre_ln(T* norm_output,
