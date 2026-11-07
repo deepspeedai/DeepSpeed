@@ -23,3 +23,6 @@ def test_partition_balanced():
     check_partition([1, 1, 1, 1], 4, target_diff=0)
     check_partition([1, 1, 1, 1, 1], 4, target_diff=1)
     check_partition([1, 1, 1, 1, 0, 1], 4, target_diff=1)
+    assert ds_utils.partition_balanced([0, 1, 2, 3, 3, 3], 4) == [0, 3, 4, 5, 6]
+    assert ds_utils.partition_balanced([1, 1, 1, 1, 0, 1], 4) == [0, 2, 3, 5, 6]
+
