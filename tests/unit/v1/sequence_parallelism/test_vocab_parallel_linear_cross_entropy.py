@@ -159,6 +159,56 @@ def test_hidden_gradient_sums_many_vocab_entries_exactly():
     torch.testing.assert_close(hidden.grad, reference.grad)
 
 
+def test_ignored_tokens_do_not_affect_loss_or_gradients():
+    hidden, weight, _, target = _inputs(bias=False)
+    # Non-finite activations at ignored positions must not reach the loss or any gradient.
+    poisoned = hidden.clone()
+    poisoned[target == -100] = float("nan")
+    args = [_leaf(poisoned), _leaf(weight)]
+    ref_args = [_leaf(hidden), _leaf(weight)]
+
+    actual = vocab_parallel_linear_cross_entropy(*args, target, chunk_size=100)
+    expected = _reference(*ref_args, None, target, "mean")
+    torch.testing.assert_close(actual, expected)
+    actual.backward()
+    expected.backward()
+    for got, want in zip(args, ref_args):
+        torch.testing.assert_close(got.grad, want.grad)
+
+
+def test_all_ignored_tokens_give_zero_loss_and_gradients():
+    # A fully masked micro-batch, such as one holding only prompts, has nothing to project.
+    hidden, weight, bias, target = _inputs()
+    target = torch.full_like(target, -100)
+    args = [_leaf(hidden), _leaf(weight), _leaf(bias)]
+
+    per_token = vocab_parallel_linear_cross_entropy(args[0], args[1], target, bias=args[2], reduction="none")
+    assert torch.equal(per_token, torch.zeros_like(per_token, dtype=torch.float32))
+    loss = vocab_parallel_linear_cross_entropy(args[0], args[1], target, bias=args[2])
+    assert loss.item() == 0
+    loss.backward()
+    for arg in args:
+        assert torch.equal(arg.grad, torch.zeros_like(arg))
+
+
+@pytest.mark.parametrize("chunk_size", [None, 4096])
+def test_many_tokens_low_precision_matches_reference_on_accelerator(chunk_size):
+    device = get_accelerator().device_name()
+    torch.manual_seed(0)
+    hidden = torch.randn(4096, 8, device=device).mul_(4).bfloat16()
+    weight = torch.randn(129, 8, device=device).bfloat16()
+    target = torch.randint(0, 129, (4096, ), device=device)
+    args = [_leaf(hidden), _leaf(weight)]
+    reference = [_leaf(hidden.float()), _leaf(weight.float())]
+
+    # The default splits these tokens into several chunks; 4096 projects them in one.
+    vocab_parallel_linear_cross_entropy(*args, target, chunk_size=chunk_size).backward()
+    _reference(*reference, None, target, "mean").backward()
+
+    for got, want in zip(args, reference):
+        assert (got.grad.float() - want.grad).norm() <= 1e-2 * want.grad.norm()
+
+
 class _LegacyAutocastTorch:
     """``torch`` as seen by code on PyTorch < 2.4, which has no device-aware autocast getters."""
 

@@ -34,6 +34,12 @@ class KLXPU_Accelerator(CudaAccelerator):
     def prefer_triton_grouped_mm(self):
         return False
 
+    def is_graph_capture_supported(self):
+        # Presents itself through the CUDA runtime, but HybridEngine graph
+        # capture is not validated on this backend. Keep the explicit
+        # default-deny instead of inheriting the CUDA opt-in.
+        return False
+
     def op_builder_dir(self):
         try:
             # is op_builder from deepspeed or a 3p version? this should only succeed if it's deepspeed

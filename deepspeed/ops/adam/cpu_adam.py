@@ -8,6 +8,7 @@ import os
 import torch
 from deepspeed.utils import logger
 from deepspeed.utils.logging import should_log_le
+from deepspeed.ops.cpu_optimizer import DeepSpeedCPUOptimizer
 from deepspeed.ops.op_builder import CPUAdamBuilder
 
 
@@ -31,7 +32,7 @@ def single_thread_warning():
             "cores per rank, or launch with `deepspeed --bind_cores_to_rank`.")
 
 
-class DeepSpeedCPUAdam(torch.optim.Optimizer):
+class DeepSpeedCPUAdam(DeepSpeedCPUOptimizer):
     optimizer_id = 0
 
     def __init__(self,
@@ -91,7 +92,7 @@ class DeepSpeedCPUAdam(torch.optim.Optimizer):
                             weight_decay=weight_decay,
                             bias_correction=bias_correction,
                             amsgrad=amsgrad)
-        super(DeepSpeedCPUAdam, self).__init__(model_params, default_args)
+        super(DeepSpeedCPUAdam, self).__init__(model_params, default_args, fp32_optimizer_states)
 
         # Imported here because importing cpuinfo runs subprocesses (file, uname), which slows down import deepspeed.
         from cpuinfo import get_cpu_info
@@ -114,7 +115,6 @@ class DeepSpeedCPUAdam(torch.optim.Optimizer):
             if message:
                 logger.warning(message)
         self.adam_w_mode = adamw_mode
-        self.fp32_optimizer_states = fp32_optimizer_states
         try:
             self.ds_opt_adam = CPUAdamBuilder().load()
         except Exception as e:
