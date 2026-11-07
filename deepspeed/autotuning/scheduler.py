@@ -18,7 +18,7 @@ from tqdm import tqdm
 
 from ..utils import logger
 from .constants import AUTOTUNING, AUTOTUNING_METRIC_PATH, BUFSIZE
-from .utils import get_val_by_key, search_error, was_interrupted
+from .utils import get_val_by_key, metric_is_better, metric_value, search_error, was_interrupted
 """
 thread-0: loop over experiment queue dispatching experiments if they become available
 thread-N: start each experiment in its own thread
@@ -218,7 +218,7 @@ class ResourceManager:
         Returns:
             The path to the result folder of the experiment with the optimal configuration.
         """
-        max_throughput = sys.float_info.min
+        best_metric_val = None
         best_exp_id = -1
         for exp_id, (exp, err) in self.finished_experiments.items():
             if err:
@@ -232,15 +232,15 @@ class ResourceManager:
             if os.path.exists(metric_file):
                 with open(metric_file, 'r') as f:
                     results = hjson.load(f)
-                    curr_throughput = results[metric]
-                    if curr_throughput > max_throughput:
-                        max_throughput = curr_throughput
+                    curr_metric_val = metric_value(results, metric)
+                    if metric_is_better(metric, curr_metric_val, best_metric_val):
+                        best_metric_val = curr_metric_val
                         best_exp_id = exp_id
                     exp['results'] = results
 
         if best_exp_id != -1:
             best_exp, _ = self.finished_experiments[best_exp_id]
-            return best_exp, max_throughput
+            return best_exp, best_metric_val
 
         return exp, None
 

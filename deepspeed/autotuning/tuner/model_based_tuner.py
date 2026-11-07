@@ -135,7 +135,7 @@ class ModelBasedTuner(BaseTuner):
             p = exp["ds_config"][AUTOTUNING][AUTOTUNING_METRIC_PATH]
             with open(p, 'r') as f:
                 results = hjson.load(f)
-                curr_iter = results[self.metric]
+                curr_iter = metric_value(results, self.metric)
                 logger.debug(f"parsing the results for {exp_id}， Result is {curr_iter}")
 
                 ds_config = exp["ds_config"]
