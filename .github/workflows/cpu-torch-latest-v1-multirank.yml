@@ -287,7 +287,17 @@ jobs:
             exit 0
           fi
           echo "Selected targets (${#targets[@]}): ${targets[*]}"
+          set +e
           HF_HOME=/tmp/hf_home \
             LOCAL_SIZE=4 \
             DS_MULTIRANK_ONLY=1 \
             pytest $PYTEST_OPTS --forked -n 4 "${targets[@]}" --torch_ver="$TORCH_TEST_VERSION"
+          pytest_exit=$?
+          set -e
+          # A selection can legitimately hold no multi-rank tests (DS_MULTIRANK_ONLY
+          # deselects single-rank ones); pytest then exits 5 for "no tests ran".
+          if [ "$pytest_exit" -eq 5 ]; then
+            echo "No multi-rank tests in the selection; nothing to run."
+            exit 0
+          fi
+          exit "$pytest_exit"
