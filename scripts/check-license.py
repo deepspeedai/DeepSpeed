@@ -25,6 +25,8 @@ COPYRIGHT = [
         r"^\/\/ SPDX-License-Identifier: Apache-2.0$",
         r"^# SPDX-License-Identifier: Apache-2.0 AND BSD-3-Clause$",
         r"^\/\/ SPDX-License-Identifier: Apache-2.0 AND BSD-3-Clause$",
+        r"^# SPDX-License-Identifier: Apache-2.0 AND MIT$",
+        r"^\/\/ SPDX-License-Identifier: Apache-2.0 AND MIT$",
     ),
     (r"^# DeepSpeed Team$", r"^\/\/ DeepSpeed Team$"),
 ]
