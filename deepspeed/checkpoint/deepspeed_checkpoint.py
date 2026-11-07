@@ -285,11 +285,14 @@ class DeepSpeedCheckpoint(object):
         data_map = {}
         if self.pp_degree > 0:
             transformer_layers = self.layer_keys[1:self.final_layer_norm_idx]
-            layers_per_pp = len(transformer_layers) // self.pp_degree
-            data_map = {
-                i: transformer_layers[i * layers_per_pp:(i + 1) * layers_per_pp]
-                for i in range(0, self.pp_degree)
-            }
+            layers_per_pp, remainder = divmod(len(transformer_layers), self.pp_degree)
+            start = 0
+            for pp_index in range(self.pp_degree):
+                # Distribute the remainder so no layer is dropped or assigned past the last stage.
+                stage_layers = layers_per_pp + (1 if pp_index < remainder else 0)
+                end = start + stage_layers
+                data_map[pp_index] = transformer_layers[start:end]
+                start = end
         return data_map
 
     def _dump_mapping(self, data_map, map_tag=None):
@@ -299,22 +302,15 @@ class DeepSpeedCheckpoint(object):
             print(f'{k} = {v}')
 
     def _build_transformer_file_map(self):
-        transformer_layer_keys = self.layer_keys[1:self.final_layer_norm_idx]
         file_map = {}
-        # XXX: this is not guaranteed
-        layers_per_pp = 1
-        if self.pp_degree > 0:
-            layers_per_pp = len(transformer_layer_keys) // self.pp_degree
-        #print(f"{transformer_layer_keys} {layers_per_pp}")
-        for key_index, layer_key in enumerate(transformer_layer_keys):
-            pp_index = key_index // layers_per_pp
-            layer_files = get_files_with_prefix(self.layer_files, layer_key + '-')
-            layer_file_partitions = partition_data(layer_files, self.tp_degree)
+        for pp_index, layer_keys in self.pp_to_transformer_map.items():
             for tp_index in range(self.tp_degree):
-                map_key = (tp_index, pp_index)
-                if map_key not in file_map.keys():
-                    file_map[map_key] = []
-                file_map[map_key].append(layer_file_partitions[tp_index])
+                file_map[(tp_index, pp_index)] = []
+            for layer_key in layer_keys:
+                layer_files = get_files_with_prefix(self.layer_files, layer_key + '-')
+                layer_file_partitions = partition_data(layer_files, self.tp_degree)
+                for tp_index in range(self.tp_degree):
+                    file_map[(tp_index, pp_index)].append(layer_file_partitions[tp_index])
 
         return file_map
 
