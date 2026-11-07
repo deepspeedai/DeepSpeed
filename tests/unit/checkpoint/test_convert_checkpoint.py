@@ -7,6 +7,7 @@ import json
 import shutil
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import torch
 import torch.nn as nn
@@ -15,6 +16,7 @@ import pytest
 import deepspeed
 import deepspeed.comm as dist
 from deepspeed.accelerator import get_accelerator
+from deepspeed.runtime.checkpoint_engine.torch_checkpoint_engine import TorchCheckpointEngine
 import deepspeed.utils.zero_to_fp32 as zero_to_fp32
 import deepspeed.utils.zero_to_torch as zero_to_torch
 from deepspeed.utils.zero_to_fp32 import (convert_zero_checkpoint_to_fp32_state_dict,
@@ -123,6 +125,55 @@ def test_zero_to_torch_standalone_uses_local_converter(tmp_path):
 
     assert script_path.read_text(encoding="utf-8").startswith("#!/usr/bin/env python\n")
     assert marker_path.read_text(encoding="utf-8") == "fp16"
+
+
+@pytest.mark.parametrize("zero_stage", [1, 2, 3])
+@pytest.mark.parametrize("serialization", [(False, False), (True, True), (False, True)],
+                         ids=["legacy", "zip", "mixed"])
+def test_checkpoint_conversion_serialization(tmp_path, zero_stage, serialization):
+    checkpoint_dir = tmp_path / "checkpoint"
+    tag_dir = checkpoint_dir / "step1"
+    tag_dir.mkdir(parents=True)
+    (checkpoint_dir / "latest").write_text("step1")
+    expected = {"weight": torch.arange(1., 10.).view(3, 3), "bias": torch.arange(10., 13.)}
+    shapes = [{name: value.shape} for name, value in expected.items()]
+    world_size = len(serialization)
+    alignment = world_size if zero_stage == 3 else 2 * world_size
+    groups = [
+        torch.cat([value.flatten(), torch.zeros((-value.numel()) % alignment)]).chunk(world_size)
+        for value in expected.values()
+    ]
+    for rank, zip_serialization in enumerate(serialization):
+        writer = TorchCheckpointEngine(
+            SimpleNamespace(checkpoint_config={"checkpoint_serialization": zip_serialization}))
+        model_state = {"module": {}, "buffer_names": [], "param_shapes": shapes, "shared_params": {}}
+        model_name = f"zero_pp_rank_{rank}_mp_rank_00_model_states.pt" if zero_stage == 3 else f"mp_rank_{rank:02d}_model_states.pt"
+        writer.save(model_state, str(tag_dir / model_name))
+        groups_key = "fp32_flat_groups" if zero_stage == 3 else "single_partition_of_fp32_groups"
+        writer.save(
+            {
+                "optimizer_state_dict": {
+                    "zero_stage": zero_stage,
+                    "partition_count": world_size,
+                    groups_key: [group[rank].clone() for group in groups],
+                }
+            }, str(tag_dir / f"zero_pp_rank_{rank}_mp_rank_00_optim_states.pt"))
+
+    for lazy_mode in [False, True]:
+        restored = zero_to_fp32.get_fp32_state_dict_from_zero_checkpoint(checkpoint_dir, lazy_mode=lazy_mode)
+        assert restored.keys() == expected.keys()
+        for name, reference in expected.items():
+            torch.testing.assert_close(restored[name].contiguous(), reference, rtol=0, atol=0)
+
+    output_dir = tmp_path / "converted"
+    convert_zero_checkpoint_to_fp32_state_dict(checkpoint_dir, output_dir, max_shard_size=32)
+    index = json.loads((output_dir / "pytorch_model.bin.index.json").read_text())
+    exported = {}
+    for filename in set(index["weight_map"].values()):
+        exported.update(torch.load(output_dir / filename, weights_only=True))
+    assert exported.keys() == expected.keys()
+    for name, reference in expected.items():
+        torch.testing.assert_close(exported[name], reference, rtol=0, atol=0)
 
 
 class ModelWithSharedWeights(nn.Module):
