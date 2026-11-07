@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # DeepSpeed Team
+
 """
 Support different forms of monitoring such as wandb and tensorboard
 """
@@ -25,6 +26,7 @@ from .wandb import WandbMonitor
 from .tensorboard import TensorBoardMonitor
 from .csv_monitor import csvMonitor
 from .comet import CometMonitor
+from .trackio import TrackioMonitor
 
 
 class MonitorMaster(Monitor):
@@ -35,8 +37,8 @@ class MonitorMaster(Monitor):
         self.wandb_monitor = None
         self.csv_monitor = None
         self.comet_monitor = None
+        self.trackio_monitor = None
         self.enabled = monitor_config.enabled
-
         if dist.get_rank() == 0:
             if monitor_config.tensorboard.enabled:
                 self.tb_monitor = TensorBoardMonitor(monitor_config.tensorboard)
@@ -46,6 +48,8 @@ class MonitorMaster(Monitor):
                 self.csv_monitor = csvMonitor(monitor_config.csv_monitor)
             if monitor_config.comet.enabled:
                 self.comet_monitor = CometMonitor(monitor_config.comet)
+            if monitor_config.trackio.enabled:
+                self.trackio_monitor = TrackioMonitor(monitor_config.trackio)
 
     def write_events(self, event_list):
         if dist.get_rank() == 0:
@@ -57,3 +61,5 @@ class MonitorMaster(Monitor):
                 self.csv_monitor.write_events(event_list)
             if self.comet_monitor is not None:
                 self.comet_monitor.write_events(event_list)
+            if self.trackio_monitor is not None:
+                self.trackio_monitor.write_events(event_list)
