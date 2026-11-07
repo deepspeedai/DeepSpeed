@@ -9,7 +9,7 @@ import pytest
 from deepspeed.accelerator import get_accelerator
 from deepspeed.ops.op_builder import InferenceBuilder
 from deepspeed.ops.transformer.inference.op_binding.layer_norm import LayerNormOp
-from .inference_test_utils import allclose, get_dtypes
+from .inference_test_utils import allclose, get_dtypes, run_with_output_canaries, CANARY_VALUE
 try:
     import triton  # noqa: F401 # type: ignore
     from deepspeed.ops.transformer.inference.triton import (
@@ -40,8 +40,8 @@ def ds_triton_implementation(vals, gamma, beta, epsilon):
 
 @pytest.mark.inference_ops
 @pytest.mark.parametrize("batch", [1, 32])
-@pytest.mark.parametrize("seq_len", [1, 128])
-@pytest.mark.parametrize("channels", [384, 512, 768, 1024, 2048, 8192, 14432])
+@pytest.mark.parametrize("seq_len", [1, 17, 33, 128])
+@pytest.mark.parametrize("channels", [32, 64, 384, 512, 768, 1024, 2048, 8192, 14432])
 @pytest.mark.parametrize("dtype", get_dtypes())
 @pytest.mark.parametrize("use_triton_ops", [False, True])
 def test_layer_norm(batch, seq_len, channels, dtype, use_triton_ops):
@@ -88,8 +88,8 @@ def residual_ds_triton_implementation(vals, bias, res, gamma, beta, epsilon):
 
 @pytest.mark.inference_ops
 @pytest.mark.parametrize("batch", [1, 32])
-@pytest.mark.parametrize("seq_len", [1, 128])
-@pytest.mark.parametrize("channels", [384, 512, 768, 1024, 2048, 8192, 14432])
+@pytest.mark.parametrize("seq_len", [1, 17, 33, 128])
+@pytest.mark.parametrize("channels", [32, 64, 384, 512, 768, 1024, 2048, 8192, 14432])
 @pytest.mark.parametrize("dtype", get_dtypes())
 @pytest.mark.parametrize("use_triton_ops", [False, True])
 def test_layer_norm_residual(batch, seq_len, channels, dtype, use_triton_ops):
@@ -135,8 +135,8 @@ def residual_store_ds_implementation(vals, bias, res, gamma, beta, epsilon):
 
 @pytest.mark.inference_ops
 @pytest.mark.parametrize("batch", [1, 32])
-@pytest.mark.parametrize("seq_len", [1, 128])
-@pytest.mark.parametrize("channels", [384, 512, 768, 1024, 2048, 8192, 14432])
+@pytest.mark.parametrize("seq_len", [1, 17, 33, 128])
+@pytest.mark.parametrize("channels", [32, 64, 384, 512, 768, 1024, 2048, 8192, 14432])
 @pytest.mark.parametrize("dtype", get_dtypes())
 def test_layer_norm_residual_store_pre_ln_res(batch, seq_len, channels, dtype):
     vals = torch.randn((batch, seq_len, channels), dtype=dtype, device=get_accelerator().current_device_name())
@@ -154,6 +154,73 @@ def test_layer_norm_residual_store_pre_ln_res(batch, seq_len, channels, dtype):
 
     assert allclose(ds_res_output, norm_res_output)
     assert allclose(ds_norm_output, ref_norm_output)
+
+
+# LayerNormOp.layer_norm_residual* above are PyTorch implementations, so call the CUDA launchers
+# directly. These sizes pack several rows into one block (8 or 16 threads per row), and 17 / 33 rows
+# leave the last block partially filled.
+@pytest.mark.inference_ops
+@pytest.mark.parametrize("rows", [17, 33])
+@pytest.mark.parametrize("dtype, channels", [(torch.float32, 32), (torch.float32, 64), (torch.float16, 64),
+                                             (torch.float16, 128), (torch.bfloat16, 128)])
+@pytest.mark.parametrize("store_pre_ln_res", [False, True])
+def test_layer_norm_residual_cuda(rows, dtype, channels, store_pre_ln_res):
+    if dtype not in get_dtypes():
+        pytest.skip(f"{dtype} is not supported on this system")
+    inference_module = InferenceBuilder().load()
+    device = get_accelerator().current_device_name()
+    vals = torch.randn((1, rows, channels), dtype=dtype, device=device)
+    residual = torch.randn((1, rows, channels), dtype=dtype, device=device)
+    bias = torch.randn((channels), dtype=dtype, device=device)
+    gamma = torch.randn((channels), dtype=dtype, device=device)
+    beta = torch.rand((channels), dtype=dtype, device=device)
+    epsilon = 1e-5
+
+    ref_output = residual_ref_implementation(vals, bias, residual, gamma, beta, epsilon, channels, dtype)
+    if store_pre_ln_res:
+        ds_output, ds_res_output = inference_module.layer_norm_residual_store_pre_ln_res(
+            vals, bias, residual, gamma, beta, epsilon)
+        assert allclose(ds_res_output, vals + bias + residual)
+    else:
+        ds_output = inference_module._layer_norm_residual(vals, bias, residual, gamma, beta, epsilon)
+
+    assert allclose(ds_output, ref_output)
+
+
+# For hidden sizes <= 128 several rows share one thread block; with 17 / 33 rows the last block is only
+# partially filled. Nothing may be written past the last row of an output (checked with canaries placed
+# right after each output, so this fails under plain pytest, not only under compute-sanitizer).
+@pytest.mark.inference_ops
+@pytest.mark.parametrize("rows", [17, 33])
+@pytest.mark.parametrize("dtype, channels", [(torch.float32, 32), (torch.float32, 64), (torch.float16, 64),
+                                             (torch.float16, 128), (torch.bfloat16, 128)])
+@pytest.mark.parametrize("op", ["layer_norm", "layer_norm_residual", "layer_norm_residual_store_pre_ln_res"])
+def test_layer_norm_no_write_past_last_row(rows, dtype, channels, op):
+    if dtype not in get_dtypes():
+        pytest.skip(f"{dtype} is not supported on this system")
+    inference_module = InferenceBuilder().load()
+    device = get_accelerator().current_device_name()
+    vals = torch.randn((1, rows, channels), dtype=dtype, device=device)
+    residual = torch.randn((1, rows, channels), dtype=dtype, device=device)
+    bias = torch.randn((channels), dtype=dtype, device=device)
+    gamma = torch.randn((channels), dtype=dtype, device=device)
+    beta = torch.rand((channels), dtype=dtype, device=device)
+    epsilon = 1e-5
+
+    if op == "layer_norm":
+        run, num_outputs = lambda: inference_module.layer_norm(vals, gamma, beta, epsilon), 1
+    elif op == "layer_norm_residual":
+        run, num_outputs = lambda: inference_module._layer_norm_residual(vals, bias, residual, gamma, beta, epsilon), 1
+    else:
+        run, num_outputs = lambda: inference_module.layer_norm_residual_store_pre_ln_res(
+            vals, bias, residual, gamma, beta, epsilon), 2
+    _, canaries = run_with_output_canaries(run,
+                                           rows * channels,
+                                           dtype,
+                                           num_outputs=num_outputs,
+                                           canary_numel=32 * channels)
+    for canary in canaries:
+        assert (canary == CANARY_VALUE).all()
 
 
 @pytest.mark.inference_ops
