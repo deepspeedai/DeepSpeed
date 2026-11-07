@@ -155,8 +155,7 @@ def maybe_copy(module,
             else:
                 if qkv and megatron_v2:
                     tmp = _transpose(transpose(tmp), heads=heads, mp_replace=mp_replace).contiguous()
-                    if weight_quantizer.q_int8:
-                        tmp = transpose(tmp)
+                    tmp = transpose(tmp)
                 dst = mp_replace.copy(dst, weight_quantizer.quantize(tmp if weight_quantizer.q_int8 else \
                                                 transpose(tmp)), int8=weight_quantizer.q_int8)
         setattr(module, dst_name, dst)
