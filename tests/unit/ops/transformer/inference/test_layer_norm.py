@@ -40,8 +40,8 @@ def ds_triton_implementation(vals, gamma, beta, epsilon):
 
 @pytest.mark.inference_ops
 @pytest.mark.parametrize("batch", [1, 32])
-@pytest.mark.parametrize("seq_len", [1, 128])
-@pytest.mark.parametrize("channels", [384, 512, 768, 1024, 2048, 8192, 14432])
+@pytest.mark.parametrize("seq_len", [1, 9, 128])
+@pytest.mark.parametrize("channels", [64, 96, 128, 384, 512, 768, 1024, 2048, 8192, 14432])
 @pytest.mark.parametrize("dtype", get_dtypes())
 @pytest.mark.parametrize("use_triton_ops", [False, True])
 def test_layer_norm(batch, seq_len, channels, dtype, use_triton_ops):
@@ -88,8 +88,8 @@ def residual_ds_triton_implementation(vals, bias, res, gamma, beta, epsilon):
 
 @pytest.mark.inference_ops
 @pytest.mark.parametrize("batch", [1, 32])
-@pytest.mark.parametrize("seq_len", [1, 128])
-@pytest.mark.parametrize("channels", [384, 512, 768, 1024, 2048, 8192, 14432])
+@pytest.mark.parametrize("seq_len", [1, 9, 128])
+@pytest.mark.parametrize("channels", [64, 96, 128, 384, 512, 768, 1024, 2048, 8192, 14432])
 @pytest.mark.parametrize("dtype", get_dtypes())
 @pytest.mark.parametrize("use_triton_ops", [False, True])
 def test_layer_norm_residual(batch, seq_len, channels, dtype, use_triton_ops):
@@ -135,8 +135,8 @@ def residual_store_ds_implementation(vals, bias, res, gamma, beta, epsilon):
 
 @pytest.mark.inference_ops
 @pytest.mark.parametrize("batch", [1, 32])
-@pytest.mark.parametrize("seq_len", [1, 128])
-@pytest.mark.parametrize("channels", [384, 512, 768, 1024, 2048, 8192, 14432])
+@pytest.mark.parametrize("seq_len", [1, 9, 128])
+@pytest.mark.parametrize("channels", [64, 96, 128, 384, 512, 768, 1024, 2048, 8192, 14432])
 @pytest.mark.parametrize("dtype", get_dtypes())
 def test_layer_norm_residual_store_pre_ln_res(batch, seq_len, channels, dtype):
     vals = torch.randn((batch, seq_len, channels), dtype=dtype, device=get_accelerator().current_device_name())
@@ -154,6 +154,34 @@ def test_layer_norm_residual_store_pre_ln_res(batch, seq_len, channels, dtype):
 
     assert allclose(ds_res_output, norm_res_output)
     assert allclose(ds_norm_output, ref_norm_output)
+
+
+# LayerNormOp.layer_norm_residual* above are PyTorch implementations, so call the CUDA
+# launchers directly for fp32 hidden sizes 65-128 (one 32-thread group per row).
+@pytest.mark.inference_ops
+@pytest.mark.parametrize("rows", [9])
+@pytest.mark.parametrize("channels", [96, 128])
+@pytest.mark.parametrize("store_pre_ln_res", [False, True])
+def test_layer_norm_residual_cuda_fp32(rows, channels, store_pre_ln_res):
+    inference_module = InferenceBuilder().load()
+    dtype = torch.float32
+    device = get_accelerator().current_device_name()
+    vals = torch.randn((1, rows, channels), dtype=dtype, device=device)
+    residual = torch.randn((1, rows, channels), dtype=dtype, device=device)
+    bias = torch.randn((channels), dtype=dtype, device=device)
+    gamma = torch.randn((channels), dtype=dtype, device=device)
+    beta = torch.rand((channels), dtype=dtype, device=device)
+    epsilon = 1e-5
+
+    ref_output = residual_ref_implementation(vals, bias, residual, gamma, beta, epsilon, channels, dtype)
+    if store_pre_ln_res:
+        ds_output, ds_res_output = inference_module.layer_norm_residual_store_pre_ln_res(
+            vals, bias, residual, gamma, beta, epsilon)
+        assert allclose(ds_res_output, vals + bias + residual)
+    else:
+        ds_output = inference_module._layer_norm_residual(vals, bias, residual, gamma, beta, epsilon)
+
+    assert allclose(ds_output, ref_output)
 
 
 @pytest.mark.inference_ops

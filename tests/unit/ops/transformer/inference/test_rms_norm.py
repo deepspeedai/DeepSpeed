@@ -32,8 +32,8 @@ def ds_implementation(vals, gamma, epsilon):
 
 @pytest.mark.inference_ops
 @pytest.mark.parametrize("batch", [1, 32])
-@pytest.mark.parametrize("seq_len", [1, 128])
-@pytest.mark.parametrize("channels", [384, 512, 768, 1024, 2048, 8192, 14432])
+@pytest.mark.parametrize("seq_len", [1, 9, 128])
+@pytest.mark.parametrize("channels", [64, 96, 128, 384, 512, 768, 1024, 2048, 8192, 14432])
 @pytest.mark.parametrize("dtype", get_dtypes())
 def test_rms_norm(batch, seq_len, channels, dtype):
     device = get_accelerator().current_device_name()
@@ -66,8 +66,8 @@ def pre_ref_implementation(vals, residual, gamma, epsilon):
 
 @pytest.mark.inference_ops
 @pytest.mark.parametrize("batch", [1, 32])
-@pytest.mark.parametrize("seq_len", [1, 128])
-@pytest.mark.parametrize("channels", [384, 512, 768, 1024, 2048, 8192, 14432])
+@pytest.mark.parametrize("seq_len", [1, 9, 128])
+@pytest.mark.parametrize("channels", [64, 96, 128, 384, 512, 768, 1024, 2048, 8192, 14432])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.float32])
 def test_pre_norm(batch, seq_len, channels, dtype):
     device = get_accelerator().current_device_name()
