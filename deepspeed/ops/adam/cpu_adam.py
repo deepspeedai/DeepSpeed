@@ -151,7 +151,6 @@ class DeepSpeedCPUAdam(DeepSpeedCPUOptimizer):
                 state = self.state[p]
                 # State initialization
                 if len(state) == 0:
-                    #print(f'group {group_id} param {param_id} = {p.numel()}')
                     state['step'] = 0
 
                     #use full precision by default unless self.fp32_optimizer_states is off

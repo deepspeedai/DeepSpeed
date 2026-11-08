@@ -171,7 +171,6 @@ class LossScalerBase(DeepSpeedConfigObject):
     def backward(self, loss, retain_graph=False):
         scaled_loss = self.scale_loss(loss)
         scaled_loss.backward(retain_graph=retain_graph)
-        # print(f'LossScalerBackward: {scaled_loss=}')
 
 
 class LossScaler(LossScalerBase):

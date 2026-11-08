@@ -67,7 +67,6 @@ class ModelBasedTuner(BaseTuner):
                 if isinstance(v, numbers.Number):
                     feature_val.append(v)
             configs.append(feature_val)
-        # print(configs)
         # TODO the current implementation requires that all configs have the same shape.
         configs = np.array(configs, dtype=np.float32)
         estimates = self.cost_model.predict(configs)

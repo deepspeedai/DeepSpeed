@@ -298,7 +298,6 @@ __global__ void lamb_cuda_kernel_part3(
 
     if (blockId == 0 && threadIdInBlock == 0) {
         lamb_coeff_val[0] = lamb_coeff;
-        // printf("Cuda Lamb Coeff is %.6f \n",lamb_coeff);
     }
 
     for (int j = i; j < tsize; j += totThreads) {

@@ -511,8 +511,6 @@ class TestZeroToFP32(DistributedTest):
             fp32_model = load_state_dict_from_zero_checkpoint(model.module, tmpdir)
             fp32_state_dict = fp32_model.state_dict()
 
-        # dump_state_dict(fp32_model)
-
         if dist.get_rank() == 0:
             for name in orig_state_dict.keys():
                 # float() workaround for torch<1.6
@@ -600,8 +598,6 @@ class TestZeroToFP32(DistributedTest):
         # make sure all sides saved it
         dist.barrier()
 
-        # dump_state_dict(model)
-
         orig_state_dict = {}
         for name, param in model.module.named_parameters():
             if zero_stage == 3:
@@ -617,8 +613,6 @@ class TestZeroToFP32(DistributedTest):
         else:
             fp32_model = load_state_dict_from_zero_checkpoint(model.module, tmpdir)
             fp32_state_dict = fp32_model.state_dict()
-
-        # dump_state_dict(fp32_model)
 
         if dist.get_rank() == 0:
             for name in orig_state_dict.keys():

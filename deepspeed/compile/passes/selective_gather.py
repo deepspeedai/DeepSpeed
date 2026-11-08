@@ -155,18 +155,6 @@ def selective_gather(gm: GraphModule, graph_id: int, graph_order: List[Tuple[int
     ds_ids = [ds_id for ds_id in ds_id_to_size if ds_id not in persistent_ds_ids]
     ds_ids.sort(key=lambda ds_id: _time_per_byte(ds_id_to_time, ds_id_to_size, ds_id), reverse=True)
 
-    # print(f"ds_id_to_size={ds_id_to_size}")
-    # print(f"ds_id_to_time={ds_id_to_time}")
-
-    # if dist.get_rank() == 0:
-    #     for ds_id in ds_ids:
-    #         dtime_in_sec = ds_id_to_prof_dtime[ds_id]
-    #         wtime_in_sec = ds_id_to_prof_wtime[ds_id]
-    #         size_in_mb = ds_id_to_size[ds_id] / 1024 / 1024
-    #         print(
-    #             f"ds_id={ds_id} time_per_size={ds_id_to_time[ds_id] / ds_id_to_size[ds_id]:.5f} dtime={dtime_in_sec:.3f} wtime={wtime_in_sec:.3f} size={size_in_mb:.2f}MB bw={size_in_mb/dtime_in_sec:.2f}MB/s"
-    #         )
-
     accelerator = get_accelerator()
     total_mem = accelerator.total_memory()
     current_available_mem = accelerator.available_memory()

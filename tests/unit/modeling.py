@@ -151,14 +151,8 @@ class LinearActivation(Module):
 
     def forward(self, input):
         if self.fused_gelu:
-            #timing = []
-            #t1 = GPUTimer()
-            #t1.record()
             y = F.linear(input, self.weight, None)
-            #timing.append(t1.elapsed())
-            #t1.record()
             bg = bias_gelu(self.bias, y)
-            #timing.append(t1.elapsed())
             return bg
         elif self.fused_tanh:
             return bias_tanh(self.bias, F.linear(input, self.weight, None))
@@ -491,7 +485,6 @@ class BertEncoder(nn.Module):
             for i, layer_module in enumerate(self.layer):
                 hidden_states = layer_module(hidden_states, attention_mask, self.grads, collect_all_grads=True)
                 hidden_states.register_hook(lambda x, i=i, self=self: self.grads.append([x, "hidden_state"]))
-                #print("pytorch weight is: ", layer_module.get_w())
 
                 if output_all_encoded_layers:
                     all_encoder_layers.append((hidden_states))

@@ -123,9 +123,6 @@ class TestTiledCompute(DistributedTest):
         elif dtype == torch.float16:
             config_dict["fp16"] = {"enabled": True, "loss_scale": 1.0}
 
-        # for debug
-        # torch.set_printoptions(precision=8, sci_mode=True)
-
         vocab_size = 10
         seed = 42
         hidden_dim = 128
@@ -181,12 +178,6 @@ class TestTiledCompute(DistributedTest):
         assert param_grad_b2 is not None
         assert x_grad_b is not None
 
-        # print(f"{loss_a=}")
-        # print(f"{loss_b=}")
-        # print(f"{param_grad_a1=}")
-        # print(f"{param_grad_b1=}")
-        # print(f"{param_grad_a2=}")
-        # print(f"{param_grad_b2=}")
         torch_assert_equal(loss_a, loss_b)
 
         # Gradient will not be exactly the same, especially under half-precision. And bf16 is
@@ -221,10 +212,6 @@ class TestTiledCompute(DistributedTest):
         assert param_grad_c2 is not None
         assert x_grad_c is not None
 
-        # print(f"{loss_a=}")
-        # print(f"{loss_c=}")
-        # print(f"{param_grad_a1=}")
-        # print(f"{param_grad_c1=}")
         # see notes for B
         torch_assert_equal(loss_a, loss_c)
         torch_assert_close(param_grad_a1, param_grad_c1)  #, rtol=1e-03, atol=1e-04)
@@ -388,9 +375,6 @@ class TestTiledFusedLogitsLoss(DistributedTest):
         elif dtype == torch.float16:
             config_dict["fp16"] = {"enabled": True, "loss_scale": 1.0}
 
-        # for debug
-        # torch.set_printoptions(precision=8, sci_mode=True)
-
         vocab_size = 100
         seed = 42
         hidden_dim = 64
@@ -443,12 +427,6 @@ class TestTiledFusedLogitsLoss(DistributedTest):
         assert param_grad_b is not None
         assert x_grad_b is not None
 
-        # print(f"{loss_a=}")
-        # print(f"{loss_b=}")
-        # print(f"{x_grad_a=}")
-        # print(f"{x_grad_b=}")
-        # print(f"{param_grad_a=}")
-        # print(f"{param_grad_b=}")
         # usually this is an exact match, but on cpu CI this fails.
         torch_assert_close(loss_a, loss_b)
 
