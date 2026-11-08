@@ -43,6 +43,7 @@ public:
           _betta1_t(1.0),
           _betta2_t(1.0),
           _step(0),
+          _grad_scale(1.0f),
           _adamw_mode(adamw_mode)
     {
     }
@@ -90,6 +91,25 @@ public:
     STEP(1)
     STEP(4)
     STEP(8)
+#if defined(__AVX512__) or defined(__AVX256__) or defined(__NEON__)
+    template <int span, typename ds_grad_precision_t>
+    void Rescale_Step_AVX(size_t* rounded_size,
+                          float* _params,
+                          ds_grad_precision_t* grads,
+                          float* _exp_avg,
+                          float* _exp_avg_sq,
+                          size_t param_size,
+                          float old_scale,
+                          float new_scale);
+#endif
+    template <typename ds_grad_precision_t>
+    void Rescale_Step(float* _params,
+                      ds_grad_precision_t* grads,
+                      float* _exp_avg,
+                      float* _exp_avg_sq,
+                      size_t _param_size,
+                      float old_scale,
+                      float new_scale);
     inline void IncrementStep(size_t step, float beta1, float beta2)
     {
         if (beta1 != _betta1 || beta2 != _betta2) {
@@ -113,11 +133,17 @@ public:
             }
         }
     }
-    inline void update_state(float lr, float epsilon, float weight_decay, bool bias_correction)
+    // grad_scale multiplies the gradients as the step reads them, as unscaling and clipping does.
+    inline void update_state(float lr,
+                             float epsilon,
+                             float weight_decay,
+                             bool bias_correction,
+                             float grad_scale = 1.0f)
     {
         _alpha = lr;
         _eps = epsilon;
         _weight_decay = weight_decay;
+        _grad_scale = grad_scale;
 
         _bias_correction1 = 1.0f;
         _bias_correction2 = 1.0f;
@@ -140,6 +166,8 @@ private:
 
     float _bias_correction1;
     float _bias_correction2;
+
+    float _grad_scale;
 
     bool _adamw_mode;
 };
@@ -192,6 +220,8 @@ void Adam_Optimizer::Step_AVX(size_t* rounded_size,
     AVX_Data weight_decay4;
     if (_weight_decay > 0)
         weight_decay4.data = (_adamw_mode ? SIMD_SET(w_decay) : SIMD_SET(_weight_decay));
+    AVX_Data grad_scale_4;
+    grad_scale_4.data = SIMD_SET(_grad_scale);
     new_rounded_size = ROUND_DOWN(_param_size, SIMD_WIDTH * span);
     for (size_t t = 0; t < new_rounded_size; t += TILE) {
         size_t copy_size = TILE;
@@ -201,6 +231,7 @@ void Adam_Optimizer::Step_AVX(size_t* rounded_size,
         for (size_t i = t; i < offset; i += SIMD_WIDTH * span) {
             AVX_Data grad_4[span];
             simd_load<span>(grad_4, grads + i);
+            if (_grad_scale != 1.0f) { simd_mul<span>(grad_4, grad_4, grad_scale_4); }
 
             AVX_Data momentum_4[span];
             simd_load<span>(momentum_4, _exp_avg + i);
@@ -237,6 +268,90 @@ void Adam_Optimizer::Step_AVX(size_t* rounded_size,
     }
     *rounded_size = new_rounded_size;
 }
+
+// Turns the last step of fp32 params and states, taken on grads * old_scale, into the step on
+// grads * new_scale, in one pass where undoing it and stepping again take two. The moments move by
+// the difference of the two gradients, and the params by the difference of the two Adam updates:
+// AdamW's weight decay does not depend on the gradient.
+template <int span, typename ds_grad_precision_t>
+void Adam_Optimizer::Rescale_Step_AVX(size_t* rounded_size,
+                                      float* _params,
+                                      ds_grad_precision_t* grads,
+                                      float* _exp_avg,
+                                      float* _exp_avg_sq,
+                                      size_t _param_size,
+                                      float old_scale,
+                                      float new_scale)
+{
+#if !defined(__AVX512__) && !defined(__NEON__)
+    if (std::is_same_v<ds_grad_precision_t, c10::BFloat16>) { return; }
+#endif
+    AVX_Data momentum_shift_4;
+    momentum_shift_4.data = SIMD_SET((1 - _betta1) * (new_scale - old_scale));
+    AVX_Data variance_shift_4;
+    variance_shift_4.data =
+        SIMD_SET((1 - _betta2) * (new_scale * new_scale - old_scale * old_scale));
+
+    AVX_Data bias2_sqrt;
+    bias2_sqrt.data = SIMD_SET(_bias_correction2);
+
+    AVX_Data eps_4;
+    eps_4.data = SIMD_SET(_eps);
+
+    float step_size = -1 * _alpha / _bias_correction1;
+    AVX_Data step_size_4;
+    step_size_4.data = SIMD_SET(step_size);
+    AVX_Data minus_step_size_4;
+    minus_step_size_4.data = SIMD_SET(-step_size);
+
+    AVX_Data zero_4;
+    zero_4.data = SIMD_SET(0.0f);
+
+    size_t new_rounded_size = ROUND_DOWN(_param_size, SIMD_WIDTH * span);
+    for (size_t t = 0; t < new_rounded_size; t += TILE) {
+        size_t copy_size = TILE;
+        if ((t + TILE) > new_rounded_size) copy_size = new_rounded_size - t;
+        size_t offset = copy_size + t;
+#pragma omp parallel for
+        for (size_t i = t; i < offset; i += SIMD_WIDTH * span) {
+            AVX_Data grad_4[span];
+            simd_load<span>(grad_4, grads + i);
+
+            AVX_Data momentum_4[span];
+            simd_load<span>(momentum_4, _exp_avg + i);
+
+            AVX_Data variance_4[span];
+            simd_load<span>(variance_4, _exp_avg_sq + i);
+
+            AVX_Data param_4[span];
+            simd_load<span>(param_4, _params + i);
+
+            // The update of the last step, as Step_AVX computed it from these moments.
+            AVX_Data update_4[span];
+            simd_sqrt<span>(update_4, variance_4);
+            simd_fma<span>(update_4, update_4, bias2_sqrt, eps_4);
+            simd_div<span>(update_4, momentum_4, update_4);
+            simd_fma<span>(param_4, update_4, minus_step_size_4, param_4);
+
+            simd_fma<span>(momentum_4, grad_4, momentum_shift_4, momentum_4);
+            simd_mul<span>(grad_4, grad_4, grad_4);
+            simd_fma<span>(variance_4, grad_4, variance_shift_4, variance_4);
+            // The shift can leave a rounding residual below 0 where the old variance was 0,
+            // whose sqrt is NaN.
+            simd_max<span>(variance_4, zero_4, variance_4);
+
+            simd_sqrt<span>(update_4, variance_4);
+            simd_fma<span>(update_4, update_4, bias2_sqrt, eps_4);
+            simd_div<span>(update_4, momentum_4, update_4);
+            simd_fma<span>(param_4, update_4, step_size_4, param_4);
+
+            simd_store<span>(_params + i, param_4);
+            simd_store<span>(_exp_avg + i, momentum_4);
+            simd_store<span>(_exp_avg_sq + i, variance_4);
+        }
+    }
+    *rounded_size = new_rounded_size;
+}
 #endif
 
 #if defined(__SVE__) && defined(__ARM_FEATURE_SVE)
@@ -255,6 +370,8 @@ void Adam_Optimizer::Step_SVE(size_t* rounded_size,
     if constexpr (std::is_same_v<ds_params_precision_t, float> &&
                   std::is_same_v<ds_state_precision_t, float> &&
                   std::is_same_v<ds_grad_precision_t, float>) {
+        // The SVE kernel does not scale the gradient; the scalar loop steps a scaled one.
+        if (_grad_scale != 1.0f) { return; }
         sve_adam_update<span>(_params,
                               grads,
                               _exp_avg,
@@ -290,6 +407,8 @@ void Adam_Optimizer::Step_RVV(size_t* rounded_size,
     if constexpr (std::is_same_v<ds_params_precision_t, float> &&
                   std::is_same_v<ds_state_precision_t, float> &&
                   std::is_same_v<ds_grad_precision_t, float>) {
+        // The RVV kernel does not scale the gradient; the scalar loop steps a scaled one.
+        if (_grad_scale != 1.0f) { return; }
         rvv_adam_update<span>(_params,
                               grads,
                               _exp_avg,
@@ -329,7 +448,23 @@ int ds_adam_step(int optimizer_id,
                  torch::Tensor& params,
                  torch::Tensor& grads,
                  torch::Tensor& exp_avg,
-                 torch::Tensor& exp_avg_sq);
+                 torch::Tensor& exp_avg_sq,
+                 float grad_scale);
+
+int ds_adam_rescale_step(int optimizer_id,
+                         size_t step,
+                         float lr,
+                         float beta1,
+                         float beta2,
+                         float epsilon,
+                         float weight_decay,
+                         bool bias_correction,
+                         torch::Tensor& params,
+                         torch::Tensor& grads,
+                         torch::Tensor& exp_avg,
+                         torch::Tensor& exp_avg_sq,
+                         float old_scale,
+                         float new_scale);
 
 int ds_adam_rollback(int optimizer_id,
                      size_t step,

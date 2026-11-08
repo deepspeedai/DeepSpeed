@@ -191,6 +191,96 @@ def test_cpu_adam_steps_fp32_params_on_bf16_grads():
         op.destroy_adam(opt_id)
 
 
+def test_cpu_adam_scales_grads_as_it_reads_them():
+    """adam_update with grad_scale steps bit for bit as on the gradient scaled before, as unscale_and_clip_grads
+    scales it, for fp32 and bf16 gradients of fp32 params."""
+    from deepspeed.ops.adam import DeepSpeedCPUAdam
+
+    op = CPUAdamBuilder().load()
+    opt_id = DeepSpeedCPUAdam.optimizer_id
+    DeepSpeedCPUAdam.optimizer_id += 1
+    lr, beta1, beta2, eps, wd, scale = 1e-3, 0.9, 0.999, 1e-8, 0.01, 0.37
+    n = 100003  # not a multiple of the SIMD block, so the scalar tail runs too
+    torch.manual_seed(0)
+    params = torch.randn(n)
+    for grad_dtype in (torch.bfloat16, torch.float):
+        grads = [torch.randn(n).to(grad_dtype) for _ in range(3)]
+        results = []
+        for in_kernel in (True, False):
+            # A new native optimizer for each, as it carries beta**step over from the steps before.
+            op.create_adam(opt_id, lr, beta1, beta2, eps, wd, True, False)
+            p, m, v = params.clone(), torch.zeros(n), torch.zeros(n)
+            for step, grad in enumerate(grads, 1):
+                if in_kernel:
+                    op.adam_update(opt_id, step, lr, beta1, beta2, eps, wd, True, p, grad, m, v, scale)
+                else:
+                    op.adam_update(opt_id, step, lr, beta1, beta2, eps, wd, True, p, grad.float() * scale, m, v)
+            results.append((p, m, v))
+            op.destroy_adam(opt_id)
+        for name, a, b in zip(("params", "exp_avg", "exp_avg_sq"), *results):
+            assert torch.equal(a, b), f"{grad_dtype} {name}"
+
+
+@pytest.mark.parametrize("earlier_steps", [0, 3], ids=["first_step", "later_step"])
+@pytest.mark.parametrize("grad_dtype", [torch.bfloat16, torch.float], ids=["bf16", "fp32"])
+def test_cpu_adam_rescale_step(earlier_steps, grad_dtype):
+    """adam_rescale_step turns a step on grad * old_scale into the step on grad * new_scale from the same state, up to
+    rounding: 7e-6 of the update for the params and 1e-6 of the largest moment (2.5e-7 and 1e-6 on the first step,
+    where the moments of before were 0). Rescaling to the same scale leaves the moments as they are, and takes the
+    update out of the params and adds it back."""
+    from deepspeed.ops.adam import DeepSpeedCPUAdam
+
+    op = CPUAdamBuilder().load()
+    opt_id = DeepSpeedCPUAdam.optimizer_id
+    DeepSpeedCPUAdam.optimizer_id += 1
+    lr, beta1, beta2, eps, wd, old_scale, new_scale = 1e-3, 0.9, 0.999, 1e-8, 0.01, 1.0, 0.2
+    n = 100003  # not a multiple of the SIMD block, so the scalar tail runs too
+    torch.manual_seed(0)
+    params = torch.randn(n) * 0.02
+    earlier = [torch.randn(n) * 1e-3 for _ in range(earlier_steps)]
+    grad = (torch.randn(n) * 1e-3).to(grad_dtype)
+    step = earlier_steps + 1
+    results = []
+    for rescale in (True, False):
+        op.create_adam(opt_id, lr, beta1, beta2, eps, wd, True, False)
+        p, m, v = params.clone(), torch.zeros(n), torch.zeros(n)
+        for t, g in enumerate(earlier, 1):
+            op.adam_update(opt_id, t, lr, beta1, beta2, eps, wd, True, p, g, m, v)
+        before = p.clone()
+        if rescale:
+            op.adam_update(opt_id, step, lr, beta1, beta2, eps, wd, True, p, grad, m, v, old_scale)
+            stepped = (p.clone(), m.clone(), v.clone())
+            op.adam_rescale_step(opt_id, step, lr, beta1, beta2, eps, wd, True, p, grad, m, v, old_scale, old_scale)
+            assert torch.equal(m, stepped[1]) and torch.equal(v, stepped[2])
+            torch.testing.assert_close(p, stepped[0], rtol=0, atol=1e-5 * (stepped[0] - before).abs().max().item())
+            op.adam_rescale_step(opt_id, step, lr, beta1, beta2, eps, wd, True, p, grad, m, v, old_scale, new_scale)
+        else:
+            op.adam_update(opt_id, step, lr, beta1, beta2, eps, wd, True, p, grad, m, v, new_scale)
+        results.append((p, m, v))
+        op.destroy_adam(opt_id)
+    (p, m, v), (p_ref, m_ref, v_ref) = results
+    torch.testing.assert_close(p, p_ref, rtol=0, atol=1e-4 * (p_ref - before).abs().max().item())
+    torch.testing.assert_close(m, m_ref, rtol=0, atol=2e-6 * m_ref.abs().max().item())
+    torch.testing.assert_close(v, v_ref, rtol=0, atol=1e-5 * v_ref.abs().max().item())
+
+
+def test_cpu_adam_rescale_step_rejects_l2_weight_decay():
+    """Adam's L2 decay adds the params of before the step to the gradient, which a rescale cannot recover."""
+    from deepspeed.ops.adam import DeepSpeedCPUAdam
+
+    op = CPUAdamBuilder().load()
+    opt_id = DeepSpeedCPUAdam.optimizer_id
+    DeepSpeedCPUAdam.optimizer_id += 1
+    op.create_adam(opt_id, 1e-3, 0.9, 0.999, 1e-8, 0.01, False, False)
+    try:
+        p, g, m, v = torch.randn(64), torch.randn(64), torch.zeros(64), torch.zeros(64)
+        op.adam_update(opt_id, 1, 1e-3, 0.9, 0.999, 1e-8, 0.01, True, p, g, m, v)
+        with pytest.raises(RuntimeError, match="AdamW only"):
+            op.adam_rescale_step(opt_id, 1, 1e-3, 0.9, 0.999, 1e-8, 0.01, True, p, g, m, v, 1.0, 0.5)
+    finally:
+        op.destroy_adam(opt_id)
+
+
 @pytest.mark.parametrize('dtype', [torch.half, torch.bfloat16, torch.float], ids=["fp16", "bf16", "fp32"])
 @pytest.mark.parametrize('model_size',
                          [

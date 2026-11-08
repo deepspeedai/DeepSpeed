@@ -8,11 +8,29 @@
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
 {
     using namespace pybind11::literals;
-    // The update and the rollback release the GIL, so that a CPU Adam step in another thread lets
-    // the training thread run.
+    // The update, the rescale and the rollback release the GIL, so that a CPU Adam step in another
+    // thread lets the training thread run.
     m.def("adam_update",
           &ds_adam_step,
-          "DeepSpeed CPU Adam update (C++)",
+          "DeepSpeed CPU Adam update (C++); grad_scale multiplies each gradient as it is read",
+          "optimizer_id"_a,
+          "step"_a,
+          "lr"_a,
+          "beta1"_a,
+          "beta2"_a,
+          "epsilon"_a,
+          "weight_decay"_a,
+          "bias_correction"_a,
+          "params"_a,
+          "grads"_a,
+          "exp_avg"_a,
+          "exp_avg_sq"_a,
+          "grad_scale"_a = 1.0f,
+          pybind11::call_guard<pybind11::gil_scoped_release>());
+    m.def("adam_rescale_step",
+          &ds_adam_rescale_step,
+          "DeepSpeed CPU Adam: turn the last step, taken on grads * old_scale, into the step on "
+          "grads * new_scale (C++)",
           pybind11::call_guard<pybind11::gil_scoped_release>());
     m.def("adam_rollback",
           &ds_adam_rollback,

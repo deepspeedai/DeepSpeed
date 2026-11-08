@@ -64,6 +64,7 @@ void Adam_Optimizer::Step_1(ds_params_precision_t* _params,
 #pragma omp parallel for if (parallel)
             for (size_t k = t; k < offset; k++) {
                 float grad = (float)grads[k];
+                if (_grad_scale != 1.0f) { grad = grad * _grad_scale; }
                 float param = (float)_params[k];
                 float momentum = _exp_avg[k];
                 float variance = _exp_avg_sq[k];
@@ -274,7 +275,8 @@ int ds_adam_step(int optimizer_id,
                  torch::Tensor& params,
                  torch::Tensor& grads,
                  torch::Tensor& exp_avg,
-                 torch::Tensor& exp_avg_sq)
+                 torch::Tensor& exp_avg_sq,
+                 float grad_scale)
 {
     auto params_c = params.contiguous();
     auto grads_c = grads.contiguous();
@@ -284,10 +286,107 @@ int ds_adam_step(int optimizer_id,
     std::shared_ptr<Adam_Optimizer> opt =
         std::static_pointer_cast<Adam_Optimizer>(s_optimizers[optimizer_id]);
     opt->IncrementStep(step, beta1, beta2);
-    opt->update_state(lr, epsilon, weight_decay, bias_correction);
+    opt->update_state(lr, epsilon, weight_decay, bias_correction, grad_scale);
 
     invoke(opt, params_c, grads_c, exp_avg_c, exp_avg_sq_c, params_c.numel());
 
+    return 0;
+}
+
+template <typename ds_grad_precision_t>
+void Adam_Optimizer::Rescale_Step(float* _params,
+                                  ds_grad_precision_t* grads,
+                                  float* _exp_avg,
+                                  float* _exp_avg_sq,
+                                  size_t _param_size,
+                                  float old_scale,
+                                  float new_scale)
+{
+    if (_weight_decay > 0 && !_adamw_mode) {
+        // Adam's L2 decay adds the params of before the step to the gradient, which are gone.
+        throw std::runtime_error(
+            "Adam rescale step supports AdamW only, or Adam without weight decay");
+    }
+    size_t rounded_size = 0;
+#if defined(__AVX512__) or defined(__AVX256__) or defined(__NEON__)
+    Rescale_Step_AVX<8>(
+        &rounded_size, _params, grads, _exp_avg, _exp_avg_sq, _param_size, old_scale, new_scale);
+#endif
+    if (_param_size <= rounded_size) return;
+    float momentum_shift = (1 - _betta1) * (new_scale - old_scale);
+    float variance_shift = (1 - _betta2) * (new_scale * new_scale - old_scale * old_scale);
+    float step_size = -1 * _alpha / _bias_correction1;
+#pragma omp parallel for
+    for (size_t k = rounded_size; k < _param_size; k++) {
+        float grad = (float)grads[k];
+        float momentum = _exp_avg[k];
+        float variance = _exp_avg_sq[k];
+        float param = _params[k];
+        param = momentum / (sqrt(variance) * _bias_correction2 + _eps) * -step_size + param;
+        momentum = grad * momentum_shift + momentum;
+        // std::max(x, 0) keeps a NaN x.
+        variance = std::max(grad * grad * variance_shift + variance, 0.0f);
+        param = momentum / (sqrt(variance) * _bias_correction2 + _eps) * step_size + param;
+        _params[k] = param;
+        _exp_avg[k] = momentum;
+        _exp_avg_sq[k] = variance;
+    }
+}
+
+int ds_adam_rescale_step(int optimizer_id,
+                         size_t step,
+                         float lr,
+                         float beta1,
+                         float beta2,
+                         float epsilon,
+                         float weight_decay,
+                         bool bias_correction,
+                         torch::Tensor& params,
+                         torch::Tensor& grads,
+                         torch::Tensor& exp_avg,
+                         torch::Tensor& exp_avg_sq,
+                         float old_scale,
+                         float new_scale)
+{
+    TORCH_CHECK(params.scalar_type() == torch::kFloat32 &&
+                    exp_avg.scalar_type() == torch::kFloat32 &&
+                    exp_avg_sq.scalar_type() == torch::kFloat32,
+                "Adam rescale step supports float32 params and states only");
+    TORCH_CHECK(grads.scalar_type() == torch::kFloat32 || grads.scalar_type() == torch::kBFloat16,
+                "Adam rescale step supports float32 and bfloat16 gradients only");
+    TORCH_CHECK(params.is_contiguous() && grads.is_contiguous() && exp_avg.is_contiguous() &&
+                    exp_avg_sq.is_contiguous(),
+                "Adam rescale step updates its tensors in place, so they must be contiguous");
+    TORCH_CHECK(grads.numel() == params.numel() && exp_avg.numel() == params.numel() &&
+                    exp_avg_sq.numel() == params.numel(),
+                "Adam rescale step needs as many gradients and states as params");
+
+    std::shared_ptr<Adam_Optimizer> opt =
+        std::static_pointer_cast<Adam_Optimizer>(s_optimizers[optimizer_id]);
+    // As the step being rescaled had this step and these betas, beta1^step and beta2^step stay.
+    opt->IncrementStep(step, beta1, beta2);
+    opt->update_state(lr, epsilon, weight_decay, bias_correction);
+
+    float* params_ptr = params.data_ptr<float>();
+    float* exp_avg_ptr = exp_avg.data_ptr<float>();
+    float* exp_avg_sq_ptr = exp_avg_sq.data_ptr<float>();
+    if (grads.scalar_type() == torch::kBFloat16) {
+        opt->Rescale_Step(params_ptr,
+                          (c10::BFloat16*)grads.data_ptr(),
+                          exp_avg_ptr,
+                          exp_avg_sq_ptr,
+                          params.numel(),
+                          old_scale,
+                          new_scale);
+    } else {
+        opt->Rescale_Step(params_ptr,
+                          grads.data_ptr<float>(),
+                          exp_avg_ptr,
+                          exp_avg_sq_ptr,
+                          params.numel(),
+                          old_scale,
+                          new_scale);
+    }
     return 0;
 }
 

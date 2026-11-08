@@ -42,6 +42,8 @@ inline void writeAs(void* dst, const T& val)
 #define SIMD_FMA(x, y, c) _mm512_fmadd_ps(x, y, c)
 #define SIMD_SQRT(x) _mm512_sqrt_ps(x)
 #define SIMD_DIV(x, y) _mm512_div_ps(x, y)
+// Returns y when either operand is NaN.
+#define SIMD_MAX(x, y) _mm512_max_ps(x, y)
 #define SIMD_AND(x, y) _mm512_and_ps(x, y)
 #define SIMD_ANDNOT(x, y) _mm512_andnot_ps(x, y)
 #define SIMD_OR(x, y) _mm512_or_ps(x, y)
@@ -105,6 +107,8 @@ static void store_16_f32_as_bf16_nearest(__m512 v, void* data)
 #define SIMD_FMA(x, y, c) _mm256_fmadd_ps(x, y, c)
 #define SIMD_SQRT(x) _mm256_sqrt_ps(x)
 #define SIMD_DIV(x, y) _mm256_div_ps(x, y)
+// Returns y when either operand is NaN.
+#define SIMD_MAX(x, y) _mm256_max_ps(x, y)
 #define SIMD_AND(x, y) _mm256_and_ps(x, y)
 #define SIMD_ANDNOT(x, y) _mm256_andnot_ps(x, y)
 #define SIMD_OR(x, y) _mm256_or_ps(x, y)
@@ -128,6 +132,8 @@ static void store_16_f32_as_bf16_nearest(__m512 v, void* data)
 #define SIMD_FMA(x, y, c) vfmaq_f32(c, x, y)
 #define SIMD_SQRT(x) vsqrtq_f32(x)
 #define SIMD_DIV(x, y) vdivq_f32(x, y)
+// Returns NaN when either operand is NaN.
+#define SIMD_MAX(x, y) vmaxq_f32(x, y)
 #define SIMD_AND(x, y) \
     vreinterpretq_f32_u32(vandq_u32(vreinterpretq_u32_f32(x), vreinterpretq_u32_f32(y)))
 // x86 andnot(x, y) computes ~x & y; NEON bic(a, b) computes a & ~b, so the operands swap.
@@ -304,6 +310,13 @@ inline void simd_div(AVX_Data* dst, AVX_Data* src_a_l, AVX_Data* src_a_r)
 {
 #pragma unroll
     for (size_t i = 0; i < span; ++i) { dst[i].data = SIMD_DIV(src_a_l[i].data, src_a_r[i].data); }
+}
+// max(src_a_l, src_a_r) keeps a NaN of src_a_r on every ISA.
+template <int span>
+inline void simd_max(AVX_Data* dst, AVX_Data src_a_l, AVX_Data* src_a_r)
+{
+#pragma unroll
+    for (size_t i = 0; i < span; ++i) { dst[i].data = SIMD_MAX(src_a_l.data, src_a_r[i].data); }
 }
 template <int span>
 inline void simd_and(AVX_Data* dst, AVX_Data* src_a_l, AVX_Data src_a_r)
