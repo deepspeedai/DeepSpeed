@@ -271,7 +271,10 @@ int ds_adam_step(int optimizer_id,
     opt->IncrementStep(step, beta1, beta2);
     opt->update_state(lr, epsilon, weight_decay, bias_correction);
 
-    invoke(opt, params_c, grads_c, exp_avg_c, exp_avg_sq_c, params_c.numel());
+    // The CPU fused optimizer shares this state across parameter groups.
+    auto step_opt = std::make_shared<Adam_Optimizer>(*opt);
+    pybind11::gil_scoped_release release;
+    invoke(step_opt, params_c, grads_c, exp_avg_c, exp_avg_sq_c, params_c.numel());
 
     return 0;
 }

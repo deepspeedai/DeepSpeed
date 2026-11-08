@@ -7,6 +7,8 @@ import copy
 import math
 import os
 import sys
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 import torch
 import numpy as np
 import pytest
@@ -112,6 +114,47 @@ def test_cpu_adam_strict_state_updates(model_size, adamw_mode, weight_decay, bia
         torch.testing.assert_close(cpu_param, ref_param, rtol=3e-5, atol=2e-6)
         torch.testing.assert_close(state['exp_avg'], ref_exp_avg, rtol=3e-5, atol=2e-6)
         torch.testing.assert_close(state['exp_avg_sq'], ref_exp_avg_sq, rtol=3e-5, atol=2e-6)
+
+
+@pytest.mark.parametrize('fused', [False, True])
+def test_cpu_adam_concurrent_updates(fused):
+    from deepspeed.ops.adam import DeepSpeedCPUAdam
+
+    if fused and get_accelerator().device_name() != 'cpu':
+        pytest.skip("requires the CPU fused Adam implementation")
+
+    barrier = Barrier(2)
+    cases = []
+    for index in range(2):
+        generator = torch.Generator().manual_seed(71 + index)
+        parameter = torch.nn.Parameter(torch.randn(1048579, generator=generator))
+        reference = torch.nn.Parameter(parameter.detach().clone())
+        options = dict(lr=0.001 + index * 0.004,
+                       betas=(0.85 - index * 0.1, 0.97 - index * 0.03),
+                       eps=1e-7,
+                       weight_decay=0.07)
+        optimizer = (FusedAdam if fused else DeepSpeedCPUAdam)([parameter], **options)
+        expected = torch.optim.AdamW([reference], foreach=False, **options)
+        gradients = [torch.randn(parameter.shape, generator=generator) for _ in range(4)]
+        cases.append((parameter, reference, optimizer, expected, gradients))
+
+    def update(case):
+        parameter, reference, optimizer, expected, gradients = case
+        for gradient in gradients:
+            parameter.grad = gradient
+            reference.grad = gradient
+            barrier.wait(timeout=30)
+            optimizer.step()
+            expected.step()
+            torch.testing.assert_close(parameter, reference, rtol=3e-5, atol=2e-6)
+            for key in ('exp_avg', 'exp_avg_sq'):
+                torch.testing.assert_close(optimizer.state[parameter][key],
+                                           expected.state[reference][key],
+                                           rtol=3e-5,
+                                           atol=2e-6)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        list(executor.map(update, cases))
 
 
 def test_cpu_adam_rejects_amsgrad():
