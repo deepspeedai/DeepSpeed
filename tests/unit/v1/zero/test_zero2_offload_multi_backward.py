@@ -268,11 +268,14 @@ def _run_request_boundaries(rank, rendezvous, zero_stage, cpu_offload, accumulat
 @pytest.mark.parametrize("accumulation_dtype", ["bf16", "fp32"])
 @pytest.mark.parametrize("checkpointed", [False, True], ids=["plain", "reentrant"])
 def test_multiple_request_boundaries_before_step(tmp_path, zero_stage, cpu_offload, accumulation_dtype, checkpointed):
-    torch.multiprocessing.spawn(_run_request_boundaries,
-                                args=(f"file://{tmp_path / 'rendezvous'}", zero_stage, cpu_offload, accumulation_dtype,
-                                      checkpointed),
-                                nprocs=2,
-                                join=True)
+    # Match DistributedTest's forkserver lifecycle: spawn also runs native global
+    # destructors during interpreter shutdown, beyond the explicit engine/group cleanup.
+    torch.multiprocessing.start_processes(_run_request_boundaries,
+                                          args=(f"file://{tmp_path / 'rendezvous'}", zero_stage, cpu_offload,
+                                                accumulation_dtype, checkpointed),
+                                          nprocs=2,
+                                          join=True,
+                                          start_method="forkserver")
 
 
 class TestZero2OffloadOverflowRecovery(DistributedTest):
@@ -285,6 +288,8 @@ class TestZero2OffloadOverflowRecovery(DistributedTest):
             pytest.skip("CPUAdam is required for low-precision offloaded master weights")
         if precision == "bf16" and not get_accelerator().is_bf16_supported():
             pytest.skip("BF16 is not supported")
+        if precision == "fp16" and not get_accelerator().is_fp16_supported():
+            pytest.skip("FP16 is not supported")
 
         class TwoGroups(torch.nn.Module):
 

@@ -1366,7 +1366,7 @@ def _emit_ssm_output(
                 remaining_live[public_line] -= 1
                 continue
             print(f"[aws:{phase}] {public_line}", flush=True)
-        if (phase == "test" and payload.get("Status") != "Success" and len(content) >= inline_limit
+        if (phase in ("prepare", "test") and payload.get("Status") != "Success" and len(content) >= inline_limit
                 and payload.get(url_field)):
             tail = _read_ssm_output_tail(instance, run_identity, phase, command_id, stream, run_command)
             if tail is None:

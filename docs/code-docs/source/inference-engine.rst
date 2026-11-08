@@ -60,6 +60,22 @@ For benchmark matrices, cases execute from the largest effective batch to the
 smallest because HybridEngine sizes its inference workspace on the first
 forward. Results remain in the user-requested matrix order.
 
+HybridEngine Rollout CUDA Graph Decode
+--------------------------------------
+
+``HybridEngineRolloutConfig(use_graph_capture=True)`` captures the decode
+forward pass in a CUDA graph and replays it for every generated token. Only the
+model forward is captured; the next token is chosen from the graph's output
+logits after each replay. The graph path, and continuous batching with or
+without graphs, apply ``temperature``, ``top_k``, ``top_p`` and
+``repetition_penalty`` from ``SamplingConfig`` in the order ``generate()``
+applies them, so every path samples from the same distribution. A
+``repetition_penalty`` of ``None`` uses the value in the model's
+``generation_config``, and 1.0 disables the penalty. Other
+``generation_config`` settings are not applied on these paths. With
+``return_log_probs``, ``generate()`` warns about a penalty other than 1.0,
+since a training forward pass cannot reproduce those log-probs.
+
 Shared Prompt Prefill
 ---------------------
 
@@ -77,17 +93,6 @@ longer than one token. In a multi-turn rollout it applies to each trajectory's
 first turn: the copies of a prompt differ once they hold their own responses.
 Sampling still happens independently for every response branch after the
 shared prompt forward.
-
-Sampling on the Decode Paths
-----------------------------
-
-The graph path, and continuous batching with or without graphs, apply
-``temperature``, ``top_k``, ``top_p`` and ``repetition_penalty`` from
-``SamplingConfig`` in the order ``generate()`` applies them. A
-``repetition_penalty`` of ``None`` uses the value in the model's
-``generation_config``, and 1.0 disables the penalty. With ``return_log_probs``,
-``generate()`` warns about a penalty other than 1.0, since a training forward
-pass cannot reproduce those log-probs.
 
 Continuous batching (experimental)
 -----------------------------------
