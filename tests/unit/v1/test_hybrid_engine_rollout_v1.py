@@ -475,3 +475,77 @@ class TestAutoTPRollout(DistributedTest):
         assert record.tokens[5:7] == [first, 50]
         gathered = self._gather([record])
         assert gathered[0] == gathered[1]
+
+
+class TestDataParallelRollout(DistributedTest):
+    """Data-parallel ranks roll out their own prompts independently, before and after a training step."""
+    world_size = 2
+
+    @pytest.mark.parametrize("use_graph_capture", [False, True])
+    @pytest.mark.parametrize("continuous_batch_size", [None, 2])
+    def test_each_rank_matches_its_own_greedy_generation(self, use_graph_capture, continuous_batch_size):
+        if use_graph_capture and not get_accelerator().is_graph_capture_supported():
+            pytest.skip("requires graph capture")
+        from transformers import AutoModelForCausalLM, Qwen3Config
+
+        config = Qwen3Config(vocab_size=64,
+                             hidden_size=64,
+                             intermediate_size=128,
+                             num_hidden_layers=2,
+                             num_attention_heads=4,
+                             num_key_value_heads=2,
+                             head_dim=16,
+                             max_position_embeddings=128)
+        torch.manual_seed(0)
+        model = AutoModelForCausalLM.from_config(config)
+        ds_config = {
+            "train_micro_batch_size_per_gpu": 1,
+            "optimizer": {
+                "type": "AdamW",
+                "params": {
+                    "lr": 1e-2,
+                    "torch_adam": True
+                }
+            },
+            "zero_optimization": {
+                "stage": 2
+            },
+        }
+        engine, *_ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=ds_config)
+        module = engine.module
+        device = get_accelerator().current_device_name()
+        tokenizer = SimpleNamespace(pad_token_id=0, eos_token_id=None, decode=lambda ids, **_kwargs: "")
+        rollout = HybridEngineRollout(
+            engine, tokenizer,
+            HybridEngineRolloutConfig(use_graph_capture=use_graph_capture,
+                                      continuous_batch_size=continuous_batch_size))
+        # Each rank has its own prompts, of different lengths and counts, so nothing keeps the ranks in step.
+        rank = dist.get_rank()
+        prompts = [[3 + rank, 7, 21, 30], [5, 9 + rank, 12], [8, 2, 40 + rank, 11, 6]][:2 + rank]
+        sampling = SamplingConfig(max_new_tokens=6, temperature=0.0)
+
+        def check_against_hf_generate():
+            module.eval()
+            records = rollout.generate(
+                RolloutRequest(samples=[RolloutRecord(tokens=p, attention_mask=[1] * len(p)) for p in prompts]),
+                sampling).samples
+            for prompt, record in zip(prompts, records):
+                with torch.no_grad():
+                    expected = module.generate(torch.tensor([prompt], device=device),
+                                               max_new_tokens=6,
+                                               do_sample=False,
+                                               pad_token_id=0)
+                # Records keep the request's left padding, so compare the real tokens.
+                real = [token for token, keep in zip(record.tokens, record.attention_mask) if keep]
+                assert real == expected[0].tolist()
+            return [record.tokens for record in records]
+
+        before = check_against_hf_generate()
+        # A training step changes the weights in place, and the next rollout must read the new ones.
+        module.train()
+        input_ids = torch.tensor([prompts[0] * 2], device=device)
+        loss = engine(input_ids, labels=input_ids).loss
+        engine.backward(loss)
+        engine.step()
+        after = check_against_hf_generate()
+        assert after != before
