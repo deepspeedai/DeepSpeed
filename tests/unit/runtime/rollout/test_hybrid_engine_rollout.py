@@ -2066,20 +2066,17 @@ def _check_as_if_alone(model, prompts, samples, n_samples_per_prompt, eos, tool_
                 assert step[token] >= step.max() - atol
 
 
-@pytest.mark.parametrize(
-    "model_name, dtype, use_graph_capture, temperature, poll_steps",
-    [
-        ("qwen3", torch.float32, True, 0.0, 16),
-        ("qwen3", torch.float32, False, 0.0, 16),
-        ("qwen3", torch.bfloat16, True, 0.8, 16),
-        ("llama", None, True, 0.0, 16),
-        # Checking every step admits turns into rows as soon as they free up.
-        ("qwen3", torch.bfloat16, True, 1.0, 1),
-        ("qwen3", torch.float32, True, 1.0, 1),
-    ])
+@pytest.mark.parametrize("model_name, dtype, use_graph_capture, temperature", [
+    ("qwen3", torch.float32, True, 0.0),
+    ("qwen3", torch.float32, False, 0.0),
+    ("qwen3", torch.bfloat16, True, 0.8),
+    ("llama", None, True, 0.0),
+    ("qwen3", torch.bfloat16, True, 1.0),
+    ("qwen3", torch.float32, True, 1.0),
+])
 @patch("deepspeed.runtime.rollout.hybrid_engine_rollout.tokenize_tool_responses", return_value=_TOOL_TOKENS)
 def test_multi_turn_continuous_batching_generates_each_turn_as_if_alone(_tokenize_tool_responses, model_name, dtype,
-                                                                        use_graph_capture, temperature, poll_steps):
+                                                                        use_graph_capture, temperature):
     """With fewer decode rows than trajectories, every turn waits for a row, is prefilled with its whole
     conversation, and must decode exactly as the trajectory would alone."""
     if not torch.cuda.is_available():  #ignore-cuda
@@ -2090,7 +2087,6 @@ def test_multi_turn_continuous_batching_generates_each_turn_as_if_alone(_tokeniz
                                   eos,
                                   tool_length,
                                   use_graph_capture=use_graph_capture,
-                                  continuous_poll_steps=poll_steps,
                                   continuous_batch_size=3,
                                   return_log_probs=True)
     sampling = SamplingConfig(max_new_tokens=24,
@@ -2137,6 +2133,31 @@ def test_multi_turn_continuous_repetition_penalty_matches_generate(_tokenize_too
         assert real == alone[0].tolist()
 
 
+@pytest.mark.parametrize("use_graph_capture", [True, False])
+def test_multi_turn_continuous_batching_admits_into_a_freed_row_on_the_next_step(use_graph_capture):
+    """A finished turn frees its row for the next queued turn at once, so no row idles while a turn waits."""
+    if not torch.cuda.is_available():  #ignore-cuda
+        pytest.skip("multi-turn continuous batching runs on CUDA")
+    model, prompts, _, _ = _continuous_case(_tiny_qwen3, torch.float32)
+    # eos -1 never matches, so each trajectory is one turn of exactly max_new_tokens tokens.
+    rollout = _continuous_rollout(model,
+                                  -1,
+                                  0,
+                                  use_graph_capture=use_graph_capture,
+                                  enable_profiling=True,
+                                  continuous_batch_size=2)
+    max_new_tokens = 8
+    sampling = SamplingConfig(max_new_tokens=max_new_tokens, temperature=0)
+
+    samples = rollout.generate(RolloutRequest(samples=[_prompt(prompt) for prompt in prompts]), sampling).samples
+
+    assert [sample.response_length for sample in samples] == [max_new_tokens] * len(prompts)
+    # Turns run in waves of two rows, each taking max_new_tokens - 1 decode steps after its prefill picks the first
+    # token. A row that waited for a later check before taking the next turn would add steps.
+    waves = -(-len(prompts) // 2)
+    assert rollout.get_last_profile()["num_decode_forwards"] == waves * (max_new_tokens - 1)
+
+
 @patch("deepspeed.runtime.rollout.hybrid_engine_rollout.tokenize_tool_responses", return_value=_TOOL_TOKENS)
 def test_multi_turn_continuous_batching_matches_static_batching(_tokenize_tool_responses):
     """At temperature 0 both schedules must produce the same trajectories, turn by turn."""
@@ -2158,10 +2179,10 @@ def test_multi_turn_continuous_batching_matches_static_batching(_tokenize_tool_r
     continuous = continuous_rollout.generate(request, sampling)
 
     assert sum(0 in sample.loss_mask for sample in continuous.samples) >= 2
-    # The poll trace accounts for every decoded token (each turn's first comes from its prefill), and never counts
+    # The step trace accounts for every decoded token (each turn's first comes from its prefill), and never counts
     # more decoding rows than rows holding a turn.
     profile = continuous_rollout.get_last_profile()
-    trace = profile["continuous_poll_trace"]
+    trace = profile["continuous_step_trace"]
     assert trace[-1][4] == profile["num_generated_tokens"] - profile["num_turns"]
     assert all(decoding <= held <= 3 for _, _, held, decoding, *_ in trace)
     for expected, actual in zip(static.samples, continuous.samples):

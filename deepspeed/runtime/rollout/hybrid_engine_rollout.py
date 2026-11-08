@@ -190,21 +190,13 @@ class HybridEngineRolloutConfig:
     enable_cache_trimming: bool = False
     multi_turn: bool = False
     continuous_cache_capacity: Optional[int] = None
-    # Multi-turn continuous batching: decode steps between host checks for finished turns. A turn that ends
-    # in between idles in its row until the check.
-    continuous_poll_steps: int = 16
     max_turns: Optional[int] = None
-    # Most prompt + response tokens a multi-turn trajectory may hold; None means no cap.
     max_context_len: Optional[int] = None
-    # Extra arguments for ``tokenizer.apply_chat_template``, e.g. {"enable_thinking": False} for Qwen3.
     chat_template_kwargs: dict = field(default_factory=dict)
     # Format of the model's tool calls, a key of TOOL_CALL_PARSERS: "hermes" (Qwen2.5, Qwen3) or
     # "qwen3_coder" (Qwen3-Coder, Qwen3.5).
     tool_call_parser: str = "hermes"
-    # Decode rows for continuous batching; None keeps static batching. It sizes the KV cache and the captured
-    # graph, so it belongs to the engine, not to a generate call.
     continuous_batch_size: Optional[int] = None
-    # Record each generated token's log-prob under the sampling distribution in RolloutRecord.rollout_log_probs.
     return_log_probs: bool = False
 
     def __post_init__(self) -> None:
@@ -251,7 +243,6 @@ class HybridEngineRollout(RolloutEngine):
         self.align_decode_fronts = getattr(cfg, 'align_decode_fronts', False) if cfg else False
         self.enable_cache_trimming = getattr(cfg, 'enable_cache_trimming', False) if cfg else False
         self.continuous_cache_capacity = getattr(cfg, 'continuous_cache_capacity', None) if cfg else None
-        self.continuous_poll_steps = getattr(cfg, 'continuous_poll_steps', 16) if cfg else 16
         self.continuous_batch_size = getattr(cfg, 'continuous_batch_size', None) if cfg else None
         self.return_log_probs = getattr(cfg, 'return_log_probs', False) if cfg else False
         self.multi_turn = getattr(cfg, 'multi_turn', False) if cfg else False
@@ -585,8 +576,8 @@ class HybridEngineRollout(RolloutEngine):
         EOS or its budget. The row is released as soon as the turn ends. If the trajectory called tools, they
         run on a background event loop while the row serves other turns, and the next turn joins the queue when
         they return. Every row decodes at its own position in one step (a captured graph with
-        ``use_graph_capture``); rows without a turn decode throwaway tokens. Finished turns are collected every
-        ``continuous_poll_steps`` steps.
+        ``use_graph_capture``); rows without a turn decode throwaway tokens. Finished turns are collected after
+        every step.
 
         Turn budgets, statuses and the returned samples follow ``_generate_multi_turn``.
         """
@@ -611,7 +602,7 @@ class HybridEngineRollout(RolloutEngine):
         # With a repetition penalty, which tokens each row's trajectory holds, so a decode step needs no host read.
         seen_tokens = None
         max_new_tokens = sampling.max_new_tokens
-        stats = {"prefill_ms": 0.0, "decode_ms": 0.0, "tool_ms": 0.0, "steps": 0, "polls": 0, "turns": 0}
+        stats = {"prefill_ms": 0.0, "decode_ms": 0.0, "tool_ms": 0.0, "steps": 0, "turns": 0}
 
         samples = render_prompts(samples, self.tokenizer, self.tools.specs, pad_token_id, self.chat_template_kwargs)
         trajectories = expand_samples(samples, sampling.n_samples_per_prompt)
@@ -657,8 +648,8 @@ class HybridEngineRollout(RolloutEngine):
         token_buf = torch.zeros(num_rows, turn_len, dtype=torch.long, device=device)
         log_prob_buf = torch.zeros(num_rows, turn_len, dtype=torch.float32, device=device)
         stop_token = eos_token_id if eos_token_id is not None else -1
-        # With profiling, one entry per poll shows how the rows were used over the call (the drain at its end).
-        poll_trace = [] if self.enable_profiling else None
+        # With profiling, one entry per step shows how the rows were used over the call (the drain at its end).
+        step_trace = [] if self.enable_profiling else None
         decoded = torch.zeros((), dtype=torch.long, device=device)
         logits_kwargs = self._last_logits_kwargs(module)
 
@@ -765,7 +756,7 @@ class HybridEngineRollout(RolloutEngine):
             token_buf.scatter_(1, position, torch.where(recording, tokens, token_buf.gather(1, position)))
             log_prob_buf.scatter_(1, position, torch.where(recording, log_probs, log_prob_buf.gather(1, position)))
             num_generated.add_(active.long())
-            if poll_trace is not None:
+            if step_trace is not None:
                 decoded.add_(active.sum())
             ended = (tokens[:, 0] == stop_token) | (num_generated >= turn_limit)
             active.logical_and_(~ended)
@@ -838,16 +829,18 @@ class HybridEngineRollout(RolloutEngine):
                 rows_held = sum(owner is not None for owner in row_owner)
                 if rows_held:
                     decode_start = time.perf_counter()
-                    for _ in range(self.continuous_poll_steps):
-                        decode_step()
-                    still_active = active.tolist()
+                    decode_step()
+                    if step_trace is None:
+                        still_active = active.tolist()
+                    else:
+                        # One read for both, so profiling adds no host sync.
+                        *still_active, decoded_so_far = torch.cat((active.long(), decoded.view(1))).tolist()
                     stats["decode_ms"] += (time.perf_counter() - decode_start) * 1000.0
-                    stats["steps"] += self.continuous_poll_steps
-                    stats["polls"] += 1
+                    stats["steps"] += 1
                     collect_finished_turns(still_active)
-                    if poll_trace is not None:
-                        poll_trace.append((stats["steps"], round(time.perf_counter() - call_start, 3), rows_held,
-                                           sum(still_active), decoded.item(), len(pending), len(tools_in_flight)))
+                    if step_trace is not None:
+                        step_trace.append((stats["steps"], round(time.perf_counter() - call_start, 3), rows_held,
+                                           sum(still_active), decoded_so_far, len(pending), len(tools_in_flight)))
                 elif tools_in_flight and not pending:
                     # Nothing to decode or admit until a tool returns.
                     concurrent.futures.wait([entry[3] for entry in tools_in_flight.values()],
@@ -886,16 +879,14 @@ class HybridEngineRollout(RolloutEngine):
                 sampling.n_samples_per_prompt,
                 "continuous_rows":
                 num_rows,
-                "continuous_polls":
-                stats["polls"],
                 # Decode slots used: tokens after each turn's first (which comes from its prefill) per row-step.
                 "continuous_decode_occupancy":
                 ((num_generated_tokens - stats["turns"]) / (stats["steps"] * num_rows) if stats["steps"] else 0.0),
-                # Per poll: (decode steps so far, seconds since the call started, rows holding a turn during the
-                # poll's steps, rows still decoding after them, tokens decoded so far, turns queued, trajectories
-                # waiting on tools).
-                "continuous_poll_trace":
-                poll_trace,
+                # Per step: (decode steps so far, seconds since the call started, rows holding a turn during the
+                # step, rows still decoding after it, tokens decoded so far, turns queued, trajectories waiting on
+                # tools).
+                "continuous_step_trace":
+                step_trace,
             }
         return RolloutBatch(samples=trajectories)
 
@@ -2196,12 +2187,10 @@ class HybridEngineRollout(RolloutEngine):
             module._forward_hooks.update(saved_post)
 
         # --- Decode loop ---
-        # Checking for EOS reads the device from the host, which stalls the queued steps, so it runs every few
-        # steps. Rows that end in between keep decoding; callers cut each response at its first EOS.
-        eos_check_every = 16
+        # Rows that ended keep decoding until every row has; callers cut each response at its first EOS.
         eos_mask = next_token.squeeze(1) == eos_token_id
         for step in range(max_new_tokens - 1):
-            if step % eos_check_every == 0 and bool(eos_mask.all().item()):
+            if bool(eos_mask.all().item()):
                 break
 
             # Update static inputs. Only the current token's own slot is revealed: later slots still hold warmup
