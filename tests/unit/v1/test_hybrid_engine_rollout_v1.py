@@ -477,15 +477,53 @@ class TestAutoTPRollout(DistributedTest):
         assert gathered[0] == gathered[1]
 
 
+# ZeRO-3 gathers parameters in every forward, so its ranks must run the same forwards: single-turn static batching
+# on HF generate only, the same number of prompts per rank, and no early stop.
+_DATA_PARALLEL_SETUPS = {
+    "zero2": {
+        "zero_optimization": {
+            "stage": 2
+        }
+    },
+    "zero2_offload": {
+        "zero_optimization": {
+            "stage": 2,
+            "offload_optimizer": {
+                "device": "cpu"
+            }
+        }
+    },
+    "zero2_fp16": {
+        "zero_optimization": {
+            "stage": 2
+        },
+        "fp16": {
+            "enabled": True,
+            "initial_scale_power": 8
+        }
+    },
+    "zero3": {
+        "zero_optimization": {
+            "stage": 3
+        }
+    },
+}
+
+
 class TestDataParallelRollout(DistributedTest):
     """Data-parallel ranks roll out their own prompts independently, before and after a training step."""
     world_size = 2
 
+    @pytest.mark.parametrize("setup", list(_DATA_PARALLEL_SETUPS))
     @pytest.mark.parametrize("use_graph_capture", [False, True])
     @pytest.mark.parametrize("continuous_batch_size", [None, 2])
-    def test_each_rank_matches_its_own_greedy_generation(self, use_graph_capture, continuous_batch_size):
+    def test_each_rank_matches_its_own_greedy_generation(self, use_graph_capture, continuous_batch_size, setup):
         if use_graph_capture and not get_accelerator().is_graph_capture_supported():
             pytest.skip("requires graph capture")
+        if setup == "zero3" and (use_graph_capture or continuous_batch_size is not None):
+            pytest.skip("ZeRO-3 runs on static batching with HF generate only")
+        if setup == "zero2_fp16" and not get_accelerator().is_fp16_supported():
+            pytest.skip("requires fp16")
         from transformers import AutoModelForCausalLM, Qwen3Config
 
         config = Qwen3Config(vocab_size=64,
@@ -498,18 +536,16 @@ class TestDataParallelRollout(DistributedTest):
                              max_position_embeddings=128)
         torch.manual_seed(0)
         model = AutoModelForCausalLM.from_config(config)
+        optimizer_params = {"lr": 1e-2}
+        if setup != "zero2_offload":
+            optimizer_params["torch_adam"] = True
         ds_config = {
             "train_micro_batch_size_per_gpu": 1,
             "optimizer": {
                 "type": "AdamW",
-                "params": {
-                    "lr": 1e-2,
-                    "torch_adam": True
-                }
+                "params": optimizer_params
             },
-            "zero_optimization": {
-                "stage": 2
-            },
+            **_DATA_PARALLEL_SETUPS[setup],
         }
         engine, *_ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=ds_config)
         module = engine.module
@@ -521,7 +557,8 @@ class TestDataParallelRollout(DistributedTest):
                                       continuous_batch_size=continuous_batch_size))
         # Each rank has its own prompts, of different lengths and counts, so nothing keeps the ranks in step.
         rank = dist.get_rank()
-        prompts = [[3 + rank, 7, 21, 30], [5, 9 + rank, 12], [8, 2, 40 + rank, 11, 6]][:2 + rank]
+        prompts = [[3 + rank, 7, 21, 30], [5, 9 + rank, 12], [8, 2, 40 + rank, 11, 6]]
+        prompts = prompts[:2] if setup == "zero3" else prompts[:2 + rank]
         sampling = SamplingConfig(max_new_tokens=6, temperature=0.0)
 
         def check_against_hf_generate():
