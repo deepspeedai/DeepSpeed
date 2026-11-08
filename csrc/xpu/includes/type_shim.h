@@ -4,8 +4,8 @@
 // DeepSpeed Team
 
 /* Taken from NVIDIA/apex commit 855808f3fc268e9715d613f3c2e56469d8c986d8 */
-#include <sycl/sycl.hpp>
 #include <ATen/ATen.h>
+#include <sycl/sycl.hpp>
 
 // Forward/backward compatibility hack around
 // https://github.com/pytorch/pytorch/commit/3aeb78079bcd68282fe9117088e138b77318e288

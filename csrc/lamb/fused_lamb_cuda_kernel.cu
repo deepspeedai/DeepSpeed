@@ -8,10 +8,10 @@
 #include <stdio.h>
 #include <cmath>
 #include "ATen/ATen.h"
+#include "ATen/AccumulateType.h"
 #include "ATen/TensorUtils.h"
 #include "ATen/cuda/CUDAContext.h"
 #include "ATen/cuda/detail/IndexUtils.cuh"
-#include "ATen/AccumulateType.h"
 
 #include <iostream>
 
