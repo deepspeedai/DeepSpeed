@@ -2282,7 +2282,7 @@ def test_static_graph_capture_receives_a_prebuilt_4d_mask(mock_get_accelerator):
         assert torch.equal(masked, expected), f"replay {step}"
 
 
-def test_static_graph_rejects_flash_attention():
+def test_static_graph_rejects_flash_attention(graph_capture_accelerator):
     module = torch.nn.Linear(1, 1)
     module.config = SimpleNamespace(_attn_implementation="flash_attention_2")
     rollout = HybridEngineRollout(SimpleNamespace(module=module),
