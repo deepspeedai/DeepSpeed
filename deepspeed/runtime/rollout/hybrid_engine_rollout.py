@@ -1459,7 +1459,7 @@ class HybridEngineRollout(RolloutEngine):
             cache_position=torch.arange(prompt_len, device=device),
             **self._last_logits_kwargs(module),
         )
-        next_token = prefill_out.logits[:, -1, :].argmax(dim=-1, keepdim=True)
+        next_token = select_next_tokens(prefill_out.logits[:, -1, :])
 
         # --- Copy prefill KV into DeepSpeedStaticCache ---
         # per-row positions: the batched step and decode-attention kernels
@@ -1663,7 +1663,7 @@ class HybridEngineRollout(RolloutEngine):
                 # b>1 attends every slot the mask reveals.
                 static_attn[:, :, :, pos] = True
                 get_accelerator().replay_graph(graph)
-                next_token = static_logits[:, -1, :].argmax(dim=-1, keepdim=True)
+                next_token = select_next_tokens(static_logits[:, -1, :])
                 output_ids.append(next_token)
                 eos_mask |= (next_token.view(batch_size) == eos_token_id)
             return torch.cat(output_ids, dim=1)
