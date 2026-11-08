@@ -5,7 +5,6 @@
 
 /* Taken from NVIDIA/apex commit 855808f3fc268e9715d613f3c2e56469d8c986d8 */
 #include <sycl/sycl.hpp>
-
 #include <ATen/ATen.h>
 
 // Forward/backward compatibility hack around
