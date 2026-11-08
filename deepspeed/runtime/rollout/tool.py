@@ -149,7 +149,7 @@ def _convert_parameter(value: str, param_type: Optional[str]) -> Any:
             return int(number) if looks_integral and number.is_integer() else number
         if param_type in ("boolean", "bool"):
             return value.lower() == "true"
-        # object, array and anything else: the template wrote it as JSON.
+        # The template writes objects, arrays and any other type as JSON.
         return json.loads(value)
     except (ValueError, OverflowError):
         return value

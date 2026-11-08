@@ -17,13 +17,7 @@ def group_advantages(records: Sequence[RolloutRecord],
                      rewards: Sequence[float],
                      scale_by_std: bool = True,
                      eps: float = 1e-6) -> torch.Tensor:
-    """GRPO advantages ``[len(records)]``: each reward minus its group's mean reward.
-
-    A group is the records that share a ``group_index``, i.e. the responses to
-    one prompt. With ``scale_by_std`` the difference is also divided by the
-    group's standard deviation (plus ``eps``). A group of one record, or of
-    equal rewards, gets advantage 0.
-    """
+    """Group-relative advantages, one per record, from rewards normalized within each prompt's group."""
     if len(records) != len(rewards):
         raise ValueError(f"got {len(rewards)} rewards for {len(records)} records")
     rewards = torch.as_tensor(rewards, dtype=torch.float32)
@@ -44,11 +38,9 @@ def group_advantages(records: Sequence[RolloutRecord],
 
 
 def old_log_probs_from_rollout(rollout: RolloutBatch, device: Optional[torch.device] = None) -> torch.Tensor:
-    """The records' ``rollout_log_probs`` laid out like ``ResponseTokenBatch.from_rollout``'s targets.
+    """The records' recorded log-probs, laid out like the targets of ``ResponseTokenBatch.from_rollout``.
 
-    Column ``i`` holds the log-prob of target ``i`` (token ``i + 1``). Rows are
-    left-padded, so each response ends at the last column. Positions outside a
-    response are 0; use them only under ``response_mask``.
+    Positions outside a response are 0, so use them only under ``response_mask``.
     """
     width = max(len(record.tokens) for record in rollout.samples)
     old_log_probs = torch.zeros((len(rollout.samples), width - 1), dtype=torch.float32)
@@ -67,12 +59,9 @@ def old_log_probs_from_rollout(rollout: RolloutBatch, device: Optional[torch.dev
 
 @dataclass(frozen=True)
 class GRPOLossOutput:
-    """GRPO policy loss, its unreduced statistics for distributed aggregation, and logging metrics.
+    """The GRPO policy loss, the sums to aggregate it across ranks, and logging metrics.
 
-    ``loss`` is ``loss_sum / loss_normalizer``. For ``token_mean`` the
-    normalizer counts response tokens; for ``sample_mean`` it counts samples
-    with at least one response token. Summing ``loss_sum`` and
-    ``loss_normalizer`` across ranks gives the loss of the global batch.
+    Summing ``loss_sum`` and ``loss_normalizer`` across ranks gives the loss of the global batch.
     """
 
     loss: torch.Tensor
@@ -94,18 +83,9 @@ def grpo_policy_loss(log_probs: torch.Tensor,
                      ref_log_probs: Optional[torch.Tensor] = None,
                      kl_coef: float = 0.0,
                      aggregation: str = "token_mean") -> GRPOLossOutput:
-    """PPO-clip loss on per-token log-probs, as GRPO uses it.
+    """The GRPO policy loss, PPO-clip on per-token log-probs with an optional KL penalty to a reference policy.
 
-    ``log_probs``, ``old_log_probs`` and the optional ``ref_log_probs`` are
-    ``[B, T]`` log-probs of the target tokens under the current, rollout and
-    reference policies; ``response_mask`` ``[B, T]`` selects the tokens to
-    train on (``ResponseTokenBatch.response_mask`` excludes prompts, padding
-    and tool output). ``advantages`` is ``[B]``.
-
-    The ratio is clipped to ``[1 - clip_low, 1 + clip_high]``; ``clip_high``
-    defaults to ``clip_low`` (set it higher for DAPO's clip-higher). With
-    ``ref_log_probs``, the k3 estimator of KL(current || reference), weighted
-    by ``kl_coef``, is added to each token's loss.
+    ``clip_high`` defaults to ``clip_low``; set it higher for DAPO's clip-higher.
     """
     if log_probs.dim() != 2:
         raise ValueError("log_probs must be [batch, tokens]")
@@ -134,7 +114,7 @@ def grpo_policy_loss(log_probs: torch.Tensor,
 
     kl = None
     if ref_log_probs is not None:
-        # The k3 estimator (Schulman, "Approximating KL Divergence"): non-negative and low-variance.
+        # The k3 estimator (Schulman, "Approximating KL Divergence") is non-negative and low-variance.
         log_ratio = ref_log_probs - log_probs
         token_kl = torch.exp(log_ratio) - log_ratio - 1.0
         token_loss = token_loss + kl_coef * token_kl

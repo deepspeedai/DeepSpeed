@@ -29,11 +29,10 @@ class RolloutConfig:
     max_context_len: Optional[int] = None
     # Extra arguments for ``tokenizer.apply_chat_template``, e.g. {"enable_thinking": False} for Qwen3.
     chat_template_kwargs: dict = field(default_factory=dict)
-    # Format of the model's tool calls, a key of TOOL_CALL_PARSERS: "hermes" (Qwen2.5, Qwen3) or
+    # The model's tool-call format, a key of TOOL_CALL_PARSERS such as "hermes" (Qwen2.5, Qwen3) or
     # "qwen3_coder" (Qwen3-Coder, Qwen3.5).
     tool_call_parser: str = "hermes"
-    # Decode rows for continuous batching; None keeps static batching. It sizes the KV cache and the captured
-    # graph, so it belongs to the engine, not to a generate call.
+    # Decode rows for continuous batching; None keeps static batching.
     continuous_batch_size: Optional[int] = None
     # Record each generated token's log-prob under the sampling distribution in RolloutRecord.rollout_log_probs.
     return_log_probs: bool = False
@@ -64,10 +63,18 @@ class SamplingConfig:
     n_samples_per_prompt: int = 1
     repetition_penalty: Optional[float] = None
 
+    def __post_init__(self) -> None:
+        if self.max_new_tokens <= 0:
+            raise ValueError("max_new_tokens must be positive")
+        if self.max_new_tokens_per_turn is not None and self.max_new_tokens_per_turn <= 0:
+            raise ValueError("max_new_tokens_per_turn must be positive")
+        if self.repetition_penalty is not None and self.repetition_penalty <= 0:
+            raise ValueError("repetition_penalty must be positive")
+
 
 @dataclass
 class RolloutRecord:
-    """One prompt and its rollout: tokens across all turns, masks, log-probs, reward and status."""
+    """One prompt and its rollout across all turns."""
 
     class Status(Enum):
         PENDING = "pending"

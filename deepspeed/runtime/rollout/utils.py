@@ -7,14 +7,7 @@ import torch
 
 
 def left_pad_samples(samples, pad_token_id: int):
-    """Stack samples' ``tokens`` and ``attention_mask`` into left-padded tensors.
-
-    Every row is padded on the left to the longest sample, so generation
-    appends right after each sample's real tokens.
-
-    Returns:
-        ``(input_ids, attention_mask)``, both ``[len(samples), max_len]`` long tensors.
-    """
+    """Stack samples' tokens and attention masks into left-padded ``[len(samples), max_len]`` tensors."""
     max_len = max(len(sample.tokens) for sample in samples)
     input_ids = torch.full((len(samples), max_len), pad_token_id, dtype=torch.long)
     attention_mask = torch.zeros((len(samples), max_len), dtype=torch.long)
@@ -28,10 +21,7 @@ def left_pad_samples(samples, pad_token_id: int):
 def render_prompts(samples, tokenizer, tool_specs, pad_token_id: int, chat_template_kwargs=None):
     """Copies of ``samples`` with their prompts rendered to tokens and left-padded to one width.
 
-    A message-list prompt is rendered with the chat template, the tool specs,
-    ``chat_template_kwargs`` and the generation prompt; a string prompt is
-    taken as already-rendered text, so a caller can apply its own template. A sample that already has
-    tokens (e.g. continuing a rollout) keeps them. Padding gets attention mask 0.
+    A string prompt is taken as already-rendered text, and a sample that already has tokens keeps them.
     """
     rendered = []
     for sample in samples:
@@ -57,11 +47,7 @@ def render_prompts(samples, tokenizer, tool_specs, pad_token_id: int, chat_templ
 
 
 def expand_samples(samples, n_samples_per_prompt: int):
-    """``n_samples_per_prompt`` copies of each sample, one per response to generate.
-
-    Copies of one sample share its ``group_index`` (its position in ``samples``
-    when unset); ``index`` numbers the copies in order.
-    """
+    """``n_samples_per_prompt`` copies of each sample, sharing its ``group_index``."""
     expanded = []
     for group, sample in enumerate(samples):
         group_index = sample.group_index if sample.group_index is not None else group
@@ -76,15 +62,10 @@ def masked_lists(values, mask):
 
 
 def tokenize_tool_responses(tool_messages, tokenizer, chat_template_kwargs=None):
-    """Token ids that append ``tool_messages`` after an assistant turn ending in EOS.
+    """Token ids that append ``tool_messages`` after an assistant turn ending in EOS, without re-tokenizing it.
 
-    The chat template renders a fixed dummy conversation with and without the
-    tool messages and the difference is kept, so real assistant turns are
-    never re-tokenized. The template's text after the end-of-turn token (a
-    newline for Qwen) is prepended because generation stops at that token.
-    ``chat_template_kwargs`` must match the prompt's, since they can change
-    the generation prompt that ends the tool output (Qwen3's empty think block
-    when thinking is off).
+    ``chat_template_kwargs`` must match the prompt's, since they can change the generation prompt that ends the
+    tool output.
     """
     tool_calls = [{
         "type": "function",
@@ -105,22 +86,19 @@ def tokenize_tool_responses(tool_messages, tokenizer, chat_template_kwargs=None)
                                                **kwargs)
     if not with_tools.startswith(without):
         raise ValueError("the chat template renders earlier messages differently once tool messages follow")
+    # Generation stops at the end-of-turn token, so the template's text after it (a newline for Qwen) comes first.
     end_of_turn = tokenizer.eos_token
     join_suffix = without[without.rfind(end_of_turn) + len(end_of_turn):]
     return tokenizer.encode(join_suffix + with_tools[len(without):], add_special_tokens=False)
 
 
 def update_sample_from_response(sample, response, response_log_probs, tool_response, tokenizer) -> None:
-    """Append one turn to ``sample`` in place: generated tokens, then tool output.
+    """Append one turn, its generated tokens and then its tool output, to ``sample`` in place.
 
-    Generated tokens get loss mask 1 and their rollout log-probs; tool output
-    gets loss mask 0 and log-prob 0.0, since it is environment text the model
-    should not be trained to produce. ``response_log_probs=None`` leaves
-    ``rollout_log_probs`` unchanged. Fields are reassigned rather than
-    extended because copies made by ``expand_samples`` share list objects
-    with their source sample.
+    Tool output gets loss mask 0, since the model should not be trained to produce it.
     """
     turn = response + tool_response
+    # The fields are reassigned, not extended, because copies made by expand_samples share their lists.
     sample.tokens = sample.tokens + turn
     sample.attention_mask = sample.attention_mask + [1] * len(turn)
     sample.loss_mask = (sample.loss_mask or []) + [1] * len(response) + [0] * len(tool_response)

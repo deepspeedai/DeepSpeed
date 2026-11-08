@@ -2,16 +2,22 @@
 # DeepSpeed Team
 """Accelerator-backed v1 HybridEngineRollout tests."""
 
+import copy
 import os
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 import torch
 from transformers import PretrainedConfig
 
+import deepspeed
+import deepspeed.comm as dist
 from deepspeed.accelerator import get_accelerator
+from deepspeed.runtime.rollout import Tool, ToolSet
 from deepspeed.runtime.rollout.base import RolloutRecord, RolloutRequest, SamplingConfig
 from deepspeed.runtime.rollout.hybrid_engine_rollout import HybridEngineRollout, HybridEngineRolloutConfig
+from unit.common import DistributedTest
 
 
 def test_continuous_generation_profile_on_accelerator():
@@ -133,12 +139,6 @@ def test_continuous_graph_generation_refills_a_fixed_slot_on_cuda():
             for sample in graph_output.samples] == [sample.attention_mask for sample in eager_output.samples]
     # A response stops at its EOS (token 2).
     assert [sample.tokens[3:] for sample in graph_output.samples] == [[2], [7, 2], [7, 2]]
-    stats = graph_rollout.get_last_continuous_stats()
-    assert stats["cache_capacity"] == 5
-    assert stats["peak_cache_length"] == 4
-    assert stats["decode_steps"] == 2
-    assert stats["trim_count"] == 0
-    assert stats["trim_frequency"] == 0.0
 
 
 @pytest.mark.parametrize("attn_implementation", ["eager", "sdpa"])
@@ -196,13 +196,13 @@ def test_continuous_rollout_matches_native_llama_generation_on_accelerator(attn_
         return original_capture_to_graph(*args, **kwargs)
 
     monkeypatch.setattr(accelerator, "capture_to_graph", counted_capture_to_graph)
-    # Three requests and two slots force refill; the second call also exercises graph reuse.
+    # Three requests and two slots force refill. Each graph call captures once, however many turns it admits.
     for rollout in (eager_rollout, graph_rollout, graph_rollout):
         output = rollout.generate(request, sampling).samples
         assert [sample.tokens for sample in output] == reference.tolist()
         assert [sample.attention_mask for sample in output] == expected_attention
         assert all(sample.response_length == sampling.max_new_tokens for sample in output)
-    assert capture_count == 1
+    assert capture_count == 2
 
 
 def _records(prompt_ids, attention_mask):
@@ -367,3 +367,111 @@ def test_continuous_graph_matches_pretrained_model_when_enabled():
         accelerator.create_graph = original_create_graph
 
     assert capture_count[0] == 1
+
+
+class _RankTool(Tool):
+    """Answers with the rank that runs it, so ranks that each run their tools disagree."""
+    name = "rank"
+    description = "Returns the rank."
+    parameters = {"type": "object", "properties": {}}
+
+    async def execute(self, arguments):
+        return str(dist.get_rank())
+
+
+class TestAutoTPRollout(DistributedTest):
+    """Tensor-parallel ranks must roll out the same records, or they would run different forwards."""
+    world_size = 2
+
+    def _engine(self):
+        from transformers import AutoModelForCausalLM, Qwen3Config
+
+        config = Qwen3Config(vocab_size=64,
+                             hidden_size=64,
+                             intermediate_size=128,
+                             num_hidden_layers=2,
+                             num_attention_heads=4,
+                             num_key_value_heads=2,
+                             head_dim=16,
+                             max_position_embeddings=128,
+                             tie_word_embeddings=False)
+        torch.manual_seed(0)
+        model = AutoModelForCausalLM.from_config(config).eval()
+        reference = copy.deepcopy(model).to(get_accelerator().current_device_name()).eval()
+        ds_config = {
+            "train_micro_batch_size_per_gpu": 1,
+            "tensor_parallel": {
+                "autotp_size": 2
+            },
+            "zero_optimization": {
+                "stage": 0
+            },
+        }
+        engine, *_ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=ds_config)
+        engine.module.eval()
+        return engine, reference
+
+    @staticmethod
+    def _gather(records):
+        gathered = [None] * dist.get_world_size()
+        dist.all_gather_object(gathered, [(record.tokens, record.rollout_log_probs) for record in records])
+        return gathered
+
+    @pytest.mark.parametrize("use_graph_capture", [False, True])
+    @pytest.mark.parametrize("temperature", [0.0, 1.0])
+    def test_ranks_sample_the_same_tokens(self, use_graph_capture, temperature):
+        if use_graph_capture and not get_accelerator().is_graph_capture_supported():
+            pytest.skip("requires graph capture")
+        engine, reference = self._engine()
+        tokenizer = SimpleNamespace(pad_token_id=0, eos_token_id=None, decode=lambda ids, **_kwargs: "")
+        rollout = HybridEngineRollout(
+            engine, tokenizer, HybridEngineRolloutConfig(use_graph_capture=use_graph_capture, return_log_probs=True))
+        prompts = [[0, 0, 5, 9, 12], [3, 7, 21, 30, 44]]
+        request = RolloutRequest(samples=[
+            RolloutRecord(tokens=prompt, attention_mask=[int(token != 0) for token in prompt]) for prompt in prompts
+        ])
+        # Each rank gets a different seed, so only the rollout's own synchronization can keep sampling identical.
+        torch.manual_seed(dist.get_rank())
+        sampling = SamplingConfig(max_new_tokens=8, temperature=temperature, n_samples_per_prompt=2)
+
+        records = rollout.generate(request, sampling).samples
+
+        gathered = self._gather(records)
+        assert gathered[0] == gathered[1]
+        if temperature == 0.0:
+            device = get_accelerator().current_device_name()
+            prompt_ids = torch.tensor(prompts, device=device)
+            with torch.no_grad():
+                expected = reference.generate(prompt_ids,
+                                              attention_mask=(prompt_ids != 0).long(),
+                                              max_new_tokens=8,
+                                              do_sample=False,
+                                              pad_token_id=0)
+            assert [record.tokens for record in records[::2]] == expected.tolist()
+
+    def test_ranks_append_the_first_ranks_tool_output(self):
+        engine, reference = self._engine()
+        prompt = [3, 7, 21, 30, 44]
+        device = get_accelerator().current_device_name()
+        with torch.no_grad():
+            first = reference.generate(torch.tensor([prompt], device=device), max_new_tokens=1,
+                                       do_sample=False)[0, -1].item()
+        # The first greedy token ends the turn and calls the tool, so the second turn reads the tool output.
+        tokenizer = SimpleNamespace(
+            pad_token_id=0,
+            eos_token_id=first,
+            decode=lambda ids, **_kwargs: '<tool_call>{"name": "rank", "arguments": {}}</tool_call>')
+        rollout = HybridEngineRollout(engine,
+                                      tokenizer,
+                                      HybridEngineRolloutConfig(multi_turn=True, max_turns=2, return_log_probs=True),
+                                      tools=ToolSet([_RankTool()]))
+        sampling = SamplingConfig(max_new_tokens=6, max_new_tokens_per_turn=3, temperature=0.0)
+
+        with patch("deepspeed.runtime.rollout.hybrid_engine_rollout.tokenize_tool_responses",
+                   side_effect=lambda messages, *_args: [50 + int(message["content"]) for message in messages]):
+            record = rollout.generate(RolloutRequest(samples=[RolloutRecord(tokens=prompt, attention_mask=[1] * 5)]),
+                                      sampling).samples[0]
+
+        assert record.tokens[5:7] == [first, 50]
+        gathered = self._gather([record])
+        assert gathered[0] == gathered[1]

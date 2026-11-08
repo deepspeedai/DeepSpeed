@@ -245,7 +245,7 @@ def test_static_cache_decode_matches_a_full_forward():
                            cache_position=torch.tensor([position]),
                            position_ids=torch.full((batch_size, 1), position))
             decode_logits.append(output.logits[:, -1])
-        # Oracle: one forward over the whole sequence, without a cache.
+        # The reference is one forward over the whole sequence, without a cache.
         expected = model(tokens, attention_mask=attention_mask).logits[:, prompt_len:]
 
     torch.testing.assert_close(torch.stack(decode_logits, dim=1), expected, atol=1e-5, rtol=1e-5)

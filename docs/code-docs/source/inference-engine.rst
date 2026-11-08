@@ -68,12 +68,15 @@ When one prompt branches into multiple response samples,
 forward once and repeats its KV cache before decoding the independent response
 branches. The option is disabled by default.
 
-Shared prefill currently requires HybridEngine kernel injection, ZeRO stage 0,
-inference tensor-parallel size 1, an internal KV cache, and a prompt longer than
-one token. It cannot be combined with CUDA graph capture,
-``release_inference_cache``, or continuous batching
-(``continuous_batch_size``). Sampling still happens independently
-for every response branch after the shared prompt forward.
+Shared prefill runs on HybridEngine's inference kernels, so it needs a model
+with a DeepSpeed inference policy; models without one, such as Qwen3, are
+rejected when the rollout is constructed, as are CUDA graph capture and
+continuous batching (``continuous_batch_size``). It also requires ZeRO stage 0,
+inference tensor-parallel size 1, no ``release_inference_cache``, and a prompt
+longer than one token. In a multi-turn rollout it applies to each trajectory's
+first turn: the copies of a prompt differ once they hold their own responses.
+Sampling still happens independently for every response branch after the
+shared prompt forward.
 
 Sampling on the Decode Paths
 ----------------------------
@@ -92,74 +95,71 @@ Continuous batching (experimental)
 Continuous batching is enabled through ``continuous_batch_size`` in
 ``RolloutConfig`` or ``HybridEngineRolloutConfig``. It sizes the KV cache and
 the captured graph, so it is fixed for the rollout engine rather than passed
-with each ``generate(request, sampling)`` call. When unset, generation keeps
-its existing behavior. When set to a positive
-value, at most that many prompt rows are active at once; completed rows retire
-and pending rows are prefetched into the released slots. The returned
-``RolloutBatch`` remains in the original ``RolloutRequest`` row order.
-When ``HybridEngineRolloutConfig(enable_cache_trimming=True)`` is enabled, the
-experimental path periodically trims unused cache columns from the left to
-keep long-running staggered-EOS workloads within the allocated cache span.
+with each ``generate(request, sampling)`` call. When unset, turns run in static
+batches. When set, at most that many turns decode at once: a row is freed as
+soon as its turn ends, and the next queued turn is prefilled into it. A
+single-turn call is a rollout of one turn per sample; with ``multi_turn``, a
+turn that calls a tool frees its row while the tool runs, and the trajectory's
+next turn joins the front of the queue. The returned ``RolloutBatch`` remains in
+the original ``RolloutRequest`` order, and any ``n_samples_per_prompt`` is
+supported. Finished turns are collected after every decode step.
 
-When ``HybridEngineRolloutConfig(enable_profiling=True)`` is enabled, this path
-also records a snapshot in ``get_last_profile()``. In addition to the common
-rollout fields, the snapshot reports ``scheduler_overhead_ms`` for scheduler
-transitions, ``cache_management_overhead_ms`` for cache compaction, trimming,
-reset, and admitted-row copies, and separate ``prefill_forward_ms`` and
-``decode_forward_ms`` totals. ``num_prefill_forwards`` counts each admitted
-prompt batch, while ``num_decode_forwards`` counts decode steps that had
-surviving rows. ``num_generated_tokens`` counts tokens actually produced by
-all requests (padding is excluded), and ``active_batch_size`` is the maximum
-number of simultaneously active rows; ``continuous_batch_size`` is the
-configured capacity.
+The cache layout depends on graph capture:
 
-The experimental path intentionally does not implement paged attention or change the
-default generation semantics. It currently requires one padded prompt width for
-all rows, a model with cache-class support, and one sample per
-prompt. Shared prompt prefill is rejected until the scheduling semantics are
-validated on real workloads. Models that explicitly declare no cache-class
-support are rejected; models with unknown support should be validated against
-the default ``generate()`` path before use.
-``align_decode_fronts=False`` is the default equal-width padded-prompt baseline:
-all requests use the same padded prompt width. Different effective lengths
-encoded by the attention masks retain the legacy staggered logical decode
-positions; physical decode-front alignment is enabled only when
-``align_decode_fronts=True``. Cache trimming is independently controlled by
-``enable_cache_trimming`` and is disabled by default. When disabled, the
-rollout does not trim periodically, but it reclaims a dead prefix when that is
-necessary to avoid exhausting the configured cache capacity.
+* **Without graph capture**, all live rows share one write column. A turn is
+  admitted into the columns just before it; a turn whose context is longer than
+  the column moves the column forward, and the live rows' attention masks skip
+  the columns in between. Freed rows are compacted away, so each decode step
+  runs only the live rows. By default every admission is prefilled in one
+  left-padded forward and placed at that padded width.
+  ``align_decode_fronts=True`` instead places each context with its real length,
+  so no padding enters the cache, and orders the first admissions longest
+  prompt first. Columns no live row attends are trimmed from the left when the
+  cache is full, or as soon as they reach the prompt width with
+  ``enable_cache_trimming=True``, at the cost of copying the live columns. If
+  the cache is full and nothing can be trimmed, the rollout raises an error that
+  names ``continuous_cache_capacity`` and ``enable_cache_trimming``.
+* **With graph capture**, every row decodes at its own position, so the
+  captured decode keeps one batch shape and stable tensor addresses. A turn is
+  prefilled in one left-padded forward and only its real tokens are copied into
+  its row, from slot 0. All rows decode every step; rows without a turn produce
+  throwaway tokens. The graph is captured once per call, when the first turn is
+  admitted. ``align_decode_fronts`` and ``enable_cache_trimming`` are rejected,
+  since rows never share a column.
 
-Set ``HybridEngineRolloutConfig(align_decode_fronts=True)`` to enable the
-follow-up alignment path. It derives each request's effective prompt width from
-its attention mask, orders requests from longest to shortest internally, and
-restores the original row order in the returned batch. Retired rows are refilled
-from that pre-sorted pending queue. Cache trimming remains disabled unless
-``enable_cache_trimming=True`` is also set. You can override the derived cache
-span with ``continuous_cache_capacity``; if the span is exhausted, the rollout
-raises an error that names both remedies.
+The cache size is ``continuous_cache_capacity`` when set. Otherwise it follows
+from the longest context a turn can be admitted with, ``C``, and the most one
+turn can generate, ``b`` (``max_new_tokens_per_turn`` when set, else
+``max_new_tokens``). In a single-turn call ``C`` is the prompt width, and in a
+multi-turn rollout it is ``max_context_len``, which, without
+``continuous_cache_capacity``, a multi-turn rollout must set: tool output has no
+bound. The shared write column gets ``C + b`` columns, which is enough because
+trimming at full leaves the oldest live row at column 0. Each graph row gets
+``max_context_len``, or the longest prompt plus ``b`` in a single-turn call.
 
-The most recent cache statistics are available from
+Continuous batching rejects ZeRO-3, ``flash_attention_2``, shared prefill, and
+models that declare no cache-class support.
+
+When ``HybridEngineRolloutConfig(enable_profiling=True)`` is enabled,
+``get_last_profile()`` records ``generation_ms``, ``prefill_forward_ms``,
+``decode_forward_ms``, ``num_decode_forwards``, ``tool_ms``, ``num_turns``,
+``num_generated_tokens`` (tokens actually generated, padding excluded) and
+``tokens_per_second``. Without graph capture it also reports
+``scheduler_overhead_ms``, ``cache_management_overhead_ms`` for compaction,
+trimming, reset and admitted-row copies, ``num_prefill_forwards`` and
+``active_batch_size``, the most rows live at once. With graph capture it reports
+``continuous_rows``, ``continuous_decode_occupancy`` and
+``continuous_step_trace``, one entry per decode step.
+
+Without graph capture, the most recent cache statistics are available from
 ``rollout.get_last_continuous_stats()``. They include ``cache_capacity``,
 ``peak_cache_length``, ``cache_memory_bytes``, ``trim_count``,
 ``trimmed_columns``, ``trim_frequency``, and ``trim_bytes_moved``.
-``cache_memory_bytes`` covers
-the preallocated KV tensors and active cache metadata. With profiling enabled,
-``trim_latency_ms``, ``end_to_end_ms``, and ``tokens_per_second`` are also
-measured with accelerator synchronization; otherwise those timing fields are
-``None`` or zero.
-``trim_frequency`` is the number of trims divided by decode steps. Trimming
-statistics remain zero when ``enable_cache_trimming`` is false unless a
-capacity-exhaustion fallback reclaims a dead prefix.
-
-CUDA Graph capture is supported for CUDA inputs with the default
-``align_decode_fronts=False`` and ``enable_cache_trimming=False`` settings. It
-uses a fixed ``continuous_batch_size`` layout, keeps every KV-cache row and
-decode tensor at a stable address, and masks inactive rows while the scheduler
-refills them. Graph state is reused across matching rollout calls and rebuilt
-when the model parameters or static decode shape changes. Aligned decode fronts
-and cache trimming are rejected while graph capture is enabled because they
-move cache rows or columns. ``flash_attention_2`` is also rejected because the
-captured decode uses a four-dimensional additive attention mask.
+``cache_memory_bytes`` covers the preallocated KV tensors and active cache
+metadata. With profiling enabled, ``trim_latency_ms``, ``end_to_end_ms``, and
+``tokens_per_second`` are also measured with accelerator synchronization;
+otherwise those timing fields are ``None`` or zero. ``trim_frequency`` is the
+number of trims divided by decode steps.
 
 ``DeepSpeedStaticCache`` accepts one write position per row and can compact
 active rows while preserving its static tensor addresses. This mirrors the
@@ -240,11 +240,27 @@ exceptions are returned to the model as text instead of failing the rollout.
 for example ``{"enable_thinking": False}``.
 
 ``RolloutConfig.continuous_batch_size`` schedules a multi-turn rollout by turn
-instead of by record. It sets the number of decode rows, which needs
+instead of by record (see "Continuous batching" above). It needs
 ``max_context_len`` or ``HybridEngineRolloutConfig.continuous_cache_capacity`` to
 size the cache. A row is freed when a turn ends; the tools run on the host while
 the row serves another trajectory, and the next turn is prefilled into any free
-row. ZeRO-3 is not supported on this path.
+row.
+
+Rollout runs independently on every data-parallel rank. Multi-turn rollout,
+graph capture and continuous batching reject ZeRO-3: every forward gathers
+parameters, so ranks must run the same forwards, and they run different numbers
+of turns and decode steps. Single-turn static rollout supports ZeRO-3 by running
+every rank to ``max_new_tokens``.
+
+AutoTP (``tensor_parallel.autotp_size``) is supported with static batching.
+Tensor-parallel ranks must run the same forwards, so before each generate call
+every rank takes its group's first rank's random state, which makes sampling
+draw the same tokens from the gathered logits, and tool calls run on the
+group's first rank only, which broadcasts their output. Continuous batching
+rejects AutoTP: a turn is admitted when its tools return, which happens at
+different steps on each rank. HybridEngine's ``inference_tp_size`` is rejected,
+since the rollout calls the module directly and skips the input gather of the
+hybrid engine's ``generate()``.
 
 GRPO Loss
 ---------

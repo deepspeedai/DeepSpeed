@@ -72,11 +72,9 @@ def test_continuous_batching_details_are_not_public_exports():
 
 def test_response_token_batch_masks_prompts_padding_and_tool_output():
     rollout = RolloutBatch(samples=[
-        # Prompt [0, 11, 12] with its own left padding, response [21, 2].
         RolloutRecord(tokens=[0, 11, 12, 21, 2], attention_mask=[0, 1, 1, 1, 1], response_length=2),
-        # Prompt [13, 14, 15], response [22, 23, 2].
         RolloutRecord(tokens=[13, 14, 15, 22, 23, 2], attention_mask=[1] * 6, response_length=3),
-        # Multi-turn: generated 31, tool output 41 (loss mask 0), generated 32 and EOS.
+        # A multi-turn record with generated 31, tool output 41 (loss mask 0), generated 32 and EOS.
         RolloutRecord(
             tokens=[16, 17, 31, 41, 32, 2], attention_mask=[1] * 6, response_length=4, loss_mask=[1, 0, 1, 1]),
     ])
@@ -165,7 +163,7 @@ def test_generalized_jsd_loss_supports_top_k_and_empty_response_masks():
 
 
 class FakeRollout(RolloutEngine):
-    """Deterministic stub: appends ``[42] * max_new_tokens`` to ``n_samples_per_prompt`` copies of each prompt."""
+    """A deterministic stub that appends ``[42] * max_new_tokens`` to ``n_samples_per_prompt`` copies of each prompt."""
 
     name = "fake"
 
@@ -219,8 +217,8 @@ def test_fake_rollout_with_n_samples():
 
 def test_fake_rollout_left_padded_prompts():
     fake = FakeRollout()
-    # Prompt B is left-padded: its first two positions are padding, so the response
-    # still follows its last real token and the padding stays masked out.
+    # Prompt B's first two positions are padding, so the response still follows its
+    # last real token and the padding stays masked out.
     req = RolloutRequest(samples=[_prompt([1, 2, 3, 4]), _prompt([0, 0, 5, 6], [0, 0, 1, 1])])
     out = fake.generate(req, SamplingConfig(max_new_tokens=2))
     assert out.samples[1].tokens == [0, 0, 5, 6, 42, 42]
@@ -259,7 +257,7 @@ def test_group_advantages_normalize_within_each_prompt_group():
     records = _grouped([0, 0, 1, 1, 2])
     rewards = [1.0, -1.0, 1.0, 1.0, 1.0]
 
-    # Group 0: mean 0, sample std sqrt(2). Group 1 has equal rewards and group 2 one record, so both get 0.
+    # Group 0 has mean 0 and sample std sqrt(2). Group 1 has equal rewards and group 2 one record, so both get 0.
     expected = torch.tensor([2**-0.5, -2**-0.5, 0.0, 0.0, 0.0])
     assert torch.allclose(group_advantages(records, rewards, eps=0.0), expected)
     assert group_advantages(records, rewards, scale_by_std=False).tolist() == [1.0, -1.0, 0.0, 0.0, 0.0]
@@ -273,7 +271,7 @@ def test_group_advantages_reject_ungrouped_records_and_mismatched_rewards():
 
 
 def test_old_log_probs_line_up_with_the_response_targets():
-    # A multi-turn record: model token, tool token (log-prob 0.0, loss mask 0), model token.
+    # A multi-turn record with a model token, a tool token (log-prob 0.0, loss mask 0) and a model token.
     multi_turn = RolloutRecord(tokens=[5, 6, 7, 8, 9],
                                attention_mask=[1] * 5,
                                response_length=3,
@@ -310,7 +308,7 @@ def _ppo_case():
 @pytest.mark.parametrize(
     "aggregation, expected_loss",
     [
-        # Token losses: row 0 [-1.28 (ratio clipped at 1 + 0.28), -0.5], row 1 [0.8 (ratio clipped at 1 - 0.2)].
+        # Row 0's token losses are [-1.28 (ratio clipped at 1 + 0.28), -0.5] and row 1's [0.8 (clipped at 1 - 0.2)].
         ("token_mean", (-1.28 - 0.5 + 0.8) / 3),
         ("sample_mean", ((-1.28 - 0.5) / 2 + 0.8) / 2),
     ],

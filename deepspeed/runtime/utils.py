@@ -1268,7 +1268,13 @@ def reload_adam_states(optimizer, device, non_blocking: bool = False):
 
 
 def is_transformers_cache(obj):
-    """Skip checks for the `transformers` cache class when performing AutoTP tensor comparisons."""
+    """Skip checks for the `transformers` cache class when performing AutoTP tensor comparisons.
+
+    DeepSpeedStaticCache follows that interface without subclassing it, and is a per-rank object too.
+    """
+    from deepspeed.utils.static_cache import DeepSpeedStaticCache
+    if isinstance(obj, DeepSpeedStaticCache):
+        return True
     try:
         from transformers.cache_utils import Cache
     except ImportError:
