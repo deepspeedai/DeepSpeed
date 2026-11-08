@@ -373,7 +373,6 @@ class PartitionedParameterCoordinator:
 
             self.__profiler.start_event(event_name)
             # kick off all gather for params in the immediately required submodule
-            #for param in params_to_fetch:
             if logger.isEnabledFor(logging.DEBUG):
                 for param in params_to_fetch:
                     debug_rank0(f"-fetch: {param.ds_summary()}")

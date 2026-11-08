@@ -75,8 +75,6 @@ class ModelBasedTuner(BaseTuner):
         top_idx = np.argsort(estimates)
         top_idx_ret = top_idx if self.metric == AUTOTUNING_METRIC_LATENCY else top_idx[::-1][:n]
 
-        # top_configs = [self.all_configs[i] for i in top_idx]
-
         return top_idx_ret
 
     def next_batch(self, sample_size):

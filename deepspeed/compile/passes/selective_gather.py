@@ -224,13 +224,3 @@ def selective_gather(gm: GraphModule, graph_id: int, graph_order: List[Tuple[int
         print_rank_0(f"selective_gather selected_count={selected_count} selected_bytes={persistent_mem}")
 
     return gm
-
-
-# def make_selective_gather(z3_optimizer, nz3):
-
-#     def selective_gather_wrapper(graph: Graph, graph_id: int, graph_order: List[Tuple[int, bool]], profiling_results,
-#                                  mem_budget: float, param_manager, bwd: bool) -> Graph:
-#         return selective_gather(graph, graph_id, graph_order, profiling_results, mem_budget, param_manager, bwd,
-#                                 z3_optimizer, nz3)
-
-#     return selective_gather_wrapper

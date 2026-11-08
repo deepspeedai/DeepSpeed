@@ -97,7 +97,6 @@ config_dict = {
         }
     }
 }
-#        "initial_scale_power": 15
 args = get_args('/tmp/', config_dict)
 hidden_dim = 4 * 1024
 
@@ -116,7 +115,6 @@ def print_params(tag, model):
 
 
 data_loader = get_data_loader(model=model, total_samples=1000, hidden_dim=hidden_dim, device=model.device)
-#while True:
 for n, batch in enumerate(data_loader):
     loss = model(batch[0], batch[1])
     if dist.get_rank() == 0:

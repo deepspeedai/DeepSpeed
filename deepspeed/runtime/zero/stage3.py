@@ -3155,15 +3155,6 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         if not param.requires_grad:
             return
 
-        # if not get_accelerator().resolves_data_dependency():
-        #     self.reduce_and_partition_stream.synchronize()
-
-        # if self.offload_optimizer:
-        #     group_idx, dest_offset, num_elements = self.grad_position[self.get_param_id(param)]
-        #     fp32_grad = self.fp32_partitioned_groups_flat[group_idx].grad.narrow(0, dest_offset, num_elements)
-        # else:
-        #     fp32_grad = self.__param_id_to_grad_partition[param.ds_id]
-
         fp32_grad, group_idx = self._get_fp32_grad_state_partition(param=param, release_swap_buffers=False)
         my_rank = self._get_param_partition_rank(param)
         value_partition = value.flatten().narrow(0, fp32_grad.numel() * my_rank, fp32_grad.numel())
@@ -3906,7 +3897,6 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         self.empty_partition_cache()
 
         def needs_offload(target):
-            # return True
             return target not in self.offloaded_states and (include == None or target in include)
 
         if needs_offload(OffloadStateTypeEnum.optim_states) or needs_offload(OffloadStateTypeEnum.hp_params):

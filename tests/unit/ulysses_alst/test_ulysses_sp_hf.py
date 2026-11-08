@@ -37,8 +37,6 @@ class TestUlyssesSPHF(DistributedTest):
     def test_ulysses_sp_hf(self, zero_stage):
         core_attn_implementation = "sdpa"
         model_name_or_path = 'hf-internal-testing/tiny-random-LlamaForCausalLM'
-        #model_name_or_path = 'Felladrin/Llama-160M-Chat-v1'
-        #model_name_or_path = 'Felladrin/Llama-160M-Chat-v1'
         seq_length = 64
         sequence_parallel_size = self.world_size
         micro_batch_size = 1

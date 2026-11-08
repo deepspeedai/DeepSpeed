@@ -34,7 +34,6 @@ sycl::queue* getStreamFromPool(bool)
 }
 }  // namespace cuda
 }  // namespace at
-// #include <iostream>
 
 // This header is the one-stop shop for all your multi-tensor apply needs.
 
@@ -148,7 +147,6 @@ void multi_tensor_apply(int block_size,
 
     TensorListMetadata<depth> tl;
 
-    /* const at::cuda::OptionalCUDAGuard device_guard(device_of(tensor_lists[0][0])); */
     auto stream = at::cuda::getCurrentCUDAStream();
 
     tl.start_tensor_this_launch = 0;
@@ -172,9 +170,6 @@ void multi_tensor_apply(int block_size,
             bool blocks_full = (loc_block_info == depth_to_max_blocks[depth - 1]);
             bool last_chunk = (t == ntensors - 1 && chunk == chunks_this_tensor - 1);
             if (tensors_full || blocks_full || last_chunk) {
-                // using accscalar_t = acc_type<scalar_t, true>;
-                /* multi_tensor_apply_kernel<TensorListMetadata<depth>, T, ArgTypes...>
-                 * fn(chunk_size, noop_flag.DATA_PTR<int>(), tl, callable, args...); */
                 if constexpr (sizeof(multi_tensor_apply_kernel(
                                   chunk_size, noop_flag.DATA_PTR<int>(), tl, callable, args...)) <
                               2048) {

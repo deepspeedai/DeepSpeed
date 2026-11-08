@@ -181,7 +181,6 @@ class UlyssesSPAttentionHF(torch.nn.Module):
 
                 # MQA and some GQA cases:
                 if self.kv_replication_factor > 1:
-                    # local_head_count *= self.kv_replication_factor
                     # replicate heads to the kv_replication_factor on hc dimension [sl_l bs hc hs] - so dim=2
                     input = input.repeat_interleave(self.kv_replication_factor, dim=2)
 

@@ -1155,7 +1155,6 @@ def main(args):
         _check_for_required_state(ds_checkpoint)
 
         iteration = ds_checkpoint.get_iteration()
-        #_create_latest_file(args.output_folder, iteration)
         checkpoint_paths = _create_checkpoint_paths(args.output_folder, iteration, ds_checkpoint.tp_degree,
                                                     ds_checkpoint.pp_degree)
 

@@ -578,7 +578,6 @@ class DeepSpeedZeRoOffload(object):
 
     @torch.no_grad()
     def post_sub_module_backward_function(self, sub_module):
-        # assert sub_module.training, "backward pass is invalid for module in evaluation mode"
         see_memory_usage(
             f"After sub module backward function {sub_module.__class__.__name__} {sub_module.ds_id=} before release",
             force=False)
@@ -649,8 +648,6 @@ class DeepSpeedZeRoOffload(object):
         num_layers += 1
         ds_model_granularity = (num_params // num_layers) if num_params <= Z3_MAX_LEAF_SIZE else sys.maxsize
         module.ds_model_granularity = ds_model_granularity
-        # module.ds_model_num_layers = num_layers
-        # module.ds_model_num_params = num_params
         if self.min_granularity_value > ds_model_granularity:
             self.min_granularity_value = ds_model_granularity
             self.min_granularity_layer = module.__class__.__name__

@@ -39,9 +39,6 @@ from torch.nn import Module
 import torch.nn.functional as F
 import torch.nn.init as init
 
-#from numba import cuda
-
-#from deepspeed_cuda import DeepSpeedSoftmaxConfig, DeepSpeedSoftmax
 from deepspeed.accelerator import get_accelerator
 
 logger = logging.getLogger(__name__)
@@ -133,14 +130,8 @@ class LinearActivation(Module):
                 self.act_fn = ACT2FN[act]
         else:
             self.act_fn = act
-        #self.weight = Parameter(torch.Tensor(out_features, in_features))
         self.weight = weights[5]
         self.bias = biases[5]
-        #if bias:
-        #    self.bias = Parameter(torch.Tensor(out_features))
-        #else:
-        #    self.register_parameter('bias', None)
-        #self.reset_parameters()
 
     def reset_parameters(self):
         init.kaiming_uniform_(self.weight, a=math.sqrt(5))
@@ -281,15 +272,6 @@ class BertSelfAttention(nn.Module):
 
         self.dropout = nn.Dropout(config.attention_probs_dropout_prob)
         self.softmax = nn.Softmax(dim=-1)
-        #self.softmax_config = DeepSpeedSoftmaxConfig()
-        #self.softmax_config.batch_size = config.batch_size
-        #self.softmax_config.max_seq_length = config.max_position_embeddings
-        #self.softmax_config.hidden_size = config.hidden_size
-        #self.softmax_config.heads = config.num_attention_heads
-        #self.softmax_config.softmax_id = i
-        #self.softmax_config.fp16 = config.fp16
-        #self.softmax_config.prob_drop_out = 0.0
-        #self.softmax = DeepSpeedSoftmax(i, self.softmax_config)
 
     def transpose_for_scores(self, x):
         new_x_shape = x.size()[:-1] + (self.num_attention_heads, self.attention_head_size)
@@ -416,10 +398,6 @@ class BertLayer(nn.Module):
         layer_output = self.output(intermediate_output, attention_output)
 
         if collect_all_grads:
-            # self.weight[0].register_hook(lambda x, self=self: grads.append([x,"Q_W"]))
-            # self.biases[0].register_hook(lambda x, self=self: grads.append([x,"Q_B"]))
-            # self.weight[1].register_hook(lambda x, self=self: grads.append([x,"K_W"]))
-            # self.biases[1].register_hook(lambda x, self=self: grads.append([x,"K_B"]))
             self.weight[2].register_hook(lambda x, self=self: grads.append([x, "V_W"]))
             self.biases[2].register_hook(lambda x, self=self: grads.append([x, "V_B"]))
             self.weight[3].register_hook(lambda x, self=self: grads.append([x, "O_W"]))
@@ -443,7 +421,6 @@ class BertEncoder(nn.Module):
 
     def __init__(self, config, weights, biases):
         super(BertEncoder, self).__init__()
-        #layer = BertLayer(config, weights, biases)
         self.FinalLayerNorm = BertLayerNorm(config.hidden_size, eps=1e-12)
 
         self.layer = nn.ModuleList(

@@ -11,12 +11,11 @@
 #include "ATen/TensorUtils.h"
 #include "ATen/cuda/CUDAContext.h"
 #include "ATen/cuda/detail/IndexUtils.cuh"
-// #include "ATen/Type.h"
+
 #include "ATen/AccumulateType.h"
 
 #include <iostream>
 
-// #include <helper_functions.h>
 #if defined(__HIP_PLATFORM_AMD__) && HIP_VERSION > 305
 #include <hip/hip_cooperative_groups.h>
 #else
@@ -335,8 +334,6 @@ void fused_lamb_cuda(at::Tensor& p,
                      at::Tensor& u_l2_i,
                      at::Tensor& lamb_coeff)
 {
-    //        using namespace at;
-
     // Get tensor size
     int tsize = p.numel();
     // Determine #threads and #blocks
@@ -470,6 +467,3 @@ void fused_lamb_cuda(at::Tensor& p,
     }
     C10_CUDA_CHECK(cudaGetLastError());
 }
-
-// template __device__ void reduce_two_vectors_in_register<float,512>(float a, float b, float* g_a,
-// float* g_b, cg::grid_group &cgg);

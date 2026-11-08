@@ -17,8 +17,6 @@ This file is adapted from fused adam in NVIDIA/apex, commit a109f85
 
 #include <assert.h>
 
-// #include <iostream>
-
 // This header is the one-stop shop for all your multi-tensor apply needs.
 
 // TODO:  Kernel arg size limit may be <4KB for some other cards (ie Jetson)
@@ -103,7 +101,6 @@ void multi_tensor_apply(int64_t block_size,
             bool blocks_full = (loc_block_info == depth_to_max_blocks[depth - 1]);
             bool last_chunk = (t == ntensors - 1 && chunk == chunks_this_tensor - 1);
             if (tensors_full || blocks_full || last_chunk) {
-                // using accscalar_t = acc_type<scalar_t, true>;
                 multi_tensor_apply_kernel<<<loc_block_info, block_size, 0, stream>>>(
                     chunk_size, noop_flag.DATA_PTR<int>(), tl, callable, args...);
 

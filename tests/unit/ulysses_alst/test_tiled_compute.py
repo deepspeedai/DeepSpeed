@@ -369,7 +369,6 @@ class TestTiledFusedLogitsLoss(DistributedTest):
             },
         }
         dtype = preferred_dtype()
-        #dtype = torch.float
         if dtype == torch.bfloat16:
             config_dict["bf16"] = {"enabled": True}
         elif dtype == torch.float16:

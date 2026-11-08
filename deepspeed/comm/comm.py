@@ -170,7 +170,6 @@ def init_deepspeed_backend(ds_backend, timeout, init_method):
 
 
 def is_initialized() -> bool:
-    #assert cdb is not None, 'DeepSpeed backend not set, please initialize it using init_process_group()'
     if cdb is None:
         return False
     else:

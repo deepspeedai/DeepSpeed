@@ -210,7 +210,6 @@ class PipelineModule(nn.Module):
 
         # if configuration use_reentrant = False, self.activation_checkpoint_func will be set to ``checkpointing.non_reentrant_checkpoint``
 
-        #with torch.random.fork_rng(devices=[get_accelerator().current_device_name()]):
         self._build()
         self.to(get_accelerator().device_name(self.local_rank))
 
