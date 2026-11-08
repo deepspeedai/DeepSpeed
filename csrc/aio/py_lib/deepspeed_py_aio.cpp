@@ -47,6 +47,8 @@ int deepspeed_py_aio_write(const torch::Tensor& buffer,
 {
     const auto start_time = std::chrono::high_resolution_clock::now();
     deepspeed_aio_config_t config(block_size, queue_depth, single_submit, overlap_events, false);
+    // Before the file is opened: the constructor throws if io_queue_init fails.
+    std::unique_ptr<aio_context> aio_ctxt(new aio_context(config._block_size, config._queue_depth));
 
     const auto fd = open_file(filename, false);
     if (fd == -1) { return -1; }
@@ -57,17 +59,19 @@ int deepspeed_py_aio_write(const torch::Tensor& buffer,
 
     std::unique_ptr<io_xfer_ctxt> xfer_ctxt(
         new io_xfer_ctxt(fd, 0, 0, num_write_bytes, write_buffer));
-    std::unique_ptr<aio_context> aio_ctxt(new aio_context(config._block_size, config._queue_depth));
 
-    if (config._overlap_events) {
-        do_aio_operation_overlap(false, aio_ctxt, xfer_ctxt, &config, nullptr);
-    } else {
-        do_aio_operation_sequential(false, aio_ctxt, xfer_ctxt, &config, nullptr);
-    }
+    const auto error_code =
+        config._overlap_events
+            ? do_aio_operation_overlap(false, aio_ctxt, xfer_ctxt, &config, nullptr)
+            : do_aio_operation_sequential(false, aio_ctxt, xfer_ctxt, &config, nullptr);
     const std::chrono::duration<double> aio_time =
         std::chrono::high_resolution_clock::now() - start_time;
 
     close(fd);
+    if (error_code != 0) {
+        report_file_error(filename, " write", -error_code);
+        return -1;
+    }
 
     if (validate) { validate_aio_operation(false, filename, write_buffer, num_write_bytes); }
 
@@ -95,6 +99,8 @@ int deepspeed_py_aio_read(torch::Tensor& buffer,
     }
 
     deepspeed_aio_config_t config(block_size, queue_depth, single_submit, overlap_events, false);
+    // Before the file is opened: the constructor throws if io_queue_init fails.
+    std::unique_ptr<aio_context> aio_ctxt(new aio_context(config._block_size, config._queue_depth));
     const auto fd = open_file(filename, true);
     if (fd == -1) { return -1; }
 
@@ -103,17 +109,19 @@ int deepspeed_py_aio_read(torch::Tensor& buffer,
 
     std::unique_ptr<io_xfer_ctxt> xfer_ctxt(
         new io_xfer_ctxt(fd, 0, 0, num_file_bytes, read_buffer));
-    std::unique_ptr<aio_context> aio_ctxt(new aio_context(config._block_size, config._queue_depth));
 
-    if (config._overlap_events) {
-        do_aio_operation_overlap(true, aio_ctxt, xfer_ctxt, &config, nullptr);
-    } else {
-        do_aio_operation_sequential(true, aio_ctxt, xfer_ctxt, &config, nullptr);
-    }
+    const auto error_code =
+        config._overlap_events
+            ? do_aio_operation_overlap(true, aio_ctxt, xfer_ctxt, &config, nullptr)
+            : do_aio_operation_sequential(true, aio_ctxt, xfer_ctxt, &config, nullptr);
     const std::chrono::duration<double> aio_time =
         std::chrono::high_resolution_clock::now() - start_time;
 
     close(fd);
+    if (error_code != 0) {
+        report_file_error(filename, " read", -error_code);
+        return -1;
+    }
 
     if (validate) { validate_aio_operation(true, filename, read_buffer, num_file_bytes); }
 

@@ -3,6 +3,7 @@
 
 # DeepSpeed Team
 
+import copy
 import math
 import os
 import sys
@@ -13,8 +14,10 @@ from cpuinfo import get_cpu_info
 
 import deepspeed
 from deepspeed.accelerator import get_accelerator
-from deepspeed.ops.adam import FusedAdam
-from deepspeed.ops.op_builder import CPUAdamBuilder, FusedAdamBuilder
+from deepspeed.ops.adagrad import DeepSpeedCPUAdagrad
+from deepspeed.ops.adam import DeepSpeedCPUAdam, FusedAdam
+from deepspeed.ops.lion import DeepSpeedCPULion
+from deepspeed.ops.op_builder import CPUAdagradBuilder, CPUAdamBuilder, CPULionBuilder, FusedAdamBuilder
 from unit.common import DistributedTest
 
 if not deepspeed.ops.__compatible_ops__[CPUAdamBuilder.NAME]:
@@ -121,6 +124,43 @@ def test_cpu_adam_rejects_amsgrad():
     with pytest.raises(RuntimeError, match="AMSGrad"):
         optimizer.add_param_group({'params': [torch.nn.Parameter(torch.zeros(4))], 'amsgrad': True})
     assert len(optimizer.param_groups) == 1
+
+
+@pytest.mark.parametrize('fp32_optimizer_states', [True, False])
+@pytest.mark.parametrize('optimizer_class, builder', [(DeepSpeedCPUAdam, CPUAdamBuilder),
+                                                      (DeepSpeedCPULion, CPULionBuilder),
+                                                      (DeepSpeedCPUAdagrad, CPUAdagradBuilder)],
+                         ids=['adam', 'lion', 'adagrad'])
+def test_cpu_optimizer_load_state_dict_keeps_state_dtype(optimizer_class, builder, fp32_optimizer_states):
+    """Resuming from a state_dict must keep the states in the dtype step() uses for them, so that the resumed
+    optimizer takes the same step as the one that was saved."""
+    if not deepspeed.ops.__compatible_ops__[builder.NAME]:
+        pytest.skip(f"{builder.NAME} is not compatible")
+
+    generator = torch.Generator().manual_seed(0)
+    param = torch.nn.Parameter(torch.randn(1024, generator=generator).to(torch.bfloat16))
+    optimizer = optimizer_class([param], fp32_optimizer_states=fp32_optimizer_states)
+    for _ in range(3):
+        param.grad = torch.randn(1024, generator=generator).to(torch.bfloat16)
+        optimizer.step()
+
+    resumed_param = torch.nn.Parameter(param.detach().clone())
+    resumed = optimizer_class([resumed_param], fp32_optimizer_states=fp32_optimizer_states)
+    # A deep copy stands in for a checkpoint, so that the two optimizers do not share state tensors.
+    resumed.load_state_dict(copy.deepcopy(optimizer.state_dict()))
+
+    state_dtype = torch.float32 if fp32_optimizer_states else torch.bfloat16
+    for key, value in optimizer.state[param].items():
+        if torch.is_tensor(value):
+            assert resumed.state[resumed_param][key].dtype == state_dtype
+            assert torch.equal(resumed.state[resumed_param][key], value)
+
+    grad = torch.randn(1024, generator=generator).to(torch.bfloat16)
+    param.grad = grad
+    resumed_param.grad = grad.clone()
+    optimizer.step()
+    resumed.step()
+    assert torch.equal(resumed_param, param)
 
 
 @pytest.mark.parametrize('dtype', [torch.half, torch.bfloat16, torch.float], ids=["fp16", "bf16", "fp32"])

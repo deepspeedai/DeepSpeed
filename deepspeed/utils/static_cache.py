@@ -127,6 +127,12 @@ class DeepSpeedStaticLayer:
         # returns (position-based sizes are the DynamicLayer formula).
         return self.max_cache_len, 0
 
+    def get_query_offset(self) -> int | torch.Tensor:
+        # Mask construction precedes the current KV write, unlike get_seq_length().
+        if self._write_position is None:
+            return 0
+        return self._write_position
+
     def get_seq_length(self) -> int | torch.Tensor:
         # The write position doubles as the cached-token count (HF
         # cumulative_length semantics): the next token is written AT this
@@ -440,6 +446,15 @@ class DeepSpeedStaticCache:
         if layer_idx >= len(self._layers):
             return self._max_cache_len
         return self._layers[layer_idx].get_max_cache_shape()
+
+    def get_query_offset(self, layer_idx: int = 0) -> int | torch.Tensor:
+        if layer_idx >= len(self._layers):
+            return 0
+        offset = self._layers[layer_idx].get_query_offset()
+        if isinstance(offset, torch.Tensor) and offset.dim() == 1:
+            # As with get_seq_length(), per-row masks handle validity below this shared frontier.
+            return offset.max()
+        return offset
 
     def get_mask_sizes(self, query_length: int, layer_idx: int = 0) -> tuple[int, int]:
         # HF convention: mask builders sample shared masks with the default

@@ -6,11 +6,10 @@
 Two generation paths:
   1. **model.generate()** (default): delegates to HuggingFace generate.
      Supports sampling (temperature, top_p) and greedy.
-  2. **graph capture + DeepSpeedStaticCache**: greedy (temperature=0) and
-     sampling (sampling runs outside the captured graph, ~0.9% decode cost).
-     Pre-allocates a StaticCache, captures the decode forward pass into a
-     graph, and replays it for each decode step.  Eliminates kernel launch
-     overhead.
+  2. **graph capture + DeepSpeedStaticCache**: greedy and sampling
+     (temperature, top_k, top_p). Pre-allocates a StaticCache, captures the
+     decode forward pass into a graph, and replays it for each decode
+     step.  Eliminates kernel launch overhead.
   3. **continuous batching (experimental)**: an opt-in bounded greedy path
      selected through ``SamplingConfig.continuous_batch_size``.
 """
@@ -100,27 +99,6 @@ class HybridEngineRolloutConfig:
     align_decode_fronts: bool = False
     enable_cache_trimming: bool = False
     continuous_cache_capacity: Optional[int] = None
-
-
-def _sample_from_logits(logits, sampling):
-    """Temperature + top-k + nucleus sampling on the last-position logits.
-
-    Runs outside the captured graph (~0.9% decode cost, measured) instead of
-    falling back to module.generate (~60% slower)."""
-    logits = logits.float() / max(sampling.temperature, 1e-8)
-    if sampling.top_k and sampling.top_k > 0:
-        kth = torch.topk(logits, sampling.top_k, dim=-1).values[..., -1, None]
-        logits = logits.masked_fill(logits < kth, float("-inf"))
-    if 0.0 < sampling.top_p < 1.0:
-        sorted_logits, sorted_idx = torch.sort(logits, descending=True, dim=-1)
-        probs = torch.softmax(sorted_logits, dim=-1)
-        cumulative = torch.cumsum(probs, dim=-1)
-        keep = (cumulative - probs) < sampling.top_p
-        sorted_logits = sorted_logits.masked_fill(~keep, float("-inf"))
-        filtered = torch.full_like(logits, float("-inf"))
-        filtered.scatter_(1, sorted_idx, sorted_logits)
-        logits = filtered
-    return torch.multinomial(torch.softmax(logits, dim=-1), num_samples=1)
 
 
 @dataclass
@@ -407,6 +385,8 @@ class HybridEngineRollout(RolloutEngine):
 
         device = requests[0].prompt_ids.device
         model_dtype = next(module.parameters()).dtype
+        select_next_tokens = self._token_selector(sampling)
+        repetition_penalty = self._repetition_penalty(module)
 
         scheduler_start = self._profile_start(profile)
         scheduler = ContinuousBatchScheduler(max_batch_size, sampling.max_new_tokens)
@@ -657,6 +637,8 @@ class HybridEngineRollout(RolloutEngine):
         if max_positions is not None and max_cache_len > max_positions:
             raise ValueError("continuous batching cache exceeds the model maximum position embeddings")
         model_dtype = next(module.parameters()).dtype
+        select_next_tokens = self._token_selector(sampling)
+        repetition_penalty = self._repetition_penalty(module)
         scheduler = ContinuousBatchScheduler(max_batch_size, sampling.max_new_tokens)
         prompt_lengths = {request_id: prompt_len for request_id in range(len(requests))}
         request_by_id = {}
@@ -1389,8 +1371,59 @@ class HybridEngineRollout(RolloutEngine):
     # Graph capture decode loop (greedy only)
     # ------------------------------------------------------------------
 
-    def _generate_graph(self, prompt_ids, prompt_attn, max_new_tokens, pad_token_id, module, device, sampling=None):
-        """Greedy decode with DeepSpeedStaticCache + graph capture."""
+    @staticmethod
+    def _token_selector(sampling):
+        """Return a function that picks the next tokens ``[B, 1]`` from last-position logits ``[B, V]``.
+
+        Tokens are picked after each forward or graph replay, outside any
+        captured graph. Sampling applies Hugging Face's temperature, top-k and
+        top-p warpers in the order ``generate()`` applies them, so every path
+        draws from the same distribution as ``generate()``.
+        """
+        if sampling.temperature <= 0.0:
+            return lambda logits: logits.argmax(dim=-1, keepdim=True)
+
+        from transformers.generation.logits_process import (TemperatureLogitsWarper, TopKLogitsWarper,
+                                                            TopPLogitsWarper)
+
+        warpers = []
+        if sampling.temperature != 1.0:
+            warpers.append(TemperatureLogitsWarper(sampling.temperature))
+        if sampling.top_k > 0:
+            warpers.append(TopKLogitsWarper(top_k=sampling.top_k))
+        if sampling.top_p < 1.0:
+            warpers.append(TopPLogitsWarper(top_p=sampling.top_p))
+
+        def sample(logits):
+            # generate() also warps and samples in float32.
+            scores = logits.float()
+            for warper in warpers:
+                # The warpers read only the scores, not the generated ids.
+                scores = warper(None, scores)
+            return torch.multinomial(torch.softmax(scores, dim=-1), num_samples=1)
+
+        return sample
+
+    @staticmethod
+    def _repetition_penalty(module):
+        repetition_penalty = getattr(getattr(module, "generation_config", None), "repetition_penalty", 1.0)
+        return 1.0 if repetition_penalty is None else repetition_penalty
+
+    @staticmethod
+    def _apply_repetition_penalty(logits, input_ids, repetition_penalty):
+        """Penalize the tokens of ``input_ids`` in last-position ``logits``, without changing ``logits``.
+
+        generate() applies the penalty in float32, before the sampling warpers, so it shapes the sampled distribution.
+        """
+        if repetition_penalty == 1.0:
+            return logits
+        logits = logits.float()
+        scores = logits.gather(1, input_ids)
+        scores = torch.where(scores < 0, scores * repetition_penalty, scores / repetition_penalty)
+        return logits.scatter(1, input_ids, scores)
+
+    def _generate_graph(self, prompt_ids, prompt_attn, max_new_tokens, pad_token_id, module, device, sampling):
+        """Decode with DeepSpeedStaticCache + graph capture, greedy or sampled per ``sampling``."""
         from transformers import StaticCache
         from deepspeed.utils.static_cache import DeepSpeedStaticCache
 
@@ -1399,6 +1432,8 @@ class HybridEngineRollout(RolloutEngine):
         max_len = prompt_len + max_new_tokens
         eos_token_id = self.tokenizer.eos_token_id
         model_dtype = next(module.parameters()).dtype
+        select_next_tokens = self._token_selector(sampling)
+        repetition_penalty = self._repetition_penalty(module)
 
         # AutoTP wraps module.config as a dict after sharding; restore the
         # original config object so cache creation and mask logic work
@@ -1665,10 +1700,7 @@ class HybridEngineRollout(RolloutEngine):
             write_pos.fill_(pos)
             static_attn[:, :, :, pos] = True
             get_accelerator().replay_graph(graph)
-            if is_greedy:
-                next_token = static_logits[:, -1, :].argmax(dim=-1, keepdim=True)
-            else:
-                next_token = _sample_from_logits(static_logits[:, -1, :], sampling)
+            next_token = select_next_tokens(static_logits[:, -1, :])
             output_ids.append(next_token)
             eos_mask |= (next_token.view(1) == eos_token_id)
         return torch.cat(output_ids, dim=1)
