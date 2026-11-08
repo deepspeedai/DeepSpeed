@@ -211,8 +211,6 @@ def test_hybrid_cache_exposes_hf_gdn_protocol():
     crashes every graph-capture rollout that leaves use_segki off."""
     from types import SimpleNamespace
 
-    from deepspeed.utils.static_cache import DSStaticGDNSlot
-
     config = type(
         "Config", (), {
             "num_hidden_layers": 2,
