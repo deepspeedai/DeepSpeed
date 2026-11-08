@@ -46,3 +46,46 @@ zero-copy transport such as GPUDirect RDMA would instead take each round's
 removes the arena copy but needs a registration lifetime this API has no place
 for, so the wire contract (one packed message per peer per round) is expected to
 change when such a path lands.
+
+Refreshing an inference copy
+----------------------------
+
+A rollout engine that generates with its own tensor-parallel copy of a ZeRO
+model refreshes that copy after every optimizer step.
+``deepspeed.runtime.rollout.affine_weight_sync`` does it shard to shard: no
+rank gathers a whole parameter. Both sides are maps keyed by global rank. The
+trainer side comes from ``zero_param_shaped_storage_map`` (or
+``autotp_storage_affine_maps`` for an AutoTP model). The inference side is a
+tensor-parallel layout held by every replica, from
+``replicated_layout_map``::
+
+    from deepspeed.checkpoint.affine import contiguous_split_map
+    from deepspeed.checkpoint.zero_affine import zero_param_storage_shard
+    from deepspeed.runtime.rollout.affine_weight_sync import (
+        AffineWeightSync, WeightArena, replicated_layout_map,
+        zero_param_shaped_storage_map)
+
+    replicas = [[0, 1], [2, 3]]  # two replicas of TP=2
+    layouts = {name: contiguous_split_map(...) for name in names}
+    params = dict(engine.module.named_parameters())
+    sync = AffineWeightSync(
+        {name: zero_param_shaped_storage_map(params[name]) for name in names},
+        {name: replicated_layout_map(layouts[name], replicas) for name in names},
+        torch.bfloat16)
+    arena = WeightArena({name: layouts[name].shard_shapes[tp_rank] for name in names},
+                        torch.bfloat16, device)
+
+    engine.empty_partition_cache()  # ZeRO-3: release gathered copies first
+    sync.sync({name: zero_param_storage_shard(params[name]) for name in names},
+              dict(arena.items()))
+
+Plans are made once, when the sync is built, without communication.
+``plan_transfer`` plans each parameter. A block that several ranks hold is read
+from the target's own process if that process holds it, and otherwise from the
+holder that sends the least so far; local copies do not count as load. ``sync``
+is collective: it runs every parameter's copies as one ``execute_transfers``
+batch, and a rank that lacks one of its shards makes every rank refuse the batch
+before any data moves. ``WeightArena`` keeps a
+rank's shards as views of one buffer that is never reallocated, and the
+executor writes targets in place. A CUDA graph captured on the arena therefore
+reads the new weights after every sync. Maintenance contact: ``@LiRunGuo``.
