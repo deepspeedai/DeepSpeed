@@ -42,19 +42,6 @@ import torch.nn.init as init
 from deepspeed.accelerator import get_accelerator
 
 logger = logging.getLogger(__name__)
-"""
-@torch.jit.script
-def f_gelu(x):
-    return x * 0.5 * (1.0 + torch.erf(x / 1.41421))
-@torch.jit.script
-def bias_gelu(bias, y):
-    x = bias + y
-    return x * 0.5 * (1.0 + torch.erf(x / 1.41421))
-@torch.jit.script
-def bias_tanh(bias, y):
-    x = bias + y
-    return torch.tanh(x)
- """
 
 
 def f_gelu(x):

@@ -103,8 +103,6 @@ def _fwd_kernel(
         V_block_ptr = tl.advance(V_block_ptr, (BLOCK_N, 0))
     # write back l and m
     acc = acc / l_i[:, None]
-    #l_ptrs = L + off_hz * N_CTX + offs_m
-    #tl.store(l_ptrs, m_i + tl.math.log2(l_i))
     # write back O
     O_block_ptr = tl.make_block_ptr(base=Out + qvk_offset,
                                     shape=(N_CTX, BLOCK_DMODEL),

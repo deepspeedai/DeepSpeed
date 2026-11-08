@@ -158,10 +158,8 @@ class DeepSpeedCPUAdam(DeepSpeedCPUOptimizer):
 
                     # gradient momentums
                     state['exp_avg'] = torch.zeros_like(p.data, dtype=state_dtype, device=device)
-                    #memory_format=torch.preserve_format)
                     # gradient variances
                     state['exp_avg_sq'] = torch.zeros_like(p.data, dtype=state_dtype, device=device)
-                    #memory_format=torch.preserve_format)
 
                 state['step'] += 1
                 beta1, beta2 = group['betas']
