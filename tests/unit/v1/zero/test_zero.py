@@ -1919,6 +1919,177 @@ class TestZeroOffloadOptim(DistributedTest):
             model, _, _, _ = deepspeed.initialize(model=model, optimizer=optimizer, config=config_dict)
 
 
+@pytest.mark.skipif(not get_accelerator().is_bf16_supported(), reason="bf16 is not supported on this accelerator")
+@pytest.mark.parametrize("ratio", [1.0, 0.5])
+class TestZero3OffloadPinnedCopyBack(DistributedTest):
+    """With pin_memory, the CPU master partitions are pinned, as in ZeRO-1/2, and the updated masters must reach the
+    device with the same values as the direct copy from pageable memory (pin_memory False): the parameters after
+    training are compared bitwise. The pinned run must actually go through the pinned copy, or the test would compare
+    the direct copy with itself."""
+    world_size = 2
+
+    def _train(self, pin_memory, ratio):
+        hidden_dim = 256
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 2,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 1e-3
+                }
+            },
+            "bf16": {
+                "enabled": True
+            },
+            "zero_optimization": {
+                "stage": 3,
+                "sub_group_size": 20000,
+                "offload_optimizer": {
+                    "device": "cpu",
+                    "pin_memory": pin_memory,
+                    "ratio": ratio
+                }
+            },
+        }
+        torch.manual_seed(0)
+        model = SimpleModel(hidden_dim, nlayers=4)
+        model, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config_dict)
+        optimizer = model.optimizer
+        cpu_masters = [m for m in optimizer.fp32_partitioned_groups_flat if m.device.type == "cpu" and m.numel() > 0]
+        pinned_masters = sum(get_accelerator().is_pinned(m) for m in cpu_masters)
+        pinned_copies = []
+        copy_pinned_master = optimizer._copy_pinned_master_to_device
+
+        def counting_copy(dst, src):
+            pinned_copies.append(src.numel())
+            copy_pinned_master(dst, src)
+
+        optimizer._copy_pinned_master_to_device = counting_copy
+        torch.manual_seed(1)
+        data_loader = random_dataloader(model=model,
+                                        total_samples=6,
+                                        hidden_dim=hidden_dim,
+                                        device=model.device,
+                                        dtype=torch.bfloat16)
+        for batch in data_loader:
+            loss = model(batch[0], batch[1])
+            model.backward(loss)
+            model.step()
+        params = []
+        for p in model.module.parameters():
+            with deepspeed.zero.GatheredParameters([p]):
+                params.append(p.detach().clone().cpu())
+        return params, len(cpu_masters), pinned_masters, len(pinned_copies)
+
+    def test(self, ratio):
+        if get_accelerator().device_name() == "cpu":
+            pytest.skip("optimizer offload copies the master weights back to an accelerator; on the CPU accelerator "
+                        "they never leave the host")
+        direct, direct_cpu_masters, direct_pinned, direct_copies = self._train(pin_memory=False, ratio=ratio)
+        pinned, pinned_cpu_masters, pinned_pinned, pinned_copies = self._train(pin_memory=True, ratio=ratio)
+        assert direct_cpu_masters > 0 and direct_pinned == 0 and direct_copies == 0
+        assert pinned_cpu_masters > 0 and pinned_pinned == pinned_cpu_masters and pinned_copies > 0
+        assert len(direct) == len(pinned)
+        for a, b in zip(direct, pinned):
+            assert torch.equal(a, b)
+
+
+@pytest.mark.skipif(not get_accelerator().is_bf16_supported(), reason="bf16 is not supported on this accelerator")
+class TestZero3AutocastSharesMasterWeights(DistributedTest):
+    """With torch autocast and no bf16 / fp16 section, the model keeps its weights in float32, the master dtype, so
+    ZeRO-3 without optimizer offload must use each partition as its own master copy (_create_fp32_partitions) instead
+    of keeping a second float32 copy. The check compares the partition's torch.device with the optimizer's device
+    name. (With "bf16": {"enabled": true} as well, the partitions are bf16 and this branch is not taken.)"""
+    world_size = 2
+
+    def test(self):
+        hidden_dim = 64
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 2,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 1e-3
+                }
+            },
+            "torch_autocast": {
+                "enabled": True,
+                "dtype": "bfloat16"
+            },
+            "zero_optimization": {
+                "stage": 3
+            },
+        }
+        torch.manual_seed(0)
+        model = SimpleModel(hidden_dim, nlayers=2)
+        model, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config_dict)
+        optimizer = model.optimizer
+        partitions = [p for p in optimizer.fp16_partitioned_groups_flat if p is not None]
+        assert partitions and all(p.dtype == torch.float32 for p in partitions)
+        for model_partition, master in zip(optimizer.fp16_partitioned_groups_flat,
+                                           optimizer.fp32_partitioned_groups_flat):
+            assert master is model_partition
+        data_loader = random_dataloader(model=model,
+                                        total_samples=4,
+                                        hidden_dim=hidden_dim,
+                                        device=model.device,
+                                        dtype=torch.float32)
+        for batch in data_loader:
+            loss = model(batch[0], batch[1])
+            model.backward(loss)
+            model.step()
+
+
+class TestZero3Fp32SharesMasterWeights(DistributedTest):
+    """A float32 model with no bf16 / fp16 section is in the master dtype too, so ZeRO-3 without optimizer offload
+    uses each partition as its own master copy, and training must match torch.optim.Adam on an unsharded copy."""
+    world_size = 2
+
+    def test(self):
+        hidden_dim = 64
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 2,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 1e-2
+                }
+            },
+            "zero_optimization": {
+                "stage": 3
+            },
+            # The reference does not clip; DeepSpeed clips the global gradient norm to 1.0 by default.
+            "gradient_clipping": 0.0,
+        }
+        torch.manual_seed(0)
+        model = SimpleModel(hidden_dim, nlayers=2)
+        device = get_accelerator().current_device_name()
+        reference = deepcopy(model).to(device)
+        reference_optimizer = torch.optim.Adam(reference.parameters(), lr=1e-2)
+        engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config_dict)
+        optimizer = engine.optimizer
+        for model_partition, master in zip(optimizer.fp16_partitioned_groups_flat,
+                                           optimizer.fp32_partitioned_groups_flat):
+            assert master is model_partition
+
+        for step in range(3):
+            # The same batch on every rank, so the averaged gradient is the reference's.
+            generator = torch.Generator().manual_seed(100 + step)
+            x = torch.randn(2, hidden_dim, generator=generator).to(device)
+            y = torch.randint(0, hidden_dim, (2, ), generator=generator).to(device)
+            loss = engine(x, y)
+            engine.backward(loss)
+            engine.step()
+            reference_loss = reference(x, y)
+            reference_loss.backward()
+            reference_optimizer.step()
+            reference_optimizer.zero_grad()
+            torch.testing.assert_close(loss, reference_loss, rtol=1e-5, atol=1e-6)
+
+        for param, reference_param in zip(engine.module.parameters(), reference.parameters()):
+            torch.testing.assert_close(safe_get_full_fp32_param(param), reference_param, rtol=1e-5, atol=1e-6)
+
+
 @pytest.mark.parametrize("training", [True, False])
 class TestZeroPartitionCache(DistributedTest):
     world_size = 1

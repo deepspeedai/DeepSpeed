@@ -587,9 +587,12 @@ Requirements and limits:
 - AutoEP combines with AutoTP (``tensor_parallel.autotp_size > 1``) by
   folding: on the same ranks, AutoTP shards the layers its partition
   specification names and AutoEP distributes the routed experts. Folding
-  supports ZeRO stages 0 to 3 with ``expert_tensor_parallel_size=1``, and
-  rejects ZeRO optimizer or parameter offload and DeepCompile. Tensor model
-  parallelism from ``mpu`` is not supported.
+  supports ZeRO stages 0 to 3 with ``expert_tensor_parallel_size=1``. With
+  ZeRO stage 3 the optimizer can be offloaded to the CPU
+  (``offload_optimizer.device: "cpu"``); folding rejects optimizer offload
+  with ZeRO stages 1 and 2 or to NVMe, Muon with optimizer offload, parameter
+  offload, and DeepCompile. Tensor model parallelism from ``mpu`` is not
+  supported.
 - AutoEP with ZeRO Stage 3 is supported only without sequence parallelism,
   hpZeRO secondary tensor groups, non-1 expert tensor parallelism, or
   quantized gradients.
@@ -602,6 +605,24 @@ Requirements and limits:
 - DeepSeek-V2 and DeepSeek-V3 AutoEP do not support load-balance expert bias
   yet. The built-in DeepSeek presets disable it by default; explicit non-null
   values fail.
+
+Gradient clipping under folding
+-------------------------------
+
+For AutoEP with AutoTP at ZeRO stages 1 and 2, the routed-expert gradient norm
+sums squared partition contributions over expert data parallelism and then
+expert parallelism. Every expert owner contributes, including owners whose
+tensor-parallel rank is nonzero. This expert total does not receive another
+tensor-parallel sum. Replicated and tensor-parallel dense parameters retain
+their existing norm reductions. Native MoE groups in the same optimizer
+retain their model-parallel reduction and expert-norm averaging.
+
+The clipping coefficient in ``engine.step()`` therefore uses each logical
+expert once. The sharded-attention regression checks complete gradients,
+the global norm, and actual FP32 SGD updates against the unsharded reference.
+Thresholds at half and twice the reference norm cover active clipping and
+an unclipped control, including models built under ``deepspeed.zero.Init``
+at ZeRO stage 3.
 
 Chunked causal-LM loss
 ----------------------
