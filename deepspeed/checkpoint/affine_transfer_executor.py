@@ -291,6 +291,8 @@ def _is_packed(shape: Sequence[int], strides: Sequence[int]) -> bool:
     This is ``Tensor.is_contiguous`` for the ``as_strided`` view ``_region`` builds over a packed
     shard, decided from geometry alone: axes of extent 1 place no constraint on their stride.
     """
+    if 0 in shape:
+        return True
     expected = 1
     for size, stride in zip(reversed(shape), reversed(strides)):
         if size != 1:
@@ -442,12 +444,17 @@ def schedule_transfers(plans: Sequence[TransferPlan],
     """
     if not isinstance(element_size, int) or isinstance(element_size, bool) or element_size <= 0:
         raise AffineTransferExecutionError('element_size must be a positive integer')
+    if (not isinstance(budget.bytes_per_peer, int) or isinstance(budget.bytes_per_peer, bool)
+            or budget.bytes_per_peer < element_size):
+        raise AffineTransferExecutionError('the staging budget must hold at least one element')
     for plan in plans:
         for segment in plan.segments:
             if segment.source_rank not in endpoints.source or segment.target_rank not in endpoints.target:
                 raise AffineTransferExecutionError(f'{segment!r} names a location with no endpoint binding')
     indexed = _indexed_operations(plans, endpoints, budget, element_size)
     named = set(endpoints.source.values()) | set(endpoints.target.values())
+    if process is not None and process not in named:
+        raise AffineTransferExecutionError(f'process {process} is not named by the endpoints')
     processes = sorted(named) if process is None else [process]
     schedules = {}
     for member, lane in _lanes(indexed, processes, budget.bytes_per_peer // element_size).items():

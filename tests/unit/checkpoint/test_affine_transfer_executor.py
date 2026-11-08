@@ -319,6 +319,9 @@ class TestB2TransferCPU:
                             for stride in row_major)
             view = torch.as_strided(storage, shape, strides, storage_offset=3)
             assert _is_packed(shape, strides) == view.is_contiguous(), (shape, strides)
+        for shape, strides in (((0, ), (2, )), ((2, 0, 3), (1, 7, 5))):
+            view = torch.as_strided(storage, shape, strides)
+            assert _is_packed(shape, strides) == view.is_contiguous(), (shape, strides)
 
     def test_schedule_of_a_single_process_is_all_local_copies(self):
         source = contiguous_split_map((6, 4), [3, 3], 0)
@@ -334,6 +337,12 @@ class TestB2TransferCPU:
             schedule_transfers([plan], TransferEndpoints({0: 0}, {0: 0, 1: 0}), StagingBudget(8), 4)
         with pytest.raises(AffineTransferExecutionError, match='element_size'):
             schedule_transfers([plan], endpoints, StagingBudget(8), 0)
+        # A budget or process the executor would refuse is refused here too, even for an empty batch.
+        for budget in (StagingBudget(0), StagingBudget(3), StagingBudget(8.0)):
+            with pytest.raises(AffineTransferExecutionError, match='staging budget'):
+                schedule_transfers([], endpoints, budget, 4)
+        with pytest.raises(AffineTransferExecutionError, match='not named'):
+            schedule_transfers([plan], endpoints, StagingBudget(8), 4, process=1)
 
     def test_shared_plan_uses_each_buffer_and_rechecks_each_call(self):
         map_ = replicated_map((3, 4), 1)
