@@ -30,8 +30,8 @@ def render_prompts(samples, tokenizer, tool_specs, pad_token_id: int, chat_templ
 
     A message-list prompt is rendered with the chat template, the tool specs,
     ``chat_template_kwargs`` and the generation prompt; a string prompt is
-    taken as already-rendered text, as miles does. A sample that already has tokens (e.g. continuing a
-    rollout) keeps them. Padding gets attention mask 0.
+    taken as already-rendered text, so a caller can apply its own template. A sample that already has
+    tokens (e.g. continuing a rollout) keeps them. Padding gets attention mask 0.
     """
     rendered = []
     for sample in samples:

@@ -1514,7 +1514,7 @@ def test_multi_turn_caps_each_turn_and_the_whole_response(_tokenize_tool_respons
 
 @patch("deepspeed.runtime.rollout.hybrid_engine_rollout.tokenize_tool_responses", return_value=[9])
 def test_multi_turn_per_turn_cap_resets_every_turn(_tokenize_tool_responses):
-    # miles' rollout_max_response_len: every turn may generate up to the cap, beyond it in total.
+    # The per-turn cap applies to each turn on its own, so the whole response may grow beyond it.
     engine, rollout = _multi_turn_rollout([[_TOOL_CALL_TOKEN, 2], [_TOOL_CALL_TOKEN, 2], [5, 2]])
     sampling = SamplingConfig(max_new_tokens=100, max_new_tokens_per_turn=2, temperature=0)
 

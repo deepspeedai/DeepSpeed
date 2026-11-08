@@ -1,14 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # DeepSpeed Team
-"""Tools the model can call during multi-turn rollout.
-
-Users subclass ``Tool``: its spec tells the model what the tool does (it is
-passed to ``tokenizer.apply_chat_template(tools=...)``) and ``execute`` runs
-a call. ``ToolSet`` groups the tools of a rollout, and a parser from
-``TOOL_CALL_PARSERS`` reads the calls a model emits, in the format its chat
-template teaches.
-"""
+"""Tools the model can call during multi-turn rollout, and parsers for the calls it emits."""
 
 import json
 import re
@@ -18,18 +11,14 @@ from typing import Any, Dict, List, Optional, Sequence
 
 
 class Tool(ABC):
-    """A tool the model can call.
-
-    Subclasses set ``name``, ``description`` and ``parameters`` (a JSON
-    schema of the arguments) and implement ``execute``.
-    """
+    """Subclasses set ``name``, ``description`` and ``parameters`` (a JSON schema) and implement ``execute``."""
 
     name: str
     description: str
     parameters: Dict[str, Any]
 
     def spec(self) -> Dict[str, Any]:
-        """The tool in OpenAI function format, as chat templates expect it."""
+        """The tool in the OpenAI function format chat templates expect."""
         return {
             "type": "function",
             "function": {
@@ -41,15 +30,11 @@ class Tool(ABC):
 
     @abstractmethod
     async def execute(self, arguments: Dict[str, Any]) -> str:
-        """Run one call. The returned string becomes the tool message's content."""
+        """Run one call; the result becomes the tool message's content."""
 
 
 class ToolSet:
-    """The tools available in a rollout, looked up by name.
-
-    Prompts must be rendered with ``specs`` so the model is shown exactly the
-    tools the rollout can run.
-    """
+    """The tools of a rollout; prompts are rendered with ``specs``, so the model sees exactly these."""
 
     def __init__(self, tools: Sequence[Tool]):
         self.tools = {}
@@ -66,11 +51,7 @@ class ToolSet:
         return self.tools.get(name)
 
     async def run(self, call: "ToolCall") -> str:
-        """Execute one call and return the text the model reads next.
-
-        Parse errors, unknown tools and exceptions are reported as text, so
-        one bad call never fails the rollout.
-        """
+        """Run one call. Errors are returned as text for the model, so a bad call never fails the rollout."""
         if call.error is not None:
             return f"Error: {call.error}"
         tool = self.get(call.name)
@@ -98,12 +79,9 @@ _TOOL_CALL_BLOCK = re.compile(r"<tool_call>(.*?)</tool_call>", re.DOTALL)
 
 
 def parse_hermes_tool_calls(text: str) -> List[ToolCall]:
-    """Parse ``<tool_call>{"name": ..., "arguments": {...}}</tool_call>`` blocks.
+    """Parse ``<tool_call>{"name": ..., "arguments": {...}}</tool_call>`` blocks (Hermes, Qwen2.5, Qwen3).
 
-    This is the format the Hermes, Qwen2.5 and Qwen3 chat templates teach. A
-    block that cannot be parsed still yields a ``ToolCall`` with ``error``
-    set, so the model can be told what went wrong instead of the call
-    silently disappearing.
+    A block that cannot be parsed yields a ``ToolCall`` with ``error`` set, so the model learns what went wrong.
     """
     calls = []
     for match in _TOOL_CALL_BLOCK.finditer(text):
@@ -157,12 +135,7 @@ def _parameter_types(tools: Optional[ToolSet], name: str) -> Dict[str, str]:
 
 
 def _convert_parameter(value: str, param_type: Optional[str]) -> Any:
-    """Convert a parameter's text to its schema type; the text is kept when conversion fails.
-
-    Mirrors SGLang's ``qwen3_coder`` parser. Parameters missing from the
-    schema stay strings, so a string argument such as code is never
-    reinterpreted as a number.
-    """
+    """Convert a parameter's text to its schema type, keeping the text when that fails or the type is unknown."""
     if value.lower() == "null":
         return None
     if param_type is None or param_type in _STRING_TYPES:
@@ -185,12 +158,8 @@ def _convert_parameter(value: str, param_type: Optional[str]) -> Any:
 def parse_qwen3_coder_tool_calls(text: str, tools: Optional[ToolSet] = None) -> List[ToolCall]:
     """Parse ``<tool_call><function=NAME><parameter=KEY>VALUE</parameter></function></tool_call>`` blocks.
 
-    This is the format the Qwen3-Coder and Qwen3.5 chat templates teach (SGLang
-    calls its parser ``qwen3_coder``). The template wraps every value in one
-    leading and one trailing newline, which are removed. Values are converted
-    to the types in the tool's parameter schema, so ``tools`` should be the
-    rollout's tools. As with ``parse_hermes_tool_calls``, a block that cannot
-    be parsed yields a ``ToolCall`` with ``error`` set.
+    This is the Qwen3-Coder and Qwen3.5 format. Values are converted to the types in ``tools``' parameter schemas;
+    unparsable blocks yield a ``ToolCall`` with ``error`` set.
     """
     calls = []
     for match in _TOOL_CALL_BLOCK.finditer(text):
@@ -228,7 +197,7 @@ def parse_qwen3_coder_tool_calls(text: str, tools: Optional[ToolSet] = None) -> 
     return calls
 
 
-# Tool-call formats by name, as in SGLang's --tool-call-parser.
+# Tool-call formats by name, for ``RolloutConfig.tool_call_parser``.
 TOOL_CALL_PARSERS = {
     "hermes": lambda text, tools: parse_hermes_tool_calls(text),
     "qwen3_coder": parse_qwen3_coder_tool_calls,
