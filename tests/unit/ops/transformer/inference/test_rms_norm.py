@@ -81,3 +81,38 @@ def test_pre_norm(batch, seq_len, channels, dtype):
 
     assert allclose(new_output[0], ref_output[0])
     #assert allclose(new_output[1], ref_output[1])
+
+
+@pytest.mark.inference_ops
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("channels", [96, 128])
+def test_rms_norm_subblock_32_thread_group(channels, dtype):
+    device = get_accelerator().current_device_name()
+    vals = torch.randn((1, 4, channels), dtype=dtype, device=device)
+    residual = torch.randn_like(vals)
+    gamma = torch.randn((channels, ), dtype=dtype, device=device)
+    epsilon = 1e-5
+
+    assert allclose(ds_implementation(vals, gamma, epsilon), ref_implementation(vals, gamma, epsilon))
+
+    expected = pre_ref_implementation(vals, residual, gamma, epsilon)
+    actual = pre_ds_implementation(vals, residual, gamma, epsilon)
+    assert allclose(actual[0], expected[0])
+    assert allclose(actual[1], expected[1])
+
+
+@pytest.mark.inference_ops
+@pytest.mark.parametrize("dtype,rows", [(torch.float32, 17), (torch.float16, 33), (torch.bfloat16, 33)])
+def test_rms_norm_subblock_tail_rows(dtype, rows):
+    device = get_accelerator().current_device_name()
+    channels, epsilon = 64, 1e-5
+    vals = torch.randn((1, rows, channels), dtype=dtype, device=device)
+    residual = torch.randn_like(vals)
+    gamma = torch.randn((channels, ), dtype=dtype, device=device)
+
+    assert allclose(ds_implementation(vals, gamma, epsilon), ref_implementation(vals, gamma, epsilon))
+
+    expected = pre_ref_implementation(vals, residual, gamma, epsilon)
+    actual = pre_ds_implementation(vals, residual, gamma, epsilon)
+    assert allclose(actual[0], expected[0])
+    assert allclose(actual[1], expected[1])
