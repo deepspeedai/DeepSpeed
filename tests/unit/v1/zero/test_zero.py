@@ -4,7 +4,9 @@
 # DeepSpeed Team
 
 from copy import deepcopy
+import gc
 import math
+import weakref
 from collections import namedtuple
 from typing import Dict, List, NamedTuple, Set, Tuple
 import pytest
@@ -19,6 +21,7 @@ from torch.nn.utils import skip_init
 
 from unit.common import DistributedTest, preferred_dtype, allclose_on_all_ranks
 from unit.simple_model import SimpleModel, random_dataloader
+from unit.util import torch_assert_equal
 
 import deepspeed
 from deepspeed.runtime.engine import DeepSpeedEngine
@@ -2272,3 +2275,107 @@ class TestZero3ClientModuleID(DistributedTest):
         post_init_m_id = model.id
         assert pre_init_m_id == post_init_m_id
         model.destroy()
+
+
+# Training loops that re-initialize DeepSpeed for the same model (e.g. every epoch) need every destroyed
+# engine to be reclaimable without disturbing the engine that replaced it.
+# https://github.com/deepspeedai/DeepSpeed/issues/7204
+class TestDestroyReleasesEngine(DistributedTest):
+    world_size = 1
+
+    @pytest.mark.parametrize(
+        "zero_stage, offload, grad_accum_dtype",
+        [
+            (1, False, None),
+            (2, False, None),
+            (3, False, None),
+            (1, True, None),
+            (2, True, None),
+            (3, True, None),
+            # With bf16 parameters, this selects BF16_Optimizer.
+            (1, False, "fp32"),
+        ])
+    def test(self, zero_stage, offload, grad_accum_dtype):
+        zero_config = {"stage": zero_stage}
+        if offload:
+            zero_config["offload_optimizer"] = {"device": "cpu"}
+            if zero_stage == 3:
+                zero_config["offload_param"] = {"device": "cpu"}
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 2,
+            "zero_optimization": zero_config,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 1e-3,
+                    "torch_adam": True
+                }
+            },
+        }
+        if grad_accum_dtype is not None:
+            config_dict["data_types"] = {"grad_accum_dtype": grad_accum_dtype}
+        dtype = preferred_dtype()
+        if dtype == torch.bfloat16:
+            config_dict["bf16"] = {"enabled": True}
+        elif dtype == torch.float16:
+            config_dict["fp16"] = {"enabled": True, "initial_scale_power": 8}
+        hidden_dim = 16
+        model = SimpleModel(hidden_dim=hidden_dim)
+        engine, optimizer, _, _ = deepspeed.initialize(config=config_dict,
+                                                       model=model,
+                                                       model_parameters=model.parameters())
+        data_loader = random_dataloader(model=engine,
+                                        total_samples=8,
+                                        hidden_dim=hidden_dim,
+                                        device=engine.device,
+                                        dtype=dtype)
+        for batch in data_loader:
+            loss = engine(batch[0], batch[1])
+            engine.backward(loss)
+            engine.step()
+        engine.destroy()
+
+        engine_ref = weakref.ref(engine)
+        optimizer_ref = weakref.ref(optimizer)
+        # BF16_Optimizer gives each parameter a view of its fp32 gradient buffer. Compare storages: a view keeps
+        # the buffer's storage alive even after the buffer's own tensor object has been collected.
+        grad_buffer_storages = {
+            buffer.untyped_storage().data_ptr()
+            for buffer in getattr(optimizer, "fp32_groups_gradients_flat", [])
+        }
+        del engine, optimizer, data_loader, batch, loss
+        gc.collect()
+        assert engine_ref() is None, "the kept model still references the destroyed engine"
+        assert optimizer_ref() is None, "the kept model still references the destroyed optimizer"
+        assert not grad_buffer_storages & self._storages_held_by_params(model), \
+            "the kept model still references the destroyed optimizer's gradient buffer"
+
+        # Garbage collection may reclaim a destroyed engine only after the next one has wrapped the model.
+        engine, _, _, _ = deepspeed.initialize(config=config_dict, model=model, model_parameters=model.parameters())
+        engine.destroy()
+        new_engine, _, _, _ = deepspeed.initialize(config=config_dict,
+                                                   model=model,
+                                                   model_parameters=model.parameters())
+        fp32_params = [safe_get_full_fp32_param(p) for p in model.parameters()]
+        engine_ref = weakref.ref(engine)
+        del engine
+        gc.collect()
+        assert engine_ref() is None, "the kept model still references the destroyed engine"
+        torch_assert_equal([safe_get_full_fp32_param(p) for p in model.parameters()],
+                           fp32_params,
+                           msg="collecting a destroyed engine changed the engine that replaced it")
+        new_engine.destroy()
+
+        model_ref = weakref.ref(model)
+        del new_engine, model
+        gc.collect()
+        assert model_ref() is None, "DeepSpeed still references the model after destroy()"
+
+    # A helper keeps the loop variables out of the test: a leftover ZeRO-3 parameter would keep the model alive.
+    def _storages_held_by_params(self, model):
+        storages = set()
+        for param in model.parameters():
+            for value in [param.grad, *vars(param).values()]:
+                if torch.is_tensor(value):
+                    storages.add(value.untyped_storage().data_ptr())
+        return storages

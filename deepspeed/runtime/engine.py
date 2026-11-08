@@ -1253,6 +1253,10 @@ class DeepSpeedEngine(Module):
         return replacement_sources
 
     def __del__(self):
+        # An explicitly destroyed engine can be garbage-collected after a new engine has wrapped the same model;
+        # tearing it down again here would clear state that now belongs to the new engine.
+        if getattr(self, "_destroyed", False):
+            return
         try:
             self.destroy()
         except Exception as exc:
@@ -1260,6 +1264,7 @@ class DeepSpeedEngine(Module):
             logger.debug("DeepSpeedEngine.__del__ cleanup skipped: %s", exc, exc_info=True)
 
     def destroy(self):
+        self._destroyed = True
         try:
             # DeepEP buffers ask the library not to reclaim them, so they outlive
             # the engine unless something releases them here. Only this engine's
@@ -1276,6 +1281,14 @@ class DeepSpeedEngine(Module):
                 optimizer.destroy()
             if self.is_deepcompile_active() or getattr(self, "_deepcompile_native_initialized", False):
                 self._deactivate_deepcompile()
+            # Callers often keep the model after destroy() (e.g. HF Trainer), and these hooks close
+            # over the engine, so leaving them registered would keep the engine and optimizer alive.
+            # This runs after _deactivate_deepcompile() because that re-registers the forward hooks.
+            for hook_attr in ("module_forward_pre_hook", "module_forward_post_hook", "first_dataloader_check"):
+                hook = getattr(self, hook_attr, None)
+                if hook is not None:
+                    hook.remove()
+                    setattr(self, hook_attr, None)
             debug_clear_module_and_param_names()
 
             checkpoint_engine = getattr(self, "checkpoint_engine", None)
