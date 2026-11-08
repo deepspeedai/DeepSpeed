@@ -254,10 +254,6 @@ class UlyssesSPAttentionHF(torch.nn.Module):
         # [batch_size, num_heads, seqlen, head_size]
         # UlyssesSPAttentionHF expects:
         # [seqlen, batch_size, num_heads, head_size]
-        # print_rank0(f"{query.shape=}")
-        # print_rank0(f"{key.shape=}")
-        # print_rank0(f"{value.shape=}")
-        # print_rank0(f"{self.required_input_shape=}")
 
         # Skip SP operations during eval if disable_in_eval is True
         # This avoids issues with frameworks like HF Trainer that may run eval with different data distribution

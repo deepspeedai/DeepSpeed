@@ -345,8 +345,6 @@ class DeepSpeedZeRoOffload(object):
         module.ds_id = my_count
         module.ds_recompute_parameters = set()
 
-        #print(f"{module.__class__} : {module.ds_id}")
-
         if z3_leaf_module(module):
             for param in module.parameters():
                 param.ds_z3_leaf_module = module
@@ -370,7 +368,6 @@ class DeepSpeedZeRoOffload(object):
                 if torch.is_tensor(output):
                     output = [output]
                 else:
-                    #print(f'got UNKNOWN type {type(output)}')
                     outputs = []
                     output = output if isinstance(output, dict) else vars(output)
                     for name, val in output.items():
@@ -418,12 +415,9 @@ class DeepSpeedZeRoOffload(object):
         def _alternate_post_backward_module_hook(module, inputs):
             module.ds_grads_remaining = 0
 
-            #print(f"Before Forward {module.__class__.__name__}")
-
             def _run_after_backward_hook(*unused):
                 module.ds_grads_remaining = module.ds_grads_remaining - 1
                 if module.ds_grads_remaining == 0:
-                    #print(f"After backward {module.__class__.__name__}")
                     self.post_sub_module_backward_function(module)
 
             def _run_before_forward_function(input):
@@ -457,11 +451,9 @@ class DeepSpeedZeRoOffload(object):
                 # some models (e.g. Albert) may run multiple forwards on the same layer in a loop
                 # before doing backwards, so each backward will need a pre-fetch - using reference
                 # counting to support this scenario
-                #print(f"COUNTER before: {sub_module.applied_pre_backward_ref_cnt}")
                 if sub_module.applied_pre_backward_ref_cnt > 0:
                     self.pre_sub_module_backward_function(sub_module)
                     sub_module.applied_pre_backward_ref_cnt -= 1
-                #print(f"COUNTER after: {sub_module.applied_pre_backward_ref_cnt}")
 
             class PreBackwardFunctionForModule(torch.autograd.Function):
 
@@ -507,12 +499,6 @@ class DeepSpeedZeRoOffload(object):
                     if output_in.requires_grad:
                         #TODO SOME TIMES post backward does not seem to be triggered debug in detail
                         #Should only cause increase in memory not correctness issue
-                        #if output.grad_fn.__class__.__name__ == 'ViewBackward':
-                        #    ctx.view=True
-                        #    print(f"Warning view tensor for input to module : {module.__class__.__name__}. Backward hooks may not trigger properly")
-                        #assert len(module.parameters(recurse=False)), "The input tensor to the module is a view, and autograd Function or register_hook is not triggered with view tensors."
-                        #if module.ds_grads_remaining == 0:
-                        #    print(f"Before Forward: {ctx.module.__class__.__name__}")
                         module.ds_grads_remaining += 1
                         ctx.post_backward_function = _run_after_backward_function
 

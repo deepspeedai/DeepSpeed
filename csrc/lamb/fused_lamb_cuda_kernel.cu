@@ -296,9 +296,7 @@ __global__ void lamb_cuda_kernel_part3(
         if (lamb_coeff < min_coeff) { lamb_coeff = min_coeff; }
     }
 
-    if (blockId == 0 && threadIdInBlock == 0) {
-        lamb_coeff_val[0] = lamb_coeff;
-    }
+    if (blockId == 0 && threadIdInBlock == 0) { lamb_coeff_val[0] = lamb_coeff; }
 
     for (int j = i; j < tsize; j += totThreads) {
         T pj = (float)p[j];

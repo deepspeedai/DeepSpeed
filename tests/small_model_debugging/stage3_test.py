@@ -73,5 +73,4 @@ def test_driver():
     output.backward(grad_output)
 
 
-
 test_driver()
