@@ -66,7 +66,7 @@ class SuperOffloadCPUAdam:
         DeepSpeedCPUAdam.optimizer_id += 1
         self._ops.create_adam(self._opt_id, defaults["lr"], defaults["betas"][0], defaults["betas"][1],
                               defaults["eps"], defaults["weight_decay"], adamw_mode, should_log_le("info"))
-        # Holds a gradient with the loss scale removed, or one in fp32 for adam_rollback.
+        # Holds the gradient adam_rollback reads: in fp32, with the loss scale removed.
         self._grad_buffer = None
 
     def submit(self, fn: Callable, *args) -> Future:
@@ -86,11 +86,17 @@ class SuperOffloadCPUAdam:
             state["exp_avg"] = torch.zeros_like(weights, dtype=state_dtype)
             state["exp_avg_sq"] = torch.zeros_like(weights, dtype=state_dtype)
         state["step"] += 1
-        if grad_scale != 1.0:
-            grad = self._unscaled(grad, weights.dtype, grad_scale)
-        # adam_update reads bf16 gradients of fp32 weights as they are, so they go to the CPU at half the bytes.
+        # adam_update reads bf16 gradients of fp32 weights as they are, so they go to the CPU at half the bytes, and
+        # multiplies them by grad_scale as it reads them.
         self._ops.adam_update(self._opt_id, state["step"], *_kernel_args(hyperparams), weights, grad, state["exp_avg"],
-                              state["exp_avg_sq"])
+                              state["exp_avg_sq"], grad_scale)
+
+    def rescale_step(self, state: Dict[str, Any], weights: torch.Tensor, grad: torch.Tensor,
+                     hyperparams: Dict[str, Any], old_scale: float, new_scale: float) -> None:
+        """Turn the last step of the weights, taken on grad * old_scale with these hyperparameters, into the step on
+        grad * new_scale, in one pass over the weights and moments."""
+        self._ops.adam_rescale_step(self._opt_id, state["step"], *_kernel_args(hyperparams), weights, grad,
+                                    state["exp_avg"], state["exp_avg_sq"], old_scale, new_scale)
 
     def rollback(self,
                  state: Dict[str, Any],
@@ -111,7 +117,7 @@ class SuperOffloadCPUAdam:
         if buffer is None or buffer.dtype != dtype or buffer.numel() < grad.numel():
             buffer = self._grad_buffer = torch.empty(grad.numel(), dtype=dtype)
         unscaled = buffer[:grad.numel()].view_as(grad)
-        # A step submitted during backward gets the gradient before the loss scale is removed.
+        # The step of a sub-group submitted during backward read the gradient before the loss scale is removed.
         torch.mul(grad, grad_scale, out=unscaled)
         return unscaled
 

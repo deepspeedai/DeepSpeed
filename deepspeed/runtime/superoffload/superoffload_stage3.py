@@ -47,7 +47,7 @@ def _cpu_adam_settings(optimizer):
 
 
 class _CPUStep(NamedTuple):
-    """A CPU step submitted during backward, and what a rollback of it needs."""
+    """A CPU step submitted during backward, and what changing or undoing it needs."""
     # Its result tells whether the sub-group stepped: one whose gradients were not finite is left to step().
     stepped: Future
     hyperparams: dict
@@ -89,8 +89,9 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
         super().__init__(module, init_optimizer, param_names, timers, ds_config, **kwargs)
 
         self.sub_group_to_param_num = [len(group) for group in self.fp16_groups]
-        # A step taken during backward is undone with adam_rollback, which supports only fp32 AdamW with bias
-        # correction. With other settings, step() runs the CPU sub-groups after the overflow and clipping checks.
+        # step() changes a step taken during backward with adam_rescale_step when the gradients clip or the loss scale
+        # changed, and undoes it with adam_rollback when it skips the step. Both need fp32 AdamW, and adam_rollback
+        # bias correction. With other settings, step() runs the CPU sub-groups after the overflow and clipping checks.
         bias_correction = all(group.get("bias_correction", True) for group in self.optimizer.param_groups)
         self.speculative_cpu_step = (adamw_mode and fp32_optimizer_states
                                      and self.master_weights_and_grads_dtype == torch.float32 and bias_correction)
@@ -159,17 +160,6 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
         """The gradient of a sub-group that the CPU worker steps on: the bf16 one if it has one, else the fp32 one."""
         half_grad = self._half_cpu_grads.get(sub_group_id)
         return half_grad if half_grad is not None else self.fp32_partitioned_groups_flat[sub_group_id].grad.data
-
-    def _cpu_step_grad(self, sub_group_id, total_norm):
-        """The gradient for step() to step a CPU sub-group with that did not step during backward, unscaled and
-        clipped. A bf16 gradient that needs neither goes as it is; otherwise the fp32 gradient takes the scaling."""
-        half_grad = self._half_cpu_grads.get(sub_group_id)
-        if half_grad is not None:
-            if self.loss_scale == 1 and not self.check_clip_grads(total_norm):
-                return half_grad
-            self.fp32_partitioned_groups_flat[sub_group_id].grad.copy_(half_grad)
-        self.unscale_and_clip_grads(sub_group_id, total_norm)
-        return self.fp32_partitioned_groups_flat[sub_group_id].grad.data
 
     def destroy(self):
         self.cpu_adam.close()
@@ -463,22 +453,20 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
         timer_names.add(OPTIMIZER_STEP_TIMER)
         self.timers(OPTIMIZER_STEP_TIMER).start()
 
-        # The steps taken during backward used the unclipped gradients, and the loss scale of the backward, which
-        # _loss_scale_update_and_overflow_cleanup may have raised before unscale_and_clip_grads removes it.
-        if self.check_clip_grads(scaled_global_grad_norm) or self._loss_scale_changed():
-            self._rollback_submitted_cpu_sub_groups()
-
+        # CPU Adam removes the loss scale and clips as it reads the gradients, by the factor unscale_and_clip_grads
+        # multiplies them by.
+        grad_scale = float(self._unscale_and_clip_factor(scaled_global_grad_norm))
         for sub_group_id, group in enumerate(self.fp16_groups):
             self._prepare_sub_group(sub_group_id, timer_names)
-            # A sub-group stepped during backward had the loss scale removed in the worker, and one that needed
-            # clipping was rolled back above, so its gradients are not read again.
             if self.subgroup_to_device[sub_group_id] != 'cpu':
                 self.unscale_and_clip_grads(sub_group_id, scaled_global_grad_norm)
                 self._optimizer_step(sub_group_id)
-            elif sub_group_id not in self._submitted_cpu_sub_groups:
+            elif sub_group_id in self._submitted_cpu_sub_groups:
+                self._rescale_cpu_step(sub_group_id, grad_scale)
+            else:
                 param_group_id = self.sub_group_to_group_id[sub_group_id]
-                self._cpu_step_and_wait(sub_group_id, self._cpu_step_grad(sub_group_id, scaled_global_grad_norm),
-                                        self._hyperparams(param_group_id))
+                self._cpu_step_and_wait(sub_group_id, self._worker_grad(sub_group_id),
+                                        self._hyperparams(param_group_id), grad_scale)
 
             if sub_group_id in self._staged_lp_params:
                 self._apply_staged_lp_params(sub_group_id)
@@ -544,10 +532,6 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
         hyperparams["bias_correction"] = group.get("bias_correction", True)
         return hyperparams
 
-    def _loss_scale_changed(self):
-        grad_scale = 1.0 / self.loss_scale
-        return any(step.grad_scale != grad_scale for step in self._submitted_cpu_sub_groups.values())
-
     def _step_when_copied(self, sub_group_id, copies_done, grads_finite, hyperparams, grad_scale):
         """In the CPU Adam thread: step a sub-group once its gradients are on the CPU, and tell whether it did.
 
@@ -570,8 +554,33 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
         self._drop_staged_lp_params(sub_group_id)
         self.cpu_adam.submit(self._cpu_adam_step, sub_group_id, grad, hyperparams, grad_scale, rollback).result()
 
+    def _rescale_cpu_step(self, sub_group_id, grad_scale):
+        """Turn the CPU step a sub-group took during backward into the step on its gradients at grad_scale.
+
+        That step read the gradients unclipped and with the loss scale of the backward, which
+        _loss_scale_update_and_overflow_cleanup may have raised since. One pass over the weights and moments changes
+        the step, where undoing it and stepping again would take two, and the undo is slower than a step.
+        """
+        step = self._submitted_cpu_sub_groups[sub_group_id]
+        if step.grad_scale == grad_scale:
+            return
+        hyperparams = self._hyperparams(self.sub_group_to_group_id[sub_group_id])
+        if hyperparams != step.hyperparams:
+            # Changed since backward, so the step taken with the old ones is undone, and taken again.
+            self._rollback_cpu_sub_group(sub_group_id)
+            self._cpu_step_and_wait(sub_group_id, self._worker_grad(sub_group_id), hyperparams, grad_scale)
+            return
+        self._drop_staged_lp_params(sub_group_id)
+        self.cpu_adam.submit(self._cpu_adam_rescale, sub_group_id, hyperparams, step.grad_scale, grad_scale).result()
+
+    def _cpu_adam_rescale(self, sub_group_id, hyperparams, old_scale, new_scale):
+        """In the CPU Adam thread: turn the last step of a CPU sub-group into the step on its gradient at new_scale."""
+        fp32_param = self.fp32_partitioned_groups_flat[sub_group_id]
+        self.cpu_adam.rescale_step(self.optimizer.state[fp32_param], fp32_param.data, self._worker_grad(sub_group_id),
+                                   hyperparams, old_scale, new_scale)
+
     def _rollback_submitted_cpu_sub_groups(self):
-        """Undo the CPU steps taken during backward, for a skipped step or before redoing them with clipping."""
+        """Undo the CPU steps taken during backward, for a skipped step."""
         for sub_group_id in list(self._submitted_cpu_sub_groups):
             self._rollback_cpu_sub_group(sub_group_id)
 
@@ -583,14 +592,6 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
                                 step.hyperparams,
                                 step.grad_scale,
                                 rollback=True)
-
-    @instrument_w_nvtx
-    def check_clip_grads(self, total_norm):
-        """Check if unscale_and_clip_grads will scale the gradients down, with the same test."""
-        if not self.clip_grad:
-            return False
-        clip = ((total_norm / self.loss_scale) + 1e-6) / self.clip_grad
-        return bool(clip > 1.0)
 
     def load_state_dict(self,
                         state_dict_list,

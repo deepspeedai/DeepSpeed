@@ -3036,6 +3036,10 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
     @instrument_w_nvtx
     def unscale_and_clip_grads(self, sub_group_id, total_norm):
+        self.fp32_partitioned_groups_flat[sub_group_id].grad.mul_(self._unscale_and_clip_factor(total_norm))
+
+    def _unscale_and_clip_factor(self, total_norm):
+        """The factor unscale_and_clip_grads multiplies the gradients by: it removes the loss scale and clips."""
         # compute combined scale factor for this group
         combined_scale = self.loss_scale
         if self.clip_grad > 0.:
@@ -3043,8 +3047,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             clip = ((total_norm / self.loss_scale) + 1e-6) / self.clip_grad
             clip = torch.clamp(clip, min=1.0)
             combined_scale = clip * self.loss_scale
-
-        self.fp32_partitioned_groups_flat[sub_group_id].grad.mul_(1. / combined_scale)
+        return 1. / combined_scale
 
     def _check_overflow(self, partition_gradients=True):
         self.overflow = self.has_overflow(partition_gradients)

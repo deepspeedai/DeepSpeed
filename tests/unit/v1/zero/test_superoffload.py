@@ -179,8 +179,8 @@ CASES = {
     "bf16_master_weights": (dict(precision="bf16_master"), lambda unused: _all_used, True),
     "bf16_optimizer_states": (dict(precision="bf16_states"), lambda unused: _all_used, True),
     "two_param_groups": (dict(two_groups=True, sub_group_size=4500), _b_unused_on_even_steps, True),
-    # Clipping undoes the steps taken during backward and redoes them, which is exact up to rounding. In fp32 the
-    # rounding stays small; bf16 weights would amplify it.
+    # Clipping turns the steps taken during backward into steps on the clipped gradients, exact up to rounding. In
+    # fp32 the rounding stays small; bf16 weights would amplify it.
     "clipping": (dict(clip=0.05, precision="fp32"), lambda unused: _all_used, False),
     # A step cannot be undone with a beta of 0 (the rollback divides by the betas), so those CPU steps wait for
     # step() and stay exact.
@@ -253,7 +253,7 @@ class TestSuperOffloadFollowsZeRO3(DistributedTest):
 
     def test_fp16_loss_scale_increase(self):
         """Dynamic loss scaling raises the scale in step(), after the CPU steps taken during backward used the old
-        one; those steps are undone and redone, exact up to rounding, which fp16 weights amplify (1.4e-5 after 6
+        one; those steps are changed to the new one, exact up to rounding, which fp16 weights amplify (1.4e-5 after 6
         steps; 3.9e-3 when the steps are kept)."""
         results = []
         for super_offload in (False, True):
@@ -293,6 +293,43 @@ class TestSuperOffloadFollowsZeRO3(DistributedTest):
         assert calls == [("step", torch.bfloat16)] * cpu_sub_groups
         # CPU Adam steps the weights where they are, without moving them to shared memory.
         assert not any(t.is_shared() for t in engine.optimizer.fp32_partitioned_groups_flat)
+        _close(engine)
+
+    def test_clipping_bf16(self):
+        """Clipping with bf16 gradients, which the worker scales as it reads them. Where a master differs by an ulp,
+        its bf16 weight can round the other way, which the next steps amplify: 3.5e-7 after 2 steps, 6e-5 after 8
+        (3e-5 when the steps of backward are undone and taken again), so only 2 steps are compared."""
+        results = []
+        for super_offload in (False, True):
+            engine = _engine(_config(super_offload=super_offload, clip=0.05))
+            results.append(_train(engine, 2, _all_used))
+            _close(engine)
+        _assert_same(results[1], results[0], exact=False)
+
+    def test_clipped_step_rescales_cpu_steps(self):
+        """A step that clips changes each CPU step taken during backward to the clipped gradients in one pass,
+        instead of undoing it and stepping again."""
+        engine = _engine(_config(super_offload=True, clip=0.05))
+        cpu_adam = engine.optimizer.cpu_adam
+        calls = []
+
+        def recording(name):
+            update = getattr(cpu_adam, name)
+
+            def record(*args):
+                calls.append(name)
+                update(*args)
+
+            return record
+
+        for name in ("step", "rescale_step", "rollback"):
+            setattr(cpu_adam, name, recording(name))
+        x = torch.randn(4, HIDDEN).to(engine.device, torch.bfloat16)
+        engine.backward(engine(x, {}))
+        engine.step()
+        assert engine.get_global_grad_norm() > 0.05
+        cpu_sub_groups = list(engine.optimizer.subgroup_to_device.values()).count("cpu")
+        assert calls == ["step"] * cpu_sub_groups + ["rescale_step"] * cpu_sub_groups
         _close(engine)
 
     def test_cpu_buffers_pinned(self):
