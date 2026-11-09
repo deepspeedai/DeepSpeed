@@ -54,7 +54,7 @@ class _StubConfig:
 def _mock_accelerator(mock_get_accelerator, graph_capture=True):
     """Dress a patched accelerator as graph-capable or not, independent of the real device."""
     mock_get_accelerator.return_value.is_available.return_value = True
-    mock_get_accelerator.return_value.create_graph.return_value = object() if graph_capture else None
+    mock_get_accelerator.return_value.is_graph_capture_supported.return_value = graph_capture
 
 
 @patch("deepspeed.runtime.hybrid_engine_graph.get_accelerator")
@@ -85,10 +85,20 @@ def test_validate_accepts_graph_configuration(mock_get_accelerator):
 
 @patch("deepspeed.runtime.hybrid_engine_graph.get_accelerator")
 def test_validate_rejects_unsupported_accelerator(mock_get_accelerator):
-    # Backends without graph capture return None from create_graph(); the
-    # device gate rejects first, before the configuration checks, so the
-    # engine degrades to eager decode.
+    # Backends that do not opt in keep the eager fallback; the device gate
+    # rejects first, before the configuration checks.
     _mock_accelerator(mock_get_accelerator, graph_capture=False)
+    assert "graph capture is not supported on the current accelerator" in validate_graph_capture_support(_StubConfig(),
+                                                                                                         zero_stage=2)
+
+
+@patch("deepspeed.runtime.hybrid_engine_graph.get_accelerator")
+def test_validate_requires_explicit_graph_capture_opt_in(mock_get_accelerator):
+    # Exposing create_graph() is not enough: capture also needs a working
+    # is_current_stream_capturing hook (see the static KV cache), so a backend
+    # that only has a graph API must stay on the eager path.
+    _mock_accelerator(mock_get_accelerator, graph_capture=False)
+    mock_get_accelerator.return_value.create_graph.return_value = object()
     assert "graph capture is not supported on the current accelerator" in validate_graph_capture_support(_StubConfig(),
                                                                                                          zero_stage=2)
 

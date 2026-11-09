@@ -675,7 +675,6 @@ class BF16_Optimizer(ZeROOptimizer):
 
         if load_optimizer_states:
             self.clip_grad = current_rank_sd.get(CLIP_GRAD, self.clip_grad)
-            print("_load_legacy_checkpoint current_rank_sd[BASE_OPTIMIZER_STATE]")
             self.optimizer.load_state_dict(current_rank_sd[BASE_OPTIMIZER_STATE])
 
         if load_from_fp32_weights:
@@ -683,6 +682,8 @@ class BF16_Optimizer(ZeROOptimizer):
                                       current_rank_sd[SINGLE_PARTITION_OF_FP32_GROUPS]):
                 src_tensor = _get_padded_tensor(saved, current.numel())
                 current.data.copy_(src_tensor.data)
+        else:
+            self._restore_from_bit16_weights()
 
         if load_optimizer_states:
             self._link_all_hp_params()

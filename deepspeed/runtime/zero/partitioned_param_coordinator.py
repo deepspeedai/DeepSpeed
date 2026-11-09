@@ -675,6 +675,7 @@ class PartitionedParameterCoordinator:
 
         numel_considered = 0
         swap_in_params = []
+        swap_in_params_set = set()
         for param_in_trace in self.__param_queue:
             param = param_in_trace.param
             if param.nvme_swapper is None:
@@ -682,8 +683,11 @@ class PartitionedParameterCoordinator:
             if (numel_considered > 2 * numel_in_flight
                     or len(swap_in_params) >= param.nvme_swapper.available_swap_in_buffers()):
                 break
-            if param.ds_tensor.status == PartitionedParamStatus.NOT_AVAILABLE:
+            # The queue has a param once per use, e.g. the last layer's for the forward and again for the backward,
+            # but swap_in() takes each param once.
+            if param.ds_tensor.status == PartitionedParamStatus.NOT_AVAILABLE and param not in swap_in_params_set:
                 swap_in_params.append(param)
+                swap_in_params_set.add(param)
             numel_considered += param.ds_numel
 
         if swap_in_params:
