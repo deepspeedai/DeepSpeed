@@ -20,6 +20,7 @@ See ``deepspeed/checkpoint/affine_ir_spec.md`` for the full specification.
 
 import torch
 
+from .affine_geometry import LogicalBox, boxes_disjoint
 from .affine_geometry import (dot as _dot, product as _product, row_major_range_boxes as _row_major_range_boxes,
                               row_major_strides as _row_major_strides, strided_address as _strided_address)
 
@@ -292,8 +293,8 @@ class ParamAffineMap:
             cursor = stop
 
         # A column split's pieces have no interval, so the check above skips them. Check them as
-        # boxes against every other box-shaped piece of the rank instead. Ranks whose pieces are
-        # all dense are fully covered above and skip this pairwise pass.
+        # boxes of the shard grid instead. Ranks whose pieces are all dense are fully covered above
+        # and skip this pass.
         if not has_strided_piece:
             return
         boxes = []
@@ -313,6 +314,13 @@ class ParamAffineMap:
                 # not a box of the shard's grid, so the walk in validate_coverage() checks it instead.
                 continue
             boxes.append(box)
+        # A sweep proves most layouts disjoint without comparing every pair; the pairwise walk
+        # only runs to name the address that two boxes share.
+        if boxes_disjoint([
+                LogicalBox(tuple(starts), tuple(stop - start for start, stop in zip(starts, stops)))
+                for starts, stops in boxes
+        ]):
+            return
         for index, box in enumerate(boxes):
             for other_box in boxes[index + 1:]:
                 shared = _first_shared_address(box, other_box, shard_shape)
