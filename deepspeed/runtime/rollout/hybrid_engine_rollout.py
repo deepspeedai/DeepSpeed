@@ -23,6 +23,9 @@ from typing import Optional
 import torch
 
 from deepspeed.accelerator import get_accelerator
+import logging
+
+logger = logging.getLogger(__name__)
 from deepspeed.runtime.rollout.base import RolloutBatch, RolloutEngine, RolloutRequest, SamplingConfig
 from deepspeed.runtime.rollout.continuous_batching import ContinuousBatchRequest, ContinuousBatchScheduler
 
@@ -1241,7 +1244,7 @@ class HybridEngineRollout(RolloutEngine):
         cache_config = config
         if not hasattr(config, "num_key_value_heads") or config.num_key_value_heads is None:
             cache_config = copy(config)
-            cache_config.num_key_value_heads = config.num_attention_heads
+            cache_config.num_key_value_heads = getattr(config, "num_attention_heads", 1)
         common_kwargs = {
             "config": cache_config,
             "max_cache_len": max_cache_len,
@@ -1481,7 +1484,9 @@ class HybridEngineRollout(RolloutEngine):
         if dist.is_initialized() and dist.get_world_size() > 1:
             ds_tp_config = copy(module.config)
             ds_tp_config.num_key_value_heads = max(1, module.config.num_key_value_heads // dist.get_world_size())
-            ds_tp_config.num_attention_heads = max(1, module.config.num_attention_heads // dist.get_world_size())
+            ds_tp_config.num_attention_heads = max(
+                1,
+                getattr(module.config, "num_attention_heads", 1) // dist.get_world_size())
         ds_cache = DeepSpeedStaticCache(
             ds_tp_config,
             batch_size=batch_size,
