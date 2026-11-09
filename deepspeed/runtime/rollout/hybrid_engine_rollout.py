@@ -988,7 +988,7 @@ class HybridEngineRollout(RolloutEngine):
         if sampling.max_new_tokens <= 0:
             raise ValueError("max_new_tokens must be positive")
         if sampling.temperature > 0:
-            raise ValueError("continuous batching currently supports greedy decoding only")
+            pass  # sampling supported since #8939 (select_next_tokens handles it)
         if sampling.n_samples_per_prompt != 1:
             raise ValueError("continuous batching currently supports one sample per prompt")
         for request in requests:
@@ -1039,14 +1039,9 @@ class HybridEngineRollout(RolloutEngine):
                 [request_by_id[request_id].prompt_attention_mask for request_id in admitted_ids], dim=0)
             prompt_len = prompt_ids.shape[1]
             prefill_start = self._profile_start(profile)
-            prefill_tokens, prefill_cache = self._continuous_prefill_cache(
-                module,
-                static_cache_type,
-                prompt_ids,
-                prompt_attention,
-                model_dtype,
-                device,
-            )
+            prefill_tokens, prefill_cache = self._continuous_prefill_cache(module, static_cache_type, prompt_ids,
+                                                                           prompt_attention, model_dtype, device,
+                                                                           sampling)
             self._profile_end(profile, "prefill_forward_ms", prefill_start, count="num_prefill_forwards")
             cache_copy_start = self._profile_start(profile)
             cache_start = cache_position - prompt_len
@@ -1073,14 +1068,9 @@ class HybridEngineRollout(RolloutEngine):
             prompt_ids = request.prompt_ids[:, valid]
             prompt_attention = torch.ones_like(prompt_ids)
             prefill_start = self._profile_start(profile)
-            prefill_tokens, prefill_cache = self._continuous_prefill_cache(
-                module,
-                static_cache_type,
-                prompt_ids,
-                prompt_attention,
-                model_dtype,
-                device,
-            )
+            prefill_tokens, prefill_cache = self._continuous_prefill_cache(module, static_cache_type, prompt_ids,
+                                                                           prompt_attention, model_dtype, device,
+                                                                           sampling)
             self._profile_end(profile, "prefill_forward_ms", prefill_start, count="num_prefill_forwards")
             cache_copy_start = self._profile_start(profile)
             admitted_tokens[request_id] = prefill_tokens
@@ -1161,7 +1151,8 @@ class HybridEngineRollout(RolloutEngine):
             "continuous_batch_size": max_batch_size,
         }
 
-    def _continuous_prefill_cache(self, module, static_cache_type, prompt_ids, prompt_attention, model_dtype, device):
+    def _continuous_prefill_cache(self, module, static_cache_type, prompt_ids, prompt_attention, model_dtype, device,
+                                  sampling):
         position_ids = self._prefill_position_ids(prompt_attention)
         if getattr(module, "_supports_cache_class", None) is None:
             pad_token_id = self.tokenizer.pad_token_id
