@@ -1540,7 +1540,14 @@ class Init(InsertPostInitMethodToModuleSubClasses):
         def all_gather_coalesced(params: Iterable[Parameter],
                                  safe_mode: bool = False,
                                  quantize: bool = False) -> AllGatherCoalescedHandle:
-            params = list(params)
+            # ensure that each rank has params in same order. callers may pass a set, whose
+            # order differs across ranks. the allgather is done by flattening the parameter
+            # list into a single tensor that can be allgathered in a single call - this means
+            # that if each rank gives a list of the same parameters in a different order we
+            # will silently get incorrect parameter values. params of different partition
+            # groups are gathered one group at a time, so a different order would also issue
+            # the per-group collectives in a different order and deadlock.
+            params = sorted(params, key=lambda p: p.ds_id)
             if len(params) == 0:
                 return _no_gather_coalesced(params)
 
@@ -1575,13 +1582,6 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                 world_size = self.num_ranks_in_param_group
 
             #pprint(dir(ds_process_group))
-            # ensure that each rank has params in same order. the allgather
-            # is done by flattening the parameter list into a single tensor that
-            # can be allgathered in a single call - this means that if each rank
-            # gives a list of the same parameters in a different order we will
-            # silently get incorrect parameter values, and have very difficult
-            # to debug correctness issues.
-            params = sorted(params, key=lambda p: p.ds_id)
 
             if logger.isEnabledFor(logging.DEBUG):
                 debug_rank0(f"-allgather_coalesced: {[p.ds_id for p in params]}")

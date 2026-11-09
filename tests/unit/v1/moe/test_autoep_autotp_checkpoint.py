@@ -216,6 +216,8 @@ def _load_torch_checkpoint(path):
 def _drop_folding_metadata_from_model_checkpoints(checkpoint_dir):
     model_paths = sorted(glob.glob(os.path.join(str(checkpoint_dir), "folded", "mp_rank_*_model_states.pt")))
     assert model_paths
+    # Every rank must finish reading these files before rank 0 rewrites them.
+    dist.barrier()
     if dist.get_rank() == 0:
         for path in model_paths:
             state = _load_torch_checkpoint(path)

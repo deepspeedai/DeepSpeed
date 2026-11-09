@@ -140,12 +140,19 @@ class DeepSpeedTransformerConfig(TransformerConfig):
         return cls.from_dict(json.loads(text))
 
 
+def _validate_stochastic_mode(config):
+    if config.stochastic_mode and torch.are_deterministic_algorithms_enabled():
+        raise RuntimeError("Deterministic execution requires stochastic_mode=False for DeepSpeedTransformerLayer")
+
+
 class DeepSpeedTransformerFunction(Function):
 
     @staticmethod
     def forward(ctx, input, input_mask, self, grads, layer_id, attn_qkvw, attn_qkvb, attn_ow, attn_ob, attn_nw,
                 attn_nb, inter_w, inter_b, output_w, output_b, norm_w, norm_b, config):
 
+        # Engines can enable deterministic execution after the layer was constructed.
+        _validate_stochastic_mode(config)
         cuda_module = stochastic_transformer_cuda_module if config.stochastic_mode else transformer_cuda_module
         forward_func = cuda_module.forward_fp16 if config.fp16 else cuda_module.forward_fp32
 
@@ -249,6 +256,7 @@ class DeepSpeedTransformerFunction(Function):
             (output, input, input_mask, attn_qkvw, attn_qkvb, attn_ow, attn_ob, attn_nw, attn_nb, inter_w, inter_b,
              output_w, output_b, norm_w, norm_b) = ctx.saved_tensors
 
+        _validate_stochastic_mode(ctx.config)
         cuda_module = stochastic_transformer_cuda_module if ctx.config.stochastic_mode else transformer_cuda_module
         backward_func = cuda_module.backward_fp16 if ctx.config.fp16 else cuda_module.backward_fp32
 
@@ -311,6 +319,7 @@ class DeepSpeedTransformerLayer(nn.Module):
     def __init__(self, config, initial_weights=None, initial_biases=None):
         super(DeepSpeedTransformerLayer, self).__init__()
 
+        _validate_stochastic_mode(config)
         self.config = config
         self.config.layer_id = DeepSpeedTransformerLayer.layer_id
         DeepSpeedTransformerLayer.layer_id = DeepSpeedTransformerLayer.layer_id + 1
