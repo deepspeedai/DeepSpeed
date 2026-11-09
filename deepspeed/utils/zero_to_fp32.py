@@ -611,6 +611,22 @@ def to_torch_tensor(state_dict, return_empty_tensor=False, dtype=None):
     return torch_state_dict
 
 
+def _with_own_storage(state_dict):
+    # torch.save writes the whole storage behind a view, so copy tensors that view a larger
+    # buffer (ZeRO-1/2 params share one flat buffer). Tied tensors keep sharing one copy.
+    saved_tensors = {}
+    for tensor in state_dict.values():
+        tensor_id = id(tensor)
+        if tensor_id in saved_tensors:
+            continue
+        storage_nbytes = tensor.untyped_storage().nbytes()
+        if storage_nbytes > tensor.numel() * tensor.element_size():
+            saved_tensors[tensor_id] = tensor.clone()
+        else:
+            saved_tensors[tensor_id] = tensor
+    return {name: saved_tensors[id(tensor)] for name, tensor in state_dict.items()}
+
+
 def get_fp32_state_dict_from_zero_checkpoint(checkpoint_dir,
                                              tag=None,
                                              exclude_frozen_parameters=False,
@@ -745,6 +761,8 @@ def convert_zero_checkpoint_to_state_dict(checkpoint_dir,
         if safe_serialization:
             save_file(shard_state_dict, output_path, metadata={"format": "pt"})
         else:
+            if state_dict_split.is_sharded:
+                shard_state_dict = _with_own_storage(shard_state_dict)
             torch.save(shard_state_dict, output_path)
         # release the memory of current shard
         for tensor_name in list(shard_state_dict.keys()):
