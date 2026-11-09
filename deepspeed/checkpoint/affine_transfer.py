@@ -338,12 +338,18 @@ def _shards_tile(frames: List[_Frame], side: str, limits: PlanBudget) -> None:
     of them land on the same addresses of the shard, and their numels still sum to the shard size. A
     shard that two pieces claim cannot be read or written by address, so a plan built on such a map is
     wrong in whichever direction it is used.
+
+    A rank whose pieces sweep as disjoint and fill the shard passes without pairwise comparisons; any
+    other rank takes the pairwise walk, which names the pieces at fault.
     """
     by_rank: Dict[int, List[_Frame]] = {}
     for frame in frames:
         by_rank.setdefault(frame.rank, []).append(frame)
 
     for rank, held in sorted(by_rank.items()):
+        if boxes_disjoint([frame.local for frame in held]) and sum(frame.local.volume
+                                                                   for frame in held) == held[0].shard_numel:
+            continue
         if len(held)**2 > limits.max_pair_checks:
             raise AffineTransferError(f'{side}: rank {rank} holds {len(held)} pieces, over the budget for '
                                       'address checks')

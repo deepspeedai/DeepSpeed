@@ -678,6 +678,19 @@ def test_many_consistent_pieces_need_no_pairwise_holder_checks():
         torch.testing.assert_close(shard, target.extract(full, rank))
 
 
+def test_many_pieces_on_one_rank_need_no_pairwise_address_checks():
+    rows, ranks = 2048, 2
+    source = block_gather_map((rows, 2), {rank: list(range(rank, rows, ranks)) for rank in range(ranks)}, 1, 0)
+    target = contiguous_split_map((rows, 2), [rows // ranks] * ranks, 0)
+    assert (rows // ranks)**2 > PlanBudget().max_pair_checks
+    full = torch.arange(rows * 2, dtype=torch.float64).reshape(rows, 2)
+    # Merging this many segments is a separate quadratic step with its own budget.
+    plan = plan_transfer(target, source, PlanBudget(max_merge_checks=1 << 30))
+    copied = _apply_plan(plan, target, _shards(source, lambda m, r: m.extract(full, r)))
+    for rank, shard in copied.items():
+        torch.testing.assert_close(shard, target.extract(full, rank))
+
+
 def _random_holder_map(rng, rows, cols, ranks):
     """Row blocks on every rank, sometimes split at a replica's own points, with holders sometimes wrong."""
     shared = sorted(rng.sample(range(1, rows), rng.randint(0, rows - 1)))
