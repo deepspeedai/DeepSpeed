@@ -335,7 +335,6 @@ class TestZero2OffloadOverflowRecovery(DistributedTest):
         if accumulation_dtype is not None:
             config["data_types"] = {"grad_accum_dtype": accumulation_dtype}
         config["train_batch_size"] = 2
-        config["managed_gradient_accumulation"] = False
         model = Scaled()
         engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config)
         try:
