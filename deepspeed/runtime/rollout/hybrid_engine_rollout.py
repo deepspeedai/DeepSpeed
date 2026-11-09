@@ -240,7 +240,7 @@ class HybridEngineRollout(RolloutEngine):
             _cfg = getattr(module, "config", None)
             layer_types = getattr(getattr(_cfg, "text_config", _cfg), "layer_types", None) or []
             needs_pad_fallback = module._ki_prompt_padded and ("linear_attention" in layer_types or self.use_segki)
-            if self.use_graph_capture and not needs_pad_fallback:
+            if use_graph_capture and not needs_pad_fallback:
                 output_ids = self._generate_graph(prompt_ids, prompt_attn, max_new_tokens, pad_token_id, module,
                                                   device, sampling)
             else:
