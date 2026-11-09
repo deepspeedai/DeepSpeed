@@ -295,8 +295,6 @@ class TestZero2OffloadOverflowRecovery(DistributedTest):
             pytest.skip("BF16 is not supported")
         if precision == "fp16" and not get_accelerator().is_fp16_supported():
             pytest.skip("FP16 is not supported")
-        if low_precision_master and accumulation_dtype == "fp32":
-            pytest.skip("fp32 accumulation with a low-precision master is rejected at config time")
 
         class TwoGroups(torch.nn.Module):
 

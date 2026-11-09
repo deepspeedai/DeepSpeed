@@ -209,24 +209,6 @@ def test_sum_gradient_allreduce_rejects_deepcompile(zero_stage):
         })
 
 
-@pytest.mark.parametrize("master_key", ["bf16", "fp16"])
-def test_fp32_grad_accum_rejects_low_precision_master(master_key):
-    with pytest.raises(ValueError, match="grad_accum_dtype"):
-        DeepSpeedConfig({
-            "train_batch_size": 1,
-            master_key: {
-                "enabled": True,
-                f"{master_key}_master_weights_and_grads": True,
-            },
-            "data_types": {
-                "grad_accum_dtype": "fp32",
-            },
-            "zero_optimization": {
-                "stage": 2,
-            },
-        })
-
-
 def test_fp32_grad_accum_with_fp32_master_is_allowed():
     config = DeepSpeedConfig({
         "train_batch_size": 1,
