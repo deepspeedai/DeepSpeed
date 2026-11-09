@@ -1191,7 +1191,6 @@ class HybridEngineRollout(RolloutEngine):
         )
         return prefill_output.logits[:, -1, :].argmax(dim=-1, keepdim=True), prefill_cache
 
-    @staticmethod
     @classmethod
     def _continuous_next_tokens(cls, logits, request_ids, request_by_id, responses, module, select_next_tokens):
         repetition_penalty = cls._repetition_penalty(module)
