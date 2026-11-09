@@ -216,9 +216,21 @@ class HybridEngineRollout(RolloutEngine):
 
         is_greedy = sampling.temperature <= 0.0
 
+        # Master's graph-capture gating (#8980 + #8939): the local variable
+        # is the config value narrowed by the accelerator capability check.
+        # No is_greedy gate — #8939 added sampling to the graph path; the
+        # token selector runs outside the captured graph (~0.9% decode cost).
+        use_graph_capture = self.use_graph_capture
+        if use_graph_capture and not get_accelerator().is_graph_capture_supported():
+            import logging
+            logging.getLogger(__name__).warning(
+                "HybridEngineRollout: graph capture is not supported on the current accelerator; "
+                "falling back to eager generation.")
+            use_graph_capture = False
+
         forward_profiler = None
         forward_profile_handles = []
-        if self.enable_profiling and not (self.use_graph_capture and is_greedy):
+        if self.enable_profiling and not use_graph_capture:
             forward_profiler = _ForwardProfiler(accelerator)
             forward_profile_handles = forward_profiler.register(module)
 
