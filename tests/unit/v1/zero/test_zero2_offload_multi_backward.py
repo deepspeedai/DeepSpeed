@@ -222,6 +222,10 @@ def _run_request_boundaries(rank, rendezvous, zero_stage, cpu_offload, accumulat
         # Each projection first joins a later backward after contributing to the preceding update.
         for early, late in [(0, 1), (1, 0)]:
             windows.append(([["c0"], ["c1", "c2"], ["c3"]], {"c0": (early, ), "c1": (late, ), "c2": (late, )}))
+        # A projection can contribute to a request without joining its boundary backward.
+        for early, late in [(0, 1), (1, 0)]:
+            windows.append(([["c0", "c1"], ["c2"]], {"c0": (early, ), "c1": (late, )}))
+            windows.append(([["c0", "c1"]], {"c0": (early, ), "c1": (late, )}))
         reference_names = list(references)
         for step, (requests, selections) in enumerate(windows):
             expected = {name: torch.zeros_like(reference) for name, reference in references.items()}
@@ -283,13 +287,16 @@ class TestZero2OffloadOverflowRecovery(DistributedTest):
 
     @pytest.mark.parametrize("precision", ["bf16", "fp16"])
     @pytest.mark.parametrize("low_precision_master", [True, False])
-    def test_finite_step_after_overflow(self, precision, low_precision_master):
+    @pytest.mark.parametrize("accumulation_dtype", [None, "fp32"])
+    def test_finite_step_after_overflow(self, precision, low_precision_master, accumulation_dtype):
         if not deepspeed.ops.__compatible_ops__[CPUAdamBuilder.NAME]:
             pytest.skip("CPUAdam is required for low-precision offloaded master weights")
         if precision == "bf16" and not get_accelerator().is_bf16_supported():
             pytest.skip("BF16 is not supported")
         if precision == "fp16" and not get_accelerator().is_fp16_supported():
             pytest.skip("FP16 is not supported")
+        if low_precision_master and accumulation_dtype == "fp32":
+            pytest.skip("fp32 accumulation with a low-precision master is rejected at config time")
 
         class TwoGroups(torch.nn.Module):
 
@@ -307,6 +314,8 @@ class TestZero2OffloadOverflowRecovery(DistributedTest):
         config[precision] = {"enabled": True, f"{precision}_master_weights_and_grads": low_precision_master}
         if precision == "fp16":
             config[precision]["loss_scale"] = 1.0
+        if accumulation_dtype is not None:
+            config["data_types"] = {"grad_accum_dtype": accumulation_dtype}
         config["train_batch_size"] = 2
         config["managed_gradient_accumulation"] = False
         config["optimizer"]["params"]["lr"] = 0.1

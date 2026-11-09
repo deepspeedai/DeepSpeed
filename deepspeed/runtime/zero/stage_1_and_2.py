@@ -653,6 +653,10 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             self._offload_accumulated_param_ids = set()
             # FP32-master gradients first seen at a boundary stay in the partition until another backward.
             self._offload_partition_only_param_ids = set()
+            # Host sums updated by a non-boundary backward since they were last published to the FP32 partition.
+            self._offload_unpublished_param_ids = set()
+            # Compact FP32 partitions freed at a boundary; the host gradient holds their running sum.
+            self._host_owned_compact_partitions = set()
             self.temp_grad_buffer_for_cpu_offload = torch.zeros(largest_param_numel,
                                                                 device=self.device,
                                                                 dtype=self.dtype)
@@ -1063,6 +1067,9 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                     # sum until step(): more request boundaries may precede the update.
                     if self.use_grad_accum_attribute:
                         self.all_grad_tensors[i] = None
+        elif self.is_gradient_accumulation_boundary():
+            self._publish_unpublished_offload_grads()
+            self._offload_compact_grad_partitions()
 
         self._release_ipg_buffers()
 
@@ -1110,10 +1117,34 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 if self._use_compact_grad_partition_buffer(group_idx):
                     self.copy_grads_in_partition(param, group_idx)
                     continue
-                self._restore_cpu_offload_grad_to_gpu(param)
-                self.set_norm_for_param_grad_in_gpu(param)
-                self.update_offload_overflow_tracker_for_param_grad(param)
-                self.async_inplace_copy_grad_to_fp32_buffer_from_gpu(param)
+                self._publish_host_accumulated_grad(param)
+        self._offload_unpublished_param_ids.clear()
+        self._offload_compact_grad_partitions()
+
+    def _publish_host_accumulated_grad(self, param):
+        """Read this parameter's host sum back to the device, then into the FP32 partition.
+
+        The device pass lets the shared norm and overflow helpers see the full accumulated gradient.
+        """
+        self._restore_cpu_offload_grad_to_gpu(param)
+        self.set_norm_for_param_grad_in_gpu(param)
+        self.update_offload_overflow_tracker_for_param_grad(param)
+        self.async_inplace_copy_grad_to_fp32_buffer_from_gpu(param)
+
+    def _publish_unpublished_offload_grads(self):
+        """Bring every host sum a non-boundary backward left behind into the FP32 partition.
+
+        A boundary backward publishes only the parameters it reduced. A parameter whose last
+        contribution this window came from a non-boundary backward would otherwise reach step(),
+        safe_get_full_grad() and the grad norm as zero.
+        """
+        for group_idx, group in enumerate(self.params_in_partition):
+            if self._use_compact_grad_partition_buffer(group_idx):
+                continue
+            for param in group:
+                if self.get_param_id(param) in self._offload_unpublished_param_ids:
+                    self._publish_host_accumulated_grad(param)
+        self._offload_unpublished_param_ids.clear()
 
     def _restore_cpu_offload_grad_to_gpu(self, param):
         # Last non-boundary epilogue cleared param.grad; reload accumulated CPU grads for boundary helpers.
@@ -1264,13 +1295,27 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         return param.grad_accum if self.use_grad_accum_attribute else param.grad
 
     def _use_compact_grad_partition_buffer(self, group_idx):
-        gradient_accumulation_dtype = getattr(self, "gradient_accumulation_dtype", None)
-        if gradient_accumulation_dtype != torch.float32 or gradient_accumulation_dtype == self.dtype:
-            return False
         params_in_partition = self.params_in_partition[group_idx]
         if len(params_in_partition) > 0 and self._is_muon_group(params_in_partition):
             return False
+        # Stage-2 CPU offload keeps the running sum in one partition buffer in gradient_accumulation_dtype
+        # for every dtype, so the host publish is the only dtype conversion. Stage 1 (its unreduced
+        # grad_accum is cumulative across reentrant phases) and ZenFlow keep their existing gate.
+        if (getattr(self, "cpu_offload", False) and getattr(self, "partition_gradients", False)
+                and not getattr(self, "zenflow", False)):
+            return True
+        gradient_accumulation_dtype = getattr(self, "gradient_accumulation_dtype", None)
+        if gradient_accumulation_dtype != torch.float32 or gradient_accumulation_dtype == self.dtype:
+            return False
         return True
+
+    @staticmethod
+    def _host_grad_holds_accum_exactly(host_dtype, accum_dtype):
+        # The host gradient may be restored into the device buffer only if no bits are lost:
+        # same dtype, or an fp32 host holding bf16/fp16 values that were widened from it.
+        if host_dtype == accum_dtype:
+            return True
+        return host_dtype == torch.float32 and accum_dtype in (torch.bfloat16, torch.float16)
 
     def _build_compact_grad_partition_buffer(self, group_idx):
         partition_size = int(self.partition_size[group_idx])
@@ -1313,8 +1358,62 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             return grad_group
 
         grad_group = self._build_compact_grad_partition_buffer(group_idx)
+        if self.cpu_offload and group_idx in self._host_owned_compact_partitions:
+            self._restore_compact_grad_partition(group_idx, grad_group)
         self.averaged_gradients[group_idx] = grad_group
         return grad_group
+
+    def _offload_compact_grad_partitions(self):
+        """Copy each compact FP32 partition's running sum to the host gradient at a boundary.
+
+        Every parameter accumulated in this window is copied, including one that missed the
+        boundary backward. Once the host holds the exact sum, the GPU partition is freed so it
+        does not occupy HBM between requests; a later backward in the window restores it.
+        """
+        stream = get_accelerator().current_stream()
+        if self.overlap_comm and self.reduction_stream is not None:
+            stream.wait_stream(self.reduction_stream)
+        for group_idx in range(len(self.bit16_groups)):
+            grad_group = self.averaged_gradients.get(group_idx)
+            if grad_group is None or not self._use_compact_grad_partition_buffer(group_idx):
+                continue
+            partition_id = dist.get_rank(group=self.real_dp_process_group[group_idx])
+            host_grad = self.single_partition_of_fp32_groups[group_idx].grad.view(-1)
+            for param in self.params_in_partition[group_idx]:
+                param_id = self.get_param_id(param)
+                if param_id not in self._offload_accumulated_param_ids:
+                    continue
+                [_, _, dest_offset, num_elements] = self.grad_position[param_id]
+                source = self._get_compact_grad_partition_slice(group_idx, partition_id, param_id, num_elements)
+                self.norm_for_param_grads[param_id] = source.data.to(get_norm_dtype()).norm(2)
+                self.update_offload_overflow_tracker(source)
+                host_grad.narrow(0, dest_offset, num_elements).copy_(source.to(host_grad.dtype), non_blocking=True)
+            self._record_offload_copy()
+
+            # Free only when the host copy can restore the device sum bit for bit. Otherwise the
+            # device buffer stays resident until step(), and ZenFlow orders its own copies.
+            if not self._host_grad_holds_accum_exactly(host_grad.dtype, grad_group.flat_partition.dtype):
+                continue
+            if not self._offload_gradient_safety_enabled:
+                continue
+            self._record_gradient_stream(grad_group.flat_partition, stream)
+            self.averaged_gradients[group_idx] = None
+            self._host_owned_compact_partitions.add(group_idx)
+
+    def _restore_compact_grad_partition(self, group_idx, grad_group):
+        self._host_owned_compact_partitions.discard(group_idx)
+        # The restore may run on another stream than the boundary copy that filled the host gradient.
+        self._wait_for_offload_copies()
+        partition_id = dist.get_rank(group=self.real_dp_process_group[group_idx])
+        host_grad = self.single_partition_of_fp32_groups[group_idx].grad.view(-1)
+        for param in self.params_in_partition[group_idx]:
+            param_id = self.get_param_id(param)
+            if param_id not in self._offload_accumulated_param_ids:
+                continue
+            [_, _, dest_offset, num_elements] = self.grad_position[param_id]
+            insertion_offset = int(self.grad_partition_insertion_offset[group_idx][partition_id][param_id])
+            destination = grad_group.flat_partition.narrow(0, insertion_offset, num_elements)
+            destination.copy_(host_grad.narrow(0, dest_offset, num_elements), non_blocking=True)
 
     def _get_compact_grad_partition_slice(self, group_idx, partition_id, param_id, num_elements):
         if not self._use_compact_grad_partition_buffer(group_idx):
@@ -2131,19 +2230,9 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         if group_idx is None:
             group_idx = self._get_param_group_idx(param)
         if self.cpu_offload and self._use_compact_grad_partition_buffer(group_idx):
-            param_id = self.get_param_id(param)
-            self._offload_accumulated_param_ids.add(param_id)
+            # The boundary copy to the host runs per group, in _offload_compact_grad_partitions().
+            self._offload_accumulated_param_ids.add(self.get_param_id(param))
             if self.is_gradient_accumulation_boundary():
-                [_, _, dest_offset, num_elements] = self.grad_position[param_id]
-                partition_id = dist.get_rank(group=self.real_dp_process_group[group_idx])
-                source = self._get_compact_grad_partition_slice(group_idx, partition_id, param_id, num_elements)
-                self.norm_for_param_grads[param_id] = source.data.to(get_norm_dtype()).norm(2)
-                self.update_offload_overflow_tracker(source)
-                destination = self.single_partition_of_fp32_groups[group_idx].grad.view(-1).narrow(
-                    0, dest_offset, num_elements)
-                destination.copy_(source.to(destination.dtype), non_blocking=True)
-                self._record_gradient_stream(source, get_accelerator().current_stream())
-                self._record_offload_copy()
                 self.clear_grad_attribute(param)
             return
         if self.cpu_offload:
@@ -2163,6 +2252,9 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 self.update_offload_overflow_tracker_for_param_grad(param)
 
                 self.async_inplace_copy_grad_to_fp32_buffer_from_gpu(param)
+                self._offload_unpublished_param_ids.discard(param_id)
+            else:
+                self._offload_unpublished_param_ids.add(param_id)
 
             # Include the shared-buffer fast path in subsequent accumulation and finalization.
             self._offload_accumulated_param_ids.add(param_id)
@@ -2926,6 +3018,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         self._wait_for_offload_copies()
         self.norm_for_param_grads = {}
         self.local_overflow = False
+        self._host_owned_compact_partitions.clear()
         # Adam consumes the partition gradient; a parameter idle in the next window must not reuse it.
         for fp32_partition in self.single_partition_of_fp32_groups:
             if fp32_partition.grad is not None:
@@ -3038,6 +3131,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         if self.cpu_offload:
             self._offload_accumulated_param_ids = set()
             self._offload_partition_only_param_ids = set()
+            self._offload_unpublished_param_ids = set()
 
         if not self.compute_grad_norm:
             self._global_grad_norm = None
@@ -3075,6 +3169,9 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             self._release_preflattened_grad_buffers()
             if self.cpu_offload:
                 self.reset_cpu_buffers()
+                # A resident compact partition still holds the skipped window's inf/NaN sum.
+                for k in self.averaged_gradients.keys():
+                    self.averaged_gradients[k] = None
             else:
                 for k in self.averaged_gradients.keys():
                     self.averaged_gradients[k] = None

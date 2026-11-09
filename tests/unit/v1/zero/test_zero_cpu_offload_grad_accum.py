@@ -19,11 +19,18 @@ from unit.simple_model import SimpleModel, random_dataloader
 from deepspeed.accelerator import get_accelerator
 
 
-def _cpu_grad_norm(engine):
+def _running_grad_norm(engine):
+    # The running sum lives in the device partition buffer until a boundary publishes it. Fall back
+    # to the host accumulator for groups that use it (Muon, ZenFlow).
+    optimizer = engine.optimizer
     total_norm_sq = 0.0
-    for grad in engine.optimizer.accumulated_grads_in_cpu:
-        if grad is not None:
-            total_norm_sq += grad.float().norm(2).item()**2
+    for group_idx in range(len(optimizer.bit16_groups)):
+        grad_group = optimizer.averaged_gradients.get(group_idx)
+        flat_partition = getattr(grad_group, "flat_partition", None)
+        if flat_partition is not None:
+            total_norm_sq += flat_partition.float().norm(2).item()**2
+        elif optimizer.accumulated_grads_in_cpu[group_idx] is not None:
+            total_norm_sq += optimizer.accumulated_grads_in_cpu[group_idx].float().norm(2).item()**2
     return total_norm_sq**0.5
 
 
@@ -79,12 +86,12 @@ class TestZero2CPUOffloadGradAccumNorm(DistributedTest):
         for batch in data_loader:
             loss = model(batch[0], batch[1])
             model.backward(loss)
-            norms.append(_cpu_grad_norm(model))
+            norms.append(_running_grad_norm(model))
 
         model.destroy()
 
-        assert norms[0] > 0, "accumulated_grads_in_cpu should be non-zero after first backward"
+        assert norms[0] > 0, "running gradient sum should be non-zero after first backward"
         for i in range(1, len(norms)):
-            assert norms[i] != norms[0], (f"accumulated_grads_in_cpu norm did not change after micro-step {i}: "
+            assert norms[i] != norms[0], (f"running gradient sum norm did not change after micro-step {i}: "
                                           f"norm[0]={norms[0]:.6f}, norm[{i}]={norms[i]:.6f}. "
-                                          "Gradients were not copied back to CPU (PR #7967 regression).")
+                                          "Gradients were not accumulated (PR #7967 regression).")
