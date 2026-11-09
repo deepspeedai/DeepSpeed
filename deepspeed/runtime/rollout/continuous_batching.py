@@ -207,8 +207,12 @@ class _ContinuousRunBase:
             response, log_probs, calls, future, submitted = self.tools_in_flight.pop(i)
             self.tool_ms += (time.perf_counter() - submitted) * 1000.0
             tool_response = self.rollout._tool_response(calls, future.result()[i])
-            update_sample_from_response(self.trajectories[i], response, log_probs, tool_response,
-                                        self.rollout.tokenizer)
+            sample = self.trajectories[i]
+            if not self.rollout._tool_output_fits(sample, response, tool_response):
+                sample.status = RolloutRecord.Status.TRUNCATED
+                update_sample_from_response(sample, response, log_probs, [], self.rollout.tokenizer)
+                continue
+            update_sample_from_response(sample, response, log_probs, tool_response, self.rollout.tokenizer)
             self.requeue(i)
 
     def wait_for_a_tool(self):
@@ -303,7 +307,7 @@ class _ContinuousRunGraph(_ContinuousRunBase):
         prefill_start = self.rollout._sync_time(self.accelerator)
         target = torch.tensor([row for row, _, _ in admitted], device=device)
         prompt_ids, prompt_attn = left_pad_samples([self.trajectories[i] for _, i, _ in admitted],
-                                                   self.rollout.tokenizer.pad_token_id)
+                                                   self.rollout._pad_token_id())
         prompt_attn = prompt_attn.to(device)
         lengths = prompt_attn.sum(dim=1)
         logits = self.rollout._prefill_rows(self.module, prompt_ids.to(device), prompt_attn, self.ds_cache,

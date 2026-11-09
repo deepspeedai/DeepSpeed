@@ -255,7 +255,8 @@ Rollout runs independently on every data-parallel rank. Multi-turn rollout,
 graph capture and continuous batching reject ZeRO-3: every forward gathers
 parameters, so ranks must run the same forwards, and they run different numbers
 of turns and decode steps. Single-turn static rollout supports ZeRO-3 by running
-every rank to ``max_new_tokens``.
+every rank to the same length: ``max_new_tokens``, or with ``max_context_len``
+the longest budget any rank's prompts leave.
 
 AutoTP (``tensor_parallel.autotp_size``) is supported with static batching.
 Tensor-parallel ranks must run the same forwards, so before each generate call

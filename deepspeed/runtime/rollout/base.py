@@ -38,8 +38,8 @@ class RolloutConfig:
     return_log_probs: bool = False
 
     def __post_init__(self) -> None:
-        if self.multi_turn and not self.max_turns:
-            raise ValueError("max_turns must be set when multi_turn is enabled")
+        if self.multi_turn and (not isinstance(self.max_turns, int) or self.max_turns < 1):
+            raise ValueError("max_turns must be a positive integer when multi_turn is enabled")
         if self.continuous_batch_size is not None and self.continuous_batch_size < 1:
             raise ValueError("continuous_batch_size must be positive")
         if self.tool_call_parser not in TOOL_CALL_PARSERS:

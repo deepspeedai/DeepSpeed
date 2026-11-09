@@ -102,6 +102,13 @@ def test_config_defaults():
     assert cfg.return_log_probs is False
 
 
+@pytest.mark.parametrize("config_class", [RolloutConfig, HybridEngineRolloutConfig])
+@pytest.mark.parametrize("max_turns", [None, 0, -1, 1.5])
+def test_config_rejects_a_multi_turn_rollout_without_a_positive_max_turns(config_class, max_turns):
+    with pytest.raises(ValueError, match="max_turns must be a positive integer"):
+        config_class(multi_turn=True, max_turns=max_turns)
+
+
 def test_config_rejects_non_positive_continuous_batch_size():
     with pytest.raises(ValueError, match="continuous_batch_size must be positive"):
         HybridEngineRolloutConfig(continuous_batch_size=0)
@@ -946,6 +953,32 @@ def test_profiling_does_not_change_rollout_output():
     assert output_with_profiling.samples == output_without_profiling.samples
 
 
+def test_generate_pads_with_eos_when_the_tokenizer_has_no_pad_token():
+    engine = _make_engine()
+    engine.module.generate.side_effect = lambda prompt_ids, **_kwargs: torch.cat(
+        (prompt_ids, torch.full((prompt_ids.shape[0], 1), 2, device=prompt_ids.device)), dim=1)
+    tokenizer = _make_tokenizer()
+    tokenizer.pad_token_id = None
+    rollout = HybridEngineRollout(engine, tokenizer)
+
+    output = rollout.generate(RolloutRequest(samples=[_prompt([5, 6, 7]), _prompt([8])]), _make_sampling())
+
+    prompt_ids = engine.module.generate.call_args.args[0]
+    assert prompt_ids[1].tolist() == [2, 2, 8]
+    assert engine.module.generate.call_args.kwargs["pad_token_id"] == 2
+    assert [sample.status for sample in output.samples] == [RolloutRecord.Status.COMPLETED] * 2
+
+
+def test_generate_requires_a_pad_or_eos_token():
+    tokenizer = _make_tokenizer()
+    tokenizer.pad_token_id = None
+    tokenizer.eos_token_id = None
+    rollout = HybridEngineRollout(_make_engine(), tokenizer)
+
+    with pytest.raises(ValueError, match="must define pad_token_id or eos_token_id"):
+        rollout.generate(_make_request(), _make_sampling())
+
+
 def test_generate_preserves_zero_pad_token_id():
     engine = _make_engine()
     engine.module.generate.return_value = torch.tensor([[0, 1, 2, 0], [0, 3, 4, 0]])
@@ -1382,6 +1415,20 @@ def test_single_turn_caps_the_context_at_max_context_len():
     assert sample.status == RolloutRecord.Status.TRUNCATED
 
 
+@patch("deepspeed.runtime.rollout.hybrid_engine_rollout.tokenize_tool_responses", return_value=[9] * 10)
+def test_multi_turn_ends_when_tool_output_would_pass_max_context_len(_tokenize_tool_responses):
+    engine, rollout = _multi_turn_rollout([[_TOOL_CALL_TOKEN, 2]], max_context_len=8)
+
+    sample = rollout.generate(RolloutRequest(samples=[_prompt([10, 11])]),
+                              SamplingConfig(max_new_tokens=6, temperature=0)).samples[0]
+
+    # The tool output is dropped rather than cut, and the trajectory keeps its last response.
+    assert engine.module.generate.call_count == 1
+    assert sample.tokens == [10, 11, _TOOL_CALL_TOKEN, 2]
+    assert sample.loss_mask == [1, 1]
+    assert sample.status == RolloutRecord.Status.TRUNCATED
+
+
 @patch("deepspeed.runtime.rollout.hybrid_engine_rollout.tokenize_tool_responses", return_value=[9])
 def test_multi_turn_shares_the_prefill_of_the_first_turn_only(_tokenize_tool_responses):
     # Copies of a prompt are identical only until their first responses, so later turns prefill every row.
@@ -1537,6 +1584,15 @@ def test_qwen3_coder_parser_converts_arguments_to_their_schema_types():
     ]
 
 
+@pytest.mark.parametrize(("text", "expected"), [("true", True), ("False", False), ("yes", "yes"), ("1", "1")])
+def test_qwen3_coder_parser_converts_only_true_and_false_to_booleans(text, expected):
+    call = f"<tool_call>\n<function=typed>\n<parameter=flag>\n{text}\n</parameter>\n</function>\n</tool_call>"
+
+    calls = parse_qwen3_coder_tool_calls(call, ToolSet([_TypedTool()]))
+
+    assert calls == [ToolCall(name="typed", arguments={"flag": expected})]
+
+
 def test_qwen3_coder_parser_keeps_text_where_the_schema_does_not_say_otherwise():
     text = ("<tool_call>\n<function=typed>\n<parameter=code>\n42\n</parameter>\n"
             "<parameter=count>\nthree\n</parameter>\n<parameter=extra>\n7\n</parameter>\n</function>\n</tool_call>")
@@ -1632,7 +1688,10 @@ def test_generate_keeps_ranks_in_lockstep_and_pads_after_eos():
     engine.module.generate.return_value = torch.tensor([[10, 11, 5, 2, 7, 8]])
     request = RolloutRequest(samples=[_prompt([10, 11])])
 
-    result = rollout.generate(request, SamplingConfig(max_new_tokens=4, temperature=0))
+    with patch.object(rollout, "_max_across_ranks", side_effect=lambda value: value) as max_across_ranks:
+        result = rollout.generate(request, SamplingConfig(max_new_tokens=4, temperature=0))
+
+    max_across_ranks.assert_called_once_with(4)
 
     assert engine.module.generate.call_args.kwargs['eos_token_id'] is None
     sample = result.samples[0]

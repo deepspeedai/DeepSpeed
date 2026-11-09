@@ -369,6 +369,71 @@ def test_continuous_graph_matches_pretrained_model_when_enabled():
     assert capture_count[0] == 1
 
 
+class _OkTool(Tool):
+    name = "ok"
+    description = "Returns ok."
+    parameters = {"type": "object", "properties": {}}
+
+    async def execute(self, arguments):
+        return "ok"
+
+
+def _tiny_qwen3(device):
+    from transformers import AutoModelForCausalLM, Qwen3Config
+
+    config = Qwen3Config(vocab_size=64,
+                         hidden_size=64,
+                         intermediate_size=128,
+                         num_hidden_layers=2,
+                         num_attention_heads=4,
+                         num_key_value_heads=2,
+                         head_dim=16,
+                         max_position_embeddings=128)
+    torch.manual_seed(0)
+    model = AutoModelForCausalLM.from_config(config).to(device).eval()
+    model.generation_config.repetition_penalty = 1.0
+    return model
+
+
+@pytest.mark.parametrize("use_graph_capture", [False, True])
+@pytest.mark.parametrize("continuous_batch_size", [None, 2])
+def test_tool_output_that_would_pass_max_context_len_ends_the_trajectory(use_graph_capture, continuous_batch_size):
+    accelerator = get_accelerator()
+    if not accelerator.is_available():
+        pytest.skip("requires an accelerator")
+    if use_graph_capture and not accelerator.is_graph_capture_supported():
+        pytest.skip("requires graph capture")
+    device = accelerator.current_device_name()
+    model = _tiny_qwen3(device)
+    prompt = [5, 6, 7, 8, 9, 10]
+    with torch.no_grad():
+        first = model.generate(torch.tensor([prompt], device=device),
+                               max_new_tokens=1,
+                               do_sample=False,
+                               pad_token_id=0)[0, -1].item()
+    # The first greedy token ends the turn, and every turn calls the tool.
+    call = '<tool_call>{"name": "ok", "arguments": {}}</tool_call>'
+    tokenizer = SimpleNamespace(pad_token_id=0, eos_token_id=first, decode=lambda ids, **_kwargs: call)
+    max_context_len = len(prompt) + 10
+    rollout = HybridEngineRollout(SimpleNamespace(module=model, zero_optimization_partition_weights=lambda: False),
+                                  tokenizer,
+                                  HybridEngineRolloutConfig(multi_turn=True,
+                                                            max_turns=3,
+                                                            max_context_len=max_context_len,
+                                                            use_graph_capture=use_graph_capture,
+                                                            continuous_batch_size=continuous_batch_size),
+                                  tools=ToolSet([_OkTool()]))
+    request = RolloutRequest(samples=[RolloutRecord(tokens=prompt, attention_mask=[1] * len(prompt))])
+    sampling = SamplingConfig(max_new_tokens=8, temperature=0.0, n_samples_per_prompt=3)
+
+    with patch("deepspeed.runtime.rollout.hybrid_engine_rollout.tokenize_tool_responses", return_value=[40] * 30):
+        records = rollout.generate(request, sampling).samples
+
+    for record in records:
+        assert record.tokens == prompt + [first]
+        assert record.status == RolloutRecord.Status.TRUNCATED
+
+
 class _RankTool(Tool):
     """Answers with the rank that runs it, so ranks that each run their tools disagree."""
     name = "rank"
@@ -504,7 +569,9 @@ _DATA_PARALLEL_SETUPS = {
     },
     "zero3": {
         "zero_optimization": {
-            "stage": 3
+            "stage": 3,
+            # The test model's parameters are below the default threshold, so ZeRO-3 would keep them all whole.
+            "stage3_param_persistence_threshold": 0
         }
     },
 }
@@ -586,3 +653,58 @@ class TestDataParallelRollout(DistributedTest):
         engine.step()
         after = check_against_hf_generate()
         assert after != before
+
+    @pytest.mark.parametrize("over_cap", [False, True])
+    def test_zero3_ranks_stay_in_step_under_max_context_len(self, over_cap):
+        """``max_context_len`` gives each rank a different budget, or none, and ZeRO-3 ranks must still agree."""
+        from transformers import AutoModelForCausalLM, Qwen3Config
+
+        config = Qwen3Config(vocab_size=64,
+                             hidden_size=64,
+                             intermediate_size=128,
+                             num_hidden_layers=2,
+                             num_attention_heads=4,
+                             num_key_value_heads=2,
+                             head_dim=16,
+                             max_position_embeddings=128)
+        torch.manual_seed(0)
+        model = AutoModelForCausalLM.from_config(config)
+        ds_config = {
+            "train_micro_batch_size_per_gpu": 1,
+            "optimizer": {
+                "type": "AdamW",
+                "params": {
+                    "lr": 1e-2,
+                    "torch_adam": True
+                }
+            },
+            **_DATA_PARALLEL_SETUPS["zero3"],
+        }
+        engine, *_ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=ds_config)
+        module = engine.module.eval()
+        device = get_accelerator().current_device_name()
+        tokenizer = SimpleNamespace(pad_token_id=0, eos_token_id=None, decode=lambda ids, **_kwargs: "")
+        max_context_len, max_new_tokens = 12, 6
+        rollout = HybridEngineRollout(engine, tokenizer, HybridEngineRolloutConfig(max_context_len=max_context_len))
+        # Rank 0 has the room for every token; rank 1 for two, or with over_cap for none.
+        if dist.get_rank() == 0:
+            prompts = [[3, 7, 21, 30], [5, 9, 12]]
+        else:
+            length = 13 if over_cap else 10
+            prompts = [list(range(1, length + 1)), list(range(2, length + 2))]
+
+        records = rollout.generate(
+            RolloutRequest(samples=[RolloutRecord(tokens=p, attention_mask=[1] * len(p)) for p in prompts]),
+            SamplingConfig(max_new_tokens=max_new_tokens, temperature=0.0)).samples
+
+        for prompt, record in zip(prompts, records):
+            budget = max(min(max_new_tokens, max_context_len - len(prompt)), 0)
+            # Every rank generates the same number of tokens here, so the reference stays in step too.
+            with torch.no_grad():
+                expected = module.generate(torch.tensor([prompt], device=device),
+                                           max_new_tokens=max_new_tokens,
+                                           do_sample=False,
+                                           pad_token_id=0)
+            real = [token for token, keep in zip(record.tokens, record.attention_mask) if keep]
+            assert real == expected[0, :len(prompt) + budget].tolist()
+            assert record.status == RolloutRecord.Status.TRUNCATED

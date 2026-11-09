@@ -180,8 +180,8 @@ class HybridEngineRolloutConfig:
     return_log_probs: bool = False
 
     def __post_init__(self) -> None:
-        if self.multi_turn and not self.max_turns:
-            raise ValueError("Max turns not specified when using multi-turn rollout")
+        if self.multi_turn and (not isinstance(self.max_turns, int) or self.max_turns < 1):
+            raise ValueError("max_turns must be a positive integer when multi_turn is enabled")
         if self.continuous_batch_size is not None and self.continuous_batch_size < 1:
             raise ValueError("continuous_batch_size must be positive")
         if self.tool_call_parser not in TOOL_CALL_PARSERS:
@@ -239,7 +239,7 @@ class HybridEngineRollout(RolloutEngine):
         if static and self.enable_profiling:
             get_accelerator().synchronize()
             call_start = time.perf_counter()
-        samples = render_prompts(samples, self.tokenizer, self.tools.specs, self.tokenizer.pad_token_id,
+        samples = render_prompts(samples, self.tokenizer, self.tools.specs, self._pad_token_id(),
                                  self.chat_template_kwargs)
         trajectories = expand_samples(samples, sampling.n_samples_per_prompt)
         if static:
@@ -305,6 +305,23 @@ class HybridEngineRollout(RolloutEngine):
         dist.broadcast_object_list(outputs, src, group=groups.get_tensor_model_parallel_group())
         return outputs[0]
 
+    def _max_across_ranks(self, value):
+        """The largest ``value`` over the ranks that gather ZeRO-3 parameters together."""
+        import deepspeed.comm as dist
+
+        tensor = torch.tensor([value], device=get_accelerator().current_device_name())
+        dist.all_reduce(tensor, op=dist.ReduceOp.MAX, group=getattr(self.engine, "seq_data_parallel_group", None))
+        return int(tensor.item())
+
+    def _pad_token_id(self):
+        """The tokenizer's pad id, falling back to its EOS id."""
+        pad_token_id = self.tokenizer.pad_token_id
+        if pad_token_id is None:
+            pad_token_id = self.tokenizer.eos_token_id
+        if pad_token_id is None:
+            raise ValueError("The tokenizer must define pad_token_id or eos_token_id")
+        return pad_token_id
+
     def _turn_limit(self):
         """The number of turns a trajectory may run."""
         return self.max_turns if self.multi_turn else 1
@@ -335,6 +352,12 @@ class HybridEngineRollout(RolloutEngine):
             return None
         return calls
 
+    def _tool_output_fits(self, sample, response, tool_response):
+        """Whether a turn's response and tool output stay within ``max_context_len``."""
+        if self.max_context_len is None:
+            return True
+        return sum(sample.attention_mask) + len(response) + len(tool_response) <= self.max_context_len
+
     def _tool_response(self, calls, outputs):
         """Tokens of the tool messages that answer ``calls``."""
         tool_messages = [{
@@ -351,7 +374,7 @@ class HybridEngineRollout(RolloutEngine):
         n = sampling.n_samples_per_prompt
         max_new_tokens = sampling.max_new_tokens
         return_log_probs = self.return_log_probs
-        pad_token_id = self.tokenizer.pad_token_id
+        pad_token_id = self._pad_token_id()
         module = self.engine.module
         # render_prompts left-pads every prompt to the request's longest, so this is the longest prompt's length.
         prompt_length = max(len(sample.tokens) for sample in trajectories)
@@ -381,6 +404,13 @@ class HybridEngineRollout(RolloutEngine):
                 if room[i] <= 0:
                     trajectories[i].status = RolloutRecord.Status.TRUNCATED
             active = [i for i in active if room[i] > 0]
+            turn_max_new_tokens = max((room[i] for i in active), default=0)
+            if self._partitions_weights():
+                # ZeRO-3 gathers parameters in every forward, so all ranks run as many as the longest budget needs.
+                turn_max_new_tokens = self._max_across_ranks(turn_max_new_tokens)
+                if not active and turn_max_new_tokens > 0:
+                    dummy = torch.full((1, 1), pad_token_id, dtype=torch.long, device=device)
+                    self._generate_tokens(dummy, torch.ones_like(dummy), turn_max_new_tokens, sampling, pad_token_id)
             if not active:
                 break
             turn_samples = [trajectories[i] for i in active]
@@ -404,7 +434,6 @@ class HybridEngineRollout(RolloutEngine):
                 forward_profiler = _ForwardProfiler(accelerator)
                 handles.extend(forward_profiler.register(module))
 
-            turn_max_new_tokens = max(budgets)
             try:
                 if self.use_shared_prefill and n > 1 and turn == 0:
                     num_groups = len(active) // n
@@ -454,7 +483,11 @@ class HybridEngineRollout(RolloutEngine):
                 tool_response = []
                 if row in turn_calls:
                     tool_response = self._tool_response(turn_calls[row], tool_outputs[row])
-                    tool_active.append(i)
+                    if self._tool_output_fits(trajectories[i], turn_responses[row], tool_response):
+                        tool_active.append(i)
+                    else:
+                        trajectories[i].status = RolloutRecord.Status.TRUNCATED
+                        tool_response = []
                 update_sample_from_response(trajectories[i], turn_responses[row], turn_log_probs[row], tool_response,
                                             self.tokenizer)
             active = tool_active
@@ -705,7 +738,7 @@ class HybridEngineRollout(RolloutEngine):
             prompt_len = max(row.prompt_ids.shape[1] for row in rows)
             prompt_ids = torch.cat([
                 torch.nn.functional.pad(row.prompt_ids, (prompt_len - row.prompt_ids.shape[1], 0),
-                                        value=self.tokenizer.pad_token_id) for row in rows
+                                        value=self._pad_token_id()) for row in rows
             ],
                                    dim=0)
             prompt_attention = torch.cat([
@@ -848,9 +881,7 @@ class HybridEngineRollout(RolloutEngine):
                                   sampling):
         position_ids = self._prefill_position_ids(prompt_attention)
         if getattr(module, "_supports_cache_class", None) is None:
-            pad_token_id = self.tokenizer.pad_token_id
-            if pad_token_id is None:
-                pad_token_id = self.tokenizer.eos_token_id
+            pad_token_id = self._pad_token_id()
             prefill_output = module.generate(
                 prompt_ids,
                 attention_mask=prompt_attention,
