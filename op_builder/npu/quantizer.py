@@ -40,6 +40,16 @@ class NPUQuantizer:
     The dequantize_*_experimental methods are unrelated to that wire format:
     they serve the inference weight-quantization path, which is asymmetric
     with a per-group scale and minimum.
+
+    The inference int4 path as a whole requires CANN >= 9.0.0: the shared
+    Quantizer._compress_uint8_to_uint4 packs with a uint8 left shift
+    (aclnnLeftShifts), which older CANN releases do not provide. The
+    dequantizers below do not use that operator and are version-independent;
+    on older CANN the failure happens during quantization, before they run.
+    torch_npu exposes the CANN version through
+    torch_npu.utils.get_cann_version() and
+    torch_npu.npu.utils._is_gte_cann_version(), but this module does not gate
+    on it because the failing step is in shared code.
     """
 
     Symmetric = 0
