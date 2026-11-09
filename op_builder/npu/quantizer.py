@@ -36,6 +36,10 @@ class NPUQuantizer:
     and exposes no truncation mode, so no native op can honor the wire
     format today. If CANN later adds one, _quantize_groups is the single
     swap point.
+
+    The dequantize_*_experimental methods are unrelated to that wire format:
+    they serve the inference weight-quantization path, which is asymmetric
+    with a per-group scale and minimum.
     """
 
     Symmetric = 0
@@ -243,12 +247,38 @@ class NPUQuantizer:
         return packed, stored.view(out_groups, 1)
 
     @staticmethod
+    def _dequantize_inference_groups(values, scale_buffer, min_val_buffer, num_group, group_size):
+        """Asymmetric inference dequantization: value / scale + min, in fp16.
+
+        The inference weight-quantization path stores one scale and one minimum
+        per group and expects fp16 output, matching DeQuantizer in
+        deepspeed/inference/quantization/utils.py. The arithmetic is in-place
+        to keep the peak memory close to one fp16 copy of the weights.
+        """
+        scale = scale_buffer.reshape(num_group, 1).to(torch.float16)
+        min_val = min_val_buffer.reshape(num_group, 1).to(torch.float16)
+        values = values.reshape(num_group, group_size).to(torch.float16)
+        return values.div_(scale).add_(min_val)
+
+    @staticmethod
     def dequantize_int4_to_half_experimental(data_in, scale_buffer, min_val_buffer, num_group, group_size):
-        raise NotImplementedError("experimental fp_quantizer path is not needed for hpZ")
+        """Unpack the inference int4 wire format and dequantize to fp16.
+
+        Each byte holds two unsigned 4-bit values: the high nibble is the even
+        element and the low nibble the odd element. This is the inverse of
+        Quantizer._compress_uint8_to_uint4 (inference/quantization/utils.py).
+        The nibbles stay uint8 so the temporary is one byte per element.
+        """
+        packed = data_in.reshape(-1)
+        values = torch.empty(packed.numel() * 2, dtype=torch.uint8, device=data_in.device)
+        values[0::2] = packed >> 4
+        values[1::2] = packed & 0x0F
+        return NPUQuantizer._dequantize_inference_groups(values, scale_buffer, min_val_buffer, num_group, group_size)
 
     @staticmethod
     def dequantize_int8_to_half_experimental(data_in, scale_buffer, min_val_buffer, num_group, group_size):
-        raise NotImplementedError("experimental fp_quantizer path is not needed for hpZ")
+        """Dequantize the inference int8 wire format to fp16."""
+        return NPUQuantizer._dequantize_inference_groups(data_in, scale_buffer, min_val_buffer, num_group, group_size)
 
 
 class QuantizerBuilder(NPUOpBuilder):
