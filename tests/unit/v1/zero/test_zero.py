@@ -4,7 +4,9 @@
 # DeepSpeed Team
 
 from copy import deepcopy
+import gc
 import math
+import weakref
 from collections import namedtuple
 from typing import Dict, List, NamedTuple, Set, Tuple
 import pytest
@@ -19,6 +21,7 @@ from torch.nn.utils import skip_init
 
 from unit.common import DistributedTest, preferred_dtype, allclose_on_all_ranks
 from unit.simple_model import SimpleModel, random_dataloader
+from unit.util import torch_assert_equal
 
 import deepspeed
 from deepspeed.runtime.engine import DeepSpeedEngine
@@ -1994,6 +1997,102 @@ class TestZero3OffloadPinnedCopyBack(DistributedTest):
             assert torch.equal(a, b)
 
 
+@pytest.mark.skipif(not get_accelerator().is_bf16_supported(), reason="bf16 is not supported on this accelerator")
+class TestZero3AutocastSharesMasterWeights(DistributedTest):
+    """With torch autocast and no bf16 / fp16 section, the model keeps its weights in float32, the master dtype, so
+    ZeRO-3 without optimizer offload must use each partition as its own master copy (_create_fp32_partitions) instead
+    of keeping a second float32 copy. The check compares the partition's torch.device with the optimizer's device
+    name. (With "bf16": {"enabled": true} as well, the partitions are bf16 and this branch is not taken.)"""
+    world_size = 2
+
+    def test(self):
+        hidden_dim = 64
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 2,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 1e-3
+                }
+            },
+            "torch_autocast": {
+                "enabled": True,
+                "dtype": "bfloat16"
+            },
+            "zero_optimization": {
+                "stage": 3
+            },
+        }
+        torch.manual_seed(0)
+        model = SimpleModel(hidden_dim, nlayers=2)
+        model, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config_dict)
+        optimizer = model.optimizer
+        partitions = [p for p in optimizer.fp16_partitioned_groups_flat if p is not None]
+        assert partitions and all(p.dtype == torch.float32 for p in partitions)
+        for model_partition, master in zip(optimizer.fp16_partitioned_groups_flat,
+                                           optimizer.fp32_partitioned_groups_flat):
+            assert master is model_partition
+        data_loader = random_dataloader(model=model,
+                                        total_samples=4,
+                                        hidden_dim=hidden_dim,
+                                        device=model.device,
+                                        dtype=torch.float32)
+        for batch in data_loader:
+            loss = model(batch[0], batch[1])
+            model.backward(loss)
+            model.step()
+
+
+class TestZero3Fp32SharesMasterWeights(DistributedTest):
+    """A float32 model with no bf16 / fp16 section is in the master dtype too, so ZeRO-3 without optimizer offload
+    uses each partition as its own master copy, and training must match torch.optim.Adam on an unsharded copy."""
+    world_size = 2
+
+    def test(self):
+        hidden_dim = 64
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 2,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 1e-2
+                }
+            },
+            "zero_optimization": {
+                "stage": 3
+            },
+            # The reference does not clip; DeepSpeed clips the global gradient norm to 1.0 by default.
+            "gradient_clipping": 0.0,
+        }
+        torch.manual_seed(0)
+        model = SimpleModel(hidden_dim, nlayers=2)
+        device = get_accelerator().current_device_name()
+        reference = deepcopy(model).to(device)
+        reference_optimizer = torch.optim.Adam(reference.parameters(), lr=1e-2)
+        engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config_dict)
+        optimizer = engine.optimizer
+        for model_partition, master in zip(optimizer.fp16_partitioned_groups_flat,
+                                           optimizer.fp32_partitioned_groups_flat):
+            assert master is model_partition
+
+        for step in range(3):
+            # The same batch on every rank, so the averaged gradient is the reference's.
+            generator = torch.Generator().manual_seed(100 + step)
+            x = torch.randn(2, hidden_dim, generator=generator).to(device)
+            y = torch.randint(0, hidden_dim, (2, ), generator=generator).to(device)
+            loss = engine(x, y)
+            engine.backward(loss)
+            engine.step()
+            reference_loss = reference(x, y)
+            reference_loss.backward()
+            reference_optimizer.step()
+            reference_optimizer.zero_grad()
+            torch.testing.assert_close(loss, reference_loss, rtol=1e-5, atol=1e-6)
+
+        for param, reference_param in zip(engine.module.parameters(), reference.parameters()):
+            torch.testing.assert_close(safe_get_full_fp32_param(param), reference_param, rtol=1e-5, atol=1e-6)
+
+
 @pytest.mark.parametrize("training", [True, False])
 class TestZeroPartitionCache(DistributedTest):
     world_size = 1
@@ -2176,3 +2275,107 @@ class TestZero3ClientModuleID(DistributedTest):
         post_init_m_id = model.id
         assert pre_init_m_id == post_init_m_id
         model.destroy()
+
+
+# Training loops that re-initialize DeepSpeed for the same model (e.g. every epoch) need every destroyed
+# engine to be reclaimable without disturbing the engine that replaced it.
+# https://github.com/deepspeedai/DeepSpeed/issues/7204
+class TestDestroyReleasesEngine(DistributedTest):
+    world_size = 1
+
+    @pytest.mark.parametrize(
+        "zero_stage, offload, grad_accum_dtype",
+        [
+            (1, False, None),
+            (2, False, None),
+            (3, False, None),
+            (1, True, None),
+            (2, True, None),
+            (3, True, None),
+            # With bf16 parameters, this selects BF16_Optimizer.
+            (1, False, "fp32"),
+        ])
+    def test(self, zero_stage, offload, grad_accum_dtype):
+        zero_config = {"stage": zero_stage}
+        if offload:
+            zero_config["offload_optimizer"] = {"device": "cpu"}
+            if zero_stage == 3:
+                zero_config["offload_param"] = {"device": "cpu"}
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 2,
+            "zero_optimization": zero_config,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 1e-3,
+                    "torch_adam": True
+                }
+            },
+        }
+        if grad_accum_dtype is not None:
+            config_dict["data_types"] = {"grad_accum_dtype": grad_accum_dtype}
+        dtype = preferred_dtype()
+        if dtype == torch.bfloat16:
+            config_dict["bf16"] = {"enabled": True}
+        elif dtype == torch.float16:
+            config_dict["fp16"] = {"enabled": True, "initial_scale_power": 8}
+        hidden_dim = 16
+        model = SimpleModel(hidden_dim=hidden_dim)
+        engine, optimizer, _, _ = deepspeed.initialize(config=config_dict,
+                                                       model=model,
+                                                       model_parameters=model.parameters())
+        data_loader = random_dataloader(model=engine,
+                                        total_samples=8,
+                                        hidden_dim=hidden_dim,
+                                        device=engine.device,
+                                        dtype=dtype)
+        for batch in data_loader:
+            loss = engine(batch[0], batch[1])
+            engine.backward(loss)
+            engine.step()
+        engine.destroy()
+
+        engine_ref = weakref.ref(engine)
+        optimizer_ref = weakref.ref(optimizer)
+        # BF16_Optimizer gives each parameter a view of its fp32 gradient buffer. Compare storages: a view keeps
+        # the buffer's storage alive even after the buffer's own tensor object has been collected.
+        grad_buffer_storages = {
+            buffer.untyped_storage().data_ptr()
+            for buffer in getattr(optimizer, "fp32_groups_gradients_flat", [])
+        }
+        del engine, optimizer, data_loader, batch, loss
+        gc.collect()
+        assert engine_ref() is None, "the kept model still references the destroyed engine"
+        assert optimizer_ref() is None, "the kept model still references the destroyed optimizer"
+        assert not grad_buffer_storages & self._storages_held_by_params(model), \
+            "the kept model still references the destroyed optimizer's gradient buffer"
+
+        # Garbage collection may reclaim a destroyed engine only after the next one has wrapped the model.
+        engine, _, _, _ = deepspeed.initialize(config=config_dict, model=model, model_parameters=model.parameters())
+        engine.destroy()
+        new_engine, _, _, _ = deepspeed.initialize(config=config_dict,
+                                                   model=model,
+                                                   model_parameters=model.parameters())
+        fp32_params = [safe_get_full_fp32_param(p) for p in model.parameters()]
+        engine_ref = weakref.ref(engine)
+        del engine
+        gc.collect()
+        assert engine_ref() is None, "the kept model still references the destroyed engine"
+        torch_assert_equal([safe_get_full_fp32_param(p) for p in model.parameters()],
+                           fp32_params,
+                           msg="collecting a destroyed engine changed the engine that replaced it")
+        new_engine.destroy()
+
+        model_ref = weakref.ref(model)
+        del new_engine, model
+        gc.collect()
+        assert model_ref() is None, "DeepSpeed still references the model after destroy()"
+
+    # A helper keeps the loop variables out of the test: a leftover ZeRO-3 parameter would keep the model alive.
+    def _storages_held_by_params(self, model):
+        storages = set()
+        for param in model.parameters():
+            for value in [param.grad, *vars(param).values()]:
+                if torch.is_tensor(value):
+                    storages.add(value.untyped_storage().data_ptr())
+        return storages

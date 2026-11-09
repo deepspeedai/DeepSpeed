@@ -173,7 +173,10 @@ class FakeAwsCli:
             )
         if (service, operation) == ("s3api", "get-object"):
             key = argv[argv.index("--key") + 1]
-            stream = self.test_stderr if key.endswith("/stderr") else self.test_stdout
+            if "/prepare/" in key:
+                stream = self.prepare_stdout
+            else:
+                stream = self.test_stderr if key.endswith("/stderr") else self.test_stdout
             Path(argv[-1]).write_bytes(stream.encode("utf-8")[-torch_latest.SSM_OUTPUT_TAIL_BYTES:])
             return _command_result(stdout="{}\n")
         if (service, operation) == ("ec2", "terminate-instances"):
@@ -1458,6 +1461,32 @@ def test_aws_test_failure_emits_bounded_s3_tail_for_nightly_triage():
         tail_calls = [call for call, _ in fake.calls if call[2:4] == ("s3api", "get-object")]
         assert len(tail_calls) == 1
         assert tail_calls[0][tail_calls[0].index("--range") + 1] == f"bytes=-{torch_latest.SSM_OUTPUT_TAIL_BYTES}"
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_aws_prepare_failure_emits_bounded_s3_tail():
+    root, path = _selection_file("tests/unit/v1/test_one.py\n")
+    try:
+        late_failure = "verify Python dependencies failed with exit code 1"
+        full_output = "early output\n" * 2500 + f"{late_failure}\n"
+        env = _valid_env(
+            path,
+            DS_TEST_SELECTION_MODE="subset",
+            AWS_MODAL_FALLBACK_CONFIG=_aws_config(),
+            GITHUB_RUN_ID="123",
+            GITHUB_RUN_ATTEMPT="1",
+        )
+        fake = FakeAwsCli(prepare_code=1, prepare_stdout=full_output)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            _expect_error(torch_latest.run_aws_controller, env, fake, exception=torch_latest.AwsControllerError)
+        public_log = output.getvalue()
+        assert late_failure in public_log
+        assert "[aws:prepare:tail] complete stdout" in public_log
+        tail_calls = [call for call, _ in fake.calls if call[2:4] == ("s3api", "get-object")]
+        assert len(tail_calls) == 1
+        assert "/prepare/" in tail_calls[0][tail_calls[0].index("--key") + 1]
     finally:
         shutil.rmtree(root, ignore_errors=True)
 

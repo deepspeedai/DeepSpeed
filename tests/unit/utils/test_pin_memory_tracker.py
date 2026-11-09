@@ -38,6 +38,8 @@ def test_fmt_bytes():
 
 
 def test_torch_tensor_nbytes_is_consistent():
+    # The tracker is process-global, so an earlier test can leave bytes behind.
+    _tracker.reset()
     t = torch.zeros(1024, dtype=torch.float32)
     track_pinned_memory(t.nbytes)
     assert _tracker._bytes == 4096
