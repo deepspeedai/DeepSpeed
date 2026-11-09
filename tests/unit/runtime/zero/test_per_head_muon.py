@@ -849,7 +849,7 @@ def test_it_raises_when_the_flag_ends_up_doing_nothing():
 # ---------------------------------------------------------------------------
 #
 # The head count is tagged on the parameter, so it only reaches Newton-Schulz if the code
-# that calls `muon_update` reads it back off. Three of the six call sites did not, and an
+# that calls `muon_update` reads it back off. Three of the call sites did not, and an
 # update that quietly stays whole-matrix looks exactly like a working one.
 
 _MUON_UPDATE_ARGS = list(inspect.signature(muon_update).parameters)
@@ -980,6 +980,61 @@ class TestZeroPaddedPartitionForwardsTheHeadCount(DistributedTest):
         engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config)
         padding = engine.optimizer.round_robin_bit16_padding
         assert any(any(group) for group in padding), "nothing was padded, so this runs the unpadded branch"
+
+        x = torch.randn(2, 63, device=engine.device, dtype=torch.bfloat16)
+        engine.backward(engine(x, torch.randn_like(x)))
+        engine.step()
+
+        assert (tuple(model.q_proj.weight.shape), 8) in seen, f"q_proj lost its head count: {seen}"
+
+
+class TestBF16OptimizerForwardsTheHeadCount(DistributedTest):
+    """ZeRO-1 in bf16 with fp32 gradient accumulation runs Muon in `BF16_Optimizer`, which has its own call site.
+
+    The scan above only sees that the call names `num_heads`, not what it passes, so this steps a
+    real engine and checks what `muon_update` was handed.
+    """
+
+    world_size = 1
+
+    def test_q_proj_reaches_muon_update_with_its_head_count(self, monkeypatch):
+        import deepspeed.runtime.zero.muon.original_muon as original_muon
+        from deepspeed.runtime.bf16_optimizer import BF16_Optimizer
+
+        seen = []
+
+        def spy(grad, momentum, *args, **kwargs):
+            seen.append((tuple(grad.shape), kwargs.get("num_heads")))
+            return muon_update(grad, momentum, *args, **kwargs)
+
+        # `_prepare_muon_updates` imports `muon_update` when it runs, so patch it where it is defined.
+        monkeypatch.setattr(original_muon, "muon_update", spy)
+
+        config = {
+            "train_micro_batch_size_per_gpu": 2,
+            "steps_per_print": 10**9,
+            "bf16": {
+                "enabled": True
+            },
+            "data_types": {
+                "grad_accum_dtype": "fp32"
+            },
+            "zero_optimization": {
+                "stage": 1
+            },
+            "optimizer": {
+                "type": "Muon",
+                "params": {
+                    "lr": 1e-3,
+                    "momentum": 0.95,
+                    "per_head_muon": True
+                }
+            },
+        }
+        # Only the tagged q_proj matters here, so the model is the one the padded test above uses.
+        model = _PaddedAttn()
+        engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config)
+        assert isinstance(engine.optimizer, BF16_Optimizer), f"this ran {type(engine.optimizer).__name__}"
 
         x = torch.randn(2, 63, device=engine.device, dtype=torch.bfloat16)
         engine.backward(engine(x, torch.randn_like(x)))
