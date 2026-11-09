@@ -716,9 +716,8 @@ class DeepSpeedConfig(object):
                 ZeroStageEnum.optimizer_states, ZeroStageEnum.gradients,
                 ZeroStageEnum.weights), "bf16_optimizer_states is only supported with ZeRO Stage 1, 2, or 3."
             assert self.bfloat16_config.bf16_master_weights_and_grads, "bf16_optimizer_states requires bf16_master_weights_and_grads to be enabled."
-        if (self.grad_accum_dtype is not None and DtypeEnum(self.grad_accum_dtype).value == torch.float32
-                and (self.float16_config.fp16_master_weights_and_grads
-                     or self.bfloat16_config.bf16_master_weights_and_grads)):
+        if (self.grad_accum_dtype is not None and DtypeEnum(self.grad_accum_dtype).value == torch.float32 and
+            (self.float16_config.fp16_master_weights_and_grads or self.bfloat16_config.bf16_master_weights_and_grads)):
             raise ValueError("data_types.grad_accum_dtype='fp32' is incompatible with "
                              "fp16/bf16_master_weights_and_grads: the optimizer step runs in the master dtype, "
                              "so the extra accumulation precision is discarded. Use an fp32 master, or omit "
