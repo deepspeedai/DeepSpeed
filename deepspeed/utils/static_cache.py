@@ -134,16 +134,17 @@ class DeepSpeedStaticLayer:
         return self._write_position
 
     def get_seq_length(self) -> int | torch.Tensor:
-        # The write position doubles as the cached-token count (HF
-        # cumulative_length semantics): the next token is written AT this
-        # index, so the count of already-cached tokens equals it. Returning
-        # +1 here shifts every model-derived decode position by one and
-        # mis-ropes the stored keys. Kept as a tensor expression: this is
-        # read inside captured regions and must not sync.
+        # Transformers >= 5.20 cache protocol (#8852): the length counts the
+        # slot the current query is writing, so it is one past the write
+        # position; position/mask math must use get_query_offset() instead
+        # (it returns the write position itself). Our decode paths pass
+        # cache_position/position_ids explicitly, so this value never feeds
+        # RoPE. Kept as a tensor expression: this is read inside captured
+        # regions and must not sync.
         if not self.is_initialized:
             return 0
         if self._write_position is not None:
-            return self._write_position
+            return self._write_position + 1
         return 0
 
     def get_max_cache_shape(self) -> int:
