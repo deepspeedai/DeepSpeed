@@ -158,6 +158,9 @@ class PartitionedParameterCoordinator:
         # In-progress backward submodules keyed by ds_id. A dict (not LIFO deque) lets release
         # remove a specific module, since multi-tensor z3-leaf hooks fire out of reverse order.
         self.__active_backward_submodules: Dict[int, Module] = {}
+        # Cache per instance: a class-level lru_cache keys on self and would keep every coordinator,
+        # and the modules and parameters it references, alive for the life of the process.
+        self.__params_to_release = functools.lru_cache(maxsize=None)(self.__params_to_release)
 
     """Tracing and Tracking
     TODO. consider performing trace before initializing PartitionedParameterCoordinator
@@ -630,7 +633,6 @@ class PartitionedParameterCoordinator:
             self.__n_available_params -= param.ds_numel
 
     @instrument_w_nvtx
-    @functools.lru_cache(maxsize=None)
     def __params_to_release(self, submodule_to_release: Module, step_id: int) -> Set[int]:
         if not self.is_complete_trace():
             raise RuntimeError("expected trace to be complete")

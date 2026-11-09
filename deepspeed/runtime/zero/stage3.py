@@ -538,6 +538,9 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
     def destroy(self):
         self.parameter_offload.destroy()
+        for p in self.module.parameters():
+            if getattr(p, '_z3_optimizer', None) is self:
+                p._z3_optimizer = None
         self._clear_muon_allgather_buffers()
         for hook in self._grad_acc_hooks:
             hook.remove()

@@ -280,6 +280,16 @@ class DeepSpeedZeRoOffload(object):
 
     def destroy(self):
         self._remove_module_hooks()
+        # setup_zero_stage3_hooks() pushed the top module onto this process-wide stack; without
+        # popping it, every destroyed model (and the engine its hooks reference) stays alive.
+        # Pop it only once: after a newer engine wraps the same module, a repeated destroy() would
+        # otherwise remove that engine's entry.
+        if self._has_fwd_stack_entry:
+            for i, module in enumerate(FWD_MODULE_STACK):
+                if module is self.module:
+                    del FWD_MODULE_STACK[i]
+                    break
+            self._has_fwd_stack_entry = False
 
     def _remove_module_hooks(self):
         num_forward_hooks = len(self.forward_hooks)
@@ -313,6 +323,7 @@ class DeepSpeedZeRoOffload(object):
         # Add top module to stack trace
         global FWD_MODULE_STACK
         FWD_MODULE_STACK.append(self.module)
+        self._has_fwd_stack_entry = True
 
     def mark_persistent_parameters(self, param_threshold, model_threshold):
         persistent_params = []

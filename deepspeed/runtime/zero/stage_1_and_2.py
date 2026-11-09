@@ -759,6 +759,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             for p in self.bit16_groups[i]:
                 if getattr(p, '_hp_mapping', None):
                     p._hp_mapping = None
+                if getattr(p, '_zero_optimizer', None) is self:
+                    del p._zero_optimizer
         for hook in self._grad_acc_hooks:
             hook.remove()
         self.print_rank_0("Removed grad acc hooks")
