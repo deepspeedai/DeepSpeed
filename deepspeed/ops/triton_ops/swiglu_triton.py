@@ -437,10 +437,15 @@ if _TRITON_AVAILABLE:
 
 def _swiglu_clamped_eager(gate: torch.Tensor, up: torch.Tensor, alpha: float, limit: float, oai: bool) -> torch.Tensor:
     """Pure-PyTorch reference used as the non-Triton fallback."""
+    if oai:
+        # Only this form scales the gate before the sigmoid: in the input dtype that product
+        # rounds first and the sigmoid amplifies it, past the single rounding the kernel costs.
+        dtype = gate.dtype
+        gate = gate.float().clamp(max=limit)
+        up = up.float().clamp(min=-limit, max=limit)
+        return ((up + 1.0) * (gate * torch.sigmoid(gate * alpha))).to(dtype)
     gate = gate.clamp(max=limit)
     up = up.clamp(min=-limit, max=limit)
-    if oai:
-        return (up + 1.0) * (gate * torch.sigmoid(gate * alpha))
     return F.silu(gate) * up
 
 

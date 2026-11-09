@@ -51,7 +51,9 @@ def make_optimizer(dtype=torch.bfloat16, device=None, low_precision=False, cpu_o
     opt._pending_offload_events = {}
     opt._offload_accumulated_param_ids = set()
     opt._offload_partition_only_param_ids = set()
-    opt.accumulated_grads_in_cpu = {}
+    # The group accumulator is created on the first non-boundary accumulation.
+    opt.accumulated_grads_in_cpu = [None]
+    opt.partition_size = [8]
     opt.norm_for_param_grads = {}
     opt.local_overflow = False
     opt.overflow = False
@@ -65,6 +67,7 @@ def make_optimizer(dtype=torch.bfloat16, device=None, low_precision=False, cpu_o
     opt.param_id = {id(param): 0}
     opt.grad_position = {0: [0, 0, 0, 8]}
     opt.bit16_groups = [[param]]
+    opt.bit16_groups_flat = [param.detach()]
     opt.params_in_partition = [[param]]
     opt.params_already_reduced = [False]
     opt.extra_large_param_to_reduce = {}
@@ -175,10 +178,9 @@ def test_single_boundary_offload_avoids_auxiliary_storage_and_copy(monkeypatch, 
         with monkeypatch.context() as patch:
             patch.setattr(torch.Tensor, "copy_", count_copy)
             backward_values(opt, param, [value], [True])
-        # Pin the resource regression: one partition copy, no additional host storage.
+        # Pin the resource regression: one partition copy, and no host accumulator is allocated.
         assert copies == [master.grad.data_ptr()]
-        for buffer in opt.accumulated_grads_in_cpu.values():
-            assert buffer.untyped_storage().data_ptr() == master.grad.untyped_storage().data_ptr()
+        assert opt.accumulated_grads_in_cpu[0] is None
         assert torch.equal(master.grad, torch.full_like(master, value))
         opt.finalize_gradient_accumulation_boundary()
         opt.step()
@@ -377,7 +379,7 @@ def test_cpu_accumulator_waits_before_pageable_source_is_read(first_boundary):
     def complete_copy():
         if first_boundary:
             master.grad.fill_(3)
-        if 0 in opt.accumulated_grads_in_cpu:
+        if opt.accumulated_grads_in_cpu[0] is not None:
             opt.accumulated_grads_in_cpu[0].fill_(3)
 
     event = FakeEvent(complete_copy)
@@ -483,6 +485,75 @@ def test_offload_first_use_after_another_backward_starts_fresh(monkeypatch, low_
     opt.finalize_gradient_accumulation_boundary()
     opt.step()
     ref.grad = torch.full_like(ref, 3)
+    ref_optimizer.step()
+    assert torch.equal(master, ref)
+
+
+@pytest.mark.parametrize("low_precision", [False, True], ids=["fp32-master", "bf16-master"])
+def test_idle_parameter_window_does_not_reuse_previous_gradient(monkeypatch, low_precision):
+    opt, param, master = make_optimizer(low_precision=low_precision)
+    prepare_step(opt, param, master, monkeypatch)
+    ref = torch.nn.Parameter(master.detach().clone())
+    ref_optimizer = torch.optim.Adam([ref], lr=0.01)
+
+    backward_values(opt, param, [2], [True])
+    opt.step()
+    ref.grad = torch.full_like(ref, 2)
+    ref_optimizer.step()
+    assert torch.equal(master, ref)
+
+    # The parameter receives no gradient in this window, so the optimizer must see zero, not the stale sum.
+    opt.micro_step_id = 0
+    opt.set_gradient_accumulation_boundary(True)
+    opt.step()
+    ref.grad = torch.zeros_like(ref)
+    ref_optimizer.step()
+    assert torch.equal(master, ref)
+
+
+@pytest.mark.parametrize("low_precision", [False, True], ids=["fp32-master", "bf16-master"])
+def test_idle_parameter_stays_zero_beside_active_neighbor(monkeypatch, low_precision):
+    opt, first, _ = make_optimizer(low_precision=low_precision)
+    dtype, device = first.dtype, first.device
+    second = torch.nn.Parameter(torch.zeros_like(first))
+    second.param_idx_in_group = 1
+    opt.param_id[id(second)] = 1
+    # Both parameters write neighboring slices of one group buffer and one partition gradient.
+    opt.grad_position = {0: [0, 0, 0, 8], 1: [0, 0, 8, 8]}
+    opt.bit16_groups = [[first, second]]
+    opt.params_in_partition = [[first, second]]
+    opt.params_already_reduced = [False, False]
+    opt.partition_size = [16]
+    master = torch.nn.Parameter(torch.zeros(16, dtype=opt.master_weights_and_grads_dtype))
+    master.grad = torch.zeros_like(master)
+    opt.single_partition_of_fp32_groups = [master]
+    prepare_step(opt, first, master, monkeypatch)
+    opt.parallel_partitioned_bit16_groups = [[torch.zeros(16, dtype=dtype, device=device)]]
+    opt.param_buffer_of_bit16_for_cpu_offload_groups = [torch.zeros(16, dtype=dtype, device=device)]
+    opt.bit16_groups_flat = [torch.zeros(16, dtype=dtype, device=device)]
+    ref = torch.nn.Parameter(master.detach().clone())
+    ref_optimizer = torch.optim.Adam([ref], lr=0.01)
+
+    def window(grads):
+        for micro_step, boundary in enumerate([False, True]):
+            opt.micro_step_id = micro_step
+            opt.set_gradient_accumulation_boundary(boundary)
+            for param, values in grads:
+                param.grad = torch.full_like(param, values[micro_step])
+                opt.copy_grads_in_partition(param)
+                param.grad = None
+        opt._wait_for_offload_copies()
+        opt.finalize_gradient_accumulation_boundary()
+        opt.step()
+
+    window([(first, [1, 3]), (second, [2, 4])])
+    ref.grad = torch.cat([torch.full((8, ), 4.0), torch.full((8, ), 6.0)]).to(ref.dtype)
+    ref_optimizer.step()
+    assert torch.equal(master, ref)
+
+    # Only the first parameter runs; the idle neighbor's slice must reach Adam as zero, not its previous sum.
+    window([(first, [5, 7])])
+    ref.grad = torch.cat([torch.full((8, ), 12.0), torch.zeros(8)]).to(ref.dtype)
     ref_optimizer.step()
     assert torch.equal(master, ref)
 

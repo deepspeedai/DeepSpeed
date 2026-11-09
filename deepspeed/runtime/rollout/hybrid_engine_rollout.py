@@ -6,12 +6,13 @@
 Two generation paths:
   1. **model.generate()** (default): delegates to HuggingFace generate.
      Supports sampling (temperature, top_p) and greedy.
-  2. **graph capture + DeepSpeedStaticCache**: only for greedy (temperature=0).
-     Pre-allocates a StaticCache, captures the decode forward pass into a
-     graph, and replays it for each decode step.  Eliminates kernel launch
-     overhead.
-  3. **continuous batching (experimental)**: an opt-in bounded greedy path
-     selected through ``SamplingConfig.continuous_batch_size``.
+  2. **graph capture + DeepSpeedStaticCache**: greedy and sampling
+     (temperature, top_k, top_p). Pre-allocates a StaticCache, captures the
+     decode forward pass into a graph, and replays it for each decode
+     step.  Eliminates kernel launch overhead.
+  3. **continuous batching (experimental)**: an opt-in bounded path
+     selected through ``SamplingConfig.continuous_batch_size``; greedy or
+     sampled like the graph path, with or without graph capture.
 """
 
 import time
@@ -25,6 +26,7 @@ import torch
 from deepspeed.accelerator import get_accelerator
 from deepspeed.runtime.rollout.base import RolloutBatch, RolloutEngine, RolloutRequest, SamplingConfig
 from deepspeed.runtime.rollout.continuous_batching import ContinuousBatchRequest, ContinuousBatchScheduler
+from deepspeed.utils import logger
 
 
 class _ForwardProfiler:
@@ -169,11 +171,18 @@ class HybridEngineRollout(RolloutEngine):
             accelerator.synchronize()
             expansion_end = time.perf_counter()
 
-        is_greedy = sampling.temperature <= 0.0
+        use_graph_capture = self.use_graph_capture
+        if use_graph_capture and not get_accelerator().is_graph_capture_supported():
+            # Same opt-in as the HybridEngine graph cache and the continuous
+            # rollout path: falling back keeps backends that only expose a
+            # graph API on the eager path.
+            logger.warning_once("HybridEngineRollout: graph capture is not supported on the current accelerator; "
+                                "falling back to eager generation.")
+            use_graph_capture = False
 
         forward_profiler = None
         forward_profile_handles = []
-        if self.enable_profiling and not (self.use_graph_capture and is_greedy):
+        if self.enable_profiling and not use_graph_capture:
             forward_profiler = _ForwardProfiler(accelerator)
             forward_profile_handles = forward_profiler.register(module)
 
@@ -184,25 +193,19 @@ class HybridEngineRollout(RolloutEngine):
                     raise RuntimeError("Shared prefill does not support graph capture")
                 self.engine.prepare_shared_prefill(B, n, prompt_len)
                 shared_prefill_handles = self._register_shared_prefill_hooks(module, B, n)
-            if self.use_graph_capture and is_greedy:
+            if use_graph_capture:
                 output_ids = self._generate_graph(prompt_ids, prompt_attn, max_new_tokens, pad_token_id, module,
-                                                  device)
+                                                  device, sampling)
             else:
-                temperature = max(sampling.temperature, 1e-8)
-                do_sample = not is_greedy
                 generate_kwargs = {
                     "attention_mask": prompt_attn,
                     "max_new_tokens": max_new_tokens,
                     # ZeRO-3 gathers parameters during each decode forward, so every
                     # data-parallel rank must execute the same number of iterations.
                     "eos_token_id": None,
-                    "do_sample": do_sample,
-                    "temperature": temperature if do_sample else 1.0,
-                    "top_p": sampling.top_p if do_sample else 1.0,
                     "pad_token_id": pad_token_id,
+                    **self._hf_sampling_kwargs(sampling),
                 }
-                if do_sample:
-                    generate_kwargs["top_k"] = max(sampling.top_k, 0)
                 output_ids = module.generate(prompt_ids, **generate_kwargs)
         finally:
             for handle in shared_prefill_handles:
@@ -282,21 +285,29 @@ class HybridEngineRollout(RolloutEngine):
 
     @torch.no_grad()
     def _generate_continuous(self, request, sampling, max_batch_size):
-        """Generate independent greedy requests in an experimental continuous batch.
+        """Generate independent requests in an experimental continuous batch.
 
-        Continuous batching currently requires one prompt row per request and
-        greedy decoding. Completed rows retire immediately and pending prompts
-        prefill into the released rows before the next decode step.
+        Continuous batching currently requires one prompt row per request.
+        Completed rows retire immediately and pending prompts prefill into the
+        released rows before the next decode step.
         """
         original_request = request
         requests = tuple(
             RolloutRequest(request.prompt_ids[index:index + 1], request.prompt_attention_mask[index:index + 1])
             for index in range(request.prompt_ids.shape[0]))
         self._validate_continuous_inputs(requests, sampling, max_batch_size)
-        if self.use_graph_capture:
+        use_graph_capture = self.use_graph_capture
+        if use_graph_capture and not get_accelerator().is_graph_capture_supported():
+            # The eager continuous path is a full fallback, so keep it instead
+            # of aborting when the backend has not opted into graph capture.
+            logger.warning_once("HybridEngineRollout: graph capture is not supported on the current accelerator; "
+                                "falling back to eager continuous batching.")
+            use_graph_capture = False
+        if use_graph_capture:
             return self._generate_continuous_graph(original_request, requests, sampling, max_batch_size)
 
         module = self.engine.module
+        select_next_tokens = self._token_selector(sampling)
         profile = self._start_continuous_profile() if self.enable_profiling else None
         profile_accelerator = profile["accelerator"] if profile is not None else None
         profile_start = profile["start"] if profile is not None else None
@@ -463,6 +474,7 @@ class HybridEngineRollout(RolloutEngine):
                 prompt_lengths,
                 model_dtype,
                 device,
+                sampling,
                 self.align_decode_fronts,
                 profile,
             )
@@ -501,6 +513,7 @@ class HybridEngineRollout(RolloutEngine):
                     request_by_id,
                     responses,
                     module,
+                    select_next_tokens,
                 )
                 stats["decode_steps"] += 1
                 decoded_tokens = dict(zip(survivor_ids, decoded.split(1, dim=0)))
@@ -545,7 +558,7 @@ class HybridEngineRollout(RolloutEngine):
 
     @torch.no_grad()
     def _generate_continuous_graph(self, original_request, requests, sampling, max_batch_size):
-        """Run continuous greedy decoding with a fixed-capacity graph.
+        """Run continuous decoding with a fixed-capacity graph.
 
         Scheduler slots stay attached to physical cache rows for their whole
         lifetime. Retired rows are masked until a new prompt is prefetched into
@@ -553,6 +566,7 @@ class HybridEngineRollout(RolloutEngine):
         static tensor addresses.
         """
         module = self.engine.module
+        select_next_tokens = self._token_selector(sampling)
         prompt_len = requests[0].prompt_ids.shape[1]
         self._validate_continuous_graph_options(prompt_len, sampling)
         if getattr(module, "_supports_cache_class", None) is False:
@@ -561,8 +575,6 @@ class HybridEngineRollout(RolloutEngine):
         if getattr(module.config, "_attn_implementation", None) == "flash_attention_2":
             raise ValueError("continuous graph capture does not support flash_attention_2")
         device = requests[0].prompt_ids.device
-        if get_accelerator().create_graph() is None:
-            raise ValueError("continuous graph capture is not supported on the current accelerator")
 
         from transformers import StaticCache
         from deepspeed.utils.static_cache import DeepSpeedStaticCache
@@ -659,6 +671,7 @@ class HybridEngineRollout(RolloutEngine):
                     prompt_lengths,
                     model_dtype,
                     device,
+                    sampling,
                     profile=profile,
                     target_slots=tuple(admitted_slots),
                 )
@@ -694,6 +707,7 @@ class HybridEngineRollout(RolloutEngine):
                     request_by_id,
                     responses,
                     module,
+                    select_next_tokens,
                 )
                 for request_id, token in zip(decode_ids, decoded.split(1, dim=0)):
                     decoded_tokens[request_id] = token
@@ -901,8 +915,6 @@ class HybridEngineRollout(RolloutEngine):
         device = requests[0].prompt_ids.device
         if sampling.max_new_tokens <= 0:
             raise ValueError("max_new_tokens must be positive")
-        if sampling.temperature > 0:
-            raise ValueError("continuous batching currently supports greedy decoding only")
         if sampling.n_samples_per_prompt != 1:
             raise ValueError("continuous batching currently supports one sample per prompt")
         for request in requests:
@@ -936,6 +948,7 @@ class HybridEngineRollout(RolloutEngine):
                             prompt_lengths,
                             model_dtype,
                             device,
+                            sampling,
                             align_decode_fronts=False,
                             profile=None,
                             target_slots=None):
@@ -960,6 +973,7 @@ class HybridEngineRollout(RolloutEngine):
                 prompt_attention,
                 model_dtype,
                 device,
+                sampling,
             )
             self._profile_end(profile, "prefill_forward_ms", prefill_start, count="num_prefill_forwards")
             cache_copy_start = self._profile_start(profile)
@@ -994,6 +1008,7 @@ class HybridEngineRollout(RolloutEngine):
                 prompt_attention,
                 model_dtype,
                 device,
+                sampling,
             )
             self._profile_end(profile, "prefill_forward_ms", prefill_start, count="num_prefill_forwards")
             cache_copy_start = self._profile_start(profile)
@@ -1075,7 +1090,8 @@ class HybridEngineRollout(RolloutEngine):
             "continuous_batch_size": max_batch_size,
         }
 
-    def _continuous_prefill_cache(self, module, static_cache_type, prompt_ids, prompt_attention, model_dtype, device):
+    def _continuous_prefill_cache(self, module, static_cache_type, prompt_ids, prompt_attention, model_dtype, device,
+                                  sampling):
         position_ids = self._prefill_position_ids(prompt_attention)
         if getattr(module, "_supports_cache_class", None) is None:
             pad_token_id = self.tokenizer.pad_token_id
@@ -1086,10 +1102,10 @@ class HybridEngineRollout(RolloutEngine):
                 attention_mask=prompt_attention,
                 position_ids=position_ids,
                 max_new_tokens=1,
-                do_sample=False,
                 eos_token_id=None,
                 pad_token_id=pad_token_id,
                 return_dict_in_generate=True,
+                **self._hf_sampling_kwargs(sampling),
             )
             return prefill_output.sequences[:, -1:], prefill_output.past_key_values
 
@@ -1106,25 +1122,86 @@ class HybridEngineRollout(RolloutEngine):
             position_ids=position_ids,
             **self._last_logits_kwargs(module),
         )
-        return prefill_output.logits[:, -1, :].argmax(dim=-1, keepdim=True), prefill_cache
+        logits = self._apply_repetition_penalty(prefill_output.logits[:, -1, :], prompt_ids,
+                                                self._repetition_penalty(module))
+        return self._token_selector(sampling)(logits), prefill_cache
 
     @staticmethod
-    def _continuous_next_tokens(logits, request_ids, request_by_id, responses, module):
+    def _repetition_penalty(module):
         repetition_penalty = getattr(getattr(module, "generation_config", None), "repetition_penalty", 1.0)
-        if repetition_penalty is None:
-            repetition_penalty = 1.0
-        if repetition_penalty == 1.0:
-            return logits.argmax(dim=-1, keepdim=True)
+        return 1.0 if repetition_penalty is None else repetition_penalty
 
-        next_tokens = []
-        for row, request_id in enumerate(request_ids):
-            input_ids = torch.cat((request_by_id[request_id].prompt_ids, *responses[request_id]), dim=1)
-            row_logits = logits[row:row + 1].clone()
-            scores = row_logits.gather(1, input_ids)
-            scores = torch.where(scores < 0, scores * repetition_penalty, scores / repetition_penalty)
-            row_logits.scatter_(1, input_ids, scores)
-            next_tokens.append(row_logits.argmax(dim=-1, keepdim=True))
-        return torch.cat(next_tokens, dim=0)
+    @staticmethod
+    def _apply_repetition_penalty(logits, input_ids, repetition_penalty):
+        """Penalize the tokens of ``input_ids`` in last-position ``logits``, without changing ``logits``.
+
+        generate() applies the penalty in float32, before the sampling warpers, so it shapes the sampled distribution.
+        """
+        if repetition_penalty == 1.0:
+            return logits
+        logits = logits.float()
+        scores = logits.gather(1, input_ids)
+        scores = torch.where(scores < 0, scores * repetition_penalty, scores / repetition_penalty)
+        return logits.scatter(1, input_ids, scores)
+
+    @classmethod
+    def _continuous_next_tokens(cls, logits, request_ids, request_by_id, responses, module, select_next_tokens):
+        repetition_penalty = cls._repetition_penalty(module)
+        if repetition_penalty != 1.0:
+            logits = torch.cat([
+                cls._apply_repetition_penalty(
+                    logits[row:row + 1],
+                    torch.cat((request_by_id[request_id].prompt_ids, *responses[request_id]), dim=1),
+                    repetition_penalty,
+                ) for row, request_id in enumerate(request_ids)
+            ],
+                               dim=0)
+        return select_next_tokens(logits)
+
+    @staticmethod
+    def _hf_sampling_kwargs(sampling):
+        """Hugging Face ``generate()`` arguments for ``sampling``; ``temperature <= 0`` is greedy."""
+        if sampling.temperature <= 0.0:
+            return {"do_sample": False, "temperature": 1.0, "top_p": 1.0}
+        return {
+            "do_sample": True,
+            "temperature": sampling.temperature,
+            "top_p": sampling.top_p,
+            "top_k": max(sampling.top_k, 0),
+        }
+
+    @staticmethod
+    def _token_selector(sampling):
+        """Return a function that picks the next tokens ``[B, 1]`` from last-position logits ``[B, V]``.
+
+        Tokens are picked after each forward or graph replay, outside any
+        captured graph. Sampling applies Hugging Face's temperature, top-k and
+        top-p warpers in the order ``generate()`` applies them, so every path
+        draws from the same distribution as ``generate()``.
+        """
+        if sampling.temperature <= 0.0:
+            return lambda logits: logits.argmax(dim=-1, keepdim=True)
+
+        from transformers.generation.logits_process import (TemperatureLogitsWarper, TopKLogitsWarper,
+                                                            TopPLogitsWarper)
+
+        warpers = []
+        if sampling.temperature != 1.0:
+            warpers.append(TemperatureLogitsWarper(sampling.temperature))
+        if sampling.top_k > 0:
+            warpers.append(TopKLogitsWarper(top_k=sampling.top_k))
+        if sampling.top_p < 1.0:
+            warpers.append(TopPLogitsWarper(top_p=sampling.top_p))
+
+        def sample(logits):
+            # generate() also warps and samples in float32.
+            scores = logits.float()
+            for warper in warpers:
+                # The warpers read only the scores, not the generated ids.
+                scores = warper(None, scores)
+            return torch.multinomial(torch.softmax(scores, dim=-1), num_samples=1)
+
+        return sample
 
     @staticmethod
     def _prefill_position_ids(attention_mask):
@@ -1300,19 +1377,30 @@ class HybridEngineRollout(RolloutEngine):
         return output_ids, response_attn.long()
 
     # ------------------------------------------------------------------
-    # Graph capture decode loop (greedy only)
+    # Graph capture decode loop
     # ------------------------------------------------------------------
 
-    def _generate_graph(self, prompt_ids, prompt_attn, max_new_tokens, pad_token_id, module, device):
-        """Greedy decode with DeepSpeedStaticCache + graph capture."""
+    def _generate_graph(self, prompt_ids, prompt_attn, max_new_tokens, pad_token_id, module, device, sampling):
+        """Decode with DeepSpeedStaticCache + graph capture, greedy or sampled per ``sampling``."""
         from transformers import StaticCache
         from deepspeed.utils.static_cache import DeepSpeedStaticCache
+
+        if getattr(module.config, "_attn_implementation", None) == "flash_attention_2":
+            raise ValueError("graph capture does not support flash_attention_2")
 
         batch_size = prompt_ids.shape[0]
         prompt_len = prompt_ids.shape[1]
         max_len = prompt_len + max_new_tokens
         eos_token_id = self.tokenizer.eos_token_id
         model_dtype = next(module.parameters()).dtype
+        select_next_tokens = self._token_selector(sampling)
+        repetition_penalty = self._repetition_penalty(module)
+        output_ids = [prompt_ids]
+
+        def next_tokens(logits):
+            if repetition_penalty != 1.0:
+                logits = self._apply_repetition_penalty(logits, torch.cat(output_ids, dim=1), repetition_penalty)
+            return select_next_tokens(logits)
 
         # --- Prefill with HF StaticCache (correct attention semantics) ---
         prefill_cache = self._create_static_cache(StaticCache, module.config, batch_size, max_len, device, model_dtype)
@@ -1326,7 +1414,8 @@ class HybridEngineRollout(RolloutEngine):
             cache_position=torch.arange(prompt_len, device=device),
             **self._last_logits_kwargs(module),
         )
-        next_token = prefill_out.logits[:, -1, :].argmax(dim=-1, keepdim=True)
+        next_token = next_tokens(prefill_out.logits[:, -1, :])
+        output_ids.append(next_token)
 
         # --- Copy prefill KV into DeepSpeedStaticCache ---
         write_pos = torch.tensor(prompt_len - 1, dtype=torch.long, device=device)
@@ -1347,13 +1436,17 @@ class HybridEngineRollout(RolloutEngine):
             ds_layer.keys[:, :, :prompt_len, :].copy_(hf_keys[:, :, :prompt_len, :])
             ds_layer.values[:, :, :prompt_len, :].copy_(hf_values[:, :, :prompt_len, :])
 
-        output_ids = [prompt_ids, next_token]
-
         # --- Static buffers for graph capture ---
         static_token = torch.zeros(batch_size, 1, dtype=torch.long, device=device)
         static_attn = torch.zeros(batch_size, max_len, dtype=torch.long, device=device)
         static_attn[:, :prompt_len] = prompt_attn
         static_attn[:, prompt_len] = 1  # first decode position
+        # Transformers builds its SDPA mask from a 2-D attention_mask with host-side checks
+        # (``padding_mask.all()`` in ``_ignore_causal_mask_sdpa``). Those synchronize the stream and
+        # invalidate CUDA graph capture, so the captured forward receives a pre-built 4-D additive
+        # mask instead, as the continuous graph path does; each decode step unmasks one more column.
+        static_causal_attn = torch.zeros((batch_size, 1, 1, max_len), dtype=model_dtype, device=device)
+        self._update_static_causal_attention(static_attn, static_causal_attn)
         static_pos = torch.tensor(prompt_len, dtype=torch.long, device=device)
         static_cache_pos = static_pos.unsqueeze(0)  # [1] for cache_position
         static_pos_ids = static_pos.reshape(1, 1).expand(batch_size, 1)  # [batch, 1]
@@ -1375,7 +1468,7 @@ class HybridEngineRollout(RolloutEngine):
                 for _ in range(3):
                     out = module(
                         static_token,
-                        attention_mask=static_attn,
+                        attention_mask=static_causal_attn,
                         past_key_values=ds_cache,
                         use_cache=True,
                         cache_position=static_cache_pos,
@@ -1388,7 +1481,7 @@ class HybridEngineRollout(RolloutEngine):
             with get_accelerator().capture_to_graph(graph):
                 out = module(
                     static_token,
-                    attention_mask=static_attn,
+                    attention_mask=static_causal_attn,
                     past_key_values=ds_cache,
                     use_cache=True,
                     cache_position=static_cache_pos,
@@ -1413,10 +1506,11 @@ class HybridEngineRollout(RolloutEngine):
             static_cache_pos.fill_(pos)
             static_pos_ids.fill_(pos)
             static_attn[:, pos] = 1
+            self._update_static_causal_attention(static_attn, static_causal_attn)
 
             # Replay
             get_accelerator().replay_graph(graph)
-            next_token = static_logits[:, -1, :].argmax(dim=-1, keepdim=True)
+            next_token = next_tokens(static_logits[:, -1, :])
             output_ids.append(next_token)
             eos_mask |= (next_token.squeeze(1) == eos_token_id)
 
