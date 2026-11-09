@@ -24,11 +24,9 @@ from typing import Optional
 import torch
 
 from deepspeed.accelerator import get_accelerator
-import logging
-
-logger = logging.getLogger(__name__)
 from deepspeed.runtime.rollout.base import RolloutBatch, RolloutEngine, RolloutRequest, SamplingConfig
 from deepspeed.runtime.rollout.continuous_batching import ContinuousBatchRequest, ContinuousBatchScheduler
+from deepspeed.utils import logger
 
 
 class _ForwardProfiler:
@@ -226,10 +224,11 @@ class HybridEngineRollout(RolloutEngine):
         # token selector runs outside the captured graph (~0.9% decode cost).
         use_graph_capture = self.use_graph_capture
         if use_graph_capture and not get_accelerator().is_graph_capture_supported():
-            import logging
-            logging.getLogger(__name__).warning(
-                "HybridEngineRollout: graph capture is not supported on the current accelerator; "
-                "falling back to eager generation.")
+            # Same opt-in as the HybridEngine graph cache and the continuous
+            # rollout path: falling back keeps backends that only expose a
+            # graph API on the eager path.
+            logger.warning_once("HybridEngineRollout: graph capture is not supported on the current accelerator; "
+                                "falling back to eager generation.")
             use_graph_capture = False
 
         forward_profiler = None
@@ -366,7 +365,14 @@ class HybridEngineRollout(RolloutEngine):
             RolloutRequest(request.prompt_ids[index:index + 1], request.prompt_attention_mask[index:index + 1])
             for index in range(request.prompt_ids.shape[0]))
         self._validate_continuous_inputs(requests, sampling, max_batch_size)
-        if self.use_graph_capture:
+        use_graph_capture = self.use_graph_capture
+        if use_graph_capture and not get_accelerator().is_graph_capture_supported():
+            # The eager continuous path is a full fallback, so keep it instead
+            # of aborting when the backend has not opted into graph capture.
+            logger.warning_once("HybridEngineRollout: graph capture is not supported on the current accelerator; "
+                                "falling back to eager continuous batching.")
+            use_graph_capture = False
+        if use_graph_capture:
             return self._generate_continuous_graph(original_request, requests, sampling, max_batch_size)
 
         module = self.engine.module
@@ -1448,6 +1454,9 @@ class HybridEngineRollout(RolloutEngine):
         """Decode with DeepSpeedStaticCache + graph capture, greedy or sampled per ``sampling``."""
         from transformers import StaticCache
         from deepspeed.utils.static_cache import DeepSpeedStaticCache
+
+        if getattr(module.config, "_attn_implementation", None) == "flash_attention_2":
+            raise ValueError("graph capture does not support flash_attention_2")
 
         batch_size = prompt_ids.shape[0]
         prompt_len = prompt_ids.shape[1]
