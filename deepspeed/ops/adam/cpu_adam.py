@@ -151,7 +151,6 @@ class DeepSpeedCPUAdam(DeepSpeedCPUOptimizer):
                 state = self.state[p]
                 # State initialization
                 if len(state) == 0:
-                    #print(f'group {group_id} param {param_id} = {p.numel()}')
                     state['step'] = 0
 
                     #use full precision by default unless self.fp32_optimizer_states is off
@@ -159,10 +158,8 @@ class DeepSpeedCPUAdam(DeepSpeedCPUOptimizer):
 
                     # gradient momentums
                     state['exp_avg'] = torch.zeros_like(p.data, dtype=state_dtype, device=device)
-                    #memory_format=torch.preserve_format)
                     # gradient variances
                     state['exp_avg_sq'] = torch.zeros_like(p.data, dtype=state_dtype, device=device)
-                    #memory_format=torch.preserve_format)
 
                 state['step'] += 1
                 beta1, beta2 = group['betas']

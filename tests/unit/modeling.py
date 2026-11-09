@@ -39,25 +39,9 @@ from torch.nn import Module
 import torch.nn.functional as F
 import torch.nn.init as init
 
-#from numba import cuda
-
-#from deepspeed_cuda import DeepSpeedSoftmaxConfig, DeepSpeedSoftmax
 from deepspeed.accelerator import get_accelerator
 
 logger = logging.getLogger(__name__)
-"""
-@torch.jit.script
-def f_gelu(x):
-    return x * 0.5 * (1.0 + torch.erf(x / 1.41421))
-@torch.jit.script
-def bias_gelu(bias, y):
-    x = bias + y
-    return x * 0.5 * (1.0 + torch.erf(x / 1.41421))
-@torch.jit.script
-def bias_tanh(bias, y):
-    x = bias + y
-    return torch.tanh(x)
- """
 
 
 def f_gelu(x):
@@ -133,14 +117,8 @@ class LinearActivation(Module):
                 self.act_fn = ACT2FN[act]
         else:
             self.act_fn = act
-        #self.weight = Parameter(torch.Tensor(out_features, in_features))
         self.weight = weights[5]
         self.bias = biases[5]
-        #if bias:
-        #    self.bias = Parameter(torch.Tensor(out_features))
-        #else:
-        #    self.register_parameter('bias', None)
-        #self.reset_parameters()
 
     def reset_parameters(self):
         init.kaiming_uniform_(self.weight, a=math.sqrt(5))
@@ -151,14 +129,8 @@ class LinearActivation(Module):
 
     def forward(self, input):
         if self.fused_gelu:
-            #timing = []
-            #t1 = GPUTimer()
-            #t1.record()
             y = F.linear(input, self.weight, None)
-            #timing.append(t1.elapsed())
-            #t1.record()
             bg = bias_gelu(self.bias, y)
-            #timing.append(t1.elapsed())
             return bg
         elif self.fused_tanh:
             return bias_tanh(self.bias, F.linear(input, self.weight, None))
@@ -287,15 +259,6 @@ class BertSelfAttention(nn.Module):
 
         self.dropout = nn.Dropout(config.attention_probs_dropout_prob)
         self.softmax = nn.Softmax(dim=-1)
-        #self.softmax_config = DeepSpeedSoftmaxConfig()
-        #self.softmax_config.batch_size = config.batch_size
-        #self.softmax_config.max_seq_length = config.max_position_embeddings
-        #self.softmax_config.hidden_size = config.hidden_size
-        #self.softmax_config.heads = config.num_attention_heads
-        #self.softmax_config.softmax_id = i
-        #self.softmax_config.fp16 = config.fp16
-        #self.softmax_config.prob_drop_out = 0.0
-        #self.softmax = DeepSpeedSoftmax(i, self.softmax_config)
 
     def transpose_for_scores(self, x):
         new_x_shape = x.size()[:-1] + (self.num_attention_heads, self.attention_head_size)
@@ -422,10 +385,6 @@ class BertLayer(nn.Module):
         layer_output = self.output(intermediate_output, attention_output)
 
         if collect_all_grads:
-            # self.weight[0].register_hook(lambda x, self=self: grads.append([x,"Q_W"]))
-            # self.biases[0].register_hook(lambda x, self=self: grads.append([x,"Q_B"]))
-            # self.weight[1].register_hook(lambda x, self=self: grads.append([x,"K_W"]))
-            # self.biases[1].register_hook(lambda x, self=self: grads.append([x,"K_B"]))
             self.weight[2].register_hook(lambda x, self=self: grads.append([x, "V_W"]))
             self.biases[2].register_hook(lambda x, self=self: grads.append([x, "V_B"]))
             self.weight[3].register_hook(lambda x, self=self: grads.append([x, "O_W"]))
@@ -449,7 +408,6 @@ class BertEncoder(nn.Module):
 
     def __init__(self, config, weights, biases):
         super(BertEncoder, self).__init__()
-        #layer = BertLayer(config, weights, biases)
         self.FinalLayerNorm = BertLayerNorm(config.hidden_size, eps=1e-12)
 
         self.layer = nn.ModuleList(
@@ -491,7 +449,6 @@ class BertEncoder(nn.Module):
             for i, layer_module in enumerate(self.layer):
                 hidden_states = layer_module(hidden_states, attention_mask, self.grads, collect_all_grads=True)
                 hidden_states.register_hook(lambda x, i=i, self=self: self.grads.append([x, "hidden_state"]))
-                #print("pytorch weight is: ", layer_module.get_w())
 
                 if output_all_encoded_layers:
                     all_encoder_layers.append((hidden_states))

@@ -1360,7 +1360,6 @@ class DeepSpeedEngine(Module):
                 configured micro-batch size and data parallelism.
         """
         if train_batch_size % (self.train_micro_batch_size_per_gpu() * self.dp_world_size) != 0:
-            #print(f'{train_batch_size=} {self.train_micro_batch_size_per_gpu()=} {self.dp_world_size=}')
             raise ValueError('Train batch size must be divisible by micro-batch data parallelism')
         new_gas = train_batch_size // (self.train_micro_batch_size_per_gpu() * self.dp_world_size)
         # overwrite config
@@ -1474,7 +1473,6 @@ class DeepSpeedEngine(Module):
         if random_ltd_config[RANDOM_LTD_LAYER_TOKEN_LR_SCHEDULE][RANDOM_LTD_LAYER_TOKEN_LR_ENABLED]:
             assert self.client_lr_scheduler is None
             raise ValueError('not yet support')
-            #self.lr_scheduler = lr_schedules.WarmupLayerTokenDecayLR(self.optimizer, self.random_ltd_scheduler)
 
     def get_data_parallel_rank(self):
         return groups.get_data_parallel_rank()
@@ -2509,7 +2507,6 @@ class DeepSpeedEngine(Module):
         # Copy so the pop() calls below (torch_adam, adam_w_mode, fp32_optimizer_states) do not
         # mutate the shared config dict returned by optimizer_params().
         optimizer_parameters = dict(self.optimizer_params() or {})
-        # print(optimizer_parameters.keys())
         if "max_grad_norm" in optimizer_parameters.keys():
             raise ValueError(
                 "'max_grad_norm' is not supported as an optimizer parameter, please switch to using the deepspeed parameter 'gradient_clipping' see: https://www.deepspeed.ai/docs/config-json/#gradient-clipping for more details"
@@ -3085,18 +3082,15 @@ class DeepSpeedEngine(Module):
         salltoall = 0.0
 
         for gate in self.gate_modules:
-            #logger.info(f"Individual TopK gate time: {gate.gate_time:.2f} ms")
             gate_time += gate.gate_time
 
         for l in self.moe_layers:
-            #logger.info(f"MoE layer; total: {l.time_moe:.2f} ms, first alltoall: {l.time_falltoall:.2f}, second alltoall: {l.time_salltoall:.2f}")
             moe_time += l.time_moe
             falltoall += l.time_falltoall
             salltoall += l.time_salltoall
 
         # TODO: Allreduce/average them across ranks for more accurate timing.
 
-        # if deepspeed.comm.get_rank() == 0:
         log_dist(
             f"time (ms) | fwd: {fwd_time:.2f} (fwd_moe: {moe_time:.2f}, 1st_a2a: {falltoall:.2f}, 2nd_a2a: {salltoall:.2f}, top_k: {gate_time:.2f})",
             ranks=[0])
@@ -4250,7 +4244,6 @@ class DeepSpeedEngine(Module):
                             tag,
                             checkpoint_mp_rank=checkpoint_mp_rank),
                                                                    map_location=torch.device('cpu'))
-                        # print(expert_state_dict.keys())
                         # Updating global -> local expert ids
                         moe_str_prefix = '.deepspeed_moe.experts.deepspeed_experts.'
                         for key in list(expert_state_dict.keys()):
@@ -4668,7 +4661,6 @@ class DeepSpeedEngine(Module):
         # Universal Checkpoint restores parameters from the zero/ layout, so
         # do not require regular MoE expert checkpoint files in that path.
         if self.has_moe_layers and not self.load_universal_checkpoint():
-            # print(checkpoint.keys())
             old_moe_load = False
             if not isinstance(checkpoint['num_experts'], list):
                 old_moe_load = True
@@ -5159,8 +5151,6 @@ class DeepSpeedEngine(Module):
                 num_local_experts = module.num_local_experts
                 expp_rank = groups._get_expert_parallel_rank(group_name)
                 exp_dp_rank = groups._get_expert_data_parallel_rank(group_name)
-                # print(expp_rank, exp_dp_rank)
-                # if exp_dp_rank != 0:
                 if not self.checkpoint_engine.is_data_parallel_writer(exp_dp_rank):
                     moe_layer_id += 1
                     continue
@@ -5171,7 +5161,6 @@ class DeepSpeedEngine(Module):
                     if 'expert' in n and 'moe.gate.wg.weight' not in n:
                         moe_state_dict[n_module + '.' + n] = p
                 moe_str_prefix = '.deepspeed_moe.experts.deepspeed_experts.'
-                # print(moe_state_dict.keys()) # until now, everything is fine. So the bug happens at next few lines
                 # Reorder the moe name rank, so that each checkpoint only has one expert
                 experts_state_dict = defaultdict(dict)
                 for key in list(moe_state_dict.keys()):
@@ -5548,11 +5537,7 @@ class DeepSpeedEngine(Module):
                     raise ValueError("failed to find optimizer param in named params")
                 name = self.param_names[param]
                 param_shapes[name] = shape
-
-                # uncomment to debug zero_to_fp32.py problems
-                # if self.global_rank == 0: print(f"saving param {name} {shape} (numel={shape.numel()})")
             param_group_shapes.append(param_shapes)
-        # if self.global_rank == 0: print(f"Total saved {numel} numels in {cnt} params")
 
         return param_group_shapes
 
@@ -5582,7 +5567,6 @@ class DeepSpeedEngine(Module):
 
                 if param_id in shared_index:
                     # shared weights
-                    #print(f"`{key}` is shared with `{shared_index[param_id]}`")
                     shared_params_by_full_name[key] = shared_index[param_id]
                 else:
                     shared_index[param_id] = key
@@ -5601,7 +5585,6 @@ class DeepSpeedEngine(Module):
         for script in ("zero_to_fp32.py", "zero_to_torch.py"):
             src = os.path.join(base_dir, "utils", script)
             dst = os.path.join(save_path, script)
-            #logger.info(f"creating recovery script {dst}")
             copyfile(src, dst)
             self._change_recovery_script_permissions(dst)
 
@@ -5635,7 +5618,6 @@ class DeepSpeedEngine(Module):
         if self.global_rank == 0:
             self._copy_recovery_script(save_path)
         ckpt_type = 'zero' if self.zero_optimization() else 'bf16_zero'
-        #logger.info(f'{ckpt_type} checkpoint saved {zero_checkpoint_name}')
 
     def _replace_module_consolidated_state_dict(self):
         """
@@ -5659,7 +5641,6 @@ class DeepSpeedEngine(Module):
                     key = prefix + name
                     if (dist.get_rank() == 0):
                         state_dict[key] = param.detach().cpu()
-                        # print(key,module, param.detach().cpu().shape)
 
             for name, child in module.named_children():
                 if child is not None:
@@ -5723,7 +5704,6 @@ class DeepSpeedEngine(Module):
         def get_layer_state_dict(module, prefix=""):
             # gather one layer at a time to be memory-efficient
             # must use modifier_rank=0 to release GPU memory after each layer gathered
-            #see_memory_usage("before GatheredParameters", force=True)
             module_params = list(module.parameters(recurse=False))
             with deepspeed.zero.GatheredParameters(module_params, modifier_rank=0):
                 with GatherReplacedLayerParams(module_params, module, enabled=autotp_enabled):
@@ -5738,18 +5718,15 @@ class DeepSpeedEngine(Module):
                             # (and shared params will have the same param.ds_id)
                             if param.ds_id in shared_params:
                                 # shared weights
-                                #print(f"`{key}` is shared with `{shared_params[param.ds_id]}`")
                                 state_dict[key] = state_dict[shared_params[param.ds_id]]
                             else:
                                 state_dict[key] = param.detach().cpu()
                                 shared_params[param.ds_id] = key
-                            #print(f"param {param.ds_id} {param.shape} {key} ")
 
                         # now buffers - not sure if need to take care of potentially shared weights here
                         for name, buf in module.named_buffers(recurse=False):
                             if (buf is not None and name not in module._non_persistent_buffers_set):
                                 state_dict[prefix + name] = buf.detach().cpu()
-            #see_memory_usage("after GatheredParameters", force=True)
 
             for name, child in module.named_children():
                 if child is not None:
