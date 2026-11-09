@@ -10,8 +10,9 @@ Two generation paths:
      (temperature, top_k, top_p). Pre-allocates a StaticCache, captures the
      decode forward pass into a graph, and replays it for each decode
      step.  Eliminates kernel launch overhead.
-  3. **continuous batching (experimental)**: an opt-in bounded greedy path
-     selected through ``SamplingConfig.continuous_batch_size``.
+  3. **continuous batching (experimental)**: an opt-in bounded path
+     selected through ``SamplingConfig.continuous_batch_size``; greedy or
+     sampled like the graph path, with or without graph capture.
 """
 
 import time
@@ -537,6 +538,7 @@ class HybridEngineRollout(RolloutEngine):
                 prompt_lengths,
                 model_dtype,
                 device,
+                sampling,
                 self.align_decode_fronts,
                 profile,
             )
@@ -736,6 +738,7 @@ class HybridEngineRollout(RolloutEngine):
                     prompt_lengths,
                     model_dtype,
                     device,
+                    sampling,
                     profile=profile,
                     target_slots=tuple(admitted_slots),
                 )
@@ -987,8 +990,6 @@ class HybridEngineRollout(RolloutEngine):
         device = requests[0].prompt_ids.device
         if sampling.max_new_tokens <= 0:
             raise ValueError("max_new_tokens must be positive")
-        if sampling.temperature > 0:
-            pass  # sampling supported since #8939 (select_next_tokens handles it)
         if sampling.n_samples_per_prompt != 1:
             raise ValueError("continuous batching currently supports one sample per prompt")
         for request in requests:
@@ -1022,6 +1023,7 @@ class HybridEngineRollout(RolloutEngine):
                             prompt_lengths,
                             model_dtype,
                             device,
+                            sampling,
                             align_decode_fronts=False,
                             profile=None,
                             target_slots=None):
@@ -1167,6 +1169,7 @@ class HybridEngineRollout(RolloutEngine):
                 eos_token_id=None,
                 pad_token_id=pad_token_id,
                 return_dict_in_generate=True,
+                **self._hf_sampling_kwargs(sampling),
             )
             return prefill_output.sequences[:, -1:], prefill_output.past_key_values
 
@@ -1183,7 +1186,9 @@ class HybridEngineRollout(RolloutEngine):
             position_ids=position_ids,
             **self._last_logits_kwargs(module),
         )
-        return prefill_output.logits[:, -1, :].argmax(dim=-1, keepdim=True), prefill_cache
+        logits = self._apply_repetition_penalty(prefill_output.logits[:, -1, :], prompt_ids,
+                                                self._repetition_penalty(module))
+        return self._token_selector(sampling)(logits), prefill_cache
 
     @classmethod
     def _continuous_next_tokens(cls, logits, request_ids, request_by_id, responses, module, select_next_tokens):
@@ -1408,6 +1413,18 @@ class HybridEngineRollout(RolloutEngine):
             return torch.multinomial(torch.softmax(scores, dim=-1), num_samples=1)
 
         return sample
+
+    @staticmethod
+    def _hf_sampling_kwargs(sampling):
+        """Hugging Face ``generate()`` arguments for ``sampling``; ``temperature <= 0`` is greedy."""
+        if sampling.temperature <= 0.0:
+            return {"do_sample": False, "temperature": 1.0, "top_p": 1.0}
+        return {
+            "do_sample": True,
+            "temperature": sampling.temperature,
+            "top_p": sampling.top_p,
+            "top_k": max(sampling.top_k, 0),
+        }
 
     @staticmethod
     def _repetition_penalty(module):
