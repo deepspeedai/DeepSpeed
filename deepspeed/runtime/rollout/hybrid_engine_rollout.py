@@ -356,6 +356,7 @@ class HybridEngineRollout(RolloutEngine):
         greedy decoding. Completed rows retire immediately and pending prompts
         prefill into the released rows before the next decode step.
         """
+        select_next_tokens = self._token_selector(sampling)
         original_request = request
         requests = tuple(
             RolloutRequest(request.prompt_ids[index:index + 1], request.prompt_attention_mask[index:index + 1])
@@ -571,6 +572,7 @@ class HybridEngineRollout(RolloutEngine):
                     request_by_id,
                     responses,
                     module,
+                    select_next_tokens,
                 )
                 stats["decode_steps"] += 1
                 decoded_tokens = dict(zip(survivor_ids, decoded.split(1, dim=0)))
@@ -766,6 +768,7 @@ class HybridEngineRollout(RolloutEngine):
                     request_by_id,
                     responses,
                     module,
+                    select_next_tokens,
                 )
                 for request_id, token in zip(decode_ids, decoded.split(1, dim=0)):
                     decoded_tokens[request_id] = token
@@ -1189,22 +1192,19 @@ class HybridEngineRollout(RolloutEngine):
         return prefill_output.logits[:, -1, :].argmax(dim=-1, keepdim=True), prefill_cache
 
     @staticmethod
-    def _continuous_next_tokens(logits, request_ids, request_by_id, responses, module):
-        repetition_penalty = getattr(getattr(module, "generation_config", None), "repetition_penalty", 1.0)
-        if repetition_penalty is None:
-            repetition_penalty = 1.0
-        if repetition_penalty == 1.0:
-            return logits.argmax(dim=-1, keepdim=True)
-
-        next_tokens = []
-        for row, request_id in enumerate(request_ids):
-            input_ids = torch.cat((request_by_id[request_id].prompt_ids, *responses[request_id]), dim=1)
-            row_logits = logits[row:row + 1].clone()
-            scores = row_logits.gather(1, input_ids)
-            scores = torch.where(scores < 0, scores * repetition_penalty, scores / repetition_penalty)
-            row_logits.scatter_(1, input_ids, scores)
-            next_tokens.append(row_logits.argmax(dim=-1, keepdim=True))
-        return torch.cat(next_tokens, dim=0)
+    @classmethod
+    def _continuous_next_tokens(cls, logits, request_ids, request_by_id, responses, module, select_next_tokens):
+        repetition_penalty = cls._repetition_penalty(module)
+        if repetition_penalty != 1.0:
+            logits = torch.cat([
+                cls._apply_repetition_penalty(
+                    logits[row:row + 1],
+                    torch.cat((request_by_id[request_id].prompt_ids, *responses[request_id]), dim=1),
+                    repetition_penalty,
+                ) for row, request_id in enumerate(request_ids)
+            ],
+                               dim=0)
+        return select_next_tokens(logits)
 
     @staticmethod
     def _prefill_position_ids(attention_mask):
