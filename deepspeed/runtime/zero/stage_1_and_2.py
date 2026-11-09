@@ -1298,12 +1298,6 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         params_in_partition = self.params_in_partition[group_idx]
         if len(params_in_partition) > 0 and self._is_muon_group(params_in_partition):
             return False
-        # Stage-2 CPU offload keeps the running sum in one partition buffer in gradient_accumulation_dtype
-        # for every dtype, so the host publish is the only dtype conversion. Stage 1 (its unreduced
-        # grad_accum is cumulative across reentrant phases) and ZenFlow keep their existing gate.
-        if (getattr(self, "cpu_offload", False) and getattr(self, "partition_gradients", False)
-                and not getattr(self, "zenflow", False)):
-            return True
         gradient_accumulation_dtype = getattr(self, "gradient_accumulation_dtype", None)
         if gradient_accumulation_dtype != torch.float32 or gradient_accumulation_dtype == self.dtype:
             return False

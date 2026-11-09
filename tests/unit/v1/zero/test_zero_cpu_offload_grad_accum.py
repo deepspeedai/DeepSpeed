@@ -11,6 +11,7 @@ accumulated_grads_in_cpu to stay frozen and the gradient norm to be
 underestimated.
 """
 
+import pytest
 import torch
 import deepspeed
 
@@ -41,7 +42,8 @@ def _running_grad_norm(engine):
 class TestZero2CPUOffloadGradAccumNorm(DistributedTest):
     world_size = 1
 
-    def test(self):
+    @pytest.mark.parametrize("accumulation_dtype", [None, "fp32"])
+    def test(self, accumulation_dtype):
         gradient_accumulation_steps = 4
         hidden_dim = 10
 
@@ -64,6 +66,9 @@ class TestZero2CPUOffloadGradAccumNorm(DistributedTest):
                 },
             },
         }
+
+        if accumulation_dtype is not None:
+            config_dict["data_types"] = {"grad_accum_dtype": accumulation_dtype}
 
         if get_accelerator().is_bf16_supported():
             config_dict["bf16"] = {"enabled": True}
