@@ -20,8 +20,9 @@ from deepspeed.accelerator import get_accelerator
 
 
 def _running_grad_norm(engine):
-    # The running sum lives in the device partition buffer until a boundary publishes it. Fall back
-    # to the host accumulator for groups that use it (Muon, ZenFlow).
+    # The running sum lives in the device partition buffer until a boundary copies it to the host and
+    # frees the buffer; after that the host gradient holds it. Groups on the legacy path (Muon, ZenFlow)
+    # use the host accumulator.
     optimizer = engine.optimizer
     total_norm_sq = 0.0
     for group_idx in range(len(optimizer.bit16_groups)):
@@ -29,6 +30,9 @@ def _running_grad_norm(engine):
         flat_partition = getattr(grad_group, "flat_partition", None)
         if flat_partition is not None:
             total_norm_sq += flat_partition.float().norm(2).item()**2
+        elif group_idx in optimizer._host_owned_compact_partitions:
+            host_grad = optimizer.single_partition_of_fp32_groups[group_idx].grad
+            total_norm_sq += host_grad.float().norm(2).item()**2
         elif optimizer.accumulated_grads_in_cpu[group_idx] is not None:
             total_norm_sq += optimizer.accumulated_grads_in_cpu[group_idx].float().norm(2).item()**2
     return total_norm_sq**0.5
@@ -90,7 +94,7 @@ class TestZero2CPUOffloadGradAccumNorm(DistributedTest):
 
         model.destroy()
 
-        assert norms[0] > 0, "running gradient sum should be non-zero after first backward"
+        assert all(norm > 0 for norm in norms), f"running gradient sum should stay non-zero: {norms}"
         for i in range(1, len(norms)):
             assert norms[i] != norms[0], (f"running gradient sum norm did not change after micro-step {i}: "
                                           f"norm[0]={norms[0]:.6f}, norm[{i}]={norms[i]:.6f}. "

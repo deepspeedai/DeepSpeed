@@ -655,7 +655,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             self._offload_partition_only_param_ids = set()
             # Host sums updated by a non-boundary backward since they were last published to the FP32 partition.
             self._offload_unpublished_param_ids = set()
-            # Compact FP32 partitions freed at a boundary; the host gradient holds their running sum.
+            # Compact partitions freed at a boundary; the host gradient holds their running sum.
             self._host_owned_compact_partitions = set()
             self.temp_grad_buffer_for_cpu_offload = torch.zeros(largest_param_numel,
                                                                 device=self.device,
@@ -1364,7 +1364,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         return grad_group
 
     def _offload_compact_grad_partitions(self):
-        """Copy each compact FP32 partition's running sum to the host gradient at a boundary.
+        """Copy each compact partition's running sum to the host gradient at a boundary.
 
         Every parameter accumulated in this window is copied, including one that missed the
         boundary backward. Once the host holds the exact sum, the GPU partition is freed so it
@@ -1386,8 +1386,11 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 [_, _, dest_offset, num_elements] = self.grad_position[param_id]
                 source = self._get_compact_grad_partition_slice(group_idx, partition_id, param_id, num_elements)
                 self.norm_for_param_grads[param_id] = source.data.to(get_norm_dtype()).norm(2)
-                self.update_offload_overflow_tracker(source)
-                host_grad.narrow(0, dest_offset, num_elements).copy_(source.to(host_grad.dtype), non_blocking=True)
+                # Check the value the optimizer will read: an fp32 sum can pass here and become inf in an
+                # fp16 host gradient.
+                host_value = source.to(host_grad.dtype)
+                self.update_offload_overflow_tracker(host_value)
+                host_grad.narrow(0, dest_offset, num_elements).copy_(host_value, non_blocking=True)
             self._record_offload_copy()
 
             # Free only when the host copy can restore the device sum bit for bit. Otherwise the
