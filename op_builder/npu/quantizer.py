@@ -270,6 +270,49 @@ class NPUQuantizer:
         values = values.reshape(num_group, group_size).to(torch.float16)
         return values.div_(scale).add_(min_val)
 
+    _int4_supported = None
+
+    @staticmethod
+    def _cann_supports_int4():
+        """Return whether CANN provides aclnnLeftShifts for the int4 packer.
+
+        The int4 inference path as a whole needs CANN >= 9.0.0. Returns True
+        when the version cannot be determined, so the normal path reports its
+        own error instead of being blocked by a failed probe.
+        """
+        cached = NPUQuantizer._int4_supported
+        if cached is not None:
+            return cached
+        supported = True
+        try:
+            from torch_npu.npu.utils import _is_gte_cann_version
+            supported = bool(_is_gte_cann_version('9.0.0', module='CANN'))
+        except Exception:
+            try:
+                from torch_npu.utils import get_cann_version
+                parts = []
+                for token in get_cann_version().split('.'):
+                    digits = ''.join(ch for ch in token if ch.isdigit())
+                    parts.append(int(digits) if digits else 0)
+                supported = tuple(parts[:2]) >= (9, 0)
+            except Exception:
+                supported = True
+        NPUQuantizer._int4_supported = supported
+        return supported
+
+    @staticmethod
+    def _check_int4_inference_support():
+        if NPUQuantizer._cann_supports_int4():
+            return
+        try:
+            from torch_npu.utils import get_cann_version
+            version = get_cann_version()
+        except Exception:
+            version = 'unknown'
+        raise RuntimeError(f"int4 inference quantization on Ascend requires CANN >= 9.0.0 "
+                           f"for aclnnLeftShifts; detected CANN {version}. "
+                           f"Upgrade CANN or use int8 quantization.")
+
     @staticmethod
     def dequantize_int4_to_half_experimental(data_in, scale_buffer, min_val_buffer, num_group, group_size):
         """Unpack the inference int4 wire format and dequantize to fp16.
@@ -279,6 +322,7 @@ class NPUQuantizer:
         Quantizer._compress_uint8_to_uint4 (inference/quantization/utils.py).
         The nibbles stay uint8 so the temporary is one byte per element.
         """
+        NPUQuantizer._check_int4_inference_support()
         packed = data_in.reshape(-1)
         values = torch.empty(packed.numel() * 2, dtype=torch.uint8, device=data_in.device)
         values[0::2] = packed >> 4
