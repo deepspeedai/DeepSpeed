@@ -3,8 +3,6 @@
 
 # DeepSpeed Team
 
-import os
-
 try:
     # is op_builder from deepspeed or a 3p version? this should only succeed if it's deepspeed
     # if successful this also means we're doing a local install and not JIT compile path
@@ -15,20 +13,6 @@ except ImportError:
 
 
 class CPUOpBuilder(OpBuilder):
-
-    def builder(self):
-        from torch.utils.cpp_extension import CppExtension as ExtensionBuilder
-        include_dirs = [os.path.abspath(x) for x in self.strip_empty_entries(self.include_paths())]
-        compile_args = {'cxx': self.strip_empty_entries(self.cxx_args())}
-
-        cpp_ext = ExtensionBuilder(name=self.absolute_name(),
-                                   sources=self.strip_empty_entries(self.sources()),
-                                   include_dirs=include_dirs,
-                                   libraries=self.strip_empty_entries(self.libraries_args()),
-                                   extra_compile_args=compile_args,
-                                   extra_link_args=self.strip_empty_entries(self.extra_ldflags()))
-
-        return cpp_ext
 
     def cxx_args(self):
         args = ['-O3', '-g', '-Wno-reorder']

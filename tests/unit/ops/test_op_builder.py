@@ -125,10 +125,11 @@ def test_jit_load_restores_env_and_state_after_failure():
     with patch.dict(os.environ, {"TORCH_CUDA_ARCH_LIST": "8.9"}, clear=False):
         with patch.object(builder, "is_compatible", return_value=True):
             with patch.object(CUDAOpBuilder, "is_rocm_pytorch", return_value=False):
-                with patch("torch.utils.cpp_extension.verify_ninja_availability", return_value=None):
-                    with patch.object(builder, "nvcc_args", side_effect=fail_nvcc_args):
-                        with pytest.raises(RuntimeError, match="build failed"):
-                            builder.jit_load(verbose=False)
+                with patch.object(builder_module, "assert_no_cuda_mismatch", return_value=True):
+                    with patch("torch.utils.cpp_extension.verify_ninja_availability", return_value=None):
+                        with patch.object(builder, "nvcc_args", side_effect=fail_nvcc_args):
+                            with pytest.raises(RuntimeError, match="build failed"):
+                                builder.jit_load(verbose=False)
 
         assert getattr(builder, "_jit_arch_list", None) is None
         assert os.environ["TORCH_CUDA_ARCH_LIST"] == "8.9"
@@ -146,11 +147,12 @@ def test_jit_load_restores_state_after_success():
     with patch.dict(os.environ, {"TORCH_CUDA_ARCH_LIST": "8.9"}, clear=False):
         with patch.object(builder, "is_compatible", return_value=True):
             with patch.object(CUDAOpBuilder, "is_rocm_pytorch", return_value=False):
-                with patch("torch.utils.cpp_extension.verify_ninja_availability", return_value=None):
-                    with patch.object(builder, "nvcc_args", side_effect=successful_nvcc_args):
-                        with patch.object(builder, "cxx_args", return_value=[]):
-                            with patch("torch.utils.cpp_extension.load", return_value=op_module):
-                                assert builder.jit_load(verbose=False) is op_module
+                with patch.object(builder_module, "assert_no_cuda_mismatch", return_value=True):
+                    with patch("torch.utils.cpp_extension.verify_ninja_availability", return_value=None):
+                        with patch.object(builder, "nvcc_args", side_effect=successful_nvcc_args):
+                            with patch.object(builder, "cxx_args", return_value=[]):
+                                with patch("torch.utils.cpp_extension.load", return_value=op_module):
+                                    assert builder.jit_load(verbose=False) is op_module
 
         assert os.environ["TORCH_CUDA_ARCH_LIST"] == "8.9"
         assert getattr(builder, "_jit_arch_list", None) is None
@@ -204,32 +206,103 @@ def test_prebuilt_builder_targets_requested_archs_instead_of_local_gpus():
     assert "-gencode=arch=compute_90,code=sm_90" in nvcc_args
 
 
-def prebuild_with_cuda_versions(installed_cuda, torch_cuda):
+def test_prebuilt_and_jit_builds_compile_and_link_an_op_the_same_way():
+    # A pre-built op must be compiled and linked like the same op built at load time. Only the targeted
+    # archs differ by nature: JIT builds target the local GPUs and hand them to PyTorch through
+    # TORCH_CUDA_ARCH_LIST, while pre-built ops pass -gencode flags for the requested archs.
+    builder = make_builder(include_paths=lambda: ["csrc/includes"],
+                           extra_ldflags=lambda: ["-lcublas"],
+                           libraries_args=lambda: ["curand"])
+    load = MagicMock()
+    with patch.dict(os.environ, {"TORCH_CUDA_ARCH_LIST": "9.0"}, clear=False):
+        with patch.object(CUDAOpBuilder, "is_rocm_pytorch", return_value=False):
+            with patch.object(builder_module, "assert_no_cuda_mismatch", return_value=True):
+                with patch.object(builder_module, "installed_cuda_version", return_value=(12, 8)):
+                    with patch("torch.utils.cpp_extension.verify_ninja_availability", return_value=None):
+                        with patch("torch.utils.cpp_extension.load", load):
+                            builder.jit_load(verbose=False)
+                    with patch("torch.utils.cpp_extension.CUDAExtension") as cuda_extension:
+                        builder.builder()
+
+    jit_kwargs = load.call_args.kwargs
+    prebuilt_kwargs = cuda_extension.call_args.kwargs
+    prebuilt_nvcc_args = [arg for arg in prebuilt_kwargs["extra_compile_args"]["nvcc"] if "-gencode" not in arg]
+    # setuptools links each entry of libraries with -l<name>.
+    prebuilt_link_args = prebuilt_kwargs["extra_link_args"] + [f"-l{name}" for name in prebuilt_kwargs["libraries"]]
+    assert prebuilt_kwargs["extra_compile_args"]["cxx"] == jit_kwargs["extra_cflags"]
+    assert prebuilt_nvcc_args == jit_kwargs["extra_cuda_cflags"]
+    assert prebuilt_kwargs["include_dirs"] == jit_kwargs["extra_include_paths"]
+    assert prebuilt_link_args == jit_kwargs["extra_ldflags"]
+
+
+def test_prebuilt_op_that_drops_archs_does_not_drop_them_for_the_ops_built_after_it():
+    # setup.py pre-builds every op in one process. An op that drops the archs it cannot run on, as
+    # fp_quantizer drops those below 8.0, must leave them in place for the ops built after it.
+    def keep_ampere_and_newer(ccs):
+        return [cc.split('.') for cc in ccs if int(cc.split('.')[0]) >= 8]
+
+    with patch.dict(os.environ, {"TORCH_CUDA_ARCH_LIST": "7.0;7.5;8.0;9.0"}, clear=False):
+        make_builder(jit_mode=False, filter_ccs=keep_ampere_and_newer).compute_capability_args()
+        next_op_args = make_builder(jit_mode=False).compute_capability_args()
+
+    assert next_op_args == [
+        "-gencode=arch=compute_70,code=sm_70",
+        "-gencode=arch=compute_75,code=sm_75",
+        "-gencode=arch=compute_80,code=sm_80",
+        "-gencode=arch=compute_90,code=sm_90",
+    ]
+
+
+def test_default_archs_on_cuda_13_only_include_archs_it_can_build():
+    # Pre-builds that do not set TORCH_CUDA_ARCH_LIST use the default arch list. CUDA 13 cannot build for
+    # compute capabilities below 7.5 (nvcc --list-gpu-arch starts at compute_75), and Turing (7.5) is the
+    # oldest GPU it still supports.
+    with patch("torch.utils.cpp_extension.CUDA_HOME", "/usr/local/cuda-13.0"):
+        with patch.object(builder_module, "installed_cuda_version", return_value=(13, 0)):
+            default_archs = builder_module.get_default_compute_capabilities().split(';')
+
+    assert "7.5" in default_archs
+    assert all(tuple(int(part) for part in arch.split('.')) >= (7, 5) for arch in default_archs)
+
+
+BUILD_PATHS = {
+    "prebuilt": lambda builder: builder.builder(),
+    "jit": lambda builder: builder.jit_load(verbose=False),
+}
+
+
+def build_with_cuda_versions(build_path, installed_cuda, torch_cuda):
     with patch.dict(os.environ, {"TORCH_CUDA_ARCH_LIST": "9.0"}, clear=False):
         with patch.object(CUDAOpBuilder, "is_rocm_pytorch", return_value=False):
             with patch.object(builder_module, "installed_cuda_version", return_value=installed_cuda):
                 with patch.object(builder_module.torch.version, "cuda", torch_cuda):
-                    with patch("torch.utils.cpp_extension.CUDAExtension"):
-                        make_builder().builder()
+                    with patch("torch.utils.cpp_extension.verify_ninja_availability", return_value=None):
+                        with patch("torch.utils.cpp_extension.load"):
+                            with patch("torch.utils.cpp_extension.CUDAExtension"):
+                                BUILD_PATHS[build_path](make_builder())
 
 
-def test_prebuilt_builder_warns_instead_of_failing_on_cuda_minor_version_mismatch(capsys):
+@pytest.mark.parametrize("build_path", BUILD_PATHS)
+def test_cuda_op_build_warns_instead_of_failing_on_cuda_minor_version_mismatch(build_path, capsys):
     # Like PyTorch's own extension build, and as docs/_tutorials/advanced-install.md says, only a CUDA
     # major version mismatch stops the build; a minor one gets a warning. A table of known compatible
     # minor versions used to reject every CUDA 13 minor mismatch.
     with patch.dict(os.environ, {"DS_SKIP_CUDA_CHECK": "0"}, clear=False):
-        prebuild_with_cuda_versions(installed_cuda=(13, 2), torch_cuda="13.0")
+        build_with_cuda_versions(build_path, installed_cuda=(13, 2), torch_cuda="13.0")
 
     assert "13.2" in capsys.readouterr().out
 
 
-def test_prebuilt_builder_fails_on_cuda_major_version_mismatch_unless_check_is_skipped():
+@pytest.mark.parametrize("build_path", BUILD_PATHS)
+def test_cuda_op_build_fails_on_cuda_major_version_mismatch_unless_check_is_skipped(build_path):
+    # PyTorch's load() does not check the toolkit version at all, so JIT builds need this check as much as
+    # pre-built ones.
     with patch.dict(os.environ, {"DS_SKIP_CUDA_CHECK": "0"}, clear=False):
         with pytest.raises(builder_module.CUDAMismatchException):
-            prebuild_with_cuda_versions(installed_cuda=(13, 0), torch_cuda="12.8")
+            build_with_cuda_versions(build_path, installed_cuda=(13, 0), torch_cuda="12.8")
 
     with patch.dict(os.environ, {"DS_SKIP_CUDA_CHECK": "1"}, clear=False):
-        prebuild_with_cuda_versions(installed_cuda=(13, 0), torch_cuda="12.8")
+        build_with_cuda_versions(build_path, installed_cuda=(13, 0), torch_cuda="12.8")
 
 
 def test_non_jit_branch_unchanged():
@@ -250,7 +323,6 @@ def test_non_jit_branch_sorts_and_dedupes_gencode_flags():
 
     with patch.dict(os.environ, {"TORCH_CUDA_ARCH_LIST": "8.0;7.5;8.0;7.0"}, clear=False):
         args = builder.compute_capability_args()
-        assert os.environ["TORCH_CUDA_ARCH_LIST"] == "7.0;7.5;8.0"
 
     assert args == [
         "-gencode=arch=compute_70,code=sm_70",
@@ -263,7 +335,6 @@ def test_non_jit_branch_canonicalizes_mixed_ptx_variants_to_one_sm_and_one_ptx()
     # For mixed inputs such as "8.0;8.0+PTX" or "8.0+PTX;8.0", PyTorch
     # canonicalizes the architecture to one sm_80 entry plus one compute_80
     # PTX entry. Dedupe by the canonical numeric arch so we match.
-    expected_arch_list = "7.5;8.0+PTX"
     expected_args = [
         "-gencode=arch=compute_75,code=sm_75",
         "-gencode=arch=compute_80,code=sm_80",
@@ -274,7 +345,6 @@ def test_non_jit_branch_canonicalizes_mixed_ptx_variants_to_one_sm_and_one_ptx()
         builder = make_builder(jit_mode=False)
         with patch.dict(os.environ, {"TORCH_CUDA_ARCH_LIST": arch_input}, clear=False):
             args = builder.compute_capability_args()
-            assert os.environ["TORCH_CUDA_ARCH_LIST"] == expected_arch_list, arch_input
         assert args == expected_args, arch_input
 
 
@@ -283,18 +353,14 @@ def test_non_jit_branch_canonical_dedupe_mixed_ptx_combinations():
     # behavior cannot regress on either ordering or duplication.
     builder = make_builder(jit_mode=False)
     cases = [
-        ("8.0;8.0+PTX", "8.0+PTX", ["-gencode=arch=compute_80,code=sm_80",
-                                    "-gencode=arch=compute_80,code=compute_80"]),
-        ("8.0+PTX;8.0", "8.0+PTX", ["-gencode=arch=compute_80,code=sm_80",
-                                    "-gencode=arch=compute_80,code=compute_80"]),
-        ("8.0;8.0", "8.0", ["-gencode=arch=compute_80,code=sm_80"]),
-        ("8.0+PTX;8.0+PTX", "8.0+PTX",
-         ["-gencode=arch=compute_80,code=sm_80", "-gencode=arch=compute_80,code=compute_80"]),
+        ("8.0;8.0+PTX", ["-gencode=arch=compute_80,code=sm_80", "-gencode=arch=compute_80,code=compute_80"]),
+        ("8.0+PTX;8.0", ["-gencode=arch=compute_80,code=sm_80", "-gencode=arch=compute_80,code=compute_80"]),
+        ("8.0;8.0", ["-gencode=arch=compute_80,code=sm_80"]),
+        ("8.0+PTX;8.0+PTX", ["-gencode=arch=compute_80,code=sm_80", "-gencode=arch=compute_80,code=compute_80"]),
     ]
-    for arch_input, expected_arch_list, expected_args in cases:
+    for arch_input, expected_args in cases:
         with patch.dict(os.environ, {"TORCH_CUDA_ARCH_LIST": arch_input}, clear=False):
             args = builder.compute_capability_args()
-            assert os.environ["TORCH_CUDA_ARCH_LIST"] == expected_arch_list, arch_input
         assert args == expected_args, arch_input
 
 

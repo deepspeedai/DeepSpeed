@@ -93,6 +93,9 @@ def get_default_compute_capabilities():
             compute_caps += ";8.0;8.6;9.0"
             if installed_cuda_version()[1] >= 8:
                 compute_caps += ";10.0;12.0"
+        elif installed_cuda_version()[0] >= 13:
+            # CUDA 13 cannot build for compute capabilities below 7.5, which rules out the whole base list
+            compute_caps = "7.5;8.0;8.6;9.0;10.0;12.0"
     return compute_caps
 
 
@@ -226,6 +229,19 @@ class OpBuilder(ABC):
 
     def extra_ldflags(self):
         return []
+
+    def libraries_args(self):
+        '''
+        Returns list of libraries to link the op against
+        '''
+        return []
+
+    def extra_compile_args(self):
+        '''
+        Returns the flags for each compiler. builder() and jit_load() both build with them, so a pre-built op
+        is compiled the same way as one compiled at load time.
+        '''
+        return {'cxx': self.strip_empty_entries(self.cxx_args())}
 
     def has_function(self, funcname, libraries, library_dirs=None, verbose=False):
         '''
@@ -481,13 +497,19 @@ class OpBuilder(ABC):
         else:
             return os.path.join(Path(__file__).parent.parent.absolute(), code_path)
 
+    def absolute_include_paths(self):
+        return [
+            os.path.abspath(self.deepspeed_src_path(path)) for path in self.strip_empty_entries(self.include_paths())
+        ]
+
     def builder(self):
         from torch.utils.cpp_extension import CppExtension
-        include_dirs = [os.path.abspath(x) for x in self.strip_empty_entries(self.include_paths())]
+        include_dirs = self.absolute_include_paths()
         return CppExtension(name=self.absolute_name(),
                             sources=self.strip_empty_entries(self.sources()),
                             include_dirs=include_dirs,
-                            extra_compile_args={'cxx': self.strip_empty_entries(self.cxx_args())},
+                            libraries=self.strip_empty_entries(self.libraries_args()),
+                            extra_compile_args=self.extra_compile_args(),
                             extra_link_args=self.strip_empty_entries(self.extra_ldflags()))
 
     def load(self, verbose=False):
@@ -512,9 +534,7 @@ class OpBuilder(ABC):
         '''
         Returns the compile arguments that jit_load() passes to torch.utils.cpp_extension.load()
         '''
-        cxx_args = self.strip_empty_entries(self.cxx_args())
-        cxx_args.append("-UC10_USE_GLOG")
-        return {'extra_cflags': cxx_args}
+        return {'extra_cflags': self.extra_compile_args()['cxx']}
 
     def jit_load(self, verbose=True):
         if not self.is_compatible(verbose):
@@ -531,10 +551,13 @@ class OpBuilder(ABC):
 
         start_build = time.time()
         sources = [os.path.abspath(self.deepspeed_src_path(path)) for path in self.sources()]
-        extra_include_paths = [os.path.abspath(self.deepspeed_src_path(path)) for path in self.include_paths()]
+        extra_include_paths = self.absolute_include_paths()
 
         compile_kwargs = self.jit_load_kwargs()
         extra_ldflags = self.strip_empty_entries(self.extra_ldflags())
+        # load() has no libraries argument, so link them by name the way setuptools does for builder().
+        for library in self.strip_empty_entries(self.libraries_args()):
+            extra_ldflags.append(f"{library}.lib" if sys.platform == "win32" else f"-l{library}")
         op_module = load(name=self.name,
                          sources=self.strip_empty_entries(sources),
                          extra_include_paths=self.strip_empty_entries(extra_include_paths),
@@ -768,19 +791,22 @@ class CUDAOpBuilder(OpBuilder):
             if major <= 7:
                 self.enable_bf16 = False
 
-        # Keep TORCH_CUDA_ARCH_LIST in sync with the filtered arch list so
-        # PyTorch does not re-add archs that filter_ccs() removed. Emit one
-        # token per arch using the X.Y or X.Y+PTX form, matching PyTorch's
-        # canonical parsing where +PTX on an arch token already implies both
-        # the sm and PTX emissions for that arch.
-        arch_tokens = [f"{major}.{minor}{'+PTX' if has_ptx else ''}" for (major, minor), has_ptx in canonical_archs]
-        os.environ["TORCH_CUDA_ARCH_LIST"] = ";".join(arch_tokens)
-
         if self.jit_mode:
-            # Let PyTorch generate -gencode flags from the env var.
+            # Before torch 2.9, load() adds -gencode flags from TORCH_CUDA_ARCH_LIST (or the visible GPUs) even
+            # when extra_cuda_cflags already has some. So set the env var to the filtered arch list and let
+            # PyTorch generate the flags, which keeps it from re-adding archs that filter_ccs() removed;
+            # jit_load() restores the caller's value. Emit one token per arch using the X.Y or X.Y+PTX form,
+            # matching PyTorch's canonical parsing where +PTX on an arch token already implies both the sm and
+            # PTX emissions for that arch.
+            arch_tokens = [
+                f"{major}.{minor}{'+PTX' if has_ptx else ''}" for (major, minor), has_ptx in canonical_archs
+            ]
+            os.environ["TORCH_CUDA_ARCH_LIST"] = ";".join(arch_tokens)
             return []
 
         # Non-JIT: return explicit flags per builder for extra_compile_args.
+        # BuildExtension uses these instead of TORCH_CUDA_ARCH_LIST, so leave the env var alone: setup.py
+        # builds every op in one process, and each op must start from the requested arch list.
         # Emit exactly one sm_X line per arch, followed by one compute_X PTX
         # line when any variant of that arch carried +PTX.
         args = []
@@ -819,29 +845,15 @@ class CUDAOpBuilder(OpBuilder):
         # Pre-built ops run on other machines, so they target the requested arch list rather than
         # the GPUs of this one.
         self.jit_mode = False
-        if not self.is_rocm_pytorch():
-            assert_no_cuda_mismatch(self.name)
-
-        from torch.utils.cpp_extension import CUDAExtension as ExtensionBuilder
-        include_dirs = [os.path.abspath(x) for x in self.strip_empty_entries(self.include_paths())]
-        compile_args = {
-            'cxx': self.strip_empty_entries(self.cxx_args()),
-            'nvcc': self.strip_empty_entries(self.nvcc_args())
-        }
-
-        if self.enable_bf16:
-            compile_args['cxx'].append("-DBF16_AVAILABLE")
-            compile_args['nvcc'].append("-DBF16_AVAILABLE")
-
+        compile_args = self.extra_compile_args()
         if self.is_rocm_pytorch():
-            compile_args['cxx'].append("-D__HIP_PLATFORM_AMD__=1")
-            #cxx compiler args are required to compile cpp files
-            compile_args['cxx'].append('-DROCM_WAVEFRONT_SIZE=%s' % self.get_rocm_wavefront_size())
-            #nvcc compiler args are required to compile hip files
+            # BuildExtension compiles hip files with the nvcc args only, while load() also passes them the cxx args.
             compile_args['nvcc'].append('-DROCM_WAVEFRONT_SIZE=%s' % self.get_rocm_wavefront_size())
             if self.get_rocm_gpu_arch():
                 os.environ["PYTORCH_ROCM_ARCH"] = self.get_rocm_gpu_arch()
 
+        from torch.utils.cpp_extension import CUDAExtension as ExtensionBuilder
+        include_dirs = self.absolute_include_paths()
         cuda_ext = ExtensionBuilder(name=self.absolute_name(),
                                     sources=self.strip_empty_entries(self.sources()),
                                     include_dirs=include_dirs,
@@ -878,13 +890,16 @@ class CUDAOpBuilder(OpBuilder):
                 os.environ.pop("TORCH_CUDA_ARCH_LIST", None)
             self._jit_arch_list = None
 
-    def jit_load_kwargs(self):
-        # nvcc_args() goes first because it decides enable_bf16 and the JIT arch list.
+    def extra_compile_args(self):
+        # Unlike BuildExtension, PyTorch's load() does not check the CUDA toolkit version, so check it here
+        # for both build paths.
+        if not self.is_rocm_pytorch():
+            assert_no_cuda_mismatch(self.name)
+        # nvcc_args() goes first because it decides enable_bf16 and the arch list.
         nvcc_args = self.strip_empty_entries(self.nvcc_args())
-        kwargs = super().jit_load_kwargs()
-        cxx_args = kwargs['extra_cflags']
+        compile_args = super().extra_compile_args()
+        cxx_args = compile_args['cxx']
 
-        nvcc_args.append("-UC10_USE_GLOG")
         if self.enable_bf16:
             cxx_args.append("-DBF16_AVAILABLE")
             nvcc_args.append("-DBF16_AVAILABLE")
@@ -894,12 +909,17 @@ class CUDAOpBuilder(OpBuilder):
 
         if self.is_rocm_pytorch():
             cxx_args.append("-D__HIP_PLATFORM_AMD__=1")
-            os.environ["PYTORCH_ROCM_ARCH"] = self.get_rocm_gpu_arch()
             cxx_args.append('-DROCM_WAVEFRONT_SIZE=%s' % self.get_rocm_wavefront_size())
 
-        kwargs['extra_cuda_cflags'] = nvcc_args
-        kwargs['with_cuda'] = True
-        return kwargs
+        compile_args['nvcc'] = nvcc_args
+        return compile_args
+
+    def jit_load_kwargs(self):
+        compile_args = self.extra_compile_args()
+        if self.is_rocm_pytorch():
+            # A JIT build targets the GPU of this machine.
+            os.environ["PYTORCH_ROCM_ARCH"] = self.get_rocm_gpu_arch()
+        return {'extra_cflags': compile_args['cxx'], 'extra_cuda_cflags': compile_args['nvcc'], 'with_cuda': True}
 
     def hipify_extension(self):
         if self.is_rocm_pytorch():
