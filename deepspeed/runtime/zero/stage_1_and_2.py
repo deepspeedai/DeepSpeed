@@ -206,11 +206,11 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                  elastic_checkpoint=False,
                  check_grad_overflow=True,
                  compute_grad_norm=True,
-                 release_compact_grad_partition=True):
+                 free_hbm_grad_partition_between_requests=True):
 
         super().__init__()
 
-        self.release_compact_grad_partition = release_compact_grad_partition
+        self.free_hbm_grad_partition_between_requests = free_hbm_grad_partition_between_requests
         if not compute_grad_norm and clip_grad > 0.0:
             raise ValueError("zero_optimization.compute_grad_norm=false requires gradient_clipping=0")
         if not compute_grad_norm and zenflow_config is not None:
@@ -1395,7 +1395,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 continue
             if not self._offload_gradient_safety_enabled:
                 continue
-            if not self.release_compact_grad_partition:
+            if not self.free_hbm_grad_partition_between_requests:
                 continue
             self._record_gradient_stream(grad_group.flat_partition, stream)
             self.averaged_gradients[group_idx] = None
