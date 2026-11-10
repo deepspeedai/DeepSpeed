@@ -33,6 +33,14 @@ from .indexed_dataset import MMapIndexedDataset
 from .utils import create_mmap_dataset_builder, close_mmap_dataset_builder, find_fit_int_dtype
 
 
+def _concatenate_samples(sample_rows):
+    if not sample_rows:
+        return None
+    if len(sample_rows) == 1:
+        return np.copy(sample_rows[0])
+    return np.concatenate(sample_rows, axis=None)
+
+
 class DeepSpeedDataSampler(object):
 
     def __init__(self,
@@ -131,17 +139,15 @@ class DeepSpeedDataSampler(object):
         return start_idx, end_idx
 
     def get_sample_based_on_metric_value(self, metric, value_start, value_end):
-        new_samples = None
+        sample_rows = []
         for row in range(len(self.curriculum_index_to_sample[metric])):
             if self.curriculum_index_to_metric[metric][row] <= value_end and self.curriculum_index_to_metric[metric][
                     row] > value_start:
-                row_samples = np.copy(self.curriculum_index_to_sample[metric][row])
-                new_samples = row_samples if new_samples is None else np.concatenate(
-                    (new_samples, row_samples), axis=None)
-        return new_samples
+                sample_rows.append(self.curriculum_index_to_sample[metric][row])
+        return _concatenate_samples(sample_rows)
 
     def get_sample_based_on_metric_percentile(self, metric, percentile_start, percentile_end):
-        new_samples = None
+        sample_rows = []
         if self.data_1epoch_size is None:
             self.data_1epoch_size = sum(len(x) for x in self.curriculum_index_to_sample[metric])
         max_percentile = self.data_efficiency_config[DATA_SAMPLING][CURRICULUM_LEARNING][CURRICULUM_LEARNING_METRICS][
@@ -153,20 +159,19 @@ class DeepSpeedDataSampler(object):
             end_count = self.data_1epoch_size
         current_count = 0
         for row in range(len(self.curriculum_index_to_sample[metric])):
-            row_size = len(self.curriculum_index_to_sample[metric][row])
+            row_samples = self.curriculum_index_to_sample[metric][row]
+            row_size = len(row_samples)
             if current_count + row_size > start_count:
                 row_start = max(0, start_count - current_count)
                 if current_count + row_size <= end_count:
                     row_end = row_size
                 else:
                     row_end = end_count - current_count
-                row_samples = np.copy(self.curriculum_index_to_sample[metric][row][row_start:row_end])
-                new_samples = row_samples if new_samples is None else np.concatenate(
-                    (new_samples, row_samples), axis=None)
+                sample_rows.append(row_samples[row_start:row_end])
             current_count += row_size
             if current_count >= end_count:
                 break
-        return new_samples
+        return _concatenate_samples(sample_rows)
 
     def get_new_cluster(self, previous_difficulties):
         cluster_fname = CURRICULUM_LEARNING_CLUSTER_PREFIX

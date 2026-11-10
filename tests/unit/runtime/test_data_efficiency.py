@@ -5,10 +5,12 @@
 
 import torch
 import os
+import numpy as np
 import deepspeed
 from deepspeed.accelerator import get_accelerator
 import pytest
 from deepspeed.runtime.data_pipeline.data_sampling.data_analyzer import DataAnalyzer
+from deepspeed.runtime.data_pipeline.data_sampling.data_sampler import DeepSpeedDataSampler
 from deepspeed.runtime.data_pipeline.data_sampling.indexed_dataset import MMapIndexedDataset
 from unit.common import DistributedTest
 from unit.simple_model import SimpleModel, random_dataset
@@ -98,6 +100,33 @@ def test_curriculum_tops_out_at_the_configured_max():
     # the ramp at the configured value, and this change does not touch that end.
     scheduler = _curriculum_scheduler(16, 1000, 16)
     assert scheduler.get_difficulty(200) == 1000
+
+
+def test_curriculum_cluster_selection_preserves_sample_order():
+    sample_rows = [np.arange(0, 2), np.arange(2, 5), np.arange(5, 10)]
+    sampler = DeepSpeedDataSampler.__new__(DeepSpeedDataSampler)
+    sampler.curriculum_index_to_sample = {"metric": sample_rows}
+    sampler.curriculum_index_to_metric = {"metric": [np.array([1]), np.array([2]), np.array([3])]}
+    sampler.data_1epoch_size = None
+    sampler.data_efficiency_config = {
+        "data_sampling": {
+            "curriculum_learning": {
+                "curriculum_metrics": {
+                    "metric": {
+                        "max_difficulty": 10
+                    }
+                }
+            }
+        }
+    }
+
+    np.testing.assert_array_equal(sampler.get_sample_based_on_metric_value("metric", 1, 3), np.arange(2, 10))
+    np.testing.assert_array_equal(sampler.get_sample_based_on_metric_percentile("metric", 2, 8), np.arange(2, 8))
+    assert sampler.get_sample_based_on_metric_value("metric", 3, 4) is None
+
+    single_row = sampler.get_sample_based_on_metric_value("metric", 1, 2)
+    single_row[0] = -1
+    assert sample_rows[1][0] == 2
 
 
 @pytest.mark.parametrize('dtype', [torch.bfloat16, torch.float16])
