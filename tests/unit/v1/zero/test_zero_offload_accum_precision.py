@@ -168,12 +168,12 @@ class TestZeroOffloadSetFullGrad(DistributedTest):
             assert err_overwritten < 1e-2, "mid-window set is no longer overwritten at the boundary"
 
 
-def _release_option_run(release):
+def _retain_option_run(retain):
     """Three request-boundary backwards and one step; returns residency per boundary, grads, and final weight."""
     torch.manual_seed(0)
     model = Weighted(NUMEL)
     config = _config(2, False, "fp32")
-    config["zero_optimization"]["free_hbm_grad_partition_cache"] = release
+    config["zero_optimization"]["retain_hbm_grad_partition"] = retain
     engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config)
     try:
         generator = torch.Generator().manual_seed(99)
@@ -200,8 +200,8 @@ class TestZeroOffloadReleaseOption(DistributedTest):
     def test_release_option_controls_residency_without_changing_results(self):
         if not deepspeed.ops.__compatible_ops__[deepspeed.ops.op_builder.CPUAdamBuilder.NAME]:
             pytest.skip("CPUAdam is required for offloaded low-precision masters")
-        resident_released, err_released, w_released = _release_option_run(True)
-        resident_kept, err_kept, w_kept = _release_option_run(False)
+        resident_released, err_released, w_released = _retain_option_run(False)
+        resident_kept, err_kept, w_kept = _retain_option_run(True)
         # `resident` is True while the GPU partition is held. With the option on, every boundary frees it.
         assert resident_released == [False, False,
                                      False], f"partition stayed resident with the option on: {resident_released}"
