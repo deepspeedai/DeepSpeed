@@ -204,6 +204,34 @@ def test_prebuilt_builder_targets_requested_archs_instead_of_local_gpus():
     assert "-gencode=arch=compute_90,code=sm_90" in nvcc_args
 
 
+def prebuild_with_cuda_versions(installed_cuda, torch_cuda):
+    with patch.dict(os.environ, {"TORCH_CUDA_ARCH_LIST": "9.0"}, clear=False):
+        with patch.object(CUDAOpBuilder, "is_rocm_pytorch", return_value=False):
+            with patch.object(builder_module, "installed_cuda_version", return_value=installed_cuda):
+                with patch.object(builder_module.torch.version, "cuda", torch_cuda):
+                    with patch("torch.utils.cpp_extension.CUDAExtension"):
+                        make_builder().builder()
+
+
+def test_prebuilt_builder_warns_instead_of_failing_on_cuda_minor_version_mismatch(capsys):
+    # Like PyTorch's own extension build, and as docs/_tutorials/advanced-install.md says, only a CUDA
+    # major version mismatch stops the build; a minor one gets a warning. A table of known compatible
+    # minor versions used to reject every CUDA 13 minor mismatch.
+    with patch.dict(os.environ, {"DS_SKIP_CUDA_CHECK": "0"}, clear=False):
+        prebuild_with_cuda_versions(installed_cuda=(13, 2), torch_cuda="13.0")
+
+    assert "13.2" in capsys.readouterr().out
+
+
+def test_prebuilt_builder_fails_on_cuda_major_version_mismatch_unless_check_is_skipped():
+    with patch.dict(os.environ, {"DS_SKIP_CUDA_CHECK": "0"}, clear=False):
+        with pytest.raises(builder_module.CUDAMismatchException):
+            prebuild_with_cuda_versions(installed_cuda=(13, 0), torch_cuda="12.8")
+
+    with patch.dict(os.environ, {"DS_SKIP_CUDA_CHECK": "1"}, clear=False):
+        prebuild_with_cuda_versions(installed_cuda=(13, 0), torch_cuda="12.8")
+
+
 def test_non_jit_branch_unchanged():
     builder = make_builder(jit_mode=False)
 

@@ -96,26 +96,18 @@ def get_default_compute_capabilities():
     return compute_caps
 
 
-# list compatible minor CUDA versions - so that for example pytorch built with cuda-11.0 can be used
-# to build deepspeed and system-wide installed cuda 11.2
-cuda_minor_mismatch_ok = {
-    10: ["10.0", "10.1", "10.2"],
-    11: ["11.0", "11.1", "11.2", "11.3", "11.4", "11.5", "11.6", "11.7", "11.8"],
-    12: ["12.0", "12.1", "12.2", "12.3", "12.4", "12.5", "12.6", "12.8", "12.9"],  # There is no CUDATk 12.7
-}
-
-
 def assert_no_cuda_mismatch(name=""):
     cuda_major, cuda_minor = installed_cuda_version(name)
     sys_cuda_version = f'{cuda_major}.{cuda_minor}'
     torch_cuda_version = ".".join(torch.version.cuda.split('.')[:2])
-    # This is a show-stopping error, should probably not proceed past this
     if sys_cuda_version != torch_cuda_version:
-        if (cuda_major in cuda_minor_mismatch_ok and sys_cuda_version in cuda_minor_mismatch_ok[cuda_major]
-                and torch_cuda_version in cuda_minor_mismatch_ok[cuda_major]):
-            print(f"Installed CUDA version {sys_cuda_version} does not match the "
-                  f"version torch was compiled with {torch.version.cuda} "
-                  "but since the APIs are compatible, accepting this combination")
+        torch_cuda_major = int(torch_cuda_version.split('.')[0])
+        # Like PyTorch's own extension build, fail only on a major version mismatch: CUDA keeps the
+        # releases of one major version compatible, so a minor mismatch only gets a warning.
+        if cuda_major == torch_cuda_major:
+            print(f"{WARNING} DeepSpeed Op Builder: Installed CUDA version {sys_cuda_version} has a minor version "
+                  f"mismatch with the version torch was compiled with {torch.version.cuda}. Accepting this "
+                  "combination, but it may result in unexpected behavior.")
             return True
         elif os.getenv("DS_SKIP_CUDA_CHECK", "0") == "1":
             print(
