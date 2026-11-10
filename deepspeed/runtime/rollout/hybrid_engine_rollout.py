@@ -19,7 +19,8 @@ import torch
 
 from deepspeed.accelerator import get_accelerator
 from deepspeed.utils import logger
-from deepspeed.runtime.rollout.base import RolloutBatch, RolloutEngine, RolloutRecord, RolloutRequest, SamplingConfig
+from deepspeed.runtime.rollout.base import (RolloutBatch, RolloutConfig, RolloutEngine, RolloutRecord, RolloutRequest,
+                                            SamplingConfig)
 from deepspeed.runtime.rollout.continuous_batching import _ContinuousRunGraph, _ContinuousRun
 from deepspeed.runtime.rollout.tool import TOOL_CALL_PARSERS, ToolSet
 from deepspeed.runtime.rollout.utils import (
@@ -144,7 +145,7 @@ def _penalize_repeats(logits, input_ids, repetition_penalty):
 
 
 @dataclass
-class HybridEngineRolloutConfig:
+class HybridEngineRolloutConfig(RolloutConfig):
     """Configuration for HybridEngineRollout.
 
     ``align_decode_fronts`` is opt-in. When false, continuous batching keeps
@@ -165,7 +166,6 @@ class HybridEngineRolloutConfig:
     multi_turn: bool = False
     continuous_cache_capacity: Optional[int] = None
     max_turns: Optional[int] = None
-    max_context_len: Optional[int] = None
     chat_template_kwargs: dict = field(default_factory=dict)
     # The model's tool-call format, a key of TOOL_CALL_PARSERS such as "hermes" (Qwen2.5, Qwen3) or
     # "qwen3_coder" (Qwen3-Coder, Qwen3.5).
@@ -199,20 +199,30 @@ class HybridEngineRollout(RolloutEngine):
         self.partitions_weights = engine.zero_optimization_partition_weights()
         self.autotp_size = engine.autotp_size()
         self.inference_tp_size = engine._config.hybrid_engine.inference_tp_size
+        # The rollout runs every trajectory to completion, so it needs an explicit cap on total length rather than
+        # the hybrid engine's default.
+        if "max_out_tokens" not in engine._config.hybrid_engine.model_fields_set:
+            raise ValueError("HybridEngineRollout caps each trajectory's prompt, responses and tool output at "
+                             "hybrid_engine.max_out_tokens; set it in the DeepSpeed config")
+        self.max_out_tokens = engine._config.hybrid_engine.max_out_tokens
         self.tools = tools if tools is not None else ToolSet([])
-        self.use_graph_capture = getattr(cfg, 'use_graph_capture', False) if cfg else False
-        self.enable_profiling = getattr(cfg, 'enable_profiling', False) if cfg else False
-        self.use_shared_prefill = getattr(cfg, 'use_shared_prefill', False) if cfg else False
-        self.align_decode_fronts = getattr(cfg, 'align_decode_fronts', False) if cfg else False
-        self.enable_cache_trimming = getattr(cfg, 'enable_cache_trimming', False) if cfg else False
-        self.continuous_cache_capacity = getattr(cfg, 'continuous_cache_capacity', None) if cfg else None
-        self.continuous_batch_size = getattr(cfg, 'continuous_batch_size', None) if cfg else None
-        self.return_log_probs = getattr(cfg, 'return_log_probs', False) if cfg else False
-        self.multi_turn = getattr(cfg, 'multi_turn', False) if cfg else False
-        self.max_turns = getattr(cfg, 'max_turns', None) if cfg else None
-        self.max_context_len = getattr(cfg, 'max_context_len', None) if cfg else None
-        self.chat_template_kwargs = (getattr(cfg, 'chat_template_kwargs', None) if cfg else None) or {}
-        self.parse_tool_calls = TOOL_CALL_PARSERS[getattr(cfg, 'tool_call_parser', 'hermes') if cfg else 'hermes']
+        if cfg is None:
+            cfg = HybridEngineRolloutConfig()
+        # Any other config would leave every setting at its default without a word.
+        if not isinstance(cfg, HybridEngineRolloutConfig):
+            raise TypeError(f"HybridEngineRollout needs a HybridEngineRolloutConfig, got {type(cfg).__name__}")
+        self.use_graph_capture = cfg.use_graph_capture
+        self.enable_profiling = cfg.enable_profiling
+        self.use_shared_prefill = cfg.use_shared_prefill
+        self.align_decode_fronts = cfg.align_decode_fronts
+        self.enable_cache_trimming = cfg.enable_cache_trimming
+        self.continuous_cache_capacity = cfg.continuous_cache_capacity
+        self.continuous_batch_size = cfg.continuous_batch_size
+        self.return_log_probs = cfg.return_log_probs
+        self.multi_turn = cfg.multi_turn
+        self.max_turns = cfg.max_turns
+        self.chat_template_kwargs = cfg.chat_template_kwargs
+        self.parse_tool_calls = TOOL_CALL_PARSERS[cfg.tool_call_parser]
         self._last_profile = None
         self._last_continuous_stats = None
         if self.use_shared_prefill:
@@ -297,9 +307,7 @@ class HybridEngineRollout(RolloutEngine):
         budget = sampling.max_new_tokens - generated_length
         if sampling.max_new_tokens_per_turn is not None:
             budget = min(budget, sampling.max_new_tokens_per_turn)
-        if self.max_context_len is not None:
-            budget = min(budget, self.max_context_len - sum(sample.attention_mask))
-        return budget
+        return min(budget, self.max_out_tokens - sum(sample.attention_mask))
 
     def _end_turn(self, sample, response, turn, generated, max_new_tokens):
         """Settle a trajectory after a turn, and return the tool calls it should run next, if any."""
@@ -319,10 +327,8 @@ class HybridEngineRollout(RolloutEngine):
         return calls
 
     def _tool_output_fits(self, sample, response, tool_response):
-        """Whether a turn's response and tool output stay within ``max_context_len``."""
-        if self.max_context_len is None:
-            return True
-        return sum(sample.attention_mask) + len(response) + len(tool_response) <= self.max_context_len
+        """Whether a turn's response and tool output stay within ``max_out_tokens``."""
+        return sum(sample.attention_mask) + len(response) + len(tool_response) <= self.max_out_tokens
 
     def _tool_response(self, calls, outputs):
         """Tokens of the tool messages that answer ``calls``."""
@@ -512,15 +518,13 @@ class HybridEngineRollout(RolloutEngine):
         if sampling.max_new_tokens_per_turn is not None:
             turn_cap = min(turn_cap, sampling.max_new_tokens_per_turn)
         longest_prompt = max(sum(sample.attention_mask) for sample in trajectories)
-        capacity = self.continuous_cache_capacity or self.max_context_len
-        if not self.multi_turn:
-            if capacity is None:
-                capacity = longest_prompt + turn_cap
-            elif capacity < longest_prompt + turn_cap:
-                raise ValueError("continuous_cache_capacity must fit the prompt and all generated tokens")
+        # A single turn needs no more than its prompt and budget; a multi-turn row may grow to the cap.
+        needed = self.max_out_tokens if self.multi_turn else min(self.max_out_tokens, longest_prompt + turn_cap)
+        capacity = self.continuous_cache_capacity
         if capacity is None:
-            raise ValueError("multi-turn continuous batching sizes its rows by max_context_len or "
-                             "continuous_cache_capacity; set one of them")
+            capacity = needed
+        elif not self.multi_turn and capacity < needed:
+            raise ValueError("continuous_cache_capacity must fit the prompt and all generated tokens")
         max_positions = getattr(getattr(module, "config", None), "max_position_embeddings", None)
         if isinstance(max_positions, int) and capacity > max_positions:
             raise ValueError("continuous batching cache exceeds the model maximum position embeddings")
@@ -634,12 +638,9 @@ class HybridEngineRollout(RolloutEngine):
         if not isinstance(max_positions, int):
             max_positions = None
         if self.multi_turn:
-            if self.max_context_len is None and self.continuous_cache_capacity is None:
-                raise ValueError("multi-turn continuous batching sizes its cache by max_context_len or "
-                                 "continuous_cache_capacity; set one of them")
-            if max_positions is not None and self.max_context_len is not None and self.max_context_len > max_positions:
-                raise ValueError("max_context_len exceeds the model maximum position embeddings")
-            longest_context = self.max_context_len
+            if max_positions is not None and self.max_out_tokens > max_positions:
+                raise ValueError("hybrid_engine.max_out_tokens exceeds the model maximum position embeddings")
+            longest_context = self.max_out_tokens
         else:
             if max_positions is not None:
                 if any(sum(sample.attention_mask) + turn_cap > max_positions for sample in trajectories):

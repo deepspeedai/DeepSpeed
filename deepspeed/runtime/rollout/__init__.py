@@ -21,7 +21,7 @@ from deepspeed.runtime.rollout.base import (
     RolloutRequest,
     SamplingConfig,
 )
-from deepspeed.runtime.rollout.hybrid_engine_rollout import HybridEngineRollout
+from deepspeed.runtime.rollout.hybrid_engine_rollout import HybridEngineRollout, HybridEngineRolloutConfig
 from deepspeed.runtime.rollout.grpo import (GRPOLossOutput, group_advantages, grpo_policy_loss,
                                             old_log_probs_from_rollout)
 from deepspeed.runtime.rollout.opsd import JSDLossOutput, ResponseTokenBatch, generalized_jsd_loss
@@ -30,6 +30,7 @@ from deepspeed.runtime.rollout.tool import Tool, ToolCall, ToolSet, parse_hermes
 __all__ = [
     "GRPOLossOutput",
     "HybridEngineRollout",
+    "HybridEngineRolloutConfig",
     "JSDLossOutput",
     "RolloutBatch",
     "RolloutConfig",
@@ -54,8 +55,8 @@ def build_rollout(rollout_cfg, generation_engine=None, tokenizer=None, tools=Non
     """Factory: construct the rollout engine specified by ``rollout_cfg.engine``.
 
     Args:
-        rollout_cfg: :class:`RolloutConfig` (or any object with an ``engine``
-            attribute set to ``"hybrid_engine"``).
+        rollout_cfg: The backend's config, a subclass of :class:`RolloutConfig` whose ``engine`` names the
+            backend: :class:`HybridEngineRolloutConfig` for ``"hybrid_engine"``.
         generation_engine: DeepSpeed engine wrapping the student model.
         tokenizer: HuggingFace tokenizer.
         tools: Tools the model may call in multi-turn rollout: a

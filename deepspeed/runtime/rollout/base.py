@@ -13,38 +13,11 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
 
-from deepspeed.runtime.rollout.tool import TOOL_CALL_PARSERS
-
 
 @dataclass
 class RolloutConfig:
-    """Configuration for the rollout engine."""
+    """Selects the rollout backend; each backend's config subclasses this with its own settings."""
     engine: str = "hybrid_engine"
-
-    # Use CUDA graph capture for decode acceleration.
-    use_graph_capture: bool = False
-
-    multi_turn: bool = False
-    max_turns: Optional[int] = None
-    max_context_len: Optional[int] = None
-    # Extra arguments for ``tokenizer.apply_chat_template``, e.g. {"enable_thinking": False} for Qwen3.
-    chat_template_kwargs: dict = field(default_factory=dict)
-    # The model's tool-call format, a key of TOOL_CALL_PARSERS such as "hermes" (Qwen2.5, Qwen3) or
-    # "qwen3_coder" (Qwen3-Coder, Qwen3.5).
-    tool_call_parser: str = "hermes"
-    # Decode rows for continuous batching; None keeps static batching.
-    continuous_batch_size: Optional[int] = None
-    # Record each generated token's log-prob under the sampling distribution in RolloutRecord.rollout_log_probs.
-    return_log_probs: bool = False
-
-    def __post_init__(self) -> None:
-        if self.multi_turn and (not isinstance(self.max_turns, int) or self.max_turns < 1):
-            raise ValueError("max_turns must be a positive integer when multi_turn is enabled")
-        if self.continuous_batch_size is not None and self.continuous_batch_size < 1:
-            raise ValueError("continuous_batch_size must be positive")
-        if self.tool_call_parser not in TOOL_CALL_PARSERS:
-            raise ValueError(f"unknown tool_call_parser {self.tool_call_parser!r}; "
-                             f"choose from {', '.join(TOOL_CALL_PARSERS)}")
 
 
 @dataclass

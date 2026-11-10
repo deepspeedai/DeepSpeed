@@ -98,7 +98,7 @@ Continuous batching (experimental)
 -----------------------------------
 
 Continuous batching is enabled through ``continuous_batch_size`` in
-``RolloutConfig`` or ``HybridEngineRolloutConfig``. It sizes the KV cache and
+``HybridEngineRolloutConfig``. It sizes the KV cache and
 the captured graph, so it is fixed for the rollout engine rather than passed
 with each ``generate(request, sampling)`` call. When unset, turns run in static
 batches. When set, at most that many turns decode at once: a row is freed as
@@ -136,11 +136,11 @@ The cache size is ``continuous_cache_capacity`` when set. Otherwise it follows
 from the longest context a turn can be admitted with, ``C``, and the most one
 turn can generate, ``b`` (``max_new_tokens_per_turn`` when set, else
 ``max_new_tokens``). In a single-turn call ``C`` is the prompt width, and in a
-multi-turn rollout it is ``max_context_len``, which, without
-``continuous_cache_capacity``, a multi-turn rollout must set: tool output has no
-bound. The shared write column gets ``C + b`` columns, which is enough because
-trimming at full leaves the oldest live row at column 0. Each graph row gets
-``max_context_len``, or the longest prompt plus ``b`` in a single-turn call.
+multi-turn rollout it is ``hybrid_engine.max_out_tokens``, since tool output has
+no other bound. The shared write column gets ``C + b`` columns, which is enough
+because trimming at full leaves the oldest live row at column 0. Each graph row
+gets ``max_out_tokens``, or in a single-turn call the longest prompt plus ``b``
+when that is smaller.
 
 Continuous batching rejects ZeRO-3, ``flash_attention_2``, shared prefill, and
 models that declare no cache-class support.
@@ -193,7 +193,7 @@ model tokens, 0 on tool output), ``rollout_log_probs`` and ``status``
 from one prompt share its ``group_index``. A record without ``tokens`` is
 rendered with the tokenizer's chat template.
 
-``RolloutConfig(return_log_probs=True)`` records each generated token's
+``HybridEngineRolloutConfig(return_log_probs=True)`` records each generated token's
 log-probability under ``softmax(logits / temperature)``, the distribution a
 training forward pass can reproduce. ``generate()`` therefore rejects
 ``return_log_probs`` combined with ``top_k`` or ``top_p`` when sampling, and
@@ -202,7 +202,7 @@ warns about a repetition penalty other than 1.0.
 Multi-turn Rollout and Tool Calling
 -----------------------------------
 
-With ``RolloutConfig(multi_turn=True, max_turns=...)``, ``HybridEngineRollout``
+With ``HybridEngineRolloutConfig(multi_turn=True, max_turns=...)``, ``HybridEngineRollout``
 runs each record over several turns. Each turn generates for all records still
 active, parses tool calls from every response that ends in EOS, runs the tools,
 and appends their output as tool messages. A record ends ``COMPLETED`` when a
@@ -216,12 +216,13 @@ Tools subclass ``Tool``: set ``name``, ``description`` and a JSON-schema
 ``build_rollout(..., tools=[...])``. Prompts are rendered with the tools'
 specs, calls in one turn run concurrently, and parse errors, unknown tools and
 exceptions are returned to the model as text instead of failing the rollout.
-``RolloutConfig.tool_call_parser`` selects the call format: ``"hermes"``
+``HybridEngineRolloutConfig.tool_call_parser`` selects the call format: ``"hermes"``
 (Qwen2.5, Qwen3) or ``"qwen3_coder"`` (Qwen3-Coder).
 
 .. code-block:: python
 
-    from deepspeed.runtime.rollout import RolloutConfig, RolloutRequest, SamplingConfig, Tool, build_rollout
+    from deepspeed.runtime.rollout import (HybridEngineRolloutConfig, RolloutRequest, SamplingConfig, Tool,
+                                           build_rollout)
     from deepspeed.runtime.rollout.base import RolloutRecord
 
     class Calculator(Tool):
@@ -232,22 +233,23 @@ exceptions are returned to the model as text instead of failing the rollout.
         async def execute(self, arguments):
             return str(evaluate(arguments["expression"]))
 
-    rollout = build_rollout(RolloutConfig(multi_turn=True, max_turns=8, return_log_probs=True), engine, tokenizer,
-                            tools=[Calculator()])
+    cfg = HybridEngineRolloutConfig(multi_turn=True, max_turns=8, return_log_probs=True)
+    rollout = build_rollout(cfg, engine, tokenizer, tools=[Calculator()])
     request = RolloutRequest(samples=[RolloutRecord(prompt=[{"role": "user", "content": question}])])
     sampling = SamplingConfig(max_new_tokens=8192, max_new_tokens_per_turn=2048, n_samples_per_prompt=8)
     records = rollout.generate(request, sampling).samples
 
 ``max_new_tokens`` caps a record's generated tokens over all turns,
-``max_new_tokens_per_turn`` caps each turn, and
-``RolloutConfig.max_context_len`` caps the whole conversation.
-``RolloutConfig.chat_template_kwargs`` is passed to every chat-template call,
+``max_new_tokens_per_turn`` caps each turn, and the DeepSpeed config's
+``hybrid_engine.max_out_tokens`` caps the whole conversation: prompt, responses
+and tool output. ``HybridEngineRollout`` requires it to be set explicitly.
+``HybridEngineRolloutConfig.chat_template_kwargs`` is passed to every chat-template call,
 for example ``{"enable_thinking": False}``.
 
-``RolloutConfig.continuous_batch_size`` schedules a multi-turn rollout by turn
-instead of by record (see "Continuous batching" above). It needs
-``max_context_len`` or ``HybridEngineRolloutConfig.continuous_cache_capacity`` to
-size the cache. A row is freed when a turn ends; the tools run on the host while
+``HybridEngineRolloutConfig.continuous_batch_size`` schedules a multi-turn rollout by turn
+instead of by record (see "Continuous batching" above). Its cache is sized by
+``max_out_tokens`` unless ``HybridEngineRolloutConfig.continuous_cache_capacity``
+is set. A row is freed when a turn ends; the tools run on the host while
 the row serves another trajectory, and the next turn is prefilled into any free
 row.
 
@@ -255,8 +257,8 @@ Rollout runs independently on every data-parallel rank. Multi-turn rollout,
 graph capture and continuous batching reject ZeRO-3: every forward gathers
 parameters, so ranks must run the same forwards, and they run different numbers
 of turns and decode steps. Single-turn static rollout supports ZeRO-3 by running
-every rank to the same length: ``max_new_tokens``, or with ``max_context_len``
-the longest budget any rank's prompts leave.
+every rank to the same length: the longest budget any rank's prompts leave
+under ``max_new_tokens`` and ``max_out_tokens``.
 
 AutoTP (``tensor_parallel.autotp_size``) is supported with static batching.
 Tensor-parallel ranks must run the same forwards, so before each generate call

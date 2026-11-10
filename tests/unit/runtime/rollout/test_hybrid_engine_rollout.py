@@ -30,22 +30,27 @@ from deepspeed.runtime.rollout.hybrid_engine_rollout import _token_selector
 from deepspeed.utils.static_cache import DeepSpeedStaticCache
 
 
-def _engine_for(module):
-    """A stand-in for a DeepSpeed engine wrapping ``module``, without ZeRO-3 or tensor parallelism."""
+def _engine_for(module, max_out_tokens=None):
+    """A stand-in for a DeepSpeed engine wrapping ``module``, without ZeRO-3 or tensor parallelism.
+
+    ``max_out_tokens`` defaults to the model's position limit, so it caps nothing a test generates.
+    """
+    if max_out_tokens is None:
+        max_out_tokens = getattr(getattr(module, "config", None), "max_position_embeddings", None) or 1024
     return SimpleNamespace(module=module,
                            zero_optimization_partition_weights=lambda: False,
                            autotp_size=lambda: 1,
-                           _config=SimpleNamespace(hybrid_engine=HybridEngineConfig()))
+                           _config=SimpleNamespace(hybrid_engine=HybridEngineConfig(max_out_tokens=max_out_tokens)))
 
 
-def _make_engine():
+def _make_engine(max_out_tokens=1024):
     engine = MagicMock()
     engine.module = MagicMock()
     engine.module.parameters.return_value = iter([])
     # Not ZeRO-3, so generation may stop at EOS.
     engine.zero_optimization_partition_weights.return_value = False
     engine.autotp_size.return_value = 1
-    engine._config.hybrid_engine = HybridEngineConfig()
+    engine._config.hybrid_engine = HybridEngineConfig(max_out_tokens=max_out_tokens)
     return engine
 
 
@@ -113,11 +118,16 @@ def test_config_defaults():
     assert cfg.return_log_probs is False
 
 
-@pytest.mark.parametrize("config_class", [RolloutConfig, HybridEngineRolloutConfig])
 @pytest.mark.parametrize("max_turns", [None, 0, -1, 1.5])
-def test_config_rejects_a_multi_turn_rollout_without_a_positive_max_turns(config_class, max_turns):
+def test_config_rejects_a_multi_turn_rollout_without_a_positive_max_turns(max_turns):
     with pytest.raises(ValueError, match="max_turns must be a positive integer"):
-        config_class(multi_turn=True, max_turns=max_turns)
+        HybridEngineRolloutConfig(multi_turn=True, max_turns=max_turns)
+
+
+def test_rollout_rejects_a_config_of_another_backend():
+    # Its settings would otherwise all fall back to their defaults.
+    with pytest.raises(TypeError, match="HybridEngineRolloutConfig"):
+        HybridEngineRollout(_make_engine(), _make_tokenizer(), RolloutConfig())
 
 
 def test_config_rejects_non_positive_continuous_batch_size():
@@ -1383,9 +1393,10 @@ _TOOL_CALL_TOKEN = 7
 def _multi_turn_rollout(responses_per_turn,
                         call_text='<tool_call>{"name": "echo", "arguments": {}}</tool_call>',
                         tools=None,
+                        max_out_tokens=1024,
                         **cfg_kwargs):
     """A multi-turn rollout whose model emits ``responses_per_turn`` in order, and ``call_text`` on token 7."""
-    engine = _make_engine()
+    engine = _make_engine(max_out_tokens)
     responses = iter(responses_per_turn)
 
     def generate(prompt_ids, **_kwargs):
@@ -1412,11 +1423,11 @@ def test_single_turn_does_not_run_tool_calls():
     assert sample.status == RolloutRecord.Status.COMPLETED
 
 
-def test_single_turn_caps_the_context_at_max_context_len():
-    engine = _make_engine()
+def test_single_turn_caps_the_context_at_max_out_tokens():
+    engine = _make_engine(max_out_tokens=4)
     engine.module.generate.side_effect = lambda prompt_ids, **kwargs: torch.cat(
         (prompt_ids, torch.full((prompt_ids.shape[0], kwargs["max_new_tokens"]), 5, device=prompt_ids.device)), dim=1)
-    rollout = HybridEngineRollout(engine, _make_tokenizer(), HybridEngineRolloutConfig(max_context_len=4))
+    rollout = HybridEngineRollout(engine, _make_tokenizer())
 
     sample = rollout.generate(RolloutRequest(samples=[_prompt([10, 11, 12])]),
                               SamplingConfig(max_new_tokens=8, temperature=0)).samples[0]
@@ -1426,8 +1437,8 @@ def test_single_turn_caps_the_context_at_max_context_len():
 
 
 @patch("deepspeed.runtime.rollout.hybrid_engine_rollout.tokenize_tool_responses", return_value=[9] * 10)
-def test_multi_turn_ends_when_tool_output_would_pass_max_context_len(_tokenize_tool_responses):
-    engine, rollout = _multi_turn_rollout([[_TOOL_CALL_TOKEN, 2]], max_context_len=8)
+def test_multi_turn_ends_when_tool_output_would_pass_max_out_tokens(_tokenize_tool_responses):
+    engine, rollout = _multi_turn_rollout([[_TOOL_CALL_TOKEN, 2]], max_out_tokens=8)
 
     sample = rollout.generate(RolloutRequest(samples=[_prompt([10, 11])]),
                               SamplingConfig(max_new_tokens=6, temperature=0)).samples[0]
@@ -1673,10 +1684,9 @@ def test_multi_turn_runs_tools_called_in_the_configured_format(tokenize_tool_res
     assert sample.status == RolloutRecord.Status.COMPLETED
 
 
-@pytest.mark.parametrize("config_type", [HybridEngineRolloutConfig, RolloutConfig])
-def test_configs_reject_unknown_tool_call_parser(config_type):
+def test_config_rejects_unknown_tool_call_parser():
     with pytest.raises(ValueError, match="tool_call_parser"):
-        config_type(tool_call_parser="xml")
+        HybridEngineRolloutConfig(tool_call_parser="xml")
 
 
 def test_single_turn_applies_the_per_turn_cap():
@@ -2022,8 +2032,8 @@ def _continuous_rollout(model, eos, tool_length, **cfg_kwargs):
     tokenizer = SimpleNamespace(pad_token_id=0,
                                 eos_token_id=eos,
                                 decode=lambda ids, **_kwargs: _ECHO_CALL if len(ids) == tool_length else "")
-    cfg = HybridEngineRolloutConfig(multi_turn=True, max_turns=4, max_context_len=48, **cfg_kwargs)
-    engine = _engine_for(model)
+    cfg = HybridEngineRolloutConfig(multi_turn=True, max_turns=4, **cfg_kwargs)
+    engine = _engine_for(model, max_out_tokens=48)
     return HybridEngineRollout(engine, tokenizer, cfg, tools=ToolSet([_EchoTool()]))
 
 
@@ -2227,12 +2237,12 @@ def test_multi_turn_shared_column_matches_static_batching(_tokenize_tool_respons
         torch.testing.assert_close(actual.rollout_log_probs, expected.rollout_log_probs, atol=1e-4, rtol=0)
 
 
-def test_multi_turn_continuous_batching_needs_a_row_capacity():
-    rollout = HybridEngineRollout(_make_engine(), _make_tokenizer(),
-                                  HybridEngineRolloutConfig(continuous_batch_size=2, multi_turn=True, max_turns=2))
-    sampling = SamplingConfig(max_new_tokens=4, temperature=0)
-    with pytest.raises(ValueError, match="max_context_len or continuous_cache_capacity"):
-        rollout.generate(RolloutRequest(samples=[_prompt([1, 2])]), sampling)
+def test_rollout_requires_an_explicit_max_out_tokens():
+    # The hybrid engine's default would silently cap every trajectory.
+    engine = _make_engine()
+    engine._config.hybrid_engine = HybridEngineConfig()
+    with pytest.raises(ValueError, match="hybrid_engine.max_out_tokens"):
+        HybridEngineRollout(engine, _make_tokenizer())
 
 
 @patch("deepspeed.runtime.rollout.hybrid_engine_rollout.get_accelerator")

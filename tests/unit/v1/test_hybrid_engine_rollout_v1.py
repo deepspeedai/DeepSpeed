@@ -21,12 +21,17 @@ from deepspeed.runtime.rollout.hybrid_engine_rollout import HybridEngineRollout,
 from unit.common import DistributedTest
 
 
-def _engine_for(module):
-    """A stand-in for a DeepSpeed engine wrapping ``module``, without ZeRO-3 or tensor parallelism."""
+def _engine_for(module, max_out_tokens=None):
+    """A stand-in for a DeepSpeed engine wrapping ``module``, without ZeRO-3 or tensor parallelism.
+
+    ``max_out_tokens`` defaults to the model's position limit, so it caps nothing a test generates.
+    """
+    if max_out_tokens is None:
+        max_out_tokens = getattr(getattr(module, "config", None), "max_position_embeddings", None) or 1024
     return SimpleNamespace(module=module,
                            zero_optimization_partition_weights=lambda: False,
                            autotp_size=lambda: 1,
-                           _config=SimpleNamespace(hybrid_engine=HybridEngineConfig()))
+                           _config=SimpleNamespace(hybrid_engine=HybridEngineConfig(max_out_tokens=max_out_tokens)))
 
 
 def test_continuous_generation_profile_on_accelerator():
@@ -406,7 +411,7 @@ def _tiny_qwen3(device):
 
 @pytest.mark.parametrize("use_graph_capture", [False, True])
 @pytest.mark.parametrize("continuous_batch_size", [None, 2])
-def test_tool_output_that_would_pass_max_context_len_ends_the_trajectory(use_graph_capture, continuous_batch_size):
+def test_tool_output_that_would_pass_max_out_tokens_ends_the_trajectory(use_graph_capture, continuous_batch_size):
     accelerator = get_accelerator()
     if not accelerator.is_available():
         pytest.skip("requires an accelerator")
@@ -423,12 +428,10 @@ def test_tool_output_that_would_pass_max_context_len_ends_the_trajectory(use_gra
     # The first greedy token ends the turn, and every turn calls the tool.
     call = '<tool_call>{"name": "ok", "arguments": {}}</tool_call>'
     tokenizer = SimpleNamespace(pad_token_id=0, eos_token_id=first, decode=lambda ids, **_kwargs: call)
-    max_context_len = len(prompt) + 10
-    rollout = HybridEngineRollout(_engine_for(model),
+    rollout = HybridEngineRollout(_engine_for(model, max_out_tokens=len(prompt) + 10),
                                   tokenizer,
                                   HybridEngineRolloutConfig(multi_turn=True,
                                                             max_turns=3,
-                                                            max_context_len=max_context_len,
                                                             use_graph_capture=use_graph_capture,
                                                             continuous_batch_size=continuous_batch_size),
                                   tools=ToolSet([_OkTool()]))
@@ -479,6 +482,9 @@ class TestAutoTPRollout(DistributedTest):
             },
             "zero_optimization": {
                 "stage": 0
+            },
+            "hybrid_engine": {
+                "max_out_tokens": 128
             },
         }
         engine, *_ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=ds_config)
@@ -621,6 +627,9 @@ class TestDataParallelRollout(DistributedTest):
                 "type": "AdamW",
                 "params": optimizer_params
             },
+            "hybrid_engine": {
+                "max_out_tokens": 128
+            },
             **_DATA_PARALLEL_SETUPS[setup],
         }
         engine, *_ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=ds_config)
@@ -664,8 +673,8 @@ class TestDataParallelRollout(DistributedTest):
         assert after != before
 
     @pytest.mark.parametrize("over_cap", [False, True])
-    def test_zero3_ranks_stay_in_step_under_max_context_len(self, over_cap):
-        """``max_context_len`` gives each rank a different budget, or none, and ZeRO-3 ranks must still agree."""
+    def test_zero3_ranks_stay_in_step_under_max_out_tokens(self, over_cap):
+        """``max_out_tokens`` gives each rank a different budget, or none, and ZeRO-3 ranks must still agree."""
         from transformers import AutoModelForCausalLM, Qwen3Config
 
         config = Qwen3Config(vocab_size=64,
@@ -678,6 +687,7 @@ class TestDataParallelRollout(DistributedTest):
                              max_position_embeddings=128)
         torch.manual_seed(0)
         model = AutoModelForCausalLM.from_config(config)
+        max_out_tokens, max_new_tokens = 12, 6
         ds_config = {
             "train_micro_batch_size_per_gpu": 1,
             "optimizer": {
@@ -687,15 +697,17 @@ class TestDataParallelRollout(DistributedTest):
                     "torch_adam": True
                 }
             },
+            "hybrid_engine": {
+                "max_out_tokens": max_out_tokens
+            },
             **_DATA_PARALLEL_SETUPS["zero3"],
         }
         engine, *_ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=ds_config)
         module = engine.module.eval()
         device = get_accelerator().current_device_name()
         tokenizer = SimpleNamespace(pad_token_id=0, eos_token_id=None, decode=lambda ids, **_kwargs: "")
-        max_context_len, max_new_tokens = 12, 6
-        rollout = HybridEngineRollout(engine, tokenizer, HybridEngineRolloutConfig(max_context_len=max_context_len))
-        # Rank 0 has the room for every token; rank 1 for two, or with over_cap for none.
+        rollout = HybridEngineRollout(engine, tokenizer, HybridEngineRolloutConfig())
+        # Rank 0 has the budget for every token; rank 1 for two, or with over_cap for none.
         if dist.get_rank() == 0:
             prompts = [[3, 7, 21, 30], [5, 9, 12]]
         else:
@@ -707,7 +719,7 @@ class TestDataParallelRollout(DistributedTest):
             SamplingConfig(max_new_tokens=max_new_tokens, temperature=0.0)).samples
 
         for prompt, record in zip(prompts, records):
-            budget = max(min(max_new_tokens, max_context_len - len(prompt)), 0)
+            budget = max(min(max_new_tokens, max_out_tokens - len(prompt)), 0)
             # Every rank generates the same number of tokens here, so the reference stays in step too.
             with torch.no_grad():
                 expected = module.generate(torch.tensor([prompt], device=device),
