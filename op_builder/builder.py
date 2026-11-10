@@ -142,7 +142,6 @@ class OpBuilder(ABC):
     def __init__(self, name):
         self.name = name
         self.jit_mode = False
-        self.build_for_cpu = False
         self.enable_bf16 = False
         self.error_log = None
 
@@ -624,9 +623,6 @@ class OpBuilder(ABC):
         except RuntimeError as e:
             raise RuntimeError(f"Unable to JIT load the {self.name} op due to ninja not being installed.") from e
 
-        if isinstance(self, CUDAOpBuilder) and not self.is_rocm_pytorch():
-            self.build_for_cpu = not torch.cuda.is_available()
-
         saved_jit_mode = self.jit_mode
         self.jit_mode = True
         torch_arch_list_present = "TORCH_CUDA_ARCH_LIST" in os.environ
@@ -646,7 +642,7 @@ class OpBuilder(ABC):
             cxx_args.append("-UC10_USE_GLOG")
             nvcc_args.append("-UC10_USE_GLOG")
             if isinstance(self, CUDAOpBuilder):
-                if not self.build_for_cpu and self.enable_bf16:
+                if self.enable_bf16:
                     cxx_args.append("-DBF16_AVAILABLE")
                     nvcc_args.append("-DBF16_AVAILABLE")
                     nvcc_args.append("-U__CUDA_NO_BFLOAT16_OPERATORS__")
@@ -664,7 +660,7 @@ class OpBuilder(ABC):
                              extra_cflags=cxx_args,
                              extra_cuda_cflags=nvcc_args,
                              extra_ldflags=self.strip_empty_entries(self.extra_ldflags()),
-                             with_cuda=True if (isinstance(self, CUDAOpBuilder) and not self.build_for_cpu) else None,
+                             with_cuda=True if isinstance(self, CUDAOpBuilder) else None,
                              verbose=verbose)
 
             build_duration = time.time() - start_build
@@ -847,23 +843,17 @@ class CUDAOpBuilder(OpBuilder):
         return super().is_compatible(verbose)
 
     def builder(self):
-        try:
-            if not self.is_rocm_pytorch():
-                assert_no_cuda_mismatch(self.name)
-            self.build_for_cpu = False
-        except MissingCUDAException:
-            self.build_for_cpu = True
+        if not self.is_rocm_pytorch():
+            assert_no_cuda_mismatch(self.name)
 
-        if self.build_for_cpu:
-            from torch.utils.cpp_extension import CppExtension as ExtensionBuilder
-        else:
-            from torch.utils.cpp_extension import CUDAExtension as ExtensionBuilder
+        from torch.utils.cpp_extension import CUDAExtension as ExtensionBuilder
         include_dirs = [os.path.abspath(x) for x in self.strip_empty_entries(self.include_paths())]
-        compile_args = {'cxx': self.strip_empty_entries(self.cxx_args())} if self.build_for_cpu else \
-                       {'cxx': self.strip_empty_entries(self.cxx_args()), \
-                        'nvcc': self.strip_empty_entries(self.nvcc_args())}
+        compile_args = {
+            'cxx': self.strip_empty_entries(self.cxx_args()),
+            'nvcc': self.strip_empty_entries(self.nvcc_args())
+        }
 
-        if not self.build_for_cpu and self.enable_bf16:
+        if self.enable_bf16:
             compile_args['cxx'].append("-DBF16_AVAILABLE")
             compile_args['nvcc'].append("-DBF16_AVAILABLE")
 
@@ -918,8 +908,6 @@ class CUDAOpBuilder(OpBuilder):
             return ['-O3', cpp_standard, '-g', '-Wno-reorder']
 
     def nvcc_args(self):
-        if self.build_for_cpu:
-            return []
         args = ['-O3']
         # torch 2.12+ headers require C++20 (see cxx_args), so the device compiler
         # must use the same standard instead of the toolkit's default.
@@ -962,9 +950,6 @@ class CUDAOpBuilder(OpBuilder):
         return args
 
     def libraries_args(self):
-        if self.build_for_cpu:
-            return []
-
         if sys.platform == "win32":
             return ['cublas', 'curand']
         else:

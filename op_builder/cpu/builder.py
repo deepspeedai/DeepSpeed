@@ -25,7 +25,8 @@ class CPUOpBuilder(OpBuilder):
                                    sources=self.strip_empty_entries(self.sources()),
                                    include_dirs=include_dirs,
                                    libraries=self.strip_empty_entries(self.libraries_args()),
-                                   extra_compile_args=compile_args)
+                                   extra_compile_args=compile_args,
+                                   extra_link_args=self.strip_empty_entries(self.extra_ldflags()))
 
         return cpp_ext
 

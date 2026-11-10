@@ -124,11 +124,10 @@ def test_jit_load_restores_env_and_state_after_failure():
     with patch.dict(os.environ, {"TORCH_CUDA_ARCH_LIST": "8.9"}, clear=False):
         with patch.object(builder, "is_compatible", return_value=True):
             with patch.object(CUDAOpBuilder, "is_rocm_pytorch", return_value=False):
-                with patch.object(CUDA_API, "is_available", return_value=True):
-                    with patch("torch.utils.cpp_extension.verify_ninja_availability", return_value=None):
-                        with patch.object(builder, "nvcc_args", side_effect=fail_nvcc_args):
-                            with pytest.raises(RuntimeError, match="build failed"):
-                                builder.jit_load(verbose=False)
+                with patch("torch.utils.cpp_extension.verify_ninja_availability", return_value=None):
+                    with patch.object(builder, "nvcc_args", side_effect=fail_nvcc_args):
+                        with pytest.raises(RuntimeError, match="build failed"):
+                            builder.jit_load(verbose=False)
 
         assert getattr(builder, "_jit_arch_list", None) is None
         assert builder.jit_mode is False
@@ -147,12 +146,11 @@ def test_jit_load_restores_state_after_success():
     with patch.dict(os.environ, {"TORCH_CUDA_ARCH_LIST": "8.9"}, clear=False):
         with patch.object(builder, "is_compatible", return_value=True):
             with patch.object(CUDAOpBuilder, "is_rocm_pytorch", return_value=False):
-                with patch.object(CUDA_API, "is_available", return_value=True):
-                    with patch("torch.utils.cpp_extension.verify_ninja_availability", return_value=None):
-                        with patch.object(builder, "nvcc_args", side_effect=successful_nvcc_args):
-                            with patch.object(builder, "cxx_args", return_value=[]):
-                                with patch("torch.utils.cpp_extension.load", return_value=op_module):
-                                    assert builder.jit_load(verbose=False) is op_module
+                with patch("torch.utils.cpp_extension.verify_ninja_availability", return_value=None):
+                    with patch.object(builder, "nvcc_args", side_effect=successful_nvcc_args):
+                        with patch.object(builder, "cxx_args", return_value=[]):
+                            with patch("torch.utils.cpp_extension.load", return_value=op_module):
+                                assert builder.jit_load(verbose=False) is op_module
 
         assert os.environ["TORCH_CUDA_ARCH_LIST"] == "8.9"
         assert getattr(builder, "_jit_arch_list", None) is None
@@ -347,11 +345,34 @@ def test_import_deepspeed_defers_device_queries_compilation_and_transformers():
 
 def test_installed_cuda_version_reports_a_runtime_only_cuda_home_as_missing(tmp_path):
     # CUDA_HOME often points at a runtime only install (a pip torch wheel, a conda cudatoolkit) that has
-    # no nvcc under bin/. That has to surface as MissingCUDAException, because that is what the callers
-    # falling back to a CPU only build already catch. See #7452.
+    # no nvcc under bin/. That has to surface as MissingCUDAException, which says the CUDA op cannot be
+    # compiled, rather than as an OSError from running the missing nvcc. See #7452.
     with patch("torch.utils.cpp_extension.CUDA_HOME", str(tmp_path)):
         with pytest.raises(MissingCUDAException, match="unable to compile CUDA op"):
             installed_cuda_version()
+
+
+def test_cuda_op_builder_without_cuda_toolkit_raises_instead_of_building_for_cpu():
+    # A CUDA op cannot be pre-compiled without a CUDA toolkit. builder() must say so instead of quietly
+    # returning a CPU extension without the op's CUDA flags; CPU builds come from CPUOpBuilder.
+    with patch("torch.utils.cpp_extension.CUDA_HOME", None):
+        with patch.object(CUDAOpBuilder, "is_rocm_pytorch", return_value=False):
+            with pytest.raises(MissingCUDAException, match="unable to compile CUDA op"):
+                make_builder().builder()
+
+
+def test_cuda_accelerator_pre_compiles_async_io_without_cuda_and_links_libaio():
+    # async_io stages device tensors through host memory and uses no CUDA headers or libraries, so on
+    # CUDA systems it must pre-compile without a CUDA toolkit. The prebuilt extension must still link
+    # libaio, or importing it fails on the unresolved io_submit/io_getevents symbols.
+    from accelerator.cuda_accelerator import CUDA_Accelerator
+
+    builder = CUDA_Accelerator().create_op_builder("AsyncIOBuilder")
+    with patch("torch.utils.cpp_extension.CUDA_HOME", None):
+        extension = builder.builder()
+
+    links_libaio = "-laio" in extension.extra_link_args or "aio" in extension.libraries
+    assert links_libaio
 
 
 class _RaisingBuilder:

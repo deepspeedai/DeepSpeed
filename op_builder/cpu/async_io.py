@@ -39,11 +39,6 @@ class AsyncIOBuilder(CPUOpBuilder):
     def cxx_args(self):
         # -O0 for improved debugging, since performance is bound by I/O
         args = super().cxx_args()
-        import torch
-        TORCH_MAJOR, TORCH_MINOR = map(int, torch.__version__.split('.')[0:2])
-        if not (TORCH_MAJOR >= 2 and TORCH_MINOR >= 1):
-            args.remove('-std=c++17')
-            args.append('-std=c++14')
         args += ['-Wall', '-O0', '-shared', '-fPIC', '-Wno-reorder']
         return args
 
