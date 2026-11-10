@@ -26,7 +26,7 @@ from deepspeed.runtime.rollout.hybrid_engine_rollout import (
     HybridEngineRollout,
     HybridEngineRolloutConfig,
 )
-from deepspeed.runtime.rollout.hybrid_engine_rollout import _token_selector
+from deepspeed.runtime.rollout.hybrid_engine_rollout import _TokenSelector
 from deepspeed.utils.static_cache import DeepSpeedStaticCache
 
 
@@ -742,22 +742,32 @@ def test_continuous_generation_refills_padded_prompts_after_trim():
 
 
 @pytest.mark.parametrize("repetition_penalty, expected", [(1.5, [[1]]), (1.0, [[0]])])
-def test_continuous_generation_applies_repetition_penalty(repetition_penalty, expected):
-    row = SimpleNamespace(prompt_ids=torch.tensor([[0]]))
-    responses = {0: [torch.tensor([[0]])]}
+def test_token_selector_applies_repetition_penalty(repetition_penalty, expected):
+    select = _TokenSelector(SamplingConfig(max_new_tokens=1, temperature=0), repetition_penalty)
 
     # Pin the real-model regression: a bare argmax would select the repeated
     # token 0, while Transformers' repetition processor must select token 1.
-    next_tokens, _ = HybridEngineRollout._continuous_next_tokens(
-        torch.tensor([[6.0, 5.0]]),
-        (0, ),
-        {0: row},
-        responses,
-        repetition_penalty,
-        _token_selector(SamplingConfig(max_new_tokens=1, temperature=0)),
-    )
+    next_tokens, _ = select.first(torch.tensor([[6.0, 5.0]]), torch.tensor([[0]]))
 
     assert next_tokens.tolist() == expected
+
+
+def test_token_selector_tracks_each_rows_history():
+    select = _TokenSelector(SamplingConfig(max_new_tokens=1, temperature=0), repetition_penalty=4.0, num_rows=3)
+    # Token 2 scores highest until it has been seen, then token 1 takes over.
+    logits = torch.tensor([[0.0, 3.0, 4.0, 0.0]]).expand(3, -1)
+
+    # The pad position of row 1 holds token 2, which the mask leaves out of its history.
+    first, _ = select.first(logits[:2], torch.tensor([[3, 3], [2, 3]]), torch.tensor([[1, 1], [0, 1]]))
+    assert first.tolist() == [[2], [2]]
+    # Each row now has token 2 in its history, from its own pick.
+    assert select(logits[:2])[0].tolist() == [[1], [1]]
+
+    # Row 2 starts fresh in the spare row, then row 0 retires and rows 1 and 2 move to the front.
+    assert select.first(logits[:1], torch.tensor([[3]]), rows=torch.tensor([2]))[0].tolist() == [[2]]
+    select.keep(torch.tensor([1, 2]))
+    assert select.seen[:2, 2].tolist() == [True, True]
+    assert select.seen[:2, 1].tolist() == [True, False]
 
 
 class _StubCacheConfig(SimpleNamespace):
@@ -1274,17 +1284,16 @@ def test_generate_falls_back_to_eager_without_graph_capture_opt_in(mock_get_acce
 
 
 def test_repetition_penalty_applies_before_warpers_and_in_float32():
-    row = SimpleNamespace(prompt_ids=torch.tensor([[0]]))
-    select = _token_selector(SamplingConfig(max_new_tokens=1, temperature=1.0, top_k=1))
+    prompt = torch.tensor([[0]])
+    select = _TokenSelector(SamplingConfig(max_new_tokens=1, temperature=1.0, top_k=1), repetition_penalty=1.5)
     # generate() penalizes before warping, which drops token 0 from 6 to 4 so top-k 1 keeps only token 1.
-    tokens, _ = HybridEngineRollout._continuous_next_tokens(torch.tensor([[6.0, 5.0]]), (0, ), {0: row}, {0: []}, 1.5,
-                                                            select)
+    tokens, _ = select.first(torch.tensor([[6.0, 5.0]]), prompt)
     assert tokens.tolist() == [[1]]
 
     # In bf16 token 0 would round to 4.0312 and tie with token 1, and argmax would keep token 0.
     logits = torch.tensor([[6.03125, 4.03125]], dtype=torch.bfloat16)
-    greedy = _token_selector(SamplingConfig(max_new_tokens=1, temperature=0))
-    tokens, _ = HybridEngineRollout._continuous_next_tokens(logits, (0, ), {0: row}, {0: []}, 1.5, greedy)
+    greedy = _TokenSelector(SamplingConfig(max_new_tokens=1, temperature=0), repetition_penalty=1.5)
+    tokens, _ = greedy.first(logits, prompt)
     assert tokens.tolist() == [[1]]
     assert logits.tolist() == [[6.03125, 4.03125]]
 
@@ -1311,7 +1320,7 @@ def _reference_probs(logits, temperature, top_k, top_p):
 def test_token_selector_samples_the_configured_distribution(temperature, top_k, top_p):
     logits = torch.tensor([2.0, 1.5, 1.0, 0.5, 0.0, -0.5, -1.0, -2.0])
     expected = _reference_probs(logits, temperature, top_k, top_p)
-    select = _token_selector(SamplingConfig(max_new_tokens=1, temperature=temperature, top_k=top_k, top_p=top_p))
+    select = _TokenSelector(SamplingConfig(max_new_tokens=1, temperature=temperature, top_k=top_k, top_p=top_p))
     draws = 20000
 
     torch.manual_seed(0)
@@ -1327,7 +1336,7 @@ def test_token_selector_samples_the_configured_distribution(temperature, top_k, 
 
 def test_token_selector_is_argmax_without_temperature():
     logits = torch.tensor([[0.1, 3.0, 2.0], [5.0, -1.0, 4.9]])
-    tokens, _ = _token_selector(SamplingConfig(max_new_tokens=1, temperature=0))(logits)
+    tokens, _ = _TokenSelector(SamplingConfig(max_new_tokens=1, temperature=0))(logits)
 
     assert tokens.tolist() == [[1], [0]]
 
@@ -1362,7 +1371,7 @@ def test_graph_capture_samples_with_temperature_and_scores_the_sampled_distribut
     # Called directly to test the decode loop on its own, without prompt rendering.
     with torch.no_grad():
         output_ids, log_probs = rollout._generate_graph(
-            prompt_ids, prompt_attn, max_new_tokens, 0,
+            prompt_ids, prompt_attn, max_new_tokens,
             SamplingConfig(max_new_tokens=max_new_tokens, temperature=temperature), model, device)
         # The reference is an ordinary full forward over the generated sequences, scored the way training scores them.
         attention_mask = torch.cat((prompt_attn, torch.ones_like(output_ids[:, prompt_len:])), dim=1)
@@ -1795,7 +1804,7 @@ def test_graph_generation_matches_hf_greedy_and_samples_with_temperature(batch_s
     def run(temperature):
         with torch.no_grad():
             output_ids, _ = rollout._generate_graph(
-                prompt_ids, prompt_attn, max_new_tokens, 0,
+                prompt_ids, prompt_attn, max_new_tokens,
                 SamplingConfig(max_new_tokens=max_new_tokens, temperature=temperature), module, device)
         return output_ids[:, prompt_ids.shape[1]:]
 
@@ -1861,7 +1870,7 @@ def test_graph_capture_decodes_left_padded_rows_as_if_alone(dtype):
 
     with torch.no_grad():
         output_ids, log_probs = rollout._generate_graph(
-            prompt_ids, prompt_attn, max_new_tokens, 0,
+            prompt_ids, prompt_attn, max_new_tokens,
             SamplingConfig(max_new_tokens=max_new_tokens, temperature=temperature), model, device)
         responses = output_ids[:, width:]
         for row, prompt in enumerate(prompts):
@@ -1873,7 +1882,7 @@ def test_graph_capture_decodes_left_padded_rows_as_if_alone(dtype):
             torch.testing.assert_close(log_probs[row], expected.squeeze(1), atol=atol, rtol=0)
 
         if dtype == torch.float32:
-            greedy, _ = rollout._generate_graph(prompt_ids, prompt_attn, max_new_tokens, 0,
+            greedy, _ = rollout._generate_graph(prompt_ids, prompt_attn, max_new_tokens,
                                                 SamplingConfig(max_new_tokens=max_new_tokens, temperature=0.0), model,
                                                 device)
             for row, prompt in enumerate(prompts):

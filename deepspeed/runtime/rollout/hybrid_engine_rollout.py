@@ -105,43 +105,86 @@ def _chosen_log_probs(logits, tokens):
     return torch.log_softmax(logits.float(), dim=-1).gather(1, tokens)
 
 
-def _token_selector(sampling):
-    """Return a function that picks the next tokens from logits, with their log-probs, the way ``generate()`` does."""
-    if sampling.temperature <= 0.0:
+class _TokenSelector:
+    """Picks next tokens from logits the way ``generate()`` does: repetition penalty, then temperature and top-k or
+    top-p, returning each token with its log-prob.
 
-        def select_greedy(logits):
+    With a repetition penalty it keeps a mask of the tokens each row has seen, so a caller starts each row's history
+    from its prompt and the selector adds every token it picks. Rows are cache rows; ``rows=None`` means the leading
+    ``logits.shape[0]`` rows.
+    """
+
+    def __init__(self, sampling, repetition_penalty=1.0, num_rows=None):
+        self.temperature = sampling.temperature
+        self.repetition_penalty = repetition_penalty
+        self.num_rows = num_rows
+        self.seen = None
+        self.warpers = []
+        if self.temperature > 0.0 and (sampling.top_k > 0 or sampling.top_p < 1.0):
+            from transformers.generation.logits_process import TopKLogitsWarper, TopPLogitsWarper
+            if sampling.top_k > 0:
+                self.warpers.append(TopKLogitsWarper(top_k=sampling.top_k))
+            if sampling.top_p < 1.0:
+                self.warpers.append(TopPLogitsWarper(top_p=sampling.top_p))
+
+    def start(self, prompt_ids, prompt_mask=None, rows=None, vocab_size=None):
+        """Reset the history of ``rows`` to ``prompt_ids``, leaving out positions where ``prompt_mask`` is 0."""
+        if self.repetition_penalty == 1.0:
+            return
+        if self.seen is None:
+            self.seen = torch.zeros(self.num_rows or prompt_ids.shape[0],
+                                    vocab_size,
+                                    dtype=torch.bool,
+                                    device=prompt_ids.device)
+        vocab_size = self.seen.shape[1]
+        # Masked positions write to a spare column that is then dropped.
+        if prompt_mask is not None:
+            prompt_ids = prompt_ids.masked_fill(prompt_mask == 0, vocab_size)
+        seen = torch.zeros(prompt_ids.shape[0], vocab_size + 1, dtype=torch.bool, device=prompt_ids.device)
+        seen = seen.scatter_(1, prompt_ids, True)[:, :vocab_size]
+        if rows is None:
+            self.seen[:prompt_ids.shape[0]] = seen
+        else:
+            self.seen[rows] = seen
+
+    def first(self, logits, prompt_ids, prompt_mask=None, rows=None):
+        """Start the history of ``rows`` from their prompts, then pick their first tokens."""
+        self.start(prompt_ids, prompt_mask, rows, vocab_size=logits.shape[-1])
+        return self(logits, rows)
+
+    def record(self, tokens, rows=None):
+        """Add tokens picked elsewhere to the history of ``rows``."""
+        if self.seen is None:
+            return
+        if rows is None:
+            self.seen[:tokens.shape[0]].scatter_(1, tokens, True)
+        else:
+            self.seen[rows] = self.seen[rows].scatter(1, tokens, True)
+
+    def keep(self, keep_rows):
+        """Move the histories of ``keep_rows`` to the leading rows, as a batch compaction does."""
+        if self.seen is not None and keep_rows.numel():
+            self.seen[:keep_rows.numel()] = self.seen[keep_rows]
+
+    def __call__(self, logits, rows=None):
+        if self.seen is not None:
+            seen = self.seen[:logits.shape[0]] if rows is None else self.seen[rows]
+            # generate() penalizes in float32, before any warper.
+            logits = logits.float()
+            penalty = self.repetition_penalty
+            logits = torch.where(seen, torch.where(logits < 0, logits * penalty, logits / penalty), logits)
+        if self.temperature <= 0.0:
             tokens = logits.argmax(dim=-1, keepdim=True)
-            return tokens, _chosen_log_probs(logits, tokens)
-
-        return select_greedy
-
-    warpers = []
-    if sampling.top_k > 0 or sampling.top_p < 1.0:
-        from transformers.generation.logits_process import TopKLogitsWarper, TopPLogitsWarper
-        if sampling.top_k > 0:
-            warpers.append(TopKLogitsWarper(top_k=sampling.top_k))
-        if sampling.top_p < 1.0:
-            warpers.append(TopPLogitsWarper(top_p=sampling.top_p))
-
-    def select_sampled(logits):
-        scores = logits.float() / sampling.temperature
-        for warper in warpers:
-            # The warpers read only the scores, not the generated ids.
-            scores = warper(None, scores)
-        tokens = torch.multinomial(torch.softmax(scores, dim=-1), num_samples=1)
-        return tokens, torch.log_softmax(scores, dim=-1).gather(1, tokens)
-
-    return select_sampled
-
-
-def _penalize_repeats(logits, input_ids, repetition_penalty):
-    """Apply the repetition penalty to ``logits`` the way ``generate()`` does."""
-    if repetition_penalty == 1.0:
-        return logits
-    logits = logits.float()
-    scores = logits.gather(1, input_ids)
-    scores = torch.where(scores < 0, scores * repetition_penalty, scores / repetition_penalty)
-    return logits.scatter(1, input_ids, scores)
+            log_probs = _chosen_log_probs(logits, tokens)
+        else:
+            scores = logits.float() / self.temperature
+            for warper in self.warpers:
+                # The warpers read only the scores, not the generated ids.
+                scores = warper(None, scores)
+            tokens = torch.multinomial(torch.softmax(scores, dim=-1), num_samples=1)
+            log_probs = torch.log_softmax(scores, dim=-1).gather(1, tokens)
+        self.record(tokens, rows)
+        return tokens, log_probs
 
 
 @dataclass
@@ -542,8 +585,8 @@ class HybridEngineRollout(RolloutEngine):
         if isinstance(max_positions, int) and capacity > max_positions:
             raise ValueError("continuous batching cache exceeds the model maximum position embeddings")
 
-        _ContinuousRunGraph(self, trajectories, sampling, num_prompts, capacity, _token_selector(sampling),
-                            get_repetition_penalty(sampling, module)).run()
+        selector = _TokenSelector(sampling, get_repetition_penalty(sampling, module), self.continuous_batch_size)
+        _ContinuousRunGraph(self, trajectories, sampling, num_prompts, capacity, selector).run()
 
     @staticmethod
     def _sync_time(accelerator):
@@ -579,7 +622,7 @@ class HybridEngineRollout(RolloutEngine):
     def _generate_tokens(self, prompt_ids, prompt_attn_mask, max_new_tokens, sampling, pad_token_id):
         module = self.engine.module
         if self._graph_capture_enabled():
-            return self._generate_graph(prompt_ids, prompt_attn_mask, max_new_tokens, pad_token_id, sampling, module,
+            return self._generate_graph(prompt_ids, prompt_attn_mask, max_new_tokens, sampling, module,
                                         prompt_ids.device)
 
         # ZeRO-3 gathers parameters during each decode forward, so every
@@ -635,8 +678,8 @@ class HybridEngineRollout(RolloutEngine):
             prompt_len = max(len(sample.tokens) for sample in trajectories)
         max_cache_len = self._shared_column_width(module, trajectories, prompt_len, turn_cap)
         self._validate_continuous(module)
-        _ContinuousRun(self, trajectories, sampling, num_prompts, prompt_len, max_cache_len, _token_selector(sampling),
-                       get_repetition_penalty(sampling, module)).run()
+        selector = _TokenSelector(sampling, get_repetition_penalty(sampling, module), self.continuous_batch_size)
+        _ContinuousRun(self, trajectories, sampling, num_prompts, prompt_len, max_cache_len, selector).run()
 
     def _shared_column_width(self, module, trajectories, prompt_len, turn_cap):
         """The number of cache columns for the shared write column.
@@ -696,6 +739,7 @@ class HybridEngineRollout(RolloutEngine):
                             model_dtype,
                             device,
                             sampling,
+                            selector,
                             align_decode_fronts=False,
                             profile=None,
                             target_slots=None):
@@ -730,6 +774,8 @@ class HybridEngineRollout(RolloutEngine):
                 model_dtype,
                 device,
                 sampling,
+                selector,
+                torch.tensor(target_slots, dtype=torch.long, device=device),
             )
             self._profile_end(profile, "prefill_forward_ms", prefill_start, count="num_prefill_forwards")
             cache_copy_start = self._profile_start(profile)
@@ -768,6 +814,8 @@ class HybridEngineRollout(RolloutEngine):
                 model_dtype,
                 device,
                 sampling,
+                selector,
+                torch.tensor([target_row], dtype=torch.long, device=device),
             )
             self._profile_end(profile, "prefill_forward_ms", prefill_start, count="num_prefill_forwards")
             cache_copy_start = self._profile_start(profile)
@@ -853,7 +901,7 @@ class HybridEngineRollout(RolloutEngine):
         }
 
     def _continuous_prefill_cache(self, module, static_cache_type, prompt_ids, prompt_attention, model_dtype, device,
-                                  sampling):
+                                  sampling, selector, rows):
         position_ids = self._prefill_position_ids(prompt_attention)
         if getattr(module, "_supports_cache_class", None) is None:
             pad_token_id = get_pad_token_id(self.tokenizer)
@@ -872,6 +920,9 @@ class HybridEngineRollout(RolloutEngine):
             # output_logits holds the raw logits; return_log_probs rules out every other setting that changes them.
             scale = sampling.temperature if sampling.temperature > 0.0 else 1.0
             log_probs = _chosen_log_probs(prefill_output.logits[-1] / scale, tokens)
+            # generate() picked these tokens, so the selector only records them for the decode steps.
+            selector.start(prompt_ids, prompt_attention, rows, vocab_size=prefill_output.logits[-1].shape[-1])
+            selector.record(tokens, rows)
             return tokens, log_probs, prefill_output.past_key_values
 
         prompt_len = prompt_ids.shape[1]
@@ -887,21 +938,8 @@ class HybridEngineRollout(RolloutEngine):
             position_ids=position_ids,
             **self._last_logits_kwargs(module),
         )
-        last_logits = _penalize_repeats(prefill_output.logits[:, -1, :], prompt_ids,
-                                        get_repetition_penalty(sampling, module))
-        tokens, log_probs = _token_selector(sampling)(last_logits)
+        tokens, log_probs = selector.first(prefill_output.logits[:, -1, :], prompt_ids, prompt_attention, rows)
         return tokens, log_probs, prefill_cache
-
-    @staticmethod
-    def _continuous_next_tokens(logits, request_ids, request_by_id, responses, repetition_penalty, select_next_tokens):
-        if repetition_penalty == 1.0:
-            return select_next_tokens(logits)
-
-        penalized = []
-        for row, request_id in enumerate(request_ids):
-            input_ids = torch.cat((request_by_id[request_id].prompt_ids, *responses[request_id]), dim=1)
-            penalized.append(_penalize_repeats(logits[row:row + 1], input_ids, repetition_penalty))
-        return select_next_tokens(torch.cat(penalized, dim=0))
 
     @staticmethod
     def _hf_sampling_kwargs(sampling):
@@ -1084,7 +1122,7 @@ class HybridEngineRollout(RolloutEngine):
                 ds_layer.values[target, :, :length] = hf_values[row, :, width - length:]
         return last_logits
 
-    def _generate_graph(self, prompt_ids, prompt_attn_mask, max_new_tokens, pad_token_id, sampling, module, device):
+    def _generate_graph(self, prompt_ids, prompt_attn_mask, max_new_tokens, sampling, module, device):
         """Decode a static batch on a captured graph, greedy or sampled."""
         from deepspeed.utils.static_cache import DeepSpeedStaticCache
 
@@ -1122,11 +1160,9 @@ class HybridEngineRollout(RolloutEngine):
         prefill_logits = prefill_out.logits[:, -1, :]
         decode_start = torch.full((batch_size, ), prompt_len, dtype=torch.long, device=device)
         prompt_slots = prompt_attn_mask.bool()
-        select_next_tokens = _token_selector(sampling)
-        repetition_penalty = get_repetition_penalty(sampling, module)
-        # generate() penalizes the sequence so far, prompt included.
-        next_token, first_log_probs = select_next_tokens(
-            _penalize_repeats(prefill_logits, prompt_ids, repetition_penalty))
+        selector = _TokenSelector(sampling, get_repetition_penalty(sampling, module), batch_size)
+        # generate() penalizes the sequence so far, the padded prompt included.
+        next_token, first_log_probs = selector.first(prefill_logits, prompt_ids)
         log_probs = [first_log_probs]
 
         output_ids = [prompt_ids, next_token]
@@ -1202,18 +1238,11 @@ class HybridEngineRollout(RolloutEngine):
 
             # Replay
             get_accelerator().replay_graph(graph)
-            step_logits = static_logits[:, -1, :]
-            if repetition_penalty != 1.0:
-                step_logits = _penalize_repeats(step_logits, torch.cat(output_ids, dim=1), repetition_penalty)
-            next_token, step_log_probs = select_next_tokens(step_logits)
+            next_token, step_log_probs = selector(static_logits[:, -1, :])
             output_ids.append(next_token)
             log_probs.append(step_log_probs)
             eos_mask |= (next_token.squeeze(1) == stop_token)
 
-        remaining = max_new_tokens - (len(output_ids) - 1)
-        if remaining > 0:
-            output_ids.append(torch.full((batch_size, remaining), pad_token_id, dtype=torch.long, device=device))
-            log_probs.append(torch.zeros((batch_size, remaining), device=device))
         return torch.cat(output_ids, dim=1), torch.cat(log_probs, dim=1)
 
     def sync_weights(self, step: int) -> None:  # noqa: ARG002

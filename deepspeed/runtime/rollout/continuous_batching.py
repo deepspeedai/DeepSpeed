@@ -223,7 +223,7 @@ class _ContinuousRunBase:
 class _ContinuousRunGraph(_ContinuousRunBase):
     """Continuous batching on a captured graph, with each row decoding at its own position."""
 
-    def __init__(self, rollout, trajectories, sampling, num_prompts, capacity, select_next_tokens, repetition_penalty):
+    def __init__(self, rollout, trajectories, sampling, num_prompts, capacity, selector):
         super().__init__(rollout, trajectories, sampling)
         from deepspeed.utils.static_cache import DeepSpeedStaticCache
 
@@ -231,8 +231,7 @@ class _ContinuousRunGraph(_ContinuousRunBase):
         self.num_prompts = num_prompts
         self.num_rows = num_rows = rollout.continuous_batch_size
         self.capacity = capacity
-        self.select_next_tokens = select_next_tokens
-        self.repetition_penalty = repetition_penalty
+        self.selector = selector
         self.accelerator = get_accelerator()
         self.call_start = time.perf_counter()
         self.device = device = self.accelerator.current_device_name()
@@ -241,7 +240,6 @@ class _ContinuousRunGraph(_ContinuousRunBase):
         self.stats = {"prefill_ms": 0.0, "decode_ms": 0.0, "steps": 0, "turns": 0}
         self.pending = deque(range(len(trajectories)))
         self.row_owner = [None] * num_rows
-        self.seen_tokens = None
 
         self.rows = torch.arange(num_rows, device=device)
         self.slots = torch.arange(capacity, device=device)
@@ -284,12 +282,6 @@ class _ContinuousRunGraph(_ContinuousRunBase):
         budget = self.rollout._turn_budget(sample, self.generated[i], self.sampling)
         return min(budget, self.capacity - sum(sample.attention_mask))
 
-    def penalize_seen(self, logits, seen):
-        penalty = self.repetition_penalty
-        logits = logits.float()
-        penalized = torch.where(logits < 0, logits * penalty, logits / penalty)
-        return torch.where(seen, penalized, logits)
-
     def admit(self):
         """Prefill queued turns into free rows, and report whether any was admitted."""
         free_rows = [row for row, owner in enumerate(self.row_owner) if owner is None]
@@ -308,22 +300,12 @@ class _ContinuousRunGraph(_ContinuousRunBase):
         target = torch.tensor([row for row, _, _ in admitted], device=device)
         prompt_ids, prompt_attn = left_pad_samples([self.trajectories[i] for _, i, _ in admitted],
                                                    get_pad_token_id(self.rollout.tokenizer))
+        prompt_ids = prompt_ids.to(device)
         prompt_attn = prompt_attn.to(device)
         lengths = prompt_attn.sum(dim=1)
-        logits = self.rollout._prefill_rows(self.module, prompt_ids.to(device), prompt_attn, self.ds_cache,
-                                            self.logits_kwargs, self.model_dtype, device, target, self.num_rows)
-        if self.repetition_penalty != 1.0:
-            if self.seen_tokens is None:
-                self.seen_tokens = torch.zeros(self.num_rows, logits.shape[-1], dtype=torch.bool, device=device)
-            self.seen_tokens[target] = False
-            for row, i, _ in admitted:
-                sample = self.trajectories[i]
-                real = [token for token, keep in zip(sample.tokens, sample.attention_mask) if keep]
-                self.seen_tokens[row, torch.tensor(real, device=device)] = True
-            logits = self.penalize_seen(logits, self.seen_tokens[target])
-        first, first_log_probs = self.select_next_tokens(logits)
-        if self.repetition_penalty != 1.0:
-            self.seen_tokens[target] = self.seen_tokens[target].scatter(1, first, True)
+        logits = self.rollout._prefill_rows(self.module, prompt_ids, prompt_attn, self.ds_cache, self.logits_kwargs,
+                                            self.model_dtype, device, target, self.num_rows)
+        first, first_log_probs = self.selector.first(logits, prompt_ids, prompt_attn, target)
         limits = torch.tensor([budget for _, _, budget in admitted], device=device)
         self.static_attn[target, 0, 0, :] = self.slots.unsqueeze(0) <= lengths.unsqueeze(1)
         self.write_pos[target] = lengths
@@ -374,12 +356,7 @@ class _ContinuousRunGraph(_ContinuousRunBase):
 
     def decode_step(self):
         self.accelerator.replay_graph(self.graph)
-        logits = self.static_logits[:, -1, :]
-        if self.repetition_penalty != 1.0:
-            logits = self.penalize_seen(logits, self.seen_tokens)
-        tokens, log_probs = self.select_next_tokens(logits)
-        if self.repetition_penalty != 1.0:
-            self.seen_tokens.scatter_(1, tokens, True)
+        tokens, log_probs = self.selector(self.static_logits[:, -1, :])
         position = self.num_generated.clamp(max=self.turn_len - 1).unsqueeze(1)
         recording = self.active.unsqueeze(1)
         self.token_buf.scatter_(1, position, torch.where(recording, tokens, self.token_buf.gather(1, position)))
@@ -480,8 +457,7 @@ class _ContinuousRunGraph(_ContinuousRunBase):
 class _ContinuousRun(_ContinuousRunBase):
     """Continuous batching without graph capture, with all rows writing one shared cache column."""
 
-    def __init__(self, rollout, trajectories, sampling, num_prompts, prompt_len, max_cache_len, select_next_tokens,
-                 repetition_penalty):
+    def __init__(self, rollout, trajectories, sampling, num_prompts, prompt_len, max_cache_len, selector):
         super().__init__(rollout, trajectories, sampling)
         from deepspeed.utils.static_cache import DeepSpeedStaticCache
 
@@ -491,8 +467,7 @@ class _ContinuousRun(_ContinuousRunBase):
         self.align = rollout.align_decode_fronts
         self.prompt_len = prompt_len
         self.max_cache_len = max_cache_len
-        self.select_next_tokens = select_next_tokens
-        self.repetition_penalty = repetition_penalty
+        self.selector = selector
         self.device = device = next(module.parameters()).device
         self.model_dtype = model_dtype = next(module.parameters()).dtype
         self.profile = rollout._start_continuous_profile() if rollout.enable_profiling else None
@@ -613,6 +588,7 @@ class _ContinuousRun(_ContinuousRunBase):
         if survivor_count:
             if update.retired:
                 self.cache.compact(keep_slots)
+                self.selector.keep(keep_slots)
                 identity = torch.arange(survivor_count, dtype=torch.long, device=device)
                 if not torch.equal(keep_slots, identity):
                     survivor_attention = self.attention_mask.index_select(0, keep_slots).clone()
@@ -680,9 +656,7 @@ class _ContinuousRun(_ContinuousRunBase):
             position_ids=position_ids,
         )
         rollout._profile_end(self.profile, "decode_forward_ms", decode_start, count="num_decode_forwards")
-        decoded, decoded_log_probs = rollout._continuous_next_tokens(output.logits[:, -1, :], survivor_ids,
-                                                                     self.request_by_id, self.responses,
-                                                                     self.repetition_penalty, self.select_next_tokens)
+        decoded, decoded_log_probs = self.selector(output.logits[:, -1, :])
         self.stats["decode_steps"] += 1
         for request_id in survivor_ids:
             self.logical_positions[request_id] += 1
@@ -714,6 +688,7 @@ class _ContinuousRun(_ContinuousRunBase):
             self.model_dtype,
             self.device,
             self.sampling,
+            self.selector,
             self.align,
             self.profile,
         )
