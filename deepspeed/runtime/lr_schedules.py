@@ -551,7 +551,8 @@ class OneCycle(object):
         # Validate both bounds before touching the optimizer, so a bad cycle_max_lr does
         # not leave the param groups half updated.
         if last_batch_iteration == -1:
-            update_lr(optimizer.param_groups, self.min_lrs)
+            # Record the initial lr so get_last_lr() works before the first step(), like the other schedules.
+            self._last_lr = update_lr(optimizer.param_groups, self.min_lrs)
 
         self.decay_lr_rate = decay_lr_rate
 
@@ -569,11 +570,17 @@ class OneCycle(object):
             return
 
         self.decay_mom_rate = decay_mom_rate
-        self.min_moms = [(mom, 0.99) for mom in _format_param(optimizer, cycle_min_mom, 'cycle_min_mom')]
-        self.max_moms = [(mom, 0.99) for mom in _format_param(optimizer, cycle_max_mom, 'cycle_max_mom')]
+        # Only betas[0] is cycled; keep each group's own beta2 instead of overwriting it.
+        group_beta2s = [group['betas'][1] for group in optimizer.param_groups]
+        cycle_min_moms = _format_param(optimizer, cycle_min_mom, 'cycle_min_mom')
+        cycle_max_moms = _format_param(optimizer, cycle_max_mom, 'cycle_max_mom')
+        self.min_moms = [(mom, beta2) for mom, beta2 in zip(cycle_min_moms, group_beta2s)]
+        self.max_moms = [(mom, beta2) for mom, beta2 in zip(cycle_max_moms, group_beta2s)]
 
+        # The schedule starts at scale 0, where lr is cycle_min_lr and momentum is cycle_max_mom
+        # (the same value get_mom() returns), so the first update must use cycle_max_mom.
         if last_batch_iteration == -1:
-            for momentum, group in zip(self.min_moms, optimizer.param_groups):
+            for momentum, group in zip(self.max_moms, optimizer.param_groups):
                 group['betas'] = momentum
 
         if math.isclose(self.decay_mom_rate, 0):
