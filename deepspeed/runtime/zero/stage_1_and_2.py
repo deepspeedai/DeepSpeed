@@ -25,7 +25,7 @@ from deepspeed.runtime.torch_autocast import get_autocast_dtype, get_all_comm_dt
 from deepspeed.runtime.utils import (empty_cache, see_memory_usage, has_inf_or_nan, inf, is_model_parallel_parameter,
                                      align_dense_tensors, all_gather_dp_groups, mask_nan_or_inf_with_val_inplace,
                                      combine_grad_norm_groups, count_used_parameters_in_backward, is_invalid_grad_norm,
-                                     is_optimized_parameter)
+                                     is_optimized_parameter, scale_grads_)
 from deepspeed.runtime.zero.config import ZeroStageEnum
 from deepspeed.runtime.zero.utils import ZeRORuntimeException, get_norm_dtype
 from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum, OffloadStateTypeEnum
@@ -3221,9 +3221,9 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             if isinstance(grad, list):
                 sub_partitions = grad
                 for g in sub_partitions:
-                    g.data.mul_(1. / combined_scale)
+                    scale_grads_(g.data, 1. / combined_scale)
             else:
-                grad.data.mul_(1. / combined_scale)
+                scale_grads_(grad.data, 1. / combined_scale)
 
     def _check_overflow(self, partition_gradients=True):
         self.overflow = self.has_overflow(partition_gradients)

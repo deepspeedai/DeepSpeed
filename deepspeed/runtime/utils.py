@@ -240,6 +240,24 @@ def is_invalid_grad_norm(norm):
     return not isfinite(float(norm)) or norm < 0
 
 
+_SCALE_CHUNK_NUMEL = 1 << 24
+
+
+def scale_grads_(grad, scale):
+    """In-place ``grad.mul_(scale)`` that applies a tensor ``scale`` at its own precision.
+
+    Elementwise ops cast a 0-dim device tensor to the other operand's dtype, so ``bf16_grad.mul_(fp32_scale)``
+    multiplies by a bf16-rounded scale (a clip coefficient up to 0.39% off). A bf16/fp16 ``grad`` is
+    multiplied in fp32 instead, in bounded chunks and without a host sync. Other gradients use ``mul_``.
+    """
+    if (not torch.is_tensor(scale) or grad.dtype not in (torch.bfloat16, torch.float16)
+            or not grad.is_contiguous()):
+        return grad.mul_(scale)
+    for chunk in grad.view(-1).split(_SCALE_CHUNK_NUMEL):
+        chunk.copy_(chunk.float().mul_(scale))
+    return grad
+
+
 class CheckOverflow(object):
     '''Checks for overflow in gradient across parallel process'''
 
