@@ -6,6 +6,23 @@ from dataclasses import replace
 import torch
 
 
+def get_repetition_penalty(sampling, module):
+    if sampling.repetition_penalty is not None:
+        return sampling.repetition_penalty
+    penalty = getattr(getattr(module, "generation_config", None), "repetition_penalty", None)
+    return penalty if isinstance(penalty, (int, float)) else 1.0
+
+
+def get_pad_token_id(tokenizer):
+    """The tokenizer's pad id, falling back to its EOS id."""
+    pad_token_id = tokenizer.pad_token_id
+    if pad_token_id is None:
+        pad_token_id = tokenizer.eos_token_id
+    if pad_token_id is None:
+        raise ValueError("The tokenizer must define pad_token_id or eos_token_id")
+    return pad_token_id
+
+
 def left_pad_samples(samples, pad_token_id: int):
     """Stack samples' tokens and attention masks into left-padded ``[len(samples), max_len]`` tensors."""
     max_len = max(len(sample.tokens) for sample in samples)
@@ -18,16 +35,13 @@ def left_pad_samples(samples, pad_token_id: int):
     return input_ids, attention_mask
 
 
-def render_prompts(samples, tokenizer, tool_specs, pad_token_id: int, chat_template_kwargs=None):
-    """Copies of ``samples`` with their prompts rendered to tokens and left-padded to one width.
-
-    A string prompt is taken as already-rendered text, and a sample that already has tokens keeps them.
-    """
+def render_prompts(samples, tokenizer, tool_specs, chat_template_kwargs=None):
     rendered = []
     for sample in samples:
         tokens, attention_mask = sample.tokens, sample.attention_mask
         if not tokens:
             text = sample.prompt
+            # A string prompt is taken as already-rendered text
             if not isinstance(text, str):
                 text = tokenizer.apply_chat_template(text,
                                                      tools=tool_specs or None,
@@ -37,12 +51,6 @@ def render_prompts(samples, tokenizer, tool_specs, pad_token_id: int, chat_templ
             tokens = tokenizer.encode(text, add_special_tokens=False)
             attention_mask = [1] * len(tokens)
         rendered.append(replace(sample, tokens=tokens, attention_mask=attention_mask))
-
-    width = max(len(sample.tokens) for sample in rendered)
-    for sample in rendered:
-        padding = width - len(sample.tokens)
-        sample.tokens = [pad_token_id] * padding + sample.tokens
-        sample.attention_mask = [0] * padding + sample.attention_mask
     return rendered
 
 

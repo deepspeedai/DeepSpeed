@@ -19,7 +19,7 @@ import torch
 
 from deepspeed.accelerator import get_accelerator
 from deepspeed.runtime.rollout.base import RolloutRecord
-from deepspeed.runtime.rollout.utils import left_pad_samples, update_sample_from_response
+from deepspeed.runtime.rollout.utils import get_pad_token_id, left_pad_samples, update_sample_from_response
 
 
 @dataclass(frozen=True)
@@ -307,7 +307,7 @@ class _ContinuousRunGraph(_ContinuousRunBase):
         prefill_start = self.rollout._sync_time(self.accelerator)
         target = torch.tensor([row for row, _, _ in admitted], device=device)
         prompt_ids, prompt_attn = left_pad_samples([self.trajectories[i] for _, i, _ in admitted],
-                                                   self.rollout._pad_token_id())
+                                                   get_pad_token_id(self.rollout.tokenizer))
         prompt_attn = prompt_attn.to(device)
         lengths = prompt_attn.sum(dim=1)
         logits = self.rollout._prefill_rows(self.module, prompt_ids.to(device), prompt_attn, self.ds_cache,

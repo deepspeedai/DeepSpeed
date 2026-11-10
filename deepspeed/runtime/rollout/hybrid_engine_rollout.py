@@ -24,6 +24,8 @@ from deepspeed.runtime.rollout.continuous_batching import _ContinuousRunGraph, _
 from deepspeed.runtime.rollout.tool import TOOL_CALL_PARSERS, ToolSet
 from deepspeed.runtime.rollout.utils import (
     expand_samples,
+    get_pad_token_id,
+    get_repetition_penalty,
     left_pad_samples,
     masked_lists,
     render_prompts,
@@ -131,14 +133,6 @@ def _token_selector(sampling):
     return select_sampled
 
 
-def _repetition_penalty(sampling, module):
-    """The repetition penalty to apply, chosen the way ``generate()`` chooses it."""
-    if sampling.repetition_penalty is not None:
-        return sampling.repetition_penalty
-    penalty = getattr(getattr(module, "generation_config", None), "repetition_penalty", None)
-    return penalty if isinstance(penalty, (int, float)) else 1.0
-
-
 def _penalize_repeats(logits, input_ids, repetition_penalty):
     """Apply the repetition penalty to ``logits`` the way ``generate()`` does."""
     if repetition_penalty == 1.0:
@@ -239,8 +233,7 @@ class HybridEngineRollout(RolloutEngine):
         if static and self.enable_profiling:
             get_accelerator().synchronize()
             call_start = time.perf_counter()
-        samples = render_prompts(samples, self.tokenizer, self.tools.specs, self._pad_token_id(),
-                                 self.chat_template_kwargs)
+        samples = render_prompts(samples, self.tokenizer, self.tools.specs, self.chat_template_kwargs)
         trajectories = expand_samples(samples, sampling.n_samples_per_prompt)
         if static:
             self._generate(trajectories, sampling, len(samples), call_start)
@@ -313,15 +306,6 @@ class HybridEngineRollout(RolloutEngine):
         dist.all_reduce(tensor, op=dist.ReduceOp.MAX, group=getattr(self.engine, "seq_data_parallel_group", None))
         return int(tensor.item())
 
-    def _pad_token_id(self):
-        """The tokenizer's pad id, falling back to its EOS id."""
-        pad_token_id = self.tokenizer.pad_token_id
-        if pad_token_id is None:
-            pad_token_id = self.tokenizer.eos_token_id
-        if pad_token_id is None:
-            raise ValueError("The tokenizer must define pad_token_id or eos_token_id")
-        return pad_token_id
-
     def _turn_limit(self):
         """The number of turns a trajectory may run."""
         return self.max_turns if self.multi_turn else 1
@@ -374,7 +358,7 @@ class HybridEngineRollout(RolloutEngine):
         n = sampling.n_samples_per_prompt
         max_new_tokens = sampling.max_new_tokens
         return_log_probs = self.return_log_probs
-        pad_token_id = self._pad_token_id()
+        pad_token_id = get_pad_token_id(self.tokenizer)
         module = self.engine.module
         # render_prompts left-pads every prompt to the request's longest, so this is the longest prompt's length.
         prompt_length = max(len(sample.tokens) for sample in trajectories)
@@ -561,7 +545,7 @@ class HybridEngineRollout(RolloutEngine):
             raise ValueError("continuous batching cache exceeds the model maximum position embeddings")
 
         _ContinuousRunGraph(self, trajectories, sampling, num_prompts, capacity, _token_selector(sampling),
-                            _repetition_penalty(sampling, module)).run()
+                            get_repetition_penalty(sampling, module)).run()
 
     @staticmethod
     def _sync_time(accelerator):
@@ -582,7 +566,7 @@ class HybridEngineRollout(RolloutEngine):
         return_log_probs = self.return_log_probs
         if return_log_probs and sampling.temperature > 0.0 and (sampling.top_p < 1.0 or sampling.top_k > 0):
             raise ValueError("return_log_probs requires top_p=1 and top_k<=0 when sampling")
-        repetition_penalty = _repetition_penalty(sampling, self.engine.module)
+        repetition_penalty = get_repetition_penalty(sampling, self.engine.module)
         if return_log_probs and repetition_penalty != 1.0:
             logger.warning_once(f"return_log_probs with repetition_penalty={repetition_penalty}: a training forward "
                                 "pass cannot reproduce the recorded log-probs")
@@ -658,7 +642,7 @@ class HybridEngineRollout(RolloutEngine):
         max_cache_len = self._shared_column_width(module, trajectories, prompt_len, turn_cap)
         self._validate_continuous(module)
         _ContinuousRun(self, trajectories, sampling, num_prompts, prompt_len, max_cache_len, _token_selector(sampling),
-                       _repetition_penalty(sampling, module)).run()
+                       get_repetition_penalty(sampling, module)).run()
 
     def _shared_column_width(self, module, trajectories, prompt_len, turn_cap):
         """The number of cache columns for the shared write column.
@@ -738,7 +722,7 @@ class HybridEngineRollout(RolloutEngine):
             prompt_len = max(row.prompt_ids.shape[1] for row in rows)
             prompt_ids = torch.cat([
                 torch.nn.functional.pad(row.prompt_ids, (prompt_len - row.prompt_ids.shape[1], 0),
-                                        value=self._pad_token_id()) for row in rows
+                                        value=get_pad_token_id(self.tokenizer)) for row in rows
             ],
                                    dim=0)
             prompt_attention = torch.cat([
@@ -881,7 +865,7 @@ class HybridEngineRollout(RolloutEngine):
                                   sampling):
         position_ids = self._prefill_position_ids(prompt_attention)
         if getattr(module, "_supports_cache_class", None) is None:
-            pad_token_id = self._pad_token_id()
+            pad_token_id = get_pad_token_id(self.tokenizer)
             prefill_output = module.generate(
                 prompt_ids,
                 attention_mask=prompt_attention,
@@ -913,7 +897,7 @@ class HybridEngineRollout(RolloutEngine):
             **self._last_logits_kwargs(module),
         )
         last_logits = _penalize_repeats(prefill_output.logits[:, -1, :], prompt_ids,
-                                        _repetition_penalty(sampling, module))
+                                        get_repetition_penalty(sampling, module))
         tokens, log_probs = _token_selector(sampling)(last_logits)
         return tokens, log_probs, prefill_cache
 
@@ -1161,7 +1145,7 @@ class HybridEngineRollout(RolloutEngine):
         decode_start = torch.full((batch_size, ), prompt_len, dtype=torch.long, device=device)
         prompt_slots = prompt_attn.bool()
         select_next_tokens = _token_selector(sampling)
-        repetition_penalty = _repetition_penalty(sampling, module)
+        repetition_penalty = get_repetition_penalty(sampling, module)
         # generate() penalizes the sequence so far, prompt included.
         next_token, first_log_probs = select_next_tokens(
             _penalize_repeats(prefill_logits, prompt_ids, repetition_penalty))
