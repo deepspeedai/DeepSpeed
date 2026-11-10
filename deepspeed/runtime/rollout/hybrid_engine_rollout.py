@@ -631,26 +631,19 @@ class HybridEngineRollout(RolloutEngine):
         # data-parallel rank must run the same number of decode steps and
         # generation cannot stop at EOS. Other stages stop once every row ends.
         stop_at_eos = not self.engine.zero_optimization_partition_weights()
-        temperature = max(sampling.temperature, 1e-8)
-        do_sample = sampling.temperature > 0.0
         generate_kwargs = {
             "attention_mask": prompt_attn_mask,
             "max_new_tokens": max_new_tokens,
             "eos_token_id": self.tokenizer.eos_token_id if stop_at_eos else None,
-            "do_sample": do_sample,
-            "temperature": temperature if do_sample else 1.0,
-            "top_p": sampling.top_p if do_sample else 1.0,
             "pad_token_id": pad_token_id,
+            **self._hf_sampling_kwargs(sampling),
         }
-        if do_sample:
-            generate_kwargs["top_k"] = max(sampling.top_k, 0)
-        if sampling.repetition_penalty is not None:
-            generate_kwargs["repetition_penalty"] = sampling.repetition_penalty
         finish_log_probs = None
         if self.return_log_probs:
+            # output_scores / output_logits would keep a [batch, vocab] tensor per step until generate() returns;
+            # the recorder keeps only each sampled token's log-prob.
             from transformers import LogitsProcessorList
-            # Greedy decoding picks from the raw logits, i.e. temperature 1.
-            processor, finish_log_probs = _sampled_log_prob_recorder(temperature if do_sample else 1.0)
+            processor, finish_log_probs = _sampled_log_prob_recorder(generate_kwargs["temperature"])
             generate_kwargs["logits_processor"] = LogitsProcessorList([processor])
         output_ids = module.generate(prompt_ids, **generate_kwargs)
         log_probs = finish_log_probs(output_ids[:, -1:]) if finish_log_probs is not None else None
