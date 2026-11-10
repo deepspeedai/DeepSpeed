@@ -1631,6 +1631,9 @@ class DeepSpeedEngine(Module):
     def zero_compute_grad_norm(self):
         return self._config.zero_config.compute_grad_norm
 
+    def zero_release_compact_grad_partition(self):
+        return self._config.zero_config.release_compact_grad_partition
+
     def zero_optimization_partition_gradients(self):
         return self.zero_optimization_stage() >= ZeroStageEnum.gradients
 
@@ -2723,7 +2726,8 @@ class DeepSpeedEngine(Module):
                 communication_data_type=self.communication_data_type,
                 elastic_checkpoint=self.zero_elastic_checkpoint(),
                 check_grad_overflow=check_grad_overflow,
-                compute_grad_norm=self.zero_compute_grad_norm())
+                compute_grad_norm=self.zero_compute_grad_norm(),
+                release_compact_grad_partition=self.zero_release_compact_grad_partition())
 
         elif zero_stage == ZeroStageEnum.weights:
             self._validate_zero3_moe_compatibility()

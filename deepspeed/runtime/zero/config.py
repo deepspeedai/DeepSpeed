@@ -147,6 +147,15 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
     and callers do not use ``get_global_grad_norm()``.
     """
 
+    release_compact_grad_partition: bool = True
+    """
+    With ZeRO-2 CPU optimizer offload and fp32 gradient accumulation on a 16-bit model, free the
+    device gradient partition after each request boundary and restore it from the host gradient for
+    the next backward. Set to ``false`` to keep the partition resident until ``step()``: this costs
+    device memory of one fp32 partition per rank, but avoids the per-request host copy and restore.
+    Has no effect on configurations that do not use the compact partition buffer.
+    """
+
     load_from_fp32_weights: bool = Field(True, json_schema_extra={"deprecated": True})
     """
     Deprecated and ignored by ``DeepSpeedEngine.load_checkpoint``. Full ZeRO

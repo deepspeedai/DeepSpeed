@@ -166,3 +166,46 @@ class TestZeroOffloadSetFullGrad(DistributedTest):
         else:
             # Characterizes the resident case: the boundary overwrites the set value (not kept).
             assert err_overwritten < 1e-2, "mid-window set is no longer overwritten at the boundary"
+
+
+def _release_option_run(release):
+    """Three request-boundary backwards and one step; returns residency per boundary, grads, and final weight."""
+    torch.manual_seed(0)
+    model = Weighted(NUMEL)
+    config = _config(2, False, "fp32")
+    config["zero_optimization"]["release_compact_grad_partition"] = release
+    engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config)
+    try:
+        generator = torch.Generator().manual_seed(99)
+        exact = torch.zeros(NUMEL, dtype=torch.float64)
+        resident = []  # True while the GPU partition is held
+        for _ in range(3):
+            k = torch.randint(0, 128, (NUMEL, ), generator=generator)
+            c = ((128 + k).float() / 128).to(device=engine.device, dtype=torch.bfloat16)
+            exact += c.double().cpu()
+            engine.set_gradient_accumulation_boundary(True)
+            engine.backward(engine(c))
+            resident.append(engine.optimizer.averaged_gradients.get(0) is not None)
+        grad = safe_get_full_grad(engine.module.w).detach().float().cpu().double()
+        engine.step()
+        weight = engine.module.w.detach().float().cpu().clone()
+        return resident, (grad - exact).abs().max().item(), weight
+    finally:
+        engine.destroy()
+
+
+class TestZeroOffloadReleaseOption(DistributedTest):
+    world_size = 1
+
+    def test_release_option_controls_residency_without_changing_results(self):
+        if not deepspeed.ops.__compatible_ops__[deepspeed.ops.op_builder.CPUAdamBuilder.NAME]:
+            pytest.skip("CPUAdam is required for offloaded low-precision masters")
+        resident_released, err_released, w_released = _release_option_run(True)
+        resident_kept, err_kept, w_kept = _release_option_run(False)
+        # `resident` is True while the GPU partition is held. With the option on, every boundary frees it.
+        assert resident_released == [False, False,
+                                     False], f"partition stayed resident with the option on: {resident_released}"
+        assert resident_kept == [True, True, True], f"partition was freed with the option off: {resident_kept}"
+        assert err_kept == 0.0, f"resident path lost precision: {err_kept:.3e}"
+        assert err_released == 0.0, f"released path lost precision: {err_released:.3e}"
+        assert torch.equal(w_released, w_kept), "release option changed the optimizer result"
