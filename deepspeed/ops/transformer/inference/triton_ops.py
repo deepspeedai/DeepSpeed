@@ -79,17 +79,13 @@ def _fwd_kernel(
     q = (q * qk_scale).to(tl.float16)
     # loop over k, v and update accumulator
     lo = 0
-    #hi = (start_m + 1) * BLOCK_M if IS_CAUSAL else N_CTX
     hi = N_CTX
-    #hi = (start_m + 1) * BLOCK_M
     for start_n in range(lo, hi, BLOCK_N):
         # -- load k, v --
         k = tl.load(K_block_ptr)
         v = tl.load(V_block_ptr)
         # -- compute qk ---
         qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
-        #if IS_CAUSAL:
-        #qk = tl.where(offs_m[:, None] >= (start_n + offs_n[None, :]), qk, float("-inf"))
         qk += tl.dot(q, k)
         # -- compute scaling constant ---
         m_i_new = tl.maximum(m_i, tl.max(qk, 1))
@@ -107,8 +103,6 @@ def _fwd_kernel(
         V_block_ptr = tl.advance(V_block_ptr, (BLOCK_N, 0))
     # write back l and m
     acc = acc / l_i[:, None]
-    #l_ptrs = L + off_hz * N_CTX + offs_m
-    #tl.store(l_ptrs, m_i + tl.math.log2(l_i))
     # write back O
     O_block_ptr = tl.make_block_ptr(base=Out + qvk_offset,
                                     shape=(N_CTX, BLOCK_DMODEL),
