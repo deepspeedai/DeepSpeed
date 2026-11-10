@@ -28,11 +28,14 @@ from deepspeed.runtime.utils import (combine_grad_norm_groups, count_used_parame
                                      is_invalid_grad_norm, is_model_parallel_parameter, is_optimized_parameter,
                                      mask_nan_or_inf_with_val_inplace)
 from deepspeed.runtime.zero.partition_parameters import *
+from deepspeed.runtime.zero.partition_parameters import get_quantizer
 from deepspeed.runtime.zero.config import ZeroStageEnum
 from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum, OffloadStateTypeEnum
 from deepspeed.runtime.zero.parameter_offload import DeepSpeedZeRoOffload
 import deepspeed.runtime.zenflow.engine_stage3 as zf_engine_stage3
-from deepspeed.runtime.zero.utils import ZeRORuntimeException, get_mapping_to_flat_buffer, defragment, get_norm_dtype
+from deepspeed.runtime.zero.utils import (ZeRORuntimeException, get_mapping_to_flat_buffer, defragment, get_norm_dtype,
+                                          is_quantized_partition, should_quantize_nontrainable_partition,
+                                          QUANT_SCALE_ATTR)
 from deepspeed.runtime.zero.offload_states import (offload_adam_states, reload_adam_states,
                                                    unpin_offloaded_optimizer_states)
 from deepspeed.ops.adam import DeepSpeedCPUAdam
@@ -2191,14 +2194,15 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                 "Warning: quantize_nontrainable_params() called with zero_quantized_nontrainable_weights disabled, return without doing anything",
                 force=True)
             return
-        quantizer_module = CUDAQuantizer()
+        quantizer_module = get_quantizer()
 
         def quantize_dstensor(tensor):
             assert tensor.dtype == torch.float16, f"quantize_dstensor() expects tensor.dtype == torch.float16, got {tensor.dtype}"
             partition_size = tensor.ds_numel
             ds_status = tensor.status
             final_location = tensor.final_location
-            tensor, tensor.ds_quant_scale = quantizer_module.quantize(tensor)
+            tensor, scale = quantizer_module.quantize(tensor)
+            setattr(tensor, QUANT_SCALE_ATTR, scale)
             tensor.ds_numel = partition_size
             tensor.status = ds_status
             tensor.final_location = final_location
@@ -2209,12 +2213,14 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             if hasattr(param, "ds_tensor") and (param.ds_tensor.numel() <= 2048 or param.ds_numel <= 500000):
                 # skip small parameters
                 continue
-            if hasattr(param,
-                       "ds_tensor") and not param.requires_grad and not hasattr(param.ds_tensor, "ds_quant_scale"):
-                param.ds_tensor = quantize_dstensor(param.ds_tensor)
-            if hasattr(param, "ds_secondary_tensor") and not param.requires_grad and not hasattr(
-                    param.ds_secondary_tensor, "ds_quant_scale") and param.ds_secondary_tensor is not None:
-                param.ds_secondary_tensor = quantize_dstensor(param.ds_secondary_tensor)
+            ds_tensor = getattr(param, "ds_tensor", None)
+            if not is_quantized_partition(ds_tensor) and should_quantize_nontrainable_partition(
+                    param, ds_tensor, True):
+                param.ds_tensor = quantize_dstensor(ds_tensor)
+            secondary_tensor = getattr(param, "ds_secondary_tensor", None)
+            if not is_quantized_partition(secondary_tensor) and should_quantize_nontrainable_partition(
+                    param, secondary_tensor, True):
+                param.ds_secondary_tensor = quantize_dstensor(secondary_tensor)
         get_accelerator().synchronize()
 
     def flatten_and_print(self, message, tensors, start=0, n=5):

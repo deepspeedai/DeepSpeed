@@ -108,8 +108,9 @@ def _global_ranks(group):
 
 def _check_zero3_param_storage(param):
     from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum
+    from deepspeed.runtime.zero.utils import is_quantized_partition
 
-    if hasattr(param.ds_tensor, 'ds_quant_scale'):
+    if is_quantized_partition(param.ds_tensor):
         raise NotImplementedError('Quantized ZeRO-3 parameter storage has no affine storage map.')
     # NVMe offload swaps a partition out of memory and leaves a placeholder in its place.
     if getattr(param.ds_tensor, 'final_location', None) == OffloadDeviceEnum.nvme:

@@ -22,15 +22,16 @@ _FORWARD_TOL = 5e-2
 
 
 class _QuantizedLeaf(torch.nn.Module):
-    """Two frozen params of different sizes plus one trainable param."""
+    """Two params of different sizes plus one trainable param."""
 
-    def __init__(self):
+    def __init__(self, freeze=True):
         super().__init__()
         self.w1 = torch.nn.Parameter(torch.randn(1024, 768) * 0.02)
         self.w2 = torch.nn.Parameter(torch.randn(512, 1024) * 0.02)
         self.h = torch.nn.Parameter(torch.randn(32, 512) * 0.02)
-        self.w1.requires_grad_(False)
-        self.w2.requires_grad_(False)
+        if freeze:
+            self.w1.requires_grad_(False)
+            self.w2.requires_grad_(False)
 
     def forward(self, x):
         return F.linear(F.linear(x, self.w1), self.w2) @ self.h.t()
@@ -40,7 +41,14 @@ def _reference(w1, w2, h, x):
     return F.linear(F.linear(x, w1), w2) @ h.t()
 
 
-def _config(world_size):
+def _config(world_size, hpz_partition_size=None):
+    zero_config = {
+        "stage": 3,
+        "zero_quantized_nontrainable_weights": True,
+        "stage3_prefetch_bucket_size": 1e9,
+    }
+    if hpz_partition_size is not None:
+        zero_config["zero_hpz_partition_size"] = hpz_partition_size
     return {
         "train_batch_size": 8 * world_size,
         "train_micro_batch_size_per_gpu": 8,
@@ -55,11 +63,7 @@ def _config(world_size):
                 "lr": 1e-3
             },
         },
-        "zero_optimization": {
-            "stage": 3,
-            "zero_quantized_nontrainable_weights": True,
-            "stage3_prefetch_bucket_size": 1e9,
-        },
+        "zero_optimization": zero_config,
     }
 
 
@@ -77,6 +81,20 @@ def _check_quantized_partition(param, full_weight, rank):
     # One stored scale is one quantization step; allow one step of slack.
     bound = scale.view(groups, 1).expand(groups, elems) * 1.05
     assert torch.all((dequantized - expected).abs() <= bound)
+
+
+def test_nvme_partition_is_not_quantized():
+    from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum
+    from deepspeed.runtime.zero.utils import should_quantize_nontrainable_partition
+
+    class _Param:
+        requires_grad = False
+
+    tensor = torch.empty(1)
+    tensor.final_location = OffloadDeviceEnum.nvme
+    assert not should_quantize_nontrainable_partition(_Param(), tensor, True)
+    tensor.final_location = None
+    assert should_quantize_nontrainable_partition(_Param(), tensor, True)
 
 
 class TestZeroQuantizedNontrainableWeights(DistributedTest):
@@ -97,6 +115,75 @@ class TestZeroQuantizedNontrainableWeights(DistributedTest):
         try:
             with pytest.raises(RuntimeError, match="quantized coalesced bucket"):
                 model.w1.all_gather_coalesced([model.w1, model.h], quantize=True)
+            with pytest.raises(RuntimeError, match="requires quantize=True"):
+                model.w1.all_gather_coalesced([model.w1], quantize=False)
+        finally:
+            engine.destroy()
+
+    def test_quantize_nontrainable_params_after_init(self):
+        if not _QUANTIZER_AVAILABLE:
+            pytest.skip("quantizer op is not available")
+        if not get_accelerator().is_fp16_supported():
+            pytest.skip("requires fp16 support")
+
+        world_size = int(os.environ["WORLD_SIZE"])
+        rank = dist.get_rank()
+        device = get_accelerator().current_device_name()
+        torch.manual_seed(0)
+        model = _QuantizedLeaf(freeze=False).half().to(device)
+        initial = {name: p.detach().clone() for name, p in model.named_parameters()}
+        inputs = torch.randn(8, 768, device=device).half()
+
+        engine, *_ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=_config(world_size))
+        try:
+            for name in ("w1", "w2"):
+                assert not hasattr(getattr(model, name).ds_tensor, "ds_quant_scale")
+
+            # The documented LoRA flow freezes after init and re-quantizes.
+            model.w1.requires_grad_(False)
+            model.w2.requires_grad_(False)
+            engine.optimizer.quantize_nontrainable_params()
+
+            for name in ("w1", "w2"):
+                _check_quantized_partition(getattr(model, name), initial[name], rank)
+
+            out = engine(inputs)
+            ref_out = _reference(initial["w1"], initial["w2"], initial["h"], inputs)
+            torch_assert_close(out, ref_out, rtol=1e-2, atol=_FORWARD_TOL)
+        finally:
+            engine.destroy()
+
+    def test_quantize_nontrainable_params_after_init_with_hpz(self):
+        if not _QUANTIZER_AVAILABLE:
+            pytest.skip("quantizer op is not available")
+        if not get_accelerator().is_fp16_supported():
+            pytest.skip("requires fp16 support")
+        world_size = int(os.environ["WORLD_SIZE"])
+        if world_size < 2:
+            return
+
+        rank = dist.get_rank()
+        device = get_accelerator().current_device_name()
+        torch.manual_seed(0)
+        model = _QuantizedLeaf(freeze=False).half().to(device)
+        initial = {name: p.detach().clone() for name, p in model.named_parameters()}
+        inputs = torch.randn(8, 768, device=device).half()
+
+        engine, *_ = deepspeed.initialize(model=model,
+                                          model_parameters=model.parameters(),
+                                          config=_config(world_size, hpz_partition_size=world_size))
+        try:
+            model.w1.requires_grad_(False)
+            model.w2.requires_grad_(False)
+            engine.optimizer.quantize_nontrainable_params()
+
+            for name in ("w1", "w2"):
+                _check_quantized_partition(getattr(model, name), initial[name], rank)
+                assert hasattr(getattr(model, name).ds_secondary_tensor, "ds_quant_scale")
+
+            out = engine(inputs)
+            ref_out = _reference(initial["w1"], initial["w2"], initial["h"], inputs)
+            torch_assert_close(out, ref_out, rtol=1e-2, atol=_FORWARD_TOL)
         finally:
             engine.destroy()
 

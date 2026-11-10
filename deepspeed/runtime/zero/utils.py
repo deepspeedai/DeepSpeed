@@ -17,9 +17,39 @@ from deepspeed.ops.lion import DeepSpeedCPULion, FusedLion
 from deepspeed.utils.nvtx import instrument_w_nvtx
 from deepspeed.accelerator import get_accelerator
 from deepspeed.runtime.utils import get_only_unique_item
+from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum
 
 # ensure we only warn once, otherwise every iteration will trigger a warning
 warned = False
+
+QUANT_SCALE_ATTR = "ds_quant_scale"
+
+
+def is_quantized_partition(tensor):
+    """Whether a ZeRO partition's storage holds quantized codes."""
+    return tensor is not None and hasattr(tensor, QUANT_SCALE_ATTR)
+
+
+def active_partition(param, use_secondary_tensor=None):
+    """The partition tensor a fetch reads; defaults to the secondary tensor when present."""
+    if use_secondary_tensor is None:
+        use_secondary_tensor = getattr(param, "ds_secondary_tensor", None) is not None
+    return param.ds_secondary_tensor if use_secondary_tensor else param.ds_tensor
+
+
+def is_quantized_param(param, use_secondary_tensor=None):
+    return is_quantized_partition(active_partition(param, use_secondary_tensor))
+
+
+def should_quantize_nontrainable_partition(param, tensor, enabled):
+    """Quantize frozen storage only when it is not the NVMe swapper's buffer.
+
+    An NVMe partition points into the swapper buffer, so rebinding it to a
+    quantized tensor would leave the bytes written to disk unquantized while
+    ``ds_quant_scale`` stays attached to the parameter.
+    """
+    return (enabled and not param.requires_grad and tensor is not None
+            and getattr(tensor, "final_location", None) != OffloadDeviceEnum.nvme)
 
 
 def _initialize_parameter_parallel_groups(parameter_parallel_size=None):
