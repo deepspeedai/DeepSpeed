@@ -18,6 +18,7 @@ from deepspeed.utils import groups, z3_leaf_parameter
 from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
 from deepspeed.runtime.base_optimizer import ZeROOptimizer
 from deepspeed.utils import logger
+from deepspeed.utils.tensor_fragment import _count_fragment_owners
 from deepspeed.utils.torch import register_grad_hook, required_torch_version
 from deepspeed.utils.pin_memory_tracker import pinned_memory_summary
 from deepspeed.runtime.fp16.loss_scaler import CreateLossScaler
@@ -3189,6 +3190,18 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
     def get_full_hp_param(self, param, optim_state_key=None) -> Tensor:
         if not param.requires_grad:
             return None
+
+        if optim_state_key is not None:
+            group_idx = self.grad_position[self.get_param_id(param)][0]
+            fp32_param = self.fp32_partitioned_groups_flat[group_idx]
+            state = self.optimizer.state[fp32_param] if fp32_param in self.optimizer.state else None
+            ready = state is not None and torch.is_tensor(state.get(optim_state_key))
+            group = self._get_param_partition_group(param)
+            device = torch.device(get_accelerator().current_device_name())
+            # Count first so every rank either all-gathers or raises.
+            owners, ready_count = _count_fragment_owners(True, ready, group, device)
+            if ready_count != owners:
+                raise ValueError(f'{optim_state_key} not found in optimizer state fragment')
 
         fp32_opt_state, group_idx = self._get_fp32_opt_state_partition(param,
                                                                        release_swap_buffers=True,
