@@ -132,17 +132,12 @@ def assert_no_cuda_mismatch(name=""):
 
 
 class OpBuilder(ABC):
-    _rocm_version = None
-    _rocm_gpu_arch = None
-    _rocm_wavefront_size = None
     _is_rocm_pytorch = None
     _is_sycl_enabled = None
     _loaded_ops = {}
 
     def __init__(self, name):
         self.name = name
-        self.jit_mode = False
-        self.enable_bf16 = False
         self.error_log = None
 
     @abstractmethod
@@ -177,26 +172,12 @@ class OpBuilder(ABC):
                                f"Install torch version={install_torch_version}, "
                                f"Runtime torch version={current_torch_version}")
 
-    @staticmethod
-    def validate_torch_op_version(torch_info):
-        if not OpBuilder.is_rocm_pytorch():
-            current_cuda_version = ".".join(torch.version.cuda.split('.')[:2])
-            install_cuda_version = torch_info['cuda_version']
-            if install_cuda_version != current_cuda_version:
-                raise RuntimeError("CUDA version mismatch! DeepSpeed ops were compiled and installed "
-                                   "with a different version than what is being used at runtime. "
-                                   f"Please re-install DeepSpeed or switch torch versions. "
-                                   f"Install CUDA version={install_cuda_version}, "
-                                   f"Runtime CUDA version={current_cuda_version}")
-        else:
-            current_hip_version = ".".join(torch.version.hip.split('.')[:2])
-            install_hip_version = torch_info['hip_version']
-            if install_hip_version != current_hip_version:
-                raise RuntimeError("HIP version mismatch! DeepSpeed ops were compiled and installed "
-                                   "with a different version than what is being used at runtime. "
-                                   f"Please re-install DeepSpeed or switch torch versions. "
-                                   f"Install HIP version={install_hip_version}, "
-                                   f"Runtime HIP version={current_hip_version}")
+    def validate_torch_op_version(self, torch_info):
+        '''
+        Check that a pre-compiled op was built against the device toolkit of the runtime torch. Builders
+        whose ops are compiled against a device toolkit override this.
+        '''
+        pass
 
     @staticmethod
     def is_rocm_pytorch():
@@ -233,85 +214,9 @@ class OpBuilder(ABC):
         OpBuilder._is_sycl_enabled = _is_sycl_enabled
         return OpBuilder._is_sycl_enabled
 
-    @staticmethod
-    def installed_rocm_version():
-        if OpBuilder._rocm_version:
-            return OpBuilder._rocm_version
-
-        ROCM_MAJOR = '0'
-        ROCM_MINOR = '0'
-        ROCM_VERSION_DEV_RAW = ""
-        if OpBuilder.is_rocm_pytorch():
-            from torch.utils.cpp_extension import ROCM_HOME
-            rocm_ver_file = Path(ROCM_HOME).joinpath(".info/version")
-            if rocm_ver_file.is_file():
-                with open(rocm_ver_file, 'r') as file:
-                    ROCM_VERSION_DEV_RAW = file.read()
-            elif "rocm" in torch.__version__:
-                ROCM_VERSION_DEV_RAW = torch.__version__.split("rocm")[1]
-            if ROCM_VERSION_DEV_RAW != "":
-                ROCM_MAJOR = ROCM_VERSION_DEV_RAW.split('.')[0]
-                ROCM_MINOR = ROCM_VERSION_DEV_RAW.split('.')[1]
-            else:
-                # Look in /usr/include/rocm-version.h
-                rocm_ver_file = Path("/usr/include/rocm_version.h")
-                if rocm_ver_file.is_file():
-                    with open(rocm_ver_file, 'r') as file:
-                        for ln in file.readlines():
-                            if "#define ROCM_VERSION_MAJOR" in ln:
-                                ROCM_MAJOR = re.findall(r'\S+', ln)[2]
-                            elif "#define ROCM_VERSION_MINOR" in ln:
-                                ROCM_MINOR = re.findall(r'\S+', ln)[2]
-            if ROCM_MAJOR == '0':
-                assert False, "Could not detect ROCm version"
-
-        OpBuilder._rocm_version = (int(ROCM_MAJOR), int(ROCM_MINOR))
-        return OpBuilder._rocm_version
-
-    @staticmethod
-    def get_rocm_gpu_arch():
-        if OpBuilder._rocm_gpu_arch:
-            return OpBuilder._rocm_gpu_arch
-        rocm_info = Path("/opt/rocm/bin/rocminfo")
-        if (not rocm_info.is_file()):
-            rocm_info = Path("rocminfo")
-        try:
-            result = subprocess.check_output([str(rocm_info)], stderr=subprocess.DEVNULL)
-            output = result.decode('utf-8')
-            match = re.search(r'gfx\S+', output)
-            rocm_gpu_arch = match.group(0).strip() if match else ""
-        except (subprocess.CalledProcessError, FileNotFoundError, OSError):
-            rocm_gpu_arch = ""
-        OpBuilder._rocm_gpu_arch = rocm_gpu_arch
-        return OpBuilder._rocm_gpu_arch
-
-    @staticmethod
-    def get_rocm_wavefront_size():
-        if OpBuilder._rocm_wavefront_size:
-            return OpBuilder._rocm_wavefront_size
-
-        rocm_info = Path("/opt/rocm/bin/rocminfo")
-        if (not rocm_info.is_file()):
-            rocm_info = Path("rocminfo")
-        try:
-            result = subprocess.check_output([str(rocm_info)], stderr=subprocess.DEVNULL)
-            output = result.decode('utf-8')
-            match = re.search(r'Wavefront Size:\s+(\d+)', output)
-            rocm_wavefront_size = match.group(1) if match else "32"
-        except (subprocess.CalledProcessError, FileNotFoundError, OSError):
-            rocm_wavefront_size = "32"
-        OpBuilder._rocm_wavefront_size = rocm_wavefront_size
-        return OpBuilder._rocm_wavefront_size
-
     def include_paths(self):
         '''
         Returns list of include paths, relative to root of deepspeed package (i.e., DeepSpeed/deepspeed)
-        '''
-        return []
-
-    def nvcc_args(self):
-        '''
-        Returns optional list of compiler flags to forward to nvcc when building CUDA sources
         '''
         return []
 
@@ -601,16 +506,23 @@ class OpBuilder(ABC):
         from deepspeed.accelerator import get_accelerator
         if installed_ops.get(self.name, False) and accelerator_name == get_accelerator()._name:
             # Ensure the op we're about to load was compiled with the same
-            # torch/cuda versions we are currently using at runtime.
+            # torch and device toolkit versions we are currently using at runtime.
             self.validate_torch_version(torch_info)
-            if torch.cuda.is_available() and isinstance(self, CUDAOpBuilder):
-                self.validate_torch_op_version(torch_info)
+            self.validate_torch_op_version(torch_info)
 
             op_module = importlib.import_module(self.absolute_name())
             __class__._loaded_ops[self.name] = op_module
             return op_module
         else:
             return self.jit_load(verbose)
+
+    def jit_load_kwargs(self):
+        '''
+        Returns the compile arguments that jit_load() passes to torch.utils.cpp_extension.load()
+        '''
+        cxx_args = self.strip_empty_entries(self.cxx_args())
+        cxx_args.append("-UC10_USE_GLOG")
+        return {'extra_cflags': cxx_args}
 
     def jit_load(self, verbose=True):
         if not self.is_compatible(verbose):
@@ -623,63 +535,132 @@ class OpBuilder(ABC):
         except RuntimeError as e:
             raise RuntimeError(f"Unable to JIT load the {self.name} op due to ninja not being installed.") from e
 
-        saved_jit_mode = self.jit_mode
-        self.jit_mode = True
-        torch_arch_list_present = "TORCH_CUDA_ARCH_LIST" in os.environ
-        torch_arch_list = os.environ.get("TORCH_CUDA_ARCH_LIST")
-        normalized_arch_list = torch_arch_list.strip() if torch_arch_list is not None else None
-        self._jit_arch_list = normalized_arch_list or None
         from torch.utils.cpp_extension import load
 
         start_build = time.time()
         sources = [os.path.abspath(self.deepspeed_src_path(path)) for path in self.sources()]
         extra_include_paths = [os.path.abspath(self.deepspeed_src_path(path)) for path in self.include_paths()]
 
-        try:
-            nvcc_args = self.strip_empty_entries(self.nvcc_args())
-            cxx_args = self.strip_empty_entries(self.cxx_args())
+        compile_kwargs = self.jit_load_kwargs()
+        extra_ldflags = self.strip_empty_entries(self.extra_ldflags())
+        op_module = load(name=self.name,
+                         sources=self.strip_empty_entries(sources),
+                         extra_include_paths=self.strip_empty_entries(extra_include_paths),
+                         extra_ldflags=extra_ldflags,
+                         verbose=verbose,
+                         **compile_kwargs)
 
-            cxx_args.append("-UC10_USE_GLOG")
-            nvcc_args.append("-UC10_USE_GLOG")
-            if isinstance(self, CUDAOpBuilder):
-                if self.enable_bf16:
-                    cxx_args.append("-DBF16_AVAILABLE")
-                    nvcc_args.append("-DBF16_AVAILABLE")
-                    nvcc_args.append("-U__CUDA_NO_BFLOAT16_OPERATORS__")
-                    nvcc_args.append("-U__CUDA_NO_BFLOAT162_OPERATORS__")
-                    nvcc_args.append("-U__CUDA_NO_BFLOAT16_CONVERSIONS__")
+        build_duration = time.time() - start_build
+        if verbose:
+            print(f"Time to load {self.name} op: {build_duration} seconds")
 
-            if self.is_rocm_pytorch():
-                cxx_args.append("-D__HIP_PLATFORM_AMD__=1")
-                os.environ["PYTORCH_ROCM_ARCH"] = self.get_rocm_gpu_arch()
-                cxx_args.append('-DROCM_WAVEFRONT_SIZE=%s' % self.get_rocm_wavefront_size())
+        __class__._loaded_ops[self.name] = op_module
 
-            op_module = load(name=self.name,
-                             sources=self.strip_empty_entries(sources),
-                             extra_include_paths=self.strip_empty_entries(extra_include_paths),
-                             extra_cflags=cxx_args,
-                             extra_cuda_cflags=nvcc_args,
-                             extra_ldflags=self.strip_empty_entries(self.extra_ldflags()),
-                             with_cuda=True if isinstance(self, CUDAOpBuilder) else None,
-                             verbose=verbose)
-
-            build_duration = time.time() - start_build
-            if verbose:
-                print(f"Time to load {self.name} op: {build_duration} seconds")
-
-            __class__._loaded_ops[self.name] = op_module
-
-            return op_module
-        finally:
-            if torch_arch_list_present:
-                os.environ["TORCH_CUDA_ARCH_LIST"] = torch_arch_list
-            else:
-                os.environ.pop("TORCH_CUDA_ARCH_LIST", None)
-            self._jit_arch_list = None
-            self.jit_mode = saved_jit_mode
+        return op_module
 
 
 class CUDAOpBuilder(OpBuilder):
+    _rocm_version = None
+    _rocm_gpu_arch = None
+    _rocm_wavefront_size = None
+
+    def __init__(self, name):
+        super().__init__(name)
+        # Ops are JIT-built for the GPUs of the machine that loads them, unless builder() pre-builds them.
+        self.jit_mode = True
+        self.enable_bf16 = False
+
+    def validate_torch_op_version(self, torch_info):
+        if not torch.cuda.is_available():
+            return
+        if not self.is_rocm_pytorch():
+            current_cuda_version = ".".join(torch.version.cuda.split('.')[:2])
+            install_cuda_version = torch_info['cuda_version']
+            if install_cuda_version != current_cuda_version:
+                raise RuntimeError("CUDA version mismatch! DeepSpeed ops were compiled and installed "
+                                   "with a different version than what is being used at runtime. "
+                                   f"Please re-install DeepSpeed or switch torch versions. "
+                                   f"Install CUDA version={install_cuda_version}, "
+                                   f"Runtime CUDA version={current_cuda_version}")
+        else:
+            current_hip_version = ".".join(torch.version.hip.split('.')[:2])
+            install_hip_version = torch_info['hip_version']
+            if install_hip_version != current_hip_version:
+                raise RuntimeError("HIP version mismatch! DeepSpeed ops were compiled and installed "
+                                   "with a different version than what is being used at runtime. "
+                                   f"Please re-install DeepSpeed or switch torch versions. "
+                                   f"Install HIP version={install_hip_version}, "
+                                   f"Runtime HIP version={current_hip_version}")
+
+    @staticmethod
+    def installed_rocm_version():
+        if CUDAOpBuilder._rocm_version:
+            return CUDAOpBuilder._rocm_version
+
+        ROCM_MAJOR = '0'
+        ROCM_MINOR = '0'
+        ROCM_VERSION_DEV_RAW = ""
+        if OpBuilder.is_rocm_pytorch():
+            from torch.utils.cpp_extension import ROCM_HOME
+            rocm_ver_file = Path(ROCM_HOME).joinpath(".info/version")
+            if rocm_ver_file.is_file():
+                with open(rocm_ver_file, 'r') as file:
+                    ROCM_VERSION_DEV_RAW = file.read()
+            elif "rocm" in torch.__version__:
+                ROCM_VERSION_DEV_RAW = torch.__version__.split("rocm")[1]
+            if ROCM_VERSION_DEV_RAW != "":
+                ROCM_MAJOR = ROCM_VERSION_DEV_RAW.split('.')[0]
+                ROCM_MINOR = ROCM_VERSION_DEV_RAW.split('.')[1]
+            else:
+                # Look in /usr/include/rocm-version.h
+                rocm_ver_file = Path("/usr/include/rocm_version.h")
+                if rocm_ver_file.is_file():
+                    with open(rocm_ver_file, 'r') as file:
+                        for ln in file.readlines():
+                            if "#define ROCM_VERSION_MAJOR" in ln:
+                                ROCM_MAJOR = re.findall(r'\S+', ln)[2]
+                            elif "#define ROCM_VERSION_MINOR" in ln:
+                                ROCM_MINOR = re.findall(r'\S+', ln)[2]
+            if ROCM_MAJOR == '0':
+                assert False, "Could not detect ROCm version"
+
+        CUDAOpBuilder._rocm_version = (int(ROCM_MAJOR), int(ROCM_MINOR))
+        return CUDAOpBuilder._rocm_version
+
+    @staticmethod
+    def get_rocm_gpu_arch():
+        if CUDAOpBuilder._rocm_gpu_arch:
+            return CUDAOpBuilder._rocm_gpu_arch
+        rocm_info = Path("/opt/rocm/bin/rocminfo")
+        if (not rocm_info.is_file()):
+            rocm_info = Path("rocminfo")
+        try:
+            result = subprocess.check_output([str(rocm_info)], stderr=subprocess.DEVNULL)
+            output = result.decode('utf-8')
+            match = re.search(r'gfx\S+', output)
+            rocm_gpu_arch = match.group(0).strip() if match else ""
+        except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+            rocm_gpu_arch = ""
+        CUDAOpBuilder._rocm_gpu_arch = rocm_gpu_arch
+        return CUDAOpBuilder._rocm_gpu_arch
+
+    @staticmethod
+    def get_rocm_wavefront_size():
+        if CUDAOpBuilder._rocm_wavefront_size:
+            return CUDAOpBuilder._rocm_wavefront_size
+
+        rocm_info = Path("/opt/rocm/bin/rocminfo")
+        if (not rocm_info.is_file()):
+            rocm_info = Path("rocminfo")
+        try:
+            result = subprocess.check_output([str(rocm_info)], stderr=subprocess.DEVNULL)
+            output = result.decode('utf-8')
+            match = re.search(r'Wavefront Size:\s+(\d+)', output)
+            rocm_wavefront_size = match.group(1) if match else "32"
+        except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+            rocm_wavefront_size = "32"
+        CUDAOpBuilder._rocm_wavefront_size = rocm_wavefront_size
+        return CUDAOpBuilder._rocm_wavefront_size
 
     def cuda_capability_major(self):
         """Compute-capability major of CUDA device 0, or ``None`` when it cannot
@@ -843,6 +824,9 @@ class CUDAOpBuilder(OpBuilder):
         return super().is_compatible(verbose)
 
     def builder(self):
+        # Pre-built ops run on other machines, so they target the requested arch list rather than
+        # the GPUs of this one.
+        self.jit_mode = False
         if not self.is_rocm_pytorch():
             assert_no_cuda_mismatch(self.name)
 
@@ -885,6 +869,45 @@ class CUDAOpBuilder(OpBuilder):
                     sources[i] = str(src)
             cuda_ext.sources = sources
         return cuda_ext
+
+    def jit_load(self, verbose=True):
+        # compute_capability_args() publishes the JIT arch list through TORCH_CUDA_ARCH_LIST for
+        # PyTorch's build to read, so the caller's value is put back afterwards.
+        torch_arch_list_present = "TORCH_CUDA_ARCH_LIST" in os.environ
+        torch_arch_list = os.environ.get("TORCH_CUDA_ARCH_LIST")
+        normalized_arch_list = torch_arch_list.strip() if torch_arch_list is not None else None
+        self._jit_arch_list = normalized_arch_list or None
+        try:
+            return super().jit_load(verbose)
+        finally:
+            if torch_arch_list_present:
+                os.environ["TORCH_CUDA_ARCH_LIST"] = torch_arch_list
+            else:
+                os.environ.pop("TORCH_CUDA_ARCH_LIST", None)
+            self._jit_arch_list = None
+
+    def jit_load_kwargs(self):
+        # nvcc_args() goes first because it decides enable_bf16 and the JIT arch list.
+        nvcc_args = self.strip_empty_entries(self.nvcc_args())
+        kwargs = super().jit_load_kwargs()
+        cxx_args = kwargs['extra_cflags']
+
+        nvcc_args.append("-UC10_USE_GLOG")
+        if self.enable_bf16:
+            cxx_args.append("-DBF16_AVAILABLE")
+            nvcc_args.append("-DBF16_AVAILABLE")
+            nvcc_args.append("-U__CUDA_NO_BFLOAT16_OPERATORS__")
+            nvcc_args.append("-U__CUDA_NO_BFLOAT162_OPERATORS__")
+            nvcc_args.append("-U__CUDA_NO_BFLOAT16_CONVERSIONS__")
+
+        if self.is_rocm_pytorch():
+            cxx_args.append("-D__HIP_PLATFORM_AMD__=1")
+            os.environ["PYTORCH_ROCM_ARCH"] = self.get_rocm_gpu_arch()
+            cxx_args.append('-DROCM_WAVEFRONT_SIZE=%s' % self.get_rocm_wavefront_size())
+
+        kwargs['extra_cuda_cflags'] = nvcc_args
+        kwargs['with_cuda'] = True
+        return kwargs
 
     def hipify_extension(self):
         if self.is_rocm_pytorch():

@@ -19,6 +19,7 @@ BUILDER_SPEC = importlib.util.spec_from_file_location("test_op_builder_module", 
 builder_module = importlib.util.module_from_spec(BUILDER_SPEC)
 BUILDER_SPEC.loader.exec_module(builder_module)
 CUDAOpBuilder = builder_module.CUDAOpBuilder
+OpBuilder = builder_module.OpBuilder
 
 BUILDER_MODULE = builder_module
 CUDA_API = BUILDER_MODULE.torch.cuda  #ignore-cuda
@@ -130,7 +131,6 @@ def test_jit_load_restores_env_and_state_after_failure():
                             builder.jit_load(verbose=False)
 
         assert getattr(builder, "_jit_arch_list", None) is None
-        assert builder.jit_mode is False
         assert os.environ["TORCH_CUDA_ARCH_LIST"] == "8.9"
 
 
@@ -154,7 +154,54 @@ def test_jit_load_restores_state_after_success():
 
         assert os.environ["TORCH_CUDA_ARCH_LIST"] == "8.9"
         assert getattr(builder, "_jit_arch_list", None) is None
-        assert builder.jit_mode is False
+
+
+class _StubHostOpBuilder(OpBuilder):
+    BUILD_VAR = "STUB_HOST_BUILDER"
+    NAME = "stub_host"
+
+    def __init__(self):
+        super().__init__(name=self.NAME)
+
+    def absolute_name(self):
+        return "deepspeed.ops.stub_host"
+
+    def sources(self):
+        return []
+
+
+def test_jit_load_builds_host_op_without_hip_settings_on_rocm():
+    # Host ops such as the CPU optimizers and async I/O build as plain C++ extensions. On a ROCm torch,
+    # JIT loading one must not add HIP defines or overwrite the user's PYTORCH_ROCM_ARCH, which only the
+    # HIP builds of CUDA ops use.
+    load = MagicMock()
+    with patch.dict(os.environ, {"PYTORCH_ROCM_ARCH": "gfx90a;gfx942"}, clear=False):
+        with patch.object(OpBuilder, "is_rocm_pytorch", return_value=True):
+            with patch("torch.utils.cpp_extension.verify_ninja_availability", return_value=None):
+                with patch("torch.utils.cpp_extension.load", load):
+                    _StubHostOpBuilder().jit_load(verbose=False)
+        assert os.environ["PYTORCH_ROCM_ARCH"] == "gfx90a;gfx942"
+
+    cxx_args = load.call_args.kwargs["extra_cflags"]
+    assert not [arg for arg in cxx_args if "HIP" in arg or "ROCM" in arg]
+    assert not load.call_args.kwargs.get("with_cuda")
+
+
+def test_prebuilt_builder_targets_requested_archs_instead_of_local_gpus():
+    # Builders default to JIT mode, which targets the local GPUs and leaves the -gencode flags to PyTorch.
+    # Pre-built ops run on other machines, so builder() must emit explicit -gencode flags for the
+    # requested arch list.
+    builder = make_builder()
+    with patch.dict(os.environ, {"TORCH_CUDA_ARCH_LIST": "8.0;9.0"}, clear=False):
+        with patch.object(CUDAOpBuilder, "is_rocm_pytorch", return_value=False):
+            with patch.object(builder_module, "assert_no_cuda_mismatch", return_value=True):
+                with patch.object(builder_module, "installed_cuda_version", return_value=(12, 8)):
+                    with patch("torch.utils.cpp_extension.CUDAExtension") as cuda_extension:
+                        builder.builder()
+
+    nvcc_args = cuda_extension.call_args.kwargs["extra_compile_args"]["nvcc"]
+    assert "-gencode=arch=compute_80,code=sm_80" in nvcc_args
+    assert "-gencode=arch=compute_90,code=sm_90" in nvcc_args
 
 
 def test_non_jit_branch_unchanged():

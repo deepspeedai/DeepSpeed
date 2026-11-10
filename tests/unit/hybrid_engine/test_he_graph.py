@@ -7,7 +7,8 @@ import torch
 from unittest.mock import patch
 import deepspeed
 from deepspeed.accelerator import get_accelerator
-from deepspeed.ops.op_builder import InferenceBuilder, OpBuilder
+from deepspeed.ops.op_builder import InferenceBuilder
+from deepspeed.ops.op_builder.builder import CUDAOpBuilder
 from deepspeed.runtime.hybrid_engine_graph import (DecodeGraphCache, decode_steps_from_generate_kwargs,
                                                    validate_graph_capture_support)
 from unit.common import DistributedTest
@@ -191,7 +192,7 @@ def test_changing_generation_length_invalidates_graphs():
 if not deepspeed.ops.__compatible_ops__[InferenceBuilder.NAME]:
     pytest.skip("This op had not been implemented on this system.", allow_module_level=True)
 
-if OpBuilder.installed_rocm_version() != (0, 0):
+if CUDAOpBuilder.installed_rocm_version() != (0, 0):
     pytest.skip("skip inference tests on rocm for now", allow_module_level=True)
 
 
