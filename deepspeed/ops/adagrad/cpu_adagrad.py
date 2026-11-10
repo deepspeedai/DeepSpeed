@@ -75,16 +75,13 @@ class DeepSpeedCPUAdagrad(DeepSpeedCPUOptimizer):
                 state = self.state[p]
                 # State initialization
                 if len(state) == 0:
-                    #print(f'group {group_id} param {param_id} = {p.numel()}')
                     state['step'] = 0
 
                     #use full precision by default unless self.fp32_optimizer_states is off
                     state_dtype = torch.float if self.fp32_optimizer_states else p.dtype
 
-                    #memory_format=torch.preserve_format)
                     # gradient variances
                     state['exp_avg_sq'] = torch.zeros_like(p.data, dtype=state_dtype, device='cpu')
-                    #memory_format=torch.preserve_format)
 
                 state['step'] += 1
 

@@ -130,6 +130,10 @@ class BF16_Optimizer(ZeROOptimizer):
             for p in self.bf16_groups[i]:
                 if getattr(p, '_hp_mapping', None):
                     p._hp_mapping = None
+                # _update_hp_grad() leaves a view of the fp32 gradient buffer here; a model kept after
+                # destroy() would otherwise keep the whole buffer alive.
+                if getattr(p, '_hp_grad', None) is not None:
+                    p._hp_grad = None
         for hook in self._grad_acc_hooks:
             hook.remove()
         print_rank_0("Removed grad acc hooks")

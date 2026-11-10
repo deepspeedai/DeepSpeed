@@ -168,7 +168,6 @@ def test_cpu_optimizer_load_state_dict_keeps_state_dtype(optimizer_class, builde
                          [
                              (64),
                              (22),
-                             #(55),
                              (128),
                              (1024),
                              (1048576),
@@ -196,12 +195,6 @@ class TestCPUAdam(DistributedTest):
         cpu_data = torch.randn(model_size, device='cpu').to(dtype)
         cpu_param = torch.nn.Parameter(cpu_data)
         cuda_param = torch.nn.Parameter(cpu_data.to(get_accelerator().device_name()))
-
-        # tolerance = cpu_param.float().norm().detach().numpy() * 1e-2
-        # check_equal(cpu_param.float().norm(),
-        #             cuda_param.float().cpu().norm(),
-        #             atol=tolerance,
-        #             verbose=True)
 
         cpu_optimizer = DeepSpeedCPUAdam([cpu_param])
         cuda_optimizer = FusedAdam([cuda_param])

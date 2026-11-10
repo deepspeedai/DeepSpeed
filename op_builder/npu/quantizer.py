@@ -36,6 +36,20 @@ class NPUQuantizer:
     and exposes no truncation mode, so no native op can honor the wire
     format today. If CANN later adds one, _quantize_groups is the single
     swap point.
+
+    The dequantize_*_experimental methods are unrelated to that wire format:
+    they serve the inference weight-quantization path, which is asymmetric
+    with a per-group scale and minimum.
+
+    The inference int4 path as a whole requires CANN >= 9.0.0: the shared
+    Quantizer._compress_uint8_to_uint4 packs with a uint8 left shift
+    (aclnnLeftShifts), which older CANN releases do not provide. The
+    dequantizers below do not use that operator and are version-independent;
+    on older CANN the failure happens during quantization, before they run.
+    torch_npu exposes the CANN version through
+    torch_npu.utils.get_cann_version() and
+    torch_npu.npu.utils._is_gte_cann_version(), but this module does not gate
+    on it because the failing step is in shared code.
     """
 
     Symmetric = 0
@@ -243,12 +257,82 @@ class NPUQuantizer:
         return packed, stored.view(out_groups, 1)
 
     @staticmethod
+    def _dequantize_inference_groups(values, scale_buffer, min_val_buffer, num_group, group_size):
+        """Asymmetric inference dequantization: value / scale + min, in fp16.
+
+        The inference weight-quantization path stores one scale and one minimum
+        per group and expects fp16 output, matching DeQuantizer in
+        deepspeed/inference/quantization/utils.py. The arithmetic is in-place
+        to keep the peak memory close to one fp16 copy of the weights.
+        """
+        scale = scale_buffer.reshape(num_group, 1).to(torch.float16)
+        min_val = min_val_buffer.reshape(num_group, 1).to(torch.float16)
+        values = values.reshape(num_group, group_size).to(torch.float16)
+        return values.div_(scale).add_(min_val)
+
+    _int4_supported = None
+
+    @staticmethod
+    def _cann_supports_int4():
+        """Return whether CANN provides aclnnLeftShifts for the int4 packer.
+
+        The int4 inference path as a whole needs CANN >= 9.0.0. Returns True
+        when the version cannot be determined, so the normal path reports its
+        own error instead of being blocked by a failed probe.
+        """
+        cached = NPUQuantizer._int4_supported
+        if cached is not None:
+            return cached
+        supported = True
+        try:
+            from torch_npu.npu.utils import _is_gte_cann_version
+            supported = bool(_is_gte_cann_version('9.0.0', module='CANN'))
+        except Exception:
+            try:
+                from torch_npu.utils import get_cann_version
+                parts = []
+                for token in get_cann_version().split('.'):
+                    digits = ''.join(ch for ch in token if ch.isdigit())
+                    parts.append(int(digits) if digits else 0)
+                supported = tuple(parts[:2]) >= (9, 0)
+            except Exception:
+                supported = True
+        NPUQuantizer._int4_supported = supported
+        return supported
+
+    @staticmethod
+    def _check_int4_inference_support():
+        if NPUQuantizer._cann_supports_int4():
+            return
+        try:
+            from torch_npu.utils import get_cann_version
+            version = get_cann_version()
+        except Exception:
+            version = 'unknown'
+        raise RuntimeError(f"int4 inference quantization on Ascend requires CANN >= 9.0.0 "
+                           f"for aclnnLeftShifts; detected CANN {version}. "
+                           f"Upgrade CANN or use int8 quantization.")
+
+    @staticmethod
     def dequantize_int4_to_half_experimental(data_in, scale_buffer, min_val_buffer, num_group, group_size):
-        raise NotImplementedError("experimental fp_quantizer path is not needed for hpZ")
+        """Unpack the inference int4 wire format and dequantize to fp16.
+
+        Each byte holds two unsigned 4-bit values: the high nibble is the even
+        element and the low nibble the odd element. This is the inverse of
+        Quantizer._compress_uint8_to_uint4 (inference/quantization/utils.py).
+        The nibbles stay uint8 so the temporary is one byte per element.
+        """
+        NPUQuantizer._check_int4_inference_support()
+        packed = data_in.reshape(-1)
+        values = torch.empty(packed.numel() * 2, dtype=torch.uint8, device=data_in.device)
+        values[0::2] = packed >> 4
+        values[1::2] = packed & 0x0F
+        return NPUQuantizer._dequantize_inference_groups(values, scale_buffer, min_val_buffer, num_group, group_size)
 
     @staticmethod
     def dequantize_int8_to_half_experimental(data_in, scale_buffer, min_val_buffer, num_group, group_size):
-        raise NotImplementedError("experimental fp_quantizer path is not needed for hpZ")
+        """Dequantize the inference int8 wire format to fp16."""
+        return NPUQuantizer._dequantize_inference_groups(data_in, scale_buffer, min_val_buffer, num_group, group_size)
 
 
 class QuantizerBuilder(NPUOpBuilder):

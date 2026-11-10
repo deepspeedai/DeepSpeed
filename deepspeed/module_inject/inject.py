@@ -93,20 +93,8 @@ def test_hi():
     bert_config = BertConfigPreLN(**bert_model_config)
     base_model = BertForQuestionAnsweringPreLN(bert_config, args=None)
 
-    #base_model = LinearStack()
-
     test_model = copy.deepcopy(base_model)
     test_model = module_inject(BertLayer, test_model, bert_config, 4, 384, 1234)
 
     print('BASE', base_model)
     print('TEST', test_model)
-
-    #base_model.eval()
-    #test_model.eval()
-
-    #test_input = torch.rand(1, base_model.input_dim)
-
-    #base_output = base_model(test_input)
-    #test_output = test_model(test_input)
-    #
-    #assert torch.allclose(base_output, test_output, atol=3e-8)
