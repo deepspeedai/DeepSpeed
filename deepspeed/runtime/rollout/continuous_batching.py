@@ -241,7 +241,7 @@ class _ContinuousRunGraph(_ContinuousRunBase):
         self.pending = deque(range(len(trajectories)))
         self.row_owner = [None] * num_rows
 
-        self.rows = torch.arange(num_rows, device=device)
+        self.row_indices = torch.arange(num_rows, device=device)
         self.slots = torch.arange(capacity, device=device)
         self.ds_cache = DeepSpeedStaticCache(module.config,
                                              batch_size=num_rows,
@@ -373,7 +373,7 @@ class _ContinuousRunGraph(_ContinuousRunBase):
         self.active.logical_and_(~ended)
         self.static_token.copy_(tokens)
         self.write_pos.add_(self.active.long())
-        self.static_attn[self.rows, 0, 0, self.write_pos] |= self.active
+        self.static_attn[self.row_indices, 0, 0, self.write_pos] |= self.active
 
     def collect_finished_turns(self, still_active):
         finished = [row for row, owner in enumerate(self.row_owner) if owner is not None and not still_active[row]]

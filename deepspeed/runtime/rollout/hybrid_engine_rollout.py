@@ -341,9 +341,10 @@ class HybridEngineRollout(RolloutEngine):
         accelerator.set_rng_state(state.cpu())
 
     def _run_tools(self, calls_by_row):
-        """Run a turn's tool calls once per AutoTP group, so every rank gets the same output."""
         if self.autotp_size <= 1:
             return asyncio.run(self._run_tool_calls(calls_by_row))
+
+        # Run a turn's tool calls once per AutoTP group, so every rank gets the same output.
         import deepspeed.comm as dist
         from deepspeed.utils import groups
 
@@ -367,7 +368,6 @@ class HybridEngineRollout(RolloutEngine):
         return min(budget, self.max_out_tokens - sum(sample.attention_mask))
 
     def _end_turn(self, sample, response, turn, generated, max_new_tokens):
-        """Settle a trajectory after a turn, and return the tool calls it should run next, if any."""
         if not response or response[-1] != self.tokenizer.eos_token_id:
             sample.status = RolloutRecord.Status.TRUNCATED
             return None
@@ -388,7 +388,6 @@ class HybridEngineRollout(RolloutEngine):
         return sum(sample.attention_mask) + len(response) + len(tool_response) <= self.max_out_tokens
 
     def _tool_response(self, calls, outputs):
-        """Tokens of the tool messages that answer ``calls``."""
         tool_messages = [{
             "role": "tool",
             "name": call.name or "unknown",
@@ -477,8 +476,9 @@ class HybridEngineRollout(RolloutEngine):
                 accelerator.synchronize()
                 generation_end = time.perf_counter()
 
-            # Under ZeRO-3 generation runs past EOS, and rows that stop early are padded either way, so each
-            # response is cut at its first EOS.
+            # Under ZeRO-3 generation runs past EOS, so ranks run the same number of parameter gathers; otherwise
+            # rows that end early keep decoding until every row has. Either way, each response keeps its first EOS
+            # and every later token becomes padding.
             output_ids, response_attn = self._pad_after_eos(
                 output_ids,
                 response_start=prompt_len,
@@ -499,6 +499,7 @@ class HybridEngineRollout(RolloutEngine):
                 calls = self._end_turn(trajectories[i], response, turn, generated_length[i], max_new_tokens)
                 if calls is not None:
                     turn_calls[row] = calls
+
             tool_outputs = {}
             tool_ms = 0.0
             if turn_calls:
@@ -650,7 +651,6 @@ class HybridEngineRollout(RolloutEngine):
         return output_ids, log_probs
 
     async def _run_tool_calls(self, calls_by_row):
-        """Run every row's calls concurrently; returns each row's outputs in call order."""
         rows = list(calls_by_row)
         outputs = await asyncio.gather(*(asyncio.gather(*(self.tools.run(call) for call in calls_by_row[row]))
                                          for row in rows))
@@ -892,7 +892,7 @@ class HybridEngineRollout(RolloutEngine):
             "num_turns": num_turns,
             "batch_size": batch_size,
             "num_samples_per_prompt": num_samples_per_prompt,
-            "prompt_length": prompt_len,
+            "max_prompt_length": prompt_len,
             "response_length": max(response_lengths, default=0),
             "active_batch_size": max(profile["active_batch_sizes"], default=0),
             "continuous_batch_size": max_batch_size,
@@ -1129,7 +1129,7 @@ class HybridEngineRollout(RolloutEngine):
         max_len = prompt_len + max_new_tokens
         eos_token_id = self.tokenizer.eos_token_id
         model_dtype = next(module.parameters()).dtype
-        rows = torch.arange(batch_size, device=device)
+        row_indices = torch.arange(batch_size, device=device)
 
         cache_config = module.config
         tp_size = self.autotp_size
@@ -1160,7 +1160,6 @@ class HybridEngineRollout(RolloutEngine):
         prompt_slots = prompt_attn_mask.bool()
         selector = _TokenSelector(sampling, get_repetition_penalty(sampling, module), batch_size,
                                   self.return_log_probs)
-        # generate() penalizes the sequence so far, the padded prompt included.
         next_token, first_log_probs = selector.first(prefill_logits, prompt_ids)
         log_probs = [first_log_probs]
 
@@ -1173,7 +1172,7 @@ class HybridEngineRollout(RolloutEngine):
         static_token = torch.zeros(batch_size, 1, dtype=torch.long, device=device)
         static_attn_mask = torch.zeros(batch_size, 1, 1, max_len, dtype=torch.bool, device=device)
         static_attn_mask[:, 0, 0, :prompt_len] = prompt_slots
-        static_attn_mask[rows, 0, 0, decode_start] = True
+        static_attn_mask[row_indices, 0, 0, decode_start] = True
         static_cache_pos = write_pos[:1]
         static_pos_ids = write_pos.unsqueeze(1)
 
@@ -1232,7 +1231,7 @@ class HybridEngineRollout(RolloutEngine):
             # Update static inputs
             static_token.copy_(next_token)
             torch.add(decode_start, step, out=write_pos)
-            static_attn_mask[rows, 0, 0, write_pos] = True
+            static_attn_mask[row_indices, 0, 0, write_pos] = True
             self._update_static_causal_attention(static_attn_mask[:, 0, 0], static_causal_attn_mask)
 
             # Replay
