@@ -179,6 +179,8 @@ class PartitionedParameterCoordinator:
         self.__step_id_module_fetched_for = collections.defaultdict(lambda: collections.deque())
         self.__param_queue = None
         self.__params_to_release_cache.clear()
+        if hasattr(self.__params_to_release, "cache_clear"):
+            self.__params_to_release.cache_clear()
 
     def is_complete_trace(self) -> bool:
         return self.__trace_mode == ZeRoTraceMode.COMPLETE
@@ -633,19 +635,16 @@ class PartitionedParameterCoordinator:
             self.__n_available_params -= param.ds_numel
 
     @instrument_w_nvtx
-    def __params_to_release(self, submodule_to_release: Module, step_id: int) -> FrozenSet[int]:
+    def __params_to_release(self, submodule_to_release: Module, step_id: int) -> Set[int]:
+        if not self.is_complete_trace():
+            raise RuntimeError("expected trace to be complete")
+
         # Cached per coordinator (not via a class-level lru_cache, which pins the coordinator and its modules
         # forever) and dropped together with the trace, since it is only valid for the trace it was built from.
         key = (submodule_to_release.ds_id, step_id)
-        params_to_release = self.__params_to_release_cache.get(key)
-        if params_to_release is None:
-            params_to_release = frozenset(self.__compute_params_to_release(submodule_to_release, step_id))
-            self.__params_to_release_cache[key] = params_to_release
-        return params_to_release
-
-    def __compute_params_to_release(self, submodule_to_release: Module, step_id: int) -> Set[int]:
-        if not self.is_complete_trace():
-            raise RuntimeError("expected trace to be complete")
+        cached = self.__params_to_release_cache.get(key)
+        if cached is not None:
+            return cached
 
         params_to_release = set(
             p.ds_id for p in iter_params(submodule_to_release, recurse=z3_leaf_module(submodule_to_release))
@@ -673,7 +672,9 @@ class PartitionedParameterCoordinator:
                 params_to_release.discard(param.ds_id)
                 params_traversed += param.ds_numel
 
-        return params_to_release
+        result = frozenset(params_to_release)
+        self.__params_to_release_cache[key] = result
+        return result
 
     @instrument_w_nvtx
     def __prefetch_nvme_param_partitions(self) -> None:
