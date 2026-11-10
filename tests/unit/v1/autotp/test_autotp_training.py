@@ -29,7 +29,7 @@ from deepspeed.module_inject.layers import (LinearAllreduce, LinearLayer, VocabP
                                             set_autotp_mode, is_autotp_training_mode, GatherFromTensorParallelRegion,
                                             ScatterToTensorParallelRegion, HiddenParallelEmbedding,
                                             Yuan_LinearAllreduce, _sum_replicated_kv_gradient,
-                                            _make_replicated_kv_grad_hook)
+                                            _ReplicatedKvGradReducer)
 from deepspeed.module_inject.tp_shard import AutoTPMeta, get_shard_size_list
 from unit.checkpoint.common import compare_lr_scheduler_states, compare_optimizer_states
 import os
@@ -1311,10 +1311,35 @@ def test_replicated_kv_gradient_hook_and_staging(monkeypatch):
     param = nn.Parameter(torch.zeros(4, 2))
     param.grad = torch.ones(4, 2)
     monkeypatch.setattr(layers_module.dist, "all_reduce", lambda tensor, group=None: tensor.fill_(7.0))
-    _make_replicated_kv_grad_hook(param, kv_start=2, group=None)((torch.empty_like(param.grad), ),
-                                                                 (torch.empty_like(param.grad), ))
+    reducer = _ReplicatedKvGradReducer(param, kv_start=2, group=None)
+    reducer.post_accumulate_hook((torch.empty_like(param.grad), ), (torch.empty_like(param.grad), ))
     torch.testing.assert_close(param.grad[:2], torch.ones(2, 2))
     torch.testing.assert_close(param.grad[2:], torch.full((2, 2), 7.0))
+
+
+def _run_two_accumulated_backwards(monkeypatch, register_tensor_hook):
+    import deepspeed.module_inject.layers as layers_module
+    from deepspeed.utils.torch import register_grad_hook
+
+    param = nn.Parameter(torch.zeros(4, 1))
+    # Simulate a two-rank TP sum on the replicated K/V rows.
+    monkeypatch.setattr(layers_module.dist, "all_reduce", lambda tensor, group=None: tensor.mul_(2))
+    reducer = _ReplicatedKvGradReducer(param, kv_start=2, group=None)
+    if register_tensor_hook:
+        param.register_hook(reducer.tensor_hook)
+    register_grad_hook(param, reducer.post_accumulate_hook)
+    for _ in range(2):
+        (param * 1.0).sum().backward()
+    return param
+
+
+@pytest.mark.parametrize("register_tensor_hook", [True, False])
+def test_replicated_kv_gradient_reduces_each_micro_batch_once(monkeypatch, register_tensor_hook):
+    # The second case simulates the torch_npu path where the plain tensor hook is skipped under
+    # ZeRO 1/2. The post-accumulate fallback must reduce only the new K/V rows, not the whole
+    # accumulated gradient.
+    param = _run_two_accumulated_backwards(monkeypatch, register_tensor_hook)
+    torch.testing.assert_close(param.grad, torch.tensor([[2.0], [2.0], [4.0], [4.0]]))
 
 
 @contextmanager

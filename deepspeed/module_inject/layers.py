@@ -1467,17 +1467,15 @@ class SubParamColumnParallel(LinearLayer):
                                     is_bias=True)
 
 
-def _sum_replicated_kv_gradient(grad, kv_start, group):
-    """Sum the K/V gradient rows that every rank holds a copy of.
+def _all_reduce_replicated_kv_rows(kv_grad, group):
+    """All-reduce the replicated K/V rows in place.
 
     Some backends return this gradient non-contiguously, which collectives reject; reduce a
     contiguous copy in that case and preserve the original layout for autograd.
     """
-    grad = grad.clone()
-    kv_grad = grad.narrow(0, kv_start, grad.shape[0] - kv_start)
     if kv_grad.numel() == 0:
         # The key/value block is replicated whole, so it is empty on every rank at once.
-        return grad
+        return kv_grad
     if kv_grad.is_contiguous():
         # Contiguous: reduce the view in place.
         dist.all_reduce(kv_grad, group=group)
@@ -1486,18 +1484,63 @@ def _sum_replicated_kv_gradient(grad, kv_start, group):
         reduced = kv_grad.contiguous()
         dist.all_reduce(reduced, group=group)
         kv_grad.copy_(reduced)
+    return kv_grad
+
+
+def _sum_replicated_kv_gradient(grad, kv_start, group):
+    """Sum the K/V gradient rows that every rank holds a copy of."""
+    grad = grad.clone()
+    _all_reduce_replicated_kv_rows(grad.narrow(0, kv_start, grad.shape[0] - kv_start), group)
     return grad
 
 
-def _make_replicated_kv_grad_hook(param, kv_start, group):
+class _ReplicatedKvGradReducer:
+    """Sum each micro-batch's replicated K/V gradient exactly once.
 
-    def hook(*_unused):
+    A plain tensor hook reduces the incoming gradient before PyTorch accumulates it, which is
+    correct with gradient accumulation. Some backends skip that hook under ZeRO 1/2, so a
+    post-accumulate hook is registered as well. The fallback reduces only the K/V rows added
+    since its previous call: reducing the whole accumulated gradient again would scale earlier
+    micro-batches once per later backward.
+    """
+
+    def __init__(self, param, kv_start, group):
+        self.param = param
+        self.kv_start = kv_start
+        self.group = group
+        self._tensor_hook_ran = False
+        self._grad = None
+        self._kv = None
+
+    def tensor_hook(self, grad):
+        self._tensor_hook_ran = True
+        return _sum_replicated_kv_gradient(grad, self.kv_start, self.group)
+
+    def post_accumulate_hook(self, *_unused):
         # Both hook forms leave the gradient on the parameter; the pre-2.1
         # AccumulateGrad hook also passes (grad_inputs, grad_outputs).
-        if param.grad is not None:
-            param.grad = _sum_replicated_kv_gradient(param.grad, kv_start, group)
-
-    return hook
+        grad = self.param.grad
+        if grad is None:
+            self._tensor_hook_ran = False
+            self._grad = None
+            self._kv = None
+            return
+        kv_grad = grad.narrow(0, self.kv_start, grad.shape[0] - self.kv_start)
+        if self._tensor_hook_ran:
+            # The tensor hook already summed this micro-batch before it was accumulated.
+            self._tensor_hook_ran = False
+        else:
+            if self._grad is grad and self._kv is not None:
+                delta = kv_grad - self._kv
+            else:
+                delta = kv_grad.clone()
+            _all_reduce_replicated_kv_rows(delta, self.group)
+            if self._grad is grad and self._kv is not None:
+                kv_grad.copy_(self._kv + delta)
+            else:
+                kv_grad.copy_(delta)
+        self._grad = grad
+        self._kv = kv_grad.clone()
 
 
 class FusedModuleWrapper:
@@ -1546,11 +1589,13 @@ class fused_LinearLayer(SubParamColumnParallel):
 
         from deepspeed.utils.torch import register_grad_hook
 
-        # Route through ZeRO's post-accumulate helper; torch_npu skipped the plain hook
-        # under ZeRO 1/2, while CUDA ran it in our tests.
+        # The tensor hook handles the common path before accumulation; the post-accumulate
+        # fallback covers torch_npu, which skipped it under ZeRO 1/2 in our tests.
         for param in (self.weight, self.bias):
             if param is not None and param.requires_grad:
-                register_grad_hook(param, _make_replicated_kv_grad_hook(param, kv_start, group))
+                reducer = _ReplicatedKvGradReducer(param, kv_start, group)
+                param.register_hook(reducer.tensor_hook)
+                register_grad_hook(param, reducer.post_accumulate_hook)
 
     def _freeze_partition_sizes(self, total_size):
         super()._freeze_partition_sizes(total_size)
