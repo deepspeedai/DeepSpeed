@@ -11,7 +11,7 @@ ABC. This keeps engine-specific concerns out of the trainer loop.
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Optional
+from typing import Optional
 
 from deepspeed.runtime.rollout.tool import TOOL_CALL_PARSERS
 
@@ -80,16 +80,13 @@ class RolloutRecord:
         PENDING = "pending"
         COMPLETED = "completed"
         TRUNCATED = "truncated"
-        ABORTED = "aborted"
 
     group_index: int | None = None
-    index: int | None = None
     prompt: str | list[dict[str, str]] = ""
     tokens: list[int] = field(default_factory=list)
     attention_mask: list[int] = field(default_factory=list)
     response: str = ""
     response_length: int = 0
-    reward: float | dict[str, Any] | None = None
     loss_mask: list[int] | None = None
     rollout_log_probs: list[float] | None = None
     status: Status = Status.PENDING

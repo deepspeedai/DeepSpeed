@@ -179,7 +179,6 @@ class FakeRollout(RolloutEngine):
                 samples.append(
                     replace(prompt,
                             group_index=group_index,
-                            index=len(samples),
                             tokens=prompt.tokens + response,
                             attention_mask=prompt.attention_mask + [1] * len(response),
                             loss_mask=[1] * len(response),
@@ -212,7 +211,6 @@ def test_fake_rollout_with_n_samples():
     assert out.batch_size == 8
     assert out.seq_len == 5
     assert [sample.group_index for sample in out.samples] == [0] * 4 + [1] * 4
-    assert [sample.index for sample in out.samples] == list(range(8))
 
 
 def test_fake_rollout_left_padded_prompts():

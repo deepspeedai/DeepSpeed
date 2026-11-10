@@ -188,8 +188,8 @@ HybridEngine Rollout Records
 record is one prompt and its rollout: ``prompt`` (chat messages, or text that
 is already rendered), ``tokens`` and ``attention_mask`` across every turn,
 ``response`` and ``response_length``, a ``loss_mask`` over the response (1 on
-model tokens, 0 on tool output), ``rollout_log_probs``, ``reward`` and
-``status`` (``COMPLETED``, ``TRUNCATED`` or ``ABORTED``). Records generated
+model tokens, 0 on tool output), ``rollout_log_probs`` and ``status``
+(``COMPLETED`` or ``TRUNCATED``). Records generated
 from one prompt share its ``group_index``. A record without ``tokens`` is
 rendered with the tokenizer's chat template.
 

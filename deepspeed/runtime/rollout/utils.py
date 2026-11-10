@@ -55,12 +55,11 @@ def render_prompts(samples, tokenizer, tool_specs, chat_template_kwargs=None):
 
 
 def expand_samples(samples, n_samples_per_prompt: int):
-    """``n_samples_per_prompt`` copies of each sample, sharing its ``group_index``."""
     expanded = []
     for group, sample in enumerate(samples):
         group_index = sample.group_index if sample.group_index is not None else group
         for _ in range(n_samples_per_prompt):
-            expanded.append(replace(sample, group_index=group_index, index=len(expanded)))
+            expanded.append(replace(sample, group_index=group_index))
     return expanded
 
 

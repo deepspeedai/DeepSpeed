@@ -428,7 +428,6 @@ def test_continuous_generation_covers_modern_static_cache_path():
     assert [sample.loss_mask for sample in output.samples] == [[1], [1, 1, 1], [1, 1, 1]]
     assert [sample.status for sample in output.samples
             ] == [RolloutRecord.Status.COMPLETED, RolloutRecord.Status.TRUNCATED, RolloutRecord.Status.TRUNCATED]
-    assert [sample.index for sample in output.samples] == [0, 1, 2]
     assert model.calls[0] == (2, 3)
     assert (1, 3) in model.calls
 
@@ -1726,7 +1725,6 @@ def test_generate_forwards_top_k_for_sampling_with_multiple_samples_and_eos():
     assert [sample.tokens for sample in result.samples] == [[10, 11, 5, 2], [10, 11, 6, 7, 2]]
     assert [sample.loss_mask for sample in result.samples] == [[1, 1], [1, 1, 1]]
     assert [sample.group_index for sample in result.samples] == [0, 0]
-    assert [sample.index for sample in result.samples] == [0, 1]
     assert [sample.status for sample in result.samples] == [RolloutRecord.Status.COMPLETED] * 2
 
 
