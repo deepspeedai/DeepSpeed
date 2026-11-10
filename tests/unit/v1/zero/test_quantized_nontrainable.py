@@ -153,6 +153,34 @@ class TestZeroQuantizedNontrainableWeights(DistributedTest):
         finally:
             engine.destroy()
 
+    def test_quantize_nontrainable_params_skips_nvme(self):
+        from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum
+
+        if not _QUANTIZER_AVAILABLE:
+            pytest.skip("quantizer op is not available")
+        if not get_accelerator().is_fp16_supported():
+            pytest.skip("requires fp16 support")
+
+        world_size = int(os.environ["WORLD_SIZE"])
+        device = get_accelerator().current_device_name()
+        torch.manual_seed(0)
+        model = _QuantizedLeaf(freeze=False).half().to(device)
+        engine, *_ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=_config(world_size))
+        try:
+            model.w1.requires_grad_(False)
+            model.w2.requires_grad_(False)
+            original_location = model.w1.ds_tensor.final_location
+            model.w1.ds_tensor.final_location = OffloadDeviceEnum.nvme
+            try:
+                engine.optimizer.quantize_nontrainable_params()
+            finally:
+                model.w1.ds_tensor.final_location = original_location
+
+            assert not hasattr(model.w1.ds_tensor, "ds_quant_scale")
+            assert hasattr(model.w2.ds_tensor, "ds_quant_scale")
+        finally:
+            engine.destroy()
+
     def test_quantize_nontrainable_params_after_init_with_hpz(self):
         if not _QUANTIZER_AVAILABLE:
             pytest.skip("quantizer op is not available")

@@ -1754,6 +1754,8 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                     all_gather_quantize_list = []
                     all_gather_nonquantize_list = []
                     for param in group_params:
+                        # These blocking helpers below fetch the primary ds_tensor, not the
+                        # hpZ secondary tensor, so classify by the primary storage.
                         if is_quantized_partition(param.ds_tensor):
                             all_gather_quantize_list.append(param)
                         else:
@@ -1778,14 +1780,14 @@ class Init(InsertPostInitMethodToModuleSubClasses):
     def _dequantize_partition_storage(self, tensor, dtype):
         if not is_quantized_partition(tensor):
             return
-        tensor.data = self.quantizer_module.dequantize(tensor.data, getattr(tensor, QUANT_SCALE_ATTR), dtype=dtype)
+        tensor.data = get_quantizer().dequantize(tensor.data, getattr(tensor, QUANT_SCALE_ATTR), dtype=dtype)
         delattr(tensor, QUANT_SCALE_ATTR)
 
     def _quantize_nontrainable_partition(self, param, tensor):
         if not should_quantize_nontrainable_partition(param, tensor, self.quantized_nontrainable_weights):
             return
         with torch.no_grad():
-            quantized_storage, scale = self.quantizer_module.quantize(tensor.data)
+            quantized_storage, scale = get_quantizer().quantize(tensor.data)
         tensor.data = quantized_storage
         setattr(tensor, QUANT_SCALE_ATTR, scale)
 
