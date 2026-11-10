@@ -32,8 +32,7 @@ Reflow needs no model code changes. Enable it in the DeepSpeed configuration:
     "reflow": {
       "enable_cpu_affinity": true,
       "main_thread_cores": 2,
-      "bucketwise_cores_per_worker": 8,
-      "state_update_cores": 2
+      "bucketwise_cores_per_worker": 8
     }
   },
   "optimizer": {
@@ -53,7 +52,7 @@ Launch with `--bind_cores_to_rank` so each rank runs on the CPU cores local to i
 deepspeed --bind_cores_to_rank train.py --deepspeed_config ds_config.json
 ```
 
-Reflow always pins optimizer workers to NUMA-local cores and reserves `main_thread_cores` from those workers. `enable_cpu_affinity` additionally restricts the main process to its NUMA-local core slice. The remaining cores are split into workers of `bucketwise_cores_per_worker` cores. While the state commit overlaps the forward it uses only `state_update_cores` cores: every busy core lowers the CPU's turbo frequency, which would slow the launch-bound forward.
+By default Reflow pins the initializing thread to `main_thread_cores` CPU IDs and divides the remaining CPUs among optimizer workers. Local ranks sharing a CPU set divide it before reserving their main CPUs; partially overlapping rank affinities are rejected. The state commit may use all worker CPUs unless `state_update_cores` or `state_update_backward_cores` sets a limit. `enable_cpu_affinity` additionally restricts the main process to its NUMA-local CPU slice.
 
 ## Gradient clipping
 

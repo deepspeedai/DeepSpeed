@@ -25,23 +25,21 @@ class ReflowConfig(DeepSpeedConfigModel):
     main_thread_core_type: Literal["logical", "physical"] = "logical"
     """Count main-thread reservations as logical CPUs or physical cores including their SMT siblings."""
 
-    pin_main_thread: bool = False
+    pin_main_thread: bool = True
     """Pin the initializing thread to the reserved main CPUs and restore its affinity on destroy."""
 
     worker_core_type: Literal["logical", "physical"] = "logical"
     """Use all worker CPU IDs, or one logical CPU per worker physical core."""
 
-    bucketwise_worker_affinity: Literal["task", "thread"] = "task"
+    bucketwise_worker_affinity: Literal["task", "thread"] = "thread"
     """Choose a CPU mask for each task, or keep each pool thread on its initial mask."""
 
     bucketwise_cores_per_worker: int = Field(8, ge=1)
     """Cores per bucketwise optimizer worker. The worker count follows from the cores available
     to the rank divided by this value."""
 
-    state_update_cores: int = Field(2, ge=1)
-    """Worker cores the background optimizer-state commit may use while it overlaps the next
-    forward. Every busy core lowers the turbo frequency the CPU allows, which slows the
-    launch-bound forward; once backward starts the commit uses every worker core."""
+    state_update_cores: Optional[int] = Field(None, ge=1)
+    """Limit worker CPUs used by the background state commit during forward; ``None`` uses all worker CPUs."""
 
     state_update_backward_cores: Optional[int] = Field(None, ge=1)
     """Limit the state commit's backward CPU mask; ``None`` uses all worker CPUs."""

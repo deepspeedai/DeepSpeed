@@ -146,8 +146,8 @@ void Reflow_Lion_Optimizer::Step_AVX_HalfGrad(size_t* rounded_size,
 {
     size_t new_rounded_size = 0;
 
-    AVX_Data neg1_4;
-    neg1_4.data = SIMD_SET(-1.0f);
+    AVX_Data sign_mask_4;
+    sign_mask_4.data = SIMD_SET(-0.0f);
 
     AVX_Data betta1_4;
     betta1_4.data = SIMD_SET(_betta1);
@@ -210,7 +210,7 @@ void Reflow_Lion_Optimizer::Step_AVX_HalfGrad(size_t* rounded_size,
             AVX_Data tmp_4[span];
             simd_mul<span>(tmp_4, momentum_4, betta1_4);
             simd_fma<span>(tmp_4, grad_4, betta1_minus1_4, tmp_4);
-            simd_and<span>(tmp_4, tmp_4, neg1_4);
+            simd_and<span>(tmp_4, tmp_4, sign_mask_4);
             simd_xor<span>(tmp_4, tmp_4, step_size_4);
             if (use_weight_decay) {
                 simd_fma<span>(param_4, param_4, after_decay_4, tmp_4);
@@ -245,8 +245,8 @@ void Reflow_Lion_Optimizer::Step_AVX_FP16_HalfGrad(size_t* rounded_size,
 {
     size_t new_rounded_size = 0;
 
-    AVX_Data neg1_4;
-    neg1_4.data = SIMD_SET(-1.0f);
+    AVX_Data sign_mask_4;
+    sign_mask_4.data = SIMD_SET(-0.0f);
 
     AVX_Data betta1_4;
     betta1_4.data = SIMD_SET(_betta1);
@@ -307,7 +307,7 @@ void Reflow_Lion_Optimizer::Step_AVX_FP16_HalfGrad(size_t* rounded_size,
             AVX_Data tmp_4[span];
             simd_mul<span>(tmp_4, momentum_4, betta1_4);
             simd_fma<span>(tmp_4, grad_4, betta1_minus1_4, tmp_4);
-            simd_and<span>(tmp_4, tmp_4, neg1_4);
+            simd_and<span>(tmp_4, tmp_4, sign_mask_4);
             simd_xor<span>(tmp_4, tmp_4, step_size_4);
             if (use_weight_decay) {
                 simd_fma<span>(param_4, param_4, after_decay_4, tmp_4);

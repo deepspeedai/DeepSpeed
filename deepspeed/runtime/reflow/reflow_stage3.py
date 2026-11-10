@@ -13,6 +13,7 @@ import psutil
 import torch
 
 import deepspeed.comm as dist
+from deepspeed.comm import pg_utils
 from deepspeed.accelerator import get_accelerator
 from deepspeed.runtime.reflow.reflow_cpu_adam import ReflowCPUAdam
 from deepspeed.runtime.reflow import reflow_utils
@@ -20,7 +21,8 @@ from deepspeed.runtime.swap_tensor.partitioned_param_swapper import PartitionedP
 from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum, OffloadStateTypeEnum
 from deepspeed.runtime.zero.partition_parameters import Parameter, Tensor
 from deepspeed.runtime.zero.stage3 import DeepSpeedZeroOptimizer_Stage3, INIT_OPTIMIZER_TIMER
-from deepspeed.runtime.utils import has_inf_or_nan, is_model_parallel_parameter, mask_nan_or_inf_with_val_inplace
+from deepspeed.runtime.utils import (combine_grad_norm_groups, has_inf_or_nan, is_invalid_grad_norm,
+                                     is_model_parallel_parameter, mask_nan_or_inf_with_val_inplace)
 from deepspeed.utils import logger
 from deepspeed.utils.nvtx import instrument_w_nvtx
 
@@ -131,15 +133,17 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
         # and per-NUMA-node optimizer-worker groups (so workers never straddle a NUMA boundary).
         total_cpus, available_cores, node_worker_groups, main_cores, worker_cores = \
             reflow_utils.plan_cpu_core_layout(main_thread_cores, self._reflow_config.main_thread_core_type,
-                                             self._reflow_config.worker_core_type)
+                                             self._reflow_config.worker_core_type,
+                                             self._reflow_config.pin_main_thread)
         self._worker_node_groups = node_worker_groups
 
         self._worker_cpu_affinity_mask = set(worker_cores)
-        # While the state commit overlaps the next forward it stays on a few worker cores, away from the
-        # main-thread cores at the front of the list: every busy core lowers the turbo frequency the CPU
-        # allows, which slows the launch-bound forward. See _state_commit_cpu_affinity_mask.
-        state_update_core_count = min(max(1, int(self.state_update_cores)), len(worker_cores))
-        self._state_update_cpu_affinity_mask = set(worker_cores[-state_update_core_count:]) if worker_cores else None
+        state_update_core_count = self.state_update_cores
+        if state_update_core_count is None:
+            state_update_cores = worker_cores
+        else:
+            state_update_cores = worker_cores[-state_update_core_count:]
+        self._state_update_cpu_affinity_mask = set(state_update_cores) if state_update_cores else None
         backward_count = self._reflow_config.state_update_backward_cores
         backward_cores = worker_cores[-backward_count:] if backward_count is not None else worker_cores
         self._state_backward_cpu_affinity_mask = set(backward_cores)
@@ -152,8 +156,6 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
 
         if enable_cpu_affinity and available_cores:
             try:
-                # Keep the main process on the whole NUMA-local slice, not only main_thread_cores: the ZeRO-3 forward
-                # is bound by kernel launches from this thread. The workers still pin themselves to worker_cores.
                 psutil.Process().cpu_affinity(available_cores)
                 if dist.get_rank() == 0:
                     logger.info(f"CPU affinity: main process on {len(available_cores)} NUMA-local cores, "
@@ -245,6 +247,7 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
         self._bucketwise_update_submit = _submit_bucketwise_task
         self._bucketwise_update_futures = []
         self._bucketwise_inflight_futures = []
+        # Backward and step own this registry; executor workers never access it.
         self._bucketwise_accumulation_futures = {}
         # Use the default (lowest) stream priority so H2D weight copies never preempt compute. CUDA priorities
         # are inverted: a negative priority would outrank the compute stream.
@@ -590,7 +593,6 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
         stream_needs_sync = copy_grad_stream != current_stream
         is_sync_device = get_accelerator().is_synchronized_device()
         accumulate_submit = getattr(self, "_bucketwise_update_submit", None)
-        accum_futures_dict = self._bucketwise_accumulation_futures
 
         for param, grad_partition in zip(params_to_release, grad_partitions):
             copy_event = None
@@ -621,6 +623,10 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
                 self._reflow_grad_overflow.logical_or_(has_inf_or_nan(converted_grad))
 
             grad_numel = grad_buffer.numel()
+
+            if micro_step_id > 0:
+                # Both slices must remain unchanged until the previous worker consumes them.
+                self._wait_for_accum_gradient(param_id)
 
             if micro_step_id == 0:  # don't accumulate, first micro step
                 if self._single_grad_buffer:
@@ -687,8 +693,7 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
                             ReflowCPUAdam.bf16_accumulate(_dst_slice.view(-1), _src_slice.view(-1))
 
                         future = accumulate_submit(_accumulate_worker)
-                        if accum_futures_dict is not None:
-                            accum_futures_dict.setdefault(sub_group_id, []).append(future)
+                        self._bucketwise_accumulation_futures[param_id] = future
                         grad_buffer = dst_slice
                     else:
                         copy_event.synchronize()
@@ -848,23 +853,21 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
             finally:
                 self._last_state_update_future = None
 
-    def _wait_for_accum_gradient(self, sub_group_id=None):
-        """Wait for pending gradient-accumulation workers (one subgroup, or all)."""
-        if sub_group_id is not None:
-            for f in self._bucketwise_accumulation_futures.get(sub_group_id, []):
-                try:
-                    f.result()
-                except Exception as e:
-                    self._record_bucketwise_worker_error(e)
-            self._bucketwise_accumulation_futures[sub_group_id] = []
-        else:
-            for _sg_id, futures in list(self._bucketwise_accumulation_futures.items()):
-                for f in futures:
-                    try:
-                        f.result()
-                    except Exception as e:
-                        self._record_bucketwise_worker_error(e)
+    def _wait_for_accum_gradient(self, param_id=None):
+        """Wait until the requested gradient buffers are no longer used by accumulation workers."""
+        if param_id is None:
+            futures = list(self._bucketwise_accumulation_futures.values())
             self._bucketwise_accumulation_futures.clear()
+        else:
+            future = self._bucketwise_accumulation_futures.pop(param_id, None)
+            if future is None:
+                return
+            futures = (future, )
+        for future in futures:
+            try:
+                future.result()
+            except Exception as e:
+                self._record_bucketwise_worker_error(e)
 
     def _get_cpu_grad_buffer(self, sub_group_id, pending=False):
         if sub_group_id >= len(self._cpu_grad_double_buffers):
@@ -959,9 +962,7 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
             if cancel_version != getattr(self, "_bucketwise_cancel_version", 0):
                 return None
 
-            # Ensure all gradient accumulations for this subgroup completed.
-            self._wait_for_accum_gradient(sub_group_id)
-
+            # Boundary ranges are enqueued after their accumulation completes; step() drains the rest before reruns.
             # Make sure the previous state update for this subgroup finished.
             self._wait_for_pending_state_updates(sub_group_id=sub_group_id)
 
@@ -1396,8 +1397,6 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
         super().backward_prologue()
 
     def _state_commit_cpu_affinity_mask(self):
-        # A few busy cores keep the forward's core at a high turbo frequency; after the forward the commit gets every
-        # worker core so a large model's commit still finishes before the next step() waits on it.
         if self._state_commit_overlaps_forward:
             return self._state_update_cpu_affinity_mask
         return self._state_backward_cpu_affinity_mask
@@ -1428,11 +1427,19 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
         if not self.offload_optimizer:
             return super()._get_norm_groups()
 
+        partition_groups = [self._get_sub_group_process_group(i) for i in range(len(self.fp16_groups))]
+        if self.model_parallel_group is None:
+            counts_every_rank = [False] * len(self.fp16_groups)
+        else:
+            counts_every_rank = [
+                self._grad_norm_counts_every_rank(group, process_group)
+                for group, process_group in zip(self.fp16_groups, partition_groups)
+            ]
         local_sq = []
-        for group in self.fp16_groups:
+        for group, count_every_rank in zip(self.fp16_groups, counts_every_rank):
             group_sq = 0.0
             for p in group:
-                if is_model_parallel_parameter(p) or (self.model_parallel_rank == 0):
+                if count_every_rank or is_model_parallel_parameter(p) or (self.model_parallel_rank == 0):
                     param_id = self.get_param_id(p)
                     if param_id in self.norm_for_param_grads:
                         group_sq += self.norm_for_param_grads[param_id]**2
@@ -1442,10 +1449,12 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
         # Match complete_grad_norm_calculation_for_cpu_offload: each subgroup sums over its own partition group,
         # then the model-parallel group, then (AutoEP expert subgroups only) the expert-parallel group. Subgroups
         # sharing a group are reduced together, so the usual single-group case stays one all-reduce.
-        partition_groups = [self._get_sub_group_process_group(i) for i in range(len(self.fp16_groups))]
         self._all_reduce_norm_entries_by_group(total_norms, partition_groups)
-        self._model_parallel_all_reduce(tensor=total_norms, op=dist.ReduceOp.SUM)
+        if pg_utils.is_parallel(self.model_parallel_group):
+            model_groups = [self.model_parallel_group if not count else None for count in counts_every_rank]
+            self._all_reduce_norm_entries_by_group(total_norms, model_groups)
         expert_groups = [self._autoep_expert_parallel_group(group) for group in self.fp16_groups]
+        expert_groups = [group if pg_utils.is_parallel(group) else None for group in expert_groups]
         self._all_reduce_norm_entries_by_group(total_norms, expert_groups)
 
         norm_groups = []
@@ -1481,7 +1490,15 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
         # the overflow check advances the loss scale / optimizer state.
         self._check_bucketwise_worker_error()
 
-        if self._overflow_check_and_loss_scale_update():
+        self._overflow_check_and_loss_scale_update(update_scale=False)
+        scaled_global_grad_norm = None
+        if not self.overflow:
+            norm_groups = self._get_norm_groups()
+            scaled_global_grad_norm = combine_grad_norm_groups(norm_groups)
+            if is_invalid_grad_norm(scaled_global_grad_norm):
+                self.overflow = True
+
+        if self._loss_scale_update_and_overflow_cleanup():
             if self.swap_optimizer:
                 self.optimizer_swapper.log_timers()
             # Discard the step like the base optimizer. The workers already wrote new FP16/BF16 params to the GPU
@@ -1492,9 +1509,6 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
             for sub_group_id in range(len(self.fp16_groups)):
                 self._restore_fp16_params_from_master(sub_group_id)
             return
-
-        norm_groups = self._get_norm_groups()
-        scaled_global_grad_norm = torch.linalg.vector_norm(torch.stack(norm_groups))
 
         self._global_grad_norm = scaled_global_grad_norm / self.loss_scale
 

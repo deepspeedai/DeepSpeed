@@ -231,7 +231,7 @@ class TestReflowCPULionDropIn:
         module.reflow_destroy_lion(opt_id)
 
         # Phase-1 emits the base optimizer's new weights into the half buffer (BF16/FP16 rounding)...
-        torch.testing.assert_close(half_params.float(), param_ref, atol=2e-2, rtol=2e-2)
+        assert torch.equal(half_params, param_ref.to(grad_dtype))
         # ...and leaves the FP32 master and momentum untouched (the deferred writeback).
         torch.testing.assert_close(param_fp32, param_before, atol=0, rtol=0)
         torch.testing.assert_close(exp_avg, exp_avg_before, atol=0, rtol=0)

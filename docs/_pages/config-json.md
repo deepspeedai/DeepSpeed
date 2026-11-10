@@ -727,11 +727,11 @@ The `reflow` block enables it, so an empty block is enough to run with the defau
     "enable_cpu_affinity": false,
     "main_thread_cores": 3,
     "main_thread_core_type": "logical",
-    "pin_main_thread": false,
+    "pin_main_thread": true,
     "worker_core_type": "logical",
-    "bucketwise_worker_affinity": "task",
+    "bucketwise_worker_affinity": "thread",
     "bucketwise_cores_per_worker": 8,
-    "state_update_cores": 2,
+    "state_update_cores": null,
     "state_update_backward_cores": null
   }
 ```
@@ -751,7 +751,7 @@ The `reflow` block enables it, so an empty block is enough to run with the defau
 
 | Description | Default |
 | ----------- | ------- |
-| CPUs or physical cores reserved from the optimizer workers, according to `main_thread_core_type`. Worker placement uses this reservation even when `enable_cpu_affinity` is false. | `3` |
+| CPUs or physical cores reserved for the initializing thread, according to `main_thread_core_type`. Ranks sharing a CPU set divide it before reserving their main CPUs. Partially overlapping rank affinities are rejected when pinning is enabled. | `3` |
 
 ***main_thread_core_type***: [string]
 
@@ -763,7 +763,7 @@ The `reflow` block enables it, so an empty block is enough to run with the defau
 
 | Description | Default |
 | ----------- | ------- |
-| Pin the initializing thread to the reserved main CPUs. Its original affinity is restored on engine destruction. Requires OS thread-affinity support. | `false` |
+| Pin the initializing thread to the reserved main CPUs. Its original affinity is restored on engine destruction. Requires OS thread-affinity support. | `true` |
 
 ***worker_core_type***: [string]
 
@@ -775,7 +775,7 @@ The `reflow` block enables it, so an empty block is enough to run with the defau
 
 | Description | Default |
 | ----------- | ------- |
-| Assign a CPU mask per submitted task (`task`) or pin each pool thread to its initial mask (`thread`). | `"task"` |
+| Assign a CPU mask per submitted task (`task`) or pin each pool thread to its initial mask (`thread`). | `"thread"` |
 
 ***bucketwise_cores_per_worker***: [integer]
 
@@ -783,11 +783,11 @@ The `reflow` block enables it, so an empty block is enough to run with the defau
 | ----------- | ------- |
 | Maximum worker CPU IDs per bucketwise worker. Each NUMA group is split into chunks of this size; the final chunk may be smaller. One pool thread is created per chunk. | `8` |
 
-***state_update_cores***: [integer]
+***state_update_cores***: [integer or null]
 
 | Description | Default |
 | ----------- | ------- |
-| Worker CPU IDs available to the background optimizer-state commit while it overlaps the next forward. Once backward starts, the commit uses the mask selected by `state_update_backward_cores`. | `2` |
+| Limit worker CPU IDs available to the background optimizer-state commit during forward. When unset, all worker CPUs are available. | `null` |
 
 ***state_update_backward_cores***: [integer or null]
 

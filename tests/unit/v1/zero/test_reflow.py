@@ -46,6 +46,9 @@ def test_reflow_block_configures_the_optimizer():
     config = DeepSpeedConfig(minimal_reflow_config({"state_update_cores": 4}))
     assert config.zero_config.reflow.state_update_cores == 4
     assert config.zero_config.reflow.bucketwise_cores_per_worker == 8
+    assert config.zero_config.reflow.bucketwise_worker_affinity == "thread"
+    assert config.zero_config.reflow.pin_main_thread is True
+    assert DeepSpeedConfig(minimal_reflow_config()).zero_config.reflow.state_update_cores is None
 
     for cores in (1, 4, 8):
         config = DeepSpeedConfig(minimal_reflow_config({"bucketwise_cores_per_worker": cores}))
@@ -66,6 +69,12 @@ def test_cpu_placement_options_are_validated():
     config = DeepSpeedConfig(minimal_reflow_config(options)).zero_config.reflow
     for key, value in options.items():
         assert getattr(config, key) == value
+    config = DeepSpeedConfig(minimal_reflow_config({
+        "bucketwise_worker_affinity": "task",
+        "pin_main_thread": False
+    })).zero_config.reflow
+    assert config.bucketwise_worker_affinity == "task"
+    assert config.pin_main_thread is False
     for key in ("main_thread_core_type", "worker_core_type", "bucketwise_worker_affinity"):
         with pytest.raises(ValueError):
             DeepSpeedConfig(minimal_reflow_config({key: "unsupported"}))
@@ -250,6 +259,8 @@ def test_heuristic_numa_split_with_uneven_rank_count():
     nodes = [list(range(8)), list(range(8, 16))]
     assigned = [set(reflow_utils.heuristic_rank_cores(nodes, rank, 3)) for rank in range(3)]
     assert assigned == [set(range(4)), set(range(8, 16)), set(range(4, 8))]
+    assigned = [set(reflow_utils.heuristic_rank_cores([list(range(11))], rank, 3)) for rank in range(3)]
+    assert assigned == [set(range(4)), set(range(4, 8)), set(range(8, 11))]
 
 
 # The oracle runs are bf16 ZeRO-3 on a GPU accelerator; Reflow is not validated on the CPU accelerator.
@@ -555,7 +566,6 @@ class TestReflowCPUPlacementMatchesZeroOffload(DistributedTest):
         config["zero_optimization"]["reflow"] = {
             "main_thread_cores": 1,
             "main_thread_core_type": "physical",
-            "pin_main_thread": True,
             "worker_core_type": worker_type,
             "bucketwise_cores_per_worker": 4,
             "bucketwise_worker_affinity": worker_affinity,
@@ -577,13 +587,13 @@ class TestReflowCPUPlacementMatchesZeroOffload(DistributedTest):
                 original = getattr(native, name)
                 originals[name] = original
 
-                def recorded(*args, _phase=phase, _original=original):
+                def recorded(*args, _phase=phase, _original=original, **kwargs):
                     mask = frozenset(os.sched_getaffinity(0))
                     if _phase == "params":
                         param_masks.setdefault(threading.get_native_id(), set()).add(mask)
                     else:
                         state_masks.add(mask)
-                    return _original(*args)
+                    return _original(*args, **kwargs)
 
                 setattr(native, name, recorded)
 
@@ -622,6 +632,96 @@ class TestReflowCPUPlacementMatchesZeroOffload(DistributedTest):
             assert torch.equal(got, want)
         for want, got in zip(expected["fp32_params"], actual["fp32_params"]):
             assert torch.equal(got, want)
+
+
+@pytest.mark.parametrize("rank_affinity", ["shared", "launcher", "partial", "insufficient"])
+@needs_gpu_accelerator
+class TestReflowRankCoreBinding(DistributedTest):
+    world_size = 2
+
+    def test_rank_main_and_worker_cpus_are_disjoint(self, rank_affinity):
+        # A shared container cpuset must be split, while launcher-assigned rank cpus must be retained.
+        skip_if_reflow_training_unsupported()
+        if not hasattr(os, "sched_getaffinity"):
+            pytest.skip("requires Linux CPU affinity")
+        original = set(os.sched_getaffinity(0))
+        available = [None] * dist.get_world_size()
+        dist.all_gather_object(available, sorted(original))
+        shared = sorted(set.intersection(*(set(cpus) for cpus in available)))
+        if len(shared) < 16:
+            pytest.skip("requires at least 16 CPUs available to both ranks")
+        shared = shared[:16]
+        rank = dist.get_rank()
+        rank_cpus = set(shared[rank * 8:(rank + 1) * 8])
+        if rank_affinity == "shared":
+            input_cpus = set(shared)
+        elif rank_affinity == "partial":
+            input_cpus = set(shared[:12] if rank == 0 else shared[4:])
+        elif rank_affinity == "insufficient":
+            input_cpus = set(shared[rank * 3:(rank + 1) * 3])
+        else:
+            input_cpus = rank_cpus
+        engine = None
+        native = None
+        originals = {}
+        worker_masks = []
+        state_masks = []
+        try:
+            os.sched_setaffinity(0, input_cpus)
+            torch.manual_seed(1234)
+            model = SimpleModel(hidden_dim=16, nlayers=2)
+            config = get_variant_config(reflow=True, variant="adam")
+            config["zero_optimization"]["reduce_bucket_size"] = 1_000_000
+            if rank_affinity in ("partial", "insufficient"):
+                message = ("partially overlapping rank CPU affinities"
+                           if rank_affinity == "partial" else "main_thread_cores and at least one worker CPU")
+                with pytest.raises(ValueError, match=message):
+                    deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config)
+                return
+            engine, optimizer, _, _ = deepspeed.initialize(model=model,
+                                                           model_parameters=model.parameters(),
+                                                           config=config)
+            main_cpus = set(os.sched_getaffinity(0))
+            native = optimizer.optimizer.ds_opt_adam
+            for phase in ("params", "state"):
+                name = f"reflow_adam_update_{phase}_halfgrad"
+                originals[name] = getattr(native, name)
+
+                def recorded(*args, _phase=phase, _original=originals[name], **kwargs):
+                    mask = set(os.sched_getaffinity(0))
+                    if _phase == "params":
+                        worker_masks.append(mask)
+                    else:
+                        state_masks.append(mask)
+                    return _original(*args, **kwargs)
+
+                setattr(native, name, recorded)
+            batches = make_batches(16, count=2)
+            for inputs, labels in batches:
+                loss = engine(inputs, labels)
+                engine.backward(loss)
+                engine.step()
+            optimizer.state_dict()
+            assert len(main_cpus) == 3
+            assert main_cpus == set(sorted(rank_cpus)[:3])
+            assert worker_masks
+            assert all(mask <= rank_cpus - main_cpus for mask in worker_masks)
+            assert state_masks
+            assert all(mask == rank_cpus - main_cpus for mask in state_masks)
+            placements = [None] * dist.get_world_size()
+            dist.all_gather_object(placements, (main_cpus, rank_cpus))
+            assert placements[0][1].isdisjoint(placements[1][1])
+            assert all(main <= cpus for main, cpus in placements)
+        finally:
+            if native is not None:
+                for name, original_fn in originals.items():
+                    setattr(native, name, original_fn)
+            if engine is not None:
+                engine.destroy()
+            restored_cpus = set(os.sched_getaffinity(0))
+            os.sched_setaffinity(0, original)
+            if engine is not None:
+                assert restored_cpus == input_cpus
 
 
 class TestReflowOptimizerRequiresOptIn(DistributedTest):
@@ -888,7 +988,8 @@ def read_state_right_after_each_step(model, config, batches):
     return snapshots
 
 
-@pytest.mark.parametrize("gradient_accumulation_steps, warmup_lr", [(1, False), (3, False), (1, True)])
+@pytest.mark.parametrize("gradient_accumulation_steps, warmup_lr", [(1, False), (2, False), (3, False), (4, False),
+                                                                    (8, False), (1, True)])
 @needs_gpu_accelerator
 class TestReflowStateReadAfterStep(DistributedTest):
     world_size = [1, 2]
@@ -921,6 +1022,45 @@ class TestReflowStateReadAfterStep(DistributedTest):
                                                               expected_step, actual_step):
                 for index, (want, got) in enumerate(zip(expected_tensors, actual_tensors)):
                     assert torch.equal(got, want), f"{name}[{index}] differs after step {step}"
+
+
+@pytest.mark.parametrize("gradient_accumulation_steps", [4, 8])
+@pytest.mark.parametrize("precision", ["bf16", "fp16"])
+@needs_gpu_accelerator
+class TestReflowAccumulationBufferReuse(DistributedTest):
+    world_size = 1
+
+    def test_matches_zero_offload(self, gradient_accumulation_steps, precision):
+        # Repeated updates with many parameters in one subgroup catch scratch buffers reused before CPU reads finish.
+        skip_if_reflow_training_unsupported()
+        hidden_dim = 128
+        torch.manual_seed(1234)
+        dtype = torch.float16 if precision == "fp16" else torch.bfloat16
+        batches = make_batches(hidden_dim, count=4 * gradient_accumulation_steps, dtype=dtype)
+
+        def config_for(reflow):
+            config = get_state_read_config(reflow=reflow,
+                                           gradient_accumulation_steps=gradient_accumulation_steps,
+                                           warmup_lr=False)
+            config["zero_optimization"]["reduce_bucket_size"] = 1_000_000
+            if precision == "fp16":
+                config["bf16"] = {"enabled": False}
+                config["fp16"] = {"enabled": True, "loss_scale": 128}
+            return config
+
+        expected = read_state_right_after_each_step(SimpleModel(hidden_dim=hidden_dim, nlayers=8), config_for(False),
+                                                    batches)
+        torch.manual_seed(1234)
+        actual = read_state_right_after_each_step(SimpleModel(hidden_dim=hidden_dim, nlayers=8), config_for(True),
+                                                  batches)
+        for expected_step, actual_step in zip(expected, actual):
+            for expected_tensors, actual_tensors in zip(expected_step, actual_step):
+                for want, got in zip(expected_tensors, actual_tensors):
+                    assert torch.equal(got, want)
+
+
+class TestReflowAccumulationBufferReuseDistributed(TestReflowAccumulationBufferReuse):
+    world_size = 2
 
 
 class TestReflowMaximizeClientInitialization(DistributedTest):
@@ -980,3 +1120,43 @@ class TestReflowMaximizeTraining(DistributedTest):
             torch.testing.assert_close(actual, expected, rtol=0, atol=0)
         for expected, actual in zip(results[0][1], results[1][1]):
             torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("precision", ["bf16", "fp16"])
+@pytest.mark.parametrize("invalid_value", [float("nan"), float("inf")])
+@needs_gpu_accelerator
+class TestReflowInvalidGradient(DistributedTest):
+    world_size = [1, 2]
+
+    def test_invalid_step_preserves_parameters_and_state(self, precision, invalid_value):
+        skip_if_reflow_training_unsupported()
+        torch.manual_seed(1234)
+        config = get_variant_config(reflow=True, variant="adam")
+        config["zero_optimization"]["reduce_bucket_size"] = 1_000_000
+        if precision == "fp16":
+            config["bf16"] = {"enabled": False}
+            config["fp16"] = {"enabled": True, "loss_scale": 128}
+        dtype = torch.float16 if precision == "fp16" else torch.bfloat16
+        batches = make_batches(16, count=2, dtype=dtype)
+        model = SimpleModel(hidden_dim=16, nlayers=2)
+        engine, optimizer, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config)
+        try:
+            loss = engine(*batches[0])
+            engine.backward(loss)
+            engine.step()
+            before_params = [safe_get_full_fp32_param(p).clone() for p in engine.module.parameters()]
+            before_states = [safe_get_full_optimizer_state(p, "exp_avg").clone() for p in engine.module.parameters()]
+            before_steps = [int(state["step"]) for state in optimizer.optimizer.state.values()]
+            skipped_steps = engine.skipped_steps
+            loss = engine(*batches[1])
+            if dist.get_rank() == 0:
+                loss = loss * invalid_value
+            engine.backward(loss)
+            engine.step()
+            assert engine.skipped_steps == skipped_steps + 1
+            assert [int(state["step"]) for state in optimizer.optimizer.state.values()] == before_steps
+            for param, before_param, before_state in zip(engine.module.parameters(), before_params, before_states):
+                assert torch.equal(safe_get_full_fp32_param(param), before_param)
+                assert torch.equal(safe_get_full_optimizer_state(param, "exp_avg"), before_state)
+        finally:
+            engine.destroy()

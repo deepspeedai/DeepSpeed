@@ -120,8 +120,8 @@ to the original optimizer cannot follow the remapping and is rejected.
         "main_thread_cores": 2,             // cores reserved for the forward/backward (main) thread
         "bucketwise_cores_per_worker": 7,   // cores per bucketwise CPU-Adam worker; worker count =
                                             //   (rank worker cores) / this value
-        "state_update_cores": 2             // cores for the background optimizer-state commit while it
-                                            //   overlaps the next forward (default 2)
+        "state_update_cores": 2             // optional forward limit for the background state commit
+                                            //   (default: all worker CPUs)
         // "num_threads": <int>             // CPU-Adam threads (default: all available cores)
     }
     // optional: also offload PARAMETERS to CPU (orthogonal to Reflow; frees the per-rank param
@@ -152,17 +152,19 @@ and give the rest to the workers (e.g. on a 9-core-per-rank box, `main_thread_co
 `bucketwise_cores_per_worker: 7`). Launch with `deepspeed --bind_cores_to_rank` so each rank is
 pinned to the cores physically attached to its GPU.
 
-By default, counts refer to logical CPUs in the rank's affinity mask. `main_thread_cores` excludes
-that many CPU IDs from workers; SMT siblings remain available and the main thread is not pinned
-to the reservation. The following options allow other placements without machine-specific CPU IDs:
+By default, counts refer to logical CPUs in the rank's affinity mask. The initializing thread is pinned
+to `main_thread_cores` CPU IDs and workers use the remaining IDs; SMT siblings may still be shared.
+Local ranks with the same CPU affinity share it disjointly. Partially overlapping rank affinities are
+rejected when main-thread pinning is enabled. The following options allow other placements:
 
 | Option | Default | Behavior |
 |---|---|---|
 | `main_thread_core_type` | `"logical"` | `"physical"` counts physical cores and reserves all their available SMT siblings. |
-| `pin_main_thread` | `false` | Pins the initializing thread to the reserved main CPUs; `engine.destroy()` restores its original affinity. |
+| `pin_main_thread` | `true` | Pins the initializing thread to the reserved main CPUs; `engine.destroy()` restores its original affinity. |
 | `worker_core_type` | `"logical"` | `"physical"` uses one logical CPU per remaining physical core. |
 | `bucketwise_cores_per_worker` | `8` | Maximum logical CPUs per bucketwise worker; the last mask within a NUMA node may be smaller. |
-| `bucketwise_worker_affinity` | `"task"` | `"task"` assigns CPU masks round-robin; `"thread"` fixes each pool thread to a mask at startup, reducing migrations and preserving its OpenMP team placement. |
+| `bucketwise_worker_affinity` | `"thread"` | `"task"` assigns CPU masks round-robin; `"thread"` fixes each pool thread to a mask at startup, reducing migrations and preserving its OpenMP team placement. |
+| `state_update_cores` | `null` | Caps the worker CPU IDs used by the state commit during forward; `null` uses all worker CPUs. |
 | `state_update_backward_cores` | `null` | Caps the number of worker CPU IDs used by the state commit during backward; `null` uses all worker CPUs. `state_update_cores` still controls its forward mask. |
 
 For example, this reserves one physical main core, uses its SMT siblings for the main thread,
@@ -182,8 +184,7 @@ and keeps optimizer pool threads on fixed CPU masks:
 
 Physical placement requires readable Linux CPU topology. Automatic rank assignment keeps SMT
 siblings together; an existing taskset/launcher affinity remains authoritative. Main reservations
-are capped to leave a worker core, and physical main reservation raises an error if a rank has fewer
-than two physical cores. Counts for worker masks and state commits remain logical CPU counts, even
+must leave at least one worker CPU; initialization raises an error if the rank's CPU set is too small. Counts for worker masks and state commits remain logical CPU counts, even
 when main reservations count physical cores. Tune these values for the workload and CPU topology.
 
 Reflow applies each worker's CPU mask to its retained OpenMP helpers, changing their affinity only
@@ -242,12 +243,9 @@ accumulation, params on GPU, NVMe offload) logs a warning and falls back to the 
 - **Single-GPU is the stress case.** With one GPU the optimizer is the *full* (unpartitioned) model
   and must hide inside a single backward, so the bucketwise CPU-Adam workers must run truly in
   parallel across the NUMA-local cores (see the mutex note under Correctness).
-- **The state commit narrows its cores while it overlaps the forward.** The previous step's
-  optimizer-state commit overlaps the forward, which is launch-bound on the main thread. Every busy
-  core lowers the turbo frequency the CPU allows, so a commit spread over all worker cores slowed the
-  forward (OPT-350m: ~25%, main core ~3.6 GHz vs ~4.2 GHz). The commit therefore runs in slices on
-  `state_update_cores` cores (default 2) until the next backward starts, then on every worker core,
-  so a large model's commit still finishes before the next `step()` waits on it.
+- **The state commit can overlap the forward.** By default it can use all worker CPUs in both forward
+  and backward. Set `state_update_cores` or `state_update_backward_cores` to limit its affinity during
+  either phase; changes take effect between commit slices.
 - **Gradient clipping re-runs the update inside `step()`.** The bucketwise workers apply the update
   during backward, before the global grad norm is known. When a step needs clipping
   (`gradient_clipping > 0` and the grad norm exceeds it), the in-flight work is cancelled and every
