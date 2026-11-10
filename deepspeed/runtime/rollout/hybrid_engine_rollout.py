@@ -240,6 +240,10 @@ class HybridEngineRollout(RolloutEngine):
             return RolloutBatch(samples=[])
         self._check_sampling(sampling)
         self._check_parallelism()
+        self._check_attention()
+        # Once per call is enough: the ranks then run the same forwards and samples, and take tool output from one
+        # rank, so their random states stay equal across turns.
+        self._sync_rng_across_tp()
         static_batching = self.continuous_batch_size is None
         call_start = None
         if static_batching and self.enable_profiling:
@@ -268,6 +272,15 @@ class HybridEngineRollout(RolloutEngine):
         # tensor-parallel ranks would run different forwards.
         if self.autotp_size > 1 and self.continuous_batch_size is not None:
             raise ValueError("continuous batching does not support AutoTP")
+
+    def _check_attention(self):
+        # Graph decode and continuous batching pass their own 4-D attention masks, which flash_attention_2 cannot take.
+        if getattr(getattr(self.engine.module, "config", None), "_attn_implementation", None) != "flash_attention_2":
+            return
+        if self.continuous_batch_size is not None:
+            raise ValueError("continuous batching does not support flash_attention_2")
+        if self._graph_capture_enabled():
+            raise ValueError("graph capture does not support flash_attention_2")
 
     def _sync_rng_across_tp(self):
         """Share the random state across each AutoTP group, so its ranks sample the same tokens."""
@@ -543,8 +556,6 @@ class HybridEngineRollout(RolloutEngine):
         if getattr(module, "_supports_cache_class", None) is False:
             raise ValueError("continuous batching requires a model with cache-class support; use the default "
                              "generate() path or upgrade transformers")
-        if getattr(getattr(module, "config", None), "_attn_implementation", None) == "flash_attention_2":
-            raise ValueError("continuous batching does not support flash_attention_2")
 
     def _check_sampling(self, sampling: SamplingConfig) -> None:
         return_log_probs = self.return_log_probs
@@ -567,7 +578,6 @@ class HybridEngineRollout(RolloutEngine):
 
     def _generate_tokens(self, prompt_ids, prompt_attn_mask, max_new_tokens, sampling, pad_token_id):
         module = self.engine.module
-        self._sync_rng_across_tp()
         if self._graph_capture_enabled():
             return self._generate_graph(prompt_ids, prompt_attn_mask, max_new_tokens, pad_token_id, sampling, module,
                                         prompt_ids.device)
@@ -1083,13 +1093,6 @@ class HybridEngineRollout(RolloutEngine):
         max_len = prompt_len + max_new_tokens
         eos_token_id = self.tokenizer.eos_token_id
         model_dtype = next(module.parameters()).dtype
-        # AutoTP wraps module.config as a dict after sharding; restore the
-        # original config object so cache creation and mask logic work.
-        if isinstance(getattr(module, "config", None), dict):
-            from types import SimpleNamespace
-            module.config = SimpleNamespace(**module.config)
-        if getattr(module.config, "_attn_implementation", None) == "flash_attention_2":
-            raise ValueError("graph capture does not support flash_attention_2")
         rows = torch.arange(batch_size, device=device)
 
         cache_config = module.config

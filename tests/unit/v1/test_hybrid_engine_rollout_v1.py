@@ -556,6 +556,34 @@ class TestAutoTPRollout(DistributedTest):
         gathered = self._gather([record])
         assert gathered[0] == gathered[1]
 
+    def test_ranks_sample_the_same_tokens_after_a_tool_turn(self):
+        engine, _ = self._engine()
+        tokenizer = SimpleNamespace(pad_token_id=0, eos_token_id=None, decode=lambda ids, **_kwargs: "")
+        rollout = HybridEngineRollout(engine,
+                                      tokenizer,
+                                      HybridEngineRolloutConfig(multi_turn=True, max_turns=2, return_log_probs=True),
+                                      tools=ToolSet([_RankTool()]))
+        end_turn = rollout._end_turn
+        # Sampled responses rarely end in EOS, so the first turn is made to call the tool regardless.
+        call = rollout.parse_tool_calls('<tool_call>{"name": "rank", "arguments": {}}</tool_call>', rollout.tools)
+        rollout._end_turn = lambda sample, response, turn, *args: call if turn == 0 else end_turn(
+            sample, response, turn, *args)
+        prompts = [[0, 0, 5, 9, 12], [3, 7, 21, 30, 44]]
+        request = RolloutRequest(samples=[
+            RolloutRecord(tokens=prompt, attention_mask=[int(token != 0) for token in prompt]) for prompt in prompts
+        ])
+        # Each rank gets a different seed, so only the rollout's own synchronization can keep sampling identical.
+        torch.manual_seed(dist.get_rank())
+        sampling = SamplingConfig(max_new_tokens=8, max_new_tokens_per_turn=4, temperature=1.0)
+
+        with patch("deepspeed.runtime.rollout.hybrid_engine_rollout.tokenize_tool_responses",
+                   side_effect=lambda messages, *_args: [50 + int(message["content"]) for message in messages]):
+            records = rollout.generate(request, sampling).samples
+
+        assert all(len(record.tokens) == 5 + 4 + 1 + 4 for record in records)
+        gathered = self._gather(records)
+        assert gathered[0] == gathered[1]
+
 
 # ZeRO-3 gathers parameters in every forward, so its ranks must run the same forwards: single-turn static batching
 # on HF generate only, the same number of prompts per rank, and no early stop.
