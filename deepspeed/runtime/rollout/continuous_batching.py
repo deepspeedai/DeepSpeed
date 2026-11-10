@@ -281,8 +281,8 @@ class _ContinuousRunGraph(_ContinuousRunBase):
 
     def turn_budget(self, i):
         sample = self.trajectories[i]
-        room = self.rollout._turn_room(sample, self.generated[i], self.sampling)
-        return min(room, self.capacity - sum(sample.attention_mask))
+        budget = self.rollout._turn_budget(sample, self.generated[i], self.sampling)
+        return min(budget, self.capacity - sum(sample.attention_mask))
 
     def penalize_seen(self, logits, seen):
         penalty = self.repetition_penalty
@@ -550,9 +550,9 @@ class _ContinuousRun(_ContinuousRunBase):
         rollout._profile_end(self.profile, "cache_management_overhead_ms", cache_start)
 
     def submit(self, i, front=False):
-        """Queue a trajectory's next turn, or end the trajectory if it has no room left."""
+        """Queue a trajectory's next turn, or end the trajectory if it has no budget left."""
         sample = self.trajectories[i]
-        budget = self.rollout._turn_room(sample, self.generated[i], self.sampling)
+        budget = self.rollout._turn_budget(sample, self.generated[i], self.sampling)
         if budget <= 0:
             sample.status = RolloutRecord.Status.TRUNCATED
             return

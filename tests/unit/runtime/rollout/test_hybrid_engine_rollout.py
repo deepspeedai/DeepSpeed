@@ -18,6 +18,7 @@ from transformers import PretrainedConfig
 
 from deepspeed.accelerator import get_accelerator
 from deepspeed.ops.transformer.inference.op_binding.workspace import WorkspaceOp
+from deepspeed.runtime.config import HybridEngineConfig
 from deepspeed.runtime.hybrid_engine import DeepSpeedHybridEngine
 from deepspeed.runtime.rollout.base import RolloutConfig, RolloutRecord, RolloutRequest, SamplingConfig
 from deepspeed.runtime.rollout.tool import Tool, ToolCall, ToolSet, parse_qwen3_coder_tool_calls
@@ -29,12 +30,22 @@ from deepspeed.runtime.rollout.hybrid_engine_rollout import _token_selector
 from deepspeed.utils.static_cache import DeepSpeedStaticCache
 
 
+def _engine_for(module):
+    """A stand-in for a DeepSpeed engine wrapping ``module``, without ZeRO-3 or tensor parallelism."""
+    return SimpleNamespace(module=module,
+                           zero_optimization_partition_weights=lambda: False,
+                           autotp_size=lambda: 1,
+                           _config=SimpleNamespace(hybrid_engine=HybridEngineConfig()))
+
+
 def _make_engine():
     engine = MagicMock()
     engine.module = MagicMock()
     engine.module.parameters.return_value = iter([])
     # Not ZeRO-3, so generation may stop at EOS.
     engine.zero_optimization_partition_weights.return_value = False
+    engine.autotp_size.return_value = 1
+    engine._config.hybrid_engine = HybridEngineConfig()
     return engine
 
 
@@ -219,7 +230,7 @@ def test_continuous_generation_falls_back_to_eager_without_graph_capture_opt_in(
             return SimpleNamespace(logits=logits, past_key_values=past_key_values)
 
     rollout = HybridEngineRollout(
-        SimpleNamespace(module=CacheClassModel()),
+        _engine_for(CacheClassModel()),
         SimpleNamespace(pad_token_id=0, eos_token_id=2, decode=lambda ids, **_kwargs: ""),
         cfg=HybridEngineRolloutConfig(continuous_batch_size=2, use_graph_capture=True),
     )
@@ -285,7 +296,7 @@ def test_continuous_generation_validates_each_request_length():
             self.config = SimpleNamespace(max_position_embeddings=4)
 
     model = LimitedModel()
-    rollout = HybridEngineRollout(SimpleNamespace(module=model),
+    rollout = HybridEngineRollout(_engine_for(model),
                                   SimpleNamespace(pad_token_id=0, eos_token_id=None),
                                   cfg=HybridEngineRolloutConfig(continuous_batch_size=1))
     request = _tensor_request(torch.tensor([[1, 2, 3]]), torch.ones((1, 3), dtype=torch.long))
@@ -331,7 +342,7 @@ def test_continuous_generation_reports_cache_capacity_remedies():
             return SimpleNamespace(logits=logits, past_key_values=past_key_values)
 
     rollout = HybridEngineRollout(
-        SimpleNamespace(module=CacheClassModel()),
+        _engine_for(CacheClassModel()),
         _make_tokenizer(),
         cfg=HybridEngineRolloutConfig(continuous_batch_size=1, align_decode_fronts=True, continuous_cache_capacity=2),
     )
@@ -354,7 +365,7 @@ def test_continuous_generation_rejects_legacy_cache_model():
             self.config = SimpleNamespace(max_position_embeddings=32)
 
     model = LegacyModel()
-    rollout = HybridEngineRollout(SimpleNamespace(module=model),
+    rollout = HybridEngineRollout(_engine_for(model),
                                   SimpleNamespace(pad_token_id=0, eos_token_id=None),
                                   cfg=HybridEngineRolloutConfig(continuous_batch_size=1))
     request = _tensor_request(torch.tensor([[1, 2, 3]]), torch.ones((1, 3), dtype=torch.long))
@@ -375,7 +386,7 @@ def test_continuous_graph_generation_rejects_legacy_cache_model():
 
     model = LegacyModel()
     rollout = HybridEngineRollout(
-        SimpleNamespace(module=model),
+        _engine_for(model),
         SimpleNamespace(pad_token_id=0, eos_token_id=None),
         cfg=HybridEngineRolloutConfig(continuous_batch_size=1, use_graph_capture=True),
     )
@@ -415,7 +426,7 @@ def test_continuous_generation_covers_modern_static_cache_path():
             return SimpleNamespace(logits=logits, past_key_values=past_key_values)
 
     model = CacheClassModel()
-    rollout = HybridEngineRollout(SimpleNamespace(module=model),
+    rollout = HybridEngineRollout(_engine_for(model),
                                   _make_tokenizer(),
                                   cfg=HybridEngineRolloutConfig(continuous_batch_size=2))
     request = _tensor_request(
@@ -474,7 +485,7 @@ def test_continuous_prefill_requests_last_logits_only():
             return SimpleNamespace(logits=logits, past_key_values=past_key_values)
 
     model = LastLogitsModel()
-    rollout = HybridEngineRollout(SimpleNamespace(module=model),
+    rollout = HybridEngineRollout(_engine_for(model),
                                   _make_tokenizer(),
                                   cfg=HybridEngineRolloutConfig(continuous_batch_size=2))
     request = _tensor_request(torch.tensor([[1, 2, 3], [1, 2, 4]]), torch.ones((2, 3), dtype=torch.long))
@@ -532,7 +543,7 @@ def test_aligned_continuous_generation_supports_mixed_effective_prompt_lengths()
 
     model = CacheClassModel()
     rollout = HybridEngineRollout(
-        SimpleNamespace(module=model),
+        _engine_for(model),
         _make_tokenizer(),
         cfg=HybridEngineRolloutConfig(continuous_batch_size=2, align_decode_fronts=True, enable_cache_trimming=True),
     )
@@ -604,7 +615,7 @@ def test_aligned_continuous_generation_reclaims_dead_prefix_when_cache_would_exh
             return SimpleNamespace(logits=logits, past_key_values=past_key_values)
 
     rollout = HybridEngineRollout(
-        SimpleNamespace(module=CacheClassModel()),
+        _engine_for(CacheClassModel()),
         _make_tokenizer(),
         cfg=HybridEngineRolloutConfig(continuous_batch_size=2, align_decode_fronts=True),
     )
@@ -649,7 +660,7 @@ def test_continuous_generation_trims_cache_after_staggered_eos():
 
     model = CacheClassModel()
     rollout = HybridEngineRollout(
-        SimpleNamespace(module=model),
+        _engine_for(model),
         _make_tokenizer(),
         cfg=HybridEngineRolloutConfig(continuous_batch_size=2, enable_cache_trimming=True),
     )
@@ -705,7 +716,7 @@ def test_continuous_generation_refills_padded_prompts_after_trim():
 
     model = CacheClassModel()
     rollout = HybridEngineRollout(
-        SimpleNamespace(module=model),
+        _engine_for(model),
         _make_tokenizer(),
         cfg=HybridEngineRolloutConfig(continuous_batch_size=8, enable_cache_trimming=True),
     )
@@ -788,7 +799,7 @@ def _next_token_logits(previous):
 
 def test_continuous_generation_records_greedy_log_probs():
     model = _LastTokenModel(lambda input_ids: _next_token_logits(input_ids[..., None].float()))
-    rollout = HybridEngineRollout(SimpleNamespace(module=model),
+    rollout = HybridEngineRollout(_engine_for(model),
                                   _make_tokenizer(),
                                   cfg=HybridEngineRolloutConfig(return_log_probs=True, continuous_batch_size=1))
     request = RolloutRequest(samples=[_prompt([3, 4]), _prompt([0, 5], [0, 1]), _prompt([7, 8])])
@@ -822,7 +833,7 @@ def test_continuous_generation_reads_repetition_penalty_from_the_checkpoint():
 
     def generate(checkpoint_repetition_penalty):
         model = _LastTokenModel(_repeat_preferring_logits, checkpoint_repetition_penalty=checkpoint_repetition_penalty)
-        rollout = HybridEngineRollout(SimpleNamespace(module=model),
+        rollout = HybridEngineRollout(_engine_for(model),
                                       _make_tokenizer(),
                                       cfg=HybridEngineRolloutConfig(continuous_batch_size=1))
         sampling = SamplingConfig(max_new_tokens=3, temperature=0)
@@ -837,7 +848,7 @@ def test_sampling_repetition_penalty_overrides_the_checkpoint():
 
     def generate(checkpoint_repetition_penalty, repetition_penalty):
         model = _LastTokenModel(_repeat_preferring_logits, checkpoint_repetition_penalty=checkpoint_repetition_penalty)
-        rollout = HybridEngineRollout(SimpleNamespace(module=model),
+        rollout = HybridEngineRollout(_engine_for(model),
                                       _make_tokenizer(),
                                       cfg=HybridEngineRolloutConfig(continuous_batch_size=1))
         sampling = SamplingConfig(max_new_tokens=3, temperature=0, repetition_penalty=repetition_penalty)
@@ -870,7 +881,7 @@ def test_sampling_config_rejects_invalid_options(kwargs, message):
 @patch("deepspeed.runtime.rollout.hybrid_engine_rollout.logger")
 def test_return_log_probs_warns_about_a_checkpoint_repetition_penalty(mock_logger):
     model = _LastTokenModel(_repeat_preferring_logits, checkpoint_repetition_penalty=1.5)
-    rollout = HybridEngineRollout(SimpleNamespace(module=model),
+    rollout = HybridEngineRollout(_engine_for(model),
                                   _make_tokenizer(),
                                   cfg=HybridEngineRolloutConfig(continuous_batch_size=1, return_log_probs=True))
     sampling = SamplingConfig(max_new_tokens=2, temperature=0)
@@ -912,7 +923,7 @@ def test_generate_records_profile_when_enabled(mock_get_accelerator, mock_perf_c
     assert profile["tokens_per_second"] == pytest.approx(8 / 0.013)
     assert profile["batch_size"] == 2
     assert profile["num_samples_per_prompt"] == 2
-    assert profile["prompt_length"] == 3
+    assert profile["max_prompt_length"] == 3
     assert profile["response_length"] == 2
     assert [sample.attention_mask[:3] for sample in output.samples] == [[0, 1, 1]] * 4
     assert mock_get_accelerator.return_value.synchronize.call_count == 4
@@ -1328,7 +1339,7 @@ def test_graph_capture_samples_with_temperature_and_scores_the_sampled_distribut
                          max_position_embeddings=64)
     model = LlamaForCausalLM(config).to(device).eval()
     # An EOS id that is never generated keeps every row decoding to max_new_tokens.
-    rollout = HybridEngineRollout(SimpleNamespace(module=model),
+    rollout = HybridEngineRollout(_engine_for(model),
                                   SimpleNamespace(pad_token_id=0, eos_token_id=-1),
                                   cfg=HybridEngineRolloutConfig(return_log_probs=True))
     num_rows, prompt_len, max_new_tokens, temperature = 8, 4, 6, 0.7
@@ -1831,7 +1842,7 @@ def test_graph_capture_decodes_left_padded_rows_as_if_alone(dtype):
     device = torch.device("cuda")
     model = _tiny_qwen3(device, dtype)
     # An EOS id that is never generated keeps every row decoding to max_new_tokens.
-    rollout = HybridEngineRollout(SimpleNamespace(module=model), SimpleNamespace(pad_token_id=0, eos_token_id=-1),
+    rollout = HybridEngineRollout(_engine_for(model), SimpleNamespace(pad_token_id=0, eos_token_id=-1),
                                   HybridEngineRolloutConfig(return_log_probs=True, use_graph_capture=True))
     torch.manual_seed(1)
     prompts = [torch.randint(1, 128, (length, )).tolist() for length in (9, 5, 7, 9, 3)]
@@ -1938,7 +1949,7 @@ def test_single_turn_records_log_probs_of_the_sampled_distribution():
     # The rollout places prompts on the accelerator's current device, where the policy lives.
     device = torch.device(get_accelerator().current_device_name())
     model = LlamaForCausalLM(config).to(device).eval()
-    engine = SimpleNamespace(module=model, zero_optimization_partition_weights=lambda: False)
+    engine = _engine_for(model)
     rollout = HybridEngineRollout(engine, _make_tokenizer(), cfg=HybridEngineRolloutConfig(return_log_probs=True))
     request = RolloutRequest(samples=[_prompt([5, 6, 7]), _prompt([0, 8, 9], [0, 1, 1])])
     sampling = SamplingConfig(max_new_tokens=4, temperature=0.7, n_samples_per_prompt=2)
@@ -2012,7 +2023,7 @@ def _continuous_rollout(model, eos, tool_length, **cfg_kwargs):
                                 eos_token_id=eos,
                                 decode=lambda ids, **_kwargs: _ECHO_CALL if len(ids) == tool_length else "")
     cfg = HybridEngineRolloutConfig(multi_turn=True, max_turns=4, max_context_len=48, **cfg_kwargs)
-    engine = SimpleNamespace(module=model, zero_optimization_partition_weights=lambda: False)
+    engine = _engine_for(model)
     return HybridEngineRollout(engine, tokenizer, cfg, tools=ToolSet([_EchoTool()]))
 
 
@@ -2284,7 +2295,7 @@ def test_static_graph_capture_receives_a_prebuilt_4d_mask(mock_get_accelerator):
     accelerator.replay_graph.side_effect = lambda _graph: replay_views.append(
         masked_columns(module.captured_masks[0]).clone())
 
-    rollout = HybridEngineRollout(SimpleNamespace(module=module),
+    rollout = HybridEngineRollout(_engine_for(module),
                                   _make_tokenizer(),
                                   cfg=HybridEngineRolloutConfig(use_graph_capture=True))
     request = RolloutRequest(samples=[_prompt([1, 3, 4], [0, 1, 1]), _prompt([5, 6, 7])])
@@ -2306,7 +2317,7 @@ def test_static_graph_capture_receives_a_prebuilt_4d_mask(mock_get_accelerator):
 def test_static_graph_rejects_flash_attention(graph_capture_accelerator):
     module = torch.nn.Linear(1, 1)
     module.config = SimpleNamespace(_attn_implementation="flash_attention_2")
-    rollout = HybridEngineRollout(SimpleNamespace(module=module),
+    rollout = HybridEngineRollout(_engine_for(module),
                                   _make_tokenizer(),
                                   cfg=HybridEngineRolloutConfig(use_graph_capture=True))
     request = RolloutRequest(samples=[_prompt([1, 2])])

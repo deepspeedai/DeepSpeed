@@ -13,11 +13,20 @@ from transformers import PretrainedConfig
 
 import deepspeed
 import deepspeed.comm as dist
+from deepspeed.runtime.config import HybridEngineConfig
 from deepspeed.accelerator import get_accelerator
 from deepspeed.runtime.rollout import Tool, ToolSet
 from deepspeed.runtime.rollout.base import RolloutRecord, RolloutRequest, SamplingConfig
 from deepspeed.runtime.rollout.hybrid_engine_rollout import HybridEngineRollout, HybridEngineRolloutConfig
 from unit.common import DistributedTest
+
+
+def _engine_for(module):
+    """A stand-in for a DeepSpeed engine wrapping ``module``, without ZeRO-3 or tensor parallelism."""
+    return SimpleNamespace(module=module,
+                           zero_optimization_partition_weights=lambda: False,
+                           autotp_size=lambda: 1,
+                           _config=SimpleNamespace(hybrid_engine=HybridEngineConfig()))
 
 
 def test_continuous_generation_profile_on_accelerator():
@@ -50,7 +59,7 @@ def test_continuous_generation_profile_on_accelerator():
     device = torch.device(accelerator.device_name())
     model = CacheClassModel().to(device)
     rollout = HybridEngineRollout(
-        SimpleNamespace(module=model),
+        _engine_for(model),
         SimpleNamespace(pad_token_id=0, eos_token_id=2, decode=lambda ids, **_kwargs: ""),
         cfg=HybridEngineRolloutConfig(continuous_batch_size=1, enable_profiling=True),
     )
@@ -115,11 +124,11 @@ def test_continuous_graph_generation_refills_a_fixed_slot_on_cuda():
     device = torch.device(accelerator.device_name())
     tokenizer = SimpleNamespace(pad_token_id=0, eos_token_id=2, decode=lambda ids, **_kwargs: "")
     graph_rollout = HybridEngineRollout(
-        SimpleNamespace(module=CacheClassModel().to(device)),
+        _engine_for(CacheClassModel().to(device)),
         tokenizer,
         cfg=HybridEngineRolloutConfig(use_graph_capture=True, continuous_batch_size=2),
     )
-    eager_rollout = HybridEngineRollout(SimpleNamespace(module=CacheClassModel().to(device)),
+    eager_rollout = HybridEngineRollout(_engine_for(CacheClassModel().to(device)),
                                         tokenizer,
                                         cfg=HybridEngineRolloutConfig(continuous_batch_size=2))
 
@@ -174,10 +183,10 @@ def test_continuous_rollout_matches_native_llama_generation_on_accelerator(attn_
     request = _records(prompt_ids, attention_mask)
     sampling = SamplingConfig(max_new_tokens=5, temperature=0)
     tokenizer = SimpleNamespace(pad_token_id=0, eos_token_id=None, decode=lambda ids, **_kwargs: "")
-    eager_rollout = HybridEngineRollout(SimpleNamespace(module=model),
+    eager_rollout = HybridEngineRollout(_engine_for(model),
                                         tokenizer,
                                         cfg=HybridEngineRolloutConfig(continuous_batch_size=2))
-    graph_rollout = HybridEngineRollout(SimpleNamespace(module=model),
+    graph_rollout = HybridEngineRollout(_engine_for(model),
                                         tokenizer,
                                         cfg=HybridEngineRolloutConfig(use_graph_capture=True, continuous_batch_size=2))
     with torch.no_grad():
@@ -235,7 +244,7 @@ def _peaked_llama(device):
 def _decode_rollout(model, use_graph_capture, continuous_batch_size=None):
     # eos -1 never matches, so every row generates the full length.
     tokenizer = SimpleNamespace(pad_token_id=0, eos_token_id=-1, decode=lambda ids, **_kwargs: "")
-    return HybridEngineRollout(SimpleNamespace(module=model),
+    return HybridEngineRollout(_engine_for(model),
                                tokenizer,
                                cfg=HybridEngineRolloutConfig(use_graph_capture=use_graph_capture,
                                                              continuous_batch_size=continuous_batch_size))
@@ -329,11 +338,11 @@ def test_continuous_graph_matches_pretrained_model_when_enabled():
     graph_model.load_state_dict(eager_model.state_dict())
 
     sampling = SamplingConfig(max_new_tokens=32, temperature=0)
-    eager_rollout = HybridEngineRollout(SimpleNamespace(module=eager_model),
+    eager_rollout = HybridEngineRollout(_engine_for(eager_model),
                                         tokenizer,
                                         cfg=HybridEngineRolloutConfig(continuous_batch_size=1))
     graph_rollout = HybridEngineRollout(
-        SimpleNamespace(module=graph_model),
+        _engine_for(graph_model),
         tokenizer,
         cfg=HybridEngineRolloutConfig(use_graph_capture=True, continuous_batch_size=1),
     )
@@ -415,7 +424,7 @@ def test_tool_output_that_would_pass_max_context_len_ends_the_trajectory(use_gra
     call = '<tool_call>{"name": "ok", "arguments": {}}</tool_call>'
     tokenizer = SimpleNamespace(pad_token_id=0, eos_token_id=first, decode=lambda ids, **_kwargs: call)
     max_context_len = len(prompt) + 10
-    rollout = HybridEngineRollout(SimpleNamespace(module=model, zero_optimization_partition_weights=lambda: False),
+    rollout = HybridEngineRollout(_engine_for(model),
                                   tokenizer,
                                   HybridEngineRolloutConfig(multi_turn=True,
                                                             max_turns=3,
