@@ -1047,12 +1047,12 @@ class DeepSpeedEngine(Module):
         # from_model_config descends into text_config itself, so multimodal outer configs
         # work here too.
         from deepspeed.module_inject.tp_shard import AutoTPMeta
-        from deepspeed.module_inject.fusedqkv_utils import replicates_kv_block
+        from deepspeed.module_inject.fusedqkv_utils import replicates_kv_block, replicated_kv_shard_heads
 
         meta = AutoTPMeta.from_model_config(model_config)
         # Replicated-K/V layouts are bounded by query heads, not K/V heads.
         replicated_kv = replicates_kv_block(model)
-        shard_heads = meta.num_attention_heads if replicated_kv else meta.num_kv_heads
+        shard_heads = replicated_kv_shard_heads(meta, replicated_kv)
 
         # The replicated-K/V rejection lives in AutoTP.set_tensor_parallel_config and also
         # covers inference; keep this warning only for non-replicated layouts.

@@ -19,7 +19,9 @@ from deepspeed.module_inject.layers import collect_autotp_universal_checkpoint_i
 from deepspeed.checkpoint.constants import (DS_AUTOTP_UC_META, PARAMETER_WITH_ROW_PARALLELISM_PATTERNS,
                                             TP_REPLICATED_PARAMETER_PATTERNS)
 from deepspeed.module_inject.autotp_config import AutoTPConfig
-from deepspeed.module_inject.tp_shard import AutoTPMeta, get_shard_size, get_shard_size_list
+from deepspeed.module_inject.tp_shard import (AutoTPMeta, get_shard_size, get_shard_size_list, _MODULE_KV_HEAD_ATTRS)
+from deepspeed.module_inject.fusedqkv_utils import (replicated_kv_query_widths, replicated_kv_row_start,
+                                                    replicated_kv_shard_heads)
 from deepspeed.module_inject.auto_tp import AutoTP
 from deepspeed.module_inject.auto_tp_model_utils import (build_bloom_alibi_tensor, build_mpt_alibi_tensor,
                                                          get_alibi_mask, install_head_sharded_helper)
@@ -585,7 +587,7 @@ def test_explicit_partition_config_keeps_non_mqa_layout(monkeypatch):
           num_key_value_heads=1), dict(num_heads=4, num_key_value_heads=1, num_key_value_groups=None), None),
     (dict(num_heads=8, num_key_value_heads=1,
           num_key_value_groups=8), dict(num_heads=4, num_key_value_heads=1, num_key_value_groups=4), None),
-    (dict(num_heads=8, num_key_value_groups=8), {}, "neither kv_heads nor num_key_value_heads"),
+    (dict(num_heads=8, num_key_value_groups=8), {}, "none of the module K/V head attributes"),
     (dict(num_heads=8, kv_heads=1, num_key_value_groups=8), dict(num_heads=4, kv_heads=1,
                                                                  num_key_value_groups=4), None),
 ])
@@ -601,6 +603,25 @@ def test_update_mp_params_replicated_kv_attributes(monkeypatch, attrs, expected,
             assert not hasattr(child, name)
         else:
             assert getattr(child, name) == value
+
+
+@pytest.mark.parametrize("kv_attr", _MODULE_KV_HEAD_ATTRS)
+def test_update_mp_params_recomputes_groups_from_each_kv_attr(monkeypatch, kv_attr):
+    # Keep the skip list and the group-count lookup on the same attribute list.
+    autotp, child = _kv_attention_stub(monkeypatch, num_heads=8, num_key_value_groups=8, **{kv_attr: 1})
+    autotp.update_mp_params(child)
+    assert child.num_heads == 4
+    assert getattr(child, kv_attr) == 1
+    assert child.num_key_value_groups == 4
+
+
+def test_replicated_kv_policy_helpers_use_query_heads():
+    meta = AutoTPMeta(num_attention_heads=8, num_kv_heads=1, n_embd=32)
+
+    assert replicated_kv_shard_heads(meta, True) == 8
+    assert replicated_kv_shard_heads(meta, False) == 1
+    assert replicated_kv_query_widths(meta, 2) == [16, 16]
+    assert replicated_kv_row_start(meta, 2, 1) == 16
 
 
 @pytest.mark.parametrize("training", [False, True])

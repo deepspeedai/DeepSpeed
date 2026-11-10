@@ -18,7 +18,7 @@ from deepspeed.runtime.zero.utils import is_zero_param
 from abc import ABC, abstractmethod
 from typing import Iterable, Any, Optional, List, Tuple, Dict
 from .fusedqkv_utils import (shard_value_with_share_qk, prepare_tp_fused_qkvw, fused_qkv_subparam_sizes,
-                             set_fused_qkv_shard_state)
+                             set_fused_qkv_shard_state, replicated_kv_query_widths, replicated_kv_row_start)
 from deepspeed.runtime.tensor_parallel import AUTOTP_MODE
 from deepspeed.checkpoint.constants import (DS_AUTOTP_UC_META, UNIVERSAL_CHECKPOINT_VERSION_KEY,
                                             UNIVERSAL_CHECKPOINT_VERSION_VALUE)
@@ -1538,11 +1538,10 @@ class fused_LinearLayer(SubParamColumnParallel):
 
         if get_fused_qkv_type(self.fused_module.module) != 'bigcodetype' or not pg_utils.is_parallel(self.mp_group):
             return
-        n_embd = self.tp_meta.n_embd
-        if n_embd is None:
-            return
         # This rank's shard is its query rows followed by the whole key/value block.
-        kv_start = get_shard_size_list(n_embd, self.tp_world_size, self.tp_meta)[self.tp_index]
+        kv_start = replicated_kv_row_start(self.tp_meta, self.tp_world_size, self.tp_index)
+        if kv_start is None:
+            return
         group = self.mp_group
 
         from deepspeed.utils.torch import register_grad_hook
@@ -1606,7 +1605,9 @@ class fused_LinearLayer(SubParamColumnParallel):
         # The query rows are not split evenly: the widths follow the head count and the grain
         # size, so they have to come from the same helper the partition calls rather than
         # from a division here.
-        query_widths = list(get_shard_size_list(n_embd, self.tp_world_size, self.tp_meta))
+        query_widths = replicated_kv_query_widths(self.tp_meta, self.tp_world_size)
+        if query_widths is None:
+            return None
         return segmented_map(shape, [(n_embd, False), (shape[0] - n_embd, True)],
                              0,
                              self.tp_world_size,
