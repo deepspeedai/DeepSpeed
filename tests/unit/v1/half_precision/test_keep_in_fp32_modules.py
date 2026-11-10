@@ -13,7 +13,6 @@ import pytest
 import torch
 
 import deepspeed
-from deepspeed.accelerator import get_accelerator
 from deepspeed.runtime.config import DeepSpeedConfig, DeepSpeedConfigError
 from deepspeed.runtime.keep_in_fp32 import keep_in_fp32_pattern
 from unit.common import DistributedTest
@@ -119,7 +118,7 @@ class TestKeepInFp32Config(DistributedTest):
             DeepSpeedConfig(_config(0, keep=keep))
 
 
-@pytest.mark.skipif(torch.bfloat16 not in get_accelerator().supported_dtypes(), reason="bf16 not supported")
+@pytest.mark.skipif("torch.bfloat16 not in get_accelerator().supported_dtypes()", reason="bf16 not supported")
 class TestZeroInitKeepsBuffersFp32(DistributedTest):
     world_size = 2
 
@@ -163,7 +162,7 @@ class TestZeroInitKeepsBuffersFp32(DistributedTest):
         assert model.child2.inner.router_bias.dtype == torch.bfloat16
 
 
-@pytest.mark.skipif(torch.bfloat16 not in get_accelerator().supported_dtypes(), reason="bf16 not supported")
+@pytest.mark.skipif("torch.bfloat16 not in get_accelerator().supported_dtypes()", reason="bf16 not supported")
 @pytest.mark.parametrize("zero_stage", [0, 3])
 class TestEngineKeepsBuffersFp32(DistributedTest):
     world_size = 1

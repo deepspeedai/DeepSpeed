@@ -5,6 +5,7 @@
 
 from typing import Tuple
 
+import pytest
 import torch
 from deepspeed.accelerator import get_accelerator
 
@@ -29,11 +30,11 @@ def get_dtypes(include_float=True):
     global DTYPES
     if DTYPES is None:
         DTYPES = [torch.float16, torch.float32] if include_float else [torch.float16]
-        try:
-            if get_accelerator().is_bf16_supported():
-                DTYPES.append(torch.bfloat16)
-        except (AssertionError, AttributeError):
-            pass
+        # Check bf16 support when each test runs. Probing the device here, while pytest collects tests,
+        # initializes CUDA in the collecting process, and `pytest --forked` children cannot use CUDA after that.
+        bf16_skip = pytest.mark.skipif("not get_accelerator().is_bf16_supported()",
+                                       reason="bf16 is not supported on this accelerator")
+        DTYPES.append(pytest.param(torch.bfloat16, marks=bf16_skip))
     return DTYPES
 
 

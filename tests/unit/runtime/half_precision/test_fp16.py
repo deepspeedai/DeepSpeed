@@ -15,8 +15,8 @@ from deepspeed.accelerator import get_accelerator
 from deepspeed.ops.op_builder import CPUAdamBuilder, FusedLambBuilder
 from deepspeed.moe.utils import split_params_into_different_moe_groups_for_optimizer
 
-if torch.half not in get_accelerator().supported_dtypes():
-    pytest.skip(f"fp16 not supported, valid dtype: {get_accelerator().supported_dtypes()}", allow_module_level=True)
+pytestmark = pytest.mark.skipif("torch.half not in get_accelerator().supported_dtypes()",
+                                reason="fp16 is not supported on this accelerator")
 
 
 class TestLambFP32GradClip(DistributedTest):

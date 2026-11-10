@@ -45,6 +45,13 @@ tests. Note that [pytest-forked](https://github.com/pytest-dev/pytest-forked) an
 `--forked` flag are required to test CUDA functionality in distributed tests. Using
 `--forked` is safe because `import deepspeed` no longer initializes a CUDA context;
 earlier versions probed CUDA at import time, which poisoned `fork()`.
+Tests must keep that property while pytest collects them: do not query the device at
+import time, including in decorator arguments. A boolean condition such as
+`@pytest.mark.skipif(not get_accelerator().is_fp16_supported(), ...)` initializes CUDA in
+the pytest process, and every test forked from it then fails with `Cannot re-initialize
+CUDA in forked subprocess`. Write the condition as a string instead,
+`@pytest.mark.skipif("not get_accelerator().is_fp16_supported()", ...)`, which pytest
+evaluates when the test runs.
 
 You can also run:
 ```

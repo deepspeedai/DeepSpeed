@@ -45,6 +45,14 @@ def pytest_addoption(parser):
     parser.addoption("--cuda_ver", default=None, type=str)
 
 
+def pytest_markeval_namespace():
+    # pytest evaluates string conditions in skipif marks when each test runs, so device probes belong there rather
+    # than at import: under --forked, a probe during collection initializes CUDA in the parent, and the forked
+    # children cannot use CUDA after that. Provide get_accelerator() whether or not the test module imports it.
+    from deepspeed.accelerator import get_accelerator
+    return {"get_accelerator": get_accelerator}
+
+
 def validate_version(expected, found):
     version_depth = expected.count('.') + 1
     found = '.'.join(found.split('.')[:version_depth])

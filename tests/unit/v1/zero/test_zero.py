@@ -1919,7 +1919,7 @@ class TestZeroOffloadOptim(DistributedTest):
             model, _, _, _ = deepspeed.initialize(model=model, optimizer=optimizer, config=config_dict)
 
 
-@pytest.mark.skipif(not get_accelerator().is_bf16_supported(), reason="bf16 is not supported on this accelerator")
+@pytest.mark.skipif("not get_accelerator().is_bf16_supported()", reason="bf16 is not supported on this accelerator")
 @pytest.mark.parametrize("ratio", [1.0, 0.5])
 class TestZero3OffloadPinnedCopyBack(DistributedTest):
     """With pin_memory, the CPU master partitions are pinned, as in ZeRO-1/2, and the updated masters must reach the
@@ -1994,7 +1994,7 @@ class TestZero3OffloadPinnedCopyBack(DistributedTest):
             assert torch.equal(a, b)
 
 
-@pytest.mark.skipif(not get_accelerator().is_bf16_supported(), reason="bf16 is not supported on this accelerator")
+@pytest.mark.skipif("not get_accelerator().is_bf16_supported()", reason="bf16 is not supported on this accelerator")
 class TestZero3AutocastSharesMasterWeights(DistributedTest):
     """With torch autocast and no bf16 / fp16 section, the model keeps its weights in float32, the master dtype, so
     ZeRO-3 without optimizer offload must use each partition as its own master copy (_create_fp32_partitions) instead

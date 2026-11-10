@@ -242,21 +242,27 @@ class HybridStateOptimizer(torch.optim.Optimizer):
         return loss
 
 
-def random_dataset(total_samples, hidden_dim, device, dtype=preferred_dtype()):
+def random_dataset(total_samples, hidden_dim, device, dtype=None):
+    # Resolve the default here, not in the signature: a default argument runs at import, and probing the device
+    # while pytest collects tests initializes CUDA in the parent, which breaks every test that `--forked` forks.
+    if dtype is None:
+        dtype = preferred_dtype()
     train_data = torch.randn(total_samples, hidden_dim, device=device, dtype=dtype)
     train_label = torch.empty(total_samples, dtype=torch.long, device=device).random_(hidden_dim)
     train_dataset = torch.utils.data.TensorDataset(train_data, train_label)
     return train_dataset
 
 
-def random_dataloader(model, total_samples, hidden_dim, device, dtype=preferred_dtype()):
+def random_dataloader(model, total_samples, hidden_dim, device, dtype=None):
     batch_size = model.train_micro_batch_size_per_gpu()
     train_dataset = random_dataset(total_samples, hidden_dim, device, dtype=dtype)
     train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size)
     return train_loader
 
 
-def sequence_dataloader(model, total_samples, hidden_dim, device, seq_len: int = 32, dtype=preferred_dtype()):
+def sequence_dataloader(model, total_samples, hidden_dim, device, seq_len: int = 32, dtype=None):
+    if dtype is None:
+        dtype = preferred_dtype()
     batch_size = model.train_micro_batch_size_per_gpu()
     train_data = torch.randn(total_samples, seq_len, hidden_dim, device=device, dtype=dtype)
     train_label = torch.empty(total_samples, dtype=torch.long, device=device).random_(hidden_dim)

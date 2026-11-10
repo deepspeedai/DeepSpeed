@@ -1229,6 +1229,12 @@ class TestAutoEPRegionalCompile:
 
     @pytest.mark.parametrize("checkpoint_enabled", [False, True])
     def test_compiles_model_root_with_direct_autoep_child(self, checkpoint_enabled):
+        if checkpoint_enabled:
+            from deepspeed.accelerator import get_accelerator
+            # Dynamo reads the device RNG state when it first traces a frame. If nothing has initialized the device
+            # yet, that read initializes it inside the checkpointed forward, and checkpoint raises after that forward.
+            if get_accelerator().is_available():
+                get_accelerator().current_device()
         eager_model = _replace_callable_autoep_layers(num_layers=1).model.layers[0]
         compiled_model = copy.deepcopy(eager_model)
         compiled_inputs = torch.randn(1, 8, 64, requires_grad=True)

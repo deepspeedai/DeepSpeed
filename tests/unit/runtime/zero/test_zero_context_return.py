@@ -126,10 +126,16 @@ config = {
     }
 }
 
-if get_accelerator().is_bf16_supported():
-    config["bf16"] = {"enabled": True}
-elif get_accelerator().is_fp16_supported():
-    config["fp16"] = {"enabled": True, "loss_scale": 138.}
+
+def get_config():
+    # Choose the precision when a test runs: probing the device at import initializes CUDA in the pytest
+    # process that collects tests, and the children that `pytest --forked` creates cannot use CUDA after that.
+    test_config = dict(config)
+    if get_accelerator().is_bf16_supported():
+        test_config["bf16"] = {"enabled": True}
+    elif get_accelerator().is_fp16_supported():
+        test_config["fp16"] = {"enabled": True, "loss_scale": 138.}
+    return test_config
 
 
 class TestReturnParam(DistributedTest):
@@ -141,7 +147,10 @@ class TestReturnParam(DistributedTest):
         net = DanglingExt()
 
         args = SimpleNamespace(local_rank=0)
-        engine, _, _, _ = deepspeed.initialize(args=args, model=net, model_parameters=net.parameters(), config=config)
+        engine, _, _, _ = deepspeed.initialize(args=args,
+                                               model=net,
+                                               model_parameters=net.parameters(),
+                                               config=get_config())
 
         for _ in range(5):
             input = torch.rand(net.dim).to(engine.device).to(preferred_dtype())
@@ -157,7 +166,10 @@ class TestReturnParam(DistributedTest):
         net = ModelContainer(return_obj=True)
 
         args = SimpleNamespace(local_rank=0)
-        engine, _, _, _ = deepspeed.initialize(args=args, model=net, model_parameters=net.parameters(), config=config)
+        engine, _, _, _ = deepspeed.initialize(args=args,
+                                               model=net,
+                                               model_parameters=net.parameters(),
+                                               config=get_config())
 
         for _ in range(5):
             input = torch.rand(net.dim).to(engine.device).to(preferred_dtype())
@@ -175,7 +187,10 @@ class TestReturnParam(DistributedTest):
         net = ModelContainerVariableOutputType(output_type=output_type)
 
         args = SimpleNamespace(local_rank=0)
-        engine, _, _, _ = deepspeed.initialize(args=args, model=net, model_parameters=net.parameters(), config=config)
+        engine, _, _, _ = deepspeed.initialize(args=args,
+                                               model=net,
+                                               model_parameters=net.parameters(),
+                                               config=get_config())
 
         for _ in range(1):
             input = torch.rand(net.dim).to(engine.device).to(preferred_dtype())

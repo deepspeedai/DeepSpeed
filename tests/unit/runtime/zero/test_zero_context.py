@@ -56,10 +56,16 @@ config = {
     }
 }
 
-if get_accelerator().is_bf16_supported():
-    config["bf16"] = {"enabled": True}
-elif get_accelerator().is_fp16_supported():
-    config["fp16"] = {"enabled": True, "loss_scale": 138.}
+
+def get_config():
+    # Choose the precision when a test runs: probing the device at import initializes CUDA in the pytest
+    # process that collects tests, and the children that `pytest --forked` creates cannot use CUDA after that.
+    test_config = dict(config)
+    if get_accelerator().is_bf16_supported():
+        test_config["bf16"] = {"enabled": True}
+    elif get_accelerator().is_fp16_supported():
+        test_config["fp16"] = {"enabled": True, "loss_scale": 138.}
+    return test_config
 
 
 def test_multiple_all_gather_handles_wait_passes_dependency_by_keyword():
@@ -186,7 +192,7 @@ class TestSerialContext(DistributedTest):
 
     def test_subclass_param(self):
         setup_serial_env()
-        with deepspeed.zero.Init(config=config):
+        with deepspeed.zero.Init(config=get_config()):
             model = ConvNet()
 
         assert model.param.ds_status == ZeroParamStatus.NOT_AVAILABLE
@@ -320,7 +326,7 @@ class TestSerialContext(DistributedTest):
         engine, optim, _, _ = deepspeed.initialize(args=args,
                                                    model=net,
                                                    model_parameters=net.parameters(),
-                                                   config=config)
+                                                   config=get_config())
 
         with deepspeed.zero.GatheredParameters(net.linear1.weight):
             assert net.linear1.weight.numel() == net.dim**2

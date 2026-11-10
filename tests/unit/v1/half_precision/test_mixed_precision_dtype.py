@@ -11,7 +11,6 @@ import pytest
 import deepspeed
 import deepspeed.comm as dist
 from deepspeed.runtime.engine import DeepSpeedEngine
-from deepspeed.accelerator import get_accelerator
 from unit.common import DistributedTest
 
 
@@ -124,7 +123,7 @@ class TestCastModuleMixedPrecision:
         assert module.linear.weight.dtype == torch.bfloat16
 
 
-@pytest.mark.skipif(torch.bfloat16 not in get_accelerator().supported_dtypes(), reason="bf16 not supported")
+@pytest.mark.skipif("torch.bfloat16 not in get_accelerator().supported_dtypes()", reason="bf16 not supported")
 @pytest.mark.parametrize("zero_stage", [0, 3])
 class TestMixedPrecisionDtypeEndToEnd(DistributedTest):
     world_size = 1
@@ -185,7 +184,7 @@ class TestMixedPrecisionDtypeEndToEnd(DistributedTest):
         assert engine.module.linear.weight.dtype == torch.bfloat16
 
 
-@pytest.mark.skipif(torch.bfloat16 not in get_accelerator().supported_dtypes(), reason="bf16 not supported")
+@pytest.mark.skipif("torch.bfloat16 not in get_accelerator().supported_dtypes()", reason="bf16 not supported")
 class TestNarrowDtypeBroadcast(DistributedTest):
     world_size = 2
 

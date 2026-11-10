@@ -31,10 +31,16 @@ config = {
     }
 }
 
-if get_accelerator().is_bf16_supported():
-    config["bf16"] = {"enabled": True}
-elif get_accelerator().is_fp16_supported():
-    config["fp16"] = {"enabled": True, "loss_scale": 138.}
+
+def get_config():
+    # Choose the precision when a test runs: probing the device at import initializes CUDA in the pytest
+    # process that collects tests, and the children that `pytest --forked` creates cannot use CUDA after that.
+    test_config = dict(config)
+    if get_accelerator().is_bf16_supported():
+        test_config["bf16"] = {"enabled": True}
+    elif get_accelerator().is_fp16_supported():
+        test_config["fp16"] = {"enabled": True, "loss_scale": 138.}
+    return test_config
 
 
 class TestUnwrapModel(DistributedTest):
@@ -57,7 +63,7 @@ class TestUnwrapModel(DistributedTest):
             return False
 
         model = SimpleModel(hidden_dim=100)
-        engine, _, _, _ = deepspeed.initialize(args=None, model=model, config=config)
+        engine, _, _, _ = deepspeed.initialize(args=None, model=model, config=get_config())
 
         with unwrap_model_for_generation(engine):
             # assert no hooks
@@ -76,7 +82,7 @@ class TestUnwrapModelTraceInvalidate(DistributedTest):
 
     def test(self):
         model = SimpleModel(hidden_dim=100)
-        engine, _, _, _ = deepspeed.initialize(args=None, model=model, config=config)
+        engine, _, _, _ = deepspeed.initialize(args=None, model=model, config=get_config())
 
         x = torch.randn(2, 100, device=engine.device, dtype=preferred_dtype())
         y = torch.empty(2, dtype=torch.long, device=engine.device).random_(100)

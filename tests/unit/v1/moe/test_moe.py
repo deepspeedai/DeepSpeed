@@ -83,7 +83,8 @@ def _step_with_fixed_grads_and_read_norm(expert_weight_scale):
 class TestSimpleMoE(DistributedTest):
     world_size = 2
 
-    @pytest.mark.skipif(not get_accelerator().is_fp16_supported(), reason="fp16 is not supported on this accelerator")
+    @pytest.mark.skipif("not get_accelerator().is_fp16_supported()",
+                        reason="fp16 is not supported on this accelerator")
     def test(self, zero_stage):
         if not required_torch_version(min_version=1.8):
             pytest.skip("DeepSpeed MoE tests need torch 1.8 or higher to run correctly")
@@ -123,7 +124,8 @@ class TestSimpleMoE(DistributedTest):
 class TestMoEFP16GradientNorm(DistributedTest):
     world_size = 1
 
-    @pytest.mark.skipif(not get_accelerator().is_fp16_supported(), reason="fp16 is not supported on this accelerator")
+    @pytest.mark.skipif("not get_accelerator().is_fp16_supported()",
+                        reason="fp16 is not supported on this accelerator")
     def test_expert_weight_values_do_not_affect_gradient_norm(self):
         if not required_torch_version(min_version=1.8):
             pytest.skip("DeepSpeed MoE tests need torch 1.8 or higher to run correctly")
@@ -141,7 +143,8 @@ class TestMoEFP16GradientNorm(DistributedTest):
 class TestMoE(DistributedTest):
     world_size = 4
 
-    @pytest.mark.skipif(not get_accelerator().is_fp16_supported(), reason="fp16 is not supported on this accelerator")
+    @pytest.mark.skipif("not get_accelerator().is_fp16_supported()",
+                        reason="fp16 is not supported on this accelerator")
     def test(self, ep_size, zero_stage, use_residual):
         if not required_torch_version(min_version=1.8):
             pytest.skip("DeepSpeed MoE tests need torch 1.8 or higher to run correctly")
@@ -240,7 +243,8 @@ class TestMoE(DistributedTest):
 class TestPRMoE(DistributedTest):
     world_size = 4
 
-    @pytest.mark.skipif(not get_accelerator().is_fp16_supported(), reason="fp16 is not supported on this accelerator")
+    @pytest.mark.skipif("not get_accelerator().is_fp16_supported()",
+                        reason="fp16 is not supported on this accelerator")
     def test(self, ep_size, use_residual):
         if not required_torch_version(min_version=1.8):
             pytest.skip("DeepSpeed MoE tests need torch 1.8 or higher to run correctly")

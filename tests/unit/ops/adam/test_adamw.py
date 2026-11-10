@@ -38,8 +38,8 @@ adam_configs = [["AdamW", False, False, False, (FusedAdam, True)],
     adam_configs)
 # Skipping at module level would also hide the dtype-parametrized reference test below, which is
 # what let the CPU adam_w_mode bug go unnoticed on runners without fp16 support.
-@pytest.mark.skipif(torch.half not in get_accelerator().supported_dtypes(),
-                    reason=f"fp16 not supported, valid dtype: {get_accelerator().supported_dtypes()}")
+@pytest.mark.skipif("torch.half not in get_accelerator().supported_dtypes()",
+                    reason="fp16 is not supported on this accelerator")
 class TestAdamConfigs(DistributedTest):
     world_size = 1
     reuse_dist_env = True

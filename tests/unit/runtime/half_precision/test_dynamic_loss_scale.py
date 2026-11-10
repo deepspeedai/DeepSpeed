@@ -339,7 +339,7 @@ class TestZeroStage0Hysteresis(DistributedTest):
         # One overflow is already spent, so the next one is the last one absorbed.
         assert restored.loss_scale_config.cur_hysteresis == 2
 
-    @pytest.mark.skipif(not get_accelerator().is_fp16_supported(), reason="fp16 is not supported")
+    @pytest.mark.skipif("not get_accelerator().is_fp16_supported()", reason="fp16 is not supported")
     def test_hysteresis_through_the_engine(self, optimizer_class):
         # SGD gets FP16_UnfusedOptimizer from the engine, Adam gets FP16_Optimizer.
         optimizer_type = "Adam" if optimizer_class is FP16_Optimizer else "SGD"
