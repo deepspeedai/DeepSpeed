@@ -4,6 +4,20 @@ toc: true
 toc_label: "Contents"
 ---
 
+### Deterministic Execution
+
+`deterministic_mode` is a JSON boolean, default `false`. On NVIDIA CUDA, enabling it
+selects strict PyTorch deterministic algorithms, disables TF32 and cuDNN
+benchmarking, and enables deterministic cuDNN algorithms at engine initialization.
+Set `CUBLAS_WORKSPACE_CONFIG=:4096:8` or `:16:8` before CUDA use.
+Enabling it on any accelerator other than NVIDIA CUDA, including a CUDA-compatible accelerator such as KLXPU, is currently unsupported; disabled behavior is unchanged.
+
+The flag does not change precision, NCCL algorithm, parallelism or overlap.
+PyTorch checks do not cover all custom kernels or distributed scheduling;
+configuration acceptance does not certify workload bitwise repeatability or
+Megatron compatibility. Settings are process-global and not restored at teardown.
+See [Deterministic Mode](/tutorials/deterministic-mode/) for details.
+
 ### Batch Size Related Parameters
 
 **Note:** <i>**train_batch_size**</i> must be equal to  <i>**train_micro_batch_size_per_gpu**</i> * <i>**gradient_accumulation_steps**</i> * number of GPUs. For simplicity, you can choose to only specify two of the three parameters, the last one will be inferred automatically by DeepSpeed.
@@ -870,17 +884,17 @@ The Hybrid Engine (`DeepSpeedHybridEngine`) switches a model between training mo
     "release_inference_cache": false,
     "pin_parameters": true,
     "tp_gather_partition_size": 8,
-    "enable_cuda_graph": false
+    "enable_graph_capture": false
   }
 ```
 
-***enable_cuda_graph***: [boolean]
+***enable_graph_capture***: [boolean]
 
 | Description                                                                                                                                                                                                                                                                                                                                        | Default |
 | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| Capture token generation into CUDA graphs. Generation issues on the order of a thousand kernel launches per token and is bound by CPU launch overhead rather than by the GPU, so replaying a captured graph removes most of the per-token cost. One graph is captured per decode position, and generated tokens are unchanged. | `false` |
+| Capture token generation into device graphs. Generation issues on the order of a thousand kernel launches per token and is bound by CPU launch overhead rather than by the accelerator, so replaying a captured graph removes most of the per-token cost. One graph is captured per decode position, and generated tokens are unchanged. The previous key `enable_cuda_graph` is deprecated: its value migrates to this field with a warning, so existing configs keep working. | `false` |
 
-`enable_cuda_graph` requires a pinned generation length (`min_new_tokens` equal to `max_new_tokens`) and `max_out_tokens` large enough to cover the longest generation. It is ignored, with a warning, when any of the following apply, since captured graphs would not stay valid:
+`enable_graph_capture` requires a pinned generation length (`min_new_tokens` equal to `max_new_tokens`) and `max_out_tokens` large enough to cover the longest generation. It is ignored, with a warning, when any of the following apply, since captured graphs would not stay valid:
 
 * ZeRO stage 3, where parameters are gathered into fresh buffers for each generation
 * `release_inference_cache: true`, which frees the buffers the graphs write into
@@ -1013,7 +1027,7 @@ smoke coverage used for this AutoEP surface produced the following version gates
 
 | Description                                                                                                    | Default  |
 | -------------------------------------------------------------------------------------------------------------- | -------- |
-| Experimental. In the reentrant recompute of a decoder layer, record the DeepEP route's post-expert row weighting and combine without running them: nothing reads that recomputed output, and their backward is unchanged. The skipped output is NaN. Requires `comm_backend="deepep"` with `autoep_size > 1`, a preset whose decoder layer adds the MoE output to the residual (`deepseek_v2`, `deepseek_v3`, `minimax_m3`, `mixtral`, `qwen3_5_moe`, `qwen3_moe`), and Hugging Face per-layer gradient checkpointing with `use_reentrant=True`. Any non-null `moe_layer_pattern` is rejected, even alongside an explicit or auto-detected supported preset, because the override can select an unvalidated decoder parent. Leave the pattern unset or disable the skip; custom patterns are unchanged when the option is off. Unsupported settings are rejected rather than ignored. | `false` |
+| Experimental. In the reentrant recompute of a decoder layer, record the DeepEP route's post-expert row weighting and combine without running them: nothing reads that recomputed output, and their backward is unchanged. The skipped output is NaN. Requires `comm_backend="deepep"` with `autoep_size > 1`, a preset whose decoder layer adds the MoE output to the residual (`deepseek_v2`, `deepseek_v3`, `minimax_m3`, `mixtral`, `qwen3_5_moe`, `qwen3_moe`), and a decoder layer in training mode with Hugging Face per-layer gradient checkpointing and `use_reentrant=True`. Eval-mode outer recomputes are rejected because the decoder does not checkpoint; ordinary eval forwards are unchanged. Any non-null `moe_layer_pattern` is rejected, even alongside an explicit or auto-detected supported preset, because the override can select an unvalidated decoder parent. Leave the pattern unset or disable the skip; custom patterns are unchanged when the option is off. Unsupported settings are rejected rather than ignored. | `false` |
 
 ***route_norm***: [boolean]
 

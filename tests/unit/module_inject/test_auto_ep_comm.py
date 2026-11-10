@@ -1210,7 +1210,7 @@ class TestSkipRecomputeCombine(unittest.TestCase):
             return x + moe
 
         def forward(self, x):
-            if self.gradient_checkpointing:
+            if self.gradient_checkpointing and self.training:
                 return self._gradient_checkpointing_func(self.block, x)
             return self.block(x)
 
@@ -1254,6 +1254,7 @@ class TestSkipRecomputeCombine(unittest.TestCase):
         layer.score_apply = score_apply
         layer.row_weighting_impl = "eager"
         layer.skip_recompute_combine = skip
+        layer.overlap_weight_grad = False
         layer._decoder_layer = None
         return layer
 
@@ -1264,20 +1265,28 @@ class TestSkipRecomputeCombine(unittest.TestCase):
                   reads_output=False,
                   attach=True,
                   routing=None,
-                  steps=1):
+                  steps=1,
+                  training=True,
+                  outer_reentrant=False):
         log = []
         layer = self.make_layer(log, skip, score_apply)
         decoder = self.DecoderLayer(layer, self.gate, self.routing if routing is None else routing, checkpoint_func,
                                     reads_output)
+        decoder.train(training)
         if attach:
             layer.attach_decoder_layer(decoder)
+
+        def outer_block(inputs):
+            hidden = decoder(inputs)
+            return hidden * hidden
+
         initial_routing = decoder.routing
         step_results = []
         for step in range(steps):
             decoder.zero_grad(set_to_none=True)
             decoder.routing = (initial_routing + step) % self.EXPERTS
             x = (self.inputs + step).requires_grad_(True)
-            output = decoder(x)
+            output = checkpoint(outer_block, x, use_reentrant=True) if outer_reentrant else decoder(x)
             (output.float() * self.target).sum().backward()
             result = {"output": output.detach(), "x": x.grad, "gate": decoder.gate.grad}
             result.update({name: getattr(layer.experts, name).grad for name in ("w1", "w2", "w3")})
@@ -1307,12 +1316,30 @@ class TestSkipRecomputeCombine(unittest.TestCase):
                 self.assertEqual(skipped_log, ["dispatch", "combine", "dispatch", "cached_dispatch", "combine"])
 
     def test_nothing_is_skipped_without_a_recompute(self):
-        normal, normal_log = self.run_block(False, None)
-        skipped, skipped_log = self.run_block(True, None)
-        for name, expected in normal.items():
-            self.assertTrue(torch.equal(skipped[name], expected), name)
-        self.assertEqual(skipped_log, normal_log)
-        self.assertEqual(skipped_log, ["dispatch", "combine", "cached_dispatch", "combine"])
+        for training in (True, False):
+            with self.subTest(training=training):
+                normal, normal_log = self.run_block(False, None, training=training)
+                skipped, skipped_log = self.run_block(True, None, training=training)
+                for name, expected in normal.items():
+                    self.assertTrue(torch.equal(skipped[name], expected), name)
+                self.assertEqual(skipped_log, normal_log)
+                self.assertEqual(skipped_log, ["dispatch", "combine", "cached_dispatch", "combine"])
+
+    def test_outer_recompute_respects_the_decoder_training_state(self):
+        for training, score_apply in itertools.product((True, False), ("pre", "post")):
+            with self.subTest(training=training, score_apply=score_apply):
+                kwargs = dict(score_apply=score_apply, training=training, outer_reentrant=True)
+                normal, normal_log = self.run_block(False, self.reentrant(), **kwargs)
+                for name, expected in normal.items():
+                    self.assertTrue(torch.isfinite(expected).all(), name)
+                if not training:
+                    with self.assertRaisesRegex(RuntimeError, "skip_recompute_combine.*training mode"):
+                        self.run_block(True, self.reentrant(), **kwargs)
+                    continue
+                skipped, skipped_log = self.run_block(True, self.reentrant(), **kwargs)
+                for name, expected in normal.items():
+                    self.assertTrue(torch.equal(skipped[name], expected), name)
+                self.assertEqual(skipped_log.count("combine"), normal_log.count("combine") - 1)
 
     def test_repeated_steps_do_not_replay_the_previous_steps_dispatch(self):
         for score_apply in ("pre", "post"):

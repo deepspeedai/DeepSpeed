@@ -6,10 +6,11 @@
 import torch
 from deepspeed.utils import logger
 from deepspeed.utils.logging import should_log_le
+from deepspeed.ops.cpu_optimizer import DeepSpeedCPUOptimizer
 from deepspeed.ops.op_builder import CPUAdamBuilder
 
 
-class DeepSpeedCPUAdam(torch.optim.Optimizer):
+class DeepSpeedCPUAdam(DeepSpeedCPUOptimizer):
     optimizer_id = 0
 
     def __init__(self,
@@ -69,7 +70,7 @@ class DeepSpeedCPUAdam(torch.optim.Optimizer):
                             weight_decay=weight_decay,
                             bias_correction=bias_correction,
                             amsgrad=amsgrad)
-        super(DeepSpeedCPUAdam, self).__init__(model_params, default_args)
+        super(DeepSpeedCPUAdam, self).__init__(model_params, default_args, fp32_optimizer_states)
 
         # Imported here because importing cpuinfo runs subprocesses (file, uname), which slows down import deepspeed.
         from cpuinfo import get_cpu_info
@@ -88,7 +89,6 @@ class DeepSpeedCPUAdam(torch.optim.Optimizer):
         self.opt_id = DeepSpeedCPUAdam.optimizer_id
         DeepSpeedCPUAdam.optimizer_id = DeepSpeedCPUAdam.optimizer_id + 1
         self.adam_w_mode = adamw_mode
-        self.fp32_optimizer_states = fp32_optimizer_states
         try:
             self.ds_opt_adam = CPUAdamBuilder().load()
         except Exception as e:
@@ -151,7 +151,6 @@ class DeepSpeedCPUAdam(torch.optim.Optimizer):
                 state = self.state[p]
                 # State initialization
                 if len(state) == 0:
-                    #print(f'group {group_id} param {param_id} = {p.numel()}')
                     state['step'] = 0
 
                     #use full precision by default unless self.fp32_optimizer_states is off
@@ -159,10 +158,8 @@ class DeepSpeedCPUAdam(torch.optim.Optimizer):
 
                     # gradient momentums
                     state['exp_avg'] = torch.zeros_like(p.data, dtype=state_dtype, device=device)
-                    #memory_format=torch.preserve_format)
                     # gradient variances
                     state['exp_avg_sq'] = torch.zeros_like(p.data, dtype=state_dtype, device=device)
-                    #memory_format=torch.preserve_format)
 
                 state['step'] += 1
                 beta1, beta2 = group['betas']

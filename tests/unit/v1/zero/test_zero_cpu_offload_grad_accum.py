@@ -21,8 +21,9 @@ from deepspeed.accelerator import get_accelerator
 
 def _cpu_grad_norm(engine):
     total_norm_sq = 0.0
-    for grad in engine.optimizer.accumulated_grads_in_cpu.values():
-        total_norm_sq += grad.float().norm(2).item()**2
+    for grad in engine.optimizer.accumulated_grads_in_cpu:
+        if grad is not None:
+            total_norm_sq += grad.float().norm(2).item()**2
     return total_norm_sq**0.5
 
 
