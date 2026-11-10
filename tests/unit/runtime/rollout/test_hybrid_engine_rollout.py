@@ -1341,6 +1341,16 @@ def test_token_selector_is_argmax_without_temperature():
     assert tokens.tolist() == [[1], [0]]
 
 
+@pytest.mark.parametrize("temperature", [0.0, 1.0])
+def test_token_selector_skips_log_probs_unless_asked(temperature):
+    select = _TokenSelector(SamplingConfig(max_new_tokens=1, temperature=temperature), return_log_probs=False)
+
+    tokens, log_probs = select(torch.tensor([[0.1, 3.0, 2.0]]))
+
+    assert tokens.shape == (1, 1)
+    assert log_probs is None
+
+
 @pytest.mark.parametrize("left_padded", [False, True])
 def test_graph_capture_samples_with_temperature_and_scores_the_sampled_distribution(left_padded):
     if not torch.cuda.is_available():  #ignore-cuda

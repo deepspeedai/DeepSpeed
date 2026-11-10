@@ -265,7 +265,9 @@ class _ContinuousRunGraph(_ContinuousRunBase):
         max_new_tokens = sampling.max_new_tokens
         self.turn_len = max(1, min(capacity, max_new_tokens, sampling.max_new_tokens_per_turn or max_new_tokens))
         self.token_buf = torch.zeros(num_rows, self.turn_len, dtype=torch.long, device=device)
-        self.log_prob_buf = torch.zeros(num_rows, self.turn_len, dtype=torch.float32, device=device)
+        self.log_prob_buf = None
+        if rollout.return_log_probs:
+            self.log_prob_buf = torch.zeros(num_rows, self.turn_len, dtype=torch.float32, device=device)
         eos_token_id = rollout.tokenizer.eos_token_id
         self.stop_token = eos_token_id if eos_token_id is not None else -1
         self.step_trace = [] if rollout.enable_profiling else None
@@ -311,7 +313,8 @@ class _ContinuousRunGraph(_ContinuousRunBase):
         self.write_pos[target] = lengths
         self.static_token[target] = first
         self.token_buf[target, 0] = first[:, 0]
-        self.log_prob_buf[target, 0] = first_log_probs[:, 0]
+        if self.log_prob_buf is not None:
+            self.log_prob_buf[target, 0] = first_log_probs[:, 0]
         self.num_generated[target] = 1
         self.turn_limit[target] = limits
         self.active[target] = (first[:, 0] != self.stop_token) & (limits > 1)
@@ -360,8 +363,9 @@ class _ContinuousRunGraph(_ContinuousRunBase):
         position = self.num_generated.clamp(max=self.turn_len - 1).unsqueeze(1)
         recording = self.active.unsqueeze(1)
         self.token_buf.scatter_(1, position, torch.where(recording, tokens, self.token_buf.gather(1, position)))
-        self.log_prob_buf.scatter_(1, position, torch.where(recording, log_probs,
-                                                            self.log_prob_buf.gather(1, position)))
+        if self.log_prob_buf is not None:
+            self.log_prob_buf.scatter_(1, position,
+                                       torch.where(recording, log_probs, self.log_prob_buf.gather(1, position)))
         self.num_generated.add_(self.active.long())
         if self.step_trace is not None:
             self.decoded.add_(self.active.sum())
@@ -379,11 +383,13 @@ class _ContinuousRunGraph(_ContinuousRunBase):
         counts = self.num_generated[finished_rows].tolist()
         width = max(counts)
         tokens = self.token_buf[finished_rows, :width].tolist()
-        log_probs = self.log_prob_buf[finished_rows, :width].tolist()
+        log_probs = [None] * len(finished)
+        if self.log_prob_buf is not None:
+            log_probs = [row[:count] for row, count in zip(self.log_prob_buf[finished_rows, :width].tolist(), counts)]
         for row, count, row_tokens, row_log_probs in zip(finished, counts, tokens, log_probs):
             i = self.row_owner[row]
             self.row_owner[row] = None
-            self.finish_turn(i, row_tokens[:count], row_log_probs[:count] if self.rollout.return_log_probs else None)
+            self.finish_turn(i, row_tokens[:count], row_log_probs)
 
     def run(self):
         stats = self.stats
@@ -660,8 +666,10 @@ class _ContinuousRun(_ContinuousRunBase):
         self.stats["decode_steps"] += 1
         for request_id in survivor_ids:
             self.logical_positions[request_id] += 1
-        return dict(zip(survivor_ids,
-                        decoded.split(1, dim=0))), dict(zip(survivor_ids, decoded_log_probs.split(1, dim=0)))
+        decoded_log_probs_by_id = {}
+        if decoded_log_probs is not None:
+            decoded_log_probs_by_id = dict(zip(survivor_ids, decoded_log_probs.split(1, dim=0)))
+        return dict(zip(survivor_ids, decoded.split(1, dim=0))), decoded_log_probs_by_id
 
     def step(self, update):
         """Run one admission and decode step, and return the trajectories whose turns ended in EOS."""
@@ -707,7 +715,8 @@ class _ContinuousRun(_ContinuousRunBase):
         for request_id in update.active_ids:
             token = self.next_tokens[request_id]
             self.responses[request_id].append(token)
-            self.response_log_probs[request_id].append(self.next_log_probs[request_id])
+            if rollout.return_log_probs:
+                self.response_log_probs[request_id].append(self.next_log_probs[request_id])
             if rollout._is_eos(token):
                 finished_ids.append(request_id)
         if survivor_count:
