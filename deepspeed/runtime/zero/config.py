@@ -147,7 +147,7 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
     and callers do not use ``get_global_grad_norm()``.
     """
 
-    free_hbm_grad_partition_between_requests: bool = True
+    free_hbm_grad_partition_cache: bool = True
     """
     With ZeRO-2 CPU optimizer offload and fp32 gradient accumulation on a 16-bit model, free the
     fp32 gradient partition in GPU HBM after each request boundary, and restore it from the host

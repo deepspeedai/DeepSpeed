@@ -173,7 +173,7 @@ def _release_option_run(release):
     torch.manual_seed(0)
     model = Weighted(NUMEL)
     config = _config(2, False, "fp32")
-    config["zero_optimization"]["free_hbm_grad_partition_between_requests"] = release
+    config["zero_optimization"]["free_hbm_grad_partition_cache"] = release
     engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config)
     try:
         generator = torch.Generator().manual_seed(99)
