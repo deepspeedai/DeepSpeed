@@ -206,11 +206,11 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                  elastic_checkpoint=False,
                  check_grad_overflow=True,
                  compute_grad_norm=True,
-                 retain_hbm_grad_partition=False):
+                 retain_gpu_grad_partition_until_step=False):
 
         super().__init__()
 
-        self.retain_hbm_grad_partition = retain_hbm_grad_partition
+        self.retain_gpu_grad_partition_until_step = retain_gpu_grad_partition_until_step
         if not compute_grad_norm and clip_grad > 0.0:
             raise ValueError("zero_optimization.compute_grad_norm=false requires gradient_clipping=0")
         if not compute_grad_norm and zenflow_config is not None:
@@ -1364,7 +1364,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
         Every parameter accumulated in this window is copied, including one that missed the
         boundary backward. Once the host holds the exact sum, the GPU partition is freed so it
-        does not occupy HBM between requests; a later backward in the window restores it.
+        does not occupy GPU memory between requests; a later backward in the window restores it.
         """
         stream = get_accelerator().current_stream()
         if self.overlap_comm and self.reduction_stream is not None:
@@ -1395,7 +1395,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 continue
             if not self._offload_gradient_safety_enabled:
                 continue
-            if self.retain_hbm_grad_partition:
+            if self.retain_gpu_grad_partition_until_step:
                 continue
             self._record_gradient_stream(grad_group.flat_partition, stream)
             self.averaged_gradients[group_idx] = None

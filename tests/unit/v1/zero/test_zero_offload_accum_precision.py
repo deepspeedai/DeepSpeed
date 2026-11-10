@@ -173,7 +173,7 @@ def _retain_option_run(retain):
     torch.manual_seed(0)
     model = Weighted(NUMEL)
     config = _config(2, False, "fp32")
-    config["zero_optimization"]["retain_hbm_grad_partition"] = retain
+    config["zero_optimization"]["retain_gpu_grad_partition_until_step"] = retain
     engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config)
     try:
         generator = torch.Generator().manual_seed(99)

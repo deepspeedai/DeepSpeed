@@ -1631,8 +1631,8 @@ class DeepSpeedEngine(Module):
     def zero_compute_grad_norm(self):
         return self._config.zero_config.compute_grad_norm
 
-    def zero_retain_hbm_grad_partition(self):
-        return self._config.zero_config.retain_hbm_grad_partition
+    def zero_retain_gpu_grad_partition_until_step(self):
+        return self._config.zero_config.retain_gpu_grad_partition_until_step
 
     def zero_optimization_partition_gradients(self):
         return self.zero_optimization_stage() >= ZeroStageEnum.gradients
@@ -2727,7 +2727,7 @@ class DeepSpeedEngine(Module):
                 elastic_checkpoint=self.zero_elastic_checkpoint(),
                 check_grad_overflow=check_grad_overflow,
                 compute_grad_norm=self.zero_compute_grad_norm(),
-                retain_hbm_grad_partition=self.zero_retain_hbm_grad_partition())
+                retain_gpu_grad_partition_until_step=self.zero_retain_gpu_grad_partition_until_step())
 
         elif zero_stage == ZeroStageEnum.weights:
             self._validate_zero3_moe_compatibility()

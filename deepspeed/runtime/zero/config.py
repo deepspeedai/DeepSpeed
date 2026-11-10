@@ -147,13 +147,13 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
     and callers do not use ``get_global_grad_norm()``.
     """
 
-    retain_hbm_grad_partition: bool = False
+    retain_gpu_grad_partition_until_step: bool = False
     """
     With ZeRO-2 CPU optimizer offload and fp32 gradient accumulation on a 16-bit model, the fp32
-    gradient partition is freed from GPU HBM after each request boundary and restored from the host
-    gradient for the next backward. This is the default and keeps HBM use between requests low.
-    Set to ``true`` to keep the partition in HBM until ``step()``: HBM use between requests rises by
-    one fp32 partition per rank, and the per-request host copy and restore are avoided.
+    gradient partition is freed from GPU memory after each request boundary and restored from the host
+    gradient for the next backward. This is the default and keeps GPU memory use between requests low.
+    Set to ``true`` to keep the partition in GPU memory until ``step()``: GPU memory use between
+    requests rises by one fp32 partition per rank, and the per-request host copy and restore are avoided.
     Has no effect on configurations that do not use the compact gradient partition.
     """
 
