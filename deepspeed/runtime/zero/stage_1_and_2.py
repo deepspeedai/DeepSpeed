@@ -765,6 +765,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             for p in self.bit16_groups[i]:
                 if getattr(p, '_hp_mapping', None):
                     p._hp_mapping = None
+                if getattr(p, '_zero_optimizer', None) is self:
+                    del p._zero_optimizer
         for hook in self._grad_acc_hooks:
             hook.remove()
         self.print_rank_0("Removed grad acc hooks")
@@ -1030,8 +1032,6 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         self.reduce_ipg_grads()
         self.report_ipg_memory_usage("In ipg_epilogue after reduce_ipg_grads", 0)
 
-        # if dist.get_rank() == 0:
-        #    logger.info("Params already reduced %s", self.params_already_reduced)
         for i in range(len(self.params_already_reduced)):
             self.params_already_reduced[i] = False
 
@@ -1737,7 +1737,6 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             prev_id, prev_process_group, prev_copy_ranks = -1, None, None
 
             process_group = self.dp_process_group
-            # count = 0
             bucket = self.ipg_buckets[communication_data_type]
             for i, param_idx_in_group, param_id in bucket.params:
                 param = self.bit16_groups[i][param_idx_in_group]
@@ -1764,10 +1763,6 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 # Calculate rank and offsets for grad slices
                 for idx in range(len(partition_ids_w_offsets)):
                     partition_id, offset = partition_ids_w_offsets[idx]
-
-                    # if dist.get_rank() == 0 and count < 100:
-                    #     print(f"Rank {dist.get_rank()} rank offset id {idx} calculated dp size {dist.get_world_size(group=process_group)} real dp size {dist.get_world_size(self.real_dp_process_group[i])} and dst: {partition_id}")
-                    # count += 1
 
                     # Calculate numel for grad slice depending on partition location
                     if idx == len(partition_ids_w_offsets) - 1:
@@ -2264,7 +2259,6 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             if self.use_grad_accum_attribute:
                 self.clear_grad_attribute(param)
             return
-        #print(f"ID {self.get_param_id(param)} grad norm {param.grad.norm()}")
         if self.grads_in_partition is None:
             self.grads_in_partition_offset = 0
             total_size = 0
@@ -2283,7 +2277,6 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         new_grad_tensor = self.grads_in_partition.view(-1).narrow(0, self.grads_in_partition_offset, param.numel())
         new_grad_tensor.copy_(grad_reduc.view(-1))
         grad_reduc.data = new_grad_tensor.data.view_as(grad_reduc)
-        #print(f"Grad norm after copy to contiguous_buffer {param.grad.data.norm()}")
         self.grads_in_partition_offset += param.numel()
 
     def reduce_ipg_grads(self, comm_dtype=None):
@@ -2644,7 +2637,6 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         partitions = []
 
         dp = dist.get_world_size(group=self.real_dp_process_group[group_id])
-        # dp_id = dist.get_rank(group=self.real_dp_process_group[group_id])
 
         total_num_elements = tensor.numel()
 
@@ -2761,8 +2753,6 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             else:
                 dist.all_reduce(total_norm, op=dist.ReduceOp.MAX, group=expert_parallel_group)
         else:
-            # if dist.get_rank() == 0:
-            #    logger.info(f"Total Norm beginning {total_norm}")
             param_gradients = (g for g in gradients if not getattr(g, "_zero_padding", False))
             for g, p in zip(param_gradients, params):
                 # Pipeline parallelism may replicate parameters. Avoid multi-counting.
