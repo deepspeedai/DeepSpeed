@@ -9,6 +9,8 @@ import struct
 import sys
 import time
 import importlib
+import functools
+import platform
 from pathlib import Path
 import subprocess
 import shlex
@@ -47,7 +49,13 @@ def installed_cuda_version(name=""):
     if cuda_home is None:
         raise MissingCUDAException("CUDA_HOME does not exist, unable to compile CUDA op(s)")
     # Ensure there is not a cuda version mismatch between torch and nvcc compiler
-    nvcc = cuda_home + "/bin/nvcc"
+    return _nvcc_version(cuda_home + "/bin/nvcc")
+
+
+# Every CUDA op asks for the toolkit version, so nvcc runs once per nvcc path and process. The cache holds just
+# those (path, version) pairs, never a builder.
+@functools.lru_cache(maxsize=None)
+def _nvcc_version(nvcc):
     try:
         output = subprocess.check_output([nvcc, "-V"], universal_newlines=True)
     except (OSError, subprocess.SubprocessError) as err:
@@ -60,6 +68,53 @@ def installed_cuda_version(name=""):
     # Ignore patch versions, only look at major + minor
     cuda_major, cuda_minor = release[:2]
     return int(cuda_major), int(cuda_minor)
+
+
+# py-cpuinfo's names for the platform.machine() values that DeepSpeed selects CPU flags for.
+_CPU_ARCH_NAMES = {
+    'x86_64': 'X86_64',
+    'amd64': 'X86_64',
+    'aarch64': 'ARM_8',
+    'arm64': 'ARM_8',
+    'ppc64': 'PPC_64',
+    'ppc64le': 'PPC_64',
+    'riscv64': 'RISCV_64',
+}
+
+
+@functools.lru_cache(maxsize=None)
+def _cpu_info():
+    '''
+    Returns the host CPU architecture, named the way py-cpuinfo names it (X86_64, ARM_8, PPC_64, RISCV_64, ...),
+    and its feature flags as a frozenset. The CPU is queried once per process, through py-cpuinfo or, when that is
+    missing or fails, lscpu. Returns (None, frozenset()) when neither works.
+    '''
+    try:
+        from cpuinfo import get_cpu_info
+    except ImportError:
+        return _lscpu_cpu_info()
+    try:
+        cpu_info = get_cpu_info()
+    except Exception as e:
+        print(f"{WARNING} py-cpuinfo failed to detect the CPU (exception type: {type(e)}, {e}), "
+              "falling back to lscpu to get this information.")
+        return _lscpu_cpu_info()
+    return cpu_info.get('arch'), frozenset(cpu_info.get('flags', []))
+
+
+def _lscpu_cpu_info():
+    try:
+        # LC_ALL=C keeps the field names in English.
+        output = subprocess.check_output(['lscpu'], universal_newlines=True, env={**os.environ, 'LC_ALL': 'C'})
+    except (OSError, subprocess.SubprocessError) as e:
+        print(f"{WARNING} Unable to detect the CPU with py-cpuinfo or lscpu ({type(e).__name__}: {e}), "
+              "will fall back to use -march=native and non-vectorized execution.")
+        return None, frozenset()
+    flags = ''
+    for line in output.splitlines():
+        if line.startswith('Flags:'):
+            flags = line[len('Flags:'):]
+    return _CPU_ARCH_NAMES.get(platform.machine().lower()), frozenset(flags.lower().split())
 
 
 def probe_is_compatible(builder, verbose=False):
@@ -338,64 +393,14 @@ class OpBuilder(ABC):
         return [x for x in args if len(x) > 0]
 
     def cpu_arch(self):
-        try:
-            from cpuinfo import get_cpu_info
-        except ImportError as e:
-            cpu_info = self._backup_cpuinfo()
-            if cpu_info is None:
-                return "-march=native"
-
-        try:
-            cpu_info = get_cpu_info()
-        except Exception as e:
-            self.warning(f"{self.name} attempted to use py-cpuinfo but failed (exception type: {type(e)}, {e}), "
-                         "falling back to lscpu to get this information.")
-            cpu_info = self._backup_cpuinfo()
-            if cpu_info is None:
-                return "-march=native"
-
-        if cpu_info['arch'].startswith('PPC_'):
+        arch, _ = _cpu_info()
+        if (arch or '').startswith('PPC_'):
             # gcc does not provide -march on PowerPC, use -mcpu instead
             return '-mcpu=native'
-        elif (cpu_info['arch'] or '').lower().replace('_', '').startswith('riscv64'):
+        elif arch == 'RISCV_64':
             # The vector extension must be in -march for the RVV kernels to compile.
-            # py-cpuinfo on riscv64 reports "RISCV_64" (uppercase, underscore), but
-            # the lscpu fallback path and platform.uname().machine both report
-            # "riscv64" (lowercase, no separator); normalize both forms.
             return '-march=rv64gcv' if self._riscv_has_vector() else '-march=rv64gc'
         return '-march=native'
-
-    def _backup_cpuinfo(self):
-        # Construct cpu_info dict from lscpu that is similar to what py-cpuinfo provides
-        if not self.command_exists('lscpu'):
-            self.warning(f"{self.name} attempted to query 'lscpu' after failing to use py-cpuinfo "
-                         "to detect the CPU architecture. 'lscpu' does not appear to exist on "
-                         "your system, will fall back to use -march=native and non-vectorized execution.")
-            return None
-        result = subprocess.check_output(['lscpu'])
-        result = result.decode('utf-8').strip().lower()
-
-        cpu_info = {}
-        cpu_info['arch'] = None
-        cpu_info['flags'] = ""
-        if 'genuineintel' in result or 'authenticamd' in result:
-            cpu_info['arch'] = 'X86_64'
-            if 'avx512' in result:
-                cpu_info['flags'] += 'avx512,'
-            elif 'avx512f' in result:
-                cpu_info['flags'] += 'avx512f,'
-            if 'avx2' in result:
-                cpu_info['flags'] += 'avx2'
-        elif 'ppc64le' in result:
-            cpu_info['arch'] = "PPC_"
-        elif 'riscv64' in result:
-            cpu_info['arch'] = "riscv64"
-        elif 'aarch64' in result:
-            cpu_info['arch'] = "ARM_8"
-            if ' sve ' in result:
-                cpu_info['flags'] = 'sve'
-
-        return cpu_info
 
     def _riscv_hwcap(self):
         # AT_HWCAP from the auxiliary vector, the same source getauxval(3) serves.
@@ -439,34 +444,19 @@ class OpBuilder(ABC):
         return hwcap is not None and hwcap & (1 << (ord('V') - ord('A'))) != 0  # COMPAT_HWCAP_ISA_V
 
     def simd_width(self):
-        try:
-            from cpuinfo import get_cpu_info
-        except ImportError as e:
-            cpu_info = self._backup_cpuinfo()
-            if cpu_info is None:
-                return '-D__SCALAR__'
-
-        try:
-            cpu_info = get_cpu_info()
-        except Exception as e:
-            self.warning(f"{self.name} attempted to use py-cpuinfo but failed (exception type: {type(e)}, {e}), "
-                         "falling back to lscpu to get this information.")
-            cpu_info = self._backup_cpuinfo()
-            if cpu_info is None:
-                return '-D__SCALAR__'
-
-        if cpu_info['arch'] == 'X86_64':
-            if 'avx512' in cpu_info['flags'] or 'avx512f' in cpu_info['flags']:
+        arch, flags = _cpu_info()
+        if arch == 'X86_64':
+            if 'avx512f' in flags:
                 return '-D__AVX512__'
-            elif 'avx2' in cpu_info['flags']:
+            elif 'avx2' in flags:
                 return '-D__AVX256__'
-        elif (cpu_info['arch'] or '').startswith('ARM') and 'sve' in cpu_info['flags']:
+        elif (arch or '').startswith('ARM') and 'sve' in flags:
             return '-D__SVE__'
-        elif cpu_info['arch'] == 'ARM_8':
+        elif arch == 'ARM_8':
             # NEON is baseline on AArch64; vdivq/vsqrtq used by simd.h are A64-only,
             # so do not advertise it for 32-bit ARM.
             return '-D__NEON__'
-        elif (cpu_info['arch'] or '').lower().replace('_', '').startswith('riscv64') and self._riscv_has_vector():
+        elif arch == 'RISCV_64' and self._riscv_has_vector():
             return '-D__RVV__'
         return '-D__SCALAR__'
 
@@ -576,8 +566,6 @@ class OpBuilder(ABC):
 
 class CUDAOpBuilder(OpBuilder):
     _rocm_version = None
-    _rocm_gpu_arch = None
-    _rocm_wavefront_size = None
 
     def __init__(self, name):
         super().__init__(name)
@@ -643,39 +631,28 @@ class CUDAOpBuilder(OpBuilder):
         return CUDAOpBuilder._rocm_version
 
     @staticmethod
-    def get_rocm_gpu_arch():
-        if CUDAOpBuilder._rocm_gpu_arch:
-            return CUDAOpBuilder._rocm_gpu_arch
+    @functools.lru_cache(maxsize=None)
+    def _rocminfo_output():
+        # The GPU arch and the wavefront size both come from rocminfo, so it runs once per process. An empty
+        # output, when rocminfo cannot run, is cached as well.
         rocm_info = Path("/opt/rocm/bin/rocminfo")
         if (not rocm_info.is_file()):
             rocm_info = Path("rocminfo")
         try:
             result = subprocess.check_output([str(rocm_info)], stderr=subprocess.DEVNULL)
-            output = result.decode('utf-8')
-            match = re.search(r'gfx\S+', output)
-            rocm_gpu_arch = match.group(0).strip() if match else ""
+            return result.decode('utf-8')
         except (subprocess.CalledProcessError, FileNotFoundError, OSError):
-            rocm_gpu_arch = ""
-        CUDAOpBuilder._rocm_gpu_arch = rocm_gpu_arch
-        return CUDAOpBuilder._rocm_gpu_arch
+            return ""
+
+    @staticmethod
+    def get_rocm_gpu_arch():
+        match = re.search(r'gfx\S+', CUDAOpBuilder._rocminfo_output())
+        return match.group(0).strip() if match else ""
 
     @staticmethod
     def get_rocm_wavefront_size():
-        if CUDAOpBuilder._rocm_wavefront_size:
-            return CUDAOpBuilder._rocm_wavefront_size
-
-        rocm_info = Path("/opt/rocm/bin/rocminfo")
-        if (not rocm_info.is_file()):
-            rocm_info = Path("rocminfo")
-        try:
-            result = subprocess.check_output([str(rocm_info)], stderr=subprocess.DEVNULL)
-            output = result.decode('utf-8')
-            match = re.search(r'Wavefront Size:\s+(\d+)', output)
-            rocm_wavefront_size = match.group(1) if match else "32"
-        except (subprocess.CalledProcessError, FileNotFoundError, OSError):
-            rocm_wavefront_size = "32"
-        CUDAOpBuilder._rocm_wavefront_size = rocm_wavefront_size
-        return CUDAOpBuilder._rocm_wavefront_size
+        match = re.search(r'Wavefront Size:\s+(\d+)', CUDAOpBuilder._rocminfo_output())
+        return match.group(1) if match else "32"
 
     def cuda_capability_major(self):
         """Compute-capability major of CUDA device 0, or ``None`` when it cannot
