@@ -367,6 +367,13 @@ class TorchBackend(Backend):
         if use_ds_op:
             required_level = 1 if tensor.dtype == torch.float32 else 2
             use_ds_op = getattr(self, 'shm_vector_kernel_level', 0) >= required_level
+            # The shm kernel is bound to the WORLD topology and takes no group
+            # argument, so it may only serve world-wide reduces; a proper TP
+            # subgroup must fall through to the group-aware all_reduce below,
+            # or sibling subgroups' partial sums get combined (a subgroup with
+            # full world size is necessarily the world itself, hence the check).
+            if use_ds_op:
+                use_ds_op = torch.distributed.get_world_size(group=group) == torch.distributed.get_world_size()
         if not use_ds_op:
             op = self._reduce_op(op)
             return torch.distributed.all_reduce(tensor=tensor, op=op, group=group, async_op=False)
