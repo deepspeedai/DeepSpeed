@@ -50,7 +50,6 @@ jobs:
       - name: Install deepspeed
         run: |
           pip install .[dev,autotuning]
-          #python -c "from deepspeed.env_report import cli_main; cli_main()"
           ds_report
 
       - name: Python environment

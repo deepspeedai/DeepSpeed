@@ -61,9 +61,6 @@ class MegatronMoELayerPolicy(MegatronLayerPolicy):
         # for now, all of this is tightly coupled to megatron-deepspeed moe implementation
         # todo: think and refactor this to be more general
 
-        #from deepspeed.moe.utils import has_moe_layers
-        #moe, _ = has_moe_layers(self.client_module)
-
         moe_experts = self.client_module.mlp.deepspeed_moe.experts.deepspeed_experts if moe_type == 'standard' else \
                         self.client_module.mlp.moe.deepspeed_moe.experts.deepspeed_experts
         num_experts = len(moe_experts)
