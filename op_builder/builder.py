@@ -19,11 +19,8 @@ import tempfile
 from abc import ABC, abstractmethod
 from typing import List
 
-YELLOW = '\033[93m'
-END = '\033[0m'
-WARNING = f"{YELLOW} [WARNING] {END}"
+WARNING = "\033[93m [WARNING] \033[0m"
 
-DEFAULT_TORCH_EXTENSION_PATH = "/tmp/torch_extensions"
 DEFAULT_COMPUTE_CAPABILITIES = "6.0;6.1;7.0"
 
 try:
@@ -43,7 +40,7 @@ class CUDAMismatchException(Exception):
     pass
 
 
-def installed_cuda_version(name=""):
+def installed_cuda_version():
     import torch.utils.cpp_extension
     cuda_home = torch.utils.cpp_extension.CUDA_HOME
     if cuda_home is None:
@@ -154,8 +151,8 @@ def get_default_compute_capabilities():
     return compute_caps
 
 
-def assert_no_cuda_mismatch(name=""):
-    cuda_major, cuda_minor = installed_cuda_version(name)
+def assert_no_cuda_mismatch():
+    cuda_major, cuda_minor = installed_cuda_version()
     sys_cuda_version = f'{cuda_major}.{cuda_minor}'
     torch_cuda_version = ".".join(torch.version.cuda.split('.')[:2])
     if sys_cuda_version != torch_cuda_version:
@@ -460,23 +457,6 @@ class OpBuilder(ABC):
             return '-D__RVV__'
         return '-D__SCALAR__'
 
-    def command_exists(self, cmd):
-        if '|' in cmd:
-            cmds = cmd.split("|")
-        else:
-            cmds = [cmd]
-        valid = False
-        for cmd in cmds:
-            safe_cmd = ["bash", "-c", f"type {cmd}"]
-            result = subprocess.Popen(safe_cmd, stdout=subprocess.PIPE)
-            valid = valid or result.wait() == 0
-
-        if not valid and len(cmds) > 1:
-            print(f"{WARNING} {self.name} requires one of the following commands '{cmds}', but it does not exist!")
-        elif not valid and len(cmds) == 1:
-            print(f"{WARNING} {self.name} requires the '{cmd}' command, but it does not exist!")
-        return valid
-
     def warning(self, msg):
         self.error_log = f"{msg}"
         print(f"{WARNING} {msg}")
@@ -566,6 +546,10 @@ class OpBuilder(ABC):
 
 class CUDAOpBuilder(OpBuilder):
     _rocm_version = None
+    # Oldest compute capability major the op supports, or None to skip these checks. For an op that sets it,
+    # filter_ccs() drops older build targets, and is_compatible() requires torch and, when a GPU is visible, a CUDA
+    # toolkit and a GPU that is not older.
+    MIN_COMPUTE_CAPABILITY = None
 
     def __init__(self, name):
         super().__init__(name)
@@ -800,9 +784,39 @@ class CUDAOpBuilder(OpBuilder):
         Prune any compute capabilities that are not compatible with the builder. Should log
         which CCs have been pruned.
         """
-        return [cc.split('.') for cc in ccs]
+        ccs = [cc.split('.') for cc in ccs]
+        if self.MIN_COMPUTE_CAPABILITY is None:
+            return ccs
+        ccs_retained = [cc for cc in ccs if int(cc[0]) >= self.MIN_COMPUTE_CAPABILITY]
+        ccs_pruned = [cc for cc in ccs if int(cc[0]) < self.MIN_COMPUTE_CAPABILITY]
+        if len(ccs_pruned) > 0:
+            self.warning(f"Filtered compute capabilities {ccs_pruned}")
+        return ccs_retained
 
     def is_compatible(self, verbose=False):
+        if self.MIN_COMPUTE_CAPABILITY is None:
+            return super().is_compatible(verbose)
+        # setup.py checks every op, even when torch is not installed.
+        try:
+            import torch
+        except ImportError:
+            self.error_log = f"Please install torch if trying to pre-compile {self.name}"
+            if verbose:
+                self.warning(self.error_log)
+            return False
+        check_gpu = not os.environ.get("DS_IGNORE_CUDA_DETECTION") and not self.is_rocm_pytorch()
+        if check_gpu and torch.cuda.is_available():
+            # Raises MissingCUDAException when there is no CUDA toolkit to build the op with.
+            installed_cuda_version()
+            cuda_capability = self.cuda_capability_major()
+            if cuda_capability is not None and cuda_capability < self.MIN_COMPUTE_CAPABILITY:
+                # Recorded even when not verbose: load() checks with verbose=False, and jit_load() then reports
+                # error_log as the reason.
+                self.error_log = (f"{self.name} requires a GPU with compute capability "
+                                  f"{self.MIN_COMPUTE_CAPABILITY}.0 or newer")
+                if verbose:
+                    self.warning(self.error_log)
+                return False
         return super().is_compatible(verbose)
 
     def builder(self):
@@ -858,7 +872,7 @@ class CUDAOpBuilder(OpBuilder):
         # Unlike BuildExtension, PyTorch's load() does not check the CUDA toolkit version, so check it here
         # for both build paths.
         if not self.is_rocm_pytorch():
-            assert_no_cuda_mismatch(self.name)
+            assert_no_cuda_mismatch()
         # nvcc_args() goes first because it decides enable_bf16 and the arch list.
         nvcc_args = self.strip_empty_entries(self.nvcc_args())
         compile_args = super().extra_compile_args()

@@ -3,7 +3,7 @@
 
 # DeepSpeed Team
 
-from .builder import CUDAOpBuilder, installed_cuda_version
+from .builder import CUDAOpBuilder
 import importlib
 import os
 from pathlib import Path
@@ -13,6 +13,7 @@ import sys
 class EvoformerAttnBuilder(CUDAOpBuilder):
     BUILD_VAR = "DS_BUILD_EVOFORMER_ATTN"
     NAME = "evoformer_attn"
+    MIN_COMPUTE_CAPABILITY = 7  # The kernels use Tensor Cores.
     CUTLASS_IGNORE = "DS_IGNORE_CUTLASS_DETECTION"
     CUTLASS_PYTHON_BINDINGS = "DS_USE_CUTLASS_PYTHON_BINDINGS"
 
@@ -41,27 +42,7 @@ class EvoformerAttnBuilder(CUDAOpBuilder):
                          "Use TORCH_CUDA_ARCH_LIST to control build targets.")
         return super().nvcc_args()
 
-    def filter_ccs(self, ccs):
-        """Keep only Tensor Core capable targets (>= 7.0)."""
-        retained = []
-        pruned = []
-        for cc in [cc.split('.') for cc in ccs]:
-            if int(cc[0]) >= 7:
-                retained.append(cc)
-            else:
-                pruned.append(cc)
-        if pruned:
-            self.warning(f"Evoformer: excluding targets below SM 7.0: {pruned}. Tensor Core required.")
-        return retained
-
     def is_compatible(self, verbose=False):
-        try:
-            import torch
-        except ImportError:
-            if verbose:
-                self.warning("Please install torch if trying to pre-compile kernels")
-            return False
-
         if self.cutlass_path != self.CUTLASS_IGNORE:
             try:
                 self.include_paths()
@@ -81,22 +62,7 @@ class EvoformerAttnBuilder(CUDAOpBuilder):
                             self.warning("Please use CUTLASS version >= 3.1.0")
                         return False
 
-        # Check CUDA and GPU capabilities
-        cuda_okay = True
-        if not os.environ.get("DS_IGNORE_CUDA_DETECTION"):
-            if not self.is_rocm_pytorch() and torch.cuda.is_available():  #ignore-cuda
-                sys_cuda_major, _ = installed_cuda_version()
-                torch_cuda_major = int(torch.version.cuda.split(".")[0])
-                cuda_capability = self.cuda_capability_major()
-                if cuda_capability is not None and cuda_capability < 7:
-                    if verbose:
-                        self.warning("Please use a GPU with compute capability >= 7.0")
-                    cuda_okay = False
-                if torch_cuda_major < 11 or sys_cuda_major < 11:
-                    if verbose:
-                        self.warning("Please use CUDA 11+")
-                    cuda_okay = False
-        return super().is_compatible(verbose) and cuda_okay
+        return super().is_compatible(verbose)
 
     @staticmethod
     def _repo_root():

@@ -404,6 +404,32 @@ def test_cuda_capability_major_skips_probe_in_bad_fork():
     get_device_properties.assert_not_called()
 
 
+@pytest.mark.parametrize("gpu_major", [6, 7])
+@pytest.mark.parametrize("builder_name",
+                         ["inference_cutlass_builder.InferenceCutlassBuilder", "ragged_ops.RaggedOpsBuilder"])
+def test_jit_load_rejects_a_gpu_older_than_every_build_target_and_says_why(builder_name, gpu_major, tmp_path):
+    # These ops build only for compute capability 8.0 and newer, so they cannot run on a 6.x or 7.x GPU.
+    # is_compatible() must reject such a GPU instead of letting the JIT build fail on an empty arch list,
+    # and the JIT-load error must name the requirement: load() checks with verbose=False, which used to
+    # leave the reason as "None".
+    nvcc = tmp_path / "bin" / "nvcc"
+    nvcc.parent.mkdir()
+    nvcc.write_text("#!/bin/sh\necho 'Cuda compilation tools, release 12.8, V12.8.93'\n")
+    nvcc.chmod(0o755)
+    module_name, class_name = builder_name.split(".")
+    builder = getattr(importlib.import_module(f"deepspeed.ops.op_builder.{module_name}"), class_name)()
+    with patch.dict(os.environ, {"TORCH_CUDA_ARCH_LIST": f"{gpu_major}.0"}):
+        os.environ.pop("DS_IGNORE_CUDA_DETECTION", None)
+        with patch("torch.utils.cpp_extension.CUDA_HOME", str(tmp_path)), \
+                patch("torch.utils.cpp_extension.load", side_effect=AssertionError("must not compile")), \
+                patch.object(CUDA_API, "is_available", return_value=True), \
+                patch.object(builder, "is_rocm_pytorch", return_value=False), \
+                patch.object(builder, "cuda_capability_major", return_value=gpu_major):
+            assert builder.is_compatible() is False
+            with pytest.raises(RuntimeError, match=r"compute capability 8\.0"):
+                builder.jit_load(verbose=False)
+
+
 def test_forked_child_can_use_cuda_after_importing_deepspeed():
     # Core contract of issue #7918: after the parent process runs
     # ``import deepspeed``, a forked child must still be able to initialize and
