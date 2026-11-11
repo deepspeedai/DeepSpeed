@@ -666,6 +666,11 @@ class TestDeepEPMatchesCollective(DistributedTest):
         serial = _run_one_step("deepep", self.world_size, seed, **common)
         overlapped = _run_one_step("deepep", self.world_size, seed, overlap_weight_grad=True, **common)
 
+        for result in (serial, overlapped):
+            assert result["exchanges"], "the test did not exercise DeepEP"
+            for exchange in result["exchanges"]:
+                assert isinstance(exchange.buffer, exchange.deep_ep.ElasticBuffer)
+
         _assert_cleanup_results_close(overlapped, serial, compare_score_gradients=False)
         pairs = [("input_gradient", overlapped["input_gradient"], serial["input_gradient"])]
         pairs += [(name, overlapped["gradients"][name], grad) for name, grad in serial["gradients"].items()]

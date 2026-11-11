@@ -409,12 +409,13 @@ class ExpertWeightGradSlot:
     def __init__(self):
         self._compute = None
 
-    def defer(self, compute: Callable[[], tuple[torch.Tensor, torch.Tensor, torch.Tensor]]) -> None:
+    def defer(self, compute: Callable[[], tuple[torch.Tensor | None, torch.Tensor | None,
+                                                torch.Tensor | None]]) -> None:
         if self._compute is not None:
             raise RuntimeError("an expert weight gradient was deferred twice into one slot")
         self._compute = compute
 
-    def run(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def run(self) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
         if self._compute is None:
             raise RuntimeError("the expert backward did not run before the backward that computes its weight "
                                "gradients")
@@ -469,16 +470,28 @@ class _DeferredWeightGradExperts(torch.autograd.Function):
             grad_gate, grad_up = _expert_activation_backward(grad_h, gate, up, *ctx.activation)
             grad_x = torch._grouped_mm(grad_gate, w1c, offs=offsets) + torch._grouped_mm(grad_up, w3c, offs=offsets)
 
+        needs_w1, needs_w2, needs_w3 = ctx.needs_input_grad[2:5]
+
         def weight_grads():
-            grad_w2 = torch._grouped_mm(grad_out.transpose(-2, -1), h, offs=offsets)
+            grad_w1 = grad_w2 = grad_w3 = None
+            if needs_w2:
+                grad_w2 = torch._grouped_mm(grad_out.transpose(-2, -1), h, offs=offsets)
             if ctx.fused_gate_up:
-                grad_w13 = torch._grouped_mm(grad_gate_up.transpose(-2, -1), x, offs=offsets)
-                inter = grad_w13.shape[1] // 2
-                grad_w1, grad_w3 = grad_w13.narrow(1, 0, inter), grad_w13.narrow(1, inter, inter)
+                if needs_w1 or needs_w3:
+                    grad_w13 = torch._grouped_mm(grad_gate_up.transpose(-2, -1), x, offs=offsets)
+                    inter = grad_w13.shape[1] // 2
+                    if needs_w1:
+                        grad_w1 = grad_w13.narrow(1, 0, inter)
+                    if needs_w3:
+                        grad_w3 = grad_w13.narrow(1, inter, inter)
             else:
-                grad_w1 = torch._grouped_mm(grad_gate.transpose(-2, -1), x, offs=offsets)
-                grad_w3 = torch._grouped_mm(grad_up.transpose(-2, -1), x, offs=offsets)
-            return tuple(grad.to(dtype) for grad, dtype in zip((grad_w1, grad_w2, grad_w3), ctx.weight_dtypes))
+                if needs_w1:
+                    grad_w1 = torch._grouped_mm(grad_gate.transpose(-2, -1), x, offs=offsets)
+                if needs_w3:
+                    grad_w3 = torch._grouped_mm(grad_up.transpose(-2, -1), x, offs=offsets)
+            return tuple(
+                grad.to(dtype) if grad is not None else None
+                for grad, dtype in zip((grad_w1, grad_w2, grad_w3), ctx.weight_dtypes))
 
         if ctx.slot is None:
             return (grad_x, None, *weight_grads(), None, None, None, None, None)

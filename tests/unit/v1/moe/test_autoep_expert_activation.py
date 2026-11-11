@@ -646,6 +646,59 @@ class TestDeferredExpertWeightGrad:
         self._compare(get_accelerator().current_device_name(), torch.bfloat16, activation, gate_up_impl, True)
 
     @pytest.mark.parametrize("gate_up_impl", ["separate", "fused"])
+    @pytest.mark.parametrize("trainable", [(False, False, False), (False, True, False), (True, False, False),
+                                           (False, False, True)])
+    def test_frozen_weight_gradients_are_not_computed(self, gate_up_impl, trainable, record_property):
+        if get_accelerator().device_name() == "cuda":
+            device, dtype = get_accelerator().current_device_name(), torch.bfloat16
+        else:
+            if not _grouped_mm_runs_on("cpu"):
+                pytest.skip("this PyTorch build has no CPU torch._grouped_mm")
+            device, dtype = "cpu", torch.float32
+        torch.manual_seed(0)
+        kwargs = dict(dim=16,
+                      hidden_dim=8,
+                      num_experts=3,
+                      disable_triton_grouped_mm=True,
+                      activation="geglu_tanh",
+                      gate_up_impl=gate_up_impl)
+        plain, overlapped = GroupedExperts(**kwargs), GroupedExperts(**kwargs)
+        for weight in plain.parameters():
+            nn.init.normal_(weight, std=0.4)
+        overlapped.load_state_dict(plain.state_dict())
+        for experts in (plain, overlapped):
+            experts.to(device=device, dtype=dtype)
+            for name, requires_grad in zip(("w1", "w2", "w3"), trainable):
+                getattr(experts, name).requires_grad_(requires_grad)
+        counts = torch.tensor([3, 0, 5], device=device)
+        hidden = torch.randn(8, 16, device=device, dtype=dtype)
+        grad_output = torch.randn_like(hidden)
+        results, gemm_counts = [], []
+        for experts in (plain, overlapped):
+            inputs = hidden.clone().requires_grad_(True)
+            slot = ExpertWeightGradSlot() if experts is overlapped else None
+            with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU]) as profile:
+                output = experts(inputs, counts, weight_grad_slot=slot)
+                output.backward(grad_output)
+                if slot is not None:
+                    for name, grad in zip(("w1", "w2", "w3"), slot.run()):
+                        weight = getattr(experts, name)
+                        assert (grad is None) == (not weight.requires_grad)
+                        weight.grad = grad
+            # Frozen gradients already match numerically; the regression is redundant GEMM work.
+            gemm_counts.append(sum(event.count for event in profile.key_averages()
+                                   if event.key == "aten::_grouped_mm"))
+            results.append((output, inputs.grad))
+        for actual, expected in zip(results[1], results[0]):
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        for name in ("w1", "w2", "w3"):
+            torch.testing.assert_close(getattr(overlapped, name).grad, getattr(plain, name).grad, rtol=0, atol=0)
+        assert gemm_counts[0] > 0
+        assert gemm_counts[1] == gemm_counts[0]
+        record_property("serial_grouped_mm_count", gemm_counts[0])
+        record_property("overlapped_grouped_mm_count", gemm_counts[1])
+
+    @pytest.mark.parametrize("gate_up_impl", ["separate", "fused"])
     def test_create_graph_is_rejected(self, gate_up_impl):
         if not _grouped_mm_runs_on("cpu"):
             pytest.skip("this PyTorch build has no CPU torch._grouped_mm")

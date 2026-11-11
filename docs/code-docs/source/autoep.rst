@@ -351,6 +351,8 @@ kernels sized to every SM, which would leave the combine nowhere to run, so the
 dW GEMMs are launched with ``comm_num_sm`` SMs withheld through PyTorch's
 experimental SM carveout, restored immediately afterwards.
 The asynchronous combine is waited on even if a weight-gradient GEMM raises.
+Frozen expert weights omit their dW GEMMs and return no gradient. With fused
+gate+up, the shared dW GEMM is omitted only when both projections are frozen.
 
 The same gradient products autograd forms for ``torch._grouped_mm`` run in a
 different schedule; exact numerical equality across algorithms or hardware
