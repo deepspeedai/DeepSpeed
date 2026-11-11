@@ -53,9 +53,10 @@ Refreshing an inference copy
 A rollout engine that generates with its own tensor-parallel copy of a ZeRO
 model refreshes that copy after every optimizer step.
 ``deepspeed.runtime.rollout.affine_weight_sync`` does it shard to shard: no
-rank gathers a whole parameter. Both sides are maps keyed by global rank. The
-trainer side comes from ``zero_param_shaped_storage_map`` (or
-``autotp_storage_affine_maps`` for an AutoTP model). The inference side is a
+rank gathers a whole parameter. Both sides are maps keyed by global rank, also
+when the copies run over a custom process group. The trainer side comes from
+``zero_param_shaped_storage_map`` (``autotp_storage_affine_maps`` should serve
+for an AutoTP model, but that is not tested yet). The inference side is a
 tensor-parallel layout held by every replica, from
 ``replicated_layout_map``::
 
@@ -82,7 +83,9 @@ tensor-parallel layout held by every replica, from
 Plans are made once, when the sync is built, without communication.
 ``plan_transfer`` plans each parameter. A block that several ranks hold is read
 from the target's own process if that process holds it, and otherwise from the
-holder that sends the least so far; local copies do not count as load. ``sync``
+holder that sends the least so far, over all parameters; local copies do not
+count as load. The choice changes only the cost: replicas hold the same values,
+so every choice writes the same bits. ``sync``
 is collective: it runs every parameter's copies as one ``execute_transfers``
 batch, and a rank that lacks one of its shards makes every rank refuse the batch
 before any data moves. ``WeightArena`` keeps a

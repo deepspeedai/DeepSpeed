@@ -7,11 +7,16 @@
 A rollout engine that generates with its own tensor-parallel copy of the weights refreshes that copy after every
 optimizer step. Gathering each parameter whole and cutting out the local shard sends every parameter to every rank.
 Instead, each parameter is described twice with affine maps (:mod:`deepspeed.checkpoint.affine`): how the trainer
-stores it (:func:`zero_param_shaped_storage_map`, or ``autotp_storage_affine_maps`` for an AutoTP model) and which
-block each inference rank needs (:func:`replicated_layout_map`).
+stores it (:func:`zero_param_shaped_storage_map`; ``autotp_storage_affine_maps`` should serve for an AutoTP model,
+but that is not tested yet) and which block each inference rank needs (:func:`replicated_layout_map`).
 :func:`~deepspeed.checkpoint.affine_transfer.plan_transfer` composes the two into copies from trainer shards straight
 into inference shards, once per layout, and every sync runs the copies of all parameters as one
 :func:`~deepspeed.checkpoint.affine_transfer_executor.execute_transfers` batch.
+
+Which holder a replicated block is read from changes only the cost, never the result: once both maps pass
+``plan_transfer``'s checks, every plan writes the same values whichever replica it reads, provided the replicas hold
+the same values. Under ZeRO-1/2 the replicas are the data-parallel copies of each parameter, equal after every step's
+all-gather; under ZeRO-3 each element has a single holder.
 
 CUDA graphs record raw device pointers, so a decode graph captured on the inference copy stays valid only while every
 update writes into the storage it was captured on. The executor writes targets in place, and :class:`WeightArena`
@@ -120,6 +125,10 @@ class _LocalFirstLeastLoaded:
     use no link and do not count, and regions with a single holder do, since that load cannot move. ``plan_transfer``
     consults the selector only where a region has several holders, so :meth:`settle` recounts the load from each
     finished plan; within one parameter, its single-holder regions are counted only once it is planned.
+
+    The load is kept across parameters: the increment in :meth:`__call__` balances the regions of the parameter being
+    planned, and :meth:`settle` replaces it with what that plan actually sends, added to the load of the parameters
+    planned before.
     """
 
     def __init__(self):
@@ -151,7 +160,8 @@ class AffineWeightSync:
             :func:`replicated_layout_map`. It names the same parameters as ``source_maps``.
         dtype: of every buffer; ranks that hold no buffer must agree on it too.
         group: the process group the copies cross, the world by default. It must contain every rank the maps name,
-            and all of its ranks construct the sync with the same maps.
+            and all of its ranks construct the sync with the same maps. The maps stay keyed by global rank with any
+            group; the sync translates them to the group's ranks for the executor.
         budget: bytes staged per peer and direction, see
             :class:`~deepspeed.checkpoint.affine_transfer_executor.StagingBudget`.
         limits: planning limits, see :class:`~deepspeed.checkpoint.affine_transfer.PlanBudget`.

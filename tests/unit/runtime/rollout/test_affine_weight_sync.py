@@ -147,7 +147,8 @@ class TestAffineWeightSync(DistributedTest):
         engine.destroy()
 
     def test_reads_of_replicated_parameters_spread_over_their_holders(self):
-        # Ranks 0-2 each hold all six parameters whole, and rank 3 needs them all.
+        # Ranks 0-2 each hold all six parameters whole, and rank 3 needs them all. Each parameter is a single region,
+        # so the even split comes from the load carried across parameters.
         shapes = {f'w{index}': (4, 6) for index in range(6)}
         rank = dist.get_rank()
         device = get_accelerator().current_device_name()
@@ -192,6 +193,28 @@ class TestAffineWeightSync(DistributedTest):
         assert _all(stats.sent_bytes) == [24 * 4, 24 * 4, 0, 0]
         for name in needed:
             assert torch.equal(arena[name], full[name]), name
+
+    def test_maps_stay_keyed_by_global_rank_with_a_custom_group(self):
+        # The group leaves rank 0 out, so its ranks differ from global ranks: rank 1 (group rank 0) holds 'w' and
+        # rank 3 (group rank 2) needs it.
+        shape = (4, 6)
+        rank = dist.get_rank()
+        device = get_accelerator().current_device_name()
+        group = dist.new_group([1, 2, 3])
+        if rank == 0:
+            return
+        whole = replicated_map(shape, 1)
+        sync = AffineWeightSync({'w': replicated_layout_map(whole, [[1]])}, {'w': replicated_layout_map(whole, [[3]])},
+                                torch.float32,
+                                group=group)
+        full = torch.arange(24, dtype=torch.float32, device=device).view(shape)
+        arena = WeightArena({'w': shape}, torch.float32, device) if rank == 3 else None
+
+        stats = sync.sync({'w': full} if rank == 1 else {}, dict(arena.items()) if arena is not None else {})
+
+        assert stats.sent_bytes == (24 * 4 if rank == 1 else 0)
+        if arena is not None:
+            assert torch.equal(arena['w'], full)
 
     def test_a_rank_missing_a_shard_makes_every_rank_refuse_before_anything_moves(self):
         shape = (4, 6)
