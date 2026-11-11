@@ -128,19 +128,36 @@ The cache layout depends on graph capture:
   captured decode keeps one batch shape and stable tensor addresses. A turn is
   prefilled in one left-padded forward and only its real tokens are copied into
   its row, from slot 0. All rows decode every step; rows without a turn produce
-  throwaway tokens. The graph is captured once per call, when the first turn is
-  admitted. ``align_decode_fronts`` and ``enable_cache_trimming`` are rejected,
-  since rows never share a column.
+  throwaway tokens. The graph is captured once and reused across calls until the
+  batch size, the cache size, or the model's parameters change, so an in-place
+  optimizer step makes the next call capture again. ``align_decode_fronts`` and
+  ``enable_cache_trimming`` are rejected, since rows never share a column.
 
-The cache size is ``continuous_cache_capacity`` when set. Otherwise it follows
-from the longest context a turn can be admitted with, ``C``, and the most one
-turn can generate, ``b`` (``max_new_tokens_per_turn`` when set, else
-``max_new_tokens``). In a single-turn call ``C`` is the prompt width, and in a
-multi-turn rollout it is ``hybrid_engine.max_out_tokens``, since tool output has
-no other bound. The shared write column gets ``C + b`` columns, which is enough
-because trimming at full leaves the oldest live row at column 0. Each graph row
-gets ``max_out_tokens``, or in a single-turn call the longest prompt plus ``b``
-when that is smaller.
+The cache size follows from the longest context a turn can be admitted with,
+``C``, and the most one turn can generate, ``b`` (``max_new_tokens_per_turn``
+when set, else ``max_new_tokens``). In a single-turn call ``C`` is the prompt
+width, and in a multi-turn rollout it is ``hybrid_engine.max_out_tokens``, since
+tool output has no other bound, plus the longest left padding of a pre-tokenized
+sample without ``align_decode_fronts``, since records keep it on every turn.
+With ``multi_turn`` or ``align_decode_fronts``, the shared write column gets
+``C + b`` columns, which is enough because trimming at full leaves the oldest
+live row at column 0. A single-turn call without ``align_decode_fronts`` instead
+simulates the scheduler as if every request generated its whole budget, and
+takes the prompt width plus the longest span before the batch empties, so
+trimming at full is rarely needed; that is ``C + b`` when every request has the
+same budget. Requests that end early at EOS can keep the batch from emptying and
+outgrow the estimate, and trimming at full covers them. Each graph row gets
+``max_out_tokens``, or in a single-turn call the longest prompt plus ``b`` when
+that is smaller.
+
+``continuous_cache_capacity`` overrides the size, and each path treats it
+differently. Without graph capture, a single-turn call uses it as a memory cap:
+it must hold the prompt width, trimming has to work within it, and the rollout
+raises the error above if it runs out. A multi-turn rollout raises a smaller
+value to ``C + b`` with a warning, since a returning turn's context is known only
+once its tools finish. With graph capture, a single-turn call rejects a value
+smaller than the longest prompt plus ``b``, and a multi-turn rollout limits each
+turn to the room left in its row instead.
 
 Continuous batching rejects ZeRO-3, ``flash_attention_2``, shared prefill, and
 models that declare no cache-class support.
@@ -149,14 +166,18 @@ When ``HybridEngineRolloutConfig(enable_profiling=True)`` is enabled,
 ``get_last_profile()`` records ``generation_ms``, ``prefill_forward_ms``,
 ``decode_forward_ms``, ``num_decode_forwards``, ``tool_ms``, ``num_turns``,
 ``num_generated_tokens`` (tokens actually generated, padding excluded) and
-``tokens_per_second``. Without graph capture it also reports
+``tokens_per_second``. Continuous batching also reports
 ``scheduler_overhead_ms``, ``cache_management_overhead_ms`` for compaction,
-trimming, reset and admitted-row copies, ``num_prefill_forwards`` and
-``active_batch_size``, the most rows live at once. With graph capture it reports
-``continuous_rows``, ``continuous_decode_occupancy`` and
-``continuous_step_trace``, one entry per decode step.
+trimming, reset and admitted-row copies, ``num_prefill_forwards``,
+``active_batch_size``, the most rows live at once, ``continuous_batch_size``,
+``continuous_decode_occupancy``, the share of ``continuous_batch_size`` rows
+times decode steps that produced a token (graph replays every row, while the
+shared write column runs only its live rows, so the two are not directly
+comparable), and ``continuous_step_trace``, one entry per step with the rows holding
+a turn, the rows still decoding, the tokens decoded so far, the turns queued and
+the trajectories waiting on tools.
 
-Without graph capture, the most recent cache statistics are available from
+For continuous batching, the most recent cache statistics are available from
 ``rollout.get_last_continuous_stats()``. They include ``cache_capacity``,
 ``peak_cache_length``, ``cache_memory_bytes``, ``trim_count``,
 ``trimmed_columns``, ``trim_frequency``, and ``trim_bytes_moved``.
