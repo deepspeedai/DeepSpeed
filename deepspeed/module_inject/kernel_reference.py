@@ -34,9 +34,7 @@ def grouped_linear(x, weights, glu_epilogue=False):
     """
     outs = [F.linear(x, w) for w in weights]
     if glu_epilogue:
-        gate = outs[0].float()
-        up = outs[1].float()
-        outs = [(gate / (1.0 + torch.exp(-gate)) * up).to(x.dtype)]
+        outs = [F.silu(outs[0]) * outs[1]]
     return outs
 
 
@@ -44,7 +42,7 @@ def gdn_gates(a, b, a_log, dt_bias):
     """GDN gating: beta = sigmoid(b), g = -exp(a_log) * softplus(a + dt_bias)."""
     beta = torch.sigmoid(b)
     g = -torch.exp(a_log.float()) * F.softplus(a.float() + dt_bias.float())
-    return beta, g.to(b.dtype)
+    return beta, g
 
 
 def decode_attn(q, K, V, pos):
@@ -80,9 +78,7 @@ def decode_attn(q, K, V, pos):
 
 def silu_mul(gu, n):
     """GLU epilogue on a [M, 2n] buffer: silu(g) * u."""
-    g = gu[:, :n].float()
-    u = gu[:, n:].float()
-    return (g / (1.0 + torch.exp(-g)) * u).to(gu.dtype)
+    return F.silu(gu[:, :n]) * gu[:, n:]
 
 
 def repeat_qk(q, k, ratio):
@@ -93,12 +89,13 @@ def repeat_qk(q, k, ratio):
 def gated_norm(x, z, weight, eps=1e-5):
     """GDN z-gated output norm: (weight * rms(x)) * silu(z), weight direct."""
     xf = x.float()
-    xf = xf * torch.rsqrt(xf.pow(2).mean(-1, keepdim=True) + eps)
-    return (xf * weight.float() * torch.nn.functional.silu(z.float())).to(x.dtype)
+    normalized = (xf * torch.rsqrt(xf.pow(2).mean(-1, keepdim=True) + eps)).to(x.dtype)
+    weighted = normalized * weight
+    return (weighted.float() * torch.nn.functional.silu(z.float())).to(x.dtype)
 
 
 def fused_add_norm(hidden, residual, weight, eps=1e-5):
     """Residual add + RMSNorm: rms_norm(hidden + residual) * weight."""
-    combined = hidden.float() + residual.float()
+    combined = (hidden + residual).float()
     rms = torch.rsqrt(combined.pow(2).mean(dim=-1, keepdim=True) + eps)
     return (combined * rms * weight.float()).to(hidden.dtype)

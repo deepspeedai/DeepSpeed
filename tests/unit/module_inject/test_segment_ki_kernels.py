@@ -18,6 +18,7 @@ Three groups:
 """
 
 import os
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -74,17 +75,60 @@ def _rand_bf16(*shape, device=DEV):
 @pytest.mark.skipif(not GPU_AVAILABLE, reason="non-CPU device required")
 class TestKernelReferenceConsistency:
 
+    @pytest.mark.parametrize("rows", [1, 8, 65])
+    def test_glu_preserves_bf16_rounding(self, rows):
+        torch.manual_seed(0)
+        x = torch.zeros(rows, 128, dtype=torch.bfloat16, device=DEV)
+        x[:, :2] = 0.5
+        gate = torch.zeros(64, 128, dtype=torch.bfloat16, device=DEV)
+        up = torch.zeros_like(gate)
+        gate[:, :2] = _rand_bf16(64, 2)
+        up[:, :2] = _rand_bf16(64, 2)
+        expected = torch.nn.functional.silu(torch.nn.functional.linear(x, gate)) * torch.nn.functional.linear(x, up)
+
+        actual = _op().grouped_linear(x, [gate, up], True)[0]
+        torch.testing.assert_close(actual, expected.reshape_as(actual), atol=0, rtol=0)
+        torch.testing.assert_close(ref_grouped_linear(x, [gate, up], True)[0], expected, atol=0, rtol=0)
+
     def test_gated_norm(self):
-        """GDN z-gated norm kernel vs reference: (w * rms(x)) * silu(z)."""
+        modeling = pytest.importorskip("transformers.models.qwen3_5.modeling_qwen3_5")
         torch.manual_seed(0)
         b, dim = 4, 256
         x = _rand_bf16(b, dim)
         z = _rand_bf16(b, dim)
         w = _rand_bf16(dim)
+        norm = modeling.Qwen3_5RMSNormGated(dim).to(device=DEV, dtype=torch.bfloat16)
+        with torch.no_grad():
+            norm.weight.copy_(w)
         out = torch.empty_like(x)
         _op().gated_norm(x, z, w, out, 1e-6)
-        expected = ref_gated_norm(x.float(), z.float(), w.float())
-        torch.testing.assert_close(out.float(), expected, atol=5e-2, rtol=5e-2)
+        expected = norm(x, z)
+        torch.testing.assert_close(out.float(), expected.float(), atol=1e-3, rtol=1e-3)
+        torch.testing.assert_close(ref_gated_norm(x, z, w, eps=1e-6), expected, atol=0, rtol=0)
+
+    @pytest.mark.parametrize("gate_dtype", [torch.bfloat16, torch.float32])
+    def test_gdn_recurrent_step_preserves_gate_precision(self, gate_dtype):
+        modeling = pytest.importorskip("transformers.models.qwen3_5.modeling_qwen3_5")
+        torch.manual_seed(0)
+        q, k = _rand_bf16(2, 4, 32), _rand_bf16(2, 4, 32)
+        v = _rand_bf16(2, 4, 16)
+        g = -torch.rand(2, 4, device=DEV).to(gate_dtype)
+        beta = torch.rand(2, 4, device=DEV).bfloat16()
+        state = torch.randn(2, 4, 32, 16, device=DEV)
+        expected, expected_state = modeling.torch_recurrent_gated_delta_rule(
+            q.unsqueeze(1),
+            k.unsqueeze(1),
+            v.unsqueeze(1),
+            g=g.unsqueeze(1),
+            beta=beta.unsqueeze(1),
+            initial_state=state.clone(),
+            output_final_state=True,
+            use_qk_l2norm_in_kernel=True,
+        )
+        actual = torch.empty_like(v)
+        _op().gdn_recurrent_step(q, k, v, g, beta, state, actual)
+        torch.testing.assert_close(actual, expected.squeeze(1), atol=1e-2, rtol=1e-2)
+        torch.testing.assert_close(state, expected_state, atol=2e-5, rtol=2e-5)
 
     def test_decode_attn_fused_q(self):
         """Fused q-side path: the kernel applies per-head RMSNorm (1+w),
@@ -133,6 +177,50 @@ class TestKernelReferenceConsistency:
         attn = ref_decode_attn(qf.bfloat16().float(), K.float(), V.float(), pos)
         expected = attn * torch.sigmoid(gate.float()).view(b, nq, hd)
         torch.testing.assert_close(out.float(), expected, atol=5e-2, rtol=5e-2)
+
+    @pytest.mark.parametrize("rope_dim", [64, 128])
+    def test_decode_attention_preserves_hf_cache_and_gate_rounding(self, rope_dim):
+        modeling = pytest.importorskip("transformers.models.qwen3_5.modeling_qwen3_5")
+        torch.manual_seed(0)
+        batch, num_q_heads, num_kv_heads, head_dim = 8, 8, 2, 128
+        query = _rand_bf16(batch, num_q_heads, head_dim)
+        key = _rand_bf16(batch, num_kv_heads, head_dim)
+        value = _rand_bf16(batch, num_kv_heads, head_dim)
+        gate = _rand_bf16(batch, num_q_heads, head_dim)
+        norm = modeling.Qwen3_5RMSNorm(head_dim).to(device=DEV, dtype=torch.bfloat16)
+        with torch.no_grad():
+            norm.weight.copy_(_rand_bf16(head_dim) * 0.1)
+        scale = (1.0 + norm.weight.float()).contiguous()
+        cosine, sine = _rand_bf16(1, rope_dim), _rand_bf16(1, rope_dim)
+        _, expected_key = modeling.apply_rotary_pos_emb(
+            norm(query).unsqueeze(2),
+            norm(key).unsqueeze(2), cosine.unsqueeze(0), sine.unsqueeze(0))
+        keys = torch.zeros(batch, num_kv_heads, 1, head_dim, dtype=torch.bfloat16, device=DEV)
+        values = torch.zeros_like(keys)
+        output = torch.empty_like(query)
+        _op().decode_attn(query,
+                          keys,
+                          values,
+                          torch.zeros(batch, dtype=torch.long, device=DEV),
+                          output,
+                          num_q_heads,
+                          num_kv_heads,
+                          head_dim,
+                          1,
+                          q_norm_w=scale,
+                          cos_t=cosine.float(),
+                          sin_t=sine.float(),
+                          gate=gate,
+                          k_raw=key,
+                          v_raw=value,
+                          k_norm_w=scale,
+                          eps=norm.eps,
+                          rope_dim=rope_dim)
+        torch.testing.assert_close(keys, expected_key, atol=0, rtol=0)
+        torch.testing.assert_close(values.squeeze(2), value, atol=0, rtol=0)
+        # With one KV slot, attention returns V exactly, independently of softmax implementation.
+        expected_output = value.repeat_interleave(num_q_heads // num_kv_heads, dim=1) * torch.sigmoid(gate)
+        torch.testing.assert_close(output, expected_output, atol=0, rtol=0)
 
     def test_decode_attn_fused_q_partial_rope(self):
         """Partial RoPE (Qwen3.5 convention): rotation over [0, rope_dim)
@@ -252,6 +340,9 @@ class TestKernelReferenceConsistency:
         dt = torch.randn(8, device=DEV)
         beta, g = _op().gdn_gates(a, b, a_log, dt)
         ref_beta, ref_g = ref_gdn_gates(a, b, a_log, dt)
+        expected_g = -torch.exp(a_log) * torch.nn.functional.softplus(a.float() + dt)
+        torch.testing.assert_close(g, expected_g, atol=1e-6, rtol=1e-6)
+        torch.testing.assert_close(ref_g, expected_g, atol=0, rtol=0)
         torch.testing.assert_close(beta.float(), ref_beta.float(), atol=1e-2, rtol=1e-2)
         torch.testing.assert_close(g.float(), ref_g.float(), atol=5e-2, rtol=5e-2)
 
@@ -436,6 +527,46 @@ class TestGraphPathWithoutSegki:
 
 @pytest.mark.skipif(not GPU_AVAILABLE, reason="non-CPU device required")
 class TestRolloutTrainRollout:
+
+    @pytest.mark.parametrize("batch_size", [1, 4, 8])
+    @pytest.mark.parametrize("use_segki", [False, True])
+    def test_graph_decode_matches_eager_greedy(self, batch_size, use_segki):
+        pytest.importorskip("transformers")
+        accelerator = get_accelerator()
+        if not accelerator.is_graph_capture_supported():
+            pytest.skip("graph capture is not supported")
+        from transformers import AutoModelForCausalLM
+        from deepspeed.runtime.rollout.base import RolloutRequest, SamplingConfig
+        from deepspeed.runtime.rollout.hybrid_engine_rollout import HybridEngineRollout, HybridEngineRolloutConfig
+
+        device = accelerator.device_name()
+        model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen3.5-0.8B-Base",
+                                                     dtype=torch.bfloat16,
+                                                     attn_implementation="sdpa").to(device).eval()
+        model.generation_config.eos_token_id = None
+        model.generation_config.pad_token_id = 0
+        generator = torch.Generator(device=device).manual_seed(0)
+        # These prompts expose fused-kernel rounding and static-cache decode differences.
+        ids = torch.randint(1000, 50000, (8, 128), generator=generator, device=device)[:batch_size].clone()
+        attn = torch.ones_like(ids)
+        request = RolloutRequest(prompt_ids=ids, prompt_attention_mask=attn)
+        sampling = SamplingConfig(max_new_tokens=16, temperature=0.0)
+        with torch.no_grad():
+            expected = model.generate(ids,
+                                      attention_mask=attn,
+                                      max_new_tokens=16,
+                                      do_sample=False,
+                                      eos_token_id=None,
+                                      pad_token_id=0)
+            rollout = HybridEngineRollout(SimpleNamespace(module=model),
+                                          SimpleNamespace(pad_token_id=0, eos_token_id=-1),
+                                          HybridEngineRolloutConfig(use_segki=use_segki))
+            if use_segki:
+                assert rollout._segki_report["fused_glu"]["segments_replaced"] > 0
+            torch.testing.assert_close(rollout.generate(request, sampling).input_ids, expected, atol=0, rtol=0)
+            rollout.use_graph_capture = True
+            for _ in range(2):
+                torch.testing.assert_close(rollout.generate(request, sampling).input_ids, expected, atol=0, rtol=0)
 
     def test_rl_loop_needs_no_switch_or_sync(self):
         """The co-location contract end-to-end: generate with full
@@ -708,8 +839,9 @@ class TestAmpereGlueReferences:
         for M, n in ((32, 4608), (1, 2304), (64, 128)):
             gu = _rand_bf16(M, 2 * n)
             out = _op().silu_mul(gu, n)
-            r = ref_silu_mul(gu.float(), n)
-            torch.testing.assert_close(out.float(), r, atol=5e-2, rtol=5e-2)
+            expected = torch.nn.functional.silu(gu[:, :n]) * gu[:, n:]
+            torch.testing.assert_close(out, expected, atol=0, rtol=0)
+            torch.testing.assert_close(ref_silu_mul(gu, n), expected, atol=0, rtol=0)
 
     def test_repeat_qk_matches_reference(self):
         from deepspeed.module_inject.kernel_reference import repeat_qk as ref_repeat_qk

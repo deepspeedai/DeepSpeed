@@ -5,8 +5,8 @@
 // Native CUDA kernel for the segment-KI fused_glu op: computes
 // out = silu(hidden[:, :k]) * hidden[:, k:2k] on the fused gate|up GEMM
 // output without materializing chunked views. hidden is contiguous
-// [N, 2k]; out is contiguous [N, k]. Activation math runs in fp32 with a
-// single rounding to the storage dtype (torch opmath convention).
+// [N, 2k]; out is contiguous [N, k]. Projection and activation outputs round
+// to the storage dtype before the next operation, matching eager GLU.
 
 #include <ATen/cuda/CUDAContext.h>
 #include <cooperative_groups.h>
@@ -21,6 +21,24 @@
 
 #define SILU(x) ((x) / (1.0f + expf(-(x))))
 
+__device__ __forceinline__ float bf16_round(float value)
+{
+    return __bfloat162float(__float2bfloat16_rn(value));
+}
+
+__device__ __forceinline__ __nv_bfloat16 bf16_silu_mul(float gate, float up)
+{
+    const float g = bf16_round(gate);
+    const float u = bf16_round(up);
+    const float activated = bf16_round(SILU(g));
+    return __float2bfloat16_rn(activated * u);
+}
+
+__device__ __forceinline__ float bf16_rope(float value, float rotated, float cosine, float sine)
+{
+    return bf16_round(bf16_round(value * cosine) + bf16_round(rotated * sine));
+}
+
 // GDN gating for the segment-KI fused_gdn op: per-token, per-value-head
 //   beta = sigmoid(b);  g = -exp(A_log) * softplus(a + dt_bias)
 // computed in fp32 regardless of storage dtype (matches the native forward's
@@ -30,7 +48,7 @@ __global__ void gdn_gates_kernel(const __nv_bfloat16* __restrict__ a,
                                  const float* __restrict__ a_log,
                                  const float* __restrict__ dt_bias,
                                  __nv_bfloat16* __restrict__ beta_out,
-                                 __nv_bfloat16* __restrict__ g_out,
+                                 float* __restrict__ g_out,
                                  int64_t total,
                                  int num_heads,
                                  int64_t row_stride)
@@ -45,14 +63,9 @@ __global__ void gdn_gates_kernel(const __nv_bfloat16* __restrict__ a,
         float av = __bfloat162float(a[off]);
         float bv = __bfloat162float(b[off]);
         float sp_x = av + dt_bias[h];
-        // Numerically stable softplus: 1+exp(x) rounds to 1 in fp32 for
-        // strongly negative x (log(1+exp(-20)) == 0), so use log1p there;
-        // for large x, log(1+exp(x)) == x to fp32 precision.
-        float sp = (sp_x > 20.0f)    ? sp_x
-                   : (sp_x < -10.0f) ? log1pf(expf(sp_x))
-                                     : logf(1.0f + expf(sp_x));
+        float sp = (sp_x > 20.0f) ? sp_x : log1pf(expf(sp_x));
         beta_out[i] = __float2bfloat16(1.0f / (1.0f + expf(-bv)));
-        g_out[i] = __float2bfloat16(-expf(a_log[h]) * sp);
+        g_out[i] = -expf(a_log[h]) * sp;
     }
 }
 
@@ -61,7 +74,7 @@ std::vector<at::Tensor> gdn_gates(at::Tensor a, at::Tensor b, at::Tensor a_log, 
     TORCH_CHECK(a.is_cuda() && b.is_cuda(), "gdn_gates is CUDA-only");
     TORCH_CHECK(a.stride(-1) == 1 && b.stride(-1) == 1, "a/b must be unit-stride in the last dim");
     auto beta = at::empty_like(a);
-    auto g = at::empty_like(b);
+    auto g = at::empty(a.sizes(), a.options().dtype(at::kFloat));
     int64_t total = a.numel();
     if (total == 0) return {beta, g};
     int heads = (int)dt_bias.size(0);
@@ -74,7 +87,7 @@ std::vector<at::Tensor> gdn_gates(at::Tensor a, at::Tensor b, at::Tensor a_log, 
         a_log.data_ptr<float>(),
         dt_bias.data_ptr<float>(),
         reinterpret_cast<__nv_bfloat16*>(beta.data_ptr<at::BFloat16>()),
-        reinterpret_cast<__nv_bfloat16*>(g.data_ptr<at::BFloat16>()),
+        g.data_ptr<float>(),
         total,
         heads,
         (int64_t)a.stride(-2));
@@ -229,10 +242,7 @@ __global__ void dual_gemv_silu_mul_kernel(const __nv_bfloat16* __restrict__ hidd
         up_acc += __shfl_down_sync(0xffffffff, up_acc, offset);
     }
 
-    if (lane == 0) {
-        float activated = SILU(gate_acc);
-        out[warp_id] = __float2bfloat16_rn(activated * up_acc);
-    }
+    if (lane == 0) { out[warp_id] = bf16_silu_mul(gate_acc, up_acc); }
 }
 
 void dual_gemv_silu_mul(at::Tensor hidden, at::Tensor gate_w, at::Tensor up_w, at::Tensor out)
@@ -421,7 +431,8 @@ __global__ void __launch_bounds__(512)
         for (int off = 16; off > 0; off >>= 1) ss += __shfl_down_sync(0xffffffff, ss, off);
         const float inv_norm = rsqrtf(__shfl_sync(0xffffffff, ss, 0) / HEAD_DIM + eps);
 #pragma unroll
-        for (int e = 0; e < EPL; e++) q_reg[e] = q_reg[e] * inv_norm * q_norm_w[lane * EPL + e];
+        for (int e = 0; e < EPL; e++)
+            q_reg[e] = bf16_round(q_reg[e] * inv_norm * q_norm_w[lane * EPL + e]);
         // Partial RoPE (HF convention): rotate_half only over [0, rope_dim),
         // elements past rope_dim pass through. Lanes holding rope elements
         // pair with the lane half a rope region away.
@@ -441,7 +452,7 @@ __global__ void __launch_bounds__(512)
             const float* srow = sin_t + (long)pos * rope_dim + j0;
 #pragma unroll
             for (int e = 0; e < EPL; e++)
-                q_reg[e] = q_reg[e] * crow[e] + (first_half ? -pair[e] : pair[e]) * srow[e];
+                q_reg[e] = bf16_rope(q_reg[e], first_half ? -pair[e] : pair[e], crow[e], srow[e]);
         }
     }
 
@@ -462,7 +473,8 @@ __global__ void __launch_bounds__(512)
         for (int off = 16; off > 0; off >>= 1) kss += __shfl_down_sync(0xffffffff, kss, off);
         const float k_inv = rsqrtf(__shfl_sync(0xffffffff, kss, 0) / HEAD_DIM + eps);
 #pragma unroll
-        for (int e = 0; e < EPL; e++) k_reg[e] = k_reg[e] * k_inv * k_norm_w[lane * EPL + e];
+        for (int e = 0; e < EPL; e++)
+            k_reg[e] = bf16_round(k_reg[e] * k_inv * k_norm_w[lane * EPL + e]);
         const int kj0 = lane * EPL;
         const int khalf_lanes = rope_dim > 0 ? (rope_dim / 2) / EPL : 0;
         const int kpartner = (kj0 < rope_dim / 2) ? lane + khalf_lanes
@@ -477,7 +489,7 @@ __global__ void __launch_bounds__(512)
             const float* ksrow = sin_t + (long)pos * rope_dim + kj0;
 #pragma unroll
             for (int e = 0; e < EPL; e++)
-                k_reg[e] = k_reg[e] * kcrow[e] + (kfirst ? -kpair[e] : kpair[e]) * ksrow[e];
+                k_reg[e] = bf16_rope(k_reg[e], kfirst ? -kpair[e] : kpair[e], kcrow[e], ksrow[e]);
         }
         __nv_bfloat16* k_slot = Kg + (long)pos * HEAD_DIM;
         __nv_bfloat16* v_slot = Vg + (long)pos * HEAD_DIM;
@@ -561,9 +573,9 @@ __global__ void __launch_bounds__(512)
         float inv = 1.0f / S;
 #pragma unroll
         for (int e = 0; e < EPL; e++) {
-            float v = acc[e] * inv;
+            float v = bf16_round(acc[e] * inv);
             if (gate != nullptr)
-                v *= 1.0f / (1.0f + expf(-__bfloat162float(g_row[lane * EPL + e])));
+                v *= bf16_round(1.0f / (1.0f + expf(-__bfloat162float(g_row[lane * EPL + e]))));
             out[((long)(row * num_q_heads + q_head)) * HEAD_DIM + lane * EPL + e] =
                 __float2bfloat16_rn(v);
         }
@@ -748,9 +760,10 @@ void decode_attn(at::Tensor q,
 // residual stream; the normalized output is written to a separate tensor that
 // feeds the next sublayer. One thread block covers the whole row so the
 // sum-of-squares reduction stays block-local.
+template <typename Weight>
 __global__ void fused_add_norm_kernel(__nv_bfloat16* __restrict__ hidden,
                                       const __nv_bfloat16* __restrict__ residual,
-                                      const __nv_bfloat16* __restrict__ weight,
+                                      const Weight* __restrict__ weight,
                                       __nv_bfloat16* __restrict__ out,
                                       float eps,
                                       int dim)
@@ -769,9 +782,11 @@ __global__ void fused_add_norm_kernel(__nv_bfloat16* __restrict__ hidden,
 
     float local_ss = 0.0f;
     for (int i = tid; i < dim; i += n_threads) {
-        float h = __bfloat162float(hrow[i]) + __bfloat162float(rrow[i]);
+        __nv_bfloat16 combined =
+            __float2bfloat16_rn(__bfloat162float(hrow[i]) + __bfloat162float(rrow[i]));
+        float h = __bfloat162float(combined);
         s_data[i] = h;
-        hrow[i] = __float2bfloat16_rn(h);
+        hrow[i] = combined;
         local_ss += h * h;
     }
 
@@ -791,7 +806,7 @@ __global__ void fused_add_norm_kernel(__nv_bfloat16* __restrict__ hidden,
     float rms = s_reduce[0];
 
     for (int i = tid; i < dim; i += n_threads)
-        orow[i] = __float2bfloat16_rn(s_data[i] * rms * __bfloat162float(weight[i]));
+        orow[i] = __float2bfloat16_rn(s_data[i] * rms * static_cast<float>(weight[i]));
 }
 
 __device__ __forceinline__ float silu_f(float v) { return v / (1.0f + expf(-v)); }
@@ -834,15 +849,22 @@ __global__ void gated_norm_kernel(const __nv_bfloat16* __restrict__ x,
     }
     __syncthreads();
     float rms = s_reduce[0];
-    for (int i = tid; i < dim; i += n_threads)
-        orow[i] = __float2bfloat16_rn(s_data[i] * rms * __bfloat162float(w[i]) *
-                                      silu_f(__bfloat162float(zr[i])));
+    for (int i = tid; i < dim; i += n_threads) {
+        float normalized = __bfloat162float(__float2bfloat16_rn(s_data[i] * rms));
+        float weighted = __bfloat162float(__float2bfloat16_rn(normalized * __bfloat162float(w[i])));
+        orow[i] = __float2bfloat16_rn(weighted * silu_f(__bfloat162float(zr[i])));
+    }
 }
 
 at::Tensor fused_add_norm(at::Tensor hidden, at::Tensor residual, at::Tensor weight, double eps)
 {
-    TORCH_CHECK(hidden.is_cuda() && hidden.scalar_type() == at::ScalarType::BFloat16,
-                "hidden/residual/weight must be CUDA bf16");
+    TORCH_CHECK(hidden.is_cuda() && residual.is_cuda() &&
+                    hidden.scalar_type() == at::ScalarType::BFloat16 &&
+                    residual.scalar_type() == at::ScalarType::BFloat16,
+                "hidden/residual must be CUDA bf16");
+    TORCH_CHECK(weight.is_cuda() && (weight.scalar_type() == at::ScalarType::BFloat16 ||
+                                     weight.scalar_type() == at::ScalarType::Float),
+                "weight must be CUDA bf16 or fp32");
     TORCH_CHECK(hidden.is_contiguous() && residual.is_contiguous() && weight.is_contiguous(),
                 "inputs must be contiguous");
     int64_t rows = hidden.numel() / hidden.size(-1);
@@ -855,13 +877,19 @@ at::Tensor fused_add_norm(at::Tensor hidden, at::Tensor residual, at::Tensor wei
     auto stream = at::cuda::getCurrentCUDAStream();
     int threads = std::min(1024, ((dim + 31) / 32) * 32);
     if (threads == 0) threads = 32;
-    fused_add_norm_kernel<<<(int)rows, threads, (size_t)dim * sizeof(float), stream>>>(
-        reinterpret_cast<__nv_bfloat16*>(hidden.data_ptr<at::BFloat16>()),
-        reinterpret_cast<const __nv_bfloat16*>(residual.data_ptr<at::BFloat16>()),
-        reinterpret_cast<const __nv_bfloat16*>(weight.data_ptr<at::BFloat16>()),
-        reinterpret_cast<__nv_bfloat16*>(out.data_ptr<at::BFloat16>()),
-        (float)eps,
-        dim);
+    auto launch = [&](auto* weight_ptr) {
+        fused_add_norm_kernel<<<(int)rows, threads, (size_t)dim * sizeof(float), stream>>>(
+            reinterpret_cast<__nv_bfloat16*>(hidden.data_ptr<at::BFloat16>()),
+            reinterpret_cast<const __nv_bfloat16*>(residual.data_ptr<at::BFloat16>()),
+            weight_ptr,
+            reinterpret_cast<__nv_bfloat16*>(out.data_ptr<at::BFloat16>()),
+            (float)eps,
+            dim);
+    };
+    if (weight.scalar_type() == at::ScalarType::Float)
+        launch(weight.data_ptr<float>());
+    else
+        launch(reinterpret_cast<const __nv_bfloat16*>(weight.data_ptr<at::BFloat16>()));
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     return out;
 }
@@ -1241,8 +1269,8 @@ __global__ void glu_gemm_kernel(const __nv_bfloat16* __restrict__ x,
     for (int idx = tid; idx < M * NT_TILE; idx += GRP_TPB) {
         int m = idx / NT_TILE, c = idx % NT_TILE;
         if (n0 + c < N) {
-            float v = silu_f(out_s[m * (NT_TILE + 8) + c]) * out_u[m * (NT_TILE + 8) + c];
-            out[(long)m * N + n0 + c] = __float2bfloat16_rn(v);
+            out[(long)m * N + n0 + c] =
+                bf16_silu_mul(out_s[m * (NT_TILE + 8) + c], out_u[m * (NT_TILE + 8) + c]);
         }
     }
 #endif
@@ -1329,10 +1357,11 @@ std::vector<at::Tensor> grouped_gemm_impl(at::Tensor x,
 // precomputed beta/g and in-kernel qk-l2norm; the state rides in shared
 // memory so the four passes (FLA read+write, HF copy-back read+write)
 // collapse to one read + one write.
+template <typename Gate>
 __global__ void gdn_recurrent_step_kernel(const __nv_bfloat16* __restrict__ q,
                                           const __nv_bfloat16* __restrict__ k,
                                           const __nv_bfloat16* __restrict__ v,
-                                          const __nv_bfloat16* __restrict__ g,
+                                          const Gate* __restrict__ g,
                                           const __nv_bfloat16* __restrict__ beta,
                                           float* __restrict__ state,
                                           __nv_bfloat16* __restrict__ out,
@@ -1378,7 +1407,7 @@ __global__ void gdn_recurrent_step_kernel(const __nv_bfloat16* __restrict__ q,
     const float inv_qq = rsqrtf(s_red[0] + 1e-6f) * scale;
     const float inv_kk = rsqrtf(s_red[1] + 1e-6f);
 
-    const float decay = __expf(__bfloat162float(g[bh]));
+    const float decay = __expf(static_cast<float>(g[bh]));
     const float b_beta = __bfloat162float(beta[bh]);
 
     // one thread per state column j: kv = k^T (decay*h), then the
@@ -1415,6 +1444,10 @@ void gdn_recurrent_step(at::Tensor q,
                 "q/k/v must be contiguous");
     TORCH_CHECK(state.is_contiguous() && state.scalar_type() == at::ScalarType::Float,
                 "state must be fp32 contiguous");
+    TORCH_CHECK(g.is_cuda() && g.is_contiguous() &&
+                    (g.scalar_type() == at::ScalarType::BFloat16 ||
+                     g.scalar_type() == at::ScalarType::Float),
+                "g must be CUDA bf16 or fp32 contiguous");
     const int B = (int)q.size(0), H = (int)q.size(1), K = (int)q.size(2), V = (int)v.size(2);
     TORCH_CHECK(k.sizes() == q.sizes() && v.size(0) == B && v.size(1) == H && v.size(2) == V,
                 "shape mismatch");
@@ -1424,16 +1457,22 @@ void gdn_recurrent_step(at::Tensor q,
     TORCH_CHECK(V <= 1024, "V must fit one-thread-per-column");
     const int smem = (2 * K + V) * 4;
     auto stream = at::cuda::getCurrentCUDAStream();
-    gdn_recurrent_step_kernel<<<B * H, (V + 31) / 32 * 32, smem, stream.stream()>>>(
-        (const __nv_bfloat16*)q.data_ptr(),
-        (const __nv_bfloat16*)k.data_ptr(),
-        (const __nv_bfloat16*)v.data_ptr(),
-        (const __nv_bfloat16*)g.data_ptr(),
-        (const __nv_bfloat16*)beta.data_ptr(),
-        (float*)state.data_ptr(),
-        (__nv_bfloat16*)out.data_ptr(),
-        K,
-        V);
+    auto launch = [&](auto* gate_ptr) {
+        gdn_recurrent_step_kernel<<<B * H, (V + 31) / 32 * 32, smem, stream.stream()>>>(
+            (const __nv_bfloat16*)q.data_ptr(),
+            (const __nv_bfloat16*)k.data_ptr(),
+            (const __nv_bfloat16*)v.data_ptr(),
+            gate_ptr,
+            (const __nv_bfloat16*)beta.data_ptr(),
+            (float*)state.data_ptr(),
+            (__nv_bfloat16*)out.data_ptr(),
+            K,
+            V);
+    };
+    if (g.scalar_type() == at::ScalarType::Float)
+        launch(g.data_ptr<float>());
+    else
+        launch(reinterpret_cast<const __nv_bfloat16*>(g.data_ptr<at::BFloat16>()));
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
@@ -1517,7 +1556,7 @@ __global__ void silu_mul_kernel(const __nv_bfloat16* __restrict__ gu,
         const long long base = r * 2 * n;
         const float g = __bfloat162float(gu[base + j]);
         const float u = __bfloat162float(gu[base + n + j]);
-        out[i] = __float2bfloat16(g / (1.0f + __expf(-g)) * u);
+        out[i] = bf16_silu_mul(g, u);
     }
 }
 }  // namespace

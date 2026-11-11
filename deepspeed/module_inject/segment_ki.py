@@ -404,7 +404,7 @@ def _fused_gdn_forward(self, hidden_states, *args, **kwargs):
     # overhead (a no-grad path); training runs the composite ops instead.
     # It also reads raw BFloat16 pointers only — fp16 models must take the
     # composite path rather than raise inside the binding.
-    if (gdn_op is not None and get_accelerator().on_accelerator(a) and not torch.is_grad_enabled()
+    if (seq_len == 1 and gdn_op is not None and get_accelerator().on_accelerator(a) and not torch.is_grad_enabled()
             and a.dtype is torch.bfloat16):
         # A_log/dt_bias are static across the rollout — cache the fp32
         # rank slice once instead of re-casting every decode step
@@ -456,7 +456,7 @@ def _fused_gdn_forward(self, hidden_states, *args, **kwargs):
     core_attn_out = core_attn_out.reshape(-1, self.head_v_dim)
     z = z.reshape(-1, self.head_v_dim)
     gdn2_op = getattr(self, "_ki_gdn_op", None)
-    if (gdn2_op is not None and hasattr(gdn2_op, "gated_norm") and not torch.is_grad_enabled()
+    if (seq_len == 1 and gdn2_op is not None and hasattr(gdn2_op, "gated_norm") and not torch.is_grad_enabled()
             and core_attn_out.is_contiguous() and z.is_contiguous() and core_attn_out.dtype is torch.bfloat16):
         normed = torch.empty_like(core_attn_out)
         norm_eps = getattr(self.norm, "variance_epsilon", None) or self.norm.eps
@@ -1131,7 +1131,7 @@ def _fused_norm_layer_forward(self,
     # directly. During capture the add becomes part of the graph, so replay
     # reads the parameter's memory and reflects post-training values.
     new_residual = hidden_states
-    postattn_scale = torch.add(1.0, self.post_attention_layernorm.weight).contiguous()
+    postattn_scale = torch.add(1.0, self.post_attention_layernorm.weight.float()).contiguous()
     mlp_input = op.fused_add_norm(new_residual, residual, postattn_scale, self.post_attention_layernorm.eps)
     hidden_states = self.mlp(mlp_input)
     hidden_states = hidden_states + new_residual

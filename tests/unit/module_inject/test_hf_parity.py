@@ -121,31 +121,25 @@ class TestMLPParity:
 
 @pytest.mark.skipif(get_accelerator().device_name() == "cpu", reason="non-CPU device required")
 class TestFusedAddNormVsHFFormula:
-    """The reviewer's rounding-order case: HF materializes the residual sum
-    in bf16 before the norm; the kernel keeps the fp32 sum for the output
-    and rounds only the residual write-back. Pin both sides' magnitude."""
+    """Residual addition and zero-centered scaling must retain HF's rounding."""
 
-    def test_output_and_residual_vs_hf(self, model):
+    def test_output_and_residual_vs_hf(self):
+        modeling = pytest.importorskip("transformers.models.qwen3_5.modeling_qwen3_5")
         from deepspeed.ops.module_inject import get_fused_glu_op
         torch.manual_seed(0)
+        device = get_accelerator().device_name()
         dim = 256
-        h = (torch.randn(4, dim, device="cuda") * 0.5).bfloat16()
-        r = (torch.randn(4, dim, device="cuda") * 0.5).bfloat16()
-        w = (torch.randn(dim, device="cuda") * 0.1).bfloat16()
+        h = (torch.randn(4, dim, device=device) * 0.5).bfloat16()
+        r = (torch.randn(4, dim, device=device) * 0.5).bfloat16()
+        norm = modeling.Qwen3_5RMSNorm(dim).to(device=device, dtype=torch.bfloat16)
+        with torch.no_grad():
+            norm.weight.copy_((torch.randn(dim, device=device) * 0.1).bfloat16())
         eps = 1e-6
 
         h_kernel = h.clone()
-        # hold the scaled weight in a variable: the kernel launch is async,
-        # and an unreferenced temporary's memory can be handed to the next
-        # allocation (the ref below) before the kernel reads it
-        w_scaled = (1.0 + w.float()).bfloat16()
+        w_scaled = 1.0 + norm.weight.float()
         out_kernel = get_fused_glu_op().fused_add_norm(h_kernel, r, w_scaled, eps)
+        ref = norm(h + r)
 
-        # HF formula verbatim: bf16 sum materialized, fp32 norm, (1+w) scale
-        combined_bf16 = h + r  # bf16 rounding happens here in HF
-        xf = combined_bf16.float()
-        ref = (xf * torch.rsqrt(xf.pow(2).mean(-1, keepdim=True) + eps) * (1.0 + w.float())).bfloat16()
-
-        torch.testing.assert_close(out_kernel.float(), ref.float(), atol=ATOL, rtol=RTOL)
-        # the residual stream the kernel writes back is the bf16 sum, as in HF
-        torch.testing.assert_close(h_kernel.float(), combined_bf16.float(), atol=ATOL, rtol=RTOL)
+        torch.testing.assert_close(out_kernel.float(), ref.float(), atol=1e-3, rtol=1e-3)
+        torch.testing.assert_close(h_kernel, h + r, atol=0, rtol=0)

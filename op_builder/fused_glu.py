@@ -16,3 +16,7 @@ class FusedGLUBuilder(CUDAOpBuilder):
 
     def sources(self):
         return ['csrc/module_inject/fused_glu.cu']
+
+    def nvcc_args(self):
+        # Preserve the fp32 gate and normalization arithmetic used by eager models.
+        return [arg for arg in super().nvcc_args() if arg != '--use_fast_math']
