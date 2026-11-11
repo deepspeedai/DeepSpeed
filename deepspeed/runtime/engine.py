@@ -565,6 +565,9 @@ class DeepSpeedEngine(Module):
 
         self._is_gradient_accumulation_boundary = None
         self._replicated_kv_reducers = []
+        # Deferral is a per-window decision; see _backward_prologue.
+        self._replicated_kv_window = None
+        self._replicated_kv_window_defer = False
         self.scale_wrt_gas = None
         self.losses = None
         self.mesh_device = mesh_device
@@ -3163,18 +3166,29 @@ class DeepSpeedEngine(Module):
             # of param.grad, BF16_Optimizer accumulates into its own fp32 buffer, and ZeRO-2/3
             # reduce or partition the gradient during each micro-batch. no_sync and coalesced
             # reduction deliberately delay the engine's own reduction as well.
-            stage = self.zero_optimization_stage()
-            optimizer = self.optimizer
-            if stage == ZeroStageEnum.disabled:
-                gradient_is_local = not isinstance(optimizer, BF16_Optimizer) and not self.zero_use_cpu_optimizer()
-            else:
-                gradient_is_local = (stage == ZeroStageEnum.optimizer_states
-                                     and isinstance(optimizer, DeepSpeedZeroOptimizer)
-                                     and not getattr(optimizer, "use_grad_accum_attribute", True)
-                                     and not self.zero_use_cpu_optimizer() and not self.zenflow)
-            defer_allowed = (gradient_is_local and self.gradient_accumulation_steps() > 1
-                             and self.managed_gradient_accumulation() and not self.inside_no_sync_ctxt
-                             and not self.pipeline_parallelism)
+            #
+            # Latch the decision for the whole window. Deciding per backward lets one window mix
+            # the deferred and per-micro-batch paths (for example when only the non-boundary
+            # backwards are inside no_sync); the boundary's whole-window reduce then counts the
+            # micro-batches that were already reduced before accumulation again.
+            window = self.micro_steps // self.gradient_accumulation_steps()
+            if window != self._replicated_kv_window:
+                self._replicated_kv_window = window
+                stage = self.zero_optimization_stage()
+                optimizer = self.optimizer
+                if stage == ZeroStageEnum.disabled:
+                    gradient_is_local = (not isinstance(optimizer, BF16_Optimizer)
+                                         and not self.zero_use_cpu_optimizer())
+                else:
+                    gradient_is_local = (stage == ZeroStageEnum.optimizer_states
+                                         and isinstance(optimizer, DeepSpeedZeroOptimizer)
+                                         and not getattr(optimizer, "use_grad_accum_attribute", True)
+                                         and not self.zero_use_cpu_optimizer() and not self.zenflow)
+                self._replicated_kv_window_defer = (
+                    gradient_is_local and self.gradient_accumulation_steps() > 1
+                    and self.managed_gradient_accumulation() and not self.inside_no_sync_ctxt
+                    and not self.pipeline_parallelism)
+            defer_allowed = self._replicated_kv_window_defer
             is_boundary = self.is_gradient_accumulation_boundary()
             for reducer in self._replicated_kv_reducers:
                 reducer.set_accumulation_state(is_boundary, defer_allowed)

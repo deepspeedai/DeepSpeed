@@ -21,7 +21,7 @@ from deepspeed.checkpoint.constants import (AFFINE_MAP, AFFINE_MAP_PARAMS, ORIGI
                                             UNIVERSAL_CHECKPOINT_INFO)
 from unit.simple_model import SimpleModel, random_dataloader
 from deepspeed.utils import groups
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from torch import nn
 from deepspeed.module_inject.auto_tp import AutoTP
 from deepspeed.module_inject.fusedqkv_utils import shared_qk_value_head_ids
@@ -1544,13 +1544,24 @@ class TestGPTBigCodeMultiQueryTraining(DistributedTest):
 
 
 class TestGPTBigCodeMultiQueryAccumulation(DistributedTest):
-    """The replicated K/V sum is deferred to the accumulation boundary for ZeRO 0/1."""
+    """The replicated K/V sum is deferred to the accumulation boundary for ZeRO 0/1.
+
+    A window that starts under no_sync keeps the per-micro-batch path; the decision is
+    latched for the whole window so the two paths cannot mix.
+    """
 
     world_size = 4
     reuse_dist_env = False
 
-    @pytest.mark.parametrize("zero_stage", [0, 1, 2, 3])
-    def test_gas2_matches_single_device(self, zero_stage):
+    @pytest.mark.parametrize("zero_stage,use_no_sync", [
+        (0, False),
+        (1, False),
+        (2, False),
+        (3, False),
+        (0, True),
+        (1, True),
+    ])
+    def test_gas2_matches_single_device(self, zero_stage, use_no_sync):
         skip_on_device()
         assert dist.get_world_size() == 4
         transformers = pytest.importorskip("transformers")
@@ -1611,17 +1622,25 @@ class TestGPTBigCodeMultiQueryAccumulation(DistributedTest):
             counts_per_step = []
             for step_batches in batches:
                 with _count_kv_gradient_all_reduces(kv_rows, hidden) as counts:
-                    for input_ids in step_batches:
-                        loss = engine(input_ids=input_ids, labels=input_ids).loss
-                        engine.backward(loss)
+                    for micro, input_ids in enumerate(step_batches):
+                        # The canonical DDP pattern: no_sync covers every non-boundary
+                        # micro-batch. The engine latches the deferral decision per window,
+                        # so the boundary must stay on the same per-micro-batch path.
+                        context = engine.no_sync() if use_no_sync and micro < gas - 1 else nullcontext()
+                        with context:
+                            loss = engine(input_ids=input_ids, labels=input_ids).loss
+                            engine.backward(loss)
                         engine.step()
                         losses.append(loss.item())
                 counts_per_step.append(dict(counts))
 
             torch.testing.assert_close(torch.tensor(losses), torch.tensor(reference_losses), atol=1e-5, rtol=0)
-            # Two layers, weight and bias. ZeRO 0/1 defer the reduce to the boundary (two of
-            # each per step); ZeRO 2/3 reduce every micro-batch (four of each per step).
-            expected = 2 if zero_stage in (0, 1) else 4
+            # Two layers, weight and bias. A window that starts under no_sync stays on the
+            # per-micro-batch path for all of its micro-batches. Otherwise ZeRO 0/1 defer the
+            # reduce to the boundary (two of each per step) and ZeRO 2/3 reduce every
+            # micro-batch (four of each per step).
+            deferred = zero_stage in (0, 1) and not use_no_sync
+            expected = 2 if deferred else 4
             for counts in counts_per_step:
                 assert counts == {"weight": expected, "bias": expected}, counts
 
