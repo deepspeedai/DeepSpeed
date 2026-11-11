@@ -320,8 +320,6 @@ torch::Tensor weight_matrix_prepacking_cpu(torch::Tensor fp6_tensor, size_t OC, 
 {
     assert((OC % 256 == 0) && (IC % 64 == 0));
     assert((fp6_tensor.size(0) == OC) && (fp6_tensor.size(1) == IC / 16 * 3));
-    // auto packed_tensor = torch::empty_like(fp6_tensor);
-    // auto packed_tensor_ptr = reinterpret_cast<int*>(packed_tensor.data_ptr<int>());
     auto fp6_tensor_ptr = reinterpret_cast<int*>(fp6_tensor.data_ptr<int>());
     weight_matrix_prepacking(fp6_tensor_ptr, OC, IC);
     return fp6_tensor;

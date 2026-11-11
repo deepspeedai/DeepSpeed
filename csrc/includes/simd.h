@@ -182,7 +182,6 @@ union AVX_Data {
 #elif defined(__NEON__)
     float32x4_t data;
 #endif
-    // float data_f[16];
 };
 
 template <int span, typename T>

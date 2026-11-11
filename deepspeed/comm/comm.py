@@ -170,7 +170,6 @@ def init_deepspeed_backend(ds_backend, timeout, init_method):
 
 
 def is_initialized() -> bool:
-    #assert cdb is not None, 'DeepSpeed backend not set, please initialize it using init_process_group()'
     if cdb is None:
         return False
     else:
@@ -694,12 +693,7 @@ def all_reduce(tensor,
                prof=False,
                log_name='all_reduce',
                debug=get_caller_func()):
-    #if profile_comm:
-    # context of the timers?
-    # timers.start()
-    # TensorBoard logging for comm calls.?
     global cdb
-    #print(f'op = {op}, cdb= {cdb.name}')
     return cdb.all_reduce(tensor, op, group, async_op)
 
 

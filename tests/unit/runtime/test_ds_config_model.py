@@ -91,6 +91,54 @@ def test_config_base():
     assert config.param_1 == 42
 
 
+@pytest.mark.parametrize("value", ["true", 1, None, {}])
+def test_deterministic_mode_requires_boolean(value):
+    with pytest.raises(ValueError, match="JSON boolean"):
+        ds_config.DeepSpeedConfig({"train_batch_size": 1, "deterministic_mode": value})
+
+
+@pytest.mark.parametrize("settings", [
+    {},
+    {
+        "communication_data_type": "bf16"
+    },
+    {
+        "gradient_accumulation_steps": 2
+    },
+    {
+        "zero_optimization": {
+            "stage": 2,
+            "overlap_comm": True
+        }
+    },
+    {
+        "tensor_parallel": {
+            "tp_overlap_comm": True
+        }
+    },
+    {
+        "expert_parallel": {
+            "enabled": True
+        }
+    },
+])
+def test_deterministic_mode_preserves_configuration(settings):
+    import copy
+    import torch
+    source = {"train_batch_size": 2, **settings}
+    original = copy.deepcopy(source)
+    before = torch.are_deterministic_algorithms_enabled()
+    baseline = ds_config.DeepSpeedConfig(source)
+    enabled = ds_config.DeepSpeedConfig({**source, "deterministic_mode": True})
+    assert baseline.deterministic_mode is False
+    assert enabled.deterministic_mode is True
+    assert source == original
+    for field in ("communication_data_type", "grad_accum_dtype", "gradient_accumulation_steps", "zero_config",
+                  "tensor_parallel_config", "expert_parallel_config"):
+        assert getattr(enabled, field) == getattr(baseline, field)
+    assert torch.are_deterministic_algorithms_enabled() == before
+
+
 def test_config_base_deprecatedfield():
     config = SimpleConf(**{"param_2_old": "DS"})
     assert config.param_2 == ["DS"]

@@ -921,13 +921,14 @@ class CUDAOpBuilder(OpBuilder):
         if self.build_for_cpu:
             return []
         args = ['-O3']
+        # torch 2.12+ headers require C++20 (see cxx_args), so the device compiler
+        # must use the same standard instead of the toolkit's default.
+        torch_requires_cxx20 = (TORCH_MAJOR, TORCH_MINOR) >= (2, 12)
         if self.is_rocm_pytorch():
             ROCM_MAJOR, ROCM_MINOR = self.installed_rocm_version()
-            # Match cxx_args: PyTorch >= 2.12 headers require C++20, and this flag is
-            # appended after torch's own -std=c++20, so the later one wins.
-            cpp_standard = '-std=c++20' if (TORCH_MAJOR, TORCH_MINOR) >= (2, 12) else '-std=c++17'
+            rocm_std = '-std=c++20' if torch_requires_cxx20 else '-std=c++17'
             args += [
-                cpp_standard, '-U__HIP_NO_HALF_OPERATORS__', '-U__HIP_NO_HALF_CONVERSIONS__',
+                rocm_std, '-U__HIP_NO_HALF_OPERATORS__', '-U__HIP_NO_HALF_CONVERSIONS__',
                 '-U__HIP_NO_HALF2_OPERATORS__',
                 '-DROCM_VERSION_MAJOR=%s' % ROCM_MAJOR,
                 '-DROCM_VERSION_MINOR=%s' % ROCM_MINOR
@@ -943,10 +944,11 @@ class CUDAOpBuilder(OpBuilder):
 
             cuda_major, cuda_minor = installed_cuda_version()
             if cuda_major > 10:
-                if (cuda_major == 12 and cuda_minor >= 5) or cuda_major >= 13:
-                    std_lib = '-std=c++20'
-                else:
-                    std_lib = '-std=c++17'
+                # nvcc supports -std=c++20 from CUDA 12.0, so a torch 2.12+ build must
+                # use it even on 12.0-12.4 instead of falling back to C++17.
+                use_cxx20 = ((torch_requires_cxx20 and cuda_major >= 12) or (cuda_major == 12 and cuda_minor >= 5)
+                             or cuda_major >= 13)
+                std_lib = '-std=c++20' if use_cxx20 else '-std=c++17'
             else:
                 std_lib = '-std=c++14'
             args += [

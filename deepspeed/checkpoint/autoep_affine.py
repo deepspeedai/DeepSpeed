@@ -2,13 +2,15 @@
 # DeepSpeed Team
 """AutoEP expert placement descriptors and their affine lowering.
 
-The descriptor records placement in EP-local rank coordinates. ZeRO and EDP
-fragments are deliberately outside this map: callers must first normalize
-storage to one logical, packed expert tensor per EP rank.
+The descriptor records placement in EP-local rank coordinates, and
+``autoep_placement_to_affine_map`` describes one logical, packed expert tensor
+per EP rank. ``autoep_storage_affine_map`` adds the expert-data-parallel and
+ZeRO layer on top: it describes what each global rank actually stores.
 """
 
-from deepspeed.checkpoint.affine import AFFINE_MAP_FORMAT_VERSION, AffinePiece, ParamAffineMap
+from deepspeed.checkpoint.affine import AFFINE_MAP_FORMAT_VERSION, AffinePiece, ParamAffineMap, nest_affine_maps
 from deepspeed.checkpoint.affine_transfer import plan_transfer
+from deepspeed.checkpoint.zero_affine import zero_storage_affine_map
 from deepspeed.checkpoint.constants import (AFFINE_MAP, AFFINE_MAP_PARAMS, AFFINE_MAP_VERSION, AUTOEP_AFFINE_MAPS,
                                             AUTOEP_EXPERT_PLACEMENT, AUTOEP_PLACEMENT_EP_SIZE,
                                             AUTOEP_PLACEMENT_EXPERTS, AUTOEP_PLACEMENT_NUM_EXPERTS,
@@ -23,6 +25,7 @@ __all__ = [
     'legacy_uniform_autoep_placement_descriptor',
     'autoep_placements_equal',
     'autoep_placement_to_affine_map',
+    'autoep_storage_affine_map',
     'autoep_metadata_to_affine_map',
     'extract_autoep_rank_tensor',
     'plan_autoep_placement_transfer',
@@ -169,6 +172,40 @@ def autoep_placement_to_affine_map(descriptor, logical_shape):
     return affine_map
 
 
+def autoep_storage_affine_map(descriptor, logical_shape, holders_by_ep_rank, partition_numel_by_ep_rank=None):
+    """Lower one expert parameter to the storage each global rank actually holds.
+
+    ``holders_by_ep_rank`` maps every rank ID of ``descriptor`` to the global ranks that store that
+    EP rank's packed ``[local_experts, ...]`` tensor, in expert-data-parallel (EDP) rank order.
+
+    Without ``partition_numel_by_ep_rank``, every holder stores the whole packed tensor, as EDP
+    replicas do under ZeRO-0/1/2. With it, holder ``d`` of EP rank ``r`` stores elements
+    ``[d * n, (d + 1) * n)`` of the flattened packed tensor, where ``n`` is
+    ``partition_numel_by_ep_rank[r]``, as ZeRO-3 does. ZeRO-3's trailing padding holds no
+    parameter elements and is not part of the shard, so a holder whose partition is all padding,
+    like every holder of an EP rank without experts, has an empty shard.
+
+    The returned map describes the parameter in its own shape and is keyed by global rank; each
+    shard is the holder's flat storage. It nests the placement's layout map with ZeRO's
+    storage map of each packed tensor, so every holder of an element, across EDP replicas and
+    redundant experts, is listed in the piece's ``locations``; choosing among them is left to the
+    transfer planner's replica selection.
+    """
+    layout = autoep_placement_to_affine_map(descriptor, logical_shape)
+    entries_by_rank = {entry[AUTOEP_PLACEMENT_RANK]: entry for entry in descriptor[AUTOEP_PLACEMENT_RANKS]}
+    holders_by_ep_rank = _validated_storage_holders(holders_by_ep_rank, entries_by_rank)
+
+    storage_by_ep_rank = {}
+    for ep_rank, global_ranks in holders_by_ep_rank.items():
+        packed_numel = _product(layout.shard_shapes[ep_rank])
+        partition_numel = None
+        if partition_numel_by_ep_rank is not None:
+            partition_numel = _storage_partition_numel(partition_numel_by_ep_rank, ep_rank, len(global_ranks),
+                                                       packed_numel)
+        storage_by_ep_rank[ep_rank] = zero_storage_affine_map(packed_numel, global_ranks, partition_numel)
+    return nest_affine_maps(layout, storage_by_ep_rank)
+
+
 def autoep_metadata_to_affine_map(metadata, logical_shape, param_name=None):
     """Load a persisted AutoEP affine map, falling back to legacy placement lowering."""
     serialized_map = metadata.get(AFFINE_MAP)
@@ -250,6 +287,39 @@ def _pieces_for_rank(experts, holders, expert_shape, expert_numel, source_stride
                             locations=holders[first_expert]))
             run_start = local_index
     return pieces
+
+
+def _validated_storage_holders(holders_by_ep_rank, entries_by_rank):
+    if not isinstance(holders_by_ep_rank, dict):
+        raise TypeError('holders_by_ep_rank must map each EP rank ID to its global holder ranks.')
+    if set(holders_by_ep_rank) != set(entries_by_rank):
+        raise ValueError(f'holders_by_ep_rank names EP ranks {sorted(holders_by_ep_rank)}; the placement '
+                         f'descriptor names {sorted(entries_by_rank)}.')
+    seen = set()
+    validated = {}
+    for ep_rank in sorted(holders_by_ep_rank):
+        global_ranks = list(holders_by_ep_rank[ep_rank])
+        if not global_ranks:
+            raise ValueError(f'EP rank {ep_rank} has no global holder rank.')
+        for global_rank in global_ranks:
+            if not isinstance(global_rank, int) or isinstance(global_rank, bool) or global_rank < 0:
+                raise ValueError(f'Global holder rank {global_rank!r} of EP rank {ep_rank} is not a '
+                                 'non-negative integer.')
+            if global_rank in seen:
+                raise ValueError(f'Global rank {global_rank} holds storage for more than one EP rank entry.')
+            seen.add(global_rank)
+        validated[ep_rank] = global_ranks
+    return validated
+
+
+def _storage_partition_numel(partition_numel_by_ep_rank, ep_rank, num_holders, packed_numel):
+    partition_numel = partition_numel_by_ep_rank.get(ep_rank)
+    if not isinstance(partition_numel, int) or isinstance(partition_numel, bool) or partition_numel < 0:
+        raise ValueError(f'Partition size {partition_numel!r} of EP rank {ep_rank} is not a non-negative integer.')
+    if partition_numel * num_holders < packed_numel:
+        raise ValueError(f'EP rank {ep_rank} packs {packed_numel} elements, but its {num_holders} holders of '
+                         f'{partition_numel} elements each cannot store them.')
+    return partition_numel
 
 
 def _expert_holders(entries_by_rank, num_experts):
