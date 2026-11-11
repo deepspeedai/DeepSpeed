@@ -30,6 +30,8 @@ def make_optimizer(dtype=torch.bfloat16, device=None, low_precision=False, cpu_o
     opt = zero.DeepSpeedZeroOptimizer.__new__(zero.DeepSpeedZeroOptimizer)
     opt.cpu_offload = cpu_offload
     opt._offload_gradient_safety_enabled = cpu_offload
+    opt._host_owned_compact_partitions = set()
+    opt._offload_unpublished_param_ids = set()
     opt.cpu_offload_pin_memory = False
     opt.device = "cpu"
     opt.dtype = dtype
@@ -40,6 +42,10 @@ def make_optimizer(dtype=torch.bfloat16, device=None, low_precision=False, cpu_o
     opt.contiguous_gradients = True
     opt.overlap_comm = False
     opt.zenflow = False
+    # These stubs drive copy_grads_in_partition directly and skip the reduction that fills the
+    # compact partition buffer. Pin them to the host accumulator path, which Muon and ZenFlow still
+    # use; the compact layout is covered by the engine tests in test_zero2_offload_multi_backward.py.
+    opt._use_compact_grad_partition_buffer = lambda group_idx: False
     opt.has_moe_layers = False
     opt.autoep_folding_tp_group = None
     opt.gradient_accumulation_steps = 1
