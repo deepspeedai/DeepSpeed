@@ -158,6 +158,9 @@ class PartitionedParameterCoordinator:
         # In-progress backward submodules keyed by ds_id. A dict (not LIFO deque) lets release
         # remove a specific module, since multi-tensor z3-leaf hooks fire out of reverse order.
         self.__active_backward_submodules: Dict[int, Module] = {}
+        # Cache per instance: a class-level lru_cache keys on self and would keep every coordinator,
+        # and the modules and parameters it references, alive for the life of the process.
+        self.__params_to_release = functools.lru_cache(maxsize=None)(self.__params_to_release)
 
     """Tracing and Tracking
     TODO. consider performing trace before initializing PartitionedParameterCoordinator
@@ -370,11 +373,9 @@ class PartitionedParameterCoordinator:
             self._dump_param_ids(event_name, current_submodule.ds_id,
                                  [(p.ds_id, p.ds_shape)
                                   for p in params_to_fetch if p.ds_status == ZeroParamStatus.NOT_AVAILABLE])
-            # self._dump_params(event_name, current_submodule, [p for p in params_to_fetch if p.ds_status == ZeroParamStatus.NOT_AVAILABLE])
 
             self.__profiler.start_event(event_name)
             # kick off all gather for params in the immediately required submodule
-            #for param in params_to_fetch:
             if logger.isEnabledFor(logging.DEBUG):
                 for param in params_to_fetch:
                     debug_rank0(f"-fetch: {param.ds_summary()}")
@@ -494,7 +495,6 @@ class PartitionedParameterCoordinator:
     def release_sub_module(self, submodule: Module, forward=False) -> None:
         """release the parameters of a sub module, assuming they meet conditions to
         be released."""
-        # print_rank_0(f"release_sub_module {'fwd' if forward else 'bwd'}: {submodule.ds_id=} {debug_module2name_id(submodule)}", force=False)
         params_to_release = (self.__params_to_release(submodule, self.__step_id) if self.is_complete_trace() else set(
             p.ds_id for p in iter_params(submodule, recurse=z3_leaf_module(submodule))))
 
@@ -630,7 +630,6 @@ class PartitionedParameterCoordinator:
             self.__n_available_params -= param.ds_numel
 
     @instrument_w_nvtx
-    @functools.lru_cache(maxsize=None)
     def __params_to_release(self, submodule_to_release: Module, step_id: int) -> Set[int]:
         if not self.is_complete_trace():
             raise RuntimeError("expected trace to be complete")
