@@ -139,6 +139,12 @@ class DeepSpeedStaticLayer:
     def get_max_cache_shape(self) -> int:
         return self.max_cache_len
 
+    def memory_bytes(self) -> int:
+        # Layers are allocated lazily from the first prefill, so an unused layer holds no memory yet.
+        if not self.is_initialized:
+            return 0
+        return self.keys.nbytes + self.values.nbytes
+
     def reset(self) -> None:
         if self.is_initialized:
             self.keys.zero_()
@@ -226,6 +232,10 @@ class DeepSpeedStaticCache:
     @property
     def layers(self):
         return self._layers
+
+    def memory_bytes(self) -> int:
+        """Return the bytes held by the layers' cache tensors."""
+        return sum(layer.memory_bytes() for layer in self._layers)
 
     def set_write_position(self, pos: torch.Tensor):
         """Set the write position shared by all layers.

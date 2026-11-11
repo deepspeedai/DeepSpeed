@@ -309,6 +309,11 @@ def test_continuous_graph_generation_refills_a_fixed_slot_on_cuda():
     assert torch.equal(graph_output.attention_mask, eager_output.attention_mask)
     assert graph_output.input_ids[:, 3:].cpu().tolist() == [[2, 0], [7, 2], [7, 2]]
     stats = graph_rollout.get_last_continuous_stats()
+    # 2 cache rows x 5 positions: fp32 keys and values with one head of width 1, int64 attention mask,
+    # and one int64 write position per row. Both decode paths report the same cache footprint.
+    expected_cache_bytes = 2 * 5 * 4 * 2 + 2 * 5 * 8 + 2 * 8
+    assert stats["cache_memory_bytes"] == expected_cache_bytes
+    assert eager_rollout.get_last_continuous_stats()["cache_memory_bytes"] == expected_cache_bytes
     assert stats["cache_capacity"] == 5
     assert stats["peak_cache_length"] == 4
     assert stats["decode_steps"] == 2

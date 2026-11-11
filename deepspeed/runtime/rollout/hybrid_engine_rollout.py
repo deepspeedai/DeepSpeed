@@ -507,10 +507,7 @@ class HybridEngineRollout(RolloutEngine):
             update = scheduler.advance(finished_ids)
             self._profile_end(profile, "scheduler_overhead_ms", scheduler_start)
 
-        stats["cache_memory_bytes"] = (
-            sum(layer.keys.numel() * layer.keys.element_size() + layer.values.numel() * layer.values.element_size()
-                for layer in cache.layers) + attention_mask.numel() * attention_mask.element_size() +
-            write_positions.numel() * write_positions.element_size())
+        stats["cache_memory_bytes"] = self._continuous_cache_memory_bytes(cache, attention_mask, write_positions)
         generation_end = self._profile_start(profile)
         post_processing_start = generation_end
         output = self._build_continuous_batch(original_request, responses)
@@ -588,27 +585,14 @@ class HybridEngineRollout(RolloutEngine):
         graph = state.graph
         static_logits = state.static_logits
         stats = {
-            "cache_capacity":
-            max_cache_len,
-            "peak_cache_length":
-            prompt_len,
-            "cache_memory_bytes":
-            sum(layer.keys.numel() * layer.keys.element_size() + layer.values.numel() * layer.values.element_size()
-                for layer in cache.layers) + static_input.numel() * static_input.element_size() +
-            static_attention.numel() * static_attention.element_size() +
-            static_causal_attention.numel() * static_causal_attention.element_size() +
-            static_position_ids.numel() * static_position_ids.element_size() +
-            static_write_positions.numel() * static_write_positions.element_size(),
-            "trim_count":
-            0,
-            "trimmed_columns":
-            0,
-            "trim_latency_ms":
-            0.0,
-            "trim_bytes_moved":
-            0,
-            "decode_steps":
-            0,
+            "cache_capacity": max_cache_len,
+            "peak_cache_length": prompt_len,
+            "cache_memory_bytes": self._continuous_cache_memory_bytes(cache, static_attention, static_write_positions),
+            "trim_count": 0,
+            "trimmed_columns": 0,
+            "trim_latency_ms": 0.0,
+            "trim_bytes_moved": 0,
+            "decode_steps": 0,
         }
 
         slot_by_request = {}
@@ -1006,6 +990,12 @@ class HybridEngineRollout(RolloutEngine):
             write_positions[target_row] = cache_position
             self._profile_end(profile, "cache_management_overhead_ms", cache_copy_start)
         return admitted_tokens
+
+    @staticmethod
+    def _continuous_cache_memory_bytes(cache, attention_mask, write_positions):
+        # Eager and graph decoding report the same quantity: the KV cache plus the per-row metadata that
+        # tracks it. Graph-only staging buffers are not counted.
+        return cache.memory_bytes() + attention_mask.nbytes + write_positions.nbytes
 
     @staticmethod
     def _continuous_cache_layer(cache, layer_idx, prefill_keys, prefill_values, max_batch_size):

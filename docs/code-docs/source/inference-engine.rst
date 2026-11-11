@@ -130,7 +130,8 @@ The most recent cache statistics are available from
 ``peak_cache_length``, ``cache_memory_bytes``, ``trim_count``,
 ``trimmed_columns``, ``trim_frequency``, and ``trim_bytes_moved``.
 ``cache_memory_bytes`` covers
-the preallocated KV tensors and active cache metadata. With profiling enabled,
+the allocated KV tensors plus the per-row attention mask and write positions,
+with the same definition for eager and graph-captured decoding. With profiling enabled,
 ``trim_latency_ms``, ``end_to_end_ms``, and ``tokens_per_second`` are also
 measured with accelerator synchronization; otherwise those timing fields are
 ``None`` or zero.
