@@ -587,6 +587,10 @@ class DeepSpeedEngine(Module):
 
         self._is_gradient_accumulation_boundary = None
         self._replicated_kv_reducers = []
+        # Deferral is a per-window decision; see _backward_prologue.
+        self._replicated_kv_window = None
+        self._replicated_kv_boundaries = 0
+        self._replicated_kv_window_defer = False
         self.scale_wrt_gas = None
         self.losses = None
         self.mesh_device = mesh_device
@@ -3314,26 +3318,34 @@ class DeepSpeedEngine(Module):
         self._check_autotp_frozen_replicated_params()
 
         if self._replicated_kv_reducers:
-            # Deferral is safe only when the whole accumulation window stays in param.grad.
-            # ZeRO-1 with a separate accumulation buffer moves each micro-batch's gradient out
-            # of param.grad, BF16_Optimizer accumulates into its own fp32 buffer, and ZeRO-2/3
-            # reduce or partition the gradient during each micro-batch. no_sync and coalesced
-            # reduction deliberately delay the engine's own reduction as well.
-            stage = self.zero_optimization_stage()
-            optimizer = self.optimizer
-            if stage == ZeroStageEnum.disabled:
-                gradient_is_local = not isinstance(optimizer, BF16_Optimizer) and not self.zero_use_cpu_optimizer()
-            else:
-                gradient_is_local = (stage == ZeroStageEnum.optimizer_states
-                                     and isinstance(optimizer, DeepSpeedZeroOptimizer)
-                                     and not getattr(optimizer, "use_grad_accum_attribute", True)
-                                     and not self.zero_use_cpu_optimizer() and not self.zenflow)
-            defer_allowed = (gradient_is_local and self.gradient_accumulation_steps() > 1
-                             and self.managed_gradient_accumulation() and not self.inside_no_sync_ctxt
-                             and not self.pipeline_parallelism)
+            # Deferral is safe only when the whole window stays in param.grad. ZeRO-1 with a
+            # separate accumulation buffer, BF16_Optimizer, CPU/NVMe offload, and ZeRO-2/3
+            # move or reduce each micro-batch's gradient; no_sync and coalesced reduction delay
+            # the engine's own reduction. Latch the decision per actual accumulation boundary:
+            # mixing paths double-counts, and manual windows need not align with the configured
+            # accumulation length.
             is_boundary = self.is_gradient_accumulation_boundary()
+            window = self._replicated_kv_boundaries
+            if window != self._replicated_kv_window:
+                self._replicated_kv_window = window
+                stage = self.zero_optimization_stage()
+                optimizer = self.optimizer
+                if stage == ZeroStageEnum.disabled:
+                    gradient_is_local = (not isinstance(optimizer, BF16_Optimizer)
+                                         and not self.zero_use_cpu_optimizer())
+                else:
+                    gradient_is_local = (stage == ZeroStageEnum.optimizer_states
+                                         and isinstance(optimizer, DeepSpeedZeroOptimizer)
+                                         and not getattr(optimizer, "use_grad_accum_attribute", True)
+                                         and not self.zero_use_cpu_optimizer() and not self.zenflow)
+                self._replicated_kv_window_defer = (gradient_is_local and self.gradient_accumulation_steps() > 1
+                                                    and self.managed_gradient_accumulation()
+                                                    and not self.inside_no_sync_ctxt and not self.pipeline_parallelism)
+            defer_allowed = self._replicated_kv_window_defer
             for reducer in self._replicated_kv_reducers:
                 reducer.set_accumulation_state(is_boundary, defer_allowed)
+            if is_boundary:
+                self._replicated_kv_boundaries += 1
 
         # When necessary internal APIs are not available, we disable direct calls to tensor.backward()
         # and limit to engine.backward(loss) only.

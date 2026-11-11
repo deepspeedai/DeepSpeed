@@ -1521,8 +1521,7 @@ class _ReplicatedKvGradReducer:
     micro-batches once per later backward.
 
     When the engine allows deferred reduction, both hooks leave the local partial in place and
-    the post-accumulate hook reduces the K/V rows that were accumulated since the previous
-    boundary. The engine only allows this when the full window stays in ``param.grad``.
+    the boundary hook reduces the window's rows once.
     """
 
     def __init__(self, param, kv_start, group):
@@ -1539,10 +1538,9 @@ class _ReplicatedKvGradReducer:
     def set_accumulation_state(self, is_boundary, defer_allowed):
         """Record the engine's accumulation state for this backward.
 
-        The state lives on each reducer, so two engines in one process do not overwrite each
-        other. A non-boundary backward in a deferred window forgets the previous boundary's
-        snapshot. The fallback keeps its delta snapshot across the whole window, because it
-        reduces every micro-batch and must count each row once.
+        State lives on each reducer, so two engines in one process do not overwrite each other.
+        Deferred windows drop the snapshot at non-boundary backwards; the fallback keeps it so
+        each row is reduced once.
         """
         self._accumulation_boundary = is_boundary
         self._defer_allowed = defer_allowed
@@ -1589,8 +1587,8 @@ class _ReplicatedKvGradReducer:
                 self._grad = None
                 self._kv = None
                 return
-            # A reentrant checkpoint may run this hook more than once at the boundary.
-            # Reducing the delta keeps each new local contribution counted once.
+            # Reentrant checkpoints can run this hook more than once; reduce the delta so each
+            # new contribution counts once.
             self._reduce_new_kv_rows(grad, kv_grad, use_delta=self._boundary_reduced)
             self._boundary_reduced = True
             self._tensor_hook_ran = False
