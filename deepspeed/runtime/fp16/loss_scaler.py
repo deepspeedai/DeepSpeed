@@ -80,6 +80,9 @@ class LossScaleConfig:
     scale_factor: Optional[float] = None
     scale_window: Optional[int] = None
     min_loss_scale: Optional[float] = None
+    delayed_shift: int = 1
+    cur_hysteresis: int = 1
+    consecutive_hysteresis: bool = False
 
     def __init__(self,
                  low_precision_dtype,
@@ -99,6 +102,9 @@ class LossScaleConfig:
         self.scale_factor = None
         self.scale_window = None
         self.min_loss_scale = None
+        self.delayed_shift = 1
+        self.cur_hysteresis = 1
+        self.consecutive_hysteresis = False
 
         if not use_grad_scaling:
             return
@@ -122,6 +128,8 @@ class LossScaleConfig:
         self.cur_scale = dynamic_loss_args[INITIAL_LOSS_SCALE]
         self.scale_window = dynamic_loss_args[SCALE_WINDOW]
         self.min_loss_scale = dynamic_loss_args[MIN_LOSS_SCALE]
+        self.delayed_shift = self.cur_hysteresis = dynamic_loss_args.get(DELAYED_SHIFT, 1)
+        self.consecutive_hysteresis = dynamic_loss_args.get(CONSECUTIVE_HYSTERESIS, False)
 
 
 # item() is a recent addition, so this helps with backward compatibility.
@@ -163,7 +171,6 @@ class LossScalerBase(DeepSpeedConfigObject):
     def backward(self, loss, retain_graph=False):
         scaled_loss = self.scale_loss(loss)
         scaled_loss.backward(retain_graph=retain_graph)
-        # print(f'LossScalerBackward: {scaled_loss=}')
 
 
 class LossScaler(LossScalerBase):
@@ -252,7 +259,6 @@ class DynamicLossScaler(LossScalerBase):
     # `overflow` is boolean indicating whether the gradient overflowed
     def update_scale(self, overflow):
         if overflow:
-            # self.cur_scale /= self.scale_factor
             if self.delayed_shift == 1 or self.cur_hysteresis == 1:
                 if (self.cur_scale == self.min_scale) and self.raise_error_at_min_scale:
                     raise Exception(

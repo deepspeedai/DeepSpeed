@@ -67,7 +67,6 @@ class ModelBasedTuner(BaseTuner):
                 if isinstance(v, numbers.Number):
                     feature_val.append(v)
             configs.append(feature_val)
-        # print(configs)
         # TODO the current implementation requires that all configs have the same shape.
         configs = np.array(configs, dtype=np.float32)
         estimates = self.cost_model.predict(configs)
@@ -75,8 +74,6 @@ class ModelBasedTuner(BaseTuner):
         n = len(estimates)
         top_idx = np.argsort(estimates)
         top_idx_ret = top_idx if self.metric == AUTOTUNING_METRIC_LATENCY else top_idx[::-1][:n]
-
-        # top_configs = [self.all_configs[i] for i in top_idx]
 
         return top_idx_ret
 

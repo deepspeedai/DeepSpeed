@@ -34,8 +34,6 @@ def see_memory_usage(message):
 tens = torch.rand(1024, 16384, dtype=torch.half, device=torch.device(get_accelerator().device_name()))
 tens_back = tens.detach().clone()
 
-#linear_bk = torch.nn.functional.linear
-#torch.nn.functional.linear = deepspeed.pt.deepspeed_linear.LinearFunctionForZeroStage3.apply
 model = LinearModuleForZeroStage3(16384, 16384)
 
 model.to(get_accelerator().device_name()).half()

@@ -23,7 +23,7 @@ from .linear import zero3_linear_wrap
 
 from deepspeed.utils import groups
 import deepspeed
-from ..utils import see_memory_usage, get_only_unique_item
+from ..utils import see_memory_usage, get_only_unique_item, view_as_uint8
 from deepspeed.runtime.zero.config import DeepSpeedZeroConfig
 from deepspeed.runtime.zero.utils import assert_ints_same_as_other_ranks, is_zero_param
 from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum
@@ -127,11 +127,6 @@ def print_rank_0(message, debug=False, force=False):
     rank = dist.get_rank()
     if rank == 0 and (debug or force):
         print(message)
-    # other variations
-    # - print for all ranks w/o interleaving
-    # printflock(f"[{rank}] {message}")
-    # - print to log file per rank
-    # log_rank_file(rank, message)
 
 
 def debug_rank0(msg: str) -> None:
@@ -468,7 +463,7 @@ class InsertPostInitMethodToModuleSubClasses(object):
                     fn_to_apply(module_to_apply_fn_to)
 
                     for param in params_to_apply_fn_to:
-                        dist.broadcast(param.data.view(torch.uint8), 0, group=param.ds_process_group)
+                        dist.broadcast(view_as_uint8(param.data), 0, group=param.ds_process_group)
 
                     for param in params_to_apply_fn_to:
                         param.partition(has_been_updated=True)
@@ -1201,9 +1196,9 @@ class Init(InsertPostInitMethodToModuleSubClasses):
         self._convert_to_deepspeed_param(param)
         partition_group = self.get_partition_dp_group(param)
         if dist.get_world_group() == partition_group:
-            dist.broadcast(param.data.view(torch.uint8), 0, partition_group)
+            dist.broadcast(view_as_uint8(param.data), 0, partition_group)
         else:
-            dist.broadcast(param.data.view(torch.uint8), dist.get_global_rank(partition_group, 0), partition_group)
+            dist.broadcast(view_as_uint8(param.data), dist.get_global_rank(partition_group, 0), partition_group)
         param.partition()
 
     def _convert_to_zero_parameters(self, param_list):
@@ -1230,7 +1225,6 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                 f'"nvme_path" in DeepSpeed Config cannot be None if remote device is {OffloadDeviceEnum.nvme}'
 
     def _post_init_method(self, module):
-        #see_memory_usage(f"Before converting params in {module.__class__.__name__}", force=False)
         print_rank_0(f'Converting Params in {module.__class__.__name__}', force=False)
         see_memory_usage(f"Before converting and partitioning params in {module.__class__.__name__}", force=False)
 
@@ -1540,7 +1534,14 @@ class Init(InsertPostInitMethodToModuleSubClasses):
         def all_gather_coalesced(params: Iterable[Parameter],
                                  safe_mode: bool = False,
                                  quantize: bool = False) -> AllGatherCoalescedHandle:
-            params = list(params)
+            # ensure that each rank has params in same order. callers may pass a set, whose
+            # order differs across ranks. the allgather is done by flattening the parameter
+            # list into a single tensor that can be allgathered in a single call - this means
+            # that if each rank gives a list of the same parameters in a different order we
+            # will silently get incorrect parameter values. params of different partition
+            # groups are gathered one group at a time, so a different order would also issue
+            # the per-group collectives in a different order and deadlock.
+            params = sorted(params, key=lambda p: p.ds_id)
             if len(params) == 0:
                 return _no_gather_coalesced(params)
 
@@ -1573,15 +1574,6 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                 ds_process_group = self.zero_param_process_group  #intragroup
                 rank_in_group = self.rank_in_group
                 world_size = self.num_ranks_in_param_group
-
-            #pprint(dir(ds_process_group))
-            # ensure that each rank has params in same order. the allgather
-            # is done by flattening the parameter list into a single tensor that
-            # can be allgathered in a single call - this means that if each rank
-            # gives a list of the same parameters in a different order we will
-            # silently get incorrect parameter values, and have very difficult
-            # to debug correctness issues.
-            params = sorted(params, key=lambda p: p.ds_id)
 
             if logger.isEnabledFor(logging.DEBUG):
                 debug_rank0(f"-allgather_coalesced: {[p.ds_id for p in params]}")
@@ -1770,10 +1762,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
             self._partition_param(param, has_been_updated=has_been_updated, free_data=free_data)
 
             param.ds_status = ZeroParamStatus.NOT_AVAILABLE
-            # if param.ds_tensor is not None:
-            #    assert id(param.data) == id(param.ds_tensor.data), \
-            #    "After the parameters are initially partitioned, make sure we are not recreating the partition."
-            #print_rank_0(f"After Partitioning Param {param.ds_id} {param.ds_tensor.size()} {param.ds_tensor}",force=False)
+
     @instrument_w_nvtx
     def _partition_param(self, param, buffer=None, has_been_updated=False, free_data=True):
         assert param.ds_status is not ZeroParamStatus.INFLIGHT, f" {param} Cannot partition a param in flight"
@@ -1781,22 +1770,8 @@ class Init(InsertPostInitMethodToModuleSubClasses):
         print_rank_0(f"Param id {param.ds_id} status is {param.ds_status}", force=False)
         if param.ds_status is ZeroParamStatus.AVAILABLE:
             print_rank_0(f"Partitioning param id {param.ds_id} reuse buffers {reuse_buffers}", force=False)
-            # if reuse_buffers and False:
-            #     numel = buffer.numel()
-            #     buffer = param.data.view(-1)
-            #     print_rank_0(
-            #         "Returning buffer for param {param.ds_id} with numel {param.ds_numel} to empty buffers",
-            #         force=False)
-            #     if numel in empty_buffers:
-            #         empty_buffers[numel].append(buffer)
-
-            # if deepspeed.comm.get_rank():
-            #    print(f"Releasing {param.data.numel()}")
 
             if param.ds_tensor is not None and not has_been_updated:  ##param already partitioned
-
-                #print_rank_0(f"Param  {param.ds_id} pri {param.ds_tensor.size()}  loc? {param.ds_tensor.final_location}", force=False)
-                #param.data = param.ds_tensor.data
 
                 see_memory_usage(f'Before partitioning param {param.ds_id} {param.shape}', force=False)
                 # param.data does not store anything meaningful in partitioned state
@@ -1862,12 +1837,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                     # otherwise, torch tracer will complain.
                     param.ds_tensor.copy_(src_tensor)
 
-                #partitioned_tensor = src_tensor.clone().detach().to(self.remote_device)
-
             else:
-                # partitioned_tensor = torch.zeros(partition_size,
-                #                                  dtype=param.dtype,
-                #                                  device=self.remote_device )
 
                 if start < param.ds_numel:
                     elems_to_copy = param.ds_numel - start
@@ -1876,12 +1846,6 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                         # otherwise, torch tracer will complain.
                         param.ds_tensor.narrow(0, 0,
                                                elems_to_copy).copy_(one_dim_param.narrow(0, start, elems_to_copy))
-
-            #print(f"Remote device {self.remote_device}")
-
-            #param.ds_tensor = partitioned_tensor
-
-            #param.data = param.ds_tensor.data
 
             # param.data does not store anything meaningful in partitioned state
 
@@ -1901,7 +1865,6 @@ class Init(InsertPostInitMethodToModuleSubClasses):
         assert param.ds_status is not ZeroParamStatus.INFLIGHT, f" {param} Cannot partition a param in flight"
         global reuse_buffers
         ##support for NVME secondary param offload
-        #print_rank_0(f"SEC Param id {param.ds_id} status is {param.ds_status}", force=False)
         if param.ds_status is ZeroParamStatus.AVAILABLE:
             if param.ds_secondary_tensor is not None and not has_been_updated:  ##param already partitioned
                 return
@@ -1991,12 +1954,6 @@ class Init(InsertPostInitMethodToModuleSubClasses):
         print_rank_0(
             f"{'--'* hierarchy}----allgather param with {debug_param2name_id_shape_status(param)} partition size={partition_size}"
         )
-        #        if not flat_tensor.numel() > 100000:
-        #            replicated_tensor = flat_tensor.narrow(0,
-        #                                                   0,
-        #                                                   param.ds_numel).view(param.ds_shape)
-        #            param.data = replicated_tensor.data
-        #            return None
         if self.use_all_gather_into_tensor:
             handle = dist.all_gather_into_tensor(flat_tensor,
                                                  param.ds_tensor.to(get_accelerator().device_name()),
@@ -2190,9 +2147,6 @@ class Init(InsertPostInitMethodToModuleSubClasses):
         return None
 
     def _reduce_scatter_gradients(self, param_list):
-        #print_rank_0([param.grad for param in param_list])
-        #assert any([param.grad is None for param in param_list]), "None gradients cannot be reduce scattered"
-
         handles_and_reduced_partitions = []
         for param in param_list:
             assert param.grad.numel(
@@ -2210,7 +2164,6 @@ class Init(InsertPostInitMethodToModuleSubClasses):
             partition_size = param.ds_tensor.ds_numel
             start = self._partition_rank(param) * partition_size
             end = start + partition_size
-            #print_rank_0("REduce scatter was executed for param {param.ds_id}")
             if start < param.ds_numel < end:
                 elements = param.ds_numel - start
                 param.grad.view(-1).narrow(0, start, elements).copy_(reduced_partition.narrow(0, 0, elements))
@@ -2218,8 +2171,6 @@ class Init(InsertPostInitMethodToModuleSubClasses):
     def _reduce_scatter_gradient(self, param):
 
         partition_size = param.ds_tensor.ds_numel
-        #output = torch.empty(partition_size, dtype=param.dtype, device=param.device)
-
         partition_world_size = self._partition_world_size(param)
         input_list = []
 
@@ -2228,7 +2179,6 @@ class Init(InsertPostInitMethodToModuleSubClasses):
             start = i * partition_size
             end = start + partition_size
 
-            #print("before reduce scatter gradients")
             if start < param.ds_numel and end <= param.ds_numel:
                 input = param.grad.view(-1).narrow(0, start, partition_size)
             else:
@@ -2237,7 +2187,6 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                 if start < param.ds_numel:
                     elements = param.ds_numel - start
                     input.narrow(0, 0, elements).copy_(param.grad.view(-1).narrow(0, start, elements))
-            #print("after reduce scatter gradients")
             input_list.append(input)
 
         rank = dist.get_rank(group=self.get_partition_dp_group(param))
@@ -2257,9 +2206,6 @@ class Init(InsertPostInitMethodToModuleSubClasses):
 
     def _partition_gradient(self, param, partition_buffer=None, accumulate=False):
 
-        #import pdb;pdb.set_trace()
-        # param.grad=None
-        # param.grad.test()
         print_rank_0(
             f"Partitioning param {param.ds_id} gradient of size {param.grad.numel()} type {param.grad.dtype} part_size {param.ds_tensor.ds_numel}"
         )
@@ -2279,7 +2225,6 @@ class Init(InsertPostInitMethodToModuleSubClasses):
 
         dest_tensor_full_buffer = partition_buffer.view(-1).narrow(0, 0, partition_size)
 
-        #print("before partition gradients")
         if start < param.ds_numel:
             elements = min(param.ds_numel - start, partition_size)
 
@@ -2305,15 +2250,6 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                 acc_tensor.copy_(dest_tensor)
                 acc_tensor.add_(src_tensor)
                 dest_tensor.copy_(acc_tensor)
-
-            # partition_buffer.view(-1).narrow(
-            #     0,
-            #     0,
-            #     elements).copy_(param.grad.view(-1).narrow(0,
-            #                                             start,
-            #                                             elements))
-
-        #print("after partition gradients")
         param.grad.data = dest_tensor_full_buffer.data
         see_memory_usage("After partitioning gradients", force=False)
 
@@ -2557,7 +2493,7 @@ class GatheredParameters:
                     f"the accelerator device. If you don't need to broadcast updates, use modifier_rank=None.")
 
         handles = [
-            dist.broadcast(p.data.view(torch.uint8),
+            dist.broadcast(view_as_uint8(p.data),
                            self.src_rank_by_group[id(p.ds_process_group)],
                            group=p.ds_process_group,
                            async_op=True) for p in self.params

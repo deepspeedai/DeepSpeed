@@ -308,7 +308,11 @@ def shard_value_with_share_qk(
         if shard_value:
             sharded_bias = torch.cat(sharded_bias, dim=0)
         else:
-            bias = bias / float(world_size)
+            # The output projection is row parallel: LinearAllreduce sums the partial products
+            # across ranks first and adds the bias once afterwards, so every rank keeps the whole
+            # bias unchanged. Dividing it by the world size here would scale the output's bias by
+            # the same factor.
+            sharded_bias = bias.data
         return torch.nn.Parameter(sharded_weight), torch.nn.Parameter(sharded_bias)
     else:
         return torch.nn.Parameter(sharded_weight), None

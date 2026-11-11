@@ -4,6 +4,8 @@
 # DeepSpeed Team
 
 import os
+import platform
+import struct
 import sys
 import subprocess
 import importlib.util
@@ -378,3 +380,60 @@ def test_probe_is_compatible_does_not_propagate_a_failed_probe():
 @pytest.mark.parametrize("answer", [True, False])
 def test_probe_is_compatible_passes_through_a_successful_probe(answer):
     assert probe_is_compatible(_AnsweringBuilder(answer)) is answer
+
+
+_AT_HWCAP = 16  # <linux/auxvec.h>
+_HWCAP_ISA_V = 1 << (ord("V") - ord("A"))  # COMPAT_HWCAP_ISA_V in <asm/hwcap.h>
+
+
+def _kernel_hwcap_has_vector():
+    # Read AT_HWCAP straight from the auxiliary vector, the same source getauxval(3)
+    # serves; its V bit is the kernel's own userspace availability interface for the
+    # vector extension, and the independent reference for the probe under test.
+    with open("/proc/self/auxv", "rb") as f:
+        auxv = f.read()
+    for offset in range(0, len(auxv) - 15, 16):
+        a_type, value = struct.unpack("=QQ", auxv[offset:offset + 16])
+        if a_type == _AT_HWCAP:
+            return value & _HWCAP_ISA_V != 0
+    return False
+
+
+@pytest.mark.skipif(platform.machine() != "riscv64", reason="requires a riscv64 host")
+def test_riscv_has_vector_agrees_with_kernel_hwcap():
+    # cpu_arch()/simd_width() gate -march=rv64gcv and __RVV__ on this probe. A wrong
+    # True on draft-V hardware builds V 1.0 encodings the CPU cannot execute. On a
+    # real host the probe must agree with the kernel's HWCAP V bit: the only input
+    # where the probe overrides HWCAP is an explicitly versioned isa token, and a
+    # kernel that accepted such a token also sets the HWCAP bit, so the two cannot
+    # disagree on real hardware.
+    assert make_builder()._riscv_has_vector() is _kernel_hwcap_has_vector()
+
+
+@pytest.mark.parametrize("torch_version, cuda_version, rocm, expected", [
+    ((2, 14), (12, 4), False, "-std=c++20"),
+    ((2, 12), (12, 0), False, "-std=c++20"),
+    ((2, 11), (12, 4), False, "-std=c++17"),
+    ((2, 11), (12, 5), False, "-std=c++20"),
+    ((2, 14), (11, 8), False, "-std=c++17"),
+    ((2, 14), None, True, "-std=c++20"),
+    ((2, 11), None, True, "-std=c++17"),
+])
+def test_nvcc_standard_tracks_torch_cxx_requirement(torch_version, cuda_version, rocm, expected):
+    # torch 2.12+ headers require C++20. The device compiler must use the same
+    # standard, including on CUDA 12.0-12.4 where the old CUDA-version rule
+    # forced C++17 and broke every nvcc source that includes torch headers.
+    builder = make_builder()
+    with patch.object(builder_module, "TORCH_MAJOR", torch_version[0]), \
+            patch.object(builder_module, "TORCH_MINOR", torch_version[1]), \
+            patch.object(CUDAOpBuilder, "is_rocm_pytorch", return_value=rocm):
+        if rocm:
+            with patch.object(builder, "installed_rocm_version", return_value=(6, 2)):
+                args = builder.nvcc_args()
+        else:
+            with patch.object(builder_module, "installed_cuda_version", return_value=cuda_version), \
+                    patch.object(builder, "compute_capability_args", return_value=[]):
+                args = builder.nvcc_args()
+
+    assert expected in args
+    assert [arg for arg in args if arg.startswith("-std=")] == [expected]

@@ -5,6 +5,7 @@
 
 import os
 import re
+import struct
 import sys
 import time
 import importlib
@@ -444,8 +445,12 @@ class OpBuilder(ABC):
         if cpu_info['arch'].startswith('PPC_'):
             # gcc does not provide -march on PowerPC, use -mcpu instead
             return '-mcpu=native'
-        elif cpu_info['arch'].startswith('riscv64'):
-            return '-march=rv64gc'
+        elif (cpu_info['arch'] or '').lower().replace('_', '').startswith('riscv64'):
+            # The vector extension must be in -march for the RVV kernels to compile.
+            # py-cpuinfo on riscv64 reports "RISCV_64" (uppercase, underscore), but
+            # the lscpu fallback path and platform.uname().machine both report
+            # "riscv64" (lowercase, no separator); normalize both forms.
+            return '-march=rv64gcv' if self._riscv_has_vector() else '-march=rv64gc'
         return '-march=native'
 
     def _backup_cpuinfo(self):
@@ -480,6 +485,47 @@ class OpBuilder(ABC):
 
         return cpu_info
 
+    def _riscv_hwcap(self):
+        # AT_HWCAP from the auxiliary vector, the same source getauxval(3) serves.
+        # The kernel builds ELF_HWCAP from the extensions its own ISA parsing
+        # accepted, so unlike a raw ISA string the V bit does not mirror draft
+        # tokens. None means the kernel provided no AT_HWCAP at all.
+        try:
+            with open('/proc/self/auxv', 'rb') as f:
+                auxv = f.read()
+        except OSError:
+            return None
+        at_hwcap = 16  # <linux/auxvec.h>
+        for offset in range(0, len(auxv) - 15, 16):
+            a_type, value = struct.unpack('=QQ', auxv[offset:offset + 16])
+            if a_type == at_hwcap:
+                return value
+        return None
+
+    def _riscv_has_vector(self):
+        # A bare "v" in the ISA line is not evidence of ratified V 1.0: T-Head C906
+        # (Allwinner D1) devicetrees report unversioned rv64imafdcv while the core
+        # implements incompatible draft V 0.7.1, and -march=rv64gcv would emit
+        # encodings such a CPU cannot execute. An explicitly versioned token is
+        # authoritative ("v1p0" qualifies, "v0p7" never does); anything else defers
+        # to the kernel's HWCAP V bit, the availability interface the kernel's own
+        # vector documentation defines. Only the base segment before the first
+        # underscore carries single-letter V (zvl*b, zvfh, ... can never match), and
+        # there each letter is its own token, optionally versioned ("i2p0" style).
+        try:
+            with open('/proc/cpuinfo') as f:
+                for line in f:
+                    if line.startswith('isa'):
+                        base = line.split(':', 1)[1].split('_', 1)[0].strip()[4:]
+                        for token in re.findall(r'[a-z](?:\d+p\d+)?', base):
+                            if token[0] == 'v' and token[1:]:
+                                return int(token[1:].partition('p')[0]) >= 1
+                        break
+        except OSError:
+            pass
+        hwcap = self._riscv_hwcap()
+        return hwcap is not None and hwcap & (1 << (ord('V') - ord('A'))) != 0  # COMPAT_HWCAP_ISA_V
+
     def simd_width(self):
         try:
             from cpuinfo import get_cpu_info
@@ -508,6 +554,8 @@ class OpBuilder(ABC):
             # NEON is baseline on AArch64; vdivq/vsqrtq used by simd.h are A64-only,
             # so do not advertise it for 32-bit ARM.
             return '-D__NEON__'
+        elif (cpu_info['arch'] or '').lower().replace('_', '').startswith('riscv64') and self._riscv_has_vector():
+            return '-D__RVV__'
         return '-D__SCALAR__'
 
     def command_exists(self, cmd):
@@ -873,10 +921,14 @@ class CUDAOpBuilder(OpBuilder):
         if self.build_for_cpu:
             return []
         args = ['-O3']
+        # torch 2.12+ headers require C++20 (see cxx_args), so the device compiler
+        # must use the same standard instead of the toolkit's default.
+        torch_requires_cxx20 = (TORCH_MAJOR, TORCH_MINOR) >= (2, 12)
         if self.is_rocm_pytorch():
             ROCM_MAJOR, ROCM_MINOR = self.installed_rocm_version()
+            rocm_std = '-std=c++20' if torch_requires_cxx20 else '-std=c++17'
             args += [
-                '-std=c++17', '-U__HIP_NO_HALF_OPERATORS__', '-U__HIP_NO_HALF_CONVERSIONS__',
+                rocm_std, '-U__HIP_NO_HALF_OPERATORS__', '-U__HIP_NO_HALF_CONVERSIONS__',
                 '-U__HIP_NO_HALF2_OPERATORS__',
                 '-DROCM_VERSION_MAJOR=%s' % ROCM_MAJOR,
                 '-DROCM_VERSION_MINOR=%s' % ROCM_MINOR
@@ -892,10 +944,11 @@ class CUDAOpBuilder(OpBuilder):
 
             cuda_major, cuda_minor = installed_cuda_version()
             if cuda_major > 10:
-                if (cuda_major == 12 and cuda_minor >= 5) or cuda_major >= 13:
-                    std_lib = '-std=c++20'
-                else:
-                    std_lib = '-std=c++17'
+                # nvcc supports -std=c++20 from CUDA 12.0, so a torch 2.12+ build must
+                # use it even on 12.0-12.4 instead of falling back to C++17.
+                use_cxx20 = ((torch_requires_cxx20 and cuda_major >= 12) or (cuda_major == 12 and cuda_minor >= 5)
+                             or cuda_major >= 13)
+                std_lib = '-std=c++20' if use_cxx20 else '-std=c++17'
             else:
                 std_lib = '-std=c++14'
             args += [

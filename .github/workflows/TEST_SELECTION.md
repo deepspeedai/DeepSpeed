@@ -71,6 +71,11 @@ and documentation checks are not disabled.
 The active `python`, `cpu-torch-latest`, and `nv-pre-compile-ops` workflows use
 the reusable `check-paths.yml` gate. Disabled legacy workflows are left unchanged.
 
+The shared gate also skips root `version.txt` changes on both PRs and merge queue
+entries, including diffs mixing version and documentation changes. Any other
+changed path still requires CI unless explicitly excluded for that workflow.
+The Modal selector already selects no tests for a version-only diff.
+
 The optional `mps-torch-latest` and `no-torch` workflows rely on their PR trigger
 paths instead, which exclude Markdown. A README under a watched source directory
 cannot start these workflows merely because the PR also changes unrelated code.
@@ -95,8 +100,9 @@ diff runs tests, and detection failures, including a base branch without the
 script, emit a warning and fall back to running tests. If the gate job itself
 fails or exceeds its 10-minute limit, the required jobs fail instead of skipping.
 Callers may pass `pr-ignore` (files, or directories ending in `/`, such as
-`version.txt`) to skip more paths on pull requests only; merge queue entries skip
-only documentation-only diffs. Preview the decision with
+`deepspeed/inference/v2/`) to skip more paths on pull requests only; merge queue
+entries use only the shared documentation and root `version.txt` exclusions.
+Preview the decision with
 `python ci/check_paths.py --base "$(git merge-base origin/master HEAD)"`.
 
 Scheduled, manual, and push runs retain their existing behavior. Required

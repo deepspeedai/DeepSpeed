@@ -187,7 +187,6 @@ def _fp_matmul(
     elif ACTIVATION == "leaky_relu":
         acc = tl.where(acc >= 0, acc, 0.01 * acc)
     elif ACTIVATION == "gelu":
-        #acc = tl.sigmoid(1.702 * acc) * acc
         acc = gelu_functor(acc)
     elif ACTIVATION == "sigmoid":
         acc = tl.sigmoid(acc)  # sigmoid

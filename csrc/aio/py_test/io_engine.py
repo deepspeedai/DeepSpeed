@@ -96,7 +96,6 @@ def io_engine_tasklet(pool_params):
     task_barrier(aio_barrier, num_processes)
 
     ctxt = io_engine.ctxt
-    # return ctxt["main_task_sec"], ctxt["elapsed_sec"], ctxt["num_bytes"] * args.loops
     if args.include_warmup_time:
         e2e_latency_sec = sum(ctxt["main_task_sec"])
         task_latency_sec = sum(ctxt["elapsed_sec"])
