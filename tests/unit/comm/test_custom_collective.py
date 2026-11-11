@@ -59,6 +59,41 @@ def test_unimplemented_collective_never_ready():
     assert custom_collective.custom_collective_max_bytes(op="all_gather") == 0
 
 
+class TestSubgroupReduceStaysGroupScoped(DistributedTest):
+    """inference_all_reduce must reduce within the caller's process group.
+
+    The CPU shm fast kernel is bound to the WORLD topology and takes no group
+    argument; letting it serve a proper TP subgroup would combine sibling
+    subgroups' partial sums -- the TestTpGradNorm[2-*] CI failure, where tp=2
+    subgroups in a 4-rank world received 4-way sums instead of 2-way.
+    """
+    world_size = 4
+
+    def test(self):
+        rank = dist.get_rank()
+        # new_group is collective: every rank must create both groups.
+        low_pair = dist.new_group([0, 1])
+        high_pair = dist.new_group([2, 3])
+        subgroup = low_pair if rank < 2 else high_pair
+
+        # No explicit device index: on CUDA the current device is the one the
+        # test rank owns; on CPU this is simply 'cpu'.
+        device = torch.device(get_accelerator().device_name())
+        payload = torch.full((8, ), float(rank), dtype=torch.float32, device=device)
+        dist.inference_all_reduce(payload, op=dist.ReduceOp.SUM, group=subgroup)
+
+        # rank 0+1 -> 1, rank 2+3 -> 5; a world-scoped reduction would give 6.
+        expected = 1.0 if rank < 2 else 5.0
+        assert torch.all(payload == expected), f"rank {rank}: {payload[0].item()} != {expected}"
+
+        # Sanity: a world-wide call through the same entry stays correct too
+        # (and for world-sized TP this is the configuration that keeps the
+        # fast path eligible).
+        world_payload = torch.full((8, ), float(rank), dtype=torch.float32, device=device)
+        dist.inference_all_reduce(world_payload, op=dist.ReduceOp.SUM)
+        assert torch.all(world_payload == 6.0), f"rank {rank}: {world_payload[0].item()} != 6.0"
+
+
 class TestCustomARTwoDeviceParity(DistributedTest):
     """End-to-end parity over the production inference_all_reduce entry.
 
