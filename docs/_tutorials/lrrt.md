@@ -54,7 +54,7 @@ schedule that:
 ### PyTorch
 
 For PyTorch models, LRRT is implemented as a [learning rate
-scheduler](https://pytorch.org/docs/stable/_modules/torch/optim/lr_scheduler.html),
+scheduler](https://docs.pytorch.org/docs/stable/optim.html),
 a feature that is available in PyTorch versions 1.0.1 and newer. Thus, you can
 add a `"scheduler"` entry of type `"LRRangeTest"` into your model configuration
 as illustrated below:

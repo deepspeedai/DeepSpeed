@@ -210,7 +210,6 @@ class PipelineModule(nn.Module):
 
         # if configuration use_reentrant = False, self.activation_checkpoint_func will be set to ``checkpointing.non_reentrant_checkpoint``
 
-        #with torch.random.fork_rng(devices=[get_accelerator().current_device_name()]):
         self._build()
         self.to(get_accelerator().device_name(self.local_rank))
 
@@ -525,10 +524,6 @@ class PipelineModule(nn.Module):
                             if self.global_rank != tied_ranks[0]:
                                 for p in self.tied_modules[key].parameters():
                                     p.ds_pipe_replicated = True
-        '''
-        if len(tied_comms) > 0:
-            print(f'RANK={self.global_rank} tied_comms={tied_comms}')
-        '''
 
         return tied_comms
 
@@ -659,11 +654,6 @@ class PipelineModule(nn.Module):
             load_path, checkpoint, _ = sd_loader.load(mp_world_size, mp_rank, module_key=None, is_pipe_parallel=True)
 
             layer.load_state_dict(checkpoint, strict=strict)
-
-            # if self._grid.data_parallel_id == 0:
-            #     logger.info(
-            #         f'RANK={self.global_rank} Loaded layer={idx+self._local_start} file={load_path}'
-            #     )
 
         self._synchronize_tied_weights()
 
