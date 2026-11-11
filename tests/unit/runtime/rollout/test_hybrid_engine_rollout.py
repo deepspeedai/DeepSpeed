@@ -1150,6 +1150,7 @@ def test_generate_uses_shared_prefill_for_multiple_samples():
 
         def __init__(self):
             super().__init__()
+            self.config = SimpleNamespace()
             self.forward_batch_sizes = []
 
         def forward(self, input_ids, attention_mask=None):

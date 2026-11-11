@@ -210,13 +210,13 @@ def test_continuous_rollout_matches_native_llama_generation_on_accelerator(attn_
         return original_capture_to_graph(*args, **kwargs)
 
     monkeypatch.setattr(accelerator, "capture_to_graph", counted_capture_to_graph)
-    # Three requests and two slots force refill. Each graph call captures once, however many turns it admits.
+    # Three requests and two slots force refill; the second call also exercises graph reuse.
     for rollout in (eager_rollout, graph_rollout, graph_rollout):
         output = rollout.generate(request, sampling).samples
         assert [sample.tokens for sample in output] == reference.tolist()
         assert [sample.attention_mask for sample in output] == expected_attention
         assert all(sample.response_length == sampling.max_new_tokens for sample in output)
-    assert capture_count == 2
+    assert capture_count == 1
 
 
 def _records(prompt_ids, attention_mask):
