@@ -135,7 +135,7 @@ def _parameter_types(tools: Optional[ToolSet], name: str) -> Dict[str, str]:
 
 
 def _convert_parameter(value: str, param_type: Optional[str]) -> Any:
-    """Convert a parameter's text to its schema type, keeping the text when that fails or the type is unknown."""
+    # ``null`` becomes ``None`` for any type, as in SGLang's Qwen3-Coder parser, so rollouts parse calls as serving does.
     if value.lower() == "null":
         return None
     if param_type is None or param_type in _STRING_TYPES:
