@@ -14,6 +14,8 @@ Provides:
   - :func:`build_rollout` — factory that selects the engine from config
 """
 
+import warnings
+
 from deepspeed.runtime.rollout.base import (
     RolloutBatch,
     RolloutConfig,
@@ -61,7 +63,15 @@ def build_rollout(rollout_cfg, generation_engine=None, tokenizer=None, tools=Non
         tokenizer: HuggingFace tokenizer.
         tools: Tools the model may call in multi-turn rollout: a
             :class:`ToolSet` or a list of :class:`Tool`.
+        student_engine: Deprecated alias of ``generation_engine``.
     """
+    if "student_engine" in kwargs:
+        if generation_engine is not None:
+            raise TypeError("build_rollout got both generation_engine and its deprecated alias student_engine")
+        warnings.warn("build_rollout(student_engine=...) is deprecated; use generation_engine",
+                      DeprecationWarning,
+                      stacklevel=2)
+        generation_engine = kwargs.pop("student_engine")
     engine_name = rollout_cfg.engine
     if engine_name == "hybrid_engine":
         if generation_engine is None or tokenizer is None:

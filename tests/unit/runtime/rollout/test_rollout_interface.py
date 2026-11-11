@@ -244,6 +244,21 @@ def test_engine_factory_hybrid_requires_student_engine():
         build_rollout(RolloutConfig(engine="hybrid_engine"))
 
 
+def test_engine_factory_accepts_the_deprecated_student_engine_keyword():
+    from unittest.mock import MagicMock, patch
+    from deepspeed.runtime.rollout.base import RolloutConfig
+
+    cfg = RolloutConfig(engine="hybrid_engine")
+    engine, tokenizer = MagicMock(), MagicMock()
+    with patch.object(rollout_module, "HybridEngineRollout") as rollout_cls:
+        with pytest.warns(DeprecationWarning, match="student_engine"):
+            build_rollout(cfg, student_engine=engine, tokenizer=tokenizer)
+        rollout_cls.assert_called_once_with(engine=engine, tokenizer=tokenizer, cfg=cfg, tools=None)
+
+        with pytest.raises(TypeError, match="deprecated alias"):
+            build_rollout(cfg, engine, tokenizer, student_engine=engine)
+
+
 # --- GRPO ---------------------------------------------------------------------
 
 
