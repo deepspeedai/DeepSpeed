@@ -15,6 +15,7 @@ import torch.nn as nn
 import deepspeed
 import deepspeed.comm as dist
 import deepspeed.checkpoint.ds_to_universal as ds_to_universal
+from deepspeed.accelerator import get_accelerator
 from deepspeed.checkpoint.constants import (
     AUTOTP_UNSUPPORTED_PARAMETER_PATTERNS, CAT_DIM, FP32_FLAT_GROUPS, FP32_WEIGHT_KEY, OPTIMIZER_STATE_DICT, PARAM,
     PARAM_GROUPS, PARAM_SHAPES, PARAMETER_WITH_ROW_PARALLELISM_PATTERNS, PARAMETER_WITH_SUB_PARAMS, SUB_PARAM_SHAPE,
@@ -890,23 +891,27 @@ def test_group_per_tp_shapes_rejects_disagreeing_pipeline_replicas():
 
 
 class TestRealCheckpointUniversalConversionTPxPP(DistributedTest):
-    # Generate a real ZeRO-1 checkpoint with TP=2, PP=2 on CPU (gloo) using the
-    # production DeepSpeed writer, then convert it to a universal checkpoint.
-    # The writer numbers mp_rank files PP-major (mp_rank = pp * tp_degree + tp,
-    # matching reshape_meg_2d.simple_init); _group_per_tp_shapes must use the same
-    # ordering. The TP-major index bug dropped a shape (None) for one TP rank of
-    # every parameter, so the assertion below fails fast on regression and the
-    # converter would crash on its reshape.
+    # Generate a real ZeRO-1 checkpoint with TP=2, PP=2 using the accelerator's
+    # communication backend (CPU: gloo, NPU: hccl, CUDA: nccl), then convert it
+    # to a universal checkpoint. The writer numbers mp_rank files PP-major
+    # (mp_rank = pp * tp_degree + tp, matching reshape_meg_2d.simple_init);
+    # _group_per_tp_shapes must use the same ordering. The TP-major index bug
+    # dropped a shape (None) for one TP rank of every parameter, so the assertion
+    # below fails fast on regression and the converter would crash on its reshape.
     world_size = 4
-    backend = "gloo"
     requires_cuda_env = False
 
     def _launch_procs(self, num_procs, init_method):
-        # CPU/gloo test: the number of processes is not bound to the accelerator's
+        # On CPU, the number of processes is not bound to the accelerator's
         # device_count() (CPU sockets), so bypass the base class's per-device gate
         # that would otherwise skip a 4-process test on a single-socket CPU box.
-        torch.multiprocessing.set_start_method('forkserver', force=True)
-        self._launch_daemonic_procs(num_procs, init_method)
+        # On accelerators, use the base class so missing devices skip instead of
+        # oversubscribing.
+        if get_accelerator().device_name() == "cpu":
+            torch.multiprocessing.set_start_method('forkserver', force=True)
+            self._launch_daemonic_procs(num_procs, init_method)
+        else:
+            super()._launch_procs(num_procs, init_method)
 
     def test(self, tmpdir):
         hidden = 8

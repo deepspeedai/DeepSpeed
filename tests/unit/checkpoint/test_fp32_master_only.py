@@ -98,7 +98,11 @@ def _init_dist(rank, world_size, port):
     os.environ["LOCAL_RANK"] = str(rank)
     os.environ["WORLD_SIZE"] = str(world_size)
     os.environ["LOCAL_SIZE"] = str(world_size)
-    deepspeed.init_distributed(dist_backend="gloo", auto_mpi_discovery=False, rank=rank, world_size=world_size)
+    # The fixture spawns processes directly, so select the device before NCCL/HCCL
+    # initialization. The backend follows the accelerator (CPU: gloo, NPU: hccl).
+    if get_accelerator().is_available():
+        get_accelerator().set_device(rank)
+    deepspeed.init_distributed(auto_mpi_discovery=False, rank=rank, world_size=world_size)
 
 
 def _save_dp2(rank, world_size, tmpdir, port):
@@ -200,6 +204,8 @@ def _spawn(target, *args):
 def dp2_checkpoint(tmp_path_factory):
     if not get_accelerator().is_bf16_supported():
         pytest.skip("bf16 is not supported")
+    if get_accelerator().device_name() != "cpu" and get_accelerator().device_count() < 2:
+        pytest.skip("requires 2 accelerator devices for the data-parallel checkpoint fixture")
     import torch.multiprocessing as mp
 
     tmpdir = str(tmp_path_factory.mktemp("dp2"))
@@ -293,7 +299,8 @@ def test_nvme_master_only_load_copies_only_fp32_swap_files(tmpdir):
 
 class TestFp32MasterOnlyLoad(DistributedTest):
     world_size = 1
-    backend = "gloo"
+    # The parameters live on the accelerator, so use its communication backend;
+    # gloo cannot broadcast NPU tensors.
     requires_cuda_env = False
 
     def test_legacy_load_keeps_masters_and_drops_moments(self, tmpdir):

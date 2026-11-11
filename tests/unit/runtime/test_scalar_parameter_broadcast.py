@@ -20,7 +20,8 @@ class ScalarModel(nn.Module):
 
 class TestScalarParameterBroadcast(DistributedTest):
     world_size = 2
-    backend = "gloo"
+    # The scalar parameter lives on the accelerator, so use its communication
+    # backend; gloo cannot broadcast NPU tensors.
     requires_cuda_env = False
 
     @pytest.mark.parametrize("zero_stage", [0, 3])
