@@ -238,7 +238,7 @@ def test_prebuilt_op_that_drops_archs_does_not_drop_them_for_the_ops_built_after
     # setup.py pre-builds every op in one process. An op that drops the archs it cannot run on, as
     # fp_quantizer drops those below 8.0, must leave them in place for the ops built after it.
     def keep_ampere_and_newer(ccs):
-        return [cc.split('.') for cc in ccs if int(cc.split('.')[0]) >= 8]
+        return [cc for cc in ccs if cc.major >= 8]
 
     with patch.dict(os.environ, {"TORCH_CUDA_ARCH_LIST": "7.0;7.5;8.0;9.0"}, clear=False):
         make_builder(jit_mode=False, filter_ccs=keep_ampere_and_newer).compute_capability_args()
@@ -249,6 +249,7 @@ def test_prebuilt_op_that_drops_archs_does_not_drop_them_for_the_ops_built_after
         "-gencode=arch=compute_75,code=sm_75",
         "-gencode=arch=compute_80,code=sm_80",
         "-gencode=arch=compute_90,code=sm_90",
+        "-gencode=arch=compute_90,code=compute_90",
     ]
 
 
@@ -327,6 +328,7 @@ def test_non_jit_branch_sorts_and_dedupes_gencode_flags():
         "-gencode=arch=compute_70,code=sm_70",
         "-gencode=arch=compute_75,code=sm_75",
         "-gencode=arch=compute_80,code=sm_80",
+        "-gencode=arch=compute_80,code=compute_80",
     ]
 
 
@@ -354,13 +356,51 @@ def test_non_jit_branch_canonical_dedupe_mixed_ptx_combinations():
     cases = [
         ("8.0;8.0+PTX", ["-gencode=arch=compute_80,code=sm_80", "-gencode=arch=compute_80,code=compute_80"]),
         ("8.0+PTX;8.0", ["-gencode=arch=compute_80,code=sm_80", "-gencode=arch=compute_80,code=compute_80"]),
-        ("8.0;8.0", ["-gencode=arch=compute_80,code=sm_80"]),
+        ("8.0;8.0", ["-gencode=arch=compute_80,code=sm_80", "-gencode=arch=compute_80,code=compute_80"]),
         ("8.0+PTX;8.0+PTX", ["-gencode=arch=compute_80,code=sm_80", "-gencode=arch=compute_80,code=compute_80"]),
     ]
     for arch_input, expected_args in cases:
         with patch.dict(os.environ, {"TORCH_CUDA_ARCH_LIST": arch_input}, clear=False):
             args = builder.compute_capability_args()
         assert args == expected_args, arch_input
+
+
+def arch_flags(arch_list, jit_mode):
+    # JIT builds hand the arch list to PyTorch through TORCH_CUDA_ARCH_LIST, so use PyTorch's own parser to
+    # turn it into the -gencode flags that load() compiles with.
+    builder = make_builder(jit_mode=jit_mode)
+    with patch.dict(os.environ, {"TORCH_CUDA_ARCH_LIST": arch_list}, clear=False):
+        args = builder.compute_capability_args()
+        if jit_mode:
+            from torch.utils.cpp_extension import _get_cuda_arch_flags
+            args = _get_cuda_arch_flags()
+    return sorted(args)
+
+
+@pytest.mark.parametrize("jit_mode", [False, True])
+@pytest.mark.parametrize(
+    "arch_list, expected_targets",
+    [
+        # An "a" target is kept, and PTX goes on the highest target without a suffix, because PTX for 9.0a
+        # only runs on that exact GPU.
+        ("8.0;9.0a", ["compute_80,code=compute_80", "compute_80,code=sm_80", "compute_90a,code=sm_90a"]),
+        ("9.0a+PTX", ["compute_90a,code=compute_90a", "compute_90a,code=sm_90a"]),
+        # Empty entries and extra whitespace are ignored. Without any +PTX entry, the highest target gets PTX
+        # in both modes, so the op also runs on newer GPUs.
+        ("8.0; 8.6;", ["compute_80,code=sm_80", "compute_86,code=compute_86", "compute_86,code=sm_86"]),
+    ])
+def test_prebuilt_and_jit_builds_target_the_same_archs(arch_list, expected_targets, jit_mode):
+    assert arch_flags(arch_list, jit_mode) == [f"-gencode=arch={target}" for target in expected_targets]
+
+
+@pytest.mark.parametrize("jit_mode", [False, True])
+@pytest.mark.parametrize("arch_list", ["Ampere", "8.0;10.0f"])
+def test_unsupported_arch_list_entries_fail_with_the_entry_in_the_message(arch_list, jit_mode):
+    # Architecture names are ambiguous, and PyTorch's extension builder accepts no suffix other than "a".
+    # Such entries used to fail inside int() with a message that did not mention TORCH_CUDA_ARCH_LIST.
+    unsupported_entry = arch_list.split(';')[-1]
+    with pytest.raises(ValueError, match=f"TORCH_CUDA_ARCH_LIST entry '{unsupported_entry}'"):
+        arch_flags(arch_list, jit_mode)
 
 
 def test_cuda_capability_major_skips_probe_when_context_not_initialized():

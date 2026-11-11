@@ -17,7 +17,7 @@ import shlex
 import shutil
 import tempfile
 from abc import ABC, abstractmethod
-from typing import List
+from typing import List, NamedTuple
 
 WARNING = "\033[93m [WARNING] \033[0m"
 
@@ -149,6 +149,37 @@ def get_default_compute_capabilities():
             # CUDA 13 cannot build for compute capabilities below 7.5, which rules out the whole base list
             compute_caps = "7.5;8.0;8.6;9.0;10.0;12.0"
     return compute_caps
+
+
+class CudaArch(NamedTuple):
+    """One TORCH_CUDA_ARCH_LIST entry, such as 8.0, 9.0a or 10.0+PTX."""
+    major: int
+    minor: int
+    # "a" marks an architecture-specific target, whose code only runs on that exact GPU.
+    suffix: str
+    ptx: bool
+
+    def __str__(self):
+        return f"{self.major}.{self.minor}{self.suffix}{'+PTX' if self.ptx else ''}"
+
+
+def _parse_cuda_arch_list(arch_list):
+    """
+    Parse a TORCH_CUDA_ARCH_LIST value, such as "8.0;9.0a 10.0+PTX", into CudaArch entries.
+
+    Entries are separated by ; or whitespace, and empty entries are ignored. Like PyTorch's extension
+    builder, the only suffix accepted is "a". Architecture names such as "Ampere" are rejected because
+    they are ambiguous.
+    """
+    ccs = []
+    for entry in arch_list.replace(';', ' ').split():
+        match = re.fullmatch(r"(\d+)\.(\d+)(a?)(\+PTX)?", entry)
+        if match is None:
+            raise ValueError(f"Unsupported TORCH_CUDA_ARCH_LIST entry '{entry}'. Use compute capabilities such as "
+                             "8.0, 9.0a or 10.0+PTX.")
+        major, minor, suffix, ptx = match.groups()
+        ccs.append(CudaArch(int(major), int(minor), suffix, ptx is not None))
+    return ccs
 
 
 def assert_no_cuda_mismatch():
@@ -666,15 +697,17 @@ class CUDAOpBuilder(OpBuilder):
            c. runtime device probing when the process is not in a bad-fork context
            d. an error when no explicit arch list exists in a bad-fork context
 
-           JIT mode auto-adds ``+PTX`` to the highest compute capability when
-           no entry already carries it, then sets ``TORCH_CUDA_ARCH_LIST`` so
-           PyTorch can generate the ``-gencode`` flags itself.
+           JIT mode then sets ``TORCH_CUDA_ARCH_LIST`` so PyTorch can generate
+           the ``-gencode`` flags itself.
         2. ``TORCH_CUDA_ARCH_LIST`` takes priority over ``cross_compile_archs``.
         3. If neither is set default compute capabilities will be used.
+        4. In both modes, when no entry carries ``+PTX``, the highest entry
+           without a suffix gets it.
 
         Format:
 
-        - ``TORCH_CUDA_ARCH_LIST`` may use ; or whitespace separators. Examples:
+        - ``TORCH_CUDA_ARCH_LIST`` may use ; or whitespace separators, ``+PTX``,
+          and the ``a`` suffix. Examples:
 
         TORCH_CUDA_ARCH_LIST="6.1;7.5;8.6;9.0;10.0" pip install ...
         TORCH_CUDA_ARCH_LIST="6.0 6.1 7.0 7.5 8.0 8.6 9.0 10.0+PTX" pip install ...
@@ -682,56 +715,40 @@ class CUDAOpBuilder(OpBuilder):
         - ``cross_compile_archs`` uses ; separator.
 
         """
-        ccs = []
         if self.jit_mode:
-            arch_string = getattr(self, '_jit_arch_list', None)
-            if arch_string:
-                arch_string = arch_string.replace(' ', ';')
-                ccs = [cc.strip() for cc in arch_string.split(';') if cc.strip()]
-            else:
-                arch_string = os.environ.get('TORCH_CUDA_ARCH_LIST', '').strip()
-                if arch_string:
-                    arch_string = arch_string.replace(' ', ';')
-                    ccs = [cc.strip() for cc in arch_string.split(';') if cc.strip()]
-                else:
-                    if hasattr(torch.cuda, '_is_in_bad_fork') and torch.cuda._is_in_bad_fork():
-                        raise RuntimeError(
-                            f"DeepSpeed JIT builder for '{self.name}' cannot probe CUDA device capabilities "
-                            "in a forked subprocess where CUDA has already been initialized. Set "
-                            "TORCH_CUDA_ARCH_LIST to specify target architectures explicitly.")
-                    for i in range(torch.cuda.device_count()):
-                        CC_MAJOR, CC_MINOR = torch.cuda.get_device_capability(i)
-                        cc = f"{CC_MAJOR}.{CC_MINOR}"
-                        if cc not in ccs:
-                            ccs.append(cc)
-                    if len(ccs) == 0:
-                        raise RuntimeError(f"DeepSpeed JIT builder for '{self.name}' found no CUDA devices. Set "
-                                           "TORCH_CUDA_ARCH_LIST or make GPUs visible.")
-
-            ccs = sorted(ccs, key=lambda cc: tuple(int(part.split('+')[0]) for part in cc.split('.')))
-            if not any('+PTX' in cc for cc in ccs):
-                ccs[-1] += '+PTX'
+            arch_list = getattr(self, '_jit_arch_list', None) or os.environ.get('TORCH_CUDA_ARCH_LIST', '')
+            ccs = _parse_cuda_arch_list(arch_list)
+            if not ccs:
+                if hasattr(torch.cuda, '_is_in_bad_fork') and torch.cuda._is_in_bad_fork():
+                    raise RuntimeError(
+                        f"DeepSpeed JIT builder for '{self.name}' cannot probe CUDA device capabilities "
+                        "in a forked subprocess where CUDA has already been initialized. Set "
+                        "TORCH_CUDA_ARCH_LIST to specify target architectures explicitly.")
+                for i in range(torch.cuda.device_count()):
+                    CC_MAJOR, CC_MINOR = torch.cuda.get_device_capability(i)
+                    cc = CudaArch(CC_MAJOR, CC_MINOR, '', False)
+                    if cc not in ccs:
+                        ccs.append(cc)
+                if len(ccs) == 0:
+                    raise RuntimeError(f"DeepSpeed JIT builder for '{self.name}' found no CUDA devices. Set "
+                                       "TORCH_CUDA_ARCH_LIST or make GPUs visible.")
         else:
             # Cross-compile mode, compile for various architectures
             # env override takes priority
-            cross_compile_archs_env = os.environ.get('TORCH_CUDA_ARCH_LIST', None)
-            if cross_compile_archs_env is not None:
-                if cross_compile_archs is not None:
-                    print(
-                        f"{WARNING} env var TORCH_CUDA_ARCH_LIST={cross_compile_archs_env} overrides cross_compile_archs={cross_compile_archs}"
-                    )
-                cross_compile_archs = cross_compile_archs_env.replace(' ', ';')
-            else:
-                if cross_compile_archs is None:
-                    cross_compile_archs = get_default_compute_capabilities()
-            ccs = cross_compile_archs.split(';')
+            ccs = _parse_cuda_arch_list(os.environ.get('TORCH_CUDA_ARCH_LIST', ''))
+            if ccs and cross_compile_archs is not None:
+                print(
+                    f"{WARNING} env var TORCH_CUDA_ARCH_LIST={os.environ['TORCH_CUDA_ARCH_LIST']} overrides cross_compile_archs={cross_compile_archs}"
+                )
+            if not ccs:
+                ccs = _parse_cuda_arch_list(cross_compile_archs or get_default_compute_capabilities())
 
         ccs = self.filter_ccs(ccs)
         if len(ccs) == 0:
             raise RuntimeError(
                 f"Unable to load {self.name} op due to no compute capabilities remaining after filtering")
 
-        # Canonicalize by numeric (major, minor) so the emitted -gencode
+        # Canonicalize by (major, minor, suffix) so the emitted -gencode
         # sequence matches PyTorch's own dedupe (see #7871). For mixed inputs
         # such as "8.0;8.0+PTX" or "8.0+PTX;8.0", PyTorch collapses to one
         # sm_80 entry plus one compute_80 PTX entry. Track has_PTX per arch
@@ -739,30 +756,31 @@ class CUDAOpBuilder(OpBuilder):
         # carries through after dedupe.
         canonical = {}
         for cc in ccs:
-            major = int(cc[0])
-            minor_part = cc[1]
-            has_ptx = minor_part.endswith('+PTX')
-            minor = int(minor_part.split('+')[0])
-            key = (major, minor)
-            canonical[key] = canonical.get(key, False) or has_ptx
-        canonical_archs = sorted(canonical.items())
+            key = cc._replace(ptx=False)
+            canonical[key] = canonical.get(key, False) or cc.ptx
+        ccs = sorted(key._replace(ptx=has_ptx) for key, has_ptx in canonical.items())
+
+        # PTX lets the op run on GPUs newer than every target. PTX for an "a" target only runs on that exact
+        # GPU, so when no entry asks for PTX, add it to the highest target without a suffix.
+        if not any(cc.ptx for cc in ccs):
+            plain_ccs = [cc for cc in ccs if not cc.suffix]
+            if plain_ccs:
+                highest = plain_ccs[-1]
+                ccs[ccs.index(highest)] = highest._replace(ptx=True)
 
         self.enable_bf16 = True
-        for (major, _minor), _has_ptx in canonical_archs:
-            if major <= 7:
+        for cc in ccs:
+            if cc.major <= 7:
                 self.enable_bf16 = False
 
         if self.jit_mode:
             # Before torch 2.9, load() adds -gencode flags from TORCH_CUDA_ARCH_LIST (or the visible GPUs) even
             # when extra_cuda_cflags already has some. So set the env var to the filtered arch list and let
             # PyTorch generate the flags, which keeps it from re-adding archs that filter_ccs() removed;
-            # jit_load() restores the caller's value. Emit one token per arch using the X.Y or X.Y+PTX form,
-            # matching PyTorch's canonical parsing where +PTX on an arch token already implies both the sm and
-            # PTX emissions for that arch.
-            arch_tokens = [
-                f"{major}.{minor}{'+PTX' if has_ptx else ''}" for (major, minor), has_ptx in canonical_archs
-            ]
-            os.environ["TORCH_CUDA_ARCH_LIST"] = ";".join(arch_tokens)
+            # jit_load() restores the caller's value. Emit one token per arch using the X.Y[a] or X.Y[a]+PTX
+            # form, matching PyTorch's canonical parsing where +PTX on an arch token already implies both the
+            # sm and PTX emissions for that arch.
+            os.environ["TORCH_CUDA_ARCH_LIST"] = ";".join(str(cc) for cc in ccs)
             return []
 
         # Non-JIT: return explicit flags per builder for extra_compile_args.
@@ -771,24 +789,23 @@ class CUDAOpBuilder(OpBuilder):
         # Emit exactly one sm_X line per arch, followed by one compute_X PTX
         # line when any variant of that arch carried +PTX.
         args = []
-        for (major, minor), has_ptx in canonical_archs:
-            num = f"{major}{minor}"
+        for cc in ccs:
+            num = f"{cc.major}{cc.minor}{cc.suffix}"
             args.append(f'-gencode=arch=compute_{num},code=sm_{num}')
-            if has_ptx:
+            if cc.ptx:
                 args.append(f'-gencode=arch=compute_{num},code=compute_{num}')
 
         return args
 
-    def filter_ccs(self, ccs: List[str]):
+    def filter_ccs(self, ccs: List[CudaArch]):
         """
         Prune any compute capabilities that are not compatible with the builder. Should log
         which CCs have been pruned.
         """
-        ccs = [cc.split('.') for cc in ccs]
         if self.MIN_COMPUTE_CAPABILITY is None:
             return ccs
-        ccs_retained = [cc for cc in ccs if int(cc[0]) >= self.MIN_COMPUTE_CAPABILITY]
-        ccs_pruned = [cc for cc in ccs if int(cc[0]) < self.MIN_COMPUTE_CAPABILITY]
+        ccs_retained = [cc for cc in ccs if cc.major >= self.MIN_COMPUTE_CAPABILITY]
+        ccs_pruned = [str(cc) for cc in ccs if cc.major < self.MIN_COMPUTE_CAPABILITY]
         if len(ccs_pruned) > 0:
             self.warning(f"Filtered compute capabilities {ccs_pruned}")
         return ccs_retained
