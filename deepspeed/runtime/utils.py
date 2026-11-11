@@ -205,7 +205,6 @@ def get_norm_with_moe_layers_fast(all_groups_norm, group):
     scaled_norm_tensor = torch.tensor(scaled_norm, device=get_accelerator().current_device_name(), dtype=torch.float)
     dist.all_reduce(scaled_norm_tensor, group=group)
     all_groups_norm = scaled_norm_tensor.item()
-    #print(f"old = {all_groups_norm_old} and new = {all_groups_norm} at rank: {deepspeed.comm.get_rank()}")
     return all_groups_norm
 
 
@@ -308,9 +307,6 @@ class CheckOverflow(object):
         # Since each model parallel GPU carries only part of the model,
         # make sure overflow flag is synced across all the model parallel GPUs
         overflow_gpu = get_accelerator().ByteTensor([overflow])
-        # deepspeed.comm.all_reduce(overflow_gpu,
-        #                             op=deepspeed.comm.ReduceOp.MAX,
-        #                             group=mpu.get_model_parallel_group())
         if has_moe_params:
             # All reduce this across expert_parallel_group, so that if an expert
             # overflows, we detect it here
@@ -356,7 +352,6 @@ def get_global_norm(norm_list):
     total_norm = 0.0
     for norm in norm_list:
         total_norm += norm**2.0
-    # logger.info(f'norm_list = {norm_list} global = {sqrt(total_norm)}')
     return sqrt(total_norm)
 
 
