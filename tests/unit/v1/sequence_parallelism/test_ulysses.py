@@ -3,6 +3,8 @@
 
 # DeepSpeed Team
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 import torch.nn.functional as F
@@ -14,7 +16,8 @@ from transformers import AutoModel
 from unit.common import DistributedTest
 from deepspeed.sequence.layer import (DistributedAttention, _SeqAllToAll, _generate_layout_params, post_all2all,
                                       pre_all2all_fun, single_all_to_all)
-from deepspeed.sequence.fpdt_layer import _FPDTGPUAttentionImpl_, _FPDTGPUOffloadingAttentionImpl_, FPDT_InputConstruct
+from deepspeed.sequence.fpdt_layer import (_FPDTGPUAttentionImpl_, _FPDTGPUOffloadingAttentionImpl_,
+                                           FPDT_InputConstruct, FPDT_Attention, FPDT_LogitsLoss)
 from unit.util import skip_on_arch
 from unit.simple_model import *
 from deepspeed.utils import groups
@@ -382,6 +385,139 @@ class TestFPDTAttention(DistributedTest):
         assert torch.allclose(
             fpdt_output, baseline_output_shuffled, rtol=0.01, atol=0.1
         ), f"rank {dist.get_rank()}, sp size: {dist.get_world_size(spg)}, input_tensor: {input_tensor.shape}, fpdt_input_tensor: {fpdt_input_tensor.shape}, fpdt_output: {fpdt_output.shape},            baseline_output_shuffled: {baseline_output_shuffled.shape},{torch.max(torch.abs(fpdt_output - baseline_output_shuffled))}"
+
+
+@pytest.mark.parametrize('length', [24, 19, 3])
+@pytest.mark.parametrize('offload', [False, True])
+class TestFPDTPadding(DistributedTest):
+    world_size = 2
+
+    def test_padding_matches_unpadded_reference(self, length, offload):
+        skip_on_arch(min_arch=8)
+        try:
+            from flash_attn.flash_attn_interface import _flash_attn_forward, _flash_attn_backward
+        except ImportError:
+            _flash_attn_forward = None
+            _flash_attn_backward = None
+        if _flash_attn_forward is None or _flash_attn_backward is None:
+            pytest.skip("Flash Attention is not available.")
+
+        chunk, width, heads, head_dim, vocab = 8, 64, 2, 32, 23
+        device = get_accelerator().current_device_name()
+        group = dist.get_world_group()
+        size, rank = dist.get_world_size(group), dist.get_rank(group)
+        generator = torch.Generator().manual_seed(41)
+
+        def random_tensor(shape, scale):
+            return (torch.randn(shape, generator=generator) * scale).to(device=device, dtype=torch.half)
+
+        inputs = random_tensor((2, length, width), 0.3)
+        weight = random_tensor((3 * width, width), 0.5 / width**0.5)
+        bias = random_tensor((3 * width, ), 0.02)
+        head = random_tensor((vocab, width), 0.5 / width**0.5)
+        labels = torch.randint(vocab, (2, length), generator=generator).to(device)
+        weights = (torch.arange(2 * length, device=device).reshape(2, length) % 5).float() / 4
+        config = SimpleNamespace(ds_sequence_parallel_fpdt_chunk_size=chunk,
+                                 kv_channels=head_dim,
+                                 num_attention_heads=heads,
+                                 num_key_value_heads=heads,
+                                 hidden_size=width,
+                                 attention_dropout=0.0)
+
+        # Independent ordinary global causal attention; the head/loss rounding
+        # follows FPDT's legitimate fp16 matmul -> float softmax().log() recipe.
+        ref_x, ref_w, ref_b, ref_head = (t.clone().requires_grad_() for t in (inputs, weight, bias, head))
+        q, k, v = (ref_x @ ref_w.t() + ref_b).chunk(3, dim=-1)
+        q, k, v = (t.reshape(2, length, heads, head_dim).transpose(1, 2).float() for t in (q, k, v))
+        scores = (q @ k.transpose(-2, -1)) / head_dim**0.5
+        causal = torch.ones(length, length, device=device, dtype=torch.bool).tril()
+        probabilities = scores.masked_fill(~causal, float('-inf')).softmax(-1)
+        ref_output = (probabilities @ v).transpose(1, 2).reshape(2, length, width).half()
+        logits = (ref_output @ ref_head.t()).float()
+        losses = F.nll_loss(logits.softmax(-1).log().reshape(-1, vocab), labels.reshape(-1), reduction='none')
+        ref_loss = (losses.reshape_as(weights) * weights).sum() / weights.sum()
+        ref_loss.backward()
+
+        def compare(actual, expected):
+            # Normalize small gradients so a broad absolute tolerance cannot
+            # hide their loss; the floor covers fp16 noise in the zero key bias.
+            actual, expected = actual.detach().float(), expected.detach().float()
+            if expected.numel():
+                scale = expected.abs().max().clamp_min(2e-4)
+                torch.testing.assert_close(actual / scale, expected / scale, atol=0.01, rtol=0.01)
+
+        # Verify these tolerances reject lost or doubled meaningful parameter gradients.
+        for grad in (*ref_w.grad.chunk(3), ref_head.grad):
+            for incorrect in (torch.zeros_like(grad), 2 * grad):
+                with pytest.raises(AssertionError):
+                    compare(incorrect, grad)
+
+        padded_length = ((length + chunk - 1) // chunk) * chunk
+        padding = padded_length - length
+        indices = torch.tensor([i for i in range(padded_length) if (i % chunk) // (chunk // size) == rank],
+                               device=device)
+        valid = indices < length
+        expected = (ref_output[:, indices[valid]], ref_x.grad[:, indices[valid]], *ref_w.grad.chunk(3),
+                    *ref_b.grad.chunk(3), ref_head.grad)
+        baseline = None
+        modes = ('aligned', ) if padding == 0 else ('auto', 'explicit', 'perturbed')
+        for mode in modes:
+            x, y, mask = inputs, labels, weights
+            if mode in ('explicit', 'perturbed'):
+                pad_x = inputs.new_full((2, padding, width), 0.75 if mode == 'perturbed' else 0)
+                pad_y = labels.new_full((2, padding), vocab - 1 if mode == 'perturbed' else 0)
+                x = torch.cat((inputs, pad_x), dim=1)
+                y = torch.cat((labels, pad_y), dim=1)
+                mask = torch.cat((weights, weights.new_zeros((2, padding))), dim=1)
+            local, local_labels, global_weights, _, _ = FPDT_InputConstruct(x, y, mask, None, None, config, size,
+                                                                            rank).generate()
+            local = local.transpose(0, 1).contiguous().detach().requires_grad_()
+            w, b, h = (t.clone().requires_grad_() for t in (weight, bias, head))
+            attention = FPDT_Attention(config,
+                                       w,
+                                       b,
+                                       torch.eye(width, device=device, dtype=torch.half),
+                                       inputs.new_zeros(width),
+                                       group,
+                                       gather_idx=1,
+                                       scatter_idx=2,
+                                       return_bias=False,
+                                       chunk_size=chunk)
+            output, _ = attention(local, None, None, None, cpu_offloading=offload)
+            pending = [output.grad_fn]
+            while pending:
+                backend = pending.pop()
+                if type(backend).__name__.startswith('_FPDTGPU'):
+                    break
+                if backend is not None:
+                    pending.extend(child for child, _ in backend.next_functions)
+            else:
+                pytest.fail('FPDT attention backend was not selected')
+            uses_offload = offload and padded_length > chunk
+            implementation = _FPDTGPUOffloadingAttentionImpl_ if uses_offload else _FPDTGPUAttentionImpl_
+            assert type(backend).__name__ == implementation.__name__ + 'Backward'
+            if uses_offload:
+                assert all(t.cpu_chunk.device.type == 'cpu' for t in backend.global_q)
+                assert any(t.gpu_chunk is None for t in backend.global_q)
+            losses = FPDT_LogitsLoss.apply(output, local_labels, h, rank, size, group, padded_length // chunk)
+            # A rank can own no real tokens. Normalize by SP-global weight, never local weight.
+            loss = (losses * global_weights.t()).sum() / global_weights.sum()
+            loss.backward()
+            grads = [t.grad.float() for t in (w, b, h)]
+            for grad in grads:
+                dist.all_reduce(grad, op=dist.ReduceOp.SUM, group=group)
+            actual = (output.transpose(0, 1)[:, valid], local.grad.transpose(0, 1)[:, valid], *grads[0].chunk(3),
+                      *grads[1].chunk(3), grads[2])
+            for value, reference in zip(actual, expected):
+                assert value.shape == reference.shape
+                compare(value, reference)
+            torch.testing.assert_close(loss, ref_loss, atol=1e-5, rtol=1e-4)
+            assert torch.count_nonzero(local.grad[~valid]) == 0
+            values = tuple(t.detach().float() for t in (*actual, loss))
+            if baseline is not None:
+                for value, previous in zip(values, baseline):
+                    torch.testing.assert_close(value, previous, atol=2e-7, rtol=1e-3)
+            baseline = values
 
 
 @pytest.mark.parametrize("num_kv_heads", [2, 4, 8])
