@@ -13,6 +13,16 @@ def get_repetition_penalty(sampling, module):
     return penalty if isinstance(penalty, (int, float)) else 1.0
 
 
+def get_eos_token_ids(tokenizer, module):
+    generation_config = getattr(module, "generation_config", None)
+    eos_ids = []
+    for eos in (tokenizer.eos_token_id, getattr(generation_config, "eos_token_id", None)):
+        for token in eos if isinstance(eos, (list, tuple)) else [eos]:
+            if isinstance(token, int) and token not in eos_ids:
+                eos_ids.append(token)
+    return eos_ids
+
+
 def get_pad_token_id(tokenizer):
     """The tokenizer's pad id, falling back to its EOS id."""
     pad_token_id = tokenizer.pad_token_id
@@ -68,11 +78,10 @@ def masked_lists(values, mask):
     return [values[row][mask.bool()[row]].tolist() for row in range(values.shape[0])]
 
 
-def tokenize_tool_responses(tool_messages, tokenizer, chat_template_kwargs=None):
-    """Token ids that append ``tool_messages`` after an assistant turn ending in EOS, without re-tokenizing it.
+def tokenize_tool_responses(tool_messages, tokenizer, eos_token_ids, chat_template_kwargs=None):
+    """Token ids that append ``tool_messages`` after an assistant turn ending in one of ``eos_token_ids``, without
+    re-tokenizing it.
 
-    ``chat_template_kwargs`` must match the prompt's, since they can change the generation prompt that ends the
-    tool output.
     """
     tool_calls = [{
         "type": "function",
@@ -93,9 +102,11 @@ def tokenize_tool_responses(tool_messages, tokenizer, chat_template_kwargs=None)
                                                **kwargs)
     if not with_tools.startswith(without):
         raise ValueError("the chat template renders earlier messages differently once tool messages follow")
-    # Generation stops at the end-of-turn token, so the template's text after it (a newline for Qwen) comes first.
-    end_of_turn = tokenizer.eos_token
-    join_suffix = without[without.rfind(end_of_turn) + len(end_of_turn):]
+    eos_tokens = tokenizer.convert_ids_to_tokens(eos_token_ids)
+    end, end_of_turn = max(((without.rfind(token), token) for token in eos_tokens), default=(-1, ""))
+    if end < 0:
+        raise ValueError("the chat template ends the assistant turn without an EOS token")
+    join_suffix = without[end + len(end_of_turn):]
     return tokenizer.encode(join_suffix + with_tools[len(without):], add_special_tokens=False)
 
 

@@ -268,8 +268,7 @@ class _ContinuousRunGraph(_ContinuousRunBase):
         self.log_prob_buf = None
         if rollout.return_log_probs:
             self.log_prob_buf = torch.zeros(num_rows, self.turn_len, dtype=torch.float32, device=device)
-        eos_token_id = rollout.tokenizer.eos_token_id
-        self.stop_token = eos_token_id if eos_token_id is not None else -1
+        self.eos_ids = rollout._eos_tensor(device)
         self.step_trace = [] if rollout.enable_profiling else None
         self.decoded = torch.zeros((), dtype=torch.long, device=device)
         self.graph = None
@@ -317,7 +316,7 @@ class _ContinuousRunGraph(_ContinuousRunBase):
             self.log_prob_buf[target, 0] = first_log_probs[:, 0]
         self.num_generated[target] = 1
         self.turn_limit[target] = limits
-        self.active[target] = (first[:, 0] != self.stop_token) & (limits > 1)
+        self.active[target] = ~self.rollout._matches_eos(first[:, 0], self.eos_ids) & (limits > 1)
         for row, i, _ in admitted:
             self.row_owner[row] = i
         self.stats["turns"] += len(admitted)
@@ -369,7 +368,7 @@ class _ContinuousRunGraph(_ContinuousRunBase):
         self.num_generated.add_(self.active.long())
         if self.step_trace is not None:
             self.decoded.add_(self.active.sum())
-        ended = (tokens[:, 0] == self.stop_token) | (self.num_generated >= self.turn_limit)
+        ended = self.rollout._matches_eos(tokens[:, 0], self.eos_ids) | (self.num_generated >= self.turn_limit)
         self.active.logical_and_(~ended)
         self.static_token.copy_(tokens)
         self.write_pos.add_(self.active.long())

@@ -22,6 +22,7 @@ from deepspeed.runtime.config import HybridEngineConfig
 from deepspeed.runtime.hybrid_engine import DeepSpeedHybridEngine
 from deepspeed.runtime.rollout.base import RolloutConfig, RolloutRecord, RolloutRequest, SamplingConfig
 from deepspeed.runtime.rollout.tool import Tool, ToolCall, ToolSet, parse_qwen3_coder_tool_calls
+from deepspeed.runtime.rollout.utils import get_eos_token_ids, tokenize_tool_responses
 from deepspeed.runtime.rollout.hybrid_engine_rollout import (
     HybridEngineRollout,
     HybridEngineRolloutConfig,
@@ -1737,6 +1738,89 @@ def test_generate_keeps_ranks_in_lockstep_and_pads_after_eos():
     assert sample.status == RolloutRecord.Status.COMPLETED
 
 
+def test_get_eos_token_ids_merges_the_tokenizer_and_generation_config():
+    engine = _make_engine()
+    tok = _make_tokenizer()
+    rollout = HybridEngineRollout(engine, tok)
+    # A mocked generation config has no real EOS ids.
+    assert get_eos_token_ids(tok, engine.module) == [2]
+
+    engine.module.generation_config = SimpleNamespace(eos_token_id=[2, 8, 9])
+    assert get_eos_token_ids(tok, engine.module) == [2, 8, 9]
+
+    tok.eos_token_id = [9, 3]
+    engine.module.generation_config = SimpleNamespace(eos_token_id=8)
+    assert get_eos_token_ids(tok, engine.module) == [9, 3, 8]
+
+    tok.eos_token_id = None
+    engine.module.generation_config = SimpleNamespace(eos_token_id=None)
+    assert get_eos_token_ids(tok, engine.module) == []
+    assert rollout._eos_tensor("cpu").tolist() == [-1]
+
+
+@pytest.mark.parametrize("tokenizer_eos, config_eos", [([2, 3], None), (2, [2, 3])])
+def test_static_generation_ends_turns_on_every_eos_id(tokenizer_eos, config_eos):
+    engine = _make_engine()
+    engine.module.generation_config = SimpleNamespace(eos_token_id=config_eos)
+    tok = _make_tokenizer()
+    tok.eos_token_id = tokenizer_eos
+    cfg = HybridEngineRolloutConfig(multi_turn=True, max_turns=1)
+    rollout = HybridEngineRollout(engine, tok, cfg=cfg, tools=ToolSet([_EchoTool()]))
+    # The first row ends in the second EOS id, then runs on; the second never ends.
+    engine.module.generate.return_value = torch.tensor([[10, 11, 5, 3, 7], [10, 11, 6, 7, 8]])
+    request = RolloutRequest(samples=[_prompt([10, 11]), _prompt([10, 11])])
+
+    with patch.object(rollout, "parse_tool_calls", return_value=[]) as parse_tool_calls:
+        result = rollout.generate(request, SamplingConfig(max_new_tokens=3, temperature=0))
+
+    assert engine.module.generate.call_args.kwargs["eos_token_id"] == [2, 3]
+    parse_tool_calls.assert_called_once()
+    assert [sample.tokens for sample in result.samples] == [[10, 11, 5, 3], [10, 11, 6, 7, 8]]
+    assert [sample.status for sample in result.samples] == [
+        RolloutRecord.Status.COMPLETED,
+        RolloutRecord.Status.TRUNCATED,
+    ]
+
+
+def _tool_template_tokenizer(assistant_end):
+    """A tokenizer whose template ends the user turn with <eot> and the tool-call turn with ``assistant_end``."""
+    tok = MagicMock()
+
+    def render(messages, add_generation_prompt=False, **_kwargs):
+        text = f"<u>dummy<eot>\n<a>call{assistant_end}\n"
+        if len(messages) > 2:
+            text += "<t>out<eot>\n"
+        if add_generation_prompt:
+            text += "<a>"
+        return text
+
+    tok.apply_chat_template.side_effect = render
+    tok.convert_ids_to_tokens.side_effect = lambda ids: [{2: "<eot>", 3: "<eom>"}[i] for i in ids]
+    tok.encode.side_effect = lambda text, **_kwargs: list(text)
+    return tok
+
+
+def test_tokenize_tool_responses_joins_after_the_last_eos_token_of_any_kind():
+    tool_messages = [{"role": "tool", "name": "echo", "content": "out"}]
+
+    ids = tokenize_tool_responses(tool_messages, _tool_template_tokenizer("<eom>"), [2, 3])
+
+    assert "".join(ids) == "\n<t>out<eot>\n<a>"
+
+
+def test_tokenize_tool_responses_requires_an_eos_token_in_the_template():
+    tool_messages = [{"role": "tool", "name": "echo", "content": "out"}]
+
+    with pytest.raises(ValueError, match="without an EOS token"):
+        tokenize_tool_responses(tool_messages, _tool_template_tokenizer("<end>"), [3])
+
+
+def test_matches_eos_checks_membership_in_every_eos_id():
+    eos_ids = torch.tensor([2, 3])
+
+    assert HybridEngineRollout._matches_eos(torch.tensor([1, 2, 3, 4]), eos_ids).tolist() == [False, True, True, False]
+
+
 def test_generate_forwards_top_k_for_sampling_with_multiple_samples_and_eos():
     engine = _make_engine()
     tok = _make_tokenizer()
@@ -1757,7 +1841,7 @@ def test_generate_forwards_top_k_for_sampling_with_multiple_samples_and_eos():
     assert generate_call.kwargs["temperature"] == 0.7
     assert generate_call.kwargs["top_p"] == 0.8
     assert generate_call.kwargs["top_k"] == 5
-    assert generate_call.kwargs["eos_token_id"] == tok.eos_token_id
+    assert generate_call.kwargs["eos_token_id"] == [tok.eos_token_id]
     assert [sample.tokens for sample in result.samples] == [[10, 11, 5, 2], [10, 11, 6, 7, 2]]
     assert [sample.loss_mask for sample in result.samples] == [[1, 1], [1, 1, 1]]
     assert [sample.group_index for sample in result.samples] == [0, 0]

@@ -25,6 +25,7 @@ from deepspeed.runtime.rollout.continuous_batching import _ContinuousRunGraph, _
 from deepspeed.runtime.rollout.tool import TOOL_CALL_PARSERS, ToolSet
 from deepspeed.runtime.rollout.utils import (
     expand_samples,
+    get_eos_token_ids,
     get_pad_token_id,
     get_repetition_penalty,
     left_pad_samples,
@@ -368,7 +369,7 @@ class HybridEngineRollout(RolloutEngine):
         return min(budget, self.max_out_tokens - sum(sample.attention_mask))
 
     def _end_turn(self, sample, response, turn, generated, max_new_tokens):
-        if not response or response[-1] != self.tokenizer.eos_token_id:
+        if not response or response[-1] not in get_eos_token_ids(self.tokenizer, self.engine.module):
             sample.status = RolloutRecord.Status.TRUNCATED
             return None
         if not self.multi_turn:
@@ -393,7 +394,9 @@ class HybridEngineRollout(RolloutEngine):
             "name": call.name or "unknown",
             "content": output
         } for call, output in zip(calls, outputs)]
-        return tokenize_tool_responses(tool_messages, self.tokenizer, self.chat_template_kwargs)
+        return tokenize_tool_responses(tool_messages, self.tokenizer,
+                                       get_eos_token_ids(self.tokenizer, self.engine.module),
+                                       self.chat_template_kwargs)
 
     @torch.no_grad()
     def _generate(self, trajectories, sampling, num_prompts, call_start=None):
@@ -482,7 +485,7 @@ class HybridEngineRollout(RolloutEngine):
             output_ids, response_attn = self._pad_after_eos(
                 output_ids,
                 response_start=prompt_len,
-                eos_token_id=self.tokenizer.eos_token_id,
+                eos_token_id=get_eos_token_ids(self.tokenizer, self.engine.module),
                 pad_token_id=pad_token_id,
             )
             responses = masked_lists(output_ids[:, prompt_len:], response_attn)
@@ -634,7 +637,7 @@ class HybridEngineRollout(RolloutEngine):
         generate_kwargs = {
             "attention_mask": prompt_attn_mask,
             "max_new_tokens": max_new_tokens,
-            "eos_token_id": self.tokenizer.eos_token_id if stop_at_eos else None,
+            "eos_token_id": (get_eos_token_ids(self.tokenizer, self.engine.module) or None) if stop_at_eos else None,
             "pad_token_id": pad_token_id,
             **self._hf_sampling_kwargs(sampling),
         }
@@ -956,11 +959,20 @@ class HybridEngineRollout(RolloutEngine):
         position_ids = attention_mask.long().cumsum(dim=-1) - 1
         return position_ids.masked_fill(attention_mask == 0, 1)
 
+    def _eos_tensor(self, device):
+        return torch.tensor(get_eos_token_ids(self.tokenizer, self.engine.module) or [-1],
+                            dtype=torch.long,
+                            device=device)
+
+    @staticmethod
+    def _matches_eos(tokens, eos_ids):
+        return (tokens.unsqueeze(-1) == eos_ids).any(dim=-1)
+
     def _is_eos(self, token):
-        eos_token_id = self.tokenizer.eos_token_id
-        if eos_token_id is None:
+        eos_ids = get_eos_token_ids(self.tokenizer, self.engine.module)
+        if not eos_ids:
             return False
-        eos_ids = torch.as_tensor(eos_token_id, dtype=token.dtype, device=token.device).flatten()
+        eos_ids = torch.as_tensor(eos_ids, dtype=token.dtype, device=token.device)
         return bool((token == eos_ids).any().item())
 
     @staticmethod
@@ -1123,7 +1135,7 @@ class HybridEngineRollout(RolloutEngine):
         batch_size = prompt_ids.shape[0]
         prompt_len = prompt_ids.shape[1]
         max_len = prompt_len + max_new_tokens
-        eos_token_id = self.tokenizer.eos_token_id
+        eos_ids = self._eos_tensor(device)
         model_dtype = next(module.parameters()).dtype
         row_indices = torch.arange(batch_size, device=device)
 
@@ -1218,8 +1230,7 @@ class HybridEngineRollout(RolloutEngine):
             module._forward_hooks.update(saved_post)
 
         # --- Decode loop ---
-        stop_token = eos_token_id if eos_token_id is not None else -1
-        eos_mask = next_token.squeeze(1) == stop_token
+        eos_mask = self._matches_eos(next_token.squeeze(1), eos_ids)
         for step in range(max_new_tokens - 1):
             if bool(eos_mask.all().item()):
                 break
@@ -1235,7 +1246,7 @@ class HybridEngineRollout(RolloutEngine):
             next_token, step_log_probs = selector(static_logits[:, -1, :])
             output_ids.append(next_token)
             log_probs.append(step_log_probs)
-            eos_mask |= (next_token.squeeze(1) == stop_token)
+            eos_mask |= self._matches_eos(next_token.squeeze(1), eos_ids)
 
         return torch.cat(output_ids, dim=1), torch.cat(log_probs, dim=1) if self.return_log_probs else None
 
