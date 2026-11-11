@@ -339,7 +339,6 @@ class OpBuilder(ABC):
         import distutils.ccompiler
         import distutils.log
         import distutils.sysconfig
-        from distutils.errors import CompileError, LinkError
 
         tempdir = None  # we create a temporary directory to hold various files
         filestderr = None  # handle to open file to which we redirect stderr
@@ -394,12 +393,6 @@ class OpBuilder(ABC):
             # Compile and link succeeded
             return True
 
-        except CompileError:
-            return False
-
-        except LinkError:
-            return False
-
         except Exception:
             return False
 
@@ -407,6 +400,7 @@ class OpBuilder(ABC):
             # Restore stderr file descriptor and close the stderr redirect file.
             if oldstderr is not None:
                 os.dup2(oldstderr, sys.stderr.fileno())
+                os.close(oldstderr)
             if filestderr is not None:
                 filestderr.close()
 
