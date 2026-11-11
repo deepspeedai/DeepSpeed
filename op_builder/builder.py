@@ -825,19 +825,6 @@ class CUDAOpBuilder(OpBuilder):
         """
         return [cc.split('.') for cc in ccs]
 
-    def version_dependent_macros(self):
-        # Fix from apex that might be relevant for us as well, related to https://github.com/NVIDIA/apex/issues/456
-        version_ge_1_1 = []
-        if (TORCH_MAJOR > 1) or (TORCH_MAJOR == 1 and TORCH_MINOR > 0):
-            version_ge_1_1 = ['-DVERSION_GE_1_1']
-        version_ge_1_3 = []
-        if (TORCH_MAJOR > 1) or (TORCH_MAJOR == 1 and TORCH_MINOR > 2):
-            version_ge_1_3 = ['-DVERSION_GE_1_3']
-        version_ge_1_5 = []
-        if (TORCH_MAJOR > 1) or (TORCH_MAJOR == 1 and TORCH_MINOR > 4):
-            version_ge_1_5 = ['-DVERSION_GE_1_5']
-        return version_ge_1_1 + version_ge_1_3 + version_ge_1_5
-
     def is_compatible(self, verbose=False):
         return super().is_compatible(verbose)
 
@@ -936,23 +923,18 @@ class CUDAOpBuilder(OpBuilder):
             )
 
     def cxx_args(self):
+        # No -std flag: PyTorch adds the C++ standard its headers need, and a later -std would override it.
         if sys.platform == "win32":
             return ['-O2']
         else:
-            cpp_standard = '-std=c++20' if (TORCH_MAJOR, TORCH_MINOR) >= (2, 12) else '-std=c++17'
-            return ['-O3', cpp_standard, '-g', '-Wno-reorder']
+            return ['-O3', '-g', '-Wno-reorder']
 
     def nvcc_args(self):
         args = ['-O3']
-        # torch 2.12+ headers require C++20 (see cxx_args), so the device compiler
-        # must use the same standard instead of the toolkit's default.
-        torch_requires_cxx20 = (TORCH_MAJOR, TORCH_MINOR) >= (2, 12)
         if self.is_rocm_pytorch():
             ROCM_MAJOR, ROCM_MINOR = self.installed_rocm_version()
-            rocm_std = '-std=c++20' if torch_requires_cxx20 else '-std=c++17'
             args += [
-                rocm_std, '-U__HIP_NO_HALF_OPERATORS__', '-U__HIP_NO_HALF_CONVERSIONS__',
-                '-U__HIP_NO_HALF2_OPERATORS__',
+                '-U__HIP_NO_HALF_OPERATORS__', '-U__HIP_NO_HALF_CONVERSIONS__', '-U__HIP_NO_HALF2_OPERATORS__',
                 '-DROCM_VERSION_MAJOR=%s' % ROCM_MAJOR,
                 '-DROCM_VERSION_MINOR=%s' % ROCM_MINOR
             ]
@@ -965,17 +947,8 @@ class CUDAOpBuilder(OpBuilder):
             except ValueError:
                 nvcc_threads = min(os.cpu_count(), 8)
 
-            cuda_major, cuda_minor = installed_cuda_version()
-            if cuda_major > 10:
-                # nvcc supports -std=c++20 from CUDA 12.0, so a torch 2.12+ build must
-                # use it even on 12.0-12.4 instead of falling back to C++17.
-                use_cxx20 = ((torch_requires_cxx20 and cuda_major >= 12) or (cuda_major == 12 and cuda_minor >= 5)
-                             or cuda_major >= 13)
-                std_lib = '-std=c++20' if use_cxx20 else '-std=c++17'
-            else:
-                std_lib = '-std=c++14'
             args += [
-                '-allow-unsupported-compiler' if sys.platform == "win32" else '', '--use_fast_math', std_lib,
+                '-allow-unsupported-compiler' if sys.platform == "win32" else '', '--use_fast_math',
                 '-U__CUDA_NO_HALF_OPERATORS__', '-U__CUDA_NO_HALF_CONVERSIONS__', '-U__CUDA_NO_HALF2_OPERATORS__',
                 f'--threads={nvcc_threads}'
             ]

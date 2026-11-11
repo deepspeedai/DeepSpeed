@@ -24,12 +24,8 @@ class FusedAdamBuilder(CUDAOpBuilder):
     def include_paths(self):
         return ['csrc/includes', 'csrc/adam']
 
-    def cxx_args(self):
-        args = super().cxx_args()
-        return args + self.version_dependent_macros()
-
     def nvcc_args(self):
-        nvcc_flags = ['-O3'] + self.version_dependent_macros()
+        nvcc_flags = ['-O3']
         if not self.is_rocm_pytorch():
             nvcc_flags.extend(
                 ['-allow-unsupported-compiler' if sys.platform == "win32" else '', '-lineinfo', '--use_fast_math'] +

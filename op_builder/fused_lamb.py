@@ -24,12 +24,8 @@ class FusedLambBuilder(CUDAOpBuilder):
     def include_paths(self):
         return ['csrc/includes']
 
-    def cxx_args(self):
-        args = super().cxx_args()
-        return args + self.version_dependent_macros()
-
     def nvcc_args(self):
-        nvcc_flags = ['-O3'] + self.version_dependent_macros()
+        nvcc_flags = ['-O3']
         if self.is_rocm_pytorch():
             ROCM_MAJOR, ROCM_MINOR = self.installed_rocm_version()
             nvcc_flags += ['-DROCM_VERSION_MAJOR=%s' % ROCM_MAJOR, '-DROCM_VERSION_MINOR=%s' % ROCM_MINOR]

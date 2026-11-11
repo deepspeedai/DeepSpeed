@@ -217,12 +217,11 @@ def test_prebuilt_and_jit_builds_compile_and_link_an_op_the_same_way():
     with patch.dict(os.environ, {"TORCH_CUDA_ARCH_LIST": "9.0"}, clear=False):
         with patch.object(CUDAOpBuilder, "is_rocm_pytorch", return_value=False):
             with patch.object(builder_module, "assert_no_cuda_mismatch", return_value=True):
-                with patch.object(builder_module, "installed_cuda_version", return_value=(12, 8)):
-                    with patch("torch.utils.cpp_extension.verify_ninja_availability", return_value=None):
-                        with patch("torch.utils.cpp_extension.load", load):
-                            builder.jit_load(verbose=False)
-                    with patch("torch.utils.cpp_extension.CUDAExtension") as cuda_extension:
-                        builder.builder()
+                with patch("torch.utils.cpp_extension.verify_ninja_availability", return_value=None):
+                    with patch("torch.utils.cpp_extension.load", load):
+                        builder.jit_load(verbose=False)
+                with patch("torch.utils.cpp_extension.CUDAExtension") as cuda_extension:
+                    builder.builder()
 
     jit_kwargs = load.call_args.kwargs
     prebuilt_kwargs = cuda_extension.call_args.kwargs
@@ -570,32 +569,3 @@ def test_riscv_has_vector_agrees_with_kernel_hwcap():
     # kernel that accepted such a token also sets the HWCAP bit, so the two cannot
     # disagree on real hardware.
     assert make_builder()._riscv_has_vector() is _kernel_hwcap_has_vector()
-
-
-@pytest.mark.parametrize("torch_version, cuda_version, rocm, expected", [
-    ((2, 14), (12, 4), False, "-std=c++20"),
-    ((2, 12), (12, 0), False, "-std=c++20"),
-    ((2, 11), (12, 4), False, "-std=c++17"),
-    ((2, 11), (12, 5), False, "-std=c++20"),
-    ((2, 14), (11, 8), False, "-std=c++17"),
-    ((2, 14), None, True, "-std=c++20"),
-    ((2, 11), None, True, "-std=c++17"),
-])
-def test_nvcc_standard_tracks_torch_cxx_requirement(torch_version, cuda_version, rocm, expected):
-    # torch 2.12+ headers require C++20. The device compiler must use the same
-    # standard, including on CUDA 12.0-12.4 where the old CUDA-version rule
-    # forced C++17 and broke every nvcc source that includes torch headers.
-    builder = make_builder()
-    with patch.object(builder_module, "TORCH_MAJOR", torch_version[0]), \
-            patch.object(builder_module, "TORCH_MINOR", torch_version[1]), \
-            patch.object(CUDAOpBuilder, "is_rocm_pytorch", return_value=rocm):
-        if rocm:
-            with patch.object(builder, "installed_rocm_version", return_value=(6, 2)):
-                args = builder.nvcc_args()
-        else:
-            with patch.object(builder_module, "installed_cuda_version", return_value=cuda_version), \
-                    patch.object(builder, "compute_capability_args", return_value=[]):
-                args = builder.nvcc_args()
-
-    assert expected in args
-    assert [arg for arg in args if arg.startswith("-std=")] == [expected]
