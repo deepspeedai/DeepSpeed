@@ -17,9 +17,11 @@ fp_quant_module = None
 
 
 def _validate_scale(scale) -> None:
-    """Reject zero / non-finite scales before inversion to avoid silently
-    propagating inf/nan into dequantized outputs (#7838)."""
+    """Reject zero / non-finite scale values, decoding CUDA metadata first."""
     if torch.is_tensor(scale):
+        # CUDA 将每个 float32 scale 编码为四个 uint8 元数据字节。
+        if scale.dtype == torch.uint8:
+            scale = scale.contiguous().view(torch.float32)
         if not torch.isfinite(scale).all() or (scale == 0).any():
             raise ValueError("FPQuantizer.dequantize requires finite non-zero scale values")
     else:

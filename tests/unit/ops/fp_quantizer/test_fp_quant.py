@@ -154,47 +154,50 @@ def test_fp_quant_preserves_zero_and_subnormal_codes(q_bits, mantissa_bits):
     assert x_dequantized[3] != 0
 
 
-@pytest.mark.parametrize("dtype", [torch.bfloat16], ids=["bf16"])
-def test_fp_quant_dequantize_rejects_zero_scale(dtype):
+@pytest.mark.parametrize("selective", [False, True], ids=["full", "selective"])
+def test_fp_quant_meta_with_zero_bytes(selective):
     device_name = get_accelerator().device_name()
-    quant_config = QuantizationConfig()
-    quant_config.q_dtype = FPQuantizerBuilder.get_default_quant_dtype()
-    quant_config.group_size = 128
-    fpq = FP_Quantize(quantization_config=quant_config)
+    fpq = FP_Quantize(QuantizationConfig(group_size=128))
+    # 此固定输入产生含零字节的合法 float32 scale，防止逐字节判零回归。
+    x = torch.full((4, 1, 128), 0.99609375, dtype=torch.bfloat16, device=device_name)
+    x_quantized, meta = fpq.quantize(x, return_meta_tensor=True)
+    assert (meta == 0).any()
 
-    x = torch.rand(4, quant_config.group_size, dtype=dtype, device=device_name)
-    x_quantized = fpq.quantize(x, q_bits=8)
+    if selective:
+        indexes = torch.arange(4, dtype=torch.int32, device=device_name)
+        result = fpq.selective_dequantize(x_quantized, indexes, scale=meta)
+    else:
+        result = fpq.dequantize(x_quantized, scale=meta)
 
-    zero_scale = torch.zeros(fpq.num_groups, 1, dtype=torch.float32, device=device_name)
-    with pytest.raises(ValueError, match="finite non-zero"):
-        fpq.dequantize(x_quantized, q_bits=8, scale=zero_scale)
+    torch.testing.assert_close(result, x, rtol=0, atol=0)
 
 
-@pytest.mark.parametrize("dtype", [torch.bfloat16], ids=["bf16"])
-def test_fp_quant_dequantize_rejects_nonfinite_scale(dtype):
+@pytest.mark.parametrize("selective", [False, True], ids=["full", "selective"])
+@pytest.mark.parametrize("scale_value", [0.0, -0.0, float("nan"), float("inf"), -float("inf")],
+                         ids=["zero", "negative_zero", "nan", "inf", "negative_inf"])
+def test_fp_quant_dequantize_rejects_invalid_metadata(scale_value, selective):
     device_name = get_accelerator().device_name()
-    quant_config = QuantizationConfig()
-    quant_config.q_dtype = FPQuantizerBuilder.get_default_quant_dtype()
-    quant_config.group_size = 128
-    fpq = FP_Quantize(quantization_config=quant_config)
-
-    x = torch.rand(4, quant_config.group_size, dtype=dtype, device=device_name)
-    x_quantized = fpq.quantize(x, q_bits=8)
-
-    nan_scale = torch.full((fpq.num_groups, 1), float("nan"), dtype=torch.float32, device=device_name)
-    with pytest.raises(ValueError, match="finite non-zero"):
-        fpq.dequantize(x_quantized, q_bits=8, scale=nan_scale)
-
-
-def test_fp_quant_dequantize_rejects_zero_scalar_scale():
-    device_name = get_accelerator().device_name()
-    quant_config = QuantizationConfig()
-    quant_config.q_dtype = FPQuantizerBuilder.get_default_quant_dtype()
-    quant_config.group_size = 128
-    fpq = FP_Quantize(quantization_config=quant_config)
-
-    x = torch.rand(4, quant_config.group_size, dtype=torch.bfloat16, device=device_name)
-    x_quantized = fpq.quantize(x, q_bits=8)
+    fpq = FP_Quantize(QuantizationConfig(group_size=128))
+    x = torch.ones(4, 1, 128, dtype=torch.bfloat16, device=device_name)
+    x_quantized, meta = fpq.quantize(x, return_meta_tensor=True)
+    # 仅破坏一个组，并保留 CUDA 接口实际使用的 uint8 编码。
+    meta.view(torch.float32)[-1, 0] = scale_value
 
     with pytest.raises(ValueError, match="finite non-zero"):
-        fpq.dequantize(x_quantized, q_bits=8, scale=0.0)
+        if selective:
+            indexes = torch.arange(4, dtype=torch.int32, device=device_name)
+            fpq.selective_dequantize(x_quantized, indexes, scale=meta)
+        else:
+            fpq.dequantize(x_quantized, scale=meta)
+
+
+@pytest.mark.parametrize("scale_value", [0.0, float("nan"), float("inf"), -float("inf")],
+                         ids=["zero", "nan", "inf", "negative_inf"])
+def test_fp_quant_dequantize_rejects_invalid_scalar_scale(scale_value):
+    device_name = get_accelerator().device_name()
+    fpq = FP_Quantize(QuantizationConfig(group_size=128))
+    x = torch.ones(4, 128, dtype=torch.bfloat16, device=device_name)
+    x_quantized, _ = fpq.quantize(x, return_meta_tensor=True)
+
+    with pytest.raises(ValueError, match="finite non-zero"):
+        fpq.dequantize(x_quantized, scale=scale_value)
