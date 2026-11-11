@@ -35,7 +35,7 @@ def masked_softmax_kernel(output_ptr, input_ptr, stride, mask_ptr, mask_stride, 
     row_start_ptr = input_ptr + row_idx * stride
     col_offsets = tl.arange(0, BLOCK_SIZE)
     input_ptrs = row_start_ptr + col_offsets
-    mask_ptrs = mask_ptr + col_offsets + row_idx * mask_stride  # mask_stride is 0 for 1d mask
+    mask_ptrs = mask_ptr + col_offsets + row_idx * mask_stride  # mask_stride is 0 for a mask shared by all rows
     row = tl.load(input_ptrs, mask=col_offsets < n_cols, other=-float('inf')).to(tl.float32)
     mask = tl.load(mask_ptrs, mask=col_offsets < n_cols, other=0).to(tl.float32)
     row_minus_max = row - tl.max(row, axis=0)
@@ -65,9 +65,13 @@ def softmax(input: torch.Tensor, mask: torch.Tensor = None, dim=-1) -> torch.Ten
     # Allocate output
     output = torch.empty_like(input)
     if use_mask:
-        assert mask.is_contiguous()
-        mask = mask.view(-1, mask.shape[-1])
-        mask_stride = mask.shape[-1] if mask.shape[-2] > 1 else 0
+        # Broadcast the mask against the input like `input + mask`, then give the kernel one mask row per
+        # input row. This stays a view for a mask shared by all rows or a full-size mask; a mask that
+        # broadcasts over a middle dimension (e.g. a per-batch [B, 1, 1, S] mask) is materialized.
+        mask = mask.expand(input.shape).reshape(-1, n_cols)
+        if mask.stride(-1) != 1:
+            mask = mask.contiguous()
+        mask_stride = mask.stride(0)
         masked_softmax_kernel[(n_rows, )](
             output,
             input,
