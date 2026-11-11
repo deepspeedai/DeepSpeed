@@ -26,7 +26,6 @@ import torch
 
 import deepspeed.comm as dist
 from deepspeed.accelerator import get_accelerator
-import deepspeed.comm as dist
 from deepspeed.runtime.rollout.base import RolloutBatch, RolloutEngine, RolloutRequest, SamplingConfig
 from deepspeed.runtime.rollout.continuous_batching import (ContinuousBatchRequest, ContinuousBatchScheduler,
                                                            plan_prefill_buckets)
@@ -914,7 +913,7 @@ class HybridEngineRollout(RolloutEngine):
         return output
 
     def _validate_continuous_graph_options(self, prompt_len, sampling):
-        if self.align_decode_fronts:
+        if self.align_decode_fronts and not self.adaptive_prefill:
             raise ValueError("continuous graph capture does not support aligned decode fronts")
         if self.enable_cache_trimming:
             raise ValueError("continuous graph capture does not support cache trimming")

@@ -234,7 +234,8 @@ decode in fixed physical slots. Each surviving request keeps its KV row across
 refills. The graph capacity and position limits use the physical input width.
 Graph capture is explicitly selected by the caller; the cost model chooses the
 prefill buckets. Profiling reports ``generation_strategy="bucketed_graph"``.
-The graph restrictions on explicit aligned fronts and cache trimming still apply.
+Auto takes precedence over ``align_decode_fronts``; either value of that flag
+uses the same fixed-slot graph path. Graph capture still rejects cache trimming.
 Accelerators without graph support use the eager adaptive policy.
 
 Other non-default generation settings beyond repetition penalty, token IDs and the supported length/sampling
@@ -274,9 +275,9 @@ CUDA Graph capture is supported for CUDA inputs with the default
 uses a fixed ``continuous_batch_size`` layout, keeps every KV-cache row and
 decode tensor at a stable address, and masks inactive rows while the scheduler
 refills them. Graph state is reused across matching rollout calls and rebuilt
-when the model parameters or static decode shape changes. Aligned decode fronts
-and cache trimming are rejected while graph capture is enabled because they
-move cache rows or columns. ``flash_attention_2`` is also rejected because the
+when the model parameters or static decode shape changes. With Auto disabled,
+manual aligned decode fronts are rejected. Cache trimming is rejected in both
+graph modes. ``flash_attention_2`` is also rejected because the
 captured decode uses a four-dimensional additive attention mask.
 
 ``DeepSpeedStaticCache`` accepts one write position per row and can compact

@@ -425,7 +425,8 @@ def test_continuous_rollout_matches_native_llama_generation_on_accelerator(attn_
     assert capture_count == 1
 
 
-def test_bucketed_prefill_refills_fixed_graph_slot_on_accelerator(monkeypatch):
+@pytest.mark.parametrize("align_decode_fronts", [False, True])
+def test_bucketed_prefill_refills_fixed_graph_slot_on_accelerator(monkeypatch, align_decode_fronts):
     from transformers import LlamaConfig, LlamaForCausalLM
 
     accelerator = get_accelerator()
@@ -459,6 +460,7 @@ def test_bucketed_prefill_refills_fixed_graph_slot_on_accelerator(monkeypatch):
         SimpleNamespace(module=model), SimpleNamespace(pad_token_id=0, eos_token_id=eos),
         HybridEngineRolloutConfig(use_graph_capture=True,
                                   adaptive_prefill=True,
+                                  align_decode_fronts=align_decode_fronts,
                                   enable_profiling=True,
                                   prefill_max_tokens=8))
     capture = accelerator.capture_to_graph

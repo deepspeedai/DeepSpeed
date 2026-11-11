@@ -2076,6 +2076,9 @@ def test_adaptive_profile_counts_only_productive_tokens_after_eos(capacity, stop
     if not stop_at_first:
         assert result.input_ids[:, width:].tolist() == [[0], [0]]
     assert profile["num_generated_tokens"] == 2
+    if stop_at_first:
+        assert profile["num_decode_forwards"] == 0
+        assert result.input_ids.shape[1] == width + 1
     assert profile["tokens_per_second"] == pytest.approx(2 * 1000 / profile["total_ms"])
     assert profile["active_batch_size"] == min(capacity, 2)
     assert profile["continuous_batch_size"] == capacity
@@ -2216,18 +2219,20 @@ def test_adaptive_short_batch_does_not_read_one_gpu_scalar_per_request():
 
 
 @pytest.mark.parametrize("capacity", [1, 2])
-def test_adaptive_generation_resolves_custom_generation_config(capacity):
+@pytest.mark.parametrize("trigger", ["budget", "eos"])
+def test_adaptive_generation_resolves_custom_generation_config(capacity, trigger):
     model = _make_small_qwen()
     native_prepare = model._prepare_generation_config
 
     def prepare(*args, **kwargs):
         config, model_kwargs = native_prepare(*args, **kwargs)
-        if kwargs.get("max_new_tokens") == 2:
+        if ((trigger == "budget" and kwargs.get("max_new_tokens") == 2)
+                or (trigger == "eos" and kwargs.get("eos_token_id") == 2)):
             config.min_length = 5
         return config, model_kwargs
 
     prompt = torch.ones((2, 4), dtype=torch.long, device=next(model.parameters()).device)
-    rollout = HybridEngineRollout(SimpleNamespace(module=model), SimpleNamespace(pad_token_id=0, eos_token_id=None),
+    rollout = HybridEngineRollout(SimpleNamespace(module=model), SimpleNamespace(pad_token_id=0, eos_token_id=2),
                                   HybridEngineRolloutConfig(adaptive_prefill=True))
     with patch.object(model, "_prepare_generation_config", side_effect=prepare):
         with pytest.raises(ValueError, match="min_length"):
