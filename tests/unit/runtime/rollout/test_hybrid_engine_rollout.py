@@ -167,17 +167,13 @@ def test_constructor_defaults_without_cfg():
     assert rollout.continuous_cache_capacity is None
 
 
-def test_continuous_generation_rejects_unsupported_inputs():
+def test_continuous_generation_returns_nothing_for_an_empty_request():
     engine = _make_engine()
     engine.module = torch.nn.Linear(1, 1)
     rollout = HybridEngineRollout(engine, _make_tokenizer(), cfg=HybridEngineRolloutConfig(continuous_batch_size=1))
-    request = RolloutRequest(samples=[_prompt([0, 1, 2], [0, 1, 1])])
 
     empty = rollout.generate(RolloutRequest(samples=[]), SamplingConfig(max_new_tokens=2))
     assert empty.samples == []
-    with pytest.raises(ValueError, match="at least one prompt token"):
-        rollout.generate(RolloutRequest(samples=[_prompt([0, 0], [0, 0])]),
-                         SamplingConfig(max_new_tokens=2, temperature=0))
 
 
 @pytest.mark.parametrize(

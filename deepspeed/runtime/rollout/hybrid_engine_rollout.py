@@ -566,7 +566,6 @@ class HybridEngineRollout(RolloutEngine):
     def _generate_continuous_graph(self, trajectories, sampling, num_prompts):
         """Continuous batching on a captured graph."""
         module = self.engine.module
-        num_rows = self.continuous_batch_size
         self._validate_continuous(module)
         if self.align_decode_fronts:
             raise ValueError("continuous graph capture does not support aligned decode fronts")
@@ -660,9 +659,6 @@ class HybridEngineRollout(RolloutEngine):
     def _generate_continuous(self, trajectories, sampling, num_prompts):
         """Continuous batching without graph capture, on one write column shared by all rows."""
         module = self.engine.module
-        max_batch_size = self.continuous_batch_size
-        if not all(any(sample.attention_mask) for sample in trajectories):
-            raise ValueError("continuous batching requires at least one prompt token per request")
         max_new_tokens = sampling.max_new_tokens
         turn_cap = max_new_tokens
         if sampling.max_new_tokens_per_turn is not None:
