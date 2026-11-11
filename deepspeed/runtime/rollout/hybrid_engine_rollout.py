@@ -411,6 +411,9 @@ class HybridEngineRollout(RolloutEngine):
                         generation_config, model_kwargs = prepare_config(None, **overrides)
                         if any(name != "attention_mask" for name in model_kwargs):
                             raise ValueError("adaptive prefill does not support custom generation model kwargs")
+                        # A custom preparer can re-enable sampling, but CB routes decode greedily.
+                        if getattr(generation_config, "do_sample", False):
+                            raise ValueError("adaptive prefill currently supports greedy decoding only")
                     prepared_generation_config = generation_config
                 if self._generation_defaults is None:
                     self._generation_defaults = GenerationConfig()
