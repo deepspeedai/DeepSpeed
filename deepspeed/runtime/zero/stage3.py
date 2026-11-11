@@ -16,7 +16,7 @@ from deepspeed.comm import pg_utils
 from deepspeed.utils import groups, z3_leaf_parameter
 
 from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
-from deepspeed.runtime.base_optimizer import ZeROOptimizer
+from deepspeed.runtime.base_optimizer import ZeROOptimizer, place_restored_optimizer_step
 from deepspeed.utils import logger
 from deepspeed.utils.torch import register_grad_hook, required_torch_version
 from deepspeed.utils.pin_memory_tracker import pinned_memory_summary
@@ -3701,6 +3701,11 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                     param_group['params'] = []
                 else:
                     param_group[key] = value
+
+        # The restored group settings decide where step belongs, so place it after them.
+        for sub_group_id, fp32_param in enumerate(self.fp32_partitioned_groups_flat):
+            param_group = self.optimizer.param_groups[self.sub_group_to_group_id[sub_group_id]]
+            place_restored_optimizer_step(self.optimizer.state[fp32_param], fp32_param, param_group)
 
         if self.swap_optimizer:
             # Purge the swapped optimizer state, it was initialized to the freshly created model and not the checkpoint
