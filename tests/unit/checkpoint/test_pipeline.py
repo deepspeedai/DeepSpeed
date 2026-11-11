@@ -68,22 +68,7 @@ class TestPipelineCheckpoint(DistributedTest):
                                             train_batch=True,
                                             dtype=torch.float16 if zero_stage > 0 else torch.float32)
 
-    @pytest.mark.parametrize(
-        "base_topo,test_topo",
-        [
-            #(PipeTopo(num_pp=1,
-            #          num_dp=4),
-            # PipeTopo(num_pp=4,
-            #          num_dp=1)),
-            #(PipeTopo(num_pp=2,
-            #          num_dp=2),
-            # PipeTopo(num_pp=2,
-            #          num_dp=2)),
-            #(PipeTopo(num_pp=4,
-            #          num_dp=1),
-            # PipeTopo(num_pp=2,
-            #          num_dp=2)),
-        ])
+    @pytest.mark.parametrize("base_topo,test_topo", [])
     def test_checkpoint_pipe_module(self, base_topo, test_topo, tmpdir):
         checkpoint_engine = TorchCheckpointEngine()
         base_model = LinearStackPipe(topology=base_topo)
