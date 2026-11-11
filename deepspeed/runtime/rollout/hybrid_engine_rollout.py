@@ -409,7 +409,9 @@ class HybridEngineRollout(RolloutEngine):
                         overrides.pop("stopping_criteria")
                         overrides.pop("synced_gpus")
                         generation_config, model_kwargs = prepare_config(None, **overrides)
-                        if any(name != "attention_mask" for name in model_kwargs):
+                        # generate() would use a replaced mask, while CB routes keep the request mask.
+                        prepared_mask = model_kwargs.pop("attention_mask", overrides["attention_mask"])
+                        if model_kwargs or prepared_mask is not overrides["attention_mask"]:
                             raise ValueError("adaptive prefill does not support custom generation model kwargs")
                         # CB routes read these settings from the request, while generate() reruns the preparer.
                         for name, value in overrides.items():
@@ -1093,7 +1095,8 @@ class HybridEngineRollout(RolloutEngine):
         if sampling.n_samples_per_prompt != 1:
             raise ValueError("continuous batching currently supports one sample per prompt")
         # Rollout masks contain 0/1; validate and read all lengths in one device-to-host transfer.
-        lengths = request.prompt_attention_mask.sum(dim=1).tolist()
+        # Count like the boolean token selection; a low-precision sum would round long prompts.
+        lengths = request.prompt_attention_mask.count_nonzero(dim=1).tolist()
         if any(length <= 0 for length in lengths):
             raise ValueError("continuous batching requires at least one prompt token per request")
         return lengths

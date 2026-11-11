@@ -1887,7 +1887,7 @@ def test_static_graph_capture_receives_a_prebuilt_4d_mask(mock_get_accelerator):
         assert torch.equal(masked, expected), f"replay {step}"
 
 
-def _make_small_qwen():
+def _make_small_qwen(max_position_embeddings=64):
     from transformers import Qwen2Config, Qwen2ForCausalLM
     from deepspeed.accelerator import get_accelerator
 
@@ -1899,7 +1899,7 @@ def _make_small_qwen():
                          num_hidden_layers=2,
                          num_attention_heads=4,
                          num_key_value_heads=2,
-                         max_position_embeddings=64,
+                         max_position_embeddings=max_position_embeddings,
                          pad_token_id=0,
                          eos_token_id=None)
     return Qwen2ForCausalLM(config).to(device).eval()
@@ -2239,6 +2239,43 @@ def test_adaptive_generation_resolves_custom_generation_config(capacity, trigger
         with pytest.raises(ValueError, match=name):
             rollout.generate(RolloutRequest(prompt, torch.ones_like(prompt)),
                              SamplingConfig(max_new_tokens=2, temperature=0, continuous_batch_size=capacity))
+
+
+@pytest.mark.parametrize("capacity", [1, 2])
+def test_adaptive_generation_rejects_mask_replaced_by_custom_preparer(capacity):
+    model = _make_small_qwen()
+    native_prepare = model._prepare_generation_config
+
+    def prepare(*args, **kwargs):
+        config, model_kwargs = native_prepare(*args, **kwargs)
+        # Hide the first prompt token from generate() only.
+        model_kwargs["attention_mask"] = model_kwargs["attention_mask"].clone()
+        model_kwargs["attention_mask"][:, 0] = 0
+        return config, model_kwargs
+
+    prompt = torch.ones((2, 4), dtype=torch.long, device=next(model.parameters()).device)
+    rollout = HybridEngineRollout(SimpleNamespace(module=model), SimpleNamespace(pad_token_id=0, eos_token_id=2),
+                                  HybridEngineRolloutConfig(adaptive_prefill=True))
+    with patch.object(model, "_prepare_generation_config", side_effect=prepare):
+        with pytest.raises(ValueError, match="model kwargs"):
+            rollout.generate(RolloutRequest(prompt, torch.ones_like(prompt)),
+                             SamplingConfig(max_new_tokens=2, temperature=0, continuous_batch_size=capacity))
+
+
+@pytest.mark.parametrize("align_decode_fronts", [False, True])
+def test_aligned_generation_counts_bfloat16_mask_lengths_exactly(align_decode_fronts):
+    model = _make_small_qwen(max_position_embeddings=512)
+    # A BF16 sum rounds 257 real tokens to 256, which no longer matches the selected prompt tokens.
+    prompt = torch.ones((2, 257), dtype=torch.long, device=next(model.parameters()).device)
+    cfg = HybridEngineRolloutConfig(adaptive_prefill=not align_decode_fronts, align_decode_fronts=align_decode_fronts)
+    rollout = HybridEngineRollout(SimpleNamespace(module=model), SimpleNamespace(pad_token_id=0, eos_token_id=None),
+                                  cfg)
+    sampling = SamplingConfig(max_new_tokens=2, temperature=0, continuous_batch_size=1)
+
+    expected = rollout.generate(RolloutRequest(prompt, torch.ones_like(prompt)), sampling)
+    actual = rollout.generate(RolloutRequest(prompt, torch.ones_like(prompt, dtype=torch.bfloat16)), sampling)
+
+    assert torch.equal(actual.input_ids, expected.input_ids)
 
 
 @pytest.mark.parametrize("cache_support", [True, None])
