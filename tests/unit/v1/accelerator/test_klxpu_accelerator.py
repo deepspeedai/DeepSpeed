@@ -2,7 +2,13 @@
 
 # DeepSpeed Team
 
+import pytest
 import torch
+
+try:
+    import torch_xmlir  # noqa: F401 # type: ignore
+except ImportError:
+    pytest.skip("KLXPU accelerator requires torch_xmlir (KUNLUNXIN XPU stack)", allow_module_level=True)
 
 from deepspeed.accelerator.klxpu_accelerator import KLXPU_Accelerator
 
