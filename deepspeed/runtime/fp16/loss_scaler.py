@@ -171,7 +171,6 @@ class LossScalerBase(DeepSpeedConfigObject):
     def backward(self, loss, retain_graph=False):
         scaled_loss = self.scale_loss(loss)
         scaled_loss.backward(retain_graph=retain_graph)
-        # print(f'LossScalerBackward: {scaled_loss=}')
 
 
 class LossScaler(LossScalerBase):
@@ -260,7 +259,6 @@ class DynamicLossScaler(LossScalerBase):
     # `overflow` is boolean indicating whether the gradient overflowed
     def update_scale(self, overflow):
         if overflow:
-            # self.cur_scale /= self.scale_factor
             if self.delayed_shift == 1 or self.cur_hysteresis == 1:
                 if (self.cur_scale == self.min_scale) and self.raise_error_at_min_scale:
                     raise Exception(

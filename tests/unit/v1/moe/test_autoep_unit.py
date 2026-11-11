@@ -2409,6 +2409,44 @@ def _eager_pep604_lines(module):
     return sorted(set(offending_lines))
 
 
+class _ModelKeyedRegistry(dict):
+    """Like transformers' newer _CAN_RECORD_REGISTRY: keyed by str(model class), with get() and __setitem__() that
+    take a model."""
+
+    def __setitem__(self, model, can_record_outputs):
+        super().__setitem__(str(model.__class__), can_record_outputs)
+
+    def get(self, model):
+        return super().get(str(model.__class__)) or {}
+
+
+class TestTransformersOutputRecorderRegistry:
+
+    @pytest.mark.parametrize("registry_type", [dict, _ModelKeyedRegistry], ids=["plain_dict", "model_keyed"])
+    def test_install_uses_and_restores_entries_by_class_key(self, registry_type):
+        import deepspeed.module_inject.auto_ep_presets.base as presets_base
+
+        model = nn.Sequential(nn.Linear(2, 2))
+        model_key, layer_key = str(model.__class__), str(model[0].__class__)
+        registry = registry_type()
+        dict.__setitem__(registry, model_key, {"router_logits": "original"})
+        seen_while_installing = {}
+
+        def maybe_install_capturing_hooks(installed_model):
+            seen_while_installing.update(dict(registry))
+
+        output_capturing = SimpleNamespace(_CAN_RECORD_REGISTRY=registry,
+                                           maybe_install_capturing_hooks=maybe_install_capturing_hooks)
+        entries = {model_key: {"router_logits": "retargeted"}, layer_key: {"router_logits": "added"}}
+        installed = presets_base._install_instance_transformers_output_recorders(model, entries, output_capturing,
+                                                                                 lambda module: 0)
+
+        assert installed
+        assert seen_while_installing == entries
+        # The original entry is back under its class key, and the added one is gone.
+        assert dict(registry) == {model_key: {"router_logits": "original"}}
+
+
 class TestPy39AnnotationSafety:
 
     def test_autoep_import_chain_defers_pep604_annotations(self):

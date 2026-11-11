@@ -60,7 +60,6 @@ def init_schedule(graph: Graph):
     edges = defaultdict(list)
     for node in graph.nodes:
         filtered_args = filter_args(node)
-        # print(f"Node: {node} args: {node.args}")
         if len(filtered_args) == 0:
             scheduled.append(node)
 
@@ -701,7 +700,6 @@ def fast_free_schedule(graph: Graph,
                                      schedule_until_ag_peak_mem, schedule_until_free_peak_mem,
                                      schedule_until_ag_live_mem, schedule_until_free_live_mem)
 
-                # print(f" ag_count {ag_count} allgather runnable {i}: {node} last_use: {node_to_last_use[node]} t: {t2-t1:.2f}")
                 runnable_ags.append(task)
 
             if len(runnable_ags) > 0:
@@ -727,7 +725,6 @@ def fast_free_schedule(graph: Graph,
             else:
                 raise AssertionError("No runnable allgather nodes")
 
-        # print(f" next_ag {next_ag}")
         for n in nodes_to_schedule:
             # Only the selected path advances the committed residency model;
             # rejected simulations operated on tracker copies above.
@@ -801,8 +798,6 @@ def fast_free_schedule(graph: Graph,
                 unscheduled.remove(nn)
                 if gathered_tracker is not None:
                     gathered_tracker.apply(nn)
-
-    # print(f"After ag scheduled: scheduled: {scheduled}")
 
     scheduled_set = set(scheduled)
     for node in graph.nodes:
