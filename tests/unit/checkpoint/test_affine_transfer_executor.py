@@ -12,11 +12,13 @@ import pytest
 import torch
 import deepspeed.comm as dist
 from deepspeed.accelerator import get_accelerator
-from deepspeed.checkpoint.affine import contiguous_split_map, replicated_map
+from deepspeed.checkpoint.affine import (ParamAffineMap, contiguous_split_map, nest_affine_maps, replicated_map,
+                                         union_affine_maps)
 from deepspeed.checkpoint.affine_transfer import PlanBudget, plan_transfer
 from deepspeed.checkpoint.affine_transfer_executor import (AffineTransferExecutionError, StagingBudget,
                                                            TransferEndpoints, TransferRequest, _is_packed,
                                                            execute_transfer, execute_transfers, schedule_transfers)
+from deepspeed.checkpoint.zero_affine import zero_storage_affine_map
 from unit.common import DistributedTest
 
 UNWRITTEN = float('nan')
@@ -399,6 +401,38 @@ class TestB2LazyViewsRefused(DistributedTest):
         if rank == (0 if side == 'source' else 1):
             assert 'conjugate or negative view' in str(refused.value.__cause__)
         assert not store.any()
+
+
+class TestB2TwoLayoutsOnOneProcess(DistributedTest):
+    """A process that holds a parameter in two layouts serves each of its buffers under its own location."""
+    world_size = 2
+
+    def test_a_union_source_reads_both_buffers_of_one_process(self):
+        _join_transfer_group()
+        rows, cols = 8, 6
+        numel = rows * cols
+        zero = nest_affine_maps(replicated_map((rows, cols), 1),
+                                {0: zero_storage_affine_map(numel, [100, 101], numel // 2)})
+        # Process 0 also keeps row shard 0 of a tensor-parallel copy that is still current.
+        layout = contiguous_split_map((rows, cols), [4, 4], 0)
+        shard = ParamAffineMap((rows, cols), {0: layout.shard_shapes[0]}, {0: layout.pieces_by_rank[0]})
+        source = union_affine_maps([zero, shard])
+        target = contiguous_split_map((rows, cols), [3, 3], 1)
+        endpoints = TransferEndpoints(source={0: 0, 100: 0, 101: 1}, target={0: 1, 1: 0})
+        dtype = torch.float32
+        full = _full(rows, cols, dtype)
+        source_buffers = {
+            location: source.extract(full, location).contiguous()
+            for location, process in endpoints.source.items() if process == dist.get_rank()
+        }
+        target_buffers = _targets(target, endpoints, dtype)
+
+        plan = plan_transfer(target, source, PlanBudget())
+        # The lowest holder is read by default, so the row shard serves the rows it holds.
+        assert 0 in {segment.source_rank for segment in plan.segments}
+        execute_transfer(plan, source_buffers, target_buffers, endpoints, dtype)
+
+        _assert_matches(target_buffers, target, full)
 
 
 class TestB2TransferCPU:
