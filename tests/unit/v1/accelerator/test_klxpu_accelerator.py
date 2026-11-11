@@ -2,15 +2,15 @@
 
 # DeepSpeed Team
 
-import pytest
 import torch
 
-try:
-    import torch_xmlir  # noqa: F401 # type: ignore
-except ImportError:
-    pytest.skip("KLXPU accelerator requires torch_xmlir (KUNLUNXIN XPU stack)", allow_module_level=True)
+from conftest import mock_missing_modules
 
-from deepspeed.accelerator.klxpu_accelerator import KLXPU_Accelerator
+# KLXPU_Accelerator depends on the CUDA runtime but does *not* call into
+# torch_xmlir at test time.  Use mock_missing_modules so pytest still
+# collects these tests when the KUNLUNXIN XPU stack is absent.
+with mock_missing_modules("deepspeed.accelerator.klxpu_accelerator") as _klxpu_mod:
+    KLXPU_Accelerator = _klxpu_mod.KLXPU_Accelerator
 
 
 def test_identity_is_klxpu_but_device_is_cuda():

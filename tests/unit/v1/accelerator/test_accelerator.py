@@ -5,9 +5,7 @@
 import pytest
 
 import os
-import sys
 import importlib
-import re
 
 import torch
 
@@ -18,34 +16,7 @@ from deepspeed.accelerator.abstract_accelerator import DeepSpeedAccelerator
 DS_ACCEL_PATH = "deepspeed.accelerator"
 IGNORE_FILES = ["abstract_accelerator.py", "real_accelerator.py"]
 
-
-@pytest.fixture
-def accel_class_name(module_name):
-    class_list = []
-    mocked_modules = []
-
-    # Get the accelerator class name for a given module
-    while True:
-        try:
-            module = importlib.import_module(module_name)
-            break
-        except ModuleNotFoundError as e:
-            # If the environment is missing a module, mock it so we can still
-            # test importing the accelerator class
-            missing_module = re.search(r"\'(.*)\'", e.msg).group().strip("'")
-            sys.modules[missing_module] = lambda x: None
-            mocked_modules.append(missing_module)
-    for name in dir(module):
-        if name.endswith("_Accelerator"):
-            class_list.append(name)
-
-    assert len(class_list) == 1, f"Multiple accelerator classes found in {module_name}"
-
-    yield class_list[0]
-
-    # Clean up mocked modules so as to not impact other tests
-    for module in mocked_modules:
-        del sys.modules[module]
+# accel_class_name fixture is provided by conftest.py
 
 
 @pytest.mark.parametrize(
