@@ -2242,15 +2242,18 @@ def test_adaptive_generation_resolves_custom_generation_config(capacity, trigger
 
 
 @pytest.mark.parametrize("capacity", [1, 2])
-def test_adaptive_generation_rejects_mask_replaced_by_custom_preparer(capacity):
+@pytest.mark.parametrize("in_place", [False, True])
+def test_adaptive_generation_rejects_mask_changed_by_custom_preparer(capacity, in_place):
     model = _make_small_qwen()
     native_prepare = model._prepare_generation_config
 
     def prepare(*args, **kwargs):
         config, model_kwargs = native_prepare(*args, **kwargs)
+        mask = model_kwargs["attention_mask"]
+        if not in_place:
+            mask = model_kwargs["attention_mask"] = mask.clone()
         # Hide the first prompt token from generate() only.
-        model_kwargs["attention_mask"] = model_kwargs["attention_mask"].clone()
-        model_kwargs["attention_mask"][:, 0] = 0
+        mask[:, 0] = 0
         return config, model_kwargs
 
     prompt = torch.ones((2, 4), dtype=torch.long, device=next(model.parameters()).device)

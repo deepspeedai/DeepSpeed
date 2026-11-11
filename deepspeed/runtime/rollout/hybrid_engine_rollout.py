@@ -408,10 +408,14 @@ class HybridEngineRollout(RolloutEngine):
                         # generate() consumes these arguments before preparing its generation config.
                         overrides.pop("stopping_criteria")
                         overrides.pop("synced_gpus")
+                        request_mask = overrides["attention_mask"]
+                        mask_snapshot = request_mask.clone()
                         generation_config, model_kwargs = prepare_config(None, **overrides)
-                        # generate() would use a replaced mask, while CB routes keep the request mask.
-                        prepared_mask = model_kwargs.pop("attention_mask", overrides["attention_mask"])
-                        if model_kwargs or prepared_mask is not overrides["attention_mask"]:
+                        # generate() would use a replaced or edited mask, while CB routes plan from the request mask.
+                        prepared_mask = model_kwargs.pop("attention_mask", request_mask)
+                        mask_replaced = prepared_mask is not request_mask
+                        mask_edited = not torch.equal(request_mask, mask_snapshot)
+                        if model_kwargs or mask_replaced or mask_edited:
                             raise ValueError("adaptive prefill does not support custom generation model kwargs")
                         # CB routes read these settings from the request, while generate() reruns the preparer.
                         for name, value in overrides.items():
