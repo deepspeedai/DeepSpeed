@@ -115,8 +115,34 @@ class TestZeroQuantizedNontrainableWeights(DistributedTest):
         try:
             with pytest.raises(RuntimeError, match="quantized coalesced bucket"):
                 model.w1.all_gather_coalesced([model.w1, model.h], quantize=True)
-            with pytest.raises(RuntimeError, match="requires quantize=True"):
-                model.w1.all_gather_coalesced([model.w1], quantize=False)
+        finally:
+            engine.destroy()
+
+    def test_default_gather_dequantizes_quantized_params(self):
+        if not _QUANTIZER_AVAILABLE:
+            pytest.skip("quantizer op is not available")
+        if not get_accelerator().is_fp16_supported():
+            pytest.skip("requires fp16 support")
+        world_size = int(os.environ["WORLD_SIZE"])
+        if world_size < 2:
+            return
+        device = get_accelerator().current_device_name()
+        torch.manual_seed(0)
+        model = _QuantizedLeaf().half().to(device)
+        initial = {name: p.detach().clone() for name, p in model.named_parameters()}
+
+        engine, *_ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=_config(world_size))
+        try:
+            # No quantize flag: an all-quantized bucket must select the quantized
+            # gather path itself rather than returning the int8 codes as weights.
+            handle = model.w1.all_gather_coalesced([model.w1, model.w2])
+            handle.wait()
+            for name in ("w1", "w2"):
+                gathered = getattr(model, name)
+                assert gathered.dtype == torch.float16
+                assert (gathered.data - initial[name]).abs().max() < 1e-2
+            model.w1.partition()
+            model.w2.partition()
         finally:
             engine.destroy()
 

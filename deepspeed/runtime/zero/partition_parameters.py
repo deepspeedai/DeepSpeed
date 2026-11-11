@@ -1574,7 +1574,9 @@ class Init(InsertPostInitMethodToModuleSubClasses):
             if any(quantized) and not all(quantized):
                 raise RuntimeError("all parameters in a quantized coalesced bucket must share quantization status")
             if all(quantized) and not quantize:
-                raise RuntimeError("quantized parameter storage requires quantize=True for a coalesced fetch")
+                # Quantized storage cannot be gathered as full-precision weights;
+                # use the quantized path and dequantize when the handle completes.
+                quantize = True
 
             for param in params:
                 if param.ds_status != ZeroParamStatus.NOT_AVAILABLE:
