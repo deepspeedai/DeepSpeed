@@ -648,7 +648,9 @@ def _fragment_config(stage):
 
 
 def _owner_count(param):
-    owned = torch.zeros(1, dtype=torch.float32)
+    # NCCL rejects a CPU tensor. current_device_name() is 'cpu' on the CPU accelerator.
+    device = get_accelerator().current_device_name()
+    owned = torch.zeros(1, dtype=torch.float32, device=device)
     if getattr(param, "_hp_mapping", None) is not None:
         owned[0] = 1
     dist.all_reduce(owned)
