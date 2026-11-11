@@ -11,6 +11,8 @@ from deepspeed.inference.v2.inference_utils import ActivationType, DtypeEnum
 from deepspeed.inference.v2.kernels.cutlass_ops import MoEGEMM
 from ....v2.inference_test_utils import allclose
 
+pytest.importorskip("dskernels", reason="deepspeed-kernels (dskernels) is not installed")
+
 SINGLE_EXPERT_CASES = [(13, 2048, 2048), (256, 1024, 4096), (278, 5120, 2048), (893, 5120, 2560)]
 
 PYTORCH_ACT_FN_MAP = {

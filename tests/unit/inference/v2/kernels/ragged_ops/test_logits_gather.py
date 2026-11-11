@@ -13,6 +13,8 @@ from deepspeed.inference.v2.kernels.ragged_ops import RaggedLogitsGather
 from ....v2.inference_test_utils import allclose, get_dtypes
 from .ragged_testing_utils import build_simple_batch
 
+pytest.importorskip("dskernels", reason="deepspeed-kernels (dskernels) is not installed")
+
 
 def baseline_implementation(hidden_states: torch.Tensor, seq_lens: List[int]) -> torch.Tensor:
     output = torch.empty((len(seq_lens), hidden_states.shape[1]),

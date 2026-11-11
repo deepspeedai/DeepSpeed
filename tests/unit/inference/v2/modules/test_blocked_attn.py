@@ -18,6 +18,8 @@ from deepspeed.inference.v2.modules.interfaces import DSSelfAttentionRegistry, D
 from ..kernels.ragged_ops.ragged_testing_utils import build_batch_and_manager
 from ...v2.inference_test_utils import allclose
 
+pytest.importorskip("dskernels", reason="deepspeed-kernels (dskernels) is not installed")
+
 try:
     from flash_attn.flash_attn_interface import flash_attn_varlen_func
     validate_accuracy = True

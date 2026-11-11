@@ -13,6 +13,8 @@ from deepspeed.inference.v2.kernels.ragged_ops import RaggedTopKGating
 from .ragged_testing_utils import build_simple_batch
 from ...inference_test_utils import allclose
 
+pytest.importorskip("dskernels", reason="deepspeed-kernels (dskernels) is not installed")
+
 
 def _top_k_gating_testing_helper(n_tokens: int, n_experts: int, n_top_k: int, seed: int = 0xC0FFEE) -> None:
 

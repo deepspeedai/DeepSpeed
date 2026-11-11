@@ -13,6 +13,8 @@ from deepspeed.inference.v2.kernels.ragged_ops import RaggedEmbeddingKernel
 from ....v2.inference_test_utils import allclose, get_dtypes
 from .ragged_testing_utils import build_batch_and_manager
 
+pytest.importorskip("dskernels", reason="deepspeed-kernels (dskernels) is not installed")
+
 
 def baseline_implementation(token_ids: torch.Tensor,
                             embedding_table: torch.Tensor,

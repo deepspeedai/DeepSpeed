@@ -17,6 +17,8 @@ from deepspeed.inference.v2.modules.interfaces import DSMoERegistry
 from ..kernels.ragged_ops.ragged_testing_utils import build_simple_batch
 from ...v2.inference_test_utils import allclose, get_dtypes
 
+pytest.importorskip("dskernels", reason="deepspeed-kernels (dskernels) is not installed")
+
 
 def _gating_reference(logits: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     """

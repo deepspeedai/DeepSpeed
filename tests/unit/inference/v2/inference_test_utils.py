@@ -23,19 +23,14 @@ def get_tolerances():
     return TOLERANCES
 
 
-DTYPES = None
-
-
 def get_dtypes(include_float=True):
-    global DTYPES
-    if DTYPES is None:
-        DTYPES = [torch.float16, torch.float32] if include_float else [torch.float16]
-        # Check bf16 support when each test runs. Probing the device here, while pytest collects tests,
-        # initializes CUDA in the collecting process, and `pytest --forked` children cannot use CUDA after that.
-        bf16_skip = pytest.mark.skipif("not get_accelerator().is_bf16_supported()",
-                                       reason="bf16 is not supported on this accelerator")
-        DTYPES.append(pytest.param(torch.bfloat16, marks=bf16_skip))
-    return DTYPES
+    dtypes = [torch.float16, torch.float32] if include_float else [torch.float16]
+    # Check bf16 support when each test runs. Probing the device here, while pytest collects tests,
+    # initializes CUDA in the collecting process, and `pytest --forked` children cannot use CUDA after that.
+    bf16_skip = pytest.mark.skipif("not get_accelerator().is_bf16_supported()",
+                                   reason="bf16 is not supported on this accelerator")
+    dtypes.append(pytest.param(torch.bfloat16, marks=bf16_skip))
+    return dtypes
 
 
 def allclose(x, y, tolerances: Tuple[int, int] = None):

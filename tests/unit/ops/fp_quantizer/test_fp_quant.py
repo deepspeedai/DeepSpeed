@@ -16,11 +16,12 @@ from deepspeed.accelerator import get_accelerator
 if not deepspeed.ops.__compatible_ops__[FPQuantizerBuilder.NAME]:
     pytest.skip("FPQuantizer op is not available on this system", allow_module_level=True)
 
-# warning: this import silently JIT builds a set of kernels and may take a minute
-from qtorch.quant import float_quantize
-
 
 def qtorch_quantize(input, exp_bits=4, man_bits=3, rounding="nearest", group_size=1024):
+    # Import when a test runs: qtorch JIT-builds its kernels on import, and that build queries the device, which
+    # initializes CUDA in the pytest process that collects tests; `pytest --forked` children cannot use CUDA after that.
+    from qtorch.quant import float_quantize
+
     ori_dt = input.dtype
     ori_shape = input.shape
     last_dim = group_size

@@ -16,6 +16,8 @@ inputs. If ``RaggedTopKGating`` is broken, these tests will fail, so double chec
 the unit test results there before debugging here.
 """
 
+pytest.importorskip("dskernels", reason="deepspeed-kernels (dskernels) is not installed")
+
 TEST_CONFIGS = [
     (13, 64, 1),
     (278, 64, 1),

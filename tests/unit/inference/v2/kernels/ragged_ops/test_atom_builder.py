@@ -9,6 +9,8 @@ import torch
 from deepspeed.inference.v2.kernels.ragged_ops import AtomBuilder
 from .ragged_testing_utils import build_complex_batch
 
+pytest.importorskip("dskernels", reason="deepspeed-kernels (dskernels) is not installed")
+
 Q_BLOCK_SIZE = 128
 KV_BLOCK_SIZE = 128
 

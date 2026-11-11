@@ -21,6 +21,8 @@ these tests will fail, so double check the unit test results there before
 debugging here.
 """
 
+pytest.importorskip("dskernels", reason="deepspeed-kernels (dskernels) is not installed")
+
 TEST_CASES = [
     # (n_tokens, n_experts, n_top_k)
     (13, 64, 1),

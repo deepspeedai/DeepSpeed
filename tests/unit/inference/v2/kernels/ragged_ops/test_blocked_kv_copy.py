@@ -10,6 +10,8 @@ from deepspeed.accelerator import get_accelerator
 from deepspeed.inference.v2.kernels.ragged_ops import LinearBlockedKVCopy
 from .ragged_testing_utils import build_batch_and_manager, validate_kv_cache
 
+pytest.importorskip("dskernels", reason="deepspeed-kernels (dskernels) is not installed")
+
 
 @pytest.mark.inference_v2_ops
 @pytest.mark.parametrize("n_tokens, history_size", [(1, 0), (17, 0), (33, 8), (63, 1)])

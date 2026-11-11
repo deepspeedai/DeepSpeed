@@ -20,6 +20,8 @@ make sure we are aligning on the training implementation's cast pattern here, gi
 tend to be sufficient elsewhere.
 """
 
+pytest.importorskip("dskernels", reason="deepspeed-kernels (dskernels) is not installed")
+
 
 def rotary_pos_embs(q: torch.Tensor,
                     k: torch.Tensor,
