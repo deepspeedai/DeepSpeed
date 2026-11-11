@@ -2337,27 +2337,28 @@ def test_manual_continuous_generation_omits_unsupported_output_logits(align_deco
 @pytest.mark.parametrize("force_cb", [False, True])
 def test_adaptive_profile_includes_route_planning_time(force_cb):
     model = _make_small_qwen()
+    native_prepare = model._prepare_generation_config
     device = next(model.parameters()).device
     prompt = torch.ones((1024, 4), dtype=torch.long, device=device)
     rollout = HybridEngineRollout(
         SimpleNamespace(module=model), SimpleNamespace(pad_token_id=0, eos_token_id=None),
         HybridEngineRolloutConfig(adaptive_prefill=True, enable_profiling=True, enable_cache_trimming=force_cb))
-    # The clock advances only during the first planning step, so the profile must report exactly that time.
+    # The clock advances only inside the model's generation-config preparer, which Auto calls while planning.
     clock = [0.0]
-    validate_inputs = rollout._validate_continuous_inputs
 
-    def slow_validate_inputs(*args):
+    def slow_prepare(*args, **kwargs):
         clock[0] += 1.0
-        return validate_inputs(*args)
+        return native_prepare(*args, **kwargs)
 
     with patch("deepspeed.runtime.rollout.hybrid_engine_rollout.time.perf_counter", side_effect=lambda: clock[0]):
-        with patch.object(rollout, "_validate_continuous_inputs", side_effect=slow_validate_inputs):
+        with patch.object(model, "_prepare_generation_config", side_effect=slow_prepare):
             result = rollout.generate(RolloutRequest(prompt, torch.ones_like(prompt)),
                                       SamplingConfig(max_new_tokens=1, temperature=0, continuous_batch_size=1024))
     profile = rollout.get_last_profile()
     # The former profile excluded initial DP planning and over-reported throughput.
     assert profile["generation_strategy"] == ("bucketed" if force_cb else "batched")
-    assert profile["total_ms"] == pytest.approx(1000.0)
+    assert clock[0] > 0
+    assert profile["total_ms"] == pytest.approx(clock[0] * 1000)
     assert profile["num_generated_tokens"] == result.attention_mask[:, 4:].sum().item()
     if force_cb:
-        assert rollout.get_last_continuous_stats()["end_to_end_ms"] == pytest.approx(1000.0)
+        assert rollout.get_last_continuous_stats()["end_to_end_ms"] == pytest.approx(clock[0] * 1000)
