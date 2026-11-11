@@ -2220,9 +2220,8 @@ def test_adaptive_short_batch_does_not_read_one_gpu_scalar_per_request():
 
 @pytest.mark.parametrize("capacity", [1, 2])
 @pytest.mark.parametrize("trigger", ["budget", "eos"])
-@pytest.mark.parametrize(("name", "value", "message"), [("min_length", 5, "min_length"),
-                                                        ("do_sample", True, "greedy")])
-def test_adaptive_generation_resolves_custom_generation_config(capacity, trigger, name, value, message):
+@pytest.mark.parametrize(("name", "value"), [("min_length", 5), ("do_sample", True), ("max_new_tokens", 1)])
+def test_adaptive_generation_resolves_custom_generation_config(capacity, trigger, name, value):
     model = _make_small_qwen()
     native_prepare = model._prepare_generation_config
 
@@ -2237,7 +2236,7 @@ def test_adaptive_generation_resolves_custom_generation_config(capacity, trigger
     rollout = HybridEngineRollout(SimpleNamespace(module=model), SimpleNamespace(pad_token_id=0, eos_token_id=2),
                                   HybridEngineRolloutConfig(adaptive_prefill=True))
     with patch.object(model, "_prepare_generation_config", side_effect=prepare):
-        with pytest.raises(ValueError, match=message):
+        with pytest.raises(ValueError, match=name):
             rollout.generate(RolloutRequest(prompt, torch.ones_like(prompt)),
                              SamplingConfig(max_new_tokens=2, temperature=0, continuous_batch_size=capacity))
 
