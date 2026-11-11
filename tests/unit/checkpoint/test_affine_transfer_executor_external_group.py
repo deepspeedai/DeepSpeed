@@ -66,7 +66,8 @@ def _worker(rank, port, tmp):
     del store
     assert not mismatched, mismatched
     assert calibration['world_size'] == 2
-    assert sorted((sample['from_process'], sample['to_process']) for sample in calibration['peer']) == [(0, 1), (1, 0)]
+    assert sorted((sample['from_process'], sample['to_process']) for sample in calibration['peer']
+                  if not sample['both_ways']) == [(0, 1), (1, 0)]
 
 
 @pytest.mark.skipif(get_accelerator().device_name() != 'cpu',

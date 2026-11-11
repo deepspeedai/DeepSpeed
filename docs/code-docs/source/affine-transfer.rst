@@ -63,7 +63,7 @@ receives the same raw samples::
     calibration = calibrate_links(path_of=node_path_of(processes_per_node=8), fan_width=[1, 2, 4, 7])
     fits = fit_links(calibration)
     fits['peer_pairs'][(0, 1)]       # the link from process 0 to process 1 alone
-    fits['peer_both_ways_pairs'][(0, 1)]  # the same direction while 1 also sends to 0
+    fits['peer_both_ways_pairs'][(0, 1)]  # the pair's completion time while 0 and 1 send to each other
     fits['relay'][('intra_node', 'inter_node')]      # receiving within a node while sending out of it
     fits['fan_in'][(0, (1, 2, 3, 4))]['inter_node']  # per-link cost while 1-4 send to 0 at once
     fits['receive'][(0, (1, 2, 3, 4))]               # process 0's aggregate rate receiving from 1-4
@@ -98,8 +98,10 @@ that tells NVLink from PCIe pairs. ``fit_links`` pools the samples per label and
 fits ``alpha + bytes / bandwidth`` to the median at each size, and
 ``peer_pairs`` fits each ordered pair alone, both from one-way samples;
 ``peer_both_ways`` and ``peer_both_ways_pairs`` do the same for the two-way
-samples, so comparing them with ``peer`` shows what a link loses per direction
-when both directions are busy. ``relay`` is fitted per
+samples. Both directions of a two-way sample carry the pair's completion time,
+so ``(a, b)`` and ``(b, a)`` fit the same; comparing them with the slower of the
+two one-way ``peer_pairs`` fits shows what a link loses when both directions are
+busy. ``relay`` is fitted per
 ``(receive_path, send_path)``. Fan fits are keyed by
 ``(root, peers)``, with the peers sorted; the width is ``len(peers)``. ``send``
 and ``receive`` fit each root's own time against all the bytes it moved, giving

@@ -361,9 +361,11 @@ def fit_links(calibration: Dict) -> Dict:
     - ``peer_pairs``: a fit per ordered ``(from_process, to_process)`` pair, from the one-way
       ``peer`` samples. It keeps the sender and direction asymmetry that pooling by path label
       averages away, as between cards behind PCIe switches.
-    - ``peer_both_ways`` and ``peer_both_ways_pairs``: the same, from the ``both_ways`` samples,
-      i.e. the per-direction cost while the reverse direction is busy too. Compare with ``peer``
-      and ``peer_pairs`` to see what a link loses when used both ways at once.
+    - ``peer_both_ways`` and ``peer_both_ways_pairs``: the same, from the ``both_ways`` samples.
+      Both directions of a two-way sample carry the pair's completion time, so
+      ``peer_both_ways_pairs[(a, b)]`` equals ``peer_both_ways_pairs[(b, a)]``. To see what a
+      link loses when used both ways at once, compare it with the slower of the two one-way
+      ``peer_pairs`` fits, not with each direction's own.
     - ``relay``: a fit per ``(receive_path, send_path)``, from each process's time to receive one
       message and send another at once while every process does the same.
     - ``fan_out`` and ``fan_in``: per fan, keyed by ``(root, peers)`` with the peers sorted, a fit
