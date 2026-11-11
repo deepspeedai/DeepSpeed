@@ -92,9 +92,6 @@ __global__ void fused_ln(T* output,
     const float variance = mean_diff / elems_per_row;
     const float denom = __frsqrt_rn(variance + epsilon);
 
-    // const T mean_compute = conversion::to<T>(mean);
-    // const T denom_compute = conversion::to<T>(denom);
-
     T* block_output = output + block_offset;
 
 #pragma unRoll
@@ -354,8 +351,6 @@ __global__ void fused_residual_ln(T* output,
 
 #pragma unRoll
         for (int j = 0; j < T_per_load; j++) {
-            // iteration_buffer[j] = (iteration_buffer[j] - mean_compute) * denom_compute;
-            // iteration_buffer[j] = iteration_buffer[j] * gamma_local[j] + beta_local[j];
             float val = conversion::to<float>(iteration_buffer[j]);
             val = (val - mean) * denom;
             val =

@@ -81,7 +81,6 @@ void gds_op_desc_t::remove_buffer_from_registry(const torch::Tensor& buffer)
     const int64_t device = buffer.get_device();
     void* reg_ptr = buffer.data_ptr();
 
-    // std::cout << "DEREG PTR " <<  reg_ptr << std::endl;
     check_cudaruntimecall(cudaSetDevice(device));
     cuFileBufDeregister(reg_ptr);
 

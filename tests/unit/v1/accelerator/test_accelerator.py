@@ -14,6 +14,7 @@ import torch
 import deepspeed
 from deepspeed.accelerator import get_accelerator
 from deepspeed.accelerator.abstract_accelerator import DeepSpeedAccelerator
+from deepspeed.accelerator.cuda_accelerator import CUDA_Accelerator
 
 DS_ACCEL_PATH = "deepspeed.accelerator"
 IGNORE_FILES = ["abstract_accelerator.py", "real_accelerator.py"]
@@ -67,6 +68,17 @@ def test_abstract_methods_defined(module_name, accel_class_name):
         _ = accel_class()
     finally:
         accel_class.__init__ = original_init
+
+
+def test_cuda_synchronize_omits_none_device(monkeypatch):
+    calls = []
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda *args: calls.append(args))  #ignore-cuda
+    accelerator = CUDA_Accelerator.__new__(CUDA_Accelerator)
+
+    accelerator.synchronize()
+    accelerator.synchronize(2)
+
+    assert calls == [(), (2, )]
 
 
 def _require_native(monkeypatch):

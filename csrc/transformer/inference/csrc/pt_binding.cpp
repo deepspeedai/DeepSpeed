@@ -664,13 +664,6 @@ at::Tensor ds_bias_residual(at::Tensor& input, at::Tensor& residual, at::Tensor&
     auto residual_cont = residual.contiguous();
 
     int bsz = input_cont.size(0) * input_cont.size(1);
-    // launch_bias_residual((T*)input_cont.data_ptr(),
-    //                      (T*)residual_cont.data_ptr(),
-    //                      (T*)bias.data_ptr(),
-    //                      bsz,
-    //                      input_cont.size(2),
-    //                      (bias.size(0) > 1),
-    //                      InferenceContext::Instance().GetCurrentStream());
     return input_cont;
 }
 
@@ -867,8 +860,6 @@ void quantized_gemm(void* output,
                     int bsz,
                     int hidden_size)
 {
-    // T* weight16 = (T*)InferenceContext::Instance().GetWorkSpace() + 12 * hidden_size * bsz;
-
     auto options = at::TensorOptions()
                        .dtype(at::kHalf)
                        .layout(at::kStrided)
@@ -1199,8 +1190,6 @@ at::Tensor ds_linear_layer(at::Tensor& input,
             return at::from_blob(final_output,
                                  {3, input.size(0), num_heads, input.size(1), padded_head_size},
                                  options);
-            // return at::from_blob(padded_output, {input.size(0) * input.size(1), 3, num_heads,
-            // padded_head_size}, options);
         } else {
             auto final_output = workspace + output.numel();
             launch_bias_add_transform_0213<T>(
@@ -1225,8 +1214,6 @@ at::Tensor ds_linear_layer(at::Tensor& input,
                 rope_theta);
             return at::from_blob(
                 final_output, {3, input.size(0), num_heads, input.size(1), head_size}, options);
-            // return at::from_blob(workspace, {input.size(0) * input.size(1), 3, num_heads,
-            // head_size}, options);
         }
 
     } else
@@ -1732,11 +1719,6 @@ at::Tensor fused_gemm_gelu(at::Tensor& input,
 
     int intm_dim = (transposed_mode || q_int8) ? weight.size(0) : weight.size(1);
 
-    // auto output = at::from_blob((T*)InferenceContext::Instance().GetWorkSpace() +
-    // torch::numel(input),
-    //                            {input.size(0), input.size(1), out_size},
-    //                            options);
-    // T* intermediate = (T*)input.data_ptr() + torch::numel(input);
     auto intermediate = at::empty({input.size(0), input.size(1), intm_dim}, options);
 
     int bsz = input.size(0) * input.size(1);
@@ -1807,8 +1789,6 @@ at::Tensor fused_gemm_gelu(at::Tensor& input,
                        CUBLAS_GEMM_DEFAULT_TENSOR_OP);
 #endif
     }
-    // cudaEventRecord(InferenceContext::Instance().GetCompEvent(2),
-    //                InferenceContext::Instance().GetCurrentStream(true));
     return output;
 }
 
