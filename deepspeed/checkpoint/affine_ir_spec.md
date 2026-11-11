@@ -720,3 +720,13 @@ master weights, which the next step casts back over them.
 **10.7 Not described.** Offload tiers, MiCS / hpZ, expert tensor parallelism, quantized
 ZeRO-3 storage, non-elementwise transforms, derived copies, and AutoEP expert optimizer
 states.
+
+**10.8 One parameter in several layouts.** A parameter can be held in two layouts at once, such
+as a trainer's ZeRO-3 partitions and a rollout replica's tensor-parallel shard that is still
+current. `union_affine_maps([storage, shard])` describes both as one source. The layouts use
+disjoint locations, one per buffer; the transfer's endpoints may bind several locations to one
+process. Every piece is cut at the edges of the blocks the other layouts hold over it, and each
+cut piece lists the holders from every layout, so P5 holds and the planner may read either copy.
+A cut keeps a piece's strides and moves its offsets, so every location keeps its storage. A
+ZeRO-3 block of several rows cut at a column edge keeps its row-major strides and its partition's
+offset, so it is not dense in its 1-D shard (10.2): it is described, but not yet planned.

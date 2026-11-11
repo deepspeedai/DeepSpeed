@@ -32,7 +32,7 @@ from typing import Callable, Dict, FrozenSet, List, Mapping, Optional, Sequence,
 
 from .affine import AffinePiece, ParamAffineMap
 from .affine_geometry import (LogicalBox, coordinate as _coordinate, product as _product, row_major_strides as
-                              _row_major_strides)
+                              _row_major_strides, subtract as _subtract)
 
 __all__ = [
     'AffineTransferError', 'InvalidMapError', 'InvalidReplicaPolicyError', 'UnsupportedLayoutError', 'PlanBudget',
@@ -428,32 +428,6 @@ def _covers_exactly(region: LogicalBox, parts: Sequence[LogicalBox]) -> bool:
     gap and an overlap of equal size cancel in any total.
     """
     return sum(part.volume for part in parts) == region.volume
-
-
-def _subtract(region: LogicalBox, cut: LogicalBox) -> List[LogicalBox]:
-    """Return the disjoint parts of a box outside another box."""
-    overlap = region.intersection(cut)
-    if overlap.is_empty:
-        return [region]
-    origin = list(region.origin)
-    extent = list(region.extent)
-    pieces = []
-    for axis, (low, high) in enumerate(zip(overlap.origin, overlap.upper())):
-        if origin[axis] < low:
-            shape = extent.copy()
-            shape[axis] = low - origin[axis]
-            pieces.append(LogicalBox(tuple(origin), tuple(shape)))
-            extent[axis] -= shape[axis]
-            origin[axis] = low
-        end = origin[axis] + extent[axis]
-        if high < end:
-            start = origin.copy()
-            shape = extent.copy()
-            start[axis] = high
-            shape[axis] = end - high
-            pieces.append(LogicalBox(tuple(start), tuple(shape)))
-            extent[axis] = high - origin[axis]
-    return pieces
 
 
 def _covers_union(region: LogicalBox, boxes: Sequence[LogicalBox], limits: PlanBudget) -> bool:
