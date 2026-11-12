@@ -1779,6 +1779,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
             self._partition_param(param, has_been_updated=has_been_updated, free_data=free_data)
 
             param.ds_status = ZeroParamStatus.NOT_AVAILABLE
+
     def _dequantize_partition_storage(self, tensor, dtype):
         if not is_quantized_partition(tensor):
             return
