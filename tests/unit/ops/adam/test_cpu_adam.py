@@ -8,7 +8,8 @@ import math
 import os
 import sys
 from concurrent.futures import ThreadPoolExecutor
-from threading import Barrier
+from threading import Barrier, Event, Thread
+from time import monotonic
 import torch
 import numpy as np
 import pytest
@@ -155,6 +156,61 @@ def test_cpu_adam_concurrent_updates(fused):
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         list(executor.map(update, cases))
+
+
+@pytest.mark.parametrize('fused', [False, True])
+def test_cpu_adam_native_update_releases_gil(fused):
+    if fused and get_accelerator().device_name() != 'cpu':
+        pytest.skip("requires the CPU fused Adam implementation")
+
+    parameter = torch.nn.Parameter(torch.ones(16 * 1024 * 1024))
+    parameter.grad = torch.ones_like(parameter)
+    optimizer = (FusedAdam if fused else DeepSpeedCPUAdam)([parameter])
+    optimizer.step()
+    state = optimizer.state[parameter]
+    if fused:
+        native_update = optimizer.multi_tensor_adam
+        args = (65536, optimizer._dummy_overflow_buf, [[parameter.grad], [parameter], [state['exp_avg']],
+                                                       [state['exp_avg_sq']]], 0.001, 0.9, 0.999, 1e-8, 2, 1, 1, 0.0)
+    else:
+        native_update = optimizer.ds_opt_adam.adam_update
+        args = (optimizer.opt_id, 2, 0.001, 0.9, 0.999, 1e-8, 0.0, True, parameter, parameter.grad, state['exp_avg'],
+                state['exp_avg_sq'])
+
+    ready = Event()
+    stop = Event()
+    progressed = Event()
+    updating = False
+
+    def observe():
+        ready.set()
+        while not stop.wait(0.001):
+            if updating:
+                progressed.set()
+                return
+
+    observer = Thread(target=observe, daemon=True)
+    switch_interval = sys.getswitchinterval()
+    observer.start()
+    try:
+        assert ready.wait(timeout=5), "Python observer did not start"
+        # Exclude interpreter scheduling between the flag changes and the native call.
+        # All tensors and arguments are prepared before this interval.
+        sys.setswitchinterval(60)
+        deadline = monotonic() + 5
+        for _ in range(20):
+            updating = True
+            native_update(*args)
+            updating = False
+            if progressed.is_set() or monotonic() >= deadline:
+                break
+        assert progressed.is_set(), "Python thread made no progress during native Adam updates"
+    finally:
+        updating = False
+        sys.setswitchinterval(switch_interval)
+        stop.set()
+        observer.join(timeout=5)
+    assert not observer.is_alive()
 
 
 def test_cpu_adam_rejects_amsgrad():
