@@ -46,7 +46,8 @@ from deepspeed.runtime.fp16.unfused_optimizer import FP16_UnfusedOptimizer
 from deepspeed.runtime.bf16_optimizer import BF16_Optimizer
 
 from deepspeed.linear.optimized_linear import LoRAOptimizedLinear
-from deepspeed.module_inject.layers import GatherReplacedLayerParams, configure_tensor_parallel_runtime, collect_autotp_universal_checkpoint_info
+from deepspeed.module_inject.layers import (GatherReplacedLayerParams, configure_tensor_parallel_runtime,
+                                            collect_autotp_universal_checkpoint_info)
 from deepspeed.module_inject.auto_ep_folding import (clear_autoep_folding_gradient_corrected,
                                                      is_autoep_folding_gradient_corrected,
                                                      reduce_autoep_folding_gradient)
@@ -563,6 +564,7 @@ class DeepSpeedEngine(Module):
         self.lr_scheduler = None
 
         self._is_gradient_accumulation_boundary = None
+        self._replicated_kv_reducers = []
         self.scale_wrt_gas = None
         self.losses = None
         self.mesh_device = mesh_device
@@ -604,6 +606,9 @@ class DeepSpeedEngine(Module):
             # Head counts were recorded against the whole model; the parameters are shards now.
             from deepspeed import resolve_per_head_muon_after_sharding
             resolve_per_head_muon_after_sharding(model)
+            self._replicated_kv_reducers = [
+                p._ds_replicated_kv_reducer for p in model.parameters() if hasattr(p, "_ds_replicated_kv_reducer")
+            ]
         see_memory_usage("DeepSpeed Engine: After args sanity test", force=self.memory_breakdown())
         self._set_distributed_vars(args)
 
@@ -3151,6 +3156,28 @@ class DeepSpeedEngine(Module):
             return
         self._start_timers(self.engine_timers.backward_timers)
         self._check_autotp_frozen_replicated_params()
+
+        if self._replicated_kv_reducers:
+            # Deferral is safe only when the whole accumulation window stays in param.grad.
+            # ZeRO-1 with a separate accumulation buffer moves each micro-batch's gradient out
+            # of param.grad, BF16_Optimizer accumulates into its own fp32 buffer, and ZeRO-2/3
+            # reduce or partition the gradient during each micro-batch. no_sync and coalesced
+            # reduction deliberately delay the engine's own reduction as well.
+            stage = self.zero_optimization_stage()
+            optimizer = self.optimizer
+            if stage == ZeroStageEnum.disabled:
+                gradient_is_local = not isinstance(optimizer, BF16_Optimizer) and not self.zero_use_cpu_optimizer()
+            else:
+                gradient_is_local = (stage == ZeroStageEnum.optimizer_states
+                                     and isinstance(optimizer, DeepSpeedZeroOptimizer)
+                                     and not getattr(optimizer, "use_grad_accum_attribute", True)
+                                     and not self.zero_use_cpu_optimizer() and not self.zenflow)
+            defer_allowed = (gradient_is_local and self.gradient_accumulation_steps() > 1
+                             and self.managed_gradient_accumulation() and not self.inside_no_sync_ctxt
+                             and not self.pipeline_parallelism)
+            is_boundary = self.is_gradient_accumulation_boundary()
+            for reducer in self._replicated_kv_reducers:
+                reducer.set_accumulation_state(is_boundary, defer_allowed)
 
         # When necessary internal APIs are not available, we disable direct calls to tensor.backward()
         # and limit to engine.backward(loss) only.

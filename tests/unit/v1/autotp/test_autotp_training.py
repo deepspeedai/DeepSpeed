@@ -1342,6 +1342,60 @@ def test_replicated_kv_gradient_reduces_each_micro_batch_once(monkeypatch, regis
     torch.testing.assert_close(param.grad, torch.tensor([[2.0], [2.0], [4.0], [4.0]]))
 
 
+def test_replicated_kv_gradient_defers_to_accumulation_boundary(monkeypatch):
+    import deepspeed.module_inject.layers as layers_module
+    from deepspeed.utils.torch import register_grad_hook
+
+    param = nn.Parameter(torch.zeros(4, 1))
+    calls = []
+
+    def fake_all_reduce(tensor, group=None):
+        calls.append(tensor.shape)
+        tensor.mul_(2)
+
+    monkeypatch.setattr(layers_module, "_all_reduce_replicated_kv_rows", fake_all_reduce)
+    reducer = _ReplicatedKvGradReducer(param, kv_start=2, group=None)
+    param.register_hook(reducer.tensor_hook)
+    register_grad_hook(param, reducer.post_accumulate_hook)
+    try:
+        reducer.set_accumulation_state(is_boundary=False, defer_allowed=True)
+        (param * 1.0).sum().backward()
+        assert calls == []
+
+        reducer.set_accumulation_state(is_boundary=True, defer_allowed=True)
+        (param * 1.0).sum().backward()
+        assert calls == [(2, 1)]
+        torch.testing.assert_close(param.grad, torch.tensor([[2.0], [2.0], [4.0], [4.0]]))
+    finally:
+        reducer.set_accumulation_state(is_boundary=True, defer_allowed=False)
+
+
+def test_replicated_kv_gradient_deferred_boundary_reduces_new_rows(monkeypatch):
+    """A reentrant boundary can run the post hook more than once in one backward."""
+    import deepspeed.module_inject.layers as layers_module
+
+    param = nn.Parameter(torch.zeros(4, 1))
+    calls = []
+
+    def fake_all_reduce(tensor, group=None):
+        calls.append(tensor.shape)
+        tensor.mul_(2)
+
+    monkeypatch.setattr(layers_module, "_all_reduce_replicated_kv_rows", fake_all_reduce)
+    reducer = _ReplicatedKvGradReducer(param, kv_start=2, group=None)
+    reducer.set_accumulation_state(is_boundary=True, defer_allowed=True)
+
+    param.grad = torch.ones(4, 1)
+    reducer.post_accumulate_hook()
+    torch.testing.assert_close(param.grad, torch.tensor([[1.0], [1.0], [2.0], [2.0]]))
+
+    # A later phase adds one more local contribution to the K/V rows.
+    param.grad[2:] += 1.0
+    reducer.post_accumulate_hook()
+    assert calls == [(2, 1), (2, 1)]
+    torch.testing.assert_close(param.grad, torch.tensor([[1.0], [1.0], [4.0], [4.0]]))
+
+
 @contextmanager
 def _count_kv_gradient_all_reduces(kv_rows, hidden):
     """Count the K/V-row all-reduces issued by the fused c_attn gradient hook.
@@ -1485,6 +1539,168 @@ class TestGPTBigCodeMultiQueryTraining(DistributedTest):
                 kv_on_ranks = [None] * dist.get_world_size()
                 dist.all_gather_object(kv_on_ranks, c_attn.weight.detach()[-kv_rows:].cpu())
                 assert all(torch.equal(kv, kv_on_ranks[0]) for kv in kv_on_ranks)
+        finally:
+            reset_tp_model_init_state()
+
+
+class TestGPTBigCodeMultiQueryAccumulation(DistributedTest):
+    """The replicated K/V sum is deferred to the accumulation boundary for ZeRO 0/1."""
+
+    world_size = 4
+    reuse_dist_env = False
+
+    @pytest.mark.parametrize("zero_stage", [0, 1, 2, 3])
+    def test_gas2_matches_single_device(self, zero_stage):
+        skip_on_device()
+        assert dist.get_world_size() == 4
+        transformers = pytest.importorskip("transformers")
+        hidden, heads, gas, steps, lr = 32, 4, 2, 3, 0.5
+        kv_rows = 2 * (hidden // heads)
+        device = torch.device(get_accelerator().current_device_name())
+
+        def build_model():
+            torch.manual_seed(0)
+            config = transformers.GPTBigCodeConfig(vocab_size=64,
+                                                   n_positions=32,
+                                                   n_embd=hidden,
+                                                   n_layer=2,
+                                                   n_head=heads,
+                                                   multi_query=True,
+                                                   attn_pdrop=0.0,
+                                                   resid_pdrop=0.0,
+                                                   embd_pdrop=0.0)
+            return transformers.GPTBigCodeForCausalLM(config)
+
+        batches = [[
+            torch.randint(0, 64, (2, 16), generator=torch.Generator().manual_seed(step * gas + micro)).to(device)
+            for micro in range(gas)
+        ] for step in range(steps)]
+
+        reference = build_model().to(device)
+        reference_optimizer = torch.optim.SGD(reference.parameters(), lr=lr)
+        reference_losses = []
+        for step_batches in batches:
+            reference_optimizer.zero_grad()
+            for input_ids in step_batches:
+                loss = reference(input_ids=input_ids, labels=input_ids).loss
+                (loss / gas).backward()
+                reference_losses.append(loss.item())
+            reference_optimizer.step()
+
+        ds_config = {
+            "train_micro_batch_size_per_gpu": 2,
+            "gradient_accumulation_steps": gas,
+            "optimizer": {
+                "type": "SGD",
+                "params": {
+                    "lr": lr,
+                },
+            },
+            "gradient_clipping": 0.0,
+            "zero_allow_untested_optimizer": True,
+            "tensor_parallel": {
+                "autotp_size": 2,
+            },
+            "zero_optimization": {
+                "stage": zero_stage,
+            },
+        }
+        try:
+            engine, _, _, _ = deepspeed.initialize(model=build_model(), config=ds_config)
+            losses = []
+            counts_per_step = []
+            for step_batches in batches:
+                with _count_kv_gradient_all_reduces(kv_rows, hidden) as counts:
+                    for input_ids in step_batches:
+                        loss = engine(input_ids=input_ids, labels=input_ids).loss
+                        engine.backward(loss)
+                        engine.step()
+                        losses.append(loss.item())
+                counts_per_step.append(dict(counts))
+
+            torch.testing.assert_close(torch.tensor(losses), torch.tensor(reference_losses), atol=1e-5, rtol=0)
+            # Two layers, weight and bias. ZeRO 0/1 defer the reduce to the boundary (two of
+            # each per step); ZeRO 2/3 reduce every micro-batch (four of each per step).
+            expected = 2 if zero_stage in (0, 1) else 4
+            for counts in counts_per_step:
+                assert counts == {"weight": expected, "bias": expected}, counts
+
+            c_attn = engine.module.transformer.h[0].attn.c_attn
+            kv_on_ranks = [None] * dist.get_world_size()
+            dist.all_gather_object(kv_on_ranks, c_attn.weight.detach()[-kv_rows:].cpu())
+            assert all(torch.equal(kv, kv_on_ranks[0]) for kv in kv_on_ranks)
+        finally:
+            reset_tp_model_init_state()
+
+    @pytest.mark.parametrize("model_dtype,grad_accum_dtype", [("fp16", "fp32"), ("bf16", "fp32")])
+    def test_gas2_low_precision_stage1_keeps_kv_replicated(self, model_dtype, grad_accum_dtype):
+        skip_on_device()
+        assert dist.get_world_size() == 4
+        transformers = pytest.importorskip("transformers")
+        hidden, heads, gas, steps, lr = 32, 4, 2, 2, 0.5
+        kv_rows = 2 * (hidden // heads)
+        device = torch.device(get_accelerator().current_device_name())
+        dtype = torch.float16 if model_dtype == "fp16" else torch.bfloat16
+
+        def build_model():
+            torch.manual_seed(0)
+            config = transformers.GPTBigCodeConfig(vocab_size=64,
+                                                   n_positions=32,
+                                                   n_embd=hidden,
+                                                   n_layer=2,
+                                                   n_head=heads,
+                                                   multi_query=True,
+                                                   attn_pdrop=0.0,
+                                                   resid_pdrop=0.0,
+                                                   embd_pdrop=0.0)
+            return transformers.GPTBigCodeForCausalLM(config).to(dtype=dtype)
+
+        batches = [[
+            torch.randint(0, 64, (2, 16), generator=torch.Generator().manual_seed(step * gas + micro)).to(device)
+            for micro in range(gas)
+        ] for step in range(steps)]
+
+        ds_config = {
+            "train_micro_batch_size_per_gpu": 2,
+            "gradient_accumulation_steps": gas,
+            "optimizer": {
+                "type": "SGD",
+                "params": {
+                    "lr": lr,
+                },
+            },
+            "gradient_clipping": 0.0,
+            "zero_allow_untested_optimizer": True,
+            "data_types": {
+                "grad_accum_dtype": grad_accum_dtype
+            },
+            "tensor_parallel": {
+                "autotp_size": 2,
+            },
+            "zero_optimization": {
+                "stage": 1,
+            },
+        }
+        ds_config[model_dtype] = {"enabled": True}
+        if model_dtype == "fp16":
+            ds_config[model_dtype]["initial_scale_power"] = 8
+        try:
+            engine, _, _, _ = deepspeed.initialize(model=build_model(), config=ds_config)
+            for step_batches in batches:
+                with _count_kv_gradient_all_reduces(kv_rows, hidden) as counts:
+                    for input_ids in step_batches:
+                        loss = engine(input_ids=input_ids, labels=input_ids).loss
+                        engine.backward(loss)
+                        engine.step()
+                # fp16/bf16 with fp32 accumulation stores earlier micro-batches outside
+                # param.grad, so the K/V reduce must stay per micro-batch.
+                assert counts == {"weight": 4, "bias": 4}, counts
+
+                c_attn = engine.module.transformer.h[0].attn.c_attn
+                kv_on_ranks = [None] * dist.get_world_size()
+                dist.all_gather_object(kv_on_ranks, c_attn.weight.detach()[-kv_rows:].float().cpu())
+                for kv in kv_on_ranks[1:]:
+                    torch.testing.assert_close(kv, kv_on_ranks[0], atol=1e-2, rtol=1e-2)
         finally:
             reset_tp_model_init_state()
 

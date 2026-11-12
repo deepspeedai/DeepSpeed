@@ -1502,6 +1502,10 @@ class _ReplicatedKvGradReducer:
     post-accumulate hook is registered as well. The fallback reduces only the K/V rows added
     since its previous call: reducing the whole accumulated gradient again would scale earlier
     micro-batches once per later backward.
+
+    When the engine allows deferred reduction, both hooks leave the local partial in place and
+    the post-accumulate hook reduces the K/V rows that were accumulated since the previous
+    boundary. The engine only allows this when the full window stays in ``param.grad``.
     """
 
     def __init__(self, param, kv_start, group):
@@ -1511,10 +1515,44 @@ class _ReplicatedKvGradReducer:
         self._tensor_hook_ran = False
         self._grad = None
         self._kv = None
+        self._boundary_reduced = False
+        self._accumulation_boundary = True
+        self._defer_allowed = False
+
+    def set_accumulation_state(self, is_boundary, defer_allowed):
+        """Record the engine's accumulation state for this backward.
+
+        Called from the engine's backward prologue for this reducer only, so two engines in
+        one process do not overwrite each other's state. A non-boundary backward starts a new
+        window: even a parameter that is unused there must forget the previous boundary's
+        reduced snapshot.
+        """
+        self._accumulation_boundary = is_boundary
+        self._defer_allowed = defer_allowed
+        if not is_boundary:
+            self._tensor_hook_ran = False
+            self._grad = None
+            self._kv = None
+            self._boundary_reduced = False
 
     def tensor_hook(self, grad):
         self._tensor_hook_ran = True
+        if self._defer_allowed:
+            return grad
         return _sum_replicated_kv_gradient(grad, self.kv_start, self.group)
+
+    def _reduce_new_kv_rows(self, grad, kv_grad, use_delta):
+        if use_delta and self._grad is grad and self._kv is not None:
+            delta = kv_grad - self._kv
+        else:
+            delta = kv_grad.clone()
+        _all_reduce_replicated_kv_rows(delta, self.group)
+        if use_delta and self._grad is grad and self._kv is not None:
+            kv_grad.copy_(self._kv + delta)
+        else:
+            kv_grad.copy_(delta)
+        self._grad = grad
+        self._kv = kv_grad.clone()
 
     def post_accumulate_hook(self, *_unused):
         # Both hook forms leave the gradient on the parameter; the pre-2.1
@@ -1524,23 +1562,27 @@ class _ReplicatedKvGradReducer:
             self._tensor_hook_ran = False
             self._grad = None
             self._kv = None
+            self._boundary_reduced = False
             return
         kv_grad = grad.narrow(0, self.kv_start, grad.shape[0] - self.kv_start)
+        if self._defer_allowed:
+            if not self._accumulation_boundary:
+                # The next window starts here; forget the previous boundary's snapshot.
+                self._tensor_hook_ran = False
+                self._grad = None
+                self._kv = None
+                return
+            # A reentrant checkpoint may run this hook more than once at the boundary.
+            # Reducing the delta keeps each new local contribution counted once.
+            self._reduce_new_kv_rows(grad, kv_grad, use_delta=self._boundary_reduced)
+            self._boundary_reduced = True
+            self._tensor_hook_ran = False
+            return
         if self._tensor_hook_ran:
             # The tensor hook already summed this micro-batch before it was accumulated.
             self._tensor_hook_ran = False
         else:
-            if self._grad is grad and self._kv is not None:
-                delta = kv_grad - self._kv
-            else:
-                delta = kv_grad.clone()
-            _all_reduce_replicated_kv_rows(delta, self.group)
-            if self._grad is grad and self._kv is not None:
-                kv_grad.copy_(self._kv + delta)
-            else:
-                kv_grad.copy_(delta)
-        self._grad = grad
-        self._kv = kv_grad.clone()
+            self._reduce_new_kv_rows(grad, kv_grad, use_delta=True)
 
 
 class FusedModuleWrapper:
@@ -1596,6 +1638,7 @@ class fused_LinearLayer(SubParamColumnParallel):
                 reducer = _ReplicatedKvGradReducer(param, kv_start, group)
                 param.register_hook(reducer.tensor_hook)
                 register_grad_hook(param, reducer.post_accumulate_hook)
+                param._ds_replicated_kv_reducer = reducer
 
     def _freeze_partition_sizes(self, total_size):
         super()._freeze_partition_sizes(total_size)
