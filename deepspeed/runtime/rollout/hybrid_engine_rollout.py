@@ -1362,17 +1362,13 @@ class HybridEngineRollout(RolloutEngine):
                             sampling,
                             selector,
                             align_decode_fronts=False,
-                            profile=None,
-                            target_slots=None):
+                            profile=None):
         if not update.admitted:
             return {}, {}
 
         if not align_decode_fronts:
             admitted_ids = tuple(request.request_id for request in update.admitted)
-            if target_slots is None:
-                target_slots = update.admitted_slots
-            if len(target_slots) != len(admitted_ids):
-                raise ValueError("continuous prefill needs one target slot per admitted request")
+            target_slots = update.admitted_slots
             # Returning turns have longer contexts than new ones; left-pad the admission to its widest.
             prompt_ids, prompt_attention = left_pad_samples([samples[request_id] for request_id in admitted_ids],
                                                             get_pad_token_id(self.tokenizer))

@@ -959,12 +959,12 @@ def _prompt(tokens):
 
 @pytest.mark.parametrize("left_padded", [False, True])
 def test_graph_capture_samples_with_temperature_and_scores_the_sampled_distribution(left_padded):
-    if not torch.cuda.is_available():  #ignore-cuda
-        pytest.skip("CUDA is required for graph capture")
+    if not get_accelerator().is_available() or not get_accelerator().is_graph_capture_supported():
+        pytest.skip("requires graph capture")
     from transformers import LlamaConfig, LlamaForCausalLM
 
     torch.manual_seed(0)
-    device = torch.device("cuda")
+    device = torch.device(get_accelerator().device_name())
     config = LlamaConfig(vocab_size=128,
                          hidden_size=64,
                          intermediate_size=128,
@@ -1021,10 +1021,10 @@ def _tiny_llama(device):
 def test_graph_generation_matches_hf_greedy_and_samples_with_temperature(batch_size):
     """The graph path must match HF generate at temperature 0 and sample every
     token (including the first, read off the prefill) when temperature > 0."""
-    if not torch.cuda.is_available():  #ignore-cuda
-        pytest.skip("CUDA graph capture requires CUDA")
+    if not get_accelerator().is_available() or not get_accelerator().is_graph_capture_supported():
+        pytest.skip("requires graph capture")
 
-    device = torch.device("cuda")
+    device = torch.device(get_accelerator().device_name())
     module = _tiny_llama(device)
     # The decode loop is called with the model directly. The engine's module only adds the EOS ids of its generation
     # config, so a stand-in without one leaves the tokenizer's -1, never generated: every row decodes all tokens.
@@ -1089,9 +1089,9 @@ def _left_pad(prompts, device):
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 def test_graph_capture_decodes_left_padded_rows_as_if_alone(dtype):
     """The mask hides pad slots, so a left-padded row must decode as it would alone and unpadded."""
-    if not torch.cuda.is_available():  #ignore-cuda
-        pytest.skip("CUDA graph capture requires CUDA")
-    device = torch.device("cuda")
+    if not get_accelerator().is_available() or not get_accelerator().is_graph_capture_supported():
+        pytest.skip("requires graph capture")
+    device = torch.device(get_accelerator().device_name())
     model = _small_qwen3(device, dtype)
     # An EOS id that is never generated keeps every row decoding to max_new_tokens.
     rollout = HybridEngineRollout(_engine_for(model), SimpleNamespace(pad_token_id=0, eos_token_id=-1),
@@ -1131,7 +1131,7 @@ _TOOL_TOKENS = [9, 10]
 
 def _continuous_case(model_factory, dtype):
     """A tiny model, prompts, an EOS id its greedy decoding produces, and the response length that calls a tool."""
-    device = torch.device("cuda")
+    device = torch.device(get_accelerator().device_name())
     model = model_factory(device, dtype) if dtype is not None else model_factory(device)
     torch.manual_seed(1)
     prompts = [torch.randint(11, 60, (length, )).tolist() for length in (3, 7, 5, 9, 4)]
@@ -1207,8 +1207,8 @@ def test_multi_turn_continuous_batching_generates_each_turn_as_if_alone(_tokeniz
                                                                         use_graph_capture, temperature):
     """With fewer decode rows than trajectories, every turn waits for a row, is prefilled with its whole
     conversation, and must decode exactly as the trajectory would alone."""
-    if not torch.cuda.is_available():  #ignore-cuda
-        pytest.skip("multi-turn continuous batching runs on CUDA")
+    if not get_accelerator().is_available():
+        pytest.skip("multi-turn continuous batching requires an accelerator")
     model_factory = _small_qwen3 if model_name == "qwen3" else _tiny_llama
     model, prompts, eos, tool_length = _continuous_case(model_factory, dtype)
     rollout = _continuous_rollout(model,
@@ -1238,8 +1238,8 @@ def test_multi_turn_continuous_batching_generates_each_turn_as_if_alone(_tokeniz
 @patch("deepspeed.runtime.rollout.hybrid_engine_rollout.tokenize_tool_responses", return_value=_TOOL_TOKENS)
 def test_multi_turn_continuous_repetition_penalty_matches_generate(_tokenize_tool_responses, model_name, dtype):
     """With fewer rows than trajectories, a reused row must penalize its new trajectory's tokens, not its last one's."""
-    if not torch.cuda.is_available():  #ignore-cuda
-        pytest.skip("multi-turn continuous batching runs on CUDA")
+    if not get_accelerator().is_available():
+        pytest.skip("multi-turn continuous batching requires an accelerator")
     model_factory = _small_qwen3 if model_name == "qwen3" else _tiny_llama
     model, prompts, _, _ = _continuous_case(model_factory, dtype)
     device = next(model.parameters()).device
@@ -1264,8 +1264,8 @@ def test_multi_turn_continuous_repetition_penalty_matches_generate(_tokenize_too
 @pytest.mark.parametrize("use_graph_capture", [True, False])
 def test_multi_turn_continuous_batching_admits_into_a_freed_row_on_the_next_step(use_graph_capture):
     """A finished turn frees its row for the next queued turn at once, so no row idles while a turn waits."""
-    if not torch.cuda.is_available():  #ignore-cuda
-        pytest.skip("multi-turn continuous batching runs on CUDA")
+    if not get_accelerator().is_available():
+        pytest.skip("multi-turn continuous batching requires an accelerator")
     model, prompts, _, _ = _continuous_case(_small_qwen3, torch.float32)
     # eos -1 never matches, so each trajectory is one turn of exactly max_new_tokens tokens.
     rollout = _continuous_rollout(model,
@@ -1289,8 +1289,8 @@ def test_multi_turn_continuous_batching_admits_into_a_freed_row_on_the_next_step
 @patch("deepspeed.runtime.rollout.hybrid_engine_rollout.tokenize_tool_responses", return_value=_TOOL_TOKENS)
 def test_multi_turn_continuous_batching_matches_static_batching(_tokenize_tool_responses):
     """At temperature 0 both schedules must produce the same trajectories, turn by turn."""
-    if not torch.cuda.is_available():  #ignore-cuda
-        pytest.skip("multi-turn continuous batching runs on CUDA")
+    if not get_accelerator().is_available():
+        pytest.skip("multi-turn continuous batching requires an accelerator")
     model, prompts, eos, tool_length = _continuous_case(_small_qwen3, torch.float32)
     request = RolloutRequest(samples=[_prompt(prompt) for prompt in prompts])
     sampling = SamplingConfig(max_new_tokens=24, max_new_tokens_per_turn=8, temperature=0, n_samples_per_prompt=2)
@@ -1338,8 +1338,8 @@ def test_multi_turn_continuous_batching_matches_static_batching(_tokenize_tool_r
 @patch("deepspeed.runtime.rollout.hybrid_engine_rollout.tokenize_tool_responses", return_value=_TOOL_TOKENS)
 def test_multi_turn_shared_column_matches_static_batching(_tokenize_tool_responses, layout_kwargs):
     """Without graph capture, rows share one write column; at temperature 0 the trajectories match static batching."""
-    if not torch.cuda.is_available():  #ignore-cuda
-        pytest.skip("multi-turn continuous batching runs on CUDA")
+    if not get_accelerator().is_available():
+        pytest.skip("multi-turn continuous batching requires an accelerator")
     model, prompts, eos, tool_length = _continuous_case(_small_qwen3, torch.float32)
     request = RolloutRequest(samples=[_prompt(prompt) for prompt in prompts])
     sampling = SamplingConfig(max_new_tokens=24, max_new_tokens_per_turn=8, temperature=0, n_samples_per_prompt=2)

@@ -888,6 +888,12 @@ The Hybrid Engine (`DeepSpeedHybridEngine`) switches a model between training mo
   }
 ```
 
+***max_out_tokens***: [integer]
+
+| Description                                                                                                                                                                                                  | Default |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------- |
+| The longest sequence the hybrid engine generates. `HybridEngineRollout` (`deepspeed.runtime.rollout`) uses it as the cap on each trajectory's prompt, responses and tool output, and requires it to be set explicitly. | `512`   |
+
 ***enable_graph_capture***: [boolean]
 
 | Description                                                                                                                                                                                                                                                                                                                                        | Default |
