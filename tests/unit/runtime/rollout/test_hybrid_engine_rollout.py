@@ -1218,7 +1218,7 @@ class TestZero3SynchronizedEarlyStop(DistributedTest):
         from transformers import Qwen2Config, Qwen2ForCausalLM
 
         rank = dist.get_rank()
-        device = torch.device(f"cuda:{rank}")
+        device = torch.device(get_accelerator().current_device_name())
         model = Qwen2ForCausalLM(
             Qwen2Config(
                 vocab_size=32,
