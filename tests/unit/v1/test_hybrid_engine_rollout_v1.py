@@ -2,16 +2,196 @@
 # DeepSpeed Team
 """Accelerator-backed v1 HybridEngineRollout tests."""
 
+import gc
 import os
 from types import SimpleNamespace
 
 import pytest
 import torch
 from transformers import PretrainedConfig
+from transformers.cache_utils import Cache
 
+import deepspeed
 from deepspeed.accelerator import get_accelerator
 from deepspeed.runtime.rollout.base import RolloutRequest, SamplingConfig
 from deepspeed.runtime.rollout.hybrid_engine_rollout import HybridEngineRollout, HybridEngineRolloutConfig
+from deepspeed.utils.static_cache import DeepSpeedStaticCache
+from unit.common import DistributedTest
+
+
+class _LocalKVModel(torch.nn.Module):
+    """Emits fewer KV heads than its global config, like an AutoTP shard."""
+    _supports_cache_class = True
+
+    def __init__(self, local_heads):
+        super().__init__()
+        self.local_heads = local_heads
+        self.weight = torch.nn.Parameter(torch.zeros(1))
+        self.config = PretrainedConfig(max_position_embeddings=32,
+                                       num_hidden_layers=1,
+                                       num_attention_heads=4,
+                                       num_key_value_heads=4,
+                                       hidden_size=4,
+                                       head_dim=1)
+
+    def forward(self, input_ids, attention_mask, past_key_values=None, cache_position=None, **kwargs):
+        heads = torch.arange(1, self.local_heads + 1, device=input_ids.device)
+        states = input_ids[:, None, :, None].float() * heads[None, :, None, None]
+        _, values = past_key_values.update(states,
+                                           states,
+                                           layer_idx=0,
+                                           cache_kwargs={"cache_position": cache_position})
+        if attention_mask.dim() == 4:
+            valid = attention_mask[:, 0, 0, :] == 0
+        else:
+            valid = torch.zeros((values.shape[0], values.shape[2]), dtype=torch.bool, device=input_ids.device)
+            valid[:, :attention_mask.shape[1]] = attention_mask.bool()
+        cache_sums = (values * valid[:, None, :, None]).sum(dim=(1, 2, 3)).long()
+        next_tokens = cache_sums.remainder(29) + 3
+        logits = torch.zeros((input_ids.shape[0], input_ids.shape[1], 32), device=input_ids.device)
+        logits.scatter_(2, next_tokens[:, None, None].expand(-1, input_ids.shape[1], 1), 1)
+        return SimpleNamespace(logits=logits)
+
+
+def _local_kv_tokens(prompts, new_tokens, local_heads):
+    head_sum = sum(range(1, local_heads + 1))
+    expected = []
+    for prompt in prompts:
+        tokens = list(prompt)
+        for _ in range(new_tokens):
+            tokens.append(sum(tokens) * head_sum % 29 + 3)
+        expected.append(tokens)
+    return expected
+
+
+def _count_replays(monkeypatch, accelerator):
+    counter = {"replays": 0}
+    original_replay = accelerator.replay_graph
+
+    def replay(graph):
+        counter["replays"] += 1
+        return original_replay(graph)
+
+    monkeypatch.setattr(accelerator, "replay_graph", replay)
+    return counter
+
+
+@pytest.mark.parametrize("local_heads", [4, 2, 1])
+def test_static_graph_uses_prefill_kv_shape(local_heads, monkeypatch):
+    accelerator = get_accelerator()
+    if not accelerator.is_available() or accelerator.create_graph() is None:
+        pytest.skip("requires graph capture")
+
+    counter = _count_replays(monkeypatch, accelerator)
+    device = torch.device(accelerator.device_name())
+    model = _LocalKVModel(local_heads).to(device).eval()
+    rollout = HybridEngineRollout(SimpleNamespace(module=model),
+                                  SimpleNamespace(pad_token_id=0, eos_token_id=-1),
+                                  cfg=HybridEngineRolloutConfig(use_graph_capture=True))
+    prompts = [[1, 3, 4], [3, 4, 5]]
+    prompt_ids = torch.tensor(prompts, device=device)
+    new_tokens = 4
+    output = rollout.generate(RolloutRequest(prompt_ids, torch.ones_like(prompt_ids)),
+                              SamplingConfig(max_new_tokens=new_tokens, temperature=0))
+
+    assert output.input_ids.tolist() == _local_kv_tokens(prompts, new_tokens, local_heads)
+    assert counter["replays"] == new_tokens - 1
+    assert model.config.num_key_value_heads == 4
+
+
+@pytest.mark.parametrize("use_graph", [False, True])
+@pytest.mark.parametrize("local_heads", [4, 2, 1])
+def test_continuous_generation_uses_local_kv_shape(local_heads, use_graph, monkeypatch):
+    accelerator = get_accelerator()
+    if use_graph and (not accelerator.is_available() or accelerator.create_graph() is None):
+        pytest.skip("requires graph capture")
+
+    counter = _count_replays(monkeypatch, accelerator)
+    device = torch.device(accelerator.device_name())
+    model = _LocalKVModel(local_heads).to(device).eval()
+    rollout = HybridEngineRollout(SimpleNamespace(module=model),
+                                  SimpleNamespace(pad_token_id=0, eos_token_id=-1),
+                                  cfg=HybridEngineRolloutConfig(use_graph_capture=use_graph))
+    # Three requests on two slots force a refill into an already allocated cache row.
+    prompts = [[1, 3, 4], [3, 4, 5], [2, 2, 6]]
+    prompt_ids = torch.tensor(prompts, device=device)
+    new_tokens = 4
+    output = rollout.generate(RolloutRequest(prompt_ids, torch.ones_like(prompt_ids)),
+                              SamplingConfig(max_new_tokens=new_tokens, temperature=0, continuous_batch_size=2))
+
+    assert output.input_ids.tolist() == _local_kv_tokens(prompts, new_tokens, local_heads)
+    decode_steps = rollout.get_last_continuous_stats()["decode_steps"]
+    assert counter["replays"] == (decode_steps if use_graph else 0)
+    assert decode_steps > 0
+    assert model.config.num_key_value_heads == 4
+
+
+class TestAutoTPContinuousRollout(DistributedTest):
+    world_size = 2
+
+    @pytest.mark.parametrize("use_graph", [False, True])
+    def test_matches_generate_on_sharded_llama(self, use_graph):
+        accelerator = get_accelerator()
+        if use_graph and accelerator.create_graph() is None:
+            pytest.skip("requires graph capture")
+        # Eager continuous decode passes a 2-D mask, so newer Transformers query the cache offset.
+        hf_needs_offset = hasattr(Cache, "get_query_offset")
+        cache_has_offset = hasattr(DeepSpeedStaticCache, "get_query_offset")
+        if not use_graph and hf_needs_offset and not cache_has_offset:
+            pytest.skip("DeepSpeedStaticCache lacks get_query_offset for this Transformers version")
+
+        from transformers import AutoModelForCausalLM, LlamaConfig
+
+        config = LlamaConfig(vocab_size=128,
+                             hidden_size=64,
+                             intermediate_size=128,
+                             num_hidden_layers=2,
+                             num_attention_heads=4,
+                             num_key_value_heads=4,
+                             max_position_embeddings=64)
+        torch.manual_seed(0)
+        model = AutoModelForCausalLM.from_config(config)
+        ds_config = {
+            "train_micro_batch_size_per_gpu": 1,
+            "tensor_parallel": {
+                "autotp_size": 2
+            },
+            "zero_optimization": {
+                "stage": 0
+            },
+        }
+        engine, _, _, _ = deepspeed.initialize(model=model, config=ds_config)
+        model.eval()
+        head_dim = config.hidden_size // config.num_attention_heads
+        assert model.model.layers[0].self_attn.k_proj.weight.shape[0] == config.num_key_value_heads * head_dim // 2
+
+        device = torch.device(accelerator.current_device_name())
+        prompt_ids = torch.tensor([[5, 17, 42, 9], [33, 8, 71, 2], [64, 11, 19, 90]], device=device)
+        prompt_attn = torch.ones_like(prompt_ids)
+        new_tokens = 6
+        with torch.no_grad():
+            expected = model.generate(prompt_ids,
+                                      attention_mask=prompt_attn,
+                                      max_new_tokens=new_tokens,
+                                      do_sample=False,
+                                      eos_token_id=None,
+                                      pad_token_id=0)
+
+        rollout = HybridEngineRollout(engine,
+                                      SimpleNamespace(pad_token_id=0, eos_token_id=-1),
+                                      cfg=HybridEngineRolloutConfig(use_graph_capture=use_graph))
+        try:
+            # Three requests on two slots force a refill into an already allocated cache row.
+            output = rollout.generate(
+                RolloutRequest(prompt_ids, prompt_attn),
+                SamplingConfig(max_new_tokens=new_tokens, temperature=0, continuous_batch_size=2))
+            assert torch.equal(output.input_ids, expected)
+            assert model.config.num_key_value_heads == 4
+        finally:
+            # A live graph holding NCCL work hangs process-group teardown.
+            del rollout
+            gc.collect()
+            accelerator.synchronize()
 
 
 @pytest.mark.parametrize("attn_implementation", ["eager", "sdpa"])
@@ -170,6 +350,11 @@ def test_continuous_graph_generation_refills_a_fixed_slot_on_cuda():
     assert torch.equal(graph_output.attention_mask, eager_output.attention_mask)
     assert graph_output.input_ids[:, 3:].cpu().tolist() == [[2, 0], [7, 2], [7, 2]]
     stats = graph_rollout.get_last_continuous_stats()
+    # 2 cache rows x 5 positions: fp32 keys and values with one head of width 1, int64 attention mask,
+    # and one int64 write position per row. Both decode paths report the same cache footprint.
+    expected_cache_bytes = 2 * 5 * 4 * 2 + 2 * 5 * 8 + 2 * 8
+    assert stats["cache_memory_bytes"] == expected_cache_bytes
+    assert eager_rollout.get_last_continuous_stats()["cache_memory_bytes"] == expected_cache_bytes
     assert stats["cache_capacity"] == 5
     assert stats["peak_cache_length"] == 4
     assert stats["decode_steps"] == 2
@@ -292,3 +477,120 @@ def test_continuous_graph_matches_pretrained_model_when_enabled():
         accelerator.create_graph = original_create_graph
 
     assert capture_count[0] == 1
+
+
+def _tiny_llama(device):
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    torch.manual_seed(0)
+    config = LlamaConfig(vocab_size=64,
+                         hidden_size=64,
+                         intermediate_size=128,
+                         num_hidden_layers=2,
+                         num_attention_heads=4,
+                         num_key_value_heads=2,
+                         max_position_embeddings=128)
+    model = LlamaForCausalLM(config)
+    # A random initialization gives almost uniform next-token distributions, under which a wrong temperature or
+    # cutoff rarely changes the drawn token. Scaling the output head makes them peaked.
+    with torch.no_grad():
+        model.lm_head.weight.mul_(30)
+    return model.to(device).eval()
+
+
+def _rollout(model, use_graph_capture):
+    # eos -1 never matches, so every row generates the full length.
+    tokenizer = SimpleNamespace(pad_token_id=0, eos_token_id=-1)
+    return HybridEngineRollout(SimpleNamespace(module=model),
+                               tokenizer,
+                               cfg=HybridEngineRolloutConfig(use_graph_capture=use_graph_capture))
+
+
+def _random_request(batch_size, prompt_len, device):
+    generator = torch.Generator().manual_seed(1)
+    prompt_ids = torch.randint(1, 64, (batch_size, prompt_len), generator=generator)
+    return RolloutRequest(prompt_ids.to(device), torch.ones_like(prompt_ids).to(device))
+
+
+@pytest.mark.parametrize("use_graph_capture, continuous_batch_size", [(True, None), (True, 8), (False, 8)])
+@pytest.mark.parametrize("temperature, top_k, top_p", [(1.0, 0, 1.0), (0.7, 5, 1.0), (1.0, 0, 0.8)])
+def test_decode_sampling_matches_hf_generate(temperature, top_k, top_p, use_graph_capture, continuous_batch_size):
+    accelerator = get_accelerator()
+    if not accelerator.is_available() or accelerator.device_name() != "cuda":
+        pytest.skip("CUDA is required for CUDA graph decode coverage")
+
+    device = torch.device(accelerator.device_name())
+    model = _tiny_llama(device)
+    new_tokens = 32
+    # Every prompt gets its own continuous batching slot, so each step draws the tokens of all rows in one call, as
+    # generate() does, and the same seed gives both the same random numbers.
+    request = _random_request(batch_size=8, prompt_len=8, device=device)
+    sampling = SamplingConfig(max_new_tokens=new_tokens,
+                              temperature=temperature,
+                              top_k=top_k,
+                              top_p=top_p,
+                              continuous_batch_size=continuous_batch_size)
+
+    torch.manual_seed(2)
+    output = _rollout(model, use_graph_capture).generate(request, sampling)
+
+    torch.manual_seed(2)
+    with torch.no_grad():
+        expected = model.generate(request.prompt_ids,
+                                  attention_mask=request.prompt_attention_mask,
+                                  max_new_tokens=new_tokens,
+                                  do_sample=True,
+                                  temperature=temperature,
+                                  top_k=top_k,
+                                  top_p=top_p,
+                                  eos_token_id=None,
+                                  pad_token_id=0)
+
+    assert output.input_ids.tolist() == expected.tolist()
+
+
+@pytest.mark.parametrize("use_graph_capture, continuous_batch_size", [(True, None), (True, 8), (False, 8)])
+@pytest.mark.parametrize("temperature", [0.0, 0.7])
+def test_decode_repetition_penalty_matches_hf_generate(temperature, use_graph_capture, continuous_batch_size):
+    accelerator = get_accelerator()
+    if not accelerator.is_available() or accelerator.device_name() != "cuda":
+        pytest.skip("CUDA is required for CUDA graph decode coverage")
+
+    device = torch.device(accelerator.device_name())
+    model = _tiny_llama(device)
+    new_tokens = 32
+    request = _random_request(batch_size=8, prompt_len=8, device=device)
+    sampling = SamplingConfig(max_new_tokens=new_tokens,
+                              temperature=temperature,
+                              top_k=0,
+                              top_p=1.0,
+                              continuous_batch_size=continuous_batch_size)
+    hf_sampling = {
+        "do_sample": True,
+        "temperature": temperature,
+        "top_k": 0,
+        "top_p": 1.0
+    } if temperature > 0 else {
+        "do_sample": False
+    }
+
+    def hf_generate():
+        torch.manual_seed(2)
+        with torch.no_grad():
+            return model.generate(request.prompt_ids,
+                                  attention_mask=request.prompt_attention_mask,
+                                  max_new_tokens=new_tokens,
+                                  eos_token_id=None,
+                                  pad_token_id=0,
+                                  **hf_sampling).tolist()
+
+    model.generation_config.repetition_penalty = 1.0
+    unpenalized = hf_generate()
+    model.generation_config.repetition_penalty = 1.3
+    expected = hf_generate()
+    assert expected != unpenalized
+
+    torch.manual_seed(2)
+    output = _rollout(model, use_graph_capture).generate(request, sampling)
+
+    assert output.input_ids.tolist() == expected

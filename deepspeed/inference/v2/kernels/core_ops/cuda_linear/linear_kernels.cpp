@@ -121,7 +121,6 @@ void weight_prepacking_fp16_to_fp6(uint16_t* weight_16bit,
     // Every four 16-bit elements are packed into three 6-bit values (4*6bit == 3*8bit).
     if (K * 6 % 8 != 0) { throw std::invalid_argument("(K * 6 % 8) should be 0"); }
     size_t K_fp6_packed = K * 6 / 8;
-    // #pragma omp parallel for
     for (auto m = 0; m < M; m++) {
         uint8_t* ptr_6bit = weight_6bit_packed + m * K_fp6_packed;
         uint16_t* ptr_16bit = weight_16bit + m * K;
