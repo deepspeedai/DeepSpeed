@@ -45,6 +45,13 @@ def test_no_subpackage_resolves_the_portable_module(monkeypatch):
     assert impl.__name__ == "deepspeed.ops.triton_ops.swiglu_triton"
 
 
+def test_platform_subpackage_resolves_the_platform_module(monkeypatch):
+    monkeypatch.setattr(deepspeed.accelerator, "get_accelerator",
+                        lambda: _FakeAccelerator("deepspeed.ops.triton_ops.npu"))
+    impl = resolve_triton_ops_impl("swiglu_triton")
+    assert impl.__name__ == "deepspeed.ops.triton_ops.npu.swiglu_triton"
+
+
 def test_unoverridden_feature_falls_back_to_the_portable_module(monkeypatch):
     monkeypatch.setattr(deepspeed.accelerator, "get_accelerator",
                         lambda: _FakeAccelerator("deepspeed.ops.triton_ops.npu"))
@@ -69,6 +76,26 @@ def test_out_of_package_feature_without_a_platform_variant_resolves_its_portable
     impl = resolve_triton_ops_impl("liger_vocab_parallel_cross_entropy",
                                    portable_module="deepspeed.sequence.cross_entropy")
     assert impl.__name__ == "deepspeed.sequence.cross_entropy"
+
+
+def test_out_of_package_feature_with_a_platform_variant_resolves_the_platform_module(monkeypatch):
+    # The platform subpackage overrides the MoE gather kernel, so ep_kernels
+    # must resolve to the platform module rather than the portable one.
+    monkeypatch.setattr(deepspeed.accelerator, "get_accelerator",
+                        lambda: _FakeAccelerator("deepspeed.ops.triton_ops.npu"))
+    impl = resolve_triton_ops_impl("ep_kernels", portable_module="deepspeed.moe.ep_kernels")
+    assert impl.__name__ == "deepspeed.ops.triton_ops.npu.ep_kernels"
+
+
+def test_dispatch_selects_the_platform_gather_variant(monkeypatch):
+    import deepspeed.moe.ep_kernels as ep_kernels
+    import deepspeed.ops.triton_ops.npu.ep_kernels as platform_ep_kernels
+
+    monkeypatch.setattr(deepspeed.accelerator, "get_accelerator",
+                        lambda: _FakeAccelerator("deepspeed.ops.triton_ops.npu"))
+    sentinel = object()
+    monkeypatch.setattr(platform_ep_kernels, "gather_rows", lambda src, index: sentinel)
+    assert ep_kernels.gather_rows(None, None) is sentinel
 
 
 # --- The dispatch decorator ---

@@ -7,6 +7,7 @@ Shared Triton availability check and per-hardware implementation dispatch for th
 """
 
 import functools
+import threading
 from contextlib import contextmanager
 
 try:
@@ -27,6 +28,46 @@ except Exception:
 def is_triton_available() -> bool:
     """Return True if Triton is importable and its kernels can be used."""
     return _TRITON_AVAILABLE
+
+
+_TRITON_KERNEL_PROBE_CACHE: dict[str, bool] = {}
+_TRITON_KERNEL_PROBE_ERRORS: dict[str, Exception] = {}
+_TRITON_KERNEL_PROBE_LOCK = threading.Lock()
+
+
+def probe_once(key: str, run) -> bool:
+    """Run a platform-owned kernel probe once per key and cache the answer.
+
+    This is a building block for platform variants that choose to validate a
+    kernel before using it; it is deliberately not a global gate. The caller
+    owns the key, the probe input, and the policy on failure (fall back, raise,
+    or warn), so each accelerator can decide how much validation and what
+    failure behavior a given kernel gets. The policy is per probe/kernel, not
+    per accelerator or per package. A platform with no variant of its own
+    can add a probe-only variant that wraps the portable entry point with this
+    helper; a platform that ships its own implementation can use it as a canary
+    and raise on failure. The shared layer never probes on its own. Exceptions
+    from ``run`` are contained and cached as a failed probe; ``probe_error``
+    returns the original exception for logging or chaining. The lock serializes
+    first-use probes of the same process, matching the one-time cost of a
+    Triton compilation.
+    """
+    with _TRITON_KERNEL_PROBE_LOCK:
+        if key in _TRITON_KERNEL_PROBE_CACHE:
+            return _TRITON_KERNEL_PROBE_CACHE[key]
+        try:
+            run()
+            supported = True
+        except Exception as exc:
+            _TRITON_KERNEL_PROBE_ERRORS[key] = exc
+            supported = False
+        _TRITON_KERNEL_PROBE_CACHE[key] = supported
+        return supported
+
+
+def probe_error(key: str) -> Exception | None:
+    """The exception that closed a platform-owned probe, if any."""
+    return _TRITON_KERNEL_PROBE_ERRORS.get(key)
 
 
 _TRITON_OPS_IMPL_CACHE: dict[str, object] = {}

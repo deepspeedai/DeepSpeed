@@ -244,7 +244,18 @@ class NPU_Accelerator(DeepSpeedAccelerator):
         return self._communication_backend_name
 
     def is_triton_supported(self):
-        return False
+        if not self.is_available():
+            return False
+        # Triton kernels run on Ascend via the triton-ascend backend, which
+        # reports itself through the same backend check as CUDA/ROCm in
+        # deepspeed.ops.triton_ops._triton. If the backend is not installed,
+        # the Triton gates stay closed.
+        from deepspeed.ops.triton_ops import is_triton_available
+
+        return is_triton_available()
+
+    def triton_ops_dir(self):
+        return "deepspeed.ops.triton_ops.npu"
 
     # Graph operations
     def is_graph_capture_supported(self) -> bool:
