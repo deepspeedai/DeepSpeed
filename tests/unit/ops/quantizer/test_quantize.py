@@ -203,8 +203,7 @@ def test_quantize_rounds_to_nearest(num_bits):
     pg = params.reshape(groups, 1)
     ratio = xg / pg
     q = torch.round(ratio).clamp(-2**(num_bits - 1), 2**(num_bits - 1) - 1)
-    kernel_q = torch.round(out.view(groups, -1).float() / pg).clamp(-2**(num_bits - 1),
-                                                                   2**(num_bits - 1) - 1)
+    kernel_q = torch.round(out.view(groups, -1).float() / pg).clamp(-2**(num_bits - 1), 2**(num_bits - 1) - 1)
 
     # The kernel quantizes by multiplying with its reciprocal scale. At an exact
     # half-step boundary, one ULP in that reciprocal can legitimately choose
