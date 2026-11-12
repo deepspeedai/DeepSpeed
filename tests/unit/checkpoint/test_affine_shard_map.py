@@ -19,6 +19,7 @@ process group or an accelerator.
 """
 
 import random
+import re
 
 import pytest
 import torch
@@ -620,17 +621,20 @@ def _validation_outcome(affine_map):
 
 
 @pytest.mark.parametrize('seed', range(200))
-def test_strided_destination_sweep_agrees_with_pairwise_walk(seed, monkeypatch):
-    """The sweep accepts exactly the layouts that write no address twice, and errors read as before."""
-    from deepspeed.checkpoint import affine as affine_module
-
+def test_strided_destination_check_refuses_exactly_double_writes(seed):
+    """validate() accepts exactly the layouts that write no address twice, and a refusal names
+    an address that is written twice."""
     affine_map = _random_column_block_map(random.Random(seed))
     written = [(piece.dest_offset + row * piece.dest_strides[0] + column) for piece in affine_map.pieces_by_rank[0]
                for row in range(piece.shape[0]) for column in range(piece.shape[1])]
-    fast = _validation_outcome(affine_map)
-    assert (fast is None) == (len(set(written)) == len(written))
-    monkeypatch.setattr(affine_module, 'boxes_disjoint', lambda boxes: False)
-    assert fast == _validation_outcome(affine_map)
+    outcome = _validation_outcome(affine_map)
+    assert (outcome is None) == (len(set(written)) == len(written))
+    if outcome is not None:
+        match = re.fullmatch(
+            r'Rank 0 writes shard address (\d+) twice, so one piece would silently overwrite '
+            r'another\.', outcome)
+        assert match is not None, outcome
+        assert written.count(int(match.group(1))) > 1
 
 
 # Guards added in review. Each one covers a way a map could produce a plausible but wrong
