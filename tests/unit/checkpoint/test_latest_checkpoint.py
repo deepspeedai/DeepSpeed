@@ -95,13 +95,17 @@ class TestLatestWrittenAfterAllRanks(DistributedTest):
         latest_path = os.path.join(save_dir, "latest")
 
         if dist.get_rank() == 1:
-            save_zero_checkpoint = model._save_zero_checkpoint
+            # Slow this rank down at the checkpoint writer's `save(state_dict, path)` contract,
+            # so the test holds for any engine implementation that routes writes through it.
+            checkpoint_engine = model.checkpoint_engine
+            engine_save = checkpoint_engine.save
 
-            def slow_save_zero_checkpoint(*args, **kwargs):
-                time.sleep(2)
-                return save_zero_checkpoint(*args, **kwargs)
+            def slow_save(state_dict, path, *args, **kwargs):
+                if os.path.basename(path) == os.path.basename(slow_rank_shard):
+                    time.sleep(2)
+                return engine_save(state_dict, path, *args, **kwargs)
 
-            model._save_zero_checkpoint = slow_save_zero_checkpoint
+            checkpoint_engine.save = slow_save
 
         shard_present_when_latest_appeared = []
 
