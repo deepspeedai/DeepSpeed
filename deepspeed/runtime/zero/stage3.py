@@ -771,7 +771,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         see_memory_usage("Before creating fp32 partitions", force=False)
         self._create_fp32_partitions()
         see_memory_usage("After creating fp32 partitions", force=False)
-        dist.barrier()
+        # Over the ranks of the partitions: a trainer on a subset of the world must not wait for the other ranks.
+        dist.barrier(group=self.dp_process_group)
 
         # To support pipelined optimizer swapping
         self._create_next_swappable_fp32_groups()
@@ -780,7 +781,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         self.initialize_optimizer_states()
         see_memory_usage("After initializing optimizer states", force=False)
-        dist.barrier()
+        dist.barrier(group=self.dp_process_group)
 
         if dist.get_rank() == 0:
             logger.info("optimizer state initialized")
@@ -932,7 +933,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                 self.param_groups_fp16_flat_cpu_memory.append(torch.empty(1, dtype=self.dtype))
 
     def _create_fp16_partitions_with_defragmentation(self, fp16_param_groups):
-        dist.barrier()
+        dist.barrier(group=self.dp_process_group)
 
         param_groups: List[List[Parameter]] = tuple(
             self._create_fp16_sub_groups(param_group["params"]) for param_group in fp16_param_groups)
@@ -1744,7 +1745,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         with get_accelerator().stream(self.reduce_and_partition_stream):
             if self.enable_sanity_checks:
-                assert_ints_same_as_other_ranks([p.ds_id for p in params_in_bucket])
+                assert_ints_same_as_other_ranks([p.ds_id for p in params_in_bucket], self.dp_process_group)
 
             if self.contiguous_gradients and bucket.elements <= self._ipg_bucket_capacity(
                     bucket) and not self.reduce_scatter:

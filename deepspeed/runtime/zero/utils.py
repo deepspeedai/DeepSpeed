@@ -77,16 +77,21 @@ def is_zero_supported_optimizer(optimizer):
     return type(optimizer) in ZERO_SUPPORTED_OPTIMIZERS
 
 
+def _first_rank(group):
+    """Global rank of ``group``'s first rank (``group`` None: the world)."""
+    return 0 if group is None else dist.get_global_rank(group, 0)
+
+
 @instrument_w_nvtx
-def assert_lst_len_same_as_other_ranks(lst: List[int]) -> None:
+def assert_lst_len_same_as_other_ranks(lst: List[int], group=None) -> None:
     rank0_len_tensor = torch.tensor(
-        len(lst) if dist.get_rank() == 0 else -1,
+        len(lst) if dist.get_rank(group=group) == 0 else -1,
         dtype=int,
         device=torch.device(get_accelerator().device_name(os.environ["LOCAL_RANK"])),
         requires_grad=False,
     )
     local_list_length = len(lst)
-    dist.broadcast(rank0_len_tensor, src=0, async_op=False)
+    dist.broadcast(rank0_len_tensor, src=_first_rank(group), group=group, async_op=False)
     rank0_list_length = rank0_len_tensor.cpu().item()
     if rank0_list_length != local_list_length:
         raise RuntimeError(f"Detected a disagreement on list length between rank0 and rank{dist.get_rank()}: "
@@ -94,33 +99,34 @@ def assert_lst_len_same_as_other_ranks(lst: List[int]) -> None:
                            f"\n rank{dist.get_rank()}: {local_list_length}")
 
 
-def get_lst_from_rank0(lst: List[int]) -> None:
+def get_lst_from_rank0(lst: List[int], group=None) -> None:
     """
     NOTE: creates both communication and synchronization overhead so should be used
     sparingly
     """
     lst_tensor = torch.tensor(
-        lst if dist.get_rank() == 0 else [-1] * len(lst),
+        lst if dist.get_rank(group=group) == 0 else [-1] * len(lst),
         dtype=int,
         device=torch.device(get_accelerator().device_name(os.environ["LOCAL_RANK"])),
         requires_grad=False,
     )
-    dist.broadcast(lst_tensor, src=0, async_op=False)
+    dist.broadcast(lst_tensor, src=_first_rank(group), group=group, async_op=False)
 
     return [t.item() for t in lst_tensor.cpu()]
 
 
 @instrument_w_nvtx
-def assert_ints_same_as_other_ranks(ints: List[int]) -> None:
+def assert_ints_same_as_other_ranks(ints: List[int], group=None) -> None:
     """
     NOTE: creates both communication and synchronization overhead so should be
     used sparingly
 
     takes a list of ints from each rank and ensures that they are the same
-    across ranks, throwing an exception if they are not.
+    across ranks, throwing an exception if they are not. ``group``: the ranks to compare (default: the world); a
+    ZeRO-3 model partitioned over a subgroup must pass its group, or the other ranks would have to take part.
     """
-    assert_lst_len_same_as_other_ranks(ints)
-    rank0_ints = get_lst_from_rank0(ints)
+    assert_lst_len_same_as_other_ranks(ints, group)
+    rank0_ints = get_lst_from_rank0(ints, group)
     if ints != rank0_ints:
         raise RuntimeError(f"Detected a disagreement on list contents between rank0 and rank{dist.get_rank()}: "
                            f"\n list length: {len(ints)}"
