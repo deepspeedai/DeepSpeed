@@ -28,8 +28,6 @@ def _init_group_wise_weight_quantization(model: nn.Module, ds_config: Dict) -> n
         nn.Module: Quantized nn.Module
     """
 
-    # global quantized_weight_registry
-
     matched_module_list_by_key = {}
     matched_module_count = 0
 

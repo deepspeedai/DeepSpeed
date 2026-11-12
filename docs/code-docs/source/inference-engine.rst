@@ -181,11 +181,12 @@ For continuous batching, the most recent cache statistics are available from
 ``rollout.get_last_continuous_stats()``. They include ``cache_capacity``,
 ``peak_cache_length``, ``cache_memory_bytes``, ``trim_count``,
 ``trimmed_columns``, ``trim_frequency``, and ``trim_bytes_moved``.
-``cache_memory_bytes`` covers the preallocated KV tensors and active cache
-metadata. With profiling enabled, ``trim_latency_ms``, ``end_to_end_ms``, and
-``tokens_per_second`` are also measured with accelerator synchronization;
-otherwise those timing fields are ``None`` or zero. ``trim_frequency`` is the
-number of trims divided by decode steps.
+``cache_memory_bytes`` covers the allocated KV tensors plus the per-row
+attention mask and write positions, with the same definition for eager and
+graph-captured decoding. With profiling enabled, ``trim_latency_ms``,
+``end_to_end_ms``, and ``tokens_per_second`` are also measured with accelerator
+synchronization; otherwise those timing fields are ``None`` or zero.
+``trim_frequency`` is the number of trims divided by decode steps.
 
 ``DeepSpeedStaticCache`` accepts one write position per row and can compact
 active rows while preserving its static tensor addresses. This mirrors the
@@ -277,17 +278,20 @@ row.
 Rollout runs independently on every data-parallel rank. Multi-turn rollout,
 graph capture and continuous batching reject ZeRO-3: every forward gathers
 parameters, so ranks must run the same forwards, and they run different numbers
-of turns and decode steps. Single-turn static rollout supports ZeRO-3 by running
-every rank to the same length: the longest budget any rank's prompts leave
-under ``max_new_tokens`` and ``max_out_tokens``.
+of turns and decode steps. Single-turn static rollout supports ZeRO-3: ranks
+agree on the longest budget any rank's prompts leave under ``max_new_tokens``
+and ``max_out_tokens``, and stop together once every rank has reached EOS,
+checked over the parameter-gather group.
 
-AutoTP (``tensor_parallel.autotp_size``) is supported with static batching.
+AutoTP (``tensor_parallel.autotp_size``) is supported with static batching and
+single-turn continuous batching; every KV cache is sized from each rank's own
+prefill, which holds only its share of the heads.
 Tensor-parallel ranks must run the same forwards, so before each generate call
 every rank takes its group's first rank's random state, which makes sampling
 draw the same tokens from the gathered logits, and tool calls run on the
-group's first rank only, which broadcasts their output. Continuous batching
-rejects AutoTP: a turn is admitted when its tools return, which happens at
-different steps on each rank. HybridEngine's ``inference_tp_size`` is rejected,
+group's first rank only, which broadcasts their output. Multi-turn continuous
+batching rejects AutoTP: a turn is admitted when its tools return, which
+happens at different steps on each rank. HybridEngine's ``inference_tp_size`` is rejected,
 since the rollout calls the module directly and skips the input gather of the
 hybrid engine's ``generate()``.
 

@@ -17,6 +17,7 @@ from typing import Optional
 
 import torch
 
+import deepspeed.comm as dist
 from deepspeed.accelerator import get_accelerator
 from deepspeed.utils import logger
 from deepspeed.runtime.rollout.base import (RolloutBatch, RolloutConfig, RolloutEngine, RolloutRecord, RolloutRequest,
@@ -190,6 +191,43 @@ class _TokenSelector:
         return tokens, log_probs
 
 
+class GlobalWorkRemaining:
+    """Rendezvous a local work flag over a distributed process group."""
+
+    def __init__(self, process_group=None):
+        self.process_group = process_group
+
+    def __call__(self, local_work_remaining):
+        work_remaining = torch.as_tensor(local_work_remaining, dtype=torch.int32).clone()
+        if dist.is_initialized() and dist.get_world_size(group=self.process_group) > 1:
+            dist.all_reduce(work_remaining, op=dist.ReduceOp.MAX, group=self.process_group)
+        return bool(work_remaining.item())
+
+
+class _GlobalEosStoppingCriteria:
+    """Stop all local sequences only after every rank has observed EOS."""
+
+    def __init__(self, response_start, eos_token_id, work_remaining, idle=False):
+        self.response_start = response_start
+        self.eos_token_ids = torch.as_tensor(eos_token_id).flatten()
+        self.work_remaining = work_remaining
+        # A rank decoding only a placeholder prompt has no work of its own and must not hold the others back.
+        self.idle = idle
+
+    def __call__(self, input_ids, scores, **kwargs):  # noqa: ARG002
+        response_ids = input_ids[:, self.response_start:]
+        eos_token_ids = self.eos_token_ids.to(device=input_ids.device, dtype=input_ids.dtype)
+        sequence_has_eos = (response_ids.unsqueeze(-1) == eos_token_ids).any(dim=-1).any(dim=-1)
+        local_work_remaining = (~sequence_has_eos).any().to(dtype=torch.int32)
+        if self.idle:
+            local_work_remaining = torch.zeros_like(local_work_remaining)
+        global_work_remaining = self.work_remaining(local_work_remaining)
+        # This is a rank-global decision, so a scalar preserves the same
+        # behavior for every local sequence and remains compatible with older
+        # Transformers releases that apply Python ``any`` to criterion results.
+        return not global_work_remaining
+
+
 @dataclass
 class HybridEngineRolloutConfig(RolloutConfig):
     """Configuration for HybridEngineRollout.
@@ -317,10 +355,10 @@ class HybridEngineRollout(RolloutEngine):
         # The rollout calls the module directly, so it skips the input gather of the hybrid engine's generate().
         if self.inference_tp_size > 1:
             raise ValueError("HybridEngineRollout does not support hybrid engine inference tensor parallelism")
-        # Continuous batching admits a turn when its tools return, which happens at different steps on each rank, so
-        # tensor-parallel ranks would run different forwards.
-        if self.autotp_size > 1 and self.continuous_batch_size is not None:
-            raise ValueError("continuous batching does not support AutoTP")
+        # Multi-turn continuous batching admits a turn when its tools return, which happens at different steps on
+        # each rank, so tensor-parallel ranks would run different forwards.
+        if self.autotp_size > 1 and self.continuous_batch_size is not None and self.multi_turn:
+            raise ValueError("multi-turn continuous batching does not support AutoTP")
 
     def _check_attention(self):
         # Graph decode and continuous batching pass their own 4-D attention masks, which flash_attention_2 cannot take.
@@ -444,7 +482,12 @@ class HybridEngineRollout(RolloutEngine):
                 turn_max_new_tokens = self._max_across_ranks(turn_max_new_tokens)
                 if not active and turn_max_new_tokens > 0:
                     dummy = torch.full((1, 1), pad_token_id, dtype=torch.long, device=device)
-                    self._generate_tokens(dummy, torch.ones_like(dummy), turn_max_new_tokens, sampling, pad_token_id)
+                    self._generate_tokens(dummy,
+                                          torch.ones_like(dummy),
+                                          turn_max_new_tokens,
+                                          sampling,
+                                          pad_token_id,
+                                          idle=True)
             if not active:
                 break
             turn_samples = [trajectories[i] for i in active]
@@ -637,27 +680,14 @@ class HybridEngineRollout(RolloutEngine):
         graph = state.graph
         static_logits = state.static_logits
         stats = {
-            "cache_capacity":
-            max_cache_len,
-            "peak_cache_length":
-            longest_prompt,
-            "cache_memory_bytes":
-            sum(layer.keys.numel() * layer.keys.element_size() + layer.values.numel() * layer.values.element_size()
-                for layer in cache.layers) + static_input.numel() * static_input.element_size() +
-            static_attention.numel() * static_attention.element_size() +
-            static_causal_attention.numel() * static_causal_attention.element_size() +
-            static_position_ids.numel() * static_position_ids.element_size() +
-            static_write_positions.numel() * static_write_positions.element_size(),
-            "trim_count":
-            0,
-            "trimmed_columns":
-            0,
-            "trim_latency_ms":
-            0.0,
-            "trim_bytes_moved":
-            0,
-            "decode_steps":
-            0,
+            "cache_capacity": max_cache_len,
+            "peak_cache_length": longest_prompt,
+            "cache_memory_bytes": self._continuous_cache_memory_bytes(cache, static_attention, static_write_positions),
+            "trim_count": 0,
+            "trimmed_columns": 0,
+            "trim_latency_ms": 0.0,
+            "trim_bytes_moved": 0,
+            "decode_steps": 0,
         }
 
         slot_by_request = {}
@@ -824,20 +854,28 @@ class HybridEngineRollout(RolloutEngine):
                             "falling back to eager generation.")
         return False
 
-    def _generate_tokens(self, prompt_ids, prompt_attn_mask, max_new_tokens, sampling, pad_token_id):
+    def _generate_tokens(self, prompt_ids, prompt_attn_mask, max_new_tokens, sampling, pad_token_id, idle=False):
         module = self.engine.module
         if self._graph_capture_enabled():
             return self._generate_graph(prompt_ids, prompt_attn_mask, max_new_tokens, sampling, module,
                                         prompt_ids.device)
 
-        # ZeRO-3 gathers parameters during each decode forward, so every
-        # data-parallel rank must run the same number of decode steps and
-        # generation cannot stop at EOS. Other stages stop once every row ends.
-        stop_at_eos = not self.engine.zero_optimization_partition_weights()
+        eos_token_ids = get_eos_token_ids(self.tokenizer, self.engine.module) or None
+        zero3_sync = self._zero3_work_remaining()
+        stopping_criteria = None
+        if zero3_sync is not None and eos_token_ids is not None:
+            stopping_criteria = [_GlobalEosStoppingCriteria(prompt_ids.shape[1], eos_token_ids, zero3_sync, idle=idle)]
         generate_kwargs = {
             "attention_mask": prompt_attn_mask,
             "max_new_tokens": max_new_tokens,
-            "eos_token_id": (get_eos_token_ids(self.tokenizer, self.engine.module) or None) if stop_at_eos else None,
+            # ZeRO-3 gathers parameters during each decode forward, so ranks stop on the group-aware criterion
+            # rather than on a rank-local EOS.
+            "eos_token_id": None if zero3_sync is not None else eos_token_ids,
+            "stopping_criteria": stopping_criteria,
+            # Transformers enables synced_gpus from the default world size when it can observe ZeRO-3, which issues
+            # an ungrouped world all-reduce. The criterion above already synchronizes over the parameter-gather
+            # group, so opt out for the ZeRO-3 path only.
+            "synced_gpus": False if zero3_sync is not None else None,
             "pad_token_id": pad_token_id,
             **self._hf_sampling_kwargs(sampling),
         }
@@ -944,33 +982,18 @@ class HybridEngineRollout(RolloutEngine):
         self._profile_end(profile, "scheduler_overhead_ms", scheduler_start)
 
         cache_start = self._profile_start(profile)
-        cache = DeepSpeedStaticCache(
-            module.config,
-            batch_size=max_batch_size,
-            max_cache_len=max_cache_len,
-            device=device,
-            dtype=model_dtype,
-        )
+        # Layers are sized by the first prefill because AutoTP shards KV heads per rank.
+        cache = DeepSpeedStaticCache(module.config, max_cache_len=max_cache_len)
         write_positions = torch.full((max_batch_size, ), -1, dtype=torch.long, device=device)
         cache.set_write_position(write_positions)
         attention_mask = torch.zeros((max_batch_size, max_cache_len), dtype=torch.long, device=device)
         stats = {
-            "cache_capacity":
-            max_cache_len,
-            "peak_cache_length":
-            prompt_len,
-            "cache_memory_bytes":
-            sum(layer.keys.numel() * layer.keys.element_size() + layer.values.numel() * layer.values.element_size()
-                for layer in cache.layers) + attention_mask.numel() * attention_mask.element_size() +
-            write_positions.numel() * write_positions.element_size(),
-            "trim_count":
-            0,
-            "trimmed_columns":
-            0,
-            "trim_latency_ms":
-            0.0,
-            "decode_steps":
-            0,
+            "cache_capacity": max_cache_len,
+            "peak_cache_length": prompt_len,
+            "trim_count": 0,
+            "trimmed_columns": 0,
+            "trim_latency_ms": 0.0,
+            "decode_steps": 0,
         }
         next_tokens = {}
         next_log_probs = {}
@@ -1157,6 +1180,7 @@ class HybridEngineRollout(RolloutEngine):
                 for request_id in update.retired:
                     tool_queue.retire(request_id, *self._continuous_turn(responses, response_log_probs, request_id))
 
+        stats["cache_memory_bytes"] = self._continuous_cache_memory_bytes(cache, attention_mask, write_positions)
         generation_end = self._profile_start(profile)
         self._finish_continuous_stats(stats, profile, tool_queue)
         if profile is not None:
@@ -1204,13 +1228,8 @@ class HybridEngineRollout(RolloutEngine):
         signature = self._continuous_graph_signature(module, max_batch_size, max_cache_len, device, model_dtype)
         state = self._continuous_graph_state
         if state is None or state.signature != signature:
-            cache = cache_type(
-                module.config,
-                batch_size=max_batch_size,
-                max_cache_len=max_cache_len,
-                device=device,
-                dtype=model_dtype,
-            )
+            # Capture sizes the layers from the model's local KV tensors.
+            cache = cache_type(module.config, max_cache_len=max_cache_len)
             static_input = torch.zeros((max_batch_size, 1), dtype=torch.long, device=device)
             static_attention = torch.zeros((max_batch_size, max_cache_len), dtype=torch.long, device=device)
             static_causal_attention = torch.zeros((max_batch_size, 1, 1, max_cache_len),
@@ -1269,6 +1288,16 @@ class HybridEngineRollout(RolloutEngine):
         module._forward_pre_hooks.clear()
         module._forward_hooks.clear()
         try:
+            if not all(layer.is_initialized for layer in cache.layers):
+                # Allocate uninitialized KV layers on the current stream, not the warmup stream.
+                module(
+                    static_input,
+                    attention_mask=static_attention,
+                    past_key_values=cache,
+                    use_cache=True,
+                    cache_position=static_cache_position,
+                    position_ids=static_position_ids,
+                )
             warmup_stream = accelerator.Stream()
             warmup_stream.wait_stream(accelerator.current_stream())
             with accelerator.stream(warmup_stream):
@@ -1369,7 +1398,8 @@ class HybridEngineRollout(RolloutEngine):
                 raise ValueError("continuous batching prompt does not fit behind the decode front")
             for layer_idx in range(self._cache_layer_count(prefill_cache)):
                 prefill_keys, prefill_values = self._cache_layer_tensors(prefill_cache, layer_idx)
-                target_layer = cache.layers[layer_idx]
+                target_layer = self._continuous_cache_layer(cache, layer_idx, prefill_keys, prefill_values,
+                                                            attention_mask.shape[0])
                 for source_row, target_row in enumerate(target_slots):
                     target_layer.keys[target_row, :, cache_start:cache_position].copy_(prefill_keys[source_row])
                     target_layer.values[target_row, :, cache_start:cache_position].copy_(prefill_values[source_row])
@@ -1414,13 +1444,27 @@ class HybridEngineRollout(RolloutEngine):
                 raise ValueError("continuous batching prompt does not fit behind the decode front")
             for layer_idx in range(self._cache_layer_count(prefill_cache)):
                 prefill_keys, prefill_values = self._cache_layer_tensors(prefill_cache, layer_idx)
-                target_layer = cache.layers[layer_idx]
+                target_layer = self._continuous_cache_layer(cache, layer_idx, prefill_keys, prefill_values,
+                                                            attention_mask.shape[0])
                 target_layer.keys[target_row, :, cache_start:cache_position].copy_(prefill_keys[0])
                 target_layer.values[target_row, :, cache_start:cache_position].copy_(prefill_values[0])
             attention_mask[target_row, cache_start:cache_position].fill_(1)
             write_positions[target_row] = cache_position
             self._profile_end(profile, "cache_management_overhead_ms", cache_copy_start)
         return admitted_tokens, admitted_log_probs
+
+    @staticmethod
+    def _continuous_cache_memory_bytes(cache, attention_mask, write_positions):
+        # Eager and graph decoding report the same quantity: the KV cache plus the per-row metadata that
+        # tracks it. Graph-only staging buffers are not counted.
+        return cache.memory_bytes() + attention_mask.nbytes + write_positions.nbytes
+
+    @staticmethod
+    def _continuous_cache_layer(cache, layer_idx, prefill_keys, prefill_values, max_batch_size):
+        layer = cache.layers[layer_idx]
+        if not layer.is_initialized:
+            layer.lazy_initialization(prefill_keys, prefill_values, max_batch_size=max_batch_size)
+        return layer
 
     def _start_continuous_profile(self):
         accelerator = get_accelerator()
@@ -1639,6 +1683,20 @@ class HybridEngineRollout(RolloutEngine):
             return layer.keys, layer.values
         return cache.key_cache[layer_idx], cache.value_cache[layer_idx]
 
+    def _zero3_work_remaining(self):
+        """Return a rendezvous over the group used for ZeRO-3 parameter gathers."""
+        is_zero3 = getattr(self.engine, "zero_optimization_partition_weights", None)
+        if not callable(is_zero3) or not is_zero3():
+            return None
+
+        process_group = None
+        if dist.is_initialized():
+            optimizer = getattr(self.engine, "optimizer", None)
+            process_group = getattr(optimizer, "dp_process_group", None)
+            if process_group is None:
+                raise RuntimeError("ZeRO-3 synchronized rollout requires optimizer.dp_process_group")
+        return GlobalWorkRemaining(process_group)
+
     def get_last_profile(self):
         """Return the most recent profiling snapshot for this rollout instance."""
         return self._last_profile
@@ -1753,19 +1811,8 @@ class HybridEngineRollout(RolloutEngine):
         model_dtype = next(module.parameters()).dtype
         row_indices = torch.arange(batch_size, device=device)
 
-        cache_config = module.config
-        tp_size = self.autotp_size
-        if tp_size > 1:
-            cache_config = copy(module.config)
-            cache_config.num_key_value_heads = max(1, module.config.num_key_value_heads // tp_size)
-            cache_config.num_attention_heads = max(1, module.config.num_attention_heads // tp_size)
-        ds_cache = DeepSpeedStaticCache(
-            cache_config,
-            batch_size=batch_size,
-            max_cache_len=max_len,
-            device=device,
-            dtype=model_dtype,
-        )
+        # The prefill sizes each layer from its local KV tensors, which AutoTP shards by heads.
+        ds_cache = DeepSpeedStaticCache(module.config, max_cache_len=max_len)
 
         ds_cache.set_write_position(torch.tensor(0, dtype=torch.long, device=device))
         prefill_out = module(

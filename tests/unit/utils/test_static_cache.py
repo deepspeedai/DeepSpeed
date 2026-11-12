@@ -249,3 +249,14 @@ def test_static_cache_decode_matches_a_full_forward():
         expected = model(tokens, attention_mask=attention_mask).logits[:, prompt_len:]
 
     torch.testing.assert_close(torch.stack(decode_logits, dim=1), expected, atol=1e-5, rtol=1e-5)
+
+
+def test_static_cache_memory_skips_layers_without_kv():
+    config = type("Config", (), {"num_hidden_layers": 2})()
+    cache = DeepSpeedStaticCache(config, max_cache_len=4)
+    keys = torch.zeros((2, 3, 1, 5), dtype=torch.float16)
+    values = torch.zeros((2, 3, 1, 7), dtype=torch.float16)
+    cache.layers[0].lazy_initialization(keys, values, max_batch_size=4)
+
+    # Only layer 0 holds KV: 4 rows x 3 heads x 4 positions x (5 key + 7 value dims) x 2 bytes.
+    assert cache.memory_bytes() == 4 * 3 * 4 * (5 + 7) * 2
