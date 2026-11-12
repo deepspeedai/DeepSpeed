@@ -299,8 +299,6 @@ def test_nvme_master_only_load_copies_only_fp32_swap_files(tmpdir):
 
 class TestFp32MasterOnlyLoad(DistributedTest):
     world_size = 1
-    # The parameters live on the accelerator, so use its communication backend;
-    # gloo cannot broadcast NPU tensors.
     requires_cuda_env = False
 
     def test_legacy_load_keeps_masters_and_drops_moments(self, tmpdir):
