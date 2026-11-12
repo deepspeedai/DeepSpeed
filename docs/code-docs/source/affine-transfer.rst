@@ -122,9 +122,10 @@ tensor-parallel layout held by every replica, from
               dict(arena.items()))
 
 Plans are made once, when the sync is built, without communication.
-``plan_transfer`` plans each parameter. A block that several ranks hold is read
-from the target's own process if that process holds it, and otherwise from the
-holder that sends the least so far, over all parameters; local copies do not
+``plan_transfers`` plans every parameter at once, with ``replica_policy``
+(``local_first_least_loaded`` by default): a block that several ranks hold is
+read from the target's own process if that process holds it, and otherwise from
+the holder that sends the least so far, over all parameters; local copies do not
 count as load. The choice changes only the cost: replicas hold the same values,
 so every choice writes the same bits. ``sync``
 is collective: it runs every parameter's copies as one ``execute_transfers``

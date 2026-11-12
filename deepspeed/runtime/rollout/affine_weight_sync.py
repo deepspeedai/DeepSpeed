@@ -9,13 +9,13 @@ optimizer step. Gathering each parameter whole and cutting out the local shard s
 Instead, each parameter is described twice with affine maps (:mod:`deepspeed.checkpoint.affine`): how the trainer
 stores it (:func:`zero_param_shaped_storage_map`; ``autotp_storage_affine_maps`` should serve for an AutoTP model,
 but that is not tested yet) and which block each inference rank needs (:func:`replicated_layout_map`).
-:func:`~deepspeed.checkpoint.affine_transfer.plan_transfer` composes the two into copies from trainer shards straight
+:func:`~deepspeed.checkpoint.affine_transfer.plan_transfers` composes the two into copies from trainer shards straight
 into inference shards, once per layout, and every sync runs the copies of all parameters as one
 :func:`~deepspeed.checkpoint.affine_transfer_executor.execute_transfers` batch.
 
-Which holder a replicated block is read from changes only the cost, never the result: once both maps pass
-``plan_transfer``'s checks, every plan writes the same values whichever replica it reads, provided the replicas hold
-the same values. Under ZeRO-1/2 the replicas are the data-parallel copies of each parameter, equal after every step's
+Which holder a replicated block is read from changes only the cost, never the result: once both maps pass the
+planner's checks, every plan writes the same values whichever replica it reads, provided the replicas hold the same
+values. Under ZeRO-1/2 the replicas are the data-parallel copies of each parameter, equal after every step's
 all-gather; under ZeRO-3 each element has a single holder.
 
 CUDA graphs record raw device pointers, so a decode graph captured on the inference copy stays valid only while every
@@ -23,13 +23,13 @@ update writes into the storage it was captured on. The executor writes targets i
 keeps a rank's shards as views of one buffer that is never reallocated.
 """
 
-from typing import Dict, Iterator, Mapping, Optional, Sequence, Set, Tuple
+from typing import Iterator, Mapping, Optional, Sequence, Set, Tuple
 
 import torch
 
 import deepspeed.comm as dist
 from deepspeed.checkpoint.affine import ParamAffineMap, nest_affine_maps, replicated_map
-from deepspeed.checkpoint.affine_transfer import PlanBudget, ReplicaSelectionRequest, TransferPlan, plan_transfer
+from deepspeed.checkpoint.affine_transfer import PlanBudget, ReplicaPolicy, plan_transfers
 from deepspeed.checkpoint.affine_transfer_executor import (StagingBudget, TransferEndpoints, TransferRequest,
                                                            TransferStats, execute_transfers)
 from deepspeed.checkpoint.zero_affine import zero_param_storage_affine_map, zero_storage_affine_map
@@ -117,39 +117,6 @@ def replicated_layout_map(layout: ParamAffineMap, replicas: Sequence[Sequence[in
     return nest_affine_maps(layout, storage)
 
 
-class _LocalFirstLeastLoaded:
-    """Replica selector: a holder in the target's own process, otherwise the holder that sends the fewest elements so
-    far, ties to the lowest rank.
-
-    Load counts what each rank sends to other processes, as #8936's ``local_first_least_loaded`` does: local copies
-    use no link and do not count, and regions with a single holder do, since that load cannot move. ``plan_transfer``
-    consults the selector only where a region has several holders, so :meth:`settle` recounts the load from each
-    finished plan; within one parameter, its single-holder regions are counted only once it is planned.
-
-    The load is kept across parameters: the increment in :meth:`__call__` balances the regions of the parameter being
-    planned, and :meth:`settle` replaces it with what that plan actually sends, added to the load of the parameters
-    planned before.
-    """
-
-    def __init__(self):
-        self.load: Dict[int, int] = {}
-
-    def __call__(self, request: ReplicaSelectionRequest) -> int:
-        holders = [candidate.source_rank for candidate in request.candidates]
-        if request.target_rank in holders:
-            return request.target_rank
-        chosen = min(holders, key=lambda rank: (self.load.get(rank, 0), rank))
-        self.load[chosen] = self.load.get(chosen, 0) + _numel(request.shape)
-        return chosen
-
-    def settle(self, before: Dict[int, int], plan: TransferPlan) -> None:
-        """Set the load to ``before`` plus everything ``plan`` sends."""
-        self.load = dict(before)
-        for segment in plan.segments:
-            if segment.source_rank != segment.target_rank:
-                self.load[segment.source_rank] = self.load.get(segment.source_rank, 0) + segment.numel
-
-
 class AffineWeightSync:
     """Copies parameters from where one side stores them into where the other side needs them, planned once.
 
@@ -165,9 +132,12 @@ class AffineWeightSync:
         budget: bytes staged per peer and direction, see
             :class:`~deepspeed.checkpoint.affine_transfer_executor.StagingBudget`.
         limits: planning limits, see :class:`~deepspeed.checkpoint.affine_transfer.PlanBudget`.
+        replica_policy: where a block several ranks hold is read from, see
+            :func:`~deepspeed.checkpoint.affine_transfer.plan_transfers`. By default
+            :func:`~deepspeed.checkpoint.affine_replica_policy.local_first_least_loaded`: from the target's own process
+            when it holds one (a local copy), and otherwise from the holder that sends the fewest bytes so far, over
+            all parameters. Every rank must pass a policy that gives the same answers.
 
-    A block several ranks hold is read from the target's own process when it holds one (a local copy), and otherwise
-    from the holder that sends the fewest elements so far, over all parameters (see :class:`_LocalFirstLeastLoaded`).
     Planning has no communication and is deterministic, so every rank derives the same plans.
     """
 
@@ -177,7 +147,8 @@ class AffineWeightSync:
                  dtype: torch.dtype,
                  group=None,
                  budget: StagingBudget = StagingBudget(),
-                 limits: Optional[PlanBudget] = None):
+                 limits: Optional[PlanBudget] = None,
+                 replica_policy: Optional[ReplicaPolicy] = None):
         if set(source_maps) != set(target_maps):
             only_one = sorted(set(source_maps) ^ set(target_maps))
             raise ValueError(f'Source and target maps must name the same parameters; only one side names {only_one}.')
@@ -193,19 +164,21 @@ class AffineWeightSync:
         outside = sorted((source_ranks | target_ranks) - set(process))
         if outside:
             raise ValueError(f'Ranks {outside} hold parameters but are not in the transfer group.')
-        self.endpoints = TransferEndpoints(source={rank: process[rank]
-                                                   for rank in sorted(source_ranks)},
-                                           target={rank: process[rank]
-                                                   for rank in sorted(target_ranks)})
+        source_processes = {rank: process[rank] for rank in sorted(source_ranks)}
+        target_processes = {rank: process[rank] for rank in sorted(target_ranks)}
+        self.endpoints = TransferEndpoints(source=source_processes, target=target_processes)
         # The parameters this rank takes part in on each side.
         self._sources_here = {name for name, affine_map in source_maps.items() if self.rank in affine_map.shard_shapes}
         self._targets_here = {name for name, affine_map in target_maps.items() if self.rank in affine_map.shard_shapes}
-        selector = _LocalFirstLeastLoaded()
-        self.plans = {}
-        for name in sorted(source_maps):
-            before = dict(selector.load)
-            self.plans[name] = plan_transfer(target_maps[name], source_maps[name], limits, replica_selector=selector)
-            selector.settle(before, self.plans[name])
+        pairs = {name: (target_maps[name], source_maps[name]) for name in source_maps}
+        element_size = dict.fromkeys(source_maps, torch.empty(0, dtype=dtype).element_size())
+        plans = plan_transfers(pairs,
+                               limits,
+                               source_processes=source_processes,
+                               target_processes=target_processes,
+                               element_size=element_size,
+                               replica_policy=replica_policy)
+        self.plans = {name: plans[name] for name in sorted(plans)}
 
     def sync(self, source_buffers: Buffers, target_buffers: Buffers) -> TransferStats:
         """Copy every parameter. Collective over ``group``.
@@ -213,7 +186,8 @@ class AffineWeightSync:
         ``source_buffers[name]`` is this rank's source shard of ``name`` and ``target_buffers[name]`` its target
         shard, for every parameter the maps place on this rank; entries for other parameters are ignored. Shards are
         contiguous tensors, which may be views (a view keeps its offset into its storage). The sources must not change
-        while the copies run. A rank that lacks a shard refuses the batch in the executor's collective preflight, so
+        while the copies run. The sync keeps no view of a shard between calls, so resolve the shards at every call:
+        ``reload_states()`` after ``offload_states()`` moves every ZeRO-3 partition to new storage. A rank that lacks a shard refuses the batch in the executor's collective preflight, so
         every rank raises and no data moves.
         """
         requests = []

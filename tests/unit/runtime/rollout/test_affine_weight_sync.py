@@ -11,6 +11,7 @@ import deepspeed
 import deepspeed.comm as dist
 from deepspeed.accelerator import get_accelerator
 from deepspeed.checkpoint.affine import contiguous_split_map, replicated_map
+from deepspeed.checkpoint.affine_replica_policy import first_holder
 from deepspeed.checkpoint.affine_transfer_executor import AffineTransferExecutionError
 from deepspeed.checkpoint.zero_affine import zero_param_storage_shard
 from deepspeed.runtime.rollout.affine_weight_sync import (AffineWeightSync, WeightArena, replicated_layout_map,
@@ -146,9 +147,11 @@ class TestAffineWeightSync(DistributedTest):
             assert not torch.equal(second_values, first_values)
         engine.destroy()
 
-    def test_reads_of_replicated_parameters_spread_over_their_holders(self):
+    @pytest.mark.parametrize('policy', ['default', 'first_holder'])
+    def test_reads_of_replicated_parameters_spread_over_their_holders(self, policy):
         # Ranks 0-2 each hold all six parameters whole, and rank 3 needs them all. Each parameter is a single region,
-        # so the even split comes from the load carried across parameters.
+        # so the even split comes from the load carried across parameters. first_holder reads everything from rank 0:
+        # the policy decides only where data is read from.
         shapes = {f'w{index}': (4, 6) for index in range(6)}
         rank = dist.get_rank()
         device = get_accelerator().current_device_name()
@@ -156,7 +159,10 @@ class TestAffineWeightSync(DistributedTest):
         for name, shape in shapes.items():
             source_maps[name] = replicated_layout_map(replicated_map(shape, 1), [[0], [1], [2]])
             target_maps[name] = replicated_layout_map(replicated_map(shape, 1), [[3]])
-        sync = AffineWeightSync(source_maps, target_maps, torch.float32)
+        sync = AffineWeightSync(source_maps,
+                                target_maps,
+                                torch.float32,
+                                replica_policy=first_holder if policy == 'first_holder' else None)
         full = {
             name: torch.arange(24, dtype=torch.float32, device=device).view(shape) + 100 * index
             for index, (name, shape) in enumerate(shapes.items())
@@ -168,7 +174,10 @@ class TestAffineWeightSync(DistributedTest):
         stats = sync.sync(full, targets)
 
         sent = _all(stats.sent_bytes)
-        assert sent[0] == sent[1] == sent[2] == 2 * 24 * 4 and sent[3] == 0
+        if policy == 'first_holder':
+            assert sent == [6 * 24 * 4, 0, 0, 0]
+        else:
+            assert sent[0] == sent[1] == sent[2] == 2 * 24 * 4 and sent[3] == 0
         if arena is not None:
             for name in shapes:
                 assert torch.equal(arena[name], full[name])
@@ -230,6 +239,54 @@ class TestAffineWeightSync(DistributedTest):
             sync.sync({'w': torch.ones(shape, device=device)}, targets)
         if rank == 2:
             assert torch.all(arena['w'] == 0)
+
+    def test_shards_given_at_each_sync_follow_offload_and_reload(self):
+        # reload_states() gives every ZeRO-3 partition new storage. The sync keeps no view of a source between calls,
+        # so shards resolved at each call follow the move; plans depend only on the maps.
+        dtype = torch.bfloat16 if get_accelerator().is_bf16_supported() else torch.float32
+        config = {
+            'train_micro_batch_size_per_gpu': 1,
+            # offload_states() supports only DeepSpeed's FusedAdam.
+            'optimizer': {
+                'type': 'Adam',
+                'params': {
+                    'lr': 1e-2
+                }
+            },
+            'zero_optimization': {
+                'stage': 3
+            },
+        }
+        if dtype == torch.bfloat16:
+            config['bf16'] = {'enabled': True}
+        with deepspeed.zero.Init(config_dict_or_path=config):
+            model = MLPBlock()
+        engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config)
+        params = dict(engine.module.named_parameters())
+        replicas = [[0, 1], [2, 3]]
+        layouts = _layouts(2)
+        tp_rank = _tp_rank(replicas, dist.get_rank())
+        source_maps = {name: zero_param_shaped_storage_map(param) for name, param in params.items()}
+        target_maps = {name: replicated_layout_map(layouts[name], replicas) for name in params}
+        sync = AffineWeightSync(source_maps, target_maps, dtype)
+        arena = WeightArena({name: layouts[name].shard_shapes[tp_rank] for name in params}, dtype, engine.device)
+
+        for x, y in random_dataloader(engine, 1, HIDDEN, engine.device, dtype):
+            engine.backward(engine(x, y))
+            engine.step()
+        engine.empty_partition_cache()
+        before = {name: zero_param_storage_shard(param).data_ptr() for name, param in params.items()}
+        engine.offload_states(pin_memory=get_accelerator().device_name() != 'cpu')
+        engine.reload_states()
+        moved = any(zero_param_storage_shard(param).data_ptr() != before[name] for name, param in params.items())
+        if get_accelerator().device_name() != 'cpu':
+            # Otherwise this test would not cover a move.
+            assert moved
+
+        sync.sync({name: zero_param_storage_shard(param) for name, param in params.items()}, dict(arena.items()))
+        for name, param in params.items():
+            assert torch.equal(arena[name], layouts[name].extract(_full_param(param), tp_rank)), name
+        engine.destroy()
 
     def test_a_graph_captured_before_a_sync_reads_the_synced_weights(self):
         if get_accelerator().device_name() != 'cuda':
