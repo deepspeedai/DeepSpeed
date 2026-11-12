@@ -70,7 +70,7 @@ receives the same raw samples::
 
 Five patterns are sampled at every size, 4 KiB to 256 MiB by default:
 
-- ``local``: a device-local copy on each process.
+- ``local``: a device-local copy on each process, labeled ``path_of(process, process)``.
 - ``peer``: each process pair alone (1 to 1), one way, and both ways at once
   (``both_ways``), as when a process sends and receives together in colocated
   resharding. A two-way exchange gives a sample per direction, labelled with

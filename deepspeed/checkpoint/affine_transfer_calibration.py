@@ -113,7 +113,7 @@ def calibrate_links(sizes: Sequence[int] = DEFAULT_SIZES,
     Every process of ``group`` (the default group unless given) must call this. It returns the
     same dictionary on every process, with ``repeats`` samples per entry and no aggregation:
 
-    - ``local``: a device-local copy on each process.
+    - ``local``: a device-local copy on each process, labeled ``path_of(process, process)``.
     - ``peer``: each pair with every other process idle, so that links through different
       switches and sockets are each sampled. A sample is the slower of its two endpoints. With
       ``both_ways`` false, one ordered pair sends one way; with it true, the pair sends to each
@@ -245,7 +245,12 @@ def calibrate_links(sizes: Sequence[int] = DEFAULT_SIZES,
     fans = {'fan_out': [], 'fan_in': []}
     for size in sizes:
         for process in range(world):
-            local.append({'bytes': size, 'process': process, 'path': LOCAL, 'seconds': gathered[process][0][size]})
+            local.append({
+                'bytes': size,
+                'process': process,
+                'path': path_of(process, process),
+                'seconds': gathered[process][0][size]
+            })
         for source in range(world):
             for target in range(world):
                 if source == target:
@@ -304,7 +309,7 @@ def calibrate_links(sizes: Sequence[int] = DEFAULT_SIZES,
     return {
         'schema': CALIBRATION_SCHEMA,
         'world_size': world,
-        'communication_backend': get_accelerator().communication_backend_name(),
+        'communication_backend': dist.get_backend(group),
         'repeats': repeats,
         'warmup': warmup,
         'local': local,

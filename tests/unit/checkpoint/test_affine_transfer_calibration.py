@@ -265,6 +265,14 @@ class TestCalibrateLinks(DistributedTest):
         for kind in ('fan_out', 'fan_in'):
             assert all(set(by_path) == {INTRA_NODE, INTER_NODE} for by_path in fits[kind].values())
 
+    def test_records_the_backend_it_measured(self):
+        get_accelerator().set_device(int(os.environ.get('LOCAL_RANK', dist.get_rank())))
+        measured = get_accelerator().communication_backend_name()
+        # The accelerator's preferred backend is not necessarily the one the group runs on.
+        with patch.object(get_accelerator(), 'communication_backend_name', return_value='not-the-group-backend'):
+            result = calibrate_links(sizes=[4096], repeats=1, warmup=0, fan_width=0)
+        assert result['communication_backend'] == measured
+
     @pytest.mark.parametrize('processes_per_node', [1, 2])
     def test_default_fans_stay_within_a_node(self, processes_per_node):
         get_accelerator().set_device(int(os.environ.get('LOCAL_RANK', dist.get_rank())))
@@ -304,6 +312,9 @@ class TestCalibrateLinks(DistributedTest):
         for sample in result['relay']:
             assert sample['receive_path'] == f'{sample["from_process"]}->{sample["process"]}'
             assert sample['send_path'] == f'{sample["process"]}->{sample["to_process"]}'
+        # A path_of that tells devices apart must not have their local copies pooled into one fit.
+        for sample in result['local']:
+            assert sample['path'] == f'{sample["process"]}->{sample["process"]}'
 
         widths = calibrate_links(sizes=[4096], repeats=1, warmup=0, fan_width=[2, 1, 2])
         assert widths['fan_widths'] == [1, 2]
