@@ -1581,13 +1581,13 @@ class AffineResumeModel(torch.nn.Module):
         return self.fc2(torch.tanh(self.fc1(x)))
 
 
-def _affine_resume_engine(tp_size, load_universal=False):
+def _affine_resume_engine(tp_size, load_universal=False, zero_stage=1):
     torch.manual_seed(1234)
     model = AffineResumeModel()
     config = {
         "train_micro_batch_size_per_gpu": 2,
         "zero_optimization": {
-            "stage": 1
+            "stage": zero_stage
         },
         "zero_allow_untested_optimizer": True,
         "checkpoint": {
@@ -1728,6 +1728,38 @@ class TestAffineUniversalCheckpointResume(DistributedTest):
                                            atol=2e-6,
                                            rtol=2e-5,
                                            msg=lambda message: f"snapshot {index}, {name}: {message}")
+        engine.destroy()
+
+
+class zero3_no_tp_checkpoint(DistributedFixture):
+    world_size = 1
+
+    def run(self, tmpdir):
+        engine = _affine_resume_engine(1, zero_stage=3)
+        for step in range(4):
+            _affine_resume_step(engine, 1, step)
+        engine.save_checkpoint(tmpdir, tag="zero3_no_tp")
+        _convert_to_universal(os.path.join(tmpdir, "zero3_no_tp"), os.path.join(tmpdir, "zero3_universal"))
+        torch.save(_affine_resume_state(engine, 1), os.path.join(tmpdir, "zero3_saved_state.pt"))
+        engine.destroy()
+
+
+@pytest.mark.parametrize("world_size", [1, 2], ids=["tp1", "tp2"])
+class TestZero3UniversalCheckpointWithoutTp(DistributedTest):
+    """ZeRO-3 conversion without TP stores each state as a bare tensor, not a dict.
+    An AutoTP target must still take its TP shard of it.
+    """
+
+    def test_restores_saved_state(self, zero3_no_tp_checkpoint, tmpdir, world_size):
+        tp_size = dist.get_world_size()
+        expected = torch.load(os.path.join(tmpdir, "zero3_saved_state.pt"), weights_only=False)
+        engine = _affine_resume_engine(tp_size, load_universal=True, zero_stage=3)
+        engine.load_checkpoint(tmpdir, tag="zero3_universal", load_optimizer_states=True)
+        restored = _affine_resume_state(engine, tp_size)
+        assert restored.keys() == expected.keys()
+        # Conversion and restore only copy elements, so every state must come back bit for bit.
+        for name in expected:
+            assert torch.equal(torch.as_tensor(restored[name]), torch.as_tensor(expected[name])), name
         engine.destroy()
 
 
