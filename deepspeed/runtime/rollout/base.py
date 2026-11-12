@@ -69,6 +69,9 @@ class RolloutBatch:
     input_ids: torch.Tensor  # [B', T_p + T_r]; B' = B * n_samples_per_prompt
     attention_mask: torch.Tensor  # [B', T_p + T_r]
     response_start_idx: torch.Tensor  # [B'] int
+    # [B', T_r] log-prob of each sampled response token under the distribution the backend sampled from, or
+    # None when the backend does not report it. Lets trainers monitor the train-vs-rollout mismatch.
+    response_logprobs: Optional[torch.Tensor] = None
 
     def __post_init__(self) -> None:
         if self.input_ids.dim() != 2:
