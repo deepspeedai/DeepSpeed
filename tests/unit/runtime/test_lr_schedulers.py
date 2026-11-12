@@ -456,6 +456,61 @@ class TestOneCycle(DistributedTest):
         if decay_rate > 0:
             _verify_continuous_increase(step_moms[(step_size * 2):])
 
+    def test_mom_betas_applied_through_training_step(self):
+        # The beta fix (cycle only betas[0], keep each group's beta2) must survive an
+        # actual optimizer update, not just scheduler.step() on a bare optimizer. Run a
+        # full DeepSpeed training step and confirm the scheduled momentum reaches the
+        # optimizer while each group's beta2 is preserved.
+        config_dict = {
+            "train_batch_size": 2,
+            "steps_per_print": 1,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 0.001
+                },
+            },
+            "scheduler": {
+                "type": ONE_CYCLE,
+                "params": {
+                    CYCLE_MIN_LR: 1e-3,
+                    CYCLE_MAX_LR: 1e-2,
+                    CYCLE_MIN_MOM: 0.85,
+                    CYCLE_MAX_MOM: 0.95,
+                    DECAY_MOM_RATE: 0,
+                    CYCLE_FIRST_STEP_SIZE: 4,
+                    DECAY_STEP_SIZE: 4
+                }
+            },
+            "gradient_clipping": 1.0
+        }
+        hidden_dim = 10
+
+        model = SimpleModel(hidden_dim, empty_grad=False)
+        model, _, _, lr_scheduler = deepspeed.initialize(config=config_dict,
+                                                         model=model,
+                                                         model_parameters=model.parameters())
+        data_loader = random_dataloader(model=model,
+                                        total_samples=max(50, 4 * 3),
+                                        hidden_dim=hidden_dim,
+                                        device=model.device,
+                                        dtype=torch.float)
+
+        for n, batch in enumerate(data_loader):
+            loss = model(batch[0], batch[1])
+            model.backward(loss)
+            model.step()
+            lr_scheduler.step()
+            if n >= 4:
+                break
+
+        # After at least one step, betas[0] has been cycled away from max_mom while
+        # each group's beta2 is still its own value, not overwritten to 0.99.
+        betas = [group["betas"] for group in model.optimizer.param_groups]
+        beta2s = [b[1] for b in betas]
+        assert beta2s == pytest.approx([0.999, 0.95])
+        assert all(b[0] != 0.95 for b in betas), "betas[0] should have been cycled from max_mom"
+
 
 class TestWarmupCosineLR(DistributedTest):
     world_size = 1

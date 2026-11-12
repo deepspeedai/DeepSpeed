@@ -701,10 +701,11 @@ class OneCycle(object):
                 param_group['betas'] = momentum
 
     def state_dict(self):
-        return {'last_batch_iteration': self.last_batch_iteration}
+        return {'last_batch_iteration': self.last_batch_iteration, '_last_lr': self._last_lr}
 
     def load_state_dict(self, sd):
         self.last_batch_iteration = sd['last_batch_iteration']
+        self._last_lr = sd.get('_last_lr', self._last_lr)
 
 
 class WarmupLR(object):
