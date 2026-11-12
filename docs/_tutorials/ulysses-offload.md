@@ -39,7 +39,20 @@ For 6.7B model, we will enable ZeRO-3, Ulysses, activation checkpointing with CP
 
 When padding is needed, supply a `loss_mask` and set `attention_mask=None`. Causal attention prevents real tokens from attending to the appended tail, so padding cannot affect their outputs. Aligned inputs retain their existing behavior.
 
-Use the reordered loss mask returned by `FPDT_InputConstruct.generate()`, keeping it aligned with the loss layout. `FPDT_LogitsLoss` returns globally gathered losses in SP-rank order with shape `[sequence, batch]`; the returned mask already covers the global sequence in the same order with shape `[batch, sequence]`. Compute `(losses * loss_mask.t()).sum() / loss_mask.sum()`. This normalizes by the SP-global valid loss-weight sum even when one rank has no valid tokens; the returned mask needs no further all-reduce.
+Use the reordered loss mask returned by `FPDT_InputConstruct.generate()`, keeping it aligned with the loss layout. `FPDT_LogitsLoss` returns globally gathered losses in SP-rank order with shape `[sequence, batch]`; the returned mask already covers the global sequence in the same order with shape `[batch, sequence]`. Zero losses at zero-weight positions before multiplying by the weights, because `inf * 0` produces `NaN`:
+
+```python
+import torch
+
+losses = torch.tensor([[1., 2.], [3., 4.], [5., 6.], [float("inf"), float("inf")]])  # [sequence, batch]
+loss_mask = torch.tensor([[1., 1., 1., 0.], [1., 1., 1., 0.]])  # [batch, sequence]
+weights = loss_mask.t()
+losses = losses.masked_fill(weights == 0, 0.0)
+mean_loss = (losses * weights).sum() / weights.sum()
+print(mean_loss.item())  # 3.5
+```
+
+This preserves nonzero loss weights, including fractional weights, and normalizes by the SP-global valid loss-weight sum even when one rank has no valid tokens; the returned mask needs no further all-reduce.
 
 ### Megatron-DeepSpeed Configuration Changes
 
