@@ -78,6 +78,13 @@ def update_out_and_lse(
 
 
 class FPDT_InputConstruct(torch.nn.Module):
+    """Partition inputs into FPDT chunks, padding the causal sequence tail if needed.
+
+    Padding requires ``loss_mask`` and ``attention_mask=None``; aligned inputs
+    retain their existing behavior. Use the reordered loss mask returned by
+    ``generate()`` with the gathered losses and normalize by the SP-global sum
+    of valid loss weights, since a rank can have no valid tokens.
+    """
 
     def __init__(self, tokens, labels, loss_mask, attention_mask, position_ids, args, sp_size, sp_rank) -> None:
 

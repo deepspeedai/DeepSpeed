@@ -33,6 +33,14 @@ For 6.7B model, we will enable ZeRO-3, Ulysses, activation checkpointing with CP
  - ds_sequence_parallel_fpdt_offloading: Boolean indicating whether to use host memory to offload chunks, default is false.
 
 
+### FPDT input padding and loss normalization
+
+`ds_sequence_parallel_fpdt_chunk_size` is the global chunk size `C`, which must be divisible by the sequence parallel (SP) size. `FPDT_InputConstruct` pads the sequence tail to a multiple of `C` before partitioning chunks among ranks. It pads tokens, labels and loss weights with zero, and extends position IDs consecutively from the last position. Padding labels use the valid class index `0` with zero loss weight because the loss backward pass indexes labels directly.
+
+When padding is needed, supply a `loss_mask` and set `attention_mask=None`. Causal attention prevents real tokens from attending to the appended tail, so padding cannot affect their outputs. Aligned inputs retain their existing behavior.
+
+Use the reordered loss mask returned by `FPDT_InputConstruct.generate()`, keeping it aligned with the loss layout. `FPDT_LogitsLoss` returns globally gathered losses in SP-rank order with shape `[sequence, batch]`; the returned mask already covers the global sequence in the same order with shape `[batch, sequence]`. Compute `(losses * loss_mask.t()).sum() / loss_mask.sum()`. This normalizes by the SP-global valid loss-weight sum even when one rank has no valid tokens; the returned mask needs no further all-reduce.
+
 ### Megatron-DeepSpeed Configuration Changes
 
 1. An example snippet of megatron-deepspeed configurations with all Ulysses-Offload features enable is shown below:
