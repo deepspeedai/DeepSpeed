@@ -23,6 +23,11 @@ PyTorch expression so callers on non-Triton builds keep working unchanged.
 :func:`swiglu_packed` takes ``gate`` and ``up`` packed side by side in one
 ``[..., 2 * I]`` tensor, the output of a single gate+up GEMM, and reads both
 halves in place with the same math, so the packed GEMM output needs no copy.
+
+``swiglu_packed`` is the portable packed implementation and carries the
+per-hardware dispatch (``_triton.dispatch``): a platform that ships its own
+packed variant overrides it by defining a same-named function in its triton_ops
+subpackage, every other platform runs this portable implementation.
 """
 
 from __future__ import annotations
@@ -31,7 +36,7 @@ import torch
 import torch.nn.functional as F
 
 from deepspeed.accelerator import get_accelerator
-from deepspeed.ops.triton_ops._triton import _TRITON_AVAILABLE, current_device, triton, tl
+from deepspeed.ops.triton_ops._triton import _TRITON_AVAILABLE, current_device, dispatch, triton, tl
 
 if _TRITON_AVAILABLE:
 
@@ -234,6 +239,7 @@ def _swiglu_packed_supported(gate_up: torch.Tensor) -> bool:
     return get_accelerator().is_triton_supported()
 
 
+@dispatch("swiglu_triton")
 def swiglu(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
     """Fused SwiGLU activation: ``silu(gate) * up``.
 
@@ -262,6 +268,7 @@ def swiglu(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
     return _SwiGLUFn.apply(gate, up)
 
 
+@dispatch("swiglu_triton")
 def swiglu_packed(gate_up: torch.Tensor) -> torch.Tensor:
     """Fused SwiGLU of a packed gate+up tensor: ``silu(gate_up[..., :I]) * gate_up[..., I:]``.
 
@@ -280,7 +287,14 @@ def swiglu_packed(gate_up: torch.Tensor) -> torch.Tensor:
     if not _TRITON_AVAILABLE or not _swiglu_packed_supported(gate_up):
         return _swiglu_packed_eager(gate_up)
 
-    return _SwiGLUPackedFn.apply(gate_up)
+    # The packed class resolves through the per-hardware dispatch: a platform
+    # that ships its own variant (see the accelerator's triton_ops_dir) answers
+    # here, every other platform gets the portable class. The resolution is
+    # cached, so the steady state is one dictionary lookup per call.
+    from deepspeed.ops.triton_ops._triton import resolve_triton_ops_impl
+
+    packed_fn = resolve_triton_ops_impl("swiglu_triton")._SwiGLUPackedFn
+    return packed_fn.apply(gate_up)
 
 
 # ---------------------------------------------------------------------------

@@ -21,7 +21,7 @@ import operator
 import torch
 
 from deepspeed.accelerator import get_accelerator
-from deepspeed.ops.triton_ops._triton import (_TRITON_AVAILABLE, is_accelerator_tensor, triton, tl)
+from deepspeed.ops.triton_ops._triton import (_TRITON_AVAILABLE, dispatch, is_accelerator_tensor, triton, tl)
 from deepspeed.utils.torch import required_torch_version
 
 _IS_ROCM_PYTORCH = getattr(torch.version, "hip", None) is not None
@@ -223,6 +223,7 @@ def _prepare_inputs(logits: torch.Tensor, target: torch.Tensor, reduction: str, 
     return target
 
 
+@dispatch("chunked_cross_entropy", portable_module="deepspeed.runtime.chunked_cross_entropy")
 def chunked_cross_entropy(logits: torch.Tensor,
                           target: torch.Tensor,
                           ignore_index: int = -100,
