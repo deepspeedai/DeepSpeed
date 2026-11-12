@@ -691,6 +691,28 @@ def test_many_pieces_on_one_rank_need_no_pairwise_address_checks():
         torch.testing.assert_close(shard, target.extract(full, rank))
 
 
+def test_sweep_comparisons_count_against_the_pair_budget():
+    """A disjoint layout can keep every box open for the whole sweep, so the sweep is budgeted too.
+
+    h full-height one-column boxes plus 2h one-element boxes beside them tile a (2h, h+1) parameter.
+    Sweeping rows, each one-element box meets all h columns: 2h**2 comparisons for 3h pieces.
+    """
+    h = 32
+    rows, cols = 2 * h, h + 1
+    pieces = [AffinePiece((rows, 1), column, (cols, 1), column * rows, (1, 1), [0]) for column in range(h)]
+    pieces += [AffinePiece((1, 1), row * cols + h, (cols, 1), h * rows + row, (1, 1), [0]) for row in range(rows)]
+    source = ParamAffineMap((rows, cols), {0: (rows * cols, )}, {0: pieces})
+    target = replicated_map((rows, cols), 1)
+    assert boxes_disjoint([LogicalBox((0, column), (rows, 1))
+                           for column in range(h)] + [LogicalBox((row, h), (1, 1)) for row in range(rows)])
+
+    full = torch.arange(rows * cols, dtype=torch.float64).reshape(rows, cols)
+    copied = _apply_plan(plan_transfer(target, source), target, _shards(source, lambda m, r: m.extract(full, r)))
+    torch.testing.assert_close(copied[0], target.extract(full, 0))
+    with pytest.raises(AffineTransferError, match='max_pair_checks'):
+        plan_transfer(target, source, PlanBudget(max_pair_checks=2 * h * h - 1))
+
+
 def _random_holder_map(rng, rows, cols, ranks):
     """Row blocks on every rank, sometimes split at a replica's own points, with holders sometimes wrong."""
     shared = sorted(rng.sample(range(1, rows), rng.randint(0, rows - 1)))

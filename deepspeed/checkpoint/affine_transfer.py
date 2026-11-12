@@ -347,8 +347,8 @@ def _shards_tile(frames: List[_Frame], side: str, limits: PlanBudget) -> None:
         by_rank.setdefault(frame.rank, []).append(frame)
 
     for rank, held in sorted(by_rank.items()):
-        if boxes_disjoint([frame.local for frame in held]) and sum(frame.local.volume
-                                                                   for frame in held) == held[0].shard_numel:
+        if boxes_disjoint([frame.local for frame in held], limits.max_pair_checks) and sum(
+                frame.local.volume for frame in held) == held[0].shard_numel:
             continue
         if len(held)**2 > limits.max_pair_checks:
             raise AffineTransferError(f'{side}: rank {rank} holds {len(held)} pieces, over the budget for '
@@ -379,7 +379,7 @@ def _validate_holders(frames: List[_Frame], side: str, limits: PlanBudget) -> No
         ranks = holders.setdefault(frame.box, set())
         repeated = repeated or frame.rank in ranks
         ranks.add(frame.rank)
-    if not repeated and boxes_disjoint(list(holders)):
+    if not repeated and boxes_disjoint(list(holders), limits.max_pair_checks):
         if all(holders[frame.box] == frame.locations for frame in frames):
             return
     _validate_holders_pairwise(frames, side, limits)
@@ -428,7 +428,7 @@ def _sources(frames: List[_Frame], limits: PlanBudget) -> List[Tuple[LogicalBox,
             by_box.setdefault(frame.box, []).append(frame)
 
     regions = sorted(by_box, key=lambda box: (box.origin, box.extent))
-    if not boxes_disjoint(regions):
+    if not boxes_disjoint(regions, limits.max_pair_checks):
         _name_overlapping_regions(regions, limits)
     return [(box, tuple(sorted(by_box[box], key=lambda frame: frame.rank))) for box in regions]
 

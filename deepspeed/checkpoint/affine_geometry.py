@@ -121,12 +121,17 @@ class LogicalBox:
         return f'Box({self.origin}+{self.extent})'
 
 
-def boxes_disjoint(boxes: Sequence[LogicalBox]) -> bool:
+def boxes_disjoint(boxes: Sequence[LogicalBox], max_checks: Optional[int] = None) -> bool:
     """Whether no two boxes share an element.
 
     Sweeps along the axis whose box origins are most varied, so a box is compared only with the boxes
     still open where it starts. For the grid and run layouts the builders emit that is a handful of
-    boxes, not all of them.
+    boxes, not all of them, but a layout that keeps many boxes open still costs a comparison per pair.
+
+    With ``max_checks``, the sweep gives up and returns False once it has compared more pairs than
+    that, so False means "not shown disjoint". The sweep compares at most n*(n-1)/2 pairs, so giving
+    up implies n**2 exceeds ``max_checks``, and a caller's pairwise fallback under the same budget
+    refuses at once.
     """
     boxes = [box for box in boxes if not box.is_empty]
     if len(boxes) < 2:
@@ -135,7 +140,11 @@ def boxes_disjoint(boxes: Sequence[LogicalBox]) -> bool:
         return False
     axis = max(range(len(boxes[0].origin)), key=lambda a: len({box.origin[a] for box in boxes}))
     open_boxes: List[LogicalBox] = []
+    checks = 0
     for box in sorted(boxes, key=lambda b: b.origin[axis]):
+        checks += len(open_boxes)
+        if max_checks is not None and checks > max_checks:
+            return False
         start = box.origin[axis]
         open_boxes = [other for other in open_boxes if other.origin[axis] + other.extent[axis] > start]
         if any(not box.intersection(other).is_empty for other in open_boxes):
