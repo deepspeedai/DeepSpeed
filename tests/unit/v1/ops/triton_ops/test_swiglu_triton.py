@@ -310,18 +310,28 @@ def test_clamped_alpha_and_limit_are_honoured(oai):
     assert torch.all(gate.grad[gate.detach() > 2.0] == 0)
 
 
-def test_clamped_gradient_at_the_limit_is_inclusive():
-    # torch.clamp passes the gradient where input == limit; the kernel must agree
+@pytest.mark.parametrize("oai", [True, False])
+@pytest.mark.parametrize("packed", [False, True])
+def test_clamped_gradient_at_the_limit_matches_torch_clamp(oai, packed):
+    # PyTorch 2.14 changed the gradient of clamp at the limit from 1 to 0. At these inputs the two rules give
+    # different gradients for both gate and up, so a kernel that hard-codes either rule fails on some torch version.
     dev = get_accelerator().current_device_name()
-    gate = torch.full((8, 8), 7.0, device=dev, requires_grad=True)
-    up = torch.full((8, 8), -7.0, device=dev, requires_grad=True)
-    gate_ref = gate.detach().clone().requires_grad_(True)
-    up_ref = up.detach().clone().requires_grad_(True)
-    swiglu_clamped(gate, up, 1.702, 7.0, True).sum().backward()
-    _clamped_eager(gate_ref, up_ref, 1.702, 7.0, True).sum().backward()
-    torch.testing.assert_close(gate.grad, gate_ref.grad)
-    torch.testing.assert_close(up.grad, up_ref.grad)
-    assert torch.all(gate.grad != 0) and torch.all(up.grad != 0)
+    gate = torch.full((8, 8), 7.0, device=dev)
+    up = torch.full((8, 8), -7.0, device=dev)
+    gate_ref = gate.clone().requires_grad_(True)
+    up_ref = up.clone().requires_grad_(True)
+    _clamped_eager(gate_ref, up_ref, 1.702, 7.0, oai).sum().backward()
+    if packed:
+        gate_up = torch.cat([gate, up], dim=-1).requires_grad_(True)
+        swiglu_clamped_packed(gate_up, 1.702, 7.0, oai).sum().backward()
+        grad_gate, grad_up = gate_up.grad.chunk(2, dim=-1)
+    else:
+        gate.requires_grad_(True)
+        up.requires_grad_(True)
+        swiglu_clamped(gate, up, 1.702, 7.0, oai).sum().backward()
+        grad_gate, grad_up = gate.grad, up.grad
+    torch.testing.assert_close(grad_gate, gate_ref.grad)
+    torch.testing.assert_close(grad_up, up_ref.grad)
 
 
 def test_clamped_empty_input():

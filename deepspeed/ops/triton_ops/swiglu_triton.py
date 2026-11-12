@@ -263,6 +263,20 @@ def swiglu_packed(gate_up: torch.Tensor) -> torch.Tensor:
 
 if _TRITON_AVAILABLE:
 
+    def _clamp_passes_gradient_at_limit() -> bool:
+        with torch.inference_mode(False), torch.enable_grad():
+            x = torch.ones((), requires_grad=True)
+            clamped = x.clamp(max=1.0)
+        # Call the backward node directly: running the autograd engine starts its device threads, after which a
+        # forked child, such as a pytest --forked test, can no longer use CUDA.
+        grad = clamped.grad_fn(torch.ones(()))
+        return grad.item() == 1.0
+
+    # PyTorch 2.14 changed the gradient of clamp at a scalar bound from 1 to 0 (pytorch/pytorch#191142), and 2.14
+    # pre-releases have either form, so ask the installed torch rather than its version. Asking at import keeps the
+    # question out of torch.compile traces.
+    _CLAMP_GRAD_AT_LIMIT = _clamp_passes_gradient_at_limit()
+
     @triton.jit
     def _swiglu_clamped_fwd_kernel(gate_ptr, up_ptr, out_ptr, n_elements, alpha, limit, OAI: tl.constexpr,
                                    PACKED: tl.constexpr, INTER: tl.constexpr, BLOCK_SIZE: tl.constexpr):
@@ -292,7 +306,7 @@ if _TRITON_AVAILABLE:
     @triton.jit
     def _swiglu_clamped_bwd_kernel(grad_out_ptr, gate_ptr, up_ptr, grad_gate_ptr, grad_up_ptr, n_elements, alpha,
                                    limit, OAI: tl.constexpr, PACKED: tl.constexpr, INTER: tl.constexpr,
-                                   BLOCK_SIZE: tl.constexpr):
+                                   GRAD_AT_LIMIT: tl.constexpr, BLOCK_SIZE: tl.constexpr):
         pid = tl.program_id(axis=0).to(tl.int64)
         offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
         mask = offsets < n_elements
@@ -308,9 +322,13 @@ if _TRITON_AVAILABLE:
         up = tl.load(up_ptr + up_offsets, mask=mask).to(tl.float32)
         g = tl.minimum(gate, limit)
         u = tl.minimum(tl.maximum(up, -limit), limit)
-        # torch.clamp passes the gradient through where the input is inside the limits, inclusive.
-        pass_gate = gate <= limit
-        pass_up = (up >= -limit) & (up <= limit)
+        # Pass the gradient where torch.clamp does: inside the limits, and at a limit only if GRAD_AT_LIMIT.
+        if GRAD_AT_LIMIT:
+            pass_gate = gate <= limit
+            pass_up = (up >= -limit) & (up <= limit)
+        else:
+            pass_gate = gate < limit
+            pass_up = (up > -limit) & (up < limit)
 
         if OAI:
             sig = tl.sigmoid(g * alpha)
@@ -375,6 +393,7 @@ if _TRITON_AVAILABLE:
                                                  OAI=ctx.oai,
                                                  PACKED=False,
                                                  INTER=1,
+                                                 GRAD_AT_LIMIT=_CLAMP_GRAD_AT_LIMIT,
                                                  BLOCK_SIZE=_BLOCK_SIZE,
                                                  num_warps=_NUM_WARPS)
             return grad_gate, grad_up, None, None, None
@@ -430,6 +449,7 @@ if _TRITON_AVAILABLE:
                                                      OAI=ctx.oai,
                                                      PACKED=True,
                                                      INTER=gate_up.shape[-1] // 2,
+                                                     GRAD_AT_LIMIT=_CLAMP_GRAD_AT_LIMIT,
                                                      BLOCK_SIZE=_BLOCK_SIZE,
                                                      num_warps=_NUM_WARPS)
             return grad_gate_up, None, None, None
@@ -459,7 +479,7 @@ def swiglu_clamped(gate: torch.Tensor,
     ``oai=True``: ``(clamp(up) + 1) * g * sigmoid(alpha * g)`` with ``g = clamp(gate, max=limit)`` and
     ``up`` clamped to ``[-limit, limit]`` (GPT-OSS, MiniMax-M3). ``oai=False``: ``silu(g) * clamp(up)``
     (DeepSeek-V4). Falls back to the eager expression when Triton is unavailable or the tensors are on
-    the CPU.
+    the CPU. At an input equal to a limit the gradient matches ``torch.clamp`` of the installed version.
     """
     if gate.shape != up.shape:
         raise ValueError(f"swiglu_clamped expects gate and up to have the same shape, got {tuple(gate.shape)} "
