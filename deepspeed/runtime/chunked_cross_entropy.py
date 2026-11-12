@@ -20,7 +20,8 @@ import operator
 
 import torch
 
-from deepspeed.ops.triton_ops._triton import _TRITON_AVAILABLE, triton, tl
+from deepspeed.accelerator import get_accelerator
+from deepspeed.ops.triton_ops._triton import (_TRITON_AVAILABLE, is_accelerator_tensor, triton, tl)
 from deepspeed.utils.torch import required_torch_version
 
 _IS_ROCM_PYTORCH = getattr(torch.version, "hip", None) is not None
@@ -68,17 +69,17 @@ if _TRITON_AVAILABLE:
 
 
 def triton_backend_available() -> bool:
-    return _TRITON_AVAILABLE and not _IS_ROCM_PYTORCH
+    return _TRITON_AVAILABLE and not _IS_ROCM_PYTORCH and get_accelerator().is_triton_supported()
 
 
 def _resolve_backend(backend: str, logits: torch.Tensor) -> str:
     if backend not in BACKENDS:
         raise ValueError(f"Unsupported chunked cross-entropy backend {backend!r}; expected one of {BACKENDS}")
-    on_cuda = logits.device.type == "cuda"
+    on_accelerator = is_accelerator_tensor(logits)
     if backend == "auto":
-        return "triton" if on_cuda and triton_backend_available() else "torch"
-    if backend == "triton" and not (on_cuda and triton_backend_available()):
-        raise RuntimeError("The Triton chunked cross-entropy backend needs CUDA logits and Triton; use "
+        return "triton" if on_accelerator and triton_backend_available() else "torch"
+    if backend == "triton" and not (on_accelerator and triton_backend_available()):
+        raise RuntimeError("The Triton chunked cross-entropy backend needs accelerator logits and Triton; use "
                            'backend="torch" to run elsewhere')
     return backend
 
@@ -195,6 +196,33 @@ class _ChunkedCrossEntropy(torch.autograd.Function):
         return grad_logits, None, None, None
 
 
+def _prepare_inputs(logits: torch.Tensor, target: torch.Tensor, reduction: str, ignore_index: int) -> torch.Tensor:
+    """Validate the public entry and return the contiguous on-device target.
+
+    Shared with platform variants, which run the same checks before their own
+    kernels. The Triton kernels read the target's logit without a bounds check,
+    so an out-of-range target would silently read another row; asserting on
+    the device fails the way cross_entropy does, without the host
+    synchronization a Python-side check would add to every step.
+    """
+    if logits.dim() != 2 or target.shape != logits.shape[:1]:
+        raise ValueError(f"Expected [rows, vocab] logits and [rows] targets, got {tuple(logits.shape)} and "
+                         f"{tuple(target.shape)}")
+    if reduction not in ("none", "sum", "mean"):
+        raise ValueError(f"Unsupported reduction: {reduction!r}")
+    if target.dtype != torch.long:
+        raise RuntimeError(f"Expected torch.long class-index targets, got {target.dtype}")
+    # The Triton kernels index both tensors by row with unit stride.
+    target = target.to(device=logits.device).contiguous()
+    out_of_range = (target != ignore_index) & ((target < 0) | (target >= logits.shape[-1]))
+    targets_in_range = ~out_of_range.any()
+    if required_torch_version(min_version="2.1"):
+        torch._assert_async(targets_in_range, f"Target is out of range for vocabulary size {logits.shape[-1]}")
+    else:
+        torch._assert_async(targets_in_range)
+    return target
+
+
 def chunked_cross_entropy(logits: torch.Tensor,
                           target: torch.Tensor,
                           ignore_index: int = -100,
@@ -206,30 +234,13 @@ def chunked_cross_entropy(logits: torch.Tensor,
     ``logits`` is ``[rows, vocab]`` and ``target`` is ``[rows]`` with dtype ``torch.long``; targets are
     not converted from other dtypes. As with ``cross_entropy``, "mean"
     divides by the number of non-ignored rows, so it is NaN when every row is ignored. ``backend``
-    "auto" uses Triton for CUDA logits when it is available and PyTorch otherwise; naming a backend
+    "auto" uses Triton for accelerator logits when it is available and PyTorch otherwise; naming a backend
     that cannot run raises instead of substituting the other. ``block_rows`` must be a positive
     integer or ``None`` and controls the PyTorch backend only.
     """
     block_rows = _validate_block_rows(block_rows)
-    if logits.dim() != 2 or target.shape != logits.shape[:1]:
-        raise ValueError(f"Expected [rows, vocab] logits and [rows] targets, got {tuple(logits.shape)} and "
-                         f"{tuple(target.shape)}")
-    if reduction not in ("none", "sum", "mean"):
-        raise ValueError(f"Unsupported reduction: {reduction!r}")
-    if target.dtype != torch.long:
-        raise RuntimeError(f"Expected torch.long class-index targets, got {target.dtype}")
-    # The Triton kernels index both tensors by row with unit stride.
-    target = target.to(device=logits.device).contiguous()
+    target = _prepare_inputs(logits, target, reduction, ignore_index)
     logits = logits.contiguous()
-    # The Triton kernel reads the target's logit without a bounds check, so an out-of-range target would
-    # silently read another row. Asserting on the device fails the way cross_entropy does, without the host
-    # synchronization a Python-side check would add to every step.
-    out_of_range = (target != ignore_index) & ((target < 0) | (target >= logits.shape[-1]))
-    targets_in_range = ~out_of_range.any()
-    if required_torch_version(min_version="2.1"):
-        torch._assert_async(targets_in_range, f"Target is out of range for vocabulary size {logits.shape[-1]}")
-    else:
-        torch._assert_async(targets_in_range)
     if _resolve_backend(backend, logits) == "triton":
         loss = _TritonCrossEntropy.apply(logits, target, ignore_index)
     else:

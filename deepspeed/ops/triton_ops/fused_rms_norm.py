@@ -7,7 +7,8 @@ from __future__ import annotations
 import torch
 from torch.autograd.function import once_differentiable
 
-from deepspeed.ops.triton_ops._triton import _TRITON_AVAILABLE, triton, tl
+from deepspeed.accelerator import get_accelerator
+from deepspeed.ops.triton_ops._triton import _TRITON_AVAILABLE, is_accelerator_tensor, triton, tl
 from deepspeed.utils import logger
 
 _IS_ROCM_PYTORCH = getattr(torch.version, "hip", None) is not None
@@ -141,19 +142,15 @@ def is_available() -> bool:
 
 
 def _assert_supported_device_and_dtype(tensor: torch.Tensor, *, name: str) -> None:
-    if not _TRITON_AVAILABLE:
-        raise RuntimeError(f"fused RMSNorm needs Triton, which is not installed in this environment.")
-    if _IS_ROCM_PYTORCH:
-        raise RuntimeError("fused RMSNorm is not yet supported on ROCm.")
     if tensor.dtype not in SUPPORTED_DTYPES:
         raise RuntimeError(
             f"fused RMSNorm supports bfloat16 and float16 tensors, but {name} has dtype {tensor.dtype}.")
-    if tensor.device.type != "cuda":
-        raise RuntimeError(f'fused RMSNorm runs CUDA kernels but {name} is on device "{tensor.device.type}".')
+    if not is_accelerator_tensor(tensor):
+        raise RuntimeError(f'fused RMSNorm runs Triton kernels but {name} is on device "{tensor.device.type}".')
 
 
-def assert_supported(hidden: torch.Tensor, weight: torch.Tensor, eps: float) -> None:
-    """Reject unsupported inputs before the fused path runs."""
+def _validate_supported(hidden: torch.Tensor, weight: torch.Tensor, eps: float) -> None:
+    """Reject inputs the fused expression cannot reproduce, before any launch."""
     _assert_supported_device_and_dtype(hidden, name="hidden")
     _assert_supported_device_and_dtype(weight, name="weight")
     if hidden.device != weight.device:
@@ -175,6 +172,28 @@ def assert_supported(hidden: torch.Tensor, weight: torch.Tensor, eps: float) -> 
             f"fused RMSNorm supports normalized dimensions up to {_MAX_FORWARD_BLOCK}, got {hidden.shape[-1]}.")
     if not isinstance(eps, float):
         raise RuntimeError(f"fused RMSNorm needs a float epsilon, got {type(eps).__name__}.")
+
+
+def _platform_supported(hidden: torch.Tensor) -> bool:
+    """Whether this backend can run the fused RMSNorm kernels for ``hidden``'s shape."""
+    if not _TRITON_AVAILABLE or _IS_ROCM_PYTORCH:
+        return False
+    if hidden.numel() == 0:
+        # The forward skips the kernels for empty inputs.
+        return True
+    return get_accelerator().is_triton_supported()
+
+
+def assert_supported(hidden: torch.Tensor, weight: torch.Tensor, eps: float) -> None:
+    """Reject unsupported inputs or backends before the fused path runs."""
+    _validate_supported(hidden, weight, eps)
+    if not _TRITON_AVAILABLE:
+        raise RuntimeError("fused RMSNorm needs Triton, which is not installed in this environment.")
+    if _IS_ROCM_PYTORCH:
+        raise RuntimeError("fused RMSNorm is not yet supported on ROCm.")
+    if not _platform_supported(hidden):
+        raise RuntimeError("fused RMSNorm's Triton kernels are not enabled by this platform's Triton gate; "
+                           "run the eager forward instead.")
 
 
 def _block_n(n_cols: int) -> int:
@@ -262,10 +281,12 @@ def fused_rms_norm(hidden: torch.Tensor, weight: torch.Tensor, eps: float) -> to
     produced for ``hidden`` are contiguous whatever the input strides.
     Gradients are first order only: differentiating them again raises.
 
-    Unsupported inputs raise. Modules installed by ``replace_rms_norm`` run
-    their eager forward for such inputs instead.
+    Unsupported inputs raise. When Triton is unavailable or this backend cannot
+    run the kernels for the input's shape, the eager expression runs instead.
     """
-    assert_supported(hidden, weight, eps)
+    _validate_supported(hidden, weight, eps)
+    if not _TRITON_AVAILABLE or not _platform_supported(hidden):
+        return _rms_norm_eager(hidden, weight, eps)
     return _run_kernels(hidden, weight, eps)
 
 
@@ -278,6 +299,15 @@ def _run_kernels(hidden: torch.Tensor, weight: torch.Tensor, eps: float) -> torc
     hidden_2d = hidden.reshape(-1, original_shape[-1])
     out = _FusedRMSNorm.apply(hidden_2d, weight, eps)
     return out.reshape(original_shape)
+
+
+def _rms_norm_eager(hidden: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
+    """The Hugging Face expression the kernels reproduce, used when they cannot run here."""
+    original_shape = hidden.shape
+    hidden_2d = hidden.reshape(-1, original_shape[-1]).float()
+    rstd = torch.rsqrt(hidden_2d.pow(2).mean(dim=-1, keepdim=True) + eps)
+    normalized = (hidden_2d * rstd).to(hidden.dtype)
+    return (normalized * weight).reshape(original_shape)
 
 
 def _qualified_name(obj) -> str:

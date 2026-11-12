@@ -12,7 +12,8 @@ import types
 import torch
 from torch.autograd.function import once_differentiable
 
-from deepspeed.ops.triton_ops._triton import _TRITON_AVAILABLE, triton, tl
+from deepspeed.accelerator import get_accelerator
+from deepspeed.ops.triton_ops._triton import (_TRITON_AVAILABLE, current_device, is_accelerator_tensor, triton, tl)
 from deepspeed.utils import logger
 
 _IS_ROCM_PYTORCH = getattr(torch.version, "hip", None) is not None
@@ -122,19 +123,15 @@ def is_available() -> bool:
     return _TRITON_AVAILABLE and not _IS_ROCM_PYTORCH
 
 
-def assert_supported(q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor,
-                     unsqueeze_dim: int) -> None:
+def _validate_supported(q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor,
+                        unsqueeze_dim: int) -> None:
     """Reject inputs the kernels do not reproduce eager for, before the fused path runs."""
-    if not _TRITON_AVAILABLE:
-        raise RuntimeError("fused RoPE needs Triton, which is not installed in this environment.")
-    if _IS_ROCM_PYTORCH:
-        raise RuntimeError("fused RoPE is not yet supported on ROCm.")
     tensors = {"q": q, "k": k, "cos": cos, "sin": sin}
     for name, tensor in tensors.items():
         if not isinstance(tensor, torch.Tensor):
             raise RuntimeError(f"fused RoPE needs tensors, but {name} is {type(tensor).__name__}.")
-        if tensor.device.type != "cuda":
-            raise RuntimeError(f'fused RoPE runs CUDA kernels but {name} is on device "{tensor.device.type}".')
+        if not is_accelerator_tensor(tensor):
+            raise RuntimeError(f'fused RoPE runs Triton kernels but {name} is on device "{tensor.device.type}".')
         if tensor.dtype != q.dtype:
             # Eager type promotion would compute in the wider dtype.
             raise RuntimeError(f"fused RoPE needs q, k, cos and sin in one dtype, got {q.dtype} and {tensor.dtype}.")
@@ -165,13 +162,36 @@ def assert_supported(q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: t
         raise RuntimeError("fused RoPE treats cos and sin as constants, but one of them requires grad.")
 
 
+def _platform_supported(q: torch.Tensor) -> bool:
+    """Whether this backend can run the fused RoPE kernels for the query's device."""
+    if not _TRITON_AVAILABLE or _IS_ROCM_PYTORCH:
+        return False
+    if q.numel() == 0:
+        # The launch skips the kernels for empty inputs.
+        return True
+    return get_accelerator().is_triton_supported()
+
+
+def assert_supported(q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor,
+                     unsqueeze_dim: int) -> None:
+    """Reject inputs or backends the fused path cannot run."""
+    _validate_supported(q, k, cos, sin, unsqueeze_dim)
+    if not _TRITON_AVAILABLE:
+        raise RuntimeError("fused RoPE needs Triton, which is not installed in this environment.")
+    if _IS_ROCM_PYTORCH:
+        raise RuntimeError("fused RoPE is not yet supported on ROCm.")
+    if not _platform_supported(q):
+        raise RuntimeError("fused RoPE's Triton kernels are not enabled by this platform's Triton gate; "
+                           "run the eager function instead.")
+
+
 def _launch(x, cos, sin, out, backward):
     batch, heads, seq_len, head_dim = x.shape
     if x.numel() == 0:
         return out
     grid = (triton.cdiv(seq_len, _BLOCK_S), batch, triton.cdiv(heads, _HEADS_PER_PROGRAM))
-    # Triton launches on the current CUDA device and stream, which need not be the input tensor's device.
-    with torch.cuda.device(x.device):  #ignore-cuda
+    # Triton launches on the current device and stream, which need not be the input tensor's device.
+    with current_device(x):
         _rotary_kernel[grid](
             x,
             cos,
@@ -265,7 +285,9 @@ def fused_apply_rotary_pos_emb(q: torch.Tensor,
     stride, and ``cos`` and ``sin`` must not require grad. Gradients are first order
     only: differentiating them again raises. Unsupported inputs raise.
     """
-    assert_supported(q, k, cos, sin, unsqueeze_dim)
+    _validate_supported(q, k, cos, sin, unsqueeze_dim)
+    if not _platform_supported(q):
+        return _reference_apply_rotary_pos_emb(q, k, cos, sin, unsqueeze_dim)
     return _run_kernels(q, k, cos, sin, unsqueeze_dim)
 
 
