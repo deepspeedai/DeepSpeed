@@ -4,6 +4,20 @@ toc: true
 toc_label: "Contents"
 ---
 
+### Deterministic Execution
+
+`deterministic_mode` is a JSON boolean, default `false`. On NVIDIA CUDA, enabling it
+selects strict PyTorch deterministic algorithms, disables TF32 and cuDNN
+benchmarking, and enables deterministic cuDNN algorithms at engine initialization.
+Set `CUBLAS_WORKSPACE_CONFIG=:4096:8` or `:16:8` before CUDA use.
+Enabling it on any accelerator other than NVIDIA CUDA, including a CUDA-compatible accelerator such as KLXPU, is currently unsupported; disabled behavior is unchanged.
+
+The flag does not change precision, NCCL algorithm, parallelism or overlap.
+PyTorch checks do not cover all custom kernels or distributed scheduling;
+configuration acceptance does not certify workload bitwise repeatability or
+Megatron compatibility. Settings are process-global and not restored at teardown.
+See [Deterministic Mode](/tutorials/deterministic-mode/) for details.
+
 ### Batch Size Related Parameters
 
 **Note:** <i>**train_batch_size**</i> must be equal to  <i>**train_micro_batch_size_per_gpu**</i> * <i>**gradient_accumulation_steps**</i> * number of GPUs. For simplicity, you can choose to only specify two of the three parameters, the last one will be inferred automatically by DeepSpeed.
@@ -870,17 +884,17 @@ The Hybrid Engine (`DeepSpeedHybridEngine`) switches a model between training mo
     "release_inference_cache": false,
     "pin_parameters": true,
     "tp_gather_partition_size": 8,
-    "enable_cuda_graph": false
+    "enable_graph_capture": false
   }
 ```
 
-***enable_cuda_graph***: [boolean]
+***enable_graph_capture***: [boolean]
 
 | Description                                                                                                                                                                                                                                                                                                                                        | Default |
 | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| Capture token generation into CUDA graphs. Generation issues on the order of a thousand kernel launches per token and is bound by CPU launch overhead rather than by the GPU, so replaying a captured graph removes most of the per-token cost. One graph is captured per decode position, and generated tokens are unchanged. | `false` |
+| Capture token generation into device graphs. Generation issues on the order of a thousand kernel launches per token and is bound by CPU launch overhead rather than by the accelerator, so replaying a captured graph removes most of the per-token cost. One graph is captured per decode position, and generated tokens are unchanged. The previous key `enable_cuda_graph` is deprecated: its value migrates to this field with a warning, so existing configs keep working. | `false` |
 
-`enable_cuda_graph` requires a pinned generation length (`min_new_tokens` equal to `max_new_tokens`) and `max_out_tokens` large enough to cover the longest generation. It is ignored, with a warning, when any of the following apply, since captured graphs would not stay valid:
+`enable_graph_capture` requires a pinned generation length (`min_new_tokens` equal to `max_new_tokens`) and `max_out_tokens` large enough to cover the longest generation. It is ignored, with a warning, when any of the following apply, since captured graphs would not stay valid:
 
 * ZeRO stage 3, where parameters are gathered into fresh buffers for each generation
 * `release_inference_cache: true`, which frees the buffers the graphs write into
@@ -1787,4 +1801,4 @@ The offload pass is **not** in the default DeepCompile schedule; enable it only 
 
 | Description | Default |
 | ----------- | ------- |
-| Buffers kept in fp32 while the model trains in bf16 or fp16. `"auto"` uses the model's Hugging Face transformers lists: `_keep_in_fp32_modules_strict`, plus `_keep_in_fp32_modules` under fp16. An example is the MoE routing bias `e_score_correction_bias` of DeepSeek-V3, GLM-4.5 and GLM-5, whose values bf16 cannot tell apart. A list gives name patterns, matched the way transformers matches them: `*` stands for any characters and a pattern may match anywhere in the buffer name. `[]` keeps nothing in fp32. Under ZeRO-3, `deepspeed.zero.Init` converts the buffers when it finishes building each module, before a checkpoint is loaded into them. Listed buffers stay fp32 even when `buffer_dtype` is set. Parameters named by the lists still follow the training dtype. | `"auto"` |
+| Parameters and buffers kept in fp32 while the model trains in bf16 or fp16. `"auto"` uses the model's Hugging Face transformers lists: `_keep_in_fp32_modules_strict`, plus `_keep_in_fp32_modules` under fp16. An example is the MoE routing bias `e_score_correction_bias` of DeepSeek-V3, GLM-4.5 and GLM-5, whose values bf16 cannot tell apart. A list gives name patterns, matched the way transformers matches them: `*` stands for any characters and a pattern may match anywhere in the parameter or buffer name. `[]` keeps nothing in fp32. Under ZeRO-3, `deepspeed.zero.Init` converts them when it finishes building each module, before a checkpoint is loaded into them. Listed buffers stay fp32 even when `buffer_dtype` is set. Listed parameters stay fp32 only under ZeRO stage 3 without parameter offload, where their gradients are also reduced and accumulated in fp32; with other stages or with parameter offload they follow the training dtype, with a warning for `"auto"` and an error for an explicit list. Frozen parameters stored quantized (`zero_quantized_nontrainable_weights`) stay quantized, with a warning. | `"auto"` |

@@ -32,6 +32,7 @@ Checkpointing API
    :maxdepth: 2
 
    model-checkpointing
+   affine-transfer
    activation-checkpointing
 
 
@@ -49,6 +50,14 @@ Mixture of Experts
 
    autoep
    moe
+
+Model-Specific Training
+-----------------------
+.. toctree::
+   :maxdepth: 2
+   :glob:
+
+   models/*
 
 Transformer Kernel API
 ----------------------
