@@ -251,6 +251,17 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         self.offload_optimizer = False
         self.offload_optimizer_pin_memory = False
+        # Fused CPU Adam copy-back (_cpu_adam_step_and_copy_back): two pinned bfloat16 buffers of this many elements, so
+        # the kernel writes one piece while the previous one is copied to the device. A power of two, so the pinned
+        # allocator does not round the buffers up.
+        self._cpu_adam_copy_piece_numel = 2**26
+        self._cpu_adam_copy_buffers = None
+        # A fused CPU Adam step applies the gradient scale while loading each gradient and leaves the offloaded fp32
+        # gradients unscaled: sub_group_id -> that factor, until _apply_deferred_grad_scale multiplies the gradients
+        # that were not overwritten since then.
+        self._deferred_grad_scale = {}
+        # ds_ids whose offloaded fp32 gradient was overwritten since the last step()
+        self._offload_grad_written_ids = set()
         self.offload_optimizer_fast_init = False
         self.offload_param = False
         self.offload_param_pin_memory = False
@@ -569,6 +580,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             if buffer is not None:
                 accelerator.unpin_memory(buffer)
         for buffer in getattr(self, 'hp_params_pin_buffers', []):
+            accelerator.unpin_memory(buffer)
+        for buffer in getattr(self, '_cpu_adam_copy_buffers', None) or []:
             accelerator.unpin_memory(buffer)
         unpin_offloaded_optimizer_states(self.optimizer)
         if self.offload_optimizer_pin_memory:
@@ -1279,7 +1292,9 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         return sub_groups
 
-    def _optimizer_step(self, sub_group_id):
+    def _optimizer_step(self, sub_group_id, grad_scale=None):
+        """grad_scale: the factor from _grad_scale_for_cpu_adam, which DeepSpeedCPUAdam applies to each gradient as it
+        loads it (the sub-group's gradients were not scaled in place); None when they were."""
         param_group_id = self.sub_group_to_group_id[sub_group_id]
         fp32_param = self.fp32_partitioned_groups_flat[sub_group_id]
 
@@ -1297,7 +1312,10 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             cur_device = self.subgroup_to_device[sub_group_id]
             if cur_device == 'cpu' or (self.use_muon and self.sub_groups_using_muon[sub_group_id]):
                 self.optimizer.param_groups[param_group_id]['params'] = [fp32_param]
-                step_with_gradscaler(self.optimizer)
+                if grad_scale is None:
+                    step_with_gradscaler(self.optimizer)
+                else:
+                    self.optimizer.step(grad_scale=grad_scale)
                 self.optimizer.param_groups[param_group_id]['params'] = []
             else:
                 self.backup_optimizer.param_groups[param_group_id]['params'] = [fp32_param]
@@ -1507,6 +1525,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         else:
             fp32_grad_tensor = self.fp32_partitioned_groups_flat[i].grad.narrow(0, dest_offset, grad_buffer.numel())
             fp32_grad_tensor.copy_(grad_buffer.to(dtype=self.master_weights_and_grads_dtype), non_blocking=True)
+            self._offload_grad_written_ids.add(param.ds_id)
 
     def _swap_out_offload_fp32_gradients(self, offload_fp32_gradients, offload_fp32_offsets):
         if not (self.offload_optimizer and self.swap_optimizer):
@@ -2617,6 +2636,10 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
     def _pre_step(self):
         self.micro_step_id = 0
         self._offload_boundary_param_ids = set()
+        # Before the overflow check, so that a skipped step also leaves the gradients as the in-place scaling would; it
+        # reads which gradients the window ending here overwrote.
+        self._apply_all_deferred_grad_scales()
+        self._offload_grad_written_ids = set()
         # Also reset the epilogue flag so the next iteration starts fresh.
         # Without this, the flag from the last backward before step() would cause
         # an increment in the next forward(), which is wrong.
@@ -2947,6 +2970,60 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         event.record()
         event.synchronize()
 
+    def _can_copy_back_from_cpu_adam(self, sub_group_id):
+        """Whether _cpu_adam_step_and_copy_back can replace _optimizer_step + _reassign_or_swap_out_partitioned_parameters
+        for this CPU sub-group (asked only when _grad_scale_for_cpu_adam returned a factor): the device partition is
+        bfloat16, offload_optimizer.pin_memory is set, and the CPU Adam build can write the bfloat16 copy."""
+        dst = self.fp16_partitioned_groups_flat[sub_group_id]
+        if dst is None or not self.offload_optimizer_pin_memory:
+            return False
+        if dst.dtype != torch.bfloat16 or dst.device.type == "cpu":
+            return False
+        return self.optimizer.copy_supported()
+
+    @instrument_w_nvtx
+    def _cpu_adam_step_and_copy_back(self, sub_group_id, grad_scale):
+        """CPU Adam on this sub-group in pieces: for each piece the kernel updates the fp32 parameters and writes them in
+        bfloat16 into one of two pinned buffers, which is copied to the device partition while the next piece is
+        updated. Replaces _optimizer_step followed by _copy_pinned_master_to_device, which reads the fp32 master again
+        and copies twice the bytes to a float32 device temporary of the whole sub-group; same values, same rounding."""
+        param_group_id = self.sub_group_to_group_id[sub_group_id]
+        fp32_param = self.fp32_partitioned_groups_flat[sub_group_id]
+        dst = self.fp16_partitioned_groups_flat[sub_group_id].data.view(-1)
+        piece_numel = self._cpu_adam_copy_piece_numel
+        if self._cpu_adam_copy_buffers is None:
+            self._cpu_adam_copy_buffers = [
+                get_accelerator().pin_empty(piece_numel, dtype=torch.bfloat16) for _ in range(2)
+            ]
+        buffers = self._cpu_adam_copy_buffers
+        copy_events = [None, None]
+        piece_id = 0
+
+        def before_piece(param, start, count):
+            event = copy_events[piece_id % 2]
+            if event is not None:
+                # The copy out of this buffer, two pieces ago, must finish before the kernel writes it again.
+                event.synchronize()
+            return buffers[piece_id % 2][:count]
+
+        def after_piece(param, start, count, out):
+            nonlocal piece_id
+            dst[start:start + count].copy_(out, non_blocking=True)
+            event = get_accelerator().Event()
+            event.record()
+            copy_events[piece_id % 2] = event
+            piece_id += 1
+
+        self.optimizer.param_groups[param_group_id]['params'] = [fp32_param]
+        self.optimizer.step(grad_scale=grad_scale, bf16_copy=(piece_numel, before_piece, after_piece))
+        self.optimizer.param_groups[param_group_id]['params'] = []
+        # As _copy_pinned_master_to_device: the partition must be on the device when this returns (the next forward's
+        # parameter all-gathers run on a stream that does not wait for this one).
+        last_event = copy_events[(piece_id - 1) % 2] if piece_id > 0 else None
+        if last_event is not None:
+            last_event.synchronize()
+        self._unflatten_partitioned_parameters(sub_group_id)
+
     @instrument_w_nvtx
     def _reassign_or_swap_out_partitioned_parameters(self, sub_group_id):
         if self.fp16_partitioned_groups_flat[sub_group_id] is not None:
@@ -3015,14 +3092,25 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             if self._muon_update_lacks_loss_scale(sub_group_id):
                 self.fp32_partitioned_groups_flat[sub_group_id].grad.mul_(self.loss_scale)
 
-            #scale the fp32 gradients
-            self.unscale_and_clip_grads(sub_group_id, scaled_global_grad_norm)
+            #scale the fp32 gradients; DeepSpeedCPUAdam applies the factor as it loads each gradient instead
+            grad_scale = self._grad_scale_for_cpu_adam(sub_group_id, scaled_global_grad_norm)
+            if grad_scale is None:
+                self.unscale_and_clip_grads(sub_group_id, scaled_global_grad_norm)
+            elif grad_scale != 1.0:
+                self._deferred_grad_scale[sub_group_id] = grad_scale
 
-            #apply the optimizer step on the sub group and copy fp32 parameters to fp16
-            self._optimizer_step(sub_group_id)
+            if grad_scale is not None and self._can_copy_back_from_cpu_adam(sub_group_id):
+                #one kernel pass updates the fp32 parameters and writes their bf16 copy, piece by piece
+                self._cpu_adam_step_and_copy_back(sub_group_id, grad_scale)
+            else:
+                #apply the optimizer step on the sub group and copy fp32 parameters to fp16
+                if grad_scale is None:
+                    self._optimizer_step(sub_group_id)
+                else:
+                    self._optimizer_step(sub_group_id, grad_scale=grad_scale)
 
-            #put fp16 parameters in appropriate location
-            self._reassign_or_swap_out_partitioned_parameters(sub_group_id)
+                #put fp16 parameters in appropriate location
+                self._reassign_or_swap_out_partitioned_parameters(sub_group_id)
 
             #release memory or swap out optimizer states of fp32 parameters
             self._release_sub_group(sub_group_id, timer_names)
@@ -3076,8 +3164,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                 norm_list = [param_norm, ds_norm] + unflat_norm
                 print(f'Post-Step Norms {i} {param_id} = {norm_list}')
 
-    @instrument_w_nvtx
-    def unscale_and_clip_grads(self, sub_group_id, total_norm):
+    def _combined_grad_scale(self, total_norm):
         # compute combined scale factor for this group
         combined_scale = self.loss_scale
         if self.clip_grad > 0.:
@@ -3085,8 +3172,52 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             clip = ((total_norm / self.loss_scale) + 1e-6) / self.clip_grad
             clip = torch.clamp(clip, min=1.0)
             combined_scale = clip * self.loss_scale
+        return combined_scale
 
+    @instrument_w_nvtx
+    def unscale_and_clip_grads(self, sub_group_id, total_norm):
+        combined_scale = self._combined_grad_scale(total_norm)
         self.fp32_partitioned_groups_flat[sub_group_id].grad.mul_(1. / combined_scale)
+
+    def _grad_scale_for_cpu_adam(self, sub_group_id, total_norm):
+        """The factor unscale_and_clip_grads would multiply this sub-group's gradients by, when DeepSpeedCPUAdam can
+        apply it while loading each gradient instead; None otherwise.
+
+        Scaling the CPU gradients in place is a separate pass over every offloaded gradient (read and write), done even
+        when the factor is 1. DeepSpeedCPUAdam.step(grad_scale=...) does the same float multiply on each loaded
+        gradient, so the update is unchanged. The gradients themselves are multiplied later, and only where the next
+        accumulation window did not overwrite them (_apply_deferred_grad_scale). Only for float32 gradients and master
+        weights on the CPU, without a GradScaler, ZenFlow, NVMe swapping or Muon.
+        """
+        if not self.deepspeed_adam_offload or self.subgroup_to_device[sub_group_id] != 'cpu':
+            return None
+        if self.torch_autocast_gradscaler or self.zenflow or self.swap_optimizer or self.use_muon:
+            return None
+        fp32_param = self.fp32_partitioned_groups_flat[sub_group_id]
+        grad = fp32_param.grad
+        if grad is None or grad.dtype != torch.float32 or fp32_param.dtype != torch.float32 or grad.device.type != 'cpu':
+            return None
+        if not self.optimizer.grad_scale_supported():
+            return None
+        return float(1. / self._combined_grad_scale(total_norm))
+
+    def _apply_deferred_grad_scale(self, sub_group_id):
+        """Multiply the gradients that a fused CPU Adam step left unscaled by its factor, except the ones overwritten
+        since then. A parameter that is not reduced in a window keeps its older gradient, and the next step reads it
+        again; the in-place path has multiplied it by every step's factor, so it must hold the same value here."""
+        factor = self._deferred_grad_scale.pop(sub_group_id, None)
+        if factor is None:
+            return
+        fp32_grad = self.fp32_partitioned_groups_flat[sub_group_id].grad
+        for param in self.fp16_groups[sub_group_id]:
+            if param.ds_id in self._offload_grad_written_ids:
+                continue
+            _, dest_offset, num_elements = self.grad_position[self.get_param_id(param)]
+            fp32_grad.narrow(0, dest_offset, num_elements).mul_(factor)
+
+    def _apply_all_deferred_grad_scales(self):
+        for sub_group_id in list(self._deferred_grad_scale):
+            self._apply_deferred_grad_scale(sub_group_id)
 
     def _check_overflow(self, partition_gradients=True):
         self.overflow = self.has_overflow(partition_gradients)
@@ -3178,6 +3309,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             self.reduce_and_partition_stream.synchronize()
         grad_dict = collections.defaultdict(dict)
         if self.offload_optimizer:
+            self._apply_all_deferred_grad_scales()
             for group in self.fp16_groups:
                 for param_idx, param in enumerate(group):
                     group_idx, dest_offset, num_elements = self.grad_position[self.get_param_id(param)]
@@ -3211,6 +3343,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             if self._swappable_optimizer_subgroup(group_idx):
                 self._optimizer_states_and_gradient_swap_in(group_idx)
 
+            self._apply_deferred_grad_scale(group_idx)
             fp32_grad = self.fp32_partitioned_groups_flat[group_idx].grad.narrow(0, dest_offset, num_elements)
 
             if self._swappable_optimizer_subgroup(group_idx) and release_swap_buffers:
@@ -3365,6 +3498,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         for group_idx, group_params in subgroups.items():
             if self._swappable_optimizer_subgroup(group_idx):
                 self._optimizer_states_and_gradient_swap_in(group_idx)
+            self._apply_deferred_grad_scale(group_idx)
 
             for param, dest_offset, num_elements in group_params:
                 if self.offload_optimizer:
