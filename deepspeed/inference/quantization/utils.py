@@ -12,7 +12,12 @@ from typing import Dict, Callable, Union
 from deepspeed.accelerator import get_accelerator
 import functools
 
-device = get_accelerator().device_name() if get_accelerator().is_available() else 'cpu'
+
+def _get_device():
+    # Resolved when needed instead of at import, because is_available() queries the GPUs, which slows down
+    # import deepspeed.
+    return get_accelerator().device_name() if get_accelerator().is_available() else 'cpu'
+
 
 quantizer_module = None
 
@@ -107,7 +112,7 @@ class DeQuantizer:
         if self.config['group_size'] % 8 == 0 and \
                 (self.config['num_bits'] == 4 or self.config['num_bits'] == 8) and \
                 self.config['group_dim'] == len(tensor.shape) - 1 and \
-                    self.dtype == torch.float16 and device == get_accelerator().device_name():
+                    self.dtype == torch.float16 and _get_device() == get_accelerator().device_name():
 
             last_dimension_size = self.config['group_size']
             if self.config['num_bits'] == 4:
@@ -118,7 +123,6 @@ class DeQuantizer:
                 shape = list(tensor.shape)
                 shape[-1] = shape[-1] * 2
             elif self.config['num_bits'] == 8:
-                # last_dimension_size = last_dimension_size // 2
                 quantized_tensor = get_quantizer_module().dequantize_int8_to_half_experimental(
                     tensor.reshape(-1, last_dimension_size), quant_scale, quant_min,
                     tensor.numel() // last_dimension_size, self.config['group_size'])

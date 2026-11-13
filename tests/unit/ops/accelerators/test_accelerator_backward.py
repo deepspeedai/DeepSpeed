@@ -79,7 +79,6 @@ def check_equal(first, second, atol=1e-2, verbose=False):
             print(np.linalg.norm(x.astype('float64')))
             print(np.linalg.norm(y.astype('float64')))
             print('-' * 80)
-        #toler = np.linalg.norm(x.astype('float64')) * 0.0005
         np.testing.assert_allclose(x, y, err_msg="Index: {}".format(i), atol=tolerance)
 
 

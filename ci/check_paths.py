@@ -2,9 +2,10 @@
 # DeepSpeed Team
 """Decide whether a diff needs the CPU/GPU CI workflows.
 
-Documentation-only diffs skip them. ``is_docs_path`` is the single definition of
-documentation: ``.github/workflows/check-paths.yml`` runs this script as its gate,
-and ``ci/tests_fetcher.py`` imports it for the Modal GPU test selection.
+Diffs containing only documentation and/or root ``version.txt`` skip them.
+``is_docs_path`` is the single definition of documentation:
+``.github/workflows/check-paths.yml`` runs this script as its gate, and
+``ci/tests_fetcher.py`` imports it for the Modal GPU test selection.
 
 The gate copies this file from the base branch and runs it outside the repository,
 so a pull request's edits apply only after merge. Keep it a single file that
@@ -64,7 +65,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    ignore = args.ignore.split()
+    ignore = ["version.txt", *args.ignore.split()]
     for entry in ignore:
         if any(char in entry for char in "*?["):
             parser.error(f"--ignore takes plain paths, not globs: {entry!r}")

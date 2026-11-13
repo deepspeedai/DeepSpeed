@@ -19,6 +19,18 @@ except ImportError:
     from deepspeed.ops.op_builder.builder import OpBuilder
 
 
+def cpp_standard():
+    import torch
+    torch_major, torch_minor = map(int, torch.__version__.split('.')[0:2])
+    # PyTorch headers require C++17 on 2.x and C++20 from 2.12 on; a later -std flag overrides
+    # the one torch adds. Same rule as the XPU builders (#8803). CANN supports the C++20
+    # standard on NPU (C++ standard support appendix in the CANN devkit guide):
+    # https://www.hiascend.com/document/detail/en/CANNCommunityEdition/latest/programug/Ascendcopdevg/docs/en/guide/technical_appendix/cpp_standard_support/overview.md
+    if (torch_major, torch_minor) >= (2, 12):
+        return '-std=c++20'
+    return '-std=c++17'
+
+
 class NPUOpBuilder(OpBuilder):
     _ascend_path = None
     _torch_npu_path = None
@@ -67,7 +79,7 @@ class NPUOpBuilder(OpBuilder):
 
     def cxx_args(self):
         args = super().cxx_args()
-        args += ['-O3', '-std=c++17', '-g', '-Wno-reorder', '-fopenmp']
+        args += ['-O3', cpp_standard(), '-g', '-Wno-reorder', '-fopenmp']
         args += ['-fstack-protector-all', '-Wl,-z,relro,-z,now,-z,noexecstack', '-Wl,--disable-new-dtags,--rpath']
         args += [
             self.cann_defs(),

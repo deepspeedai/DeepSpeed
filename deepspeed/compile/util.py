@@ -25,8 +25,6 @@ from deepspeed.utils.torch import required_torch_version
 from deepspeed.ops.op_builder.dc import DeepCompileBuilder
 from deepspeed.compile import constants
 
-from .custom_ops import sp_dp_registry
-
 
 def is_deepcompile_supported() -> bool:
     return required_torch_version(min_version=2.6) and get_accelerator().device_name() == "cuda"
@@ -349,9 +347,6 @@ def count_inflight_values(graph: Graph, file_path: str):
         ]
         csv_data.append(row)
 
-        # print(
-        #     f"Node: {node.name} users: {list(node.users.keys())} node_to_last_use: {node_to_last_use[node] if node in node_to_last_use else 'NA'} user_to_last_uses: {user_to_last_uses[node] if node in user_to_last_uses else 'NA'} inflight_values: {inflight_values} inflight_size: {inflight_size}"
-        # )
         max_inflight_size = max(max_inflight_size, inflight_size)
 
     import csv
@@ -404,14 +399,6 @@ class TensorOffloadHelper():
                 # Base tensor
                 self.devices[a_id] = a.device
                 self.base_tensors[a_id] = a
-            # elif torch.is_tensor(a) and not hasattr(a, "ds_id") and id(a._base) in base_tensor_ids:
-            #     # View
-            #     self.views[a_id] = {
-            #         "base_id": id(a._base),
-            #         "size": a.size(),
-            #         "stride": a.stride(),
-            #         "offset": a.storage_offset(),
-            #     }
             else:
                 # other types or ds tensor
                 self.non_tensor[a_id] = a
@@ -439,16 +426,6 @@ class TensorOffloadHelper():
         for a_id in self.arg_list:
             if a_id in self.base_tensors:
                 results.append(loaded_base_tensors[a_id])
-
-            # elif a_id in self.views:
-            #     view_info = self.views[a_id]
-            #     # print(f"load_args loading view {a_id} base_id={view_info['base_id']} size={view_info['size']} stride={view_info['stride']} offset={view_info['offset']}")
-            #     base_tensor = loaded_base_tensors[view_info["base_id"]]
-            #     view_tensor = base_tensor.as_strided(
-            #         view_info["size"], view_info["stride"], view_info["offset"]
-            #     )
-            #     results.append(view_tensor)
-
             elif a_id in self.non_tensor:
                 results.append(self.non_tensor[a_id])
 
@@ -538,6 +515,8 @@ def pad_tensors(specs: List[Tuple[torch.Tensor, int, int]]) -> List[torch.Tensor
 
 
 def create_shard_offsets(gm: GraphModule, s0_node: Node) -> Tuple[Node, Node]:
+    # Imported here because custom_ops registers torch custom ops, which slows down import deepspeed.
+    from .custom_ops import sp_dp_registry
     sp_size: int = sp_dp_registry.sp_size()
     sp_rank: int = dist.get_rank() % sp_dp_registry.sp_size()
     # The sequence length is dynamic, so its divisibility can only be checked when the graph runs.

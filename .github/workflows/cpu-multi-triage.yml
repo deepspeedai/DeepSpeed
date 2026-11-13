@@ -1,0 +1,212 @@
+# SPDX-License-Identifier: Apache-2.0
+# DeepSpeed Team
+name: cpu-multi-triage
+
+# Regression triage for the nightly cpu-torch-multi-latest multi-rank run.
+#
+# It mirrors nightly-triage.yml (same DS_CI_FAILURE_CLASS sentinel protocol and the
+# same deduplicating reporter) but keeps its own issue titles and its own
+# last-green tag, so the modal full-suite tag stays meaningful and the two nightlies
+# never comment on each other's issues:
+#   green  -> move the nightly-cpu-multi-last-green tag to the tested SHA
+#   infra  -> do nothing (capacity problem, no candidate information)
+#   timeout-> open an issue (a phase outgrew its `timeout` budget)
+#   unknown-> open an issue (no sentinel: the run died before the classifier ran)
+#   test   -> open an issue listing the failing tests
+#
+# Only scheduled runs on master are triaged; workflow_dispatch runs are for manual
+# debugging. Scripts are checked out at the SHA the nightly actually ran, so the
+# classifier and the sentinel protocol it parses come from the same revision.
+
+on:
+  workflow_run:
+    workflows: [cpu-torch-multi-latest]
+    types: [completed]
+
+permissions:
+  contents: read
+
+jobs:
+  triage:
+    if: >-
+      github.event.workflow_run.event == 'schedule' &&
+      github.event.workflow_run.head_branch == 'master'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      action: ${{ steps.classify.outputs.action }}
+      failure_class: ${{ steps.classify.outputs.failure_class }}
+    steps:
+      - name: Checkout triage scripts at the nightly SHA
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+          lfs: false
+          submodules: false
+
+      - name: Classify nightly outcome
+        id: classify
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NIGHTLY_RUN_ID: ${{ github.event.workflow_run.id }}
+          NIGHTLY_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+        run: bash ci/nightly_classify.sh
+
+  tag-green:
+    name: move nightly-cpu-multi-last-green tag
+    needs: triage
+    if: needs.triage.outputs.action == 'green'
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # The nightly SHA, not master: master advances during the run and the tag must
+      # point at the revision the suite actually verified.
+      - name: Checkout the nightly SHA
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 1
+
+      - name: Move the nightly-cpu-multi-last-green tag
+        env:
+          NIGHTLY_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          git tag -f nightly-cpu-multi-last-green "$NIGHTLY_SHA"
+          git push -f origin nightly-cpu-multi-last-green
+
+  report-timeout:
+    name: report multi-rank timeout
+    needs: triage
+    if: needs.triage.outputs.action == 'timeout'
+    permissions:
+      contents: read
+      issues: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout report scripts at the nightly SHA
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
+          lfs: false
+          submodules: false
+
+      - name: Report the timeout
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          NIGHTLY_RUN_URL: ${{ github.event.workflow_run.html_url }}
+          NIGHTLY_SHA: ${{ github.event.workflow_run.head_sha }}
+          FAILURE_CLASS: ${{ needs.triage.outputs.failure_class }}
+        # Title is deliberately SHA-free: a persistent timeout is one recurring issue
+        # that collects a comment per night, not one issue per night.
+        run: |
+          {
+            echo "The nightly multi-rank CPU run died at its time budget (class: $FAILURE_CLASS) at $NIGHTLY_SHA."
+            echo "The multi-rank suite likely outgrew its 120m/25m phase budgets; consider raising them or splitting the suite. Run: $NIGHTLY_RUN_URL"
+          } > issue-body.txt
+          bash ci/nightly_report.sh \
+            "nightly timeout: cpu-torch-multi-latest multi-rank suite exceeded its time budget" \
+            issue-body.txt "$NIGHTLY_RUN_URL"
+
+  report-unknown:
+    name: report unclassified multi-rank failure
+    needs: triage
+    if: needs.triage.outputs.action == 'unknown'
+    permissions:
+      contents: read
+      issues: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout report scripts at the nightly SHA
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
+          lfs: false
+          submodules: false
+
+      - name: Report the unclassified failure
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          NIGHTLY_RUN_URL: ${{ github.event.workflow_run.html_url }}
+          NIGHTLY_SHA: ${{ github.event.workflow_run.head_sha }}
+        # No sentinel means the run died before the classifier step (checkout, venv,
+        # dependency install, or a job kill). That is a different situation from a
+        # phase timeout and gets its own issue.
+        run: |
+          {
+            echo "The nightly multi-rank CPU run at $NIGHTLY_SHA failed without a DS_CI_FAILURE_CLASS sentinel."
+            echo "The run died before the classifier step (checkout, venv, or dependency install). Triage manually."
+            echo "Run: $NIGHTLY_RUN_URL"
+          } > issue-body.txt
+          bash ci/nightly_report.sh \
+            "nightly failure without a failure class: cpu-torch-multi-latest died unclassified" \
+            issue-body.txt "$NIGHTLY_RUN_URL"
+
+  report-failures:
+    name: report multi-rank test failures
+    needs: triage
+    if: needs.triage.outputs.action == 'report'
+    permissions:
+      contents: read
+      actions: read
+      issues: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout report scripts at the nightly SHA
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
+          lfs: false
+          submodules: false
+
+      - name: Extract the failing test files
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NIGHTLY_RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          # The nightly runs pytest with --color=no, so failures print as
+          # plain "FAILED unit/..." lines (its working directory is tests/);
+          # re-prefix each unique file with tests/.
+          gh run view "$NIGHTLY_RUN_ID" --log \
+            | grep -oE 'FAILED unit/[^[:space:]]*\.py' | sort -u \
+            | sed 's|^FAILED |tests/|' > failing-tests.txt
+          if [ ! -s failing-tests.txt ]; then
+            echo "no FAILED test files found in the nightly log" >&2
+            exit 1
+          fi
+          cat failing-tests.txt
+
+      - name: Report the failures
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          NIGHTLY_RUN_URL: ${{ github.event.workflow_run.html_url }}
+          NIGHTLY_SHA: ${{ github.event.workflow_run.head_sha }}
+        # Title is deliberately SHA-free (see report-timeout): the same regression
+        # recurring night after night is one tracked issue that collects a comment per
+        # occurrence, not a new issue per night.
+        run: |
+          {
+            echo "The nightly multi-rank CPU run at $NIGHTLY_SHA failed with real test failures."
+            echo "Failing test files:"
+            sed 's|^|- |' failing-tests.txt
+            echo
+            echo "Run: $NIGHTLY_RUN_URL"
+          } > issue-body.txt
+          bash ci/nightly_report.sh \
+            "nightly regression: cpu-torch-multi-latest multi-rank suite failed" \
+            issue-body.txt "$NIGHTLY_RUN_URL"
