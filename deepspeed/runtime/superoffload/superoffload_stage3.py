@@ -108,6 +108,7 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
 
         cur_device = self.subgroup_to_device[sub_group_id]
         if cur_device != 'cpu':
+            self._sync_backup_optimizer_group(param_group_id)
             self.backup_optimizer.param_groups[param_group_id]['params'] = [fp32_param]
             step_with_gradscaler(self.backup_optimizer)
             self.backup_optimizer.param_groups[param_group_id]['params'] = []
