@@ -213,6 +213,8 @@ class DeepSpeedStaticCache:
         Dtype for eager initialization.
     """
 
+    is_compileable = True
+
     def __init__(
         self,
         config,

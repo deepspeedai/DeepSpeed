@@ -425,6 +425,65 @@ def test_continuous_rollout_matches_native_llama_generation_on_accelerator(attn_
     assert capture_count == 1
 
 
+@pytest.mark.parametrize("align_decode_fronts", [False, True])
+def test_bucketed_prefill_refills_fixed_graph_slot_on_accelerator(monkeypatch, align_decode_fronts):
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    accelerator = get_accelerator()
+    if not accelerator.is_graph_capture_supported():
+        pytest.skip("requires graph capture")
+    torch.manual_seed(1234)
+    config = LlamaConfig(vocab_size=64,
+                         hidden_size=32,
+                         intermediate_size=64,
+                         num_hidden_layers=2,
+                         num_attention_heads=4,
+                         num_key_value_heads=2,
+                         max_position_embeddings=64,
+                         pad_token_id=0,
+                         eos_token_id=None,
+                         attn_implementation="sdpa")
+    device = accelerator.device_name()
+    model = LlamaForCausalLM(config).to(device).eval()
+    # The first request retires while the second continues. The shorter refill
+    # must overwrite physical slot zero and leave slot one's history intact.
+    ids = torch.tensor([[0, 0, 0, 0, 1, 2, 3, 4], [1, 6, 7, 8, 9, 10, 11, 12], [0, 0, 0, 0, 0, 0, 13, 14]],
+                       device=device)
+    mask = ids.ne(0).long()
+    eos = model.generate(ids[:1], attention_mask=mask[:1], max_new_tokens=1, do_sample=False)[0, -1].item()
+    expected = [
+        model.generate(row[None], attention_mask=attn[None], max_new_tokens=4, eos_token_id=eos,
+                       do_sample=False)[0, ids.shape[1]:] for row, attn in zip(ids, mask)
+    ]
+    assert len(expected[0]) == 1 and len(expected[1]) >= 3 and len(expected[2]) >= 2
+    rollout = HybridEngineRollout(
+        SimpleNamespace(module=model), SimpleNamespace(pad_token_id=0, eos_token_id=eos),
+        HybridEngineRolloutConfig(use_graph_capture=True,
+                                  adaptive_prefill=True,
+                                  align_decode_fronts=align_decode_fronts,
+                                  enable_profiling=True,
+                                  prefill_max_tokens=8))
+    capture = accelerator.capture_to_graph
+    captures = []
+
+    def counted_capture(*args, **kwargs):
+        captures.append(1)
+        return capture(*args, **kwargs)
+
+    monkeypatch.setattr(accelerator, "capture_to_graph", counted_capture)
+    for _ in range(2):
+        result = rollout.generate(RolloutRequest(ids, mask),
+                                  SamplingConfig(max_new_tokens=4, temperature=0, continuous_batch_size=2))
+        for i, tokens in enumerate(expected):
+            response = result.input_ids[i, ids.shape[1]:]
+            valid = result.attention_mask[i, ids.shape[1]:].bool()
+            assert torch.equal(response[valid], tokens)
+        profile = rollout.get_last_profile()
+        assert profile["generation_strategy"] == "bucketed_graph"
+        assert profile["num_prefill_forwards"] == 3
+    assert len(captures) == 1
+
+
 def test_continuous_graph_matches_pretrained_model_when_enabled():
     model_name = os.getenv("DEEPSPEED_PRETRAINED_ROLLOUT_MODEL")
     if not model_name:
@@ -560,6 +619,8 @@ def test_decode_repetition_penalty_matches_hf_generate(temperature, use_graph_ca
     model = _tiny_llama(device)
     new_tokens = 32
     request = _random_request(batch_size=8, prompt_len=8, device=device)
+    request.prompt_ids[:4, :3] = 0
+    request.prompt_attention_mask[:4, :3] = 0
     sampling = SamplingConfig(max_new_tokens=new_tokens,
                               temperature=temperature,
                               top_k=0,
