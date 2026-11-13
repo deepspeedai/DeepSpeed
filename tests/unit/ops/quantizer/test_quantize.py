@@ -9,6 +9,8 @@ import deepspeed
 from deepspeed.ops.op_builder import QuantizerBuilder
 from deepspeed.accelerator import get_accelerator
 
+from unit.util import torch_assert_close
+
 if not deepspeed.ops.__compatible_ops__[QuantizerBuilder.NAME]:
     pytest.skip("Inference ops are not available on this system", allow_module_level=True)
 
@@ -34,6 +36,22 @@ def run_dequantize_ds(activations, params, num_groups, q_bits, is_symmetric_quan
         num_groups,
         q_bits,
         inference_module.Symmetric if is_symmetric_quant else inference_module.Asymmetric,
+    )
+
+
+def run_swizzle_quant_ds(activations, num_groups, q_bits, is_symmetric_quant):
+    global inference_module
+    if inference_module is None:
+        inference_module = QuantizerBuilder().load()
+    # One node with one device keeps the groups in their original order.
+    return inference_module.swizzle_quant(
+        activations,
+        num_groups,
+        q_bits,
+        inference_module.Symmetric if is_symmetric_quant else inference_module.Asymmetric,
+        1,
+        1,
+        1,
     )
 
 
@@ -152,3 +170,48 @@ def test_float_quantize(num_elems, num_groups, is_symmetric_quant, q_bits, direc
     ds_quantization_error = torch.sum(torch.abs((activations_ds - ds_dequantized_tensor).to(torch.float64)))
 
     assert (ds_quantization_error <= ref_quantization_error * 1.05)
+
+
+def reference_quantize(x, groups, num_bits):
+    # torch.round is half to even, matching the kernels' __float2int_rn.
+    x = x.reshape(groups, -1).float()
+    absmax = x.abs().amax(dim=-1, keepdim=True)
+    scale = torch.where(absmax == 0, torch.ones_like(absmax), 2**num_bits / (2 * absmax))
+    q = torch.round(x * scale).clamp(-2**(num_bits - 1), 2**(num_bits - 1) - 1)
+    return q, 1.0 / scale
+
+
+@pytest.mark.inference_ops
+@pytest.mark.parametrize("num_bits", [4, 8])
+def test_quantize_rounds_to_nearest(num_bits):
+    # Pin round-half-to-even; truncation changes about half the codes.
+    torch.manual_seed(0)
+    groups = 16
+    x = torch.randn(groups * 256, dtype=torch.float16).to(get_accelerator().device_name())
+    _, scales = reference_quantize(x, groups, num_bits)
+
+    if num_bits == 8:
+        data, params = run_quantize_ds(x, groups, num_bits, True)
+    else:
+        data, params = run_swizzle_quant_ds(x, groups, num_bits, True)
+    out = run_dequantize_ds(data, params, groups, num_bits, True)
+
+    # Compare with codes from the kernel's own scale; reference-scale ULP
+    # differences would flip values exactly on a rounding boundary.
+    torch_assert_close(params, scales, rtol=1e-6, atol=1e-8)
+    xg = x.reshape(groups, -1).float()
+    pg = params.reshape(groups, 1)
+    ratio = xg / pg
+    q = torch.round(ratio).clamp(-2**(num_bits - 1), 2**(num_bits - 1) - 1)
+    kernel_q = torch.round(out.view(groups, -1).float() / pg).clamp(-2**(num_bits - 1), 2**(num_bits - 1) - 1)
+
+    # The kernel quantizes by multiplying with its reciprocal scale. At an exact
+    # half-step boundary, one ULP in that reciprocal can legitimately choose
+    # either neighboring code; allow that case, but reject truncation (which
+    # would differ at non-boundary values) and any difference larger than one.
+    mismatch = kernel_q != q
+    if mismatch.any():
+        frac = ratio - torch.floor(ratio)
+        at_boundary = (frac - 0.5).abs() <= 1e-5
+        assert torch.all(at_boundary[mismatch]), "quantizer rounded a non-boundary value incorrectly"
+        assert torch.all((kernel_q[mismatch] - q[mismatch]).abs() == 1), "quantizer differed by more than one code"
