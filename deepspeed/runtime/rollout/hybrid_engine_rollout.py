@@ -113,6 +113,21 @@ class _ContinuousGraphState:
     static_logits: torch.Tensor
 
 
+@dataclass
+class _StaticGraphState:
+    signature: tuple
+    cache: object
+    write_position: torch.Tensor
+    static_input: torch.Tensor
+    static_attention: torch.Tensor
+    static_causal_attention: torch.Tensor
+    static_position: torch.Tensor
+    static_cache_position: torch.Tensor
+    static_position_ids: torch.Tensor
+    graph: object
+    static_logits: torch.Tensor
+
+
 class HybridEngineRollout(RolloutEngine):
     """Rollout engine using DeepSpeed hybrid engine.
 
@@ -133,6 +148,7 @@ class HybridEngineRollout(RolloutEngine):
         self.continuous_cache_capacity = getattr(cfg, 'continuous_cache_capacity', None) if cfg else None
         self._last_profile = None
         self._continuous_graph_state = None
+        self._static_graph_state = None
         self._last_continuous_stats = None
 
     @torch.no_grad()
@@ -757,7 +773,7 @@ class HybridEngineRollout(RolloutEngine):
             raise ValueError("continuous_cache_capacity must fit the prompt and all generated tokens")
 
     def _get_continuous_graph_state(self, module, max_batch_size, max_cache_len, device, model_dtype, cache_type):
-        signature = self._continuous_graph_signature(module, max_batch_size, max_cache_len, device, model_dtype)
+        signature = self._graph_signature(module, max_batch_size, max_cache_len, device, model_dtype)
         state = self._continuous_graph_state
         if state is None or state.signature != signature:
             # Free the stale cache and graph pool before allocating replacements.
@@ -814,7 +830,7 @@ class HybridEngineRollout(RolloutEngine):
         return state
 
     @staticmethod
-    def _continuous_graph_signature(module, max_batch_size, max_cache_len, device, model_dtype):
+    def _graph_signature(module, max_batch_size, max_cache_len, device, model_dtype):
         # Replay reads parameters through the address and layout fixed at capture, so
         # in-place value updates need no recapture, but a moved or re-laid-out
         # parameter does. Prefill runs eagerly, so the prompt width only matters
@@ -1389,7 +1405,6 @@ class HybridEngineRollout(RolloutEngine):
     def _generate_graph(self, prompt_ids, prompt_attn, max_new_tokens, pad_token_id, module, device, sampling):
         """Decode with DeepSpeedStaticCache + graph capture, greedy or sampled per ``sampling``."""
         from transformers import StaticCache
-        from deepspeed.utils.static_cache import DeepSpeedStaticCache
 
         if getattr(module.config, "_attn_implementation", None) == "flash_attention_2":
             raise ValueError("graph capture does not support flash_attention_2")
@@ -1423,80 +1438,25 @@ class HybridEngineRollout(RolloutEngine):
         next_token = next_tokens(prefill_out.logits[:, -1, :])
         output_ids.append(next_token)
 
-        # --- Copy prefill KV into DeepSpeedStaticCache ---
-        write_pos = torch.tensor(prompt_len - 1, dtype=torch.long, device=device)
-        ds_cache = DeepSpeedStaticCache(
-            module.config,
-            batch_size=batch_size,
-            max_cache_len=max_len,
-            device=device,
-            dtype=model_dtype,
-        )
-        ds_cache.set_write_position(write_pos)
-        # Trigger lazy init then copy real data
+        # --- Reuse or capture the decode graph, then load the prefill KV into its cache ---
+        state = self._get_static_graph_state(module, batch_size, max_len, device, model_dtype)
+        ds_cache = state.cache
+        write_pos = state.write_position
+        static_token = state.static_input
+        static_attn = state.static_attention
+        static_causal_attn = state.static_causal_attention
+        static_cache_pos = state.static_cache_position
+        static_pos_ids = state.static_position_ids
+        graph = state.graph
+        static_logits = state.static_logits
         for layer_idx in range(self._cache_layer_count(ds_cache)):
             ds_layer = ds_cache.layers[layer_idx]
             hf_keys, hf_values = self._cache_layer_tensors(prefill_cache, layer_idx)
-            if not ds_layer.is_initialized:
-                ds_layer.lazy_initialization(hf_keys, hf_values)
             ds_layer.keys[:, :, :prompt_len, :].copy_(hf_keys[:, :, :prompt_len, :])
             ds_layer.values[:, :, :prompt_len, :].copy_(hf_values[:, :, :prompt_len, :])
-
-        # --- Static buffers for graph capture ---
-        static_token = torch.zeros(batch_size, 1, dtype=torch.long, device=device)
-        static_attn = torch.zeros(batch_size, max_len, dtype=torch.long, device=device)
         static_attn[:, :prompt_len] = prompt_attn
         static_attn[:, prompt_len] = 1  # first decode position
-        # Transformers builds its SDPA mask from a 2-D attention_mask with host-side checks
-        # (``padding_mask.all()`` in ``_ignore_causal_mask_sdpa``). Those synchronize the stream and
-        # invalidate CUDA graph capture, so the captured forward receives a pre-built 4-D additive
-        # mask instead, as the continuous graph path does; each decode step unmasks one more column.
-        static_causal_attn = torch.zeros((batch_size, 1, 1, max_len), dtype=model_dtype, device=device)
         self._update_static_causal_attention(static_attn, static_causal_attn)
-        static_pos = torch.tensor(prompt_len, dtype=torch.long, device=device)
-        static_cache_pos = static_pos.unsqueeze(0)  # [1] for cache_position
-        static_pos_ids = static_pos.reshape(1, 1).expand(batch_size, 1)  # [batch, 1]
-
-        write_pos.fill_(prompt_len)
-
-        # Remove forward hooks (they synchronize — illegal during graph capture)
-        saved_pre = dict(module._forward_pre_hooks)
-        saved_post = dict(module._forward_hooks)
-        module._forward_pre_hooks.clear()
-        module._forward_hooks.clear()
-
-        try:
-            # Warmup on side stream
-            static_token.copy_(next_token)
-            s = get_accelerator().Stream()
-            s.wait_stream(get_accelerator().current_stream())
-            with get_accelerator().stream(s):
-                for _ in range(3):
-                    out = module(
-                        static_token,
-                        attention_mask=static_causal_attn,
-                        past_key_values=ds_cache,
-                        use_cache=True,
-                        cache_position=static_cache_pos,
-                        position_ids=static_pos_ids,
-                    )
-            get_accelerator().current_stream().wait_stream(s)
-
-            # Capture
-            graph = get_accelerator().create_graph()
-            with get_accelerator().capture_to_graph(graph):
-                out = module(
-                    static_token,
-                    attention_mask=static_causal_attn,
-                    past_key_values=ds_cache,
-                    use_cache=True,
-                    cache_position=static_cache_pos,
-                    position_ids=static_pos_ids,
-                )
-            static_logits = out.logits
-        finally:
-            module._forward_pre_hooks.update(saved_pre)
-            module._forward_hooks.update(saved_post)
 
         # --- Decode loop ---
         eos_mask = torch.zeros(batch_size, dtype=torch.bool, device=device)
@@ -1522,18 +1482,118 @@ class HybridEngineRollout(RolloutEngine):
 
         return torch.cat(output_ids, dim=1)
 
+    def _get_static_graph_state(self, module, batch_size, max_len, device, model_dtype):
+        """Return the fixed-batch decode graph for this shape, capturing it only when the signature changes.
+
+        The returned cache and static inputs are cleared; the caller loads the prompt into them.
+        """
+        from deepspeed.utils.static_cache import DeepSpeedStaticCache
+
+        signature = self._graph_signature(module, batch_size, max_len, device, model_dtype)
+        state = self._static_graph_state
+        if state is None or state.signature != signature:
+            # Free the stale cache and graph pool before allocating replacements.
+            self._static_graph_state = None
+            cache = DeepSpeedStaticCache(
+                module.config,
+                batch_size=batch_size,
+                max_cache_len=max_len,
+                device=device,
+                dtype=model_dtype,
+            )
+            write_pos = torch.zeros((), dtype=torch.long, device=device)
+            cache.set_write_position(write_pos)
+            static_token = torch.zeros(batch_size, 1, dtype=torch.long, device=device)
+            static_attn = torch.zeros(batch_size, max_len, dtype=torch.long, device=device)
+            # Transformers builds its SDPA mask from a 2-D attention_mask with host-side checks
+            # (``padding_mask.all()`` in ``_ignore_causal_mask_sdpa``). Those synchronize the stream and
+            # invalidate CUDA graph capture, so the captured forward receives a pre-built 4-D additive
+            # mask instead, as the continuous graph path does; each decode step unmasks one more column.
+            static_causal_attn = torch.zeros((batch_size, 1, 1, max_len), dtype=model_dtype, device=device)
+            self._update_static_causal_attention(static_attn, static_causal_attn)
+            static_pos = torch.zeros((), dtype=torch.long, device=device)
+            static_cache_pos = static_pos.unsqueeze(0)  # [1] for cache_position
+            static_pos_ids = static_pos.reshape(1, 1).expand(batch_size, 1)  # [batch, 1]
+            graph, static_logits = self._capture_static_graph(module,
+                                                              ds_cache=cache,
+                                                              static_token=static_token,
+                                                              static_causal_attn=static_causal_attn,
+                                                              static_cache_pos=static_cache_pos,
+                                                              static_pos_ids=static_pos_ids)
+            state = _StaticGraphState(
+                signature,
+                cache,
+                write_pos,
+                static_token,
+                static_attn,
+                static_causal_attn,
+                static_pos,
+                static_cache_pos,
+                static_pos_ids,
+                graph,
+                static_logits,
+            )
+            self._static_graph_state = state
+
+        # Warmup, capture and the previous rollout all wrote into the cache.
+        state.cache.reset()
+        state.static_attention.zero_()
+        return state
+
+    @staticmethod
+    def _capture_static_graph(module, ds_cache, static_token, static_causal_attn, static_cache_pos, static_pos_ids):
+        """Capture one fixed-batch decode forward and return its static logits."""
+        # Remove forward hooks (they synchronize — illegal during graph capture)
+        saved_pre = dict(module._forward_pre_hooks)
+        saved_post = dict(module._forward_hooks)
+        module._forward_pre_hooks.clear()
+        module._forward_hooks.clear()
+
+        try:
+            # Warmup on side stream
+            s = get_accelerator().Stream()
+            s.wait_stream(get_accelerator().current_stream())
+            with get_accelerator().stream(s):
+                for _ in range(3):
+                    out = module(
+                        static_token,
+                        attention_mask=static_causal_attn,
+                        past_key_values=ds_cache,
+                        use_cache=True,
+                        cache_position=static_cache_pos,
+                        position_ids=static_pos_ids,
+                    )
+            get_accelerator().current_stream().wait_stream(s)
+
+            # Capture
+            graph = get_accelerator().create_graph()
+            with get_accelerator().capture_to_graph(graph):
+                out = module(
+                    static_token,
+                    attention_mask=static_causal_attn,
+                    past_key_values=ds_cache,
+                    use_cache=True,
+                    cache_position=static_cache_pos,
+                    position_ids=static_pos_ids,
+                )
+        finally:
+            module._forward_pre_hooks.update(saved_pre)
+            module._forward_hooks.update(saved_post)
+        return graph, out.logits
+
     def sync_weights(self, step: int) -> None:  # noqa: ARG002
         """No-op: hybrid engine reads model weights live."""
         return None
 
     def shutdown(self) -> None:
-        """Release the captured continuous decode graph and its static cache.
+        """Release the captured decode graphs and their static caches.
 
         The rollout stays usable and captures again on the next graph rollout.
-        Under tensor parallelism the graph holds captured collectives, so release
-        it before destroying the process group.
+        Under tensor parallelism the graphs hold captured collectives, so release
+        them before destroying the process group.
         """
-        if self._continuous_graph_state is None:
+        if self._continuous_graph_state is None and self._static_graph_state is None:
             return
         get_accelerator().synchronize()
         self._continuous_graph_state = None
+        self._static_graph_state = None

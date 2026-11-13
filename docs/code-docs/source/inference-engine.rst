@@ -75,6 +75,14 @@ model's ``generation_config``, as ``generate()`` does. Other
 ``generation_config`` settings are not applied on the graph path. Continuous
 batching, with or without graph capture, picks tokens the same way.
 
+The captured graph and its static cache are reused by later ``generate()``
+calls with the same batch size, prompt width plus ``max_new_tokens``, device,
+dtype and parameter layout. The prompt is still prefilled eagerly on every call,
+so one graph serves all prompt widths with the same total length. In-place
+weight updates, such as an optimizer step, are replayed without recapturing.
+The graph and cache stay allocated between rollouts until the shape changes or
+``rollout.shutdown()`` releases them.
+
 Shared Prompt Prefill
 ---------------------
 

@@ -55,6 +55,76 @@ def test_static_graph_matches_native_llama_generation(attn_implementation):
     assert output.input_ids.tolist() == expected.tolist()
 
 
+def test_static_graph_is_reused_across_rollouts_with_the_same_decode_shape(monkeypatch):
+    accelerator = get_accelerator()
+    if not accelerator.is_available() or accelerator.create_graph() is None:
+        pytest.skip("requires graph capture")
+
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    torch.manual_seed(1234)
+    config = LlamaConfig(vocab_size=64,
+                         hidden_size=64,
+                         intermediate_size=128,
+                         num_hidden_layers=2,
+                         num_attention_heads=4,
+                         num_key_value_heads=2,
+                         max_position_embeddings=128)
+    config._attn_implementation = "sdpa"
+    device = torch.device(accelerator.device_name())
+    model = LlamaForCausalLM(config).to(device).eval()
+    generator = torch.Generator().manual_seed(1)
+    short_prompts = torch.randint(1, 64, (4, 8), generator=generator).to(device)
+    long_prompts = torch.randint(1, 64, (4, 12), generator=generator).to(device)
+    # eos -1 never matches, so every row generates the full length.
+    rollout = HybridEngineRollout(SimpleNamespace(module=model),
+                                  SimpleNamespace(pad_token_id=0, eos_token_id=-1),
+                                  cfg=HybridEngineRolloutConfig(use_graph_capture=True))
+
+    original_capture_to_graph = accelerator.capture_to_graph
+    capture_count = 0
+
+    def counted_capture_to_graph(*args, **kwargs):
+        nonlocal capture_count
+        capture_count += 1
+        return original_capture_to_graph(*args, **kwargs)
+
+    monkeypatch.setattr(accelerator, "capture_to_graph", counted_capture_to_graph)
+    # The decode graph depends on the batch size and prompt width plus max_new_tokens, not on the
+    # prompt width alone: 8 + 16 and 12 + 12 share one graph, while 8 + 8 needs another.
+    outputs = []
+    for step, (prompt_ids, new_tokens) in enumerate(
+        ((short_prompts, 16), (short_prompts, 16), (long_prompts, 12), (short_prompts, 8))):
+        if step == 1:
+            # Apply the same in-place update an optimizer step would make.
+            with torch.no_grad():
+                for parameter in model.parameters():
+                    parameter.add_(torch.randn_like(parameter) * 0.05)
+        attention_mask = torch.ones_like(prompt_ids)
+        with torch.no_grad():
+            expected = model.generate(prompt_ids,
+                                      attention_mask=attention_mask,
+                                      max_new_tokens=new_tokens,
+                                      do_sample=False,
+                                      eos_token_id=None,
+                                      pad_token_id=0)
+        output = rollout.generate(RolloutRequest(prompt_ids, attention_mask),
+                                  SamplingConfig(max_new_tokens=new_tokens, temperature=0))
+        assert output.input_ids.tolist() == expected.tolist()
+        outputs.append(output.input_ids)
+
+    # The update must change the tokens, otherwise a graph replaying stale weights would also pass.
+    assert not torch.equal(outputs[0], outputs[1])
+    assert capture_count == 2
+
+    head_dim = config.hidden_size // config.num_attention_heads
+    # Keys and values for every layer at batch 4 and cache length 8 + 8.
+    cache_bytes = 2 * config.num_hidden_layers * 4 * config.num_key_value_heads * 16 * head_dim * 4
+    allocated = accelerator.memory_allocated()
+    rollout.shutdown()
+    assert accelerator.memory_allocated() <= allocated - cache_bytes
+
+
 def test_continuous_generation_profile_on_accelerator():
     accelerator = get_accelerator()
     if not accelerator.is_available():
