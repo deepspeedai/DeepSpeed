@@ -10,6 +10,7 @@ import json
 import hjson
 import argparse
 import torch
+from types import SimpleNamespace
 
 from deepspeed.runtime.zero.config import DeepSpeedZeroConfig
 from deepspeed.accelerator import get_accelerator
@@ -573,3 +574,37 @@ class TestNoModel(DistributedTest):
 
         with pytest.raises(AssertionError):
             model, _, _, _ = deepspeed.initialize(model, config=base_config)
+
+
+class TestSequenceParallelBatchConfig(DistributedTest):
+    """`sequence_parallel_size` splits the world into data-parallel replicas. The batch sizes derived from
+    that split must be integers (a DataLoader rejects a float batch_size) and must not depend on whether
+    the config is passed as a dict or as a file."""
+    world_size = 2
+
+    def _check_batch_params(self, ds_config):
+        # sequence_parallel_size == world_size, so a single data-parallel replica sees the whole batch
+        for name, expected in [("world_size", 1), ("train_batch_size", 2), ("train_micro_batch_size_per_gpu", 2),
+                               ("gradient_accumulation_steps", 1)]:
+            value = getattr(ds_config, name)
+            assert type(value) is int and value == expected, f"{name}={value!r}, expected {expected}"
+
+    @pytest.mark.parametrize("as_file", [False, True])
+    def test_dict_or_file(self, tmpdir, as_file):
+        config_dict = {"train_batch_size": 2, "sequence_parallel_size": self.world_size}
+        config = create_config_from_dict(tmpdir, config_dict) if as_file else config_dict
+        self._check_batch_params(DeepSpeedConfig(config))
+
+    def test_mpu_without_data_parallel_world_size(self):
+        mpu = SimpleNamespace(get_sequence_parallel_world_size=lambda: self.world_size)
+        self._check_batch_params(DeepSpeedConfig({"train_batch_size": 2}, mpu=mpu))
+
+    def test_size_must_divide_world_size(self):
+        # Not pytest.raises: its "DID NOT RAISE" is a BaseException that kills the pool worker, so a
+        # regression would hang the run instead of failing.
+        try:
+            DeepSpeedConfig({"train_batch_size": 2, "sequence_parallel_size": 3})
+        except ValueError as e:
+            assert "sequence_parallel_size" in str(e)
+        else:
+            raise AssertionError("sequence_parallel_size=3 on 2 ranks was accepted")
