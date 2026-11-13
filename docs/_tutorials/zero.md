@@ -306,6 +306,12 @@ convert_zero_checkpoint_to_state_dict(
 )
 ```
 
+Reusing an export directory replaces previous converter-generated weight files,
+indexes, and shards, including those from the other serialization format.
+Configuration files, tokenizer files, and unrelated files are preserved. Use
+separate output directories to retain multiple exports. Replacement is not atomic;
+do not load from or concurrently write to the directory while conversion is running.
+
 Questions and maintenance: [@gaoxiaomo](https://github.com/gaoxiaomo).
 
 Note: fp32 conversion currently uses about 2x the final checkpoint size in CPU
