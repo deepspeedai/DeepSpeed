@@ -1291,7 +1291,10 @@ class TestGPTBigCodeMultiQueryTraining(DistributedTest):
     world_size = [2, 4]
     reuse_dist_env = False
 
-    def test_matches_single_device_training(self):
+    # 0.0 disables clipping. 0.5 sits below every step's gradient norm, so clipping scales every
+    # update, and a norm that counts the shared rows once per rank shrinks the AutoTP updates (#9024).
+    @pytest.mark.parametrize("gradient_clipping", [0.0, 0.5])
+    def test_matches_single_device_training(self, gradient_clipping):
         skip_on_device()
         transformers = pytest.importorskip("transformers")
         hidden, heads, steps, lr = 32, 4, 4, 0.5
@@ -1328,6 +1331,9 @@ class TestGPTBigCodeMultiQueryTraining(DistributedTest):
             if reference_kv_grads is None:
                 c_attn = reference.transformer.h[0].attn.c_attn
                 reference_kv_grads = (c_attn.weight.grad[hidden:].clone(), c_attn.bias.grad[hidden:].clone())
+            if gradient_clipping > 0.0:
+                grad_norm = torch.nn.utils.clip_grad_norm_(reference.parameters(), gradient_clipping)
+                assert grad_norm > gradient_clipping
             reference_optimizer.step()
             reference_optimizer.zero_grad()
             reference_losses.append(loss.item())
@@ -1340,8 +1346,8 @@ class TestGPTBigCodeMultiQueryTraining(DistributedTest):
                     "lr": lr,
                 },
             },
-            # The reference does not clip, and DeepSpeed clips to norm 1.0 by default.
-            "gradient_clipping": 0.0,
+            # Set explicitly because DeepSpeed clips to norm 1.0 by default.
+            "gradient_clipping": gradient_clipping,
             "tensor_parallel": {
                 "autotp_size": dist.get_world_size(),
             },
