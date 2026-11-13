@@ -2591,3 +2591,88 @@ class TestDestroyReleasesEngine(DistributedTest):
                 if torch.is_tensor(value):
                     storages.add(value.untyped_storage().data_ptr())
         return storages
+
+
+class _SubgroupMPU:
+    """An ``mpu`` whose data-parallel group is ``ranks``, a subset of the world, with no model parallelism."""
+
+    def __init__(self, ranks):
+        self.ranks = ranks
+        self.dp_group = dist.new_group(ranks)
+        # new_group is a collective over the world, so every rank creates every rank's own group.
+        own_groups = [dist.new_group([rank]) for rank in range(dist.get_world_size())]
+        self.mp_group = own_groups[dist.get_rank()]
+
+    def get_model_parallel_rank(self):
+        return 0
+
+    def get_model_parallel_world_size(self):
+        return 1
+
+    def get_data_parallel_rank(self):
+        return self.ranks.index(dist.get_rank())
+
+    def get_data_parallel_world_size(self):
+        return len(self.ranks)
+
+    def get_data_parallel_group(self):
+        return self.dp_group
+
+    def get_model_parallel_group(self):
+        return self.mp_group
+
+
+class TestZero3OverSubgroup(DistributedTest):
+    world_size = 3
+
+    def test(self):
+        # ZeRO-3 over ranks 1-2 of a world of three; rank 0 holds no engine. A barrier or a rank-agreement check over
+        # the world would wait for rank 0, and one that broadcasts from global rank 0 would never get its data.
+        trainer_ranks = [1, 2]
+        mpu = _SubgroupMPU(trainer_ranks)
+        # Rank 0 waits for the trainers in a group of its own, so it cannot stand in for a world barrier of theirs.
+        everyone = dist.new_group(list(range(dist.get_world_size())))
+        try:
+            if dist.get_rank() in trainer_ranks:
+                self._train_like_plain_torch(mpu)
+        finally:
+            dist.barrier(group=everyone)
+
+    def _train_like_plain_torch(self, mpu):
+        # Oracle: the same model under plain torch SGD. Both trainer ranks see the same batch, so the gradient ZeRO
+        # averages over the subgroup is the reference's. SGD, because its update is linear in the gradient: Adam
+        # turns a rounding difference in a near-zero gradient into a difference of the size of the learning rate.
+        hidden_dim = 16
+        device = get_accelerator().current_device_name()
+        torch.manual_seed(1234)
+        model = SimpleModel(hidden_dim, nlayers=2)
+        reference = deepcopy(model).to(device)
+        reference_optimizer = torch.optim.SGD(reference.parameters(), lr=0.1)
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 2,
+            "gradient_clipping": 0.0,  # on by default; the reference does not clip
+            "zero_allow_untested_optimizer": True,
+            "zero_optimization": {
+                "stage": 3,
+                "stage3_param_persistence_threshold": 0
+            }
+        }
+        engine, _, _, _ = deepspeed.initialize(config=config_dict,
+                                               model=model,
+                                               model_parameters=model.parameters(),
+                                               optimizer=torch.optim.SGD(model.parameters(), lr=0.1),
+                                               mpu=mpu)
+        x = torch.randn(2, hidden_dim, generator=torch.Generator().manual_seed(7)).to(device)
+        y = torch.tensor([3, 5], device=device)
+        for _ in range(3):
+            loss = engine(x, y)
+            engine.backward(loss)
+            engine.step()
+            reference_optimizer.zero_grad()
+            reference(x, y).backward()
+            reference_optimizer.step()
+
+        for param, expected in zip(model.parameters(), reference.parameters()):
+            with deepspeed.zero.GatheredParameters([param]):
+                torch.testing.assert_close(param.data, expected.data, rtol=1e-4, atol=1e-6)
+        engine.destroy()
