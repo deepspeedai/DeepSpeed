@@ -1609,12 +1609,24 @@ def test_static_graph_capture_receives_a_prebuilt_4d_mask(mock_get_accelerator):
     accelerator.current_stream.return_value = stream
     accelerator.stream.side_effect = lambda _stream: nullcontext()
     accelerator.capture_to_graph.side_effect = capture
-    accelerator.replay_graph.side_effect = lambda _graph: replay_views.append(
-        masked_columns(module.captured_masks[0]).clone())
+
+    capture_static_graph = HybridEngineRollout._capture_static_graph
+
+    def capture_replayable_graph(module, decode_step, static_pos):
+        capture_static_graph(module, decode_step, static_pos)
+        # A replay reruns the captured step, which also advances the mask for the next replay.
+        return decode_step
+
+    def replay(decode_step):
+        replay_views.append(masked_columns(module.captured_masks[0]).clone())
+        decode_step()
+
+    accelerator.replay_graph.side_effect = replay
 
     rollout = HybridEngineRollout(SimpleNamespace(module=module),
                                   _make_tokenizer(),
                                   cfg=HybridEngineRolloutConfig(use_graph_capture=True))
+    rollout._capture_static_graph = capture_replayable_graph
     request = RolloutRequest(torch.tensor([[1, 3, 4], [5, 6, 7]]), prompt_attention)
     batch = rollout.generate(request, SamplingConfig(max_new_tokens=max_new_tokens, temperature=0))
 

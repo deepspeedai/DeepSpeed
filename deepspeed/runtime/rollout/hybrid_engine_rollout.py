@@ -117,15 +117,13 @@ class _ContinuousGraphState:
 class _StaticGraphState:
     signature: tuple
     cache: object
-    write_position: torch.Tensor
     static_input: torch.Tensor
     static_attention: torch.Tensor
     static_causal_attention: torch.Tensor
     static_position: torch.Tensor
-    static_cache_position: torch.Tensor
-    static_position_ids: torch.Tensor
+    static_output_ids: torch.Tensor
+    static_finished: torch.Tensor
     graph: object
-    static_logits: torch.Tensor
 
 
 class HybridEngineRollout(RolloutEngine):
@@ -136,6 +134,9 @@ class HybridEngineRollout(RolloutEngine):
         tokenizer: HuggingFace tokenizer (must have pad_token_id or eos_token_id).
         cfg: Optional HybridEngineRolloutConfig.
     """
+
+    # Decode steps between the graph path's EOS checks, each of which waits for the device.
+    _EOS_CHECK_INTERVAL = 16
 
     def __init__(self, engine, tokenizer, cfg=None):
         self.engine = engine
@@ -1412,16 +1413,9 @@ class HybridEngineRollout(RolloutEngine):
         batch_size = prompt_ids.shape[0]
         prompt_len = prompt_ids.shape[1]
         max_len = prompt_len + max_new_tokens
-        eos_token_id = self.tokenizer.eos_token_id
         model_dtype = next(module.parameters()).dtype
         select_next_tokens = self._token_selector(sampling)
         repetition_penalty = self._repetition_penalty(module)
-        output_ids = [prompt_ids]
-
-        def next_tokens(logits):
-            if repetition_penalty != 1.0:
-                logits = self._apply_repetition_penalty(logits, torch.cat(output_ids, dim=1), repetition_penalty)
-            return select_next_tokens(logits)
 
         # --- Prefill with HF StaticCache (correct attention semantics) ---
         prefill_cache = self._create_static_cache(StaticCache, module.config, batch_size, max_len, device, model_dtype)
@@ -1435,61 +1429,67 @@ class HybridEngineRollout(RolloutEngine):
             cache_position=torch.arange(prompt_len, device=device),
             **self._last_logits_kwargs(module),
         )
-        next_token = next_tokens(prefill_out.logits[:, -1, :])
-        output_ids.append(next_token)
+        prefill_logits = self._apply_repetition_penalty(prefill_out.logits[:, -1, :], prompt_ids, repetition_penalty)
+        next_token = select_next_tokens(prefill_logits)
 
-        # --- Reuse or capture the decode graph, then load the prefill KV into its cache ---
-        state = self._get_static_graph_state(module, batch_size, max_len, device, model_dtype)
+        # --- Reuse or capture the decode graph, then load the prompt into its static state ---
+        state = self._get_static_graph_state(module, batch_size, max_len, device, model_dtype, sampling,
+                                             repetition_penalty)
         ds_cache = state.cache
-        write_pos = state.write_position
-        static_token = state.static_input
-        static_attn = state.static_attention
-        static_causal_attn = state.static_causal_attention
-        static_cache_pos = state.static_cache_position
-        static_pos_ids = state.static_position_ids
-        graph = state.graph
-        static_logits = state.static_logits
         for layer_idx in range(self._cache_layer_count(ds_cache)):
             ds_layer = ds_cache.layers[layer_idx]
             hf_keys, hf_values = self._cache_layer_tensors(prefill_cache, layer_idx)
             ds_layer.keys[:, :, :prompt_len, :].copy_(hf_keys[:, :, :prompt_len, :])
             ds_layer.values[:, :, :prompt_len, :].copy_(hf_values[:, :, :prompt_len, :])
+        static_attn = state.static_attention
         static_attn[:, :prompt_len] = prompt_attn
         static_attn[:, prompt_len] = 1  # first decode position
-        self._update_static_causal_attention(static_attn, static_causal_attn)
+        self._update_static_causal_attention(static_attn, state.static_causal_attention)
+        output_ids = state.static_output_ids
+        output_ids[:, :prompt_len] = prompt_ids
+        output_ids[:, prompt_len:prompt_len + 1] = next_token
+        # The repetition penalty reads the whole buffer. Columns not generated yet repeat a prompt token, which is
+        # already penalized, so they do not change the penalized set.
+        output_ids[:, prompt_len + 1:] = prompt_ids[:, :1]
+        state.static_input.copy_(next_token)
+        state.static_position.fill_(prompt_len)
+        eos_ids = self._eos_ids(device)
+        if eos_ids is not None:
+            state.static_finished.copy_((next_token == eos_ids).any(dim=-1))
 
-        # --- Decode loop ---
-        eos_mask = torch.zeros(batch_size, dtype=torch.bool, device=device)
+        # --- Decode loop: each replay picks the next token and advances the static state on the device ---
+        generated_len = prompt_len + 1
         for step in range(max_new_tokens - 1):
-            if eos_mask.all():
-                output_ids.append(torch.full((batch_size, 1), pad_token_id, dtype=torch.long, device=device))
-                continue
+            # Checking for EOS synchronizes with the device, so poll only periodically.
+            if eos_ids is not None and step % self._EOS_CHECK_INTERVAL == 0 and state.static_finished.all():
+                break
+            get_accelerator().replay_graph(state.graph)
+            generated_len += 1
 
-            # Update static inputs
-            static_token.copy_(next_token)
-            pos = prompt_len + step
-            write_pos.fill_(pos)
-            static_cache_pos.fill_(pos)
-            static_pos_ids.fill_(pos)
-            static_attn[:, pos] = 1
-            self._update_static_causal_attention(static_attn, static_causal_attn)
+        result = output_ids.clone()
+        # Like generate(), stop once every row has produced EOS and pad the remaining columns.
+        result[:, generated_len:] = pad_token_id
+        return result
 
-            # Replay
-            get_accelerator().replay_graph(graph)
-            next_token = next_tokens(static_logits[:, -1, :])
-            output_ids.append(next_token)
-            eos_mask |= (next_token.squeeze(1) == eos_token_id)
+    def _eos_ids(self, device):
+        eos_token_id = self.tokenizer.eos_token_id
+        if eos_token_id is None:
+            return None
+        return torch.as_tensor(eos_token_id, dtype=torch.long, device=device).flatten()
 
-        return torch.cat(output_ids, dim=1)
-
-    def _get_static_graph_state(self, module, batch_size, max_len, device, model_dtype):
-        """Return the fixed-batch decode graph for this shape, capturing it only when the signature changes.
+    def _get_static_graph_state(self, module, batch_size, max_len, device, model_dtype, sampling, repetition_penalty):
+        """Return the fixed-batch decode graph for this shape and decoding setup, capturing it only when either
+        changes.
 
         The returned cache and static inputs are cleared; the caller loads the prompt into them.
         """
         from deepspeed.utils.static_cache import DeepSpeedStaticCache
 
-        signature = self._graph_signature(module, batch_size, max_len, device, model_dtype)
+        eos_ids = self._eos_ids(device)
+        # Token selection is captured with the forward, so the sampling settings are part of the graph.
+        decode_signature = (sampling.temperature, sampling.top_k, sampling.top_p, repetition_penalty,
+                            None if eos_ids is None else tuple(eos_ids.tolist()))
+        signature = self._graph_signature(module, batch_size, max_len, device, model_dtype) + (decode_signature, )
         state = self._static_graph_state
         if state is None or state.signature != signature:
             # Free the stale cache and graph pool before allocating replacements.
@@ -1501,8 +1501,6 @@ class HybridEngineRollout(RolloutEngine):
                 device=device,
                 dtype=model_dtype,
             )
-            write_pos = torch.zeros((), dtype=torch.long, device=device)
-            cache.set_write_position(write_pos)
             static_token = torch.zeros(batch_size, 1, dtype=torch.long, device=device)
             static_attn = torch.zeros(batch_size, max_len, dtype=torch.long, device=device)
             # Transformers builds its SDPA mask from a 2-D attention_mask with host-side checks
@@ -1511,43 +1509,64 @@ class HybridEngineRollout(RolloutEngine):
             # mask instead, as the continuous graph path does; each decode step unmasks one more column.
             static_causal_attn = torch.zeros((batch_size, 1, 1, max_len), dtype=model_dtype, device=device)
             self._update_static_causal_attention(static_attn, static_causal_attn)
+            # The position of the input token; the cache writes its key and value there.
             static_pos = torch.zeros((), dtype=torch.long, device=device)
+            cache.set_write_position(static_pos)
             static_cache_pos = static_pos.unsqueeze(0)  # [1] for cache_position
             static_pos_ids = static_pos.reshape(1, 1).expand(batch_size, 1)  # [batch, 1]
-            graph, static_logits = self._capture_static_graph(module,
-                                                              ds_cache=cache,
-                                                              static_token=static_token,
-                                                              static_causal_attn=static_causal_attn,
-                                                              static_cache_pos=static_cache_pos,
-                                                              static_pos_ids=static_pos_ids)
+            static_output_ids = torch.zeros(batch_size, max_len, dtype=torch.long, device=device)
+            static_finished = torch.zeros(batch_size, dtype=torch.bool, device=device)
+            select_next_tokens = self._token_selector(sampling)
+
+            def decode_step():
+                out = module(
+                    static_token,
+                    attention_mask=static_causal_attn,
+                    past_key_values=cache,
+                    use_cache=True,
+                    cache_position=static_cache_pos,
+                    position_ids=static_pos_ids,
+                )
+                logits = self._apply_repetition_penalty(out.logits[:, -1, :], static_output_ids, repetition_penalty)
+                next_token = select_next_tokens(logits)
+                static_output_ids.index_copy_(1, static_pos.reshape(1) + 1, next_token)
+                if eos_ids is not None:
+                    static_finished.logical_or_((next_token == eos_ids).any(dim=-1))
+                static_token.copy_(next_token)
+                static_pos.add_(1)
+                static_causal_attn.index_fill_(-1, static_pos.reshape(1), 0)
+
+            graph = self._capture_static_graph(module, decode_step, static_pos)
             state = _StaticGraphState(
                 signature,
                 cache,
-                write_pos,
                 static_token,
                 static_attn,
                 static_causal_attn,
                 static_pos,
-                static_cache_pos,
-                static_pos_ids,
+                static_output_ids,
+                static_finished,
                 graph,
-                static_logits,
             )
             self._static_graph_state = state
 
         # Warmup, capture and the previous rollout all wrote into the cache.
         state.cache.reset()
         state.static_attention.zero_()
+        state.static_finished.zero_()
         return state
 
     @staticmethod
-    def _capture_static_graph(module, ds_cache, static_token, static_causal_attn, static_cache_pos, static_pos_ids):
-        """Capture one fixed-batch decode forward and return its static logits."""
+    def _capture_static_graph(module, decode_step, static_pos):
+        """Capture one fixed-batch ``decode_step``: the forward of ``module`` and the token selection after it."""
         # Remove forward hooks (they synchronize — illegal during graph capture)
         saved_pre = dict(module._forward_pre_hooks)
         saved_post = dict(module._forward_hooks)
         module._forward_pre_hooks.clear()
         module._forward_hooks.clear()
+        # Warmup draws random numbers when sampling; restore the generator so the rollout draws the same ones as
+        # without capture.
+        rng_state = get_accelerator().get_rng_state()
 
         try:
             # Warmup on side stream
@@ -1555,31 +1574,20 @@ class HybridEngineRollout(RolloutEngine):
             s.wait_stream(get_accelerator().current_stream())
             with get_accelerator().stream(s):
                 for _ in range(3):
-                    out = module(
-                        static_token,
-                        attention_mask=static_causal_attn,
-                        past_key_values=ds_cache,
-                        use_cache=True,
-                        cache_position=static_cache_pos,
-                        position_ids=static_pos_ids,
-                    )
+                    # Each step advances the position; start every warmup at 0 to stay inside the cache.
+                    static_pos.zero_()
+                    decode_step()
             get_accelerator().current_stream().wait_stream(s)
 
             # Capture
             graph = get_accelerator().create_graph()
             with get_accelerator().capture_to_graph(graph):
-                out = module(
-                    static_token,
-                    attention_mask=static_causal_attn,
-                    past_key_values=ds_cache,
-                    use_cache=True,
-                    cache_position=static_cache_pos,
-                    position_ids=static_pos_ids,
-                )
+                decode_step()
         finally:
             module._forward_pre_hooks.update(saved_pre)
             module._forward_hooks.update(saved_post)
-        return graph, out.logits
+            get_accelerator().set_rng_state(rng_state)
+        return graph
 
     def sync_weights(self, step: int) -> None:  # noqa: ARG002
         """No-op: hybrid engine reads model weights live."""

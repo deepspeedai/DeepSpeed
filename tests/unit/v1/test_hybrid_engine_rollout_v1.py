@@ -473,6 +473,42 @@ def _random_request(batch_size, prompt_len, device):
     return RolloutRequest(prompt_ids.to(device), torch.ones_like(prompt_ids).to(device))
 
 
+def test_static_graph_stops_once_every_row_has_produced_eos(monkeypatch):
+    accelerator = get_accelerator()
+    if not accelerator.is_available() or accelerator.device_name() != "cuda":
+        pytest.skip("CUDA is required for CUDA graph decode coverage")
+
+    device = torch.device(accelerator.device_name())
+    model = _tiny_llama(device)
+    new_tokens = 48
+    request = _random_request(batch_size=8, prompt_len=8, device=device)
+    sampling = SamplingConfig(max_new_tokens=new_tokens, temperature=0)
+    unstopped = _rollout(model, use_graph_capture=False).generate(request, sampling).input_ids
+    # Every row's third generated token is an EOS id, so all rows finish early.
+    eos_ids = sorted(set(unstopped[:, 8 + 2].tolist()))
+
+    def rollout(use_graph_capture):
+        return HybridEngineRollout(SimpleNamespace(module=model),
+                                   SimpleNamespace(pad_token_id=0, eos_token_id=eos_ids),
+                                   cfg=HybridEngineRolloutConfig(use_graph_capture=use_graph_capture))
+
+    expected = rollout(use_graph_capture=False).generate(request, sampling)
+    replay_count = 0
+    original_replay_graph = accelerator.replay_graph
+
+    def counted_replay_graph(graph):
+        nonlocal replay_count
+        replay_count += 1
+        return original_replay_graph(graph)
+
+    monkeypatch.setattr(accelerator, "replay_graph", counted_replay_graph)
+    output = rollout(use_graph_capture=True).generate(request, sampling)
+
+    assert output.input_ids.tolist() == expected.input_ids.tolist()
+    assert output.attention_mask.tolist() == expected.attention_mask.tolist()
+    assert replay_count < new_tokens - 1
+
+
 @pytest.mark.parametrize("use_graph_capture, continuous_batch_size", [(True, None), (True, 8), (False, 8)])
 @pytest.mark.parametrize("temperature, top_k, top_p", [(1.0, 0, 1.0), (0.7, 5, 1.0), (1.0, 0, 0.8)])
 def test_decode_sampling_matches_hf_generate(temperature, top_k, top_p, use_graph_capture, continuous_batch_size):

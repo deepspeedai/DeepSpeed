@@ -63,13 +63,15 @@ forward. Results remain in the user-requested matrix order.
 HybridEngine Rollout CUDA Graph Decode
 --------------------------------------
 
-``HybridEngineRolloutConfig(use_graph_capture=True)`` captures the decode
-forward pass in a CUDA graph and replays it for every generated token. Only the
-model forward is captured; the next token is chosen from the graph's output
-logits after each replay. Greedy decoding (``temperature <= 0``) takes the
-argmax. Sampling applies the ``temperature``, ``top_k`` and ``top_p`` settings
-of ``SamplingConfig`` with Hugging Face's logits warpers, in the order
-``generate()`` applies them, so both paths sample from the same distribution.
+``HybridEngineRolloutConfig(use_graph_capture=True)`` captures one decode step
+in a CUDA graph and replays it for every generated token. The step is the model
+forward followed by the choice of the next token and the update of the decode
+position, attention mask and output buffer, so a replay needs no host work. The
+host checks for EOS every 16 steps and stops once every row has produced it.
+Greedy decoding (``temperature <= 0``) takes the argmax. Sampling applies the
+``temperature``, ``top_k`` and ``top_p`` settings of ``SamplingConfig`` with
+Hugging Face's logits warpers, in the order ``generate()`` applies them, so both
+paths sample from the same distribution.
 Both greedy decoding and sampling first apply the repetition penalty from the
 model's ``generation_config``, as ``generate()`` does. Other
 ``generation_config`` settings are not applied on the graph path. Continuous
@@ -81,7 +83,9 @@ dtype and parameter layout. The prompt is still prefilled eagerly on every call,
 so one graph serves all prompt widths with the same total length. In-place
 weight updates, such as an optimizer step, are replayed without recapturing.
 The graph and cache stay allocated between rollouts until the shape changes or
-``rollout.shutdown()`` releases them.
+``rollout.shutdown()`` releases them. Because the graph also selects the tokens,
+changing the sampling settings, the repetition penalty or the EOS ids captures
+it again.
 
 Shared Prompt Prefill
 ---------------------
