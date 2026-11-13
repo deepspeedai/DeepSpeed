@@ -870,6 +870,8 @@ class CUDAOpBuilder(OpBuilder):
         torch_arch_list = os.environ.get("TORCH_CUDA_ARCH_LIST")
         normalized_arch_list = torch_arch_list.strip() if torch_arch_list is not None else None
         self._jit_arch_list = normalized_arch_list or None
+        saved_jit_mode = self.jit_mode
+        self.jit_mode = True
         try:
             return super().jit_load(verbose)
         finally:
@@ -878,6 +880,7 @@ class CUDAOpBuilder(OpBuilder):
             else:
                 os.environ.pop("TORCH_CUDA_ARCH_LIST", None)
             self._jit_arch_list = None
+            self.jit_mode = saved_jit_mode
 
     def extra_compile_args(self):
         # Unlike BuildExtension, PyTorch's load() does not check the CUDA toolkit version, so check it here

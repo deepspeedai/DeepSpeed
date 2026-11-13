@@ -114,8 +114,9 @@ def test_jit_mode_probes_devices_when_safe_and_errors_without_visible_gpus():
                     builder.compute_capability_args()
 
 
-def test_jit_load_restores_env_and_state_after_failure():
-    builder = make_builder()
+@pytest.mark.parametrize("jit_mode", [False, True])
+def test_jit_load_restores_env_and_state_after_failure(jit_mode):
+    builder = make_builder(jit_mode=jit_mode)
 
     def fail_nvcc_args():
         assert getattr(builder, "_jit_arch_list", None) == "8.9"
@@ -133,10 +134,12 @@ def test_jit_load_restores_env_and_state_after_failure():
 
         assert getattr(builder, "_jit_arch_list", None) is None
         assert os.environ["TORCH_CUDA_ARCH_LIST"] == "8.9"
+        assert builder.jit_mode is jit_mode
 
 
-def test_jit_load_restores_state_after_success():
-    builder = make_builder()
+@pytest.mark.parametrize("jit_mode", [False, True])
+def test_jit_load_restores_state_after_success(jit_mode):
+    builder = make_builder(jit_mode=jit_mode)
     op_module = MagicMock()
 
     def successful_nvcc_args():
@@ -156,6 +159,7 @@ def test_jit_load_restores_state_after_success():
 
         assert os.environ["TORCH_CUDA_ARCH_LIST"] == "8.9"
         assert getattr(builder, "_jit_arch_list", None) is None
+        assert builder.jit_mode is jit_mode
 
 
 class _StubHostOpBuilder(OpBuilder):
@@ -206,7 +210,8 @@ def test_prebuilt_builder_targets_requested_archs_instead_of_local_gpus():
     assert "-gencode=arch=compute_90,code=sm_90" in nvcc_args
 
 
-def test_prebuilt_and_jit_builds_compile_and_link_an_op_the_same_way():
+@pytest.mark.parametrize("build_order", [("jit", "prebuilt"), ("prebuilt", "jit")])
+def test_prebuilt_and_jit_builds_compile_and_link_an_op_the_same_way(build_order):
     # A pre-built op must be compiled and linked like the same op built at load time. Only the targeted
     # archs differ by nature: JIT builds target the local GPUs and hand them to PyTorch through
     # TORCH_CUDA_ARCH_LIST, while pre-built ops pass -gencode flags for the requested archs.
@@ -219,9 +224,9 @@ def test_prebuilt_and_jit_builds_compile_and_link_an_op_the_same_way():
             with patch.object(builder_module, "assert_no_cuda_mismatch", return_value=True):
                 with patch("torch.utils.cpp_extension.verify_ninja_availability", return_value=None):
                     with patch("torch.utils.cpp_extension.load", load):
-                        builder.jit_load(verbose=False)
-                with patch("torch.utils.cpp_extension.CUDAExtension") as cuda_extension:
-                    builder.builder()
+                        with patch("torch.utils.cpp_extension.CUDAExtension") as cuda_extension:
+                            for build_path in build_order:
+                                BUILD_PATHS[build_path](builder)
 
     jit_kwargs = load.call_args.kwargs
     prebuilt_kwargs = cuda_extension.call_args.kwargs
