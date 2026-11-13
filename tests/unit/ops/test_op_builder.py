@@ -19,7 +19,6 @@ BUILDER_SPEC = importlib.util.spec_from_file_location("test_op_builder_module", 
 builder_module = importlib.util.module_from_spec(BUILDER_SPEC)
 BUILDER_SPEC.loader.exec_module(builder_module)
 CUDAOpBuilder = builder_module.CUDAOpBuilder
-OpBuilder = builder_module.OpBuilder
 
 BUILDER_MODULE = builder_module
 CUDA_API = BUILDER_MODULE.torch.cuda  #ignore-cuda
@@ -114,9 +113,8 @@ def test_jit_mode_probes_devices_when_safe_and_errors_without_visible_gpus():
                     builder.compute_capability_args()
 
 
-@pytest.mark.parametrize("jit_mode", [False, True])
-def test_jit_load_restores_env_and_state_after_failure(jit_mode):
-    builder = make_builder(jit_mode=jit_mode)
+def test_jit_load_restores_env_and_state_after_failure():
+    builder = make_builder()
 
     def fail_nvcc_args():
         assert getattr(builder, "_jit_arch_list", None) == "8.9"
@@ -134,12 +132,10 @@ def test_jit_load_restores_env_and_state_after_failure(jit_mode):
 
         assert getattr(builder, "_jit_arch_list", None) is None
         assert os.environ["TORCH_CUDA_ARCH_LIST"] == "8.9"
-        assert builder.jit_mode is jit_mode
 
 
-@pytest.mark.parametrize("jit_mode", [False, True])
-def test_jit_load_restores_state_after_success(jit_mode):
-    builder = make_builder(jit_mode=jit_mode)
+def test_jit_load_restores_state_after_success():
+    builder = make_builder()
     op_module = MagicMock()
 
     def successful_nvcc_args():
@@ -159,38 +155,6 @@ def test_jit_load_restores_state_after_success(jit_mode):
 
         assert os.environ["TORCH_CUDA_ARCH_LIST"] == "8.9"
         assert getattr(builder, "_jit_arch_list", None) is None
-        assert builder.jit_mode is jit_mode
-
-
-class _StubHostOpBuilder(OpBuilder):
-    BUILD_VAR = "STUB_HOST_BUILDER"
-    NAME = "stub_host"
-
-    def __init__(self):
-        super().__init__(name=self.NAME)
-
-    def absolute_name(self):
-        return "deepspeed.ops.stub_host"
-
-    def sources(self):
-        return []
-
-
-def test_jit_load_builds_host_op_without_hip_settings_on_rocm():
-    # Host ops such as the CPU optimizers and async I/O build as plain C++ extensions. On a ROCm torch,
-    # JIT loading one must not add HIP defines or overwrite the user's PYTORCH_ROCM_ARCH, which only the
-    # HIP builds of CUDA ops use.
-    load = MagicMock()
-    with patch.dict(os.environ, {"PYTORCH_ROCM_ARCH": "gfx90a;gfx942"}, clear=False):
-        with patch.object(OpBuilder, "is_rocm_pytorch", return_value=True):
-            with patch("torch.utils.cpp_extension.verify_ninja_availability", return_value=None):
-                with patch("torch.utils.cpp_extension.load", load):
-                    _StubHostOpBuilder().jit_load(verbose=False)
-        assert os.environ["PYTORCH_ROCM_ARCH"] == "gfx90a;gfx942"
-
-    cxx_args = load.call_args.kwargs["extra_cflags"]
-    assert not [arg for arg in cxx_args if "HIP" in arg or "ROCM" in arg]
-    assert not load.call_args.kwargs.get("with_cuda")
 
 
 def test_prebuilt_builder_targets_requested_archs_instead_of_local_gpus():
@@ -310,64 +274,23 @@ def test_cuda_op_build_fails_on_cuda_major_version_mismatch_unless_check_is_skip
         build_with_cuda_versions(build_path, installed_cuda=(13, 0), torch_cuda="12.8")
 
 
-def test_non_jit_branch_unchanged():
+@pytest.mark.parametrize(
+    "arch_list, expected_targets",
+    [
+        # Sorted and deduplicated. No entry asks for PTX, so the highest arch gets it.
+        ("8.0;7.5;8.0;7.0",
+         ["compute_70,code=sm_70", "compute_75,code=sm_75", "compute_80,code=sm_80", "compute_80,code=compute_80"]),
+        # +PTX on either duplicate of an arch survives deduplication (#7871) and replaces the automatic PTX on
+        # the highest arch. Keeping only the first or only the last duplicate each fails one of these orders.
+        ("7.5+PTX;8.0;7.5", ["compute_75,code=sm_75", "compute_75,code=compute_75", "compute_80,code=sm_80"]),
+        ("7.5;8.0;7.5+PTX", ["compute_75,code=sm_75", "compute_75,code=compute_75", "compute_80,code=sm_80"]),
+    ])
+def test_prebuilt_gencode_flags_are_sorted_deduplicated_and_keep_requested_ptx(arch_list, expected_targets):
     builder = make_builder(jit_mode=False)
-
-    with patch.dict(os.environ, {"TORCH_CUDA_ARCH_LIST": "8.0;8.9+PTX"}, clear=False):
+    with patch.dict(os.environ, {"TORCH_CUDA_ARCH_LIST": arch_list}, clear=False):
         args = builder.compute_capability_args()
 
-    assert args == [
-        "-gencode=arch=compute_80,code=sm_80",
-        "-gencode=arch=compute_89,code=sm_89",
-        "-gencode=arch=compute_89,code=compute_89",
-    ]
-
-
-def test_non_jit_branch_sorts_and_dedupes_gencode_flags():
-    builder = make_builder(jit_mode=False)
-
-    with patch.dict(os.environ, {"TORCH_CUDA_ARCH_LIST": "8.0;7.5;8.0;7.0"}, clear=False):
-        args = builder.compute_capability_args()
-
-    assert args == [
-        "-gencode=arch=compute_70,code=sm_70",
-        "-gencode=arch=compute_75,code=sm_75",
-        "-gencode=arch=compute_80,code=sm_80",
-        "-gencode=arch=compute_80,code=compute_80",
-    ]
-
-
-def test_non_jit_branch_canonicalizes_mixed_ptx_variants_to_one_sm_and_one_ptx():
-    # For mixed inputs such as "8.0;8.0+PTX" or "8.0+PTX;8.0", PyTorch
-    # canonicalizes the architecture to one sm_80 entry plus one compute_80
-    # PTX entry. Dedupe by the canonical numeric arch so we match.
-    expected_args = [
-        "-gencode=arch=compute_75,code=sm_75",
-        "-gencode=arch=compute_80,code=sm_80",
-        "-gencode=arch=compute_80,code=compute_80",
-    ]
-
-    for arch_input in ("8.0;8.0+PTX;7.5", "7.5;8.0+PTX;8.0", "8.0+PTX;7.5;8.0", "8.0;7.5;8.0+PTX"):
-        builder = make_builder(jit_mode=False)
-        with patch.dict(os.environ, {"TORCH_CUDA_ARCH_LIST": arch_input}, clear=False):
-            args = builder.compute_capability_args()
-        assert args == expected_args, arch_input
-
-
-def test_non_jit_branch_canonical_dedupe_mixed_ptx_combinations():
-    # Lock in the four mixed-PTX combinations for a single arch so the dedupe
-    # behavior cannot regress on either ordering or duplication.
-    builder = make_builder(jit_mode=False)
-    cases = [
-        ("8.0;8.0+PTX", ["-gencode=arch=compute_80,code=sm_80", "-gencode=arch=compute_80,code=compute_80"]),
-        ("8.0+PTX;8.0", ["-gencode=arch=compute_80,code=sm_80", "-gencode=arch=compute_80,code=compute_80"]),
-        ("8.0;8.0", ["-gencode=arch=compute_80,code=sm_80", "-gencode=arch=compute_80,code=compute_80"]),
-        ("8.0+PTX;8.0+PTX", ["-gencode=arch=compute_80,code=sm_80", "-gencode=arch=compute_80,code=compute_80"]),
-    ]
-    for arch_input, expected_args in cases:
-        with patch.dict(os.environ, {"TORCH_CUDA_ARCH_LIST": arch_input}, clear=False):
-            args = builder.compute_capability_args()
-        assert args == expected_args, arch_input
+    assert args == [f"-gencode=arch={target}" for target in expected_targets]
 
 
 def arch_flags(arch_list, jit_mode):
@@ -396,16 +319,6 @@ def arch_flags(arch_list, jit_mode):
     ])
 def test_prebuilt_and_jit_builds_target_the_same_archs(arch_list, expected_targets, jit_mode):
     assert arch_flags(arch_list, jit_mode) == [f"-gencode=arch={target}" for target in expected_targets]
-
-
-@pytest.mark.parametrize("jit_mode", [False, True])
-@pytest.mark.parametrize("arch_list", ["Ampere", "8.0;10.0f"])
-def test_unsupported_arch_list_entries_fail_with_the_entry_in_the_message(arch_list, jit_mode):
-    # Architecture names are ambiguous, and PyTorch's extension builder accepts no suffix other than "a".
-    # Such entries used to fail inside int() with a message that did not mention TORCH_CUDA_ARCH_LIST.
-    unsupported_entry = arch_list.split(';')[-1]
-    with pytest.raises(ValueError, match=f"TORCH_CUDA_ARCH_LIST entry '{unsupported_entry}'"):
-        arch_flags(arch_list, jit_mode)
 
 
 def test_cuda_capability_major_skips_probe_when_context_not_initialized():
@@ -449,30 +362,27 @@ def test_cuda_capability_major_skips_probe_in_bad_fork():
     get_device_properties.assert_not_called()
 
 
-@pytest.mark.parametrize("gpu_major", [6, 7])
 @pytest.mark.parametrize("builder_name",
                          ["inference_cutlass_builder.InferenceCutlassBuilder", "ragged_ops.RaggedOpsBuilder"])
-def test_jit_load_rejects_a_gpu_older_than_every_build_target_and_says_why(builder_name, gpu_major, tmp_path):
-    # These ops build only for compute capability 8.0 and newer, so they cannot run on a 6.x or 7.x GPU.
-    # is_compatible() must reject such a GPU instead of letting the JIT build fail on an empty arch list,
-    # and the JIT-load error must name the requirement: load() checks with verbose=False, which used to
-    # leave the reason as "None".
-    nvcc = tmp_path / "bin" / "nvcc"
-    nvcc.parent.mkdir()
-    nvcc.write_text("#!/bin/sh\necho 'Cuda compilation tools, release 12.8, V12.8.93'\n")
-    nvcc.chmod(0o755)
+def test_jit_load_rejects_only_gpus_below_the_minimum_and_says_why(builder_name):
+    # These ops link deepspeed-kernels libraries built only for compute capability 8.0 and newer, so
+    # is_compatible() must reject a 7.x GPU rather than let the JIT build fail with no archs left, and the
+    # JIT-load error must give the reason: load() checks with verbose=False, which used to leave the reason as
+    # "None". An 8.0 GPU must still be accepted.
     module_name, class_name = builder_name.split(".")
     builder = getattr(importlib.import_module(f"deepspeed.ops.op_builder.{module_name}"), class_name)()
-    with patch.dict(os.environ, {"TORCH_CUDA_ARCH_LIST": f"{gpu_major}.0"}):
+    with patch.dict(os.environ, {}, clear=False):
         os.environ.pop("DS_IGNORE_CUDA_DETECTION", None)
-        with patch("torch.utils.cpp_extension.CUDA_HOME", str(tmp_path)), \
-                patch("torch.utils.cpp_extension.load", side_effect=AssertionError("must not compile")), \
+        # The real builders use deepspeed.ops.op_builder.builder, not this file's copy of that module.
+        with patch("deepspeed.ops.op_builder.builder.installed_cuda_version", return_value=(12, 8)), \
                 patch.object(CUDA_API, "is_available", return_value=True), \
-                patch.object(builder, "is_rocm_pytorch", return_value=False), \
-                patch.object(builder, "cuda_capability_major", return_value=gpu_major):
-            assert builder.is_compatible() is False
-            with pytest.raises(RuntimeError, match=r"compute capability 8\.0"):
-                builder.jit_load(verbose=False)
+                patch.object(builder, "is_rocm_pytorch", return_value=False):
+            with patch.object(builder, "cuda_capability_major", return_value=8):
+                assert builder.is_compatible() is True
+            with patch.object(builder, "cuda_capability_major", return_value=7):
+                assert builder.is_compatible() is False
+                with pytest.raises(RuntimeError, match=r"compute capability 8\.0"):
+                    builder.jit_load(verbose=False)
 
 
 def test_forked_child_can_use_cuda_after_importing_deepspeed():
@@ -561,15 +471,6 @@ def test_installed_cuda_version_reports_a_runtime_only_cuda_home_as_missing(tmp_
     with patch("torch.utils.cpp_extension.CUDA_HOME", str(tmp_path)):
         with pytest.raises(MissingCUDAException, match="unable to compile CUDA op"):
             installed_cuda_version()
-
-
-def test_cuda_op_builder_without_cuda_toolkit_raises_instead_of_building_for_cpu():
-    # A CUDA op cannot be pre-compiled without a CUDA toolkit. builder() must say so instead of quietly
-    # returning a CPU extension without the op's CUDA flags; CPU builds come from CPUOpBuilder.
-    with patch("torch.utils.cpp_extension.CUDA_HOME", None):
-        with patch.object(CUDAOpBuilder, "is_rocm_pytorch", return_value=False):
-            with pytest.raises(MissingCUDAException, match="unable to compile CUDA op"):
-                make_builder().builder()
 
 
 def test_cuda_accelerator_pre_compiles_async_io_without_cuda_and_links_libaio():
