@@ -32,7 +32,8 @@ __all__ = [
     'node_path_of', 'calibrate_links', 'fit_links'
 ]
 
-CALIBRATION_SCHEMA = 1
+# 2: peer samples carry both_ways, and the raw result has relay samples.
+CALIBRATION_SCHEMA = 2
 
 # 4 KiB to 256 MiB: small messages fix the per-message cost, and fast links reach line rate only
 # from about 64 MiB up.

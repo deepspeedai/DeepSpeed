@@ -192,6 +192,13 @@ def test_relay_fits_are_keyed_by_receive_and_send_path():
 def test_fit_rejects_unknown_schema_and_single_size():
     with pytest.raises(ValueError):
         fit_links({'schema': CALIBRATION_SCHEMA + 1})
+    # A raw result saved before two-way and relay samples existed must be refused, not misread.
+    legacy = _synthetic_calibration({LOCAL: (1e-6, 1e9), INTER_NODE: (1e-6, 1e9)}, [4096, 1 << 20])
+    legacy['schema'] = 1
+    legacy['peer'] = [{k: v for k, v in sample.items() if k != 'both_ways'} for sample in legacy['peer']]
+    del legacy['relay']
+    with pytest.raises(ValueError):
+        fit_links(legacy)
     with pytest.raises(ValueError):
         fit_links(_synthetic_calibration({LOCAL: (1e-6, 1e9), INTER_NODE: (1e-6, 1e9)}, [4096]))
 
