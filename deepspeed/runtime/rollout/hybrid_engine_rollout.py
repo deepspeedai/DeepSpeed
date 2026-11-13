@@ -221,7 +221,7 @@ class HybridEngineRollout(RolloutEngine):
                 kwargs["use_model_defaults"] = False
         return kwargs
 
-    def _generate_batched(self, request, sampling, generation_config=None, mask_padding=True):
+    def _generate_batched(self, request, sampling, mask_padding=True):
         device = request.prompt_ids.device
         B = request.prompt_ids.shape[0]
         n = sampling.n_samples_per_prompt
@@ -280,9 +280,7 @@ class HybridEngineRollout(RolloutEngine):
                                                   device, sampling)
             else:
                 generate_kwargs = self._generation_kwargs(sampling, prompt_attn, pad_token_id,
-                                                          module if generation_config is not None else None)
-                if generation_config is not None:
-                    generate_kwargs["generation_config"] = generation_config
+                                                          module if self.adaptive_prefill else None)
                 output_ids = module.generate(prompt_ids, **generate_kwargs)
         finally:
             for handle in shared_prefill_handles:
@@ -507,10 +505,7 @@ class HybridEngineRollout(RolloutEngine):
                     use_batched = batched_cost <= bucket_cost + decode_cost
         if use_batched:
             # A bounded rollout with no pending rows can use the existing batch path.
-            output = self._generate_batched(request,
-                                            replace(sampling, continuous_batch_size=None),
-                                            generation_config=prepared_generation_config,
-                                            mask_padding=False)
+            output = self._generate_batched(request, replace(sampling, continuous_batch_size=None), mask_padding=False)
             self._last_continuous_stats = None
             if self.enable_profiling:
                 total_ms = (self._profile_start(profile) - profile["start"]) * 1000

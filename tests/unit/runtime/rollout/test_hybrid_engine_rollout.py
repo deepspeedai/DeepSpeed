@@ -2277,6 +2277,8 @@ def test_adaptive_generation_rejects_mask_changed_by_custom_preparer(capacity, i
 
 @pytest.mark.parametrize("align_decode_fronts", [False, True])
 def test_aligned_generation_counts_bfloat16_mask_lengths_exactly(align_decode_fronts):
+    if not get_accelerator().is_bf16_supported():
+        pytest.skip("BF16 is not supported on this accelerator")
     model = _make_small_qwen(max_position_embeddings=512)
     # A BF16 sum rounds 257 real tokens to 256, which no longer matches the selected prompt tokens.
     prompt = torch.ones((2, 257), dtype=torch.long, device=next(model.parameters()).device)
@@ -2297,6 +2299,8 @@ def test_aligned_generation_counts_bfloat16_mask_lengths_exactly(align_decode_fr
 def test_adaptive_generation_uses_resolved_penalty_on_both_routes(cache_support, capacity, dtype):
     from transformers import GenerationConfig
 
+    if dtype == torch.bfloat16 and not get_accelerator().is_bf16_supported():
+        pytest.skip("BF16 is not supported on this accelerator")
     model = _make_small_qwen().to(dtype=dtype)
     model._supports_cache_class = cache_support
     native_prepare = model._prepare_generation_config
@@ -2309,9 +2313,12 @@ def test_adaptive_generation_uses_resolved_penalty_on_both_routes(cache_support,
         unpenalized = model.generate(prompt, max_new_tokens=3, do_sample=False)
     assert not torch.equal(expected[:, 5:], unpenalized[:, 5:])
 
+    prepared_penalties = []
+
     def prepare(*args, **kwargs):
         config, model_kwargs = native_prepare(*args, **kwargs)
-        config.repetition_penalty = 3.0
+        config.repetition_penalty = (config.repetition_penalty or 1.0) * 3.0
+        prepared_penalties.append(config.repetition_penalty)
         return config, model_kwargs
 
     rollout = HybridEngineRollout(SimpleNamespace(module=model), SimpleNamespace(pad_token_id=0, eos_token_id=None),
@@ -2320,6 +2327,7 @@ def test_adaptive_generation_uses_resolved_penalty_on_both_routes(cache_support,
         result = rollout.generate(RolloutRequest(prompt, torch.ones_like(prompt)),
                                   SamplingConfig(max_new_tokens=3, temperature=0, continuous_batch_size=capacity))
     assert torch.equal(result.input_ids, expected)
+    assert prepared_penalties and all(penalty == 3.0 for penalty in prepared_penalties)
     assert model.generation_config.repetition_penalty == original_penalty
     assert (rollout.get_last_continuous_stats() is None) == (capacity == 2)
 
