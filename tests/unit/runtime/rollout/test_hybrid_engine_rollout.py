@@ -8,6 +8,7 @@ the transformer inference extension are available, and the graph-capture tests
 only when CUDA is available.
 """
 
+import asyncio
 import gc
 import weakref
 from types import MethodType, SimpleNamespace
@@ -1957,6 +1958,32 @@ def test_tool_queue_takes_tool_output_from_the_first_tensor_parallel_rank(tokeni
     assert not sent
     assert [call.args[0][0]["content"] for call in tokenize.call_args_list] == ["é \ud800"] * 2
     assert records[0][0].tokens == records[1][0].tokens == [1, 3, 5, 2, 9]
+
+
+class _SlowEchoTool(_EchoTextTool):
+
+    async def execute(self, arguments):
+        await asyncio.sleep(0.05 if arguments["text"] == "slow" else 0.0)
+        return await super().execute(arguments)
+
+
+@patch("deepspeed.runtime.rollout.hybrid_engine_rollout.tokenize_tool_responses", return_value=[9])
+def test_tool_queue_drain_waits_for_every_running_tool(_tokenize):
+    """Static batching starts the next turn only once every trajectory's tools have returned."""
+    tool = _SlowEchoTool()
+    rollout = HybridEngineRollout(_make_engine(), _make_tokenizer(),
+                                  HybridEngineRolloutConfig(multi_turn=True, max_turns=2), ToolSet([tool]))
+    calls = {0: "fast", 1: "slow"}
+    rollout._end_turn = lambda sample, *_args: [ToolCall(name="echo", arguments={"text": calls[sample.tokens[0]]})]
+    records = [_prompt([0, 3]), _prompt([1, 3])]
+    with ToolQueue(rollout, records, max_new_tokens=8) as queue:
+        queue.retire(0, [5, 2], None)
+        queue.retire(1, [6, 2], None)
+        assert sorted(queue.drain()) == [0, 1]
+        assert not queue.busy
+
+    assert tool.calls == 2
+    assert [record.tokens for record in records] == [[0, 3, 5, 2, 9], [1, 3, 6, 2, 9]]
 
 
 def test_tool_queue_sends_only_a_size_when_no_tool_finished():

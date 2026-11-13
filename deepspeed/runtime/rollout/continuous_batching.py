@@ -178,11 +178,12 @@ class ContinuousGraphState:
 
 
 class ToolQueue:
-    """The tool queue of a continuous-batching rollout.
+    """The tool queue of a multi-turn rollout.
 
     A request retired from the batch either leaves for good or waits here while the tools it called run on a
-    background event loop, so the other rows keep decoding. Once they finish, it leaves for the front of the pending
-    queue with its tool output appended.
+    background event loop. In continuous batching the other rows keep decoding, and once its tools finish the request
+    leaves for the front of the pending queue with its tool output appended; static batching ``drain``s the queue
+    after each turn.
 
     With AutoTP, the rollout passes a host-side ``group`` over the tensor-parallel group and its first rank ``src``:
     only ``src`` runs the tools, and ``pop_ready`` sends the finished ones to the other ranks, so the whole group
@@ -288,6 +289,13 @@ class ToolQueue:
             buffer = torch.empty(size.item(), dtype=torch.uint8)
         dist.broadcast(buffer, src, group=self._group)
         return json.loads(buffer.numpy().tobytes())
+
+    def drain(self):
+        """Block until every running tool finishes, append their output, and return the trajectories that go on."""
+        # The other ranks wait in pop_ready, for the first rank's output.
+        if self._runs_tools:
+            concurrent.futures.wait([entry[3] for entry in self.in_flight.values()])
+        return self.pop_ready()
 
     def wait(self):
         """Block until one of the running tools finishes."""

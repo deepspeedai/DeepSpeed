@@ -326,10 +326,10 @@ class HybridEngineRollout(RolloutEngine):
         self._last_profile = None
         self._last_continuous_stats = None
         self._continuous_graph_state = None
-        # Only multi-turn continuous batching under AutoTP sends tool output between ranks while they decode.
+        # Under AutoTP, tools run on each tensor-parallel group's first rank, which sends their output to the others.
         self._tool_group = None
         self._tool_src = None
-        if self.autotp_size > 1 and self.multi_turn and self.continuous_batch_size is not None:
+        if self.autotp_size > 1 and self.multi_turn:
             self._tool_group, self._tool_src = _host_tensor_parallel_group()
         if self.use_shared_prefill:
             if self.continuous_batch_size is not None:
@@ -399,18 +399,6 @@ class HybridEngineRollout(RolloutEngine):
                        group=groups.get_tensor_model_parallel_group())
         accelerator.set_rng_state(state.cpu())
 
-    def _run_tools(self, calls_by_row):
-        if self.autotp_size <= 1:
-            return asyncio.run(self._run_tool_calls(calls_by_row))
-
-        # Run a turn's tool calls once per AutoTP group, so every rank gets the same output.
-        from deepspeed.utils import groups
-
-        src = groups.get_tensor_model_parallel_src_rank()
-        outputs = [asyncio.run(self._run_tool_calls(calls_by_row)) if dist.get_rank() == src else None]
-        dist.broadcast_object_list(outputs, src, group=groups.get_tensor_model_parallel_group())
-        return outputs[0]
-
     def _turn_budget(self, sample, generated_length, sampling):
         budget = sampling.max_new_tokens - generated_length
         if sampling.max_new_tokens_per_turn is not None:
@@ -473,139 +461,120 @@ class HybridEngineRollout(RolloutEngine):
                 "num_turns": 0,
             }
 
-        generated_length = [0] * len(trajectories)
         active = list(range(len(trajectories)))
+        tool_queue = ToolQueue(self, trajectories, max_new_tokens, self._tool_group, self._tool_src)
 
-        for turn in range(self.max_turns if self.multi_turn else 1):
-            budgets = {}
-            for i in active:
-                budgets[i] = self._turn_budget(trajectories[i], generated_length[i], sampling)
-                if budgets[i] <= 0:
-                    trajectories[i].status = RolloutRecord.Status.TRUNCATED
-            active = [i for i in active if budgets[i] > 0]
-            turn_max_new_tokens = max((budgets[i] for i in active), default=0)
-            row_budgets = [budgets[i] for i in active]
-            if self.partitions_weights:
-                # ZeRO-3 gathers parameters in every forward, so ranks decode up to the same configured cap and stop
-                # together once every row on every rank has reached EOS or its own budget.
-                turn_max_new_tokens = sampling.max_new_tokens
-                if sampling.max_new_tokens_per_turn is not None:
-                    turn_max_new_tokens = min(turn_max_new_tokens, sampling.max_new_tokens_per_turn)
-                if not active:
-                    # A rank with nothing left joins with one placeholder row that is finished from the start.
-                    placeholder = torch.full((1, 1), pad_token_id, dtype=torch.long, device=device)
-                    self._generate_tokens(placeholder,
-                                          torch.ones_like(placeholder),
-                                          turn_max_new_tokens,
-                                          sampling,
-                                          pad_token_id,
-                                          row_budgets=[0])
-            if not active:
-                break
-            turn_samples = [trajectories[i] for i in active]
-
-            if self.enable_profiling:
-                turn_start = _curr_time
-
-            prompt_ids, prompt_attn_mask = left_pad_samples(turn_samples, pad_token_id)
-            prompt_len = prompt_ids.shape[1]
-            prompt_ids = prompt_ids.to(device)
-            prompt_attn_mask = prompt_attn_mask.to(device)
-
-            if self.enable_profiling:
-                accelerator.synchronize()
-                expansion_end = time.perf_counter()
-
-            forward_profiler = None
-            handles = []
-            if self.enable_profiling and not self._graph_capture_enabled():
-                forward_profiler = _ForwardProfiler(accelerator)
-                handles.extend(forward_profiler.register(module))
-
-            try:
-                if self.use_shared_prefill and n > 1 and turn == 0:
-                    num_groups = len(active) // n
-                    self.engine.prepare_shared_prefill(num_groups, n, prompt_len)
-                    handles.extend(self._register_shared_prefill_hooks(module, num_groups, n))
-                output_ids, log_probs = self._generate_tokens(prompt_ids,
-                                                              prompt_attn_mask,
-                                                              turn_max_new_tokens,
-                                                              sampling,
-                                                              pad_token_id,
-                                                              row_budgets=row_budgets)
-            finally:
-                for handle in handles:
-                    handle.remove()
-
-            if self.enable_profiling:
-                accelerator.synchronize()
-                generation_end = time.perf_counter()
-
-            # Under ZeRO-3 generation runs past EOS, so ranks run the same number of parameter gathers; otherwise
-            # rows that end early keep decoding until every row has. Either way, each response keeps its first EOS
-            # and every later token becomes padding.
-            output_ids, response_attn = self._pad_after_eos(
-                output_ids,
-                response_start=prompt_len,
-                eos_token_id=get_eos_token_ids(self.tokenizer, self.engine.module),
-                pad_token_id=pad_token_id,
-            )
-            responses = masked_lists(output_ids[:, prompt_len:], response_attn)
-            response_log_probs = masked_lists(log_probs, response_attn) if return_log_probs else None
-
-            turn_responses = []
-            turn_log_probs = []
-            turn_calls = {}
-            for row, i in enumerate(active):
-                response = responses[row][:row_budgets[row]]
-                turn_responses.append(response)
-                turn_log_probs.append(response_log_probs[row][:row_budgets[row]] if return_log_probs else None)
-                generated_length[i] += len(response)
-                calls = self._end_turn(trajectories[i], response, turn, generated_length[i], max_new_tokens)
-                if calls is not None:
-                    turn_calls[row] = calls
-
-            tool_outputs = {}
-            tool_ms = 0.0
-            if turn_calls:
-                tool_start = time.perf_counter()
-                tool_outputs = self._run_tools(turn_calls)
-                tool_ms = (time.perf_counter() - tool_start) * 1000.0
-
-            tool_active = []
-            for row, i in enumerate(active):
-                tool_response = []
-                if row in turn_calls:
-                    tool_response = self._tool_response(turn_calls[row], tool_outputs[row])
-                    if self._tool_output_fits(trajectories[i], turn_responses[row], tool_response):
-                        tool_active.append(i)
-                    else:
+        with tool_queue:
+            for turn in range(self.max_turns if self.multi_turn else 1):
+                budgets = {}
+                for i in active:
+                    budgets[i] = self._turn_budget(trajectories[i], tool_queue.generated[i], sampling)
+                    if budgets[i] <= 0:
                         trajectories[i].status = RolloutRecord.Status.TRUNCATED
-                        tool_response = []
-                update_sample_from_response(trajectories[i], turn_responses[row], turn_log_probs[row], tool_response,
-                                            self.tokenizer)
-            active = tool_active
+                active = [i for i in active if budgets[i] > 0]
+                turn_max_new_tokens = max((budgets[i] for i in active), default=0)
+                row_budgets = [budgets[i] for i in active]
+                if self.partitions_weights:
+                    # ZeRO-3 gathers parameters in every forward, so ranks decode up to the same configured cap and stop
+                    # together once every row on every rank has reached EOS or its own budget.
+                    turn_max_new_tokens = sampling.max_new_tokens
+                    if sampling.max_new_tokens_per_turn is not None:
+                        turn_max_new_tokens = min(turn_max_new_tokens, sampling.max_new_tokens_per_turn)
+                    if not active:
+                        # A rank with nothing left joins with one placeholder row that is finished from the start.
+                        placeholder = torch.full((1, 1), pad_token_id, dtype=torch.long, device=device)
+                        self._generate_tokens(placeholder,
+                                              torch.ones_like(placeholder),
+                                              turn_max_new_tokens,
+                                              sampling,
+                                              pad_token_id,
+                                              row_budgets=[0])
+                if not active:
+                    break
+                turn_samples = [trajectories[i] for i in active]
 
-            if self.enable_profiling:
-                accelerator.synchronize()
-                turn_end = time.perf_counter()
-                _curr_time = turn_end
-                profile["prompt_expansion_ms"] += (expansion_end - turn_start) * 1000.0
-                profile["generation_ms"] += (generation_end - expansion_end) * 1000.0
-                profile["tool_ms"] += tool_ms
-                profile["post_processing_ms"] += (turn_end - generation_end) * 1000.0 - tool_ms
-                profile["num_generated_tokens"] += int(output_ids.shape[0] * (output_ids.shape[1] - prompt_len))
-                profile["num_turns"] += 1
-                prefill_ms, decode_ms, num_decodes = (None, None, 0)
-                if forward_profiler is not None:
-                    prefill_ms, decode_ms, num_decodes = forward_profiler.get_stage_times()
-                if prefill_ms is None or profile["prefill_forward_ms"] is None:
-                    profile["prefill_forward_ms"] = None
-                    profile["decode_forward_ms"] = None
-                else:
-                    profile["prefill_forward_ms"] += prefill_ms
-                    profile["decode_forward_ms"] += decode_ms
-                profile["num_decode_forwards"] += num_decodes
+                if self.enable_profiling:
+                    turn_start = _curr_time
+
+                prompt_ids, prompt_attn_mask = left_pad_samples(turn_samples, pad_token_id)
+                prompt_len = prompt_ids.shape[1]
+                prompt_ids = prompt_ids.to(device)
+                prompt_attn_mask = prompt_attn_mask.to(device)
+
+                if self.enable_profiling:
+                    accelerator.synchronize()
+                    expansion_end = time.perf_counter()
+
+                forward_profiler = None
+                handles = []
+                if self.enable_profiling and not self._graph_capture_enabled():
+                    forward_profiler = _ForwardProfiler(accelerator)
+                    handles.extend(forward_profiler.register(module))
+
+                try:
+                    if self.use_shared_prefill and n > 1 and turn == 0:
+                        num_groups = len(active) // n
+                        self.engine.prepare_shared_prefill(num_groups, n, prompt_len)
+                        handles.extend(self._register_shared_prefill_hooks(module, num_groups, n))
+                    output_ids, log_probs = self._generate_tokens(prompt_ids,
+                                                                  prompt_attn_mask,
+                                                                  turn_max_new_tokens,
+                                                                  sampling,
+                                                                  pad_token_id,
+                                                                  row_budgets=row_budgets)
+                finally:
+                    for handle in handles:
+                        handle.remove()
+
+                if self.enable_profiling:
+                    accelerator.synchronize()
+                    generation_end = time.perf_counter()
+
+                # Under ZeRO-3 generation runs past EOS, so ranks run the same number of parameter gathers; otherwise
+                # rows that end early keep decoding until every row has. Either way, each response keeps its first EOS
+                # and every later token becomes padding.
+                output_ids, response_attn = self._pad_after_eos(
+                    output_ids,
+                    response_start=prompt_len,
+                    eos_token_id=get_eos_token_ids(self.tokenizer, self.engine.module),
+                    pad_token_id=pad_token_id,
+                )
+                responses = masked_lists(output_ids[:, prompt_len:], response_attn)
+                response_log_probs = masked_lists(log_probs, response_attn) if return_log_probs else None
+
+                for row, i in enumerate(active):
+                    response = responses[row][:row_budgets[row]]
+                    log_probs_row = response_log_probs[row][:row_budgets[row]] if return_log_probs else None
+                    tool_queue.retire(i, response, log_probs_row)
+
+                # The turn's tool calls run concurrently; trajectories whose output fits go on to the next turn.
+                tool_ms = 0.0
+                active = []
+                if tool_queue.busy:
+                    tool_start = time.perf_counter()
+                    active = sorted(tool_queue.drain())
+                    tool_ms = (time.perf_counter() - tool_start) * 1000.0
+
+                if self.enable_profiling:
+                    accelerator.synchronize()
+                    turn_end = time.perf_counter()
+                    _curr_time = turn_end
+                    profile["prompt_expansion_ms"] += (expansion_end - turn_start) * 1000.0
+                    profile["generation_ms"] += (generation_end - expansion_end) * 1000.0
+                    profile["tool_ms"] += tool_ms
+                    profile["post_processing_ms"] += (turn_end - generation_end) * 1000.0 - tool_ms
+                    profile["num_generated_tokens"] += int(output_ids.shape[0] * (output_ids.shape[1] - prompt_len))
+                    profile["num_turns"] += 1
+                    prefill_ms, decode_ms, num_decodes = (None, None, 0)
+                    if forward_profiler is not None:
+                        prefill_ms, decode_ms, num_decodes = forward_profiler.get_stage_times()
+                    if prefill_ms is None or profile["prefill_forward_ms"] is None:
+                        profile["prefill_forward_ms"] = None
+                        profile["decode_forward_ms"] = None
+                    else:
+                        profile["prefill_forward_ms"] += prefill_ms
+                        profile["decode_forward_ms"] += decode_ms
+                    profile["num_decode_forwards"] += num_decodes
 
         if self.enable_profiling:
             total_ms = (_curr_time - call_start) * 1000.0
