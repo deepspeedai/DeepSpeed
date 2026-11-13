@@ -729,7 +729,11 @@ def _random_holder_map(rng, rows, cols, ranks):
     for rank, blocks in blocks_of.items():
         offset, pieces[rank] = 0, []
         for low, high in blocks:
-            holders = [other for other, theirs in blocks_of.items() if any(a <= low and high <= b for a, b in theirs)]
+            # A replica may hold this block as several smaller pieces, so cover it by union.
+            holders = [
+                other for other, theirs in blocks_of.items() if all(
+                    any(a <= row < b for a, b in theirs) for row in range(low, high))
+            ]
             if rng.random() < 0.15:
                 holders = sorted(set(holders) ^ {rng.randrange(ranks)}) or [rank]
             shape = (high - low, cols)
@@ -739,27 +743,52 @@ def _random_holder_map(rng, rows, cols, ranks):
     return ParamAffineMap((rows, cols), shapes, pieces)
 
 
-def _outcome(target, source):
-    try:
-        plan = plan_transfer(target, source, PlanBudget(max_pair_checks=1 << 30))
-    except AffineTransferError as error:
-        return type(error), str(error)
-    return [segment.to_dict() for segment in plan.segments]
+def _holders_are_exact(map_):
+    """Element-by-element reading of the holder contract, independent of the planner.
+
+    No rank may hold an element twice, and every element of a piece must be held by
+    exactly the ranks the piece names.
+    """
+    full = torch.arange(_product(map_.logical_shape))
+    elements_of = {}
+    held_by = {}
+    for rank, pieces in map_.pieces_by_rank.items():
+        for piece in pieces:
+            elements = full.as_strided(piece.shape, piece.source_strides, piece.source_offset).flatten().tolist()
+            elements_of[(rank, id(piece))] = (elements, set(piece.locations))
+            for element in elements:
+                ranks = held_by.setdefault(element, [])
+                if rank in ranks:
+                    return False
+                ranks.append(rank)
+    return all(
+        set(held_by[element]) == locations for elements, locations in elements_of.values() for element in elements)
 
 
 @pytest.mark.parametrize('seed', range(200))
-def test_holder_check_agrees_with_pairwise_walk(seed, monkeypatch):
-    """The table lookup is a shortcut, so the exhaustive comparison it replaces is the oracle."""
-    from deepspeed.checkpoint import affine_transfer as transfer_module
-
+def test_holder_check_matches_an_element_level_oracle(seed):
+    """Replicas split at different points must still plan; a wrong holder set must be refused."""
     rng = random.Random(seed)
     rows, cols, ranks = rng.randint(1, 6), rng.randint(1, 3), rng.randint(1, 4)
     mapped = _random_holder_map(rng, rows, cols, ranks)
     other = replicated_map((rows, cols), 1)
     target, source = (mapped, other) if seed % 2 else (other, mapped)
-    fast = _outcome(target, source)
-    monkeypatch.setattr(transfer_module, '_validate_holders', transfer_module._validate_holders_pairwise)
-    assert fast == _outcome(target, source)
+    budget = PlanBudget(max_pair_checks=1 << 30)
+    if not _holders_are_exact(mapped):
+        with pytest.raises(InvalidMapError):
+            plan_transfer(target, source, budget)
+        return
+    try:
+        plan = plan_transfer(target, source, budget)
+    except UnsupportedLayoutError:
+        # A valid source whose replicas are cut at different points is a documented planner
+        # limitation, not a holder error; a target with such replicas must still plan.
+        assert source is mapped
+        return
+    full = torch.arange(rows * cols, dtype=torch.float64).reshape(rows, cols)
+    copied = _apply_plan(plan, target, _shards(source, lambda m, r: m.extract(full, r)))
+    for rank in target.shard_shapes:
+        torch.testing.assert_close(copied[rank], target.extract(full, rank))
 
 
 @pytest.mark.parametrize('seed', range(100))
