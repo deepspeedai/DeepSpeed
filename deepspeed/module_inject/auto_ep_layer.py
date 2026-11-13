@@ -236,8 +236,8 @@ def _start_async_split_plan_from_expert_counts(
     dependency_event,
 ) -> _PendingSplitPlan:
     """Prepare counts on the caller stream, then start a pinned-memory D2H copy."""
-    if num_tokens_per_expert.device.type != "cuda":
-        raise RuntimeError("expert_parallel.async_split_plan requires CUDA tensors")
+    if not get_accelerator().on_accelerator(num_tokens_per_expert):
+        raise RuntimeError("expert_parallel.async_split_plan requires accelerator tensors")
 
     # Keep count communication and reductions ahead of packing so they do not
     # compete with the packing kernels. Only the metadata copy overlaps them.
@@ -1097,13 +1097,23 @@ class AutoEPMoELayer(nn.Module):
                                                      self.folding_group_handles.spec.tp_size)
         x = hidden_states.reshape(-1, hdim)  # [T, H]
 
-        # Fail all ranks before any collective can stall.
+        # A backend that cannot run a fused kernel falls back to its eager
+        # implementation instead of failing the model. The check still happens
+        # before any collective, so all ranks make the same decision.
         if self.combine_impl == "fused_weighted_sum" and not self._fused_combine_checked:
-            fused_token_ops.assert_supported(x, score_apply=self.score_apply)
+            try:
+                fused_token_ops.assert_supported(x, score_apply=self.score_apply, top_k=self.top_k)
+            except RuntimeError as error:
+                logger.warning_once(f"{error} Running the eager restore instead.")
+                self.combine_impl = "weighted_sum"
             self._fused_combine_checked = True
         if self.row_weighting_impl == "fused" and not self._fused_row_weighting_checked:
             weights = x.new_empty((x.shape[0], 1), dtype=torch.float32)
-            fused_token_ops.assert_row_weighting_supported(x, weights)
+            try:
+                fused_token_ops.assert_row_weighting_supported(x, weights)
+            except RuntimeError as error:
+                logger.warning_once(f"{error} Running the eager row weighting instead.")
+                self.row_weighting_impl = "eager"
             self._fused_row_weighting_checked = True
 
         # Router
