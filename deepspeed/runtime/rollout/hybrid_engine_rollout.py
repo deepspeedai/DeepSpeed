@@ -19,6 +19,7 @@ import math
 import time
 from copy import copy
 from dataclasses import dataclass, replace
+from functools import lru_cache
 from inspect import signature
 from typing import Optional
 
@@ -388,7 +389,7 @@ class HybridEngineRollout(RolloutEngine):
         if self.adaptive_prefill:
             generation_config = getattr(module, "generation_config", None)
             if generation_config is not None:
-                from transformers import GenerationConfig, GenerationMixin
+                from transformers import GenerationConfig, GenerationMixin, PretrainedConfig
                 # HF can refresh untouched defaults from legacy model settings during generate().
                 prepare_config = getattr(module, "_prepare_generation_config", None)
                 if callable(prepare_config):
@@ -424,16 +425,25 @@ class HybridEngineRollout(RolloutEngine):
                                                  f"changes {name}")
                     prepared_generation_config = generation_config
                 if self._generation_defaults is None:
-                    self._generation_defaults = GenerationConfig()
+                    defaults = GenerationConfig.from_model_config(PretrainedConfig())
+                    get_defaults = getattr(defaults, "_get_default_generation_params", None)
+                    if callable(get_defaults):
+                        for name, value in get_defaults().items():
+                            if getattr(defaults, name) is None:
+                                setattr(defaults, name, value)
+                    self._generation_defaults = defaults
                 defaults = self._generation_defaults
                 supported_settings = {
                     "max_length", "max_new_tokens", "do_sample", "temperature", "top_p", "top_k", "bos_token_id",
                     "eos_token_id", "pad_token_id", "repetition_penalty", "transformers_version"
                 }
                 # CB implements repetition penalty; other HF processors can change tokens across routes.
+                uses_global_defaults = hasattr(defaults, "_get_default_generation_params")
                 for name, value in vars(generation_config).items():
                     if name.startswith("_") or name in supported_settings:
                         continue
+                    if uses_global_defaults and value is None:
+                        value = getattr(defaults, name, None)
                     if not hasattr(defaults, name) or value != getattr(defaults, name):
                         raise ValueError(f"adaptive prefill does not support non-default generation setting: {name}")
         if align_decode_fronts:
@@ -1394,7 +1404,19 @@ class HybridEngineRollout(RolloutEngine):
         return 1.0 if repetition_penalty is None else repetition_penalty
 
     @staticmethod
-    def _apply_repetition_penalty(logits, input_ids, repetition_penalty):
+    @lru_cache(maxsize=1)
+    def _repetition_penalty_ignores_padding():
+        from transformers import RepetitionPenaltyLogitsProcessor
+
+        # HF introduced per-row ignore lengths together with padding-aware generation.
+        try:
+            RepetitionPenaltyLogitsProcessor(1.0, prompt_ignore_length=torch.zeros(1, dtype=torch.long, device="cpu"))
+        except (TypeError, ValueError):
+            return False
+        return True
+
+    @classmethod
+    def _apply_repetition_penalty(cls, logits, input_ids, repetition_penalty, prompt_attention_mask=None):
         """Penalize the tokens of ``input_ids`` in last-position ``logits``, without changing ``logits``.
 
         generate() applies the penalty in float32, before the sampling warpers, so it shapes the sampled distribution.
@@ -1402,6 +1424,12 @@ class HybridEngineRollout(RolloutEngine):
         if repetition_penalty == 1.0:
             return logits
         logits = logits.float()
+        if prompt_attention_mask is not None and cls._repetition_penalty_ignores_padding():
+            from transformers import RepetitionPenaltyLogitsProcessor
+
+            padding_lengths = prompt_attention_mask.ne(0).int().argmax(dim=1)
+            return RepetitionPenaltyLogitsProcessor(repetition_penalty,
+                                                    prompt_ignore_length=padding_lengths)(input_ids, logits)
         scores = logits.gather(1, input_ids)
         scores = torch.where(scores < 0, scores * repetition_penalty, scores / repetition_penalty)
         return logits.scatter(1, input_ids, scores)
@@ -1422,6 +1450,7 @@ class HybridEngineRollout(RolloutEngine):
                     logits[row:row + 1],
                     torch.cat((request_by_id[request_id].prompt_ids, *responses[request_id]), dim=1),
                     repetition_penalty,
+                    request_by_id[request_id].prompt_attention_mask,
                 ) for row, request_id in enumerate(request_ids)
             ],
                                dim=0)
@@ -1683,7 +1712,8 @@ class HybridEngineRollout(RolloutEngine):
 
         def next_tokens(logits):
             if repetition_penalty != 1.0:
-                logits = self._apply_repetition_penalty(logits, torch.cat(output_ids, dim=1), repetition_penalty)
+                logits = self._apply_repetition_penalty(logits, torch.cat(output_ids, dim=1), repetition_penalty,
+                                                        prompt_attn)
             return select_next_tokens(logits)
 
         # --- Prefill with HF StaticCache (correct attention semantics) ---

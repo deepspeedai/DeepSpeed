@@ -619,6 +619,8 @@ def test_decode_repetition_penalty_matches_hf_generate(temperature, use_graph_ca
     model = _tiny_llama(device)
     new_tokens = 32
     request = _random_request(batch_size=8, prompt_len=8, device=device)
+    request.prompt_ids[:4, :3] = 0
+    request.prompt_attention_mask[:4, :3] = 0
     sampling = SamplingConfig(max_new_tokens=new_tokens,
                               temperature=temperature,
                               top_k=0,

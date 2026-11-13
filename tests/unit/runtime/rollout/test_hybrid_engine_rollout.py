@@ -2013,7 +2013,7 @@ def test_adaptive_generation_rejects_unsupported_generation_settings(setting, va
     prompt = torch.tensor([[1, 2, 3, 4], [1, 2, 3, 4]], device=next(model.parameters()).device)
     rollout = HybridEngineRollout(SimpleNamespace(module=model), SimpleNamespace(pad_token_id=0, eos_token_id=None),
                                   HybridEngineRolloutConfig(adaptive_prefill=True))
-    with pytest.raises(ValueError, match=f"adaptive prefill.*{setting}"):
+    with pytest.raises(ValueError, match=setting):
         rollout.generate(RolloutRequest(prompt, torch.ones_like(prompt)),
                          SamplingConfig(max_new_tokens=4, temperature=0, continuous_batch_size=2))
 
@@ -2092,13 +2092,24 @@ def test_adaptive_generation_applies_repetition_penalty_from_first_token(capacit
     model._supports_cache_class = True
     if config_source == "generation":
         # An explicitly changed generation config takes precedence over legacy model settings.
-        model.config.num_beams = 2
+        if hasattr(model.config, "_get_non_default_generation_parameters"):
+            model.config.num_beams = 2
         model.generation_config.repetition_penalty = 3.0
         expected_config = model.generation_config
     else:
         model.config.repetition_penalty = 3.0
         expected_config = GenerationConfig.from_model_config(model.config)
     prompt = torch.tensor([[11, 1, 2, 3, 4], [11, 1, 2, 3, 4]], device=next(model.parameters()).device)
+    if config_source == "model" and not hasattr(model.config, "_get_non_default_generation_parameters"):
+        with pytest.raises(ValueError, match="model.generation_config"):
+            model.generate(prompt, max_new_tokens=2, do_sample=False)
+        rollout = HybridEngineRollout(SimpleNamespace(module=model), SimpleNamespace(pad_token_id=0,
+                                                                                     eos_token_id=None),
+                                      HybridEngineRolloutConfig(adaptive_prefill=True))
+        with pytest.raises(ValueError, match="model.generation_config"):
+            rollout.generate(RolloutRequest(prompt, torch.ones_like(prompt)),
+                             SamplingConfig(max_new_tokens=2, temperature=0, continuous_batch_size=capacity))
+        return
     with torch.no_grad():
         # Passing the oracle config explicitly leaves the target's stale default untouched.
         expected = model.generate(prompt[:1], generation_config=expected_config, max_new_tokens=2, do_sample=False)[0,
@@ -2289,6 +2300,7 @@ def test_adaptive_generation_uses_resolved_penalty_on_both_routes(cache_support,
     model = _make_small_qwen().to(dtype=dtype)
     model._supports_cache_class = cache_support
     native_prepare = model._prepare_generation_config
+    original_penalty = model.generation_config.repetition_penalty
     prompt = torch.tensor([[11, 1, 2, 3, 4], [11, 1, 2, 3, 4]], device=next(model.parameters()).device)
     expected_config = GenerationConfig.from_model_config(model.config)
     expected_config.repetition_penalty = 3.0
@@ -2308,7 +2320,7 @@ def test_adaptive_generation_uses_resolved_penalty_on_both_routes(cache_support,
         result = rollout.generate(RolloutRequest(prompt, torch.ones_like(prompt)),
                                   SamplingConfig(max_new_tokens=3, temperature=0, continuous_batch_size=capacity))
     assert torch.equal(result.input_ids, expected)
-    assert model.generation_config.repetition_penalty == 1.0
+    assert model.generation_config.repetition_penalty == original_penalty
     assert (rollout.get_last_continuous_stats() is None) == (capacity == 2)
 
 

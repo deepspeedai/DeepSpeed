@@ -243,8 +243,8 @@ settings are rejected; for example, beam search, no-repeat n-grams, forced token
 and dictionary outputs cannot be reproduced by the continuous path. Auto resolves
 HF's effective generation configuration before validation, including legacy model
 settings, while retaining explicit generation-configuration overrides. Repetition
-penalty retains the original padded prompt history even when bucket model input
-is trimmed.
+penalty follows the installed Transformers version's treatment of leading padding,
+using the original prompt history and attention mask even when bucket input is trimmed.
 
 With profiling, ``get_last_profile()["generation_strategy"]`` reports
 ``"batched"``, ``"bucketed"``, or ``"bucketed_graph"`` for Auto; ``num_prefill_forwards`` counts actual
