@@ -57,9 +57,9 @@ run their Modal tests on the merge queue entry instead of on every PR push, to
 conserve GPU quota. `ci/tests_fetcher.py` looks at the files your PR
 changes, builds an import graph over `deepspeed/` and the `unit` test helpers,
 and selects only the tests that could be affected. The selection is previewed on
-the PR by a cheap no-secret job and executed once the PR enters the merge queue.
-The full design — and
-how to drive and extend it — is in
+the PR by a cheap no-secret job. Add the exact `needs-gpu-test` label before the
+PR enters the merge queue when those selected GPU tests should run. The full
+design — and how to drive and extend it — is in
 [`.github/workflows/TEST_SELECTION.md`](.github/workflows/TEST_SELECTION.md).
 
 How it decides:
@@ -72,8 +72,9 @@ How it decides:
   imports, or any unexpected error in the selector itself.
 
 Escape hatches:
-* **Force the full suite for a push:** put `[test all]` (or `[no filter]`) anywhere
-  in a commit message on the branch.
+* **Force full test selection:** put `[test all]` (or `[no filter]`) anywhere in
+  a commit message on the branch. Queue GPU execution still requires the exact
+  `needs-gpu-test` label.
 * **Run all by touching infra:** changes to the run-all globs (CI config, build
   system, `deepspeed/__init__.py`, collectives/accelerator, shared fixtures, etc.)
   trigger everything, except documentation files. See `COMMON_RUN_ALL_GLOBS` /
