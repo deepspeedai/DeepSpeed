@@ -13,7 +13,7 @@ import torch
 from deepspeed.accelerator import get_accelerator
 from deepspeed.module_inject.auto_ep_layer import AutoEPMoELayer
 from deepspeed.ops.triton_ops import autoep_fused_token_ops as fused_ops
-from deepspeed.utils import safe_get_full_grad
+from deepspeed.utils import safe_get_full_fp32_param, safe_get_full_grad
 from unit.common import DistributedTest
 from unit.v1.moe.autoep_test_utils import (
     MockMoEOnlyTransformer,
@@ -155,10 +155,14 @@ def _named_gradients(engine):
 
 
 def _parameters(engine):
-    return {
-        name: param.detach().float().cpu().clone()
-        for name, param in engine.module.named_parameters() if param.requires_grad
-    }
+    values = {}
+    for name, param in engine.module.named_parameters():
+        if not param.requires_grad:
+            continue
+        # A ZeRO-3 parameter holds only its partition; its full fp32 value is the parameter of an fp32 run.
+        value = safe_get_full_fp32_param(param) if hasattr(param, "ds_id") else param
+        values[name] = value.detach().float().cpu().clone()
+    return values
 
 
 def _take_one_step(engine, seed, *, checkpoint_activations):
@@ -338,7 +342,7 @@ class TestAutoEPFusedParityLocalExperts(DistributedTest):
 class TestAutoEPFusedParityFoldedTensorParallel(DistributedTest):
     world_size = 4
 
-    @pytest.mark.parametrize("zero_stage", [0, 2])
+    @pytest.mark.parametrize("zero_stage", [0, 2, 3])
     @pytest.mark.parametrize("checkpoint_activations", [True, False])
     def test_fused_matches_eager_with_autotp_folding(self, zero_stage, checkpoint_activations):
         seed = 2468
