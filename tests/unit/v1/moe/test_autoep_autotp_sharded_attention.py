@@ -674,8 +674,8 @@ UNIVERSAL_SOURCE = (2, 2)  # TP, EP of the run that saves, on 4 ranks
 UNIVERSAL_STATES = ("fp32", "exp_avg", "exp_avg_sq")
 
 
-def _universal_config(tp_size, ep_size, precision):
-    config = _folded_config(tp_size, ep_size, zero_stage=3)
+def _universal_config(tp_size, ep_size, precision, offload=False):
+    config = _folded_config(tp_size, ep_size, zero_stage=3, offload=offload)
     # Universal Checkpointing converts Adam's states.
     config["optimizer"] = {"type": "AdamW", "params": {"lr": 1e-3, "weight_decay": 0.01}}
     if tp_size == 1:
@@ -685,8 +685,8 @@ def _universal_config(tp_size, ep_size, precision):
     return config
 
 
-def _build_universal_engine(tp_size, ep_size, precision, seed, load_universal=False):
-    config = _universal_config(tp_size, ep_size, precision)
+def _build_universal_engine(tp_size, ep_size, precision, seed, load_universal=False, offload=False):
+    config = _universal_config(tp_size, ep_size, precision, offload=offload)
     if load_universal:
         config["checkpoint"] = {"load_universal": True}
     torch.manual_seed(seed)
@@ -801,15 +801,16 @@ def folded_universal_source(request):
 
 
 UNIVERSAL_TARGETS = [
-    (4, 2, 2),  # the same layout
-    (4, 2, 4),  # EP 4: each EP group spans both TP groups
-    (4, 4, 2),  # TP 4: one data-parallel group
-    (8, 4, 2),  # more ranks with the same 2 data-parallel groups
-    (2, 1, 2),  # AutoEP without AutoTP, 2 data-parallel groups
+    (4, 2, 2, False),  # the same layout
+    (4, 2, 4, False),  # EP 4: each EP group spans both TP groups
+    (4, 2, 4, True),  # the same, with the optimizer offloaded to the CPU
+    (4, 4, 2, False),  # TP 4: one data-parallel group
+    (8, 4, 2, False),  # more ranks with the same 2 data-parallel groups
+    (2, 1, 2, False),  # AutoEP without AutoTP, 2 data-parallel groups
 ]
 
 
-@pytest.mark.parametrize("world_size, tp_size, ep_size", UNIVERSAL_TARGETS)
+@pytest.mark.parametrize("world_size, tp_size, ep_size, offload", UNIVERSAL_TARGETS)
 class TestZero3FoldedUniversalCheckpoint(DistributedTest):
     """A folded ZeRO-3 checkpoint converted to the universal format loads into another layout.
 
@@ -818,12 +819,17 @@ class TestZero3FoldedUniversalCheckpoint(DistributedTest):
     """
 
     def test_universal_load_restores_and_resumes(self, folded_universal_source, universal_precision, tmpdir,
-                                                 world_size, tp_size, ep_size):
+                                                 world_size, tp_size, ep_size, offload):
         if get_accelerator().device_name() == "cpu":
             pytest.skip("AutoEP folding runs on an accelerator")
         save_dir = str(tmpdir)
         record = torch.load(os.path.join(save_dir, "source_record.pt"), weights_only=False)
-        engine = _build_universal_engine(tp_size, ep_size, universal_precision, seed=999, load_universal=True)
+        engine = _build_universal_engine(tp_size,
+                                         ep_size,
+                                         universal_precision,
+                                         seed=999,
+                                         load_universal=True,
+                                         offload=offload)
         engine.load_checkpoint(save_dir, tag="step1_universal")
 
         # Every rank finishes its collectives before any assertion, so a failure cannot leave others waiting.
