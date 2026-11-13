@@ -40,8 +40,7 @@ def build_rollout(rollout_cfg, student_engine=None, tokenizer=None, **kwargs):
 
     Args:
         rollout_cfg: :class:`RolloutConfig` (or any object with an ``engine``
-            attribute set to ``"hybrid_engine"``, or a
-            :class:`~deepspeed.runtime.rollout.native.rollout.NativeRolloutConfig` for ``"native"``).
+            attribute set to ``"hybrid_engine"``).
         student_engine: DeepSpeed engine wrapping the student model.
         tokenizer: HuggingFace tokenizer.
     """
@@ -50,10 +49,5 @@ def build_rollout(rollout_cfg, student_engine=None, tokenizer=None, **kwargs):
         if student_engine is None or tokenizer is None:
             raise ValueError("hybrid_engine rollout needs both student_engine and tokenizer")
         return HybridEngineRollout(engine=student_engine, tokenizer=tokenizer, cfg=rollout_cfg)
-    if engine_name == "native":
-        if student_engine is None or tokenizer is None:
-            raise ValueError("native rollout needs both student_engine and tokenizer")
-        from deepspeed.runtime.rollout.native.rollout import NativeRollout
-        return NativeRollout(engine=student_engine, tokenizer=tokenizer, cfg=rollout_cfg)
 
-    raise ValueError(f"Unknown rollout engine {engine_name!r}; choose from 'hybrid_engine', 'native'")
+    raise ValueError(f"Unknown rollout engine {engine_name!r}; choose from 'hybrid_engine'")

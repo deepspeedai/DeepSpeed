@@ -17,6 +17,9 @@ Every rank of the world calls ``sync_weights`` and ``reconfigure`` (they are col
 ``generate`` is called on the rollout ranks, and a replica decodes the prompts of all its ranks together. The trainer
 may run on a subset of the ranks (ZeRO-3 over those alone, e.g. one node, with the rollout on another): the other
 ranks pass no engine.
+
+This class is the destination that the tests of the relayout and of the training-state move write into. It is not
+registered with :func:`~deepspeed.runtime.rollout.build_rollout`; the tests construct it directly.
 """
 
 import time
