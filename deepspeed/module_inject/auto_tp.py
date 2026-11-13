@@ -14,8 +14,9 @@ import torch
 from deepspeed import comm as dist
 from .layers import *
 from deepspeed.accelerator import get_accelerator
-from .fusedqkv_utils import require_tp_fused_qkvw
-from deepspeed.module_inject.tp_shard import AutoTPMeta, get_shard_size, get_shard_size_list
+from .fusedqkv_utils import (require_tp_fused_qkvw, replicates_kv_block, is_replicated_kv_attention,
+                             replicated_kv_group_count, replicated_kv_shard_heads, replicated_kv_shard_meta)
+from deepspeed.module_inject.tp_shard import (AutoTPMeta, get_shard_size, get_shard_size_list, _MODULE_KV_HEAD_ATTRS)
 from deepspeed.utils import groups
 from deepspeed.utils.logging import log_dist, print_dist
 from deepspeed.module_inject.layers import is_autotp_training_mode
@@ -24,6 +25,19 @@ from deepspeed.checkpoint.constants import DS_AUTOTP_UC_META
 from .autotp_config import TPLayerSpec, AutoTPConfig, PartitionType
 from deepspeed.runtime.zero import GatheredParameters
 from deepspeed.runtime.zero.utils import is_zero_param
+
+# Module attributes update_mp_params may shard. _SHARDED_KV_HEAD_ATTRS is the subset that must
+# stay whole for replicated-K/V attention; keep it a subset of both this list and the broader
+# module attribute probe list so a later edit cannot silently drop one side.
+_MP_PARAM_ATTRS = ("n_heads", "inner_dim", "num_heads", "num_kv", "num_attention_heads", "num_attn_heads",
+                   "all_head_size", "embed_dim", "hidden_size", "num_key_value_heads", "num_kv_heads", "kv_n_heads",
+                   "d_model", "num_attention_heads_per_partition", "num_multi_query_groups_per_partition",
+                   "hidden_size_per_partition")
+_SHARDED_KV_HEAD_ATTRS = ("num_key_value_heads", "num_kv_heads", "kv_n_heads", "num_kv")
+assert set(_SHARDED_KV_HEAD_ATTRS) <= set(_MP_PARAM_ATTRS), \
+    "_SHARDED_KV_HEAD_ATTRS must be a subset of _MP_PARAM_ATTRS"
+assert set(_SHARDED_KV_HEAD_ATTRS) <= set(_MODULE_KV_HEAD_ATTRS), \
+    "_SHARDED_KV_HEAD_ATTRS must be a subset of _MODULE_KV_HEAD_ATTRS"
 
 
 def move(tensor, device, copy=True):
@@ -229,15 +243,27 @@ class AutoTP():
 
         self.mp_size = None
         self.mp_group = None
+        self.partition_config = partition_config
         # Per-model TP metadata threaded through every layer / helper so each AutoTP instance
         # shards by its own model's kv-head / grain values and keeps its own training mode.
         # None is kept in the layers so they keep following set_autotp_mode, as before.
         self.tp_meta = AutoTPMeta.from_model_config(model_config, tp_grain_size, training=training_mode)
+        self._replicates_kv_block = replicates_kv_block(self.module)
+        if self.partition_config is not None and any(
+                is_replicated_kv_attention(child, self._replicates_kv_block) for child in self.module.modules()):
+            # update_mp_params still uses model-wide head counts here, which would leave
+            # ranks without query rows with empty attention attributes.
+            raise NotImplementedError("AutoTP does not support an explicit partition_config for replicated-K/V "
+                                      "attention yet; remove partition_config to use the query-head heuristic.")
+        if self.partition_config is None:
+            # Replicated-K/V layouts keep the whole K/V block on every rank, so shard by
+            # query heads; K/V head attributes stay whole. This assumes one replicated-K/V
+            # layout per model.
+            self.tp_meta = replicated_kv_shard_meta(self.tp_meta, self._replicates_kv_block)
         self.linear_layer_setting = linear_layer_setting
         self.orig_layer_impl = orig_layer_impl
         self.linear_policies = None
         self.conv_linear_layer = False
-        self.partition_config = partition_config
         self.vocab_parallel_lm_head = vocab_parallel_lm_head
         self._training_mode = training_mode
         self._vocab_parallel_lm_head_candidate = None
@@ -406,10 +432,26 @@ class AutoTP():
         if self.training_mode:
             self.mp_group = groups.get_tensor_model_parallel_group()
             self.mp_size = groups.get_tensor_model_parallel_world_size()
-            return
+        else:
+            self.mp_size = mp_size
+            self.mp_group = mp_group
 
-        self.mp_size = mp_size
-        self.mp_group = mp_group
+        self._validate_replicated_kv_tp_width()
+
+    def _validate_replicated_kv_tp_width(self):
+        """Reject a replicated-K/V layout sharded across more ranks than query heads.
+
+        Runs after custom config, HF tp_plan, or heuristic AutoTP has been chosen.
+        """
+        if self.partition_config is not None or not self._replicates_kv_block:
+            return
+        shard_heads = replicated_kv_shard_heads(self.tp_meta, self._replicates_kv_block)
+        if shard_heads is not None and self.mp_size > shard_heads:
+            # A rank beyond the query heads has no query rows and an empty output projection.
+            raise RuntimeError(f"AutoTP cannot shard this replicated key/value attention across {self.mp_size} ranks: "
+                               f"the model has {shard_heads} query heads, so at least one rank would hold "
+                               f"no query rows and an empty attention output projection. Reduce "
+                               f"tensor_parallel.autotp_size to at most the query head count.")
 
     def _replace(self, child, name, conv_linear_layer):
         # This function should clearly define the routing rules for specific layers
@@ -1002,19 +1044,25 @@ class AutoTP():
         if has_unsharded_high_dimensional_param:
             setattr(child, "replaced", True)
             return
-        param_list = [
-            "n_heads", "inner_dim", "num_heads", "num_kv", "num_attention_heads", "num_attn_heads", "all_head_size",
-            "embed_dim", "hidden_size", "num_key_value_heads", "num_kv_heads", "kv_n_heads", "d_model",
-            "num_attention_heads_per_partition", "num_multi_query_groups_per_partition", "hidden_size_per_partition"
-        ]
+        # Replicated-K/V attention follows query heads; K/V aliases stay whole and the
+        # group count follows the local query shard.
+        replicated_kv_attention = is_replicated_kv_attention(child, getattr(self, "_replicates_kv_block", False))
+        param_list = list(_MP_PARAM_ATTRS)
         for param in param_list:
             if "Yuan" in str(child) and 'embed_dim' in param_list:
                 param_list.remove('embed_dim')
             if hasattr(child, param):
+                if replicated_kv_attention and param in _SHARDED_KV_HEAD_ATTRS:
+                    continue
                 param_val = getattr(child, param)
                 # get_shard_size selects its partitioning strategy from the module name, so the
                 # attributes must be sharded under the same name as the weights they describe.
                 setattr(child, param, get_shard_size(param_val, self.mp_size, self.tp_meta, name, rank=tp_index))
+        # Recompute groups from the local query shard. The module may expose the K/V head count
+        # under any of the runtime aliases in _MODULE_KV_HEAD_ATTRS.
+        num_heads = getattr(child, "num_heads", None)
+        if replicated_kv_attention and hasattr(child, "num_key_value_groups") and num_heads is not None:
+            child.num_key_value_groups = replicated_kv_group_count(child, num_heads)
         setattr(child, "replaced", True)
 
     def update_linear_policies(self):
