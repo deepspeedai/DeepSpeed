@@ -4415,13 +4415,15 @@ class DeepSpeedEngine(Module):
         bf16_mode = self.bfloat16_enabled()
         return self._get_rank_zero_ckpt_name(checkpoints_path, tag, self.checkpoint_mp_rank, pp_rank, bf16_mode)
 
-    def _get_ckpt_name(self, checkpoints_path, tag, mp_placeholder=None, pp_placeholder=None):
+    def _get_ckpt_name(self, checkpoints_path, tag, mp_placeholder=None, pp_placeholder=None, partition_weights=None):
         if mp_placeholder is not None:
             mp_rank_str = mp_placeholder
         else:
             mp_rank_str = f"{self.checkpoint_mp_rank:02d}"
 
-        if self.zero_optimization_partition_weights():
+        if partition_weights is None:
+            partition_weights = self.zero_optimization_partition_weights()
+        if partition_weights:
             if pp_placeholder is not None:
                 pp_rank = pp_placeholder
             else:
@@ -4471,6 +4473,15 @@ class DeepSpeedEngine(Module):
         import glob
 
         ckpt_files = glob.glob(ckpt_file_pattern)
+        if not ckpt_files and self.load_universal_checkpoint():
+            # The source's ZeRO stage named these files, and it may differ from ours. A universal load reads
+            # only metadata from them, so the other stage's naming serves as well.
+            other_pattern = self._get_ckpt_name(checkpoints_path,
+                                                tag,
+                                                mp_placeholder="*",
+                                                pp_placeholder="0",
+                                                partition_weights=not self.zero_optimization_partition_weights())
+            ckpt_files = glob.glob(other_pattern)
         ckpt_files.sort()
         return ckpt_files
 
