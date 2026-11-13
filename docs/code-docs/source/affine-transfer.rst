@@ -195,8 +195,8 @@ Analyzing a plan
 
 ``analyze_transfers`` reports what an ``execute_transfers`` batch will do,
 without running it or communicating. It takes the same plans, endpoints,
-element size and ``StagingBudget`` and replays the executor's own operation
-building and round packing, so it can be called on one process, for example to
+element size and ``StagingBudget`` and reads the schedule from
+``schedule_transfers``, so it can be called on one process, for example to
 compare two candidate plans or budgets before choosing one::
 
     from deepspeed.checkpoint.affine_transfer_analysis import (analyze_transfers, expected_stats,
@@ -209,13 +209,18 @@ compare two candidate plans or budgets before choosing one::
     summary = report_to_dict(report)
 
 The report covers volume (logical, moved, local-copy and remote bytes), the
-distribution of segment, chunk and message sizes, the number of rounds, every
+number of chunks, the distribution of segment and message sizes, the number of rounds, every
 process's sent and received bytes, peers, messages, pack and unpack bytes and
 staging arena size, and bytes per process pair and per path label. Each message
 is labelled with ``path_of(from_process, to_process)``, the same hook
 ``calibrate_links`` uses, so per-path totals can be priced with ``fit_links``
 results. ``expected_stats(report, process)`` gives the ``TransferStats`` that
 process will return, which makes the prediction checkable after a run.
+
+Processes are the transport-group ranks ``TransferEndpoints`` binds, and the
+summary records that as ``process_numbering``. Its pair and per-process figures
+join with ``fit_links`` results only when ``calibrate_links`` measured the same
+group, so pass the transfer's group to both.
 
 The report only describes a plan. It does not choose replicas, rank plans or
 estimate time; those decisions belong to the caller.
