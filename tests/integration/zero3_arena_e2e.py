@@ -52,16 +52,18 @@ Z3 = {
 }
 TPSPECS = [
     {
+        # segKI slices per-rank head ranges out of the FULL blocks; these
+        # must stay replicated under TP
         "patterns": [r".*\.linear_attn\.in_proj_z"],
-        "partition_type": "column"
+        "partition_type": "skip"
     },
     {
         "patterns": [r".*\.linear_attn\.in_proj_b"],
-        "partition_type": "column"
+        "partition_type": "skip"
     },
     {
         "patterns": [r".*\.linear_attn\.in_proj_a"],
-        "partition_type": "column"
+        "partition_type": "skip"
     },
     {
         "patterns": [r".*\.linear_attn\.out_proj"],
