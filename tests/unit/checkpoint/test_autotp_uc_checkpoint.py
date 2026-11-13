@@ -891,9 +891,8 @@ def test_group_per_tp_shapes_rejects_disagreeing_pipeline_replicas():
 
 
 class TestRealCheckpointUniversalConversionTPxPP(DistributedTest):
-    # Generate a real ZeRO-1 checkpoint with TP=2, PP=2 using the accelerator's
-    # communication backend (CPU: gloo, NPU: hccl, CUDA: nccl), then convert it
-    # to a universal checkpoint. The writer numbers mp_rank files PP-major
+    # Generate a real ZeRO-1 checkpoint with TP=2, PP=2, then convert it to a
+    # universal checkpoint. The writer numbers mp_rank files PP-major
     # (mp_rank = pp * tp_degree + tp, matching reshape_meg_2d.simple_init);
     # _group_per_tp_shapes must use the same ordering. The TP-major index bug
     # dropped a shape (None) for one TP rank of every parameter, so the assertion

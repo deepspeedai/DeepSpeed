@@ -99,7 +99,7 @@ def _init_dist(rank, world_size, port):
     os.environ["WORLD_SIZE"] = str(world_size)
     os.environ["LOCAL_SIZE"] = str(world_size)
     # The fixture spawns processes directly, so select the device before NCCL/HCCL
-    # initialization. The backend follows the accelerator (CPU: gloo, NPU: hccl).
+    # initialization.
     if get_accelerator().is_available():
         get_accelerator().set_device(rank)
     deepspeed.init_distributed(auto_mpi_discovery=False, rank=rank, world_size=world_size)
