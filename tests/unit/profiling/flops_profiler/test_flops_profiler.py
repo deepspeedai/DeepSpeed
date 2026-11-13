@@ -308,3 +308,25 @@ def test_flops_profiler_counts_shared_module_once(shared):
     assert flops == 60000
     assert macs == 30000
     assert params == (10000 if shared else 30000)
+
+
+@pytest.mark.sequential
+@pytest.mark.parametrize("lengths, expected_flops", [(None, 149760), ([5, 5, 5, 5], 149760), ([5, 3, 2, 1], 82368)])
+def test_flops_profiler_rnn_counts_packed_cell_steps(lengths, expected_flops):
+    # Regression test for https://github.com/deepspeedai/DeepSpeed/issues/4333
+    # A PackedSequence runs one cell step per row of .data, so full-length packing costs the
+    # same as the dense rectangle and ragged packing costs 11 of its 20 steps.
+    model = torch.nn.LSTM(8, 16, num_layers=2, batch_first=True)
+    padded = torch.randn(4, 5, 8)
+    if lengths is None:
+        inp = padded
+    else:
+        inp = torch.nn.utils.rnn.pack_padded_sequence(padded, lengths, batch_first=True)
+
+    prof = FlopsProfiler(model)
+    prof.start_profile()
+    model(inp)
+    flops = prof.get_total_flops()
+    prof.end_profile()
+
+    assert flops == expected_flops
