@@ -1211,7 +1211,6 @@ class HybridEngineRollout(RolloutEngine):
                 attention_mask=prompt_attention,
                 position_ids=position_ids,
                 max_new_tokens=1,
-                do_sample=False,
                 eos_token_id=None,
                 pad_token_id=pad_token_id,
                 return_dict_in_generate=True,

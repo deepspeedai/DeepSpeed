@@ -234,7 +234,6 @@ def test_hybrid_cache_exposes_hf_gdn_protocol():
     assert cache.is_recording_past(1) is False
 
 
-
 def test_static_cache_memory_skips_layers_without_kv():
     config = type("Config", (), {"num_hidden_layers": 2})()
     cache = DeepSpeedStaticCache(config, max_cache_len=4)
