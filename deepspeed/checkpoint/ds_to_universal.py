@@ -906,7 +906,9 @@ def _consolidate_zero3_autoep_expert_states(output_dir, model_files, optim_files
                         expert_fragments.setdefault(key, []).append((partition_rank, fragment_path, shape))
 
                 offset += partitioned_numel
-        del optim_state, zero_optim_state
+        # Drop every reference into this rank's optimizer state, including the loop variables, before the
+        # next file is read.
+        optim_state = zero_optim_state = optimizer_sub_state = flat_state = flat_tensor = None
 
     grouped_by_param = {}
     for (param_name, state_key, ep_rank), fragments in expert_fragments.items():
@@ -939,9 +941,14 @@ def _consolidate_zero3_autoep_expert_states(output_dir, model_files, optim_files
             if any(tuple(fragment_shape) != tuple(shape) for _, _, fragment_shape in fragments):
                 raise RuntimeError(f"Inconsistent AutoEP expert fragment shapes for {param_name}/{state_key} "
                                    f"EP rank {ep_rank}")
-            full_flat = torch.cat([torch.load(path, weights_only=True) for _, path, _ in fragments],
+            fragment_paths = [path for _, path, _ in fragments]
+            full_flat = torch.cat([torch.load(path, weights_only=True) for path in fragment_paths],
                                   dim=0)[:_shape_numel(shape)]
             ep_tensors[ep_rank] = full_flat.view(shape)
+            # Each fragment is read only once. Removing it now means the disk never holds every fragment and
+            # every universal file at the same time.
+            for path in fragment_paths:
+                os.remove(path)
 
         if not ep_tensors:
             continue
