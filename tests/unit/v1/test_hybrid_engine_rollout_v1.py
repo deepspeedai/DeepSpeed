@@ -596,7 +596,7 @@ def test_decode_repetition_penalty_matches_hf_generate(temperature, use_graph_ca
     assert output.input_ids.tolist() == expected
 
 
-def test_continuous_graph_recaptures_only_when_parameter_layout_changes():
+def test_continuous_graph_recaptures_only_when_tensor_layout_changes():
     accelerator = get_accelerator()
     if not accelerator.is_available() or accelerator.create_graph() is None:
         pytest.skip("graph capture is required for continuous graph rollout coverage")
@@ -641,7 +641,7 @@ def test_continuous_graph_recaptures_only_when_parameter_layout_changes():
     accelerator.capture_to_graph = counted_capture_to_graph
     try:
         outputs = []
-        for step, prompt_ids in enumerate((short_prompts, short_prompts, long_prompts, short_prompts)):
+        for step, prompt_ids in enumerate((short_prompts, short_prompts, long_prompts, short_prompts, short_prompts)):
             if step == 1:
                 # Apply the same in-place update an optimizer step would make.
                 with torch.no_grad():
@@ -654,6 +654,11 @@ def test_continuous_graph_recaptures_only_when_parameter_layout_changes():
                 with torch.no_grad():
                     eager_model.lm_head.weight.transpose_(0, 1)
                     graph_model.lm_head.weight.transpose_(0, 1)
+            if step == 4:
+                # A re-registered buffer lives at an address the captured kernels never read.
+                for model in (eager_model, graph_model):
+                    rotary = model.model.rotary_emb
+                    rotary.register_buffer("inv_freq", rotary.inv_freq * 0.5, persistent=False)
             request = RolloutRequest(prompt_ids, torch.ones_like(prompt_ids))
             expected = eager_rollout.generate(request, eager_sampling)
             output = graph_rollout.generate(request, graph_sampling)
@@ -664,7 +669,8 @@ def test_continuous_graph_recaptures_only_when_parameter_layout_changes():
 
     # The update must change the tokens, otherwise stale weights would also pass.
     assert not torch.equal(outputs[0], outputs[1])
-    assert capture_count[0] == 2
+    assert not torch.equal(outputs[3], outputs[4])
+    assert capture_count[0] == 3
 
     cache_bytes = graph_rollout.get_last_continuous_stats()["cache_memory_bytes"]
     allocated = accelerator.memory_allocated()

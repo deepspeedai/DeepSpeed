@@ -365,6 +365,7 @@ def test_continuous_graph_state_survives_in_place_weight_updates():
         def __init__(self):
             super().__init__()
             self.weight = torch.nn.Parameter(torch.zeros(2, 3))
+            self.register_buffer("inv_freq", torch.ones(3), persistent=False)
             self.config = SimpleNamespace()
 
     module = DecodeModule()
@@ -386,6 +387,9 @@ def test_continuous_graph_state_survives_in_place_weight_updates():
         # A replaced parameter lives at an address the captured kernels never read.
         module.weight = torch.nn.Parameter(torch.zeros(2, 3))
         moved = rollout._get_continuous_graph_state(module, 1, 5, device, torch.float32, GraphCache)
+        # Re-registering a buffer, e.g. a rotary inv_freq or quant scale, moves it too.
+        module.register_buffer("inv_freq", torch.full((3, ), 2.0), persistent=False)
+        rebuffered = rollout._get_continuous_graph_state(module, 1, 5, device, torch.float32, GraphCache)
         resized = rollout._get_continuous_graph_state(module, 1, 6, device, torch.float32, GraphCache)
         rollout.shutdown()
         released = rollout._get_continuous_graph_state(module, 1, 6, device, torch.float32, GraphCache)
@@ -393,9 +397,10 @@ def test_continuous_graph_state_survives_in_place_weight_updates():
     assert updated is first
     assert relaid is not first
     assert moved is not relaid
-    assert resized is not moved
+    assert rebuffered is not moved
+    assert resized is not rebuffered
     assert released is not resized
-    assert capture.call_count == 5
+    assert capture.call_count == 6
 
 
 def test_static_cache_constructor_supports_max_batch_keyword():

@@ -15,6 +15,7 @@ Two generation paths:
      sampled like the graph path, with or without graph capture.
 """
 
+import itertools
 import time
 from copy import copy
 from dataclasses import dataclass
@@ -616,8 +617,6 @@ class HybridEngineRollout(RolloutEngine):
         minimum_cache_len = prompt_len + sampling.max_new_tokens
         max_cache_len = (self.continuous_cache_capacity
                          if self.continuous_cache_capacity is not None else minimum_cache_len)
-        if max_cache_len < minimum_cache_len:
-            raise ValueError("continuous_cache_capacity must fit the prompt and all generated tokens")
         max_positions = getattr(module.config, "max_position_embeddings", None)
         if max_positions is not None and max_cache_len > max_positions:
             raise ValueError("continuous batching cache exceeds the model maximum position embeddings")
@@ -828,14 +827,17 @@ class HybridEngineRollout(RolloutEngine):
 
     @staticmethod
     def _continuous_graph_signature(module, max_batch_size, max_cache_len, device, model_dtype):
-        # Replay reads parameters through the address and layout fixed at capture, so
-        # in-place value updates need no recapture, but a moved or re-laid-out
-        # parameter does. Prefill runs eagerly, so the prompt width only matters
-        # through max_cache_len.
-        parameter_signature = tuple(
-            (parameter.data_ptr(), parameter.device, parameter.dtype, tuple(parameter.shape), parameter.stride())
-            for parameter in module.parameters())
-        return (id(module), device.type, device.index, model_dtype, max_batch_size, max_cache_len, parameter_signature)
+        # Replay reads parameters and buffers through the address and layout fixed
+        # at capture, so in-place value updates need no recapture, but a moved or
+        # re-laid-out tensor does. Prefill runs eagerly, so the prompt width only
+        # matters through max_cache_len.
+        tensor_signature = tuple((tensor.data_ptr(), tensor.device, tensor.dtype, tuple(tensor.shape), tensor.stride())
+                                 for tensor in itertools.chain(module.parameters(), module.buffers()))
+        device_index = device.index
+        if device_index is None and device.type == get_accelerator().device_name():
+            # torch.device("cuda") and torch.device("cuda", 0) name the same device.
+            device_index = get_accelerator().current_device()
+        return (id(module), device.type, device_index, model_dtype, max_batch_size, max_cache_len, tensor_signature)
 
     @staticmethod
     def _update_static_causal_attention(static_attention, static_causal_attention):
