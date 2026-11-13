@@ -283,15 +283,17 @@ agree on the longest budget any rank's prompts leave under ``max_new_tokens``
 and ``max_out_tokens``, and stop together once every rank has reached EOS,
 checked over the parameter-gather group.
 
-AutoTP (``tensor_parallel.autotp_size``) is supported with static batching and
-single-turn continuous batching; every KV cache is sized from each rank's own
-prefill, which holds only its share of the heads.
+AutoTP (``tensor_parallel.autotp_size``) is supported on every generate path;
+every KV cache is sized from each rank's own prefill, which holds only its
+share of the heads.
 Tensor-parallel ranks must run the same forwards, so before each generate call
 every rank takes its group's first rank's random state, which makes sampling
 draw the same tokens from the gathered logits, and tool calls run on the
-group's first rank only, which broadcasts their output. Multi-turn continuous
-batching rejects AutoTP: a turn is admitted when its tools return, which
-happens at different steps on each rank. HybridEngine's ``inference_tp_size`` is rejected,
+group's first rank only, which broadcasts their output. In multi-turn
+continuous batching, tools finish at wall-clock times, so the first rank also
+decides when a turn returns: at each step where a row frees, it sends the
+finished tools' output to its group over a Gloo group on the host, and every
+rank queues the same turns. HybridEngine's ``inference_tp_size`` is rejected,
 since the rollout calls the module directly and skips the input gather of the
 hybrid engine's ``generate()``.
 

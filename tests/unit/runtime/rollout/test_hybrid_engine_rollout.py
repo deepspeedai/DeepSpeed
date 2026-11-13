@@ -25,6 +25,7 @@ from deepspeed.ops.transformer.inference.op_binding.workspace import WorkspaceOp
 from deepspeed.runtime.config import HybridEngineConfig
 from deepspeed.runtime.hybrid_engine import DeepSpeedHybridEngine
 from deepspeed.runtime.rollout.base import RolloutConfig, RolloutRecord, RolloutRequest, SamplingConfig
+from deepspeed.runtime.rollout.continuous_batching import ToolQueue
 from deepspeed.runtime.rollout.tool import Tool, ToolCall, ToolSet, parse_qwen3_coder_tool_calls
 from deepspeed.runtime.rollout.utils import get_eos_token_ids, tokenize_tool_responses
 from deepspeed.runtime.rollout.hybrid_engine_rollout import (
@@ -1861,22 +1862,90 @@ def test_rejects_zero3_where_ranks_would_run_different_forwards(cfg_kwargs, mess
         rollout.generate(_make_request(), _make_sampling())
 
 
-@pytest.mark.parametrize(("autotp_size", "inference_tp_size", "cfg_kwargs", "message"), [
-    (2, 1, {
-        "continuous_batch_size": 2,
-        "multi_turn": True,
-        "max_turns": 2
-    }, "multi-turn continuous batching does not support AutoTP"),
-    (1, 2, {}, "does not support hybrid engine inference tensor parallelism"),
-])
-def test_rejects_unsupported_tensor_parallelism(autotp_size, inference_tp_size, cfg_kwargs, message):
+def test_rejects_hybrid_engine_inference_tensor_parallelism():
     engine = _make_engine()
-    engine.autotp_size.return_value = autotp_size
-    engine._config.hybrid_engine.inference_tp_size = inference_tp_size
-    rollout = HybridEngineRollout(engine, _make_tokenizer(), HybridEngineRolloutConfig(**cfg_kwargs))
+    engine._config.hybrid_engine.inference_tp_size = 2
+    rollout = HybridEngineRollout(engine, _make_tokenizer(), HybridEngineRolloutConfig())
 
-    with pytest.raises(ValueError, match=message):
+    with pytest.raises(ValueError, match="does not support hybrid engine inference tensor parallelism"):
         rollout.generate(_make_request(), _make_sampling())
+
+
+class _EchoTextTool(Tool):
+    name = "echo"
+    description = "Echoes its text."
+    parameters = {"type": "object", "properties": {"text": {"type": "string"}}}
+
+    def __init__(self):
+        self.calls = 0
+
+    async def execute(self, arguments):
+        self.calls += 1
+        return arguments["text"]
+
+
+@patch("deepspeed.runtime.rollout.hybrid_engine_rollout.tokenize_tool_responses", return_value=[9])
+def test_tool_queue_takes_tool_output_from_the_first_tensor_parallel_rank(tokenize):
+    """Only the first rank runs the tools; the others append the output it sends, so the group stays in step."""
+    sent = []
+
+    class FakeDist:
+        rank = 0
+
+        def get_rank(self):
+            return self.rank
+
+        def broadcast(self, tensor, src, group=None):
+            if self.rank == src:
+                sent.append(tensor.clone())
+            else:
+                tensor.copy_(sent.pop(0))
+
+    tool = _EchoTextTool()
+    rollout = HybridEngineRollout(_make_engine(), _make_tokenizer(),
+                                  HybridEngineRolloutConfig(multi_turn=True, max_turns=2), ToolSet([tool]))
+    rollout._tool_group, rollout._tool_src = object(), 0
+    # Non-ASCII text and a lone surrogate must survive the trip unchanged.
+    rollout._end_turn = lambda *_args: [ToolCall(name="echo", arguments={"text": "é \ud800"})]
+    fake = FakeDist()
+    records = {}
+    with patch("deepspeed.runtime.rollout.continuous_batching.dist", fake):
+        for rank in (0, 1):
+            fake.rank = rank
+            records[rank] = [_prompt([1, 3])]
+            with ToolQueue(rollout, records[rank], max_new_tokens=8) as queue:
+                queue.retire(0, [5, 2], None)
+                assert queue.busy
+                queue.wait()
+                assert queue.pop_ready() == [0]
+                assert not queue.busy
+                assert queue.tool_ms > 0.0
+
+    assert tool.calls == 1
+    assert not sent
+    assert [call.args[0][0]["content"] for call in tokenize.call_args_list] == ["é \ud800"] * 2
+    assert records[0][0].tokens == records[1][0].tokens == [1, 3, 5, 2, 9]
+
+
+def test_tool_queue_sends_only_a_size_when_no_tool_finished():
+    sizes = []
+
+    class FakeDist:
+
+        def get_rank(self):
+            return 1
+
+        def broadcast(self, tensor, src, group=None):
+            sizes.append(tensor.clone())
+            tensor.zero_()
+
+    rollout = HybridEngineRollout(_make_engine(), _make_tokenizer(),
+                                  HybridEngineRolloutConfig(multi_turn=True, max_turns=2))
+    rollout._tool_group, rollout._tool_src = object(), 0
+    with patch("deepspeed.runtime.rollout.continuous_batching.dist", FakeDist()):
+        queue = ToolQueue(rollout, [_prompt([1, 3])], max_new_tokens=8)
+        assert queue.pop_ready() == []
+    assert len(sizes) == 1
 
 
 @pytest.mark.parametrize("max_new_tokens_per_turn, turn_budgets", [(None, [3, 1]), (2, [2, 1])])

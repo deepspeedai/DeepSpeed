@@ -2,6 +2,7 @@
 # DeepSpeed Team
 """Accelerator-backed v1 HybridEngineRollout tests."""
 
+import asyncio
 import copy
 import gc
 import os
@@ -650,6 +651,21 @@ class _RankTool(Tool):
         return str(dist.get_rank())
 
 
+class _SlowRankTool(Tool):
+    """Answers with its rank, after a delay that differs per rank and per call, so ranks finish tools at different steps."""
+    name = "rank"
+    description = "Returns the rank."
+    parameters = {"type": "object", "properties": {}}
+
+    def __init__(self):
+        self.calls = 0
+
+    async def execute(self, arguments):
+        self.calls += 1
+        await asyncio.sleep(0.01 * (1 + 3 * dist.get_rank()) * (1 + self.calls % 3))
+        return str(dist.get_rank())
+
+
 class TestAutoTPRollout(DistributedTest):
     """Tensor-parallel ranks must roll out the same records, or they would run different forwards."""
     world_size = 2
@@ -777,6 +793,61 @@ class TestAutoTPRollout(DistributedTest):
         assert all(len(record.tokens) == 5 + 4 + 1 + 4 for record in records)
         gathered = self._gather(records)
         assert gathered[0] == gathered[1]
+
+    @pytest.mark.parametrize("use_graph_capture", [False, True])
+    def test_continuous_batching_admits_tool_turns_at_the_same_step_on_every_rank(self, use_graph_capture):
+        if use_graph_capture and not get_accelerator().is_graph_capture_supported():
+            pytest.skip("requires graph capture")
+        if (not use_graph_capture and hasattr(Cache, "get_query_offset")
+                and not hasattr(DeepSpeedStaticCache, "get_query_offset")):
+            pytest.skip("DeepSpeedStaticCache lacks get_query_offset for this Transformers version")
+        engine, _ = self._engine()
+        tokenizer = SimpleNamespace(pad_token_id=0, eos_token_id=None, decode=lambda ids, **_kwargs: "")
+        prompts = [[3, 7, 21, 30, 44], [5, 9, 12], [8, 17, 2, 40], [11, 6, 33, 25, 19, 4]]
+        sampling = SamplingConfig(max_new_tokens=12, max_new_tokens_per_turn=4, temperature=0.0)
+
+        def roll_out(continuous_batch_size):
+            tool = _SlowRankTool()
+            rollout = HybridEngineRollout(engine,
+                                          tokenizer,
+                                          HybridEngineRolloutConfig(multi_turn=True,
+                                                                    max_turns=3,
+                                                                    use_graph_capture=use_graph_capture,
+                                                                    continuous_batch_size=continuous_batch_size,
+                                                                    return_log_probs=True),
+                                          tools=ToolSet([tool]))
+            end_turn = rollout._end_turn
+            # Greedy responses here never end in EOS, so the first two turns are made to call the tool.
+            call = rollout.parse_tool_calls('<tool_call>{"name": "rank", "arguments": {}}</tool_call>', rollout.tools)
+            rollout._end_turn = lambda sample, response, turn, *args: call if turn < 2 else end_turn(
+                sample, response, turn, *args)
+            request = RolloutRequest(samples=[_prompt(prompt) for prompt in prompts])
+            try:
+                with patch("deepspeed.runtime.rollout.hybrid_engine_rollout.tokenize_tool_responses",
+                           side_effect=lambda messages, *_args: [50 + int(message["content"])
+                                                                 for message in messages]):
+                    records = rollout.generate(request, sampling).samples
+            finally:
+                # The override refers back to the rollout, and a live graph holding NCCL work hangs process-group
+                # teardown, so break the cycle and free the graph now.
+                del rollout._end_turn
+                del rollout
+                gc.collect()
+                get_accelerator().synchronize()
+            return records, tool.calls
+
+        # Two slots for four trajectories, so turns return from tools while other rows decode.
+        records, calls = roll_out(continuous_batch_size=2)
+        static_records, _ = roll_out(continuous_batch_size=None)
+
+        gathered = self._gather(records)
+        assert gathered[0] == gathered[1]
+        # Only the first rank runs the tools, and every rank appends its output.
+        assert calls == (2 * len(prompts) if dist.get_rank() == 0 else 0)
+        for prompt, record in zip(prompts, records):
+            assert len(record.tokens) == len(prompt) + 4 + 1 + 4 + 1 + 4
+            assert record.tokens[len(prompt) + 4] == record.tokens[len(prompt) + 9] == 50
+        assert [record.tokens for record in records] == [record.tokens for record in static_records]
 
 
 # ZeRO-3 gathers parameters in every forward, so its ranks must run the same forwards: single-turn static batching

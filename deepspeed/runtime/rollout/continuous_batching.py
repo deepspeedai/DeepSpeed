@@ -11,6 +11,7 @@ free rows.
 
 import asyncio
 import concurrent.futures
+import json
 import threading
 import time
 from collections import deque
@@ -19,6 +20,7 @@ from typing import Hashable, Optional
 
 import torch
 
+import deepspeed.comm as dist
 from deepspeed.runtime.rollout.base import RolloutRecord
 from deepspeed.runtime.rollout.utils import update_sample_from_response
 
@@ -132,6 +134,16 @@ class ContinuousBatchScheduler:
             self._known_ids.discard(request_id)
         return ContinuousBatchUpdate(tuple(request for request, _ in survivors), keep_slots, retired, tuple(admitted))
 
+    def will_free_slot(self, finished_ids=()) -> bool:
+        """Whether ``advance(finished_ids)`` leaves a row free, so a request queued now could be admitted."""
+        if len(self._active) < self.max_batch_size or finished_ids:
+            return True
+        for request, generated in self._active:
+            limit = request.max_new_tokens if request.max_new_tokens is not None else self.max_new_tokens
+            if generated + 1 >= limit:
+                return True
+        return False
+
     def advance(self, finished_ids=()) -> ContinuousBatchUpdate:
         explicit_finished = set(finished_ids)
         active_ids = {request.request_id for request, _ in self._active}
@@ -171,6 +183,9 @@ class ToolQueue:
     A request retired from the batch either leaves for good or waits here while the tools it called run on a
     background event loop, so the other rows keep decoding. Once they finish, it leaves for the front of the pending
     queue with its tool output appended.
+
+    With AutoTP, only the first rank of each tensor-parallel group runs the tools; ``pop_ready`` sends the finished
+    ones to the other ranks, so the whole group appends the same output and admits the same turns.
     """
 
     def __init__(self, rollout, trajectories, max_new_tokens):
@@ -180,8 +195,11 @@ class ToolQueue:
         self.generated = [0] * len(trajectories)
         self.turns = [0] * len(trajectories)
         self.tool_ms = 0.0
-        # Trajectory -> (response, log-probs, calls, future, submit time) while its tools run.
+        # Trajectory -> (response, log-probs, calls, future) while its tools run; the future is None on ranks that
+        # take tool output from their group's first rank.
         self.in_flight = {}
+        self._group = rollout._tool_group
+        self._runs_tools = self._group is None or dist.get_rank() == rollout._tool_src
         self._loop = None
         self._thread = None
 
@@ -212,17 +230,35 @@ class ToolQueue:
         if calls is None:
             update_sample_from_response(sample, response, log_probs, [], rollout.tokenizer)
             return
-        future = asyncio.run_coroutine_threadsafe(rollout._run_tool_calls({i: calls}), self._loop)
-        self.in_flight[i] = (response, log_probs, calls, future, time.perf_counter())
+        future = None
+        if self._runs_tools:
+            future = asyncio.run_coroutine_threadsafe(self._timed(rollout._run_tool_calls({i: calls})), self._loop)
+        self.in_flight[i] = (response, log_probs, calls, future)
+
+    @staticmethod
+    async def _timed(tool_calls):
+        start = time.perf_counter()
+        outputs = await tool_calls
+        return outputs, (time.perf_counter() - start) * 1000.0
 
     def pop_ready(self):
-        """Append the output of finished tools, and return the trajectories that go back to the pending queue."""
+        """Append the output of finished tools, and return the trajectories that go back to the pending queue.
+
+        With AutoTP this is a collective over the tensor-parallel group, so its ranks must call it at the same steps.
+        """
         rollout = self.rollout
+        finished = []
+        if self._runs_tools:
+            for i in [i for i, entry in self.in_flight.items() if entry[3].done()]:
+                outputs, tool_ms = self.in_flight[i][3].result()
+                finished.append((i, outputs[i], tool_ms))
+        if self._group is not None:
+            finished = self._share(finished)
         ready = []
-        for i in [i for i, entry in self.in_flight.items() if entry[3].done()]:
-            response, log_probs, calls, future, submitted = self.in_flight.pop(i)
-            self.tool_ms += (time.perf_counter() - submitted) * 1000.0
-            tool_response = rollout._tool_response(calls, future.result()[i])
+        for i, outputs, tool_ms in finished:
+            response, log_probs, calls, _ = self.in_flight.pop(i)
+            self.tool_ms += tool_ms
+            tool_response = rollout._tool_response(calls, outputs)
             sample = self.trajectories[i]
             if not rollout._tool_output_fits(sample, response, tool_response):
                 sample.status = RolloutRecord.Status.TRUNCATED
@@ -232,7 +268,29 @@ class ToolQueue:
             ready.append(i)
         return ready
 
+    def _share(self, finished):
+        """The first rank's finished tools, on every rank of its group: a size, then the output as JSON bytes.
+
+        Both go over a Gloo group on the host, so they take no device copies and do not queue behind the forward's
+        collectives; steps where nothing finished send only the size.
+        """
+        src = self.rollout._tool_src
+        payload = json.dumps(finished).encode() if finished else b""
+        size = torch.tensor([len(payload)], dtype=torch.long)
+        dist.broadcast(size, src, group=self._group)
+        if size.item() == 0:
+            return []
+        if self._runs_tools:
+            buffer = torch.frombuffer(bytearray(payload), dtype=torch.uint8)
+        else:
+            buffer = torch.empty(size.item(), dtype=torch.uint8)
+        dist.broadcast(buffer, src, group=self._group)
+        return json.loads(buffer.numpy().tobytes())
+
     def wait(self):
         """Block until one of the running tools finishes."""
+        # The other ranks wait in pop_ready, for the first rank's output.
+        if not self._runs_tools:
+            return
         concurrent.futures.wait([entry[3] for entry in self.in_flight.values()],
                                 return_when=concurrent.futures.FIRST_COMPLETED)

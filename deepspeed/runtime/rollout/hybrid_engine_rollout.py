@@ -267,6 +267,22 @@ class HybridEngineRolloutConfig(RolloutConfig):
                              f"choose from {', '.join(TOOL_CALL_PARSERS)}")
 
 
+def _host_tensor_parallel_group():
+    """A Gloo group over this rank's AutoTP group, and the group's first rank, for sending tool output on the host."""
+    from deepspeed.utils import groups
+
+    ranks = tuple(dist.get_all_ranks_from_group(groups.get_tensor_model_parallel_group()))
+    all_ranks = [None] * dist.get_world_size()
+    dist.all_gather_object(all_ranks, ranks)
+    own_group = None
+    # Every rank creates every group, in the same order.
+    for group_ranks in sorted(set(map(tuple, all_ranks))):
+        group = dist.new_group(list(group_ranks), backend="gloo")
+        if group_ranks == ranks:
+            own_group = group
+    return own_group, groups.get_tensor_model_parallel_src_rank()
+
+
 class HybridEngineRollout(RolloutEngine):
     """Rollout engine using DeepSpeed hybrid engine.
 
@@ -310,6 +326,10 @@ class HybridEngineRollout(RolloutEngine):
         self._last_profile = None
         self._last_continuous_stats = None
         self._continuous_graph_state = None
+        self._tool_group = None
+        self._tool_src = None
+        if self.autotp_size > 1 and self.multi_turn and self.continuous_batch_size is not None:
+            self._tool_group, self._tool_src = _host_tensor_parallel_group()
         if self.use_shared_prefill:
             if self.continuous_batch_size is not None:
                 raise ValueError("continuous batching does not support shared prompt prefill")
@@ -355,10 +375,6 @@ class HybridEngineRollout(RolloutEngine):
         # The rollout calls the module directly, so it skips the input gather of the hybrid engine's generate().
         if self.inference_tp_size > 1:
             raise ValueError("HybridEngineRollout does not support hybrid engine inference tensor parallelism")
-        # Multi-turn continuous batching admits a turn when its tools return, which happens at different steps on
-        # each rank, so tensor-parallel ranks would run different forwards.
-        if self.autotp_size > 1 and self.continuous_batch_size is not None and self.multi_turn:
-            raise ValueError("multi-turn continuous batching does not support AutoTP")
 
     def _check_attention(self):
         # Graph decode and continuous batching pass their own 4-D attention masks, which flash_attention_2 cannot take.
@@ -700,19 +716,8 @@ class HybridEngineRollout(RolloutEngine):
             while update.active or tool_queue.busy:
                 if not update.active:
                     tool_queue.wait()
-                for request_id in tool_queue.pop_ready():
-                    sample = trajectories[request_id]
-                    prompt_lengths[request_id] = sum(sample.attention_mask)
-                    budget = min(self._turn_budget(sample, tool_queue.generated[request_id], sampling),
-                                 max_cache_len - prompt_lengths[request_id])
-                    if budget <= 0:
-                        sample.status = RolloutRecord.Status.TRUNCATED
-                        continue
-                    # A trajectory already in progress goes before those not yet started.
-                    scheduler.submit(ContinuousBatchRequest(request_id, max_new_tokens=budget), front=True)
-                    responses[request_id] = []
-                    response_log_probs[request_id] = []
-                if not update.active:
+                    self._requeue_tool_turns(tool_queue, scheduler, sampling, prompt_lengths, responses,
+                                             response_log_probs, True, max_cache_len)
                     update = scheduler.schedule()
                     continue
                 if profile is not None:
@@ -787,6 +792,10 @@ class HybridEngineRollout(RolloutEngine):
                     if is_eos:
                         finished_ids.append(request_id)
 
+                # Finished tools are taken only when a row frees, the one time a returning turn can be admitted.
+                if tool_queue.busy and scheduler.will_free_slot(finished_ids):
+                    self._requeue_tool_turns(tool_queue, scheduler, sampling, prompt_lengths, responses,
+                                             response_log_probs, True, max_cache_len)
                 scheduler_start = self._profile_start(profile)
                 rows_held = len(update.active)
                 update = scheduler.advance(finished_ids)
@@ -808,6 +817,30 @@ class HybridEngineRollout(RolloutEngine):
                                             tool_queue.generated, [sample.response_length for sample in trajectories],
                                             sum(tool_queue.turns), tool_queue.tool_ms, max_batch_size, longest_prompt,
                                             generation_end, generation_end)
+
+    def _requeue_tool_turns(self,
+                            tool_queue,
+                            scheduler,
+                            sampling,
+                            prompt_lengths,
+                            responses,
+                            response_log_probs,
+                            unpadded,
+                            max_cache_len=None):
+        """Queue the turns whose tools finished, with ``unpadded`` contexts and at most ``max_cache_len`` long."""
+        for request_id in tool_queue.pop_ready():
+            sample = tool_queue.trajectories[request_id]
+            prompt_lengths[request_id] = sum(sample.attention_mask) if unpadded else len(sample.tokens)
+            budget = self._turn_budget(sample, tool_queue.generated[request_id], sampling)
+            if max_cache_len is not None:
+                budget = min(budget, max_cache_len - prompt_lengths[request_id])
+            if budget <= 0:
+                sample.status = RolloutRecord.Status.TRUNCATED
+                continue
+            # A trajectory already in progress goes before those not yet started.
+            scheduler.submit(ContinuousBatchRequest(request_id, max_new_tokens=budget), front=True)
+            responses[request_id] = []
+            response_log_probs[request_id] = []
 
     def _continuous_turn(self, responses, response_log_probs, request_id):
         """A retired turn's tokens and log-probs, as lists."""
@@ -1011,19 +1044,8 @@ class HybridEngineRollout(RolloutEngine):
             while update.active or tool_queue.busy:
                 if not update.active:
                     tool_queue.wait()
-                for request_id in tool_queue.pop_ready():
-                    sample = trajectories[request_id]
-                    prompt_lengths[request_id] = (sum(sample.attention_mask)
-                                                  if self.align_decode_fronts else len(sample.tokens))
-                    budget = self._turn_budget(sample, tool_queue.generated[request_id], sampling)
-                    if budget <= 0:
-                        sample.status = RolloutRecord.Status.TRUNCATED
-                        continue
-                    # A trajectory already in progress goes before those not yet started.
-                    scheduler.submit(ContinuousBatchRequest(request_id, max_new_tokens=budget), front=True)
-                    responses[request_id] = []
-                    response_log_probs[request_id] = []
-                if not update.active:
+                    self._requeue_tool_turns(tool_queue, scheduler, sampling, prompt_lengths, responses,
+                                             response_log_probs, self.align_decode_fronts)
                     update = scheduler.schedule()
                     continue
                 if profile is not None:
@@ -1172,6 +1194,10 @@ class HybridEngineRollout(RolloutEngine):
                 if survivor_count:
                     cache_position += 1
                 stats["peak_cache_length"] = max(stats["peak_cache_length"], cache_position)
+                # Finished tools are taken only when a row frees, the one time a returning turn can be admitted.
+                if tool_queue.busy and scheduler.will_free_slot(finished_ids):
+                    self._requeue_tool_turns(tool_queue, scheduler, sampling, prompt_lengths, responses,
+                                             response_log_probs, self.align_decode_fronts)
                 scheduler_start = self._profile_start(profile)
                 rows_held = len(update.active)
                 update = scheduler.advance(finished_ids)
