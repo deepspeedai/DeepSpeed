@@ -35,13 +35,13 @@ jobs:
 
       # ci/check_paths.py defines documentation for this gate and the Modal test selector.
       # Run the base branch's copy so a pull request's edits to it apply only after merge.
-      - name: Check for non-documentation changes
+      - name: Check for changes requiring CI
         id: filter
         if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         continue-on-error: true
         env:
           MERGE_GROUP_BASE_SHA: ${{ github.event.merge_group.base_sha }}
-          # Merge queue entries skip CI only for documentation-only diffs.
+          # Workflow-specific exclusions apply only to PRs; shared exclusions also apply in the merge queue.
           PR_IGNORE: ${{ github.event_name == 'pull_request' && inputs.pr-ignore || '' }}
         run: |
           if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then

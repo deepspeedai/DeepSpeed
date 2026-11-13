@@ -294,6 +294,17 @@ class AutoEPPresetAdapter:
 _MISSING_REGISTRY_ENTRY = object()
 
 
+# transformers' _CAN_RECORD_REGISTRY maps str(model class) to that class's _can_record_outputs. Newer transformers make
+# it a dict subclass whose get() and __setitem__() take a model instead of that key, so read and write it through the
+# dict methods, which work for both the plain dict and the subclass.
+def _registry_get(registry: dict[str, Any], registry_key: str, default: Any = None) -> Any:
+    return dict.get(registry, registry_key, default)
+
+
+def _registry_set(registry: dict[str, Any], registry_key: str, value: Any) -> None:
+    dict.__setitem__(registry, registry_key, value)
+
+
 def _restore_transformers_output_capture_registry(
     registry: dict[str, Any],
     original_entries: dict[str, object],
@@ -302,7 +313,7 @@ def _restore_transformers_output_capture_registry(
         if original_entry is _MISSING_REGISTRY_ENTRY:
             registry.pop(registry_key, None)
         else:
-            registry[registry_key] = original_entry
+            _registry_set(registry, registry_key, original_entry)
 
 
 def _install_instance_transformers_output_recorders(
@@ -323,7 +334,7 @@ def _install_instance_transformers_output_recorders(
     model._output_capturing_hooks_installed = False
 
     original_entries = {
-        registry_key: registry.get(registry_key, _MISSING_REGISTRY_ENTRY)
+        registry_key: _registry_get(registry, registry_key, _MISSING_REGISTRY_ENTRY)
         for registry_key in registry_entries
     }
     try:
@@ -361,7 +372,7 @@ def _retarget_transformers_output_recorders_for_modules(
 
         registry_key = str(module.__class__)
         record_outputs = getattr(module, "_can_record_outputs", None)
-        registry_outputs = registry.get(registry_key)
+        registry_outputs = _registry_get(registry, registry_key)
         base_outputs = record_outputs if isinstance(record_outputs, dict) else registry_outputs
         if not isinstance(base_outputs, dict) or "router_logits" not in base_outputs:
             continue

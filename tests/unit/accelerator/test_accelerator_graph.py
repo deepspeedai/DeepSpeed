@@ -16,6 +16,7 @@ def test_graph_capture_replay_roundtrip():
     graph = accel.create_graph()
     if graph is None:
         pytest.skip(f"{device} accelerator does not support graph capture")
+    assert not accel.is_current_stream_capturing()
 
     # Static input/output buffers; the capture records work on these addresses.
     src = torch.zeros(1, device=device)
@@ -30,7 +31,9 @@ def test_graph_capture_replay_roundtrip():
     accel.current_stream().wait_stream(stream)
 
     with accel.capture_to_graph(graph):
+        assert accel.is_current_stream_capturing()
         dst.copy_(src)
+    assert not accel.is_current_stream_capturing()
     # Capture runs the body eagerly, so dst already holds the copied value.
     assert dst.item() == 0.0
 
@@ -52,9 +55,11 @@ def test_graph_ops_run_eagerly_without_graph_support():
         pytest.skip(f"{device} accelerator supports graph capture")
 
     assert graph is None
+    assert not accel.is_current_stream_capturing()
 
     value = torch.zeros(1, device=device)
     with accel.capture_to_graph(graph):
+        assert not accel.is_current_stream_capturing()
         value.fill_(1.0)
     assert value.item() == 1.0
 

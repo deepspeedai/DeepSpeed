@@ -361,7 +361,6 @@ def run_experiment(exp: dict, reservations, user_script, user_args):
         elif "--deepspeed" in user_args:
             idx = user_args.index("--deepspeed")
         assert idx < len(user_args), "there is no ds_config file specified after --deepspeed_config or --deepspeed"
-        # user_args[idx + 1] = exp["ds_config_path"]
         # pass base64 serialized ds_config to launcher
         user_args[idx + 1] = exp["ds_config_base64"]
 

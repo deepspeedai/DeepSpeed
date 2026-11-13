@@ -47,13 +47,6 @@ ZERO_SUPPORTED_OPTIMIZERS = [
     DeepSpeedCPUAdagrad, DeepSpeedCPULion, FusedLion
 ]
 
-# Add MuonWithAuxAdam to supported list if muon is installed
-try:
-    from deepspeed.runtime.zero.muon.muon_optimizer import MuonWithAuxAdam
-    ZERO_SUPPORTED_OPTIMIZERS.append(MuonWithAuxAdam)
-except ImportError:
-    pass
-
 # Add apex FusedAdam to supported list if apex is installed
 try:
     import apex
@@ -73,6 +66,14 @@ def get_norm_dtype():
 def is_zero_supported_optimizer(optimizer):
     if dist.get_rank() == 0:
         logger.info(f'Checking ZeRO support for optimizer={optimizer.__class__.__name__} type={type(optimizer)}')
+    # Add MuonWithAuxAdam to supported list if muon is installed. This happens here instead of at module level
+    # because importing Muon compiles its kernels, which slows down import deepspeed.
+    try:
+        from deepspeed.runtime.zero.muon.muon_optimizer import MuonWithAuxAdam
+        if MuonWithAuxAdam not in ZERO_SUPPORTED_OPTIMIZERS:
+            ZERO_SUPPORTED_OPTIMIZERS.append(MuonWithAuxAdam)
+    except ImportError:
+        pass
     return type(optimizer) in ZERO_SUPPORTED_OPTIMIZERS
 
 

@@ -3,6 +3,7 @@
 """Shared fixtures and assertions for compact AutoEP tests."""
 
 import copy
+import gc
 import os
 import tempfile
 import traceback
@@ -412,6 +413,8 @@ def _cpu_gloo_worker_entry(rank, world_size, init_method, master_port, worker, s
     finally:
         if dist.is_initialized():
             dist.destroy_process_group()
+            # Completed test-engine cycles can otherwise retain Gloo groups until interpreter finalization.
+            gc.collect()
 
 
 def run_cpu_gloo_test(worker, tmpdir, *, world_size=4, timeout=DEEPSPEED_TEST_TIMEOUT):

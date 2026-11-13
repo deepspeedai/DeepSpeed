@@ -3,13 +3,16 @@
 
 # DeepSpeed Team
 
+import time
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
 import torch
 
+from deepspeed.accelerator import get_accelerator
 from deepspeed.utils.comms_logging import CommsLogger
+from unit.common import DistributedTest
 
 
 def test_stop_profiling_comms_disables_prof_all():
@@ -23,6 +26,27 @@ def test_stop_profiling_comms_disables_prof_all():
 
     comms_logger.stop_profiling_comms()
     assert comms_logger.prof_all is False
+
+
+@pytest.mark.parametrize('enabled', [False, True, None])
+def test_configure_from_config_follows_the_enabled_field(monkeypatch, enabled):
+    # The section's own "enabled" field decides, not whether the section is present.
+    # None leaves "enabled" out of the section, which means the documented default of False.
+    from deepspeed.comm import comm
+    from deepspeed.comm.config import DeepSpeedCommsConfig
+
+    monkeypatch.setattr(comm, 'comms_logger', CommsLogger())
+    section = {'prof_all': False, 'prof_ops': ['all_reduce']}
+    if enabled is not None:
+        section['enabled'] = enabled
+    comms_config = DeepSpeedCommsConfig({'comms_logger': section})
+    comm.configure(deepspeed_config=SimpleNamespace(comms_config=comms_config))
+
+    expected_enabled = enabled is True
+    assert comm.comms_logger.enabled is expected_enabled
+    if expected_enabled:
+        assert comm.comms_logger.prof_all is False
+        assert comm.comms_logger.prof_ops == ['all_reduce']
 
 
 def test_get_operation_summary_does_not_reorder_the_stored_records():
@@ -111,7 +135,8 @@ def test_collective_profiling(monkeypatch, op_name, positional, debug, profile_m
     backend = SimpleNamespace(using_mpi=False, is_initialized=lambda: True, get_world_size=lambda group=None: 2)
     setattr(backend, op_name, backend_op)
     monkeypatch.setattr(comm, 'cdb', backend)
-    monkeypatch.setattr(comm, 'get_accelerator', lambda: SimpleNamespace(synchronize=lambda: None))
+    synchronize = Mock()
+    monkeypatch.setattr(comm, 'get_accelerator', lambda: SimpleNamespace(synchronize=synchronize))
     op_timer = Mock()
     op_timer.elapsed.return_value = 1.0
     timers = Mock(return_value=op_timer)
@@ -151,7 +176,9 @@ def test_collective_profiling(monkeypatch, op_name, positional, debug, profile_m
     if profile_mode == 'unselected':
         assert comm.comms_logger.comms_dict == {}
         timers.assert_not_called()
+        synchronize.assert_not_called()
     else:
+        synchronize.assert_called_once_with()
         record_name, = comm.comms_logger.comms_dict
         if debug:
             assert record_name.startswith(log_name + ' | [Caller Func: ')
@@ -164,6 +191,34 @@ def test_collective_profiling(monkeypatch, op_name, positional, debug, profile_m
         op_timer.stop.assert_called_once_with()
         op_timer.elapsed.assert_called_once_with(reset=False)
         assert all(call.args == (record_name, ) for call in timers.call_args_list)
+
+
+class TestCommsLoggerLatency(DistributedTest):
+    world_size = 2
+
+    def test_logged_latencies_fit_in_the_loop(self):
+        # Each call is timed on its own and the calls run one after another, so the logged
+        # latencies can add up to at most the wall-clock time of the loop.
+        import deepspeed.comm as dist
+        from deepspeed.comm import comm
+
+        num_calls = 200
+        tensor = torch.ones(1024, device=get_accelerator().current_device_name())
+        dist.configure(enabled=True, prof_all=True, verbose=False, debug=False)
+        try:
+            get_accelerator().synchronize()
+            loop_start = time.time()
+            for _ in range(num_calls):
+                dist.all_reduce(tensor)
+            loop_msec = (time.time() - loop_start) * 1000.0
+            msg_size = tensor.numel() * tensor.element_size()
+            latencies = comm.comms_logger.comms_dict['all_reduce'][msg_size][1]
+        finally:
+            dist.configure(enabled=False)
+            comm.comms_logger.reset_data()
+
+        assert len(latencies) == num_calls
+        assert sum(latencies) <= loop_msec
 
 
 def test_timed_op_disabled_does_not_access_profiling_state(monkeypatch):
