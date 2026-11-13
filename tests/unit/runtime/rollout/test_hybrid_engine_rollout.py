@@ -1096,6 +1096,40 @@ def test_global_eos_stops_only_when_no_global_work_remains():
     assert [call.args[0].item() for call in rendezvous.call_args_list] == [1, 0]
 
 
+def test_global_eos_counts_a_row_past_its_budget_as_finished():
+    rendezvous = MagicMock(side_effect=lambda local: bool(local.item()))
+    # Row 0 may generate two tokens and row 1 four; neither emits EOS.
+    criterion = _GlobalEosStoppingCriteria(response_start=2, eos_token_id=2, work_remaining=rendezvous,
+                                           row_budgets=[2, 4])
+
+    assert criterion(torch.tensor([[10, 11, 5, 6], [10, 11, 5, 6]]), scores=None) is False
+    # Row 0 is at its budget; row 1 has reached EOS.
+    assert criterion(torch.tensor([[10, 11, 5, 6], [10, 11, 5, 2]]), scores=None) is True
+    # A placeholder row with budget 0 is finished from its first token, and needs no EOS ids.
+    placeholder = _GlobalEosStoppingCriteria(response_start=1, eos_token_id=None, work_remaining=rendezvous,
+                                             row_budgets=[0])
+    assert placeholder(torch.tensor([[0, 9]]), scores=None) is True
+
+
+def test_zero3_rank_with_no_budget_left_joins_with_a_finished_placeholder_row():
+    engine = _make_engine(max_out_tokens=2)
+    engine.zero_optimization_partition_weights.return_value = True
+    engine.module.parameters.side_effect = lambda: iter([torch.nn.Parameter(torch.zeros(1))])
+    engine.module.generate.return_value = torch.tensor([[0, 9]])
+    rollout = HybridEngineRollout(engine, _make_tokenizer())
+
+    # The prompt already fills max_out_tokens, so this rank has nothing to generate.
+    result = rollout.generate(RolloutRequest(samples=[_prompt([10, 11])]),
+                              SamplingConfig(max_new_tokens=4, max_new_tokens_per_turn=3, temperature=0))
+
+    assert result.samples[0].status == RolloutRecord.Status.TRUNCATED
+    kwargs = engine.module.generate.call_args.kwargs
+    assert engine.module.generate.call_args.args[0].shape == (1, 1)
+    # Ranks decode up to the same configured cap, whatever their own budgets.
+    assert kwargs["max_new_tokens"] == 3
+    assert kwargs["stopping_criteria"][0].row_budgets.tolist() == [0]
+
+
 def test_zero3_rendezvous_uses_optimizer_dp_group(monkeypatch):
     engine = _make_engine()
     process_group = object()
@@ -1130,8 +1164,7 @@ def test_zero3_generation_disables_native_synced_gpus(monkeypatch):
     monkeypatch.setattr("deepspeed.runtime.rollout.hybrid_engine_rollout.dist.is_initialized", lambda: True)
 
     rollout = HybridEngineRollout(engine, _make_tokenizer())
-    with patch.object(rollout, "_max_across_ranks", side_effect=lambda value: value):
-        rollout.generate(_make_request(), _make_sampling())
+    rollout.generate(_make_request(), _make_sampling())
 
     kwargs = engine.module.generate.call_args.kwargs
     # Transformers would otherwise derive synced_gpus from the default world
@@ -1904,7 +1937,6 @@ def test_tool_queue_takes_tool_output_from_the_first_tensor_parallel_rank(tokeni
     tool = _EchoTextTool()
     rollout = HybridEngineRollout(_make_engine(), _make_tokenizer(),
                                   HybridEngineRolloutConfig(multi_turn=True, max_turns=2), ToolSet([tool]))
-    rollout._tool_group, rollout._tool_src = object(), 0
     # Non-ASCII text and a lone surrogate must survive the trip unchanged.
     rollout._end_turn = lambda *_args: [ToolCall(name="echo", arguments={"text": "é \ud800"})]
     fake = FakeDist()
@@ -1913,7 +1945,7 @@ def test_tool_queue_takes_tool_output_from_the_first_tensor_parallel_rank(tokeni
         for rank in (0, 1):
             fake.rank = rank
             records[rank] = [_prompt([1, 3])]
-            with ToolQueue(rollout, records[rank], max_new_tokens=8) as queue:
+            with ToolQueue(rollout, records[rank], max_new_tokens=8, group=object(), src=0) as queue:
                 queue.retire(0, [5, 2], None)
                 assert queue.busy
                 queue.wait()
@@ -1941,9 +1973,8 @@ def test_tool_queue_sends_only_a_size_when_no_tool_finished():
 
     rollout = HybridEngineRollout(_make_engine(), _make_tokenizer(),
                                   HybridEngineRolloutConfig(multi_turn=True, max_turns=2))
-    rollout._tool_group, rollout._tool_src = object(), 0
     with patch("deepspeed.runtime.rollout.continuous_batching.dist", FakeDist()):
-        queue = ToolQueue(rollout, [_prompt([1, 3])], max_new_tokens=8)
+        queue = ToolQueue(rollout, [_prompt([1, 3])], max_new_tokens=8, group=object(), src=0)
         assert queue.pop_ready() == []
     assert len(sizes) == 1
 
@@ -2149,12 +2180,12 @@ def test_generate_keeps_ranks_in_lockstep_and_pads_after_eos():
     engine.module.generate.return_value = torch.tensor([[10, 11, 5, 2, 7, 8]])
     request = RolloutRequest(samples=[_prompt([10, 11])])
 
-    with patch.object(rollout, "_max_across_ranks", side_effect=lambda value: value) as max_across_ranks:
-        result = rollout.generate(request, SamplingConfig(max_new_tokens=4, temperature=0))
+    result = rollout.generate(request, SamplingConfig(max_new_tokens=4, temperature=0))
 
-    max_across_ranks.assert_called_once_with(4)
-
-    assert engine.module.generate.call_args.kwargs['eos_token_id'] is None
+    kwargs = engine.module.generate.call_args.kwargs
+    assert kwargs['eos_token_id'] is None
+    assert kwargs['max_new_tokens'] == 4
+    assert kwargs['stopping_criteria'][0].row_budgets.tolist() == [4]
     sample = result.samples[0]
     assert sample.tokens == [10, 11, 5, 2]
     assert sample.attention_mask == [1, 1, 1, 1]

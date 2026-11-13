@@ -104,10 +104,6 @@ def _sampled_log_prob_recorder(temperature: float = 1.0):
     return processor, finish
 
 
-def _chosen_log_probs(logits, tokens):
-    return torch.log_softmax(logits.float(), dim=-1).gather(1, tokens)
-
-
 class _TokenSelector:
     """Picks next tokens from logits the way ``generate()`` does: repetition penalty, then temperature and top-k or
     top-p, returning each token with its log-prob, or None when log-probs are not wanted.
@@ -178,15 +174,15 @@ class _TokenSelector:
             penalty = self.repetition_penalty
             logits = torch.where(seen, torch.where(logits < 0, logits * penalty, logits / penalty), logits)
         if self.temperature <= 0.0:
-            tokens = logits.argmax(dim=-1, keepdim=True)
-            log_probs = _chosen_log_probs(logits, tokens) if self.return_log_probs else None
+            scores = logits
+            tokens = scores.argmax(dim=-1, keepdim=True)
         else:
             scores = logits.float() / self.temperature
             for warper in self.warpers:
                 # The warpers read only the scores, not the generated ids.
                 scores = warper(None, scores)
             tokens = torch.multinomial(torch.softmax(scores, dim=-1), num_samples=1)
-            log_probs = _chosen_log_probs(scores, tokens) if self.return_log_probs else None
+        log_probs = torch.log_softmax(scores.float(), dim=-1).gather(1, tokens) if self.return_log_probs else None
         self.record(tokens, rows)
         return tokens, log_probs
 
@@ -205,22 +201,26 @@ class GlobalWorkRemaining:
 
 
 class _GlobalEosStoppingCriteria:
-    """Stop all local sequences only after every rank has observed EOS."""
+    """Stop all local sequences only after every rank has observed EOS.
 
-    def __init__(self, response_start, eos_token_id, work_remaining, idle=False):
+    With ``row_budgets``, a row that has generated its own budget also counts as finished, so ranks whose rows have
+    different budgets stop together without first agreeing on a length.
+    """
+
+    def __init__(self, response_start, eos_token_id, work_remaining, row_budgets=None):
         self.response_start = response_start
-        self.eos_token_ids = torch.as_tensor(eos_token_id).flatten()
+        self.eos_token_ids = torch.as_tensor(eos_token_id if eos_token_id is not None else [],
+                                             dtype=torch.long).flatten()
         self.work_remaining = work_remaining
-        # A rank decoding only a placeholder prompt has no work of its own and must not hold the others back.
-        self.idle = idle
+        self.row_budgets = None if row_budgets is None else torch.as_tensor(row_budgets, dtype=torch.long)
 
     def __call__(self, input_ids, scores, **kwargs):  # noqa: ARG002
         response_ids = input_ids[:, self.response_start:]
         eos_token_ids = self.eos_token_ids.to(device=input_ids.device, dtype=input_ids.dtype)
-        sequence_has_eos = (response_ids.unsqueeze(-1) == eos_token_ids).any(dim=-1).any(dim=-1)
-        local_work_remaining = (~sequence_has_eos).any().to(dtype=torch.int32)
-        if self.idle:
-            local_work_remaining = torch.zeros_like(local_work_remaining)
+        sequence_done = (response_ids.unsqueeze(-1) == eos_token_ids).any(dim=-1).any(dim=-1)
+        if self.row_budgets is not None:
+            sequence_done |= response_ids.shape[1] >= self.row_budgets.to(input_ids.device)
+        local_work_remaining = (~sequence_done).any().to(dtype=torch.int32)
         global_work_remaining = self.work_remaining(local_work_remaining)
         # This is a rank-global decision, so a scalar preserves the same
         # behavior for every local sequence and remains compatible with older
@@ -326,6 +326,7 @@ class HybridEngineRollout(RolloutEngine):
         self._last_profile = None
         self._last_continuous_stats = None
         self._continuous_graph_state = None
+        # Only multi-turn continuous batching under AutoTP sends tool output between ranks while they decode.
         self._tool_group = None
         self._tool_src = None
         if self.autotp_size > 1 and self.multi_turn and self.continuous_batch_size is not None:
@@ -389,7 +390,6 @@ class HybridEngineRollout(RolloutEngine):
         """Share the random state across each AutoTP group, so its ranks sample the same tokens."""
         if self.autotp_size <= 1:
             return
-        import deepspeed.comm as dist
         from deepspeed.utils import groups
 
         accelerator = get_accelerator()
@@ -404,21 +404,12 @@ class HybridEngineRollout(RolloutEngine):
             return asyncio.run(self._run_tool_calls(calls_by_row))
 
         # Run a turn's tool calls once per AutoTP group, so every rank gets the same output.
-        import deepspeed.comm as dist
         from deepspeed.utils import groups
 
         src = groups.get_tensor_model_parallel_src_rank()
         outputs = [asyncio.run(self._run_tool_calls(calls_by_row)) if dist.get_rank() == src else None]
         dist.broadcast_object_list(outputs, src, group=groups.get_tensor_model_parallel_group())
         return outputs[0]
-
-    def _max_across_ranks(self, value):
-        """The largest ``value`` over the ranks that gather ZeRO-3 parameters together."""
-        import deepspeed.comm as dist
-
-        tensor = torch.tensor([value], device=get_accelerator().current_device_name())
-        dist.all_reduce(tensor, op=dist.ReduceOp.MAX, group=self.engine.seq_data_parallel_group)
-        return int(tensor.item())
 
     def _turn_budget(self, sample, generated_length, sampling):
         budget = sampling.max_new_tokens - generated_length
@@ -493,21 +484,25 @@ class HybridEngineRollout(RolloutEngine):
                     trajectories[i].status = RolloutRecord.Status.TRUNCATED
             active = [i for i in active if budgets[i] > 0]
             turn_max_new_tokens = max((budgets[i] for i in active), default=0)
+            row_budgets = [budgets[i] for i in active]
             if self.partitions_weights:
-                # ZeRO-3 gathers parameters in every forward, so all ranks run as many as the longest budget needs.
-                turn_max_new_tokens = self._max_across_ranks(turn_max_new_tokens)
-                if not active and turn_max_new_tokens > 0:
-                    dummy = torch.full((1, 1), pad_token_id, dtype=torch.long, device=device)
-                    self._generate_tokens(dummy,
-                                          torch.ones_like(dummy),
+                # ZeRO-3 gathers parameters in every forward, so ranks decode up to the same configured cap and stop
+                # together once every row on every rank has reached EOS or its own budget.
+                turn_max_new_tokens = sampling.max_new_tokens
+                if sampling.max_new_tokens_per_turn is not None:
+                    turn_max_new_tokens = min(turn_max_new_tokens, sampling.max_new_tokens_per_turn)
+                if not active:
+                    # A rank with nothing left joins with one placeholder row that is finished from the start.
+                    placeholder = torch.full((1, 1), pad_token_id, dtype=torch.long, device=device)
+                    self._generate_tokens(placeholder,
+                                          torch.ones_like(placeholder),
                                           turn_max_new_tokens,
                                           sampling,
                                           pad_token_id,
-                                          idle=True)
+                                          row_budgets=[0])
             if not active:
                 break
             turn_samples = [trajectories[i] for i in active]
-            row_budgets = [budgets[i] for i in active]
 
             if self.enable_profiling:
                 turn_start = _curr_time
@@ -532,8 +527,12 @@ class HybridEngineRollout(RolloutEngine):
                     num_groups = len(active) // n
                     self.engine.prepare_shared_prefill(num_groups, n, prompt_len)
                     handles.extend(self._register_shared_prefill_hooks(module, num_groups, n))
-                output_ids, log_probs = self._generate_tokens(prompt_ids, prompt_attn_mask, turn_max_new_tokens,
-                                                              sampling, pad_token_id)
+                output_ids, log_probs = self._generate_tokens(prompt_ids,
+                                                              prompt_attn_mask,
+                                                              turn_max_new_tokens,
+                                                              sampling,
+                                                              pad_token_id,
+                                                              row_budgets=row_budgets)
             finally:
                 for handle in handles:
                     handle.remove()
@@ -671,7 +670,7 @@ class HybridEngineRollout(RolloutEngine):
         logits_kwargs = self._last_logits_kwargs(module)
         pad_token_id = get_pad_token_id(self.tokenizer)
         profile = self._start_continuous_profile() if self.enable_profiling else None
-        tool_queue = ToolQueue(self, trajectories, sampling.max_new_tokens)
+        tool_queue = ToolQueue(self, trajectories, sampling.max_new_tokens, self._tool_group, self._tool_src)
         scheduler = ContinuousBatchScheduler(max_batch_size, turn_cap)
         responses = {}
         response_log_probs = {}
@@ -887,7 +886,7 @@ class HybridEngineRollout(RolloutEngine):
                             "falling back to eager generation.")
         return False
 
-    def _generate_tokens(self, prompt_ids, prompt_attn_mask, max_new_tokens, sampling, pad_token_id, idle=False):
+    def _generate_tokens(self, prompt_ids, prompt_attn_mask, max_new_tokens, sampling, pad_token_id, row_budgets=None):
         module = self.engine.module
         if self._graph_capture_enabled():
             return self._generate_graph(prompt_ids, prompt_attn_mask, max_new_tokens, sampling, module,
@@ -896,8 +895,10 @@ class HybridEngineRollout(RolloutEngine):
         eos_token_ids = get_eos_token_ids(self.tokenizer, self.engine.module) or None
         zero3_sync = self._zero3_work_remaining()
         stopping_criteria = None
-        if zero3_sync is not None and eos_token_ids is not None:
-            stopping_criteria = [_GlobalEosStoppingCriteria(prompt_ids.shape[1], eos_token_ids, zero3_sync, idle=idle)]
+        if zero3_sync is not None:
+            stopping_criteria = [
+                _GlobalEosStoppingCriteria(prompt_ids.shape[1], eos_token_ids, zero3_sync, row_budgets=row_budgets)
+            ]
         generate_kwargs = {
             "attention_mask": prompt_attn_mask,
             "max_new_tokens": max_new_tokens,
@@ -946,7 +947,7 @@ class HybridEngineRollout(RolloutEngine):
                                   self.return_log_probs)
         profile = self._start_continuous_profile() if self.enable_profiling else None
         profile_accelerator = profile["accelerator"] if profile is not None else None
-        tool_queue = ToolQueue(self, trajectories, sampling.max_new_tokens)
+        tool_queue = ToolQueue(self, trajectories, sampling.max_new_tokens, self._tool_group, self._tool_src)
         budgets = [self._turn_budget(sample, 0, sampling) for sample in trajectories]
         prompt_lengths = {
             request_id: (sum(sample.attention_mask) if self.align_decode_fronts else len(sample.tokens))

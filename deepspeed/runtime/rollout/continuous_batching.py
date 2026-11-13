@@ -184,11 +184,12 @@ class ToolQueue:
     background event loop, so the other rows keep decoding. Once they finish, it leaves for the front of the pending
     queue with its tool output appended.
 
-    With AutoTP, only the first rank of each tensor-parallel group runs the tools; ``pop_ready`` sends the finished
-    ones to the other ranks, so the whole group appends the same output and admits the same turns.
+    With AutoTP, the rollout passes a host-side ``group`` over the tensor-parallel group and its first rank ``src``:
+    only ``src`` runs the tools, and ``pop_ready`` sends the finished ones to the other ranks, so the whole group
+    appends the same output and admits the same turns.
     """
 
-    def __init__(self, rollout, trajectories, max_new_tokens):
+    def __init__(self, rollout, trajectories, max_new_tokens, group=None, src=None):
         self.rollout = rollout
         self.trajectories = trajectories
         self.max_new_tokens = max_new_tokens
@@ -198,8 +199,9 @@ class ToolQueue:
         # Trajectory -> (response, log-probs, calls, future) while its tools run; the future is None on ranks that
         # take tool output from their group's first rank.
         self.in_flight = {}
-        self._group = rollout._tool_group
-        self._runs_tools = self._group is None or dist.get_rank() == rollout._tool_src
+        self._group = group
+        self._src = src
+        self._runs_tools = group is None or dist.get_rank() == src
         self._loop = None
         self._thread = None
 
@@ -274,7 +276,7 @@ class ToolQueue:
         Both go over a Gloo group on the host, so they take no device copies and do not queue behind the forward's
         collectives; steps where nothing finished send only the size.
         """
-        src = self.rollout._tool_src
+        src = self._src
         payload = json.dumps(finished).encode() if finished else b""
         size = torch.tensor([len(payload)], dtype=torch.long)
         dist.broadcast(size, src, group=self._group)
