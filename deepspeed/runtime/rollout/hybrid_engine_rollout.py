@@ -271,7 +271,10 @@ def _host_tensor_parallel_group():
     """A Gloo group over this rank's AutoTP group, and the group's first rank, for sending tool output on the host."""
     from deepspeed.utils import groups
 
-    ranks = tuple(dist.get_all_ranks_from_group(groups.get_tensor_model_parallel_group()))
+    tp_group = groups.get_tensor_model_parallel_group()
+    # A tensor-parallel group spanning every rank can be the default group, for which get_global_rank is the
+    # identity and never raises, so count the ranks rather than probe until an error as get_all_ranks_from_group does.
+    ranks = tuple(dist.get_global_rank(tp_group, rank) for rank in range(dist.get_world_size(group=tp_group)))
     all_ranks = [None] * dist.get_world_size()
     dist.all_gather_object(all_ranks, ranks)
     own_group = None
