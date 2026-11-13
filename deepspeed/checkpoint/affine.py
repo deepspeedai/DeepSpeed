@@ -986,7 +986,7 @@ def union_affine_maps(maps):
 
     A planner may read a block from any of its holders, so it needs any two blocks to be equal or
     disjoint, and each block to list every location that holds it. Each piece is therefore cut at the
-    edges of the blocks the other layouts hold over it, and each cut piece lists the holders from every
+    edges of every block held over it, in any layout, and each cut piece lists the holders from every
     layout. A cut keeps the piece's strides and moves its offsets, so every location still stores
     exactly what it did. Pieces must be axis-aligned blocks of the parameter.
     """
@@ -1006,11 +1006,11 @@ def _union_of_two(first, second):
     if shared:
         raise ValueError(f'Locations {shared} appear in both layouts; give each layout its own locations, one '
                          'per buffer.')
+    blocks = _disjoint_blocks(first, second)
     pieces_by_rank = {}
-    for this, other in ((first, second), (second, first)):
-        blocks = _blocks_held(other)
-        for rank, pieces in this.pieces_by_rank.items():
-            pieces_by_rank[rank] = [part for piece in pieces for part in _cut(piece, this.logical_shape, blocks)]
+    for affine_map in (first, second):
+        for rank, pieces in affine_map.pieces_by_rank.items():
+            pieces_by_rank[rank] = [part for piece in pieces for part in _cut(piece, first.logical_shape, blocks)]
     affine_map = ParamAffineMap(logical_shape=first.logical_shape,
                                 shard_shapes={
                                     **first.shard_shapes,
@@ -1021,16 +1021,31 @@ def _union_of_two(first, second):
     return affine_map
 
 
-def _blocks_held(affine_map):
-    # Each block the map holds, once, with the locations its pieces list. Sorted, so a cut does not depend
-    # on the order in which the map lists its pieces.
+def _disjoint_blocks(*maps):
+    # Every block the maps hold, cut wherever two of them meet, so the parts are disjoint and each lists every
+    # location that holds it. Replicas within one map may cut the same region at different edges, so its own
+    # blocks are cut against each other too. Sorted, so the parts do not depend on the order the maps list them.
     holders = {}
-    for pieces in affine_map.pieces_by_rank.values():
-        for piece in pieces:
-            if piece.numel:
-                block = _block_of(piece, affine_map.logical_shape)
-                holders[block] = holders.get(block, frozenset()) | piece.locations
-    return sorted(holders.items(), key=lambda item: (item[0].origin, item[0].extent))
+    for affine_map in maps:
+        for pieces in affine_map.pieces_by_rank.values():
+            for piece in pieces:
+                if piece.numel:
+                    block = _block_of(piece, affine_map.logical_shape)
+                    holders[block] = holders.get(block, frozenset()) | piece.locations
+    parts = []
+    for block, block_holders in sorted(holders.items(), key=lambda item: (item[0].origin, item[0].extent)):
+        refined = []
+        rest = [block]
+        for part, part_holders in parts:
+            overlap = part.intersection(block)
+            if overlap.is_empty:
+                refined.append((part, part_holders))
+                continue
+            refined.append((overlap, part_holders | block_holders))
+            refined.extend((box, part_holders) for box in _subtract(part, block))
+            rest = [box for remaining in rest for box in _subtract(remaining, part)]
+        parts = refined + [(box, block_holders) for box in rest]
+    return parts
 
 
 def _block_of(piece, logical_shape):
@@ -1041,6 +1056,9 @@ def _block_of(piece, logical_shape):
             size <= 1 or stride == expected
             for size, stride, expected in zip(piece.shape, piece.source_strides, strides)):
         origin = _coordinate(piece.source_offset, strides, logical_shape)
+    # A row-major run longer than what is left of its row wraps into the next row, so it is not a block.
+    if origin is not None and any(low + size > bound for low, size, bound in zip(origin, piece.shape, logical_shape)):
+        origin = None
     if origin is None:
         raise NotImplementedError(f'Piece {piece} is not an axis-aligned block of a parameter of shape '
                                   f'{logical_shape}, so it cannot be cut at another layout\'s block edges.')
@@ -1048,19 +1066,15 @@ def _block_of(piece, logical_shape):
 
 
 def _cut(piece, logical_shape, blocks):
-    # ``piece`` cut at the edges of ``blocks``: each part another layout also holds lists those holders
-    # too, and the parts no other layout holds keep the piece's own.
+    # ``piece`` cut into the disjoint ``blocks`` that cover it, each part with that block's holders.
     if not piece.numel:
         return [piece]
     block = _block_of(piece, logical_shape)
     parts = []
-    rest = [block]
     for other, holders in blocks:
         overlap = block.intersection(other)
         if not overlap.is_empty:
-            parts.append((overlap, piece.locations | holders))
-            rest = [part for box in rest for part in _subtract(box, other)]
-    parts.extend((box, piece.locations) for box in rest)
+            parts.append((overlap, holders))
     return [_part_of(piece, block.origin, box, locations) for box, locations in parts]
 
 

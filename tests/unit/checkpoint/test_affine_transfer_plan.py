@@ -908,3 +908,38 @@ def test_a_union_refuses_layouts_it_cannot_merge():
     transposed = ParamAffineMap((4, 6), {20: (6, 4)}, {20: [AffinePiece((6, 4), 0, (1, 6), 0, (4, 1), {20})]})
     with pytest.raises(NotImplementedError, match='axis-aligned block'):
         union_affine_maps([shard, transposed])
+    # Row-major strides, but eight elements from the start of a six-wide row run into the next row.
+    wrapping = ParamAffineMap(
+        (4, 6), {30: (24, )},
+        {30: [AffinePiece((1, 8), 0, (6, 1), 0, (8, 1), {30}),
+              AffinePiece((1, 16), 8, (6, 1), 8, (16, 1), {30})]})
+    with pytest.raises(NotImplementedError, match='axis-aligned block'):
+        union_affine_maps([shard, wrapping])
+
+
+def test_a_union_cuts_replicas_that_split_a_block_differently():
+    """Replicas within one layout may store a block whole or in parts, so its own edges are cut at too."""
+    rows, cols = 6, 5
+    whole_and_halves = ParamAffineMap(
+        (rows, cols),
+        {
+            0: (rows, cols),
+            1: (rows, cols)
+        },
+        {
+            0: [AffinePiece((rows, cols), 0, (cols, 1), 0, (cols, 1), {0, 1})],
+            # The same block in two halves, stored in the other order.
+            1: [
+                AffinePiece((3, cols), 0, (cols, 1), 3 * cols, (cols, 1), {0, 1}),
+                AffinePiece((3, cols), 3 * cols, (cols, 1), 0, (cols, 1), {0, 1})
+            ],
+        })
+    zero = _zero3_storage((rows, cols), 4, first_location=100)
+    source = union_affine_maps([whole_and_halves, zero])
+    full = _full(rows, cols, seed=13)
+    _assert_union_holds_what_each_layout_holds(source, [whole_and_halves, zero], full)
+    target = contiguous_split_map((rows, cols), _split(cols, 2), 1)
+    produced = _apply_plan(plan_transfer(target, source), target,
+                           _shards(source, lambda map_, rank: map_.extract(full, rank)))
+    for rank in target.shard_shapes:
+        assert torch.equal(produced[rank], target.extract(full, rank)), rank
