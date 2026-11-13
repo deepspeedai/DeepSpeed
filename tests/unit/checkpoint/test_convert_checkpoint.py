@@ -193,6 +193,45 @@ class TestCheckpointConvert(DistributedTest):
         assert bf16_size < fp32_size * 0.6
 
 
+class TestCheckpointConvertShardSize(DistributedTest):
+    world_size = 1
+
+    @pytest.mark.parametrize("zero_stage", [1, 2])
+    def test_fp32_shards_store_only_their_tensors(self, tmp_path, zero_stage):
+        config = {
+            "train_micro_batch_size_per_gpu": 1,
+            "zero_allow_untested_optimizer": True,
+            "zero_optimization": {
+                "stage": zero_stage
+            },
+        }
+        model = nn.Sequential(*[nn.Linear(64, 64) for _ in range(4)])
+        engine, _, _, _ = deepspeed.initialize(model=model,
+                                               optimizer=torch.optim.SGD(model.parameters(), lr=0.01),
+                                               config=config)
+        checkpoint_dir = tmp_path / "checkpoint"
+        engine.save_checkpoint(checkpoint_dir, tag="step0")
+
+        output_dir = tmp_path / "converted"
+        convert_zero_checkpoint_to_fp32_state_dict(checkpoint_dir, output_dir, max_shard_size="20KB")
+        index = json.loads((output_dir / "pytorch_model.bin.index.json").read_text())
+        shard_files = set(index["weight_map"].values())
+        assert len(shard_files) > 1
+
+        # A shard that stored the whole flat fp32 buffer would make the output several times larger.
+        bytes_on_disk = sum((output_dir / filename).stat().st_size for filename in shard_files)
+        assert bytes_on_disk < 1.5 * index["metadata"]["total_size"]
+
+        expected = zero_to_fp32.get_fp32_state_dict_from_zero_checkpoint(checkpoint_dir)
+        exported = {}
+        for filename in shard_files:
+            exported.update(torch.load(output_dir / filename, weights_only=True))
+        assert exported.keys() == expected.keys()
+        for name, tensor in expected.items():
+            torch.testing.assert_close(exported[name], tensor, rtol=0, atol=0)
+        engine.destroy()
+
+
 class ModelWithBuffers(nn.Module):
 
     def __init__(self):
