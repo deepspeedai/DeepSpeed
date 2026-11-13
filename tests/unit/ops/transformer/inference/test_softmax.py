@@ -65,3 +65,29 @@ def test_masked_softmax_when_max_is_masked(dtype, mask_value):
     ds_out = softmax(input_ds, mask)
     ref_out = torch.tensor([[0., 1.]], dtype=dtype, device=device)
     assert allclose(ds_out, ref_out)
+
+
+@pytest.mark.inference_ops
+@pytest.mark.parametrize("dtype", [torch.float16, torch.float32])
+@pytest.mark.parametrize("mask_shape", ["shared", "per_batch", "per_batch_query", "full"])
+def test_masked_softmax_broadcasts_mask(dtype, mask_shape):
+    if not deepspeed.get_accelerator().is_triton_supported():
+        pytest.skip("triton is not supported on this system")
+
+    from deepspeed.ops.transformer.inference.triton import softmax
+
+    device = deepspeed.accelerator.get_accelerator().device_name()
+    B, H, Q, S = 3, 4, 5, 100
+    shape = {
+        "shared": (1, 1, 1, S),
+        "per_batch": (B, 1, 1, S),
+        "per_batch_query": (B, 1, Q, S),
+        "full": (B, H, Q, S),
+    }[mask_shape]
+    input_ds = torch.randn((B, H, Q, S), dtype=dtype, device=device)
+    mask = torch.zeros(shape, dtype=dtype, device=device)
+    mask.masked_fill_(torch.rand(shape, device=device) < 0.3, -10000.)
+
+    ds_out = softmax(input_ds, mask)
+    ref_out = torch.nn.functional.softmax(input_ds.float() + mask.float(), dim=-1).to(dtype)
+    assert allclose(ds_out, ref_out)
