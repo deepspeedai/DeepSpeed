@@ -72,6 +72,7 @@ BASELINE = {
     "README.md": "# synthetic repo\n",
     "docs/guide.rst": "Guide\n=====\n",
     "blogs/tutorial/config.json": "{}\n",
+    "version.txt": "0.0.1\n",
 }
 
 
@@ -190,10 +191,10 @@ def test_commit_tag_forces_all() -> None:
         repo.cleanup()
 
 
-def test_documentation_only_changes_select_nothing() -> None:
+def test_documentation_and_version_only_changes_select_nothing() -> None:
     # Documentation elsewhere selects nothing anyway. These paths would otherwise force the
     # full suite (a run-all glob) or pull in extra tests (a dynamic edge).
-    for path in ("ci/README.md", "deepspeed/module_inject/README.md"):
+    for path in ("ci/README.md", "deepspeed/module_inject/README.md", "version.txt"):
         repo = TmpRepo()
         try:
             repo.write(path, "# changed\n")
@@ -204,12 +205,13 @@ def test_documentation_only_changes_select_nothing() -> None:
             repo.cleanup()
 
 
-def test_documentation_mixed_with_code_still_selects_tests() -> None:
+def test_documentation_and_version_mixed_with_code_still_selects_tests() -> None:
     repo = TmpRepo()
     try:
         repo.write("README.md", "# changed\n")
         repo.write("docs/guide.rst", "Changed\n=======\n")
         repo.write("blogs/tutorial/config.json", '{"changed": true}\n')
+        repo.write("version.txt", "0.0.2\n")
         # Documentation under run-all and dynamic-edge paths must not widen the selection.
         repo.write("ci/README.md", "# changed\n")
         repo.write("deepspeed/module_inject/README.md", "# changed\n")
@@ -252,12 +254,13 @@ def test_documentation_named_code_paths_still_run_all() -> None:
             repo.cleanup()
 
 
-def test_documentation_only_change_can_force_all() -> None:
+def test_documentation_and_version_only_change_can_force_all() -> None:
     repo = TmpRepo()
     try:
         repo.write("ci/README.md", "# changed\n")
         repo.write("docs/guide.rst", "Changed\n=======\n")
         repo.write("blogs/tutorial/config.json", '{"changed": true}\n')
+        repo.write("version.txt", "0.0.2\n")
         repo.commit("docs only")
         for tag in ("[test all]", "[no filter]"):
             sel = repo.selector().select("master", commit_message=tag)
@@ -314,10 +317,13 @@ def _gate_after_writing(paths: tuple[str, ...], ignore: str = "") -> tuple[int, 
         repo.cleanup()
 
 
-def test_check_paths_skips_documentation_only_diffs() -> None:
+def test_check_paths_skips_documentation_and_version_only_diffs() -> None:
     docs = ("README.md", "ci/README.md", "docs/guide.rst", "docs/code-docs/source/conf.py", "blogs/tutorial/train.py")
-    assert _gate_after_writing(docs) == _GATE_SKIPS
-    assert _gate_after_writing(docs + ("deepspeed/leaf.py", )) == _GATE_RUNS
+    for paths in (docs, ("version.txt", ), docs + ("version.txt", )):
+        assert _gate_after_writing(paths) == _GATE_SKIPS, paths
+        assert _gate_after_writing(paths + ("deepspeed/leaf.py", )) == _GATE_RUNS, paths
+    for near_miss in ("ci/version.txt", "version.txt.bak"):
+        assert _gate_after_writing(("version.txt", near_miss)) == _GATE_RUNS, near_miss
 
 
 def test_check_paths_counts_both_sides_of_renames() -> None:
@@ -457,9 +463,16 @@ def test_check_paths_workflow_runs_base_branch_copy() -> None:
 def test_check_paths_workflow_compares_with_the_merged_base() -> None:
     # Most pull requests are behind master; master's own changes since then must not count.
     docs_only = {"docs/guide.rst": "Changed\n=======\n"}
+    version_only = {"version.txt": "0.0.2\n"}
     code = {"deepspeed/leaf.py": "VALUE = 11\n"}
     for event in ("pull_request", "merge_group"):
-        for pr_changes, expected in ((docs_only, _GATE_SKIPS), (code, _GATE_RUNS)):
+        for pr_changes, expected in (
+            (docs_only, _GATE_SKIPS),
+            (version_only, _GATE_SKIPS),
+            (docs_only | version_only, _GATE_SKIPS),
+            (code, _GATE_RUNS),
+            (code | docs_only | version_only, _GATE_RUNS),
+        ):
             result = _gate_step_after_pull_request(pr_changes, event, master_moves_on=True)
             assert result == expected, (event, sorted(pr_changes))
 
@@ -651,3 +664,13 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+def test_registered_workflows_select_from_the_v1_scope() -> None:
+    """Every registered workflow must narrow to the v1 tree it actually runs."""
+    for name in ("modal-torch-latest", "cpu-torch-latest-v1-multirank"):
+        config = tests_fetcher.WORKFLOWS[name]
+        assert config.name == name
+        assert config.test_scopes == ("tests/unit/v1", ), name
+    assert (".github/workflows/cpu-torch-latest-v1-multirank.yml"
+            in tests_fetcher.WORKFLOWS["cpu-torch-latest-v1-multirank"].extra_run_all_globs)
