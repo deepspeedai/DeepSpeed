@@ -23,6 +23,7 @@ from typing import Optional
 
 import torch
 
+import deepspeed.comm as dist
 from deepspeed.accelerator import get_accelerator
 from deepspeed.runtime.rollout.base import RolloutBatch, RolloutEngine, RolloutRequest, SamplingConfig
 from deepspeed.runtime.rollout.continuous_batching import ContinuousBatchRequest, ContinuousBatchScheduler
@@ -75,6 +76,39 @@ class _ForwardProfiler:
         if self.use_host_timer:
             return (end - start) * 1000.0
         return start.elapsed_time(end)
+
+
+class GlobalWorkRemaining:
+    """Rendezvous a local work flag over a distributed process group."""
+
+    def __init__(self, process_group=None):
+        self.process_group = process_group
+
+    def __call__(self, local_work_remaining):
+        work_remaining = torch.as_tensor(local_work_remaining, dtype=torch.int32).clone()
+        if dist.is_initialized() and dist.get_world_size(group=self.process_group) > 1:
+            dist.all_reduce(work_remaining, op=dist.ReduceOp.MAX, group=self.process_group)
+        return bool(work_remaining.item())
+
+
+class _GlobalEosStoppingCriteria:
+    """Stop all local sequences only after every rank has observed EOS."""
+
+    def __init__(self, response_start, eos_token_id, work_remaining):
+        self.response_start = response_start
+        self.eos_token_ids = torch.as_tensor(eos_token_id).flatten()
+        self.work_remaining = work_remaining
+
+    def __call__(self, input_ids, scores, **kwargs):  # noqa: ARG002
+        response_ids = input_ids[:, self.response_start:]
+        eos_token_ids = self.eos_token_ids.to(device=input_ids.device, dtype=input_ids.dtype)
+        sequence_has_eos = (response_ids.unsqueeze(-1) == eos_token_ids).any(dim=-1).any(dim=-1)
+        local_work_remaining = (~sequence_has_eos).any().to(dtype=torch.int32)
+        global_work_remaining = self.work_remaining(local_work_remaining)
+        # This is a rank-global decision, so a scalar preserves the same
+        # behavior for every local sequence and remains compatible with older
+        # Transformers releases that apply Python ``any`` to criterion results.
+        return not global_work_remaining
 
 
 @dataclass
@@ -261,12 +295,25 @@ class HybridEngineRollout(RolloutEngine):
             else:
                 temperature = max(sampling.temperature, 1e-8)
                 do_sample = not is_greedy
+                zero3_sync = self._zero3_work_remaining()
+                stopping_criteria = None
+                if zero3_sync is not None and self.tokenizer.eos_token_id is not None:
+                    stopping_criteria = [
+                        _GlobalEosStoppingCriteria(prompt_len, self.tokenizer.eos_token_id, zero3_sync)
+                    ]
                 generate_kwargs = {
                     "attention_mask": prompt_attn,
                     "max_new_tokens": max_new_tokens,
+                    # ZeRO-3 gathers parameters during each decode forward, so ranks stop on the
+                    # group-aware criterion rather than on a rank-local EOS.
+                    "eos_token_id": None if zero3_sync is not None else self.tokenizer.eos_token_id,
+                    "stopping_criteria": stopping_criteria,
+                    # Transformers enables synced_gpus from the default world size when it can observe
+                    # ZeRO-3, which issues an ungrouped world all-reduce. The criterion above already
+                    # synchronizes over the parameter-gather group, so opt out for the ZeRO-3 path only.
+                    "synced_gpus": False if zero3_sync is not None else None,
                     # ZeRO-3 gathers parameters during each decode forward, so every
                     # data-parallel rank must execute the same number of iterations.
-                    "eos_token_id": None,
                     "do_sample": do_sample,
                     "temperature": temperature if do_sample else 1.0,
                     "top_p": sampling.top_p if do_sample else 1.0,
@@ -285,10 +332,10 @@ class HybridEngineRollout(RolloutEngine):
             accelerator.synchronize()
             generation_end = time.perf_counter()
 
-        # Generation deliberately ignores EOS above so ZeRO-3 ranks execute
-        # the same number of parameter-gather collectives. Restore the usual
-        # generation semantics before returning: retain the first EOS in each
-        # response and replace every later token with padding.
+        # ZeRO-3 generation ignores EOS in the decode loop so every rank runs the same
+        # number of parameter-gather collectives. Restore the usual generation semantics
+        # before returning: retain the first EOS in each response and replace every later
+        # token with padding.
         output_ids, response_attn = self._pad_after_eos(
             output_ids,
             response_start=prompt_len,
@@ -425,33 +472,18 @@ class HybridEngineRollout(RolloutEngine):
         self._profile_end(profile, "scheduler_overhead_ms", scheduler_start)
 
         cache_start = self._profile_start(profile)
-        cache = DeepSpeedStaticCache(
-            module.config,
-            batch_size=max_batch_size,
-            max_cache_len=max_cache_len,
-            device=device,
-            dtype=model_dtype,
-        )
+        # Layers are sized by the first prefill because AutoTP shards KV heads per rank.
+        cache = DeepSpeedStaticCache(module.config, max_cache_len=max_cache_len)
         write_positions = torch.full((max_batch_size, ), -1, dtype=torch.long, device=device)
         cache.set_write_position(write_positions)
         attention_mask = torch.zeros((max_batch_size, max_cache_len), dtype=torch.long, device=device)
         stats = {
-            "cache_capacity":
-            max_cache_len,
-            "peak_cache_length":
-            prompt_len,
-            "cache_memory_bytes":
-            sum(layer.keys.numel() * layer.keys.element_size() + layer.values.numel() * layer.values.element_size()
-                for layer in cache.layers) + attention_mask.numel() * attention_mask.element_size() +
-            write_positions.numel() * write_positions.element_size(),
-            "trim_count":
-            0,
-            "trimmed_columns":
-            0,
-            "trim_latency_ms":
-            0.0,
-            "decode_steps":
-            0,
+            "cache_capacity": max_cache_len,
+            "peak_cache_length": prompt_len,
+            "trim_count": 0,
+            "trimmed_columns": 0,
+            "trim_latency_ms": 0.0,
+            "decode_steps": 0,
         }
         next_tokens = {}
         logical_positions = dict(prompt_lengths)
@@ -605,6 +637,7 @@ class HybridEngineRollout(RolloutEngine):
             update = scheduler.advance(finished_ids)
             self._profile_end(profile, "scheduler_overhead_ms", scheduler_start)
 
+        stats["cache_memory_bytes"] = self._continuous_cache_memory_bytes(cache, attention_mask, write_positions)
         generation_end = self._profile_start(profile)
         post_processing_start = generation_end
         output = self._build_continuous_batch(original_request, responses)
@@ -684,27 +717,14 @@ class HybridEngineRollout(RolloutEngine):
         graph = state.graph
         static_logits = state.static_logits
         stats = {
-            "cache_capacity":
-            max_cache_len,
-            "peak_cache_length":
-            prompt_len,
-            "cache_memory_bytes":
-            sum(layer.keys.numel() * layer.keys.element_size() + layer.values.numel() * layer.values.element_size()
-                for layer in cache.layers) + static_input.numel() * static_input.element_size() +
-            static_attention.numel() * static_attention.element_size() +
-            static_causal_attention.numel() * static_causal_attention.element_size() +
-            static_position_ids.numel() * static_position_ids.element_size() +
-            static_write_positions.numel() * static_write_positions.element_size(),
-            "trim_count":
-            0,
-            "trimmed_columns":
-            0,
-            "trim_latency_ms":
-            0.0,
-            "trim_bytes_moved":
-            0,
-            "decode_steps":
-            0,
+            "cache_capacity": max_cache_len,
+            "peak_cache_length": prompt_len,
+            "cache_memory_bytes": self._continuous_cache_memory_bytes(cache, static_attention, static_write_positions),
+            "trim_count": 0,
+            "trimmed_columns": 0,
+            "trim_latency_ms": 0.0,
+            "trim_bytes_moved": 0,
+            "decode_steps": 0,
         }
 
         slot_by_request = {}
@@ -835,13 +855,8 @@ class HybridEngineRollout(RolloutEngine):
                                                      model_dtype)
         state = self._continuous_graph_state
         if state is None or state.signature != signature:
-            cache = cache_type(
-                module.config,
-                batch_size=max_batch_size,
-                max_cache_len=max_cache_len,
-                device=device,
-                dtype=model_dtype,
-            )
+            # Capture sizes the layers from the model's local KV tensors.
+            cache = cache_type(module.config, max_cache_len=max_cache_len)
             static_input = torch.zeros((max_batch_size, 1), dtype=torch.long, device=device)
             static_attention = torch.zeros((max_batch_size, max_cache_len), dtype=torch.long, device=device)
             static_causal_attention = torch.zeros((max_batch_size, 1, 1, max_cache_len),
@@ -906,6 +921,16 @@ class HybridEngineRollout(RolloutEngine):
         module._forward_pre_hooks.clear()
         module._forward_hooks.clear()
         try:
+            if not all(layer.is_initialized for layer in cache.layers):
+                # Allocate uninitialized KV layers on the current stream, not the warmup stream.
+                module(
+                    static_input,
+                    attention_mask=static_attention,
+                    past_key_values=cache,
+                    use_cache=True,
+                    cache_position=static_cache_position,
+                    position_ids=static_position_ids,
+                )
             warmup_stream = accelerator.Stream()
             warmup_stream.wait_stream(accelerator.current_stream())
             with accelerator.stream(warmup_stream):
@@ -1057,7 +1082,8 @@ class HybridEngineRollout(RolloutEngine):
                 raise ValueError("continuous batching prompt does not fit behind the decode front")
             for layer_idx in range(self._cache_layer_count(prefill_cache)):
                 prefill_keys, prefill_values = self._cache_layer_tensors(prefill_cache, layer_idx)
-                target_layer = cache.layers[layer_idx]
+                target_layer = self._continuous_cache_layer(cache, layer_idx, prefill_keys, prefill_values,
+                                                            attention_mask.shape[0])
                 for source_row, target_row in enumerate(target_slots):
                     target_layer.keys[target_row, :, cache_start:cache_position].copy_(prefill_keys[source_row])
                     target_layer.values[target_row, :, cache_start:cache_position].copy_(prefill_values[source_row])
@@ -1087,13 +1113,27 @@ class HybridEngineRollout(RolloutEngine):
                 raise ValueError("continuous batching prompt does not fit behind the decode front")
             for layer_idx in range(self._cache_layer_count(prefill_cache)):
                 prefill_keys, prefill_values = self._cache_layer_tensors(prefill_cache, layer_idx)
-                target_layer = cache.layers[layer_idx]
+                target_layer = self._continuous_cache_layer(cache, layer_idx, prefill_keys, prefill_values,
+                                                            attention_mask.shape[0])
                 target_layer.keys[target_row, :, cache_start:cache_position].copy_(prefill_keys[0])
                 target_layer.values[target_row, :, cache_start:cache_position].copy_(prefill_values[0])
             attention_mask[target_row, cache_start:cache_position].fill_(1)
             write_positions[target_row] = cache_position
             self._profile_end(profile, "cache_management_overhead_ms", cache_copy_start)
         return admitted_tokens
+
+    @staticmethod
+    def _continuous_cache_memory_bytes(cache, attention_mask, write_positions):
+        # Eager and graph decoding report the same quantity: the KV cache plus the per-row metadata that
+        # tracks it. Graph-only staging buffers are not counted.
+        return cache.memory_bytes() + attention_mask.nbytes + write_positions.nbytes
+
+    @staticmethod
+    def _continuous_cache_layer(cache, layer_idx, prefill_keys, prefill_values, max_batch_size):
+        layer = cache.layers[layer_idx]
+        if not layer.is_initialized:
+            layer.lazy_initialization(prefill_keys, prefill_values, max_batch_size=max_batch_size)
+        return layer
 
     def _start_continuous_profile(self):
         accelerator = get_accelerator()
@@ -1315,6 +1355,20 @@ class HybridEngineRollout(RolloutEngine):
                                           device=input_ids.device),
         )
 
+    def _zero3_work_remaining(self):
+        """Return a rendezvous over the group used for ZeRO-3 parameter gathers."""
+        is_zero3 = getattr(self.engine, "zero_optimization_partition_weights", None)
+        if not callable(is_zero3) or not is_zero3():
+            return None
+
+        process_group = None
+        if dist.is_initialized():
+            optimizer = getattr(self.engine, "optimizer", None)
+            process_group = getattr(optimizer, "dp_process_group", None)
+            if process_group is None:
+                raise RuntimeError("ZeRO-3 synchronized rollout requires optimizer.dp_process_group")
+        return GlobalWorkRemaining(process_group)
+
     def get_last_profile(self):
         """Return the most recent profiling snapshot for this rollout instance."""
         return self._last_profile
@@ -1517,6 +1571,7 @@ class HybridEngineRollout(RolloutEngine):
         # bound by reference to the prefill cache's HF slot objects, whose
         # state management is already cudagraph-safe by construction.
         from deepspeed.utils.static_cache import DSStaticGDNSlot
+        # Infer each layer's local KV shape from prefill before graph capture.
         for layer_idx in range(self._cache_layer_count(ds_cache)):
             ds_layer = ds_cache.layers[layer_idx]
             if isinstance(ds_layer, DSStaticGDNSlot):
