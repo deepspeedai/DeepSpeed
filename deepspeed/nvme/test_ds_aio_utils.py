@@ -29,7 +29,6 @@ def task_barrier(barrier, num_parties):
 
 
 def report_results(args, read_op, pool_results):
-    #print(f'pool_results = {pool_results}')
     io_string = 'Read' if read_op else 'Write'
     if None in pool_results:
         print(f'Failure in one of {args.threads} {io_string} processes')
