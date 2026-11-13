@@ -10,7 +10,7 @@ If you're interested in a newer version that works with HF Transformers, please 
 
 ## 1. Installation
 
-You will need to install DeepSpeed v0.10.2 or higher to use the DeepSpeed Sequence feature. Installing DeepSpeed is as simple as `pip install deepspeed`, [see more details](/tutorials/getting-started/).
+You will need to install DeepSpeed v0.10.2 or higher to use the DeepSpeed Sequence feature. Installing DeepSpeed is as simple as `pip install deepspeed`, [see more details](/getting-started/).
 
 
 ## 2. How to use DeepSpeed-Ulysses in your application?
@@ -79,7 +79,7 @@ def get_sequence_parallel_group():
 
 ```
 
-In the Megatron-DeepSpeed exampele, to enable sequence parallelism, set the degree of parallelism using the --ds-sequence-parallel-size argument. You also need to ensure that the number of attention heads is divisible by this value.
+In the Megatron-DeepSpeed example, to enable sequence parallelism, set the degree of parallelism using the --ds-sequence-parallel-size argument. You also need to ensure that the number of attention heads is divisible by this value.
 We have prepared scripts for you to quickly get some examples for training GPT-3 like models with very long sequences:
 
 ```shell

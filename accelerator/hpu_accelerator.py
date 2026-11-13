@@ -279,7 +279,7 @@ class HPU_Accelerator(DeepSpeedAccelerator):
                     for member_name in module.__dir__():
                         if member_name.endswith(
                                 'Builder'
-                        ) and member_name != "OpBuilder" and member_name != "CPUOpBuilder" and member_name != "TorchCPUOpBuilder":  # avoid abstract classes
+                        ) and member_name != "OpBuilder" and member_name != "CPUOpBuilder":  # avoid abstract classes
                             if not member_name in self.class_dict:
                                 self.class_dict[member_name] = getattr(module, member_name)
             # end initialize for create_op_builder()

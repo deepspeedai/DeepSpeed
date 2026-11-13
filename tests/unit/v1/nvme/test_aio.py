@@ -6,6 +6,8 @@
 import pytest
 import os
 import filecmp
+import resource
+import signal
 import torch
 import deepspeed
 import deepspeed.comm as dist
@@ -411,3 +413,136 @@ class TestAsyncFileOffset(DistributedTest):
 
         if not use_cuda_pinned_tensor:
             h.free_cpu_locked_tensor(data_buffer)
+
+
+def _get_buffer_view(base, layout):
+    # Views into a larger tensor, as ZeRO-Infinity swaps partitions of flat buffers: one byte past an aligned address,
+    # so no O_DIRECT alignment fits it, or every other byte.
+    if layout == "strided":
+        return base.view(IO_SIZE, 2)[:, 0]
+    view = base.narrow(0, 1, IO_SIZE)
+    return view.view(4, IO_SIZE // 4) if layout == "offset_2d" else view
+
+
+@pytest.mark.parametrize("use_cuda_pinned_tensor", [True, False])
+@pytest.mark.parametrize("layout", ["offset", "offset_2d", "strided"])
+class TestBufferView(DistributedTest):
+    world_size = 1
+    reuse_dist_env = True
+    requires_cuda_env = False
+    if not get_accelerator().is_available():
+        init_distributed = False
+        set_dist_env = False
+
+    def _get_base(self, h, use_cuda_pinned_tensor):
+        if use_cuda_pinned_tensor:
+            return get_accelerator().pin_memory(torch.zeros(2 * IO_SIZE, dtype=torch.uint8))
+        return h.new_cpu_locked_tensor(2 * IO_SIZE, torch.empty(0, dtype=torch.uint8))
+
+    def test_read(self, tmpdir, use_cuda_pinned_tensor, layout):
+        _skip_for_invalid_environment(use_cuda_pinned_tensor=use_cuda_pinned_tensor)
+        h = AsyncIOBuilder().load().aio_handle(BLOCK_SIZE, QUEUE_DEPTH, False, True, IO_PARALLEL)
+        base = self._get_base(h, use_cuda_pinned_tensor)
+        view = _get_buffer_view(base, layout)
+
+        ref_file, ref_buffer = _do_ref_write(tmpdir)
+        assert h.sync_pread(view, ref_file, 0) == 1
+        assert view.flatten().tolist() == list(ref_buffer)
+
+        if not use_cuda_pinned_tensor:
+            h.free_cpu_locked_tensor(base)
+
+    def test_write(self, tmpdir, use_cuda_pinned_tensor, layout):
+        _skip_for_invalid_environment(use_cuda_pinned_tensor=use_cuda_pinned_tensor)
+        h = AsyncIOBuilder().load().aio_handle(BLOCK_SIZE, QUEUE_DEPTH, False, True, IO_PARALLEL)
+        base = self._get_base(h, use_cuda_pinned_tensor)
+        view = _get_buffer_view(base, layout)
+
+        ref_file, ref_buffer = _do_ref_write(tmpdir)
+        view.copy_(torch.frombuffer(bytearray(ref_buffer), dtype=torch.uint8).view(view.shape))
+        aio_file = _get_test_write_file(tmpdir, 0)
+        assert h.sync_pwrite(view, aio_file, 0) == 1
+        filecmp.clear_cache()
+        assert filecmp.cmp(ref_file, aio_file, shallow=False)
+
+        if not use_cuda_pinned_tensor:
+            h.free_cpu_locked_tensor(base)
+
+
+def _get_io_error(io_call):
+    # Not pytest.raises: its failure exception cannot be pickled, so the DistributedTest would hang instead of failing.
+    try:
+        io_call()
+    except RuntimeError as error:
+        return str(error)
+    return None
+
+
+@pytest.mark.parametrize("single_submit", [True, False])
+@pytest.mark.parametrize("overlap_events", [True, False])
+class TestFailedIO(DistributedTest):
+    """An I/O request that fails raises, instead of being reported as done, and the handle can be used afterwards."""
+    world_size = 1
+    reuse_dist_env = True
+    requires_cuda_env = False
+    if not get_accelerator().is_available():
+        init_distributed = False
+        set_dist_env = False
+
+    def _check_read(self, h, tmpdir):
+        ref_file, ref_buffer = _do_ref_write(tmpdir)
+        buffer = h.new_cpu_locked_tensor(IO_SIZE, torch.empty(0, dtype=torch.uint8))
+        assert h.sync_pread(buffer, ref_file, 0) == 1
+        assert buffer.tolist() == list(ref_buffer)
+        h.free_cpu_locked_tensor(buffer)
+
+    def test_rejected_write(self, tmpdir, single_submit, overlap_events):
+        # The kernel rejects a write to a file opened read-only when the request is submitted.
+        h = AsyncIOBuilder().load().aio_handle(BLOCK_SIZE, QUEUE_DEPTH, single_submit, overlap_events, IO_PARALLEL)
+        buffer = h.new_cpu_locked_tensor(IO_SIZE, torch.empty(0, dtype=torch.uint8))
+        read_only_file = os.path.join(tmpdir, "read_only")
+        open(read_only_file, "wb").close()
+        fd = os.open(read_only_file, os.O_RDONLY)
+        assert h.async_pwrite(buffer=buffer, fd=fd, file_offset=0) == 0
+        error = _get_io_error(h.wait)
+        assert error is not None and "Bad file descriptor" in error, error
+        os.close(fd)
+        h.free_cpu_locked_tensor(buffer)
+
+        self._check_read(h, tmpdir)
+
+    def test_failed_write(self, tmpdir, single_submit, overlap_events):
+        # The kernel fails a write past the file size limit when the request completes: the second half of the buffer
+        # (the second thread's part) is past it.
+        h = AsyncIOBuilder().load().aio_handle(BLOCK_SIZE, QUEUE_DEPTH, single_submit, overlap_events, IO_PARALLEL)
+        _, ref_buffer = _do_ref_write(tmpdir)
+        _, buffer = _get_test_write_file_and_pinned_tensor(tmpdir, ref_buffer, h)
+        assert h.sync_pwrite(buffer, _get_test_write_file(tmpdir, 0), 0) == 1
+
+        limits = resource.getrlimit(resource.RLIMIT_FSIZE)
+        sigxfsz_handler = signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+        resource.setrlimit(resource.RLIMIT_FSIZE, (IO_SIZE // IO_PARALLEL, limits[1]))
+        try:
+            error = _get_io_error(lambda: h.sync_pwrite(buffer, _get_test_write_file(tmpdir, 1), 0))
+        finally:
+            resource.setrlimit(resource.RLIMIT_FSIZE, limits)
+            signal.signal(signal.SIGXFSZ, sigxfsz_handler)
+        assert error is not None and "File too large" in error, error
+        h.free_cpu_locked_tensor(buffer)
+
+        self._check_read(h, tmpdir)
+
+    def test_failed_context(self, tmpdir, single_submit, overlap_events):
+        # The kernel refuses an I/O context of queue depth 0, as it does when /proc/sys/fs/aio-max-nr is reached: the
+        # read and the write raise, and leave no file open.
+        aio = AsyncIOBuilder().load()
+        ref_file, _ = _do_ref_write(tmpdir)
+        buffer = torch.empty(IO_SIZE, dtype=torch.uint8)
+        open_files = len(os.listdir("/proc/self/fd"))
+        for io_call in (lambda: aio.aio_read(buffer, ref_file, BLOCK_SIZE, 0, single_submit, overlap_events, False),
+                        lambda: aio.aio_write(buffer, _get_test_write_file(tmpdir, 0), BLOCK_SIZE, 0, single_submit,
+                                              overlap_events, False)):
+            error = _get_io_error(io_call)
+            assert error is not None and "io_queue_init" in error, error
+        left_open = len(os.listdir("/proc/self/fd")) - open_files
+        assert left_open == 0, f"{left_open} files left open"

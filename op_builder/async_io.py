@@ -7,10 +7,10 @@ import os
 import shutil
 import subprocess
 
-from .builder import TorchCPUOpBuilder
+from .builder import CUDAOpBuilder
 
 
-class AsyncIOBuilder(TorchCPUOpBuilder):
+class AsyncIOBuilder(CUDAOpBuilder):
     BUILD_VAR = "DS_BUILD_AIO"
     NAME = "async_io"
 
@@ -56,6 +56,8 @@ class AsyncIOBuilder(TorchCPUOpBuilder):
         if not (TORCH_MAJOR >= 2 and TORCH_MINOR >= 1):
             args.remove('-std=c++17')
             args.append('-std=c++14')
+        # The host-side tensor copy is vectorized and parallelized with OpenMP.
+        args += [self.cpu_arch(), '-fopenmp', self.simd_width()]
         args += ['-Wall', '-O0', '-shared', '-fPIC', '-Wno-reorder']
         return args
 

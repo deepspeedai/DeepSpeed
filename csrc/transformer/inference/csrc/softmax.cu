@@ -85,7 +85,6 @@ __global__ void attn_softmax_v2(T* vals,
             (local_attention && real_seq_id >= window_size) ? real_seq_id - window_size : -1;
 
         float max_val = minus_infinity;
-        // if (lane == 0) printf("%d, %d: %d \n", wid, blockIdx.x, mask_offset);
         for (int i = 0; i < iterations; i++) {
             int data_id = i * (reduceWidth << 2) + (seq_lane);
             bool check = (data_id >> 2) >= window_stride4;
@@ -185,7 +184,6 @@ __global__ void attn_softmax_v2(T* vals,
                         : minus_infinity;
             }
 
-            // if(lane == 0) printf("%f , %d, %d \n", low_data[i].x, data_id, seq_id);
             max_val = (low_data[i].x > max_val ? low_data[i].x : max_val);
             max_val = (low_data[i].y > max_val ? low_data[i].y : max_val);
             max_val = (high_data[i].x > max_val ? high_data[i].x : max_val);

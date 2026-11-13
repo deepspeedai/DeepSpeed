@@ -46,11 +46,9 @@ class CheckpointWriterFactory(object):
                 num_parallel_writers = self._data_parallel_writer.world_size * self._io_multiplier
                 writer_rank = self._data_parallel_writer.rank
                 file_path = f'{file_path}-{writer_rank}.{num_parallel_writers}'
-                # print(f'create_dp_writer: {self._data_parallel_writer.global_rank=} {writer_rank=} {num_parallel_writers=} {file_path=}')
             else:
                 num_parallel_writers = 1
                 writer_rank = 0
-                # print(f'create_rank0_writer: {self._data_parallel_writer.global_rank=} {writer_rank=} {num_parallel_writers=} {file_path=}')
 
             config = FastFileWriterConfig(dnvme_handle=self._dnvme_handle,
                                           pinned_tensor=self._io_buffer,
