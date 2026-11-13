@@ -1050,9 +1050,6 @@ void launch_layerNorm_backward<__half>(const __half* out_grad,
     dim3 grid_dim(hidden_dim / TILE_DIM);
     dim3 block_dim(TILE_DIM, TILE_DIM);
 
-    // LayerNormBackward1<__half><<<grid_dim, block_dim, 0, stream[0]>>>(
-    //    out_grad, vals_hat, gamma, betta, gamma_grad, betta_grad, batch, hidden_dim, invertible);
-
     dim3 grid_dim2(batch);
 
     if (hidden_dim > 8192 && hidden_dim <= 16384)
@@ -1626,8 +1623,6 @@ __global__ void LayerNormBackward2_fused_add(const __half* out_grad1,
     __half2 vals_arr[NORM_REG];
     float2 vals_arr_f[NORM_REG];
     __half2 vals_hat_arr[NORM_REG];
-
-    // float2 result[iterations];
 
     __half2* inp_grad_h = reinterpret_cast<__half2*>(inp_grad);
     const __half2* out_grad_h1 = reinterpret_cast<const __half2*>(out_grad1);

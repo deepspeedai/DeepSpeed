@@ -236,15 +236,17 @@ class TestZeROFloat16(DistributedTest):
 
 @pytest.mark.parametrize("zero_stage", [1, 2])
 @pytest.mark.parametrize("offload_optimizer", [False, True])
+@pytest.mark.parametrize("gradient_clipping", [0.0, 1.0])
 class TestZeROBFloat16(DistributedTest):
     world_size = 2
 
-    def test_no_overflow(self, zero_stage, offload_optimizer):
+    def test_no_overflow(self, zero_stage, offload_optimizer, gradient_clipping):
         if not get_accelerator().is_bf16_supported():
             pytest.skip("bf16 is not supported")
 
         config_dict = {
             "train_micro_batch_size_per_gpu": 1,
+            "gradient_clipping": gradient_clipping,
             "steps_per_print": 1,
             "optimizer": {
                 "type": "Adam",
@@ -280,12 +282,13 @@ class TestZeROBFloat16(DistributedTest):
         assert model.skipped_steps == 0
         assert all([not has_inf_or_nan(p) for p in model.parameters()])
 
-    def test_detect_grad_overflow(self, zero_stage, offload_optimizer):
+    def test_detect_grad_overflow(self, zero_stage, offload_optimizer, gradient_clipping):
         if not get_accelerator().is_bf16_supported():
             pytest.skip("bf16 is not supported")
 
         config_dict = {
             "train_micro_batch_size_per_gpu": 1,
+            "gradient_clipping": gradient_clipping,
             "steps_per_print": 1,
             "optimizer": {
                 "type": "Adam",
@@ -322,12 +325,13 @@ class TestZeROBFloat16(DistributedTest):
 
         assert all([not has_inf_or_nan(p) for p in model.parameters()])
 
-    def test_ignore_grad_overflow(self, zero_stage, offload_optimizer):
+    def test_ignore_grad_overflow(self, zero_stage, offload_optimizer, gradient_clipping):
         if not get_accelerator().is_bf16_supported():
             pytest.skip("bf16 is not supported")
 
         config_dict = {
             "train_micro_batch_size_per_gpu": 1,
+            "gradient_clipping": gradient_clipping,
             "steps_per_print": 1,
             "optimizer": {
                 "type": "Adam",

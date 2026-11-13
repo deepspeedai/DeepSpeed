@@ -5,7 +5,6 @@
 
 import torch
 import deepspeed.comm as dist
-from torch.utils._sympy.functions import FloorDiv
 from .sp_dp_registry import get_group, is_setup, sp_size
 
 
@@ -63,6 +62,9 @@ def maybe_restore_sharded_dim(dim: torch.SymInt, factor: int):
     node = getattr(dim, "node", None)
     if node is None:
         return dim * factor
+
+    # Imported here because torch.utils._sympy imports sympy, which slows down import deepspeed.
+    from torch.utils._sympy.functions import FloorDiv
 
     expr = node.expr
     if isinstance(expr, FloorDiv) and expr.args[1] == factor:

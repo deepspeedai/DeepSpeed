@@ -217,6 +217,10 @@ def safe_get_full_grad(param):
         Returns:
             Union[torch.Tensor, None]: A tensor on accelerator device
     """
+    # BF16_Optimizer keeps its accumulation buffer separately while retaining the low-precision staging gradient.
+    if getattr(param, '_hp_grad', None) is not None:
+        return param.get_full_hp_grad()
+
     if param.grad is not None:
         return param.grad
 

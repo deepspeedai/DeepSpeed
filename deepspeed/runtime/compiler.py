@@ -24,15 +24,17 @@ except ImportError:
         # Torch does not have compiler support
         torch_is_compiling = lambda: False
 
-try:
-    if required_torch_version(min_version="2.6.0a"):
-        from torch._dynamo.compiled_autograd import _enable as compiled_autograd_enable
-    else:
-        from torch._dynamo.compiled_autograd import enable as compiled_autograd_enable
 
-    _COMPILED_AUTOGRAD_AVAILABLE = True
-except (ImportError, ModuleNotFoundError):
-    _COMPILED_AUTOGRAD_AVAILABLE = False
+def _get_compiled_autograd_enable():
+    # Imported on first use because importing torch._dynamo slows down import deepspeed.
+    try:
+        if required_torch_version(min_version="2.6.0a"):
+            from torch._dynamo.compiled_autograd import _enable as compiled_autograd_enable
+        else:
+            from torch._dynamo.compiled_autograd import enable as compiled_autograd_enable
+    except (ImportError, ModuleNotFoundError):
+        return None
+    return compiled_autograd_enable
 
 
 def is_compile_supported():
@@ -43,6 +45,14 @@ def disable(func):
     if is_compile_supported():
         return torch.compiler.disable(func)
     return func
+
+
+def lazy_disable(func):
+    # torch._disable_dynamo imports torch._dynamo on the first call instead of when decorating, so decorating at
+    # import time does not slow down import deepspeed. It caches the disabled function from torch 2.4.
+    if required_torch_version(min_version=2.4):
+        return torch._disable_dynamo(func)
+    return disable(func)
 
 
 def enable(min_version=None):
@@ -93,7 +103,7 @@ def is_compiling():
 
 @contextlib.contextmanager
 def compiled_autograd(enabled: bool, kwargs: dict):
-    if not enabled or not _COMPILED_AUTOGRAD_AVAILABLE:
+    if not enabled or _get_compiled_autograd_enable() is None:
         yield
         return
 
@@ -103,7 +113,7 @@ def compiled_autograd(enabled: bool, kwargs: dict):
 
     compiler_fn = torch.compile(backend=get_accelerator().get_compile_backend(), **kwargs)
 
-    with compiled_autograd_enable(compiler_fn):
+    with _get_compiled_autograd_enable()(compiler_fn):
         yield
 
 

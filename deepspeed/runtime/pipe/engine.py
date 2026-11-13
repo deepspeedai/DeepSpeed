@@ -376,7 +376,7 @@ class PipelineEngine(DeepSpeedEngine):
 
         if self.steps_per_print() is not None and self.global_steps % self.steps_per_print() == 0:
             if self.global_rank == 0:
-                elapsed = self.timers(TRAIN_BATCH_TIMER).elapsed(reset=True) / 1000.0
+                elapsed = self.timers(TRAIN_BATCH_TIMER).elapsed_total(reset=True) / 1000.0
                 iter_time = elapsed / self.steps_per_print()
                 tput = self.train_batch_size() / iter_time
                 log_str = f'steps: {self.global_steps} loss: {self.agg_train_loss:0.4f} '
@@ -584,7 +584,6 @@ class PipelineEngine(DeepSpeedEngine):
 
             self.dp_group_loss = loss.clone().detach()
             agg_loss = self.dp_group_loss.clone().detach()
-            #print(f'RANK={self.global_rank} bcast SENDER src={self.global_rank} group={self.grid.pp_group}', flush=True)
 
             # Average loss across all data-parallel groups
             if self.is_data_parallel:
@@ -825,7 +824,6 @@ class PipelineEngine(DeepSpeedEngine):
 
         grad_tensors = self.grad_layer
         if self.is_grad_partitioned:
-            #print(f'RANK={self.global_rank} BEFORE-BWD restoring grad={self.grad_layer[0].size()} {self.grad_layer[1].size()}')
             if self.grad_partition_grad_layer_meta_cache is None:
                 self.grad_partition_grad_layer_meta_cache = self.grad_layer[0].to('cpu')
             part_grad = PartitionedTensor.from_meta(meta=self.grad_partition_grad_layer_meta_cache,
@@ -833,7 +831,6 @@ class PipelineEngine(DeepSpeedEngine):
                                                     group=self.grid.get_slice_parallel_group())
             grad_tensors = (part_grad.full(), *grad_tensors[2:])
             part_grad = None
-            #print(f'RANK={self.global_rank} BEFORE-BWD restored grad={self.grad_layer[0].size()} {self.grad_layer[1].size()}')
 
         if self.using_bf16_optimizer and not self.is_last_stage():
             # manually call because we don't call optimizer.backward()
@@ -974,12 +971,6 @@ class PipelineEngine(DeepSpeedEngine):
 
         else:
             raise NotImplementedError(f'Could not send meta type {type(buffer)}')
-
-        # Useful for performance debugging.
-        '''
-        if self.grid.data_parallel_id == 0:
-            print(f'STAGE={self.stage_id} pipe-send-volume: {send_bytes/1024**2:0.2f}MB')
-        '''
 
     def _recv_tensor_meta(self, send_stage):
         """Receive metadata about upcoming p2p transfers and return allocated buffers.

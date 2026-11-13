@@ -3,10 +3,10 @@
 
 # DeepSpeed Team
 
-from .builder import TorchCPUOpBuilder
+from .builder import CUDAOpBuilder
 
 
-class DeepCompileBuilder(TorchCPUOpBuilder):
+class DeepCompileBuilder(CUDAOpBuilder):
     BUILD_VAR = "DS_BUILD_DEEP_COMPILE"
     NAME = "dc"
 

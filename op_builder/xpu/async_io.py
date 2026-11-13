@@ -6,7 +6,7 @@
 import shutil
 import subprocess
 
-from .builder import OpBuilder
+from .builder import OpBuilder, cpp_standard
 
 
 class AsyncIOBuilder(OpBuilder):
@@ -39,20 +39,14 @@ class AsyncIOBuilder(OpBuilder):
         return ['csrc/aio/py_lib', 'csrc/aio/common', 'csrc/pin_memory']
 
     def cxx_args(self):
-        import torch
         # -O0 for improved debugging, since performance is bound by I/O
         CPU_ARCH = self.cpu_arch()
         SIMD_WIDTH = self.simd_width()
-        TORCH_MAJOR, TORCH_MINOR = map(int, torch.__version__.split('.')[0:2])
-        if TORCH_MAJOR >= 2 and TORCH_MINOR >= 1:
-            CPP_STD = '-std=c++17'
-        else:
-            CPP_STD = '-std=c++14'
         return [
             '-g',
             '-Wall',
             '-O0',
-            CPP_STD,
+            cpp_standard(),
             '-shared',
             '-fPIC',
             '-Wno-reorder',
