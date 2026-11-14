@@ -132,6 +132,42 @@ def test_leaf_change_narrows_to_one_test() -> None:
         repo.cleanup()
 
 
+def test_package_initializer_change_selects_submodule_importers() -> None:
+    for initializer in ("deepspeed/pkg/__init__.py", "deepspeed/pkg/nested/__init__.py"):
+        repo = TmpRepo()
+        try:
+            repo.write("deepspeed/pkg/__init__.py")
+            repo.write("deepspeed/pkg/nested/__init__.py")
+            repo.write("deepspeed/pkg/nested/leaf.py", "VALUE = 1\n")
+            repo.write("deepspeed/pkg/user.py", "from deepspeed.pkg.nested.leaf import VALUE\n")
+            imports = {
+                "test_import.py": "import deepspeed.pkg.nested.leaf\n",
+                "test_from_package.py": "from deepspeed.pkg.nested import leaf\n",
+                "test_from_module.py": "from deepspeed.pkg.nested.leaf import VALUE\n",
+                "test_transitive.py": "from deepspeed.pkg.user import VALUE\n",
+            }
+            for name, content in imports.items():
+                repo.write(f"tests/unit/v1/{name}", content)
+            repo.commit("add nested package and importers")
+            repo._git("branch", "-f", "master", "HEAD")
+            repo.write(initializer, "raise RuntimeError('broken package initializer')\n")
+            repo.commit("break package initializer")
+
+            # Python executes parent initializers even without an explicit import of them.
+            result = subprocess.run([sys.executable, "-c", "import deepspeed.pkg.nested.leaf"],
+                                    cwd=repo.root,
+                                    capture_output=True,
+                                    text=True)
+            assert result.returncode != 0
+            assert "broken package initializer" in result.stderr
+
+            sel = repo.selector().select("master")
+            assert sel.mode == "subset", sel.reason
+            assert _rel_names(repo, sel.tests) == {f"tests/unit/v1/{name}" for name in imports}
+        finally:
+            repo.cleanup()
+
+
 def test_shared_change_selects_all_importers() -> None:
     repo = TmpRepo()
     try:
