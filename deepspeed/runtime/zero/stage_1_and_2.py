@@ -27,6 +27,8 @@ from deepspeed.runtime.utils import (empty_cache, see_memory_usage, has_inf_or_n
                                      combine_grad_norm_groups, count_used_parameters_in_backward, is_invalid_grad_norm,
                                      is_optimized_parameter)
 from deepspeed.runtime.zero.config import ZeroStageEnum
+from deepspeed.runtime.zero.flat_param_metadata import (ZeROFlatParamMetadata, ZeROFlatPartitionMetadata)
+from deepspeed.runtime.zero.flat_param_metadata import get_zero_flat_partition_metadata  # noqa: F401
 from deepspeed.runtime.zero.utils import ZeRORuntimeException, get_norm_dtype
 from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum, OffloadStateTypeEnum
 from deepspeed.ops.adam import DeepSpeedCPUAdam
@@ -575,6 +577,53 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                     self.param_buffer_of_bit16_for_cpu_offload_groups.append(temp_pinned)
                 else:
                     self.param_buffer_of_bit16_for_cpu_offload_groups.append(temp_buffer_bit16)
+
+            # Preserve the original parameter layout on the flat optimizer tensor. A
+            # custom optimizer receives only this local partition, so without this
+            # metadata the original shapes, tensor boundaries, and global offsets are
+            # unrecoverable.
+            partition_start = left_boundary
+            partition_end = partition_start + curr_partition_size
+            if self.round_robin_gradients:
+                # ``_round_robin_reorder`` maps original index -> flat index, so
+                # invert it before looking up the original index of a flat slot.
+                flat_index_to_original = {
+                    flat_index: original_index
+                    for original_index, flat_index in round_robin_indices.items()
+                }
+            else:
+                flat_index_to_original = {index: index for index in range(len(round_robin_tensors))}
+            flat_params = []
+            for flat_index, param in enumerate(round_robin_tensors):
+                meta = meta_tensors[flat_index]
+                offset = param_offsets[flat_index]
+                numel = meta.numel()
+                overlap_start = max(offset, partition_start)
+                overlap_end = min(offset + numel, partition_end)
+                local_numel = max(0, overlap_end - overlap_start)
+                local_offset = overlap_start - partition_start if local_numel else -1
+                original_index = getattr(param, "param_idx_in_group", None)
+                if original_index is None or self.bit16_groups[i][original_index] is not param:
+                    original_index = flat_index_to_original[flat_index]
+                flat_params.append(
+                    ZeROFlatParamMetadata(original_index=original_index,
+                                          flat_index=flat_index,
+                                          shape=meta.shape,
+                                          numel=numel,
+                                          flat_offset=offset,
+                                          padding=param_padding[flat_index],
+                                          local_offset=local_offset,
+                                          local_numel=local_numel,
+                                          requires_grad=param.requires_grad))
+            weights_partition.ds_zero_flat_partition = True
+            weights_partition.ds_zero_flat_partition_metadata = ZeROFlatPartitionMetadata(
+                group_index=i,
+                global_numel=self.bit16_groups_flat[i].numel(),
+                partition_start=partition_start,
+                partition_numel=curr_partition_size,
+                dp_group=self.real_dp_process_group[i],
+                dp_world_size=dist.get_world_size(group=self.real_dp_process_group[i]),
+                params=tuple(flat_params))
 
             self.single_partition_of_fp32_groups.append(weights_partition)
 
