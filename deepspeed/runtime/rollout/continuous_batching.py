@@ -11,7 +11,9 @@ free rows.
 
 from collections import deque
 from dataclasses import dataclass
-from typing import Hashable
+from typing import Hashable, Optional
+
+import torch
 
 
 @dataclass(frozen=True)
@@ -19,6 +21,8 @@ class ContinuousBatchRequest:
     """A request waiting for a slot in a continuous decode batch."""
 
     request_id: Hashable
+    # Tokens the request may generate; None uses the scheduler's max_new_tokens.
+    max_new_tokens: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -49,8 +53,8 @@ class ContinuousBatchUpdate:
 class ContinuousBatchScheduler:
     """FIFO scheduler for bounded, slot-based continuous batching.
 
-    All submitted requests share the scheduler's ``max_new_tokens`` budget;
-    requests may still retire earlier when the model emits EOS.
+    A request generates up to its own ``max_new_tokens``, or the scheduler's when
+    it has none; requests may still retire earlier when the model emits EOS.
     ``schedule`` performs admission/retirement without advancing tokens.
     ``advance`` represents one decode step for every active request and also
     retires requests whose token budget has been consumed. A caller may pass
@@ -77,13 +81,19 @@ class ContinuousBatchScheduler:
     def pending(self) -> tuple[ContinuousBatchRequest, ...]:
         return tuple(self._pending)
 
-    def submit(self, request: ContinuousBatchRequest) -> None:
+    def submit(self, request: ContinuousBatchRequest, front: bool = False) -> None:
+        """Queue a request, optionally ahead of those already waiting; a retired request may return."""
         if not isinstance(request, ContinuousBatchRequest):
             raise TypeError("request must be a ContinuousBatchRequest")
         if request.request_id in self._known_ids:
             raise ValueError(f"duplicate request_id: {request.request_id!r}")
+        if request.max_new_tokens is not None and request.max_new_tokens <= 0:
+            raise ValueError("max_new_tokens must be positive")
         self._known_ids.add(request.request_id)
-        self._pending.append(request)
+        if front:
+            self._pending.appendleft(request)
+        else:
+            self._pending.append(request)
 
     def schedule(self, finished_ids=()) -> ContinuousBatchUpdate:
         finished_ids = tuple(finished_ids)
@@ -115,6 +125,16 @@ class ContinuousBatchScheduler:
             self._known_ids.discard(request_id)
         return ContinuousBatchUpdate(tuple(request for request, _ in survivors), keep_slots, retired, tuple(admitted))
 
+    def will_free_slot(self, finished_ids=()) -> bool:
+        """Whether ``advance(finished_ids)`` leaves a row free, so a request queued now could be admitted."""
+        if len(self._active) < self.max_batch_size or finished_ids:
+            return True
+        for request, generated in self._active:
+            limit = request.max_new_tokens if request.max_new_tokens is not None else self.max_new_tokens
+            if generated + 1 >= limit:
+                return True
+        return False
+
     def advance(self, finished_ids=()) -> ContinuousBatchUpdate:
         explicit_finished = set(finished_ids)
         active_ids = {request.request_id for request, _ in self._active}
@@ -126,8 +146,23 @@ class ContinuousBatchScheduler:
         for request, generated in self._active:
             generated += 1
             self._generated[request.request_id] = generated
-            if generated >= self.max_new_tokens:
+            limit = request.max_new_tokens if request.max_new_tokens is not None else self.max_new_tokens
+            if generated >= limit:
                 finished.add(request.request_id)
             updated.append((request, generated))
         self._active = updated
         return self.schedule(finished)
+
+
+@dataclass
+class ContinuousGraphState:
+    signature: tuple
+    cache: object
+    static_input: torch.Tensor
+    static_attention: torch.Tensor
+    static_causal_attention: torch.Tensor
+    static_position_ids: torch.Tensor
+    static_write_positions: torch.Tensor
+    static_cache_position: torch.Tensor
+    graph: object
+    static_logits: torch.Tensor

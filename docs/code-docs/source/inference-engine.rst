@@ -66,14 +66,15 @@ HybridEngine Rollout CUDA Graph Decode
 ``HybridEngineRolloutConfig(use_graph_capture=True)`` captures the decode
 forward pass in a CUDA graph and replays it for every generated token. Only the
 model forward is captured; the next token is chosen from the graph's output
-logits after each replay. Greedy decoding (``temperature <= 0``) takes the
-argmax. Sampling applies the ``temperature``, ``top_k`` and ``top_p`` settings
-of ``SamplingConfig`` with Hugging Face's logits warpers, in the order
-``generate()`` applies them, so both paths sample from the same distribution.
-Both greedy decoding and sampling first apply the repetition penalty from the
-model's ``generation_config``, as ``generate()`` does. Other
-``generation_config`` settings are not applied on the graph path. Continuous
-batching, with or without graph capture, picks tokens the same way.
+logits after each replay. The graph path, and continuous batching with or
+without graphs, apply ``temperature``, ``top_k``, ``top_p`` and
+``repetition_penalty`` from ``SamplingConfig`` in the order ``generate()``
+applies them, so every path samples from the same distribution. A
+``repetition_penalty`` of ``None`` uses the value in the model's
+``generation_config``, and 1.0 disables the penalty. Other
+``generation_config`` settings are not applied on these paths. With
+``return_log_probs``, ``generate()`` warns about a penalty other than 1.0,
+since a training forward pass cannot reproduce those log-probs.
 
 Shared Prompt Prefill
 ---------------------
@@ -83,95 +84,115 @@ When one prompt branches into multiple response samples,
 forward once and repeats its KV cache before decoding the independent response
 branches. The option is disabled by default.
 
-Shared prefill currently requires HybridEngine kernel injection, ZeRO stage 0,
-inference tensor-parallel size 1, an internal KV cache, and a prompt longer than
-one token. It cannot be combined with CUDA graph capture,
-``release_inference_cache``, or continuous batching
-(``SamplingConfig.continuous_batch_size``). Sampling still happens independently
-for every response branch after the shared prompt forward.
+Shared prefill runs on HybridEngine's inference kernels, so it needs a model
+with a DeepSpeed inference policy; models without one, such as Qwen3, are
+rejected when the rollout is constructed, as are CUDA graph capture and
+continuous batching (``continuous_batch_size``). It also requires ZeRO stage 0,
+inference tensor-parallel size 1, no ``release_inference_cache``, and a prompt
+longer than one token. In a multi-turn rollout it applies to each trajectory's
+first turn: the copies of a prompt differ once they hold their own responses.
+Sampling still happens independently for every response branch after the
+shared prompt forward.
 
 Continuous batching (experimental)
 -----------------------------------
 
-Continuous batching is enabled through ``SamplingConfig.continuous_batch_size``
-on the regular ``HybridEngineRollout.generate(request, sampling)`` entry point.
-When unset, generation keeps its existing behavior. When set to a positive
-value, at most that many prompt rows are active at once; completed rows retire
-and pending rows are prefetched into the released slots. The returned
-``RolloutBatch`` remains in the original ``RolloutRequest`` row order.
-When ``HybridEngineRolloutConfig(enable_cache_trimming=True)`` is enabled, the
-experimental path periodically trims unused cache columns from the left to
-keep long-running staggered-EOS workloads within the allocated cache span.
+Continuous batching is enabled through ``continuous_batch_size`` in
+``HybridEngineRolloutConfig``. It sizes the KV cache and
+the captured graph, so it is fixed for the rollout engine rather than passed
+with each ``generate(request, sampling)`` call. When unset, turns run in static
+batches. When set, at most that many turns decode at once: a row is freed as
+soon as its turn ends, and the next queued turn is prefilled into it. A
+single-turn call is a rollout of one turn per sample; with ``multi_turn``, a
+turn that calls a tool frees its row while the tool runs, and the trajectory's
+next turn joins the front of the queue. The returned ``RolloutBatch`` remains in
+the original ``RolloutRequest`` order, and any ``n_samples_per_prompt`` is
+supported. Finished turns are collected after every decode step.
 
-When ``HybridEngineRolloutConfig(enable_profiling=True)`` is enabled, this path
-also records a snapshot in ``get_last_profile()``. In addition to the common
-rollout fields, the snapshot reports ``scheduler_overhead_ms`` for scheduler
-transitions, ``cache_management_overhead_ms`` for cache compaction, trimming,
-reset, and admitted-row copies, and separate ``prefill_forward_ms`` and
-``decode_forward_ms`` totals. ``num_prefill_forwards`` counts each admitted
-prompt batch, while ``num_decode_forwards`` counts decode steps that had
-surviving rows. ``num_generated_tokens`` counts tokens actually produced by
-all requests (padding is excluded), and ``active_batch_size`` is the maximum
-number of simultaneously active rows; ``continuous_batch_size`` is the
-configured capacity.
+The cache layout depends on graph capture:
 
-The experimental path intentionally does not implement paged attention or change the
-default generation semantics. It currently requires one padded prompt width for
-all rows, a model with cache-class support, and one sample per prompt. Shared
-prompt prefill is rejected until the scheduling semantics are validated on real
-workloads. Models that explicitly declare no cache-class
-support are rejected; models with unknown support should be validated against
-the default ``generate()`` path before use.
-``align_decode_fronts=False`` is the default equal-width padded-prompt baseline:
-all requests use the same padded prompt width. Different effective lengths
-encoded by the attention masks retain the legacy staggered logical decode
-positions; physical decode-front alignment is enabled only when
-``align_decode_fronts=True``. Cache trimming is independently controlled by
-``enable_cache_trimming`` and is disabled by default. When disabled, the
-rollout does not trim periodically, but it reclaims a dead prefix when that is
-necessary to avoid exhausting the configured cache capacity.
+* **Without graph capture**, all live rows share one write column. A turn is
+  admitted into the columns just before it; a turn whose context is longer than
+  the column moves the column forward, and the live rows' attention masks skip
+  the columns in between. Freed rows are compacted away, so each decode step
+  runs only the live rows. By default every admission is prefilled in one
+  left-padded forward and placed at that padded width.
+  ``align_decode_fronts=True`` instead places each context with its real length,
+  so no padding enters the cache, and orders the first admissions longest
+  prompt first. Columns no live row attends are trimmed from the left when the
+  cache is full, or as soon as they reach the prompt width with
+  ``enable_cache_trimming=True``, at the cost of copying the live columns. If
+  the cache is full and nothing can be trimmed, the rollout raises an error that
+  names ``continuous_cache_capacity`` and ``enable_cache_trimming``.
+* **With graph capture**, every row decodes at its own position, so the
+  captured decode keeps one batch shape and stable tensor addresses. A turn is
+  prefilled in one left-padded forward and only its real tokens are copied into
+  its row, from slot 0. All rows decode every step; rows without a turn produce
+  throwaway tokens. The graph is captured once and reused across calls until the
+  batch size, the cache size, the device or dtype changes, or a model parameter
+  or buffer changes address, shape, strides, dtype or device. Replays read
+  parameters in place, so an in-place optimizer step needs no new capture.
+  ``align_decode_fronts`` and ``enable_cache_trimming`` are rejected, since rows
+  never share a column. ``rollout.shutdown()`` releases the graph and its cache;
+  the rollout captures again on its next graph call. Under tensor parallelism
+  the graph holds captured collectives, so call ``shutdown()`` before
+  ``torch.distributed.destroy_process_group()``.
 
-Set ``HybridEngineRolloutConfig(align_decode_fronts=True)`` to enable the
-follow-up alignment path. It derives each request's effective prompt width from
-its attention mask, orders requests from longest to shortest internally, and
-restores the original row order in the returned batch. Retired rows are refilled
-from that pre-sorted pending queue. Cache trimming remains disabled unless
-``enable_cache_trimming=True`` is also set. You can override the derived cache
-span with ``continuous_cache_capacity``; if the span is exhausted, the rollout
-raises an error that names both remedies.
+The cache size follows from the longest context a turn can be admitted with,
+``C``, and the most one turn can generate, ``b`` (``max_new_tokens_per_turn``
+when set, else ``max_new_tokens``). In a single-turn call ``C`` is the prompt
+width, and in a multi-turn rollout it is ``hybrid_engine.max_out_tokens``, since
+tool output has no other bound, plus the longest left padding of a pre-tokenized
+sample without ``align_decode_fronts``, since records keep it on every turn.
+With ``multi_turn`` or ``align_decode_fronts``, the shared write column gets
+``C + b`` columns, which is enough because trimming at full leaves the oldest
+live row at column 0. A single-turn call without ``align_decode_fronts`` instead
+simulates the scheduler as if every request generated its whole budget, and
+takes the prompt width plus the longest span before the batch empties, so
+trimming at full is rarely needed; that is ``C + b`` when every request has the
+same budget. Requests that end early at EOS can keep the batch from emptying and
+outgrow the estimate, and trimming at full covers them. Each graph row gets
+``max_out_tokens``, or in a single-turn call the longest prompt plus ``b`` when
+that is smaller.
 
-The most recent cache statistics are available from
+``continuous_cache_capacity`` overrides the size, and each path treats it
+differently. Without graph capture, a single-turn call uses it as a memory cap:
+it must hold the prompt width, trimming has to work within it, and the rollout
+raises the error above if it runs out. A multi-turn rollout raises a smaller
+value to ``C + b`` with a warning, since a returning turn's context is known only
+once its tools finish. With graph capture, a single-turn call rejects a value
+smaller than the longest prompt plus ``b``, and a multi-turn rollout limits each
+turn to the room left in its row instead. Since it fixes the cache size, one
+captured graph then serves single-turn calls of every prompt width that fits.
+
+Continuous batching rejects ZeRO-3, ``flash_attention_2``, shared prefill, and
+models that declare no cache-class support.
+
+When ``HybridEngineRolloutConfig(enable_profiling=True)`` is enabled,
+``get_last_profile()`` records ``generation_ms``, ``prefill_forward_ms``,
+``decode_forward_ms``, ``num_decode_forwards``, ``tool_ms``, ``num_turns``,
+``num_generated_tokens`` (tokens actually generated, padding excluded) and
+``tokens_per_second``. Continuous batching also reports
+``scheduler_overhead_ms``, ``cache_management_overhead_ms`` for compaction,
+trimming, reset and admitted-row copies, ``num_prefill_forwards``,
+``active_batch_size``, the most rows live at once, ``continuous_batch_size``,
+``continuous_decode_occupancy``, the share of ``continuous_batch_size`` rows
+times decode steps that produced a token (graph replays every row, while the
+shared write column runs only its live rows, so the two are not directly
+comparable), and ``continuous_step_trace``, one entry per step with the rows holding
+a turn, the rows still decoding, the tokens decoded so far, the turns queued and
+the trajectories waiting on tools.
+
+For continuous batching, the most recent cache statistics are available from
 ``rollout.get_last_continuous_stats()``. They include ``cache_capacity``,
 ``peak_cache_length``, ``cache_memory_bytes``, ``trim_count``,
 ``trimmed_columns``, ``trim_frequency``, and ``trim_bytes_moved``.
-``cache_memory_bytes`` covers
-the allocated KV tensors plus the per-row attention mask and write positions,
-with the same definition for eager and graph-captured decoding. With profiling enabled,
-``trim_latency_ms``, ``end_to_end_ms``, and ``tokens_per_second`` are also
-measured with accelerator synchronization; otherwise those timing fields are
-``None`` or zero.
-``trim_frequency`` is the number of trims divided by decode steps. Trimming
-statistics remain zero when ``enable_cache_trimming`` is false unless a
-capacity-exhaustion fallback reclaims a dead prefix.
-
-CUDA Graph capture is supported for CUDA inputs with the default
-``align_decode_fronts=False`` and ``enable_cache_trimming=False`` settings. It
-uses a fixed ``continuous_batch_size`` layout, keeps every KV-cache row and
-decode tensor at a stable address, and masks inactive rows while the scheduler
-refills them. Graph state is reused across rollout calls with the same decode
-batch size, cache length, device and dtype, and is rebuilt when one of these
-changes or when a model parameter or buffer changes address, shape, strides,
-dtype or device. Replays read these tensors in place, so in-place optimizer updates between
-rollouts are picked up without recapturing. By default, the cache length is the
-prompt width plus ``max_new_tokens``. Set ``continuous_cache_capacity`` to reuse
-one graph across prompt widths that fit within that capacity.
-Call ``rollout.shutdown()`` to release the graph and its
-static cache. The rollout stays usable and captures again on its next graph
-call. Under tensor parallelism the graph holds captured collectives, so call
-``shutdown()`` before ``torch.distributed.destroy_process_group()``. Aligned
-decode fronts and cache trimming are rejected while graph capture is enabled
-because they move cache rows or columns. ``flash_attention_2`` is also rejected
-because the captured decode uses a four-dimensional additive attention mask.
+``cache_memory_bytes`` covers the allocated KV tensors plus the per-row
+attention mask and write positions, with the same definition for eager and
+graph-captured decoding. With profiling enabled, ``trim_latency_ms``,
+``end_to_end_ms``, and ``tokens_per_second`` are also measured with accelerator
+synchronization; otherwise those timing fields are ``None`` or zero.
+``trim_frequency`` is the number of trims divided by decode steps.
 
 ``DeepSpeedStaticCache`` accepts one write position per row and can compact
 active rows while preserving its static tensor addresses. This mirrors the
@@ -188,12 +209,157 @@ does not advance the cache or synchronize a device tensor to the host.
 This is a targeted query-offset compatibility fix, not a guarantee of support
 for every Transformers 5.20 cache API.
 
+HybridEngine Rollout Records
+----------------------------
+
+``RolloutRequest`` and ``RolloutBatch`` hold a list of ``RolloutRecord``. A
+record is one prompt and its rollout: ``prompt`` (chat messages, or text that
+is already rendered), ``tokens`` and ``attention_mask`` across every turn,
+``response`` and ``response_length``, a ``loss_mask`` over the response (1 on
+model tokens, 0 on tool output), ``rollout_log_probs``, ``num_turns`` and
+``status`` (``COMPLETED`` or ``TRUNCATED``). Records generated
+from one prompt share its ``group_index``. A record without ``tokens`` is
+rendered with the tokenizer's chat template. A request's records hold the
+prompt only; one that already has a ``loss_mask`` or turns is rejected.
+
+``HybridEngineRolloutConfig(return_log_probs=True)`` records each generated token's
+log-probability under ``softmax(logits / temperature)``, the distribution a
+training forward pass can reproduce. ``generate()`` therefore rejects
+``return_log_probs`` combined with ``top_k`` or ``top_p`` when sampling, and
+warns about a repetition penalty other than 1.0.
+
+Multi-turn Rollout and Tool Calling
+-----------------------------------
+
+With ``HybridEngineRolloutConfig(multi_turn=True, max_turns=...)``, ``HybridEngineRollout``
+runs each record over several turns. Each turn generates for all records still
+active, parses tool calls from every response that ends in EOS, runs the tools,
+and appends their output as tool messages. A record ends ``COMPLETED`` when a
+turn calls no tool, and ``TRUNCATED`` when it runs out of turns or tokens.
+Model tokens are appended exactly as sampled; tool messages are tokenized from
+the chat template's own rendering of a tool turn, so earlier tokens are never
+re-tokenized.
+
+Tools subclass ``Tool``: set ``name``, ``description`` and a JSON-schema
+``parameters``, and implement ``async execute(arguments) -> str``. Pass them to
+``build_rollout(..., tools=[...])``. Prompts are rendered with the tools'
+specs, calls in one turn run concurrently, and parse errors, unknown tools and
+exceptions are returned to the model as text instead of failing the rollout.
+``HybridEngineRolloutConfig.tool_call_parser`` selects the call format: ``"hermes"``
+(Qwen2.5, Qwen3) or ``"qwen3_coder"`` (Qwen3-Coder).
+
+.. code-block:: python
+
+    from deepspeed.runtime.rollout import (HybridEngineRolloutConfig, RolloutRequest, SamplingConfig, Tool,
+                                           build_rollout)
+    from deepspeed.runtime.rollout.base import RolloutRecord
+
+    class Calculator(Tool):
+        name = "calculator"
+        description = "Evaluates an arithmetic expression."
+        parameters = {"type": "object", "properties": {"expression": {"type": "string"}}}
+
+        async def execute(self, arguments):
+            return str(evaluate(arguments["expression"]))
+
+    cfg = HybridEngineRolloutConfig(multi_turn=True, max_turns=8, return_log_probs=True)
+    rollout = build_rollout(cfg, engine, tokenizer, tools=[Calculator()])
+    request = RolloutRequest(samples=[RolloutRecord(prompt=[{"role": "user", "content": question}])])
+    sampling = SamplingConfig(max_new_tokens=8192, max_new_tokens_per_turn=2048, n_samples_per_prompt=8)
+    records = rollout.generate(request, sampling).samples
+
+``max_new_tokens`` caps a record's generated tokens over all turns,
+``max_new_tokens_per_turn`` caps each turn, and the DeepSpeed config's
+``hybrid_engine.max_out_tokens`` caps the whole conversation: prompt, responses
+and tool output. ``HybridEngineRollout`` requires it to be set explicitly.
+``HybridEngineRolloutConfig.chat_template_kwargs`` is passed to every chat-template call,
+for example ``{"enable_thinking": False}``.
+
+A tool output that would take a record past ``max_out_tokens`` is dropped and
+the record ends ``TRUNCATED``. ``SamplingConfig.max_tool_output_chars`` cuts
+each tool output longer than that many characters before it is templated,
+keeping its ``"start"``, ``"end"`` or, by default, ``"both"`` ends
+(``tool_output_keep``) with a ``...(truncated)`` marker at the cut, so one long
+output leaves room for further turns. The cap applies to each output, so a turn
+with several calls can still add several capped outputs. Each record counts its
+cut outputs in ``num_tool_outputs_truncated``.
+
+``HybridEngineRolloutConfig.continuous_batch_size`` schedules a multi-turn rollout by turn
+instead of by record (see "Continuous batching" above). Its cache is sized by
+``max_out_tokens`` unless ``HybridEngineRolloutConfig.continuous_cache_capacity``
+is set. A row is freed when a turn ends; the tools run on the host while
+the row serves another trajectory, and the next turn is prefilled into any free
+row.
+
+Rollout runs independently on every data-parallel rank. Multi-turn rollout,
+graph capture and continuous batching reject ZeRO-3: every forward gathers
+parameters, so ranks must run the same forwards, and they run different numbers
+of turns and decode steps. Single-turn static rollout supports ZeRO-3: every rank
+decodes up to the same configured cap and stops once every row on every rank
+has reached EOS or its own budget under ``max_new_tokens`` and
+``max_out_tokens``, checked over the parameter-gather group. A rank with no
+budget left joins with a placeholder row that is finished from the start.
+
+AutoTP (``tensor_parallel.autotp_size``) is supported on every generate path;
+every KV cache is sized from each rank's own prefill, which holds only its
+share of the heads.
+Tensor-parallel ranks must run the same forwards, so before each generate call
+every rank takes its group's first rank's random state, which makes sampling
+draw the same tokens from the gathered logits, and tool calls run on the
+group's first rank only, which broadcasts their output. In multi-turn
+continuous batching, tools finish at wall-clock times, so the first rank also
+decides when a turn returns: at each step where a row frees, it sends the
+finished tools' output to its group over a Gloo group on the host, and every
+rank queues the same turns. When AutoTP shards a tied output head by vocabulary
+(``VocabParallelLinear``), each rank's logits cover only its vocabulary shard,
+which suits the vocabulary-parallel training loss but not token selection, so
+the head gathers the full logits for the duration of each rollout call and
+returns rank-local logits to training afterwards. Training code that computes
+log-probabilities from those logits itself should use
+``deepspeed.sequence.vocab_parallel_ops.vocab_parallel_logprobs``.
+HybridEngine's ``inference_tp_size`` is rejected,
+since the rollout calls the module directly and skips the input gather of the
+hybrid engine's ``generate()``.
+
+GRPO Loss
+---------
+
+``group_advantages(records, rewards)`` normalizes each reward by the mean and
+standard deviation of its ``group_index`` group; ``scale_by_std=False`` keeps
+only the mean subtraction. ``grpo_policy_loss`` is the PPO-clip loss on
+per-token log-probs, with separate ``clip_low`` and ``clip_high`` ranges, an
+optional k3 KL penalty against reference log-probs, and ``"token_mean"`` or
+``"sample_mean"`` aggregation. It takes log-probs rather than logits, so it
+works with a plain ``log_softmax`` and with vocabulary-parallel log-prob ops.
+``old_log_probs_from_rollout`` lays out the records' ``rollout_log_probs`` like
+``ResponseTokenBatch``'s targets:
+
+.. code-block:: python
+
+    from deepspeed.runtime.rollout import (ResponseTokenBatch, group_advantages, grpo_policy_loss,
+                                           old_log_probs_from_rollout)
+
+    advantages = group_advantages(rollout_batch.samples, rewards).to(device)
+    response_batch = ResponseTokenBatch.from_rollout(rollout_batch, pad_token_id=tokenizer.pad_token_id, device=device)
+    logits = response_batch.select_causal_logits(model(input_ids=response_batch.input_ids,
+                                                       attention_mask=response_batch.attention_mask).logits)
+    log_probs = torch.log_softmax(logits.float() / temperature, dim=-1)
+    log_probs = log_probs.gather(-1, response_batch.target_ids.unsqueeze(-1)).squeeze(-1)
+    output = grpo_policy_loss(log_probs, old_log_probs_from_rollout(rollout_batch, device), advantages,
+                              response_batch.response_mask, clip_low=0.2, clip_high=0.28)
+    engine.backward(output.loss)
+
+``loss_sum`` and ``loss_normalizer`` are available for normalizing the loss
+across ranks; ``clip_fraction`` and ``kl`` are detached logging metrics.
+
 OPSD response-token utilities
 -----------------------------
 
-``ResponseTokenBatch.from_rollout`` derives causal training targets and a
-response-only loss mask from a ``RolloutBatch``. The mask excludes prompt and
-padding tokens while retaining an attended EOS token. Use
+``ResponseTokenBatch.from_rollout`` left-pads a ``RolloutBatch``'s samples and
+derives causal training targets and a response-only loss mask. A sample's
+response is its last ``response_length`` tokens. The mask excludes prompt and
+padding tokens, and response tokens whose ``loss_mask`` is 0 (multi-turn tool
+output), while retaining an attended EOS token. Use
 ``generalized_jsd_loss`` to compare aligned student and teacher logits on that
 mask:
 
@@ -201,7 +367,7 @@ mask:
 
     from deepspeed.runtime.rollout import ResponseTokenBatch, generalized_jsd_loss
 
-    response_batch = ResponseTokenBatch.from_rollout(rollout_batch)
+    response_batch = ResponseTokenBatch.from_rollout(rollout_batch, pad_token_id=tokenizer.pad_token_id)
     student_logits = response_batch.select_causal_logits(student_model(**model_inputs).logits)
     teacher_logits = aligned_teacher_logits
     loss_output = generalized_jsd_loss(
