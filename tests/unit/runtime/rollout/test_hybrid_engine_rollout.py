@@ -457,8 +457,6 @@ def test_continuous_generation_validates_each_request_length():
 
     class LimitedModel(torch.nn.Module):
 
-        _supports_cache_class = False
-
         def __init__(self):
             super().__init__()
             self.weight = torch.nn.Parameter(torch.zeros(1))

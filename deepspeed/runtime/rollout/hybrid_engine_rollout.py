@@ -467,7 +467,7 @@ class HybridEngineRollout(RolloutEngine):
             return RolloutBatch(samples=[])
         self._check_sampling(sampling)
         self._check_parallelism()
-        self._check_attention()
+        self._check_model()
         # Once per call is enough: the ranks then run the same forwards and samples, and take tool output from one
         # rank, so their random states stay equal across turns.
         self._sync_rng_across_tp()
@@ -499,9 +499,14 @@ class HybridEngineRollout(RolloutEngine):
         if self.inference_tp_size > 1:
             raise ValueError("HybridEngineRollout does not support hybrid engine inference tensor parallelism")
 
-    def _check_attention(self):
+    def _check_model(self):
+        """Whether the model supports the configured decode path."""
+        module = self.engine.module
+        if self.continuous_batch_size is not None and getattr(module, "_supports_cache_class", None) is False:
+            raise ValueError("continuous batching requires a model with cache-class support; use the default "
+                             "generate() path or upgrade transformers")
         # Graph decode and continuous batching pass their own 4-D attention masks, which flash_attention_2 cannot take.
-        if getattr(getattr(self.engine.module, "config", None), "_attn_implementation", None) != "flash_attention_2":
+        if getattr(getattr(module, "config", None), "_attn_implementation", None) != "flash_attention_2":
             return
         if self.continuous_batch_size is not None:
             raise ValueError("continuous batching does not support flash_attention_2")
@@ -729,7 +734,6 @@ class HybridEngineRollout(RolloutEngine):
         the queue once they finish.
         """
         module = self.engine.module
-        self._validate_continuous(module)
         if self.align_decode_fronts:
             raise ValueError("continuous graph capture does not support aligned decode fronts")
         if self.enable_cache_trimming:
@@ -758,7 +762,6 @@ class HybridEngineRollout(RolloutEngine):
         model_dtype = next(module.parameters()).dtype
         selector = _TokenSelector(sampling, get_repetition_penalty(sampling, module), max_batch_size,
                                   self.return_log_probs)
-        logits_kwargs = self._last_logits_kwargs(module)
         pad_token_id = get_pad_token_id(self.tokenizer)
         profile = self._start_continuous_profile() if self.enable_profiling else None
         post_turn = PostTurnRouter(self, trajectories, sampling.max_new_tokens, self._tool_group, self._tool_src)
@@ -830,10 +833,9 @@ class HybridEngineRollout(RolloutEngine):
                     prompt_ids = prompt_ids.to(device)
                     prompt_attention = prompt_attention.to(device)
                     target_slots = torch.tensor(admitted_slots, dtype=torch.long, device=device)
-                    logits = self._prefill_rows(module, prompt_ids, prompt_attention, cache, logits_kwargs,
-                                                model_dtype, device, target_slots, max_batch_size)
-                    admitted_tokens, admitted_log_probs = selector.first(logits, prompt_ids, prompt_attention,
-                                                                         target_slots)
+                    admitted_tokens, admitted_log_probs = self._continuous_prefill_per_row(
+                        module, prompt_ids, prompt_attention, cache, model_dtype, device, sampling, selector,
+                        target_slots, max_batch_size)
                     self._profile_end(profile, "prefill_forward_ms", prefill_start, count="num_prefill_forwards")
                     for index, (request_id, slot) in enumerate(zip(admitted_ids, admitted_slots)):
                         static_attention[slot].zero_()
@@ -927,11 +929,6 @@ class HybridEngineRollout(RolloutEngine):
         stats.setdefault("trim_bytes_moved", 0)
         stats["trim_frequency"] = (stats["trim_count"] / stats["decode_steps"] if stats["decode_steps"] else 0.0)
         self._last_continuous_stats = stats
-
-    def _validate_continuous(self, module):
-        if getattr(module, "_supports_cache_class", None) is False:
-            raise ValueError("continuous batching requires a model with cache-class support; use the default "
-                             "generate() path or upgrade transformers")
 
     def _check_sampling(self, sampling: SamplingConfig) -> None:
         return_log_probs = self.return_log_probs
@@ -1052,7 +1049,6 @@ class HybridEngineRollout(RolloutEngine):
                                                                 max_batch_size)
         if not self.multi_turn and max_positions is not None and max_cache_len > max_positions:
             raise ValueError("continuous batching cache exceeds the model maximum position embeddings")
-        self._validate_continuous(module)
 
         from transformers import StaticCache
         from deepspeed.utils.static_cache import DeepSpeedStaticCache
@@ -1189,7 +1185,7 @@ class HybridEngineRollout(RolloutEngine):
                 self._profile_end(profile, "cache_management_overhead_ms", cache_start)
                 if cache_position > max_cache_len or (survivor_count and cache_position >= max_cache_len):
                     raise self._continuous_cache_exhaustion_error(max_cache_len)
-                admitted_tokens, admitted_log_probs = self._continuous_prefill(
+                admitted_tokens, admitted_log_probs = self._continuous_prefill_shared_column(
                     module,
                     StaticCache,
                     cache,
@@ -1437,22 +1433,22 @@ class HybridEngineRollout(RolloutEngine):
             return 0
         return int(occupied.to(dtype=torch.int32).argmax().item())
 
-    def _continuous_prefill(self,
-                            module,
-                            static_cache_type,
-                            cache,
-                            update,
-                            samples,
-                            attention_mask,
-                            write_positions,
-                            cache_position,
-                            prompt_lengths,
-                            model_dtype,
-                            device,
-                            sampling,
-                            selector,
-                            align_decode_fronts=False,
-                            profile=None):
+    def _continuous_prefill_shared_column(self,
+                                          module,
+                                          static_cache_type,
+                                          cache,
+                                          update,
+                                          samples,
+                                          attention_mask,
+                                          write_positions,
+                                          cache_position,
+                                          prompt_lengths,
+                                          model_dtype,
+                                          device,
+                                          sampling,
+                                          selector,
+                                          align_decode_fronts=False,
+                                          profile=None):
         if not update.admitted:
             return {}, {}
 
@@ -1857,24 +1853,16 @@ class HybridEngineRollout(RolloutEngine):
     # Graph capture decode loop
     # ------------------------------------------------------------------
 
-    def _prefill_rows(self, module, prompt_ids, prompt_attention, ds_cache, logits_kwargs, model_dtype, device,
-                      target_rows, cache_rows):
-        """Prefill left-padded prompts in one forward, store each row's tokens in its cache row without padding,
-        and return the last-position logits."""
+    def _continuous_prefill_per_row(self, module, prompt_ids, prompt_attention, ds_cache, model_dtype, device,
+                                    sampling, selector, target_rows, cache_rows):
+        """Prefill left-padded prompts, store each row's tokens in its cache row without padding, and return each
+        row's first token and its log-prob."""
         from transformers import StaticCache
 
-        batch_size, width = prompt_ids.shape
-        prefill_cache = self._create_static_cache(StaticCache, module.config, batch_size, width, device, model_dtype)
-        prefill_out = module(
-            prompt_ids,
-            attention_mask=prompt_attention,
-            past_key_values=prefill_cache,
-            use_cache=True,
-            cache_position=torch.arange(width, device=device),
-            position_ids=self._prefill_position_ids(prompt_attention),
-            **logits_kwargs,
-        )
-        last_logits = prefill_out.logits[:, -1, :]
+        width = prompt_ids.shape[1]
+        tokens, log_probs, prefill_cache = self._continuous_prefill_cache(module, StaticCache, prompt_ids,
+                                                                          prompt_attention, model_dtype, device,
+                                                                          sampling, selector, target_rows)
         lengths = prompt_attention.sum(dim=1).tolist()
         targets = target_rows.tolist()
         for layer_idx, ds_layer in enumerate(ds_cache.layers):
@@ -1882,11 +1870,11 @@ class HybridEngineRollout(RolloutEngine):
             if not ds_layer.is_initialized:
                 ds_layer.lazy_initialization(hf_keys.new_empty(cache_rows, *hf_keys.shape[1:]),
                                              hf_values.new_empty(cache_rows, *hf_values.shape[1:]))
-            # Left padding puts each row's real tokens at the end of the prefill.
+            # Left padding puts each row's real tokens at the end of the prompt's columns.
             for row, (target, length) in enumerate(zip(targets, lengths)):
-                ds_layer.keys[target, :, :length] = hf_keys[row, :, width - length:]
-                ds_layer.values[target, :, :length] = hf_values[row, :, width - length:]
-        return last_logits
+                ds_layer.keys[target, :, :length] = hf_keys[row, :, width - length:width]
+                ds_layer.values[target, :, :length] = hf_values[row, :, width - length:width]
+        return tokens, log_probs
 
     def _generate_graph(self, prompt_ids, prompt_attn_mask, max_new_tokens, sampling, module, device):
         """Decode a static batch on a captured graph, greedy or sampled."""
