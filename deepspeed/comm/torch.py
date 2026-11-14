@@ -332,6 +332,32 @@ class TorchBackend(Backend):
         return torch.distributed.all_reduce(tensor=tensor, op=op, group=group, async_op=async_op)
 
     def inference_all_reduce(self, tensor, op, group=None):
+        # Latency-optimized accelerator path: the one-shot P2P kernel fills the same
+        # hook the CPU backend fills with shm+AVX (see deepspeed/comm/custom_collective.py).
+        # Initialized lazily here (not in __init__): at this point the local device
+        # is bound and the real TP group is in hand, so buffers are allocated on the
+        # device the kernels will use, and topologies that can never use the fast
+        # path never pay the JIT build.
+        # The custom collective targets device accelerators for now; the CPU
+        # accelerator's fast path stays with the shm op handled further below
+        # (whose init would otherwise be preceded by this route's extra
+        # build-verdict all_reduce). Temporary exclusion: once the CPU shm
+        # backend implements the custom-collective contract, it joins this
+        # same route and the special case below is removed.
+        if get_accelerator().on_accelerator(tensor) and get_accelerator()._name != 'cpu':
+            from deepspeed.comm import custom_collective
+            world_sz = torch.distributed.get_world_size(group=group)
+            try:
+                custom_collective.initialize(group)
+            except Exception:
+                pass  # the comm library remains the answer; initialize() logs build failures
+            # the kernel only implements sum over fp16/bf16/fp32; anything else
+            # must take the standard backend, not raise from the fast path
+            if (self._reduce_op(op) == torch.distributed.ReduceOp.SUM
+                    and tensor.dtype in (torch.float16, torch.bfloat16, torch.float32)
+                    and custom_collective.custom_collective_ready(world_sz) and tensor.is_contiguous()
+                    and tensor.numel() * tensor.element_size() <= custom_collective.custom_collective_max_bytes()):
+                return custom_collective.all_reduce(tensor)
         use_ds_op = hasattr(torch.ops, 'deepspeed') and hasattr(torch.ops.deepspeed, 'inference_all_reduce_')
         world_size = torch.distributed.get_world_size(group=group)
         if world_size <= 1:
@@ -341,6 +367,13 @@ class TorchBackend(Backend):
         if use_ds_op:
             required_level = 1 if tensor.dtype == torch.float32 else 2
             use_ds_op = getattr(self, 'shm_vector_kernel_level', 0) >= required_level
+            # The shm kernel is bound to the WORLD topology and takes no group
+            # argument, so it may only serve world-wide reduces; a proper TP
+            # subgroup must fall through to the group-aware all_reduce below,
+            # or sibling subgroups' partial sums get combined (a subgroup with
+            # full world size is necessarily the world itself, hence the check).
+            if use_ds_op:
+                use_ds_op = torch.distributed.get_world_size(group=group) == torch.distributed.get_world_size()
         if not use_ds_op:
             op = self._reduce_op(op)
             return torch.distributed.all_reduce(tensor=tensor, op=op, group=group, async_op=False)
