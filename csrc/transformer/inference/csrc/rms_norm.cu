@@ -228,6 +228,12 @@ void launch_rms_norm(T* norm_output,
             LAUNCH_ALL_RMS_NORM(1, 8, maxThreads);
         } else if (threads_per_group == 16) {
             LAUNCH_ALL_RMS_NORM(1, 16, maxThreads);
+        } else if (threads_per_group == 32) {
+            // One row per block, as in the > 128 path: the kernel has no row bound, so a
+            // partially filled multi-row block would read and write past the last row.
+            const dim3 grid(rows);
+            const dim3 block(32);
+            LAUNCH_ALL_RMS_NORM(1, 32, 32);
         }
     } else if (external_unRoll == 1) {
         // 129 - 4096 elems
