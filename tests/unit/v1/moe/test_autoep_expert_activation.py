@@ -27,7 +27,6 @@ from deepspeed.module_inject.auto_ep_config import (
     validate_autoep_config,
 )
 from deepspeed.module_inject.auto_ep_layer import AutoEPMoELayer
-from deepspeed.ops.triton_ops import is_triton_available
 from deepspeed.module_inject.auto_ep_presets.registry import resolve_preset_candidates
 from deepspeed.moe.ep_experts import (
     EXPERT_ACTIVATIONS,
