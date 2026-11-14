@@ -540,7 +540,7 @@ reduction and offload ordering and is not covered; a warning is logged.
 
 | Description                                                                                                                                          | Default |
 | ---------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| Do not release a parameter if it will be reused within this threshold of parameters. Smaller values use less memory, but perform more communication. | `1e9`   |
+| Do not release a parameter if it will be reused within this threshold of parameters. Smaller values use less memory, but perform more communication. Setting this to `0` releases gathered parameters as soon as their forward use finishes and re-gathers them during backward, which minimizes forward memory at the cost of extra communication. | `1e9`   |
 
 ***stage3_prefetch_bucket_size***: [integer]
 
