@@ -73,13 +73,16 @@ def test_sampling_config_defaults():
 
 
 @pytest.mark.parametrize("kwargs, message", [
+    (dict(max_new_tokens=0), "max_new_tokens must be positive"),
+    (dict(max_new_tokens_per_turn=0), "max_new_tokens_per_turn must be positive"),
+    (dict(repetition_penalty=0.0), "repetition_penalty must be positive"),
     (dict(max_tool_output_chars=0), "max_tool_output_chars"),
     (dict(max_tool_output_chars=2.5), "max_tool_output_chars"),
     (dict(tool_output_keep="middle"), "tool_output_keep"),
 ])
-def test_sampling_config_rejects_invalid_tool_output_cap(kwargs, message):
+def test_sampling_config_rejects_invalid_options(kwargs, message):
     with pytest.raises(ValueError, match=message):
-        SamplingConfig(max_new_tokens=8, **kwargs)
+        SamplingConfig(**{"max_new_tokens": 8, **kwargs})
 
 
 def test_continuous_batching_details_are_not_public_exports():

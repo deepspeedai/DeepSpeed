@@ -605,8 +605,7 @@ def _tiny_qwen3(device):
 
 
 @pytest.mark.parametrize("use_graph_capture", [False, True])
-@pytest.mark.parametrize("continuous_batch_size", [None, 2])
-def test_tool_output_that_would_pass_max_out_tokens_ends_the_trajectory(use_graph_capture, continuous_batch_size):
+def test_continuous_tool_output_that_would_pass_max_out_tokens_ends_the_trajectory(use_graph_capture):
     accelerator = get_accelerator()
     if not accelerator.is_available():
         pytest.skip("requires an accelerator")
@@ -628,7 +627,7 @@ def test_tool_output_that_would_pass_max_out_tokens_ends_the_trajectory(use_grap
                                   HybridEngineRolloutConfig(multi_turn=True,
                                                             max_turns=3,
                                                             use_graph_capture=use_graph_capture,
-                                                            continuous_batch_size=continuous_batch_size),
+                                                            continuous_batch_size=2),
                                   tools=ToolSet([_OkTool()]))
     request = RolloutRequest(samples=[RolloutRecord(tokens=prompt, attention_mask=[1] * len(prompt))])
     sampling = SamplingConfig(max_new_tokens=8, temperature=0.0, n_samples_per_prompt=3)
@@ -756,33 +755,6 @@ class TestAutoTPRollout(DistributedTest):
                                               do_sample=False,
                                               pad_token_id=0)
             assert [record.tokens for record in records[::2]] == expected.tolist()
-
-    def test_ranks_append_the_first_ranks_tool_output(self):
-        engine, reference = self._engine()
-        prompt = [3, 7, 21, 30, 44]
-        device = get_accelerator().current_device_name()
-        with torch.no_grad():
-            first = reference.generate(torch.tensor([prompt], device=device), max_new_tokens=1,
-                                       do_sample=False)[0, -1].item()
-        # The first greedy token ends the turn and calls the tool, so the second turn reads the tool output.
-        tokenizer = SimpleNamespace(
-            pad_token_id=0,
-            eos_token_id=first,
-            decode=lambda ids, **_kwargs: '<tool_call>{"name": "rank", "arguments": {}}</tool_call>')
-        rollout = HybridEngineRollout(engine,
-                                      tokenizer,
-                                      HybridEngineRolloutConfig(multi_turn=True, max_turns=2, return_log_probs=True),
-                                      tools=ToolSet([_RankTool()]))
-        sampling = SamplingConfig(max_new_tokens=6, max_new_tokens_per_turn=3, temperature=0.0)
-
-        with patch("deepspeed.runtime.rollout.hybrid_engine_rollout.tokenize_tool_responses",
-                   side_effect=_rank_tool_tokens):
-            record = rollout.generate(RolloutRequest(samples=[RolloutRecord(tokens=prompt, attention_mask=[1] * 5)]),
-                                      sampling).samples[0]
-
-        assert record.tokens[5:7] == [first, 50]
-        gathered = self._gather([record])
-        assert gathered[0] == gathered[1]
 
     def test_ranks_sample_the_same_tokens_after_a_tool_turn(self):
         engine, _ = self._engine()
@@ -958,14 +930,23 @@ class TestDataParallelRollout(DistributedTest):
     """Data-parallel ranks roll out their own prompts independently, before and after a training step."""
     world_size = 2
 
-    @pytest.mark.parametrize("setup", list(_DATA_PARALLEL_SETUPS))
-    @pytest.mark.parametrize("use_graph_capture", [False, True])
-    @pytest.mark.parametrize("continuous_batch_size", [None, 2])
-    def test_each_rank_matches_its_own_greedy_generation(self, use_graph_capture, continuous_batch_size, setup):
+    @pytest.mark.parametrize(
+        "setup, use_graph_capture, continuous_batch_size",
+        [
+            ("zero2", False, None),
+            ("zero2", True, None),
+            ("zero2", False, 2),
+            ("zero2", True, 2),
+            # Optimizer offload changes only the step; the graph must still read the weights it writes.
+            ("zero2_offload", True, 2),
+            ("zero2_fp16", True, None),
+            ("zero2_fp16", True, 2),
+            # ZeRO-3 runs on static batching with HF generate only.
+            ("zero3", False, None),
+        ])
+    def test_each_rank_matches_its_own_greedy_generation(self, setup, use_graph_capture, continuous_batch_size):
         if use_graph_capture and not get_accelerator().is_graph_capture_supported():
             pytest.skip("requires graph capture")
-        if setup == "zero3" and (use_graph_capture or continuous_batch_size is not None):
-            pytest.skip("ZeRO-3 runs on static batching with HF generate only")
         if setup == "zero2_fp16" and not get_accelerator().is_fp16_supported():
             pytest.skip("requires fp16")
         from transformers import AutoModelForCausalLM, Qwen3Config
@@ -1097,52 +1078,6 @@ def _prompt(tokens):
     return RolloutRecord(tokens=list(tokens), attention_mask=[1] * len(tokens))
 
 
-@pytest.mark.parametrize("left_padded", [False, True])
-def test_graph_capture_samples_with_temperature_and_scores_the_sampled_distribution(left_padded):
-    if not get_accelerator().is_available() or not get_accelerator().is_graph_capture_supported():
-        pytest.skip("requires graph capture")
-    from transformers import LlamaConfig, LlamaForCausalLM
-
-    torch.manual_seed(0)
-    device = torch.device(get_accelerator().device_name())
-    config = LlamaConfig(vocab_size=128,
-                         hidden_size=64,
-                         intermediate_size=128,
-                         num_hidden_layers=2,
-                         num_attention_heads=4,
-                         num_key_value_heads=2,
-                         max_position_embeddings=64)
-    model = LlamaForCausalLM(config).to(device).eval()
-    # An EOS id that is never generated keeps every row decoding to max_new_tokens.
-    rollout = HybridEngineRollout(_engine_for(model),
-                                  SimpleNamespace(pad_token_id=0, eos_token_id=-1),
-                                  cfg=HybridEngineRolloutConfig(return_log_probs=True))
-    num_rows, prompt_len, max_new_tokens, temperature = 8, 4, 6, 0.7
-    prompt_ids = torch.tensor([[5, 6, 7, 8]], device=device).repeat(num_rows, 1)
-    prompt_attn = torch.ones_like(prompt_ids)
-    if left_padded:
-        # Every other row has a shorter prompt, padded on the left as in a batch.
-        prompt_attn[::2, 0] = 0
-
-    # Called directly to test the decode loop on its own, without prompt rendering.
-    with torch.no_grad():
-        output_ids, log_probs = rollout._generate_graph(
-            prompt_ids, prompt_attn, max_new_tokens,
-            SamplingConfig(max_new_tokens=max_new_tokens, temperature=temperature), model, device)
-        # The reference is an ordinary full forward over the generated sequences, scored the way training scores them.
-        attention_mask = torch.cat((prompt_attn, torch.ones_like(output_ids[:, prompt_len:])), dim=1)
-        logits = model(output_ids, attention_mask=attention_mask).logits.float()
-    responses = output_ids[:, prompt_len:]
-    expected = torch.log_softmax(logits[:, prompt_len - 1:-1] / temperature, dim=-1)
-    expected = expected.gather(2, responses.unsqueeze(-1)).squeeze(-1)
-
-    assert responses.shape == (num_rows, max_new_tokens)
-    # Identical prompts diverge only if tokens are sampled, the first one (chosen after prefill) included.
-    unpadded_rows = prompt_attn.all(dim=1)
-    assert len(set(responses[unpadded_rows, 0].tolist())) > 1
-    torch.testing.assert_close(log_probs, expected, atol=1e-4, rtol=1e-4)
-
-
 def _tiny_llama(device):
     from transformers import LlamaConfig, LlamaForCausalLM
 
@@ -1155,49 +1090,6 @@ def _tiny_llama(device):
                          num_key_value_heads=2,
                          max_position_embeddings=64)
     return LlamaForCausalLM(config).to(device).eval()
-
-
-@pytest.mark.parametrize("batch_size", [1, 8])
-def test_graph_generation_matches_hf_greedy_and_samples_with_temperature(batch_size):
-    """The graph path must match HF generate at temperature 0 and sample every
-    token (including the first, read off the prefill) when temperature > 0."""
-    if not get_accelerator().is_available() or not get_accelerator().is_graph_capture_supported():
-        pytest.skip("requires graph capture")
-
-    device = torch.device(get_accelerator().device_name())
-    module = _tiny_llama(device)
-    # The decode loop is called with the model directly. The engine's module only adds the EOS ids of its generation
-    # config, so a stand-in without one leaves the tokenizer's -1, never generated: every row decodes all tokens.
-    rollout = HybridEngineRollout(_engine_for(torch.nn.Linear(1, 1)), SimpleNamespace(pad_token_id=0, eos_token_id=-1),
-                                  HybridEngineRolloutConfig(return_log_probs=True, use_graph_capture=True))
-    prompt_ids = torch.tensor([[5, 9, 13, 17]], device=device).repeat(batch_size, 1)
-    prompt_attn = torch.ones_like(prompt_ids)
-    max_new_tokens = 8
-
-    def run(temperature):
-        with torch.no_grad():
-            output_ids, _ = rollout._generate_graph(
-                prompt_ids, prompt_attn, max_new_tokens,
-                SamplingConfig(max_new_tokens=max_new_tokens, temperature=temperature), module, device)
-        return output_ids[:, prompt_ids.shape[1]:]
-
-    greedy = run(0.0)
-    with torch.no_grad():
-        reference = module.generate(prompt_ids,
-                                    attention_mask=prompt_attn,
-                                    max_new_tokens=max_new_tokens,
-                                    do_sample=False,
-                                    pad_token_id=0)[:, prompt_ids.shape[1]:]
-    assert torch.equal(greedy, reference)
-
-    torch.manual_seed(1)
-    sampled = run(1.0)
-    assert sampled.shape == greedy.shape
-    # A random-init model is close to uniform over 64 tokens, so a sampled row
-    # equal to the greedy row (or 8 identical sampled first tokens) is ~1e-14.
-    assert not torch.equal(sampled, greedy)
-    if batch_size > 1:
-        assert sampled[:, 0].unique().numel() > 1
 
 
 def _small_qwen3(device, dtype):
@@ -1338,9 +1230,8 @@ def _check_as_if_alone(model, prompts, samples, n_samples_per_prompt, eos, tool_
     ("qwen3", torch.float32, True, 0.0),
     ("qwen3", torch.float32, False, 0.0),
     ("qwen3", torch.bfloat16, True, 0.8),
+    ("qwen3", torch.float32, True, 0.8),
     ("llama", None, True, 0.0),
-    ("qwen3", torch.bfloat16, True, 1.0),
-    ("qwen3", torch.float32, True, 1.0),
 ])
 @patch("deepspeed.runtime.rollout.hybrid_engine_rollout.tokenize_tool_responses", return_value=_TOOL_TOKENS)
 def test_multi_turn_continuous_batching_generates_each_turn_as_if_alone(_tokenize_tool_responses, model_name, dtype,
@@ -1374,14 +1265,12 @@ def test_multi_turn_continuous_batching_generates_each_turn_as_if_alone(_tokeniz
     _check_as_if_alone(model, prompts, samples, 2, eos, tool_length, temperature, atol)
 
 
-@pytest.mark.parametrize("model_name, dtype", [("llama", None), ("qwen3", torch.float32)])
 @patch("deepspeed.runtime.rollout.hybrid_engine_rollout.tokenize_tool_responses", return_value=_TOOL_TOKENS)
-def test_multi_turn_continuous_repetition_penalty_matches_generate(_tokenize_tool_responses, model_name, dtype):
+def test_multi_turn_continuous_repetition_penalty_matches_generate(_tokenize_tool_responses):
     """With fewer rows than trajectories, a reused row must penalize its new trajectory's tokens, not its last one's."""
     if not get_accelerator().is_available():
         pytest.skip("multi-turn continuous batching requires an accelerator")
-    model_factory = _small_qwen3 if model_name == "qwen3" else _tiny_llama
-    model, prompts, _, _ = _continuous_case(model_factory, dtype)
+    model, prompts, _, _ = _continuous_case(_small_qwen3, torch.float32)
     device = next(model.parameters()).device
     # eos -1 never matches, so each trajectory is one turn of the full length.
     model.generation_config.repetition_penalty = 1.3

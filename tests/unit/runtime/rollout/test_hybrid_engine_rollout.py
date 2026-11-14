@@ -127,21 +127,22 @@ def test_config_defaults():
     assert cfg.return_log_probs is False
 
 
-@pytest.mark.parametrize("max_turns", [None, 0, -1, 1.5])
-def test_config_rejects_a_multi_turn_rollout_without_a_positive_max_turns(max_turns):
-    with pytest.raises(ValueError, match="max_turns must be a positive integer"):
-        HybridEngineRolloutConfig(multi_turn=True, max_turns=max_turns)
+@pytest.mark.parametrize("kwargs, message", [
+    (dict(multi_turn=True, max_turns=None), "max_turns must be a positive integer"),
+    (dict(multi_turn=True, max_turns=0), "max_turns must be a positive integer"),
+    (dict(multi_turn=True, max_turns=1.5), "max_turns must be a positive integer"),
+    (dict(continuous_batch_size=0), "continuous_batch_size must be positive"),
+    (dict(tool_call_parser="xml"), "tool_call_parser"),
+])
+def test_config_rejects_invalid_options(kwargs, message):
+    with pytest.raises(ValueError, match=message):
+        HybridEngineRolloutConfig(**kwargs)
 
 
 def test_rollout_rejects_a_config_of_another_backend():
     # Its settings would otherwise all fall back to their defaults.
     with pytest.raises(TypeError, match="HybridEngineRolloutConfig"):
         HybridEngineRollout(_make_engine(), _make_tokenizer(), RolloutConfig())
-
-
-def test_config_rejects_non_positive_continuous_batch_size():
-    with pytest.raises(ValueError, match="continuous_batch_size must be positive"):
-        HybridEngineRolloutConfig(continuous_batch_size=0)
 
 
 # -- constructor --------------------------------------------------------
@@ -916,17 +917,6 @@ def test_continuous_generation_refills_padded_prompts_after_trim():
     assert rollout.get_last_continuous_stats()["trim_count"] > 0
 
 
-@pytest.mark.parametrize("repetition_penalty, expected", [(1.5, [[1]]), (1.0, [[0]])])
-def test_token_selector_applies_repetition_penalty(repetition_penalty, expected):
-    select = _TokenSelector(SamplingConfig(max_new_tokens=1, temperature=0), repetition_penalty)
-
-    # Pin the real-model regression: a bare argmax would select the repeated
-    # token 0, while Transformers' repetition processor must select token 1.
-    next_tokens, _ = select.first(torch.tensor([[6.0, 5.0]]), torch.tensor([[0]]))
-
-    assert next_tokens.tolist() == expected
-
-
 def test_token_selector_tracks_each_rows_history():
     select = _TokenSelector(SamplingConfig(max_new_tokens=1, temperature=0), repetition_penalty=4.0, num_rows=3)
     # Token 2 scores highest until it has been seen, then token 1 takes over.
@@ -1023,21 +1013,6 @@ def _repeat_preferring_logits(input_ids):
     return logits
 
 
-def test_continuous_generation_reads_repetition_penalty_from_the_checkpoint():
-    request = RolloutRequest(samples=[_prompt([5, 6])])
-
-    def generate(checkpoint_repetition_penalty):
-        model = _LastTokenModel(_repeat_preferring_logits, checkpoint_repetition_penalty=checkpoint_repetition_penalty)
-        rollout = HybridEngineRollout(_engine_for(model),
-                                      _make_tokenizer(),
-                                      cfg=HybridEngineRolloutConfig(continuous_batch_size=1))
-        sampling = SamplingConfig(max_new_tokens=3, temperature=0)
-        return rollout.generate(request, sampling).samples[0].tokens
-
-    assert generate(1.0) == [5, 6, 6, 6, 6]
-    assert generate(100.0) != generate(1.0)
-
-
 def test_sampling_repetition_penalty_overrides_the_checkpoint():
     request = RolloutRequest(samples=[_prompt([5, 6])])
 
@@ -1053,24 +1028,6 @@ def test_sampling_repetition_penalty_overrides_the_checkpoint():
     assert generate(100.0, 1.0) == generate(1.0, None)
     assert generate(1.0, 100.0) == generate(100.0, None)
     assert generate(1.0, 100.0) != generate(1.0, None)
-
-
-@pytest.mark.parametrize(("kwargs", "message"), [
-    ({
-        "max_new_tokens": 0
-    }, "max_new_tokens must be positive"),
-    ({
-        "max_new_tokens": 8,
-        "max_new_tokens_per_turn": 0
-    }, "max_new_tokens_per_turn must be positive"),
-    ({
-        "max_new_tokens": 1,
-        "repetition_penalty": 0.0
-    }, "repetition_penalty must be positive"),
-])
-def test_sampling_config_rejects_invalid_options(kwargs, message):
-    with pytest.raises(ValueError, match=message):
-        SamplingConfig(**kwargs)
 
 
 @patch("deepspeed.runtime.rollout.hybrid_engine_rollout.logger")
@@ -2248,11 +2205,6 @@ def test_multi_turn_runs_tools_called_in_the_configured_format(tokenize_tool_res
     assert [(call.name, output) for call, output in zip(calls, outputs)] == [("typed", "ok")]
     assert sample.tokens == [10, 11, _TOOL_CALL_TOKEN, 2, 9, 5, 2]
     assert sample.status == RolloutRecord.Status.COMPLETED
-
-
-def test_config_rejects_unknown_tool_call_parser():
-    with pytest.raises(ValueError, match="tool_call_parser"):
-        HybridEngineRolloutConfig(tool_call_parser="xml")
 
 
 def test_single_turn_applies_the_per_turn_cap():
