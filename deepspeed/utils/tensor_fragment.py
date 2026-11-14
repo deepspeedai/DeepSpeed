@@ -103,21 +103,26 @@ def set_full_hp_param(self, value, optim_state_key=None):
         hp_fragment.data.copy_(value_fragment.data)
 
 
-def get_full_hp_grad(self):
-    reduce_buffer = torch.zeros_like(self, dtype=torch.float32).flatten()
-    if self._hp_mapping is not None:
-        lp_grad_fragment = self._hp_mapping.get_lp_grad_fragment(self._index_in_param_group)
+def _get_full_hp_grad_buffer(param):
+    reduce_buffer = torch.zeros_like(param, dtype=torch.float32).flatten()
+    if param._hp_mapping is not None:
+        lp_grad_fragment = param._hp_mapping.get_lp_grad_fragment(param._index_in_param_group)
         hp_grad_fragment = lp_grad_fragment.to(torch.float32).flatten()
 
-        lp_frag_address = self._hp_mapping.lp_fragment_address
+        lp_frag_address = param._hp_mapping.lp_fragment_address
         reduce_fragment = torch.narrow(reduce_buffer, 0, lp_frag_address.start, lp_frag_address.numel)
 
-        if self.view(-1).shape == hp_grad_fragment.shape:
+        if param.view(-1).shape == hp_grad_fragment.shape:
             # BF16 retains a full accumulation buffer on each rank, but reconstruction must contribute
             # only the fragment owned by this optimizer partition.
             hp_grad_fragment = hp_grad_fragment.narrow(0, lp_frag_address.start, lp_frag_address.numel)
         reduce_fragment.data.copy_(hp_grad_fragment.data)
 
+    return reduce_buffer
+
+
+def get_full_hp_grad(self):
+    reduce_buffer = _get_full_hp_grad_buffer(self)
     dist.all_reduce(reduce_buffer, group=self._dp_group)
     return reduce_buffer.reshape_as(self)
 
@@ -233,6 +238,60 @@ def safe_get_full_grad(param):
         return param.get_full_hp_grad()
 
     return None
+
+
+def safe_get_full_model_grads(model):
+    """Assemble full gradients for all model parameters with coalesced communication.
+
+    Call on every data-parallel rank with the same model after ``backward`` and
+    before ``step``. ZeRO-1/2 gradients use one coalesced reduction per
+    data-parallel group when the backend supports it. ZeRO-3 uses the existing
+    per-parameter gradient accessor. Each returned gradient covers the parameter
+    on the current tensor/expert-parallel rank; AutoTP/AutoEP shards remain local.
+
+    Args:
+        model (``torch.nn.Module``): A model containing DeepSpeed-managed parameters.
+
+    Returns:
+        Dict[str, Union[torch.Tensor, None]]: Full gradients keyed by parameter name.
+    """
+    full_grads = {}
+    pending = {}
+    groups = {}
+
+    for name, param in model.named_parameters():
+        if getattr(param, '_hp_grad', None) is None and param.grad is not None:
+            full_grads[name] = param.grad
+            continue
+
+        if hasattr(param, 'ds_id'):
+            full_grads[name] = safe_get_full_grad(param)
+            continue
+
+        if not hasattr(param, '_hp_mapping'):
+            full_grads[name] = None
+            continue
+
+        reduce_buffer = _get_full_hp_grad_buffer(param)
+
+        group = param._dp_group
+        group_id = id(group)
+        if group_id not in pending:
+            pending[group_id] = []
+            groups[group_id] = group
+        pending[group_id].append((name, param, reduce_buffer))
+
+    for group_id, records in pending.items():
+        buffers = [buffer for _, _, buffer in records]
+        if dist.has_all_reduce_coalesced():
+            dist.all_reduce_coalesced(buffers, group=groups[group_id])
+        else:
+            for buffer in buffers:
+                dist.all_reduce(buffer, group=groups[group_id])
+        for name, param, buffer in records:
+            full_grads[name] = buffer.reshape_as(param)
+
+    return full_grads
 
 
 def safe_set_full_grad(param, value):
