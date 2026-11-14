@@ -86,9 +86,10 @@ class DeepSpeedConfigModel(BaseModel):
                     pydantic_config = reduce(getattr, new_param_nested[:-1], pydantic_config)
                     fields_set = pydantic_config.model_fields_set
                 new_param_name = new_param_nested[-1]
-                assert (
-                    new_param_name not in fields_set
-                ), f"Cannot provide deprecated parameter '{dep_field}' and replacing parameter '{new_field}' together"
+                if new_param_name in fields_set:
+                    raise AssertionError(
+                        f"Cannot provide deprecated parameter '{dep_field}' and replacing parameter '{new_field}' together"
+                    )
                 # A custom function for converting the old param value to new param value can be provided
                 try:
                     setattr(pydantic_config, new_param_name, param_value)
