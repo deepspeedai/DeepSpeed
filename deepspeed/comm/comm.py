@@ -786,6 +786,14 @@ def get_global_rank(group: Optional[Any] = None, group_rank: int = 0) -> int:
     return cdb.get_global_rank(group, group_rank)
 
 
+def get_backend(group: Optional[Any] = None) -> str:
+    """Name of the backend that runs ``group``'s collectives, the default group's if none is given."""
+    global cdb
+    assert cdb is not None and cdb.is_initialized(
+    ), 'DeepSpeed backend not set, please initialize it using init_process_group()'
+    return cdb.get_backend(group)
+
+
 def get_all_ranks_from_group(group=None):
     global cdb
     assert cdb is not None and cdb.is_initialized(
