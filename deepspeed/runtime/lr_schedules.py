@@ -569,8 +569,14 @@ class OneCycle(object):
             return
 
         self.decay_mom_rate = decay_mom_rate
-        self.min_moms = [(mom, 0.99) for mom in _format_param(optimizer, cycle_min_mom, 'cycle_min_mom')]
-        self.max_moms = [(mom, 0.99) for mom in _format_param(optimizer, cycle_max_mom, 'cycle_max_mom')]
+        self.min_moms = [
+            (mom, group['betas'][1])
+            for mom, group in zip(_format_param(optimizer, cycle_min_mom, 'cycle_min_mom'), optimizer.param_groups)
+        ]
+        self.max_moms = [
+            (mom, group['betas'][1])
+            for mom, group in zip(_format_param(optimizer, cycle_max_mom, 'cycle_max_mom'), optimizer.param_groups)
+        ]
 
         if last_batch_iteration == -1:
             for momentum, group in zip(self.min_moms, optimizer.param_groups):
