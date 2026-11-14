@@ -447,10 +447,25 @@ class _FusedRowWeighting(torch.autograd.Function):
         return grad_rows, grad_weights
 
 
+class _RecordedFusedRowWeighting(_FusedRowWeighting):
+    """The fused row weighting's backward, recorded without running its forward kernel."""
+
+    @staticmethod
+    def forward(ctx, rows, weights):
+        ctx.save_for_backward(rows, weights)
+        return torch.empty_like(rows)
+
+
 def fused_row_weighting(rows: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
     """Apply ``weights`` to ``rows`` as ``(rows.float() * weights).to(rows.dtype)``."""
     assert_row_weighting_supported(rows, weights)
     return _FusedRowWeighting.apply(rows, weights)
+
+
+def recorded_fused_row_weighting(rows: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
+    """:func:`fused_row_weighting` for a result nobody reads: the same backward, an uninitialized result."""
+    assert_row_weighting_supported(rows, weights)
+    return _RecordedFusedRowWeighting.apply(rows, weights)
 
 
 def fused_weighted_restore(

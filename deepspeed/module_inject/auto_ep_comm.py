@@ -491,27 +491,45 @@ class _DeepEPDispatch(torch.autograd.Function):
         return None, _conform_rows(grad_tokens, ctx.tokens_shape), None, conformed_weights, None
 
 
+def _save_combine_context(ctx, exchange: DeepEPExchange, rows: torch.Tensor, handle) -> None:
+    pending = getattr(exchange, "last_pending", None)
+    if pending is not None and pending.handle is handle:
+        # Keeps the forward's replay entry alive exactly as long as the graph that needs its layout.
+        ctx.pending = pending
+        exchange.last_pending = None
+    ctx.exchange = exchange
+    ctx.handle = handle
+    # The backward dispatch hands back a whole buffer, while autograd requires the gradient to match its input.
+    ctx.rows_shape = rows.shape
+
+
 class _DeepEPCombine(torch.autograd.Function):
     """Combine whose backward is the matching dispatch, on the same handle."""
 
     @staticmethod
     def forward(ctx, exchange: DeepEPExchange, rows: torch.Tensor, handle):
-        pending = getattr(exchange, "last_pending", None)
-        if pending is not None and pending.handle is handle:
-            # Keeps the forward's replay entry alive exactly as long as the graph that needs its layout.
-            ctx.pending = pending
-            exchange.last_pending = None
-        ctx.exchange = exchange
-        ctx.handle = handle
-        # The backward dispatch hands back a whole buffer, while autograd
-        # requires the gradient to match the input it is the gradient of.
-        ctx.rows_shape = rows.shape
+        _save_combine_context(ctx, exchange, rows, handle)
         return exchange.combine(rows, handle)
 
     @staticmethod
     def backward(ctx, grad_combined):
         grad_rows = ctx.exchange.dispatch_with_handle(grad_combined.contiguous(), ctx.handle)
         return None, _conform_rows(grad_rows, ctx.rows_shape), None
+
+
+class _RecordedDeepEPCombine(_DeepEPCombine):
+    """A combine whose result nobody reads: records the same backward and skips the transfer.
+
+    For ``skip_recompute_combine``. The output is NaN, so that a reader the layer's contract rules out fails
+    loudly instead of training on garbage.
+    """
+
+    @staticmethod
+    def forward(ctx, exchange: DeepEPExchange, rows: torch.Tensor, handle):
+        _save_combine_context(ctx, exchange, rows, handle)
+        # The handle keeps the [tokens, top_k] routing it was dispatched with.
+        num_tokens = handle.topk_idx.shape[0]
+        return rows.new_full((num_tokens, rows.shape[1]), float("nan"))
 
 
 def deepep_dispatch(exchange: DeepEPExchange,
@@ -536,3 +554,8 @@ def deepep_dispatch(exchange: DeepEPExchange,
 
 def deepep_combine(exchange: DeepEPExchange, rows: torch.Tensor, handle) -> torch.Tensor:
     return _DeepEPCombine.apply(exchange, rows, handle)
+
+
+def deepep_record_combine(exchange: DeepEPExchange, rows: torch.Tensor, handle) -> torch.Tensor:
+    """Record :func:`deepep_combine`'s backward without running the combine; the result is all NaN."""
+    return _RecordedDeepEPCombine.apply(exchange, rows, handle)
