@@ -393,7 +393,7 @@ def test_continuous_graph_keeps_cache_position_alive_for_replay():
     assert torch.equal(state.static_logits, torch.full_like(state.static_logits, 11))
 
 
-def test_continuous_graph_state_reuses_matching_capture_and_rebuilds_for_weight_updates():
+def test_continuous_graph_state_survives_in_place_weight_updates():
 
     class GraphCache:
 
@@ -410,24 +410,43 @@ def test_continuous_graph_state_reuses_matching_capture_and_rebuilds_for_weight_
 
         def __init__(self):
             super().__init__()
-            self.weight = torch.nn.Parameter(torch.zeros(1))
+            self.weight = torch.nn.Parameter(torch.zeros(2, 3))
+            self.register_buffer("inv_freq", torch.ones(3), persistent=False)
             self.config = SimpleNamespace()
 
     module = DecodeModule()
     rollout = HybridEngineRollout(_engine_for(module), _make_tokenizer())
     graph = MagicMock()
     logits = torch.empty((1, 1, 8))
+    device = torch.device("cpu")
 
     with patch.object(rollout, "_capture_continuous_graph", return_value=(graph, logits)) as capture:
-        first = rollout._get_continuous_graph_state(module, 1, 5, torch.device("cpu"), torch.float32, GraphCache)
-        second = rollout._get_continuous_graph_state(module, 1, 5, torch.device("cpu"), torch.float32, GraphCache)
+        first = rollout._get_continuous_graph_state(module, 1, 5, device, torch.float32, GraphCache)
+        # An optimizer step writes in place, so replay already reads the new values.
         with torch.no_grad():
             module.weight.add_(1)
-        third = rollout._get_continuous_graph_state(module, 1, 5, torch.device("cpu"), torch.float32, GraphCache)
+        updated = rollout._get_continuous_graph_state(module, 1, 5, device, torch.float32, GraphCache)
+        # Captured kernels keep the old strides even when the address is unchanged.
+        with torch.no_grad():
+            module.weight.transpose_(0, 1)
+        relaid = rollout._get_continuous_graph_state(module, 1, 5, device, torch.float32, GraphCache)
+        # A replaced parameter lives at an address the captured kernels never read.
+        module.weight = torch.nn.Parameter(torch.zeros(2, 3))
+        moved = rollout._get_continuous_graph_state(module, 1, 5, device, torch.float32, GraphCache)
+        # Re-registering a buffer, e.g. a rotary inv_freq or quant scale, moves it too.
+        module.register_buffer("inv_freq", torch.full((3, ), 2.0), persistent=False)
+        rebuffered = rollout._get_continuous_graph_state(module, 1, 5, device, torch.float32, GraphCache)
+        resized = rollout._get_continuous_graph_state(module, 1, 6, device, torch.float32, GraphCache)
+        rollout.shutdown()
+        released = rollout._get_continuous_graph_state(module, 1, 6, device, torch.float32, GraphCache)
 
-    assert first is second
-    assert third is not first
-    assert capture.call_count == 2
+    assert updated is first
+    assert relaid is not first
+    assert moved is not relaid
+    assert rebuffered is not moved
+    assert resized is not rebuffered
+    assert released is not resized
+    assert capture.call_count == 6
 
 
 def test_static_cache_constructor_supports_max_batch_keyword():
@@ -1280,7 +1299,7 @@ class TestZero3SynchronizedEarlyStop(DistributedTest):
         from transformers import Qwen2Config, Qwen2ForCausalLM
 
         rank = dist.get_rank()
-        device = torch.device(f"cuda:{rank}")
+        device = torch.device(get_accelerator().current_device_name())
         model = Qwen2ForCausalLM(
             Qwen2Config(
                 vocab_size=32,

@@ -52,6 +52,13 @@ def forward():
 
 ```
 
+`DistributedAttention(..., validate_shards=True)` enables an opt-in shard-length diagnostic.
+All ranks in the sequence parallel group must enable it consistently and enter each forward call.
+It compares query, key, and value sequence lengths separately across group ranks; query and KV lengths may differ.
+With consistent participation, unequal shards raise diagnostic errors before attention data collectives.
+Validation adds a metadata all-gather and host synchronization per forward; when disabled (the default), it adds no metadata communication.
+The caller remains responsible for equal shards or padding and for correct attention and loss masks; this flag adds no padding.
+
 * **Add sequence parallel communication group**:  Note that DistributedAttention takes `local_attn` and `sequence_parallel_group` as the parameters, where local_attn can be your original attention block. You also need to build the sequence parallel communication group and pass that the DistributedAttention. One way to do this is to build the sequence parallel group at the model initialization stage.
 
 

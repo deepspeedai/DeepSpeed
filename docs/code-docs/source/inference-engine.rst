@@ -129,9 +129,14 @@ The cache layout depends on graph capture:
   prefilled in one left-padded forward and only its real tokens are copied into
   its row, from slot 0. All rows decode every step; rows without a turn produce
   throwaway tokens. The graph is captured once and reused across calls until the
-  batch size, the cache size, or the model's parameters change, so an in-place
-  optimizer step makes the next call capture again. ``align_decode_fronts`` and
-  ``enable_cache_trimming`` are rejected, since rows never share a column.
+  batch size, the cache size, the device or dtype changes, or a model parameter
+  or buffer changes address, shape, strides, dtype or device. Replays read
+  parameters in place, so an in-place optimizer step needs no new capture.
+  ``align_decode_fronts`` and ``enable_cache_trimming`` are rejected, since rows
+  never share a column. ``rollout.shutdown()`` releases the graph and its cache;
+  the rollout captures again on its next graph call. Under tensor parallelism
+  the graph holds captured collectives, so call ``shutdown()`` before
+  ``torch.distributed.destroy_process_group()``.
 
 The cache size follows from the longest context a turn can be admitted with,
 ``C``, and the most one turn can generate, ``b`` (``max_new_tokens_per_turn``
@@ -157,7 +162,8 @@ raises the error above if it runs out. A multi-turn rollout raises a smaller
 value to ``C + b`` with a warning, since a returning turn's context is known only
 once its tools finish. With graph capture, a single-turn call rejects a value
 smaller than the longest prompt plus ``b``, and a multi-turn rollout limits each
-turn to the room left in its row instead.
+turn to the room left in its row instead. Since it fixes the cache size, one
+captured graph then serves single-turn calls of every prompt width that fits.
 
 Continuous batching rejects ZeRO-3, ``flash_attention_2``, shared prefill, and
 models that declare no cache-class support.

@@ -8,6 +8,7 @@ in static batches by default, or share a fixed number of decode rows with ``cont
 without graph capture.
 """
 
+import itertools
 import time
 from copy import copy
 from dataclasses import dataclass, field
@@ -1164,6 +1165,9 @@ class HybridEngineRollout(RolloutEngine):
         signature = self._continuous_graph_signature(module, max_batch_size, max_cache_len, device, model_dtype)
         state = self._continuous_graph_state
         if state is None or state.signature != signature:
+            # Free the stale cache and graph pool before allocating replacements.
+            self._continuous_graph_state = None
+            state = None
             # Capture sizes the layers from the model's local KV tensors.
             cache = cache_type(module.config, max_cache_len=max_cache_len)
             static_input = torch.zeros((max_batch_size, 1), dtype=torch.long, device=device)
@@ -1211,8 +1215,17 @@ class HybridEngineRollout(RolloutEngine):
 
     @staticmethod
     def _continuous_graph_signature(module, max_batch_size, max_cache_len, device, model_dtype):
-        parameter_signature = tuple((parameter.data_ptr(), parameter._version) for parameter in module.parameters())
-        return (id(module), device.type, device.index, model_dtype, max_batch_size, max_cache_len, parameter_signature)
+        # Replay reads parameters and buffers through the address and layout fixed
+        # at capture, so in-place value updates need no recapture, but a moved or
+        # re-laid-out tensor does. Prefill runs eagerly, so the prompt width only
+        # matters through max_cache_len.
+        tensor_signature = tuple((tensor.data_ptr(), tensor.device, tensor.dtype, tuple(tensor.shape), tensor.stride())
+                                 for tensor in itertools.chain(module.parameters(), module.buffers()))
+        device_index = device.index
+        if device_index is None and device.type == get_accelerator().device_name():
+            # torch.device("cuda") and torch.device("cuda", 0) name the same device.
+            device_index = get_accelerator().current_device()
+        return (id(module), device.type, device_index, model_dtype, max_batch_size, max_cache_len, tensor_signature)
 
     @staticmethod
     def _update_static_causal_attention(static_atten_mask, static_causal_atten_mask):
@@ -1866,3 +1879,15 @@ class HybridEngineRollout(RolloutEngine):
     def sync_weights(self, step: int) -> None:  # noqa: ARG002
         """No-op: hybrid engine reads model weights live."""
         return None
+
+    def shutdown(self) -> None:
+        """Release the captured continuous decode graph and its static cache.
+
+        The rollout stays usable and captures again on the next graph rollout.
+        Under tensor parallelism the graph holds captured collectives, so release
+        it before destroying the process group.
+        """
+        if self._continuous_graph_state is None:
+            return
+        get_accelerator().synchronize()
+        self._continuous_graph_state = None
