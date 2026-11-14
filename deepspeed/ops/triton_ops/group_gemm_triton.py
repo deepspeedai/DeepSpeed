@@ -40,7 +40,8 @@ from __future__ import annotations
 
 import torch
 
-from deepspeed.ops.triton_ops._triton import _TRITON_AVAILABLE, triton, tl
+from deepspeed.accelerator import get_accelerator
+from deepspeed.ops.triton_ops._triton import _TRITON_AVAILABLE, dispatch, triton, tl
 
 _SUPPORTED_DTYPES = (torch.float16, torch.bfloat16, torch.float32)
 
@@ -459,6 +460,7 @@ class _GroupGemmFn(torch.autograd.Function):
         return grad_a, grad_b, None, None
 
 
+@dispatch("group_gemm_triton")
 def group_gemm_triton(mat_a: torch.Tensor,
                       mat_b: torch.Tensor,
                       offs: torch.Tensor,
@@ -486,4 +488,12 @@ def group_gemm_triton(mat_a: torch.Tensor,
     # caught up front on the user-provided tensors. trans_b is passed through so
     # the contraction dim is checked without materializing a transpose view.
     _validate(mat_a, mat_b, offs, trans_b)
+
+    # The accelerator's Triton gate decides whether this platform runs the Triton
+    # kernels; platforms without it get the native grouped GEMM (its semantics are
+    # the drop-in this module mirrors).
+    if not get_accelerator().is_triton_supported():
+        b_native = mat_b.transpose(-2, -1).contiguous() if trans_b else mat_b.contiguous()
+        return torch._grouped_mm(mat_a.contiguous(), b_native, offs.to(torch.int32))
+
     return _GroupGemmFn.apply(mat_a, mat_b, offs, trans_b)

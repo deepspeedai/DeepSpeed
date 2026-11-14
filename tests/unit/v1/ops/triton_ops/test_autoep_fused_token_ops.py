@@ -10,15 +10,16 @@ import torch
 from deepspeed.accelerator import get_accelerator
 from deepspeed.module_inject.auto_ep_layer import combine_from_routed
 from deepspeed.ops.triton_ops import autoep_fused_token_ops as fused_ops
+from deepspeed.ops.triton_ops import is_triton_available
 
 
 def _fused_engine_available():
     accelerator = get_accelerator()
-    return (accelerator.is_available() and accelerator.device_name().startswith("cuda") and fused_ops.is_available())
+    return (accelerator.is_available() and is_triton_available() and fused_ops.is_available())
 
 
 pytestmark = pytest.mark.skipif(not _fused_engine_available(),
-                                reason="the fused weighted restore needs CUDA and Triton")
+                                reason="the fused weighted restore needs an accelerator and Triton")
 
 
 def _device():
@@ -155,7 +156,7 @@ def test_fused_engine_names_what_it_cannot_run():
     with pytest.raises(RuntimeError, match='resolved score_apply="pre"'):
         fused_ops.assert_supported(supported, score_apply="pre")
 
-    with pytest.raises(RuntimeError, match="CUDA kernels"):
+    with pytest.raises(RuntimeError, match="Triton kernels"):
         fused_ops.assert_supported(torch.randn(8, 16, dtype=torch.bfloat16), score_apply="post")
 
 

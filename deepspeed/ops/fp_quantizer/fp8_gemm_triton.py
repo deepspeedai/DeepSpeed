@@ -15,6 +15,8 @@ import triton
 import triton.language as tl
 from triton.runtime.errors import OutOfResources
 
+from deepspeed.ops.triton_ops._triton import dispatch
+
 # Largest num_stages that fits in shared memory, per device and tile configuration.
 _fitting_num_stages = {}
 
@@ -145,6 +147,7 @@ def _launch_with_fitting_num_stages(kernel, grid, args, num_stages, num_warps, *
     _fitting_num_stages[cache_key] = num_stages
 
 
+@dispatch("fp8_gemm_triton", portable_module="deepspeed.ops.fp_quantizer.fp8_gemm_triton")
 def matmul_fp8_triton(inp, weight, scale, quantization_group_size):
 
     assert inp.shape[1] == weight.shape[0], \

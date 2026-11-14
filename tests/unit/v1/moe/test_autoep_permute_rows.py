@@ -41,8 +41,9 @@ def _grads(function, inputs, upstream):
     return output.detach(), grad
 
 
-@pytest.mark.skipif(get_accelerator().device_name() != "cuda" or not ep_kernels._TRITON_AVAILABLE,
-                    reason="the gather-based reorder needs CUDA and Triton")
+@pytest.mark.skipif(not get_accelerator().is_available() or get_accelerator().device_name() == "cpu"
+                    or not ep_kernels._TRITON_AVAILABLE,
+                    reason="the gather-based reorder needs an accelerator and Triton")
 class TestAutoEPPermuteRows(DistributedTest):
     # DeepSpeed imports can initialize CUDA during collection; the runner starts clean workers even under --forked.
     world_size = 1
