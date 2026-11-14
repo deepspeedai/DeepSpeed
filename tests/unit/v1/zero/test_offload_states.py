@@ -263,6 +263,87 @@ class TestDynamicOffloadStatesZero12(DistributedTest):
                          non_blocking)
 
 
+@pytest.mark.parametrize(
+    "included_state",
+    [OffloadStateTypeEnum.optim_states, OffloadStateTypeEnum.hp_params, OffloadStateTypeEnum.lp_params, None])
+@pytest.mark.parametrize("zero_stage", [1, 2])
+class TestOffloadStatesZero12OptimizerStateFragments(DistributedTest):
+    """offload_states() must free the device copy of the optimizer state, and the params' optimizer-state fragments,
+    which safe_get_full_optimizer_state() reads, must follow the state through reload_states(). The test compares
+    each rank's own fragments: safe_get_full_optimizer_state() is a collective and would hang if one rank failed."""
+    world_size = 2
+
+    def _engine(self, zero_stage, elastic_checkpoint):
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 1,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 1e-2
+                }
+            },
+            "bf16": {
+                "enabled": True
+            },
+            "zero_optimization": {
+                "stage": zero_stage,
+                "elastic_checkpoint": elastic_checkpoint
+            },
+        }
+        torch.manual_seed(0)
+        model = SimpleModel(1024, nlayers=2)
+        engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config_dict)
+        return engine
+
+    def _train_step(self, engine, batch):
+        engine.backward(engine(batch[0], batch[1]))
+        engine.step()
+
+    def test_optimizer_state_fragments(self, zero_stage, included_state):
+        self._check_offload(zero_stage, included_state, before_first_step=False)
+
+    def test_offload_before_first_step(self, zero_stage, included_state):
+        # With elastic checkpointing, state_dict() adds an empty optimizer state per group, which must not be linked.
+        self._check_offload(zero_stage, included_state, before_first_step=True)
+
+    def _check_offload(self, zero_stage, included_state, before_first_step):
+        model, reference = self._engine(zero_stage, before_first_step), self._engine(zero_stage, before_first_step)
+        data_loader = random_dataloader(model=model,
+                                        total_samples=2,
+                                        hidden_dim=1024,
+                                        device=model.device,
+                                        dtype=torch.bfloat16)
+        batch = next(iter(data_loader))
+        if before_first_step:
+            model.optimizer.state_dict()
+        else:
+            for engine in (model, reference):
+                self._train_step(engine, batch)
+
+        moments = sum(state[key].numel() * state[key].element_size()
+                      for state in model.optimizer.optimizer.state.values() for key in ("exp_avg", "exp_avg_sq")
+                      if key in state)
+        alloc_before_offload = get_accelerator().memory_allocated()
+        model.offload_states(include=None if included_state is None else [included_state])
+        if included_state in (OffloadStateTypeEnum.optim_states, None) and allocator_backed_memory_stats \
+                and offload_leaves_accelerator:
+            freed = alloc_before_offload - get_accelerator().memory_allocated()
+            assert freed >= moments, f"offload_states freed {freed} bytes, the optimizer state has {moments}"
+        model.reload_states()
+
+        # The offloaded run must go on exactly like the reference, also as seen through the fragments.
+        for engine in (model, reference):
+            self._train_step(engine, batch)
+        for param, expected in zip(model.parameters(), reference.parameters()):
+            if expected._hp_mapping is None:  # not in this rank's partition
+                continue
+            for key in ("exp_avg", "exp_avg_sq"):
+                assert torch.equal(param._hp_mapping.get_optim_state_fragment(key),
+                                   expected._hp_mapping.get_optim_state_fragment(key))
+        model.destroy()
+        reference.destroy()
+
+
 # ==============================================================================
 # ZeRO-3 TESTS
 # ==============================================================================
