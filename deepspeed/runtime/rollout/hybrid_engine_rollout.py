@@ -27,6 +27,7 @@ from deepspeed.runtime.rollout.continuous_batching import (ContinuousBatchReques
 from deepspeed.runtime.rollout.tool import TOOL_CALL_PARSERS, ToolSet
 from deepspeed.runtime.rollout.utils import (
     expand_samples,
+    full_vocabulary_logits,
     get_eos_token_ids,
     get_pad_token_id,
     get_repetition_penalty,
@@ -360,12 +361,13 @@ class HybridEngineRollout(RolloutEngine):
             call_start = time.perf_counter()
         samples = render_prompts(samples, self.tokenizer, self.tools.specs, self.chat_template_kwargs)
         trajectories = expand_samples(samples, sampling.n_samples_per_prompt)
-        if static_batching:
-            self._generate(trajectories, sampling, len(samples), call_start)
-        elif self._graph_capture_enabled():
-            self._generate_continuous_graph(trajectories, sampling, len(samples))
-        else:
-            self._generate_continuous(trajectories, sampling, len(samples))
+        with full_vocabulary_logits(self.engine.module):
+            if static_batching:
+                self._generate(trajectories, sampling, len(samples), call_start)
+            elif self._graph_capture_enabled():
+                self._generate_continuous_graph(trajectories, sampling, len(samples))
+            else:
+                self._generate_continuous(trajectories, sampling, len(samples))
         return RolloutBatch(samples=trajectories)
 
     def _check_parallelism(self):
@@ -1577,7 +1579,9 @@ class HybridEngineRollout(RolloutEngine):
             # The selector needs the vocabulary size only to track a repetition penalty's history.
             vocab_size = None
             if selector.repetition_penalty != 1.0:
-                vocab_size = module.get_output_embeddings().weight.shape[0]
+                head = module.get_output_embeddings()
+                # A vocabulary-parallel head holds only this rank's rows of the weight, but gathers the full logits.
+                vocab_size = getattr(head, "vocab_size", head.weight.shape[0])
             selector.start(prompt_ids, prompt_attention, rows, vocab_size=vocab_size)
             selector.record(tokens, rows)
             return tokens, log_probs, prefill_output.past_key_values

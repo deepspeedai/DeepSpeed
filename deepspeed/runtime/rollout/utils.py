@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # DeepSpeed Team
+from contextlib import contextmanager
 from dataclasses import replace
 
 import torch
@@ -124,3 +125,22 @@ def update_sample_from_response(sample, response, response_log_probs, tool_respo
         sample.rollout_log_probs = (sample.rollout_log_probs or []) + response_log_probs + [0.0] * len(tool_response)
     sample.response = sample.response + tokenizer.decode(turn, skip_special_tokens=True)
     sample.response_length = sample.response_length + len(turn)
+
+
+@contextmanager
+def full_vocabulary_logits(module):
+    """Have AutoTP's vocabulary-parallel output heads gather their logits while the rollout decodes.
+
+    With a tied output head, AutoTP shards the head by vocabulary and keeps each rank's logits local for the
+    vocabulary-parallel training loss. Token selection needs every rank to see the whole vocabulary, so the heads
+    gather for the duration of the rollout and go back to rank-local logits for training.
+    """
+    heads = [submodule for submodule in module.modules() if getattr(submodule, "is_vocab_parallel_lm_head", False)]
+    previous = [head.gather_output for head in heads]
+    for head in heads:
+        head.gather_output = True
+    try:
+        yield
+    finally:
+        for head, gather_output in zip(heads, previous):
+            head.gather_output = gather_output

@@ -294,7 +294,14 @@ group's first rank only, which broadcasts their output. In multi-turn
 continuous batching, tools finish at wall-clock times, so the first rank also
 decides when a turn returns: at each step where a row frees, it sends the
 finished tools' output to its group over a Gloo group on the host, and every
-rank queues the same turns. HybridEngine's ``inference_tp_size`` is rejected,
+rank queues the same turns. When AutoTP shards a tied output head by vocabulary
+(``VocabParallelLinear``), each rank's logits cover only its vocabulary shard,
+which suits the vocabulary-parallel training loss but not token selection, so
+the head gathers the full logits for the duration of each rollout call and
+returns rank-local logits to training afterwards. Training code that computes
+log-probabilities from those logits itself should use
+``deepspeed.sequence.vocab_parallel_ops.vocab_parallel_logprobs``.
+HybridEngine's ``inference_tp_size`` is rejected,
 since the rollout calls the module directly and skips the input gather of the
 hybrid engine's ``generate()``.
 

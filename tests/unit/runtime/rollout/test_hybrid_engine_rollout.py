@@ -1100,14 +1100,18 @@ def test_global_eos_stops_only_when_no_global_work_remains():
 def test_global_eos_counts_a_row_past_its_budget_as_finished():
     rendezvous = MagicMock(side_effect=lambda local: bool(local.item()))
     # Row 0 may generate two tokens and row 1 four; neither emits EOS.
-    criterion = _GlobalEosStoppingCriteria(response_start=2, eos_token_id=2, work_remaining=rendezvous,
+    criterion = _GlobalEosStoppingCriteria(response_start=2,
+                                           eos_token_id=2,
+                                           work_remaining=rendezvous,
                                            row_budgets=[2, 4])
 
     assert criterion(torch.tensor([[10, 11, 5, 6], [10, 11, 5, 6]]), scores=None) is False
     # Row 0 is at its budget; row 1 has reached EOS.
     assert criterion(torch.tensor([[10, 11, 5, 6], [10, 11, 5, 2]]), scores=None) is True
     # A placeholder row with budget 0 is finished from its first token, and needs no EOS ids.
-    placeholder = _GlobalEosStoppingCriteria(response_start=1, eos_token_id=None, work_remaining=rendezvous,
+    placeholder = _GlobalEosStoppingCriteria(response_start=1,
+                                             eos_token_id=None,
+                                             work_remaining=rendezvous,
                                              row_budgets=[0])
     assert placeholder(torch.tensor([[0, 9]]), scores=None) is True
 
@@ -1894,6 +1898,32 @@ def test_rejects_zero3_where_ranks_would_run_different_forwards(cfg_kwargs, mess
 
     with pytest.raises(ValueError, match=message):
         rollout.generate(_make_request(), _make_sampling())
+
+
+def test_vocabulary_parallel_head_gathers_only_while_generating():
+    """A tied head that AutoTP shards by vocabulary must give full logits to rollout, and rank-local ones to training."""
+
+    class FailingModel(torch.nn.Module):
+
+        def __init__(self):
+            super().__init__()
+            self.lm_head = torch.nn.Linear(2, 4)
+            self.lm_head.is_vocab_parallel_lm_head = True
+            self.lm_head.gather_output = False
+            self.gathered_while_generating = None
+
+        def generate(self, *_args, **_kwargs):
+            self.gathered_while_generating = self.lm_head.gather_output
+            raise RuntimeError("generation failed")
+
+    module = FailingModel()
+    rollout = HybridEngineRollout(_engine_for(module), _make_tokenizer())
+
+    with pytest.raises(RuntimeError, match="generation failed"):
+        rollout.generate(_make_request(), _make_sampling())
+
+    assert module.gathered_while_generating is True
+    assert module.lm_head.gather_output is False
 
 
 def test_rejects_hybrid_engine_inference_tensor_parallelism():

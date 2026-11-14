@@ -670,7 +670,7 @@ class TestAutoTPRollout(DistributedTest):
     """Tensor-parallel ranks must roll out the same records, or they would run different forwards."""
     world_size = 2
 
-    def _engine(self):
+    def _engine(self, tie_word_embeddings=False):
         from transformers import AutoModelForCausalLM, Qwen3Config
 
         config = Qwen3Config(vocab_size=64,
@@ -681,7 +681,7 @@ class TestAutoTPRollout(DistributedTest):
                              num_key_value_heads=2,
                              head_dim=16,
                              max_position_embeddings=128,
-                             tie_word_embeddings=False)
+                             tie_word_embeddings=tie_word_embeddings)
         torch.manual_seed(0)
         model = AutoModelForCausalLM.from_config(config).eval()
         reference = copy.deepcopy(model).to(get_accelerator().current_device_name()).eval()
@@ -793,6 +793,64 @@ class TestAutoTPRollout(DistributedTest):
         assert all(len(record.tokens) == 5 + 4 + 1 + 4 for record in records)
         gathered = self._gather(records)
         assert gathered[0] == gathered[1]
+
+    @pytest.mark.parametrize("use_graph_capture", [False, True])
+    @pytest.mark.parametrize("continuous_batch_size", [None, 2])
+    def test_tied_vocabulary_parallel_head_decodes_over_the_whole_vocabulary(self, use_graph_capture,
+                                                                             continuous_batch_size):
+        if use_graph_capture and not get_accelerator().is_graph_capture_supported():
+            pytest.skip("requires graph capture")
+        if (continuous_batch_size is not None and not use_graph_capture and hasattr(Cache, "get_query_offset")
+                and not hasattr(DeepSpeedStaticCache, "get_query_offset")):
+            pytest.skip("DeepSpeedStaticCache lacks get_query_offset for this Transformers version")
+        engine, reference = self._engine(tie_word_embeddings=True)
+        head = engine.module.get_output_embeddings()
+        # AutoTP shards a tied head by vocabulary only when the Transformers tp_plan asks for it.
+        if not getattr(head, "is_vocab_parallel_lm_head", False):
+            pytest.skip("AutoTP keeps this tied output head whole with this Transformers version")
+        tokenizer = SimpleNamespace(pad_token_id=0, eos_token_id=None, decode=lambda ids, **_kwargs: "")
+        rollout = HybridEngineRollout(
+            engine, tokenizer,
+            HybridEngineRolloutConfig(use_graph_capture=use_graph_capture,
+                                      continuous_batch_size=continuous_batch_size,
+                                      return_log_probs=True))
+        prompts = [[0, 0, 5, 9, 12], [3, 7, 21, 30, 44]]
+
+        def request():
+            return RolloutRequest(samples=[
+                RolloutRecord(tokens=prompt, attention_mask=[int(token != 0) for token in prompt])
+                for prompt in prompts
+            ])
+
+        try:
+            # The repetition penalty also needs the whole vocabulary to track each row's history.
+            greedy = rollout.generate(request(),
+                                      SamplingConfig(max_new_tokens=8, temperature=0.0,
+                                                     repetition_penalty=1.3)).samples
+            # Each rank gets a different seed, so only the rollout's own synchronization keeps sampling identical.
+            torch.manual_seed(dist.get_rank())
+            sampled = rollout.generate(request(), SamplingConfig(max_new_tokens=8, temperature=1.0)).samples
+        finally:
+            # A live graph holding NCCL work hangs process-group teardown.
+            del rollout
+            gc.collect()
+            get_accelerator().synchronize()
+
+        device = get_accelerator().current_device_name()
+        prompt_ids = torch.tensor(prompts, device=device)
+        with torch.no_grad():
+            expected = reference.generate(prompt_ids,
+                                          attention_mask=(prompt_ids != 0).long(),
+                                          max_new_tokens=8,
+                                          do_sample=False,
+                                          repetition_penalty=1.3,
+                                          pad_token_id=0)
+        assert [record.tokens for record in greedy] == expected.tolist()
+        for records in (greedy, sampled):
+            gathered = self._gather(records)
+            assert gathered[0] == gathered[1]
+        # Training goes back to rank-local logits for the vocabulary-parallel loss.
+        assert head.gather_output is False
 
     @pytest.mark.parametrize("use_graph_capture", [False, True])
     def test_continuous_batching_admits_tool_turns_at_the_same_step_on_every_rank(self, use_graph_capture):
