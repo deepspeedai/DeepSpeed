@@ -1745,7 +1745,9 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         with get_accelerator().stream(self.reduce_and_partition_stream):
             if self.enable_sanity_checks:
-                assert_ints_same_as_other_ranks([p.ds_id for p in params_in_bucket], self.dp_process_group)
+                # over the ranks that reduce this bucket (its parameters' partition group, as the reduction below)
+                assert_ints_same_as_other_ranks([p.ds_id for p in params_in_bucket],
+                                                self._get_param_partition_group(params_in_bucket[0]))
 
             if self.contiguous_gradients and bucket.elements <= self._ipg_bucket_capacity(
                     bucket) and not self.reduce_scatter:
