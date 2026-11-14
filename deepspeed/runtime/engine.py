@@ -5063,9 +5063,10 @@ class DeepSpeedEngine(Module):
         if not self.checkpoint_engine.is_decoupled():
             commit_info = CheckpointCommitInfo(tag=tag, save_dir=save_dir, save_latest=save_latest)
             self.checkpoint_engine.commit(commit_info)
+            # Every rank must finish writing its files for `tag` before `latest` points at it.
+            dist.barrier()
             if save_latest and self.global_rank == 0:
-                with open(os.path.join(save_dir, 'latest'), 'w') as fd:
-                    fd.write(tag)
+                self._write_latest_tag(save_dir, tag)
 
         dist.barrier()
 
@@ -5081,11 +5082,24 @@ class DeepSpeedEngine(Module):
 
         self.checkpoint_engine.commit(commit_info)
 
+        # Every rank must finish writing its files for the tag before `latest` points at it.
+        dist.barrier()
         if self.global_rank == 0 and commit_info.save_latest:
-            with open(os.path.join(commit_info.save_dir, 'latest'), 'w') as fd:
-                fd.write(commit_info.tag)
+            self._write_latest_tag(commit_info.save_dir, commit_info.tag)
 
         dist.barrier()
+
+    @staticmethod
+    def _write_latest_tag(save_dir, tag):
+        # Write to a temporary file and rename it over `latest`, so a crash mid-write never
+        # leaves `latest` empty or truncated; readers see either the old tag or the new one.
+        latest_path = os.path.join(save_dir, 'latest')
+        tmp_path = f"{latest_path}.tmp.{os.getpid()}"
+        with open(tmp_path, 'w') as fd:
+            fd.write(tag)
+            fd.flush()
+            os.fsync(fd.fileno())
+        os.replace(tmp_path, latest_path)
 
     def _get_non_moe_state_dict(self, full_state_dict):
         """Remove expert-param keys from state dict, keeping all non-expert params.
