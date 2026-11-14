@@ -778,8 +778,8 @@ class TestAutoEPAsyncSplitPlanParity(DistributedTest):
     @pytest.mark.parametrize("non_default_stream", [False, True])
     def test_async_split_plan_matches_synchronous_step(self, checkpoint_activations, non_default_stream):
         accelerator = get_accelerator()
-        if not accelerator.is_available() or not accelerator.device_name().startswith("cuda"):
-            pytest.skip("async split-plan parity requires CUDA")
+        if not accelerator.is_available() or accelerator.device_name() == "cpu":
+            pytest.skip("async split-plan parity requires an accelerator with streams")
         seed = 9753
         _seed_everything(seed)
         reference_state = _make_async_split_model().state_dict()
