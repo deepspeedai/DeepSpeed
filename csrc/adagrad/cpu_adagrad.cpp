@@ -39,6 +39,7 @@ void Adagrad_Optimizer::Step_1(ds_params_precision_t* _params,
                 float param = (float)_params[k];
                 float variance = _exp_avg_sq[k];
                 if (_weight_decay > 0) { grad = param * _weight_decay + grad; }
+                float momentum = grad;
 
                 variance += grad * grad;
 
