@@ -724,7 +724,7 @@ Configuring the asynchronous I/O module for offloading parameter and optimizer s
   "aio": {
     "block_size": 1048576,
     "queue_depth": 8,
-    "thread_count": 1,
+    "intra_op_parallelism": 1,
     "single_submit": false,
     "overlap_events": true
   }
@@ -741,7 +741,7 @@ Configuring the asynchronous I/O module for offloading parameter and optimizer s
 | ---------------- | ------- |
 | I/O queue depth. | 8       |
 
-***thread_count***: [integer]
+***intra_op_parallelism***: [integer]
 
 | Description                                                               | Default |
 | ------------------------------------------------------------------------- | ------- |

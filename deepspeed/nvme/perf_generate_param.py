@@ -10,6 +10,8 @@ import argparse
 import json
 from .parse_nvme_stats import READ_SPEED, WRITE_SPEED, get_sorted_results
 from .perf_sweep_utils import BENCH_LOG_DIR, READ_LOG_DIR, WRITE_LOG_DIR
+from deepspeed.runtime.swap_tensor.constants import AIO, AIO_BLOCK_SIZE, AIO_QUEUE_DEPTH, AIO_INTRA_OP_PARALLELISM, \
+    AIO_SINGLE_SUBMIT, AIO_OVERLAP_EVENTS
 
 
 def parse_arguments():
@@ -41,11 +43,11 @@ def validate_args(args):
 def convert_to_param(key):
     assert len(key) == 6
     return {
-        "single_submit": "true" if key[0] == "single" else "false",
-        "overlap_events": "true" if key[1] == "overlap" else "false",
-        "num_threads": int(key[5]),
-        "queue_depth": int(key[3]),
-        "block_size": int(key[4])
+        AIO_SINGLE_SUBMIT: key[0] == "single",
+        AIO_OVERLAP_EVENTS: key[1] == "overlap",
+        AIO_INTRA_OP_PARALLELISM: int(key[5]),
+        AIO_QUEUE_DEPTH: int(key[3]),
+        AIO_BLOCK_SIZE: int(key[4])
     }
 
 
@@ -72,7 +74,7 @@ def generate_aio_param(read_log_dir, write_log_dir):
             optimal_perf = value
             optimal_key = key
 
-    aio_param = {"aio": convert_to_param(optimal_key)}
+    aio_param = {AIO: convert_to_param(optimal_key)}
 
     read_perf_keys = {key[1:]: key for key in read_results.keys()}
     write_perf_keys = {key[1:]: key for key in write_results.keys()}
