@@ -3,6 +3,8 @@
 
 # DeepSpeed Team
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 import torch.nn.functional as F
@@ -14,7 +16,8 @@ from transformers import AutoModel
 from unit.common import DistributedTest
 from deepspeed.sequence.layer import (DistributedAttention, _SeqAllToAll, _generate_layout_params, post_all2all,
                                       pre_all2all_fun, single_all_to_all)
-from deepspeed.sequence.fpdt_layer import _FPDTGPUAttentionImpl_, _FPDTGPUOffloadingAttentionImpl_, FPDT_InputConstruct
+from deepspeed.sequence.fpdt_layer import (_FPDTGPUAttentionImpl_, _FPDTGPUOffloadingAttentionImpl_,
+                                           FPDT_InputConstruct, FPDT_Attention, FPDT_LogitsLoss)
 from unit.util import skip_on_arch
 from unit.simple_model import *
 from deepspeed.utils import groups
@@ -384,6 +387,139 @@ class TestFPDTAttention(DistributedTest):
         ), f"rank {dist.get_rank()}, sp size: {dist.get_world_size(spg)}, input_tensor: {input_tensor.shape}, fpdt_input_tensor: {fpdt_input_tensor.shape}, fpdt_output: {fpdt_output.shape},            baseline_output_shuffled: {baseline_output_shuffled.shape},{torch.max(torch.abs(fpdt_output - baseline_output_shuffled))}"
 
 
+@pytest.mark.parametrize('length', [24, 19, 3])
+@pytest.mark.parametrize('offload', [False, True])
+class TestFPDTPadding(DistributedTest):
+    world_size = 2
+
+    def test_padding_matches_unpadded_reference(self, length, offload):
+        skip_on_arch(min_arch=8)
+        try:
+            from flash_attn.flash_attn_interface import _flash_attn_forward, _flash_attn_backward
+        except ImportError:
+            _flash_attn_forward = None
+            _flash_attn_backward = None
+        if _flash_attn_forward is None or _flash_attn_backward is None:
+            pytest.skip("Flash Attention is not available.")
+
+        chunk, width, heads, head_dim, vocab = 8, 64, 2, 32, 23
+        device = get_accelerator().current_device_name()
+        group = dist.get_world_group()
+        size, rank = dist.get_world_size(group), dist.get_rank(group)
+        generator = torch.Generator().manual_seed(41)
+
+        def random_tensor(shape, scale):
+            return (torch.randn(shape, generator=generator) * scale).to(device=device, dtype=torch.half)
+
+        inputs = random_tensor((2, length, width), 0.3)
+        weight = random_tensor((3 * width, width), 0.5 / width**0.5)
+        bias = random_tensor((3 * width, ), 0.02)
+        head = random_tensor((vocab, width), 0.5 / width**0.5)
+        labels = torch.randint(vocab, (2, length), generator=generator).to(device)
+        weights = (torch.arange(2 * length, device=device).reshape(2, length) % 5).float() / 4
+        config = SimpleNamespace(ds_sequence_parallel_fpdt_chunk_size=chunk,
+                                 kv_channels=head_dim,
+                                 num_attention_heads=heads,
+                                 num_key_value_heads=heads,
+                                 hidden_size=width,
+                                 attention_dropout=0.0)
+
+        # Independent ordinary global causal attention; the head/loss rounding
+        # follows FPDT's legitimate fp16 matmul -> float softmax().log() recipe.
+        ref_x, ref_w, ref_b, ref_head = (t.clone().requires_grad_() for t in (inputs, weight, bias, head))
+        q, k, v = (ref_x @ ref_w.t() + ref_b).chunk(3, dim=-1)
+        q, k, v = (t.reshape(2, length, heads, head_dim).transpose(1, 2).float() for t in (q, k, v))
+        scores = (q @ k.transpose(-2, -1)) / head_dim**0.5
+        causal = torch.ones(length, length, device=device, dtype=torch.bool).tril()
+        probabilities = scores.masked_fill(~causal, float('-inf')).softmax(-1)
+        ref_output = (probabilities @ v).transpose(1, 2).reshape(2, length, width).half()
+        logits = (ref_output @ ref_head.t()).float()
+        losses = F.nll_loss(logits.softmax(-1).log().reshape(-1, vocab), labels.reshape(-1), reduction='none')
+        ref_loss = (losses.reshape_as(weights) * weights).sum() / weights.sum()
+        ref_loss.backward()
+
+        def compare(actual, expected):
+            # Normalize small gradients so a broad absolute tolerance cannot
+            # hide their loss; the floor covers fp16 noise in the zero key bias.
+            actual, expected = actual.detach().float(), expected.detach().float()
+            if expected.numel():
+                scale = expected.abs().max().clamp_min(2e-4)
+                torch.testing.assert_close(actual / scale, expected / scale, atol=0.01, rtol=0.01)
+
+        # Verify these tolerances reject lost or doubled meaningful parameter gradients.
+        for grad in (*ref_w.grad.chunk(3), ref_head.grad):
+            for incorrect in (torch.zeros_like(grad), 2 * grad):
+                with pytest.raises(AssertionError):
+                    compare(incorrect, grad)
+
+        padded_length = ((length + chunk - 1) // chunk) * chunk
+        padding = padded_length - length
+        indices = torch.tensor([i for i in range(padded_length) if (i % chunk) // (chunk // size) == rank],
+                               device=device)
+        valid = indices < length
+        expected = (ref_output[:, indices[valid]], ref_x.grad[:, indices[valid]], *ref_w.grad.chunk(3),
+                    *ref_b.grad.chunk(3), ref_head.grad)
+        baseline = None
+        modes = ('aligned', ) if padding == 0 else ('auto', 'explicit', 'perturbed')
+        for mode in modes:
+            x, y, mask = inputs, labels, weights
+            if mode in ('explicit', 'perturbed'):
+                pad_x = inputs.new_full((2, padding, width), 0.75 if mode == 'perturbed' else 0)
+                pad_y = labels.new_full((2, padding), vocab - 1 if mode == 'perturbed' else 0)
+                x = torch.cat((inputs, pad_x), dim=1)
+                y = torch.cat((labels, pad_y), dim=1)
+                mask = torch.cat((weights, weights.new_zeros((2, padding))), dim=1)
+            local, local_labels, global_weights, _, _ = FPDT_InputConstruct(x, y, mask, None, None, config, size,
+                                                                            rank).generate()
+            local = local.transpose(0, 1).contiguous().detach().requires_grad_()
+            w, b, h = (t.clone().requires_grad_() for t in (weight, bias, head))
+            attention = FPDT_Attention(config,
+                                       w,
+                                       b,
+                                       torch.eye(width, device=device, dtype=torch.half),
+                                       inputs.new_zeros(width),
+                                       group,
+                                       gather_idx=1,
+                                       scatter_idx=2,
+                                       return_bias=False,
+                                       chunk_size=chunk)
+            output, _ = attention(local, None, None, None, cpu_offloading=offload)
+            pending = [output.grad_fn]
+            while pending:
+                backend = pending.pop()
+                if type(backend).__name__.startswith('_FPDTGPU'):
+                    break
+                if backend is not None:
+                    pending.extend(child for child, _ in backend.next_functions)
+            else:
+                pytest.fail('FPDT attention backend was not selected')
+            uses_offload = offload and padded_length > chunk
+            implementation = _FPDTGPUOffloadingAttentionImpl_ if uses_offload else _FPDTGPUAttentionImpl_
+            assert type(backend).__name__ == implementation.__name__ + 'Backward'
+            if uses_offload:
+                assert all(t.cpu_chunk.device.type == 'cpu' for t in backend.global_q)
+                assert any(t.gpu_chunk is None for t in backend.global_q)
+            losses = FPDT_LogitsLoss.apply(output, local_labels, h, rank, size, group, padded_length // chunk)
+            # A rank can own no real tokens. Normalize by SP-global weight, never local weight.
+            loss = (losses * global_weights.t()).sum() / global_weights.sum()
+            loss.backward()
+            grads = [t.grad.float() for t in (w, b, h)]
+            for grad in grads:
+                dist.all_reduce(grad, op=dist.ReduceOp.SUM, group=group)
+            actual = (output.transpose(0, 1)[:, valid], local.grad.transpose(0, 1)[:, valid], *grads[0].chunk(3),
+                      *grads[1].chunk(3), grads[2])
+            for value, reference in zip(actual, expected):
+                assert value.shape == reference.shape
+                compare(value, reference)
+            torch.testing.assert_close(loss, ref_loss, atol=1e-5, rtol=1e-4)
+            assert torch.count_nonzero(local.grad[~valid]) == 0
+            values = tuple(t.detach().float() for t in (*actual, loss))
+            if baseline is not None:
+                for value, previous in zip(values, baseline):
+                    torch.testing.assert_close(value, previous, atol=2e-7, rtol=1e-3)
+            baseline = values
+
+
 @pytest.mark.parametrize("num_kv_heads", [2, 4, 8])
 class TestFPDTAttentionGQABackward(DistributedTest):
     """The non-offloading FPDT attention must produce K/V gradients shaped like K/V, not Q, under GQA."""
@@ -637,3 +773,221 @@ class TestUlyssesKVHeadCount(DistributedTest):
         output = single_all_to_all(self._tagged(3), 2, 1, 0, sp_group, num_kv_heads=3)
 
         assert output.shape[2] == [2, 1][rank]
+
+
+@pytest.mark.parametrize('batch_dim_idx', [0, 1])
+@pytest.mark.parametrize('case', ['divisible4', 'padded6_masked', 'padded6_unmasked'])
+class TestDistributedAttentionSDPA(DistributedTest):
+    world_size = 2
+
+    def test_output_and_qkv_gradients(self, batch_dim_idx, case):
+        """Catch layout corruption and lost QKV gradients, including caller-owned padding.
+
+        Masked padding must retain five-token semantics. Unmasked padding is checked
+        against its own six-token oracle because zero keys still enter softmax.
+        """
+        from torch.nn.attention import SDPBackend, sdpa_kernel
+
+        device = get_accelerator().current_device_name()
+        generator = torch.Generator().manual_seed(7384)
+        source = [torch.randn(2, 5, 4, 8, generator=generator).to(device) for _ in range(3)]
+        if case == 'divisible4':
+            source = [t[:, :4].contiguous() for t in source]
+        masked = case == 'padded6_masked'
+        inputs = [F.pad(t, (0, 0, 0, 0, 0, 1)) for t in source] if case != 'divisible4' else source
+        valid = torch.ones(2, inputs[0].shape[1], device=device, dtype=torch.bool)
+        if masked:
+            valid[:, -1] = False
+        if batch_dim_idx == 1:
+            source = [t.transpose(0, 1).contiguous() for t in source]
+            inputs = [t.transpose(0, 1).contiguous() for t in inputs]
+        seq_dim = 1 - batch_dim_idx
+        weight = torch.randn(inputs[0].shape, generator=generator).to(device)
+
+        def local_attention(q, k, v):
+            if batch_dim_idx == 1:
+                q, k, v = [t.transpose(0, 1) for t in (q, k, v)]
+            with sdpa_kernel(SDPBackend.MATH):
+                output = F.scaled_dot_product_attention(q.transpose(1, 2),
+                                                        k.transpose(1, 2),
+                                                        v.transpose(1, 2),
+                                                        attn_mask=valid[:, None, None, :] if masked else None,
+                                                        dropout_p=0.0).transpose(1, 2)
+            if masked:
+                output = output * valid[:, :, None, None]
+            return output.transpose(0, 1).contiguous() if batch_dim_idx == 1 else output.contiguous()
+
+        # The masked control uses five unpadded tokens as its independent oracle.
+        reference_inputs = source if masked else inputs
+        leaves = [t.detach().clone().requires_grad_() for t in reference_inputs]
+        outputs = []
+        for start in (0, 2):
+            q, k, v = [t.narrow(2, start, 2).contiguous() for t in leaves]
+            if batch_dim_idx == 1:
+                q, k, v = [t.transpose(0, 1) for t in (q, k, v)]
+            with sdpa_kernel(SDPBackend.MATH):
+                output = F.scaled_dot_product_attention(q.transpose(1, 2),
+                                                        k.transpose(1, 2),
+                                                        v.transpose(1, 2),
+                                                        dropout_p=0.0).transpose(1, 2)
+            outputs.append(output.transpose(0, 1).contiguous() if batch_dim_idx == 1 else output.contiguous())
+        expected_output = torch.cat(outputs, dim=2)
+        reference_weight = weight.narrow(seq_dim, 0, expected_output.shape[seq_dim])
+        expected_gradients = torch.autograd.grad((expected_output * reference_weight).sum(), leaves)
+        expected = (expected_output, *expected_gradients)
+        if masked:
+            expected = tuple(torch.cat((t, torch.zeros_like(t.narrow(seq_dim, 0, 1))), dim=seq_dim) for t in expected)
+
+        rank = dist.get_rank()
+        group = dist.new_group(ranks=list(range(self.world_size)))
+
+        def shard(tensor):
+            return tensor.chunk(self.world_size, dim=seq_dim)[rank].contiguous()
+
+        local = [shard(t).detach().requires_grad_() for t in inputs]
+        distributed = DistributedAttention(local_attention, group, scatter_idx=2, gather_idx=seq_dim)
+        actual = distributed(*local, batch_dim_idx=batch_dim_idx)
+        gradients = torch.autograd.grad((actual * shard(weight)).sum(), local)
+        for observed, target in zip((actual, *gradients), expected):
+            torch.testing.assert_close(observed, shard(target), atol=2e-5, rtol=2e-5)
+
+
+@pytest.mark.parametrize('batch_dim_idx', [0, 1])
+class TestDistributedAttentionShardValidation(DistributedTest):
+    world_size = 2
+
+    @pytest.mark.parametrize('local_lengths', [(2, 2), (3, 3), (3, 2)])
+    def test_equal_shards_match_sdpa(self, batch_dim_idx, local_lengths):
+        """Catch rejection of odd equal shards and changes to outputs or any QKV gradient.
+
+        Different Q and KV lengths remain valid cross-attention inputs.
+        """
+        from torch.nn.attention import SDPBackend, sdpa_kernel
+        from deepspeed.sequence import DistributedAttention
+
+        seq_dim = 1 - batch_dim_idx
+        group = dist.new_group(ranks=list(range(self.world_size)))
+        rank = dist.get_rank(group)
+        generator = torch.Generator().manual_seed(7384)
+        device = get_accelerator().current_device_name()
+        q_len, kv_len = local_lengths
+        inputs = [
+            torch.randn(2, length * self.world_size, 4, 8, generator=generator).to(device)
+            for length in (q_len, kv_len, kv_len)
+        ]
+        if batch_dim_idx == 1:
+            inputs = [tensor.transpose(0, 1).contiguous() for tensor in inputs]
+        weight = torch.randn(inputs[0].shape, generator=generator).to(device)
+
+        def attention(q, k, v):
+            if batch_dim_idx == 1:
+                q, k, v = [tensor.transpose(0, 1) for tensor in (q, k, v)]
+            with sdpa_kernel(SDPBackend.MATH):
+                output = F.scaled_dot_product_attention(q.transpose(1, 2),
+                                                        k.transpose(1, 2),
+                                                        v.transpose(1, 2),
+                                                        dropout_p=0.0).transpose(1, 2)
+            return output.transpose(0, 1).contiguous() if batch_dim_idx == 1 else output.contiguous()
+
+        reference = [tensor.detach().clone().requires_grad_() for tensor in inputs]
+        expected_output = attention(*reference)
+        expected_gradients = torch.autograd.grad((expected_output * weight).sum(), reference)
+
+        def shard(tensor):
+            return tensor.chunk(self.world_size, dim=seq_dim)[rank].contiguous()
+
+        local = [shard(tensor).detach().requires_grad_() for tensor in inputs]
+        distributed = DistributedAttention(attention, group, gather_idx=seq_dim, validate_shards=True)
+        actual = distributed(*local, batch_dim_idx=batch_dim_idx)
+        gradients = torch.autograd.grad((actual * shard(weight)).sum(), local)
+        for observed, target in zip((actual, *gradients), (expected_output, *expected_gradients)):
+            torch.testing.assert_close(observed, shard(target), atol=2e-5, rtol=2e-5)
+
+    @pytest.mark.parametrize('mismatched_tensor', ['query', 'key', 'value'])
+    def test_unequal_shards_fail_before_data_exchange(self, batch_dim_idx, mismatched_tensor, monkeypatch):
+        """A mismatch in just one rank's Q, K or V must stop every rank before data exchange."""
+        seq_dim = 1 - batch_dim_idx
+        group = dist.new_group(ranks=list(range(self.world_size)))
+        rank = dist.get_rank(group)
+        device = get_accelerator().current_device_name()
+
+        def attention(*args):
+            pytest.fail('local attention must not run with unequal shards')
+
+        def data_exchange(*args, **kwargs):
+            # Keep a regression from entering an unsafe unequal-size backend collective.
+            pytest.fail('attention data collective must not run with unequal shards')
+
+        distributed = DistributedAttention(attention, group, gather_idx=seq_dim, validate_shards=True)
+        monkeypatch.setattr(dist, 'all_to_all_single', data_exchange)
+        # Reuse the module with changed metadata to catch validation cached after one forward.
+        for sizes in ((3, 2), (2, 3)):
+            inputs = []
+            for name in ('query', 'key', 'value'):
+                length = sizes[rank] if name == mismatched_tensor else 3
+                shape = (2, length, 4, 8) if batch_dim_idx == 0 else (length, 2, 4, 8)
+                inputs.append(torch.zeros(shape, device=device))
+            with pytest.raises(ValueError) as error:
+                distributed(*inputs, batch_dim_idx=batch_dim_idx)
+            message = str(error.value)
+            assert f'{mismatched_tensor} sequence lengths' in message
+            for group_rank, length in enumerate(sizes):
+                assert f'group rank {group_rank}: {length}' in message
+
+    def test_default_does_not_exchange_metadata(self, batch_dim_idx, monkeypatch):
+        """The default path must retain its collective participation and latency contract."""
+        group = dist.new_group(ranks=list(range(self.world_size)))
+        shape = (2, 3, 4, 8) if batch_dim_idx == 0 else (3, 2, 4, 8)
+        query = torch.randn(shape, device=get_accelerator().current_device_name(), requires_grad=True)
+
+        def metadata_exchange(*args, **kwargs):
+            pytest.fail('default attention must not add a metadata all-gather')
+
+        monkeypatch.setattr(dist, 'all_gather', metadata_exchange)
+        distributed = DistributedAttention(lambda q, k, v: q + k + v, group, gather_idx=1 - batch_dim_idx)
+        output = distributed(query, query, query, batch_dim_idx)
+        torch.testing.assert_close(output, 3 * query)
+        output.sum().backward()
+        torch.testing.assert_close(query.grad, torch.full_like(query, 3))
+
+
+@pytest.mark.parametrize('batch_dim_idx', [0, 1])
+def test_sequence_scatter_rejects_indivisible_length(batch_dim_idx):
+    """Pin the local layout guard: fail clearly before a reshape can obscure the error."""
+    shape = (2, 5, 2, 8) if batch_dim_idx == 0 else (5, 2, 2, 8)
+    with pytest.raises(AssertionError, match=r'Sequence length \(5\) must be divisible.*\(2\)'):
+        _generate_layout_params(1 - batch_dim_idx, batch_dim_idx, 2, torch.empty(shape))
+
+
+class TestDistributedAttentionShardSubgroups(DistributedTest):
+    world_size = 4
+
+    @pytest.mark.parametrize('batch_dim_idx', [0, 1])
+    def test_validation_uses_sequence_group_ranks(self, batch_dim_idx, monkeypatch):
+        """Independent noncontiguous groups may use different lengths and report their own ranks."""
+        world_rank = dist.get_rank()
+        for ranks in ([0, 2], [1, 3]):
+            candidate = dist.new_group(ranks=ranks)
+            if world_rank in ranks:
+                group = candidate
+        group_rank = dist.get_rank(group)
+        length = 2 + world_rank % 2
+        device = get_accelerator().current_device_name()
+        shape = (2, length, 4, 8) if batch_dim_idx == 0 else (length, 2, 4, 8)
+        query = torch.randn(shape, device=device)
+        distributed = DistributedAttention(lambda q, k, v: q + k + v,
+                                           group,
+                                           gather_idx=1 - batch_dim_idx,
+                                           validate_shards=True)
+        torch.testing.assert_close(distributed(query, query, query, batch_dim_idx), 3 * query)
+
+        def data_exchange(*args, **kwargs):
+            pytest.fail('unequal subgroup shards must not reach data exchange')
+
+        monkeypatch.setattr(dist, 'all_to_all_single', data_exchange)
+        query = query.narrow(1 - batch_dim_idx, 0, length - group_rank)
+        with pytest.raises(ValueError) as error:
+            distributed(query, query, query, batch_dim_idx)
+        message = str(error.value)
+        assert f'group rank 0: {length}' in message
+        assert f'group rank 1: {length - 1}' in message
