@@ -122,6 +122,10 @@ class PDSHRunner(MultiNodeRunner):
             deepspeed_launch += ["--save_pid", f"{os.getpid()}"]
         if self.args.enable_each_rank_log:
             deepspeed_launch.append(f"--enable_each_rank_log={self.args.enable_each_rank_log}")
+        if self.args.bind_cores_to_rank:
+            deepspeed_launch.append("--bind_cores_to_rank")
+        if self.args.bind_core_list is not None:
+            deepspeed_launch.append(f"--bind_core_list={self.args.bind_core_list}")
 
         cmd_to_search = [i + "\\" for i in deepspeed_launch[2:6]]
 
