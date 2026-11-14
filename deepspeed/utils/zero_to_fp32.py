@@ -23,6 +23,7 @@ import os
 import re
 import gc
 import json
+import zipfile
 import numpy as np
 from tqdm import tqdm
 from collections import OrderedDict
@@ -201,7 +202,8 @@ def parse_optim_states(files, ds_checkpoint_dir):
     total_files = len(files)
     state_dicts = []
     for f in tqdm(files, desc='Loading checkpoint shards'):
-        state_dict = torch.load(f, map_location=device, mmap=True, weights_only=False)
+        # Legacy checkpoints (checkpoint_serialization=False) cannot be memory-mapped.
+        state_dict = torch.load(f, map_location=device, mmap=zipfile.is_zipfile(f), weights_only=False)
         # immediately discard the potentially huge 2 optimizer states as we only care for fp32 master weights
         # and also handle the case where it was already removed by another helper script
         state_dict["optimizer_state_dict"].pop("optimizer_state_dict", None)
