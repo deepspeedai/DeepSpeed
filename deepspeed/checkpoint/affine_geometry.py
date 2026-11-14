@@ -10,7 +10,8 @@ from dataclasses import dataclass
 from typing import List, Optional, Sequence, Tuple
 
 __all__ = [
-    'LogicalBox', 'coordinate', 'dot', 'product', 'row_major_range_boxes', 'row_major_strides', 'strided_address'
+    'LogicalBox', 'coordinate', 'dot', 'product', 'row_major_range_boxes', 'row_major_strides', 'strided_address',
+    'subtract'
 ]
 
 
@@ -119,3 +120,29 @@ class LogicalBox:
 
     def __repr__(self) -> str:
         return f'Box({self.origin}+{self.extent})'
+
+
+def subtract(region: LogicalBox, cut: LogicalBox) -> List[LogicalBox]:
+    """Return the disjoint parts of a box outside another box."""
+    overlap = region.intersection(cut)
+    if overlap.is_empty:
+        return [region]
+    origin = list(region.origin)
+    extent = list(region.extent)
+    pieces = []
+    for axis, (low, high) in enumerate(zip(overlap.origin, overlap.upper())):
+        if origin[axis] < low:
+            shape = extent.copy()
+            shape[axis] = low - origin[axis]
+            pieces.append(LogicalBox(tuple(origin), tuple(shape)))
+            extent[axis] -= shape[axis]
+            origin[axis] = low
+        end = origin[axis] + extent[axis]
+        if high < end:
+            start = origin.copy()
+            shape = extent.copy()
+            start[axis] = high
+            shape[axis] = end - high
+            pieces.append(LogicalBox(tuple(start), tuple(shape)))
+            extent[axis] = high - origin[axis]
+    return pieces
