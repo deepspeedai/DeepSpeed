@@ -131,6 +131,69 @@ def _restore_ckpt_config(saved):
         setattr(cp, name, value)
 
 
+class TestActivationCheckpointInputReuse(DistributedTest):
+    world_size = 1
+
+    @pytest.mark.parametrize("checkpoint_fn", [ckpt, deepspeed.checkpointing.non_reentrant_checkpoint])
+    @pytest.mark.parametrize("partition_activations,checkpoint_in_cpu", [(True, False), (True, True), (False, True)])
+    def test_reused_input_fails_clearly(self, checkpoint_fn, partition_activations, checkpoint_in_cpu):
+        device = get_accelerator().device_name()
+        if device == "cpu":
+            pytest.skip("CPU accelerator does not support this test yet")
+
+        def layer(hidden, shared):
+            return hidden + shared
+
+        saved = _snapshot_ckpt_config()
+        try:
+            deepspeed.checkpointing.configure(mpu_=None,
+                                              partition_activations=partition_activations,
+                                              checkpoint_in_cpu=checkpoint_in_cpu)
+            hidden = torch.randn(4, 4, device=device, requires_grad=True)
+            shared = torch.randn(4, 4, device=device, requires_grad=True)
+            output = checkpoint_fn(layer, hidden, shared)
+
+            with pytest.raises(RuntimeError, match="deallocated by a previous activation checkpoint"):
+                checkpoint_fn(layer, output, shared)
+
+            def nested_layer(hidden, nested):
+                return hidden + nested["value"][0][0]
+
+            nested = {"value": ([shared], )}
+            with pytest.raises(RuntimeError, match="deallocated by a previous activation checkpoint"):
+                checkpoint_fn(nested_layer, output, nested)
+
+            alias = torch.randn(4, 4, device=device, requires_grad=True)
+            alias_output = checkpoint_fn(layer, alias, alias)
+            assert alias_output.shape == (4, 4)
+        finally:
+            deepspeed.checkpointing.reset()
+            _restore_ckpt_config(saved)
+
+    @pytest.mark.parametrize("checkpoint_fn", [ckpt, deepspeed.checkpointing.non_reentrant_checkpoint])
+    def test_application_metadata_does_not_mark_input_deallocated(self, checkpoint_fn):
+        device = get_accelerator().device_name()
+        if device == "cpu":
+            pytest.skip("CPU accelerator does not support this test yet")
+
+        def layer(hidden, shared):
+            return hidden + shared
+
+        saved = _snapshot_ckpt_config()
+        try:
+            deepspeed.checkpointing.configure(mpu_=None, partition_activations=False, checkpoint_in_cpu=False)
+            hidden = torch.randn(4, 4, device=device, requires_grad=True)
+            shared = torch.randn(4, 4, device=device, requires_grad=True)
+            shared.saved_data = object()
+            shared.ds_offload_id = object()
+
+            output = checkpoint_fn(layer, hidden, shared)
+            assert output.shape == (4, 4)
+        finally:
+            deepspeed.checkpointing.reset()
+            _restore_ckpt_config(saved)
+
+
 def _run_stacked(ckpt_fn, layers, x, do_checkpoint):
     hidden = x
     for layer in layers:
