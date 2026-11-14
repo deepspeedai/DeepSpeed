@@ -162,6 +162,20 @@ class PartitionedParameterCoordinator:
         # and the modules and parameters it references, alive for the life of the process.
         self.__params_to_release = functools.lru_cache(maxsize=None)(self.__params_to_release)
 
+    def wait_for_external_allgather_dependencies(self, events) -> None:
+        """Make future param all-gathers wait for external GPU writes.
+
+        Reflow writes updated fp16/bf16 parameter partitions on its own H2D stream. With overlap_comm
+        the all-gather runs on its own stream, so a compute-stream wait alone would not order those
+        reads after the H2D writes.
+        """
+        if not events or get_accelerator().is_synchronized_device():
+            return
+        with get_accelerator().stream(self.__allgather_stream):
+            for event in events:
+                if event is not None:
+                    self.__allgather_stream.wait_event(event)
+
     """Tracing and Tracking
     TODO. consider performing trace before initializing PartitionedParameterCoordinator
     and passing trace results into constructor. This way all the code in here can
