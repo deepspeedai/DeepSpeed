@@ -36,7 +36,7 @@ from deepspeed.accelerator import get_accelerator
 from ..swap_tensor.partitioned_param_swapper import AsyncPartitionedParameterSwapper, PartitionedParamStatus
 from deepspeed.inference.quantization.utils import _quantize_param, WEIGHT_QUANTIZATION_LAYERS, wrap_quantized_functional, wrap_load_from_state_dict
 from deepspeed.runtime.torch_autocast import sort_dtypes, get_comm_dtype, has_comm_dtype
-from deepspeed.runtime.keep_in_fp32 import KEEP_IN_FP32_AUTO, keep_in_fp32_pattern, keep_buffers_in_fp32
+from deepspeed.runtime.keep_in_fp32 import KEEP_IN_FP32_AUTO, keep_in_fp32_pattern, keep_tensors_in_fp32
 
 partitioned_param_data_shape = [0]
 zero_init_context = 0
@@ -127,11 +127,6 @@ def print_rank_0(message, debug=False, force=False):
     rank = dist.get_rank()
     if rank == 0 and (debug or force):
         print(message)
-    # other variations
-    # - print for all ranks w/o interleaving
-    # printflock(f"[{rank}] {message}")
-    # - print to log file per rank
-    # log_rank_file(rank, message)
 
 
 def debug_rank0(msg: str) -> None:
@@ -1081,7 +1076,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
 
         self.tensor_overrides = tensor_overrides
         super().__init__(enabled=enabled, mem_efficient_linear=mem_efficient_linear, ds_config=_ds_config, dtype=dtype)
-        # Buffers the model names for fp32 (deepspeed/runtime/keep_in_fp32.py).
+        # Parameters and buffers the model names for fp32 (deepspeed/runtime/keep_in_fp32.py).
         self.keep_in_fp32_modules = (_ds_config.keep_in_fp32_modules if _ds_config is not None else KEEP_IN_FP32_AUTO)
         if not dist.is_initialized():
             init_distributed()
@@ -1230,7 +1225,6 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                 f'"nvme_path" in DeepSpeed Config cannot be None if remote device is {OffloadDeviceEnum.nvme}'
 
     def _post_init_method(self, module):
-        #see_memory_usage(f"Before converting params in {module.__class__.__name__}", force=False)
         print_rank_0(f'Converting Params in {module.__class__.__name__}', force=False)
         see_memory_usage(f"Before converting and partitioning params in {module.__class__.__name__}", force=False)
 
@@ -1253,19 +1247,29 @@ class Init(InsertPostInitMethodToModuleSubClasses):
             f"Param count {InsertPostInitMethodToModuleSubClasses.num_module_elements}. After converting and partitioning params in {module.__class__.__name__}",
             force=False)
 
-        # A transformers model's fp32 list is complete once its own __init__ has run, which is now, and
-        # this is before any checkpoint is loaded into the buffers it names.
+        # A transformers model's fp32 list is complete once its own __init__ has run, which is now. Its
+        # submodules were partitioned already, so their partitions are converted in place, before any
+        # checkpoint is loaded into them.
         self._keep_in_fp32(module)
 
     def _keep_in_fp32(self, module):
-        """Convert the buffers of ``module`` that it names for fp32 (keep_in_fp32.py) back to fp32."""
+        """Convert the parameters and buffers of ``module`` that it names for fp32 (keep_in_fp32.py)."""
         pattern = keep_in_fp32_pattern(module, self.keep_in_fp32_modules, self.dtype)
         if pattern is None:
             return
-        converted = keep_buffers_in_fp32(module, pattern)
-        if converted:
-            print_rank_0(f"keep_in_fp32_modules: {converted} buffers of {module.__class__.__name__} kept in fp32",
-                         force=False)
+        # Offloaded parameter partitions live in one flat CPU or NVMe buffer of the training dtype, so
+        # only buffers are kept in fp32 then.
+        params_offloaded = self.remote_device != self.local_device
+        num_params, num_buffers = keep_tensors_in_fp32(module, pattern, include_params=not params_offloaded)
+        if params_offloaded and not getattr(Init, "_warned_keep_in_fp32_offload", False):
+            logger.warning("data_types.keep_in_fp32_modules: parameters offloaded to "
+                           f"{self.remote_device} stay {self.dtype}; only buffers are kept in fp32")
+            Init._warned_keep_in_fp32_offload = True
+        if num_params or num_buffers:
+            print_rank_0(
+                f"keep_in_fp32_modules: {num_params} parameters and {num_buffers} buffers of "
+                f"{module.__class__.__name__} kept in fp32",
+                force=False)
 
     def _convert_to_deepspeed_param(self, param):
 
@@ -1445,6 +1449,15 @@ class Init(InsertPostInitMethodToModuleSubClasses):
 
         def _all_gather_coalesced(params, world_size, rank_in_group, use_secondary_tensor, ds_process_group, quantize):
             if self.use_all_reduce_for_fetch_params and not quantize and not use_secondary_tensor:
+                dtypes = {p.ds_tensor.dtype for p in params}
+                if len(dtypes) > 1:
+                    # Parameters kept in fp32 (data_types.keep_in_fp32_modules) next to bf16/fp16 ones:
+                    # one flat buffer and one all_reduce per dtype.
+                    return MultipleAllGatherHandles([
+                        _all_gather_coalesced([p for p in params if p.ds_tensor.dtype == dtype], world_size,
+                                              rank_in_group, use_secondary_tensor, ds_process_group, quantize)
+                        for dtype in sort_dtypes(dtypes)
+                    ])
 
                 # Use all_reduce instead of all_gather to fetch the module params
                 flat_buffer_size = sum(p.ds_numel_aligned for p in params)
@@ -1580,8 +1593,6 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                 ds_process_group = self.zero_param_process_group  #intragroup
                 rank_in_group = self.rank_in_group
                 world_size = self.num_ranks_in_param_group
-
-            #pprint(dir(ds_process_group))
 
             if logger.isEnabledFor(logging.DEBUG):
                 debug_rank0(f"-allgather_coalesced: {[p.ds_id for p in params]}")
@@ -1770,10 +1781,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
             self._partition_param(param, has_been_updated=has_been_updated, free_data=free_data)
 
             param.ds_status = ZeroParamStatus.NOT_AVAILABLE
-            # if param.ds_tensor is not None:
-            #    assert id(param.data) == id(param.ds_tensor.data), \
-            #    "After the parameters are initially partitioned, make sure we are not recreating the partition."
-            #print_rank_0(f"After Partitioning Param {param.ds_id} {param.ds_tensor.size()} {param.ds_tensor}",force=False)
+
     @instrument_w_nvtx
     def _partition_param(self, param, buffer=None, has_been_updated=False, free_data=True):
         assert param.ds_status is not ZeroParamStatus.INFLIGHT, f" {param} Cannot partition a param in flight"
@@ -1781,22 +1789,8 @@ class Init(InsertPostInitMethodToModuleSubClasses):
         print_rank_0(f"Param id {param.ds_id} status is {param.ds_status}", force=False)
         if param.ds_status is ZeroParamStatus.AVAILABLE:
             print_rank_0(f"Partitioning param id {param.ds_id} reuse buffers {reuse_buffers}", force=False)
-            # if reuse_buffers and False:
-            #     numel = buffer.numel()
-            #     buffer = param.data.view(-1)
-            #     print_rank_0(
-            #         "Returning buffer for param {param.ds_id} with numel {param.ds_numel} to empty buffers",
-            #         force=False)
-            #     if numel in empty_buffers:
-            #         empty_buffers[numel].append(buffer)
-
-            # if deepspeed.comm.get_rank():
-            #    print(f"Releasing {param.data.numel()}")
 
             if param.ds_tensor is not None and not has_been_updated:  ##param already partitioned
-
-                #print_rank_0(f"Param  {param.ds_id} pri {param.ds_tensor.size()}  loc? {param.ds_tensor.final_location}", force=False)
-                #param.data = param.ds_tensor.data
 
                 see_memory_usage(f'Before partitioning param {param.ds_id} {param.shape}', force=False)
                 # param.data does not store anything meaningful in partitioned state
@@ -1862,12 +1856,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                     # otherwise, torch tracer will complain.
                     param.ds_tensor.copy_(src_tensor)
 
-                #partitioned_tensor = src_tensor.clone().detach().to(self.remote_device)
-
             else:
-                # partitioned_tensor = torch.zeros(partition_size,
-                #                                  dtype=param.dtype,
-                #                                  device=self.remote_device )
 
                 if start < param.ds_numel:
                     elems_to_copy = param.ds_numel - start
@@ -1876,12 +1865,6 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                         # otherwise, torch tracer will complain.
                         param.ds_tensor.narrow(0, 0,
                                                elems_to_copy).copy_(one_dim_param.narrow(0, start, elems_to_copy))
-
-            #print(f"Remote device {self.remote_device}")
-
-            #param.ds_tensor = partitioned_tensor
-
-            #param.data = param.ds_tensor.data
 
             # param.data does not store anything meaningful in partitioned state
 
@@ -1901,7 +1884,6 @@ class Init(InsertPostInitMethodToModuleSubClasses):
         assert param.ds_status is not ZeroParamStatus.INFLIGHT, f" {param} Cannot partition a param in flight"
         global reuse_buffers
         ##support for NVME secondary param offload
-        #print_rank_0(f"SEC Param id {param.ds_id} status is {param.ds_status}", force=False)
         if param.ds_status is ZeroParamStatus.AVAILABLE:
             if param.ds_secondary_tensor is not None and not has_been_updated:  ##param already partitioned
                 return
@@ -1991,12 +1973,6 @@ class Init(InsertPostInitMethodToModuleSubClasses):
         print_rank_0(
             f"{'--'* hierarchy}----allgather param with {debug_param2name_id_shape_status(param)} partition size={partition_size}"
         )
-        #        if not flat_tensor.numel() > 100000:
-        #            replicated_tensor = flat_tensor.narrow(0,
-        #                                                   0,
-        #                                                   param.ds_numel).view(param.ds_shape)
-        #            param.data = replicated_tensor.data
-        #            return None
         if self.use_all_gather_into_tensor:
             handle = dist.all_gather_into_tensor(flat_tensor,
                                                  param.ds_tensor.to(get_accelerator().device_name()),
@@ -2190,9 +2166,6 @@ class Init(InsertPostInitMethodToModuleSubClasses):
         return None
 
     def _reduce_scatter_gradients(self, param_list):
-        #print_rank_0([param.grad for param in param_list])
-        #assert any([param.grad is None for param in param_list]), "None gradients cannot be reduce scattered"
-
         handles_and_reduced_partitions = []
         for param in param_list:
             assert param.grad.numel(
@@ -2210,7 +2183,6 @@ class Init(InsertPostInitMethodToModuleSubClasses):
             partition_size = param.ds_tensor.ds_numel
             start = self._partition_rank(param) * partition_size
             end = start + partition_size
-            #print_rank_0("REduce scatter was executed for param {param.ds_id}")
             if start < param.ds_numel < end:
                 elements = param.ds_numel - start
                 param.grad.view(-1).narrow(0, start, elements).copy_(reduced_partition.narrow(0, 0, elements))
@@ -2218,8 +2190,6 @@ class Init(InsertPostInitMethodToModuleSubClasses):
     def _reduce_scatter_gradient(self, param):
 
         partition_size = param.ds_tensor.ds_numel
-        #output = torch.empty(partition_size, dtype=param.dtype, device=param.device)
-
         partition_world_size = self._partition_world_size(param)
         input_list = []
 
@@ -2228,7 +2198,6 @@ class Init(InsertPostInitMethodToModuleSubClasses):
             start = i * partition_size
             end = start + partition_size
 
-            #print("before reduce scatter gradients")
             if start < param.ds_numel and end <= param.ds_numel:
                 input = param.grad.view(-1).narrow(0, start, partition_size)
             else:
@@ -2237,7 +2206,6 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                 if start < param.ds_numel:
                     elements = param.ds_numel - start
                     input.narrow(0, 0, elements).copy_(param.grad.view(-1).narrow(0, start, elements))
-            #print("after reduce scatter gradients")
             input_list.append(input)
 
         rank = dist.get_rank(group=self.get_partition_dp_group(param))
@@ -2257,9 +2225,6 @@ class Init(InsertPostInitMethodToModuleSubClasses):
 
     def _partition_gradient(self, param, partition_buffer=None, accumulate=False):
 
-        #import pdb;pdb.set_trace()
-        # param.grad=None
-        # param.grad.test()
         print_rank_0(
             f"Partitioning param {param.ds_id} gradient of size {param.grad.numel()} type {param.grad.dtype} part_size {param.ds_tensor.ds_numel}"
         )
@@ -2279,7 +2244,6 @@ class Init(InsertPostInitMethodToModuleSubClasses):
 
         dest_tensor_full_buffer = partition_buffer.view(-1).narrow(0, 0, partition_size)
 
-        #print("before partition gradients")
         if start < param.ds_numel:
             elements = min(param.ds_numel - start, partition_size)
 
@@ -2305,15 +2269,6 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                 acc_tensor.copy_(dest_tensor)
                 acc_tensor.add_(src_tensor)
                 dest_tensor.copy_(acc_tensor)
-
-            # partition_buffer.view(-1).narrow(
-            #     0,
-            #     0,
-            #     elements).copy_(param.grad.view(-1).narrow(0,
-            #                                             start,
-            #                                             elements))
-
-        #print("after partition gradients")
         param.grad.data = dest_tensor_full_buffer.data
         see_memory_usage("After partitioning gradients", force=False)
 

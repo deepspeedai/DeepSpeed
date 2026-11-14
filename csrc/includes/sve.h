@@ -23,7 +23,8 @@ inline void sve_adam_update(float* params,
                             float learning_rate,
                             float weight_decay,
                             bool adamw_mode,
-                            bool parallel)
+                            bool parallel,
+                            float grad_scale = 1.0f)
 {
     constexpr size_t tile_size = 128ULL * 1024 * 1024;
     const size_t vector_width = svcntw();
@@ -45,6 +46,7 @@ inline void sve_adam_update(float* params,
             const svfloat32_t epsilon_vec = svdup_n_f32(epsilon);
             const svfloat32_t step_size_vec = svdup_n_f32(-learning_rate / bias_correction1);
             const svfloat32_t weight_decay_vec = svdup_n_f32(decay);
+            const svfloat32_t grad_scale_vec = svdup_n_f32(grad_scale);
 
 #pragma omp for
             for (size_t i = tile_start; i < tile_end; i += block_width) {
@@ -56,6 +58,7 @@ inline void sve_adam_update(float* params,
                     const svbool_t predicate = svwhilelt_b32(offset, tile_end);
                     svfloat32_t param = svldnt1_f32(predicate, params + offset);
                     svfloat32_t grad = svldnt1_f32(predicate, grads + offset);
+                    if (grad_scale != 1.0f) { grad = svmul_f32_x(predicate, grad, grad_scale_vec); }
                     svfloat32_t momentum = svldnt1_f32(predicate, exp_avg + offset);
                     svfloat32_t variance = svldnt1_f32(predicate, exp_avg_sq + offset);
 

@@ -48,7 +48,6 @@ class BaseTuner:
                 exp, metric_val = self.rm.parse_results(self.metric)
                 if self.best_exp is None or self.best_metric_val is None or (metric_val
                                                                              and metric_val > self.best_metric_val):
-                    # logger.info(f"tuner finds better = {exp}")
                     self.best_exp = exp
                     self.best_metric_val = metric_val
                     self.best_iter = i
