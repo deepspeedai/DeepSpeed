@@ -125,6 +125,11 @@ class TestCustomARTwoDeviceParity(DistributedTest):
 
         ready = custom_collective.custom_collective_ready(2)
         max_bytes = custom_collective.custom_collective_max_bytes() if ready else 0
+        # Either the fast path engaged, or initialize() explicitly declined
+        # this topology; anything else means setup crashed and the rest of
+        # the test would silently compare the fallback against itself.
+        assert custom_collective.settled(), \
+            "initialize() must reach a verdict (engaged or declined)"
 
         # Same sanity after initialize(): a failed or unused fast path must
         # leave the standard backend fully functional.
@@ -142,7 +147,9 @@ class TestCustomARTwoDeviceParity(DistributedTest):
             else:
                 counts = [1, 3, 7, 1024]
             for count in counts:
-                torch.manual_seed(count)
+                # rank-distinct inputs: identical payloads would hide a
+                # wrong-peer or double-counted reduction (x + x == 2x either way)
+                torch.manual_seed(1000 + 7919 * dist.get_rank() + count)
                 tensor = torch.randn(count, dtype=dtype, device=device)
                 reference = tensor.clone()
                 dist.all_reduce(reference)

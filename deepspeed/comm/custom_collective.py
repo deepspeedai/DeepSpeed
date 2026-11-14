@@ -15,13 +15,13 @@ whose load() returns a backend object implementing initialize / ready /
 max_bytes / all_reduce.
 """
 
-import torch  # noqa: F401  (tensor API surface for callers)
+import torch  # noqa: F401  (tensor API surface for callers; verdict tensors are built lazily)
 import torch.distributed as tdist  # noqa: F401  (comm-layer internal, mirrors torch.py)
 
 from deepspeed.accelerator import get_accelerator
 from deepspeed.utils import logger
 
-_state = {"op": None, "inited": False, "failed": False}
+_state = {"op": None, "inited": False, "failed": False, "ranks": None}
 
 # Collectives this fast path implements; queried per-op so accelerators
 # that ship only a subset fall back per-collective, not globally.
@@ -33,8 +33,34 @@ def _build():
     return None if builder is None else builder.load()
 
 
-def custom_collective_ready(world_size: int = 2, op: str = "all_reduce") -> bool:
-    return _state["inited"] and op in SUPPORTED_OPS and _state["op"].ready(world_size)
+def _group_ranks(group):
+    return tuple(tdist.get_process_group_ranks(group if group is not None else tdist.group.WORLD))
+
+
+def _agree(flag: bool, group) -> bool:
+    """Collective AND: both ranks must pass or both fall back.
+
+    The verdict tensor must live on the accelerator: an NCCL-only group has
+    no CPU backend, so a CPU-tensor all_reduce raises and the error path
+    leaves the state unlatched.
+    """
+    t = torch.tensor([int(flag)], dtype=torch.int, device=get_accelerator().current_device_name())
+    tdist.all_reduce(t, op=tdist.ReduceOp.MIN, group=group)
+    return bool(t.item())
+
+
+def custom_collective_ready(world_size: int = 2, op: str = "all_reduce", group=None) -> bool:
+    # The IPC buffers are mapped to one peer; a different 2-rank group must
+    # not reuse them and silently reduce against the stale mapping.
+    return (_state["inited"] and op in SUPPORTED_OPS and _state["op"].ready(world_size)
+            and _state["ranks"] == _group_ranks(group))
+
+
+def settled() -> bool:
+    """initialize() reached a verdict: engaged, or explicitly declined this
+    topology (latched ``failed``). False means it exited before latching
+    either state -- i.e. it crashed and the caller swallowed the exception."""
+    return _state["inited"] or _state["failed"]
 
 
 def custom_collective_max_bytes(op: str = "all_reduce") -> int:
@@ -61,15 +87,17 @@ def initialize(group=None):
     except Exception as e:
         backend = None
         logger.warning(f"custom_collective JIT build failed ({e}); inference all-reduce stays on the comm library")
+    # Latch failure up front: the caller swallows exceptions, so an unlatched
+    # failure would retry _build() and the failing collective on every call.
+    _state["failed"] = True
     # The backend exchange below is collective; a rank that failed to load must
     # not strand its peer inside it. Agree on the verdict before proceeding.
-    ok = torch.tensor([int(backend is not None)], dtype=torch.int)
-    tdist.all_reduce(ok, op=tdist.ReduceOp.MIN, group=group)
-    if not bool(ok.item()) or not backend.initialize(group):
-        _state["failed"] = True
+    if not _agree(backend is not None, group) or not backend.initialize(group):
         return
     _state["op"] = backend
+    _state["ranks"] = _group_ranks(group)
     _state["inited"] = True
+    _state["failed"] = False
 
 
 def all_reduce(tensor: torch.Tensor) -> torch.Tensor:
