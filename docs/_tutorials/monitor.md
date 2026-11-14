@@ -64,6 +64,8 @@ When using DeepSpeed for model training, the Monitor can be configured in the De
 
 DeepSpeed will automatically log to all available and enabled monitoring backends listed in the config, and will generate live monitoring views such as those listed above.
 
+The CSV monitor appends to existing metric files when reusing the same `output_path` and `job_name`. A header is written only when the metric file is empty, so restarting the monitor does not append another header. Use a different `job_name` to keep independent runs separate.
+
 ### Custom Monitoring
 
 In addition to automatic monitoring, users can log their own custom metrics in client scripts. Currently, there are two ways to initialize Monitor objects:
