@@ -20,7 +20,6 @@ class ScalarModel(nn.Module):
 
 class TestScalarParameterBroadcast(DistributedTest):
     world_size = 2
-    backend = "gloo"
     requires_cuda_env = False
 
     @pytest.mark.parametrize("zero_stage", [0, 3])
