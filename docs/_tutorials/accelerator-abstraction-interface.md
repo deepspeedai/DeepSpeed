@@ -47,6 +47,9 @@ Use `get_accelerator().is_current_stream_capturing()` to query whether the curre
 stream is being captured into a graph. The base implementation returns `False`;
 graph-capable backends should override it with their runtime's capture-state query.
 The CUDA accelerator delegates to `torch.cuda.is_current_stream_capturing()`.
+The XPU accelerator opts in only when the installed torch ships `torch.xpu` stream-capture
+support (`torch.xpu.is_current_stream_capturing()` and `torch.xpu.XPUGraph`); older torch
+runtimes keep the opt-out and run eager generation.
 
 HybridEngine graph capture, including the rollout generation paths, is also gated on
 `get_accelerator().is_graph_capture_supported()`. The base implementation returns `False`;
