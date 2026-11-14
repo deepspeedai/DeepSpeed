@@ -63,6 +63,8 @@ class RolloutRecord:
     loss_mask: list[int] | None = None
     rollout_log_probs: list[float] | None = None
     status: Status = Status.PENDING
+    # Turns the model has generated, each followed by the output of the tools it called, if any.
+    num_turns: int = 0
 
 
 @dataclass
@@ -76,6 +78,8 @@ class RolloutRequest:
             if len(sample.attention_mask) != len(sample.tokens):
                 raise ValueError(f"samples[{i}] attention_mask length {len(sample.attention_mask)} does not "
                                  f"match tokens length {len(sample.tokens)}")
+            if sample.num_turns != 0 or sample.loss_mask is not None:
+                raise ValueError(f"samples[{i}] already holds a rollout; pass the prompt only")
 
 
 @dataclass

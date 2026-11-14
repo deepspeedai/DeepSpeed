@@ -39,6 +39,12 @@ def test_rollout_request_validates_shapes():
         RolloutRequest(samples=[RolloutRecord(tokens=[1, 2, 3], attention_mask=[1, 1])])
 
 
+@pytest.mark.parametrize("rollout", [dict(num_turns=1), dict(loss_mask=[1])])
+def test_rollout_request_rejects_records_that_already_hold_a_rollout(rollout):
+    with pytest.raises(ValueError, match="already holds a rollout"):
+        RolloutRequest(samples=[RolloutRecord(tokens=[1, 2], attention_mask=[1, 1], **rollout)])
+
+
 def test_rollout_batch_validates_shapes():
     with pytest.raises(ValueError, match="does not match"):
         RolloutBatch(samples=[

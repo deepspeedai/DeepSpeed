@@ -8,10 +8,6 @@ in static batches by default, or share a fixed number of decode rows with ``cont
 without graph capture.
 """
 
-import asyncio
-import concurrent.futures
-import json
-import threading
 import time
 from copy import copy
 from dataclasses import dataclass, field
@@ -27,7 +23,7 @@ from deepspeed.runtime.rollout.base import (RolloutBatch, RolloutConfig, Rollout
                                             SamplingConfig)
 from deepspeed.runtime.rollout.continuous_batching import (ContinuousBatchRequest, ContinuousBatchScheduler,
                                                            ContinuousGraphState)
-from deepspeed.runtime.rollout.tool import TOOL_CALL_PARSERS, ToolSet
+from deepspeed.runtime.rollout.tool import TOOL_CALL_PARSERS, ToolQueue, ToolSet
 from deepspeed.runtime.rollout.utils import (
     expand_samples,
     full_vocabulary_logits,
@@ -36,7 +32,6 @@ from deepspeed.runtime.rollout.utils import (
     get_repetition_penalty,
     host_tensor_parallel_group,
     left_pad_samples,
-    masked_lists,
     render_prompts,
     sampled_log_prob_recorder,
     tokenize_tool_responses,
@@ -255,153 +250,9 @@ class HybridEngineRolloutConfig(RolloutConfig):
                              f"choose from {', '.join(TOOL_CALL_PARSERS)}")
 
 
-class PostTurnRouter:
-    """Where a rollout's trajectories go after each turn.
-
-    ``retire`` takes a turn retired from the batch: the trajectory either ends, or waits here while the tools it called
-    run on a background event loop. In continuous batching the other rows keep decoding, and once its tools finish
-    ``requeue`` sends the next turn to the front of the pending queue with its tool output appended; static batching
-    ``drain``s the waiting turns after each turn.
-
-    With AutoTP, the rollout passes a host-side ``group`` over the tensor-parallel group and its first rank ``src``:
-    only ``src`` runs the tools, and ``pop_ready`` sends the finished ones to the other ranks, so the whole group
-    appends the same output and admits the same turns.
-    """
-
-    def __init__(self, rollout, trajectories, max_new_tokens, group=None, src=None):
-        self.rollout = rollout
-        self.trajectories = trajectories
-        self.max_new_tokens = max_new_tokens
-        self.generated = [0] * len(trajectories)
-        self.turns = [0] * len(trajectories)
-        self.tool_ms = 0.0
-        # Trajectory -> (response, log-probs, calls, future) while its tools run; the future is None on ranks that
-        # take tool output from their group's first rank.
-        self.in_flight = {}
-        self._group = group
-        self._src = src
-        self._runs_tools = group is None or dist.get_rank() == src
-        self._loop = None
-        self._thread = None
-
-    def __enter__(self):
-        self._loop = asyncio.new_event_loop()
-        self._thread = threading.Thread(target=self._loop.run_forever, name="rollout-tools", daemon=True)
-        self._thread.start()
-        return self
-
-    def __exit__(self, *_exc_info):
-        self._loop.call_soon_threadsafe(self._loop.stop)
-        self._thread.join()
-        self._loop.close()
-        return False
-
-    @property
-    def busy(self):
-        return bool(self.in_flight)
-
-    def retire(self, i, response, log_probs):
-        """Take trajectory ``i`` from the batch: record its response, then end it or start the tools it called."""
-        rollout = self.rollout
-        sample = self.trajectories[i]
-        turn = self.turns[i]
-        self.turns[i] += 1
-        self.generated[i] += len(response)
-        calls = rollout._end_turn(sample, response, turn, self.generated[i], self.max_new_tokens)
-        if calls is None:
-            update_sample_from_response(sample, response, log_probs, [], rollout.tokenizer)
-            return
-        future = None
-        if self._runs_tools:
-            future = asyncio.run_coroutine_threadsafe(self._timed(rollout.tools.run_all(calls)), self._loop)
-        self.in_flight[i] = (response, log_probs, calls, future)
-
-    @staticmethod
-    async def _timed(tool_calls):
-        start = time.perf_counter()
-        outputs = await tool_calls
-        return outputs, (time.perf_counter() - start) * 1000.0
-
-    def pop_ready(self):
-        """Append the output of finished tools, and return the trajectories that go back to the pending queue.
-
-        With AutoTP this is a collective over the tensor-parallel group, so its ranks must call it at the same steps.
-        """
-        rollout = self.rollout
-        finished = []
-        if self._runs_tools:
-            for i in [i for i, entry in self.in_flight.items() if entry[3].done()]:
-                outputs, tool_ms = self.in_flight[i][3].result()
-                finished.append((i, outputs, tool_ms))
-        if self._group is not None:
-            finished = self._share(finished)
-        ready = []
-        for i, outputs, tool_ms in finished:
-            response, log_probs, calls, _ = self.in_flight.pop(i)
-            self.tool_ms += tool_ms
-            tool_response = rollout._tool_response(calls, outputs)
-            sample = self.trajectories[i]
-            if not rollout._tool_output_fits(sample, response, tool_response):
-                sample.status = RolloutRecord.Status.TRUNCATED
-                update_sample_from_response(sample, response, log_probs, [], rollout.tokenizer)
-                continue
-            update_sample_from_response(sample, response, log_probs, tool_response, rollout.tokenizer)
-            ready.append(i)
-        return ready
-
-    def requeue(self, scheduler, sampling, max_cache_len=None):
-        """Send the turns whose tools finished to the front of ``scheduler``'s pending queue, and return their ids.
-
-        A turn's budget is what is left of the trajectory's, and with ``max_cache_len`` what is left of a cache row
-        holding its unpadded context; a turn with no budget left ends the trajectory as truncated.
-        """
-        requeued = []
-        for i in self.pop_ready():
-            sample = self.trajectories[i]
-            budget = self.rollout._turn_budget(sample, self.generated[i], sampling)
-            if max_cache_len is not None:
-                budget = min(budget, max_cache_len - sum(sample.attention_mask))
-            if budget <= 0:
-                sample.status = RolloutRecord.Status.TRUNCATED
-                continue
-            # A trajectory already in progress goes before those not yet started.
-            scheduler.submit(ContinuousBatchRequest(i, max_new_tokens=budget), front=True)
-            requeued.append(i)
-        return requeued
-
-    def _share(self, finished):
-        """The first rank's finished tools, on every rank of its group: a size, then the output as JSON bytes.
-
-        Both go over a Gloo group on the host, so they take no device copies and do not queue behind the forward's
-        collectives; steps where nothing finished send only the size.
-        """
-        src = self._src
-        payload = json.dumps(finished).encode() if finished else b""
-        size = torch.tensor([len(payload)], dtype=torch.long)
-        dist.broadcast(size, src, group=self._group)
-        if size.item() == 0:
-            return []
-        if self._runs_tools:
-            buffer = torch.frombuffer(bytearray(payload), dtype=torch.uint8)
-        else:
-            buffer = torch.empty(size.item(), dtype=torch.uint8)
-        dist.broadcast(buffer, src, group=self._group)
-        return json.loads(buffer.numpy().tobytes())
-
-    def drain(self):
-        """Block until every running tool finishes, append their output, and return the trajectories that go on."""
-        # The other ranks wait in pop_ready, for the first rank's output.
-        if self._runs_tools:
-            concurrent.futures.wait([entry[3] for entry in self.in_flight.values()])
-        return self.pop_ready()
-
-    def wait(self):
-        """Block until one of the running tools finishes."""
-        # The other ranks wait in pop_ready, for the first rank's output.
-        if not self._runs_tools:
-            return
-        concurrent.futures.wait([entry[3] for entry in self.in_flight.values()],
-                                return_when=concurrent.futures.FIRST_COMPLETED)
+def _generated_length(sample):
+    """Tokens the model has generated across ``sample``'s turns; tool output has loss mask 0."""
+    return sum(sample.loss_mask or [])
 
 
 class HybridEngineRollout(RolloutEngine):
@@ -526,41 +377,70 @@ class HybridEngineRollout(RolloutEngine):
                        group=groups.get_tensor_model_parallel_group())
         accelerator.set_rng_state(state.cpu())
 
-    def _turn_budget(self, sample, generated_length, sampling):
-        budget = sampling.max_new_tokens - generated_length
+    def _turn_budget(self, sample, sampling):
+        budget = sampling.max_new_tokens - _generated_length(sample)
         if sampling.max_new_tokens_per_turn is not None:
             budget = min(budget, sampling.max_new_tokens_per_turn)
         return min(budget, self.max_out_tokens - sum(sample.attention_mask))
 
-    def _end_turn(self, sample, response, turn, generated, max_new_tokens):
+    def _finish_turn(self, trajectories, tool_queue, i, response_chunks, log_prob_chunks, max_new_tokens):
+        """End trajectory ``i``'s turn: record its response, then end the trajectory or start the tools it called.
+
+        The response and its log-probs come as ``[1, k]`` chunks; the log-probs are read only with ``return_log_probs``.
+        """
+        sample = trajectories[i]
+        response = torch.cat(response_chunks, dim=1)[0].tolist()
+        log_probs = torch.cat(log_prob_chunks, dim=1)[0].tolist() if self.return_log_probs else None
+        update_sample_from_response(sample, response, log_probs, [], self.tokenizer)
+        sample.num_turns += 1
         if not response or response[-1] not in get_eos_token_ids(self.tokenizer, self.engine.module):
             sample.status = RolloutRecord.Status.TRUNCATED
-            return None
-        if not self.multi_turn:
-            sample.status = RolloutRecord.Status.COMPLETED
-            return None
-        calls = self.parse_tool_calls(self.tokenizer.decode(response), self.tools)
+            return
+        calls = self.parse_tool_calls(self.tokenizer.decode(response), self.tools) if self.multi_turn else None
         if not calls:
             sample.status = RolloutRecord.Status.COMPLETED
-            return None
-        if generated >= max_new_tokens or turn == self.max_turns - 1:
+        elif _generated_length(sample) >= max_new_tokens or sample.num_turns >= self.max_turns:
             sample.status = RolloutRecord.Status.TRUNCATED
-            return None
-        return calls
+        else:
+            tool_queue.submit(i, calls)
 
-    def _tool_output_fits(self, sample, response, tool_response):
-        """Whether a turn's response and tool output stay within ``max_out_tokens``."""
-        return sum(sample.attention_mask) + len(response) + len(tool_response) <= self.max_out_tokens
+    def _append_tool_output(self, trajectories, finished):
+        """Append the tool output of ``finished`` turns, and return the trajectories that go on to another turn.
 
-    def _tool_response(self, calls, outputs):
-        tool_messages = [{
-            "role": "tool",
-            "name": call.name or "unknown",
-            "content": output
-        } for call, output in zip(calls, outputs)]
-        return tokenize_tool_responses(tool_messages, self.tokenizer,
-                                       get_eos_token_ids(self.tokenizer, self.engine.module),
-                                       self.chat_template_kwargs)
+        A trajectory whose tool output would take it past ``max_out_tokens`` ends as truncated instead.
+        """
+        resumed = []
+        for i, calls, outputs in finished:
+            sample = trajectories[i]
+            tool_response = tokenize_tool_responses(calls, outputs, self.tokenizer,
+                                                    get_eos_token_ids(self.tokenizer, self.engine.module),
+                                                    self.chat_template_kwargs)
+            if sum(sample.attention_mask) + len(tool_response) > self.max_out_tokens:
+                sample.status = RolloutRecord.Status.TRUNCATED
+                continue
+            update_sample_from_response(sample, [], [] if self.return_log_probs else None, tool_response,
+                                        self.tokenizer)
+            resumed.append(i)
+        return resumed
+
+    def _submit_turn(self, scheduler, sample, i, sampling, front=False, max_cache_len=None):
+        """Queue trajectory ``i``'s next turn with its budget, or end the trajectory as truncated if none is left.
+
+        With ``max_cache_len``, the budget is also capped by what is left of a cache row holding the unpadded context,
+        since such a row is never trimmed.
+        """
+        budget = self._turn_budget(sample, sampling)
+        if max_cache_len is not None:
+            budget = min(budget, max_cache_len - sum(sample.attention_mask))
+        if budget <= 0:
+            sample.status = RolloutRecord.Status.TRUNCATED
+            return
+        scheduler.submit(ContinuousBatchRequest(i, max_new_tokens=budget), front=front)
+
+    def _resubmit_tool_turns(self, tool_queue, scheduler, trajectories, sampling, max_cache_len=None):
+        """Queue the next turn of every trajectory whose tools finished, ahead of those not yet started."""
+        for i in self._append_tool_output(trajectories, tool_queue.pop_ready()):
+            self._submit_turn(scheduler, trajectories[i], i, sampling, front=True, max_cache_len=max_cache_len)
 
     @torch.no_grad()
     def _generate(self, trajectories, sampling, num_prompts, call_start=None):
@@ -589,13 +469,13 @@ class HybridEngineRollout(RolloutEngine):
             }
 
         active = list(range(len(trajectories)))
-        post_turn = PostTurnRouter(self, trajectories, max_new_tokens, self._tool_group, self._tool_src)
+        tool_queue = ToolQueue(self.tools, self._tool_group, self._tool_src)
 
-        with post_turn:
+        with tool_queue:
             for turn in range(self.max_turns if self.multi_turn else 1):
                 budgets = {}
                 for i in active:
-                    budgets[i] = self._turn_budget(trajectories[i], post_turn.generated[i], sampling)
+                    budgets[i] = self._turn_budget(trajectories[i], sampling)
                     if budgets[i] <= 0:
                         trajectories[i].status = RolloutRecord.Status.TRUNCATED
                 active = [i for i in active if budgets[i] > 0]
@@ -666,20 +546,20 @@ class HybridEngineRollout(RolloutEngine):
                     eos_token_id=get_eos_token_ids(self.tokenizer, self.engine.module),
                     pad_token_id=pad_token_id,
                 )
-                responses = masked_lists(output_ids[:, prompt_len:], response_attn)
-                response_log_probs = masked_lists(log_probs, response_attn) if return_log_probs else None
-
+                response_ids = output_ids[:, prompt_len:]
                 for row, i in enumerate(active):
-                    response = responses[row][:row_budgets[row]]
-                    log_probs_row = response_log_probs[row][:row_budgets[row]] if return_log_probs else None
-                    post_turn.retire(i, response, log_probs_row)
+                    keep = response_attn[row].bool()
+                    budget = row_budgets[row]
+                    response = response_ids[row:row + 1, keep][:, :budget]
+                    log_probs_row = log_probs[row:row + 1, keep][:, :budget] if return_log_probs else None
+                    self._finish_turn(trajectories, tool_queue, i, [response], [log_probs_row], max_new_tokens)
 
                 # The turn's tool calls run concurrently; trajectories whose output fits go on to the next turn.
                 tool_ms = 0.0
                 active = []
-                if post_turn.busy:
+                if tool_queue.busy:
                     tool_start = time.perf_counter()
-                    active = sorted(post_turn.drain())
+                    active = sorted(self._append_tool_output(trajectories, tool_queue.drain()))
                     tool_ms = (time.perf_counter() - tool_start) * 1000.0
 
                 if self.enable_profiling:
@@ -764,17 +644,12 @@ class HybridEngineRollout(RolloutEngine):
                                   self.return_log_probs)
         pad_token_id = get_pad_token_id(self.tokenizer)
         profile = self._start_continuous_profile() if self.enable_profiling else None
-        post_turn = PostTurnRouter(self, trajectories, sampling.max_new_tokens, self._tool_group, self._tool_src)
+        tool_queue = ToolQueue(self.tools, self._tool_group, self._tool_src)
         scheduler = ContinuousBatchScheduler(max_batch_size, turn_cap)
         responses = {}
         response_log_probs = {}
         for request_id, sample in enumerate(trajectories):
-            # A row is never trimmed, so a turn may not outgrow the cache.
-            budget = min(self._turn_budget(sample, 0, sampling), max_cache_len - prompt_lengths[request_id])
-            if budget <= 0:
-                sample.status = RolloutRecord.Status.TRUNCATED
-                continue
-            scheduler.submit(ContinuousBatchRequest(request_id, max_new_tokens=budget))
+            self._submit_turn(scheduler, sample, request_id, sampling, max_cache_len=max_cache_len)
 
         state = self._get_continuous_graph_state(module, max_batch_size, max_cache_len, device, model_dtype,
                                                  DeepSpeedStaticCache)
@@ -803,11 +678,11 @@ class HybridEngineRollout(RolloutEngine):
         next_log_probs = {}
         eos_ids = self._eos_tensor(device)
         update = scheduler.schedule()
-        with post_turn:
-            while update.active or post_turn.busy:
+        with tool_queue:
+            while update.active or tool_queue.busy:
                 if not update.active:
-                    post_turn.wait()
-                    post_turn.requeue(scheduler, sampling, max_cache_len)
+                    tool_queue.wait()
+                    self._resubmit_tool_turns(tool_queue, scheduler, trajectories, sampling, max_cache_len)
                     update = scheduler.schedule()
                     continue
                 if profile is not None:
@@ -886,13 +761,13 @@ class HybridEngineRollout(RolloutEngine):
                         finished_ids.append(request_id)
 
                 # Finished tools are taken only when a row frees, the one time a returning turn can be admitted.
-                if post_turn.busy and scheduler.will_free_slot(finished_ids):
-                    post_turn.requeue(scheduler, sampling, max_cache_len)
+                if tool_queue.busy and scheduler.will_free_slot(finished_ids):
+                    self._resubmit_tool_turns(tool_queue, scheduler, trajectories, sampling, max_cache_len)
                 scheduler_start = self._profile_start(profile)
                 rows_held = len(update.active)
                 update = scheduler.advance(finished_ids)
                 self._profile_end(profile, "scheduler_overhead_ms", scheduler_start)
-                self._trace_continuous_step(profile, rows_held, len(decode_ids), update, scheduler, post_turn)
+                self._trace_continuous_step(profile, rows_held, len(decode_ids), update, scheduler, tool_queue)
                 if write_positions:
                     stats["peak_cache_length"] = max(stats["peak_cache_length"], max(write_positions.values()))
                 for request_id in update.retired:
@@ -900,29 +775,25 @@ class HybridEngineRollout(RolloutEngine):
                     write_positions.pop(request_id, None)
                     next_tokens.pop(request_id, None)
                     next_log_probs.pop(request_id, None)
-                    post_turn.retire(request_id, *self._pop_response(responses, response_log_probs, request_id))
+                    self._finish_turn(trajectories, tool_queue, request_id, responses.pop(request_id),
+                                      response_log_probs.pop(request_id), sampling.max_new_tokens)
 
         generation_end = self._profile_start(profile)
-        self._finish_continuous_stats(stats, profile, post_turn)
+        self._finish_continuous_stats(stats, profile, trajectories)
         if profile is not None:
             self._finish_continuous_profile(profile, num_prompts, sampling.n_samples_per_prompt,
-                                            post_turn.generated, [sample.response_length for sample in trajectories],
-                                            sum(post_turn.turns), post_turn.tool_ms, max_batch_size, longest_prompt,
-                                            generation_end, generation_end)
+                                            [_generated_length(sample) for sample in trajectories],
+                                            [sample.response_length for sample in trajectories],
+                                            sum(sample.num_turns for sample in trajectories), tool_queue.tool_ms,
+                                            max_batch_size, longest_prompt, generation_end, generation_end)
 
-    def _pop_response(self, responses, response_log_probs, request_id):
-        """Take a retired turn's buffered tokens and log-probs out of the buffers, as lists."""
-        response = torch.cat(responses.pop(request_id), dim=1)[0].tolist()
-        turn_log_probs = response_log_probs.pop(request_id)
-        log_probs = torch.cat(turn_log_probs, dim=1)[0].tolist() if self.return_log_probs else None
-        return response, log_probs
-
-    def _finish_continuous_stats(self, stats, profile, post_turn):
+    def _finish_continuous_stats(self, stats, profile, trajectories):
         if profile is not None:
             profile["accelerator"].synchronize()
             total_ms = (time.perf_counter() - profile["start"]) * 1000.0
             stats["end_to_end_ms"] = total_ms
-            stats["tokens_per_second"] = sum(post_turn.generated) / (total_ms / 1000.0) if total_ms > 0.0 else 0.0
+            generated = sum(_generated_length(sample) for sample in trajectories)
+            stats["tokens_per_second"] = generated / (total_ms / 1000.0) if total_ms > 0.0 else 0.0
         else:
             stats["end_to_end_ms"] = None
             stats["tokens_per_second"] = None
@@ -1004,8 +875,8 @@ class HybridEngineRollout(RolloutEngine):
                                   self.return_log_probs)
         profile = self._start_continuous_profile() if self.enable_profiling else None
         profile_accelerator = profile["accelerator"] if profile is not None else None
-        post_turn = PostTurnRouter(self, trajectories, sampling.max_new_tokens, self._tool_group, self._tool_src)
-        budgets = [self._turn_budget(sample, 0, sampling) for sample in trajectories]
+        tool_queue = ToolQueue(self.tools, self._tool_group, self._tool_src)
+        budgets = [self._turn_budget(sample, sampling) for sample in trajectories]
         prompt_lengths = {
             request_id: (sum(sample.attention_mask) if self.align_decode_fronts else len(sample.tokens))
             for request_id, sample in enumerate(trajectories)
@@ -1063,10 +934,7 @@ class HybridEngineRollout(RolloutEngine):
         request_order = (sorted(range(len(trajectories)), key=lambda request_id: -prompt_lengths[request_id])
                          if self.align_decode_fronts else range(len(trajectories)))
         for request_id in request_order:
-            if budgets[request_id] <= 0:
-                trajectories[request_id].status = RolloutRecord.Status.TRUNCATED
-                continue
-            scheduler.submit(ContinuousBatchRequest(request_id, max_new_tokens=budgets[request_id]))
+            self._submit_turn(scheduler, trajectories[request_id], request_id, sampling)
         self._profile_end(profile, "scheduler_overhead_ms", scheduler_start)
 
         cache_start = self._profile_start(profile)
@@ -1095,11 +963,11 @@ class HybridEngineRollout(RolloutEngine):
         self._profile_end(profile, "scheduler_overhead_ms", scheduler_start)
         eos_ids = self._eos_tensor(device)
 
-        with post_turn:
-            while update.active or post_turn.busy:
+        with tool_queue:
+            while update.active or tool_queue.busy:
                 if not update.active:
-                    post_turn.wait()
-                    post_turn.requeue(scheduler, sampling)
+                    tool_queue.wait()
+                    self._resubmit_tool_turns(tool_queue, scheduler, trajectories, sampling)
                     update = scheduler.schedule()
                     continue
                 if profile is not None:
@@ -1256,24 +1124,26 @@ class HybridEngineRollout(RolloutEngine):
                     cache_position += 1
                 stats["peak_cache_length"] = max(stats["peak_cache_length"], cache_position)
                 # Finished tools are taken only when a row frees, the one time a returning turn can be admitted.
-                if post_turn.busy and scheduler.will_free_slot(finished_ids):
-                    post_turn.requeue(scheduler, sampling)
+                if tool_queue.busy and scheduler.will_free_slot(finished_ids):
+                    self._resubmit_tool_turns(tool_queue, scheduler, trajectories, sampling)
                 scheduler_start = self._profile_start(profile)
                 rows_held = len(update.active)
                 update = scheduler.advance(finished_ids)
                 self._profile_end(profile, "scheduler_overhead_ms", scheduler_start)
-                self._trace_continuous_step(profile, rows_held, survivor_count, update, scheduler, post_turn)
+                self._trace_continuous_step(profile, rows_held, survivor_count, update, scheduler, tool_queue)
                 for request_id in update.retired:
-                    post_turn.retire(request_id, *self._pop_response(responses, response_log_probs, request_id))
+                    self._finish_turn(trajectories, tool_queue, request_id, responses.pop(request_id),
+                                      response_log_probs.pop(request_id), sampling.max_new_tokens)
 
         stats["cache_memory_bytes"] = self._continuous_cache_memory_bytes(cache, attention_mask, write_positions)
         generation_end = self._profile_start(profile)
-        self._finish_continuous_stats(stats, profile, post_turn)
+        self._finish_continuous_stats(stats, profile, trajectories)
         if profile is not None:
             self._finish_continuous_profile(profile, num_prompts, sampling.n_samples_per_prompt,
-                                            post_turn.generated, [sample.response_length for sample in trajectories],
-                                            sum(post_turn.turns), post_turn.tool_ms, max_batch_size, prompt_len,
-                                            generation_end, generation_end)
+                                            [_generated_length(sample) for sample in trajectories],
+                                            [sample.response_length for sample in trajectories],
+                                            sum(sample.num_turns for sample in trajectories), tool_queue.tool_ms,
+                                            max_batch_size, prompt_len, generation_end, generation_end)
 
     @staticmethod
     def _estimate_continuous_cache_len(prompt_len, max_new_tokens, max_batch_size):
@@ -1566,14 +1436,14 @@ class HybridEngineRollout(RolloutEngine):
         }
 
     @staticmethod
-    def _trace_continuous_step(profile, rows_held, decoded, update, scheduler, post_turn):
+    def _trace_continuous_step(profile, rows_held, decoded, update, scheduler, tool_queue):
         """Add one step to the profile's step trace; it reads only host values, so it adds no host sync."""
         if profile is None:
             return
         profile["decoded_tokens"] += decoded
         profile["step_trace"].append(
             (len(profile["step_trace"]) + 1, round(time.perf_counter() - profile["start"], 3), rows_held,
-             len(update.keep_slots), profile["decoded_tokens"], len(scheduler.pending), len(post_turn.in_flight)))
+             len(update.keep_slots), profile["decoded_tokens"], len(scheduler.pending), len(tool_queue.in_flight)))
 
     @staticmethod
     def _profile_start(profile):

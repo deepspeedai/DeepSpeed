@@ -26,8 +26,7 @@ from deepspeed.ops.transformer.inference.op_binding.workspace import WorkspaceOp
 from deepspeed.runtime.config import HybridEngineConfig
 from deepspeed.runtime.hybrid_engine import DeepSpeedHybridEngine
 from deepspeed.runtime.rollout.base import RolloutConfig, RolloutRecord, RolloutRequest, SamplingConfig
-from deepspeed.runtime.rollout.hybrid_engine_rollout import PostTurnRouter
-from deepspeed.runtime.rollout.tool import Tool, ToolCall, ToolSet, parse_qwen3_coder_tool_calls
+from deepspeed.runtime.rollout.tool import Tool, ToolCall, ToolQueue, ToolSet, parse_qwen3_coder_tool_calls
 from deepspeed.runtime.rollout.utils import get_eos_token_ids, tokenize_tool_responses
 from deepspeed.runtime.rollout.hybrid_engine_rollout import (
     GlobalWorkRemaining,
@@ -1946,9 +1945,8 @@ class _EchoTextTool(Tool):
         return arguments["text"]
 
 
-@patch("deepspeed.runtime.rollout.hybrid_engine_rollout.tokenize_tool_responses", return_value=[9])
-def test_post_turn_router_takes_tool_output_from_the_first_tensor_parallel_rank(tokenize):
-    """Only the first rank runs the tools; the others append the output it sends, so the group stays in step."""
+def test_tool_queue_takes_tool_output_from_the_first_tensor_parallel_rank():
+    """Only the first rank runs the tools; the others get the output it sends, so the group stays in step."""
     sent = []
 
     class FakeDist:
@@ -1964,28 +1962,24 @@ def test_post_turn_router_takes_tool_output_from_the_first_tensor_parallel_rank(
                 tensor.copy_(sent.pop(0))
 
     tool = _EchoTextTool()
-    rollout = HybridEngineRollout(_make_engine(), _make_tokenizer(),
-                                  HybridEngineRolloutConfig(multi_turn=True, max_turns=2), ToolSet([tool]))
     # Non-ASCII text and a lone surrogate must survive the trip unchanged.
-    rollout._end_turn = lambda *_args: [ToolCall(name="echo", arguments={"text": "é \ud800"})]
+    calls = [ToolCall(name="echo", arguments={"text": "é \ud800"})]
     fake = FakeDist()
-    records = {}
-    with patch("deepspeed.runtime.rollout.hybrid_engine_rollout.dist", fake):
+    ready = {}
+    with patch("deepspeed.runtime.rollout.tool.dist", fake):
         for rank in (0, 1):
             fake.rank = rank
-            records[rank] = [_prompt([1, 3])]
-            with PostTurnRouter(rollout, records[rank], max_new_tokens=8, group=object(), src=0) as router:
-                router.retire(0, [5, 2], None)
-                assert router.busy
-                router.wait()
-                assert router.pop_ready() == [0]
-                assert not router.busy
-                assert router.tool_ms > 0.0
+            with ToolQueue(ToolSet([tool]), group=object(), src=0) as queue:
+                queue.submit(0, calls)
+                assert queue.busy
+                queue.wait()
+                ready[rank] = queue.pop_ready()
+                assert not queue.busy
+                assert queue.tool_ms > 0.0
 
     assert tool.calls == 1
     assert not sent
-    assert [call.args[0][0]["content"] for call in tokenize.call_args_list] == ["é \ud800"] * 2
-    assert records[0][0].tokens == records[1][0].tokens == [1, 3, 5, 2, 9]
+    assert ready[0] == ready[1] == [(0, calls, ["é \ud800"])]
 
 
 class _SlowEchoTool(_EchoTextTool):
@@ -1995,26 +1989,19 @@ class _SlowEchoTool(_EchoTextTool):
         return await super().execute(arguments)
 
 
-@patch("deepspeed.runtime.rollout.hybrid_engine_rollout.tokenize_tool_responses", return_value=[9])
-def test_post_turn_router_drain_waits_for_every_running_tool(_tokenize):
+def test_tool_queue_drain_waits_for_every_running_tool():
     """Static batching starts the next turn only once every trajectory's tools have returned."""
     tool = _SlowEchoTool()
-    rollout = HybridEngineRollout(_make_engine(), _make_tokenizer(),
-                                  HybridEngineRolloutConfig(multi_turn=True, max_turns=2), ToolSet([tool]))
-    calls = {0: "fast", 1: "slow"}
-    rollout._end_turn = lambda sample, *_args: [ToolCall(name="echo", arguments={"text": calls[sample.tokens[0]]})]
-    records = [_prompt([0, 3]), _prompt([1, 3])]
-    with PostTurnRouter(rollout, records, max_new_tokens=8) as router:
-        router.retire(0, [5, 2], None)
-        router.retire(1, [6, 2], None)
-        assert sorted(router.drain()) == [0, 1]
-        assert not router.busy
+    with ToolQueue(ToolSet([tool])) as queue:
+        queue.submit(0, [ToolCall(name="echo", arguments={"text": "fast"})])
+        queue.submit(1, [ToolCall(name="echo", arguments={"text": "slow"})])
+        assert sorted((i, outputs) for i, _, outputs in queue.drain()) == [(0, ["fast"]), (1, ["slow"])]
+        assert not queue.busy
 
     assert tool.calls == 2
-    assert [record.tokens for record in records] == [[0, 3, 5, 2, 9], [1, 3, 6, 2, 9]]
 
 
-def test_post_turn_router_sends_only_a_size_when_no_tool_finished():
+def test_tool_queue_sends_only_a_size_when_no_tool_finished():
     sizes = []
 
     class FakeDist:
@@ -2026,11 +2013,9 @@ def test_post_turn_router_sends_only_a_size_when_no_tool_finished():
             sizes.append(tensor.clone())
             tensor.zero_()
 
-    rollout = HybridEngineRollout(_make_engine(), _make_tokenizer(),
-                                  HybridEngineRolloutConfig(multi_turn=True, max_turns=2))
-    with patch("deepspeed.runtime.rollout.hybrid_engine_rollout.dist", FakeDist()):
-        router = PostTurnRouter(rollout, [_prompt([1, 3])], max_new_tokens=8, group=object(), src=0)
-        assert router.pop_ready() == []
+    with patch("deepspeed.runtime.rollout.tool.dist", FakeDist()):
+        queue = ToolQueue(ToolSet([]), group=object(), src=0)
+        assert queue.pop_ready() == []
     assert len(sizes) == 1
 
 
@@ -2047,6 +2032,7 @@ def test_multi_turn_caps_each_turn_and_the_whole_response(_tokenize_tool_respons
     assert [call.kwargs["max_new_tokens"] for call in engine.module.generate.call_args_list] == turn_budgets
     assert sample.tokens == [10, 11, _TOOL_CALL_TOKEN, 2, 9, 5]
     assert sample.loss_mask == [1, 1, 0, 1]
+    assert sample.num_turns == 2
     assert sample.status == RolloutRecord.Status.TRUNCATED
 
 
@@ -2205,8 +2191,8 @@ def test_multi_turn_runs_tools_called_in_the_configured_format(tokenize_tool_res
                               SamplingConfig(max_new_tokens=8, temperature=0)).samples[0]
 
     assert [call["count"] for call in tool.calls] == [3]
-    tool_messages = tokenize_tool_responses.call_args.args[0]
-    assert [(message["name"], message["content"]) for message in tool_messages] == [("typed", "ok")]
+    calls, outputs = tokenize_tool_responses.call_args.args[:2]
+    assert [(call.name, output) for call, output in zip(calls, outputs)] == [("typed", "ok")]
     assert sample.tokens == [10, 11, _TOOL_CALL_TOKEN, 2, 9, 5, 2]
     assert sample.status == RolloutRecord.Status.COMPLETED
 
@@ -2312,18 +2298,14 @@ def _tool_template_tokenizer(assistant_end):
 
 
 def test_tokenize_tool_responses_joins_after_the_last_eos_token_of_any_kind():
-    tool_messages = [{"role": "tool", "name": "echo", "content": "out"}]
-
-    ids = tokenize_tool_responses(tool_messages, _tool_template_tokenizer("<eom>"), [2, 3])
+    ids = tokenize_tool_responses([ToolCall(name="echo")], ["out"], _tool_template_tokenizer("<eom>"), [2, 3])
 
     assert "".join(ids) == "\n<t>out<eot>\n<a>"
 
 
 def test_tokenize_tool_responses_requires_an_eos_token_in_the_template():
-    tool_messages = [{"role": "tool", "name": "echo", "content": "out"}]
-
     with pytest.raises(ValueError, match="without an EOS token"):
-        tokenize_tool_responses(tool_messages, _tool_template_tokenizer("<end>"), [3])
+        tokenize_tool_responses([ToolCall(name="echo")], ["out"], _tool_template_tokenizer("<end>"), [3])
 
 
 def test_matches_eos_checks_membership_in_every_eos_id():

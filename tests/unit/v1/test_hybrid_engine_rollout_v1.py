@@ -651,6 +651,24 @@ class _RankTool(Tool):
         return str(dist.get_rank())
 
 
+def _force_tool_calls(rollout, turns):
+    """Make each trajectory's first ``turns`` turns call the rank tool, whatever the model generated."""
+    call = rollout.parse_tool_calls('<tool_call>{"name": "rank", "arguments": {}}</tool_call>', rollout.tools)
+    finish_turn = rollout._finish_turn
+
+    def finish(trajectories, tool_queue, i, *args):
+        finish_turn(trajectories, tool_queue, i, *args)
+        if trajectories[i].num_turns <= turns and i not in tool_queue.in_flight:
+            trajectories[i].status = RolloutRecord.Status.PENDING
+            tool_queue.submit(i, call)
+
+    rollout._finish_turn = finish
+
+
+def _rank_tool_tokens(calls, outputs, *_args):
+    return [50 + int(output) for output in outputs]
+
+
 class _SlowRankTool(Tool):
     """Answers with its rank, after a delay that differs per rank and per call, so ranks finish tools at different steps."""
     name = "rank"
@@ -758,7 +776,7 @@ class TestAutoTPRollout(DistributedTest):
         sampling = SamplingConfig(max_new_tokens=6, max_new_tokens_per_turn=3, temperature=0.0)
 
         with patch("deepspeed.runtime.rollout.hybrid_engine_rollout.tokenize_tool_responses",
-                   side_effect=lambda messages, *_args: [50 + int(message["content"]) for message in messages]):
+                   side_effect=_rank_tool_tokens):
             record = rollout.generate(RolloutRequest(samples=[RolloutRecord(tokens=prompt, attention_mask=[1] * 5)]),
                                       sampling).samples[0]
 
@@ -773,11 +791,8 @@ class TestAutoTPRollout(DistributedTest):
                                       tokenizer,
                                       HybridEngineRolloutConfig(multi_turn=True, max_turns=2, return_log_probs=True),
                                       tools=ToolSet([_RankTool()]))
-        end_turn = rollout._end_turn
         # Sampled responses rarely end in EOS, so the first turn is made to call the tool regardless.
-        call = rollout.parse_tool_calls('<tool_call>{"name": "rank", "arguments": {}}</tool_call>', rollout.tools)
-        rollout._end_turn = lambda sample, response, turn, *args: call if turn == 0 else end_turn(
-            sample, response, turn, *args)
+        _force_tool_calls(rollout, turns=1)
         prompts = [[0, 0, 5, 9, 12], [3, 7, 21, 30, 44]]
         request = RolloutRequest(samples=[
             RolloutRecord(tokens=prompt, attention_mask=[int(token != 0) for token in prompt]) for prompt in prompts
@@ -787,7 +802,7 @@ class TestAutoTPRollout(DistributedTest):
         sampling = SamplingConfig(max_new_tokens=8, max_new_tokens_per_turn=4, temperature=1.0)
 
         with patch("deepspeed.runtime.rollout.hybrid_engine_rollout.tokenize_tool_responses",
-                   side_effect=lambda messages, *_args: [50 + int(message["content"]) for message in messages]):
+                   side_effect=_rank_tool_tokens):
             records = rollout.generate(request, sampling).samples
 
         assert all(len(record.tokens) == 5 + 4 + 1 + 4 for record in records)
@@ -874,21 +889,17 @@ class TestAutoTPRollout(DistributedTest):
                                                                     continuous_batch_size=continuous_batch_size,
                                                                     return_log_probs=True),
                                           tools=ToolSet([tool]))
-            end_turn = rollout._end_turn
             # Greedy responses here never end in EOS, so the first two turns are made to call the tool.
-            call = rollout.parse_tool_calls('<tool_call>{"name": "rank", "arguments": {}}</tool_call>', rollout.tools)
-            rollout._end_turn = lambda sample, response, turn, *args: call if turn < 2 else end_turn(
-                sample, response, turn, *args)
+            _force_tool_calls(rollout, turns=2)
             request = RolloutRequest(samples=[_prompt(prompt) for prompt in prompts])
             try:
                 with patch("deepspeed.runtime.rollout.hybrid_engine_rollout.tokenize_tool_responses",
-                           side_effect=lambda messages, *_args: [50 + int(message["content"])
-                                                                 for message in messages]):
+                           side_effect=_rank_tool_tokens):
                     records = rollout.generate(request, sampling).samples
             finally:
                 # The override refers back to the rollout, and a live graph holding NCCL work hangs process-group
                 # teardown, so break the cycle and free the graph now.
-                del rollout._end_turn
+                del rollout._finish_turn
                 del rollout
                 gc.collect()
                 get_accelerator().synchronize()

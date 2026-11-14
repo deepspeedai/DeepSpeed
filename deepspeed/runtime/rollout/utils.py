@@ -76,16 +76,16 @@ def expand_samples(samples, n_samples_per_prompt: int):
     return expanded
 
 
-def masked_lists(values, mask):
-    """Each row's entries where ``mask`` is 1, as Python lists."""
-    return [values[row][mask.bool()[row]].tolist() for row in range(values.shape[0])]
-
-
-def tokenize_tool_responses(tool_messages, tokenizer, eos_token_ids, chat_template_kwargs=None):
-    """Token ids that append ``tool_messages`` after an assistant turn ending in one of ``eos_token_ids``, without
-    re-tokenizing it.
+def tokenize_tool_responses(calls, outputs, tokenizer, eos_token_ids, chat_template_kwargs=None):
+    """Token ids that append one tool message per call, holding its output, after an assistant turn ending in one of
+    ``eos_token_ids``, without re-tokenizing it.
 
     """
+    tool_messages = [{
+        "role": "tool",
+        "name": call.name or "unknown",
+        "content": output
+    } for call, output in zip(calls, outputs)]
     tool_calls = [{
         "type": "function",
         "function": {
@@ -99,7 +99,7 @@ def tokenize_tool_responses(tool_messages, tokenizer, eos_token_ids, chat_templa
     base = [{"role": "user", "content": "dummy"}, dummy_assistant]
     kwargs = chat_template_kwargs or {}
     without = tokenizer.apply_chat_template(base, tokenize=False, **kwargs)
-    with_tools = tokenizer.apply_chat_template(base + list(tool_messages),
+    with_tools = tokenizer.apply_chat_template(base + tool_messages,
                                                tokenize=False,
                                                add_generation_prompt=True,
                                                **kwargs)

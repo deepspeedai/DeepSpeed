@@ -4,11 +4,18 @@
 """Tools the model can call during multi-turn rollout, and parsers for the calls it emits."""
 
 import asyncio
+import concurrent.futures
 import json
 import re
+import threading
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence
+
+import torch
+
+import deepspeed.comm as dist
 
 
 class Tool(ABC):
@@ -69,6 +76,109 @@ class ToolSet:
 
     def __len__(self) -> int:
         return len(self.tools)
+
+
+class ToolQueue:
+    """Runs the tool calls of finished turns in the background while the rollout goes on.
+
+    ``submit`` starts a turn's calls on a background event loop and returns at once. ``pop_ready`` collects the turns
+    whose calls have all finished, ``wait`` blocks until one has, and ``drain`` until all have.
+
+    With AutoTP, the rollout passes a host-side ``group`` over the tensor-parallel group and its first rank ``src``:
+    only ``src`` runs the tools, and ``pop_ready`` sends their output to the other ranks, so the whole group gets the
+    same output at the same step. ``pop_ready`` is then a collective, so the ranks must call it at the same steps.
+    """
+
+    def __init__(self, tools: ToolSet, group=None, src=None):
+        self.tools = tools
+        self.tool_ms = 0.0
+        # Trajectory -> (calls, future) while its calls run; the future is None on ranks that take the output from
+        # their group's first rank.
+        self.in_flight = {}
+        self._group = group
+        self._src = src
+        self._runs_tools = group is None or dist.get_rank() == src
+        self._loop = None
+        self._thread = None
+
+    def __enter__(self):
+        self._loop = asyncio.new_event_loop()
+        self._thread = threading.Thread(target=self._loop.run_forever, name="rollout-tools", daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_exc_info):
+        self._loop.call_soon_threadsafe(self._loop.stop)
+        self._thread.join()
+        self._loop.close()
+        return False
+
+    @property
+    def busy(self):
+        return bool(self.in_flight)
+
+    def submit(self, i, calls: Sequence["ToolCall"]) -> None:
+        """Start trajectory ``i``'s calls, and return without waiting for them."""
+        future = None
+        if self._runs_tools:
+            future = asyncio.run_coroutine_threadsafe(self._timed(self.tools.run_all(calls)), self._loop)
+        self.in_flight[i] = (calls, future)
+
+    @staticmethod
+    async def _timed(tool_calls):
+        start = time.perf_counter()
+        outputs = await tool_calls
+        return outputs, (time.perf_counter() - start) * 1000.0
+
+    def pop_ready(self):
+        """The trajectories whose calls have all finished, as ``(i, calls, outputs)``; the rest keep running."""
+        finished = []
+        if self._runs_tools:
+            for i in [i for i, (_, future) in self.in_flight.items() if future.done()]:
+                outputs, tool_ms = self.in_flight[i][1].result()
+                finished.append((i, outputs, tool_ms))
+        if self._group is not None:
+            finished = self._share(finished)
+        ready = []
+        for i, outputs, tool_ms in finished:
+            calls, _ = self.in_flight.pop(i)
+            self.tool_ms += tool_ms
+            ready.append((i, calls, outputs))
+        return ready
+
+    def _share(self, finished):
+        """The first rank's finished calls, on every rank of its group: a size, then the output as JSON bytes.
+
+        Both go over a Gloo group on the host, so they take no device copies and do not queue behind the forward's
+        collectives; steps where nothing finished send only the size.
+        """
+        src = self._src
+        payload = json.dumps(finished).encode() if finished else b""
+        size = torch.tensor([len(payload)], dtype=torch.long)
+        dist.broadcast(size, src, group=self._group)
+        if size.item() == 0:
+            return []
+        if self._runs_tools:
+            buffer = torch.frombuffer(bytearray(payload), dtype=torch.uint8)
+        else:
+            buffer = torch.empty(size.item(), dtype=torch.uint8)
+        dist.broadcast(buffer, src, group=self._group)
+        return json.loads(buffer.numpy().tobytes())
+
+    def drain(self):
+        """Block until every running call finishes, and return them all as ``pop_ready`` does."""
+        # The other ranks wait in pop_ready, for the first rank's output.
+        if self._runs_tools:
+            concurrent.futures.wait([future for _, future in self.in_flight.values()])
+        return self.pop_ready()
+
+    def wait(self):
+        """Block until one of the running turns' calls have all finished."""
+        # The other ranks wait in pop_ready, for the first rank's output.
+        if not self._runs_tools:
+            return
+        concurrent.futures.wait([future for _, future in self.in_flight.values()],
+                                return_when=concurrent.futures.FIRST_COMPLETED)
 
 
 @dataclass
