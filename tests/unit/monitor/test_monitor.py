@@ -10,9 +10,16 @@ from deepspeed.monitor.config import DeepSpeedMonitorConfig
 from deepspeed.monitor.comet import CometMonitor
 
 from unit.common import DistributedTest
+from unit.simple_model import SimpleModel, random_dataloader
+from unit.util import bf16_required_version_check
 from unittest.mock import Mock, patch
 from deepspeed.runtime.config import DeepSpeedConfig
 
+import csv
+import os
+import pytest
+import torch
+import deepspeed
 import deepspeed.comm as dist
 
 
@@ -101,6 +108,98 @@ class TestCSVMonitor(DistributedTest):
         assert csv_monitor.enabled == defaults.enabled
         assert csv_monitor.output_path == defaults.output_path
         assert csv_monitor.job_name == defaults.job_name
+
+
+class TestMonitorTrainLoss(DistributedTest):
+    world_size = 1
+
+    @pytest.mark.parametrize("managed,dtype", [(True, torch.float), (False, torch.float), (True, torch.bfloat16)])
+    def test_train_loss_logged_per_step(self, tmpdir, managed, dtype):
+        # Enough micro-batches per step that summing them in bf16 would visibly drift
+        gas = 256
+        num_steps = 2
+        hidden_dim = 10
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 2,
+            "gradient_accumulation_steps": gas,
+            "managed_gradient_accumulation": managed,
+            "csv_monitor": {
+                "enabled": True,
+                "output_path": str(tmpdir),
+                "job_name": "loss"
+            },
+        }
+        if dtype == torch.bfloat16:
+            if not bf16_required_version_check():
+                pytest.skip("bf16 is not supported on this accelerator")
+            config_dict["bf16"] = {"enabled": True}
+            config_dict["zero_optimization"] = {"stage": 1}
+            config_dict["zero_allow_untested_optimizer"] = True
+        model = SimpleModel(hidden_dim)
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+        model, _, _, _ = deepspeed.initialize(config=config_dict, model=model, optimizer=optimizer)
+        data_loader = random_dataloader(model=model,
+                                        total_samples=gas * num_steps * model.train_micro_batch_size_per_gpu(),
+                                        hidden_dim=hidden_dim,
+                                        device=model.device,
+                                        dtype=dtype)
+
+        # The logged value is the mean of the micro-batch losses that went into each optimizer step.
+        expected = []
+        micro_losses = []
+        for batch in data_loader:
+            loss = model(batch[0], batch[1])
+            micro_losses.append(loss.float().item())
+            model.backward(loss)
+            if managed or len(micro_losses) == gas:
+                model.step()
+            if len(micro_losses) == gas:
+                expected.append(sum(micro_losses) / gas)
+                micro_losses = []
+
+        csv_path = os.path.join(str(tmpdir), "loss", "Train_Samples_train_loss.csv")
+        assert os.path.isfile(csv_path), "Train/Samples/train_loss was not written to the monitor"
+        with open(csv_path) as f:
+            rows = list(csv.reader(f))
+        assert rows[0] == ["step", "train_loss"]
+        logged = [float(value) for _, value in rows[1:]]
+        # Each micro-batch loss is cast to fp32 before the gas division, so bf16 matches as tightly as fp32
+        assert logged == pytest.approx(expected, rel=1e-6)
+
+    def test_fp16_loss_does_not_underflow_with_large_gas(self, tmpdir):
+        # 1e-5 / 1024 is below the smallest fp16 subnormal, so dividing before the fp32 cast would log 0
+        gas = 1024
+        hidden_dim = 10
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 1,
+            "gradient_accumulation_steps": gas,
+            "csv_monitor": {
+                "enabled": True,
+                "output_path": str(tmpdir),
+                "job_name": "loss"
+            },
+        }
+        model = SimpleModel(hidden_dim)
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+        model, _, _, _ = deepspeed.initialize(config=config_dict, model=model, optimizer=optimizer)
+        data_loader = random_dataloader(model=model,
+                                        total_samples=gas * model.train_micro_batch_size_per_gpu(),
+                                        hidden_dim=hidden_dim,
+                                        device=model.device,
+                                        dtype=torch.float)
+        micro_losses = []
+        for batch in data_loader:
+            loss = model(batch[0], batch[1])
+            small_loss = (loss * (1e-5 / loss.item())).half()
+            micro_losses.append(small_loss.float().item())
+            model.backward(small_loss)
+            model.step()
+
+        csv_path = os.path.join(str(tmpdir), "loss", "Train_Samples_train_loss.csv")
+        with open(csv_path) as f:
+            rows = list(csv.reader(f))
+        logged = [float(value) for _, value in rows[1:]]
+        assert logged == pytest.approx([sum(micro_losses) / gas], rel=1e-6)
 
 
 class TestCometMonitor(DistributedTest):
