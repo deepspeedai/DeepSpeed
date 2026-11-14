@@ -2300,6 +2300,11 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                     extra_large_grad_reduc.data = extra_large_grad_reduc_for_average.data.view_as(extra_large_grad_reduc) if (not self.zenflow or self.extra_large_param_to_reduce[comm_dtype].dim() == 1) \
                         else extra_large_grad_reduc_for_average.data.view_as(extra_large_grad_reduc.transpose(0, 1))
 
+                    # Oversized gradients bypass the contiguous IPG buffer, so the
+                    # reduction reads the parameter's own storage, which non-owner
+                    # ranks release right after the reduction is enqueued.
+                    if self.overlap_comm and not get_accelerator().resolves_data_dependency():
+                        extra_large_grad_reduc_for_average.record_stream(self.reduction_stream)
                     self.average_tensor(extra_large_grad_reduc_for_average, comm_dtype)
                     del self.extra_large_param_to_reduce[comm_dtype]
                 else:
