@@ -20,6 +20,7 @@ See ``deepspeed/checkpoint/affine_ir_spec.md`` for the full specification.
 
 import torch
 
+from .affine_geometry import LogicalBox, address_range, boxes_disjoint, coordinate, overlaps_itself
 from .affine_geometry import (dot as _dot, product as _product, row_major_range_boxes as _row_major_range_boxes,
                               row_major_strides as _row_major_strides, strided_address as _strided_address)
 
@@ -165,49 +166,26 @@ def _dest_interval(piece):
 
 
 def _dest_box(piece, shard_shape):
-    """Return a piece's destination as per-axis ``(starts, stops)`` in the shard, or None.
+    """Return a piece's destination as a box of the shard's grid, or None.
 
     A column split writes each piece into a few columns of every shard row, so its
     destination is not one interval. It is still a box in the shard's own grid, because its
     strides are the shard's row-major strides, and a box can be checked for bounds and
-    overlap from its corners without walking any elements.
+    overlap from its corners without walking any elements. A view that wraps past the end of
+    a shard row is not a box of that grid; the walk in validate_coverage() checks it instead.
     """
     if piece.numel == 0 or len(piece.shape) != len(shard_shape) or len(piece.dest_strides) != len(shard_shape):
         return None
     shard_strides = _row_major_strides(shard_shape)
     if any(size > 1 and got != want for size, got, want in zip(piece.shape, piece.dest_strides, shard_strides)):
         return None
-
-    starts = []
-    remainder = piece.dest_offset
-    for stride in shard_strides:
-        start, remainder = divmod(remainder, stride)
-        starts.append(start)
-    stops = [start + size for start, size in zip(starts, piece.shape)]
-    return starts, stops
-
-
-def _dest_address_range(piece):
-    """Return the lowest and highest shard address a piece writes."""
-    low = piece.dest_offset
-    high = piece.dest_offset
-    for size, stride in zip(piece.shape, piece.dest_strides):
-        reach = (size - 1) * stride
-        if reach < 0:
-            low += reach
-        else:
-            high += reach
-    return low, high
-
-
-def _first_shared_address(box, other_box, shard_shape):
-    """Return the first shard address two boxes both write, or None when they are disjoint."""
-    corner = []
-    for start, stop, other_start, other_stop in zip(box[0], box[1], other_box[0], other_box[1]):
-        if max(start, other_start) >= min(stop, other_stop):
-            return None
-        corner.append(max(start, other_start))
-    return sum(position * stride for position, stride in zip(corner, _row_major_strides(shard_shape)))
+    origin = coordinate(piece.dest_offset, shard_strides, shard_shape)
+    if origin is None:
+        return None
+    box = LogicalBox(origin, piece.shape)
+    if any(high > dim for high, dim in zip(box.upper(), shard_shape)):
+        return None
+    return box
 
 
 class ParamAffineMap:
@@ -261,7 +239,7 @@ class ParamAffineMap:
                              f'account for {held}.')
         for piece in pieces:
             for side, strides in (('source', piece.source_strides), ('destination', piece.dest_strides)):
-                if _overlaps_itself(piece.shape, strides):
+                if overlaps_itself(piece.shape, strides):
                     raise ValueError(f'Rank {rank} piece {piece} reaches one {side} address twice within itself, '
                                      'so one of its elements would silently overwrite another.')
         self._validate_destinations(rank, pieces, self.shard_shapes[rank])
@@ -292,33 +270,31 @@ class ParamAffineMap:
             cursor = stop
 
         # A column split's pieces have no interval, so the check above skips them. Check them as
-        # boxes against every other box-shaped piece of the rank instead. Ranks whose pieces are
-        # all dense are fully covered above and skip this pairwise pass.
+        # boxes of the shard grid instead. Ranks whose pieces are all dense are fully covered above
+        # and skip this pass.
         if not has_strided_piece:
             return
         boxes = []
         for piece in pieces:
             if piece.numel and _dest_interval(piece) is None:
-                low, high = _dest_address_range(piece)
+                low, high = address_range(piece.dest_offset, piece.shape, piece.dest_strides)
                 if low < 0 or high >= shard_numel:
                     raise ValueError(f'Rank {rank} piece {piece} writes shard addresses [{low}, {high}], '
                                      f'outside the shard of {shard_numel} elements.')
             box = _dest_box(piece, shard_shape)
-            if box is None:
-                continue
-            starts, stops = box
-            fits = all(start >= 0 and stop <= dim for start, stop, dim in zip(starts, stops, shard_shape))
-            if not fits:
-                # A view may wrap past the end of a shard row while staying inside the shard. It is
-                # not a box of the shard's grid, so the walk in validate_coverage() checks it instead.
-                continue
-            boxes.append(box)
+            if box is not None:
+                boxes.append(box)
+        # A sweep proves most layouts disjoint without comparing every pair; the pairwise walk
+        # only runs to name the address that two boxes share.
+        if boxes_disjoint(boxes):
+            return
+        shard_strides = _row_major_strides(shard_shape)
         for index, box in enumerate(boxes):
             for other_box in boxes[index + 1:]:
-                shared = _first_shared_address(box, other_box, shard_shape)
-                if shared is not None:
-                    raise ValueError(f'Rank {rank} writes shard address {shared} twice, so one piece would '
-                                     'silently overwrite another.')
+                shared = box.intersection(other_box)
+                if not shared.is_empty:
+                    raise ValueError(f'Rank {rank} writes shard address {_dot(shared.origin, shard_strides)} '
+                                     'twice, so one piece would silently overwrite another.')
 
     def validate_coverage(self):
         """Full check: each shard address is written once, the shards cover the parameter,
@@ -510,22 +486,6 @@ def _scaled(tensor, scale, scale_power):
 # What rebuild records for each element of the full tensor: nobody has written it yet, a piece
 # naming a single holder did, or a replica did.
 _UNWRITTEN, _SINGLE_HOLDER, _REPLICA = 0, 1, 2
-
-
-def _overlaps_itself(shape, strides):
-    """Whether two positions of a view with this shape and these strides share an address.
-
-    Taking the axes that move in order of stride, the view is free of overlap when each stride
-    clears every address the axes before it reach. That holds for every layout the builders here
-    produce. A view that interleaves its axes some other way is refused even where it would not
-    collide, which keeps this to a few comparisons per piece instead of a walk over its elements.
-    """
-    reach = 0
-    for stride, size in sorted((stride, size) for size, stride in zip(shape, strides) if size > 1):
-        if stride <= reach:
-            return True
-        reach += stride * (size - 1)
-    return False
 
 
 def _place(placed, piece, rank):

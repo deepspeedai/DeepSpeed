@@ -18,6 +18,9 @@ The partition functions used here take an explicit rank, so nothing in this file
 process group or an accelerator.
 """
 
+import random
+import re
+
 import pytest
 import torch
 
@@ -587,6 +590,51 @@ def test_strided_destination_validation_does_not_enumerate_elements(monkeypatch)
 
     monkeypatch.setattr(AffinePiece, '_offsets', refuse_walk)
     affine_map.validate()
+
+
+def _random_column_block_map(rng):
+    """Column blocks of row bands tiling one shard, with one block sometimes shifted onto another."""
+    rows, cols = rng.randint(1, 6), rng.randint(2, 8)
+    col_cuts = sorted(rng.sample(range(1, cols), rng.randint(1, cols - 1)))
+    blocks = []
+    for low, high in zip([0] + col_cuts, col_cuts + [cols]):
+        row_cuts = sorted(rng.sample(range(1, rows), rng.randint(0, rows - 1))) if rows > 1 else []
+        blocks += [[top, low, bottom - top, high - low] for top, bottom in zip([0] + row_cuts, row_cuts + [rows])]
+    if rng.random() < 0.5:
+        block = rng.choice(blocks)
+        block[0] = rng.randint(0, rows - block[2])
+        block[1] = rng.randint(0, cols - block[3])
+    rng.shuffle(blocks)
+    pieces = [
+        AffinePiece((height, width), top * cols + left, (cols, 1), top * cols + left, (cols, 1), [0])
+        for top, left, height, width in blocks
+    ]
+    return ParamAffineMap((rows, cols), {0: (rows, cols)}, {0: pieces})
+
+
+def _validation_outcome(affine_map):
+    try:
+        affine_map.validate()
+    except ValueError as error:
+        return str(error)
+    return None
+
+
+@pytest.mark.parametrize('seed', range(200))
+def test_strided_destination_check_refuses_exactly_double_writes(seed):
+    """validate() accepts exactly the layouts that write no address twice, and a refusal names
+    an address that is written twice."""
+    affine_map = _random_column_block_map(random.Random(seed))
+    written = [(piece.dest_offset + row * piece.dest_strides[0] + column) for piece in affine_map.pieces_by_rank[0]
+               for row in range(piece.shape[0]) for column in range(piece.shape[1])]
+    outcome = _validation_outcome(affine_map)
+    assert (outcome is None) == (len(set(written)) == len(written))
+    if outcome is not None:
+        match = re.fullmatch(
+            r'Rank 0 writes shard address (\d+) twice, so one piece would silently overwrite '
+            r'another\.', outcome)
+        assert match is not None, outcome
+        assert written.count(int(match.group(1))) > 1
 
 
 # Guards added in review. Each one covers a way a map could produce a plausible but wrong

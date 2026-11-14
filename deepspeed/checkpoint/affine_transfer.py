@@ -28,11 +28,11 @@ and ``_covers_exactly`` states what that argument does and does not buy.
 import collections.abc
 import json
 from dataclasses import dataclass
-from typing import Callable, Dict, FrozenSet, List, Mapping, Optional, Sequence, Tuple, Union
+from typing import Callable, Dict, FrozenSet, List, Mapping, Optional, Sequence, Set, Tuple, Union
 
 from .affine import AffinePiece, ParamAffineMap
-from .affine_geometry import (LogicalBox, coordinate as _coordinate, product as _product, row_major_strides as
-                              _row_major_strides)
+from .affine_geometry import (LogicalBox, boxes_disjoint, coordinate as _coordinate, product as _product,
+                              row_major_strides as _row_major_strides)
 
 __all__ = [
     'AffineTransferError', 'InvalidMapError', 'InvalidReplicaPolicyError', 'UnsupportedLayoutError', 'PlanBudget',
@@ -338,12 +338,18 @@ def _shards_tile(frames: List[_Frame], side: str, limits: PlanBudget) -> None:
     of them land on the same addresses of the shard, and their numels still sum to the shard size. A
     shard that two pieces claim cannot be read or written by address, so a plan built on such a map is
     wrong in whichever direction it is used.
+
+    A rank whose pieces sweep as disjoint and fill the shard passes without pairwise comparisons; any
+    other rank takes the pairwise walk, which names the pieces at fault.
     """
     by_rank: Dict[int, List[_Frame]] = {}
     for frame in frames:
         by_rank.setdefault(frame.rank, []).append(frame)
 
     for rank, held in sorted(by_rank.items()):
+        if boxes_disjoint([frame.local for frame in held], limits.max_pair_checks) and sum(
+                frame.local.volume for frame in held) == held[0].shard_numel:
+            continue
         if len(held)**2 > limits.max_pair_checks:
             raise AffineTransferError(f'{side}: rank {rank} holds {len(held)} pieces, over the budget for '
                                       'address checks')
@@ -360,7 +366,26 @@ def _shards_tile(frames: List[_Frame], side: str, limits: PlanBudget) -> None:
 
 
 def _validate_holders(frames: List[_Frame], side: str, limits: PlanBudget) -> None:
-    """A piece's declared holders must cover exactly its logical box on every named rank."""
+    """A piece's declared holders must cover exactly its logical box on every named rank.
+
+    Most maps pass without comparing pieces pairwise: when no two distinct boxes overlap, a rank covers
+    a box exactly when it holds that very box, so the holders of each box can be read off a table.
+    Anything else, such as replicas split at different places, takes the pairwise walk, which also
+    names the piece at fault.
+    """
+    holders: Dict[LogicalBox, Set[int]] = {}
+    repeated = False
+    for frame in frames:
+        ranks = holders.setdefault(frame.box, set())
+        repeated = repeated or frame.rank in ranks
+        ranks.add(frame.rank)
+    if not repeated and boxes_disjoint(list(holders), limits.max_pair_checks):
+        if all(holders[frame.box] == frame.locations for frame in frames):
+            return
+    _validate_holders_pairwise(frames, side, limits)
+
+
+def _validate_holders_pairwise(frames: List[_Frame], side: str, limits: PlanBudget) -> None:
     if len(frames)**2 > limits.max_pair_checks:
         raise AffineTransferError(f'{side}: holder checks exceed max_pair_checks {limits.max_pair_checks}')
     by_rank: Dict[int, List[_Frame]] = {}
@@ -403,18 +428,20 @@ def _sources(frames: List[_Frame], limits: PlanBudget) -> List[Tuple[LogicalBox,
             by_box.setdefault(frame.box, []).append(frame)
 
     regions = sorted(by_box, key=lambda box: (box.origin, box.extent))
+    if not boxes_disjoint(regions, limits.max_pair_checks):
+        _name_overlapping_regions(regions, limits)
+    return [(box, tuple(sorted(by_box[box], key=lambda frame: frame.rank))) for box in regions]
+
+
+def _name_overlapping_regions(regions: List[LogicalBox], limits: PlanBudget) -> None:
     if len(regions)**2 > limits.max_pair_checks:
         raise AffineTransferError(f'{len(regions)} source regions would take {len(regions)**2} checks, over '
                                   f'max_pair_checks {limits.max_pair_checks}')
-    grouped = []
     for index, box in enumerate(regions):
-        holders = by_box[box]
         for other in regions[index + 1:]:
             if not box.intersection(other).is_empty:
                 raise UnsupportedLayoutError(f'source: replicas of {box!r} and {other!r} have different '
                                              'piece boundaries')
-        grouped.append((box, tuple(sorted(holders, key=lambda frame: frame.rank))))
-    return grouped
 
 
 def _covers_exactly(region: LogicalBox, parts: Sequence[LogicalBox]) -> bool:
