@@ -27,7 +27,7 @@ from deepspeed.runtime.config import HybridEngineConfig
 from deepspeed.runtime.hybrid_engine import DeepSpeedHybridEngine
 from deepspeed.runtime.rollout.base import RolloutConfig, RolloutRecord, RolloutRequest, SamplingConfig
 from deepspeed.runtime.rollout.tool import Tool, ToolCall, ToolQueue, ToolSet, parse_qwen3_coder_tool_calls
-from deepspeed.runtime.rollout.utils import get_eos_token_ids, tokenize_tool_responses
+from deepspeed.runtime.rollout.utils import get_eos_token_ids, tokenize_tool_responses, truncate_tool_output
 from deepspeed.runtime.rollout.hybrid_engine_rollout import (
     GlobalWorkRemaining,
     HybridEngineRollout,
@@ -1854,6 +1854,40 @@ def test_multi_turn_ends_when_tool_output_would_pass_max_out_tokens(_tokenize_to
     assert sample.tokens == [10, 11, _TOOL_CALL_TOKEN, 2]
     assert sample.loss_mask == [1, 1]
     assert sample.status == RolloutRecord.Status.TRUNCATED
+
+
+class _LongEchoTool(Tool):
+    name = "echo"
+    description = "Returns ten letters."
+    parameters = {"type": "object", "properties": {}}
+
+    async def execute(self, arguments):
+        return "abcdefghij"
+
+
+@patch("deepspeed.runtime.rollout.hybrid_engine_rollout.tokenize_tool_responses", return_value=[9])
+def test_multi_turn_cuts_and_counts_tool_outputs_over_max_tool_output_chars(tokenize_tool_responses):
+    engine, rollout = _multi_turn_rollout([[_TOOL_CALL_TOKEN, 2], [_TOOL_CALL_TOKEN, 2], [5, 2]],
+                                          tools=ToolSet([_LongEchoTool()]))
+    sampling = SamplingConfig(max_new_tokens=8, temperature=0, max_tool_output_chars=4, tool_output_keep="start")
+
+    sample = rollout.generate(RolloutRequest(samples=[_prompt([10, 11])]), sampling).samples[0]
+
+    assert [call.args[1] for call in tokenize_tool_responses.call_args_list] == [["abcd...(truncated)"]] * 2
+    assert sample.num_tool_outputs_truncated == 2
+    assert sample.num_turns == 3
+    assert sample.status == RolloutRecord.Status.COMPLETED
+
+
+@pytest.mark.parametrize("max_chars, keep, expected", [
+    (10, "both", "abcdefghij"),
+    (4, "start", "abcd...(truncated)"),
+    (4, "end", "(truncated)...ghij"),
+    (5, "both", "ab...(truncated)...hij"),
+    (1, "both", "...(truncated)...j"),
+])
+def test_truncate_tool_output_keeps_the_chosen_ends(max_chars, keep, expected):
+    assert truncate_tool_output("abcdefghij", max_chars, keep) == expected
 
 
 @patch("deepspeed.runtime.rollout.hybrid_engine_rollout.tokenize_tool_responses", return_value=[9])

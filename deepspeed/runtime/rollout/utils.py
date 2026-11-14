@@ -7,6 +7,7 @@ from dataclasses import replace
 import torch
 
 import deepspeed.comm as dist
+from deepspeed.runtime.rollout.base import ToolOutputKeep
 
 
 def get_repetition_penalty(sampling, module):
@@ -74,6 +75,19 @@ def expand_samples(samples, n_samples_per_prompt: int):
         for _ in range(n_samples_per_prompt):
             expanded.append(replace(sample, group_index=group_index))
     return expanded
+
+
+def truncate_tool_output(output: str, max_chars: int, keep: ToolOutputKeep = "both") -> str:
+    """``output`` cut to its first, last, or first and last ``max_chars`` characters in all, with a marker where
+    text was dropped; an output within ``max_chars`` is returned as is."""
+    if len(output) <= max_chars:
+        return output
+    if keep == "start":
+        return output[:max_chars] + "...(truncated)"
+    if keep == "end":
+        return "(truncated)..." + output[len(output) - max_chars:]
+    head = max_chars // 2
+    return output[:head] + "...(truncated)..." + output[len(output) - (max_chars - head):]
 
 
 def tokenize_tool_responses(calls, outputs, tokenizer, eos_token_ids, chat_template_kwargs=None):

@@ -35,6 +35,7 @@ from deepspeed.runtime.rollout.utils import (
     render_prompts,
     sampled_log_prob_recorder,
     tokenize_tool_responses,
+    truncate_tool_output,
     update_sample_from_response,
 )
 
@@ -404,14 +405,19 @@ class HybridEngineRollout(RolloutEngine):
         else:
             tool_queue.submit(i, calls)
 
-    def _append_tool_output(self, trajectories, finished):
+    def _append_tool_output(self, trajectories, finished, sampling):
         """Append the tool output of ``finished`` turns, and return the trajectories that go on to another turn.
 
-        A trajectory whose tool output would take it past ``max_out_tokens`` ends as truncated instead.
+        Each output is first cut to ``sampling.max_tool_output_chars``, if set. A trajectory whose tool output would
+        still take it past ``max_out_tokens`` ends as truncated instead.
         """
+        max_chars = sampling.max_tool_output_chars
         resumed = []
         for i, calls, outputs in finished:
             sample = trajectories[i]
+            if max_chars is not None:
+                sample.num_tool_outputs_truncated += sum(len(output) > max_chars for output in outputs)
+                outputs = [truncate_tool_output(output, max_chars, sampling.tool_output_keep) for output in outputs]
             tool_response = tokenize_tool_responses(calls, outputs, self.tokenizer,
                                                     get_eos_token_ids(self.tokenizer, self.engine.module),
                                                     self.chat_template_kwargs)
@@ -439,7 +445,7 @@ class HybridEngineRollout(RolloutEngine):
 
     def _resubmit_tool_turns(self, tool_queue, scheduler, trajectories, sampling, max_cache_len=None):
         """Queue the next turn of every trajectory whose tools finished, ahead of those not yet started."""
-        for i in self._append_tool_output(trajectories, tool_queue.pop_ready()):
+        for i in self._append_tool_output(trajectories, tool_queue.pop_ready(), sampling):
             self._submit_turn(scheduler, trajectories[i], i, sampling, front=True, max_cache_len=max_cache_len)
 
     @torch.no_grad()
@@ -559,7 +565,7 @@ class HybridEngineRollout(RolloutEngine):
                 active = []
                 if tool_queue.busy:
                     tool_start = time.perf_counter()
-                    active = sorted(self._append_tool_output(trajectories, tool_queue.drain()))
+                    active = sorted(self._append_tool_output(trajectories, tool_queue.drain(), sampling))
                     tool_ms = (time.perf_counter() - tool_start) * 1000.0
 
                 if self.enable_profiling:

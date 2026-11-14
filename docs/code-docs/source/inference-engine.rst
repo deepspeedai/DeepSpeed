@@ -269,6 +269,15 @@ and tool output. ``HybridEngineRollout`` requires it to be set explicitly.
 ``HybridEngineRolloutConfig.chat_template_kwargs`` is passed to every chat-template call,
 for example ``{"enable_thinking": False}``.
 
+A tool output that would take a record past ``max_out_tokens`` is dropped and
+the record ends ``TRUNCATED``. ``SamplingConfig.max_tool_output_chars`` cuts
+each tool output longer than that many characters before it is templated,
+keeping its ``"start"``, ``"end"`` or, by default, ``"both"`` ends
+(``tool_output_keep``) with a ``...(truncated)`` marker at the cut, so one long
+output leaves room for further turns. The cap applies to each output, so a turn
+with several calls can still add several capped outputs. Each record counts its
+cut outputs in ``num_tool_outputs_truncated``.
+
 ``HybridEngineRolloutConfig.continuous_batch_size`` schedules a multi-turn rollout by turn
 instead of by record (see "Continuous batching" above). Its cache is sized by
 ``max_out_tokens`` unless ``HybridEngineRolloutConfig.continuous_cache_capacity``

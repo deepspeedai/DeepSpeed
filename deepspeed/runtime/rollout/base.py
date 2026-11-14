@@ -11,7 +11,7 @@ ABC. This keeps engine-specific concerns out of the trainer loop.
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional
+from typing import Literal, Optional, get_args
 
 
 @dataclass
@@ -20,12 +20,20 @@ class RolloutConfig:
     engine: str = "hybrid_engine"
 
 
+# The ends of a tool output that SamplingConfig.max_tool_output_chars keeps.
+ToolOutputKeep = Literal["start", "end", "both"]
+
+
 @dataclass
 class SamplingConfig:
     """Sampling knobs that the trainer passes to ``generate`` each step.
 
     ``top_k <= 0`` disables top-k filtering. ``repetition_penalty=None`` uses the
     value in the model's ``generation_config``; 1.0 disables the penalty.
+
+    ``max_tool_output_chars`` cuts each tool output longer than that many characters before it is added to the
+    conversation, keeping its ``"start"``, ``"end"`` or ``"both"`` ends (``tool_output_keep``) with a
+    ``...(truncated)`` marker at the cut; None leaves tool output whole.
     """
 
     max_new_tokens: int
@@ -35,6 +43,8 @@ class SamplingConfig:
     top_k: int = -1
     n_samples_per_prompt: int = 1
     repetition_penalty: Optional[float] = None
+    max_tool_output_chars: Optional[int] = None
+    tool_output_keep: ToolOutputKeep = "both"
 
     def __post_init__(self) -> None:
         if self.max_new_tokens <= 0:
@@ -43,6 +53,11 @@ class SamplingConfig:
             raise ValueError("max_new_tokens_per_turn must be positive")
         if self.repetition_penalty is not None and self.repetition_penalty <= 0:
             raise ValueError("repetition_penalty must be positive")
+        if self.max_tool_output_chars is not None and (not isinstance(self.max_tool_output_chars, int)
+                                                       or self.max_tool_output_chars < 1):
+            raise ValueError("max_tool_output_chars must be a positive integer")
+        if self.tool_output_keep not in get_args(ToolOutputKeep):
+            raise ValueError(f"tool_output_keep must be 'start', 'end' or 'both'; got {self.tool_output_keep!r}")
 
 
 @dataclass
@@ -65,6 +80,8 @@ class RolloutRecord:
     status: Status = Status.PENDING
     # Turns the model has generated, each followed by the output of the tools it called, if any.
     num_turns: int = 0
+    # Tool outputs cut to SamplingConfig.max_tool_output_chars.
+    num_tool_outputs_truncated: int = 0
 
 
 @dataclass
@@ -78,7 +95,7 @@ class RolloutRequest:
             if len(sample.attention_mask) != len(sample.tokens):
                 raise ValueError(f"samples[{i}] attention_mask length {len(sample.attention_mask)} does not "
                                  f"match tokens length {len(sample.tokens)}")
-            if sample.num_turns != 0 or sample.loss_mask is not None:
+            if sample.num_turns != 0 or sample.num_tool_outputs_truncated != 0 or sample.loss_mask is not None:
                 raise ValueError(f"samples[{i}] already holds a rollout; pass the prompt only")
 
 

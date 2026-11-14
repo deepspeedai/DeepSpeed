@@ -39,7 +39,7 @@ def test_rollout_request_validates_shapes():
         RolloutRequest(samples=[RolloutRecord(tokens=[1, 2, 3], attention_mask=[1, 1])])
 
 
-@pytest.mark.parametrize("rollout", [dict(num_turns=1), dict(loss_mask=[1])])
+@pytest.mark.parametrize("rollout", [dict(num_turns=1), dict(num_tool_outputs_truncated=1), dict(loss_mask=[1])])
 def test_rollout_request_rejects_records_that_already_hold_a_rollout(rollout):
     with pytest.raises(ValueError, match="already holds a rollout"):
         RolloutRequest(samples=[RolloutRecord(tokens=[1, 2], attention_mask=[1, 1], **rollout)])
@@ -68,6 +68,18 @@ def test_sampling_config_defaults():
     assert cfg.n_samples_per_prompt == 1
     assert not hasattr(cfg, "continuous_batch_size")
     assert not hasattr(cfg, "return_log_probs")
+    assert cfg.max_tool_output_chars is None
+    assert cfg.tool_output_keep == "both"
+
+
+@pytest.mark.parametrize("kwargs, message", [
+    (dict(max_tool_output_chars=0), "max_tool_output_chars"),
+    (dict(max_tool_output_chars=2.5), "max_tool_output_chars"),
+    (dict(tool_output_keep="middle"), "tool_output_keep"),
+])
+def test_sampling_config_rejects_invalid_tool_output_cap(kwargs, message):
+    with pytest.raises(ValueError, match=message):
+        SamplingConfig(max_new_tokens=8, **kwargs)
 
 
 def test_continuous_batching_details_are_not_public_exports():
