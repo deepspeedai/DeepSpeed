@@ -340,6 +340,8 @@ class XPU_Accelerator(DeepSpeedAccelerator):
         return torch.xpu.is_available() and hasattr(torch.xpu, 'is_current_stream_capturing')
 
     def is_current_stream_capturing(self) -> bool:
+        if not hasattr(torch.xpu, 'is_current_stream_capturing'):
+            return False
         return torch.xpu.is_current_stream_capturing()
 
     def create_graph(self):
@@ -348,10 +350,14 @@ class XPU_Accelerator(DeepSpeedAccelerator):
         return torch.xpu.XPUGraph()
 
     def capture_to_graph(self, graph, pool=None, stream=None):
+        if graph is None:
+            from deepspeed.runtime.utils import noop_context
+            return noop_context()
         return torch.xpu.graph(graph, pool, stream)
 
     def replay_graph(self, graph):
-        graph.replay()
+        if graph is not None:
+            graph.replay()
         return
 
     # Data types
