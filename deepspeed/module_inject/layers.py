@@ -18,7 +18,7 @@ from deepspeed.runtime.zero.utils import is_zero_param
 from abc import ABC, abstractmethod
 from typing import Iterable, Any, Optional, List, Tuple, Dict
 from .fusedqkv_utils import (shard_value_with_share_qk, prepare_tp_fused_qkvw, fused_qkv_subparam_sizes,
-                             set_fused_qkv_shard_state)
+                             set_fused_qkv_shard_state, replicated_kv_query_widths, replicated_kv_row_start)
 from deepspeed.runtime.tensor_parallel import AUTOTP_MODE
 from deepspeed.checkpoint.constants import (DS_AUTOTP_UC_META, UNIVERSAL_CHECKPOINT_VERSION_KEY,
                                             UNIVERSAL_CHECKPOINT_VERSION_VALUE)
@@ -1467,6 +1467,124 @@ class SubParamColumnParallel(LinearLayer):
                                     is_bias=True)
 
 
+def _all_reduce_replicated_kv_rows(kv_grad, group):
+    """All-reduce the replicated K/V rows in place.
+
+    Some backends return this gradient non-contiguously, which collectives reject; reduce a
+    contiguous copy in that case and preserve the original layout for autograd.
+    """
+    if kv_grad.numel() == 0:
+        # The key/value block is replicated whole, so it is empty on every rank at once.
+        return kv_grad
+    if kv_grad.is_contiguous():
+        # Contiguous: reduce the view in place.
+        dist.all_reduce(kv_grad, group=group)
+    else:
+        # Non-contiguous: reduce a copy, then write it back.
+        reduced = kv_grad.contiguous()
+        dist.all_reduce(reduced, group=group)
+        kv_grad.copy_(reduced)
+    return kv_grad
+
+
+def _sum_replicated_kv_gradient(grad, kv_start, group):
+    """Sum the K/V gradient rows that every rank holds a copy of."""
+    grad = grad.clone()
+    _all_reduce_replicated_kv_rows(grad.narrow(0, kv_start, grad.shape[0] - kv_start), group)
+    return grad
+
+
+class _ReplicatedKvGradReducer:
+    """Sum each micro-batch's replicated K/V gradient exactly once.
+
+    A plain tensor hook reduces the incoming gradient before PyTorch accumulates it, which is
+    correct with gradient accumulation. Some backends skip that hook under ZeRO 1/2, so a
+    post-accumulate hook is registered as well. The fallback reduces only the K/V rows added
+    since its previous call: reducing the whole accumulated gradient again would scale earlier
+    micro-batches once per later backward.
+
+    When the engine allows deferred reduction, both hooks leave the local partial in place and
+    the post-accumulate hook reduces the K/V rows that were accumulated since the previous
+    boundary. The engine only allows this when the full window stays in ``param.grad``.
+    """
+
+    def __init__(self, param, kv_start, group):
+        self.param = param
+        self.kv_start = kv_start
+        self.group = group
+        self._tensor_hook_ran = False
+        self._grad = None
+        self._kv = None
+        self._boundary_reduced = False
+        self._accumulation_boundary = True
+        self._defer_allowed = False
+
+    def set_accumulation_state(self, is_boundary, defer_allowed):
+        """Record the engine's accumulation state for this backward.
+
+        Called from the engine's backward prologue for this reducer only, so two engines in
+        one process do not overwrite each other's state. A non-boundary backward starts a new
+        window: even a parameter that is unused there must forget the previous boundary's
+        reduced snapshot.
+        """
+        self._accumulation_boundary = is_boundary
+        self._defer_allowed = defer_allowed
+        if not is_boundary:
+            self._tensor_hook_ran = False
+            self._grad = None
+            self._kv = None
+            self._boundary_reduced = False
+
+    def tensor_hook(self, grad):
+        self._tensor_hook_ran = True
+        if self._defer_allowed:
+            return grad
+        return _sum_replicated_kv_gradient(grad, self.kv_start, self.group)
+
+    def _reduce_new_kv_rows(self, grad, kv_grad, use_delta):
+        if use_delta and self._grad is grad and self._kv is not None:
+            delta = kv_grad - self._kv
+        else:
+            delta = kv_grad.clone()
+        _all_reduce_replicated_kv_rows(delta, self.group)
+        if use_delta and self._grad is grad and self._kv is not None:
+            kv_grad.copy_(self._kv + delta)
+        else:
+            kv_grad.copy_(delta)
+        self._grad = grad
+        self._kv = kv_grad.clone()
+
+    def post_accumulate_hook(self, *_unused):
+        # Both hook forms leave the gradient on the parameter; the pre-2.1
+        # AccumulateGrad hook also passes (grad_inputs, grad_outputs).
+        grad = self.param.grad
+        if grad is None:
+            self._tensor_hook_ran = False
+            self._grad = None
+            self._kv = None
+            self._boundary_reduced = False
+            return
+        kv_grad = grad.narrow(0, self.kv_start, grad.shape[0] - self.kv_start)
+        if self._defer_allowed:
+            if not self._accumulation_boundary:
+                # The next window starts here; forget the previous boundary's snapshot.
+                self._tensor_hook_ran = False
+                self._grad = None
+                self._kv = None
+                return
+            # A reentrant checkpoint may run this hook more than once at the boundary.
+            # Reducing the delta keeps each new local contribution counted once.
+            self._reduce_new_kv_rows(grad, kv_grad, use_delta=self._boundary_reduced)
+            self._boundary_reduced = True
+            self._tensor_hook_ran = False
+            return
+        if self._tensor_hook_ran:
+            # The tensor hook already summed this micro-batch before it was accumulated.
+            self._tensor_hook_ran = False
+        else:
+            self._reduce_new_kv_rows(grad, kv_grad, use_delta=True)
+
+
 class FusedModuleWrapper:
 
     def __init__(self, fused_module: nn.Module):
@@ -1505,21 +1623,22 @@ class fused_LinearLayer(SubParamColumnParallel):
 
         if get_fused_qkv_type(self.fused_module.module) != 'bigcodetype' or not pg_utils.is_parallel(self.mp_group):
             return
-        n_embd = self.tp_meta.n_embd
-        if n_embd is None:
-            return
         # This rank's shard is its query rows followed by the whole key/value block.
-        kv_start = get_shard_size_list(n_embd, self.tp_world_size, self.tp_meta)[self.tp_index]
+        kv_start = replicated_kv_row_start(self.tp_meta, self.tp_world_size, self.tp_index)
+        if kv_start is None:
+            return
         group = self.mp_group
 
-        def sum_kv_rows(grad):
-            grad = grad.clone()
-            dist.all_reduce(grad.narrow(0, kv_start, grad.shape[0] - kv_start), group=group)
-            return grad
+        from deepspeed.utils.torch import register_grad_hook
 
+        # The tensor hook handles the common path before accumulation; the post-accumulate
+        # fallback covers torch_npu, which skipped it under ZeRO 1/2 in our tests.
         for param in (self.weight, self.bias):
             if param is not None and param.requires_grad:
-                param.register_hook(sum_kv_rows)
+                reducer = _ReplicatedKvGradReducer(param, kv_start, group)
+                param.register_hook(reducer.tensor_hook)
+                register_grad_hook(param, reducer.post_accumulate_hook)
+                param._ds_replicated_kv_reducer = reducer
 
     def _freeze_partition_sizes(self, total_size):
         super()._freeze_partition_sizes(total_size)
@@ -1574,7 +1693,9 @@ class fused_LinearLayer(SubParamColumnParallel):
         # The query rows are not split evenly: the widths follow the head count and the grain
         # size, so they have to come from the same helper the partition calls rather than
         # from a division here.
-        query_widths = list(get_shard_size_list(n_embd, self.tp_world_size, self.tp_meta))
+        query_widths = replicated_kv_query_widths(self.tp_meta, self.tp_world_size)
+        if query_widths is None:
+            return None
         return segmented_map(shape, [(n_embd, False), (shape[0] - n_embd, True)],
                              0,
                              self.tp_world_size,
