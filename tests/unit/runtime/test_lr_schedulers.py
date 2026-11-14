@@ -949,3 +949,14 @@ def test_other_schedules_keep_their_config_params():
         assert err is None
         assert expected in config["params"]
         assert lrs.get_lr_from_config(config)[0] == config["params"][expected]
+
+
+def test_one_cycle_get_last_lr_before_first_step():
+    # The other schedules record the lr they set on construction, so get_last_lr() works
+    # before the first step(), e.g. while fp16 loss scaling is still skipping steps.
+    # OneCycle set the lr too but did not record it, and get_last_lr() asserted.
+    optimizer = torch.optim.Adam([torch.nn.Parameter(torch.zeros(1))], lr=0.001)
+    scheduler = OneCycle(optimizer=optimizer, cycle_min_lr=0.0001, cycle_max_lr=0.001)
+
+    assert scheduler.get_last_lr() == [0.0001]
+    assert optimizer.param_groups[0]["lr"] == 0.0001
