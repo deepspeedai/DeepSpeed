@@ -4011,7 +4011,9 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         # AutoTP + ZeRO-3: the universal tensor is the FULL weight, but each tensor-parallel
         # rank only owns its TP shard, and ZeRO then partitions that shard across the DP group.
         # Resolve the TP shard first so the DP partition below operates on the per-rank shard.
-        if param is not None and isinstance(ckpt_dict, dict):
+        # A checkpoint converted from ZeRO-3 without TP stores a bare tensor, so the target's
+        # metadata, not the file format, decides whether to slice.
+        if param is not None:
             from deepspeed.checkpoint.universal_checkpoint import _get_param_uc_restore_meta, _resolve_autotp_partition
             if _get_param_uc_restore_meta(param):
                 tp_group = groups.get_tensor_model_parallel_group()
