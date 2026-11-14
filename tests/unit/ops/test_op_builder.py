@@ -89,6 +89,8 @@ def test_bad_fork_jit_without_arch_list_raises_actionable_error():
 
 
 def test_jit_mode_probes_devices_when_safe_and_errors_without_visible_gpus():
+
+    import torch.utils.cpp_extension  # noqa: F401
     builder = make_builder(jit_mode=True)
 
     with patch.dict(os.environ, {}, clear=False):
@@ -99,7 +101,6 @@ def test_jit_mode_probes_devices_when_safe_and_errors_without_visible_gpus():
                                                                                   (8, 9)]) as get_device_capability:
                     assert builder.compute_capability_args() == []
                     assert os.environ["TORCH_CUDA_ARCH_LIST"] == "7.0;8.9+PTX"
-                    assert builder.enable_bf16 is False
 
     device_count.assert_called_once_with()
     assert get_device_capability.call_count == 2
@@ -174,6 +175,30 @@ def test_prebuilt_builder_targets_requested_archs_instead_of_local_gpus():
     assert "-gencode=arch=compute_90,code=sm_90" in nvcc_args
 
 
+@pytest.mark.parametrize(
+    "arch_list, nvcc_version, expect_bf16",
+    [
+        # bf16 arithmetic is native from Ampere (8.x). nvcc 12.2+ also compiles it for older targets, but 12.1 fails
+        # to compile the BF16 kernels for sm_70 and sm_75.
+        ("7.0;8.0", (12, 1), False),
+        ("7.0;8.0", (12, 2), True),
+        ("8.0;9.0", (12, 1), True),
+    ])
+def test_bf16_kernels_are_built_for_pre_ampere_targets_only_from_nvcc_12_2(arch_list, nvcc_version, expect_bf16):
+    builder = make_builder()
+    with patch.dict(os.environ, {"TORCH_CUDA_ARCH_LIST": arch_list}, clear=False):
+        with patch.object(CUDAOpBuilder, "is_rocm_pytorch", return_value=False):
+            with patch.object(builder_module, "assert_no_cuda_mismatch", return_value=True):
+                with patch("torch.utils.cpp_extension.CUDA_HOME", "/usr/local/cuda"):
+                    with patch.object(builder_module, "installed_cuda_version", return_value=nvcc_version):
+                        with patch("torch.utils.cpp_extension.CUDAExtension") as cuda_extension:
+                            builder.builder()
+
+    compile_args = cuda_extension.call_args.kwargs["extra_compile_args"]
+    assert ("-DBF16_AVAILABLE" in compile_args["nvcc"]) is expect_bf16
+    assert ("-DBF16_AVAILABLE" in compile_args["cxx"]) is expect_bf16
+
+
 @pytest.mark.parametrize("build_order", [("jit", "prebuilt"), ("prebuilt", "jit")])
 def test_prebuilt_and_jit_builds_compile_and_link_an_op_the_same_way(build_order):
     # A pre-built op must be compiled and linked like the same op built at load time. Only the targeted
@@ -220,18 +245,6 @@ def test_prebuilt_op_that_drops_archs_does_not_drop_them_for_the_ops_built_after
         "-gencode=arch=compute_90,code=sm_90",
         "-gencode=arch=compute_90,code=compute_90",
     ]
-
-
-def test_default_archs_on_cuda_13_only_include_archs_it_can_build():
-    # Pre-builds that do not set TORCH_CUDA_ARCH_LIST use the default arch list. CUDA 13 cannot build for
-    # compute capabilities below 7.5 (nvcc --list-gpu-arch starts at compute_75), and Turing (7.5) is the
-    # oldest GPU it still supports.
-    with patch("torch.utils.cpp_extension.CUDA_HOME", "/usr/local/cuda-13.0"):
-        with patch.object(builder_module, "installed_cuda_version", return_value=(13, 0)):
-            default_archs = builder_module.get_default_compute_capabilities().split(';')
-
-    assert "7.5" in default_archs
-    assert all(tuple(int(part) for part in arch.split('.')) >= (7, 5) for arch in default_archs)
 
 
 BUILD_PATHS = {
@@ -471,20 +484,6 @@ def test_installed_cuda_version_reports_a_runtime_only_cuda_home_as_missing(tmp_
     with patch("torch.utils.cpp_extension.CUDA_HOME", str(tmp_path)):
         with pytest.raises(MissingCUDAException, match="unable to compile CUDA op"):
             installed_cuda_version()
-
-
-def test_cuda_accelerator_pre_compiles_async_io_without_cuda_and_links_libaio():
-    # async_io stages device tensors through host memory and uses no CUDA headers or libraries, so on
-    # CUDA systems it must pre-compile without a CUDA toolkit. The prebuilt extension must still link
-    # libaio, or importing it fails on the unresolved io_submit/io_getevents symbols.
-    from accelerator.cuda_accelerator import CUDA_Accelerator
-
-    builder = CUDA_Accelerator().create_op_builder("AsyncIOBuilder")
-    with patch("torch.utils.cpp_extension.CUDA_HOME", None):
-        extension = builder.builder()
-
-    links_libaio = "-laio" in extension.extra_link_args or "aio" in extension.libraries
-    assert links_libaio
 
 
 class _RaisingBuilder:

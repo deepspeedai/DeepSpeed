@@ -211,7 +211,6 @@ def assert_no_cuda_mismatch():
 
 class OpBuilder(ABC):
     _is_rocm_pytorch = None
-    _is_sycl_enabled = None
     _loaded_ops = {}
 
     def __init__(self, name):
@@ -234,9 +233,6 @@ class OpBuilder(ABC):
         pass
 
     def hipify_extension(self):
-        pass
-
-    def sycl_extension(self):
         pass
 
     @staticmethod
@@ -268,29 +264,12 @@ class OpBuilder(ABC):
         except ImportError:
             pass
         else:
-            if TORCH_MAJOR > 1 or (TORCH_MAJOR == 1 and TORCH_MINOR >= 5):
-                _is_rocm_pytorch = hasattr(torch.version, 'hip') and torch.version.hip is not None
-                if _is_rocm_pytorch:
-                    from torch.utils.cpp_extension import ROCM_HOME
-                    _is_rocm_pytorch = ROCM_HOME is not None
+            _is_rocm_pytorch = hasattr(torch.version, 'hip') and torch.version.hip is not None
+            if _is_rocm_pytorch:
+                from torch.utils.cpp_extension import ROCM_HOME
+                _is_rocm_pytorch = ROCM_HOME is not None
         OpBuilder._is_rocm_pytorch = _is_rocm_pytorch
         return OpBuilder._is_rocm_pytorch
-
-    @staticmethod
-    def is_sycl_enabled():
-        if OpBuilder._is_sycl_enabled is not None:
-            return OpBuilder._is_sycl_enabled
-
-        _is_sycl_enabled = False
-        try:
-            result = subprocess.run(["c2s", "--version"], capture_output=True)
-        except Exception:
-            pass
-        else:
-            _is_sycl_enabled = True
-
-        OpBuilder._is_sycl_enabled = _is_sycl_enabled
-        return OpBuilder._is_sycl_enabled
 
     def include_paths(self):
         '''
@@ -681,7 +660,7 @@ class CUDAOpBuilder(OpBuilder):
             return None
         return torch.cuda.get_device_properties(0).major
 
-    def compute_capability_args(self, cross_compile_archs=None):
+    def compute_capability_args(self):
         """
         Returns nvcc compute capability compile flags.
 
@@ -693,8 +672,8 @@ class CUDAOpBuilder(OpBuilder):
 
            JIT mode then sets ``TORCH_CUDA_ARCH_LIST`` so PyTorch can generate
            the ``-gencode`` flags itself.
-        2. ``TORCH_CUDA_ARCH_LIST`` takes priority over ``cross_compile_archs``.
-        3. If neither is set default compute capabilities will be used.
+        2. Otherwise ``TORCH_CUDA_ARCH_LIST`` is used.
+        3. If it is not set, default compute capabilities will be used.
         4. In both modes, when no entry carries ``+PTX``, the highest entry
            without a suffix gets it.
 
@@ -705,8 +684,6 @@ class CUDAOpBuilder(OpBuilder):
 
         TORCH_CUDA_ARCH_LIST="6.1;7.5;8.6;9.0;10.0" pip install ...
         TORCH_CUDA_ARCH_LIST="6.0 6.1 7.0 7.5 8.0 8.6 9.0 10.0+PTX" pip install ...
-
-        - ``cross_compile_archs`` uses ; separator.
 
         """
         if self.jit_mode:
@@ -730,12 +707,8 @@ class CUDAOpBuilder(OpBuilder):
             # Cross-compile mode, compile for various architectures
             # env override takes priority
             ccs = _parse_cuda_arch_list(os.environ.get('TORCH_CUDA_ARCH_LIST', ''))
-            if ccs and cross_compile_archs is not None:
-                print(
-                    f"{WARNING} env var TORCH_CUDA_ARCH_LIST={os.environ['TORCH_CUDA_ARCH_LIST']} overrides cross_compile_archs={cross_compile_archs}"
-                )
             if not ccs:
-                ccs = _parse_cuda_arch_list(cross_compile_archs or get_default_compute_capabilities())
+                ccs = _parse_cuda_arch_list(get_default_compute_capabilities())
 
         ccs = self.filter_ccs(ccs)
         if len(ccs) == 0:
@@ -762,10 +735,12 @@ class CUDAOpBuilder(OpBuilder):
                 highest = plain_ccs[-1]
                 ccs[ccs.index(highest)] = highest._replace(ptx=True)
 
-        self.enable_bf16 = True
-        for cc in ccs:
-            if cc.major <= 7:
-                self.enable_bf16 = False
+        # Ampere (8.x) and newer GPUs have native bf16 arithmetic. For older targets, nvcc 12.2+ computes it in
+        # float instead, while older toolkits fail to compile the BF16 kernels for them.
+        self.enable_bf16 = all(cc.major >= 8 for cc in ccs)
+        if not self.enable_bf16:
+            from torch.utils.cpp_extension import CUDA_HOME
+            self.enable_bf16 = CUDA_HOME is not None and installed_cuda_version() >= (12, 2)
 
         if self.jit_mode:
             # Before torch 2.9, load() adds -gencode flags from TORCH_CUDA_ARCH_LIST (or the visible GPUs) even
