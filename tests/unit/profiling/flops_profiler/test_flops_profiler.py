@@ -86,6 +86,28 @@ def test_conv_transpose_flops(groups, stride, padding, output_padding):
 
 
 @pytest.mark.sequential
+@pytest.mark.parametrize("kernel_size", [2, 4])
+def test_conv_flops_with_same_padding(kernel_size):
+    """Even kernel with `padding='same'` preserves the input length; PyTorch pads
+    asymmetrically when kernel is even, and the profiler's symmetric formula
+    would under-count by one element per dimension."""
+    in_channels, out_channels, length = 3, 5, 10
+    model = torch.nn.Conv1d(in_channels, out_channels, kernel_size, padding='same', bias=False)
+    inputs = torch.randn(1, in_channels, length)
+
+    prof = FlopsProfiler(model)
+    prof.start_profile()
+    _ = model(inputs)
+    prof.stop_profile()
+    flops, macs = prof.get_total_flops(), prof.get_total_macs()
+    prof.end_profile()
+
+    expected_macs = out_channels * in_channels * kernel_size * length
+    assert macs == expected_macs
+    assert flops == 2 * expected_macs
+
+
+@pytest.mark.sequential
 def test_conv_transpose_flops_with_output_size():
     """`output_size=` makes torch compute the per-dimension output_padding itself, and it
     hands it over as a list rather than a tuple."""

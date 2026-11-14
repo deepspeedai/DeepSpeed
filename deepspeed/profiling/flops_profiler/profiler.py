@@ -579,24 +579,28 @@ def _conv_flops_compute(input, weight, bias=None, stride=1, padding=0, dilation=
 
     strides = stride if type(stride) is tuple else (stride, ) * length
     dilations = dilation if type(dilation) is tuple else (dilation, ) * length
+    paddings = None
+    output_dims = None
     if isinstance(padding, str):
-        if padding == 'valid':
+        if padding == 'same':
+            # `same` is only supported with a stride of 1 and always keeps the input size.
+            # The symmetric padding formula below cannot reproduce that when `d * (k - 1)`
+            # is odd (an even kernel with an odd dilation), because PyTorch pads
+            # asymmetrically in that case and the formula would be one element short.
+            output_dims = list(input_dims)
+        else:  # 'valid'
             paddings = (0, ) * length
-        elif padding == 'same':
-            paddings = ()
-            for d, k in zip(dilations, kernel_dims):
-                total_padding = d * (k - 1)
-                paddings += (total_padding // 2, )
     elif isinstance(padding, tuple):
         paddings = padding
     else:
         paddings = (padding, ) * length
 
-    output_dims = []
-    for idx, input_dim in enumerate(input_dims):
-        output_dim = (input_dim + 2 * paddings[idx] - (dilations[idx] *
-                                                       (kernel_dims[idx] - 1) + 1)) // strides[idx] + 1
-        output_dims.append(output_dim)
+    if output_dims is None:
+        output_dims = []
+        for idx, input_dim in enumerate(input_dims):
+            output_dim = (input_dim + 2 * paddings[idx] - (dilations[idx] *
+                                                           (kernel_dims[idx] - 1) + 1)) // strides[idx] + 1
+            output_dims.append(output_dim)
 
     filters_per_channel = out_channels // groups
     conv_per_position_macs = int(_prod(kernel_dims)) * in_channels * filters_per_channel
