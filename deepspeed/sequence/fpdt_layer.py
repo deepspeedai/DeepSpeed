@@ -78,22 +78,61 @@ def update_out_and_lse(
 
 
 class FPDT_InputConstruct(torch.nn.Module):
+    """Partition inputs into FPDT chunks, padding the causal sequence tail if needed.
+
+    Padding requires ``loss_mask`` and ``attention_mask=None``; aligned inputs
+    retain their existing behavior. Use the reordered loss mask returned by
+    ``generate()`` with the gathered losses and normalize by the SP-global sum
+    of valid loss weights, since a rank can have no valid tokens.
+    """
 
     def __init__(self, tokens, labels, loss_mask, attention_mask, position_ids, args, sp_size, sp_rank) -> None:
 
         super(FPDT_InputConstruct, self).__init__()
+        global_seq_len = tokens.shape[1]
+        batch_size = tokens.shape[0]
+        global_chunk_size = args.ds_sequence_parallel_fpdt_chunk_size
+        geometry = f"(S={global_seq_len}, C={global_chunk_size}, P={sp_size}, rank={sp_rank})"
+        if global_seq_len <= 0 or global_chunk_size <= 0 or sp_size <= 0:
+            raise ValueError(
+                f"FPDT sequence length, chunk size and sequence parallel size must be positive {geometry}")
+        if sp_rank < 0 or sp_rank >= sp_size:
+            raise ValueError(f"FPDT sequence parallel rank must be in [0, sp_size) {geometry}")
+        if global_chunk_size % sp_size != 0:
+            raise ValueError(f"FPDT chunk size must be divisible by the sequence parallel size {geometry}")
+
+        padding = (-global_seq_len) % global_chunk_size
+        if padding:
+            if loss_mask is None:
+                raise ValueError(f"FPDT padding requires a loss_mask to exclude padded tokens {geometry}")
+            if attention_mask is not None:
+                raise ValueError(f"FPDT padding requires attention_mask=None for causal attention {geometry}")
+
+            def append_zeros(tensor):
+                if tensor is None:
+                    return None
+                shape = (tensor.shape[0], padding, *tensor.shape[2:])
+                return torch.cat((tensor, tensor.new_zeros(shape)), dim=1)
+
+            tokens = append_zeros(tokens)
+            # FPDT_LogitsLoss.backward directly indexes labels rather than honoring ignore_index=-100.
+            # Negative labels can select the wrong class or be out of range; label 0 with zero loss weight
+            # safely excludes padding.
+            labels = append_zeros(labels)
+            loss_mask = append_zeros(loss_mask)
+            if position_ids is not None:
+                offsets = torch.arange(1, padding + 1, dtype=position_ids.dtype, device=position_ids.device)
+                offsets = offsets.reshape(1, padding, *([1] * (position_ids.dim() - 2)))
+                position_ids = torch.cat((position_ids, position_ids[:, -1:] + offsets), dim=1)
+            global_seq_len += padding
+
         self.tokens = tokens
         self.labels = labels
         self.loss_mask = loss_mask
         self.attention_mask = attention_mask
         self.position_ids = position_ids
-        global_seq_len = tokens.shape[1]
-        batch_size = tokens.shape[0]
-        assert global_seq_len % sp_size == 0
-        assert global_seq_len % args.ds_sequence_parallel_fpdt_chunk_size == 0
-        num_chunk_per_gpu = global_seq_len // args.ds_sequence_parallel_fpdt_chunk_size
+        num_chunk_per_gpu = global_seq_len // global_chunk_size
         local_seq_len = global_seq_len // sp_size
-        assert local_seq_len % num_chunk_per_gpu == 0
 
         self.num_chunk_per_gpu = num_chunk_per_gpu
         self.chunk_size = local_seq_len // num_chunk_per_gpu

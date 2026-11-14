@@ -15,6 +15,7 @@ Two generation paths:
      sampled like the graph path, with or without graph capture.
 """
 
+import itertools
 import math
 import time
 from copy import copy
@@ -410,10 +411,11 @@ class HybridEngineRollout(RolloutEngine):
                         request_mask = overrides["attention_mask"]
                         mask_snapshot = request_mask.clone()
                         generation_config, model_kwargs = prepare_config(None, **overrides)
-                        # generate() would use a replaced or edited mask, while CB routes plan from the request mask.
-                        prepared_mask = model_kwargs.pop("attention_mask", request_mask)
+                        # generate() would use a replaced, edited or dropped mask, while CB routes plan
+                        # from the request mask.
+                        prepared_mask = model_kwargs.pop("attention_mask", None)
                         mask_replaced = prepared_mask is not request_mask
-                        mask_edited = not torch.equal(request_mask, mask_snapshot)
+                        mask_edited = not mask_replaced and not torch.equal(request_mask, mask_snapshot)
                         if model_kwargs or mask_replaced or mask_edited:
                             raise ValueError("adaptive prefill does not support custom generation model kwargs")
                         # CB routes read these settings from the request, while generate() reruns the preparer.
@@ -773,8 +775,6 @@ class HybridEngineRollout(RolloutEngine):
         minimum_cache_len = prompt_len + sampling.max_new_tokens
         max_cache_len = (self.continuous_cache_capacity
                          if self.continuous_cache_capacity is not None else minimum_cache_len)
-        if max_cache_len < minimum_cache_len:
-            raise ValueError("continuous_cache_capacity must fit the prompt and all generated tokens")
         max_positions = getattr(module.config, "max_position_embeddings", None)
         if max_positions is not None and max_cache_len > max_positions:
             raise ValueError("continuous batching cache exceeds the model maximum position embeddings")
@@ -787,8 +787,8 @@ class HybridEngineRollout(RolloutEngine):
             request_by_id[request_id] = request
             responses[request_id] = []
 
-        state = self._get_continuous_graph_state(module, max_batch_size, prompt_len, max_cache_len, device,
-                                                 model_dtype, DeepSpeedStaticCache)
+        state = self._get_continuous_graph_state(module, max_batch_size, max_cache_len, device, model_dtype,
+                                                 DeepSpeedStaticCache)
         cache = state.cache
         static_input = state.static_input
         static_attention = state.static_attention
@@ -937,12 +937,13 @@ class HybridEngineRollout(RolloutEngine):
                 and self.continuous_cache_capacity < prompt_len + sampling.max_new_tokens):
             raise ValueError("continuous_cache_capacity must fit the prompt and all generated tokens")
 
-    def _get_continuous_graph_state(self, module, max_batch_size, prompt_len, max_cache_len, device, model_dtype,
-                                    cache_type):
-        signature = self._continuous_graph_signature(module, max_batch_size, prompt_len, max_cache_len, device,
-                                                     model_dtype)
+    def _get_continuous_graph_state(self, module, max_batch_size, max_cache_len, device, model_dtype, cache_type):
+        signature = self._continuous_graph_signature(module, max_batch_size, max_cache_len, device, model_dtype)
         state = self._continuous_graph_state
         if state is None or state.signature != signature:
+            # Free the stale cache and graph pool before allocating replacements.
+            self._continuous_graph_state = None
+            state = None
             # Capture sizes the layers from the model's local KV tensors.
             cache = cache_type(module.config, max_cache_len=max_cache_len)
             static_input = torch.zeros((max_batch_size, 1), dtype=torch.long, device=device)
@@ -989,10 +990,18 @@ class HybridEngineRollout(RolloutEngine):
         return state
 
     @staticmethod
-    def _continuous_graph_signature(module, max_batch_size, prompt_len, max_cache_len, device, model_dtype):
-        parameter_signature = tuple((parameter.data_ptr(), parameter._version) for parameter in module.parameters())
-        return (id(module), device.type, device.index, model_dtype, max_batch_size, prompt_len, max_cache_len,
-                parameter_signature)
+    def _continuous_graph_signature(module, max_batch_size, max_cache_len, device, model_dtype):
+        # Replay reads parameters and buffers through the address and layout fixed
+        # at capture, so in-place value updates need no recapture, but a moved or
+        # re-laid-out tensor does. Prefill runs eagerly, so the prompt width only
+        # matters through max_cache_len.
+        tensor_signature = tuple((tensor.data_ptr(), tensor.device, tensor.dtype, tuple(tensor.shape), tensor.stride())
+                                 for tensor in itertools.chain(module.parameters(), module.buffers()))
+        device_index = device.index
+        if device_index is None and device.type == get_accelerator().device_name():
+            # torch.device("cuda") and torch.device("cuda", 0) name the same device.
+            device_index = get_accelerator().current_device()
+        return (id(module), device.type, device_index, model_dtype, max_batch_size, max_cache_len, tensor_signature)
 
     @staticmethod
     def _update_static_causal_attention(static_attention, static_causal_attention):
@@ -1822,3 +1831,15 @@ class HybridEngineRollout(RolloutEngine):
     def sync_weights(self, step: int) -> None:  # noqa: ARG002
         """No-op: hybrid engine reads model weights live."""
         return None
+
+    def shutdown(self) -> None:
+        """Release the captured continuous decode graph and its static cache.
+
+        The rollout stays usable and captures again on the next graph rollout.
+        Under tensor parallelism the graph holds captured collectives, so release
+        it before destroying the process group.
+        """
+        if self._continuous_graph_state is None:
+            return
+        get_accelerator().synchronize()
+        self._continuous_graph_state = None
