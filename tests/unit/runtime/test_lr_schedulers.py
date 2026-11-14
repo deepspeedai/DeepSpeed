@@ -949,3 +949,62 @@ def test_other_schedules_keep_their_config_params():
         assert err is None
         assert expected in config["params"]
         assert lrs.get_lr_from_config(config)[0] == config["params"][expected]
+
+
+@pytest.mark.parametrize("scheduler_cls", [LRRangeTest, OneCycle, WarmupLR, WarmupDecayLR])
+@pytest.mark.parametrize("lr_shape", [(), (1, )])
+def test_tensor_lr_bound_is_not_changed_by_optimizer_updates(scheduler_cls, lr_shape):
+    # A caller can use the optimizer's LR tensor as a schedule boundary. Updating
+    # the live LR must not move that boundary on subsequent steps.
+    parameter = torch.nn.Parameter(torch.ones(1, dtype=torch.float64))
+    lr = torch.full(lr_shape, 0.1, dtype=torch.float64)
+    optimizer = torch.optim.SGD([parameter], lr=lr)
+    if scheduler_cls == LRRangeTest:
+        kwargs = dict(lr_range_test_min_lr=lr, lr_range_test_step_size=2)
+        expected = [0.15, 0.2, 0.25, 0.3]
+    elif scheduler_cls == OneCycle:
+        kwargs = dict(cycle_min_lr=lr, cycle_max_lr=0.3, cycle_first_step_size=2, cycle_momentum=False)
+        expected = [0.2, 0.3, 0.2, 0.1]
+    else:
+        kwargs = dict(warmup_min_lr=lr, warmup_max_lr=0.3, warmup_num_steps=2, warmup_type="linear")
+        expected = [0.1, 0.2, 0.3, 0.3]
+        if scheduler_cls == WarmupDecayLR:
+            kwargs["total_num_steps"] = 4
+            expected[-1] = 0.2
+    scheduler = scheduler_cls(optimizer, **kwargs)
+    expected_parameter = parameter.detach().clone()
+    for step, expected_lr in enumerate(expected):
+        scheduler.step(step)
+        assert optimizer.param_groups[0]["lr"] is lr
+        assert lr.item() == pytest.approx(expected_lr)
+        optimizer.zero_grad()
+        parameter.sum().backward()
+        optimizer.step()
+        expected_parameter -= expected_lr
+        torch.testing.assert_close(parameter, expected_parameter)
+
+
+@pytest.mark.parametrize("scheduler_cls, kwargs", [
+    (LRRangeTest, dict(lr_range_test_min_lr=0.1, lr_range_test_step_size=2)),
+    (OneCycle, dict(cycle_min_lr=0.1, cycle_max_lr=0.3, cycle_first_step_size=2, cycle_momentum=False)),
+    (WarmupLR, dict(warmup_min_lr=0.1, warmup_max_lr=0.3, warmup_num_steps=2)),
+    (WarmupDecayLR, dict(total_num_steps=4, warmup_min_lr=0.1, warmup_max_lr=0.3, warmup_num_steps=2)),
+    (WarmupCosineLR, dict(total_num_steps=4, warmup_num_steps=2)),
+])
+def test_get_last_lr_returns_tensor_snapshot(scheduler_cls, kwargs):
+    parameter = torch.nn.Parameter(torch.ones(1))
+    lr = torch.tensor(0.1)
+    optimizer = torch.optim.SGD([parameter], lr=lr)
+    scheduler = scheduler_cls(optimizer, **kwargs)
+    scheduler.step(0)
+    captured = scheduler.get_last_lr()
+    expected = captured[0].clone()
+    scheduler.step(1)
+    torch.testing.assert_close(captured[0], expected)
+
+    current = lr.clone()
+    scheduler.get_last_lr()[0].fill_(-1.0)
+    torch.testing.assert_close(lr, current)
+    parameter.sum().backward()
+    optimizer.step()
+    torch.testing.assert_close(parameter, torch.ones(1) - current)
