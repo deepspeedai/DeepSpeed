@@ -22,9 +22,15 @@ cpu_op_desc_t::cpu_op_desc_t(
       _pinned_tensor_mgr(pinned_tensor_mgr),
       _is_managed_bounce_buffer(false)
 {
-    // Need to use CPU bounce buffer if buffer is not a page-locked DRAM memory.
+    // Need to use CPU bounce buffer if buffer is not a page-locked DRAM memory, or if the kernel
+    // cannot do I/O on it directly: a view into a larger tensor may not be contiguous, or not start
+    // at the address alignment the file needs. The kernel would fail such I/O, or the data would be
+    // read into a temporary copy.
+    const auto is_locked_cpu_buffer =
+        _buffer.is_cpu() && (_buffer.is_pinned() || _pinned_tensor_mgr->is_managed(_buffer));
     _use_bounce_buffer =
-        !(_buffer.is_cpu() && (_buffer.is_pinned() || _pinned_tensor_mgr->is_managed(_buffer)));
+        !(is_locked_cpu_buffer && _buffer.is_contiguous() &&
+          reinterpret_cast<uintptr_t>(_buffer.data_ptr()) % get_io_memory_alignment(fd) == 0);
     if (_use_bounce_buffer) {
         _alloc_bounce_buffer();
         if (!_read_op) { _cpu_buffer.copy_(_buffer); }
@@ -75,11 +81,11 @@ void cpu_op_desc_t::run(const int tid,
     std::unique_ptr<io_xfer_ctxt> xfer_ctxt(new io_xfer_ctxt(
         _fd, file_base_offset, buffer_base_offset, _num_bytes_per_thread, data_ptr()));
 
-    if (aio_config->_overlap_events) {
-        do_aio_operation_overlap(_read_op, aio_ctxt, xfer_ctxt, aio_config, nullptr);
-    } else {
-        do_aio_operation_sequential(_read_op, aio_ctxt, xfer_ctxt, aio_config, nullptr);
-    }
+    const auto error_code =
+        aio_config->_overlap_events
+            ? do_aio_operation_overlap(_read_op, aio_ctxt, xfer_ctxt, aio_config, nullptr)
+            : do_aio_operation_sequential(_read_op, aio_ctxt, xfer_ctxt, aio_config, nullptr);
+    if (error_code != 0) { set_error(error_code); }
 }
 
 void cpu_op_desc_t::_alloc_bounce_buffer()
@@ -96,6 +102,8 @@ void cpu_op_desc_t::_alloc_bounce_buffer()
     _is_managed_bounce_buffer = true;
     _cpu_buffer = _pinned_tensor_mgr->alloc(_buffer.numel(), options);
 #endif
+    // The copies to and from the buffer need its shape.
+    _cpu_buffer = _cpu_buffer.view(_buffer.sizes());
 }
 
 void cpu_op_desc_t::_free_bounce_buffer()

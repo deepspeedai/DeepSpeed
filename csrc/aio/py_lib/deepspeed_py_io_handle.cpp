@@ -9,6 +9,9 @@ Functionality for swapping optimizer tensors to/from (NVMe) storage devices.
 
 #include "deepspeed_py_io_handle.h"
 #include <cstdlib>
+#include <cstring>
+#include <exception>
+#include <stdexcept>
 #include "deepspeed_aio_op_desc.h"
 
 #define O_DIRECT_ALIGNMENT 512
@@ -117,13 +120,16 @@ int deepspeed_io_handle_t::read(torch::Tensor& buffer,
     std::unique_ptr<io_xfer_ctxt> xfer_ctxt(
         new io_xfer_ctxt(fd, file_offset, 0, num_file_bytes, read_buffer));
 
-    if (_aio_config._overlap_events) {
-        do_aio_operation_overlap(true, _aio_ctxt, xfer_ctxt, &_aio_config, nullptr);
-    } else {
-        do_aio_operation_sequential(true, _aio_ctxt, xfer_ctxt, &_aio_config, nullptr);
-    }
+    const auto error_code =
+        _aio_config._overlap_events
+            ? do_aio_operation_overlap(true, _aio_ctxt, xfer_ctxt, &_aio_config, nullptr)
+            : do_aio_operation_sequential(true, _aio_ctxt, xfer_ctxt, &_aio_config, nullptr);
 
     close(fd);
+    if (error_code != 0) {
+        report_file_error(filename, " read", -error_code);
+        return -1;
+    }
     const std::chrono::duration<double> aio_time =
         std::chrono::high_resolution_clock::now() - start_time;
 
@@ -153,15 +159,18 @@ int deepspeed_io_handle_t::write(const torch::Tensor& buffer,
     std::unique_ptr<io_xfer_ctxt> xfer_ctxt(
         new io_xfer_ctxt(fd, file_offset, 0, num_write_bytes, write_buffer));
 
-    if (_aio_config._overlap_events) {
-        do_aio_operation_overlap(false, _aio_ctxt, xfer_ctxt, &_aio_config, nullptr);
-    } else {
-        do_aio_operation_sequential(false, _aio_ctxt, xfer_ctxt, &_aio_config, nullptr);
-    }
+    const auto error_code =
+        _aio_config._overlap_events
+            ? do_aio_operation_overlap(false, _aio_ctxt, xfer_ctxt, &_aio_config, nullptr)
+            : do_aio_operation_sequential(false, _aio_ctxt, xfer_ctxt, &_aio_config, nullptr);
     const std::chrono::duration<double> aio_time =
         std::chrono::high_resolution_clock::now() - start_time;
 
     close(fd);
+    if (error_code != 0) {
+        report_file_error(filename, " write", -error_code);
+        return -1;
+    }
 
     if (validate) { validate_aio_operation(false, filename, write_buffer, num_write_bytes); }
 
@@ -221,20 +230,38 @@ int deepspeed_io_handle_t::_wait_locked()
 {
     assert(_num_pending_ops > 0);
     auto num_completed_ops = 0;
+    std::string error_message;
+    std::exception_ptr finish_error = nullptr;
 
+    // Complete every pending op, also after one failed, so that the handle can be used again.
     while (_num_pending_ops > 0) {
         auto completed_op = _wait_for_aio_work();
 
-        if (completed_op->_validate) { completed_op->validate(); }
+        try {
+            if (completed_op->_validate) { completed_op->validate(); }
 
-        completed_op->finish();
+            completed_op->finish();
+        } catch (...) {
+            if (!finish_error) { finish_error = std::current_exception(); }
+        }
 
         if (!completed_op->_filename.empty()) { close(completed_op->_fd); }
+
+        const auto error_code = completed_op->_error_code.load();
+        if (error_code != 0 && error_message.empty()) {
+            const auto file = completed_op->_filename.empty()
+                                  ? "fd " + std::to_string(completed_op->_fd)
+                                  : completed_op->_filename;
+            error_message = std::string(completed_op->_read_op ? "read from " : "write to ") +
+                            file + " failed: " + strerror(-error_code);
+        }
 
         --_num_pending_ops;
         ++num_completed_ops;
     }
 
+    if (!error_message.empty()) { throw std::runtime_error("deepspeed_aio: " + error_message); }
+    if (finish_error) { std::rethrow_exception(finish_error); }
     return num_completed_ops;
 }
 

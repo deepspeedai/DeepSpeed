@@ -60,6 +60,21 @@ For benchmark matrices, cases execute from the largest effective batch to the
 smallest because HybridEngine sizes its inference workspace on the first
 forward. Results remain in the user-requested matrix order.
 
+HybridEngine Rollout CUDA Graph Decode
+--------------------------------------
+
+``HybridEngineRolloutConfig(use_graph_capture=True)`` captures the decode
+forward pass in a CUDA graph and replays it for every generated token. Only the
+model forward is captured; the next token is chosen from the graph's output
+logits after each replay. Greedy decoding (``temperature <= 0``) takes the
+argmax. Sampling applies the ``temperature``, ``top_k`` and ``top_p`` settings
+of ``SamplingConfig`` with Hugging Face's logits warpers, in the order
+``generate()`` applies them, so both paths sample from the same distribution.
+Both greedy decoding and sampling first apply the repetition penalty from the
+model's ``generation_config``, as ``generate()`` does. Other
+``generation_config`` settings are not applied on the graph path. Continuous
+batching, with or without graph capture, picks tokens the same way.
+
 Shared Prompt Prefill
 ---------------------
 
@@ -102,9 +117,9 @@ configured capacity.
 
 The experimental path intentionally does not implement paged attention or change the
 default generation semantics. It currently requires one padded prompt width for
-all rows, a model with cache-class support, greedy decoding, and one sample per
-prompt. Shared prompt prefill is rejected until the scheduling semantics are
-validated on real workloads. Models that explicitly declare no cache-class
+all rows, a model with cache-class support, and one sample per prompt. Shared
+prompt prefill is rejected until the scheduling semantics are validated on real
+workloads. Models that explicitly declare no cache-class
 support are rejected; models with unknown support should be validated against
 the default ``generate()`` path before use.
 ``align_decode_fronts=False`` is the default equal-width padded-prompt baseline:
@@ -130,7 +145,8 @@ The most recent cache statistics are available from
 ``peak_cache_length``, ``cache_memory_bytes``, ``trim_count``,
 ``trimmed_columns``, ``trim_frequency``, and ``trim_bytes_moved``.
 ``cache_memory_bytes`` covers
-the preallocated KV tensors and active cache metadata. With profiling enabled,
+the allocated KV tensors plus the per-row attention mask and write positions,
+with the same definition for eager and graph-captured decoding. With profiling enabled,
 ``trim_latency_ms``, ``end_to_end_ms``, and ``tokens_per_second`` are also
 measured with accelerator synchronization; otherwise those timing fields are
 ``None`` or zero.
@@ -142,11 +158,20 @@ CUDA Graph capture is supported for CUDA inputs with the default
 ``align_decode_fronts=False`` and ``enable_cache_trimming=False`` settings. It
 uses a fixed ``continuous_batch_size`` layout, keeps every KV-cache row and
 decode tensor at a stable address, and masks inactive rows while the scheduler
-refills them. Graph state is reused across matching rollout calls and rebuilt
-when the model parameters or static decode shape changes. Aligned decode fronts
-and cache trimming are rejected while graph capture is enabled because they
-move cache rows or columns. ``flash_attention_2`` is also rejected because the
-captured decode uses a four-dimensional additive attention mask.
+refills them. Graph state is reused across rollout calls with the same decode
+batch size, cache length, device and dtype, and is rebuilt when one of these
+changes or when a model parameter or buffer changes address, shape, strides,
+dtype or device. Replays read these tensors in place, so in-place optimizer updates between
+rollouts are picked up without recapturing. By default, the cache length is the
+prompt width plus ``max_new_tokens``. Set ``continuous_cache_capacity`` to reuse
+one graph across prompt widths that fit within that capacity.
+Call ``rollout.shutdown()`` to release the graph and its
+static cache. The rollout stays usable and captures again on its next graph
+call. Under tensor parallelism the graph holds captured collectives, so call
+``shutdown()`` before ``torch.distributed.destroy_process_group()``. Aligned
+decode fronts and cache trimming are rejected while graph capture is enabled
+because they move cache rows or columns. ``flash_attention_2`` is also rejected
+because the captured decode uses a four-dimensional additive attention mask.
 
 ``DeepSpeedStaticCache`` accepts one write position per row and can compact
 active rows while preserving its static tensor addresses. This mirrors the

@@ -394,7 +394,6 @@ void shm_initialize(int size, int rank, char* addr_string, char* port_string)
     for (int i = 0; i < size; i++) {
         if (i != rank) {
             snprintf(shm_name, NAME_BUF_SIZE, "%s_%d", shm_name_prefix, i);
-            // printf("open %s, %d\n", shm_name, rank);
             do {
                 shared_open(&allreduce_buffer, shm_name, sizeof(struct allreduce_workspace));
             } while (allreduce_buffer.descriptor == -1 && errno == ENOENT);

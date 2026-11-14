@@ -167,7 +167,13 @@ class RequestBoundaryModel(torch.nn.Module):
         return loss
 
 
-def _run_request_boundaries(rank, rendezvous, zero_stage, cpu_offload, accumulation_dtype, checkpointed):
+def _run_request_boundaries(rank,
+                            rendezvous,
+                            zero_stage,
+                            cpu_offload,
+                            accumulation_dtype,
+                            checkpointed,
+                            host_accumulator=False):
     os.environ["LOCAL_RANK"] = str(rank)
     accelerator = get_accelerator()
     accelerator.set_device(rank)
@@ -215,6 +221,9 @@ def _run_request_boundaries(rank, rendezvous, zero_stage, cpu_offload, accumulat
                                                optimizer=torch.optim.SGD(model.parameters(), lr=1 / 32),
                                                config=config,
                                                dist_init_required=False)
+        if host_accumulator:
+            # Muon groups accumulate in the host accumulator instead of the compact partition buffer.
+            engine.optimizer._use_compact_grad_partition_buffer = lambda group_idx: False
         calls = ["c0", "c1", "c2", "c3"]
         windows = [(requests, {})
                    for requests in [[calls], [["ping"], calls], [["c0"], ["c1"]], [["c0"], ["c1"], ["c2", "c3"]],
@@ -222,6 +231,10 @@ def _run_request_boundaries(rank, rendezvous, zero_stage, cpu_offload, accumulat
         # Each projection first joins a later backward after contributing to the preceding update.
         for early, late in [(0, 1), (1, 0)]:
             windows.append(([["c0"], ["c1", "c2"], ["c3"]], {"c0": (early, ), "c1": (late, ), "c2": (late, )}))
+        # A projection can contribute to a request without joining its boundary backward.
+        for early, late in [(0, 1), (1, 0)]:
+            windows.append(([["c0", "c1"], ["c2"]], {"c0": (early, ), "c1": (late, )}))
+            windows.append(([["c0", "c1"]], {"c0": (early, ), "c1": (late, )}))
         reference_names = list(references)
         for step, (requests, selections) in enumerate(windows):
             expected = {name: torch.zeros_like(reference) for name, reference in references.items()}
@@ -268,23 +281,86 @@ def _run_request_boundaries(rank, rendezvous, zero_stage, cpu_offload, accumulat
 @pytest.mark.parametrize("accumulation_dtype", ["bf16", "fp32"])
 @pytest.mark.parametrize("checkpointed", [False, True], ids=["plain", "reentrant"])
 def test_multiple_request_boundaries_before_step(tmp_path, zero_stage, cpu_offload, accumulation_dtype, checkpointed):
-    torch.multiprocessing.spawn(_run_request_boundaries,
-                                args=(f"file://{tmp_path / 'rendezvous'}", zero_stage, cpu_offload, accumulation_dtype,
-                                      checkpointed),
-                                nprocs=2,
-                                join=True)
+    # Match DistributedTest's forkserver lifecycle: spawn also runs native global
+    # destructors during interpreter shutdown, beyond the explicit engine/group cleanup.
+    torch.multiprocessing.start_processes(_run_request_boundaries,
+                                          args=(f"file://{tmp_path / 'rendezvous'}", zero_stage, cpu_offload,
+                                                accumulation_dtype, checkpointed),
+                                          nprocs=2,
+                                          join=True,
+                                          start_method="forkserver")
+
+
+@pytest.mark.skipif(get_accelerator().device_name() not in ("cpu", "cuda")
+                    or (get_accelerator().device_name() == "cuda" and get_accelerator().device_count() < 2),
+                    reason="Requires CPU or two CUDA devices")
+@pytest.mark.parametrize("accumulation_dtype", ["bf16", "fp32"])
+@pytest.mark.parametrize("checkpointed", [False, True], ids=["plain", "reentrant"])
+def test_multiple_request_boundaries_host_accumulator(tmp_path, accumulation_dtype, checkpointed):
+    # The host-accumulator path is what Muon groups use under stage-2 CPU offload.
+    torch.multiprocessing.start_processes(_run_request_boundaries,
+                                          args=(f"file://{tmp_path / 'rendezvous'}", 2, True, accumulation_dtype,
+                                                checkpointed, True),
+                                          nprocs=2,
+                                          join=True,
+                                          start_method="forkserver")
 
 
 class TestZero2OffloadOverflowRecovery(DistributedTest):
     world_size = 2
 
+    @pytest.mark.parametrize("accumulation_dtype", [None, "fp32"])
+    def test_fp16_host_gradient_overflow_skips_step(self, accumulation_dtype):
+        """A sum that exceeds the fp16 range must be caught when it reaches the fp16 host gradient.
+
+        With fp32 accumulation the overflow appears only in the cast to the fp16 master gradient.
+        """
+        if not deepspeed.ops.__compatible_ops__[CPUAdamBuilder.NAME]:
+            pytest.skip("CPUAdam is required for low-precision offloaded master weights")
+        if not get_accelerator().is_fp16_supported():
+            pytest.skip("FP16 is not supported")
+
+        class Scaled(torch.nn.Module):
+
+            def __init__(self):
+                super().__init__()
+                self.weight = torch.nn.Parameter(torch.ones(16))
+
+            def forward(self, scale):
+                return (self.weight * scale).sum()
+
+        config = _base_config(2, cpu_offload=True)
+        config.pop("bf16", None)
+        config["fp16"] = {"enabled": True, "loss_scale": 1.0, "fp16_master_weights_and_grads": True}
+        if accumulation_dtype is not None:
+            config["data_types"] = {"grad_accum_dtype": accumulation_dtype}
+        config["train_batch_size"] = 2
+        model = Scaled()
+        engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config)
+        try:
+            initial = _capture_params(engine)
+            # Each backward adds 40000 per element: finite in fp16 alone, 80000 (> 65504) in the sum.
+            for i in range(2):
+                engine.set_gradient_accumulation_boundary(i == 1)
+                engine.backward(engine(torch.tensor(40000., device=engine.device)))
+            engine.step()
+            after = _capture_params(engine)
+            for name in initial:
+                assert torch.isfinite(after[name]).all(), f"{name} became non-finite"
+            _assert_params_match(initial, after, "overflowed sum must skip the update", tol=1e-8)
+        finally:
+            engine.destroy()
+
     @pytest.mark.parametrize("precision", ["bf16", "fp16"])
     @pytest.mark.parametrize("low_precision_master", [True, False])
-    def test_finite_step_after_overflow(self, precision, low_precision_master):
+    @pytest.mark.parametrize("accumulation_dtype", [None, "fp32"])
+    def test_finite_step_after_overflow(self, precision, low_precision_master, accumulation_dtype):
         if not deepspeed.ops.__compatible_ops__[CPUAdamBuilder.NAME]:
             pytest.skip("CPUAdam is required for low-precision offloaded master weights")
         if precision == "bf16" and not get_accelerator().is_bf16_supported():
             pytest.skip("BF16 is not supported")
+        if precision == "fp16" and not get_accelerator().is_fp16_supported():
+            pytest.skip("FP16 is not supported")
 
         class TwoGroups(torch.nn.Module):
 
@@ -302,6 +378,8 @@ class TestZero2OffloadOverflowRecovery(DistributedTest):
         config[precision] = {"enabled": True, f"{precision}_master_weights_and_grads": low_precision_master}
         if precision == "fp16":
             config[precision]["loss_scale"] = 1.0
+        if accumulation_dtype is not None:
+            config["data_types"] = {"grad_accum_dtype": accumulation_dtype}
         config["train_batch_size"] = 2
         config["managed_gradient_accumulation"] = False
         config["optimizer"]["params"]["lr"] = 0.1
