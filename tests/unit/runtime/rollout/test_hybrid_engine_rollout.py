@@ -26,7 +26,7 @@ from deepspeed.ops.transformer.inference.op_binding.workspace import WorkspaceOp
 from deepspeed.runtime.config import HybridEngineConfig
 from deepspeed.runtime.hybrid_engine import DeepSpeedHybridEngine
 from deepspeed.runtime.rollout.base import RolloutConfig, RolloutRecord, RolloutRequest, SamplingConfig
-from deepspeed.runtime.rollout.continuous_batching import ToolQueue
+from deepspeed.runtime.rollout.hybrid_engine_rollout import PostTurnRouter
 from deepspeed.runtime.rollout.tool import Tool, ToolCall, ToolSet, parse_qwen3_coder_tool_calls
 from deepspeed.runtime.rollout.utils import get_eos_token_ids, tokenize_tool_responses
 from deepspeed.runtime.rollout.hybrid_engine_rollout import (
@@ -1949,7 +1949,7 @@ class _EchoTextTool(Tool):
 
 
 @patch("deepspeed.runtime.rollout.hybrid_engine_rollout.tokenize_tool_responses", return_value=[9])
-def test_tool_queue_takes_tool_output_from_the_first_tensor_parallel_rank(tokenize):
+def test_post_turn_router_takes_tool_output_from_the_first_tensor_parallel_rank(tokenize):
     """Only the first rank runs the tools; the others append the output it sends, so the group stays in step."""
     sent = []
 
@@ -1972,17 +1972,17 @@ def test_tool_queue_takes_tool_output_from_the_first_tensor_parallel_rank(tokeni
     rollout._end_turn = lambda *_args: [ToolCall(name="echo", arguments={"text": "é \ud800"})]
     fake = FakeDist()
     records = {}
-    with patch("deepspeed.runtime.rollout.continuous_batching.dist", fake):
+    with patch("deepspeed.runtime.rollout.hybrid_engine_rollout.dist", fake):
         for rank in (0, 1):
             fake.rank = rank
             records[rank] = [_prompt([1, 3])]
-            with ToolQueue(rollout, records[rank], max_new_tokens=8, group=object(), src=0) as queue:
-                queue.retire(0, [5, 2], None)
-                assert queue.busy
-                queue.wait()
-                assert queue.pop_ready() == [0]
-                assert not queue.busy
-                assert queue.tool_ms > 0.0
+            with PostTurnRouter(rollout, records[rank], max_new_tokens=8, group=object(), src=0) as router:
+                router.retire(0, [5, 2], None)
+                assert router.busy
+                router.wait()
+                assert router.pop_ready() == [0]
+                assert not router.busy
+                assert router.tool_ms > 0.0
 
     assert tool.calls == 1
     assert not sent
@@ -1998,7 +1998,7 @@ class _SlowEchoTool(_EchoTextTool):
 
 
 @patch("deepspeed.runtime.rollout.hybrid_engine_rollout.tokenize_tool_responses", return_value=[9])
-def test_tool_queue_drain_waits_for_every_running_tool(_tokenize):
+def test_post_turn_router_drain_waits_for_every_running_tool(_tokenize):
     """Static batching starts the next turn only once every trajectory's tools have returned."""
     tool = _SlowEchoTool()
     rollout = HybridEngineRollout(_make_engine(), _make_tokenizer(),
@@ -2006,17 +2006,17 @@ def test_tool_queue_drain_waits_for_every_running_tool(_tokenize):
     calls = {0: "fast", 1: "slow"}
     rollout._end_turn = lambda sample, *_args: [ToolCall(name="echo", arguments={"text": calls[sample.tokens[0]]})]
     records = [_prompt([0, 3]), _prompt([1, 3])]
-    with ToolQueue(rollout, records, max_new_tokens=8) as queue:
-        queue.retire(0, [5, 2], None)
-        queue.retire(1, [6, 2], None)
-        assert sorted(queue.drain()) == [0, 1]
-        assert not queue.busy
+    with PostTurnRouter(rollout, records, max_new_tokens=8) as router:
+        router.retire(0, [5, 2], None)
+        router.retire(1, [6, 2], None)
+        assert sorted(router.drain()) == [0, 1]
+        assert not router.busy
 
     assert tool.calls == 2
     assert [record.tokens for record in records] == [[0, 3, 5, 2, 9], [1, 3, 6, 2, 9]]
 
 
-def test_tool_queue_sends_only_a_size_when_no_tool_finished():
+def test_post_turn_router_sends_only_a_size_when_no_tool_finished():
     sizes = []
 
     class FakeDist:
@@ -2030,9 +2030,9 @@ def test_tool_queue_sends_only_a_size_when_no_tool_finished():
 
     rollout = HybridEngineRollout(_make_engine(), _make_tokenizer(),
                                   HybridEngineRolloutConfig(multi_turn=True, max_turns=2))
-    with patch("deepspeed.runtime.rollout.continuous_batching.dist", FakeDist()):
-        queue = ToolQueue(rollout, [_prompt([1, 3])], max_new_tokens=8, group=object(), src=0)
-        assert queue.pop_ready() == []
+    with patch("deepspeed.runtime.rollout.hybrid_engine_rollout.dist", FakeDist()):
+        router = PostTurnRouter(rollout, [_prompt([1, 3])], max_new_tokens=8, group=object(), src=0)
+        assert router.pop_ready() == []
     assert len(sizes) == 1
 
 

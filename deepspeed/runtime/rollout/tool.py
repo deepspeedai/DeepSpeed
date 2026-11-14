@@ -3,6 +3,7 @@
 # DeepSpeed Team
 """Tools the model can call during multi-turn rollout, and parsers for the calls it emits."""
 
+import asyncio
 import json
 import re
 from abc import ABC, abstractmethod
@@ -61,6 +62,10 @@ class ToolSet:
             return str(await tool.execute(call.arguments))
         except Exception as error:  # noqa: BLE001 - any tool failure is reported to the model
             return f"Error: {type(error).__name__}: {error}"
+
+    async def run_all(self, calls: Sequence["ToolCall"]) -> List[str]:
+        """Run one turn's calls concurrently, and return their outputs in call order."""
+        return list(await asyncio.gather(*(self.run(call) for call in calls)))
 
     def __len__(self) -> int:
         return len(self.tools)

@@ -6,6 +6,8 @@ from dataclasses import replace
 
 import torch
 
+import deepspeed.comm as dist
+
 
 def get_repetition_penalty(sampling, module):
     if sampling.repetition_penalty is not None:
@@ -144,3 +146,40 @@ def full_vocabulary_logits(module):
     finally:
         for head, gather_output in zip(heads, previous):
             head.gather_output = gather_output
+
+
+def sampled_log_prob_recorder(temperature: float = 1.0):
+    """Return ``(processor, finish)`` that record each sampled token's log-probability."""
+    steps = []
+    previous = []
+
+    def processor(input_ids, scores):
+        if previous:
+            steps.append(previous.pop().gather(1, input_ids[:, -1:]))
+        previous.append(torch.log_softmax(scores.float() / temperature, dim=-1))
+        return scores
+
+    def finish(last_tokens):
+        steps.append(previous.pop().gather(1, last_tokens))
+        return torch.cat(steps, dim=1)
+
+    return processor, finish
+
+
+def host_tensor_parallel_group():
+    """A Gloo group over this rank's AutoTP group, and the group's first rank, for sending tool output on the host."""
+    from deepspeed.utils import groups
+
+    tp_group = groups.get_tensor_model_parallel_group()
+    # A tensor-parallel group spanning every rank can be the default group, for which get_global_rank is the
+    # identity and never raises, so count the ranks rather than probe until an error as get_all_ranks_from_group does.
+    ranks = tuple(dist.get_global_rank(tp_group, rank) for rank in range(dist.get_world_size(group=tp_group)))
+    all_ranks = [None] * dist.get_world_size()
+    dist.all_gather_object(all_ranks, ranks)
+    own_group = None
+    # Every rank creates every group, in the same order.
+    for group_ranks in sorted(set(map(tuple, all_ranks))):
+        group = dist.new_group(list(group_ranks), backend="gloo")
+        if group_ranks == ranks:
+            own_group = group
+    return own_group, groups.get_tensor_model_parallel_src_rank()
