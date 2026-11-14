@@ -10,12 +10,32 @@ import pytest
 import deepspeed
 import deepspeed.comm as dist
 from deepspeed.accelerator import get_accelerator
+from deepspeed.runtime.zero import parameter_offload
 from deepspeed.runtime.zero.partition_parameters import (MultipleAllGatherHandles, ZeroParamStatus,
                                                          partitioned_param_data_shape)
 
 from unit.common import DistributedTest, preferred_dtype, reduce_boolean_flags
 from unit.simple_model import SimpleModel
 from utils import setup_serial_env
+
+
+@pytest.mark.parametrize("external_access", [False, True])
+def test_available_parameter_access_registers_only_external_dependencies(monkeypatch, external_access):
+    """Residency must not hide an external dependency from the parameter trace."""
+    owner = torch.nn.Linear(2, 2, bias=False)
+    parameter = next(owner.parameters())
+    parameter.ds_status = ZeroParamStatus.AVAILABLE
+    parameters = parameter_offload.ZeROOrderedDict(parent_module=owner)
+    parameters.update(owner._parameters)
+    parameters._in_forward = True
+    owner._parameters = parameters
+    consumer = torch.nn.Module() if external_access else owner
+    parameter_offload._init_external_params(consumer)
+    monkeypatch.setattr(parameter_offload, "FWD_MODULE_STACK", [consumer])
+
+    assert owner.weight.dtype == parameter.dtype
+    external_parameters = dict(consumer.ds_external_parameters())
+    assert external_parameters == ({id(parameter): parameter} if external_access else {})
 
 
 # Test that no sub-class or super-class is missed
