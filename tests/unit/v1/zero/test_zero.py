@@ -1962,6 +1962,8 @@ class TestZero3OffloadPinnedCopyBack(DistributedTest):
             copy_pinned_master(dst, src)
 
         optimizer._copy_pinned_master_to_device = counting_copy
+        # This test covers the copy above; the bf16 copy written by DeepSpeedCPUAdam is TestZero3CpuAdamCopyBack's.
+        optimizer._can_copy_back_from_cpu_adam = lambda sub_group_id: False
         torch.manual_seed(1)
         data_loader = random_dataloader(model=model,
                                         total_samples=6,
@@ -2085,6 +2087,222 @@ class TestZero3Fp32SharesMasterWeights(DistributedTest):
 
         for param, reference_param in zip(engine.module.parameters(), reference.parameters()):
             torch.testing.assert_close(safe_get_full_fp32_param(param), reference_param, rtol=1e-5, atol=1e-6)
+
+
+class _SometimesUsedLayerModel(Module):
+    """SimpleModel's loss over a few layers, plus one layer that runs only while ``use_extra`` is set."""
+
+    def __init__(self, hidden_dim):
+        super().__init__()
+        self.linears = ModuleList([Linear(hidden_dim, hidden_dim) for _ in range(3)])
+        self.extra = Linear(hidden_dim, hidden_dim)
+        self.use_extra = True
+        self.cross_entropy_loss = torch.nn.CrossEntropyLoss()
+
+    def forward(self, x, y):
+        for layer in self.linears:
+            x = layer(x)
+        if self.use_extra:
+            x = self.extra(x)
+        return self.cross_entropy_loss(x, y)
+
+
+def _train_zero3_cpu_offload(ratio,
+                             clip,
+                             pin_memory=True,
+                             dtype="bf16",
+                             piece_numel=None,
+                             patch=None,
+                             sometimes_used_layer=False,
+                             overflow_first_step=False):
+    """3 steps of ZeRO-3 with the optimizer offloaded to the CPU (sub-groups much smaller than the model);
+    ``patch(optimizer)`` runs after initialization. With ``sometimes_used_layer``, one layer runs only in the first step.
+    With ``overflow_first_step``, the first loss is multiplied by inf. Returns (parameters after training, their
+    gradients as safe_get_full_grad reads them after the last step, engine)."""
+    hidden_dim = 256
+    config_dict = {
+        "train_micro_batch_size_per_gpu": 2,
+        "gradient_clipping": clip,
+        "optimizer": {
+            "type": "Adam",
+            "params": {
+                "lr": 1e-3
+            }
+        },
+        "zero_optimization": {
+            "stage": 3,
+            "sub_group_size": 20000,
+            "offload_optimizer": {
+                "device": "cpu",
+                "pin_memory": pin_memory,
+                "ratio": ratio
+            }
+        },
+    }
+    if dtype == "bf16":
+        config_dict["bf16"] = {"enabled": True}
+    else:
+        config_dict["fp16"] = {"enabled": True, "initial_scale_power": 8, "hysteresis": 1}
+    torch.manual_seed(0)
+    model = _SometimesUsedLayerModel(hidden_dim) if sometimes_used_layer else SimpleModel(hidden_dim, nlayers=4)
+    model, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config_dict)
+    if piece_numel is not None:
+        model.optimizer._cpu_adam_copy_piece_numel = piece_numel
+    if patch is not None:
+        patch(model.optimizer)
+    torch.manual_seed(1)
+    data_loader = random_dataloader(model=model,
+                                    total_samples=6,
+                                    hidden_dim=hidden_dim,
+                                    device=model.device,
+                                    dtype=torch.bfloat16 if dtype == "bf16" else torch.half)
+    for step, batch in enumerate(data_loader):
+        if sometimes_used_layer:
+            model.module.use_extra = step == 0
+        loss = model(batch[0], batch[1])
+        if overflow_first_step and step == 0:
+            loss = loss * float("inf")
+        model.backward(loss)
+        model.step()
+    params = []
+    for p in model.module.parameters():
+        with deepspeed.zero.GatheredParameters([p]):
+            params.append(p.detach().clone().cpu())
+    grads = [safe_get_full_grad(p).detach().clone().cpu() for p in model.module.parameters()]
+    return params, grads, model
+
+
+def _scale_gradients_in_place(optimizer):
+    """The reference: every sub-group's gradients are scaled in place before a plain CPU Adam step."""
+    optimizer._grad_scale_for_cpu_adam = lambda sub_group_id, total_norm: None
+
+
+def _record_grad_scales(factors):
+
+    def patch(optimizer):
+        original = optimizer._grad_scale_for_cpu_adam
+
+        def wrapped(sub_group_id, total_norm):
+            factor = original(sub_group_id, total_norm)
+            factors.append(factor)
+            return factor
+
+        optimizer._grad_scale_for_cpu_adam = wrapped
+
+    return patch
+
+
+@pytest.mark.skipif(not get_accelerator().is_bf16_supported(), reason="bf16 is not supported on this accelerator")
+@pytest.mark.parametrize("ratio", [1.0, 0.5])
+@pytest.mark.parametrize("clip", [1e-3, 1e6])
+@pytest.mark.parametrize("pin_memory", [True, False])
+class TestZero3CpuAdamGradScale(DistributedTest):
+    """For CPU sub-groups, ZeRO-3 passes the clipping factor to DeepSpeedCPUAdam, which applies it while loading each
+    gradient, instead of multiplying the CPU gradients in place first. The same float multiply, so the parameters after
+    training, and the gradients read after the last step, must be bitwise equal to the in-place path. Clip 1e-3 clips
+    every step (factor below 1); clip 1e6 never does (factor 1)."""
+    world_size = 2
+
+    def test(self, ratio, clip, pin_memory):
+        factors = []
+        separate, separate_grads, _ = _train_zero3_cpu_offload(ratio,
+                                                               clip,
+                                                               pin_memory=pin_memory,
+                                                               patch=_scale_gradients_in_place)
+        fused, fused_grads, _ = _train_zero3_cpu_offload(ratio,
+                                                         clip,
+                                                         pin_memory=pin_memory,
+                                                         patch=_record_grad_scales(factors))
+        used = [f for f in factors if f is not None]
+        assert used, "no sub-group took the fused path"
+        assert all(f < 1.0 for f in used) if clip < 1.0 else all(f == 1.0 for f in used)
+        assert len(separate) == len(fused)
+        for a, b in zip(separate + separate_grads, fused + fused_grads):
+            assert torch.equal(a, b)
+
+
+@pytest.mark.skipif(not get_accelerator().is_bf16_supported(), reason="bf16 is not supported on this accelerator")
+@pytest.mark.parametrize("ratio", [1.0, 0.5])
+class TestZero3CpuAdamCopyBack(DistributedTest):
+    """For CPU sub-groups with pinned memory, one DeepSpeedCPUAdam pass updates the fp32 parameters and writes their
+    bfloat16 copy into two pinned buffers that are copied to the device piece by piece, instead of an Adam pass followed
+    by copying the fp32 master to the device and casting it there. The parameters after training must be bitwise equal
+    to the separate passes. Pieces much smaller than a sub-group reuse both buffers many times per step."""
+    world_size = 2
+
+    def test(self, ratio):
+        if get_accelerator().device_name() == "cpu":
+            pytest.skip("on the CPU accelerator the partitions never leave the host, so there is nothing to copy back")
+        calls = []
+
+        def record(optimizer):
+            original = optimizer._cpu_adam_step_and_copy_back
+
+            def wrapped(sub_group_id, grad_scale):
+                calls.append(sub_group_id)
+                return original(sub_group_id, grad_scale)
+
+            optimizer._cpu_adam_step_and_copy_back = wrapped
+
+        separate, _, _ = _train_zero3_cpu_offload(ratio, 1e-3, piece_numel=1000, patch=_scale_gradients_in_place)
+        fused, _, _ = _train_zero3_cpu_offload(ratio, 1e-3, piece_numel=1000, patch=record)
+        assert calls, "no sub-group took the fused copy-back path"
+        assert len(separate) == len(fused)
+        for a, b in zip(separate, fused):
+            assert torch.equal(a, b)
+
+
+@pytest.mark.skipif(not get_accelerator().is_bf16_supported(), reason="bf16 is not supported on this accelerator")
+@pytest.mark.parametrize("pin_memory", [True, False])
+class TestZero3CpuAdamUnusedLayer(DistributedTest):
+    """A layer used only in the first step: its offloaded gradient is not overwritten afterwards, the optimizer reads
+    it again in every later step, and the in-place path multiplies it by every step's factor. With every sub-group on
+    the fused path, the parameters after training, and the gradients read after the last step, must be bitwise equal
+    to the in-place path."""
+    world_size = 2
+
+    def test(self, pin_memory):
+        factors = []
+        separate, separate_grads, _ = _train_zero3_cpu_offload(1.0,
+                                                               1e-3,
+                                                               pin_memory=pin_memory,
+                                                               patch=_scale_gradients_in_place,
+                                                               sometimes_used_layer=True)
+        fused, fused_grads, _ = _train_zero3_cpu_offload(1.0,
+                                                         1e-3,
+                                                         pin_memory=pin_memory,
+                                                         patch=_record_grad_scales(factors),
+                                                         sometimes_used_layer=True)
+        assert factors and all(f is not None for f in factors), "a sub-group did not take the fused path"
+        assert len(separate) == len(fused)
+        for a, b in zip(separate + separate_grads, fused + fused_grads):
+            assert torch.equal(a, b)
+
+
+@pytest.mark.skipif(not get_accelerator().is_fp16_supported(), reason="fp16 is not supported on this accelerator")
+class TestZero3CpuAdamFp16Overflow(DistributedTest):
+    """fp16 with a dynamic loss scale and an overflow in the first step: the step is skipped and the loss scale lowered
+    on both paths, and the later fused steps (the factor includes the loss scale) match the in-place path bitwise."""
+    world_size = 2
+
+    def test(self):
+        factors = []
+        separate, _, separate_engine = _train_zero3_cpu_offload(1.0,
+                                                                1.0,
+                                                                dtype="fp16",
+                                                                patch=_scale_gradients_in_place,
+                                                                overflow_first_step=True)
+        fused, _, fused_engine = _train_zero3_cpu_offload(1.0,
+                                                          1.0,
+                                                          dtype="fp16",
+                                                          patch=_record_grad_scales(factors),
+                                                          overflow_first_step=True)
+        assert any(f is not None for f in factors), "no sub-group took the fused path"
+        assert fused_engine.skipped_steps == separate_engine.skipped_steps == 1
+        assert fused_engine.optimizer.loss_scale == separate_engine.optimizer.loss_scale
+        assert fused_engine.optimizer.loss_scale < 2**8
+        for a, b in zip(separate, fused):
+            assert torch.equal(a, b)
 
 
 @pytest.mark.parametrize("training", [True, False])
