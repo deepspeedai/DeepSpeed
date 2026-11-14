@@ -456,6 +456,61 @@ class TestOneCycle(DistributedTest):
         if decay_rate > 0:
             _verify_continuous_increase(step_moms[(step_size * 2):])
 
+    def test_mom_betas_applied_through_training_step(self):
+        # The beta fix (cycle only betas[0], keep each group's beta2) must survive an
+        # actual optimizer update, not just scheduler.step() on a bare optimizer. Run a
+        # full DeepSpeed training step and confirm the scheduled momentum reaches the
+        # optimizer while each group's beta2 is preserved.
+        config_dict = {
+            "train_batch_size": 2,
+            "steps_per_print": 1,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 0.001
+                },
+            },
+            "scheduler": {
+                "type": ONE_CYCLE,
+                "params": {
+                    CYCLE_MIN_LR: 1e-3,
+                    CYCLE_MAX_LR: 1e-2,
+                    CYCLE_MIN_MOM: 0.85,
+                    CYCLE_MAX_MOM: 0.95,
+                    DECAY_MOM_RATE: 0,
+                    CYCLE_FIRST_STEP_SIZE: 4,
+                    DECAY_STEP_SIZE: 4
+                }
+            },
+            "gradient_clipping": 1.0
+        }
+        hidden_dim = 10
+
+        model = SimpleModel(hidden_dim, empty_grad=False)
+        model, _, _, lr_scheduler = deepspeed.initialize(config=config_dict,
+                                                         model=model,
+                                                         model_parameters=model.parameters())
+        data_loader = random_dataloader(model=model,
+                                        total_samples=max(50, 4 * 3),
+                                        hidden_dim=hidden_dim,
+                                        device=model.device,
+                                        dtype=torch.float)
+
+        for n, batch in enumerate(data_loader):
+            loss = model(batch[0], batch[1])
+            model.backward(loss)
+            model.step()
+            lr_scheduler.step()
+            if n >= 4:
+                break
+
+        # After at least one step, betas[0] has been cycled away from max_mom while
+        # each group's beta2 is still its own value, not overwritten to 0.99.
+        betas = [group["betas"] for group in model.optimizer.param_groups]
+        beta2s = [b[1] for b in betas]
+        assert beta2s == pytest.approx([0.999, 0.95])
+        assert all(b[0] != 0.95 for b in betas), "betas[0] should have been cycled from max_mom"
+
 
 class TestWarmupCosineLR(DistributedTest):
     world_size = 1
@@ -843,7 +898,8 @@ def test_one_cycle_accepts_per_group_lr_and_momentum_lists():
     assert scheduler.min_lrs == pytest.approx([0.001, 0.002])
     assert scheduler.max_lrs == pytest.approx([0.01, 0.02])
     assert [group["lr"] for group in optimizer.param_groups] == pytest.approx([0.001, 0.002])
-    assert [group["betas"][0] for group in optimizer.param_groups] == pytest.approx([0.8, 0.85])
+    # The cycle starts at cycle_min_lr, where momentum is cycle_max_mom.
+    assert [group["betas"][0] for group in optimizer.param_groups] == pytest.approx([0.9, 0.95])
 
     # At the peak of the cycle each group reaches its own cycle_max_lr, and momentum is at
     # its own cycle_min_mom, rather than every group tracking group 0's values.
@@ -875,6 +931,44 @@ def test_one_cycle_rejects_wrong_length_per_group_lists(kwargs):
 
     with pytest.raises(ValueError):
         OneCycle(optimizer=optimizer, **{**defaults, **kwargs})
+
+
+def test_one_cycle_keeps_optimizer_beta2_and_starts_at_scheduled_momentum():
+    # OneCycle only cycles betas[0]. It used to overwrite every group's beta2 with 0.99 and to
+    # start from cycle_min_mom although get_mom() reports cycle_max_mom at the first step.
+    dense = torch.nn.Parameter(torch.zeros(1))
+    expert = torch.nn.Parameter(torch.zeros(1))
+    optimizer = torch.optim.Adam([{
+        "params": [dense],
+        "betas": (0.9, 0.999)
+    }, {
+        "params": [expert],
+        "betas": (0.9, 0.95)
+    }],
+                                 lr=0.01)
+
+    scheduler = OneCycle(optimizer=optimizer,
+                         cycle_min_lr=0.001,
+                         cycle_max_lr=0.01,
+                         cycle_first_step_size=4,
+                         cycle_second_step_size=4)
+
+    assert [mom for mom, _ in scheduler.get_mom()] == pytest.approx([0.9, 0.9])
+    assert [group["betas"] for group in optimizer.param_groups] == [(0.9, 0.999), (0.9, 0.95)]
+
+    for _ in range(3):
+        scheduler.step()
+    assert [group["betas"][1] for group in optimizer.param_groups] == pytest.approx([0.999, 0.95])
+
+
+def test_one_cycle_get_last_lr_before_first_step():
+    # The constructor already moves the optimizer to cycle_min_lr; get_last_lr() must report it
+    # instead of asserting, as WarmupLR, LRRangeTest and WarmupCosineLR do.
+    optimizer = _two_group_adam()
+
+    scheduler = OneCycle(optimizer=optimizer, cycle_min_lr=[0.001, 0.002], cycle_max_lr=0.01, cycle_first_step_size=5)
+
+    assert scheduler.get_last_lr() == pytest.approx([0.001, 0.002])
 
 
 def test_lr_range_test_staircase_is_an_opt_in_flag():
