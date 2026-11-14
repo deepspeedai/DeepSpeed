@@ -238,6 +238,30 @@ def test_timed_op_disabled_does_not_access_profiling_state(monkeypatch):
     timers.assert_not_called()
 
 
+def test_timed_op_passes_collective_group_to_comms_logger(monkeypatch):
+    from deepspeed.comm import comm
+
+    group = object()
+    backend_op = Mock(return_value='done')
+    backend = SimpleNamespace(using_mpi=False, all_reduce=backend_op)
+    logger = SimpleNamespace(enabled=True,
+                             prof_all=True,
+                             prof_ops=[],
+                             debug=False,
+                             append=Mock())
+    op_timer = Mock()
+    op_timer.elapsed.return_value = 1.0
+
+    monkeypatch.setattr(comm, 'cdb', backend)
+    monkeypatch.setattr(comm, 'comms_logger', logger)
+    monkeypatch.setattr(comm, 'get_accelerator', lambda: SimpleNamespace(synchronize=lambda: None))
+    monkeypatch.setattr(comm, 'timers', Mock(return_value=op_timer))
+
+    assert comm.all_reduce(torch.ones(4), group=group) == 'done'
+
+    logger.append.assert_called_once_with('all_reduce', 'all_reduce', 1.0, 16, group=group)
+
+
 @pytest.mark.parametrize('world_size', [1, 2, 4])
 @pytest.mark.parametrize('comm_op', ['broadcast_object_list', 'all_to_all'])
 def test_calc_bw_log_supports_object_and_list_collectives(monkeypatch, comm_op, world_size):
@@ -253,3 +277,51 @@ def test_calc_bw_log_supports_object_and_list_collectives(monkeypatch, comm_op, 
         expected_busbw *= (world_size - 1) / world_size
     assert tput == pytest.approx(expected_tput)
     assert busbw == pytest.approx(expected_busbw)
+
+
+def test_calc_bw_log_uses_subgroup_world_size_for_all_reduce(monkeypatch):
+    import deepspeed.comm as dist
+    from deepspeed.utils.comms_logging import calc_bw_log
+
+    subgroup = object()
+
+    def get_world_size(group=None):
+        return 2 if group is subgroup else 4
+
+    monkeypatch.setattr(dist, 'get_world_size', get_world_size)
+
+    size = 1024
+    duration = 2.0
+    subgroup_world_size = 2
+    expected_tput = size * 2 / duration * 8 / 1e6
+    expected_busbw = size / duration * (2 * (subgroup_world_size - 1) / subgroup_world_size) * 8 / 1e6
+
+    tput, busbw = calc_bw_log('all_reduce', size, duration, group=subgroup)
+
+    assert tput == pytest.approx(expected_tput)
+    assert busbw == pytest.approx(expected_busbw)
+
+
+def test_comms_logger_keeps_different_subgroup_sizes_separate(monkeypatch):
+    import deepspeed.comm as dist
+    from deepspeed.utils.comms_logging import CommsLogger
+
+    subgroup_a = object()
+    subgroup_b = object()
+
+    def get_world_size(group=None):
+        return {subgroup_a: 2, subgroup_b: 3}.get(group, 4)
+
+    monkeypatch.setattr(dist, 'get_world_size', get_world_size)
+    logger = object.__new__(CommsLogger)
+    logger.comms_dict = {}
+    logger.verbose = False
+
+    logger.append('all_reduce', 'all_reduce', 1.0, 1024, group=subgroup_a)
+    logger.append('all_reduce', 'all_reduce', 1.0, 1024, group=subgroup_b)
+
+    assert set(logger.comms_dict) == {
+        'all_reduce | [Group Size: 2]',
+        'all_reduce | [Group Size: 3]',
+    }
+    assert all(records[1024][0] == 1 for records in logger.comms_dict.values())
