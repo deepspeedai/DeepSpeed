@@ -697,6 +697,8 @@ class DeepSpeedEngine(Module):
         elif self.bfloat16_enabled():
             self.optimizer = self._configure_bf16_optimizer(optimizer=None)
 
+        self._configure_late_parameter_registry()
+
         self._optimized_linear_offload_setup()
 
         self.save_non_zero_checkpoint = False
@@ -3022,6 +3024,13 @@ class DeepSpeedEngine(Module):
         self._start_timers(self.engine_timers.forward_timers)
 
         if self.zero_optimization_partition_weights():
+            # Modules attached after initialization (e.g. PEFT modules_to_save
+            # wrappers) are created outside of deepspeed.zero.Init. Partition
+            # them before the hooks run so they are sharded like the rest of
+            # the model.
+            offload = getattr(self.optimizer, "parameter_offload", self.optimizer)
+            if hasattr(offload, "partition_pending_parameters"):
+                offload.partition_pending_parameters()
             # Enable automated discovery of external parameters by indicating that
             # we are in a forward pass.
             for module in self.module.modules():
@@ -5526,6 +5535,17 @@ class DeepSpeedEngine(Module):
         get_layer_named_buffers(self.module, prefix="")
 
         return buffer_names
+
+    def _configure_late_parameter_registry(self):
+        """Let ZeRO-3 refresh the checkpoint name map after partitioning late params."""
+        if not self.zero_optimization_partition_weights():
+            return
+        offload = getattr(self.optimizer, "parameter_offload", None)
+        if offload is not None and hasattr(offload, "set_param_registry_refresh"):
+            offload.set_param_registry_refresh(self._refresh_param_names)
+
+    def _refresh_param_names(self):
+        self.param_names = {param: name for name, param in self.module.named_parameters()}
 
     def _get_param_shape_func(self, param):
         return param.ds_shape if hasattr(param, 'ds_id') else param.shape
