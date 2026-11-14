@@ -4,12 +4,13 @@
 # DeepSpeed Team
 import os
 
-from .builder import CUDAOpBuilder, installed_cuda_version
+from .builder import CUDAOpBuilder
 
 
 class InferenceCutlassBuilder(CUDAOpBuilder):
     BUILD_VAR = "DS_BUILD_CUTLASS_OPS"
     NAME = "cutlass_ops"
+    MIN_COMPUTE_CAPABILITY = 8  # Only support Ampere and newer.
 
     def __init__(self, name=None):
         name = self.NAME if name is None else name
@@ -17,44 +18,6 @@ class InferenceCutlassBuilder(CUDAOpBuilder):
 
     def absolute_name(self):
         return f'deepspeed.inference.v2.kernels.cutlass_ops.{self.NAME}'
-
-    def is_compatible(self, verbose=False):
-        try:
-            import torch
-        except ImportError:
-            if verbose:
-                self.warning("Please install torch if trying to pre-compile inference kernels")
-            return False
-
-        cuda_okay = True
-        if not os.environ.get("DS_IGNORE_CUDA_DETECTION"):
-            if not self.is_rocm_pytorch() and torch.cuda.is_available():  #ignore-cuda
-                sys_cuda_major, _ = installed_cuda_version()
-                torch_cuda_major = int(torch.version.cuda.split('.')[0])
-                cuda_capability = self.cuda_capability_major()
-                if cuda_capability is not None and cuda_capability < 6:
-                    if verbose:
-                        self.warning("NVIDIA Inference is only supported on Pascal and newer architectures")
-                    cuda_okay = False
-                if cuda_capability is not None and cuda_capability >= 8:
-                    if torch_cuda_major < 11 or sys_cuda_major < 11:
-                        if verbose:
-                            self.warning("On Ampere and higher architectures please use CUDA 11+")
-                        cuda_okay = False
-        return super().is_compatible(verbose) and cuda_okay
-
-    def filter_ccs(self, ccs):
-        ccs_retained = []
-        ccs_pruned = []
-        for cc in [cc.split('.') for cc in ccs]:
-            if int(cc[0]) >= 8:
-                # Only support Ampere and newer
-                ccs_retained.append(cc)
-            else:
-                ccs_pruned.append(cc)
-        if len(ccs_pruned) > 0:
-            self.warning(f"Filtered compute capabilities {ccs_pruned}")
-        return ccs_retained
 
     def get_prefix(self):
         ds_path = self.deepspeed_src_path("deepspeed")
