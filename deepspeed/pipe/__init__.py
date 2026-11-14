@@ -4,4 +4,4 @@
 # DeepSpeed Team
 
 from ..runtime.pipe import PipelineModule, LayerSpec, TiedLayerSpec
-from ..runtime.pipe.dualpipev import DualPipeVModule
+from ..runtime.pipe.dualpipev import DualPipeVModule, WeightGradStore
