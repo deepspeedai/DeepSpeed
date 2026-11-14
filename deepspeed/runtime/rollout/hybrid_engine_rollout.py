@@ -365,6 +365,25 @@ class HybridEngineRollout(RolloutEngine):
         if self._graph_capture_enabled():
             raise ValueError("graph capture does not support flash_attention_2")
 
+    def _check_sampling(self, sampling: SamplingConfig) -> None:
+        return_log_probs = self.return_log_probs
+        if return_log_probs and sampling.temperature > 0.0 and (sampling.top_p < 1.0 or sampling.top_k > 0):
+            raise ValueError("return_log_probs requires top_p=1 and top_k<=0 when sampling")
+        repetition_penalty = get_repetition_penalty(sampling, self.engine.module)
+        if return_log_probs and repetition_penalty != 1.0:
+            logger.warning_once(f"return_log_probs with repetition_penalty={repetition_penalty}: a training forward "
+                                "pass cannot reproduce the recorded log-probs")
+
+    def _graph_capture_enabled(self):
+        """Whether to decode with a captured graph; a backend that only exposes a graph API has not opted in."""
+        if not self.use_graph_capture:
+            return False
+        if get_accelerator().is_graph_capture_supported():
+            return True
+        logger.warning_once("HybridEngineRollout: graph capture is not supported on the current accelerator; "
+                            "falling back to eager generation.")
+        return False
+
     def _sync_rng_across_tp(self):
         """Share the random state across each AutoTP group, so its ranks sample the same tokens."""
         if self.autotp_size <= 1:
@@ -608,223 +627,6 @@ class HybridEngineRollout(RolloutEngine):
                 "response_length": max(sample.response_length for sample in trajectories),
             })
             self._last_profile = profile
-
-    @torch.no_grad()
-    def _generate_continuous_graph(self, trajectories, sampling, num_prompts):
-        """Run continuous decoding with a fixed-capacity graph.
-
-        Scheduler slots stay attached to physical cache rows for their whole
-        lifetime. Retired rows are masked until a new prompt is prefetched into
-        them, so the captured decode always receives the same batch shape and
-        static tensor addresses. A turn that calls tools returns to the front of
-        the queue once they finish.
-        """
-        module = self.engine.module
-        if self.align_decode_fronts:
-            raise ValueError("continuous graph capture does not support aligned decode fronts")
-        if self.enable_cache_trimming:
-            raise ValueError("continuous graph capture does not support cache trimming")
-        max_batch_size = self.continuous_batch_size
-        turn_cap = sampling.max_new_tokens
-        if sampling.max_new_tokens_per_turn is not None:
-            turn_cap = min(turn_cap, sampling.max_new_tokens_per_turn)
-        # Rows hold their prompts without padding. A single turn needs no more than its prompt and budget; a
-        # multi-turn row may grow to the cap.
-        prompt_lengths = {request_id: sum(sample.attention_mask) for request_id, sample in enumerate(trajectories)}
-        longest_prompt = max(prompt_lengths.values())
-        minimum_cache_len = (self.max_out_tokens if self.multi_turn else min(self.max_out_tokens, longest_prompt +
-                                                                             turn_cap))
-        max_cache_len = (self.continuous_cache_capacity
-                         if self.continuous_cache_capacity is not None else minimum_cache_len)
-        if not self.multi_turn and max_cache_len < minimum_cache_len:
-            raise ValueError("continuous_cache_capacity must fit the prompt and all generated tokens")
-        max_positions = getattr(module.config, "max_position_embeddings", None)
-        if isinstance(max_positions, int) and max_cache_len > max_positions:
-            raise ValueError("continuous batching cache exceeds the model maximum position embeddings")
-
-        from deepspeed.utils.static_cache import DeepSpeedStaticCache
-
-        device = next(module.parameters()).device
-        model_dtype = next(module.parameters()).dtype
-        selector = _TokenSelector(sampling, get_repetition_penalty(sampling, module), max_batch_size,
-                                  self.return_log_probs)
-        pad_token_id = get_pad_token_id(self.tokenizer)
-        profile = self._start_continuous_profile() if self.enable_profiling else None
-        tool_queue = ToolQueue(self.tools, self._tool_group, self._tool_src)
-        scheduler = ContinuousBatchScheduler(max_batch_size, turn_cap)
-        responses = {}
-        response_log_probs = {}
-        for request_id, sample in enumerate(trajectories):
-            self._submit_turn(scheduler, sample, request_id, sampling, max_cache_len=max_cache_len)
-
-        state = self._get_continuous_graph_state(module, max_batch_size, max_cache_len, device, model_dtype,
-                                                 DeepSpeedStaticCache)
-        cache = state.cache
-        static_input = state.static_input
-        static_attention = state.static_attention
-        static_causal_attention = state.static_causal_attention
-        static_position_ids = state.static_position_ids
-        static_write_positions = state.static_write_positions
-        graph = state.graph
-        static_logits = state.static_logits
-        stats = {
-            "cache_capacity": max_cache_len,
-            "peak_cache_length": longest_prompt,
-            "cache_memory_bytes": self._continuous_cache_memory_bytes(cache, static_attention, static_write_positions),
-            "trim_count": 0,
-            "trimmed_columns": 0,
-            "trim_latency_ms": 0.0,
-            "trim_bytes_moved": 0,
-            "decode_steps": 0,
-        }
-
-        slot_by_request = {}
-        write_positions = {}
-        next_tokens = {}
-        next_log_probs = {}
-        eos_ids = self._eos_tensor(device)
-        update = scheduler.schedule()
-        with tool_queue:
-            while update.active or tool_queue.busy:
-                if not update.active:
-                    tool_queue.wait()
-                    self._resubmit_tool_turns(tool_queue, scheduler, trajectories, sampling, max_cache_len)
-                    update = scheduler.schedule()
-                    continue
-                if profile is not None:
-                    profile["active_batch_sizes"].append(len(update.active))
-
-                free_slots = [slot for slot in range(max_batch_size) if slot not in slot_by_request.values()]
-                admitted_ids = tuple(request.request_id for request in update.admitted)
-                admitted_slots = []
-                for request_id in admitted_ids:
-                    slot = free_slots.pop(0)
-                    slot_by_request[request_id] = slot
-                    # A returning turn's context holds the earlier turns and their tool output.
-                    prompt_lengths[request_id] = sum(trajectories[request_id].attention_mask)
-                    write_positions[request_id] = prompt_lengths[request_id]
-                    responses[request_id] = []
-                    response_log_probs[request_id] = []
-                    admitted_slots.append(slot)
-
-                if admitted_ids:
-                    prefill_start = self._profile_start(profile)
-                    prompt_ids, prompt_attention = left_pad_samples([trajectories[i] for i in admitted_ids],
-                                                                    pad_token_id)
-                    prompt_ids = prompt_ids.to(device)
-                    prompt_attention = prompt_attention.to(device)
-                    target_slots = torch.tensor(admitted_slots, dtype=torch.long, device=device)
-                    admitted_tokens, admitted_log_probs = self._continuous_prefill_per_row(
-                        module, prompt_ids, prompt_attention, cache, model_dtype, device, sampling, selector,
-                        target_slots, max_batch_size)
-                    self._profile_end(profile, "prefill_forward_ms", prefill_start, count="num_prefill_forwards")
-                    for index, (request_id, slot) in enumerate(zip(admitted_ids, admitted_slots)):
-                        static_attention[slot].zero_()
-                        static_attention[slot, :prompt_lengths[request_id]] = 1
-                        next_tokens[request_id] = admitted_tokens[index:index + 1]
-                        if admitted_log_probs is not None:
-                            next_log_probs[request_id] = admitted_log_probs[index:index + 1]
-
-                decode_ids = tuple(request_id for request_id in update.active_ids if request_id not in admitted_ids)
-                static_input.zero_()
-                static_position_ids.zero_()
-                # Captured replay always executes every physical row. Keep non-decoding
-                # rows away from their prefetched prompt KV until they become active.
-                static_write_positions.fill_(max_cache_len - 1)
-                if decode_ids:
-                    decode_slots = torch.tensor([slot_by_request[request_id] for request_id in decode_ids],
-                                                dtype=torch.long,
-                                                device=device)
-                    positions = torch.tensor([write_positions[request_id] for request_id in decode_ids],
-                                             dtype=torch.long,
-                                             device=device)
-                    static_input[decode_slots] = torch.cat([next_tokens[request_id] for request_id in decode_ids])
-                    # Rows hold their tokens from slot 0 without padding, so a row's position is its write position.
-                    static_position_ids[decode_slots, 0] = positions
-                    static_attention[decode_slots, positions] = 1
-                    static_write_positions[decode_slots] = positions
-                    self._update_static_causal_attention(static_attention, static_causal_attention)
-                    decode_start = self._profile_start(profile)
-                    get_accelerator().replay_graph(graph)
-                    self._profile_end(profile, "decode_forward_ms", decode_start, count="num_decode_forwards")
-                    decoded, decoded_log_probs = selector(static_logits[decode_slots, -1, :], decode_slots)
-                    for index, request_id in enumerate(decode_ids):
-                        next_tokens[request_id] = decoded[index:index + 1]
-                        if decoded_log_probs is not None:
-                            next_log_probs[request_id] = decoded_log_probs[index:index + 1]
-                        write_positions[request_id] += 1
-                    stats["decode_steps"] += 1
-
-                # One host read per step tells which active requests ended at EOS.
-                step_tokens = torch.cat([next_tokens[request_id] for request_id in update.active_ids])
-                ended = self._matches_eos(step_tokens[:, 0], eos_ids).tolist()
-                finished_ids = []
-                for request_id, token, is_eos in zip(update.active_ids, step_tokens.split(1), ended):
-                    responses[request_id].append(token)
-                    if self.return_log_probs:
-                        response_log_probs[request_id].append(next_log_probs[request_id])
-                    if is_eos:
-                        finished_ids.append(request_id)
-
-                # Finished tools are taken only when a row frees, the one time a returning turn can be admitted.
-                if tool_queue.busy and scheduler.will_free_slot(finished_ids):
-                    self._resubmit_tool_turns(tool_queue, scheduler, trajectories, sampling, max_cache_len)
-                scheduler_start = self._profile_start(profile)
-                rows_held = len(update.active)
-                update = scheduler.advance(finished_ids)
-                self._profile_end(profile, "scheduler_overhead_ms", scheduler_start)
-                self._trace_continuous_step(profile, rows_held, len(decode_ids), update, scheduler, tool_queue)
-                if write_positions:
-                    stats["peak_cache_length"] = max(stats["peak_cache_length"], max(write_positions.values()))
-                for request_id in update.retired:
-                    static_attention[slot_by_request.pop(request_id)].zero_()
-                    write_positions.pop(request_id, None)
-                    next_tokens.pop(request_id, None)
-                    next_log_probs.pop(request_id, None)
-                    self._finish_turn(trajectories, tool_queue, request_id, responses.pop(request_id),
-                                      response_log_probs.pop(request_id), sampling.max_new_tokens)
-
-        generation_end = self._profile_start(profile)
-        self._finish_continuous_stats(stats, profile, trajectories)
-        if profile is not None:
-            self._finish_continuous_profile(profile, num_prompts, sampling.n_samples_per_prompt,
-                                            [_generated_length(sample) for sample in trajectories],
-                                            [sample.response_length for sample in trajectories],
-                                            sum(sample.num_turns for sample in trajectories), tool_queue.tool_ms,
-                                            max_batch_size, longest_prompt, generation_end, generation_end)
-
-    def _finish_continuous_stats(self, stats, profile, trajectories):
-        if profile is not None:
-            profile["accelerator"].synchronize()
-            total_ms = (time.perf_counter() - profile["start"]) * 1000.0
-            stats["end_to_end_ms"] = total_ms
-            generated = sum(_generated_length(sample) for sample in trajectories)
-            stats["tokens_per_second"] = generated / (total_ms / 1000.0) if total_ms > 0.0 else 0.0
-        else:
-            stats["end_to_end_ms"] = None
-            stats["tokens_per_second"] = None
-        stats.setdefault("trim_bytes_moved", 0)
-        stats["trim_frequency"] = (stats["trim_count"] / stats["decode_steps"] if stats["decode_steps"] else 0.0)
-        self._last_continuous_stats = stats
-
-    def _check_sampling(self, sampling: SamplingConfig) -> None:
-        return_log_probs = self.return_log_probs
-        if return_log_probs and sampling.temperature > 0.0 and (sampling.top_p < 1.0 or sampling.top_k > 0):
-            raise ValueError("return_log_probs requires top_p=1 and top_k<=0 when sampling")
-        repetition_penalty = get_repetition_penalty(sampling, self.engine.module)
-        if return_log_probs and repetition_penalty != 1.0:
-            logger.warning_once(f"return_log_probs with repetition_penalty={repetition_penalty}: a training forward "
-                                "pass cannot reproduce the recorded log-probs")
-
-    def _graph_capture_enabled(self):
-        """Whether to decode with a captured graph; a backend that only exposes a graph API has not opted in."""
-        if not self.use_graph_capture:
-            return False
-        if get_accelerator().is_graph_capture_supported():
-            return True
-        logger.warning_once("HybridEngineRollout: graph capture is not supported on the current accelerator; "
-                            "falling back to eager generation.")
-        return False
 
     def _generate_tokens(self, prompt_ids, prompt_attn_mask, max_new_tokens, sampling, pad_token_id, row_budgets=None):
         module = self.engine.module
@@ -1151,40 +953,212 @@ class HybridEngineRollout(RolloutEngine):
                                             sum(sample.num_turns for sample in trajectories), tool_queue.tool_ms,
                                             max_batch_size, prompt_len, generation_end, generation_end)
 
-    @staticmethod
-    def _estimate_continuous_cache_len(prompt_len, max_new_tokens, max_batch_size):
-        """Estimate the largest cache span before the scheduler becomes empty."""
-        pending = list(max_new_tokens)
-        active = []
-        max_cache_len = prompt_len
-        busy_span = 0
+    @torch.no_grad()
+    def _generate_continuous_graph(self, trajectories, sampling, num_prompts):
+        """Run continuous decoding with a fixed-capacity graph.
 
-        while active or pending:
-            if not active:
-                active = pending[:max_batch_size]
-                pending = pending[max_batch_size:]
-                busy_span = 0
+        Scheduler slots stay attached to physical cache rows for their whole
+        lifetime. Retired rows are masked until a new prompt is prefetched into
+        them, so the captured decode always receives the same batch shape and
+        static tensor addresses. A turn that calls tools returns to the front of
+        the queue once they finish.
+        """
+        module = self.engine.module
+        if self.align_decode_fronts:
+            raise ValueError("continuous graph capture does not support aligned decode fronts")
+        if self.enable_cache_trimming:
+            raise ValueError("continuous graph capture does not support cache trimming")
+        max_batch_size = self.continuous_batch_size
+        turn_cap = sampling.max_new_tokens
+        if sampling.max_new_tokens_per_turn is not None:
+            turn_cap = min(turn_cap, sampling.max_new_tokens_per_turn)
+        # Rows hold their prompts without padding. A single turn needs no more than its prompt and budget; a
+        # multi-turn row may grow to the cap.
+        prompt_lengths = {request_id: sum(sample.attention_mask) for request_id, sample in enumerate(trajectories)}
+        longest_prompt = max(prompt_lengths.values())
+        minimum_cache_len = (self.max_out_tokens if self.multi_turn else min(self.max_out_tokens, longest_prompt +
+                                                                             turn_cap))
+        max_cache_len = (self.continuous_cache_capacity
+                         if self.continuous_cache_capacity is not None else minimum_cache_len)
+        if not self.multi_turn and max_cache_len < minimum_cache_len:
+            raise ValueError("continuous_cache_capacity must fit the prompt and all generated tokens")
+        max_positions = getattr(module.config, "max_position_embeddings", None)
+        if isinstance(max_positions, int) and max_cache_len > max_positions:
+            raise ValueError("continuous batching cache exceeds the model maximum position embeddings")
 
-            busy_span += 1
-            max_cache_len = max(max_cache_len, prompt_len + busy_span)
-            survivors = [remaining - 1 for remaining in active if remaining > 1]
-            free_slots = max_batch_size - len(survivors)
-            admitted = pending[:free_slots]
-            pending = pending[free_slots:]
+        from deepspeed.utils.static_cache import DeepSpeedStaticCache
 
-            if survivors:
-                active = survivors + admitted
-                continue
+        device = next(module.parameters()).device
+        model_dtype = next(module.parameters()).dtype
+        selector = _TokenSelector(sampling, get_repetition_penalty(sampling, module), max_batch_size,
+                                  self.return_log_probs)
+        pad_token_id = get_pad_token_id(self.tokenizer)
+        profile = self._start_continuous_profile() if self.enable_profiling else None
+        tool_queue = ToolQueue(self.tools, self._tool_group, self._tool_src)
+        scheduler = ContinuousBatchScheduler(max_batch_size, turn_cap)
+        responses = {}
+        response_log_probs = {}
+        for request_id, sample in enumerate(trajectories):
+            self._submit_turn(scheduler, sample, request_id, sampling, max_cache_len=max_cache_len)
 
-            if admitted:
-                active = admitted
-                # All previous rows retired, so the implementation resets the cache
-                # before prefilling the newly admitted requests.
-                busy_span = 0
-            else:
-                active = []
+        state = self._get_continuous_graph_state(module, max_batch_size, max_cache_len, device, model_dtype,
+                                                 DeepSpeedStaticCache)
+        cache = state.cache
+        static_input = state.static_input
+        static_attention = state.static_attention
+        static_causal_attention = state.static_causal_attention
+        static_position_ids = state.static_position_ids
+        static_write_positions = state.static_write_positions
+        graph = state.graph
+        static_logits = state.static_logits
+        stats = {
+            "cache_capacity": max_cache_len,
+            "peak_cache_length": longest_prompt,
+            "cache_memory_bytes": self._continuous_cache_memory_bytes(cache, static_attention, static_write_positions),
+            "trim_count": 0,
+            "trimmed_columns": 0,
+            "trim_latency_ms": 0.0,
+            "trim_bytes_moved": 0,
+            "decode_steps": 0,
+        }
 
-        return max_cache_len
+        slot_by_request = {}
+        write_positions = {}
+        next_tokens = {}
+        next_log_probs = {}
+        eos_ids = self._eos_tensor(device)
+        update = scheduler.schedule()
+        with tool_queue:
+            while update.active or tool_queue.busy:
+                if not update.active:
+                    tool_queue.wait()
+                    self._resubmit_tool_turns(tool_queue, scheduler, trajectories, sampling, max_cache_len)
+                    update = scheduler.schedule()
+                    continue
+                if profile is not None:
+                    profile["active_batch_sizes"].append(len(update.active))
+
+                free_slots = [slot for slot in range(max_batch_size) if slot not in slot_by_request.values()]
+                admitted_ids = tuple(request.request_id for request in update.admitted)
+                admitted_slots = []
+                for request_id in admitted_ids:
+                    slot = free_slots.pop(0)
+                    slot_by_request[request_id] = slot
+                    # A returning turn's context holds the earlier turns and their tool output.
+                    prompt_lengths[request_id] = sum(trajectories[request_id].attention_mask)
+                    write_positions[request_id] = prompt_lengths[request_id]
+                    responses[request_id] = []
+                    response_log_probs[request_id] = []
+                    admitted_slots.append(slot)
+
+                if admitted_ids:
+                    prefill_start = self._profile_start(profile)
+                    prompt_ids, prompt_attention = left_pad_samples([trajectories[i] for i in admitted_ids],
+                                                                    pad_token_id)
+                    prompt_ids = prompt_ids.to(device)
+                    prompt_attention = prompt_attention.to(device)
+                    target_slots = torch.tensor(admitted_slots, dtype=torch.long, device=device)
+                    admitted_tokens, admitted_log_probs = self._continuous_prefill_per_row(
+                        module, prompt_ids, prompt_attention, cache, model_dtype, device, sampling, selector,
+                        target_slots, max_batch_size)
+                    self._profile_end(profile, "prefill_forward_ms", prefill_start, count="num_prefill_forwards")
+                    for index, (request_id, slot) in enumerate(zip(admitted_ids, admitted_slots)):
+                        static_attention[slot].zero_()
+                        static_attention[slot, :prompt_lengths[request_id]] = 1
+                        next_tokens[request_id] = admitted_tokens[index:index + 1]
+                        if admitted_log_probs is not None:
+                            next_log_probs[request_id] = admitted_log_probs[index:index + 1]
+
+                decode_ids = tuple(request_id for request_id in update.active_ids if request_id not in admitted_ids)
+                static_input.zero_()
+                static_position_ids.zero_()
+                # Captured replay always executes every physical row. Keep non-decoding
+                # rows away from their prefetched prompt KV until they become active.
+                static_write_positions.fill_(max_cache_len - 1)
+                if decode_ids:
+                    decode_slots = torch.tensor([slot_by_request[request_id] for request_id in decode_ids],
+                                                dtype=torch.long,
+                                                device=device)
+                    positions = torch.tensor([write_positions[request_id] for request_id in decode_ids],
+                                             dtype=torch.long,
+                                             device=device)
+                    static_input[decode_slots] = torch.cat([next_tokens[request_id] for request_id in decode_ids])
+                    # Rows hold their tokens from slot 0 without padding, so a row's position is its write position.
+                    static_position_ids[decode_slots, 0] = positions
+                    static_attention[decode_slots, positions] = 1
+                    static_write_positions[decode_slots] = positions
+                    self._update_static_causal_attention(static_attention, static_causal_attention)
+                    decode_start = self._profile_start(profile)
+                    get_accelerator().replay_graph(graph)
+                    self._profile_end(profile, "decode_forward_ms", decode_start, count="num_decode_forwards")
+                    decoded, decoded_log_probs = selector(static_logits[decode_slots, -1, :], decode_slots)
+                    for index, request_id in enumerate(decode_ids):
+                        next_tokens[request_id] = decoded[index:index + 1]
+                        if decoded_log_probs is not None:
+                            next_log_probs[request_id] = decoded_log_probs[index:index + 1]
+                        write_positions[request_id] += 1
+                    stats["decode_steps"] += 1
+
+                # One host read per step tells which active requests ended at EOS.
+                step_tokens = torch.cat([next_tokens[request_id] for request_id in update.active_ids])
+                ended = self._matches_eos(step_tokens[:, 0], eos_ids).tolist()
+                finished_ids = []
+                for request_id, token, is_eos in zip(update.active_ids, step_tokens.split(1), ended):
+                    responses[request_id].append(token)
+                    if self.return_log_probs:
+                        response_log_probs[request_id].append(next_log_probs[request_id])
+                    if is_eos:
+                        finished_ids.append(request_id)
+
+                # Finished tools are taken only when a row frees, the one time a returning turn can be admitted.
+                if tool_queue.busy and scheduler.will_free_slot(finished_ids):
+                    self._resubmit_tool_turns(tool_queue, scheduler, trajectories, sampling, max_cache_len)
+                scheduler_start = self._profile_start(profile)
+                rows_held = len(update.active)
+                update = scheduler.advance(finished_ids)
+                self._profile_end(profile, "scheduler_overhead_ms", scheduler_start)
+                self._trace_continuous_step(profile, rows_held, len(decode_ids), update, scheduler, tool_queue)
+                if write_positions:
+                    stats["peak_cache_length"] = max(stats["peak_cache_length"], max(write_positions.values()))
+                for request_id in update.retired:
+                    static_attention[slot_by_request.pop(request_id)].zero_()
+                    write_positions.pop(request_id, None)
+                    next_tokens.pop(request_id, None)
+                    next_log_probs.pop(request_id, None)
+                    self._finish_turn(trajectories, tool_queue, request_id, responses.pop(request_id),
+                                      response_log_probs.pop(request_id), sampling.max_new_tokens)
+
+        generation_end = self._profile_start(profile)
+        self._finish_continuous_stats(stats, profile, trajectories)
+        if profile is not None:
+            self._finish_continuous_profile(profile, num_prompts, sampling.n_samples_per_prompt,
+                                            [_generated_length(sample) for sample in trajectories],
+                                            [sample.response_length for sample in trajectories],
+                                            sum(sample.num_turns for sample in trajectories), tool_queue.tool_ms,
+                                            max_batch_size, longest_prompt, generation_end, generation_end)
+
+    def _continuous_prefill_per_row(self, module, prompt_ids, prompt_attention, ds_cache, model_dtype, device,
+                                    sampling, selector, target_rows, cache_rows):
+        """Prefill left-padded prompts, store each row's tokens in its cache row without padding, and return each
+        row's first token and its log-prob."""
+        from transformers import StaticCache
+
+        width = prompt_ids.shape[1]
+        tokens, log_probs, prefill_cache = self._continuous_prefill_cache(module, StaticCache, prompt_ids,
+                                                                          prompt_attention, model_dtype, device,
+                                                                          sampling, selector, target_rows)
+        lengths = prompt_attention.sum(dim=1).tolist()
+        targets = target_rows.tolist()
+        for layer_idx, ds_layer in enumerate(ds_cache.layers):
+            hf_keys, hf_values = self._cache_layer_tensors(prefill_cache, layer_idx)
+            if not ds_layer.is_initialized:
+                ds_layer.lazy_initialization(hf_keys.new_empty(cache_rows, *hf_keys.shape[1:]),
+                                             hf_values.new_empty(cache_rows, *hf_values.shape[1:]))
+            # Left padding puts each row's real tokens at the end of the prompt's columns.
+            for row, (target, length) in enumerate(zip(targets, lengths)):
+                ds_layer.keys[target, :, :length] = hf_keys[row, :, width - length:width]
+                ds_layer.values[target, :, :length] = hf_values[row, :, width - length:width]
+        return tokens, log_probs
 
     def _get_continuous_graph_state(self, module, max_batch_size, max_cache_len, device, model_dtype, cache_type):
         signature = self._continuous_graph_signature(module, max_batch_size, max_cache_len, device, model_dtype)
@@ -1241,6 +1215,11 @@ class HybridEngineRollout(RolloutEngine):
         return (id(module), device.type, device.index, model_dtype, max_batch_size, max_cache_len, parameter_signature)
 
     @staticmethod
+    def _update_static_causal_attention(static_atten_mask, static_causal_atten_mask):
+        static_causal_atten_mask.copy_(static_atten_mask[:, None, None, :])
+        static_causal_atten_mask.neg_().add_(1).mul_(torch.finfo(static_causal_atten_mask.dtype).min)
+
+    @staticmethod
     def _capture_continuous_graph(module, cache, static_input, static_attention, static_write_positions,
                                   static_cache_position, static_position_ids):
         """Capture one fixed-capacity decode forward and return its static logits."""
@@ -1289,16 +1268,46 @@ class HybridEngineRollout(RolloutEngine):
         return graph, output.logits
 
     @staticmethod
-    def _update_static_causal_attention(static_atten_mask, static_causal_atten_mask):
-        static_causal_atten_mask.copy_(static_atten_mask[:, None, None, :])
-        static_causal_atten_mask.neg_().add_(1).mul_(torch.finfo(static_causal_atten_mask.dtype).min)
-
-    @staticmethod
     def _continuous_cache_exhaustion_error(max_cache_len):
         return ValueError(
             f"continuous batching cache capacity ({max_cache_len}) exhausted before active requests retired; "
             "increase HybridEngineRolloutConfig.continuous_cache_capacity or enable cache trimming with "
             "HybridEngineRolloutConfig(enable_cache_trimming=True)")
+
+    @staticmethod
+    def _estimate_continuous_cache_len(prompt_len, max_new_tokens, max_batch_size):
+        """Estimate the largest cache span before the scheduler becomes empty."""
+        pending = list(max_new_tokens)
+        active = []
+        max_cache_len = prompt_len
+        busy_span = 0
+
+        while active or pending:
+            if not active:
+                active = pending[:max_batch_size]
+                pending = pending[max_batch_size:]
+                busy_span = 0
+
+            busy_span += 1
+            max_cache_len = max(max_cache_len, prompt_len + busy_span)
+            survivors = [remaining - 1 for remaining in active if remaining > 1]
+            free_slots = max_batch_size - len(survivors)
+            admitted = pending[:free_slots]
+            pending = pending[free_slots:]
+
+            if survivors:
+                active = survivors + admitted
+                continue
+
+            if admitted:
+                active = admitted
+                # All previous rows retired, so the implementation resets the cache
+                # before prefilling the newly admitted requests.
+                busy_span = 0
+            else:
+                active = []
+
+        return max_cache_len
 
     @staticmethod
     def _continuous_dead_prefix(attention_mask, active_count):
@@ -1509,6 +1518,20 @@ class HybridEngineRollout(RolloutEngine):
             # rows still decoding after it, tokens decoded so far, turns queued and trajectories waiting on tools.
             "continuous_step_trace": profile["step_trace"],
         }
+
+    def _finish_continuous_stats(self, stats, profile, trajectories):
+        if profile is not None:
+            profile["accelerator"].synchronize()
+            total_ms = (time.perf_counter() - profile["start"]) * 1000.0
+            stats["end_to_end_ms"] = total_ms
+            generated = sum(_generated_length(sample) for sample in trajectories)
+            stats["tokens_per_second"] = generated / (total_ms / 1000.0) if total_ms > 0.0 else 0.0
+        else:
+            stats["end_to_end_ms"] = None
+            stats["tokens_per_second"] = None
+        stats.setdefault("trim_bytes_moved", 0)
+        stats["trim_frequency"] = (stats["trim_count"] / stats["decode_steps"] if stats["decode_steps"] else 0.0)
+        self._last_continuous_stats = stats
 
     def _continuous_prefill_cache(self, module, static_cache_type, prompt_ids, prompt_attention, model_dtype, device,
                                   sampling, selector, rows):
@@ -1728,29 +1751,6 @@ class HybridEngineRollout(RolloutEngine):
     # ------------------------------------------------------------------
     # Graph capture decode loop
     # ------------------------------------------------------------------
-
-    def _continuous_prefill_per_row(self, module, prompt_ids, prompt_attention, ds_cache, model_dtype, device,
-                                    sampling, selector, target_rows, cache_rows):
-        """Prefill left-padded prompts, store each row's tokens in its cache row without padding, and return each
-        row's first token and its log-prob."""
-        from transformers import StaticCache
-
-        width = prompt_ids.shape[1]
-        tokens, log_probs, prefill_cache = self._continuous_prefill_cache(module, StaticCache, prompt_ids,
-                                                                          prompt_attention, model_dtype, device,
-                                                                          sampling, selector, target_rows)
-        lengths = prompt_attention.sum(dim=1).tolist()
-        targets = target_rows.tolist()
-        for layer_idx, ds_layer in enumerate(ds_cache.layers):
-            hf_keys, hf_values = self._cache_layer_tensors(prefill_cache, layer_idx)
-            if not ds_layer.is_initialized:
-                ds_layer.lazy_initialization(hf_keys.new_empty(cache_rows, *hf_keys.shape[1:]),
-                                             hf_values.new_empty(cache_rows, *hf_values.shape[1:]))
-            # Left padding puts each row's real tokens at the end of the prompt's columns.
-            for row, (target, length) in enumerate(zip(targets, lengths)):
-                ds_layer.keys[target, :, :length] = hf_keys[row, :, width - length:width]
-                ds_layer.values[target, :, :length] = hf_values[row, :, width - length:width]
-        return tokens, log_probs
 
     def _generate_graph(self, prompt_ids, prompt_attn_mask, max_new_tokens, sampling, module, device):
         """Decode a static batch on a captured graph, greedy or sampled."""
