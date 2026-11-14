@@ -124,6 +124,7 @@ class AutoEPConfig:
     combine_impl: Literal["auto", "weighted_sum", "fused_weighted_sum", "legacy_bmm"] = "auto"
     row_weighting_impl: Literal["auto", "eager", "fused"] = "auto"
     gate_up_impl: Literal["separate", "fused"] = "separate"
+    overlap_weight_grad: bool = False
     comm_backend: Literal["comm", "deepep"] = "comm"
     comm_num_sm: int = 12
     comm_qp_margin: int = 4
