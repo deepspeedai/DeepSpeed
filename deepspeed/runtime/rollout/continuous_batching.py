@@ -181,9 +181,9 @@ class ToolQueue:
     """The tool queue of a multi-turn rollout.
 
     A request retired from the batch either leaves for good or waits here while the tools it called run on a
-    background event loop. In continuous batching the other rows keep decoding, and once its tools finish the request
-    leaves for the front of the pending queue with its tool output appended; static batching ``drain``s the queue
-    after each turn.
+    background event loop. In continuous batching the other rows keep decoding, and once its tools finish ``requeue``
+    sends the request to the front of the pending queue with its tool output appended; static batching ``drain``s the
+    queue after each turn.
 
     With AutoTP, the rollout passes a host-side ``group`` over the tensor-parallel group and its first rank ``src``:
     only ``src`` runs the tools, and ``pop_ready`` sends the finished ones to the other ranks, so the whole group
@@ -270,6 +270,26 @@ class ToolQueue:
             update_sample_from_response(sample, response, log_probs, tool_response, rollout.tokenizer)
             ready.append(i)
         return ready
+
+    def requeue(self, scheduler, sampling, max_cache_len=None):
+        """Send the turns whose tools finished to the front of ``scheduler``'s pending queue, and return their ids.
+
+        A turn's budget is what is left of the trajectory's, and with ``max_cache_len`` what is left of a cache row
+        holding its unpadded context; a turn with no budget left ends the trajectory as truncated.
+        """
+        requeued = []
+        for i in self.pop_ready():
+            sample = self.trajectories[i]
+            budget = self.rollout._turn_budget(sample, self.generated[i], sampling)
+            if max_cache_len is not None:
+                budget = min(budget, max_cache_len - sum(sample.attention_mask))
+            if budget <= 0:
+                sample.status = RolloutRecord.Status.TRUNCATED
+                continue
+            # A trajectory already in progress goes before those not yet started.
+            scheduler.submit(ContinuousBatchRequest(i, max_new_tokens=budget), front=True)
+            requeued.append(i)
+        return requeued
 
     def _share(self, finished):
         """The first rank's finished tools, on every rank of its group: a size, then the output as JSON bytes.

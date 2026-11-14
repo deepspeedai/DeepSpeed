@@ -35,7 +35,6 @@ from deepspeed.runtime.rollout.utils import (
     masked_lists,
     render_prompts,
     tokenize_tool_responses,
-    update_sample_from_response,
 )
 
 
@@ -655,8 +654,6 @@ class HybridEngineRollout(RolloutEngine):
                 sample.status = RolloutRecord.Status.TRUNCATED
                 continue
             scheduler.submit(ContinuousBatchRequest(request_id, max_new_tokens=budget))
-            responses[request_id] = []
-            response_log_probs[request_id] = []
 
         state = self._get_continuous_graph_state(module, max_batch_size, max_cache_len, device, model_dtype,
                                                  DeepSpeedStaticCache)
@@ -689,8 +686,7 @@ class HybridEngineRollout(RolloutEngine):
             while update.active or tool_queue.busy:
                 if not update.active:
                     tool_queue.wait()
-                    self._requeue_tool_turns(tool_queue, scheduler, sampling, prompt_lengths, responses,
-                                             response_log_probs, True, max_cache_len)
+                    tool_queue.requeue(scheduler, sampling, max_cache_len)
                     update = scheduler.schedule()
                     continue
                 if profile is not None:
@@ -702,7 +698,11 @@ class HybridEngineRollout(RolloutEngine):
                 for request_id in admitted_ids:
                     slot = free_slots.pop(0)
                     slot_by_request[request_id] = slot
+                    # A returning turn's context holds the earlier turns and their tool output.
+                    prompt_lengths[request_id] = sum(trajectories[request_id].attention_mask)
                     write_positions[request_id] = prompt_lengths[request_id]
+                    responses[request_id] = []
+                    response_log_probs[request_id] = []
                     admitted_slots.append(slot)
 
                 if admitted_ids:
@@ -767,8 +767,7 @@ class HybridEngineRollout(RolloutEngine):
 
                 # Finished tools are taken only when a row frees, the one time a returning turn can be admitted.
                 if tool_queue.busy and scheduler.will_free_slot(finished_ids):
-                    self._requeue_tool_turns(tool_queue, scheduler, sampling, prompt_lengths, responses,
-                                             response_log_probs, True, max_cache_len)
+                    tool_queue.requeue(scheduler, sampling, max_cache_len)
                 scheduler_start = self._profile_start(profile)
                 rows_held = len(update.active)
                 update = scheduler.advance(finished_ids)
@@ -791,36 +790,11 @@ class HybridEngineRollout(RolloutEngine):
                                             sum(tool_queue.turns), tool_queue.tool_ms, max_batch_size, longest_prompt,
                                             generation_end, generation_end)
 
-    def _requeue_tool_turns(self,
-                            tool_queue,
-                            scheduler,
-                            sampling,
-                            prompt_lengths,
-                            responses,
-                            response_log_probs,
-                            unpadded,
-                            max_cache_len=None):
-        """Queue the turns whose tools finished, with ``unpadded`` contexts and at most ``max_cache_len`` long."""
-        for request_id in tool_queue.pop_ready():
-            sample = tool_queue.trajectories[request_id]
-            prompt_lengths[request_id] = sum(sample.attention_mask) if unpadded else len(sample.tokens)
-            budget = self._turn_budget(sample, tool_queue.generated[request_id], sampling)
-            if max_cache_len is not None:
-                budget = min(budget, max_cache_len - prompt_lengths[request_id])
-            if budget <= 0:
-                sample.status = RolloutRecord.Status.TRUNCATED
-                continue
-            # A trajectory already in progress goes before those not yet started.
-            scheduler.submit(ContinuousBatchRequest(request_id, max_new_tokens=budget), front=True)
-            responses[request_id] = []
-            response_log_probs[request_id] = []
-
     def _continuous_turn(self, responses, response_log_probs, request_id):
         """A retired turn's tokens and log-probs, as lists."""
-        response = torch.cat(responses[request_id], dim=1)[0].tolist()
-        log_probs = None
-        if self.return_log_probs:
-            log_probs = torch.cat(response_log_probs[request_id], dim=1)[0].tolist()
+        response = torch.cat(responses.pop(request_id), dim=1)[0].tolist()
+        turn_log_probs = response_log_probs.pop(request_id)
+        log_probs = torch.cat(turn_log_probs, dim=1)[0].tolist() if self.return_log_probs else None
         return response, log_probs
 
     def _finish_continuous_stats(self, stats, profile, tool_queue):
@@ -985,8 +959,6 @@ class HybridEngineRollout(RolloutEngine):
                 trajectories[request_id].status = RolloutRecord.Status.TRUNCATED
                 continue
             scheduler.submit(ContinuousBatchRequest(request_id, max_new_tokens=budgets[request_id]))
-            responses[request_id] = []
-            response_log_probs[request_id] = []
         self._profile_end(profile, "scheduler_overhead_ms", scheduler_start)
 
         cache_start = self._profile_start(profile)
@@ -1019,12 +991,18 @@ class HybridEngineRollout(RolloutEngine):
             while update.active or tool_queue.busy:
                 if not update.active:
                     tool_queue.wait()
-                    self._requeue_tool_turns(tool_queue, scheduler, sampling, prompt_lengths, responses,
-                                             response_log_probs, self.align_decode_fronts)
+                    tool_queue.requeue(scheduler, sampling)
                     update = scheduler.schedule()
                     continue
                 if profile is not None:
                     profile["active_batch_sizes"].append(len(update.active))
+                for request in update.admitted:
+                    # A returning turn's context holds the earlier turns and their tool output.
+                    sample = trajectories[request.request_id]
+                    prompt_lengths[request.request_id] = (sum(sample.attention_mask)
+                                                          if self.align_decode_fronts else len(sample.tokens))
+                    responses[request.request_id] = []
+                    response_log_probs[request.request_id] = []
                 cache_start = self._profile_start(profile)
                 keep_slots = torch.tensor(update.keep_slots, dtype=torch.long, device=device)
                 survivor_count = keep_slots.numel()
@@ -1171,8 +1149,7 @@ class HybridEngineRollout(RolloutEngine):
                 stats["peak_cache_length"] = max(stats["peak_cache_length"], cache_position)
                 # Finished tools are taken only when a row frees, the one time a returning turn can be admitted.
                 if tool_queue.busy and scheduler.will_free_slot(finished_ids):
-                    self._requeue_tool_turns(tool_queue, scheduler, sampling, prompt_lengths, responses,
-                                             response_log_probs, self.align_decode_fronts)
+                    tool_queue.requeue(scheduler, sampling)
                 scheduler_start = self._profile_start(profile)
                 rows_held = len(update.active)
                 update = scheduler.advance(finished_ids)
