@@ -5,6 +5,7 @@
 import gc
 import os
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -233,6 +234,33 @@ def test_static_graph_matches_native_llama_generation(attn_implementation):
                               SamplingConfig(max_new_tokens=new_tokens, temperature=0))
 
     assert output.input_ids.tolist() == expected.tolist()
+
+
+def test_continuous_graph_first_call_benchmark_on_cuda():
+    accelerator = get_accelerator()
+    if not accelerator.is_available() or accelerator.device_name() != "cuda":
+        pytest.skip("CUDA is required for CUDA graph benchmark coverage")
+
+    from benchmarks.rollout.bench_cuda_graph_first_call import parse_args, run_benchmark
+
+    args = parse_args([
+        "--requests", "3", "--batch-size", "2", "--prompt-len", "4", "--max-new-tokens", "3", "--iterations", "2",
+        "--dtype", "float32"
+    ])
+    # Unchanged shapes must reuse captures until the optimizer updates weights.
+    with patch.object(accelerator, "capture_to_graph", wraps=accelerator.capture_to_graph) as capture:
+        report = run_benchmark(args)
+        assert capture.call_count == 2
+
+    assert report["outputs_match"]
+    assert torch.isfinite(torch.tensor(report["training_update"]["loss"]))
+    for mode in ("eager", "graph"):
+        for phase, measurement in report["results"][mode].items():
+            iterations = 2 if phase.startswith("steady_state") else 1
+            assert len(measurement["latencies_ms"]) == iterations
+            assert measurement["generated_tokens"] == 3 * 3 * iterations
+            assert all(latency > 0 for latency in measurement["latencies_ms"])
+            assert measurement["tokens_per_second"] > 0
 
 
 def test_continuous_generation_profile_on_accelerator():
