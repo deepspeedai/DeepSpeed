@@ -378,6 +378,7 @@ class ZeROOptimizer(DeepSpeedOptimizer):
             optim_state_path), f'{optim_state_path} containing optimizer global state is missing! Cannot proceed.'
         optim_sd = torch.load(optim_state_path, weights_only=False)
         self._load_global_state(optim_sd)
+        global_step = None
 
         for i, (param_group,
                 loaded_param_group) in enumerate(zip(self.optimizer.param_groups, optim_sd['param_groups'])):
@@ -397,6 +398,12 @@ class ZeROOptimizer(DeepSpeedOptimizer):
 
             hp_param = param_group['params'][0]
             assert all(step == steps[0] for step in steps), f"Steps {steps} are not equal"
+            if steps[0] is None:
+                # A ZeRO-3 source writes no per-parameter step.pt; its step is in the global state.
+                if global_step is None:
+                    from deepspeed.checkpoint.universal_checkpoint import load_universal_optimizer_step
+                    global_step = load_universal_optimizer_step(optim_sd, checkpoint_dir, [])
+                steps[0] = global_step
             if steps[0] is not None:
                 self.optimizer.state[hp_param]['step'] = steps[0]
 

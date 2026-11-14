@@ -44,6 +44,7 @@ from deepspeed.checkpoint.constants import (
     EP_IS_EXPERT_PARAM,
     EP_NUM_EXPERTS,
     OPTIMIZER_STATE_DICT,
+    PARAM_GROUPS,
     FP32_FLAT_GROUPS,
     PARAM,
     PARTITION_COUNT,
@@ -3881,7 +3882,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         self._load_global_state_stage3(optim_sd)
 
         # Generally the step of each optimizer file should be the same, we can obtain from any parameter.
-        state_step = optim_sd[OPTIMIZER_STATE_DICT]['state'][0]['step']
+        from deepspeed.checkpoint.universal_checkpoint import load_universal_optimizer_step
+        state_step = load_universal_optimizer_step(optim_sd, checkpoint_dir, self.param_names.values())
         for key in ["fp32", "exp_avg", "exp_avg_sq"]:
             for sub_group_id, fp16_group in enumerate(self.fp16_groups):
                 fp32_param = self.fp32_partitioned_groups_flat[sub_group_id]
@@ -3898,13 +3900,16 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                     offset += key_layer_state_partition.numel()
                 if key == "fp32":
                     self.fp32_partitioned_groups_flat[sub_group_id].data.copy_(key_tensor)
-                    self.optimizer.state[fp32_param]['step'] = state_step
+                    if state_step is not None:
+                        self.optimizer.state[fp32_param]['step'] = state_step
                 else:
                     self.optimizer.state[fp32_param][key] = key_tensor
 
         for param_group in self.optimizer.param_groups:
             # Generally, the hyperparameters of each parameter should be the same, we can obtain from any parameter.
-            for key, value in optim_sd[OPTIMIZER_STATE_DICT]["param_groups"][0].items():
+            # A ZeRO-1/2 source has no OPTIMIZER_STATE_DICT, only the top-level PARAM_GROUPS.
+            param_groups = optim_sd.get(PARAM_GROUPS) or optim_sd[OPTIMIZER_STATE_DICT][PARAM_GROUPS]
+            for key, value in param_groups[0].items():
                 if key == 'params':
                     param_group['params'] = []
                 else:

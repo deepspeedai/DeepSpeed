@@ -20,6 +20,7 @@ import tqdm
 
 from deepspeed.checkpoint import DeepSpeedCheckpoint
 from deepspeed.checkpoint import (
+    DS_VERSION,
     OPTIMIZER_STATE_DICT,
     ZERO_STAGE,
     BASE_OPTIMIZER_STATE,
@@ -1001,6 +1002,9 @@ def _save_optimizer_state_stage3(args, optim_files):
     sd = torch.load(optim_files[0], map_location=torch.device('cpu'), weights_only=False)
     output_sd = sd[OPTIMIZER_STATE_DICT]
     output_sd[PARAM_GROUPS] = output_sd[OPTIMIZER_STATE_DICT][PARAM_GROUPS]
+    # ZeRO-3 keeps the version beside its optimizer state rather than in it; ZeRO-1/2 targets require it.
+    if sd.get(DS_VERSION):
+        output_sd[DS_VERSION] = sd[DS_VERSION]
     zero_output_folder = os.path.join(args.output_folder, "zero")
     output_file_path = os.path.join(zero_output_folder, "optimizer_state.pt")
     _save_checkpoint(output_file_path, output_sd)

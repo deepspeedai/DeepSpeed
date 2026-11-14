@@ -15,6 +15,7 @@ from deepspeed.utils.torch import required_torch_version
 from deepspeed.checkpoint import UNIVERSAL_CHECKPOINT_INFO
 from deepspeed.checkpoint.constants import OPTIMIZER_STATE_DICT
 from deepspeed.checkpoint.ds_to_universal import main as convert_to_universal
+from deepspeed.utils import safe_get_full_fp32_param, safe_get_full_optimizer_state
 
 from unit.common import DistributedTest, DistributedFixture
 from unit.simple_model import *
@@ -355,3 +356,70 @@ class TestUniversalCheckpointFusedTorchAdamW(DistributedTest):
         for state in optimizer_states:
             assert state["step"].item() == steps_before_save + steps_after_load
         engine.destroy()
+
+
+def _full_optimizer_states(engine):
+    """Every parameter's whole fp32 master and Adam moments, gathered across the ZeRO partition."""
+    states = {}
+    for name, param in engine.module.named_parameters():
+        states[name] = [
+            safe_get_full_fp32_param(param).cpu(),
+            safe_get_full_optimizer_state(param, "exp_avg").cpu(),
+            safe_get_full_optimizer_state(param, "exp_avg_sq").cpu(),
+        ]
+    return states
+
+
+@pytest.mark.parametrize("source_stage,target_stage", [(1, 3), (2, 3), (3, 1), (3, 2)])
+class TestUniversalCheckpointAcrossZeROStages(DistributedTest):
+    world_size = 2
+
+    def test_load(self, tmpdir, source_stage, target_stage):
+        hidden_dim = 10
+        steps_before_save = 2
+
+        def build(stage, load_universal):
+            ds_config = {"train_batch_size": 2, "zero_optimization": {"stage": stage}}
+            if load_universal:
+                ds_config["checkpoint"] = {"load_universal": True}
+            model = SimpleModel(hidden_dim, nlayers=2)
+            engine, _, _, _ = deepspeed.initialize(config=ds_config,
+                                                   model=model,
+                                                   optimizer=torch.optim.Adam(model.parameters(), lr=0.1))
+            return engine
+
+        source = build(source_stage, load_universal=False)
+        _train(source, hidden_dim, steps_before_save)
+        expected = _full_optimizer_states(source)
+        source.save_checkpoint(tmpdir, tag=CP_TAG, client_state={UNIVERSAL_CHECKPOINT_INFO: {}})
+        source.destroy()
+
+        cp_dir = os.path.join(tmpdir, CP_TAG)
+        dist.barrier()
+        if dist.get_rank() == 0:
+            convert_to_universal(
+                SimpleNamespace(input_folder=cp_dir,
+                                output_folder=f"{cp_dir}_universal",
+                                num_extract_workers=1,
+                                num_merge_workers=1,
+                                keep_temp_folder=False,
+                                strict=True,
+                                inject_missing_state=False))
+        dist.barrier()
+
+        target = build(target_stage, load_universal=True)
+        target.load_checkpoint(tmpdir, tag=f"{CP_TAG}_universal")
+
+        loaded = _full_optimizer_states(target)
+        assert loaded.keys() == expected.keys()
+        for name, states in expected.items():
+            for expected_state, loaded_state in zip(states, loaded[name]):
+                assert torch.equal(expected_state, loaded_state), name
+        optimizer_states = list(target.optimizer.optimizer.state.values())
+        assert optimizer_states
+        for state in optimizer_states:
+            assert int(state["step"]) == steps_before_save
+
+        # The restored optimizer must also be able to keep training.
+        _train(target, hidden_dim, 1)
+        target.destroy()
