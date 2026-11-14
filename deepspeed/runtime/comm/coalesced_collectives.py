@@ -72,7 +72,9 @@ def all_to_all_quant_reduce(tensors: List[Tensor], groups: {}) -> List[Tensor]:
                                                        4, quantizer_module.Symmetric)
             assert final_output.numel(
             ) % num_nodes == 0, f"final_output.numel()={final_output.numel()} is not divisible by num_nodes={num_nodes}"
-            output_lst[idx] = (sum(list(final_output.chunk(num_nodes))) / num_nodes).view(-1)
+            # quantized_reduction summed the local ranks and this sums the nodes, so divide by
+            # every rank to return the average, as the reduce_scatter fallback above does.
+            output_lst[idx] = (sum(list(final_output.chunk(num_nodes))) / global_world_size).view(-1)
     return output_lst
 
 
