@@ -9,11 +9,14 @@ AutoTP model overwrote the first one's metadata (#8231). AutoTPMeta is per-model
 tests hold that line.
 """
 
+import pytest
 import torch
 from types import SimpleNamespace
 
 from unit.common import DistributedTest
+from unit.simple_model import SimpleModel
 
+import deepspeed
 import deepspeed.comm as dist
 from deepspeed.utils import groups
 from deepspeed.module_inject.auto_tp import AutoTP
@@ -103,3 +106,42 @@ class TestAutoTPMultipleModels(DistributedTest):
         assert layer.tp_meta.num_kv_heads == 3
         assert list(layer._partition_sizes) == [128, 64]
         assert layer.weight.shape[0] == [128, 64][dist.get_rank()]
+
+
+def build_engine(tp_size):
+    config = {"train_micro_batch_size_per_gpu": 1}
+    if tp_size > 1:
+        # Nothing is sharded; the test is about which groups the engine runs on.
+        config["tensor_parallel"] = {
+            "autotp_size": tp_size,
+            "partition_config": {
+                "use_default_specs": False,
+                "layer_specs": [{
+                    "patterns": [".*\\.weight$"],
+                    "partition_type": "skip",
+                }],
+            },
+        }
+    model = SimpleModel(hidden_dim=8)
+    engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config)
+    return engine
+
+
+class TestAutoTPEnginesShareProcessGroups(DistributedTest):
+    """The TP/DP groups are process-wide (#9081): a second engine must use the first engine's layout or fail."""
+    world_size = 4
+    reuse_dist_env = False
+
+    def test_same_tp_size_reuses_the_groups(self):
+        build_engine(tp_size=2)
+        second = build_engine(tp_size=2)
+        assert second.mpu.get_tensor_model_parallel_world_size() == 2
+        assert second.dp_world_size == 2
+
+    @pytest.mark.parametrize("second_tp_size", [1, 4])
+    def test_different_tp_size_raises(self, second_tp_size):
+        # Before the check, a TP4 engine silently ran on the first engine's TP2 groups, and a TP1 engine took
+        # their data parallel group and then failed deep inside initialize.
+        build_engine(tp_size=2)
+        with pytest.raises(RuntimeError):
+            build_engine(tp_size=second_tp_size)

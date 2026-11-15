@@ -532,6 +532,8 @@ For Grouped Query Attention with different Q/K/V sizes:
 
 4. **Cross-topology universal restore**: Loading a universal checkpoint back into a topology with a *different* tensor-parallel degree goes through DeepSpeed's Megatron-style model-state loader, which is not AutoTP-aware; prefer same-topology restore when changing world size.
 
+5. **One tensor-parallel layout per process**: The TP and DP groups are process-wide, and the first engine creates them. A later engine in the same process must use the same `autotp_size`; `deepspeed.initialize` raises an error if it asks for a different one, including an engine without AutoTP that does not pass its own `mpu`. Per-engine groups are tracked in [#9081](https://github.com/deepspeedai/DeepSpeed/issues/9081).
+
 
 ## See Also
 
