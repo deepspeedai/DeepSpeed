@@ -109,6 +109,39 @@ def test_conv_transpose_flops_with_output_size():
     assert flops == 2 * expected_macs + expected_bias_flops
 
 
+@pytest.mark.sequential
+@pytest.mark.parametrize("bidirectional", [False, True])
+@pytest.mark.parametrize("rnn_class, num_gates", [(torch.nn.RNN, 1), (torch.nn.GRU, 3), (torch.nn.LSTM, 4)])
+def test_rnn_macs(rnn_class, num_gates, bidirectional):
+    """RNN modules are counted by a module hook instead of the patched functionals, and it
+    reported 0 MACs while still counting their FLOPs."""
+    input_size, hidden_size, num_layers, batch_size, seq_length = 8, 16, 2, 4, 5
+    num_directions = 2 if bidirectional else 1
+    model = rnn_class(input_size, hidden_size, num_layers=num_layers, batch_first=True, bidirectional=bidirectional)
+    _, macs, _ = get_model_profile(model,
+                                   input_shape=(batch_size, seq_length, input_size),
+                                   print_profile=False,
+                                   as_string=False)
+
+    # Every cell step multiplies its layer input and previous hidden state by the gate weights.
+    layer_input_sizes = [input_size] + [hidden_size * num_directions] * (num_layers - 1)
+    step_macs = sum(num_gates * hidden_size * (layer_input + hidden_size) for layer_input in layer_input_sizes)
+    assert macs == batch_size * seq_length * num_directions * step_macs
+
+
+@pytest.mark.sequential
+@pytest.mark.parametrize("cell_class, num_gates", [(torch.nn.RNNCell, 1), (torch.nn.GRUCell, 3),
+                                                   (torch.nn.LSTMCell, 4)])
+def test_rnn_cell_macs(cell_class, num_gates):
+    input_size, hidden_size, batch_size = 8, 16, 4
+    _, macs, _ = get_model_profile(cell_class(input_size, hidden_size),
+                                   input_shape=(batch_size, input_size),
+                                   print_profile=False,
+                                   as_string=False)
+
+    assert macs == batch_size * num_gates * hidden_size * (input_size + hidden_size)
+
+
 class LeNet5(torch.nn.Module):
 
     def __init__(self, n_classes):

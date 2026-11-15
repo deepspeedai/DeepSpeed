@@ -1066,6 +1066,7 @@ def _rnn_flops(flops, rnn_module, w_ih, w_hh, input_size):
 
 def _rnn_forward_hook(rnn_module, input, output):
     flops = 0
+    macs = 0
     # input is a tuple containing a sequence to process and (optionally) hidden state
     inp = input[0]
     batch_size = inp.shape[0]
@@ -1080,6 +1081,8 @@ def _rnn_forward_hook(rnn_module, input, output):
         else:
             input_size = rnn_module.hidden_size
         flops = _rnn_flops(flops, rnn_module, w_ih, w_hh, input_size)
+        # Module hooks skip the functional-level mac tracking, so count the gate matmuls here.
+        macs += w_ih.numel() + w_hh.numel()
         if rnn_module.bias:
             b_ih = rnn_module.__getattr__("bias_ih_l" + str(i))
             b_hh = rnn_module.__getattr__("bias_hh_l" + str(i))
@@ -1091,6 +1094,11 @@ def _rnn_forward_hook(rnn_module, input, output):
         flops *= 2
     rnn_module.__flops__ += int(flops)
 
+    macs *= batch_size * seq_length
+    if rnn_module.bidirectional:
+        macs *= 2
+    rnn_module.__macs__ += int(macs)
+
 
 def _rnn_cell_forward_hook(rnn_cell_module, input, output):
     flops = 0
@@ -1100,6 +1108,7 @@ def _rnn_cell_forward_hook(rnn_cell_module, input, output):
     w_hh = rnn_cell_module.__getattr__("weight_hh")
     input_size = inp.shape[1]
     flops = _rnn_flops(flops, rnn_cell_module, w_ih, w_hh, input_size)
+    macs = w_ih.numel() + w_hh.numel()
     if rnn_cell_module.bias:
         b_ih = rnn_cell_module.__getattr__("bias_ih")
         b_hh = rnn_cell_module.__getattr__("bias_hh")
@@ -1107,6 +1116,7 @@ def _rnn_cell_forward_hook(rnn_cell_module, input, output):
 
     flops *= batch_size
     rnn_cell_module.__flops__ += int(flops)
+    rnn_cell_module.__macs__ += int(macs * batch_size)
 
 
 MODULE_HOOK_MAPPING = {
