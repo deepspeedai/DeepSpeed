@@ -1322,8 +1322,8 @@ class FPDT_LogitsLoss(torch.autograd.Function):
 
                 vocab_size = logits_chunk.size(2)
                 # nll
-                softmax = torch.nn.functional.softmax(logits_chunk, dim=-1)
-                loss_chunk = torch.nn.functional.nll_loss(softmax.log().reshape(-1, vocab_size).contiguous(),
+                log_probs = torch.nn.functional.log_softmax(logits_chunk, dim=-1)
+                loss_chunk = torch.nn.functional.nll_loss(log_probs.reshape(-1, vocab_size).contiguous(),
                                                           labels[st:ed, :].reshape(-1).contiguous(),
                                                           reduction='none')
                 loss[:, st:ed] = loss_chunk.reshape(chunk_size, batch_size).t()
