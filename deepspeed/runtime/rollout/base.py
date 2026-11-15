@@ -9,85 +9,115 @@ ABC. This keeps engine-specific concerns out of the trainer loop.
 """
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
-from typing import Optional
-
-import torch
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Literal, Optional, get_args
 
 
 @dataclass
 class RolloutConfig:
-    """Configuration for the rollout engine."""
+    """Selects the rollout backend; each backend's config subclasses this with its own settings."""
     engine: str = "hybrid_engine"
 
-    # Use CUDA graph capture for decode acceleration.
-    use_graph_capture: bool = False
+
+# The ends of a tool output that SamplingConfig.max_tool_output_chars keeps.
+ToolOutputKeep = Literal["start", "end", "both"]
 
 
 @dataclass
 class SamplingConfig:
     """Sampling knobs that the trainer passes to ``generate`` each step.
 
-    ``top_k <= 0`` disables top-k filtering.
+    ``top_k <= 0`` disables top-k filtering. ``repetition_penalty=None`` uses the
+    value in the model's ``generation_config``; 1.0 disables the penalty.
+
+    ``max_tool_output_chars`` cuts each tool output longer than that many characters before it is added to the
+    conversation, keeping its ``"start"``, ``"end"`` or ``"both"`` ends (``tool_output_keep``) with a
+    ``...(truncated)`` marker at the cut; None leaves tool output whole.
     """
 
     max_new_tokens: int
+    max_new_tokens_per_turn: Optional[int] = None
     temperature: float = 1.0
     top_p: float = 1.0
     top_k: int = -1
     n_samples_per_prompt: int = 1
-    continuous_batch_size: Optional[int] = None
+    repetition_penalty: Optional[float] = None
+    max_tool_output_chars: Optional[int] = None
+    tool_output_keep: ToolOutputKeep = "both"
+
+    def __post_init__(self) -> None:
+        if self.max_new_tokens <= 0:
+            raise ValueError("max_new_tokens must be positive")
+        if self.max_new_tokens_per_turn is not None and self.max_new_tokens_per_turn <= 0:
+            raise ValueError("max_new_tokens_per_turn must be positive")
+        if self.repetition_penalty is not None and self.repetition_penalty <= 0:
+            raise ValueError("repetition_penalty must be positive")
+        if self.max_tool_output_chars is not None and (not isinstance(self.max_tool_output_chars, int)
+                                                       or self.max_tool_output_chars < 1):
+            raise ValueError("max_tool_output_chars must be a positive integer")
+        if self.tool_output_keep not in get_args(ToolOutputKeep):
+            raise ValueError(f"tool_output_keep must be 'start', 'end' or 'both'; got {self.tool_output_keep!r}")
+
+
+@dataclass
+class RolloutRecord:
+    """One prompt and its rollout across all turns."""
+
+    class Status(Enum):
+        PENDING = "pending"
+        COMPLETED = "completed"
+        TRUNCATED = "truncated"
+
+    group_index: int | None = None
+    prompt: str | list[dict[str, str]] = ""
+    tokens: list[int] = field(default_factory=list)
+    attention_mask: list[int] = field(default_factory=list)
+    response: str = ""
+    response_length: int = 0
+    loss_mask: list[int] | None = None
+    rollout_log_probs: list[float] | None = None
+    status: Status = Status.PENDING
+    # Turns the model has generated, each followed by the output of the tools it called, if any.
+    num_turns: int = 0
+    # Tool outputs cut to SamplingConfig.max_tool_output_chars.
+    num_tool_outputs_truncated: int = 0
 
 
 @dataclass
 class RolloutRequest:
-    """Input to ``RolloutEngine.generate``.
+    """Input to ``RolloutEngine.generate``."""
 
-    Prompts arrive *left-padded* (i.e. real tokens at the right edge) so that
-    causal generation appends naturally after them.
-    """
-
-    prompt_ids: torch.Tensor  # [B, T_p] left-padded with pad_token_id
-    prompt_attention_mask: torch.Tensor  # [B, T_p], 1 on real prompt tokens
+    samples: list[RolloutRecord]
 
     def __post_init__(self) -> None:
-        if self.prompt_ids.dim() != 2:
-            raise ValueError(f"prompt_ids must be 2-D [B, T_p]; got {tuple(self.prompt_ids.shape)}")
-        if self.prompt_attention_mask.shape != self.prompt_ids.shape:
-            raise ValueError(f"prompt_attention_mask shape {tuple(self.prompt_attention_mask.shape)} "
-                             f"does not match prompt_ids {tuple(self.prompt_ids.shape)}")
+        for i, sample in enumerate(self.samples):
+            if len(sample.attention_mask) != len(sample.tokens):
+                raise ValueError(f"samples[{i}] attention_mask length {len(sample.attention_mask)} does not "
+                                 f"match tokens length {len(sample.tokens)}")
+            if sample.num_turns != 0 or sample.num_tool_outputs_truncated != 0 or sample.loss_mask is not None:
+                raise ValueError(f"samples[{i}] already holds a rollout; pass the prompt only")
 
 
 @dataclass
 class RolloutBatch:
-    """Output of ``RolloutEngine.generate``.
+    """Output of ``RolloutEngine.generate``."""
 
-    ``input_ids`` holds the *concatenation* of (left-padded) prompt and
-    response, right-padded to the longest sequence in the batch.
-    """
-
-    input_ids: torch.Tensor  # [B', T_p + T_r]; B' = B * n_samples_per_prompt
-    attention_mask: torch.Tensor  # [B', T_p + T_r]
-    response_start_idx: torch.Tensor  # [B'] int
+    samples: list[RolloutRecord]
 
     def __post_init__(self) -> None:
-        if self.input_ids.dim() != 2:
-            raise ValueError(f"input_ids must be 2-D; got {tuple(self.input_ids.shape)}")
-        if self.attention_mask.shape != self.input_ids.shape:
-            raise ValueError(f"attention_mask shape {tuple(self.attention_mask.shape)} does not "
-                             f"match input_ids {tuple(self.input_ids.shape)}")
-        B = self.input_ids.shape[0]
-        if self.response_start_idx.shape != (B, ):
-            raise ValueError(f"response_start_idx must be 1-D of length {B}; got "
-                             f"{tuple(self.response_start_idx.shape)}")
+        for i, sample in enumerate(self.samples):
+            if len(sample.attention_mask) != len(sample.tokens):
+                raise ValueError(f"samples[{i}] attention_mask length {len(sample.attention_mask)} does not "
+                                 f"match tokens length {len(sample.tokens)}")
 
     @property
     def batch_size(self) -> int:
-        return int(self.input_ids.shape[0])
+        return len(self.samples)
 
     @property
     def seq_len(self) -> int:
-        return int(self.input_ids.shape[1])
+        return max(len(sample.tokens) for sample in self.samples)
 
 
 class RolloutEngine(ABC):

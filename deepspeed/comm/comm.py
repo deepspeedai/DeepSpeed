@@ -189,11 +189,13 @@ def destroy_process_group(group: Optional[Any] = None) -> None:
     return result
 
 
-def new_group(ranks):
+def new_group(ranks, backend=None):
     global cdb
     assert cdb is not None and cdb.is_initialized(
     ), 'DeepSpeed backend not set, please initialize it using init_process_group()'
-    return cdb.new_group(ranks)
+    if backend is None:
+        return cdb.new_group(ranks)
+    return cdb.new_group(ranks, backend=backend)
 
 
 def is_available() -> bool:

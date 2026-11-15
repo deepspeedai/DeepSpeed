@@ -151,8 +151,8 @@ class CCLBackend(TorchBackend):
     def reduce(self, tensor, dst, op=ReduceOp.SUM, group=None, async_op=False):
         return self.run_collective(name="reduce", tensor=tensor, dst=dst, op=op, group=group, async_op=async_op)
 
-    def new_group(self, ranks):
-        return super(CCLBackend, self).new_group(ranks)
+    def new_group(self, ranks, backend=None):
+        return super(CCLBackend, self).new_group(ranks, backend=backend)
 
     def _new_group(self, ranks, group):
         size = len(ranks)
