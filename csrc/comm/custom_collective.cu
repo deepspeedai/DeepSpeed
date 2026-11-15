@@ -287,6 +287,7 @@ torch::Tensor car_all_reduce(torch::Tensor t)
 {
     TORCH_CHECK(g_state.ready && g_state.peer_base, "custom AR not connected");
     TORCH_CHECK(t.is_cuda() && t.is_contiguous(), "contiguous CUDA tensor required");
+    if (t.numel() == 0) return t;  // empty payload: a no-op, not a zero-block launch
     const size_t nbytes = (size_t)t.numel() * t.element_size();
     TORCH_CHECK(nbytes <= CAR_MAX_BYTES, "message exceeds custom AR buffer");
     auto stream = at::cuda::getCurrentCUDAStream();

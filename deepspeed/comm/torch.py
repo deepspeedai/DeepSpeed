@@ -355,7 +355,7 @@ class TorchBackend(Backend):
             # must take the standard backend, not raise from the fast path
             if (self._reduce_op(op) == torch.distributed.ReduceOp.SUM
                     and tensor.dtype in (torch.float16, torch.bfloat16, torch.float32)
-                    and custom_collective.custom_collective_ready(world_sz) and tensor.is_contiguous()
+                    and custom_collective.custom_collective_ready(world_sz, group=group) and tensor.is_contiguous()
                     and tensor.numel() * tensor.element_size() <= custom_collective.custom_collective_max_bytes()):
                 return custom_collective.all_reduce(tensor)
         use_ds_op = hasattr(torch.ops, 'deepspeed') and hasattr(torch.ops.deepspeed, 'inference_all_reduce_')
