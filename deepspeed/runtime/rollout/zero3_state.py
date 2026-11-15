@@ -253,6 +253,10 @@ class Zero3StateMove:
             group.update(saved)
         for k, v in self.info["counters"].items():
             setattr(self.dst, k, v)
+        # The destination may accumulate over another number of micro-batches: start its next window on a multiple
+        # of its own count (the engine's boundary is micro_steps modulo the accumulation steps).
+        gas = self.dst.gradient_accumulation_steps()
+        self.dst.micro_steps = -(-self.dst.micro_steps // gas) * gas
         if self.info["scheduler"] is not None and self.dst.lr_scheduler is not None:
             self.dst.lr_scheduler.load_state_dict(self.info["scheduler"])
         if hasattr(opt, "invalidate_secondary_tensor"):

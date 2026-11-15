@@ -326,3 +326,55 @@ class TestTrainerSwitch(DistributedTest):
         # The first plan again, after more training on rank 0.
         to_both.execute(release_source=True)
         assert_matches_reference(both)
+
+
+class TestTrainerSwitchAccumulation(DistributedTest):
+    world_size = 2
+
+    def test_destination_with_more_accumulation_steps(self):
+        # The source steps once per micro-batch, the destination accumulates two: after the move its first window
+        # must start on its own boundary, not on the source's micro-step count (one step left it mid-window, and the
+        # destination stepped on the first micro-batch alone). Oracle as in TestTrainerSwitch: every rank is fed the
+        # whole batch, so two accumulated micro-batches over two ranks average to the reference's gradient.
+        device = torch.device(get_accelerator().current_device_name())
+        rank = dist.get_rank()
+        config = copy.deepcopy(CONFIG)
+        config["optimizer"]["params"]["weight_decay"] = 0.01
+        config2 = copy.deepcopy(config)
+        config2["gradient_accumulation_steps"] = 2
+        mpu, mpu_both = TrainerMPU([0]), TrainerMPU([0, 1])
+        model = tiny_qwen3()
+        both, *_ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config2, mpu=mpu_both)
+        alone = None
+        if rank == 0:
+            model = tiny_qwen3()
+            alone, *_ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config, mpu=mpu)
+        reference = tiny_qwen3().to(device)
+        reference_opt = torch.optim.AdamW(reference.parameters(), lr=1e-3, weight_decay=0.01)
+        batch = torch.randint(1, 101, (4, 6), generator=torch.Generator().manual_seed(7)).to(device)
+
+        def micro_step(engine):
+            loss = engine(input_ids=batch).logits.float().mean()
+            engine.backward(loss)
+            engine.step()
+
+        def reference_step():
+            reference_opt.zero_grad()
+            reference(input_ids=batch).logits.float().mean().backward()
+            reference_opt.step()
+
+        if rank == 0:
+            micro_step(alone)
+        reference_step()
+        Zero3StateMove(alone, both).execute(release_source=True)
+        for micro in range(2):
+            assert both.is_gradient_accumulation_boundary() == (micro == 1)
+            micro_step(both)
+        assert both.global_steps == 2
+        reference_step()
+        for name, param in both.module.named_parameters():
+            with deepspeed.zero.GatheredParameters([param]):
+                torch.testing.assert_close(param.data,
+                                           dict(reference.named_parameters())[name].data,
+                                           rtol=1e-4,
+                                           atol=1e-6)
