@@ -15,6 +15,7 @@ Two generation paths:
      sampled like the graph path, with or without graph capture.
 """
 
+import itertools
 import time
 from copy import copy
 from dataclasses import dataclass
@@ -400,33 +401,18 @@ class HybridEngineRollout(RolloutEngine):
         self._profile_end(profile, "scheduler_overhead_ms", scheduler_start)
 
         cache_start = self._profile_start(profile)
-        cache = DeepSpeedStaticCache(
-            module.config,
-            batch_size=max_batch_size,
-            max_cache_len=max_cache_len,
-            device=device,
-            dtype=model_dtype,
-        )
+        # Layers are sized by the first prefill because AutoTP shards KV heads per rank.
+        cache = DeepSpeedStaticCache(module.config, max_cache_len=max_cache_len)
         write_positions = torch.full((max_batch_size, ), -1, dtype=torch.long, device=device)
         cache.set_write_position(write_positions)
         attention_mask = torch.zeros((max_batch_size, max_cache_len), dtype=torch.long, device=device)
         stats = {
-            "cache_capacity":
-            max_cache_len,
-            "peak_cache_length":
-            prompt_len,
-            "cache_memory_bytes":
-            sum(layer.keys.numel() * layer.keys.element_size() + layer.values.numel() * layer.values.element_size()
-                for layer in cache.layers) + attention_mask.numel() * attention_mask.element_size() +
-            write_positions.numel() * write_positions.element_size(),
-            "trim_count":
-            0,
-            "trimmed_columns":
-            0,
-            "trim_latency_ms":
-            0.0,
-            "decode_steps":
-            0,
+            "cache_capacity": max_cache_len,
+            "peak_cache_length": prompt_len,
+            "trim_count": 0,
+            "trimmed_columns": 0,
+            "trim_latency_ms": 0.0,
+            "decode_steps": 0,
         }
         next_tokens = {}
         logical_positions = dict(prompt_lengths)
@@ -580,6 +566,7 @@ class HybridEngineRollout(RolloutEngine):
             update = scheduler.advance(finished_ids)
             self._profile_end(profile, "scheduler_overhead_ms", scheduler_start)
 
+        stats["cache_memory_bytes"] = self._continuous_cache_memory_bytes(cache, attention_mask, write_positions)
         generation_end = self._profile_start(profile)
         post_processing_start = generation_end
         output = self._build_continuous_batch(original_request, responses)
@@ -630,8 +617,6 @@ class HybridEngineRollout(RolloutEngine):
         minimum_cache_len = prompt_len + sampling.max_new_tokens
         max_cache_len = (self.continuous_cache_capacity
                          if self.continuous_cache_capacity is not None else minimum_cache_len)
-        if max_cache_len < minimum_cache_len:
-            raise ValueError("continuous_cache_capacity must fit the prompt and all generated tokens")
         max_positions = getattr(module.config, "max_position_embeddings", None)
         if max_positions is not None and max_cache_len > max_positions:
             raise ValueError("continuous batching cache exceeds the model maximum position embeddings")
@@ -645,8 +630,8 @@ class HybridEngineRollout(RolloutEngine):
             request_by_id[request_id] = request
             responses[request_id] = []
 
-        state = self._get_continuous_graph_state(module, max_batch_size, prompt_len, max_cache_len, device,
-                                                 model_dtype, DeepSpeedStaticCache)
+        state = self._get_continuous_graph_state(module, max_batch_size, max_cache_len, device, model_dtype,
+                                                 DeepSpeedStaticCache)
         cache = state.cache
         static_input = state.static_input
         static_attention = state.static_attention
@@ -656,27 +641,14 @@ class HybridEngineRollout(RolloutEngine):
         graph = state.graph
         static_logits = state.static_logits
         stats = {
-            "cache_capacity":
-            max_cache_len,
-            "peak_cache_length":
-            prompt_len,
-            "cache_memory_bytes":
-            sum(layer.keys.numel() * layer.keys.element_size() + layer.values.numel() * layer.values.element_size()
-                for layer in cache.layers) + static_input.numel() * static_input.element_size() +
-            static_attention.numel() * static_attention.element_size() +
-            static_causal_attention.numel() * static_causal_attention.element_size() +
-            static_position_ids.numel() * static_position_ids.element_size() +
-            static_write_positions.numel() * static_write_positions.element_size(),
-            "trim_count":
-            0,
-            "trimmed_columns":
-            0,
-            "trim_latency_ms":
-            0.0,
-            "trim_bytes_moved":
-            0,
-            "decode_steps":
-            0,
+            "cache_capacity": max_cache_len,
+            "peak_cache_length": prompt_len,
+            "cache_memory_bytes": self._continuous_cache_memory_bytes(cache, static_attention, static_write_positions),
+            "trim_count": 0,
+            "trimmed_columns": 0,
+            "trim_latency_ms": 0.0,
+            "trim_bytes_moved": 0,
+            "decode_steps": 0,
         }
 
         slot_by_request = {}
@@ -801,19 +773,15 @@ class HybridEngineRollout(RolloutEngine):
                 and self.continuous_cache_capacity < prompt_len + sampling.max_new_tokens):
             raise ValueError("continuous_cache_capacity must fit the prompt and all generated tokens")
 
-    def _get_continuous_graph_state(self, module, max_batch_size, prompt_len, max_cache_len, device, model_dtype,
-                                    cache_type):
-        signature = self._continuous_graph_signature(module, max_batch_size, prompt_len, max_cache_len, device,
-                                                     model_dtype)
+    def _get_continuous_graph_state(self, module, max_batch_size, max_cache_len, device, model_dtype, cache_type):
+        signature = self._continuous_graph_signature(module, max_batch_size, max_cache_len, device, model_dtype)
         state = self._continuous_graph_state
         if state is None or state.signature != signature:
-            cache = cache_type(
-                module.config,
-                batch_size=max_batch_size,
-                max_cache_len=max_cache_len,
-                device=device,
-                dtype=model_dtype,
-            )
+            # Free the stale cache and graph pool before allocating replacements.
+            self._continuous_graph_state = None
+            state = None
+            # Capture sizes the layers from the model's local KV tensors.
+            cache = cache_type(module.config, max_cache_len=max_cache_len)
             static_input = torch.zeros((max_batch_size, 1), dtype=torch.long, device=device)
             static_attention = torch.zeros((max_batch_size, max_cache_len), dtype=torch.long, device=device)
             static_causal_attention = torch.zeros((max_batch_size, 1, 1, max_cache_len),
@@ -858,10 +826,18 @@ class HybridEngineRollout(RolloutEngine):
         return state
 
     @staticmethod
-    def _continuous_graph_signature(module, max_batch_size, prompt_len, max_cache_len, device, model_dtype):
-        parameter_signature = tuple((parameter.data_ptr(), parameter._version) for parameter in module.parameters())
-        return (id(module), device.type, device.index, model_dtype, max_batch_size, prompt_len, max_cache_len,
-                parameter_signature)
+    def _continuous_graph_signature(module, max_batch_size, max_cache_len, device, model_dtype):
+        # Replay reads parameters and buffers through the address and layout fixed
+        # at capture, so in-place value updates need no recapture, but a moved or
+        # re-laid-out tensor does. Prefill runs eagerly, so the prompt width only
+        # matters through max_cache_len.
+        tensor_signature = tuple((tensor.data_ptr(), tensor.device, tensor.dtype, tuple(tensor.shape), tensor.stride())
+                                 for tensor in itertools.chain(module.parameters(), module.buffers()))
+        device_index = device.index
+        if device_index is None and device.type == get_accelerator().device_name():
+            # torch.device("cuda") and torch.device("cuda", 0) name the same device.
+            device_index = get_accelerator().current_device()
+        return (id(module), device.type, device_index, model_dtype, max_batch_size, max_cache_len, tensor_signature)
 
     @staticmethod
     def _update_static_causal_attention(static_attention, static_causal_attention):
@@ -878,6 +854,16 @@ class HybridEngineRollout(RolloutEngine):
         module._forward_pre_hooks.clear()
         module._forward_hooks.clear()
         try:
+            if not all(layer.is_initialized for layer in cache.layers):
+                # Allocate uninitialized KV layers on the current stream, not the warmup stream.
+                module(
+                    static_input,
+                    attention_mask=static_attention,
+                    past_key_values=cache,
+                    use_cache=True,
+                    cache_position=static_cache_position,
+                    position_ids=static_position_ids,
+                )
             warmup_stream = accelerator.Stream()
             warmup_stream.wait_stream(accelerator.current_stream())
             with accelerator.stream(warmup_stream):
@@ -1027,7 +1013,8 @@ class HybridEngineRollout(RolloutEngine):
                 raise ValueError("continuous batching prompt does not fit behind the decode front")
             for layer_idx in range(self._cache_layer_count(prefill_cache)):
                 prefill_keys, prefill_values = self._cache_layer_tensors(prefill_cache, layer_idx)
-                target_layer = cache.layers[layer_idx]
+                target_layer = self._continuous_cache_layer(cache, layer_idx, prefill_keys, prefill_values,
+                                                            attention_mask.shape[0])
                 for source_row, target_row in enumerate(target_slots):
                     target_layer.keys[target_row, :, cache_start:cache_position].copy_(prefill_keys[source_row])
                     target_layer.values[target_row, :, cache_start:cache_position].copy_(prefill_values[source_row])
@@ -1063,13 +1050,27 @@ class HybridEngineRollout(RolloutEngine):
                 raise ValueError("continuous batching prompt does not fit behind the decode front")
             for layer_idx in range(self._cache_layer_count(prefill_cache)):
                 prefill_keys, prefill_values = self._cache_layer_tensors(prefill_cache, layer_idx)
-                target_layer = cache.layers[layer_idx]
+                target_layer = self._continuous_cache_layer(cache, layer_idx, prefill_keys, prefill_values,
+                                                            attention_mask.shape[0])
                 target_layer.keys[target_row, :, cache_start:cache_position].copy_(prefill_keys[0])
                 target_layer.values[target_row, :, cache_start:cache_position].copy_(prefill_values[0])
             attention_mask[target_row, cache_start:cache_position].fill_(1)
             write_positions[target_row] = cache_position
             self._profile_end(profile, "cache_management_overhead_ms", cache_copy_start)
         return admitted_tokens
+
+    @staticmethod
+    def _continuous_cache_memory_bytes(cache, attention_mask, write_positions):
+        # Eager and graph decoding report the same quantity: the KV cache plus the per-row metadata that
+        # tracks it. Graph-only staging buffers are not counted.
+        return cache.memory_bytes() + attention_mask.nbytes + write_positions.nbytes
+
+    @staticmethod
+    def _continuous_cache_layer(cache, layer_idx, prefill_keys, prefill_values, max_batch_size):
+        layer = cache.layers[layer_idx]
+        if not layer.is_initialized:
+            layer.lazy_initialization(prefill_keys, prefill_values, max_batch_size=max_batch_size)
+        return layer
 
     def _start_continuous_profile(self):
         accelerator = get_accelerator()
@@ -1478,15 +1479,9 @@ class HybridEngineRollout(RolloutEngine):
 
         # --- Copy prefill KV into DeepSpeedStaticCache ---
         write_pos = torch.tensor(prompt_len - 1, dtype=torch.long, device=device)
-        ds_cache = DeepSpeedStaticCache(
-            module.config,
-            batch_size=batch_size,
-            max_cache_len=max_len,
-            device=device,
-            dtype=model_dtype,
-        )
+        ds_cache = DeepSpeedStaticCache(module.config, max_cache_len=max_len)
         ds_cache.set_write_position(write_pos)
-        # Trigger lazy init then copy real data
+        # Infer each layer's local KV shape from prefill before graph capture.
         for layer_idx in range(self._cache_layer_count(ds_cache)):
             ds_layer = ds_cache.layers[layer_idx]
             hf_keys, hf_values = self._cache_layer_tensors(prefill_cache, layer_idx)
@@ -1578,3 +1573,15 @@ class HybridEngineRollout(RolloutEngine):
     def sync_weights(self, step: int) -> None:  # noqa: ARG002
         """No-op: hybrid engine reads model weights live."""
         return None
+
+    def shutdown(self) -> None:
+        """Release the captured continuous decode graph and its static cache.
+
+        The rollout stays usable and captures again on the next graph rollout.
+        Under tensor parallelism the graph holds captured collectives, so release
+        it before destroying the process group.
+        """
+        if self._continuous_graph_state is None:
+            return
+        get_accelerator().synchronize()
+        self._continuous_graph_state = None

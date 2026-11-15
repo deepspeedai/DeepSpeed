@@ -25,7 +25,7 @@ import torch
 
 import deepspeed
 from deepspeed.accelerator import get_accelerator
-from deepspeed.runtime.zero.muon.original_muon import muon_update
+from deepspeed.runtime.zero.muon.original_muon import muon_update, ns_compute_dtype
 from unit.common import DistributedTest
 from unit.simple_model import SimpleModel
 
@@ -260,7 +260,10 @@ class TestMuonMatchesZeroStage0(DistributedTest):
         weights = train(zero_stage)
 
         # Before the fix only the last matrix of each partition kept its momentum, and the
-        # others ended 2e-2 to 3e-2 away from ZeRO-0 after three steps.
+        # others ended 2e-2 to 3e-2 away from ZeRO-0 after three steps. Where Newton-Schulz runs in
+        # fp16, the two stages compile muon_update into different graphs that round a few ulps
+        # apart, which leaves every matrix about 1e-3 away.
+        tolerance = max(1e-5, 8 * torch.finfo(ns_compute_dtype("gram")).eps)
         for index, (ref, got) in enumerate(zip(reference, weights)):
             relative = ((got - ref).norm() / ref.norm()).item()
-            assert relative < 1e-5, f"matrix {index} is {relative:.1e} away from ZeRO-0"
+            assert relative < tolerance, f"matrix {index} is {relative:.1e} away from ZeRO-0"
