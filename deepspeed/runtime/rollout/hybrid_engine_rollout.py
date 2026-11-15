@@ -1756,7 +1756,12 @@ class HybridEngineRollout(RolloutEngine):
             # stay in Python (PyTorch argmax is batch-native).  The Python
             # overhead (~50us/step) is a smaller fraction of the larger GPU
             # workload at higher batch.
-            eos_check_every = 16
+            # 1 = check every step: EOS-heavy rollouts (RL responses end
+            # early; max_new_tokens is only a cap) would otherwise replay up
+            # to eos_check_every - 1 dead steps after the last row finishes,
+            # which costs far more than the per-step sync saves (measured
+            # +0.1-0.3% at b=32 without EOS vs up to ~20% with early EOS).
+            eos_check_every = 1
             eos_mask = torch.zeros(batch_size, dtype=torch.bool, device=device)
             for step in range(max_new_tokens - 1):
                 static_token.copy_(next_token)
