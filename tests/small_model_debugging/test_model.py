@@ -113,7 +113,6 @@ def print_params(tag, model):
 
 
 data_loader = get_data_loader(model=model, total_samples=256, hidden_dim=hidden_dim, device=model.device)
-#print_params('pre-train', model)
 
 for n, batch in enumerate(data_loader):
     loss = model(batch[0], batch[1])
@@ -121,5 +120,3 @@ for n, batch in enumerate(data_loader):
         print("LOSS:", loss.item())
     model.backward(loss)
     model.step()
-    #print_params('step={}'.format(n), model)
-    #if n == 5: break

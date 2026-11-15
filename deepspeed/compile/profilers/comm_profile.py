@@ -68,7 +68,6 @@ def timed_all_gather(device, input, output, start_event, end_event, warmup, tria
     # maintain and clean performance data
     avg_duration = duration / trials
     size = input.element_size() * input.nelement() * dist.get_world_size()
-    # tput, busbw = get_bw('all_gather', size, avg_duration)
 
     avg_duration_ten = torch.tensor([avg_duration], device=device)
     if dist.get_world_size() > 1:

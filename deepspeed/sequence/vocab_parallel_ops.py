@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # DeepSpeed Team
-"""Per-token log-probability, entropy, and KL divergence ops over vocabulary-sharded logits.
+"""Per-token log-probability, entropy, KL and JSD ops over vocabulary-sharded logits.
 
 These ops let RL and on-policy distillation losses run directly on the local logits shard
 produced by a vocabulary-parallel LM head, without all-gathering the full ``[..., vocab]``
@@ -12,16 +12,20 @@ masking and reduction are left to the caller. As with vocabulary-parallel cross 
 backward pass assumes every tensor-parallel rank back-propagates the same loss, which lets the
 gradient of each local logit be computed without communication.
 
-Teacher and student logits passed to the KL op must be sharded identically: same
+Teacher and student logits passed to the KL and JSD ops must be sharded identically: same
 tensor-parallel group and same vocabulary range on every rank.
 
-A row whose logits are all ``-inf`` has no defined distribution: entropy and KL return NaN for
+A row whose logits are all ``-inf`` has no defined distribution: entropy, KL and JSD return NaN for
 it, but its logits get zero gradient so that callers can mask such rows (e.g. padding) out.
 
-When Triton supports the logits' device, the per-row work runs in fused Triton kernels
+For log-probability, entropy and KL, when Triton supports the logits' device, the per-row work
+runs in fused Triton kernels
 (``deepspeed.ops.triton_ops.vocab_parallel_softmax``); otherwise, or with
 ``deepspeed.HAS_TRITON = False``, the same math runs eagerly in bounded row chunks.
+JSD also has fused Triton forward/backward kernels, with bounded eager row chunks as fallback.
 """
+
+import math
 
 import torch
 from torch.autograd.function import once_differentiable
@@ -97,11 +101,12 @@ def _softmax_stats(logits_2d_list, tp_group):
     return global_max, torch.log(sum_exp)
 
 
-def _triton_softmax_stats(logits_2d_list, tp_group):
+def _triton_softmax_stats(logits_2d_list, tp_group, local_stats=None):
     # Each shard's sum-exp is taken against its own max in the same read, then rescaled to the
     # global max, so this still needs only one MAX and one SUM all-reduce.
     kernels = _triton_kernels()
-    local_stats = [kernels.local_softmax_stats(logits) for logits in logits_2d_list]
+    if local_stats is None:
+        local_stats = [kernels.local_softmax_stats(logits) for logits in logits_2d_list]
     local_max = torch.stack([stats[0] for stats in local_stats])
     local_sum = torch.stack([stats[1] for stats in local_stats])
     global_max = local_max.clone()
@@ -383,6 +388,88 @@ class _VocabParallelKLDiv(torch.autograd.Function):
         return grad_student, grad_teacher, None, None
 
 
+def _jsd_log_ratios(student, teacher, global_max, log_sum_exp, beta):
+    student_log_probs = _log_softmax(student, global_max[0], log_sum_exp[0])
+    teacher_log_probs = _log_softmax(teacher, global_max[1], log_sum_exp[1])
+    mixture = torch.logaddexp(student_log_probs + math.log1p(-beta), teacher_log_probs + math.log(beta))
+    return student_log_probs, teacher_log_probs, student_log_probs - mixture, teacher_log_probs - mixture
+
+
+def _use_jsd_triton(student, teacher):
+    if _use_triton(student, teacher):
+        return True
+    # XPU's global capability flag is still disabled. Enable only this validated op
+    # when the installed Triton actually includes an active Intel backend.
+    if not deepspeed.HAS_TRITON or student.device.type != "xpu":
+        return False
+    from triton.backends import backends
+    intel = backends.get("intel")
+    return intel is not None and intel.driver.is_active()
+
+
+class _VocabParallelJSD(torch.autograd.Function):
+
+    @staticmethod
+    def forward(ctx, student_logits, teacher_logits, beta, tp_group):
+        ctx.use_triton = _use_jsd_triton(student_logits, teacher_logits)
+        if ctx.use_triton:
+            student, teacher = _triton_rows(student_logits), _triton_rows(teacher_logits)
+            local_stats = _triton_kernels().jsd_softmax_stats(student, teacher)
+            global_max, log_sum_exp = _triton_softmax_stats([student, teacher], tp_group, local_stats)
+            kl_to_mixture = _triton_kernels().jsd_forward(student, teacher, global_max, log_sum_exp, beta)
+        else:
+            student, teacher = _flatten(student_logits), _flatten(teacher_logits)
+            global_max, log_sum_exp = _softmax_stats([student, teacher], tp_group)
+            kl_to_mixture = torch.empty_like(global_max)
+            # Both expectations are needed for the softmax Jacobians in backward; pack their
+            # reduction so backward needs no communication, even when both models require gradients.
+            for rows in _row_chunks(student):
+                log_q, log_p, q_ratio, p_ratio = _jsd_log_ratios(student[rows], teacher[rows], global_max[:, rows],
+                                                                 log_sum_exp[:, rows], beta)
+                kl_to_mixture[0, rows] = _weighted_by_probs(log_q, q_ratio).sum(dim=-1)
+                kl_to_mixture[1, rows] = _weighted_by_probs(log_p, p_ratio).sum(dim=-1)
+        if pg_utils.is_parallel(tp_group):
+            dist.all_reduce(kl_to_mixture, op=dist.ReduceOp.SUM, group=tp_group)
+
+        ctx.beta = beta
+        ctx.save_for_backward(student_logits, teacher_logits, global_max, log_sum_exp, kl_to_mixture)
+        return (1 - beta) * kl_to_mixture[0] + beta * kl_to_mixture[1]
+
+    @staticmethod
+    @once_differentiable
+    def backward(ctx, grad_output):
+        student_logits, teacher_logits, global_max, log_sum_exp, kl_to_mixture = ctx.saved_tensors
+        if ctx.use_triton:
+            grad_student, grad_teacher = _triton_kernels().jsd_backward(_triton_rows(student_logits),
+                                                                        _triton_rows(teacher_logits), global_max,
+                                                                        log_sum_exp, kl_to_mixture,
+                                                                        grad_output.reshape(-1).float().contiguous(),
+                                                                        ctx.beta, *ctx.needs_input_grad[:2])
+            return grad_student, grad_teacher, None, None
+        student, teacher = _flatten(student_logits), _flatten(teacher_logits)
+        grad_student = torch.empty_like(student) if ctx.needs_input_grad[0] else None
+        grad_teacher = torch.empty_like(teacher) if ctx.needs_input_grad[1] else None
+        grad_output = grad_output.reshape(-1, 1).float()
+        undefined_row = _undefined_rows(global_max).any(dim=0)
+
+        for rows in _row_chunks(student):
+            log_q, log_p, q_ratio, p_ratio = _jsd_log_ratios(student[rows], teacher[rows], global_max[:, rows],
+                                                             log_sum_exp[:, rows], ctx.beta)
+            # Derivatives through the mixture cancel between its two KL terms.
+            if grad_student is not None:
+                grad = _weighted_by_probs(log_q, q_ratio - kl_to_mixture[0, rows].unsqueeze(-1))
+                grad_student[rows] = grad.mul_((1 - ctx.beta) * grad_output[rows]).masked_fill_(undefined_row[rows], 0)
+            if grad_teacher is not None:
+                grad = _weighted_by_probs(log_p, p_ratio - kl_to_mixture[1, rows].unsqueeze(-1))
+                grad_teacher[rows] = grad.mul_(ctx.beta * grad_output[rows]).masked_fill_(undefined_row[rows], 0)
+
+        if grad_student is not None:
+            grad_student = grad_student.view_as(student_logits)
+        if grad_teacher is not None:
+            grad_teacher = grad_teacher.view_as(teacher_logits)
+        return grad_student, grad_teacher, None, None
+
+
 def vocab_parallel_logprobs(vocab_parallel_logits,
                             index,
                             tp_group=None,
@@ -448,3 +535,38 @@ def vocab_parallel_kl_div(student_logits, teacher_logits, reverse=False, tp_grou
         raise ValueError("student_logits and teacher_logits must have the same shape and vocabulary sharding")
     kl = _VocabParallelKLDiv.apply(student_logits, teacher_logits, bool(reverse), tp_group)
     return kl.view(student_logits.shape[:-1])
+
+
+def vocab_parallel_jsd(student_logits, teacher_logits, beta=0.5, tp_group=None):
+    """Per-token generalized JSD over identically sharded vocabularies, in fp32.
+
+    For ``0 < beta < 1``, let ``q = softmax(student_logits)``, ``p = softmax(teacher_logits)``
+    and ``m = (1 - beta) * q + beta * p``. Returns
+    ``(1 - beta) * KL(q || m) + beta * KL(p || m)``. Following ``generalized_jsd_loss``,
+    ``beta=0`` instead returns ``KL(p || q)`` and ``beta=1`` returns ``KL(q || p)``.
+    These endpoint conventions are not the continuous limits of the interior expression.
+
+    Both inputs must have the same shape, device, TP group and ordered vocabulary shards.
+    Each TP rank must backpropagate the same loss, as for :func:`vocab_parallel_kl_div`.
+    Gradients flow to both inputs unless detached. Apply temperature to both logits first;
+    masking, reduction and any temperature-squared scaling are left to the caller.
+
+    The implementation retains the local logits and per-token statistics, not full fp32
+    probability tensors. Interior-beta JSD uses fused Triton kernels where supported,
+    otherwise eager bounded row chunks; it does not fuse
+    the LM-head projection or implement top-k restriction or pointwise clipping.
+    """
+    if student_logits.shape != teacher_logits.shape:
+        raise ValueError("student_logits and teacher_logits must have the same shape and vocabulary sharding")
+    if student_logits.dim() < 1:
+        raise ValueError("logits must have a vocabulary dimension")
+    if student_logits.device != teacher_logits.device:
+        raise ValueError("student_logits and teacher_logits must be on the same device")
+    if not student_logits.is_floating_point() or not teacher_logits.is_floating_point():
+        raise ValueError("student_logits and teacher_logits must be floating point")
+    if not 0 <= beta <= 1:
+        raise ValueError("beta must be in [0, 1]")
+    if beta == 0 or beta == 1:
+        return vocab_parallel_kl_div(student_logits, teacher_logits, reverse=(beta == 1), tp_group=tp_group)
+    jsd = _VocabParallelJSD.apply(student_logits, teacher_logits, beta, tp_group)
+    return jsd.view(student_logits.shape[:-1])

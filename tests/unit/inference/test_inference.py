@@ -739,5 +739,4 @@ class TestLMCorrectness(DistributedTest):
         ds_time = time.time() - start
 
         ppl_diff = abs(bs_output["results"][task]["ppl"] - ds_output["results"][task]["ppl"])
-        #assert ds_time <= bs_time
         assert ppl_diff < 0.01

@@ -34,7 +34,6 @@ class TestHybridEngineLlama(DistributedTest):
         for t in tokens:
             if torch.is_tensor(tokens[t]):
                 tokens[t] = tokens[t].to(f'{get_accelerator().device_name()}:{local_rank}')
-        #output = model.generate(**tokens, do_sample=False, max_length=100)
         output = model.generate(tokens.input_ids, do_sample=False, max_length=100)
         outputs = tokenizer.batch_decode(output, skip_special_tokens=True)
         return outputs

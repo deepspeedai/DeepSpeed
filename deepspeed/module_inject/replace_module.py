@@ -153,12 +153,6 @@ def generic_injection(module, dtype=None, enable_cuda_graph=True):
         except ImportError:
             new_policies = {}
 
-        #replace_transformer_layer(None,
-        #                          module.text_encoder,
-        #                          training=False,
-        #                          replace_with_kernel_inject=True,
-        #                          triangular_masking=True,
-        #                          max_out_tokens=8192)
         from ..model_implementations.transformers.clip_encoder import DSClipEncoder
         cg_encoder = DSClipEncoder(module.text_encoder, enable_cuda_graph=enable_cuda_graph)
         setattr(module, 'text_encoder', cg_encoder)
@@ -278,8 +272,6 @@ def replace_transformer_layer(orig_layer_impl,
         return _container.module
 
     def replace_wo_policy(module, all_reduce_linears, prefix="", state_dict=None):
-        #mp_replace = ReplaceWithTensorSlicing(mp_group=config.tensor_parallel.tp_group)
-
         # Get the configurable partition_config if available
         partition_config = None
         if hasattr(config, 'get_partition_config_object'):
@@ -565,7 +557,6 @@ def revert_transformer_layer(orig_layer_impl, model, config, preln=False):
     """
 
     def replace_fn(child, _replace_policy, layer_id):
-        #from turing.nvidia_modelingpreln import BertLayer
         orig_module = orig_layer_impl(config)
 
         # copy relevant state from child -> original module
