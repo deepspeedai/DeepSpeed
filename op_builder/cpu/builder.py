@@ -15,7 +15,7 @@ except ImportError:
 class CPUOpBuilder(OpBuilder):
 
     def cxx_args(self):
-        args = ['-O3', '-g', '-Wno-reorder']
+        args = ['-O3', '-Wno-reorder']
         CPU_ARCH = self.cpu_arch()
         SIMD_WIDTH = self.simd_width()
         args += [CPU_ARCH, '-fopenmp', SIMD_WIDTH]

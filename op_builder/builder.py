@@ -907,7 +907,7 @@ class CUDAOpBuilder(OpBuilder):
         if sys.platform == "win32":
             return ['-O2']
         else:
-            return ['-O3', '-g', '-Wno-reorder']
+            return ['-O3', '-Wno-reorder']
 
     def nvcc_args(self):
         args = ['-O3']
