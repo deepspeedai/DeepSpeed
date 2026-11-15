@@ -685,6 +685,17 @@ def _install_gdn_segment(seg: GDNSegment) -> bool:
                     return out
                 except (ImportError, AttributeError):
                     pass  # FLA layout changed — fall through to the wrapper
+        try:
+            # The per-layer FLA bindings are gone on transformers 5.19+, so a
+            # missing attribute is normal there; the real degradation signal is
+            # fla-core itself being absent -- every GDN scan (decode and prefill)
+            # then runs the eager torch decomposition, correct but ~1.6x slower
+            # end-to-end (measured on Qwen3.5-4B, b=32 decode), silently.
+            from fla.ops.gated_delta_rule import fused_recurrent_gated_delta_rule  # noqa: F401
+        except ImportError:
+            from deepspeed.utils import logger as _ds_logger
+            _ds_logger.warning_once("fla-core is not installed: GDN scans run the eager torch "
+                                    "decompositions (~1.6x slower end-to-end); pip install fla-core")
         fn_name = "recurrent_gated_delta_rule" if single else "chunk_gated_delta_rule"
         fn = getattr(parent, fn_name, None)
         if fn is None:

@@ -1640,6 +1640,10 @@ class HybridEngineRollout(RolloutEngine):
                 if rotary is not None:
                     with torch.no_grad():
                         positions = torch.arange(max_len, device=device)[None, :]
+                        if hasattr(rotary, "mrope_section"):
+                            # MRoPE rotary expects [3, batch, seq] positions; text-only
+                            # rows use the same positions for all three sections
+                            positions = positions[None].expand(3, 1, -1)
                         cos_t, sin_t = rotary(torch.zeros(1, max_len, dtype=model_dtype, device=device), positions)
                         cos_t = cos_t[0].float().contiguous()
                         sin_t = sin_t[0].float().contiguous()
@@ -1647,7 +1651,14 @@ class HybridEngineRollout(RolloutEngine):
                                                         sin_table=sin_t) if hasattr(attn_op, "decode_attn") else 0
                 module._ki_fused_norm_patched = install_fused_norm(module, attn_op)
                 install_lm_head(module, attn_op)
-            except Exception:
+            except Exception as e:
+                # The install chain shares one try: a failure in any part (rope
+                # tables, decode attention, fused norm, lm head) silently drops
+                # the whole segKI decode path back to the HF forward, which is
+                # numerically correct but loses all kernel gains. Make that
+                # visible instead of looking like normal slow decoding.
+                logger.warning_once(f"segKI decode install failed; rollout falls back to the HF forward "
+                                    f"({type(e).__name__}: {e}). Decode will run without the injected kernels.")
                 attn_patched = 0
                 module._ki_fused_norm_patched = 0
 
