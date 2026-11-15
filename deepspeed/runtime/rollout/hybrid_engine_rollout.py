@@ -1745,11 +1745,9 @@ class HybridEngineRollout(RolloutEngine):
             # stay in Python (PyTorch argmax is batch-native).  The Python
             # overhead (~50us/step) is a smaller fraction of the larger GPU
             # workload at higher batch.
+            eos_check_every = 16
             eos_mask = torch.zeros(batch_size, dtype=torch.bool, device=device)
             for step in range(max_new_tokens - 1):
-                if eos_mask.all():
-                    output_ids.append(torch.full((batch_size, 1), pad_token_id, dtype=torch.long, device=device))
-                    continue
                 static_token.copy_(next_token)
                 pos = prompt_len + step
                 write_pos.fill_(pos)
@@ -1760,7 +1758,22 @@ class HybridEngineRollout(RolloutEngine):
                 get_accelerator().replay_graph(graph)
                 next_token = select_next_tokens(static_logits[:, -1, :])
                 output_ids.append(next_token)
+                # eos_mask.all() is a device->host sync; running it every step
+                # serializes the ~50us of Python glue against the replay and
+                # idles the GPU between steps. Amortize it like the b=1 path:
+                # check every eos_check_every steps and break with a bulk pad.
+                # Tokens generated after a row's EOS (at most
+                # eos_check_every - 1 of them) are padded away by
+                # _pad_after_eos, so the output is identical.
+                if eos_token_id is None:
+                    continue
                 eos_mask |= (next_token.view(batch_size) == eos_token_id)
+                if step % eos_check_every == eos_check_every - 1 and bool(eos_mask.all()):
+                    remaining = max_new_tokens - 2 - step
+                    if remaining > 0:
+                        output_ids.append(
+                            torch.full((batch_size, remaining), pad_token_id, dtype=torch.long, device=device))
+                    break
             return torch.cat(output_ids, dim=1)
 
         # Full-step graph requires the step kernel to actually be in the
