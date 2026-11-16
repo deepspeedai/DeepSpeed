@@ -12,6 +12,18 @@ from torch.fx.node import map_aggregate
 
 from .util import get_last_uses
 
+try:
+    from torch._functorch.predispatch import _vmap_decrement_nesting, _vmap_increment_nesting
+except ImportError:
+    _VMAP_NESTING_OPS = frozenset()
+else:
+    _VMAP_NESTING_OPS = frozenset((_vmap_increment_nesting, _vmap_decrement_nesting))
+
+
+def is_impure_for_dce(node: Node) -> bool:
+    """Keep vmap nesting markers whose side effects are invisible to FX."""
+    return node.target in _VMAP_NESTING_OPS or node.is_impure()
+
 
 def get_output_node(graph: Graph):
     for v in graph.nodes:
@@ -125,7 +137,6 @@ def add_free_activations(graph_id: int, graph: Graph, activation_node_names: Lis
     for node in graph.nodes:
         if node.target == torch.ops.dc.reload_tensor.default:
             offload_act = node.args[0]
-            # node_to_offload_id[offload_act] = node.args[2]
             offload_id_to_node[node.args[2]] = offload_act
         elif node.target == torch.ops.dc.wait_reload.default:
             offload_id = node.args[2]
@@ -172,7 +183,12 @@ def find_node_by_name(gm: GraphModule, name: str) -> Optional[Node]:
 
 
 def get_node_shape_meta(node: Node) -> Optional[torch.Tensor]:
-    return node.meta.get("val") or node.meta.get("example_value")
+    # Compare with None explicitly: `or` would call bool() on the tensor, which raises for
+    # multi-element tensors and skips a valid zero-valued scalar.
+    value = node.meta.get("val")
+    if value is not None:
+        return value
+    return node.meta.get("example_value")
 
 
 def find_node_by_tag(gm: GraphModule, tag: str) -> Optional[Node]:
@@ -180,7 +196,11 @@ def find_node_by_tag(gm: GraphModule, tag: str) -> Optional[Node]:
     for node in gm.graph.nodes:
         # https://github.com/pytorch/pytorch/blob/085b71eab05cbc7d474a173884269c62d2778f77/torch/_dynamo/utils.py#L5048
         tensor_dict = node.meta.get('tensor_dict')
-        if tensor_dict and tensor_dict.get('tag') == tag:
+        node_tag = tensor_dict.get('tag') if tensor_dict else None
+        # prepare_autosp_inputs tags tensors with (key, seq_dim); a bare key is also accepted.
+        if isinstance(node_tag, tuple):
+            node_tag = node_tag[0]
+        if node_tag == tag:
             input_id_node = node
             break
     return input_id_node

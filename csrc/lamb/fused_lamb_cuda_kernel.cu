@@ -8,15 +8,13 @@
 #include <stdio.h>
 #include <cmath>
 #include "ATen/ATen.h"
+#include "ATen/AccumulateType.h"
 #include "ATen/TensorUtils.h"
 #include "ATen/cuda/CUDAContext.h"
 #include "ATen/cuda/detail/IndexUtils.cuh"
-// #include "ATen/Type.h"
-#include "ATen/AccumulateType.h"
 
 #include <iostream>
 
-// #include <helper_functions.h>
 #if defined(__HIP_PLATFORM_AMD__) && HIP_VERSION > 305
 #include <hip/hip_cooperative_groups.h>
 #else
@@ -296,10 +294,7 @@ __global__ void lamb_cuda_kernel_part3(
         if (lamb_coeff < min_coeff) { lamb_coeff = min_coeff; }
     }
 
-    if (blockId == 0 && threadIdInBlock == 0) {
-        lamb_coeff_val[0] = lamb_coeff;
-        // printf("Cuda Lamb Coeff is %.6f \n",lamb_coeff);
-    }
+    if (blockId == 0 && threadIdInBlock == 0) { lamb_coeff_val[0] = lamb_coeff; }
 
     for (int j = i; j < tsize; j += totThreads) {
         T pj = (float)p[j];
@@ -338,8 +333,6 @@ void fused_lamb_cuda(at::Tensor& p,
                      at::Tensor& u_l2_i,
                      at::Tensor& lamb_coeff)
 {
-    //        using namespace at;
-
     // Get tensor size
     int tsize = p.numel();
     // Determine #threads and #blocks
@@ -473,6 +466,3 @@ void fused_lamb_cuda(at::Tensor& p,
     }
     C10_CUDA_CHECK(cudaGetLastError());
 }
-
-// template __device__ void reduce_two_vectors_in_register<float,512>(float a, float b, float* g_a,
-// float* g_b, cg::grid_group &cgg);

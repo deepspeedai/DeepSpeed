@@ -254,7 +254,7 @@ class SUPA_Accelerator(DeepSpeedAccelerator):
             module = importlib.import_module("{}.{}".format(op_builder_dir, module_name))
             for member_name in module.__dir__():
                 if (member_name.endswith('Builder')
-                        and member_name not in ('OpBuilder', 'CUDAOpBuilder', 'TorchCPUOpBuilder', 'SUPAOpBuilder')):
+                        and member_name not in ('OpBuilder', 'CUDAOpBuilder', 'SUPAOpBuilder')):
                     if member_name not in self.class_dict:
                         self.class_dict[member_name] = getattr(module, member_name)
 

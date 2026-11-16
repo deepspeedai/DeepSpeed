@@ -196,6 +196,25 @@ class TestZeroLinearAutocast(DistributedTest):
         assert weight.grad.dtype == torch.float32
         assert inp.grad.dtype == torch.float32
 
+    def test_cpu_autocast_backward_matches_functional_linear(self):
+        """Backward must re-enter the autocast of the operands' device, which is not always the accelerator."""
+        inp = torch.randn(2, 8, dtype=torch.bfloat16, requires_grad=True)
+        weight = torch.randn(4, 8, requires_grad=True)
+        bias = torch.randn(4, requires_grad=True)
+        reference = [tensor.detach().clone().requires_grad_() for tensor in (inp, weight, bias)]
+
+        with torch.autocast("cpu", dtype=torch.bfloat16):
+            out = zero3_linear_wrap(inp, weight, bias)
+            expected = torch.nn.functional.linear(*reference)
+        out.float().sum().backward()
+        expected.float().sum().backward()
+
+        assert out.dtype == expected.dtype
+        torch.testing.assert_close(out, expected)
+        for got, want in zip((inp, weight, bias), reference):
+            assert got.grad.dtype == want.dtype
+            torch.testing.assert_close(got.grad, want.grad)
+
     def test_setup_context_stores_autocast_attrs(self):
         """setup_context must store _fwd_used_autocast and _dtype on ctx."""
         model = nn.Linear(4, 4)

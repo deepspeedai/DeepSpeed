@@ -4,22 +4,24 @@
 # DeepSpeed Team
 
 import deepspeed
-import torch
 import pytest
 
 from deepspeed.ops.lion import FusedLion
 from deepspeed.ops.lion import DeepSpeedCPULion
 from unit.common import DistributedTest
 from unit.simple_model import SimpleModel
-from deepspeed.accelerator import get_accelerator
-from deepspeed.ops.op_builder import CPULionBuilder
+from deepspeed.ops.op_builder import CPULionBuilder, FusedLionBuilder
 
-if torch.half not in get_accelerator().supported_dtypes():
-    pytest.skip(f"fp16 not supported, valid dtype: {get_accelerator().supported_dtypes()}", allow_module_level=True)
+# Each config builds a different optimizer, so each one is gated on the op it needs.
+requires_fused_lion = pytest.mark.skipif(not deepspeed.ops.__compatible_ops__[FusedLionBuilder.NAME],
+                                         reason="FusedLionBuilder has not been implemented on this system.")
+requires_cpu_lion = pytest.mark.skipif(not deepspeed.ops.__compatible_ops__[CPULionBuilder.NAME],
+                                       reason="CPULionBuilder has not been implemented on this system.")
+
 # yapf: disable
 #'optimizer, zero_offload, resulting_optimizer
-lion_configs = [["Lion",  False, FusedLion],
-                ["Lion",  True,  DeepSpeedCPULion]]
+lion_configs = [pytest.param("Lion", False, FusedLion,        marks=requires_fused_lion),
+                pytest.param("Lion", True,  DeepSpeedCPULion, marks=requires_cpu_lion)]
 
 @pytest.mark.parametrize(
     'optimizer, zero_offload, resulting_optimizer',
@@ -28,11 +30,11 @@ class TestLionConfigs(DistributedTest):
     world_size = 1
     reuse_dist_env = True
 
-    @pytest.mark.skipif(not deepspeed.ops.__compatible_ops__[CPULionBuilder.NAME], reason="CPULionBuilder has not been implemented on this system.")
     def test(self,
              optimizer,
              zero_offload,
              resulting_optimizer):
+        # Precision does not affect which optimizer is built; fp32 keeps the test independent of fp16/bf16 support.
         config_dict = {
             "train_batch_size": 2,
             "steps_per_print": 1,
@@ -43,9 +45,6 @@ class TestLionConfigs(DistributedTest):
                 }
             },
             "gradient_clipping": 1.0,
-            "fp16": {
-                "enabled": True
-            },
             "zero_optimization": {
                 "stage": 2,
                 "cpu_offload": zero_offload

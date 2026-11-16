@@ -171,13 +171,6 @@ def get_mpu_ranks(tp_size=1, pp_size=1, dp_size=1, virtual_pp_size=None):
 
     return all_tp_group_ranks, all_pp_group_ranks, all_dp_group_ranks
 
-    # # Build the pipeline model-parallel groups and embedding groups
-    # # (first and last rank in each pipeline model-parallel group).
-    # for i in range(num_pipeline_model_parallel_groups):
-    #     ranks = range(i, world_size,
-    #                   num_pipeline_model_parallel_groups)
-    #     print(f"EMB{i}", list(ranks))
-
 
 def reshape(src, tgt):
     """
@@ -206,17 +199,3 @@ def reshape(src, tgt):
 
     for i, r in enumerate(pp_ranks1):
         print(f'{pp_ranks2[i]} => {pp_ranks3[i]}')
-
-
-# easy
-#reshape([2,2,1],[1,1,1])
-
-# probably need more logic to suggest how to pack
-#reshape([4,4,1],[2,2,1])
-
-#reshape([2,4,2], [8,32,1])
-
-# get_mpu_ranks(2,2,2)
-# get_mpu_ranks(4,2,1)
-# get_mpu_ranks(2,4,1)
-# get_mpu_ranks(1,1,8)

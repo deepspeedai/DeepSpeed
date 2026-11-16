@@ -22,18 +22,17 @@ def make_cutlass_checkout(path):
     return path
 
 
-def test_filter_ccs_removes_below_70_and_keeps_ptx_suffix():
+def test_prebuilt_targets_drop_archs_below_70_and_keep_ptx():
     builder = EvoformerAttnBuilder()
-    result = builder.filter_ccs(["6.0", "6.1", "7.0", "8.0+PTX"])
+    builder.jit_mode = False
+    with patch.dict("os.environ", {"TORCH_CUDA_ARCH_LIST": "6.0;6.1;7.0;8.0+PTX"}, clear=False):
+        args = builder.compute_capability_args()
 
-    majors = [int(cc[0]) for cc in result]
-    assert 6 not in majors
-    assert 7 in majors
-    assert 8 in majors
-
-    ptx_entries = [cc for cc in result if cc[1].endswith("+PTX")]
-    assert len(ptx_entries) == 1
-    assert ptx_entries[0] == ["8", "0+PTX"]
+    assert args == [
+        "-gencode=arch=compute_70,code=sm_70",
+        "-gencode=arch=compute_80,code=sm_80",
+        "-gencode=arch=compute_80,code=compute_80",
+    ]
 
 
 def test_nvcc_args_deprecates_env_and_omits_gpu_arch_define():

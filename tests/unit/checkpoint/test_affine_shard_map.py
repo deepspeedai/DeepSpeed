@@ -456,6 +456,139 @@ def test_stored_version_is_the_format_version():
     assert AFFINE_MAP_FORMAT_VERSION >= 1
 
 
+def test_singleton_stride_overlap_is_refused():
+    pieces = [AffinePiece((1, 2), offset, (4, 1), 0, (4, 1), [0]) for offset in (0, 2)]
+    affine_map = ParamAffineMap((1, 4), {0: (1, 4)}, {0: pieces})
+    with pytest.raises(ValueError, match='twice'):
+        affine_map.validate()
+
+
+def test_singleton_stride_out_of_bounds_is_refused():
+    pieces = [AffinePiece((1, 2), source, (4, 1), dest, (4, 1), [0]) for source, dest in ((0, 0), (2, 3))]
+    affine_map = ParamAffineMap((1, 4), {0: (1, 4)}, {0: pieces})
+    with pytest.raises(ValueError, match='outside the shard'):
+        affine_map.validate()
+
+
+def test_singleton_stride_contiguous_layout_round_trips():
+    pieces = [AffinePiece((1, 2), offset, (4, 1), offset, (4, 1), [0]) for offset in (0, 2)]
+    affine_map = ParamAffineMap((1, 4), {0: (1, 4)}, {0: pieces})
+    shard = torch.arange(4).reshape(1, 4)
+    affine_map.validate()
+    torch.testing.assert_close(affine_map.rebuild({0: shard}), shard)
+
+
+def test_strided_column_pieces_remain_valid():
+    pieces = [AffinePiece((2, 2), offset, (4, 1), offset, (4, 1), [0]) for offset in (0, 2)]
+    affine_map = ParamAffineMap((2, 4), {0: (2, 4)}, {0: pieces})
+    shard = torch.arange(8).reshape(2, 4)
+    affine_map.validate()
+    torch.testing.assert_close(affine_map.rebuild({0: shard}), shard)
+
+
+def test_shard_element_count_mismatch_is_value_error():
+    piece = AffinePiece((2, ), 0, (1, ), 0, (1, ), [0])
+    affine_map = ParamAffineMap((4, ), {0: (4, )}, {0: [piece]})
+    with pytest.raises(ValueError, match='account for 2'):
+        affine_map.validate()
+
+
+def test_destination_validation_does_not_enumerate_elements(monkeypatch):
+    size = 10**9
+    piece = AffinePiece((size, 8), 0, (8, 1), 0, (8, 1), [0])
+    affine_map = ParamAffineMap((size, 8), {0: (size, 8)}, {0: [piece]})
+
+    def refuse_walk(self):
+        raise AssertionError('validation must not enumerate parameter elements')
+
+    monkeypatch.setattr(AffinePiece, 'source_offsets', refuse_walk)
+    affine_map.validate()
+
+
+def _column_split_qkv_map():
+    """Fused QKV split along columns, so every piece writes a few columns of each shard row."""
+    return sub_param_map(shape=(4, 12),
+                         sub_dim_sizes=[4, 4, 4],
+                         shard_widths=[[2, 2], [2, 2], [2, 2]],
+                         partition_dim=1)
+
+
+def _move_destination(affine_map, rank, index, delta):
+    piece = affine_map.pieces_by_rank[rank][index]
+    affine_map.pieces_by_rank[rank][index] = AffinePiece(piece.shape, piece.source_offset, piece.source_strides,
+                                                         piece.dest_offset + delta, piece.dest_strides,
+                                                         piece.locations)
+
+
+def test_strided_destination_overlap_is_refused():
+    # Rank 0's value columns are moved onto its key columns. The element count still matches,
+    # so without a destination check the key block is overwritten and two shard columns are
+    # never written at all.
+    affine_map = _column_split_qkv_map()
+    _move_destination(affine_map, rank=0, index=2, delta=-2)
+    with pytest.raises(ValueError, match='twice'):
+        affine_map.validate()
+
+
+def test_strided_destination_outside_the_shard_is_refused():
+    affine_map = _column_split_qkv_map()
+    _move_destination(affine_map, rank=0, index=2, delta=2)
+    with pytest.raises(ValueError, match='outside the shard'):
+        affine_map.validate()
+
+
+def test_strided_destination_that_wraps_a_shard_row_round_trips():
+    # In a (3, 3) shard, a (2, 2) view starting at address 2 with the shard's strides writes
+    # addresses 2, 3, 5 and 6. It wraps past the end of row 0 but stays inside the shard, so it
+    # is a valid destination even though it is not a box of the shard's grid.
+    pieces = [
+        AffinePiece((2, 2), 0, (2, 1), 2, (3, 1), [0]),
+        AffinePiece((2, ), 4, (1, ), 0, (1, ), [0]),
+        AffinePiece((1, ), 6, (1, ), 4, (1, ), [0]),
+        AffinePiece((2, ), 7, (1, ), 7, (1, ), [0]),
+    ]
+    affine_map = ParamAffineMap((9, ), {0: (3, 3)}, {0: pieces})
+    affine_map.validate_coverage()
+    full = torch.arange(9.)
+    torch.testing.assert_close(affine_map.rebuild({0: affine_map.extract(full, 0)}), full)
+
+
+def _colliding_strided_map():
+    # The first piece writes shard addresses 0 and 2, the second writes 1 and 2, and address 3
+    # is never written. Neither piece is a box of the shard's grid, so only walking the
+    # addresses can see it.
+    pieces = [AffinePiece((2, ), 0, (1, ), 0, (2, ), [0]), AffinePiece((2, ), 2, (1, ), 1, (1, ), [0])]
+    return ParamAffineMap((4, ), {0: (4, )}, {0: pieces})
+
+
+def test_full_check_refuses_a_destination_collision_of_any_stride():
+    with pytest.raises(ValueError, match='twice'):
+        _colliding_strided_map().validate_coverage()
+
+
+def test_conversion_refuses_a_destination_collision_of_any_stride():
+    # validate() accepts this map, so converting through it would read shard address 2 for two
+    # elements and never read address 3, and restoring would leave address 3 uninitialised.
+    affine_map = _colliding_strided_map()
+    affine_map.validate()
+    with pytest.raises(ValueError, match='twice'):
+        affine_map.extract(torch.arange(4.), 0)
+    with pytest.raises(ValueError, match='twice'):
+        affine_map.rebuild({0: torch.arange(4.)})
+
+
+def test_strided_destination_validation_does_not_enumerate_elements(monkeypatch):
+    size = 10**9
+    pieces = [AffinePiece((size, 4), column, (8, 1), column, (8, 1), [0]) for column in (0, 4)]
+    affine_map = ParamAffineMap((size, 8), {0: (size, 8)}, {0: pieces})
+
+    def refuse_walk(self, base, strides):
+        raise AssertionError('validation must not enumerate shard elements')
+
+    monkeypatch.setattr(AffinePiece, '_offsets', refuse_walk)
+    affine_map.validate()
+
+
 # Guards added in review. Each one covers a way a map could produce a plausible but wrong
 # parameter rather than failing, which is the failure mode that matters for a checkpoint.
 
@@ -478,6 +611,161 @@ def test_disagreeing_replicas_are_refused():
     shards = {0: torch.zeros(4, dtype=torch.float64), 1: torch.ones(4, dtype=torch.float64)}
     with pytest.raises(ValueError, match='different data'):
         affine_map.rebuild(shards)
+
+
+def test_replicas_cut_at_different_boundaries_are_compared_in_full():
+    # Rank 0 holds the replicated block as one piece and rank 1 as two halves. Comparing only a
+    # piece that starts where an earlier one did would check rank 1's first half and let its
+    # second half overwrite rank 0's unchecked.
+    pieces_by_rank = {
+        0: [AffinePiece((8, ), 0, (1, ), 0, (1, ), [0, 1])],
+        1: [AffinePiece((4, ), 0, (1, ), 0, (1, ), [0, 1]),
+            AffinePiece((4, ), 4, (1, ), 4, (1, ), [0, 1])],
+    }
+    affine_map = ParamAffineMap((8, ), {0: (8, ), 1: (8, )}, pieces_by_rank)
+    affine_map.validate_coverage()
+    full = torch.arange(8.)
+    torch.testing.assert_close(affine_map.rebuild({0: full, 1: full.clone()}), full)
+    drifted = full.clone()
+    drifted[6] += 1
+    with pytest.raises(ValueError, match='different data'):
+        affine_map.rebuild({0: full, 1: drifted})
+
+
+@pytest.mark.parametrize('logical_shape, source_offsets, match', [((9, ), (0, 4), 'uncovered'),
+                                                                  ((8, ), (0, 0), 'single holder')],
+                         ids=['nothing-holds-the-last-element', 'two-ranks-own-one-block'])
+def test_conversion_refuses_a_map_that_does_not_cover_the_parameter(logical_shape, source_offsets, match):
+    # Each rank fully writes its shard of four, so validate() accepts both maps. Without a check
+    # on the source side, rebuild would keep whatever torch.empty left where no rank writes.
+    pieces_by_rank = {
+        rank: [AffinePiece((4, ), offset, (1, ), 0, (1, ), [rank])]
+        for rank, offset in enumerate(source_offsets)
+    }
+    affine_map = ParamAffineMap(logical_shape, {0: (4, ), 1: (4, )}, pieces_by_rank)
+    affine_map.validate()
+    with pytest.raises(ValueError, match=match):
+        affine_map.rebuild({rank: torch.full((4, ), float(rank + 1)) for rank in (0, 1)})
+
+
+@pytest.mark.parametrize('first', [0, 1])
+def test_a_replica_overlapping_a_single_holder_is_refused_in_either_order(first):
+    # Rank 0 declares the block a replica held by ranks 0 and 1, while rank 1 declares itself its
+    # only holder. Which rank rebuild visits first must not decide whether that is caught.
+    pieces = {
+        0: [AffinePiece((4, ), 0, (1, ), 0, (1, ), [0, 1])],
+        1: [AffinePiece((4, ), 0, (1, ), 0, (1, ), [1])],
+    }
+    affine_map = ParamAffineMap((4, ), {0: (4, ), 1: (4, )}, {rank: pieces[rank] for rank in (first, 1 - first)})
+    with pytest.raises(ValueError, match='single holder'):
+        affine_map.rebuild({0: torch.arange(4.), 1: torch.arange(4.)})
+
+
+_SELF_OVERLAPPING_VIEWS = {
+    # Rank 0's source view reads addresses 0, 1, 1 and 2, so one shard value is lost, and which one
+    # survives depends on the device.
+    'source': ((6, ), {
+        0: (4, ),
+        1: (3, )
+    }, {
+        0: [AffinePiece((2, 2), 0, (1, 1), 0, (2, 1), [0])],
+        1: [AffinePiece((3, ), 3, (1, ), 0, (1, ), [1])]
+    }),
+    # A zero stride repeats one element. extract would copy it twice without complaint.
+    'zero-stride': ((4, ), {
+        0: (2, ),
+        1: (2, )
+    }, {
+        0: [AffinePiece((2, ), 0, (0, ), 0, (1, ), [0])],
+        1: [AffinePiece((2, ), 2, (1, ), 0, (1, ), [1])]
+    }),
+    # The destination view writes shard addresses 0, 1, 1 and 2, and never 3.
+    'destination': ((4, ), {
+        0: (4, )
+    }, {
+        0: [AffinePiece((2, 2), 0, (2, 1), 0, (1, 1), [0])]
+    }),
+}
+
+
+@pytest.mark.parametrize('case', sorted(_SELF_OVERLAPPING_VIEWS))
+def test_a_view_that_overlaps_itself_is_refused(case):
+    logical_shape, shard_shapes, pieces_by_rank = _SELF_OVERLAPPING_VIEWS[case]
+    affine_map = ParamAffineMap(logical_shape, shard_shapes, pieces_by_rank)
+    with pytest.raises(ValueError, match='itself'):
+        affine_map.extract(torch.arange(float(affine_map.numel)), 0)
+    with pytest.raises(ValueError, match='itself'):
+        affine_map.rebuild({rank: torch.zeros(shape) for rank, shape in shard_shapes.items()})
+
+
+def _random_widths(rng, total, tp_degree):
+    cuts = sorted(rng.sample(range(1, total), tp_degree - 1))
+    return [stop - start for start, stop in zip([0] + cuts, cuts + [total])]
+
+
+def _random_layout(rng):
+    from deepspeed.checkpoint.affine import block_gather_map, segmented_map
+    tp_degree = rng.choice([2, 3, 4])
+    shape = (rng.randint(5, 12), rng.randint(5, 12))
+    axis = rng.choice([0, 1])
+    total = shape[axis]
+    kind = rng.choice(['split', 'replicated', 'segmented', 'blocks'])
+    if kind == 'split':
+        return contiguous_split_map(shape, _random_widths(rng, total, tp_degree), axis)
+    if kind == 'replicated':
+        return replicated_map(shape, tp_degree)
+    if kind == 'segmented':
+        replicated_rows = rng.randint(1, total - tp_degree)
+        split = total - replicated_rows
+        return segmented_map(shape, [(split, False), (replicated_rows, True)], axis, tp_degree,
+                             [_random_widths(rng, split, tp_degree)])
+    blocks = list(range(total))
+    rng.shuffle(blocks)
+    block_ids_by_rank, start = {}, 0
+    for rank, width in enumerate(_random_widths(rng, total, tp_degree)):
+        block_ids_by_rank[rank] = sorted(blocks[start:start + width])
+        start += width
+    return block_gather_map(shape, block_ids_by_rank, 1, axis)
+
+
+def _corrupt_one_piece(affine_map, rng):
+    rank = rng.choice(sorted(affine_map.pieces_by_rank))
+    pieces = affine_map.pieces_by_rank[rank]
+    index = rng.randrange(len(pieces))
+    piece = pieces[index]
+    fields = [piece.source_offset, list(piece.source_strides), piece.dest_offset, list(piece.dest_strides)]
+    which = rng.randrange(4)
+    if which in (0, 2):
+        fields[which] = max(0, fields[which] + rng.choice([-2, -1, 1, 2]))
+    else:
+        axis = rng.randrange(len(piece.shape))
+        fields[which][axis] = max(1, fields[which][axis] + rng.choice([-1, 1]))
+    pieces[index] = AffinePiece(piece.shape, fields[0], fields[1], fields[2], fields[3], piece.locations)
+
+
+def test_a_corrupted_map_is_refused_or_still_exact():
+    """Fixed seed: converting through a map with one corrupted offset or stride fails or is exact.
+
+    The shards come from the map before it is corrupted, as a checkpoint's shards were written by
+    the real layout. Extracting and rebuilding through the same wrong map could let an error cancel.
+    """
+    import random
+    rng = random.Random(20261031)
+    refused = 0
+    for _ in range(300):
+        affine_map = _random_layout(rng)
+        full = torch.arange(1, affine_map.numel + 1, dtype=torch.float32).view(affine_map.logical_shape)
+        shards = {rank: affine_map.extract(full, rank) for rank in affine_map.pieces_by_rank}
+        _corrupt_one_piece(affine_map, rng)
+        try:
+            rebuilt = affine_map.rebuild(shards)
+        except (ValueError, RuntimeError):
+            refused += 1
+            continue
+        assert torch.equal(rebuilt, full), affine_map.to_dict()
+    # Most corruptions break the map; the rest still describe a valid layout. Either way the run
+    # must have exercised refusals, or it shows nothing.
+    assert refused > 100
 
 
 def test_shard_that_disagrees_with_the_map_is_refused():
@@ -698,6 +986,69 @@ def test_yuan_weight_is_no_longer_refused_by_conversion(layer_name, out_features
     assert r"^proj\.weight$" not in info.get(AUTOTP_UNSUPPORTED_PARAMETER_PATTERNS, {})
 
 
+@pytest.mark.parametrize('num_heads, mp_size', [(8, 2), (8, 4), (16, 4)])
+def test_yuan_output_projection_keeps_its_bias_whole(num_heads, mp_size):
+    """The output projection's bias must survive partitioning unchanged on every rank.
+
+    LinearAllreduce sums the ranks' partial products first and adds the bias once afterwards,
+    so each rank needs the whole bias. Partitioning used to raise on a bias here, and dividing
+    it by the world size instead would scale the output's bias by the same factor. The
+    unsharded layer is the reference for both.
+    """
+    from deepspeed.module_inject.fusedqkv_utils import shard_value_with_share_qk, shared_qk_value_head_ids
+
+    head_dim, out_features = 4, 12
+    in_features = num_heads * head_dim
+    meta = AutoTPMeta(num_kv_heads=num_heads)
+    torch.manual_seed(0)
+    weight = torch.randn(out_features, in_features, dtype=torch.float64)
+    bias = torch.randn(out_features, dtype=torch.float64)
+    x = torch.randn(3, in_features, dtype=torch.float64)
+
+    reduced = torch.zeros(3, out_features, dtype=torch.float64)
+    bias_shards = []
+    for rank in range(mp_size):
+        weight_shard, bias_shard = shard_value_with_share_qk(weight, torch.nn.Parameter(bias.clone()), rank, mp_size,
+                                                             False, meta)
+        columns = torch.cat([
+            torch.arange(head * head_dim, (head + 1) * head_dim)
+            for head in shared_qk_value_head_ids(num_heads, mp_size, rank)
+        ])
+        reduced += x[:, columns] @ weight_shard.detach().T
+        bias_shards.append(bias_shard.detach())
+
+    for bias_shard in bias_shards:
+        assert torch.equal(bias_shard, bias)
+    assert torch.allclose(reduced + bias_shards[0], x @ weight.T + bias)
+
+
+def test_yuan_output_projection_bias_is_described_as_replicated():
+    """With its bias kept whole, Yuan's output projection has nothing left to refuse.
+
+    The bias was the last parameter in tree published as unsupported whatever the configuration.
+    It is an ordinary replicated piece: every rank holds all of it, unscaled.
+    """
+    from deepspeed.checkpoint.affine import ParamAffineMap
+    from deepspeed.checkpoint.constants import (AFFINE_MAP, AFFINE_MAP_PARAMS, AUTOTP_UNSUPPORTED_PARAMETER_PATTERNS)
+    from deepspeed.module_inject.layers import Yuan_LinearAllreduce, collect_autotp_universal_checkpoint_info
+
+    mp_size = 2
+    layer = Yuan_LinearAllreduce(torch.nn.Linear(8, 8, bias=True), mp_group=None, name='o_proj')
+    layer.tp_world_size = mp_size
+    layer.tp_meta = AutoTPMeta(num_kv_heads=8)
+
+    model = torch.nn.Module()
+    model.o_proj = layer
+    info = collect_autotp_universal_checkpoint_info(model)
+
+    assert info.get(AUTOTP_UNSUPPORTED_PARAMETER_PATTERNS, {}) == {}
+    bias_map = ParamAffineMap.from_dict(info[AFFINE_MAP][AFFINE_MAP_PARAMS][r"^o_proj\.bias$"])
+    for rank in range(mp_size):
+        (piece, ) = bias_map.pieces_by_rank[rank]
+        assert piece.locations == frozenset(range(mp_size))
+        assert piece.scale == 1.0
+
+
 def test_a_layout_without_head_counts_stays_unsupported():
     """Describing Yuan needs the kv head count, so without it the layout must not be claimed."""
     from deepspeed.checkpoint.constants import AUTOTP_UNSUPPORTED_PARAMETER_PATTERNS
@@ -788,6 +1139,101 @@ def test_bigcode_weight_is_no_longer_refused_by_conversion():
                               tp_meta=_meta(4, n_embd=n_embd, num_attention_heads=4))
     layer.tp_world_size = mp_size
     layer.tp_meta = _meta(4, n_embd=n_embd, num_attention_heads=4)
+
+    model = torch.nn.Module()
+    model.c_attn = layer
+    info = collect_autotp_universal_checkpoint_info(model)
+
+    assert r"^c_attn\.weight$" in info.get(AFFINE_MAP, {}).get(AFFINE_MAP_PARAMS, {})
+    assert r"^c_attn\.weight$" not in info.get(AUTOTP_UNSUPPORTED_PARAMETER_PATTERNS, {})
+
+
+# (rows, cols, mp_size, num_kv_heads)
+CODEGEN_CONFIGS = [(24, 8, 2, 8), (48, 16, 2, 8), (96, 32, 2, 8), (96, 8, 4, 32), (192, 8, 8, 64)]
+
+
+@pytest.mark.parametrize('rows, cols, mp_size, num_kv_heads',
+                         CODEGEN_CONFIGS,
+                         ids=[f'{r}x{c}_tp{m}' for r, c, m, _ in CODEGEN_CONFIGS])
+def test_codegen_layer_map_matches_the_real_partition(rows, cols, mp_size, num_kv_heads):
+    """CodeGen permutes the rows before splitting them, so the map selects scattered blocks.
+
+    The partition reaches that order through reshapes and never names a block, so the layer
+    derives the same order independently. Requiring the two to agree is what keeps them from
+    drifting -- the derived form is what ships, the partition is truth.
+    """
+    from deepspeed.checkpoint.affine import block_gather_map
+    from deepspeed.module_inject.fusedqkv_utils import codegen_block_layout
+
+    block_size, block_ids_by_rank = codegen_block_layout(rows, mp_size, num_kv_heads)
+    analytic = block_gather_map((rows, cols), block_ids_by_rank, block_size, 0)
+    analytic.validate_coverage()
+
+    meta = _meta(num_kv_heads, n_embd=cols, num_attention_heads=num_kv_heads)
+    shard_fn = _fused_qkv_shard_fn('CodeGenBlock', mp_size, meta)
+    torch.manual_seed(0)
+    full_param = torch.randn(rows, cols, dtype=torch.float64)
+    for rank in range(mp_size):
+        assert torch.equal(analytic.extract(full_param, rank), shard_fn(full_param.clone(), rank))
+
+    shards = {rank: shard_fn(full_param.clone(), rank) for rank in range(mp_size)}
+    assert torch.equal(analytic.rebuild(shards), full_param)
+
+
+def test_codegen_piece_count_follows_the_block_structure_not_the_model_size():
+    """The count must stay put as the parameter grows, or the description is not usable.
+
+    A compressor that missed the permutation would emit one piece per row, which still covers
+    the tensor and still round-trips -- so only the count reveals it. Here the rows grow 8x
+    while the count does not move.
+    """
+    from deepspeed.checkpoint.affine import block_gather_map
+    from deepspeed.module_inject.fusedqkv_utils import codegen_block_layout
+
+    counts = set()
+    for rows in (24, 48, 96, 192):
+        block_size, block_ids_by_rank = codegen_block_layout(rows, 2, 8)
+        affine_map = block_gather_map((rows, 8), block_ids_by_rank, block_size, 0)
+        counts.update(len(pieces) for pieces in affine_map.pieces_by_rank.values())
+    assert counts == {11}, f"piece count moved with model size: {sorted(counts)}"
+
+
+def test_codegen_refuses_every_case_the_partition_would_not_produce():
+    """Claiming a permutation the weight does not have is worse than leaving it undescribed.
+
+    Each case here is a layout `_codegen_type_transpose` never produces: it asserts a head count
+    it can divide, it is not reached below two ranks, and rows that do not split into equal
+    blocks have no block description at all.
+    """
+    from deepspeed.module_inject.fusedqkv_utils import codegen_block_layout
+
+    assert codegen_block_layout(24, 2, None) is None, 'no head count'
+    assert codegen_block_layout(24, 2, 6) is None, 'head count the partition cannot divide'
+    assert codegen_block_layout(24, 1, 8) is None, 'single rank is never partitioned'
+    assert codegen_block_layout(25, 2, 8) is None, 'rows do not divide into equal blocks'
+    assert codegen_block_layout(0, 2, 8) is None, 'no rows'
+    assert codegen_block_layout(24, 2, 8) is not None, 'the supported case must still be claimed'
+
+
+def test_codegen_weight_is_no_longer_refused_by_conversion():
+    """The layer must publish the map, not merely be able to build one.
+
+    The geometry tests above cover `block_gather_map`, so a hook that never fires -- a renamed
+    method, or a fused type that reads differently here -- would leave the layout refused with
+    every other test still green.
+    """
+    from deepspeed.checkpoint.constants import (AFFINE_MAP, AFFINE_MAP_PARAMS, AUTOTP_UNSUPPORTED_PARAMETER_PATTERNS)
+    from deepspeed.module_inject.layers import collect_autotp_universal_checkpoint_info, fused_LinearLayer
+
+    rows, cols, mp_size, num_kv_heads = 24, 8, 2, 8
+    meta = _meta(num_kv_heads, n_embd=cols, num_attention_heads=num_kv_heads)
+    layer = fused_LinearLayer(torch.nn.Linear(cols, rows, bias=False),
+                              mp_group=None,
+                              name='c_attn',
+                              fused_module=_NamedModule('CodeGenBlock'),
+                              tp_meta=meta)
+    layer.tp_world_size = mp_size
+    layer.tp_meta = meta
 
     model = torch.nn.Module()
     model.c_attn = layer

@@ -83,7 +83,7 @@ class TestMuonRunsUnderZeroInit(DistributedTest):
 
     @pytest.mark.parametrize("zero_init", [False, True])
     def test_muon_update_is_called(self, zero_init):
-        import deepspeed.runtime.zero.stage3 as stage3
+        import deepspeed.runtime.zero.muon.original_muon as original_muon
 
         config = {
             "train_micro_batch_size_per_gpu": 1,
@@ -110,19 +110,19 @@ class TestMuonRunsUnderZeroInit(DistributedTest):
             model = _Model()
 
         calls = []
-        original = stage3.muon_update
+        original = original_muon.muon_update
 
         def counting(*args, **kwargs):
             calls.append(1)
             return original(*args, **kwargs)
 
-        stage3.muon_update = counting
+        original_muon.muon_update = counting
         try:
             engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config)
             x = torch.ones(1, 16, dtype=torch.bfloat16, device=engine.device)
             engine.backward(engine(x))
             engine.step()
         finally:
-            stage3.muon_update = original
+            original_muon.muon_update = original
 
         assert calls, "Muon never ran; every parameter was left on the AdamW branch"
