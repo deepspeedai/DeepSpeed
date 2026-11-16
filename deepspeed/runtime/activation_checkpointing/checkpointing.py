@@ -576,11 +576,18 @@ def get_offloaded_activations_for_backward(args, engine):
     """Offload checkpoint inputs asynchronously and empty their GPU storage.
 
     The engine holds a detached alias that keeps the source storage alive until
-    the D2H drains, so emptying ``arg`` afterwards is safe. Aliased args share one
-    id; skipped args stay on GPU.
+    the D2H drains, so emptying afterwards is safe. Aliased args share one id;
+    skipped args stay on GPU.
+
+    An offloaded arg is saved as a detached placeholder, not the arg itself:
+    emptying a view's ``.data`` does not release its base (the view's autograd
+    metadata keeps it), so a view arg (e.g. a layer output that is an unsqueeze of
+    a 2D tensor) would stay resident on GPU until backward. Recompute detaches its
+    inputs anyway, so only ``requires_grad`` has to carry over.
     """
     new_args = []
     tokens = {}
+    placeholders = {}
     to_empty = []
     for arg in args:
         if not is_activation_to_checkpoint(arg):
@@ -590,10 +597,16 @@ def get_offloaded_activations_for_backward(args, engine):
         if key not in tokens:
             tokens[key] = engine.offload_input(arg.detach())
         token = tokens[key]
-        if token is not None:
-            arg.ds_offload_id = token
-            to_empty.append(arg)
-        new_args.append(arg)
+        if token is None:
+            new_args.append(arg)
+            continue
+        if key not in placeholders:
+            placeholder = arg.detach()
+            placeholder.requires_grad_(arg.requires_grad)
+            placeholder.ds_offload_id = token
+            placeholders[key] = placeholder
+            to_empty.append(placeholder)
+        new_args.append(placeholders[key])
 
     # Empty only after all offloads register, so a repeated arg is never emptied
     # mid-offload.

@@ -6,6 +6,9 @@
 # TODO: add tests with model parallelism for activation partitioning and other features.
 
 import sys
+import weakref
+from copy import deepcopy
+
 import torch
 import pytest
 from importlib import util
@@ -98,6 +101,67 @@ class TestCheckpointSavedViewIsNotRetained(DistributedTest):
         expected = inputs.detach().clone().requires_grad_(True)
         _SaveViewOfInput.apply(module(expected)).sum().backward()
         assert torch.allclose(inputs.grad, expected.grad)
+
+
+class _ViewOutputLinear(torch.nn.Module):
+    """Returns an unsqueeze view of a 2D result, like a layer whose MLP flattens the batch dim."""
+
+    def __init__(self, dim, bases):
+        super().__init__()
+        self.linear = torch.nn.Linear(dim, dim)
+        self.bases = bases
+
+    def forward(self, x):
+        out = self.linear(x.squeeze(0))
+        if torch.is_grad_enabled() and len(self.bases) < self.n_forward:
+            self.bases.append(weakref.ref(out))
+        return out.unsqueeze(0)
+
+
+class TestCPUOffloadFreesViewArgs(DistributedTest):
+    """Emptying a view arg's ``.data`` does not free its base; the offload path must not keep the view."""
+    world_size = 1
+
+    def test_offloaded_view_arg_base_is_freed(self):
+        import deepspeed
+        import deepspeed.runtime.activation_checkpointing.checkpointing as ds_ckpt
+        from deepspeed.accelerator import get_accelerator
+
+        if get_accelerator().device_name() == "cpu":
+            pytest.skip("CPU accelerator does not offload activations")
+        device = get_accelerator().current_device_name()
+        n_layers = 6
+        bases = []
+        layers = torch.nn.ModuleList([_ViewOutputLinear(HIDDEN_DIM, bases) for _ in range(n_layers)]).to(device)
+        for layer in layers:
+            layer.n_forward = n_layers
+        ref_layers = deepcopy(layers)
+        x = torch.randn(1, 8, HIDDEN_DIM, device=device)
+
+        saved = test_act_ckpt._snapshot_ckpt_config()
+        try:
+            deepspeed.checkpointing.configure(mpu_=None, checkpoint_in_cpu=True)
+            if ds_ckpt._cpu_offload_engine is not None:
+                ds_ckpt._cpu_offload_engine.reset()
+            x_test = x.clone().requires_grad_()
+            hidden = x_test
+            for layer in layers:
+                hidden = non_reentrant_checkpoint(layer, hidden)
+            get_accelerator().synchronize()
+            # Layer 0's output is layer 1's offloaded arg; keep-last and the forward stash hold only the newest few.
+            assert bases[0]() is None, "an offloaded view arg kept its base resident on the device"
+            hidden.sum().backward()
+        finally:
+            test_act_ckpt._restore_ckpt_config(saved)
+
+        x_ref = x.clone().requires_grad_()
+        hidden = x_ref
+        for layer in ref_layers:
+            hidden = layer(hidden)
+        hidden.sum().backward()
+        torch.testing.assert_close(x_ref.grad, x_test.grad)
+        for p_ref, p_test in zip(ref_layers.parameters(), layers.parameters()):
+            torch.testing.assert_close(p_ref.grad, p_test.grad)
 
 
 # below classes are used to test the graph with inputs have no grad and parameters has grad, namely partial graph?
