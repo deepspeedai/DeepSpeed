@@ -341,6 +341,7 @@ class OptimizerSwapper(object):
         swap_paths = []
         unswapped_srcs = []
         unswapped_dsts = []
+        staged_dsts = []
 
         for i, numel in enumerate(fp16_num_elems):
             pinned_tensor, _ = fp16_swap_buffers.allocate_tensor(numel, None, numel)
@@ -354,6 +355,13 @@ class OptimizerSwapper(object):
                 if partition_path is None:
                     unswapped_srcs.append(tensor)
                     unswapped_dsts.append(dst_tensor)
+                elif (partition_numel * dst_tensor.element_size()) % self.aligned_bytes != 0:
+                    # Direct I/O reads whole blocks: read the padded partition that the swap file holds, then copy
+                    # the partition out of it.
+                    staging_numel = os.path.getsize(partition_path) // dst_tensor.element_size()
+                    swap_paths.append(partition_path)
+                    swap_tensors.append(aio_handle.new_cpu_locked_tensor(staging_numel, dst_tensor))
+                    staged_dsts.append((swap_tensors[-1], dst_tensor))
                 else:
                     swap_paths.append(partition_path)
                     swap_tensors.append(dst_tensor)
@@ -366,6 +374,10 @@ class OptimizerSwapper(object):
 
         if len(swap_tensors) > 0:
             assert len(swap_tensors) == aio_handle.wait()
+
+        for staging_tensor, dst in staged_dsts:
+            dst.data.copy_(staging_tensor.narrow(0, 0, dst.numel()))
+            aio_handle.free_cpu_locked_tensor(staging_tensor)
 
         return swapped_fp16_tensors
 

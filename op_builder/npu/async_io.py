@@ -6,7 +6,7 @@
 import shutil
 import subprocess
 
-from .builder import NPUOpBuilder
+from .builder import NPUOpBuilder, cpp_standard
 
 
 class AsyncIOBuilder(NPUOpBuilder):
@@ -39,17 +39,11 @@ class AsyncIOBuilder(NPUOpBuilder):
         # -O0 for improved debugging, since performance is bound by I/O
         CPU_ARCH = self.cpu_arch()
         SIMD_WIDTH = self.simd_width()
-        import torch  # Keep this import here to avoid errors when building DeepSpeed wheel without torch installed
-        TORCH_MAJOR, TORCH_MINOR = map(int, torch.__version__.split('.')[0:2])
-        if TORCH_MAJOR >= 2 and TORCH_MINOR >= 1:
-            CPP_STD = '-std=c++17'
-        else:
-            CPP_STD = '-std=c++14'
         return args + [
             '-g',
             '-Wall',
             '-O0',
-            CPP_STD,
+            cpp_standard(),
             '-shared',
             '-fPIC',
             '-Wno-reorder',

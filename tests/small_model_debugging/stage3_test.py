@@ -57,12 +57,6 @@ def test_driver():
         model = LinearStack()
     print()
 
-    # parted = [name for (name, p) in model.named_parameters() if p._partitioned]
-    # not_parted = [name for (name, p) in model.named_parameters() if not p._partitioned]
-    # print('partitioned: ', parted)
-    # print('full: ', not_parted)
-    # print()
-
     model.train()
 
     test_input = torch.rand(1, model.input_dim)
@@ -77,14 +71,6 @@ def test_driver():
 
     output = model(test_input)
     output.backward(grad_output)
-
-    # parted = [name for (name, p) in model.named_parameters() if p._partitioned]
-    # not_parted = [name for (name, p) in model.named_parameters() if not p._partitioned]
-    # print('partitioned: ', parted)
-    # print('full:' , not_parted)
-    # print()
-
-    #samyamspeed.disable()
 
 
 test_driver()

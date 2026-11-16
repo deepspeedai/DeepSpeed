@@ -113,9 +113,10 @@ def get_full_hp_grad(self):
         reduce_fragment = torch.narrow(reduce_buffer, 0, lp_frag_address.start, lp_frag_address.numel)
 
         if self.view(-1).shape == hp_grad_fragment.shape:
-            reduce_buffer.data.copy_(hp_grad_fragment.data)
-        else:
-            reduce_fragment.data.copy_(hp_grad_fragment.data)
+            # BF16 retains a full accumulation buffer on each rank, but reconstruction must contribute
+            # only the fragment owned by this optimizer partition.
+            hp_grad_fragment = hp_grad_fragment.narrow(0, lp_frag_address.start, lp_frag_address.numel)
+        reduce_fragment.data.copy_(hp_grad_fragment.data)
 
     dist.all_reduce(reduce_buffer, group=self._dp_group)
     return reduce_buffer.reshape_as(self)
@@ -216,6 +217,10 @@ def safe_get_full_grad(param):
         Returns:
             Union[torch.Tensor, None]: A tensor on accelerator device
     """
+    # BF16_Optimizer keeps its accumulation buffer separately while retaining the low-precision staging gradient.
+    if getattr(param, '_hp_grad', None) is not None:
+        return param.get_full_hp_grad()
+
     if param.grad is not None:
         return param.grad
 
