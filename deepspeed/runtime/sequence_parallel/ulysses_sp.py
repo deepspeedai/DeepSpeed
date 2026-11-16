@@ -1147,75 +1147,42 @@ class TiledFusedLogitsLoss(torch.autograd.Function):
             if mask.shape != x.shape[:2]:
                 raise ValueError(f"mask shape must match x and y batch/seq")
 
-        ctx.fn = fn
-        ctx.self = self
-        ctx.shards = shards
-        ctx.compute_params = [p for p in compute_params if p.requires_grad] if compute_params is not None else []
-        ctx.output_reduction = output_reduction
-        ctx.save_for_backward(x, y, mask)
-
-        # Flatten batch and sequence, accepting non-contiguous inputs as well.
-        x = x.reshape(-1, *x.shape[2:])
-        y = y.reshape(-1, *y.shape[2:])
-        x_shards = list(torch.chunk(x, chunks=shards, dim=0))
-        y_shards = list(torch.chunk(y, chunks=shards, dim=0))
+        ctx.x_shape = x.shape
+        x_requires_grad = x.requires_grad
+        # Use one flattened sequence so the generic tiler preserves this function's tile boundaries.
+        x = x.reshape(1, -1, *x.shape[2:]).requires_grad_(x_requires_grad)
+        y = y.reshape(1, -1, *y.shape[2:])
+        inputs = dict(x=x, y=y)
         if mask is not None:
-            mask_shards = list(torch.chunk(mask.reshape(-1), chunks=shards, dim=0))
+            inputs["mask"] = mask.reshape(1, -1)
+        shards = len(torch.chunk(x, chunks=shards, dim=1))
 
-        output_shards = []
-        for i, (x_shard, y_shard) in enumerate(zip(x_shards, y_shards)):
-            args = (self, x_shard, y_shard)
+        def loss_fn(x, y, mask=None):
+            args = (self, x.squeeze(0), y.squeeze(0))
             if mask is not None:
-                args += (mask_shards[i], )
-            output_shards.append(fn(*args))
+                args += (mask.squeeze(0), )
+            return fn(*args)
 
-        output_unsharded = torch.cat([l.unsqueeze(0) for l in output_shards], dim=0)
-        if output_reduction == "mean":
-            return output_unsharded.mean()
-        return output_unsharded.sum()
+        return SequenceTiledCompute.forward(
+            ctx,
+            loss_fn,
+            x.shape[1],
+            shards,
+            list(inputs),
+            [],
+            "x",
+            compute_params if compute_params is not None else [],
+            0,
+            output_reduction,
+            *inputs.values(),
+        )
 
     @staticmethod
     @autocast_custom_bwd
     def backward(ctx, *grads) -> torch.Tensor:
-        x, y, mask = ctx.saved_tensors
-        x_shape = x.shape
-        x_requires_grad = x.requires_grad
-        x = x.detach().reshape(-1, *x.shape[2:])
-        y = y.reshape(-1, *y.shape[2:])
-        x_shards = list(torch.chunk(x, chunks=ctx.shards, dim=0))
-        y_shards = list(torch.chunk(y, chunks=ctx.shards, dim=0))
-        if mask is not None:
-            mask_shards = list(torch.chunk(mask.reshape(-1), chunks=ctx.shards, dim=0))
-
-        # torch.chunk can return fewer tiles than requested. Match forward's actual reduction,
-        # without modifying an incoming gradient that may be shared by other loss branches.
-        num_shards = len(x_shards)
-        incoming_grad = grads[0]
-        if ctx.output_reduction == "mean":
-            incoming_grad = incoming_grad / num_shards
-        x_grad = torch.zeros_like(x) if x_requires_grad else None
-
-        for i, (x_shard, y_shard) in enumerate(zip(x_shards, y_shards)):
-            # ZeRO must accumulate all tile contributions before reducing this parameter.
-            # XXX: DDP, FSDP will need something similar to make it work
-            for param in ctx.compute_params:
-                param.ds_grad_is_ready = (i + 1 == num_shards)
-
-            x_shard.requires_grad_(x_requires_grad)
-            if x_grad is not None:
-                shard_step = x_shard.shape[0]
-                shard_offset = i * x_shards[0].shape[0]
-                x_shard.grad = x_grad.narrow(0, shard_offset, shard_step).view_as(x_shard)
-
-            args = (ctx.self, x_shard, y_shard)
-            if mask is not None:
-                args += (mask_shards[i], )
-            with torch.enable_grad():
-                output = ctx.fn(*args)
-            torch.autograd.backward(output, incoming_grad)
-
-        if x_grad is not None:
-            x_grad = x_grad.view(x_shape)
+        # The generic mean reduction adjusts its incoming gradient in place.
+        grad_outputs = SequenceTiledCompute.backward(ctx, grads[0].clone())
+        x_grad = grad_outputs[9].reshape(ctx.x_shape)
         return (None, None, x_grad, None, None, None, None, None)
 
 
