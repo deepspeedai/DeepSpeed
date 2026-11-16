@@ -89,7 +89,6 @@ def _train_and_detach_masters(engine):
 
 class TestFp32MastersStage3AndBf16(DistributedTest):
     world_size = 1
-    backend = "gloo"
     requires_cuda_env = False
 
     @pytest.mark.parametrize("kind", ["bf16", "zero3"])
