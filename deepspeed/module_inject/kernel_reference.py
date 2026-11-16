@@ -34,9 +34,9 @@ def grouped_linear(x, weights, glu_epilogue=False):
     """
     outs = [F.linear(x, w) for w in weights]
     if glu_epilogue:
-        gate = outs[0].float()
-        up = outs[1].float()
-        outs = [(gate / (1.0 + torch.exp(-gate)) * up).to(x.dtype)]
+        # bf16-native silu: bitwise-equal to HF's activation (the fp32
+        # decomposition rounds differently) and skips its extra casts
+        outs = [F.silu(outs[0]) * outs[1]]
     return outs
 
 
