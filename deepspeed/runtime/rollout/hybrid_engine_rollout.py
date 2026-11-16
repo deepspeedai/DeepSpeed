@@ -132,11 +132,10 @@ class HybridEngineRolloutConfig:
     use_graph_capture: bool = False
     enable_profiling: bool = False
     use_shared_prefill: bool = False
+    align_decode_fronts: bool = False
     # Apply segment-KI kernel injection to the engine's module at rollout
     # construction. Fuses comm-free projection+activation segments into
     # single GEMM+custom-kernel calls (MLP gate|up and GDN input projections).
-    use_segki: bool = False
-    align_decode_fronts: bool = False
     enable_cache_trimming: bool = False
     continuous_cache_capacity: Optional[int] = None
     adaptive_prefill: bool = False
@@ -146,6 +145,9 @@ class HybridEngineRolloutConfig:
     prefill_kv_cost_ms: float = 0.04
     continuous_decode_cost_ms: float = 10.0
     prefill_max_tokens: Optional[int] = 65536
+    # PR-local switches; kept after every upstream field so the legacy
+    # positional constructor contract (#8786's test) keeps holding
+    use_segki: bool = False
 
 
 @dataclass
