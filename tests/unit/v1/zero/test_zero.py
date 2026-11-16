@@ -164,9 +164,12 @@ class TestGradientAllreduceOpTraining(DistributedTest):
             if zero_stage > 0:
                 config_dict["zero_optimization"]["reduce_scatter"] = True
             if use_muon:
+                # SUM divides the loss by the world size. Without loss scaling that rounds fp16 gradients
+                # small enough to be subnormal, and Muon's fp16 Newton-Schulz grows the difference beyond
+                # the tolerance. A static scale keeps the gradients in the normal range.
                 config_dict["fp16"] = {
                     "enabled": True,
-                    "loss_scale": 1.0,
+                    "loss_scale": 1024.0,
                 }
             return config_dict
 
