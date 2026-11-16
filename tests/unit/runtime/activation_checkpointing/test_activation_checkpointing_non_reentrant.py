@@ -59,6 +59,47 @@ class TestCPUActivationCheckpointNonReentrant(DistributedTest):
         test_act_ckpt._test_cpu_activation_checkpoint(non_reentrant_checkpoint)
 
 
+class _SaveViewOfInput(torch.autograd.Function):
+    """Saves a view of its input, as Liger's RMSNorm saves ``X.view(-1, dim)``."""
+
+    @staticmethod
+    def forward(ctx, x):
+        ctx.save_for_backward(x.view(-1, x.shape[-1]))
+        return x * 2
+
+    @staticmethod
+    def backward(ctx, grad):
+        ctx.saved_tensors
+        return grad * 2
+
+
+class TestCheckpointSavedViewIsNotRetained(DistributedTest):
+    """A saved view reaches the pack hook flagged requires_grad and is_leaf; it must not be kept alive."""
+    world_size = 1
+
+    def test_saved_view_is_freed_after_forward(self):
+        import weakref
+        from deepspeed.accelerator import get_accelerator
+
+        device = get_accelerator().current_device_name()
+        module = torch.nn.Linear(HIDDEN_DIM, HIDDEN_DIM).to(device)
+        inputs = torch.rand(4, HIDDEN_DIM, device=device, requires_grad=True)
+        intermediates = []
+
+        def fn(x):
+            hidden = module(x)
+            intermediates.append(weakref.ref(hidden))
+            return _SaveViewOfInput.apply(hidden)
+
+        out = non_reentrant_checkpoint(fn, inputs)
+        assert intermediates[0]() is None, "checkpoint kept the forward intermediate alive"
+
+        out.sum().backward()
+        expected = inputs.detach().clone().requires_grad_(True)
+        _SaveViewOfInput.apply(module(expected)).sum().backward()
+        assert torch.allclose(inputs.grad, expected.grad)
+
+
 # below classes are used to test the graph with inputs have no grad and parameters has grad, namely partial graph?
 @pytest.mark.parametrize('mask', [
     _mixed_mask(),

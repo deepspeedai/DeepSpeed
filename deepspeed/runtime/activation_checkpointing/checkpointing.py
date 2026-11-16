@@ -950,10 +950,13 @@ def non_reentrant_checkpoint(function, *args):
                 _e[1] += _nb
                 _PROBE_PACK_SHAPES[_k] = _e
 
-        # if this is a leaf tensor, save it for backward progression trace
-        # leaf tensor used to be input or parameters, which is not activations and
-        # has no memory overhead
-        if tensor_from_forward.requires_grad and tensor_from_forward.is_leaf:
+        # if this is a leaf tensor, save it for backward progression trace (only the
+        # profiling/sync hooks use it). Skip views: a custom autograd Function that
+        # saves a view of its input (e.g. Liger RMSNorm's X.view(-1, dim)) hands the
+        # hook a view flagged requires_grad and is_leaf; holding it would keep that
+        # activation's storage alive on GPU for the rest of the step.
+        if ((PROFILE_TIME or SYNCHRONIZE) and tensor_from_forward.requires_grad and tensor_from_forward.is_leaf
+                and tensor_from_forward._base is None):
             leaf_tensors.append(tensor_from_forward)
         return res
 
