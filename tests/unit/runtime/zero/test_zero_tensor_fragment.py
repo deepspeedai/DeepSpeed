@@ -607,3 +607,48 @@ class TestTensorFragmentUpdate(DistributedTest):
             pass
 
         run_fragmented_model(model, config_dict, hidden_dim, dtype, after_bwd_validate_func, after_step_validate_func)
+
+
+class TestZero2AverageAfterCast(DistributedTest):
+    world_size = 3
+
+    @pytest.mark.parametrize("multi_rank", [True, False])
+    @pytest.mark.parametrize("communication_dtype", ["fp32", "bf16", "fp16"])
+    def test_master_gradient(self, multi_rank, communication_dtype):
+        if not get_accelerator().is_bf16_supported():
+            pytest.skip("requires bf16")
+        config = {
+            "train_micro_batch_size_per_gpu": 1,
+            "communication_data_type": communication_dtype,
+            "data_types": {
+                "grad_accum_dtype": "fp32"
+            },
+            "zero_allow_untested_optimizer": True,
+            "zero_optimization": {
+                "stage": 2,
+                "use_multi_rank_bucket_allreduce": multi_rank
+            },
+        }
+        config["bf16"] = {"enabled": True}
+        model = torch.nn.Linear(17, 1, bias=False)
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.0)
+        engine, _, _, _ = deepspeed.initialize(model=model, optimizer=optimizer, config=config)
+        inputs = torch.randn(self.world_size, 17,
+                             generator=torch.Generator().manual_seed(0)).to(engine.device, torch.bfloat16)
+        if communication_dtype == "bf16":
+            # The mean fits in bf16 but the unscaled sum does not.
+            inputs.fill_(torch.finfo(torch.bfloat16).max / 2)
+        if communication_dtype == "fp16":
+            # One rank's gradient exceeds the fp16 range but the mean does not.
+            inputs.zero_()
+            inputs[0].fill_(2 * torch.finfo(torch.float16).max)
+        engine.backward(engine(inputs[dist.get_rank():dist.get_rank() + 1]).float().sum())
+        actual = safe_get_full_grad(engine.module.weight).flatten()
+        expected = inputs[0].float() if communication_dtype == "bf16" else inputs.float().mean(0)
+        if communication_dtype == "fp16":
+            # fp16 communication plus the bf16 gradient path round to about 2**-9 relative.
+            torch.testing.assert_close(actual, expected, rtol=2**-8, atol=0)
+        else:
+            # Dividing before the fp32 sum can differ from mean-last by one fp32 ulp.
+            torch.testing.assert_close(actual, expected, rtol=0, atol=2e-7)
+        engine.destroy()

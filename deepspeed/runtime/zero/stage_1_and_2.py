@@ -1786,9 +1786,6 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                     curr_size += numel
                     prev_id, prev_process_group, prev_copy_ranks = partition_id, process_group, copy_ranks
 
-            if self.gradient_average:
-                tensor.div_(dist.get_world_size(group=self.dp_process_group) / float(self.sequence_parallel_size))
-
             buckets = {}
             for i, (dst, bucket_offset, numel, copy_ranks, grad_partition_output) in enumerate(rank_and_offsets):
                 grad_slice = tensor.narrow(0, int(bucket_offset), int(numel))
@@ -1810,7 +1807,6 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                     self.allreduce_and_scatter(buckets[bucket_key],
                                                communication_data_type,
                                                numel_per_bucket=self.reduce_bucket_size,
-                                               divide=False,
                                                process_group=bucket_key[1])
                 else:
                     _, dst, process_group = bucket_key
@@ -1820,7 +1816,6 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                                              communication_data_type,
                                              numel_per_bucket=self.reduce_bucket_size,
                                              rank=dst,
-                                             divide=False,
                                              process_group=process_group,
                                              output_bucket=grad_partition_outputs)
 
@@ -2450,11 +2445,20 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         if pg_correctness_test or self.sequence_parallel_size > 1:
             communication_data_type = torch.float32
 
+        average = divide and self.gradient_average
+        # Expert buckets retain the full data-parallel divisor.
+        averaging_factor = dist.get_world_size(group=self.dp_process_group) / float(self.sequence_parallel_size)
+        # Average in the wider dtype: after a widening cast, but before a narrowing one that could overflow.
+        average_after_cast = torch.promote_types(tensor.dtype, communication_data_type) == communication_data_type
+
+        if average and not average_after_cast:
+            tensor.div_(averaging_factor)
+
         if communication_data_type != tensor.dtype:
             tensor_to_allreduce = tensor.to(communication_data_type)
 
-        if divide and self.gradient_average:
-            tensor_to_allreduce.div_(dist.get_world_size(group=process_group) / float(self.sequence_parallel_size))
+        if average and average_after_cast:
+            tensor_to_allreduce.div_(averaging_factor)
 
         if rank is None:
             #    "All Reducing"
