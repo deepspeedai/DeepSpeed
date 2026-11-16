@@ -2767,6 +2767,8 @@ class DeepSpeedEngine(Module):
                     enable_sanity_checks=self.is_sanity_checks_enabled(),
                     cpuadam_cores_perc=self.cpuadam_cores_perc(),
                     save_muon_momentum_buffer_in_memory=self.zero_save_muon_momentum_buffer_in_memory(),
+                    experimental_mixed_dtype_grad_accumulation=(
+                        self._config.zero_config.experimental_mixed_dtype_grad_accumulation),
                 )
 
         else:

@@ -29,7 +29,8 @@ ZeRO optimization should be enabled as:
     "stage3_allgather_sequential": [true|false],
     "allgather_bucket_size": 500000000,
     "reduce_scatter": [true|false],
-    "contiguous_gradients" : [true|false]
+    "contiguous_gradients" : [true|false],
+    "experimental_mixed_dtype_grad_accumulation": [true|false],
     "overlap_comm": [true|false],
     "reduce_bucket_size": 500000000,
     "load_from_fp32_weights": [true|false],
@@ -103,6 +104,12 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
     """
     Copies the gradients to a contiguous buffer as they are produced. Avoids
     memory fragmentation during backward pass.
+    """
+
+    experimental_mixed_dtype_grad_accumulation: bool = False
+    """
+    Use direct CUDA FP16-to-FP32 gradient accumulation when enabled.
+    Disabled by default.
     """
 
     reduce_scatter: bool = True

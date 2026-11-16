@@ -159,6 +159,12 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
     """
 
+    @staticmethod
+    def _is_mixed_dtype_accumulation_eligible(enabled, device_name, offload_optimizer, zenflow, source_dtype,
+                                              destination_dtype):
+        return (enabled and device_name == "cuda" and not offload_optimizer and not zenflow
+                and source_dtype == torch.float16 and destination_dtype == torch.float32)
+
     def __init__(
         self,
         module,
@@ -206,6 +212,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         enable_sanity_checks=False,
         cpuadam_cores_perc=0.8,
         save_muon_momentum_buffer_in_memory=False,
+        experimental_mixed_dtype_grad_accumulation=False,
     ):
         see_memory_usage("Stage 3 initialize beginning", force=False)
 
@@ -235,6 +242,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         self.unflatten = _unflatten_dense_tensors
         self.dtype = self.optimizer.param_groups[0]['params'][0].dtype
         self.gradient_accumulation_dtype = gradient_accumulation_dtype
+        self.experimental_mixed_dtype_grad_accumulation = experimental_mixed_dtype_grad_accumulation
         self._global_grad_norm = 0.
         self._muon_allgather_buffers = collections.OrderedDict()
         self._muon_allgather_buffer_bytes = 0
@@ -1869,7 +1877,15 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             scale = partition_world_size / float(averaging_world_size)
             grad_partitions_for_rank = [g.mul(scale) for g in grad_partitions_for_rank]
 
-        if communication_data_type != self.gradient_accumulation_dtype:
+        defer_conversion_for_mixed_add = self._is_mixed_dtype_accumulation_eligible(
+            self.experimental_mixed_dtype_grad_accumulation,
+            get_accelerator().device_name(),
+            self.offload_optimizer,
+            self.zenflow,
+            communication_data_type,
+            self.gradient_accumulation_dtype,
+        )
+        if communication_data_type != self.gradient_accumulation_dtype and not defer_conversion_for_mixed_add:
             grad_partitions_for_rank = [g.to(self.gradient_accumulation_dtype) for g in grad_partitions_for_rank]
 
         return grad_partitions_for_rank
@@ -1954,7 +1970,18 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                 # operations and so it can be used asynchronously
                 grad_buffer = grad_buffer.to(grad_partition.device, non_blocking=True)
             elif get_accelerator().on_accelerator(grad_buffer):
-                grad_buffer.add_(grad_partition.to(self.gradient_accumulation_dtype).view(grad_buffer.shape))
+                mixed_add_enabled = self._is_mixed_dtype_accumulation_eligible(
+                    self.experimental_mixed_dtype_grad_accumulation,
+                    get_accelerator().device_name(),
+                    self.offload_optimizer,
+                    self.zenflow,
+                    grad_partition.dtype,
+                    grad_buffer.dtype,
+                )
+                if mixed_add_enabled:
+                    grad_buffer.add_(grad_partition.view(grad_buffer.shape))
+                else:
+                    grad_buffer.add_(grad_partition.to(self.gradient_accumulation_dtype).view(grad_buffer.shape))
             else:
                 # if dst is CPU, copy first to src device, do the addition
                 # there, then move back to dst. adding directly to cpu is very slow

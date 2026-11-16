@@ -15,6 +15,12 @@ def test_zero_config_reduce_bucket_size():
         DeepSpeedZeroConfig(reduce_bucket_size=0)
 
 
+def test_zero_config_mixed_dtype_gradient_accumulation_defaults_off_and_can_be_enabled():
+    assert DeepSpeedZeroConfig().experimental_mixed_dtype_grad_accumulation is False
+    config = DeepSpeedZeroConfig(experimental_mixed_dtype_grad_accumulation=True)
+    assert config.experimental_mixed_dtype_grad_accumulation is True
+
+
 def test_zero_config_parameter_alignment():
     assert DeepSpeedZeroConfig().parameter_alignment is False
     assert DeepSpeedZeroConfig(parameter_alignment=False).parameter_alignment is False
