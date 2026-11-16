@@ -34,6 +34,35 @@ The budget applies to each peer direction, not total device memory. Weights must
 remain frozen during transfer; optimizer migration and live AutoEP swaps are outside
 this API. Maintenance contact: ``@0z5a``.
 
+Repeated transfers
+------------------
+
+A weight sync moves the same batch every step. ``prepare_transfers`` does
+everything ``execute_transfers`` does before data moves -- validation, the
+schedule agreement, the staging arenas and a view of every region each round
+packs, unpacks or copies locally -- once, and returns a handle whose ``run`` only
+moves data::
+
+    from deepspeed.checkpoint.affine_transfer_executor import prepare_transfers
+
+    prepared = prepare_transfers(requests, endpoints, dtype, budget)
+    for step in steps:
+        ...  # update the source buffers in place
+        prepared.run()
+
+``prepare_transfers`` is collective and refuses a batch exactly as
+``execute_transfers`` does; ``execute_transfers`` is ``prepare_transfers``
+followed by one run. The handle keeps the buffers it was prepared with and its
+arenas stay allocated, so buffers must stay where they are and every process
+must run the handle the same number of times. By default ``run`` checks both
+before any data moves, with one small all-gather: if a buffer moved or changed
+shape on any process, or the processes are not running the same handle for the
+same time, every process raises and the batch has to be prepared again. Pass the
+requests rebuilt from the live state, such as fresh ``zero_param_storage_shard``
+views after ``reload_states``, as ``run(requests)`` to check those instead of
+the tensors the handle holds. ``run(check=False)`` skips the all-gather, so
+every process must pass the same ``check``.
+
 Planning a sync with replica policies
 -------------------------------------
 
@@ -134,8 +163,9 @@ Pass the plans in request order, since that order fixes how chunks are packed
 into rounds. Each ``ProcessSchedule`` lists, per peer and direction, the rounds
 with their element and chunk counts and whether the round is sent or received in
 place, the staging arena each peer direction allocates, the local copies, and the
-round count that ``TransferStats.rounds`` reports. ``execute_transfers`` builds
-its rounds and arenas from the same computation, so the two cannot drift apart.
+round count that ``TransferStats.rounds`` reports. ``execute_transfers`` and
+``prepare_transfers`` build their rounds and arenas from the same computation,
+so the two cannot drift apart.
 The schedule follows the current transport described above and changes with it.
 
 Analyzing a plan
