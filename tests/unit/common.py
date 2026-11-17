@@ -340,6 +340,11 @@ class DistributedExec(ABC):
             else:
                 raise e
 
+        if self.non_daemonic_procs:
+            # Join the backend worker threads before interpreter shutdown: a gloo thread that drops the last
+            # reference to a Python-owned tensor during finalization aborts the worker (#9089).
+            self._dist_destroy()
+
         return skip_msg
 
     def _launch_with_file_store(self, request, world_size):
