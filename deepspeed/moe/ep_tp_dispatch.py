@@ -428,6 +428,61 @@ def average_gradient_over_tp(tensor: torch.Tensor, tp_group, tp_size: int) -> to
     return _AverageGradientOverTP.apply(tensor, tp_group)
 
 
+def tp_keep_mask(token_indices_sorted: torch.Tensor, ctx: RestoreContext, num_tokens: int, top_k: int) -> torch.Tensor:
+    """The assignments this TP peer keeps, as a ``[tokens, top_k]`` boolean mask.
+
+    ``partition_assignments`` names the kept assignments by their position in the expert-sorted
+    list. ``token_indices_sorted`` maps each position back to ``token * top_k + slot``, the
+    token-major layout the router produced, which is the layout DeepEP's dispatch consumes.
+    """
+    kept_positions = token_indices_sorted.index_select(0, ctx.local_indices)
+    keep = torch.zeros(num_tokens * top_k, dtype=torch.bool, device=token_indices_sorted.device)
+    keep[kept_positions] = True
+    return keep.view(num_tokens, top_k)
+
+
+class _SumPartialRowsOverTP(torch.autograd.Function):
+    """Sum each TP peer's partial per-token output into the full output, replicated on every peer.
+
+    For an exchange that has already reduced a peer's kept assignments to one row per token
+    (DeepEP's combine), there are no rows left to gather: the restore is a sum of
+    ``[tokens, hidden]`` partials over the folding group.
+
+    Backward all-reduces the upstream gradient over the TP group, as ``_AllGatherVariableRows``
+    does, so each peer's gradient carries the same ``tp_size`` factor as under
+    ``restore_combined``, and the folded AVERAGE and EXPERT_TP_CANCEL strategies cancel it
+    unchanged. The plain adjoint of a sum, the identity, would leave the router and expert
+    gradients ``tp_size`` times too small after those strategies.
+    """
+
+    @staticmethod
+    def forward(ctx, tensor, group, record_only):
+        ctx.group = group
+        if record_only:
+            # Nothing reads the recomputed output (skip_recompute_combine); only the backward matters.
+            return tensor.view_as(tensor)
+        summed = tensor.clone(memory_format=torch.contiguous_format)
+        dist.all_reduce(summed, group=group)
+        return summed
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        grad = grad_output.clone(memory_format=torch.contiguous_format)
+        dist.all_reduce(grad, group=ctx.group)
+        return grad, None, None
+
+
+def sum_partial_rows_over_tp(tensor: torch.Tensor,
+                             tp_group,
+                             tp_size: int,
+                             *,
+                             record_only: bool = False) -> torch.Tensor:
+    """Return the sum of ``tensor`` over the TP folding group, with the folded gradient convention."""
+    if tp_size <= 1 or not dist.is_initialized():
+        return tensor
+    return _SumPartialRowsOverTP.apply(tensor, tp_group, record_only)
+
+
 def restore_combined(local_combined: torch.Tensor,
                      ctx: RestoreContext,
                      *,

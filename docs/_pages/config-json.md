@@ -1027,7 +1027,7 @@ smoke coverage used for this AutoEP surface produced the following version gates
 
 | Description                                                                                                    | Default  |
 | -------------------------------------------------------------------------------------------------------------- | -------- |
-| Experimental. In the DeepEP backward, send the experts' input gradient back while computing their weight gradients. The expert backward returns its input gradient first and defers its weight-gradient GEMMs to the DeepEP dispatch backward, which launches its combine asynchronously, runs those GEMMs with `comm_num_sm` SMs withheld so the combine can run beside them, and waits before returning, including when weight-gradient computation raises. Parameter-gradient semantics are unchanged; exact cross-backend equality is not guaranteed. First-order gradients only (`create_graph=True` raises). Requires `comm_backend="deepep"` with `autoep_size > 1`, the `torch._grouped_mm` expert path (`use_grouped_mm=true`, and `disable_triton_grouped_mm=true` on devices that prefer the Triton grouped GEMM), ZeRO stage 1 or 2 (not 0 or 3), and PyTorch's SM carveout getter/setter APIs; unsupported configurations fail rather than falling back. | `false` |
+| Experimental. In the DeepEP backward, send the experts' input gradient back while computing their weight gradients. The expert backward returns its input gradient first and defers its weight-gradient GEMMs to the DeepEP dispatch backward, which launches its combine asynchronously, runs those GEMMs with `comm_num_sm` SMs withheld so the combine can run beside them, and waits before returning, including when weight-gradient computation raises. Parameter-gradient semantics are unchanged; exact cross-backend equality is not guaranteed. First-order gradients only (`create_graph=True` raises). Requires `comm_backend="deepep"` with `autoep_size > 1`, the `torch._grouped_mm` expert path (`use_grouped_mm=true`, and `disable_triton_grouped_mm=true` on devices that prefer the Triton grouped GEMM), ZeRO stage 1 or 2 (not 0 or 3), `tensor_parallel.autotp_size=1`, and PyTorch's SM carveout getter/setter APIs; unsupported configurations fail rather than falling back. | `false` |
 
 ***skip_recompute_combine***: [boolean]
 
@@ -1168,7 +1168,7 @@ Use a built-in preset but override specific naming/weight fields for a fine-tune
 
 **Constraints:**
 - `autoep_size` must divide `num_experts` for all detected MoE layers
-- AutoEP combines with AutoTP (`tensor_parallel.autotp_size > 1`) by folding them onto the same ranks, at ZeRO stages 0 to 3, with `expert_tensor_parallel_size` 1 and without ZeRO offload or DeepCompile
+- AutoEP combines with AutoTP (`tensor_parallel.autotp_size > 1`) by folding them onto the same ranks, at ZeRO stages 0 to 3, with either `comm_backend`, with `expert_tensor_parallel_size` 1 and without ZeRO offload or DeepCompile
 - AutoEP with ZeRO Stage 3 is supported only without sequence parallelism, hpZeRO secondary tensor groups, non-1 `expert_tensor_parallel_size`, or quantized gradients
 - ZeRO Stage 3 saves AutoEP checkpoints partition-natively and supports same-topology save/load, module-only loads, optimizer-state-skipping loads, and universal checkpoint conversion (not yet with AutoTP folding). Universal loads can resume at a different data-parallel world size, a different `autoep_size`, or both (when the target `autoep_size` divides the expert count), including weights-only/module-only loads from the converted `fp32.pt` parameter files
 
