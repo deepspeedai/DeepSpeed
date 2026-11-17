@@ -20,6 +20,9 @@ See ``deepspeed/checkpoint/affine_ir_spec.md`` for the full specification.
 
 import torch
 
+from .affine_geometry import (dot as _dot, product as _product, row_major_range_boxes as _row_major_range_boxes,
+                              row_major_strides as _row_major_strides, strided_address as _strided_address)
+
 __all__ = [
     'AffinePiece', 'ParamAffineMap', 'AFFINE_MAP_FORMAT_VERSION', 'SCALE_POWER_BY_STATE', 'replicated_map',
     'contiguous_split_map', 'sub_param_map', 'segmented_map', 'block_gather_map', 'nest_affine_maps'
@@ -246,13 +249,22 @@ class ParamAffineMap:
 
     def validate(self):
         """Check shard element counts, and destination bounds and overlap from piece metadata."""
-        for rank, pieces in self.pieces_by_rank.items():
-            held = sum(piece.numel for piece in pieces)
-            expected = _product(self.shard_shapes[rank])
-            if held != expected:
-                raise ValueError(f'Rank {rank} holds a shard of {expected} elements but its pieces '
-                                 f'account for {held}.')
-            self._validate_destinations(rank, pieces, self.shard_shapes[rank])
+        for rank in self.pieces_by_rank:
+            self._validate_rank(rank)
+
+    def _validate_rank(self, rank):
+        pieces = self.pieces_by_rank[rank]
+        held = sum(piece.numel for piece in pieces)
+        expected = _product(self.shard_shapes[rank])
+        if held != expected:
+            raise ValueError(f'Rank {rank} holds a shard of {expected} elements but its pieces '
+                             f'account for {held}.')
+        for piece in pieces:
+            for side, strides in (('source', piece.source_strides), ('destination', piece.dest_strides)):
+                if _overlaps_itself(piece.shape, strides):
+                    raise ValueError(f'Rank {rank} piece {piece} reaches one {side} address twice within itself, '
+                                     'so one of its elements would silently overwrite another.')
+        self._validate_destinations(rank, pieces, self.shard_shapes[rank])
 
     def _validate_destinations(self, rank, pieces, shard_shape):
         """Check that dense intervals and strided boxes stay within the shard and do not overlap."""
@@ -371,26 +383,49 @@ class ParamAffineMap:
         any_shard = next(iter(shards.values()))
         full_param = torch.empty(self.numel, dtype=any_shard.dtype, device=any_shard.device)
 
-        written = {}
+        # validate() reads destinations from metadata and never looks at sources, so a map can
+        # pass it while two ranks claim one block and nothing holds another. Recording who wrote
+        # each element, one byte each, catches both for any strides; otherwise the result would
+        # keep whatever torch.empty left behind.
+        written = torch.zeros(self.numel, dtype=torch.uint8, device=full_param.device)
         for rank, pieces in self.pieces_by_rank.items():
             if not pieces:
                 continue
             flat_shard = _flat_buffer(shards[rank])
+            placed = torch.zeros(flat_shard.numel(), dtype=torch.bool, device=flat_shard.device)
             for piece in pieces:
+                _place(placed, piece, rank)
                 target = piece.source_view(full_param)
-                source = piece.dest_view(flat_shard)
-                if len(piece.locations) > 1 and piece.source_offset in written:
+                source = _scaled(piece.dest_view(flat_shard), piece.scale, scale_power)
+                writer = _REPLICA if len(piece.locations) > 1 else _SINGLE_HOLDER
+                previous = piece.source_view(written)
+                seen = previous != _UNWRITTEN
+                if seen.any():
+                    # Only replicas may share an element. Checking the earlier writer as well as this
+                    # piece keeps the answer the same whichever rank is visited first.
+                    if writer != _REPLICA or not (previous[seen] == _REPLICA).all():
+                        raise ValueError(f'Rank {rank} piece {piece} writes part of a block another piece already '
+                                         'wrote, and one of the two names a single holder, so one would silently '
+                                         'overwrite the other.')
                     # Every rank holding a replicated piece must agree. Letting the last
                     # writer win would hide rank drift or a corrupt shard, which the
-                    # category-based converter guards against explicitly.
-                    if not torch.equal(target, _scaled(source, piece.scale, scale_power)):
+                    # category-based converter guards against explicitly. Comparing element by
+                    # element also covers replicas that two ranks cut at different boundaries.
+                    if not torch.equal(target[seen], source[seen]):
                         raise ValueError(f'Ranks {sorted(piece.locations)} hold different data for the same '
                                          f'block of a replicated parameter, starting at offset '
                                          f'{piece.source_offset}.')
-                    continue
-                target.copy_(_scaled(source, piece.scale, scale_power))
-                written[piece.source_offset] = True
+                    if seen.all():
+                        continue
+                target.copy_(source)
+                previous.fill_(writer)
+            _require_placed(placed, rank)
 
+        missing = (written == _UNWRITTEN).nonzero()
+        if missing.numel():
+            raise ValueError(f'Affine map for a parameter of shape {self.logical_shape} leaves '
+                             f'{missing.numel()} element(s) uncovered, starting at offset {int(missing[0])}, '
+                             'so the parameter cannot be rebuilt from its shards.')
         return full_param.view(self.logical_shape)
 
     def _reject_scaled_optimizer_state(self, scale_power):
@@ -415,17 +450,21 @@ class ParamAffineMap:
 
     def extract(self, full_param, rank, scale_power=1):
         """Produce one rank's shard from the full parameter. The inverse of ``rebuild``."""
+        self._validate_rank(rank)
         self._reject_scaled_optimizer_state(scale_power)
         flat_param = _flat_buffer(full_param)
         shard_shape = self.shard_shapes[rank]
         shard = torch.empty(_product(shard_shape), dtype=full_param.dtype, device=full_param.device)
 
+        placed = torch.zeros(shard.numel(), dtype=torch.bool, device=shard.device)
         for piece in self.pieces_by_rank[rank]:
+            _place(placed, piece, rank)
             target = piece.dest_view(shard)
             target.copy_(piece.source_view(flat_param))
             factor = piece.scale**scale_power
             if factor != 1.0:
                 target.mul_(factor)
+        _require_placed(placed, rank)
 
         return shard.view(shard_shape)
 
@@ -468,6 +507,50 @@ def _scaled(tensor, scale, scale_power):
     return tensor / factor
 
 
+# What rebuild records for each element of the full tensor: nobody has written it yet, a piece
+# naming a single holder did, or a replica did.
+_UNWRITTEN, _SINGLE_HOLDER, _REPLICA = 0, 1, 2
+
+
+def _overlaps_itself(shape, strides):
+    """Whether two positions of a view with this shape and these strides share an address.
+
+    Taking the axes that move in order of stride, the view is free of overlap when each stride
+    clears every address the axes before it reach. That holds for every layout the builders here
+    produce. A view that interleaves its axes some other way is refused even where it would not
+    collide, which keeps this to a few comparisons per piece instead of a walk over its elements.
+    """
+    reach = 0
+    for stride, size in sorted((stride, size) for size, stride in zip(shape, strides) if size > 1):
+        if stride <= reach:
+            return True
+        reach += stride * (size - 1)
+    return False
+
+
+def _place(placed, piece, rank):
+    """Mark the shard addresses ``piece`` occupies in ``placed``, refusing one already taken.
+
+    ``validate()`` checks destinations from metadata, which cannot place a view that wraps past
+    the end of a shard row. A mask of the shard places every stride exactly.
+    """
+    view = piece.dest_view(placed)
+    if view.any():
+        index = view.nonzero()[0].tolist()
+        address = piece.dest_offset + sum(position * stride for position, stride in zip(index, piece.dest_strides))
+        raise ValueError(f'Rank {rank} writes shard address {address} twice, so one piece would '
+                         'silently overwrite another.')
+    view.fill_(True)
+
+
+def _require_placed(placed, rank):
+    """Refuse a shard that its pieces leave partly unplaced, which a self-overlapping piece can do."""
+    if not placed.all():
+        missing = (~placed).nonzero()
+        raise ValueError(f'Rank {rank} pieces leave {missing.numel()} of its {placed.numel()} shard addresses '
+                         f'unwritten, starting at {int(missing[0])}.')
+
+
 def _flat_buffer(tensor):
     """Flatten ``tensor`` into a buffer whose storage starts at its first element.
 
@@ -480,21 +563,6 @@ def _flat_buffer(tensor):
     if flat.storage_offset() != 0:
         flat = flat.clone()
     return flat
-
-
-def _product(shape):
-    count = 1
-    for dim in shape:
-        count *= dim
-    return count
-
-
-def _row_major_strides(shape):
-    """Element stride per axis for a densely packed tensor of this shape."""
-    strides = [1] * len(shape)
-    for axis in range(len(shape) - 2, -1, -1):
-        strides[axis] = strides[axis + 1] * shape[axis + 1]
-    return tuple(strides)
 
 
 def replicated_map(shape, tp_degree, scale=1.0):
@@ -852,10 +920,6 @@ def _nest_replicated_block(copies, intervals_by_outer_rank, pieces_by_rank):
                                 scale=piece.scale * storage_scale))
 
 
-def _dot(index, strides):
-    return sum(position * stride for position, stride in zip(index, strides))
-
-
 def _dense_rows(piece):
     # The number of leading axes after which the piece is contiguous in its shard: a box of the piece
     # that spans every later axis in full, and only those, is one run of shard addresses.
@@ -866,43 +930,6 @@ def _dense_rows(piece):
             return axis + 1
         run *= size
     return 0
-
-
-def _row_major_range_boxes(shape, low, high, dense_rows=0):
-    """Split the row-major index range ``[low, high)`` of ``shape`` into ``(origin, extent)`` boxes.
-
-    At most two boxes per axis: a partial run at either end and whole runs between. The first
-    ``dense_rows`` axes are never merged, so a box spans more than one position of such an axis only
-    where the storage is contiguous across it.
-    """
-    if low >= high:
-        return []
-    if not shape:
-        return [((), ())]
-    if len(shape) == 1:
-        return [((low, ), (high - low, ))]
-    inner = _product(shape[1:])
-    first, low_rest = divmod(low, inner)
-    last, high_rest = divmod(high, inner)
-
-    def within(row, start, stop):
-        return [((row, ) + origin, (1, ) + extent)
-                for origin, extent in _row_major_range_boxes(shape[1:], start, stop, dense_rows - 1)]
-
-    if first == last:
-        return within(first, low_rest, high_rest)
-    boxes = []
-    if low_rest:
-        boxes.extend(within(first, low_rest, inner))
-        first += 1
-    if dense_rows > 0:
-        for row in range(first, last):
-            boxes.extend(within(row, 0, inner))
-    elif last > first:
-        boxes.append(((first, ) + (0, ) * (len(shape) - 1), (last - first, ) + tuple(shape[1:])))
-    if high_rest:
-        boxes.extend(within(last, 0, high_rest))
-    return boxes
 
 
 def _check_monotone_dest(piece):
@@ -916,14 +943,6 @@ def _check_monotone_dest(piece):
                 raise NotImplementedError(f'Layout piece {piece} does not store its elements in row-major order, so '
                                           'its storage cannot be described.')
             later_span += stride * (size - 1)
-
-
-def _strided_address(shape, offset, strides, index):
-    address = offset
-    for size, stride in reversed(list(zip(shape, strides))):
-        index, position = divmod(index, size)
-        address += position * stride
-    return address
 
 
 def _first_index_at_or_after(piece, address):

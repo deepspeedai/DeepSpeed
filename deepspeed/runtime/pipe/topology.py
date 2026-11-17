@@ -304,7 +304,6 @@ class PipelineParallelGrid:
         for dp in range(self.data_parallel_size):
             ranks = sorted(self._topo.get_axis_list(axis='data', idx=dp))
             if self.global_rank == 0:
-                #print(f'RANK={self.global_rank} building DeepSpeed model group: {ranks}')
                 pass
             proc_group = dist.new_group(ranks=ranks)
             if self.global_rank in ranks:
@@ -334,7 +333,6 @@ class PipelineParallelGrid:
         self.pipe_groups = self._topo.get_axis_comm_lists('pipe')
         for ranks in self.pipe_groups:
             if self.global_rank == 0:
-                #print(f'RANK={self.global_rank} building pipeline group: {ranks}')
                 pass
             proc_group = dist.new_group(ranks=ranks)
             if self.global_rank in ranks:

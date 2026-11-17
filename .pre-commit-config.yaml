@@ -39,7 +39,7 @@ repos:
         name: check-torchdist
         entry: ./scripts/check-torchdist.py
         language: python
-        exclude: ^(.agents/skills/pr-checklist/SKILL.md|deepspeed/comm/|docs/|benchmarks/|scripts/check-torchdist.py|deepspeed/moe/sharded_moe.py|deepspeed/runtime/comm/coalesced_collectives.py|deepspeed/launcher/launch.py|tests/unit/comm/test_dist.py)
+        exclude: ^(.agents/skills/pr-checklist/SKILL.md|deepspeed/comm/|docs/|benchmarks/|scripts/check-torchdist.py|deepspeed/moe/sharded_moe.py|deepspeed/runtime/comm/coalesced_collectives.py|deepspeed/launcher/launch.py|tests/unit/comm/test_dist.py|tests/unit/checkpoint/test_affine_transfer_executor_external_group.py)
         # Specific deepspeed/ files are excluded for now until we wrap ProcessGroup in deepspeed.comm
 
 -   repo: local

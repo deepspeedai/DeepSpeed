@@ -106,7 +106,7 @@ def compare_loss(model_cls,
     ddp_kwargs = {'device_ids': [i], 'output_device': i} if indexed_device else {}
     baseline_model = DDP(deepcopy(model).to(device=device, dtype=torch.float32), **ddp_kwargs)
     baseline_optimizer = torch.optim.AdamW(baseline_model.parameters(), lr=lr, weight_decay=0.0)
-    baseline_scaler = torch.amp.GradScaler()
+    baseline_scaler = torch.amp.GradScaler(device=get_accelerator().device_name())
 
     stage_3_enabled = config_dict["zero_optimization"]["stage"] == 3
     if stage_3_enabled:

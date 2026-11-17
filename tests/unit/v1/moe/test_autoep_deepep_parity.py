@@ -30,7 +30,7 @@ from deepspeed.module_inject import auto_ep_layer
 from deepspeed.module_inject.auto_ep_comm import DeepEPExchange, destroy_exchanges
 from deepspeed.module_inject.auto_ep_layer import AutoEPMoELayer
 from deepspeed.ops.triton_ops import autoep_fused_token_ops as fused_ops
-from deepspeed.utils import safe_get_full_fp32_param
+from deepspeed.utils import safe_get_full_fp32_param, safe_get_full_grad
 
 from unit.common import DistributedTest
 from unit.v1.moe.autoep_test_utils import (
@@ -156,6 +156,30 @@ def _count_deepep_combines():
         yield counts
 
 
+def _checkpoint_decoder_layers(engine):
+    """Hugging Face per-layer gradient checkpointing: each decoder layer checkpoints its own block, reentrantly."""
+    model = engine.module
+    for layer in model.model.layers:
+        layer.gradient_checkpointing = True
+        layer._gradient_checkpointing_func = functools.partial(checkpoint, use_reentrant=True)
+
+    def block(layer, x):
+        residual = x
+        x = layer.input_layernorm(x)
+        x, _ = layer.self_attn(x, x, x)
+        x = residual + x
+        residual = x
+        x = layer.post_attention_layernorm(x)
+        return residual + layer.mlp(x)
+
+    def forward(x):
+        for layer in model.model.layers:
+            x = layer._gradient_checkpointing_func(block, layer, x)
+        return model.lm_head(x)
+
+    model.forward = forward
+
+
 def _count_autoep_layer_forwards(engine):
     forward_counts = {}
     for name, module in engine.module.named_modules():
@@ -199,7 +223,15 @@ def _snapshot_fp32_parameters(engine):
     return snapshot
 
 
-def _build_test_engine(backend, ep_size, seed, *, row_weighting_impl="auto", score_apply=None):
+def _build_test_engine(backend,
+                       ep_size,
+                       seed,
+                       *,
+                       row_weighting_impl="auto",
+                       score_apply=None,
+                       skip_recompute_combine=False,
+                       zero_stage=1,
+                       **expert_parallel):
     seed_everything(seed)
 
     config = make_autoep_config(ep_size=ep_size)
@@ -208,6 +240,7 @@ def _build_test_engine(backend, ep_size, seed, *, row_weighting_impl="auto", sco
     # dtype anyway for the comparison to mean anything.
     config.pop("fp16", None)
     config["bf16"] = {"enabled": True}
+    config["zero_optimization"]["stage"] = zero_stage
     config["expert_parallel"]["comm_backend"] = backend
     if row_weighting_impl != "auto":
         # The original cleanup/legacy comparisons keep the fixture's lr=1e-4. Only the new eager/fused
@@ -216,6 +249,9 @@ def _build_test_engine(backend, ep_size, seed, *, row_weighting_impl="auto", sco
         config["expert_parallel"]["row_weighting_impl"] = row_weighting_impl
     if score_apply is not None:
         config["expert_parallel"]["score_apply"] = score_apply
+    config["expert_parallel"].update(expert_parallel)
+    if skip_recompute_combine:
+        config["expert_parallel"]["skip_recompute_combine"] = True
     if backend == "deepep":
         # Sized explicitly rather than from the first batch, so both backends
         # see identical shapes whatever that batch turns out to be.
@@ -247,9 +283,21 @@ def _run_one_step(backend,
                   skewed_routing=False,
                   row_weighting_impl="auto",
                   score_apply=None,
-                  seq_len=SEQ_LEN):
+                  decoder_layer_checkpointing=False,
+                  skip_recompute_combine=False,
+                  steps=1,
+                  seq_len=SEQ_LEN,
+                  zero_stage=1,
+                  **expert_parallel):
     """Build a model on ``backend``, run one step, return its output and grads."""
-    engine = _build_test_engine(backend, ep_size, seed, row_weighting_impl=row_weighting_impl, score_apply=score_apply)
+    engine = _build_test_engine(backend,
+                                ep_size,
+                                seed,
+                                row_weighting_impl=row_weighting_impl,
+                                score_apply=score_apply,
+                                skip_recompute_combine=skip_recompute_combine,
+                                zero_stage=zero_stage,
+                                **expert_parallel)
     if backend == "deepep" and not cleanup:
         _install_legacy_deepep_prep(engine)
     if skewed_routing:
@@ -257,6 +305,8 @@ def _run_one_step(backend,
     forward_counts = _count_autoep_layer_forwards(engine)
     if activation_checkpointing:
         _checkpoint_autoep_layers(engine, use_reentrant=reentrant_checkpointing, nested=nested_checkpointing)
+    if decoder_layer_checkpointing:
+        _checkpoint_decoder_layers(engine)
 
     # Reseeded so the input is identical on every rank and across backends: the
     # comparison is of the transport, so nothing else may differ.
@@ -280,21 +330,29 @@ def _run_one_step(backend,
 
         hooks.append(module.router.register_forward_hook(capture_route))
 
-    output = engine(hidden)
-    loss = output.float().pow(2).mean()
-    engine.backward(loss)
+    for step in range(steps):
+        if step:
+            hidden = torch.randn(1, seq_len, HIDDEN_SIZE, device=engine.device,
+                                 dtype=engine_input_dtype(engine)).requires_grad_(True)
+        score_tensors.clear()
+        output = engine(hidden)
+        loss = output.float().pow(2).mean()
+        engine.backward(loss)
 
-    gradients = {
-        name: parameter.grad.detach().float().clone()
-        for name, parameter in engine.module.named_parameters() if parameter.grad is not None
-    }
-    score_gradient_parts = {}
-    for name, scores in score_tensors:
-        if scores.grad is not None:
-            score_gradient_parts.setdefault(name, []).append(scores.grad.detach().float())
-    score_gradients = {name: torch.stack(parts).sum(dim=0) for name, parts in score_gradient_parts.items()}
-    input_gradient = hidden.grad.detach().float().clone()
-    engine.step()
+        gradients = {}
+        for name, parameter in engine.module.named_parameters():
+            if not parameter.requires_grad:
+                continue
+            gradient = safe_get_full_grad(parameter)
+            assert gradient is not None, f"Expected accumulated gradient for {name} before clipping"
+            gradients[name] = gradient.detach().float().clone()
+        score_gradient_parts = {}
+        for name, scores in score_tensors:
+            if scores.grad is not None:
+                score_gradient_parts.setdefault(name, []).append(scores.grad.detach().float())
+        score_gradients = {name: torch.stack(parts).sum(dim=0) for name, parts in score_gradient_parts.items()}
+        input_gradient = hidden.grad.detach().float().clone()
+        engine.step()
     parameters_after = _snapshot_fp32_parameters(engine)
     parameter_deltas = {name: parameters_after[name] - parameters_before[name] for name in parameters_before}
     for hook in hooks:
@@ -624,6 +682,42 @@ class TestDeepEPMatchesCollective(DistributedTest):
         assert torch.count_nonzero(all_routes == 3) == 0
         assert torch.count_nonzero(all_routes == 1) > torch.count_nonzero(all_routes == 2)
 
+    @pytest.mark.parametrize("gate_up_impl", ["separate", "fused"])
+    @pytest.mark.parametrize("skewed_routing", [False, True])
+    @pytest.mark.parametrize("zero_stage", [1, 2])
+    def test_overlapped_weight_gradients_match_the_serial_backward(self, gate_up_impl, skewed_routing, zero_stage):
+        """overlap_weight_grad changes when the experts' weight gradients are computed, not their values.
+
+        The two runs dispatch separately, so DeepEP's arrival order can differ between them and change summation
+        order; gradients a backward mismatched by the overlap would be off by order one rather than by rounding.
+        """
+        skip_unless_h100_tests_enabled("DeepEP backward overlap needs H100s and a DeepEP build")
+        seed = 4321
+        common = dict(skewed_routing=skewed_routing,
+                      zero_stage=zero_stage,
+                      activation_checkpointing=True,
+                      reentrant_checkpointing=True,
+                      gate_up_impl=gate_up_impl,
+                      use_grouped_mm=True,
+                      disable_triton_grouped_mm=True)
+
+        serial = _run_one_step("deepep", self.world_size, seed, **common)
+        overlapped = _run_one_step("deepep", self.world_size, seed, overlap_weight_grad=True, **common)
+
+        for result in (serial, overlapped):
+            assert result["exchanges"], "the test did not exercise DeepEP"
+            for exchange in result["exchanges"]:
+                assert isinstance(exchange.buffer, exchange.deep_ep.ElasticBuffer)
+
+        _assert_cleanup_results_close(overlapped, serial, compare_score_gradients=False)
+        pairs = [("input_gradient", overlapped["input_gradient"], serial["input_gradient"])]
+        pairs += [(name, overlapped["gradients"][name], grad) for name, grad in serial["gradients"].items()]
+        for name, actual, expected in pairs:
+            if expected.norm() > 0:
+                error = ((actual - expected).norm() / expected.norm()).item()
+                assert error < 1e-2, f"{name} relative L2 error {error:.3e}"
+        assert torch._C._get_sm_carveout_experimental() is None, "the SM carveout leaked out of the backward"
+
     @pytest.mark.parametrize("skewed_routing", [False, True])
     @pytest.mark.parametrize("nested", [False, True], ids=["non-reentrant", "nested-in-reentrant"])
     def test_non_reentrant_checkpointing_replays_the_forward_dispatch_layout(self, skewed_routing, nested):
@@ -696,6 +790,45 @@ class TestDeepEPMatchesCollective(DistributedTest):
         finally:
             destroy_exchanges(engine.module)
         dist.barrier()
+
+    @pytest.mark.parametrize("skewed_routing", [False, True])
+    @pytest.mark.parametrize("row_weighting_impl", ["eager", "fused"])
+    def test_skipping_the_recomputed_combine_matches_the_normal_recompute(self, row_weighting_impl, skewed_routing):
+        if row_weighting_impl == "fused":
+            _skip_unless_fused_row_weighting_enabled("fused DeepEP row weighting needs H100s and a DeepEP build")
+        else:
+            skip_unless_h100_tests_enabled("skip_recompute_combine parity needs H100s and a DeepEP build")
+        seed = 2468
+        steps = 2
+        results = {}
+        for skip in (False, True):
+            with _count_deepep_combines() as counts:
+                results[skip] = _run_one_step("deepep",
+                                              self.world_size,
+                                              seed,
+                                              decoder_layer_checkpointing=True,
+                                              skip_recompute_combine=skip,
+                                              row_weighting_impl=row_weighting_impl,
+                                              skewed_routing=skewed_routing,
+                                              steps=steps)
+            results[skip]["combines"] = counts["combine"]
+
+        normal, skipped = results[False], results[True]
+        layers = len(skipped["forward_counts"])
+        assert layers > 0 and all(count == 2 * steps for count in skipped["forward_counts"].values())
+        # The recompute no longer combines: one forward combine per layer instead of two.
+        assert normal["combines"] == 2 * layers * steps
+        assert skipped["combines"] == layers * steps
+        _assert_cleanup_results_close(skipped, normal, compare_score_gradients=False)
+        # DeepEP's arrival order can differ between the recomputes, so this is not bitwise; a dropped or
+        # misrouted gradient would be far outside 2e-2.
+        _assert_native_fused_gradient_close(skipped["input_gradient"], normal["input_gradient"], name="input")
+        for name, gradient in normal["gradients"].items():
+            if gradient.norm() == 0:
+                # Skewed routing leaves an expert without tokens on the rank that owns it.
+                assert skipped["gradients"][name].norm() == 0, f"{name} gradient should be zero"
+                continue
+            _assert_native_fused_gradient_close(skipped["gradients"][name], gradient, name=name)
 
     @pytest.mark.parametrize(
         "activation_checkpointing, skewed_routing",

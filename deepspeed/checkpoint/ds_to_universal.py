@@ -17,7 +17,6 @@ import re
 import shutil
 import torch
 import tqdm
-#from pprint import pprint
 
 from deepspeed.checkpoint import DeepSpeedCheckpoint
 from deepspeed.checkpoint import (
@@ -134,13 +133,10 @@ def extract_zero_shards(dir, ds_checkpoint, indices_3D):
     pp_index, tp_index, dp_index = indices_3D
     sd = ds_checkpoint.get_zero_checkpoint_state(pp_index=pp_index, tp_index=tp_index, dp_index=dp_index)
 
-    # pprint(f"Processing {dp_index=} {pp_index=}, {tp_index=}")
-
     optim_sd = sd[OPTIMIZER_STATE_DICT]
     param_slice_mappings = optim_sd[PARAM_SLICE_MAPPINGS]
     universal_checkpoint_info = ds_checkpoint.get_checkpoint_info(UNIVERSAL_CHECKPOINT_INFO)
     pipeline_replicated_params = universal_checkpoint_info.get(PIPELINE_REPLICATED_PARAMETER_PATTERNS, [])
-    # print(f'{pipeline_replicated_params=}')
 
     # dict
     state_groups = optim_sd[BASE_OPTIMIZER_STATE]["state"]
@@ -164,7 +160,6 @@ def extract_zero_shards(dir, ds_checkpoint, indices_3D):
                 # Skip tied weights that are replicated in first and last pp stages
                 continue
 
-            # pprint(f"dpt{dp_index}{pp_index}{tp_index} {param_group_id} {name} => {fragment_mapping.start}:{fragment_mapping.numel}")
             for state_key in flat_state.keys():
                 dump_param_fragment(dir, tp_index, dp_index, state_key, flat_state[state_key], name,
                                     fragment_mapping.start, fragment_mapping.numel)
@@ -230,8 +225,6 @@ def dump_param_fragment(dir, tp_index, dp_index, state_name, state_flat_tensor, 
     cnt += 1
 
     path = os.path.join(param_base_path, f"{state_name}.{dp_index_to_str(dp_index)}")
-
-    #print(f"{param_name}: {offset}: {numel} => {path}")
 
     # State might be a python int or a tensor
     if state_name != "step" and torch.is_tensor(state_flat_tensor):
@@ -382,8 +375,6 @@ def merge_tp_slices(uc_info, dir, slice_dir, tp_degree, name_and_shapes):
         slices = _merge_zero_shards(slice_base_path, state, tp_degree, per_tp_shapes)
         final_path = os.path.join(param_base_path, f"{state}.pt")
 
-        #print(f"Expected shape: {shape}")
-        #print(f"Fragment sizes:", list(frag.shape for frag in slices))
         ckpt_dict = {}
         if matched_affine_map is not None:
             # The pieces say where every element of the parameter lives, so none of the
@@ -396,10 +387,8 @@ def merge_tp_slices(uc_info, dir, slice_dir, tp_degree, name_and_shapes):
             if len(slices) > 1:
                 assert all([slices[0].equal(other_slice) for other_slice in slices[1:]])
             param = slices[0]
-            # print(f'replicate {name} using first slice')
         elif get_matched_pattern(parameters_to_average, name):
             param = sum(slices) / len(slices)
-            # print(f'merge {name} using average')
         elif get_matched_pattern(parameters_with_2_sub_params_cat_dim_0, name):
             cat_dim = 0
             chunked_slices = [torch.chunk(s, 2, dim=cat_dim) for s in slices]
@@ -501,19 +490,15 @@ def merge_tp_slices(uc_info, dir, slice_dir, tp_degree, name_and_shapes):
                 # below, so there is no optimizer tensor to merge here.
                 continue
             cat_dim = 1 if get_matched_pattern(parameters_with_row_parallelism, name) else 0
-            # print(f"merge {name} with CAT DIM: {cat_dim}")
             param = torch.cat(slices, dim=cat_dim)
             ckpt_dict[CAT_DIM] = cat_dim
 
         if get_matched_pattern(vocabulary_parameters, name):
-            #print(f"Before {param.shape=}")
             # strip padding
             original_vocab_size = universal_checkpoint_info['original_vocab_size']
             param = param[:original_vocab_size, :]
             ckpt_dict[VOCAB_TENSOR] = True
-            #print(f"After {param.shape=}")
 
-        #print(f"Final shape: {param.shape}")
         ckpt_dict[PARAM] = param
         _save_checkpoint(final_path, ckpt_dict)
 
@@ -569,7 +554,6 @@ def _extract_zero_shard_files(args, ds_checkpoint, temp_dir):
     _3d_range_list = list(
         itertools.product(range(ds_checkpoint.pp_degree), range(ds_checkpoint.tp_degree),
                           range(ds_checkpoint.dp_degree)))
-    #pprint(f'{_3d_range_list=}')
 
     do_work = partial(extract_zero_shards, temp_dir, ds_checkpoint)
     _do_parallel_work(do_work, _3d_range_list, args.num_extract_workers)
@@ -1171,7 +1155,6 @@ def main(args):
         _check_for_required_state(ds_checkpoint)
 
         iteration = ds_checkpoint.get_iteration()
-        #_create_latest_file(args.output_folder, iteration)
         checkpoint_paths = _create_checkpoint_paths(args.output_folder, iteration, ds_checkpoint.tp_degree,
                                                     ds_checkpoint.pp_degree)
 

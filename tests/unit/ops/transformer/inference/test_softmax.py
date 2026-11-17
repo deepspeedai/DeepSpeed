@@ -25,7 +25,6 @@ def run_softmax_reference(input):
 def run_softmax_ds(input, use_triton_ops=False):
     if use_triton_ops:
         from deepspeed.ops.transformer.inference.triton import softmax
-        # return torch.empty_like(input)
         return softmax(input)
 
     assert use_triton_ops, "Only triton softmax is supported for now"

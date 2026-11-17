@@ -615,6 +615,26 @@ class TestNodeShapeMeta:
         assert get_node_shape_meta(node) is example_value
 
 
+class TestVmapCanonicalization:
+
+    def test_preserves_vmap_nesting_markers(self):
+        import deepspeed.compile.fx as dc_fx
+
+        if not dc_fx._VMAP_NESTING_OPS:
+            pytest.skip("torch does not expose predispatch vmap nesting operations")
+
+        graph = Graph()
+        value = graph.placeholder("value")
+        graph.call_function(torch.neg, args=(value, ))
+        markers = [graph.call_function(target, args=()) for target in dc_fx._VMAP_NESTING_OPS]
+        graph.output(value)
+
+        graph.eliminate_dead_code(is_impure_node=dc_fx.is_impure_for_dce)
+
+        assert all(marker in graph.nodes for marker in markers)
+        assert not any(node.target is torch.neg for node in graph.nodes)
+
+
 class TestInputIdCompile:
 
     @pytest.mark.sequential
