@@ -95,6 +95,8 @@ class FusedAdam(torch.optim.Optimizer):
         # Skip buffer
         self._dummy_overflow_buf = get_accelerator().IntTensor([0])
         self.multi_tensor_adam = fused_adam_cuda.multi_tensor_adam
+        # Used by ZeRO's bf16.store_param_remainders; an accelerator's fused Adam op may not provide it.
+        self.multi_tensor_adam_param_remainder = getattr(fused_adam_cuda, "multi_tensor_adam_param_remainder", None)
 
     def zero_grad(self):
         if self.set_grad_none:
@@ -103,6 +105,28 @@ class FusedAdam(torch.optim.Optimizer):
                     p.grad = None
         else:
             super(FusedAdam, self).zero_grad()
+
+    def step_param_remainders(self, group, param, grad, param_remainder):
+        """One Adam step of ``group`` on fp32 master weights stored as ``param`` plus ``param_remainder``.
+
+        ``param`` (bf16) and ``param_remainder`` (int16) hold the upper and lower halves of the fp32 values, as
+        described in deepspeed/utils/param_remainders.py; both are updated in place, so no fp32 copy of the weights is
+        allocated. ``grad`` may be fp32, fp16 or bf16. The moments are fp32 and live in ``self.state[param]``.
+        """
+        if self.multi_tensor_adam_param_remainder is None:
+            raise RuntimeError("This accelerator's FusedAdam op does not support bf16.store_param_remainders.")
+        state = self.state[param]
+        if len(state) == 0:
+            state['step'] = group.get('step', 0)
+            state['exp_avg'] = torch.zeros_like(param, dtype=torch.float32)
+            state['exp_avg_sq'] = torch.zeros_like(param, dtype=torch.float32)
+        state['step'] += 1
+        beta1, beta2 = group['betas']
+        bias_correction = 1 if group['bias_correction'] else 0
+        multi_tensor_applier(self.multi_tensor_adam_param_remainder, self._dummy_overflow_buf,
+                             [[grad], [param.data], [state['exp_avg']], [state['exp_avg_sq']], [param_remainder]],
+                             group['lr'], beta1, beta2, group['eps'], state['step'], self.adam_w_mode, bias_correction,
+                             group['weight_decay'])
 
     def step(self, closure=None, grads=None, output_params=None, scale=None, grad_norms=None, grad_scaler=None):
         """Performs a single optimization step.

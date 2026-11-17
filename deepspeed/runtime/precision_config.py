@@ -70,6 +70,15 @@ class DeepSpeedBF16Config(DeepSpeedConfigModel):
     Keep optimizer states in bf16 (only valid when bf16_master_weights_and_grads is enabled).
     """
 
+    store_param_remainders: bool = False
+    """
+    Store the fp32 master weights of ZeRO stage 1 and 2 as the bf16 parameters (their upper 16 bits, rounded to
+    nearest) plus an int16 remainder (their lower 16 bits), instead of a separate fp32 copy: 2 bytes per parameter
+    instead of 4, and the optimizer still updates the exact fp32 values. Megatron-LM and Transformer Engine call this
+    store_param_remainders. Needs DeepSpeed's FusedAdam, no optimizer offload, and bf16 gradient accumulation with
+    ZeRO stage 1.
+    """
+
 
 #########################################
 # FP16 support

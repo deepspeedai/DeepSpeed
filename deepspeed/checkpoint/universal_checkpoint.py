@@ -378,10 +378,10 @@ def load_hp_checkpoint_state(self, folder, tp_rank, tp_world_size, ep_rank=0, ep
         tp_hp_fragment = tp_hp_slice.narrow(0, lp_frag_address.start, lp_frag_address.numel)
 
         if key == FP32_WEIGHT_KEY:
-            dst_tensor = hp_mapping.get_hp_fragment()
-            assert dst_tensor.numel() == lp_frag_address.numel, \
-                f'Load checkpoint {key} dst numel {dst_tensor.numel()} != src numel {lp_frag_address.numel}'
-            dst_tensor.data.copy_(tp_hp_fragment.data)
+            dst_numel = hp_mapping.get_hp_fragment_address().numel
+            assert dst_numel == lp_frag_address.numel, \
+                f'Load checkpoint {key} dst numel {dst_numel} != src numel {lp_frag_address.numel}'
+            hp_mapping.set_hp_fragment(tp_hp_fragment)
         else:
             assert tp_hp_fragment.numel() == lp_frag_address.numel, \
                 f'Load checkpoint {key} dst numel {tp_hp_fragment.numel()} != src numel {lp_frag_address.numel}'

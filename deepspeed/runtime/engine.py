@@ -1723,6 +1723,9 @@ class DeepSpeedEngine(Module):
     def bf16_optimizer_states(self):
         return self._config.bfloat16_config.bf16_optimizer_states
 
+    def store_param_remainders(self):
+        return self._config.bfloat16_config.store_param_remainders
+
     def torch_autocast_enabled(self) -> bool:
         return self._config.torch_autocast_enabled
 
@@ -2686,6 +2689,10 @@ class DeepSpeedEngine(Module):
         return optimizer
 
     def _configure_bf16_optimizer(self, optimizer):
+        if self.store_param_remainders():
+            raise ValueError("bf16.store_param_remainders is not supported by the BF16 optimizer, which ZeRO stage 1 "
+                             "uses with fp32 gradient accumulation; use ZeRO stage 2 or "
+                             "data_types.grad_accum_dtype='bf16'")
         clip_grad = self.gradient_clipping()
 
         if optimizer is None:
@@ -2777,6 +2784,7 @@ class DeepSpeedEngine(Module):
                 fp16_master_weights_and_gradients=self.fp16_master_weights_and_gradients(),
                 bf16_master_weights_and_gradients=self.bf16_master_weights_and_gradients(),
                 bf16_optimizer_states=self.bf16_optimizer_states(),
+                store_param_remainders=self.store_param_remainders(),
                 gradient_accumulation_dtype=gradient_accumulation_dtype,
                 communication_data_type=self.communication_data_type,
                 elastic_checkpoint=self.zero_elastic_checkpoint(),

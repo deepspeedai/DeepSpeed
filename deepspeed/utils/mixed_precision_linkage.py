@@ -17,7 +17,10 @@ def link_hp_params(lp_param_list,
                    partition_start,
                    partition_size,
                    dp_group,
-                   param_offsets=None):
+                   param_offsets=None,
+                   flat_hp_remainder=None):
+    """``flat_hp_remainder``: with ``bf16.store_param_remainders``, the int16 lower halves of the fp32 master
+    partition; ``flat_hp_partition`` then holds the bf16 upper halves."""
     local_lp_param_and_offset = _init_lp_to_hp_mapping(lp_param_list,
                                                        partition_start,
                                                        partition_size,
@@ -26,9 +29,16 @@ def link_hp_params(lp_param_list,
                                                        use_offload=use_offload)
 
     for lp_param, lp_start in local_lp_param_and_offset:
-        lp_param._hp_mapping = get_hp_fragment_mapping(lp_param, lp_start, flat_hp_partition, gradient_dict,
-                                                       offload_gradient_dict, use_offload, param_group_index,
-                                                       partition_start, partition_size)
+        lp_param._hp_mapping = get_hp_fragment_mapping(lp_param,
+                                                       lp_start,
+                                                       flat_hp_partition,
+                                                       gradient_dict,
+                                                       offload_gradient_dict,
+                                                       use_offload,
+                                                       param_group_index,
+                                                       partition_start,
+                                                       partition_size,
+                                                       flat_hp_remainder=flat_hp_remainder)
 
 
 def lazy_init_hp_params_optimizer_state(lp_param_list, flat_hp_partition, optimizer_state):

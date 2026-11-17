@@ -6,6 +6,7 @@
 import torch
 from dataclasses import dataclass
 from deepspeed import comm as dist
+from deepspeed.utils.param_remainders import rebuild_fp32_master, split_fp32_master
 from typing import Dict, List, Callable
 
 
@@ -26,8 +27,14 @@ class tensor_fragment:
     use_offload: bool
     param_group_index: int
     optim_fragment: Dict = None
+    # With bf16.store_param_remainders: the int16 lower halves of the fp32 master fragment, whose bf16 upper halves
+    # are hp_fragment. The fp32 values then exist only as returned by get_hp_fragment(); write them with
+    # set_hp_fragment().
+    hp_remainder_fragment: torch.Tensor = None
 
     def update_hp(self):
+        if self.hp_remainder_fragment is not None:
+            self.hp_remainder_fragment.zero_()
         self.hp_fragment.data.copy_(self.lp_fragment.data)
 
     def update_lp(self):
@@ -54,8 +61,17 @@ class tensor_fragment:
 
     def get_hp_fragment(self, optim_state_key=None):
         if optim_state_key is None:
+            if self.hp_remainder_fragment is not None:
+                # A copy rebuilt from the two halves: writing it does not change the master weights.
+                return rebuild_fp32_master(self.hp_fragment.data, self.hp_remainder_fragment)
             return self.hp_fragment
         return self.get_optim_state_fragment(optim_state_key)
+
+    def set_hp_fragment(self, value, optim_state_key=None):
+        if optim_state_key is None and self.hp_remainder_fragment is not None:
+            split_fp32_master(value.to(torch.float32), self.hp_fragment.data, self.hp_remainder_fragment)
+            return
+        self.get_hp_fragment(optim_state_key).data.copy_(value.data)
 
     def get_lp_grad_fragment(self, index_in_param_group):
         if self.use_offload:
@@ -69,10 +85,12 @@ class tensor_fragment:
         return gradient_dict[self.param_group_index][index_in_param_group]
 
 
-def map_to_flat_opt_states(flat_hp_tensor, lp_tensors, optim_state, opt_keys):
+def map_to_flat_opt_states(flat_hp_tensor, lp_tensors, optim_state, opt_keys, state_dtype=None):
+    # state_dtype: the dtype the optimizer keeps its states in, when it differs from flat_hp_tensor's (the bf16 half
+    # of the master weights with bf16.store_param_remainders).
     for key in opt_keys:
         hp_param = flat_hp_tensor
-        buffer = torch.zeros_like(hp_param)
+        buffer = torch.zeros_like(hp_param, dtype=state_dtype)
 
         for lp in lp_tensors:
             if lp._hp_mapping is not None:
@@ -99,8 +117,7 @@ def set_full_hp_param(self, value, optim_state_key=None):
     if self._hp_mapping is not None:
         lp_frag_address = self._hp_mapping.lp_fragment_address
         value_fragment = torch.narrow(value.flatten(), 0, lp_frag_address.start, lp_frag_address.numel)
-        hp_fragment = self._hp_mapping.get_hp_fragment(optim_state_key)
-        hp_fragment.data.copy_(value_fragment.data)
+        self._hp_mapping.set_hp_fragment(value_fragment, optim_state_key)
 
 
 def get_full_hp_grad(self):
@@ -375,8 +392,16 @@ def safe_update_full_grad_vectorized(param_list: List[torch.nn.Parameter], updat
 ### VECTORIZED API  END ###
 
 
-def get_hp_fragment_mapping(lp_param, lp_start, flat_hp_partition, gradient_dict, offload_gradient_dict, use_offload,
-                            param_group_index, partition_start, partition_size):
+def get_hp_fragment_mapping(lp_param,
+                            lp_start,
+                            flat_hp_partition,
+                            gradient_dict,
+                            offload_gradient_dict,
+                            use_offload,
+                            param_group_index,
+                            partition_start,
+                            partition_size,
+                            flat_hp_remainder=None):
     lp_end = lp_param.numel() + lp_start
     hp_start = partition_start
     hp_end = partition_start + partition_size
@@ -389,6 +414,9 @@ def get_hp_fragment_mapping(lp_param, lp_start, flat_hp_partition, gradient_dict
     fragment_numel = fragment_end - fragment_start
     hp_frag_address = fragment_address(start=fragment_start - hp_start, numel=fragment_numel)
     hp_fragment_tensor = flat_hp_partition.narrow(0, hp_frag_address.start, hp_frag_address.numel)
+    hp_remainder_fragment = None
+    if flat_hp_remainder is not None:
+        hp_remainder_fragment = flat_hp_remainder.narrow(0, hp_frag_address.start, hp_frag_address.numel)
 
     lp_frag_address = fragment_address(start=fragment_start - lp_start, numel=fragment_numel)
     lp_fragment_tensor = lp_param.flatten().narrow(0, lp_frag_address.start, lp_frag_address.numel)
@@ -400,7 +428,8 @@ def get_hp_fragment_mapping(lp_param, lp_start, flat_hp_partition, gradient_dict
                            gradient_dict=gradient_dict,
                            offload_gradient_dict=offload_gradient_dict,
                            use_offload=use_offload,
-                           param_group_index=param_group_index)
+                           param_group_index=param_group_index,
+                           hp_remainder_fragment=hp_remainder_fragment)
 
 
 '''
