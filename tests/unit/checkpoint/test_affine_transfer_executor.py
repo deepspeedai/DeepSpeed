@@ -19,6 +19,7 @@ from deepspeed.checkpoint.affine_transfer_executor import (AffineTransferExecuti
                                                            TransferEndpoints, TransferRequest, _is_packed,
                                                            execute_transfer, execute_transfers, prepare_transfers,
                                                            schedule_transfers)
+from deepspeed.checkpoint.affine_transfer_copy import fused_copies, sequential_copies
 from unit.common import DistributedTest
 
 UNWRITTEN = float('nan')
@@ -295,6 +296,34 @@ class TestB2Prepared(DistributedTest):
                 _refill(requests, 1000.0)
             stats = prepared.run()
             assert stats == once
+            for targets, target_map, full in checks:
+                _assert_matches(targets, target_map, full + 1000.0 * run)
+        for storage, size in guards:
+            assert torch.equal(storage[:5], torch.full((5, ), -17.0, device=storage.device))
+            assert torch.equal(storage[5 + size:], torch.full((12 - 5, ), -17.0, device=storage.device))
+
+    @pytest.mark.parametrize('world_size', [2, 4])
+    @pytest.mark.parametrize('fused', [False, True])
+    def test_a_copier_runs_every_copy_list(self, world_size, fused):
+        _join_transfer_group()
+        rank = dist.get_rank()
+        endpoints, requests, checks, guards = _mixed_batch(world_size, rank)
+        budget = StagingBudget(64)
+        lists = []
+
+        def copier(pairs):
+            pairs = list(pairs)
+            lists.append(pairs)
+            return (fused_copies if fused else sequential_copies)(pairs)
+
+        prepared = prepare_transfers(requests, endpoints, torch.float32, budget, copier=copier)
+        once = execute_transfers(requests, endpoints, torch.float32, budget)
+        # A pack list and an unpack list per round, then the local copies.
+        assert len(lists) == 2 * once.rounds + 1
+        for run in range(3):
+            if run:
+                _refill(requests, 1000.0)
+            assert prepared.run() == once
             for targets, target_map, full in checks:
                 _assert_matches(targets, target_map, full + 1000.0 * run)
         for storage, size in guards:
@@ -935,3 +964,23 @@ class TestB2TransferCPU:
             execute_transfer(plan, {0: source}, {0: target}, endpoints, torch.float32, StagingBudget(4))
         assert torch.equal(target_storage, torch.tensor([-9.0, 3.0, -9.0]))
         assert torch.equal(source_storage, torch.tensor([-7.0, 3.0, -7.0]))
+
+
+@pytest.mark.parametrize('dtype', [torch.int8, torch.bfloat16, torch.float32, torch.float64])
+def test_fused_copies_match_copy_for_every_region_shape(dtype):
+    device = torch.device(get_accelerator().current_device_name())
+    source = torch.arange(300 * 520, device=device).reshape(300, 520).to(dtype)
+    target = torch.zeros(520, 300, device=device, dtype=dtype)
+    arena = torch.zeros(1 << 17, device=device, dtype=dtype)
+    pairs = [
+        (arena[:300 * 64].view(300, 64), source[:, 128:192]),  # aligned strided rows into an arena
+        (target[7:9, :100], source[3, 5:205].view(2, 100)),  # contiguous into strided rows
+        (arena[300 * 64 + 3:300 * 64 + 80], source[11, 13:90]),  # unaligned run
+        (target[100:400, 17:297], source[:300, 1:281]),  # unaligned strided rows on both sides
+        (target[500:510, 0:10].t(), source[0:10, 0:10]),  # transposed: not tileable
+    ]
+    expected = [destination.clone().copy_(region) for destination, region in pairs]
+    fused_copies(pairs)()
+    get_accelerator().synchronize()
+    for (destination, _), want in zip(pairs, expected):
+        assert torch.equal(destination, want)

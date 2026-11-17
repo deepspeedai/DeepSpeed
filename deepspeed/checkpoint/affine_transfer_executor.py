@@ -38,8 +38,10 @@ lifetime this API has no place for. Expect the wire contract -- one packed messa
 to change when such a path lands.
 
 One device per process, with explicit transport-group rank bindings, synchronous on return. No CUDA graphs, no overlap with compute,
-no custom kernels: those all change the schedule, which is the last thing a first version of a data
-mover should be perturbing.
+and ``copy_`` for every region by default: graphs and overlap change the schedule, which is the last thing
+a first version of a data mover should be perturbing. A prepared transfer may replace how a round's
+copies run (``prepare_transfers(..., copier=affine_transfer_copy.fused_copies)``), never which regions it
+copies or how rounds are ordered.
 """
 
 import contextlib
@@ -50,7 +52,7 @@ import zlib
 from bisect import bisect_right
 from dataclasses import dataclass
 from itertools import count, product
-from typing import Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import torch
 from deepspeed.accelerator import get_accelerator
@@ -567,6 +569,10 @@ class _StagedRound:
     copies: Tuple[Tuple[torch.Tensor, torch.Tensor], ...]
 
 
+# Turns a list of ``(destination, source)`` region copies into the callable a prepared run invokes for it.
+Copier = Callable[[Sequence[Tuple[torch.Tensor, torch.Tensor]]], Callable[[], None]]
+
+
 @dataclass
 class _Agreement:
     """A batch every process agreed to move, and this process's share of it."""
@@ -586,6 +592,10 @@ class _Agreement:
     world_size: int
     device: torch.device
     stream_ordered: bool
+    # What the copier built from ``rounds`` and ``local_copies``; empty unless kept.
+    packs: List[Callable[[], None]]
+    unpacks: List[Callable[[], None]]
+    local_copy: Optional[Callable[[], None]]
 
 
 # This process's preparations so far. Two batches prepared alike share a digest, so what tells their
@@ -594,7 +604,8 @@ _preparations = count()
 
 
 def _agree(requests: Sequence[TransferRequest], endpoints: TransferEndpoints, dtype: torch.dtype,
-           budget: StagingBudget, group: Optional[object], keep: bool) -> _Agreement:
+           budget: StagingBudget, group: Optional[object], keep: bool,
+           copier: Optional[Copier] = None) -> _Agreement:
     """Validate a batch, lay out this process's share and agree on it with every process.
 
     Collective. With ``keep``, the views a prepared handle keeps are built here too, before the
@@ -616,6 +627,7 @@ def _agree(requests: Sequence[TransferRequest], endpoints: TransferEndpoints, dt
     stream_ordered = initialized and not get_accelerator().is_synchronized_device()
     lane, copies, recv_arenas, send_arenas = None, [], {}, {}
     indexed, rounds, local_copies, layout = [], [], (), ()
+    packs, unpacks, local_copy = [], [], None
     element_size, digest, rejected = 0, 0, 0
     error = None
     try:
@@ -670,10 +682,17 @@ def _agree(requests: Sequence[TransferRequest], endpoints: TransferEndpoints, dt
                 rounds = list(_round_views(lane, recv_arenas, send_arenas, requests, dtype))
                 local_copies = tuple(_local_copy_views(copies, requests, dtype))
                 layout = _buffer_layout(requests)
+                if copier is None:
+                    from .affine_transfer_copy import sequential_copies as copier
+                # Built here so that a copier failing on one process refuses the batch on every process.
+                packs = [copier([pair for staged in sends for pair in staged.copies]) for _, sends in rounds]
+                unpacks = [copier([pair for staged in recvs for pair in staged.copies]) for recvs, _ in rounds]
+                local_copy = copier([(target, source) for target, source, _ in local_copies])
     except (ValueError, TypeError, KeyError, AttributeError, RuntimeError, OverflowError, MemoryError) as caught:
         error = caught
         rejected = 1
         recv_arenas, send_arenas, rounds = {}, {}, []
+        packs, unpacks, local_copy = [], [], None
         print(f'[transfer] rank {rank} rejected the batch: {caught}', file=sys.stderr, flush=True)
 
     preparations = [preparation]
@@ -706,7 +725,10 @@ def _agree(requests: Sequence[TransferRequest], endpoints: TransferEndpoints, dt
                       identity=_identity(digest, preparations),
                       world_size=world_size,
                       device=device,
-                      stream_ordered=stream_ordered)
+                      stream_ordered=stream_ordered,
+                      packs=packs,
+                      unpacks=unpacks,
+                      local_copy=local_copy)
 
 
 def _identity(digest: int, preparations: Sequence[int]) -> int:
@@ -721,19 +743,29 @@ def prepare_transfers(requests: Sequence[TransferRequest],
                       endpoints: TransferEndpoints,
                       dtype: torch.dtype,
                       budget: StagingBudget = StagingBudget(),
-                      group: Optional[object] = None) -> 'PreparedTransfer':
+                      group: Optional[object] = None,
+                      copier: Optional[Copier] = None) -> 'PreparedTransfer':
     """Everything ``execute_transfers`` does before data moves, done once for repeated runs.
 
     Collective, with the same preflight and refusal contract as ``execute_transfers``. The handle keeps
     the requests' buffers, the staging arenas and a view of every region each round packs, unpacks or
     copies locally, so ``PreparedTransfer.run`` only moves data. The buffers must stay where they are,
     and every process must run the handle the same number of times; ``run`` checks both by default.
+
+    ``copier`` turns each list of ``(destination, source)`` region copies -- a round's packs, a round's
+    unpacks, and the copies that stay on this process -- into the callable ``run`` invokes for it.
+    ``affine_transfer_copy.sequential_copies`` (one ``copy_`` per region) is the default;
+    ``affine_transfer_copy.fused_copies`` copies each list with one kernel launch where the device allows.
+    Processes may pass different copiers, since it does not change what moves.
     """
-    agreed = _agree(requests, endpoints, dtype, budget, group, keep=True)
+    agreed = _agree(requests, endpoints, dtype, budget, group, keep=True, copier=copier)
     return PreparedTransfer(_requests=tuple(requests),
                             _layout=agreed.layout,
                             _rounds=agreed.rounds,
                             _local_copies=agreed.local_copies,
+                            _packs=agreed.packs,
+                            _unpacks=agreed.unpacks,
+                            _local_copy=agreed.local_copy,
                             _segments=agreed.segments,
                             _chunks=agreed.chunks,
                             _element_size=agreed.element_size,
@@ -761,6 +793,10 @@ class PreparedTransfer:
     _rounds: List[Tuple[List[_StagedRound], List[_StagedRound]]]
     # ``(target region, source region, bytes)`` for each copy that stays on this process.
     _local_copies: Tuple[Tuple[torch.Tensor, torch.Tensor, int], ...]
+    # What ``copier`` built from the copy lists above: per round, the packs and the unpacks; then the local copies.
+    _packs: List[Callable[[], None]]
+    _unpacks: List[Callable[[], None]]
+    _local_copy: Callable[[], None]
     _segments: int
     _chunks: int
     _element_size: int
@@ -813,22 +849,43 @@ class PreparedTransfer:
                                                'prepare_transfers; prepare the batch again. No data moved.')
 
     def _move(self) -> TransferStats:
-        sent, received, copied = _run_rounds(self._rounds, len(self._rounds), self._local_copies, self._group,
-                                             self._element_size, self._stream_ordered)
+        sent, received, copied = _run_rounds(self._rounds,
+                                             len(self._rounds),
+                                             self._local_copies,
+                                             self._group,
+                                             self._element_size,
+                                             self._stream_ordered,
+                                             packs=self._packs,
+                                             unpacks=self._unpacks,
+                                             local_copy=self._local_copy)
         self._runs += 1
         return TransferStats(self._segments, self._chunks, len(self._rounds), copied, sent, received)
 
 
-def _run_rounds(rounds, round_count: int, local_copies, group: Optional[object], element_size: int,
-                stream_ordered: bool) -> Tuple[int, int, int]:
-    """Move the rounds in order, then the local copies; returns the bytes sent, received and copied."""
+def _run_rounds(rounds,
+                round_count: int,
+                local_copies,
+                group: Optional[object],
+                element_size: int,
+                stream_ordered: bool,
+                packs: Optional[Sequence[Callable[[], None]]] = None,
+                unpacks: Optional[Sequence[Callable[[], None]]] = None,
+                local_copy: Optional[Callable[[], None]] = None) -> Tuple[int, int, int]:
+    """Move the rounds in order, then the local copies; returns the bytes sent, received and copied.
+
+    ``packs``, ``unpacks`` and ``local_copy`` are a prepared handle's copier callables; without them,
+    each region is copied with ``copy_``.
+    """
     import deepspeed.comm as dist
     sent = received = copied = 0
     pending = []
     for round_index, (recvs, sends) in enumerate(rounds):
-        for staged in sends:
-            for destination, source in staged.copies:
-                destination.copy_(source)
+        if packs is not None:
+            packs[round_index]()
+        else:
+            for staged in sends:
+                for destination, source in staged.copies:
+                    destination.copy_(source)
         p2p = [(dist.irecv, staged) for staged in recvs] + [(dist.isend, staged) for staged in sends]
         operations = [
             dist.P2POp(direction,
@@ -853,12 +910,18 @@ def _run_rounds(rounds, round_count: int, local_copies, group: Optional[object],
             pending.clear()
         sent += sum(staged.payload.numel() for staged in sends) * element_size
         received += sum(staged.payload.numel() for staged in recvs) * element_size
-        for staged in recvs:
-            for destination, source in staged.copies:
-                destination.copy_(source)
+        if unpacks is not None:
+            unpacks[round_index]()
+        else:
+            for staged in recvs:
+                for destination, source in staged.copies:
+                    destination.copy_(source)
 
+    if local_copy is not None:
+        local_copy()
     for target, source, size in local_copies:
-        target.copy_(source)
+        if local_copy is None:
+            target.copy_(source)
         copied += size
 
     if stream_ordered:

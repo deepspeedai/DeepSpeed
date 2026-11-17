@@ -76,6 +76,16 @@ The handle also keeps every buffer it holds allocated: drop it before
 batch again after ``reload_states``. ``run(check=False)`` skips the all-gather,
 so every process must pass the same ``check``.
 
+Each round packs and unpacks many small strided regions, one ``copy_`` per
+region by default. ``prepare_transfers(..., copier=fused_copies)`` from
+``deepspeed.checkpoint.affine_transfer_copy`` instead builds, at prepare time, a
+table of every region a copy list touches and moves the whole list with one
+Triton launch per alignment class. It applies to CUDA and XPU tensors when
+Triton is available and otherwise falls back to ``copy_``; the copies are
+bitwise, so the result matches the default copier exactly. Building the table
+compiles the kernel once, which makes prepare slower, so it pays off only for
+handles that run many times.
+
 Planning a sync with replica policies
 -------------------------------------
 
