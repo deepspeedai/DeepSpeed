@@ -850,6 +850,8 @@ class TestWeightGradOverlap(unittest.TestCase):
         def combine(self, rows, *, handle, topk_weights=None, async_with_compute_stream=False, **kwargs):
             test, log = self.test, self.log
             log.append("combine_async" if async_with_compute_stream else "combine")
+            if async_with_compute_stream:
+                test.async_combine_settings.append(os.environ.get("EP_AVOID_RECORD_STREAM"))
             combined = rows.new_zeros(test.TOKENS, rows.shape[1]).index_add(0, handle.token_of_row, rows)
             combined_weights = None
             if topk_weights is not None:
@@ -863,6 +865,7 @@ class TestWeightGradOverlap(unittest.TestCase):
         except (AttributeError, RuntimeError, NotImplementedError):
             self.skipTest("this PyTorch build has no CPU torch._grouped_mm")
         torch.manual_seed(0)
+        self.async_combine_settings = []
         self.routing = torch.randint(0, self.EXPERTS - 1, (self.TOKENS, self.TOP_K))  # one expert stays empty
         self.inputs = torch.randn(self.TOKENS, self.HIDDEN)
         self.gate = torch.randn(self.HIDDEN, self.TOP_K)
@@ -942,6 +945,27 @@ class TestWeightGradOverlap(unittest.TestCase):
                     # The backward combine is launched before the weight gradients and read only after them.
                     self.assertEqual(log[-3:], ["combine_async", "weight_grads_with_12_sms_withheld", "wait"])
             self.assertEqual(serial_log, ["combine", "combine"])
+
+    def test_async_combine_keeps_its_tensors_in_the_event(self):
+        # Unless EP_AVOID_RECORD_STREAM is set, DeepEP records an asynchronous call's tensors on both streams, and the
+        # allocator cannot reuse their blocks until DeepEP's stream catches up. Under non-reentrant checkpointing that
+        # ran the overlapped backward out of cached memory on every combine. The setting must be on for the call and
+        # must leave the user's own value, set or not, as it was.
+        saved = os.environ.pop("EP_AVOID_RECORD_STREAM", None)
+        try:
+            for user_value in (None, "0"):
+                with self.subTest(user_value=user_value):
+                    if user_value is not None:
+                        os.environ["EP_AVOID_RECORD_STREAM"] = user_value
+                    self.async_combine_settings.clear()
+                    self.run_route(True, "fused", "non_reentrant")
+                    self.assertTrue(self.async_combine_settings)
+                    self.assertEqual(set(self.async_combine_settings), {"1"})
+                    self.assertEqual(os.environ.get("EP_AVOID_RECORD_STREAM"), user_value)
+        finally:
+            os.environ.pop("EP_AVOID_RECORD_STREAM", None)
+            if saved is not None:
+                os.environ["EP_AVOID_RECORD_STREAM"] = saved
 
     def test_the_sm_carveout_is_restored(self):
         torch._C._set_sm_carveout_experimental(None)
