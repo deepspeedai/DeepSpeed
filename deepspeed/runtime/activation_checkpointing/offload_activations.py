@@ -349,15 +349,20 @@ class _ActivationOffloadEngine:
                                "before the offload engine is reset.")
         cpu_tensor, device, shape, stride, buffer_key, _d2h = tracked
         stream = self.s1 if self.use_streams else self.compute_stream
+        # Allocate on the compute stream, which consumes and frees the tensor, as _start_reload does. Allocating
+        # inside the side-stream context puts every reload in that stream's own allocator pool, which cannot reuse
+        # blocks freed by compute; near the device memory limit that forces extra cudaMallocs and cache flushes.
+        # fresh offset-0 storage; a source offset would index past the pool buffer
+        gpu_tensor = torch.empty_strided(shape, stride, dtype=cpu_tensor.dtype, device=device)
+        if self.use_streams:
+            # the block may have been freed by compute work that is still queued
+            self.s1.wait_stream(self.compute_stream)
         with self._stream_context(stream):
-            # fresh offset-0 storage; a source offset would index past the pool buffer
-            gpu_tensor = torch.empty_strided(shape, stride, dtype=cpu_tensor.dtype, device=device)
             gpu_tensor.copy_(cpu_tensor, non_blocking=self.use_streams)
         if self.use_streams:
             compute = self.compute_stream
             event = self.s1.record_event()
             compute.wait_event(event)
-            gpu_tensor.record_stream(compute)
             self._pending_cpu_buffers.append((buffer_key, cpu_tensor, event))
         else:
             self._pool_cpu_buffer(buffer_key, cpu_tensor)
