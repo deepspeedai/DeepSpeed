@@ -746,8 +746,9 @@ forward to its recompute: ``batch * seq * heads * (head_dim * 2 + 4)`` bytes for
 BF16, 136 MB per layer for Qwen3-30B-A3B at batch 4 and sequence 4096. Choose
 ``num_layers`` to fit that memory.
 
-The attention forward output equals Hugging Face's SDPA call element for
-element, and so do the key and value gradients. cuDNN accumulates the query
+In the tested cuDNN configuration, the attention output and key/value
+gradients were numerically equal under ``torch.equal`` to Hugging Face's SDPA
+call; this is not a guarantee of matching signed-zero bit patterns. cuDNN accumulates the query
 gradient non-deterministically, which is why PyTorch does not select cuDNN SDPA
 under ``torch.use_deterministic_algorithms(True)``. The query gradient from a
 kept output is as accurate as a normal recompute's against an FP32 reference,
@@ -778,9 +779,14 @@ Requirements and limits:
 - PyTorch must select cuDNN SDPA for the layer's inputs, which needs CUDA with
   cuDNN; causal attention without an attention mask (no padding) and without
   attention dropout. Anything else raises when the layer runs.
+- First-order query/key/value gradients only; ``create_graph=True`` raises.
+  A saved output is consumed once, so repeated backward through a retained
+  graph is not supported. Evaluation bypasses the stash.
 - The installer wraps Hugging Face's ``"sdpa"`` entry in
   ``ALL_ATTENTION_FUNCTIONS`` for the whole process; attention modules without a
-  stash call the original function. Installing twice on one layer raises.
+  stash call the original function. Installing twice on one layer raises
+  before changing any other selected layer. Pending inputs are released even
+  when the decoder forward raises.
 - ``torch.compile`` and DeepSpeed's own activation checkpointing are not
   covered.
 

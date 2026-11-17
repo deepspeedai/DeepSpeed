@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # DeepSpeed Team
-"""Tests for the attention stash (deepspeed/runtime/activation_checkpointing/attention_stash.py)."""
+"""Attention-stash regressions in the accelerator CI test scope."""
 
 import gc
+import os
 
 import pytest
 import torch
@@ -178,6 +179,15 @@ class TestAttentionStashCPU:
         gc.collect()
         assert all(not stash.entries for stash in _stashes(model))
 
+    def test_eval_with_a_grad_enabled_input_does_not_stash(self, cpu_cudnn):
+        model = _tiny_model().eval()
+        install_attention_stash(model, NUM_LAYERS)
+        embeddings = model.get_input_embeddings()(_batch(3)).detach().requires_grad_(True)
+        with torch.no_grad():
+            model(inputs_embeds=embeddings)
+        assert cpu_cudnn == {"kept": 0, "replayed": 0}
+        assert all(not stash.entries for stash in _stashes(model))
+
     def test_install_rejects_unsupported_models(self):
         with pytest.raises(ValueError, match="attn_implementation='sdpa'"):
             install_attention_stash(_tiny_model(attn_implementation="eager"), 1)
@@ -208,6 +218,42 @@ class TestAttentionStashCPU:
         attention_mask[0, :4] = 0
         with pytest.raises(RuntimeError, match="without an attention mask"):
             model(input_ids=input_ids, attention_mask=attention_mask, labels=input_ids)
+
+    def test_failed_forward_releases_its_input_and_allows_retry(self, cpu_cudnn):
+        model = _tiny_model()
+        install_attention_stash(model, 1)
+        input_ids = _batch(5)
+        attention_mask = torch.ones_like(input_ids)
+        attention_mask[0, :4] = 0
+        with pytest.raises(RuntimeError, match="without an attention mask"):
+            model(input_ids=input_ids, attention_mask=attention_mask, labels=input_ids)
+
+        # A failed layer call must not retain its activation through the hook's pending input.
+        assert all(stash.pending is None for stash in _stashes(model))
+        reference = _loss_and_grads(_tiny_model(), input_ids)
+        _assert_close(reference, _loss_and_grads(model, input_ids))
+        assert all(not stash.entries for stash in _stashes(model))
+
+    def test_duplicate_install_does_not_partially_patch_other_layers(self, cpu_cudnn):
+        model = _tiny_model()
+        install_attention_stash(model, 1)
+        with pytest.raises(ValueError, match="already installed"):
+            install_attention_stash(model, NUM_LAYERS)
+
+        assert not any(hasattr(layer.self_attn, "_deepspeed_attention_stash") for layer in model.model.layers[:-1])
+        input_ids = _batch(9)
+        reference = _loss_and_grads(_tiny_model(), input_ids)
+        _assert_close(reference, _loss_and_grads(model, input_ids))
+        assert cpu_cudnn == {"kept": 1, "replayed": 1}
+
+    def test_replay_rejects_create_graph(self, cpu_cudnn):
+        query = torch.randn(1, 2, 8, 4, requires_grad=True)
+        key = torch.randn_like(query, requires_grad=True)
+        value = torch.randn_like(query, requires_grad=True)
+        kept = (*_cpu_forward(query.detach(), key.detach(), value.detach(), 0.5)[:8], 0.5)
+        output = stash_module._StashedAttention.apply(query, key, value, kept)
+        with pytest.raises(RuntimeError, match="create_graph=True"):
+            torch.autograd.grad(output.sum(), (query, key, value), create_graph=True)
 
     def test_other_sdpa_backends_fail(self, cpu_cudnn, monkeypatch):
         monkeypatch.setattr(stash_module, "_sdp_backend", lambda *args: SDPBackend.MATH.value)
@@ -242,7 +288,10 @@ def _rel_l2(a, b):
     return ((a.float() - b.float()).norm() / b.float().norm()).item()
 
 
-class TestAttentionStashCuDNN:
+@pytest.mark.skipif(os.environ.get("DS_ACCELERATOR") == "cpu", reason="attention stash needs CUDA and cuDNN")
+class TestAttentionStashCuDNN(DistributedTest):
+    world_size = 1
+    init_distributed = False
 
     def test_replay_matches_autograd(self):
         _skip_unless_cudnn_sdpa()
@@ -291,12 +340,34 @@ class TestAttentionStashCuDNN:
         reference.transpose(1, 2).contiguous().backward(grad.float())
         assert _rel_l2(grads[0], leaves[0].grad) <= 1.02 * _rel_l2(grads_ref[0], leaves[0].grad) + 1e-6
 
+    def test_replay_rejects_create_graph(self):
+        _skip_unless_cudnn_sdpa()
+        device = get_accelerator().current_device_name()
+        query = torch.randn(1, 4, 128, 64, device=device, dtype=torch.bfloat16, requires_grad=True)
+        key = torch.randn_like(query, requires_grad=True)
+        value = torch.randn_like(query, requires_grad=True)
+        scale = 64**-0.5
+        assert stash_module._sdp_backend(query, key, value, scale) == SDPBackend.CUDNN_ATTENTION.value
+        kept = (*stash_module._cudnn_forward(query.detach(), key.detach(), value.detach(), scale)[:8], scale)
+        output = stash_module._StashedAttention.apply(query, key, value, kept)
+        with pytest.raises(RuntimeError, match="create_graph=True"):
+            torch.autograd.grad(output.sum(), (query, key, value), create_graph=True)
 
+
+@pytest.mark.skipif(os.environ.get("DS_ACCELERATOR") == "cpu", reason="attention stash needs CUDA and cuDNN")
 class TestAttentionStashEngine(DistributedTest):
     world_size = 1
 
     def test_autoep_training_step_matches_without_the_stash(self):
         _skip_unless_cudnn_sdpa()
+        original_sdpa = ALL_ATTENTION_FUNCTIONS["sdpa"]
+        try:
+            self._compare_training_step()
+        finally:
+            # The worker owns the process-wide patch, not the parent fixture.
+            ALL_ATTENTION_FUNCTIONS["sdpa"] = original_sdpa
+
+    def _compare_training_step(self):
         results = {}
         for stash_layers in (0, 2):
             model = _tiny_model(dtype=torch.bfloat16,

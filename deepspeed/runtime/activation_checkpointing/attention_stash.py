@@ -76,6 +76,9 @@ class _StashedAttention(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output):
+        if torch.is_grad_enabled():
+            raise RuntimeError(
+                "Attention stash supports first-order gradients only; create_graph=True is not supported.")
         query, key, value, output, logsumexp, philox_seed, philox_offset = ctx.saved_tensors
         cum_seq_q, cum_seq_k, max_q, max_k, scale = ctx.attention_args
         grad_query, grad_key, grad_value = _cudnn_backward(grad_output, query, key, value, output, logsumexp,
@@ -175,7 +178,7 @@ def _stashing_sdpa(original,
     recompute = torch.is_grad_enabled() and in_backward
     # Inside a reentrant checkpoint the first forward runs without grad; its input requiring grad means a
     # backward through this layer will recompute it.
-    first_forward = not torch.is_grad_enabled() and not in_backward and stash.pending is not None
+    first_forward = (module.training and not torch.is_grad_enabled() and not in_backward and stash.pending is not None)
     if not recompute and not first_forward:
         # A reentrant checkpoint's forward runs without grad, so a training forward with grad is not checkpointed.
         if module.training and torch.is_grad_enabled():
@@ -231,6 +234,7 @@ def install_attention_stash(model: nn.Module, num_layers: int) -> list[int]:
     # through PyTorch's cuDNN SDPA backward.
     missing = [
         name for owner, name in ((torch._C, "_current_graph_task_id"), (torch, "_fused_sdp_choice"),
+                                 (torch.ops.aten, "_scaled_dot_product_cudnn_attention"),
                                  (torch.ops.aten, "_scaled_dot_product_cudnn_attention_backward"))
         if not hasattr(owner, name)
     ]
@@ -247,13 +251,14 @@ def install_attention_stash(model: nn.Module, num_layers: int) -> list[int]:
     if not 0 < num_layers <= len(decoder_layers):
         raise ValueError(f"install_attention_stash got num_layers={num_layers}, but the model has "
                          f"{len(decoder_layers)} decoder layers with a self_attn module.")
-    _install_sdpa_wrapper()
     first = len(decoder_layers) - num_layers
     for index, decoder_layer in enumerate(decoder_layers[first:], start=first):
         if hasattr(decoder_layer.self_attn, "_deepspeed_attention_stash"):
             raise ValueError(f"The attention stash is already installed on decoder layer {index}.")
+    _install_sdpa_wrapper()
+    for index, decoder_layer in enumerate(decoder_layers[first:], start=first):
         stash = AttentionStash(decoder_layer, index)
         decoder_layer.self_attn._deepspeed_attention_stash = stash
         decoder_layer.register_forward_pre_hook(stash.record_layer_input, with_kwargs=True)
-        decoder_layer.register_forward_hook(stash.clear_layer_input)
+        decoder_layer.register_forward_hook(stash.clear_layer_input, always_call=True)
     return list(range(first, len(decoder_layers)))
