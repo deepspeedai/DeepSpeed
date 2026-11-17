@@ -477,13 +477,12 @@ def partition_grads(optimizer_z3, params_to_release: List[Parameter], grad_parti
             # operations and so it can be used asynchronously
             grad_buffer = grad_buffer.to(grad_partition.device, non_blocking=True)
         elif get_accelerator().on_accelerator(grad_buffer):
-            grad_buffer.add_(grad_partition.to(optimizer_z3.gradient_accumulation_dtype).view(grad_buffer.shape))
+            grad_buffer.add_(grad_partition.to(grad_buffer.dtype).view(grad_buffer.shape))
         else:
             # if dst is CPU, copy first to src device, do the addition
             # there, then move back to dst. adding directly to cpu is very slow
             cuda_grad_buffer = grad_buffer.to(grad_partition.device, non_blocking=True)
-            cuda_grad_buffer.add_(
-                grad_partition.to(optimizer_z3.gradient_accumulation_dtype).view(cuda_grad_buffer.shape))
+            cuda_grad_buffer.add_(grad_partition.to(grad_buffer.dtype).view(cuda_grad_buffer.shape))
             grad_buffer.copy_(cuda_grad_buffer, non_blocking=True)
             # ensure grad buffer is a CUDA buffer to speed up the next few
             # operations and so it can be used asynchronously
