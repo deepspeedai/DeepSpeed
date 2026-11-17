@@ -1627,6 +1627,53 @@ def test_sync_weights_drops_derived_caches():
     assert not hasattr(engine.module, "_ki_tp_cat_w")
 
 
+def test_sync_weights_continuous_graph_safe():
+    """Continuous graph + weight sync must not replay freed derived tensors.
+
+    The retained continuous graph captures the derived tensors' addresses
+    (GLU concat cache, attention cat weights); a refresh that drops them
+    while the graph survives leaves replays reading freed memory. The
+    graph must be released across a sync (interim contract) until refresh
+    refills derived tensors in place."""
+    pytest.importorskip("transformers")
+    from deepspeed.accelerator import get_accelerator
+    if get_accelerator().device_name() == "cpu":
+        pytest.skip("segKI injection needs an accelerator")
+
+    model = _make_small_qwen()
+    device = next(model.parameters()).device
+
+    def make_rollout():
+        return HybridEngineRollout(SimpleNamespace(module=model), SimpleNamespace(pad_token_id=0, eos_token_id=None),
+                                   HybridEngineRolloutConfig(use_segki=True, use_graph_capture=True))
+
+    prompt = torch.randint(3, 28, (2, 8), device=device)
+    sampling = SamplingConfig(max_new_tokens=8, temperature=0, continuous_batch_size=2)
+
+    rollout = make_rollout()
+    rollout.generate(RolloutRequest(prompt, torch.ones_like(prompt)), sampling)  # capture
+    rollout.generate(RolloutRequest(prompt, torch.ones_like(prompt)), sampling)  # reuse -> retained
+    # the hazard only exists when the graph actually survives across calls
+    assert rollout._continuous_graph_state is not None, "expected the continuous graph to be retained"
+
+    with torch.no_grad():
+        for p in model.parameters():
+            p.mul_(3.0)
+    rollout.sync_weights(step=0)
+    # interim contract: the sync must release the retained graph. It captures
+    # the derived tensors' addresses wherever they exist (TP>1 cat weights,
+    # Ampere/Hopper GLU concat cache, GDN gates); refresh drops those tensors,
+    # so a surviving graph would replay freed memory. On configs without any
+    # derived tensor the replay would stay correct by luck -- pin the release
+    # so every config is safe by construction.
+    assert rollout._continuous_graph_state is None, "sync must release the retained continuous graph"
+    synced = rollout.generate(RolloutRequest(prompt, torch.ones_like(prompt)), sampling)
+
+    fresh = make_rollout().generate(RolloutRequest(prompt, torch.ones_like(prompt)), sampling)
+    assert torch.equal(synced.input_ids, fresh.input_ids), \
+        "post-sync continuous generate must match a fresh injection"
+
+
 def test_sync_weights_generate_matches_fresh_injection():
     """Rollout-path weight sync: inject -> generate -> in-place write ->
     sync_weights -> generate must equal a fresh injection of the same

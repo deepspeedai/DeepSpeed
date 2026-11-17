@@ -210,15 +210,19 @@ class HybridEngineRollout(RolloutEngine):
 
         Drops the injected forwards' derived-weight caches. The weights
         themselves are read live, so only the derived tensors go stale.
-        Caveat: a retained continuous-batching graph holds the derived
-        tensors' captured addresses; until refresh refills them in place,
-        syncs that must keep such a graph valid need the graph dropped
-        instead (see the refresh/graph design discussion in review).
+        A retained continuous-batching graph captures those tensors'
+        addresses, so it is released here too (re-captured on the next
+        rollout) -- replays would otherwise read freed memory. Interim
+        cost: one re-capture per sync; remove when refresh refills the
+        derived tensors in place and graphs survive by construction.
 
         PROVISIONAL contract — see segki_refresh; the final weight-sync
         handshake is still under design.
         """
         from deepspeed.module_inject.segment_ki import segki_refresh
+        if self._continuous_graph_state is not None:
+            get_accelerator().synchronize()
+            self._continuous_graph_state = None
         # Resolve through the engine like every other module access; unit
         # tests hand us SimpleNamespace(module=...) engines.
         module = getattr(self.engine, "module", None) or getattr(self, "module", None)
