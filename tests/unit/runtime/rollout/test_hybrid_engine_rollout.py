@@ -1610,12 +1610,59 @@ def test_engine_pairs_shared_prefill_cache_tensors():
     workspace.repeat_kv_cache.assert_called_once_with(2, 2)
 
 
-# -- sync_weights is no-op ---------------------------------------------
+# -- sync_weights invalidates derived caches ---------------------------
 
 
-def test_sync_weights_is_noop():
-    rollout = HybridEngineRollout(_make_engine(), _make_tokenizer())
-    assert rollout.sync_weights(step=0) is None
+def test_sync_weights_drops_derived_caches():
+    # refresh_weights resolves the module through engine.module; the mock
+    # engine only has to expose it. A fake derived cache on the module
+    # must vanish after the training-step hook fires.
+    engine = _make_engine()
+    # a real module, not the mock's auto-attribute: segki_refresh walks
+    # .modules() and delattr must actually remove
+    engine.module = torch.nn.Identity()
+    engine.module._ki_tp_cat_w = object()  # a derived-weight cache stand-in
+    rollout = HybridEngineRollout(engine, _make_tokenizer())
+    rollout.sync_weights(step=0)
+    assert not hasattr(engine.module, "_ki_tp_cat_w")
+
+
+def test_sync_weights_generate_matches_fresh_injection():
+    """Rollout-path weight sync: inject -> generate -> in-place write ->
+    sync_weights -> generate must equal a fresh injection of the same
+    weights (derived caches rebuilt, live reads see the new values)."""
+    pytest.importorskip("transformers")
+    from deepspeed.accelerator import get_accelerator
+    from transformers import AutoModelForCausalLM
+    if get_accelerator().device_name() == "cpu":
+        pytest.skip("segKI injection needs an accelerator")
+
+    torch.manual_seed(0)
+    device = torch.device(get_accelerator().device_name())
+    try:
+        model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen3.5-0.8B-Base", dtype=torch.bfloat16).to(device).eval()
+    except Exception as e:
+        pytest.skip(f"model unavailable: {e}")
+
+    def make_rollout():
+        return HybridEngineRollout(SimpleNamespace(module=model), SimpleNamespace(pad_token_id=0, eos_token_id=None),
+                                   HybridEngineRolloutConfig(use_segki=True, use_graph_capture=False))
+
+    prompt = torch.randint(3, 1500, (2, 16), device=device)
+    sampling = SamplingConfig(max_new_tokens=8, temperature=0)
+
+    rollout = make_rollout()
+    rollout.generate(RolloutRequest(prompt, torch.ones_like(prompt)), sampling)  # build caches
+
+    # in-place weight write, the arena/reshard contract
+    with torch.no_grad():
+        for p in model.parameters():
+            p.add_(0.01)
+    rollout.sync_weights(step=0)
+    synced = rollout.generate(RolloutRequest(prompt, torch.ones_like(prompt)), sampling)
+
+    fresh = make_rollout().generate(RolloutRequest(prompt, torch.ones_like(prompt)), sampling)
+    assert torch.equal(synced.input_ids, fresh.input_ids), "post-sync generate must match a fresh injection"
 
 
 # -- generate dispatches correctly -------------------------------------

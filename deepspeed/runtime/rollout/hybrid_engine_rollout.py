@@ -208,14 +208,23 @@ class HybridEngineRollout(RolloutEngine):
     def refresh_weights(self) -> None:
         """Handshake for in-place weight updates (arena / reshard syncs).
 
-        Drops the injected forwards' derived-weight caches; CUDA graphs
-        stay valid (their baked addresses see the new values directly).
+        Drops the injected forwards' derived-weight caches. The weights
+        themselves are read live, so only the derived tensors go stale.
+        Caveat: a retained continuous-batching graph holds the derived
+        tensors' captured addresses; until refresh refills them in place,
+        syncs that must keep such a graph valid need the graph dropped
+        instead (see the refresh/graph design discussion in review).
 
         PROVISIONAL contract — see segki_refresh; the final weight-sync
         handshake is still under design.
         """
         from deepspeed.module_inject.segment_ki import segki_refresh
-        segki_refresh(self._rollout_module() if hasattr(self, "_rollout_module") else self.module)
+        # Resolve through the engine like every other module access; unit
+        # tests hand us SimpleNamespace(module=...) engines.
+        module = getattr(self.engine, "module", None) or getattr(self, "module", None)
+        if module is None:
+            return
+        segki_refresh(module)
 
     def _apply_segki(self):
         """Apply segment-KI kernel injection to the wrapped module.
@@ -2093,8 +2102,16 @@ class HybridEngineRollout(RolloutEngine):
         return torch.cat(output_ids, dim=1)
 
     def sync_weights(self, step: int) -> None:  # noqa: ARG002
-        """No-op: hybrid engine reads model weights live."""
-        return None
+        """Invalidate derived-weight caches after in-place weight updates.
+
+        The colocated hybrid engine reads weights live, so there is
+        nothing to push -- but the injected forwards cache tensors
+        derived from the weights, and an in-place write (arena or reshard
+        sync) leaves those stale. Every training-step entry goes through
+        here, so each sync source invalidates uniformly instead of
+        relying on callers to remember refresh_weights().
+        """
+        self.refresh_weights()
 
     def shutdown(self) -> None:
         """Release the captured continuous decode graph and its static cache.
