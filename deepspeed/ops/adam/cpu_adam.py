@@ -5,6 +5,7 @@
 
 import os
 
+import psutil
 import torch
 from deepspeed.utils import logger
 from deepspeed.utils.logging import should_log_le
@@ -20,10 +21,12 @@ def single_thread_warning():
     """
     if os.environ.get("OMP_NUM_THREADS") != "1":
         return None
+    # Physical cores: the optimizer loop is dense, so hyperthreads do not add throughput.
+    cores = psutil.cpu_count(logical=False) or os.cpu_count() or 1
     try:
-        cores = len(os.sched_getaffinity(0))
+        cores = min(cores, len(os.sched_getaffinity(0)))
     except AttributeError:  # not available on macOS
-        cores = os.cpu_count() or 1
+        pass
     cores_per_rank = cores // max(int(os.environ.get("LOCAL_WORLD_SIZE", "1")), 1)
     if cores_per_rank < 2:
         return None
