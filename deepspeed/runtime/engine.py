@@ -611,9 +611,10 @@ class DeepSpeedEngine(Module):
             # Head counts were recorded against the whole model; the parameters are shards now.
             from deepspeed import resolve_per_head_muon_after_sharding
             resolve_per_head_muon_after_sharding(model)
-        elif self.mpu is None and self.mesh_device is None and groups._TENSOR_MODEL_PARALLEL_GROUP is not None:
-            # Without an mpu of its own, this engine would take its data parallel group from an earlier
-            # AutoTP engine, which covers only part of the ranks.
+        elif self.mpu is None and self.mesh_device is None and groups.mpu is groups:
+            # Without an mpu of its own, this engine inherits groups.mpu. When an earlier AutoTP engine set it,
+            # that means its data parallel group, which covers only part of the ranks. An mpu passed to a later
+            # engine replaces groups.mpu, and then the cached AutoTP groups are not used.
             groups._check_existing_tp_groups(tensor_model_parallel_size=1)
         see_memory_usage("DeepSpeed Engine: After args sanity test", force=self.memory_breakdown())
         self._set_distributed_vars(args)

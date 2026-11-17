@@ -108,7 +108,34 @@ class TestAutoTPMultipleModels(DistributedTest):
         assert layer.weight.shape[0] == [128, 64][dist.get_rank()]
 
 
-def build_engine(tp_size):
+class WorldMPU:
+    """An mpu with no tensor parallelism: data parallel over every rank."""
+
+    def __init__(self):
+        # new_group is collective, so every rank creates every single-rank group.
+        singles = [dist.new_group(ranks=[rank]) for rank in range(dist.get_world_size())]
+        self.model_parallel_group = singles[dist.get_rank()]
+
+    def get_model_parallel_rank(self):
+        return 0
+
+    def get_model_parallel_world_size(self):
+        return 1
+
+    def get_model_parallel_group(self):
+        return self.model_parallel_group
+
+    def get_data_parallel_rank(self):
+        return dist.get_rank()
+
+    def get_data_parallel_world_size(self):
+        return dist.get_world_size()
+
+    def get_data_parallel_group(self):
+        return dist.get_world_group()
+
+
+def build_engine(tp_size, mpu=None):
     config = {"train_micro_batch_size_per_gpu": 1}
     if tp_size > 1:
         # Nothing is sharded; the test is about which groups the engine runs on.
@@ -123,7 +150,7 @@ def build_engine(tp_size):
             },
         }
     model = SimpleModel(hidden_dim=8)
-    engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config)
+    engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config, mpu=mpu)
     return engine
 
 
@@ -145,3 +172,11 @@ class TestAutoTPEnginesShareProcessGroups(DistributedTest):
         build_engine(tp_size=2)
         with pytest.raises(RuntimeError):
             build_engine(tp_size=second_tp_size)
+
+    def test_engine_without_mpu_inherits_a_later_explicit_mpu(self):
+        # An explicit mpu replaces groups.mpu, so a third engine without one inherits that layout, not the
+        # cached AutoTP groups of the first engine.
+        build_engine(tp_size=2)
+        build_engine(tp_size=1, mpu=WorldMPU())
+        third = build_engine(tp_size=1)
+        assert third.dp_world_size == dist.get_world_size()
