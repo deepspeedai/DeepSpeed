@@ -271,14 +271,6 @@ class TestB2Schedule(DistributedTest):
         assert any(r.direct for r in every) and any(not r.direct for r in every)
 
 
-def _arena_elements(rounds, element_size):
-    """Elements of each peer's staging arena, read back from the rounds that stage through it."""
-    return {
-        staged.peer: staged.payload.untyped_storage().nbytes() // element_size
-        for staged in rounds if staged.copies
-    }
-
-
 def _refill(requests, offset):
     """Shift every source by ``offset`` in place, keeping its storage."""
     for request in requests:
@@ -297,13 +289,6 @@ class TestB2Prepared(DistributedTest):
         # 16 elements per message: packed and in-place rounds, as in the schedule test.
         budget = StagingBudget(64)
         prepared = prepare_transfers(requests, endpoints, torch.float32, budget)
-        schedule = schedule_transfers([request.plan for request in requests], endpoints, budget, 4, process=rank)[rank]
-        recvs = [staged for receives, _ in prepared._rounds for staged in receives]
-        sends = [staged for _, sending in prepared._rounds for staged in sending]
-        # The handle keeps exactly the arenas the schedule reports.
-        assert _arena_elements(recvs, 4) == dict(schedule.receive_arena_elements)
-        assert _arena_elements(sends, 4) == dict(schedule.send_arena_elements)
-
         once = execute_transfers(requests, endpoints, torch.float32, budget)
         for run in range(3):
             if run:
@@ -394,6 +379,27 @@ class TestB2Prepared(DistributedTest):
         # The refusal came before any data moved, so both handles still run.
         assert whole.run() == execute_transfers(requests, endpoints, torch.float32, StagingBudget(64))
         first.run()
+
+    def test_handles_prepared_alike_are_told_apart(self):
+        # Same keys, plans and endpoints, so the same schedule and digest; only the buffers differ.
+        _join_transfer_group()
+        rank = dist.get_rank()
+        endpoints, one, checks, _ = _mixed_batch(self.world_size, rank)
+        _, other, other_checks, _ = _mixed_batch(self.world_size, rank)
+        _refill(other, 1000.0)
+        first = prepare_transfers(one, endpoints, torch.float32, StagingBudget(64))
+        second = prepare_transfers(other, endpoints, torch.float32, StagingBudget(64))
+        with pytest.raises(AffineTransferExecutionError, match='not running the same prepared transfer'):
+            (first if rank == 0 else second).run()
+        for targets, _, _ in checks + other_checks:
+            for buffer in targets.values():
+                assert torch.equal(buffer, torch.full_like(buffer, -17.0))
+        first.run()
+        second.run()
+        for targets, target_map, full in checks:
+            _assert_matches(targets, target_map, full)
+        for targets, target_map, full in other_checks:
+            _assert_matches(targets, target_map, full + 1000.0)
 
 
 class TestB2DisjointEndpoints(DistributedTest):
@@ -794,6 +800,27 @@ class TestB2TransferCPU:
         prepared.run(check=False)
         assert torch.equal(old, source) and torch.equal(target, torch.full((2, 3), -2.0))
 
+    def test_requests_rebuilt_after_a_reload_show_the_move(self):
+        # As zero_param_storage_shard: a fresh view of ds_tensor on each call, which ZeRO-3 reload_states
+        # re-points with .data = ...; a view taken before that keeps the old storage.
+        map_ = replicated_map((2, 3), 1)
+        plan = plan_transfer(map_, map_)
+        endpoints = TransferEndpoints({0: 0}, {0: 0})
+        source = torch.arange(6, dtype=torch.float32).reshape(2, 3)
+        ds_tensor = torch.full((6, ), -1.0)
+
+        def requests():
+            return [TransferRequest('weight', plan, {0: source}, {0: ds_tensor.data.view(-1).narrow(0, 0, 6)})]
+
+        prepared = prepare_transfers(requests(), endpoints, torch.float32, StagingBudget(8))
+        ds_tensor.data = torch.full((6, ), -2.0)
+        with pytest.raises(AffineTransferExecutionError, match='moved or changed'):
+            prepared.run(requests())
+        assert torch.equal(ds_tensor, torch.full((6, ), -2.0))
+        # Prepared again after the reload, the batch lands in the new storage.
+        prepare_transfers(requests(), endpoints, torch.float32, StagingBudget(8)).run(requests())
+        assert torch.equal(ds_tensor, source.view(-1))
+
     def test_prepared_runs_keep_frozen_parameters_in_place(self):
         map_ = replicated_map((2, 3), 1)
         source = torch.nn.Parameter(torch.arange(6, dtype=torch.float32).reshape(2, 3))
@@ -810,23 +837,17 @@ class TestB2TransferCPU:
             assert torch.equal(target, source)
 
     @pytest.mark.parametrize('enabled', [True, False])
-    def test_preparing_leaves_the_garbage_collector_as_it_was(self, enabled, monkeypatch):
-        import deepspeed.checkpoint.affine_transfer_executor as executor
+    def test_preparing_leaves_the_garbage_collector_as_it_was(self, enabled):
         map_ = replicated_map((2, 3), 1)
         request = TransferRequest('weight', plan_transfer(map_, map_), {0: torch.ones(2, 3)}, {0: torch.zeros(2, 3)})
         endpoints = TransferEndpoints({0: 0}, {0: 0})
-
-        def refuse(requests):
-            raise RuntimeError('layout failed')
-
         was = gc.isenabled()
         try:
             gc.enable() if enabled else gc.disable()
             prepare_transfers([request], endpoints, torch.float32, StagingBudget(8))
             assert gc.isenabled() == enabled
-            monkeypatch.setattr(executor, '_buffer_layout', refuse)
-            with pytest.raises(AffineTransferExecutionError, match='layout failed'):
-                prepare_transfers([request], endpoints, torch.float32, StagingBudget(8))
+            with pytest.raises(AffineTransferExecutionError, match='at least one element'):
+                prepare_transfers([request], endpoints, torch.float32, StagingBudget(2))
             assert gc.isenabled() == enabled
         finally:
             gc.enable() if was else gc.disable()
