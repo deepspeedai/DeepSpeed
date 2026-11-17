@@ -15,13 +15,13 @@ if __name__ == "__main__" and os.environ.get("DS_RUN_ZERO3_E2E") != "1":
     print("set DS_RUN_ZERO3_E2E=1 to run this integration test", file=sys.stderr)
     sys.exit(0)
 
-import sys, os, torch
+import os
+import torch
 
 os.environ.setdefault("MASTER_ADDR", "localhost")
 os.environ.setdefault("MASTER_PORT", "29710")
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-sys.path.insert(0, "/root/pr8602-wt")
 from deepspeed.runtime.rollout.hybrid_engine_rollout import HybridEngineRollout, HybridEngineRolloutConfig
 from deepspeed.runtime.rollout.base import RolloutRequest, SamplingConfig
 import deepspeed
