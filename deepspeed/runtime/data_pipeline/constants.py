@@ -83,14 +83,6 @@ DYNAMIC_BATCHING_MAX_TOKENS = "max_tokens"
 DYNAMIC_BATCHING_VERBOSE = "verbose"
 
 #########################################
-# Curriculum Learning legacy implementation
-#########################################
-CURRICULUM_LEARNING_LEGACY = "curriculum_learning"
-
-CURRICULUM_ENABLED_LEGACY = "enabled"
-CURRICULUM_ENABLED_DEFAULT_LEGACY = False
-
-#########################################
 # Data efficiency - Data Routing
 #########################################
 DATA_ROUTING = "data_routing"

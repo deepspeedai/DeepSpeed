@@ -18,7 +18,6 @@ The file has been adapted from two fairscale files:
 from deepspeed.utils.timer import SynchronizedWallClockTimer
 from deepspeed.utils import logger
 from deepspeed.utils.bwc import bwc_tensor_model_parallel_world_size
-from deepspeed.utils.torch import jit_script_compat
 from typing import Callable, Dict, TYPE_CHECKING, Any, Optional, Tuple, Union
 
 import torch
@@ -88,6 +87,7 @@ def gumbel_rsample(shape: Tuple, device: torch.device) -> Tensor:
 
 
 from deepspeed import comm as dist
+from deepspeed.comm import pg_utils
 
 # einsum dimensions: (g)roup, (s)equence, (e)xpert, (m)odel, (c)apacity
 # See https://arxiv.org/pdf/2006.16668.pdf for details.
@@ -149,16 +149,6 @@ def einsum(rule, a, b):
         return torch.einsum(rule, a, b)
 
 
-# The following functions are extracted and scripted
-# because otherwise during a torch.jit.trace, the non-Tensor
-# values used in the calculations get recorded as constants.
-# torch.jit.script coerces them into Tensors and preserves
-# their dynamic shapes. This enables ONNX export.
-# We can't script the entire top1gating function because it
-# includes stateful caching logic which is incompatible with ONNX.
-
-
-@jit_script_compat
 def _capacity(gates: Tensor, capacity_factor: Tensor, min_capacity: Tensor) -> Tensor:
     # gates has shape of SE
     num_tokens = gates.shape[0]
@@ -166,19 +156,10 @@ def _capacity(gates: Tensor, capacity_factor: Tensor, min_capacity: Tensor) -> T
     # to(torch.int64) works around a bug in torch.onnx.export:
     # it should cast k to int64 when converting torch.topk but it doesn't.
     capacity = torch.ceil((num_tokens / num_experts) * capacity_factor).to(torch.int64)
-    if capacity < min_capacity:
-        capacity = min_capacity.to(torch.int64)
-    return capacity
-
-
-@jit_script_compat
-def _top_idx(source, k):
-    return torch.topk(source, k=k, dim=0)[1]
-
-
-@jit_script_compat
-def _one_hot_to_float(x, num_classes):
-    return F.one_hot(x, num_classes=num_classes).float()
+    # torch.maximum instead of an `if`: torch.jit.trace (used by the TorchScript-based torch.onnx.export)
+    # records only the branch taken while tracing, so a traced gate would get the wrong capacity for other
+    # token counts.
+    return torch.maximum(capacity, min_capacity.to(torch.int64))
 
 
 def _stack_routes(routes: Tensor, dtype: Optional[torch.dtype] = None) -> Tensor:
@@ -267,7 +248,7 @@ def top1gating(logits: Tensor,
     if not drop_tokens:
         new_capacity = torch.max(exp_counts).to(logits.device)
         # Communicate across expert processes to pick the maximum capacity.
-        if ep_group is not None and dist.get_world_size(group=ep_group) > 1:
+        if pg_utils.is_parallel(ep_group):
             dist.all_reduce(new_capacity, op=dist.ReduceOp.MAX, group=ep_group)
         if groups._get_expert_model_parallel_world_size() == 1:
             # If the non-expert is tensor-parallel, we need to pad the capacity to 'tp'.
@@ -300,7 +281,7 @@ def top1gating(logits: Tensor,
     # torch.topk(..., dim=0) cannot select more rows than the token dimension holds, so bound the
     # selection without shrinking the dispatch capacity the buffers are sized from.
     selection_capacity = min(capacity, torch.tensor(mask1.size(0)).to(capacity.device))
-    top_idx = _top_idx(mask1_rand, selection_capacity)
+    top_idx = torch.topk(mask1_rand, k=selection_capacity, dim=0)[1]
 
     new_mask1 = mask1 * torch.zeros_like(mask1).scatter_(0, top_idx, 1)
     mask1 = new_mask1
@@ -330,7 +311,7 @@ def top1gating(logits: Tensor,
     mask1_float = mask1.float()
     gates = gates * mask1_float
 
-    locations1_sc = _one_hot_to_float(locations1_s, capacity)
+    locations1_sc = F.one_hot(locations1_s, num_classes=capacity).float()
     combine_weights = einsum("se,sc->sec", gates, locations1_sc)
 
     dispatch_mask = combine_weights.bool()
@@ -386,7 +367,7 @@ def top2gating(logits: Tensor,
     else:
         # Do not drop tokens - set capacity according to current expert assignments
         new_capacity = torch.max(exp_counts)
-        if ep_group is not None and dist.get_world_size(group=ep_group) > 1:
+        if pg_utils.is_parallel(ep_group):
             dist.all_reduce(new_capacity, op=dist.ReduceOp.MAX, group=ep_group)
         if groups._get_expert_model_parallel_world_size() == 1:
             # If the non-expert is tensor-parallel, we need to pad the capacity to 'tp'.
@@ -421,8 +402,8 @@ def top2gating(logits: Tensor,
     # Calculate combine_weights and dispatch_mask
     gates1 = einsum("s,se->se", gates1_s, mask1_float)
     gates2 = einsum("s,se->se", gates2_s, mask2_float)
-    locations1_sc = _one_hot_to_float(locations1_s, capacity)
-    locations2_sc = _one_hot_to_float(locations2_s, capacity)
+    locations1_sc = F.one_hot(locations1_s, num_classes=capacity).float()
+    locations2_sc = F.one_hot(locations2_s, num_classes=capacity).float()
     combine1_sec = einsum("se,sc->sec", gates1, locations1_sc)
     combine2_sec = einsum("se,sc->sec", gates2, locations2_sc)
     combine_weights = combine1_sec + combine2_sec
@@ -484,7 +465,7 @@ def topkgating(
     else:
         # Do not drop tokens - set capacity according to current expert assignments
         new_capacity = torch.max(exp_counts)
-        if ep_group is not None and dist.get_world_size(group=ep_group) > 1:
+        if pg_utils.is_parallel(ep_group):
             dist.all_reduce(new_capacity, op=dist.ReduceOp.MAX, group=ep_group)
         if groups._get_expert_model_parallel_world_size() == 1:
             # If the non-expert is tensor-parallel, we need to pad the capacity to 'tp'.
@@ -516,7 +497,7 @@ def topkgating(
                 _stack_routes(route_locations, torch.int32), _stack_routes(route_gates), exp_counts)
 
     # dispatch_mask
-    locations_sc = _one_hot_to_float((locations * mask), capacity)
+    locations_sc = F.one_hot((locations * mask), num_classes=capacity).float()
 
     combine_weights = torch.einsum("se,sec->sec", gates_masked, locations_sc)
 

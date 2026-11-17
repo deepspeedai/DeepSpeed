@@ -54,7 +54,7 @@ schedule that:
 ### PyTorch
 
 For PyTorch models, LRRT is implemented as a [learning rate
-scheduler](https://pytorch.org/docs/stable/_modules/torch/optim/lr_scheduler.html),
+scheduler](https://docs.pytorch.org/docs/stable/optim.html),
 a feature that is available in PyTorch versions 1.0.1 and newer. Thus, you can
 add a `"scheduler"` entry of type `"LRRangeTest"` into your model configuration
 as illustrated below:
@@ -81,7 +81,7 @@ larger batch sizes, as we scaled from one GPU (batch size 512) to four GPUs
 to match the performance of the smaller batch size using the same amount of
 data samples. The challenge here is the well known problem of slow convergence
 of large batch size training. Our approach was to use a
-[1Cycle](/tutorials/1Cycle/) schedule in DeepSpeed to tackle
+[1Cycle](/tutorials/one-cycle/) schedule in DeepSpeed to tackle
 this problem, and we used LRRT to configure the schedule.
 
 In the plots below, we illustrate using LRRT to discover the maximum learning

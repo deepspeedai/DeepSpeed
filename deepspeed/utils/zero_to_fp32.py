@@ -35,7 +35,7 @@ from deepspeed.checkpoint.constants import (DS_VERSION, OPTIMIZER_STATE_DICT, SI
                                             FP32_FLAT_GROUPS, ZERO_STAGE, PARTITION_COUNT, PARAM_SHAPES, BUFFER_NAMES,
                                             FROZEN_PARAM_SHAPES, FROZEN_PARAM_FRAGMENTS, AUTOEP_LAYERS_KEY,
                                             AUTOEP_LAYERS_KEY_LEGACY, AUTOEP_ZERO3_EXPERT_STATE_FORMAT_KEY,
-                                            AUTOEP_ZERO3_PARTITIONED_EXPERT_STATE_FORMAT)
+                                            AUTOEP_ZERO3_PARTITIONED_EXPERT_STATE_FORMAT, PARAM_ALIGNMENT_PADDINGS)
 
 
 @dataclass
@@ -160,7 +160,10 @@ def parse_model_states(files):
             print("Found buffers:", buffer_names)
 
         # recover just the buffers while restoring them to fp32 if they were saved in fp16
-        buffers = {k: v.float() for k, v in state_dict["module"].items() if k in buffer_names}
+        buffers = {
+            k: v.float() if v.is_floating_point() else v
+            for k, v in state_dict["module"].items() if k in buffer_names
+        }
         param_shapes = state_dict[PARAM_SHAPES]
 
         # collect parameters that are included in param_shapes
@@ -231,7 +234,8 @@ def parse_optim_states(files, ds_checkpoint_dir):
         raise ValueError(f"unknown zero stage {zero_stage}")
 
     fp32_flat_groups = [state_dicts[i][OPTIMIZER_STATE_DICT][fp32_groups_key] for i in range(len(state_dicts))]
-    return zero_stage, world_size, fp32_flat_groups
+    param_alignment_paddings = state_dicts[0][OPTIMIZER_STATE_DICT].get(PARAM_ALIGNMENT_PADDINGS)
+    return zero_stage, world_size, fp32_flat_groups, param_alignment_paddings
 
 
 def _get_fp32_state_dict_from_zero_checkpoint(ds_checkpoint_dir, exclude_frozen_parameters):
@@ -251,12 +255,13 @@ def _get_fp32_state_dict_from_zero_checkpoint(ds_checkpoint_dir, exclude_frozen_
     print(f'Parsing checkpoint created by deepspeed=={zero_model_states[0].ds_version}')
 
     optim_files = get_optim_files(ds_checkpoint_dir)
-    zero_stage, world_size, fp32_flat_groups = parse_optim_states(optim_files, ds_checkpoint_dir)
+    zero_stage, world_size, fp32_flat_groups, param_alignment_paddings = parse_optim_states(
+        optim_files, ds_checkpoint_dir)
     print(f"Detected checkpoint of type zero stage {zero_stage}, world_size: {world_size}")
 
     if zero_stage <= 2:
         return _get_fp32_state_dict_from_zero2_checkpoint(world_size, fp32_flat_groups, zero_model_states,
-                                                          exclude_frozen_parameters)
+                                                          exclude_frozen_parameters, param_alignment_paddings)
     elif zero_stage == 3:
         return _get_fp32_state_dict_from_zero3_checkpoint(world_size, fp32_flat_groups, zero_model_states,
                                                           exclude_frozen_parameters)
@@ -299,7 +304,11 @@ def _has_callable(obj, fn):
     return callable(attr)
 
 
-def _zero2_merge_trainable_params(state_dict, world_size, fp32_flat_groups, zero_model_states):
+def _zero2_merge_trainable_params(state_dict,
+                                  world_size,
+                                  fp32_flat_groups,
+                                  zero_model_states,
+                                  param_alignment_paddings=None):
     param_shapes = zero_model_states[0].param_shapes
 
     # Reconstruction protocol:
@@ -333,10 +342,18 @@ def _zero2_merge_trainable_params(state_dict, world_size, fp32_flat_groups, zero
     # out-of-core computing solution
     total_numel = 0
     total_params = 0
-    for shapes, full_single_fp32_vector in zip(param_shapes, merged_single_partition_of_fp32_groups):
+    for group_idx, (shapes,
+                    full_single_fp32_vector) in enumerate(zip(param_shapes, merged_single_partition_of_fp32_groups)):
         offset = 0
         avail_numel = full_single_fp32_vector.numel()
-        for name, shape in shapes.items():
+        group_alignment_paddings = None
+        if param_alignment_paddings is not None:
+            group_alignment_paddings = param_alignment_paddings[group_idx]
+            if len(group_alignment_paddings) != len(shapes):
+                raise ValueError(f"Expected {len(shapes)} parameter alignment paddings for group {group_idx}, "
+                                 f"but found {len(group_alignment_paddings)}")
+
+        for param_idx, (name, shape) in enumerate(shapes.items()):
 
             unpartitioned_numel = shape.numel() if _has_callable(shape, 'numel') else math.prod(shape)
             total_numel += unpartitioned_numel
@@ -346,6 +363,8 @@ def _zero2_merge_trainable_params(state_dict, world_size, fp32_flat_groups, zero
                 print(f"{name} full shape: {shape} unpartitioned numel {unpartitioned_numel} ")
             state_dict[name] = full_single_fp32_vector.narrow(0, offset, unpartitioned_numel).view(shape)
             offset += unpartitioned_numel
+            if group_alignment_paddings is not None:
+                offset += group_alignment_paddings[param_idx]
 
         # Z2 started to align to 2*world_size to improve nccl performance. Therefore both offset and
         # avail_numel can differ by anywhere between 0..2*world_size. Due to two unrelated complex
@@ -372,8 +391,11 @@ def _zero2_merge_trainable_params(state_dict, world_size, fp32_flat_groups, zero
     print(f"Reconstructed fp32 state dict with {total_params} params {total_numel} elements")
 
 
-def _get_fp32_state_dict_from_zero2_checkpoint(world_size, fp32_flat_groups, zero_model_states,
-                                               exclude_frozen_parameters):
+def _get_fp32_state_dict_from_zero2_checkpoint(world_size,
+                                               fp32_flat_groups,
+                                               zero_model_states,
+                                               exclude_frozen_parameters,
+                                               param_alignment_paddings=None):
     state_dict = OrderedDict()
 
     # buffers
@@ -385,7 +407,8 @@ def _get_fp32_state_dict_from_zero2_checkpoint(world_size, fp32_flat_groups, zer
     if not exclude_frozen_parameters:
         _zero2_merge_frozen_params(state_dict, zero_model_states)
 
-    _zero2_merge_trainable_params(state_dict, world_size, fp32_flat_groups, zero_model_states)
+    _zero2_merge_trainable_params(state_dict, world_size, fp32_flat_groups, zero_model_states,
+                                  param_alignment_paddings)
 
     # recover shared parameters
     for pair in zero_model_states[0].shared_params:
@@ -576,11 +599,15 @@ def to_torch_tensor(state_dict, return_empty_tensor=False, dtype=None):
             torch_state_dict[name] = shared_tensor
         else:
             converted_tensors[tensor_id] = name
+            # Keep exact buffer values (such as integer indices and boolean masks) in
+            # both the shard-size estimate and the materialized checkpoint.
+            target_dtype = dtype if tensor.dtype.is_floating_point else None
             if return_empty_tensor:
-                torch_state_dict[name] = torch.empty(tensor.shape, dtype=dtype or tensor.dtype)
+                torch_state_dict[name] = torch.empty(tensor.shape, dtype=target_dtype or tensor.dtype)
             else:
                 contiguous_tensor = tensor.contiguous()
-                torch_state_dict[name] = contiguous_tensor.to(dtype=dtype) if dtype else contiguous_tensor
+                torch_state_dict[name] = contiguous_tensor.to(
+                    dtype=target_dtype) if target_dtype else contiguous_tensor
     return torch_state_dict
 
 
@@ -663,7 +690,8 @@ def convert_zero_checkpoint_to_state_dict(checkpoint_dir,
     Args:
         - ``checkpoint_dir``: path to the desired checkpoint folder. (one that contains the tag-folder, like ``global_step14``)
         - ``output_dir``: directory for the PyTorch state_dict output files
-        - ``dtype``: output tensor dtype. Supports float32, float16, and bfloat16 as strings or torch dtypes.
+        - ``dtype``: output floating-point tensor dtype. Supports float32, float16, and bfloat16 as strings or torch dtypes.
+          Non-floating-point buffers retain their dtype.
         - ``max_shard_size``: the maximum size for a checkpoint before being sharded, default value is 5GB
         - ``safe_serialization``:  whether to save the model using `safetensors` or the traditional PyTorch way (that uses `pickle`).
         - ``tag``: checkpoint tag used as a unique identifier for checkpoint. If not provided will attempt to load tag in the file named ``latest`` in the checkpoint folder, e.g., ``global_step14``

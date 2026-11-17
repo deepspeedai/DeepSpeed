@@ -289,3 +289,92 @@ class TestPipeDynamicShape(DistributedTest):
         for layer in model.modules():
             if isinstance(layer, DynamicShapeTestLayer):
                 assert len(layer.shapes) > 1
+
+
+class TestDualPipeV(DistributedTest):
+    world_size = [1, 2, 4]
+
+    @pytest.mark.parametrize("checkpoint_interval", [0, 1])
+    def test_matches_sequential_model(self, checkpoint_interval, tmpdir):
+        """DualPipeV must give the same loss and weights as the unpartitioned model.
+        A checkpoint saved by one engine must restore the same weights in a fresh engine.
+        """
+        from deepspeed.pipe import DualPipeVModule
+
+        num_ranks = dist.get_world_size()
+        micro_batches = 2 * num_ranks + 1
+        hidden, lr = 8, 0.1
+        config = {
+            "train_batch_size": micro_batches,
+            "train_micro_batch_size_per_gpu": 1,
+            "gradient_accumulation_steps": micro_batches,
+            "optimizer": {
+                "type": "SGD",
+                "params": {
+                    "lr": lr
+                }
+            },
+            "zero_allow_untested_optimizer": True,
+            "pipeline": {
+                "activation_checkpoint_interval": checkpoint_interval
+            },
+        }
+        torch.manual_seed(0)
+        layers = []
+        for _ in range(2 * num_ranks):
+            layers += [nn.Linear(hidden, hidden), nn.Tanh()]
+        reference = copy.deepcopy(nn.Sequential(*layers))
+        data = [(torch.randn(1, hidden), torch.randn(1, hidden)) for _ in range(micro_batches)]
+        loss_fn = nn.MSELoss()
+
+        model = DualPipeVModule(layers=layers, num_stages=num_ranks, loss_fn=loss_fn, partition_method='uniform')
+        engine, _, _, _ = deepspeed.initialize(config=config, model=model, model_parameters=model.parameters())
+        engine.set_dataiterator(RepeatingLoader(data))
+
+        def reference_step():
+            losses = []
+            for x, y in data:
+                loss = loss_fn(reference(x), y)
+                (loss / micro_batches).backward()
+                losses.append(loss.detach())
+            with torch.no_grad():
+                for p in reference.parameters():
+                    p -= lr * p.grad
+                    p.grad = None
+            return torch.stack(losses).mean()
+
+        def assert_nothing_retained():
+            # Slots are per micro-batch, so anything left over is held until the next step overwrites it.
+            for key in ('inputs', 'labels', 'outputs', 'grads', 'losses'):
+                assert all(slot is None for slot in engine.pipe_buffers[key]), key
+
+        reference_params = dict(reference.named_parameters())
+        for _ in range(2):
+            loss = engine.train_batch()
+            assert torch.allclose(loss.cpu(), reference_step(), atol=1e-5)
+            for name, p in engine.module.named_parameters():
+                assert torch.allclose(p.detach().cpu(), reference_params[name], atol=1e-5), name
+            assert_nothing_retained()
+
+        # Too few micro-batches must be rejected before the eval iterator replaces the training one.
+        with pytest.raises(ValueError):
+            engine.eval_batch(iter(data), num_micro_batches=1)
+        eval_loss = engine.eval_batch(iter(data))
+        with torch.no_grad():
+            expected = torch.stack([loss_fn(reference(x), y) for x, y in data]).mean()
+        assert torch.allclose(eval_loss.cpu(), expected, atol=1e-5)
+        assert_nothing_retained()
+        loss = engine.train_batch()
+        assert torch.allclose(loss.cpu(), reference_step(), atol=1e-5)
+
+        engine.save_checkpoint(tmpdir)
+        torch.manual_seed(1)
+        fresh = DualPipeVModule(
+            layers=[nn.Linear(hidden, hidden) if isinstance(l, nn.Linear) else nn.Tanh() for l in layers],
+            num_stages=num_ranks,
+            loss_fn=loss_fn,
+            partition_method='uniform')
+        fresh_engine, _, _, _ = deepspeed.initialize(config=config, model=fresh, model_parameters=fresh.parameters())
+        fresh_engine.load_checkpoint(tmpdir)
+        for name, p in fresh_engine.module.named_parameters():
+            assert torch.allclose(p.detach().cpu(), reference_params[name], atol=1e-5), name

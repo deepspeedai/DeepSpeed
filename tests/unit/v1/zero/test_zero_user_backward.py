@@ -165,12 +165,13 @@ def collect_ddp_gradients(model_ddp):
     return grads
 
 
-def compare_gradients(grads_ddp, grads_ds, step_info=""):
+def compare_gradients(grads_ddp, grads_ds, step_info="", **tolerance_kwargs):
     """Compare gradients between DDP and DeepSpeed.
 
     Uses PyTorch's default tolerances for the tensor dtype (e.g., for bfloat16:
-    rtol=1.6e-2, atol=1e-5). The 2-layer model keeps differences small enough
-    to pass with default tolerances even after multiple optimizer steps.
+    rtol=1.6e-2, atol=1e-5) unless tolerance_kwargs overrides them. The 2-layer
+    model keeps differences small enough to pass with default tolerances even
+    after multiple optimizer steps.
     """
     step_suffix = f" at {step_info}" if step_info else ""
     assert len(grads_ddp) == len(grads_ds), \
@@ -184,7 +185,10 @@ def compare_gradients(grads_ddp, grads_ds, step_info=""):
         if grad_ds.dtype != grad_ddp.dtype:
             grad_ds = grad_ds.to(grad_ddp.dtype)
         # Use PyTorch's default tolerances for the dtype
-        allclose_on_all_ranks(grad_ddp, grad_ds, assert_message=f"Gradients differ for parameter {name}{step_suffix}")
+        allclose_on_all_ranks(grad_ddp,
+                              grad_ds,
+                              assert_message=f"Gradients differ for parameter {name}{step_suffix}",
+                              **tolerance_kwargs)
 
 
 def collect_ddp_parameters(model_ddp):
@@ -1563,8 +1567,14 @@ class TestZeroUserBackwardWithCheckpointing(DistributedTest):
                 f"No gradients at iteration {iteration} with use_reentrant={use_reentrant}"
 
             # Compare gradients with DDP - using same optimizer so should match closely
-            # Small differences at later iterations are expected due to bfloat16 precision
-            compare_gradients(ddp_grads, ds_grads, f"iteration {iteration} with use_reentrant={use_reentrant}")
+            # Small differences at later iterations are expected due to bfloat16 precision:
+            # the engine keeps fp32 accounting while the DDP reference steps in bf16, so
+            # weights drift apart by ~one bf16 ulp per step; by iteration 2 that crosses a
+            # reduction/relu rounding boundary and yields ~8e-3 absolute gradient diffs on
+            # O(1) gradients, which dtype-default tolerances reject on some bf16 kernels.
+            late_iteration_tol = {"rtol": 1.6e-2, "atol": 1e-2} if iteration >= 2 else {}
+            compare_gradients(ddp_grads, ds_grads, f"iteration {iteration} with use_reentrant={use_reentrant}",
+                              **late_iteration_tol)
 
             # Run optimizer steps on both models
             optimizer_ddp.step()

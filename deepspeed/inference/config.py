@@ -258,7 +258,7 @@ class DeepSpeedInferenceConfig(DeepSpeedConfigModel):
 
     config: Optional[Dict] = Field(None, alias="args")  # todo: really no need for this field if we can refactor
 
-    max_out_tokens: int = Field(1024, alias="max_tokens")
+    max_out_tokens: int = Field(1024, alias="max_tokens", gt=0)
     """
     This argument shows the maximum number of tokens inference-engine can work
     with, including the input and output tokens. Please consider increasing it

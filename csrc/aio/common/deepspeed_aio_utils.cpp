@@ -57,6 +57,8 @@ void io_prep_context::prep_iocbs(const int n_iocbs,
         } else {
             io_prep_pwrite(_iocbs->at(i), _xfer_ctxt->_fd, xfer_buffer, byte_count, xfer_offset);
         }
+        // Returned in the completion event, to check the number of bytes moved.
+        _iocbs->at(i)->data = reinterpret_cast<void*>(static_cast<intptr_t>(byte_count));
     }
 }
 
@@ -94,6 +96,8 @@ int io_prep_generator::prep_iocbs(const int n_iocbs, std::vector<struct iocb*>* 
         } else {
             io_prep_pwrite(iocbs->at(i), _xfer_ctxt->_fd, xfer_buffer, num_bytes, xfer_offset);
         }
+        // Returned in the completion event, to check the number of bytes moved.
+        iocbs->at(i)->data = reinterpret_cast<void*>(static_cast<intptr_t>(num_bytes));
         _remaining_bytes -= num_bytes;
     }
     _remaining_io_blocks -= actual_n_iocbs;

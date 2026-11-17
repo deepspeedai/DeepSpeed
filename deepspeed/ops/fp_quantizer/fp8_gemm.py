@@ -15,13 +15,12 @@ import torch
 
 def matmul_fp8(inp, weight, scale, quantization_group_size, quantizer):
     from deepspeed import get_accelerator
+    from deepspeed.ops.triton_ops._triton import is_triton_available
 
-    if not get_accelerator().is_triton_supported():
-        return matmul_fp8_fallback(inp, weight, scale, quantization_group_size, quantizer)
-    else:
-        # Import dynamically to prevent failures on systems without triton.
+    if get_accelerator().is_triton_supported() and is_triton_available():
         from .fp8_gemm_triton import matmul_fp8_triton
         return matmul_fp8_triton(inp, weight, scale, quantization_group_size)
+    return matmul_fp8_fallback(inp, weight, scale, quantization_group_size, quantizer)
 
 
 def matmul_fp8_fallback(inp, weight, scale, quantization_group_size, quantizer):

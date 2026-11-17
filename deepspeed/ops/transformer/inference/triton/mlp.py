@@ -8,6 +8,7 @@ import math
 import torch.nn as nn
 from deepspeed.accelerator import get_accelerator
 from deepspeed import comm as dist
+from deepspeed.comm import pg_utils
 from ..op_binding import MLPGemmOp, VectorMatMulOp, GELUGemmOp, ResidualAddOp
 
 
@@ -75,7 +76,7 @@ class TritonMLP(nn.Module):
                                           add_bias=bias is not None,
                                           residual_add=residual_add)
 
-        if self.mp_group is not None and dist.get_world_size(group=self.mp_group) > 1:
+        if pg_utils.is_parallel(self.mp_group):
             dist.all_reduce(residual, group=self.mp_group)
 
         return residual
