@@ -66,6 +66,10 @@ class FusedAdam(torch.optim.Optimizer):
             True for decoupled weight decay(also known as AdamW) (default: True)
         set_grad_none (bool, optional): whether set grad to None when zero_grad()
             method is called. (default: True)
+        exp_avg_dtype (torch.dtype, optional): dtype of both Adam moments (exp_avg and
+            exp_avg_sq). ``None`` keeps them in the parameter's dtype. ``torch.bfloat16`` with
+            fp32 parameters keeps fp32 master weights with bf16 moments; the update itself is
+            computed in fp32 and the moments are rounded to bf16 when stored. (default: None)
 
     .. _Adam - A Method for Stochastic Optimization:
         https://arxiv.org/abs/1412.6980
@@ -82,7 +86,8 @@ class FusedAdam(torch.optim.Optimizer):
                  adam_w_mode=True,
                  weight_decay=0.,
                  amsgrad=False,
-                 set_grad_none=True):
+                 set_grad_none=True,
+                 exp_avg_dtype=None):
 
         if amsgrad:
             raise RuntimeError('FusedAdam does not support the AMSGrad variant.')
@@ -90,6 +95,15 @@ class FusedAdam(torch.optim.Optimizer):
         super(FusedAdam, self).__init__(params, defaults)
         self.adam_w_mode = 1 if adam_w_mode else 0
         self.set_grad_none = set_grad_none
+        if exp_avg_dtype not in (None, torch.float32, torch.bfloat16, torch.float16):
+            raise ValueError(f"FusedAdam exp_avg_dtype must be None, torch.float32, torch.bfloat16 or torch.float16, "
+                             f"got {exp_avg_dtype}")
+        # Only the CUDA/ROCm multi_tensor_adam kernel reads moments whose dtype differs from the parameters'; the
+        # other accelerators' FusedAdam builders assume one dtype for all four tensor lists.
+        if exp_avg_dtype is not None and get_accelerator().device_name() != "cuda":
+            raise ValueError(f"FusedAdam exp_avg_dtype is supported on CUDA and ROCm only, not on "
+                             f"{get_accelerator().device_name()}")
+        self.exp_avg_dtype = exp_avg_dtype
 
         fused_adam_cuda = FusedAdamBuilder().load()
         # Skip buffer
@@ -103,6 +117,17 @@ class FusedAdam(torch.optim.Optimizer):
                     p.grad = None
         else:
             super(FusedAdam, self).zero_grad()
+
+    def load_state_dict(self, state_dict):
+        super().load_state_dict(state_dict)
+        if self.exp_avg_dtype is None:
+            return
+        # torch.optim.Optimizer.load_state_dict casts every floating-point state tensor to its parameter's dtype, which
+        # would bring the moments of fp32 parameters back as fp32 after a checkpoint reload. Restore their dtype.
+        for state in self.state.values():
+            for key in ('exp_avg', 'exp_avg_sq'):
+                if key in state and state[key].dtype != self.exp_avg_dtype:
+                    state[key] = state[key].to(self.exp_avg_dtype)
 
     def step(self, closure=None, grads=None, output_params=None, scale=None, grad_norms=None, grad_scaler=None):
         """Performs a single optimization step.
@@ -152,9 +177,10 @@ class FusedAdam(torch.optim.Optimizer):
                     # In order to keep backward compatibility for the existing checkpoints, we use group['state'] to initialize state['step'] if it exists.
                     state['step'] = group.get('step', 0)
                     # Exponential moving average of gradient values
-                    state['exp_avg'] = torch.zeros_like(p.data)
+                    moment_dtype = self.exp_avg_dtype if self.exp_avg_dtype is not None else p.dtype
+                    state['exp_avg'] = torch.zeros_like(p.data, dtype=moment_dtype)
                     # Exponential moving average of squared gradient values
-                    state['exp_avg_sq'] = torch.zeros_like(p.data)
+                    state['exp_avg_sq'] = torch.zeros_like(p.data, dtype=moment_dtype)
 
                 if p.dtype == torch.float16:
                     g_16.append(p.grad.data)

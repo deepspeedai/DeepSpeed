@@ -131,3 +131,44 @@ def test_fused_adam_matches_reference(adam_w_mode, dtype):
     for ds_param, ref_param in zip(ds_params, ref_params):
         atol = 8 * torch.finfo(dtype).eps * ref_param.abs().max().item()
         torch.testing.assert_close(ds_param.float(), ref_param.float(), rtol=0, atol=atol)
+
+
+@pytest.mark.parametrize('moment_dtype', [torch.bfloat16, torch.half], ids=["bf16", "fp16"])
+def test_fused_adam_low_precision_moments_with_fp32_params(moment_dtype):
+    # fp32 master weights with low-precision moments: the moments must be stored in moment_dtype, and each update must
+    # be the fp32 update computed from the stored, rounded moments. A kernel that read the moments with the parameters'
+    # type would read garbage; one that kept fp32 moments would save no memory.
+    if get_accelerator().device_name() != "cuda":
+        pytest.skip("FusedAdam exp_avg_dtype is supported on CUDA and ROCm only")
+    if moment_dtype not in get_accelerator().supported_dtypes():
+        pytest.skip(f"{moment_dtype} not supported on {get_accelerator().device_name()}")
+    if not deepspeed.ops.__compatible_ops__[FusedAdamBuilder.NAME]:
+        pytest.skip("FusedAdam is not compatible")
+
+    device = get_accelerator().device_name()
+    torch.manual_seed(0)
+    lr, betas, eps, weight_decay, steps = 1e-2, (0.9, 0.999), 1e-8, 0.1, 5
+    ds_params = [torch.nn.Parameter(torch.randn(1024, device=device)) for _ in range(3)]
+    ref_params = [p.detach().clone() for p in ds_params]
+    ref_exp_avgs = [torch.zeros_like(p, dtype=moment_dtype) for p in ref_params]
+    ref_exp_avg_sqs = [torch.zeros_like(p, dtype=moment_dtype) for p in ref_params]
+    ds_optimizer = FusedAdam(ds_params, lr=lr, betas=betas, eps=eps, weight_decay=weight_decay, exp_avg_dtype=moment_dtype)
+
+    for step in range(1, steps + 1):
+        for ds_param, ref_param, exp_avg, exp_avg_sq in zip(ds_params, ref_params, ref_exp_avgs, ref_exp_avg_sqs):
+            ds_param.grad = torch.randn_like(ds_param)
+            reference_adam_step(ref_param, ds_param.grad, exp_avg, exp_avg_sq, step, lr, betas[0], betas[1], eps,
+                                weight_decay, True)
+        ds_optimizer.step()
+
+    # The kernel's fused multiply-adds can round a moment that lies on a rounding midpoint the other way than PyTorch,
+    # by one spacing of the moment dtype. That changes a later update by about that fraction, so the parameters are
+    # compared against the size of the whole update (lr x steps) and the moments against their largest magnitude.
+    for ds_param, ref_param, exp_avg, exp_avg_sq in zip(ds_params, ref_params, ref_exp_avgs, ref_exp_avg_sqs):
+        state = ds_optimizer.state[ds_param]
+        assert ds_param.dtype == torch.float32
+        assert state['exp_avg'].dtype == moment_dtype and state['exp_avg_sq'].dtype == moment_dtype
+        torch.testing.assert_close(ds_param, ref_param, rtol=0, atol=0.02 * lr * steps)
+        for moment, ref_moment in ((state['exp_avg'], exp_avg), (state['exp_avg_sq'], exp_avg_sq)):
+            spacing = torch.finfo(moment_dtype).eps * ref_moment.float().abs().max().item()
+            torch.testing.assert_close(moment.float(), ref_moment.float(), rtol=0, atol=spacing)
