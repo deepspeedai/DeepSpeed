@@ -29,9 +29,7 @@ class DeepCompileBuilder(CUDAOpBuilder):
     def include_paths(self):
         import os
         import torch
-        if self.build_for_cpu:
-            CUDA_INCLUDE = []
-        elif not self.is_rocm_pytorch():
+        if not self.is_rocm_pytorch():
             CUDA_INCLUDE = [os.path.join(torch.utils.cpp_extension.CUDA_HOME, "include")]
         else:
             CUDA_INCLUDE = [
