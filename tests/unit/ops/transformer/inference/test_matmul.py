@@ -3,6 +3,8 @@
 
 # DeepSpeed Team
 
+import importlib
+
 import pytest
 import torch
 import deepspeed
@@ -56,3 +58,38 @@ def test_matmul_4d(B, H, M, K, N, dtype, use_triton_ops):
     ds_out = run_matmul_ds(a_ds, b_ds, use_triton_ops)
     ref_out = run_matmul_ref(a_ref, b_ref)
     assert (allclose(ds_out, ref_out))
+
+
+@pytest.mark.inference_ops
+@pytest.mark.parametrize("M,N,K,transposed", [(64, 128, 32, False), (17, 65, 33, True)])
+@pytest.mark.parametrize("add_bias,activation", [(False, ""), (True, ""), (True, "gelu"), (True, "relu")])
+def test_matmul_2d_autotune(monkeypatch, M, N, K, transposed, add_bias, activation):
+    if not deepspeed.get_accelerator().is_triton_supported():
+        pytest.skip("triton is not supported on this system")
+    if not deepspeed.HAS_TRITON:
+        pytest.skip("triton is not installed")
+
+    from deepspeed.ops.transformer.inference.triton import matmul_ext, triton_matmul_kernel
+
+    # Earlier skip_autotune() calls and cached choices must not bypass pruning.
+    kernels = importlib.reload(triton_matmul_kernel)
+    monkeypatch.setattr(matmul_ext.Fp16Matmul, "_2d_kernel", kernels._fp_matmul)
+
+    device = deepspeed.get_accelerator().device_name()
+    torch.manual_seed(20)
+    a = torch.randn((M, K), dtype=torch.float16, device=device)
+    b = torch.randn((N, K) if transposed else (K, N), dtype=torch.float16, device=device)
+    if transposed:
+        b = b.t()
+    bias = torch.randn((N, ), dtype=torch.float16, device=device) if add_bias else None
+
+    ref_out = torch.matmul(a.float(), b.float())
+    if bias is not None:
+        ref_out += bias.float()
+    if activation == "gelu":
+        ref_out = torch.nn.functional.gelu(ref_out)
+    elif activation == "relu":
+        ref_out = torch.nn.functional.relu(ref_out)
+
+    ds_out = matmul_ext.matmul(a, b, bias=bias, activation=activation)
+    torch.testing.assert_close(ds_out, ref_out.half(), rtol=5e-2, atol=2e-3)

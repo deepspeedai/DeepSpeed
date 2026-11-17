@@ -2,11 +2,16 @@
 
 # DeepSpeed Team
 
+import ctypes
 import pytest
 import torch
 
+from deepspeed.accelerator import npu_accelerator
 from deepspeed.accelerator.cpu_accelerator import CPU_Accelerator
 from deepspeed.accelerator.cuda_accelerator import CUDA_Accelerator
+from deepspeed.accelerator.npu_accelerator import NPU_Accelerator
+from deepspeed.accelerator import xpu_accelerator
+from deepspeed.accelerator.xpu_accelerator import XPU_Accelerator
 from deepspeed.utils.pin_memory import NativePinnedMemory
 
 
@@ -140,6 +145,9 @@ class _RegisteringAccelerator:
     def unregister_host_memory(self, address):
         self.unregistered.append(address)
 
+    def pin_memory_alignment(self):
+        return 1
+
 
 def test_native_device_registration_and_unpin(monkeypatch, native_pins):
     accelerator = _RegisteringAccelerator()
@@ -206,6 +214,140 @@ def test_cuda_device_registration_calls_cudart(monkeypatch):
     assert errors == [0, 0]
 
 
+def test_xpu_device_registration_calls_level_zero(monkeypatch):
+    monkeypatch.setattr(XPU_Accelerator, "current_device", lambda self: 0)
+    monkeypatch.setattr(xpu_accelerator, "_l0_registrations", {})
+
+    calls = []
+
+    class _FakeLoader:
+
+        def zeMemAllocHost(self, context, host_desc, size, alignment, out):
+            host = ctypes.cast(host_desc, ctypes.POINTER(xpu_accelerator._ZeHostMemAllocDesc))[0]
+            memmap = ctypes.cast(host.pNext, ctypes.POINTER(xpu_accelerator._ZeExternalMemmapSysmemDesc))[0]
+            calls.append(("alloc", memmap.pSystemMemory, memmap.size, size))
+            # byref() without argtypes arrives as a CArgObject; cast it back.
+            ctypes.cast(out, ctypes.POINTER(ctypes.c_void_p))[0] = memmap.pSystemMemory
+            return xpu_accelerator._ZE_RESULT_SUCCESS
+
+        def zeMemFree(self, context, address):
+            calls.append(("free", address))
+            return xpu_accelerator._ZE_RESULT_SUCCESS
+
+    monkeypatch.setattr(xpu_accelerator, "_l0_device_context", lambda idx: (_FakeLoader(), f"ctx{idx}"))
+    accelerator = XPU_Accelerator.__new__(XPU_Accelerator)
+
+    assert accelerator.register_host_memory(1234, 4096) is True
+    accelerator.unregister_host_memory(1234)
+    assert calls == [("alloc", 1234, 4096, 4096), ("free", 1234)]
+
+
+def test_xpu_registration_rejects_changed_address(monkeypatch):
+    monkeypatch.setattr(XPU_Accelerator, "current_device", lambda self: 0)
+    monkeypatch.setattr(xpu_accelerator, "_l0_registrations", {})
+    """A mapping that comes back at another address is a failed registration
+    and the unusable mapping is released."""
+
+    freed = []
+
+    class _FakeLoader:
+
+        def zeMemAllocHost(self, context, host_desc, size, alignment, out):
+            ctypes.cast(out, ctypes.POINTER(ctypes.c_void_p))[0] = 0xDEAD0000
+            return xpu_accelerator._ZE_RESULT_SUCCESS
+
+        def zeMemFree(self, context, address):
+            freed.append(address)
+            return xpu_accelerator._ZE_RESULT_SUCCESS
+
+    monkeypatch.setattr(xpu_accelerator, "_l0_device_context", lambda idx: (_FakeLoader(), f"ctx{idx}"))
+    accelerator = XPU_Accelerator.__new__(XPU_Accelerator)
+    assert accelerator.register_host_memory(1234, 4096) is False
+    assert freed == [0xDEAD0000]
+
+
+def test_xpu_registers_per_device_context_and_frees_there(monkeypatch):
+    """Registration happens in a per-device context and unregister frees in the
+    same context that created the mapping."""
+
+    alloc_ctx = []
+    frees = []
+
+    class _FakeLoader:
+
+        def zeMemAllocHost(self, context, host_desc, size, alignment, out):
+            alloc_ctx.append(context)
+            host = ctypes.cast(host_desc, ctypes.POINTER(xpu_accelerator._ZeHostMemAllocDesc))[0]
+            memmap = ctypes.cast(host.pNext, ctypes.POINTER(xpu_accelerator._ZeExternalMemmapSysmemDesc))[0]
+            ctypes.cast(out, ctypes.POINTER(ctypes.c_void_p))[0] = memmap.pSystemMemory
+            return xpu_accelerator._ZE_RESULT_SUCCESS
+
+        def zeMemFree(self, context, address):
+            frees.append((context, address))
+            return xpu_accelerator._ZE_RESULT_SUCCESS
+
+    contexts = {}
+    monkeypatch.setattr(xpu_accelerator, "_l0_device_context", lambda idx: (_FakeLoader(), f"ctx{idx}"))
+    monkeypatch.setattr(xpu_accelerator, "_l0_registrations", {})
+    accelerator = XPU_Accelerator.__new__(XPU_Accelerator)
+
+    for dev in (0, 1):
+        monkeypatch.setattr(XPU_Accelerator, "current_device", lambda self, d=dev: d)
+        assert accelerator.register_host_memory(1000 + dev, 4096) is True
+    assert alloc_ctx == ["ctx0", "ctx1"]
+
+    accelerator.unregister_host_memory(1000)
+    accelerator.unregister_host_memory(1001)
+    assert frees == [("ctx0", 1000), ("ctx1", 1001)]
+
+    # unregistering an unregistered address is a no-op
+    accelerator.unregister_host_memory(999)
+    assert len(frees) == 2
+
+
+def test_xpu_registration_alloc_failure_returns_false(monkeypatch):
+    monkeypatch.setattr(XPU_Accelerator, "current_device", lambda self: 0)
+    monkeypatch.setattr(xpu_accelerator, "_l0_registrations", {})
+    """A Level Zero allocation failure must degrade to mlock-only, not raise."""
+
+    class _FakeLoader:
+
+        def zeMemAllocHost(self, context, host_desc, size, alignment, out):
+            return 0x78000001  # ZE_RESULT_ERROR_OUT_OF_HOST_MEMORY
+
+    monkeypatch.setattr(xpu_accelerator, "_l0_device_context", lambda idx: (_FakeLoader(), f"ctx{idx}"))
+    accelerator = XPU_Accelerator.__new__(XPU_Accelerator)
+    assert accelerator.register_host_memory(1234, 4096) is False
+
+
+def test_xpu_unregister_failure_raises(monkeypatch):
+    monkeypatch.setattr(xpu_accelerator, "_l0_registrations", {})
+    """A failed unmap must raise so the caller keeps the CPU allocation alive
+    (the driver may still hold a mapping for those pages)."""
+
+    class _FakeLoader:
+
+        def zeMemFree(self, context, address):
+            return 0x78000001
+
+    monkeypatch.setattr(xpu_accelerator, "_l0_device_context", lambda idx: (_FakeLoader(), f"ctx{idx}"))
+    accelerator = XPU_Accelerator.__new__(XPU_Accelerator)
+    xpu_accelerator._l0_registrations[1234] = (_FakeLoader(), "ctx")
+    with pytest.raises(RuntimeError, match="zeMemFree failed"):
+        accelerator.unregister_host_memory(1234)
+
+
+def test_xpu_device_registration_without_level_zero(monkeypatch):
+    monkeypatch.setattr(xpu_accelerator, "_l0_registrations", {})
+    """Missing loader or extension must degrade to mlock-only, not raise."""
+    monkeypatch.setattr(XPU_Accelerator, "current_device", lambda self: 0)
+    monkeypatch.setattr(xpu_accelerator, "_l0_device_context", lambda idx: None)
+    accelerator = XPU_Accelerator.__new__(XPU_Accelerator)
+
+    assert accelerator.register_host_memory(1234, 4096) is False
+    assert accelerator.unregister_host_memory(1234) is None
+
+
 def test_cpu_native_pin_with_register_env_on(monkeypatch, native_pins):
     """CPU accelerator has no register hook; native pin still works with default-on."""
     monkeypatch.setenv("DS_PIN_MEMORY_REGISTER_DEVICE", "1")
@@ -224,6 +366,9 @@ def test_device_registration_failure_keeps_mlock(monkeypatch, native_pins):
 
         def unregister_host_memory(self, address):
             raise AssertionError("unregister must not run when register failed")
+
+        def pin_memory_alignment(self):
+            return 1
 
     monkeypatch.setattr("deepspeed.accelerator.get_accelerator", lambda: _FailingAccelerator())
     monkeypatch.setenv("DS_PIN_MEMORY_REGISTER_DEVICE", "1")
@@ -284,3 +429,157 @@ def test_unpin_keeps_allocation_when_unregister_fails(monkeypatch, native_pins):
     assert native_pins.unpin(pinned) is True
     assert accelerator.unregistered == [begin]
     assert begin not in native_pins._device_registered
+
+
+class _AlignedAccelerator(_RegisteringAccelerator):
+
+    def __init__(self, alignment):
+        super().__init__()
+        self._alignment = alignment
+
+    def pin_memory_alignment(self):
+        return self._alignment
+
+
+class _OffsetHandle:
+    """pin_memory-op stand-in whose buffer base sits at a fixed byte offset."""
+
+    def __init__(self, offset):
+        self._offset = offset
+
+    def new_cpu_locked_tensor(self, numel, example):
+        storage = torch.empty(numel * example.element_size() + self._offset, dtype=torch.uint8)
+        return storage[self._offset:].view(example.dtype)
+
+    def free_cpu_locked_tensor_by_ptr(self, address):
+        return True
+
+
+@pytest.mark.parametrize("alignment, offset", [(1, 64), (2048, 1232), (4096, 64), (4096, 0)])
+def test_device_registration_aligns_to_declared_alignment(native_pins, monkeypatch, alignment, offset):
+    # Accelerators declare the alignment their device runtime requires for
+    # host-memory registration. NativePinnedMemory must round the registered
+    # range down to it, pad the size so the full request is covered, and
+    # unregister the same aligned address. Alignment 1 means no requirement,
+    # so the request passes through unchanged.
+    accelerator = _AlignedAccelerator(alignment)
+    monkeypatch.setattr("deepspeed.accelerator.get_accelerator", lambda: accelerator)
+    monkeypatch.setenv("DS_PIN_MEMORY_REGISTER_DEVICE", "1")
+    monkeypatch.setattr(native_pins, "_handle", _OffsetHandle(offset))
+
+    pinned = native_pins.pin(torch.empty(32), make_copy=False)
+    begin = pinned.data_ptr()
+    registered_address, registered_bytes = accelerator.registered[0]
+    if alignment == 1:
+        assert registered_address == begin
+    else:
+        assert registered_address % alignment == 0
+        assert registered_address <= begin < registered_address + alignment
+    assert registered_bytes == pinned.nbytes + (begin - registered_address)
+
+    assert native_pins.unpin(pinned) is True
+    assert accelerator.unregistered == [registered_address]
+
+
+def test_npu_declares_page_alignment():
+    # MAPPED registration rejects non-4K-aligned addresses; the declared
+    # alignment is what makes NativePinnedMemory round ranges down for NPU.
+    accelerator = NPU_Accelerator.__new__(NPU_Accelerator)
+    assert accelerator.pin_memory_alignment() == 4096
+
+
+def test_npu_register_uses_mapped_flag(monkeypatch):
+    # MAPPED is deliberate: PINNED-only registrations fall back to mlock-speed
+    # copies on this platform (measured ~9 GB/s vs ~23 GB/s for 64 MiB buffers).
+    registered = []
+    unregistered = []
+
+    def register(addr, num_bytes, flag):
+        registered.append((addr, num_bytes, flag))
+        return 0
+
+    def unregister(addr):
+        unregistered.append(addr)
+        return 0
+
+    monkeypatch.setattr(npu_accelerator, "_npu_host_copy_funcs", lambda: ((register, unregister), None))
+    accelerator = NPU_Accelerator.__new__(NPU_Accelerator)
+
+    assert accelerator.register_host_memory(4096, 4096) is True
+    assert registered == [(4096, 4096, npu_accelerator.ACL_HOST_REG_MAPPED)]
+    accelerator.unregister_host_memory(4096)
+    assert unregistered == [4096]
+
+
+def test_npu_device_registration_failure_returns_false(monkeypatch):
+    # A non-zero npuHostRegister return code must degrade to mlock-only, not
+    # raise: the NativePinnedMemory caller only tracks the address on True.
+    def register(address, num_bytes, flag):
+        return 107000
+
+    def unregister(address):
+        raise AssertionError("unregister must not run when register failed")
+
+    monkeypatch.setattr(npu_accelerator, "_npu_host_copy_funcs", lambda: ((register, unregister), None))
+    accelerator = NPU_Accelerator.__new__(NPU_Accelerator)
+
+    assert accelerator.register_host_memory(4096, 4096) is False
+
+
+def test_npu_unregister_failure_raises(monkeypatch):
+    # Raising keeps the allocation alive in NativePinnedMemory so the driver
+    # never holds a registration for pages later reused by malloc.
+    def register(address, num_bytes, flag):
+        return 0
+
+    def unregister(address):
+        return 107000
+
+    monkeypatch.setattr(npu_accelerator, "_npu_host_copy_funcs", lambda: ((register, unregister), None))
+    accelerator = NPU_Accelerator.__new__(NPU_Accelerator)
+
+    with pytest.raises(RuntimeError, match="npuHostUnregister"):
+        accelerator.unregister_host_memory(4096)
+
+
+def test_npu_missing_npurt_is_noop(monkeypatch):
+    monkeypatch.setattr(npu_accelerator, "_npu_host_copy_funcs", lambda: (None, "test"))
+    accelerator = NPU_Accelerator.__new__(NPU_Accelerator)
+
+    assert accelerator.register_host_memory(4096, 4096) is False
+    assert accelerator.unregister_host_memory(4096) is None
+
+
+@pytest.mark.skipif(not hasattr(torch, "npu") or not hasattr(torch.npu, "npurt"), reason="torch_npu is not installed")
+def test_npu_host_copy_lookup_gates(monkeypatch):
+    # Exercise each npurt resolution path (missing, init failure, success)
+    # by stubbing torch.npu; where torch_npu is absent the whole test is
+    # skipped because stubbing torch.npu is not reliable across torch versions.
+    class _StubNpu:
+        pass
+
+    monkeypatch.setattr(torch, "npu", _StubNpu(), raising=False)
+    # A build lacking npurt must not resolve, with a reason saying so.
+    monkeypatch.delattr(torch.npu, "npurt", raising=False)
+    funcs, reason = npu_accelerator._npu_host_copy_funcs()
+    assert funcs is None
+    assert "npurt is unavailable" in reason
+
+    # npurt() failing to initialize the runtime resolves to None with a reason.
+    def fail_npurt():
+        raise RuntimeError("init failed")
+
+    monkeypatch.setattr(torch.npu, "npurt", fail_npurt, raising=False)
+    funcs, reason = npu_accelerator._npu_host_copy_funcs()
+    assert funcs is None
+    assert "initialize" in reason
+
+    # A working npurt module resolves to its host copy functions.
+    class _Npurt:
+        npuHostRegister = "register"
+        npuHostUnregister = "unregister"
+
+    monkeypatch.setattr(torch.npu, "npurt", lambda: _Npurt(), raising=False)
+    funcs, reason = npu_accelerator._npu_host_copy_funcs()
+    assert funcs == ("register", "unregister")
+    assert reason is None

@@ -3,30 +3,79 @@
 
 # DeepSpeed Team
 
+import weakref
+
 import deepspeed.comm as dist
 
 # For lazy import with printflock()
 fcntl = None
 
+
+class WeakIdNameMap:
+    """Maps modules and parameters to their names without keeping them alive.
+
+    These maps are module-level and are only reset in ``destroy()``, so with strong keys
+    they pin the snapshotted model for the life of the process. Anything that replaces a
+    submodule afterwards -- expert-parallel replacement, kernel injection -- leaves the
+    replaced weights resident even though nothing else references them.
+
+    ``weakref.WeakKeyDictionary`` cannot be used: its keys are ``weakref.ref`` objects
+    whose ``__eq__`` forwards to the referents, and comparing two live parameters yields a
+    tensor rather than a bool. Keying on ``id()`` and dropping the entry from a finalizer
+    keeps the identity semantics the previous dicts had.
+    """
+
+    def __init__(self):
+        self._names = {}
+        self._finalizers = {}
+
+    def __setitem__(self, obj, name):
+        key = id(obj)
+        self._names[key] = name
+        # Replacing an entry whose object is still alive would otherwise leak its finalizer.
+        finalizer = self._finalizers.pop(key, None)
+        if finalizer is not None:
+            finalizer.detach()
+        self._finalizers[key] = weakref.finalize(obj, self._discard, key)
+
+    def _discard(self, key):
+        self._names.pop(key, None)
+        self._finalizers.pop(key, None)
+
+    def __getitem__(self, obj):
+        return self._names[id(obj)]
+
+    def __contains__(self, obj):
+        return id(obj) in self._names
+
+    def __len__(self):
+        return len(self._names)
+
+    def clear(self):
+        for finalizer in self._finalizers.values():
+            finalizer.detach()
+        self._names.clear()
+        self._finalizers.clear()
+
+
 # for debug purposes map module and param objects to their fully qualified names
-module_names = {}
-param_names = {}
+module_names = WeakIdNameMap()
+param_names = WeakIdNameMap()
 
 
 def debug_clear_module_and_param_names():
-    global module_names
-    global param_names
-    module_names = {}
-    param_names = {}
+    module_names.clear()
+    param_names.clear()
 
 
 def debug_extract_module_and_param_names(model):
     # extract the fully qualified names as soon as the model is acquired
-    global module_names
-    global param_names
+    debug_clear_module_and_param_names()
     # XXX: can probably make a map of param2module and vice-versa
-    module_names = {module: name for name, module in model.named_modules()}
-    param_names = {param: name for name, param in model.named_parameters()}
+    for name, module in model.named_modules():
+        module_names[module] = name
+    for name, param in model.named_parameters():
+        param_names[param] = name
 
 
 def debug_module2name(module):

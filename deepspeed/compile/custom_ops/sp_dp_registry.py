@@ -50,7 +50,21 @@ def dp_size():
 def populate_registry(SP_SIZE, DP_SIZE):
     """ Populate rank to SP/DP mesh index.  """
 
+    if SP_SIZE <= 0 or DP_SIZE <= 0:
+        raise ValueError(f"AutoSP mesh dimensions must be positive (sp={SP_SIZE}, dp={DP_SIZE})")
+
+    world_size = dist.get_world_size()
+    if SP_SIZE * DP_SIZE != world_size:
+        raise ValueError(f"AutoSP mesh (sp={SP_SIZE} x dp={DP_SIZE}) must cover the distributed world size "
+                         f"({world_size})")
+
     if GROUP_REGISTRY.get('is_reg', False):
+        # Compiled graphs look up SP_SIZE and the groups at runtime, so they cannot be rebuilt for a new mesh.
+        current_mesh = (GROUP_REGISTRY['SP_SIZE'], GROUP_REGISTRY['DP_SIZE'])
+        if current_mesh != (SP_SIZE, DP_SIZE):
+            raise RuntimeError(f"AutoSP process groups are already initialized for mesh (sp, dp)={current_mesh}, "
+                               f"but ({SP_SIZE}, {DP_SIZE}) was requested. All AutoSP engines in a process "
+                               "must use the same sequence_parallel_size.")
         return
 
     group_listing = []

@@ -6,7 +6,6 @@
 import math
 
 from deepspeed.utils import logger
-# from deepspeed.runtime.lr_schedules import WarmupLR
 from ..constants import *
 
 #####based on the paper random-ltd: https://arxiv.org/abs/2211.11586
@@ -51,7 +50,6 @@ class RandomLTDScheduler(BaseScheduler):
 
         self.state[RANDOM_LTD_CONSUMED_LAYER_TOKENS] = 0
 
-        # self.first_step = True
     def get_total_layer_tokens(self, train_iters):
         for step in range(train_iters):
             self.update_seq(step)

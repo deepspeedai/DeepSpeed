@@ -39,7 +39,6 @@ collections:
       - bert-finetuning.md
       - bert-pretraining.md
       - cifar-10.md
-      - curriculum-learning.md
       - data-efficiency.md
       - ds4sci_evoformerattention.md
       - flops-profiler.md
@@ -51,16 +50,12 @@ collections:
       - mixture-of-experts.md
       - mixture-of-experts-nlg.md
       - mixture-of-experts-inference.md
-      - model-compression.md
+
       - monitor.md
       - comms-logging.md
       - one-cycle.md
-      - onebit-adam.md
-      - zero-one-adam.md
-      - onebit-lamb.md
+
       - pipeline.md
-      - progressive_layer_dropping.md
-      - sparse-attention.md
       - transformer_kernel.md
       - zero-offload.md
       - zero.md

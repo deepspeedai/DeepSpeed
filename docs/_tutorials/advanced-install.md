@@ -68,7 +68,6 @@ Available `DS_BUILD` options include:
 * `DS_BUILD_FUSED_LAMB` builds the FusedLamb op.
 * `DS_BUILD_QUANTIZER` builds the quantizer op.
 * `DS_BUILD_RANDOM_LTD` builds the random ltd op.
-* `DS_BUILD_SPARSE_ATTN` builds the sparse attention op.
 * `DS_BUILD_TRANSFORMER` builds the transformer op.
 * `DS_BUILD_TRANSFORMER_INFERENCE` builds the transformer-inference op.
 * `DS_BUILD_STOCHASTIC_TRANSFORMER` builds the stochastic transformer op.
@@ -148,6 +147,8 @@ You can build specifically for a desired range of architectures by setting a `TO
 ```bash
 TORCH_CUDA_ARCH_LIST="6.1;7.5;8.6" pip install ...
 ```
+
+Entries can be separated by `;` or spaces, and can use `+PTX` or the `a` suffix (for example `9.0a`). Architecture names such as `Ampere` are not supported. If no entry has `+PTX`, DeepSpeed adds PTX for the highest entry without a suffix, so the ops can also run on newer GPUs.
 
 It will also make the build faster when you only build for a few architectures.
 

@@ -11,7 +11,7 @@ from deepspeed.accelerator import get_accelerator
 import deepspeed.utils.groups as groups
 
 if get_accelerator().device_name() == 'hpu':
-    pytest.skip("sparse_gradients not supported by HPU.", allow_module_level=True)
+    pytest.skip("sparse gradients not supported by HPU.", allow_module_level=True)
 
 
 class Model(torch.nn.Module):
@@ -46,7 +46,7 @@ class TestSparseAdam(DistributedTest):
     world_size = 2
 
     def test(self):
-        config_dict = {"train_batch_size": 2, "steps_per_print": 1, "sparse_gradients": True}
+        config_dict = {"train_batch_size": 2, "steps_per_print": 1}
 
         model = Model()
         optimizer = Adam(list(model.linear.parameters()), list(model.emb.parameters()))

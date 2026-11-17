@@ -11,7 +11,7 @@ from unit.util import skip_on_arch
 from deepspeed.accelerator import get_accelerator
 
 if get_accelerator().device_name() == 'hpu':
-    pytest.skip("sparse_gradients not supported by HPU.", allow_module_level=True)
+    pytest.skip("sparse gradients not supported by HPU.", allow_module_level=True)
 
 
 class Model(torch.nn.Module):
@@ -62,7 +62,7 @@ class TestSparseAdam(DistributedTest):
     def test(self):
         skip_on_arch(min_arch=7)
 
-        config_dict = {"train_batch_size": 2, "steps_per_print": 1, "sparse_gradients": True}
+        config_dict = {"train_batch_size": 2, "steps_per_print": 1}
         model, optimizer = get_model_optimizer()
         loss = torch.nn.BCEWithLogitsLoss()
         engine, _, _, _ = deepspeed.initialize(model=model, optimizer=optimizer, config=config_dict)

@@ -8,6 +8,9 @@ import os
 import torch
 import deepspeed.comm as dist
 import deepspeed
+from datetime import timedelta
+from deepspeed.comm.torch import TorchBackend
+from deepspeed.comm import pg_utils
 
 from unit.common import DistributedTest, DistributedFixture, get_master_port
 from unit.simple_model import SimpleModel
@@ -129,6 +132,32 @@ class TestDistAllReduce(DistributedTest):
         assert torch.all(x == result)
 
 
+class TestPgUtilsIsParallel(DistributedTest):
+    world_size = 4
+
+    def test(self):
+        rank = dist.get_rank()
+        pairs = [dist.new_group([0, 1]), dist.new_group([2, 3])]
+        singles = [dist.new_group([r]) for r in range(self.world_size)]
+
+        assert pg_utils.is_parallel(pairs[rank // 2])
+        assert pg_utils.is_parallel(dist.get_world_group())
+        # None marks an absent parallel dimension; it must not be treated as the world group.
+        assert not pg_utils.is_parallel(None)
+        assert not pg_utils.is_parallel(singles[rank])
+
+
+def test_pg_utils_without_process_group():
+    # Single-device code paths pass group=None before any process group exists.
+    assert not pg_utils.is_parallel(None)
+
+
+def test_pg_utils_not_exported_from_comm():
+    # group=None means "no parallelism" here but "world group" for deepspeed.comm collectives; keeping the
+    # helper out of the deepspeed.comm namespace prevents mistaking one for the other.
+    assert not hasattr(dist, "is_parallel")
+
+
 class FakeP2PWork:
     """Stands in for a torch.distributed Work so the staging wrapper can be tested single-process."""
 
@@ -142,6 +171,62 @@ class FakeP2PWork:
         if self.fill is not None:
             self.fill()
         return True
+
+
+@pytest.mark.parametrize(
+    "default_backend, subgroup_backend, group_argument, expected_device",
+    [
+        ("gloo", None, "omitted", "cpu"),
+        ("nccl", None, "omitted", "cuda"),
+        ("nccl", "gloo", "keyword", "cpu"),
+        ("gloo", "nccl", "positional", "cuda"),
+    ],
+)
+def test_cpu_staging_uses_requested_group(monkeypatch, default_backend, subgroup_backend, group_argument,
+                                          expected_device):
+    from types import SimpleNamespace
+    torch_backend = importlib.import_module("deepspeed.comm.torch")
+
+    subgroup = object()
+    backend_queries = []
+    captured = {}
+
+    class FakeTensor:
+
+        def __init__(self, device_type):
+            self.device = SimpleNamespace(type=device_type)
+
+        def to(self, device):
+            return FakeTensor(device)
+
+        def copy_(self, source):
+            return self
+
+    def get_backend(group=None):
+        backend_queries.append(group)
+        return default_backend if group is None else subgroup_backend
+
+    @torch_backend.stage_on_cpu
+    def collective(self, tensor, marker=None, group=None):
+        captured["tensor"] = tensor
+
+    monkeypatch.setattr(torch_backend.torch, "Tensor", FakeTensor)
+    monkeypatch.setattr(torch_backend.torch.distributed, "is_initialized", lambda: True)
+    monkeypatch.setattr(torch_backend.torch.distributed, "get_backend", get_backend)
+    tensor = FakeTensor("cuda")
+
+    if group_argument == "keyword":
+        collective(None, tensor, group=subgroup)
+        expected_group = subgroup
+    elif group_argument == "positional":
+        collective(None, tensor, None, subgroup)
+        expected_group = subgroup
+    else:
+        collective(None, tensor)
+        expected_group = None
+
+    assert captured["tensor"].device.type == expected_device
+    assert backend_queries == [expected_group]
 
 
 @pytest.mark.skipif(get_accelerator().device_name() != 'mps', reason="covers the MPS CPU-staging path")
@@ -333,6 +418,49 @@ class TestDistInferenceAllReduce(DistributedTest):
         x = x.to(dtype)
         dist.inference_all_reduce(x)
         assert torch.all(x == result)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("forced_level", [0, 1, 2])
+class TestInferenceAllReduceDispatch:
+
+    def test(self, dtype, forced_level, tmp_path, monkeypatch):
+        # The shm all-reduce must only run when the host ISA level covers the dtype's
+        # kernel: fp32 needs level 1 (avx2) and bf16/fp16 level 2 (avx512bw).  The
+        # collective sinks and the world size are stubbed so the routing decision is
+        # verified on any CPU instead of whichever ISA or rank count the runner
+        # happens to expose, without launching a second process.
+        required_level = 1 if dtype == torch.float32 else 2
+        expected_route = 'shm' if forced_level >= required_level else 'process-group'
+
+        routes = []
+
+        def stubbed_shm_reduce(tensor):
+            routes.append('shm')
+            return tensor
+
+        def stubbed_pg_all_reduce(*args, **kwargs):
+            routes.append('process-group')
+            return kwargs.get('tensor')
+
+        def stubbed_world_size(group=None):
+            return 2
+
+        if not torch.distributed.is_initialized():
+            torch.distributed.init_process_group('gloo',
+                                                 init_method=f'file://{tmp_path}/dispatch_store',
+                                                 rank=0,
+                                                 world_size=1)
+        backend = TorchBackend('gloo', timedelta(seconds=300), None)
+
+        monkeypatch.setattr(torch.distributed, 'get_world_size', stubbed_world_size)
+        monkeypatch.setattr(torch.distributed, 'all_reduce', stubbed_pg_all_reduce)
+        monkeypatch.setattr(torch.ops.deepspeed, 'inference_all_reduce_', stubbed_shm_reduce, raising=False)
+        monkeypatch.setattr(backend, 'shm_vector_kernel_level', forced_level, raising=False)
+
+        backend.inference_all_reduce(torch.ones(1, 4, dtype=dtype), torch.distributed.ReduceOp.SUM)
+
+        assert routes == [expected_route]
 
 
 @pytest.mark.parametrize("dist_init_required", [True, False, None])

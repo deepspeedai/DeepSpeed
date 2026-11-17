@@ -216,6 +216,18 @@ class DeepSpeedAccelerator(ABC):
         return False
 
     # Graph operations
+    # Whether HybridEngine's graph-captured generation paths are supported.
+    # Backends opt in explicitly, and only after implementing
+    # is_current_stream_capturing: the static KV cache relies on it to skip
+    # host-side checks that are illegal while a graph is being captured.
+    # Defaults to False so backends that merely expose a graph API stay on the
+    # eager path until they are validated.
+    def is_graph_capture_supported(self) -> bool:
+        return False
+
+    def is_current_stream_capturing(self) -> bool:
+        return False
+
     @abc.abstractmethod
     def create_graph(self):
         ...
@@ -285,6 +297,10 @@ class DeepSpeedAccelerator(ABC):
     def unregister_host_memory(self, address):
         """Unregister host memory previously registered with the device runtime."""
         return None
+
+    def pin_memory_alignment(self):
+        """Byte alignment required for device-registered host memory; 1 means none."""
+        return 1
 
     # CPU torch pinning is a historical no-op; subclasses that really page-lock
     # keep the default True so tracker accounting matches the docs.

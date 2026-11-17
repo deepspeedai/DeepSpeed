@@ -1,0 +1,84 @@
+name: klxpu
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 0 * * *"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  unit-tests:
+    name: klxpu / unit tests
+    runs-on: [self-hosted, klxpu]
+    timeout-minutes: 150
+    container:
+      image: hub.kunlunxin.com/public/klxpu-deepspeed:latest
+      options: >-
+        --privileged --ipc=host --cap-add=ALL
+        --device /dev/xpuctrl
+        --device /dev/xpu0 --device /dev/xpu1 --device /dev/xpu2 --device /dev/xpu3
+        --device /dev/xpu4 --device /dev/xpu5 --device /dev/xpu6 --device /dev/xpu7
+      volumes:
+        - ${{ vars.KLXPU_AIO_SCRATCH || '/tmp/klx_aio_scratch' }}:/aio_scratch
+      env:
+        http_proxy: ${{ vars.KLXPU_HTTP_PROXY }}
+        https_proxy: ${{ vars.KLXPU_HTTPS_PROXY }}
+
+    env:
+      CUDA_VISIBLE_DEVICES: "0,1,2,3"
+      TMPDIR: /aio_scratch
+      HF_HOME: /tmp/hf_home
+      HF_ENDPOINT: ${{ vars.KLXPU_HF_ENDPOINT }}
+      HF_HUB_DISABLE_XET: "1"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve conda env
+        shell: bash
+        run: |
+          source /root/miniconda/etc/profile.d/conda.sh
+          conda_env="$(conda env list | awk '$1 != "base" && $1 !~ /^#/ && NF {print $1; exit}')"
+          test -n "$conda_env"
+          echo "Using conda env: $conda_env"
+          echo "CONDA_ENV=$conda_env" >> "$GITHUB_ENV"
+
+      - name: Environment report
+        shell: bash
+        run: |
+          source /root/miniconda/etc/profile.d/conda.sh
+          conda activate "$CONDA_ENV"
+          xpu-smi || true
+          python --version
+          python -c "import torch, torch_xmlir; print('torch:', torch.__version__)"
+          python -c "import torch; print('device_count:', torch.cuda.device_count())"
+
+      - name: Install DeepSpeed (working tree)
+        shell: bash
+        run: |
+          source /root/miniconda/etc/profile.d/conda.sh
+          conda activate "$CONDA_ENV"
+          env -u http_proxy -u https_proxy pip install -U transformers
+          pip uninstall -y deepspeed || true
+          pip install -e . --no-deps --no-build-isolation
+          ds_report
+
+      - name: Check accelerator is klxpu
+        shell: bash
+        run: |
+          source /root/miniconda/etc/profile.d/conda.sh
+          conda activate "$CONDA_ENV"
+          python -c "from deepspeed.accelerator import get_accelerator; name = get_accelerator()._name; print('accelerator:', name); assert name == 'klxpu', name"
+
+      - name: Unit tests
+        shell: bash
+        run: |
+          source /root/miniconda/etc/profile.d/conda.sh
+          conda activate "$CONDA_ENV"
+          bash .github/workflows/klxpu/run-tests.sh
