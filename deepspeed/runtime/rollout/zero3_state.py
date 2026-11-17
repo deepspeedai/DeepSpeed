@@ -328,6 +328,7 @@ class Zero3Repartition:
         # ((source ranks, source partition sizes), state kinds) -> (plan, buckets); the target is this object's layout
         self._plans = {}
         self.plan, self.plan_cached = None, False
+        self.trace_restarted = False
 
     # -- membership ------------------------------------------------------------------------------------------------
 
@@ -400,12 +401,20 @@ class Zero3Repartition:
                     "scheduler": scheduler.state_dict() if scheduler is not None else None,
                 }
         cache_id = hashlib.sha1(repr(sorted(self._plans)).encode()).hexdigest()
+        # Whether this new member's parameter fetch trace is complete (None on a rank outside the new layout).
+        traced = None
+        if error is None and new_member:
+            traced = _zero3_optimizer(engine).parameter_offload.get_param_coordinator().is_complete_trace()
         everyone = [None] * dist.get_world_size()
-        dist.all_gather_object(everyone, (mine, error, cache_id))
-        errors = [e for _, e, _ in everyone if e]
+        dist.all_gather_object(everyone, (mine, error, cache_id, traced))
+        errors = [e for _, e, _, _ in everyone if e]
         if errors:
             raise RuntimeError("Zero3Repartition: " + "; ".join(errors))
-        info = next((m for m, _, _ in everyone if m is not None), None)
+        # The trace does not depend on the partition sizes, so members that all have a complete one keep it. A member
+        # without one (it has not stepped in this engine yet) would compare its trace with the others' in a collective
+        # that ranks with a complete trace do not join: then every member starts over and records the next step.
+        self.trace_restarted = not all(t for _, _, _, t in everyone if t is not None)
+        info = next((m for m, _, _, _ in everyone if m is not None), None)
         if info is None:
             raise ValueError("no rank holds the engine's state")
         moments = info["moments"]
@@ -414,7 +423,7 @@ class Zero3Repartition:
         # are part of the key: an optimizer has no moments before its first step, and a plan made then moves only the
         # fp32 master.
         key = (info["layout"], kinds)
-        cached = self._plans.get(key) if len({c for _, _, c in everyone}) == 1 else None
+        cached = self._plans.get(key) if len({c for _, _, c, _ in everyone}) == 1 else None
         self.plan_cached = cached is not None
         weights = [f"{kind}:{n}" for n, _ in info["params"] for kind in kinds]
         shapes = {f"{kind}:{n}": (numel, ) for n, numel in info["params"] for kind in kinds}
@@ -516,10 +525,8 @@ class Zero3Repartition:
         coordinator = offload.get_param_coordinator()
         if hasattr(coordinator, "_PartitionedParameterCoordinator__process_group"):
             coordinator._PartitionedParameterCoordinator__process_group = group
-        # The fetch trace is each rank's own: complete on a rank that kept training, empty on one that has not stepped
-        # in this engine yet, and a trace that is not complete is compared with the other ranks' in a collective at the
-        # next step. Every member therefore starts over, so that all of them record the next step together.
-        if not coordinator.is_invalid_trace():
+        # Every member starts its fetch trace over when one of them has no complete trace (see execute).
+        if self.trace_restarted and not coordinator.is_invalid_trace():
             coordinator._invalidate_trace()
         engine.mpu = self.mpu
         groups.mpu = self.mpu

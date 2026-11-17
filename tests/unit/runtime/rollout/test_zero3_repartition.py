@@ -183,7 +183,10 @@ class TestZero3Repartition(DistributedTest):
             freed = allocated - get_accelerator().memory_allocated()
             check(freed >= 3 * 4 * numel // 4, f"freed only {freed} bytes")
         Zero3StateMove(a4, a2, planner=planner).execute(release_source=True)
+        # Every rank had stepped, so the members keep their complete fetch traces (no step without prefetching).
+        check(not to_two.trace_restarted, "the shrink restarted complete traces")
         if rank in (0, 1):
+            check(engine.optimizer.parameter_offload.get_param_coordinator().is_complete_trace(), "trace after shrink")
             check_equal(full_state(engine), before, "B's move to two ranks")
             check(engine.gradient_accumulation_steps() == 2, "accumulation after the shrink")
             check(engine.dp_world_size == 2, "dp_world_size after the shrink")
@@ -241,6 +244,7 @@ class TestZero3Repartition(DistributedTest):
             batch = torch.randint(1, 101, (4, 6), generator=torch.Generator().manual_seed(200 + step)).to(device)
             if step == 2:
                 to_four.execute()
+                assert to_four.trace_restarted, "ranks without a fetch trace joined ranks with one, and nobody restarted"
             if step == 3:
                 to_two.execute()
             for e, members in ((engine, ranks), (plain, [0, 1, 2, 3])):
