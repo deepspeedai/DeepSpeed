@@ -8,7 +8,9 @@
 #include "ds_kernel_utils.h"
 
 #include <cuda.h>
-#ifdef BF16_AVAILABLE
+#if defined(BF16_AVAILABLE) && defined(__HIP_PLATFORM_AMD__) && !defined(__HIPCC__)
+#include <hip/amd_detail/amd_hip_bf16_gcc.h>
+#elif defined(BF16_AVAILABLE)
 #include <cuda_bf16.h>
 #endif
 #include <cuda_fp16.h>
