@@ -408,6 +408,40 @@ gradient norm after backward and before optimizer clipping in ``engine.step()``.
 Adam's first update can differ on the scale of the learning rate when a
 near-zero gradient changes sign, even if the overall gradients agree closely.
 
+``"activation"`` (experimental) applies the weight inside the expert
+activation instead, between the experts' first projections and their down
+projection: ``h = act(gate, up) * weight``. The down projection is linear and has
+no bias, so this is the same mathematical function as ``"post"``, without a
+separate pass over the expert output. For ``swiglu`` a
+fused Triton kernel computes ``silu(gate) * up * weight`` in FP32 with one
+rounding and returns the weight gradient from the same backward; other
+activations compute the same product in FP32 in plain PyTorch before casting
+to the projection dtype. This changes evaluation order and intermediate
+rounding, including for FP32; BF16/FP16 results round at the weighted activation
+instead of the weighted expert output. Bitwise equality to ``"eager"`` is not
+claimed. It requires ``score_apply`` to resolve to
+``"post"``, ``comm_backend="deepep"`` and ``autoep_size > 1``, and is rejected
+otherwise.
+
+Both separate and fused gate+up projections are supported. The packed SwiGLU
+path reads the two projection halves in place and writes a packed gradient,
+using the same weighted kernel arithmetic without copying the halves.
+With ``overlap_weight_grad``, the custom expert backward returns the FP32
+row-weight gradient alongside dX; only the parameter-gradient GEMMs are deferred.
+This preserves the router gradient through DeepEP's async combine. The parent
+option's ZeRO-stage/backend restrictions still apply.
+
+Weighted Triton activations support first-order gradients only:
+``create_graph=True`` raises. Forward and backward select the input device's
+current stream and restore the caller's device. Unsupported weight shape,
+dtype or device placement is rejected before launching a kernel.
+
+On Qwen3-30B-A3B with 8 H100s (expert parallel size 8, micro-batch 4, 16
+accumulation steps, sequence length 4096, DeepEP with 36 SMs), an equivalent
+benchmark prototype cut the step by 685 ms (3.5%) against the separate
+weighting pass. The rest of the stack also had the fused gate+up projection,
+the backward weight-gradient overlap and the recomputed-combine skip.
+
 ``"fused"`` is rejected, rather than silently ignored, when AutoEP cannot honor
 it:
 
