@@ -18,12 +18,12 @@ IN, ODD, HIDDEN = 1000, 999, 1024
 BATCH, STEPS = 4, 3
 
 
-def _skip_if_unsupported():
+def _skip_if_unsupported(dtype=torch.bfloat16):
     if not deepspeed.ops.__compatible_ops__[AsyncIOBuilder.NAME]:
         pytest.skip("async_io is not compatible")
     if not deepspeed.ops.__compatible_ops__[CPUAdamBuilder.NAME]:
         pytest.skip("cpu_adam is not compatible")
-    if not get_accelerator().is_bf16_supported():
+    if dtype == torch.bfloat16 and not get_accelerator().is_bf16_supported():
         pytest.skip("bf16 is not supported")
 
 
@@ -115,5 +115,5 @@ class TestZero3NVMeOffload(DistributedTest):
     # The tests above train in bf16 only (#9095).
     @pytest.mark.parametrize("fast_init", [False, True])
     def test_param_and_optimizer_fp32(self, tmpdir, fast_init):
-        _skip_if_unsupported()
+        _skip_if_unsupported(torch.float32)
         _assert_trains_like_cpu_offload(tmpdir, "nvme", "nvme", dtype=torch.float32, fast_init=fast_init)
