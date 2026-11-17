@@ -693,6 +693,10 @@ class TestBufferLifecycle(unittest.TestCase):
         exchange = mock.Mock(num_max_tokens_per_rank=512)
         layer = mock.Mock(_deepep_exchange=exchange)
 
+        # The capacity check lives in _ensure_deepep_exchange, which the route calls first; the stand-in layer gets
+        # the real method so the test still goes through the route.
+        layer._ensure_deepep_exchange = functools.partial(auto_ep_layer.AutoEPMoELayer._ensure_deepep_exchange, layer)
+
         with mock.patch.object(auto_ep_layer.dist, "all_reduce", lambda *a, **k: None):
             router_output = auto_ep_layer.RouterOutput(
                 top_scores=torch.ones((600, 1)),

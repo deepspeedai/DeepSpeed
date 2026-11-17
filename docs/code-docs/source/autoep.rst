@@ -508,6 +508,59 @@ Requirements and limits:
 - Not compatible with folded tensor parallelism
   (``expert_tensor_parallel_size > 1``), which is rejected at setup.
 
+**Overlapping DeepEP transfers across micro-batches (experimental):**
+
+With a trained router the experts receive uneven numbers of rows, and every
+DeepEP dispatch and combine waits for the rank that received the most. Within
+one micro-batch little independent work is available to run beside those
+transfers. ``MicroBatchOverlap`` runs the backward of micro-batch i together
+with the forward of micro-batch i+1, layer by layer, as Megatron-LM's
+``--overlap-moe-expert-parallel-comm`` does: forward layer ``k`` is paired with
+backward layer ``L - 1 - k``, and each transfer of one micro-batch is queued
+beside a computation of the other.
+
+It replaces the forward and backward of one optimizer step's micro-batches; the
+caller still makes the one ``engine.step()``:
+
+.. code-block:: python
+
+    from deepspeed.module_inject.auto_ep_microbatch_overlap import MicroBatchOverlap
+
+    overlap = MicroBatchOverlap(engine)
+    for step_batches in loader:  # the gradient_accumulation_steps micro-batches of one step
+        losses = overlap.forward_backward([{"input_ids": ids, "labels": ids} for ids in step_batches])
+        engine.step()
+
+Set ``EP_AVOID_RECORD_STREAM=1`` in the environment. DeepEP reads it on every
+asynchronous call: unset, it marks every tensor of an in-flight transfer as in
+use by both streams, and with two micro-batches in flight the allocator cache
+fragments.
+
+Every decoder layer is recomputed in its backward, keeping only its input and
+its DeepEP handle, as with full activation checkpointing; the recompute replays
+the forward's dispatch layout and does not repeat the forward's combine. The
+layer inputs saved for the backward live in one preallocated buffer of
+``num_layers + 1`` slots, so their long lifetimes do not fragment the cache.
+While a transfer is in flight, the computation beside it runs with
+``comm_num_sm`` SMs withheld through PyTorch's experimental SM carveout.
+
+On Qwen3-30B-A3B with its released weights and trained router on 8 H100s
+(expert parallel size 8, micro-batch 4, 16 accumulation steps, sequence length
+4096, ZeRO-2, bf16 master weights and Adam states), a step went from 32.90 s to
+27.76 s (-15.6%) with 16 DeepEP SMs, against the plain accumulation loop with
+64; the global loss matched within 4e-5. Peak allocated memory was 1.9 GiB lower
+and peak reserved memory 1.8 GiB higher (6.4 GiB higher again without
+``EP_AVOID_RECORD_STREAM=1``).
+
+``MicroBatchOverlap`` is rejected at construction, rather than silently
+ignored, for: models that are not Hugging Face causal LMs with
+``model.model.layers``; layers whose ``mlp`` is not an AutoEP layer on
+``comm_backend="deepep"`` with ``autoep_size > 1``; ZeRO stage 3; shared
+experts, router logits (the auxiliary loss) and AutoEP+AutoTP folding; tied
+embeddings; attention dropout; and the layer options ``overlap_weight_grad`` and
+``skip_recompute_combine``, which act inside the layer's own forward that this
+schedule does not call.
+
 **Python cyclic GC (experimental):**
 
 Large Python model graphs can accumulate cyclic objects during training, and a

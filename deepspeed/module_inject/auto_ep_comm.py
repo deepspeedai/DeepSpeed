@@ -21,6 +21,7 @@ sized at construction and are expensive to rebuild.
 
 from __future__ import annotations
 
+import contextlib
 import itertools
 import weakref
 
@@ -271,7 +272,14 @@ class DeepEPExchange:
         The weights travel with the tokens because the reduction that uses
         them happens on the receiving side, after the experts have run.
         """
-        recv_x, _, recv_weights, handle, _ = self.buffer.dispatch(
+        recv_x, recv_weights, handle, _ = self._expanded_dispatch(tokens, topk_idx, topk_weights)
+        return recv_x, recv_weights, handle
+
+    def _expanded_dispatch(self, tokens: torch.Tensor, topk_idx: torch.Tensor, topk_weights: torch.Tensor,
+                           **stream_options):
+        """The forward dispatch behind :meth:`dispatch` and :meth:`dispatch_async`; ``stream_options`` are DeepEP's
+        asynchronous-call arguments."""
+        recv_x, _, recv_weights, handle, event = self.buffer.dispatch(
             tokens,
             topk_idx=topk_idx.to(self.deep_ep.topk_idx_t),
             # DeepEP reduces in float32, and the router's scores may be bf16.
@@ -286,11 +294,12 @@ class DeepEPExchange:
             # offsets have to describe the rows that are actually there.
             expert_alignment=1,
             num_sms=self.num_sms,
+            **stream_options,
         )
         # The returned event only holds anything when the call was made with
         # async_with_compute_stream; a synchronous result is already usable.
         self.last_handle = handle
-        return recv_x, recv_weights, handle
+        return recv_x, recv_weights, handle, event
 
     def dispatch_with_handle(self, tokens: torch.Tensor, handle) -> torch.Tensor:
         """Replay a dispatch against a cached handle.
@@ -298,7 +307,12 @@ class DeepEPExchange:
         Used as the backward of a combine, which scatters the combined
         gradient back to the rows that contributed to it.
         """
-        recv_x, _, _, _, _ = self.buffer.dispatch(
+        recv_x, _ = self._dispatch_with_handle(tokens, handle)
+        return recv_x
+
+    def _dispatch_with_handle(self, tokens: torch.Tensor, handle, **stream_options):
+        """The cached dispatch behind :meth:`dispatch_with_handle` and :meth:`dispatch_with_handle_async`."""
+        recv_x, _, _, _, event = self.buffer.dispatch(
             tokens,
             handle=handle,
             num_sms=self.num_sms,
@@ -306,8 +320,9 @@ class DeepEPExchange:
             # for a cached dispatch, while combine reads it from the handle. The
             # forward dispatch is expanded, so the replay must ask for it too.
             do_expand=handle.do_expand,
+            **stream_options,
         )
-        return recv_x
+        return recv_x, event
 
     def replay_dispatch(self, tokens: torch.Tensor, topk_idx: torch.Tensor, topk_weights: torch.Tensor, handle):
         """Repeat a forward dispatch in the layout its handle recorded.
@@ -316,6 +331,13 @@ class DeepEPExchange:
         routing must be the one the handle was built from; a different routing
         cannot be reproduced from it.
         """
+        recv_x, recv_weights, _ = self._replayed_dispatch(tokens, topk_idx, topk_weights, handle)
+        self.last_handle = handle
+        return recv_x, recv_weights, handle
+
+    def _replayed_dispatch(self, tokens: torch.Tensor, topk_idx: torch.Tensor, topk_weights: torch.Tensor, handle,
+                           **stream_options):
+        """The replay behind :meth:`replay_dispatch` and :meth:`replay_dispatch_async`."""
         recorded = handle.topk_idx
         selected = topk_idx.to(recorded.dtype)
         if selected.shape != recorded.shape:
@@ -323,15 +345,57 @@ class DeepEPExchange:
                                f"{tuple(selected.shape)}, but its forward pass routed {tuple(recorded.shape)}")
         # Checked on the device: comparing on the host would stall every recomputed layer.
         torch._assert_async((selected == recorded).all(), "activation checkpointing recomputed a different routing")
-        recv_x, _, recv_weights, _, _ = self.buffer.dispatch(
+        recv_x, _, recv_weights, _, event = self.buffer.dispatch(
             tokens,
             topk_weights=None if topk_weights is None else topk_weights.float(),
             handle=handle,
             num_sms=self.num_sms,
             do_expand=handle.do_expand,
+            **stream_options,
         )
-        self.last_handle = handle
-        return recv_x, recv_weights, handle
+        return recv_x, recv_weights, event
+
+    def capture_event(self):
+        """An event on the current stream, for :meth:`dispatch_async` to start after instead of after everything."""
+        return self.buffer.capture()
+
+    def dispatch_async(self,
+                       tokens: torch.Tensor,
+                       topk_idx: torch.Tensor,
+                       topk_weights: torch.Tensor,
+                       previous_event=None):
+        """:meth:`dispatch` on DeepEP's stream, also returning the event to wait on before reading the result.
+
+        The current stream does not wait for it, so work queued next runs while the transfer is in flight. The
+        host still waits for the received row counts, as a fresh dispatch must. With ``previous_event`` (from
+        :meth:`capture_event`) the transfer waits only for the work before that event, so computation queued
+        after it, before this call, keeps the GPU busy while the host waits.
+        """
+        return self._expanded_dispatch(
+            tokens,
+            topk_idx,
+            topk_weights,
+            previous_event=previous_event,
+            # DeepEP requires this with previous_event: the outputs must not take memory the compute stream is
+            # still using for the work queued after the event.
+            allocate_on_comm_stream=previous_event is not None,
+            async_with_compute_stream=True)
+
+    def replay_dispatch_async(self, tokens: torch.Tensor, topk_idx: torch.Tensor, topk_weights: torch.Tensor, handle):
+        """:meth:`replay_dispatch` on DeepEP's stream, returning the event to wait on before reading the result."""
+        return self._replayed_dispatch(tokens, topk_idx, topk_weights, handle, async_with_compute_stream=True)
+
+    def dispatch_with_handle_async(self, tokens: torch.Tensor, handle):
+        """:meth:`dispatch_with_handle` on DeepEP's stream, returning the event to wait on before reading."""
+        return self._dispatch_with_handle(tokens, handle, async_with_compute_stream=True)
+
+    def combine_async(self, rows: torch.Tensor, handle):
+        """:meth:`combine` on DeepEP's stream, returning the event to wait on before reading the result."""
+        combined, _, event = self.buffer.combine(rows,
+                                                 handle=handle,
+                                                 num_sms=self.num_sms,
+                                                 async_with_compute_stream=True)
+        return combined, event
 
     def combine_with_weight_grad(self, rows: torch.Tensor, handle, weight_grads=None):
         """Combine that also reduces the routing-weight gradient.
@@ -394,8 +458,9 @@ class DeepEPExchange:
         self.buffer.destroy()
 
 
-def run_with_sm_carveout(num_sms: int, compute):
-    """Run ``compute`` with ``num_sms`` SMs withheld from the GEMMs it launches.
+@contextlib.contextmanager
+def sm_carveout(num_sms: int):
+    """Withhold ``num_sms`` SMs from the GEMMs launched inside.
 
     torch._grouped_mm launches persistent kernels sized to every SM, which would leave a concurrent communication
     kernel nowhere to run.
@@ -403,9 +468,15 @@ def run_with_sm_carveout(num_sms: int, compute):
     previous = torch._C._get_sm_carveout_experimental()
     torch._C._set_sm_carveout_experimental(num_sms)
     try:
-        return compute()
+        yield
     finally:
         torch._C._set_sm_carveout_experimental(previous)
+
+
+def run_with_sm_carveout(num_sms: int, compute):
+    """Run ``compute`` with ``num_sms`` SMs withheld from the GEMMs it launches (see :func:`sm_carveout`)."""
+    with sm_carveout(num_sms):
+        return compute()
 
 
 def _in_backward() -> bool:
