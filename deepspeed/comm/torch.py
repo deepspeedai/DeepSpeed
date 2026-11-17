@@ -671,6 +671,28 @@ class TorchBackend(Backend):
         from torch.distributed._symmetric_memory import enable_symm_mem_for_group
         return enable_symm_mem_for_group(group_name)
 
+    def symm_mem_rendezvous(self, numel, dtype, group=None):
+        """Allocate ``numel`` elements every member of ``group`` can address, and exchange handles."""
+        if not required_torch_version(min_version=2.5):
+            raise RuntimeError(f"Torch version must be 2.5 or higher to use symmetric memory. "
+                               f"Current version: {torch.__version__}")
+        import torch.distributed._symmetric_memory as symm_mem
+        group = group if group is not None else torch.distributed.group.WORLD
+        buffer = symm_mem.empty(numel, dtype=dtype, device=get_accelerator().current_device_name())
+        return buffer, symm_mem.rendezvous(buffer, group.group_name)
+
+    def symm_mem_peer_tensor(self, handle, peer, numel, dtype):
+        """``peer``'s symmetric buffer as a tensor on this process's device."""
+        device = torch.device(get_accelerator().current_device_name())
+        if device.type == 'cuda':
+            return handle.get_buffer(peer, (numel, ), dtype)
+        # Other backends return a view without a device index, so rebuild it from the mapped address.
+        address = handle.buffer_ptrs[peer]
+        address = address - (1 << 64) if address >= 1 << 63 else address
+        nbytes = numel * torch.empty((), dtype=dtype).element_size()
+        storage = torch._C._construct_storage_from_data_pointer(address, device, nbytes)
+        return torch.empty(0, dtype=dtype, device=device).set_(storage, 0, (numel, ))
+
 
 # This will become a light-weight wrapper around torch.distributed functions
 # TODO: create some example to show how this wrapper can help profile communication
