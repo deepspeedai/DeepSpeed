@@ -15,7 +15,6 @@ from deepspeed.accelerator import get_accelerator
 from .replace_policy import replace_policies, generic_policies
 from .auto_tp import AutoTP, ReplaceWithTensorSlicing, Loading
 from .layers import TensorParallelOcShardConv2d, TensorParallelIcShardConv2d
-from deepspeed.module_inject.layers import is_autotp_training_mode
 from deepspeed import comm as dist
 
 from .load_checkpoint import load_model_with_checkpoint
@@ -154,12 +153,6 @@ def generic_injection(module, dtype=None, enable_cuda_graph=True):
         except ImportError:
             new_policies = {}
 
-        #replace_transformer_layer(None,
-        #                          module.text_encoder,
-        #                          training=False,
-        #                          replace_with_kernel_inject=True,
-        #                          triangular_masking=True,
-        #                          max_out_tokens=8192)
         from ..model_implementations.transformers.clip_encoder import DSClipEncoder
         cg_encoder = DSClipEncoder(module.text_encoder, enable_cuda_graph=enable_cuda_graph)
         setattr(module, 'text_encoder', cg_encoder)
@@ -185,7 +178,13 @@ def generic_injection(module, dtype=None, enable_cuda_graph=True):
 container_g = None
 
 
-def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, model_config, training_mode=False):
+def replace_transformer_layer(orig_layer_impl,
+                              model,
+                              checkpoint_dict,
+                              config,
+                              model_config,
+                              training_mode=False,
+                              replacement_sources=None):
     """ Replace bert-style transformer layers with DeepSpeed's transformer layer
     Arguments:
         orig_layer_impl (torch.nn.Module): the original transformer layer implementation to look for,
@@ -194,6 +193,8 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
         checkpoint_dict: Dictionary for checkpoint passed from the Inference Engine
         config: top-level DS Inference config defined in inference/config.py
         model_config: HuggingFace model config passed from the inference/engine.py
+        replacement_sources: optional ReplacementSourceMap that collects the parameters AutoTP replaced
+            (the weights of a model built under zero.Init), so the caller can re-point its optimizer
     Returns:
         Updated nn.module with replaced transformer layers
     """
@@ -271,8 +272,6 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
         return _container.module
 
     def replace_wo_policy(module, all_reduce_linears, prefix="", state_dict=None):
-        #mp_replace = ReplaceWithTensorSlicing(mp_group=config.tensor_parallel.tp_group)
-
         # Get the configurable partition_config if available
         partition_config = None
         if hasattr(config, 'get_partition_config_object'):
@@ -299,6 +298,7 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
                          orig_layer_impl,
                          config.keep_module_on_host,
                          partition_config=partition_config,
+                         vocab_parallel_lm_head=getattr(config, "vocab_parallel_lm_head", False) is True,
                          model_config=meta_config,
                          tp_grain_size=config.tensor_parallel.tp_grain_size,
                          training_mode=training_mode)
@@ -311,12 +311,17 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
 
         # 5. Replace modules
         if "lm_head" in all_reduce_linears or "embed_out" in all_reduce_linears:
-            return _autotp._replace_last_linear_module(module)
-        return _autotp._replace_module(module)
+            new_module = _autotp._replace_last_linear_module(module)
+        else:
+            new_module = _autotp._replace_module(module)
+        # Parameters AutoTP replaced (weights of a model built under zero.Init), for the caller's optimizer.
+        if replacement_sources is not None:
+            replacement_sources.update(_autotp.replacement_sources)
+        return new_module
 
     def replace_fn(child, _policy, layer_id=0, prefix="", state_dict=None):
         # copy relevant state from child -> new module
-        if not is_autotp_training_mode() and config.replace_with_kernel_inject:
+        if not training_mode and config.replace_with_kernel_inject:
             new_module = replace_with_policy(child,
                                              _policy,
                                              config.triangular_masking,
@@ -328,7 +333,7 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
         return new_module
 
     def set_lm_head(module):
-        if is_autotp_training_mode():
+        if training_mode:
             # we need to handle autoTP training mode separately.
             return
 
@@ -472,7 +477,7 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
         set_lm_head(replaced_module)
         print(f"checkpoint loading time at rank {rank}: {time.time()-start_time} sec")
 
-    if not is_autotp_training_mode() and config.save_mp_checkpoint_path is not None:
+    if not training_mode and config.save_mp_checkpoint_path is not None:
         from collections import OrderedDict
         import json
         num_partitions = 8
@@ -552,7 +557,6 @@ def revert_transformer_layer(orig_layer_impl, model, config, preln=False):
     """
 
     def replace_fn(child, _replace_policy, layer_id):
-        #from turing.nvidia_modelingpreln import BertLayer
         orig_module = orig_layer_impl(config)
 
         # copy relevant state from child -> original module

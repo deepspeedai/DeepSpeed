@@ -140,7 +140,6 @@ def get_sweep_cmd_lines(sweep_config_dict):
     flat_list = [flatten_options(_handle_key_deprecation(key), value) for key, value in sweep_config_dict.items()]
     cmd_list = list(itertools.product(*flat_list))
     cmd_list = [list(cmd) for cmd in cmd_list]
-    #dump_cmd_lines(cmd_list)
     return cmd_list
 
 
@@ -250,7 +249,6 @@ def remove_folder(folder):
 
 def run_read_sweep(sweep_config, flush_cache_job, sync_job, cmd_lines):
     read_cmd_lines = [[f'--read {sweep_config.other_options}'] + cmd for cmd in cmd_lines]
-    #dump_cmd_lines(cmd_lines)
 
     log_folder = os.path.join(sweep_config.log_dir, f'{READ_LOG_DIR}')
     os.makedirs(log_folder, exist_ok=True)
@@ -262,7 +260,6 @@ def run_read_sweep(sweep_config, flush_cache_job, sync_job, cmd_lines):
 
 def run_write_sweep(sweep_config, flush_cache_job, sync_job, cmd_lines):
     write_cmd_lines = [[f'{sweep_config.other_options}'] + cmd for cmd in cmd_lines]
-    #dump_cmd_lines(write_cmd_lines)
 
     log_folder = os.path.join(sweep_config.log_dir, f'{WRITE_LOG_DIR}')
     os.makedirs(log_folder, exist_ok=True)

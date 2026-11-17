@@ -34,6 +34,8 @@ on:
     paths-ignore:
       - 'docs/**'
       - 'blogs/**'
+      - '*.md'
+      - 'version.txt'
       - 'deepspeed/inference/v2/**'
       - 'tests/unit/inference/v2/**'
     types: [review_requested, ready_for_review, synchronize]
@@ -128,7 +130,7 @@ jobs:
       - name: Install Python
         uses: actions/setup-python@v7
         with:
-          python-version: "3.10"
+          python-version: "3.12"
           cache: 'pip' # caching pip dependencies
 
       - name: Install build dependencies

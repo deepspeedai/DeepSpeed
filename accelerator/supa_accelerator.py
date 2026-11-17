@@ -62,6 +62,15 @@ class SUPA_Accelerator(DeepSpeedAccelerator):
     def random(self):
         return torch.random
 
+    def register_host_memory(self, address, num_bytes):
+        result = int(torch.supa.supart().supaHostRegister(address, num_bytes, 0))
+        torch.supa.check_error(result)
+        return True
+
+    def unregister_host_memory(self, address):
+        result = int(torch.supa.supart().supaHostUnregister(address))
+        torch.supa.check_error(result)
+
     def set_rng_state(self, new_state, device_index=None):
         if device_index is None:
             return torch.supa.set_rng_state(new_state)
@@ -245,7 +254,7 @@ class SUPA_Accelerator(DeepSpeedAccelerator):
             module = importlib.import_module("{}.{}".format(op_builder_dir, module_name))
             for member_name in module.__dir__():
                 if (member_name.endswith('Builder')
-                        and member_name not in ('OpBuilder', 'CUDAOpBuilder', 'TorchCPUOpBuilder', 'SUPAOpBuilder')):
+                        and member_name not in ('OpBuilder', 'CUDAOpBuilder', 'SUPAOpBuilder')):
                     if member_name not in self.class_dict:
                         self.class_dict[member_name] = getattr(module, member_name)
 

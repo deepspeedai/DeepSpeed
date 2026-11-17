@@ -10,6 +10,7 @@ ABC. This keeps engine-specific concerns out of the trainer loop.
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from typing import Optional
 
 import torch
 
@@ -25,13 +26,17 @@ class RolloutConfig:
 
 @dataclass
 class SamplingConfig:
-    """Sampling knobs that the trainer passes to ``generate`` each step."""
+    """Sampling knobs that the trainer passes to ``generate`` each step.
+
+    ``top_k <= 0`` disables top-k filtering.
+    """
 
     max_new_tokens: int
     temperature: float = 1.0
     top_p: float = 1.0
     top_k: int = -1
     n_samples_per_prompt: int = 1
+    continuous_batch_size: Optional[int] = None
 
 
 @dataclass

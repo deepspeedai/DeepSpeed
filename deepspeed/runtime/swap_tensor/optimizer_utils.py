@@ -207,10 +207,27 @@ class OptimizerSwapper(object):
         for swap_info in self.swap_params_info.values():
             swap_info.tensors = [swap_info.tensors[0]]
             swap_info.has_state_tensors = False
+            swap_info.release_unswapped_gradients()
+
+    def _writeback_gradients(self, swap_info, parameter, aio_handle):
+        """Persist a parameter's gradient partitions, whichever way they are stored."""
+        if swap_info.swapped_gradients:
+            param_gradients = swap_info.swapped_gradients.values()
+            swap_buffers = [parameter.grad.narrow(0, grad.offset, grad.length) for grad in param_gradients]
+            swap_paths = [grad.path for grad in param_gradients]
+            swap_out_tensors(aio_handle, swap_buffers, swap_paths)
+            assert len(swap_buffers) == aio_handle.wait()
+        if swap_info.unswapped_gradients:
+            # Keep these updated CPU fragments for the next swap-in before the
+            # optimizer step; only the post-step swap-out may release them.
+            swap_info.write_unswapped_gradients(src_buffer=parameter.grad)
 
     def is_swappable_tensor(self, tensor=None, numel=None):
         assert tensor is not None or numel is not None, "Either tensor or numel must be provided"
         if tensor is not None:
+            # Callers can keep an optimizer state in memory by marking it non-swappable.
+            if not getattr(tensor, "swappable", True):
+                return False
             return self.min_aio_bytes <= (tensor.numel() * self.swap_element_size)
         return self.min_aio_bytes <= (numel * self.swap_element_size)
 
@@ -324,6 +341,7 @@ class OptimizerSwapper(object):
         swap_paths = []
         unswapped_srcs = []
         unswapped_dsts = []
+        staged_dsts = []
 
         for i, numel in enumerate(fp16_num_elems):
             pinned_tensor, _ = fp16_swap_buffers.allocate_tensor(numel, None, numel)
@@ -337,6 +355,13 @@ class OptimizerSwapper(object):
                 if partition_path is None:
                     unswapped_srcs.append(tensor)
                     unswapped_dsts.append(dst_tensor)
+                elif (partition_numel * dst_tensor.element_size()) % self.aligned_bytes != 0:
+                    # Direct I/O reads whole blocks: read the padded partition that the swap file holds, then copy
+                    # the partition out of it.
+                    staging_numel = os.path.getsize(partition_path) // dst_tensor.element_size()
+                    swap_paths.append(partition_path)
+                    swap_tensors.append(aio_handle.new_cpu_locked_tensor(staging_numel, dst_tensor))
+                    staged_dsts.append((swap_tensors[-1], dst_tensor))
                 else:
                     swap_paths.append(partition_path)
                     swap_tensors.append(dst_tensor)
@@ -349,6 +374,10 @@ class OptimizerSwapper(object):
 
         if len(swap_tensors) > 0:
             assert len(swap_tensors) == aio_handle.wait()
+
+        for staging_tensor, dst in staged_dsts:
+            dst.data.copy_(staging_tensor.narrow(0, 0, dst.numel()))
+            aio_handle.free_cpu_locked_tensor(staging_tensor)
 
         return swapped_fp16_tensors
 
@@ -466,9 +495,6 @@ class OptimizerSwapper(object):
         num_elem_count = swap_info.read_unswapped_gradients(dest_buffer)
         self._stop_timer(UNSWAPPED_READ_GRADIENTS)
         self._log_timers([UNSWAPPED_READ_GRADIENTS])
-
-        # It should be safe to discard unswapped gradient partitions
-        swap_info.release_unswapped_gradients()
 
         if SWAPPER_DEBUG_MODE:
             logger.info(

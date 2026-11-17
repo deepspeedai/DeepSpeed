@@ -35,6 +35,61 @@ def _tol(dtype):
     return dict(atol=3e-2, rtol=3e-2)  # bfloat16
 
 
+@pytest.mark.parametrize("trans_b", [False, True])
+def test_deterministic_grouped_forward_and_backward(trans_b):
+    before = (torch.are_deterministic_algorithms_enabled(), torch.is_deterministic_algorithms_warn_only_enabled())
+    try:
+        torch.use_deterministic_algorithms(True)
+        torch.manual_seed(1234)
+        a = torch.randn(37, 64, device="cuda", dtype=torch.bfloat16)
+        shape = (3, 128, 64) if trans_b else (3, 64, 128)
+        b = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+        offsets = torch.tensor([13, 13, 37], device="cuda", dtype=torch.int32)
+        gradient = torch.randn(37, 128, device="cuda", dtype=torch.bfloat16)
+        results = []
+        for _ in range(3):
+            inputs = a.clone().requires_grad_()
+            weights = b.clone().requires_grad_()
+            output = group_gemm_triton(inputs, weights, offsets, trans_b=trans_b)
+            output.backward(gradient)
+            results.append((output.detach().clone(), inputs.grad.clone(), weights.grad.clone()))
+        for result in results[1:]:
+            for expected, actual in zip(results[0], result):
+                assert torch.equal(expected.contiguous().view(torch.uint8), actual.contiguous().view(torch.uint8))
+    finally:
+        torch.use_deterministic_algorithms(before[0], warn_only=before[1])
+
+
+def test_deterministic_float32_uses_ieee_precision():
+    deterministic_before = (torch.are_deterministic_algorithms_enabled(),
+                            torch.is_deterministic_algorithms_warn_only_enabled())
+    tf32_before = torch.backends.cuda.matmul.allow_tf32
+    try:
+        torch.use_deterministic_algorithms(True)
+        torch.backends.cuda.matmul.allow_tf32 = False
+        a = torch.full((32, 32), 1.0001, device="cuda", dtype=torch.float32)
+        b = torch.full((1, 32, 32), 1.0001, device="cuda", dtype=torch.float32)
+        offsets = torch.tensor([32], device="cuda", dtype=torch.int32)
+        gradient = torch.full((32, 32), 1.0001, device="cuda", dtype=torch.float32)
+
+        actual_a = a.clone().requires_grad_()
+        actual_b = b.clone().requires_grad_()
+        actual = group_gemm_triton(actual_a, actual_b, offsets)
+        actual.backward(gradient)
+
+        expected_a = a.clone().requires_grad_()
+        expected_b = b.clone().requires_grad_()
+        expected = _ref_grouped_mm(expected_a, expected_b, offsets)
+        expected.backward(gradient)
+
+        torch.testing.assert_close(actual, expected, atol=1e-5, rtol=1e-5)
+        torch.testing.assert_close(actual_a.grad, expected_a.grad, atol=1e-5, rtol=1e-5)
+        torch.testing.assert_close(actual_b.grad, expected_b.grad, atol=1e-5, rtol=1e-5)
+    finally:
+        torch.backends.cuda.matmul.allow_tf32 = tf32_before
+        torch.use_deterministic_algorithms(deterministic_before[0], warn_only=deterministic_before[1])
+
+
 def _ref_grouped_mm(a, b, offs):
     """Pure-PyTorch reference: out[rows_g] = a[rows_g] @ b[g]."""
     outs = []
@@ -113,15 +168,21 @@ _SHAPES = [
     ([1, 1, 1], 16, 16),  # single-row groups
 ]
 
-# bfloat16 requires compute capability >= 8.0 (Ampere+); include it only there.
-_DTYPES = [torch.float16, torch.float32]
-if torch.cuda.get_device_capability()[0] >= 8:  #ignore-cuda
-    _DTYPES = [torch.bfloat16] + _DTYPES
+_DTYPES = [torch.bfloat16, torch.float16, torch.float32]
+
+
+def _skip_unsupported_dtype(dtype):
+    # bfloat16 requires compute capability >= 8.0 (Ampere+). This runs inside each test instead of at module level,
+    # because querying the device initializes CUDA in the process that collects the tests, and tests forked from that
+    # process (pytest --forked) then cannot use CUDA.
+    if dtype == torch.bfloat16 and torch.cuda.get_device_capability()[0] < 8:  #ignore-cuda
+        pytest.skip("bfloat16 requires compute capability >= 8.0")
 
 
 @pytest.mark.parametrize("counts,K,N", _SHAPES)
 @pytest.mark.parametrize("dtype", _DTYPES)
 def test_forward_matches_reference(counts, K, N, dtype):
+    _skip_unsupported_dtype(dtype)
     dev = get_accelerator().current_device_name()
     torch.manual_seed(0)
     E = len(counts)
@@ -141,6 +202,7 @@ def test_forward_matches_reference(counts, K, N, dtype):
 @pytest.mark.parametrize("counts,K,N", _SHAPES)
 @pytest.mark.parametrize("dtype", _DTYPES)
 def test_backward_matches_reference(counts, K, N, dtype):
+    _skip_unsupported_dtype(dtype)
     dev = get_accelerator().current_device_name()
     torch.manual_seed(1)
     E = len(counts)
@@ -175,6 +237,7 @@ def test_trans_b_matches_reference(counts, K, N, dtype):
     autograd tape so the weight gradient is produced directly in [E,N,K] with no
     materialization copy. Result must equal the explicit-transpose path.
     """
+    _skip_unsupported_dtype(dtype)
     dev = get_accelerator().current_device_name()
     torch.manual_seed(5)
     E = len(counts)

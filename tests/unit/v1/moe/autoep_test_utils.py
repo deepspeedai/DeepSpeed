@@ -3,6 +3,7 @@
 """Shared fixtures and assertions for compact AutoEP tests."""
 
 import copy
+import gc
 import os
 import tempfile
 import traceback
@@ -216,6 +217,30 @@ def make_autoep_config(zero_stage=0, ep_size=1, load_balance_coeff=UNSET, mixed_
     return config
 
 
+def make_autoep_client_optimizer_config(zero_stage=3, ep_size=2):
+    """AutoEP config with NO ``optimizer`` block, so the caller's own optimizer is the one used.
+
+    bf16 deliberately, not the shared fp16 helper: fp16 carries a loss scaler that skips the first
+    optimizer step(s) on overflow, so no parameter would move and an "did this parameter update"
+    test could not tell "frozen because of the bug" from "frozen because the step was skipped".
+    """
+    return {
+        "bf16": {
+            "enabled": True
+        },
+        "train_micro_batch_size_per_gpu": 1,
+        "zero_optimization": {
+            "stage": zero_stage
+        },
+        "expert_parallel": {
+            "enabled": True,
+            "autoep_size": ep_size,
+            "preset_model": "mixtral",
+            "use_grouped_mm": False,
+        },
+    }
+
+
 def make_autoep_integration_config(zero_stage=0, ep_size=2):
     return make_autoep_config(zero_stage=zero_stage, ep_size=ep_size, mixed_precision=False)
 
@@ -349,6 +374,26 @@ def tiny_mixtral_config(transformers):
     )
 
 
+def tiny_minimax_m3_config(transformers):
+    return transformers.MiniMaxM3VLTextConfig(
+        vocab_size=64,
+        hidden_size=32,
+        intermediate_size=64,
+        shared_intermediate_size=64,
+        dense_intermediate_size=64,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=8,
+        max_position_embeddings=64,
+        num_local_experts=4,
+        num_experts_per_tok=2,
+        output_router_logits=True,
+        tie_word_embeddings=False,
+        use_cache=False,
+    )
+
+
 def _cpu_gloo_worker_entry(rank, world_size, init_method, master_port, worker, shared_tmpdir, error_queue):
     set_accelerator(CPU_Accelerator())
     os.environ["MASTER_ADDR"] = "127.0.0.1"
@@ -368,6 +413,8 @@ def _cpu_gloo_worker_entry(rank, world_size, init_method, master_port, worker, s
     finally:
         if dist.is_initialized():
             dist.destroy_process_group()
+            # Completed test-engine cycles can otherwise retain Gloo groups until interpreter finalization.
+            gc.collect()
 
 
 def run_cpu_gloo_test(worker, tmpdir, *, world_size=4, timeout=DEEPSPEED_TEST_TIMEOUT):

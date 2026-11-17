@@ -30,13 +30,13 @@ def fp_quantize(input: torch.FloatTensor,
                 group_size: int = -1):
     """
     Args:
-        inputs (`torch.FloatTensor`)
+        input (`torch.FloatTensor`)
             The input which needs to be quantized
         num_bits (int, >=4)
             Number of bits to use for quantization
         exp_bits:
             fp exp_bits
-        min_value/max_vlue (torch.FloatTensor)
+        min_value/max_value (torch.FloatTensor)
             Used for static activation quantization
         group_size (int) N
             The quantization block size, each N numbers has its own scaling

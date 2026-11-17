@@ -127,13 +127,14 @@ def split_params_into_different_moe_groups_for_optimizer(
                 size_of_cur_group = 0
 
                 for param in cast(List[nn.Parameter], param_group['params']):
-                    if size_of_cur_group + param.numel() <= max_group_size:
+                    param_numel = param.ds_numel if hasattr(param, "ds_numel") else param.numel()
+                    if size_of_cur_group + param_numel <= max_group_size:
                         cur_group.append(param)
-                        size_of_cur_group += param.numel()
+                        size_of_cur_group += param_numel
                     else:
                         all_groups.append(cur_group)
                         cur_group = [param]
-                        size_of_cur_group = param.numel()
+                        size_of_cur_group = param_numel
 
                 if cur_group:
                     all_groups.append(cur_group)

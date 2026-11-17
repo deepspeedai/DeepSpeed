@@ -16,16 +16,13 @@ class SparseTensor(object):
     def __init__(self, dense_tensor=None):
         self.orig_dense_tensor = dense_tensor
         if dense_tensor is not None:
-            self.is_sparse = dense_tensor.is_sparse
+            assert dense_tensor.is_sparse, \
+                "SparseTensor is only built from a natively sparse gradient"
+            self.is_sparse = True
             self.dtype = self.orig_dense_tensor.dtype
-            if self.is_sparse:
-                dense_tensor = dense_tensor.coalesce()
-                self.indices = dense_tensor.indices().flatten()
-                self.values = dense_tensor.values()
-            else:
-                result = torch.sum(dense_tensor, dim=1)
-                self.indices = result.nonzero().flatten()
-                self.values = dense_tensor[self.indices]
+            dense_tensor = dense_tensor.coalesce()
+            self.indices = dense_tensor.indices().flatten()
+            self.values = dense_tensor.values()
             self.dense_size = list(dense_tensor.size())
         else:
             self.indices = None
@@ -38,11 +35,6 @@ class SparseTensor(object):
     @staticmethod
     def type():
         return "deepspeed.SparseTensor"
-
-    def to_dense(self):
-        it = self.indices.unsqueeze(1)
-        full_indices = torch.cat([it for _ in range(self.dense_size[1])], dim=1)
-        return self.values.new_zeros(self.dense_size).scatter_add_(0, full_indices, self.values)
 
     def sparse_size(self):
         index_size = list(self.indices.size())

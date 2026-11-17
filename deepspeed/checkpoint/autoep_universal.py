@@ -11,15 +11,23 @@ topology-agnostic universal format for EP resharding support.
 import os
 import glob
 import torch
-
-from deepspeed.utils import logger
+from .affine import AFFINE_MAP_FORMAT_VERSION
 
 from .constants import (
+    AUTOEP_AFFINE_MAPS,
     AUTOEP_EP_SIZE,
+    AUTOEP_EXPERT_PLACEMENT,
     AUTOEP_EXPERT_KEY_PREFIX,
     AUTOEP_NUM_EXPERTS,
     AUTOEP_NUM_LOCAL_EXPERTS,
+    AUTOEP_PLACEMENT_EP_SIZE,
+    AUTOEP_PLACEMENT_EXPERTS,
+    AUTOEP_PLACEMENT_NUM_EXPERTS,
+    AUTOEP_PLACEMENT_RANK,
+    AUTOEP_PLACEMENT_RANKS,
     AUTOEP_ZERO12_REQUIRED_FIELDS,
+    AFFINE_MAP_PARAMS,
+    AFFINE_MAP_VERSION,
     PARAM,
     CAT_DIM,
     EP_IS_EXPERT_PARAM,
@@ -40,6 +48,7 @@ from .constants import (
     FOLDING_FAMILY,
     FOLDING_PARAM_FAMILIES,
 )
+from .autoep_affine import autoep_metadata_to_affine_map, validate_autoep_placement_descriptor
 
 
 def make_folding_metadata(*,
@@ -116,70 +125,6 @@ def validate_folding_metadata(metadata,
     return folding
 
 
-def _state_entry(state, param_id):
-    """Get optimizer state entry by param id, handling int/str key variants."""
-    if param_id in state:
-        return state[param_id]
-
-    pid_str = str(param_id)
-    if pid_str in state:
-        return state[pid_str]
-
-    if isinstance(param_id, str):
-        try:
-            pid_int = int(param_id)
-        except ValueError:
-            return None
-        return state.get(pid_int)
-
-    return None
-
-
-def _ordered_param_ids(optim_sd):
-    """Return optimizer param ids in param_groups order, deduplicated."""
-    ordered = []
-    seen = set()
-    for group in optim_sd.get('param_groups', []):
-        for param_id in group.get('params', []):
-            key = str(param_id)
-            if key in seen:
-                continue
-            seen.add(key)
-            ordered.append(param_id)
-
-    if ordered:
-        return ordered
-
-    # Fallback for unexpected optimizer formats.
-    state = optim_sd.get('state', {})
-    return list(state.keys())
-
-
-def _param_name_to_id(optim_sd):
-    """Build optional mapping from parameter name to optimizer param id."""
-    mapping = {}
-    for group in optim_sd.get('param_groups', []):
-        params = group.get('params', [])
-        param_names = group.get('param_names', None)
-        if not isinstance(param_names, list):
-            continue
-        if len(param_names) != len(params):
-            continue
-        for param_id, param_name in zip(params, param_names):
-            mapping[param_name] = param_id
-    return mapping
-
-
-def _is_expert_optimizer_state(param_state, num_local):
-    for state_key in ('exp_avg', 'exp_avg_sq'):
-        tensor = param_state.get(state_key)
-        if tensor is None:
-            continue
-        if tensor.dim() == 3 and tensor.shape[0] == num_local:
-            return True
-    return False
-
-
 def resolve_expert_ckpt_path(checkpoint_dir, moe_layer_id, global_expert_id):
     """Find the expert checkpoint file for a given (layer, expert) pair.
 
@@ -229,7 +174,7 @@ def get_autoep_zero12_expert_param_info(autoep_layers_metadata):
         if not isinstance(prefix, str) or not prefix:
             raise RuntimeError("AutoEP expert_key_prefix must be a non-empty string.")
 
-        for field in (AUTOEP_NUM_EXPERTS, AUTOEP_NUM_LOCAL_EXPERTS, AUTOEP_EP_SIZE):
+        for field in (AUTOEP_NUM_EXPERTS, AUTOEP_EP_SIZE):
             value = layer_info[field]
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
                 raise RuntimeError(f"AutoEP {field} must be a positive integer, got {value!r}.")
@@ -237,7 +182,33 @@ def get_autoep_zero12_expert_param_info(autoep_layers_metadata):
         num_experts = layer_info[AUTOEP_NUM_EXPERTS]
         num_local_experts = layer_info[AUTOEP_NUM_LOCAL_EXPERTS]
         ep_size = layer_info[AUTOEP_EP_SIZE]
-        if num_experts != num_local_experts * ep_size:
+        placement = layer_info.get(AUTOEP_EXPERT_PLACEMENT)
+        if isinstance(num_local_experts, bool) or not isinstance(num_local_experts, int):
+            raise RuntimeError(f"AutoEP {AUTOEP_NUM_LOCAL_EXPERTS} must be an integer, got "
+                               f"{num_local_experts!r}.")
+        minimum_local_experts = 0 if placement is not None else 1
+        if num_local_experts < minimum_local_experts:
+            qualifier = "non-negative" if placement is not None else "positive"
+            raise RuntimeError(f"AutoEP {AUTOEP_NUM_LOCAL_EXPERTS} must be a {qualifier} integer, got "
+                               f"{num_local_experts!r}.")
+        if placement is not None:
+            try:
+                validate_autoep_placement_descriptor(placement)
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError(f"Invalid AutoEP expert placement for {prefix}: {exc}") from exc
+            if (placement[AUTOEP_PLACEMENT_NUM_EXPERTS] != num_experts
+                    or placement[AUTOEP_PLACEMENT_EP_SIZE] != ep_size):
+                raise RuntimeError(f"AutoEP expert placement disagrees with layer metadata for {prefix}.")
+            ep_rank = layer_info.get('ep_rank')
+            if ep_rank is not None:
+                rank_entries = {entry[AUTOEP_PLACEMENT_RANK]: entry for entry in placement[AUTOEP_PLACEMENT_RANKS]}
+                if ep_rank not in rank_entries:
+                    raise RuntimeError(f"AutoEP expert placement does not contain metadata ep_rank {ep_rank}.")
+                expected_local_experts = len(rank_entries[ep_rank][AUTOEP_PLACEMENT_EXPERTS])
+                if num_local_experts != expected_local_experts:
+                    raise RuntimeError("AutoEP num_local_experts disagrees with the placement entry for "
+                                       f"EP rank {ep_rank}: {num_local_experts} != {expected_local_experts}.")
+        elif num_experts != num_local_experts * ep_size:
             raise RuntimeError(f"AutoEP expert count mismatch for {prefix}: num_experts={num_experts}, "
                                f"num_local_experts={num_local_experts}, ep_size={ep_size}.")
 
@@ -245,12 +216,23 @@ def get_autoep_zero12_expert_param_info(autoep_layers_metadata):
             'num_experts': num_experts,
             'num_local_experts': num_local_experts,
             'ep_size': ep_size,
+            'expert_placement': placement,
         }
         for weight_name in ('w1', 'w2', 'w3'):
             param_name = f"{prefix}.{weight_name}"
             if param_name in param_info:
                 raise RuntimeError(f"Duplicate AutoEP expert parameter metadata for {param_name}.")
-            param_info[param_name] = normalized
+            param_metadata = dict(normalized)
+            affine_maps = layer_info.get(AUTOEP_AFFINE_MAPS, {})
+            if affine_maps:
+                try:
+                    if affine_maps.get(AFFINE_MAP_VERSION) != AFFINE_MAP_FORMAT_VERSION:
+                        raise RuntimeError(f"Unsupported AutoEP affine map format version "
+                                           f"{affine_maps.get(AFFINE_MAP_VERSION)!r}.")
+                    param_metadata['affine_map'] = affine_maps[AFFINE_MAP_PARAMS][param_name]
+                except KeyError as exc:
+                    raise RuntimeError(f"AutoEP layer metadata is missing affine map for {param_name}.") from exc
+            param_info[param_name] = param_metadata
 
     return param_info
 
@@ -269,14 +251,48 @@ def _autoep_zero12_dp_ranks(ep_rank, dp_degree, ep_size, use_data_before_expert_
     return range(ep_rank, dp_degree, ep_size)
 
 
+def get_autoep_zero12_fp32_fallback_param_names(temp_dir, expert_param_info, slice_shapes, dp_degree,
+                                                use_data_before_expert_parallel):
+    """Find parameters that need per-expert weights as a fallback for missing master fragments."""
+    fallback_param_names = set()
+    for param_name, metadata in expert_param_info.items():
+        if param_name not in slice_shapes:
+            raise RuntimeError(f"AutoEP expert parameter {param_name} is missing from checkpoint parameter shapes.")
+
+        ep_size = metadata['ep_size']
+        local_shape = tuple(slice_shapes[param_name])
+        affine_map = None
+        if metadata.get('expert_placement') is not None:
+            logical_shape = (metadata['num_experts'], ) + local_shape[1:]
+            affine_map = autoep_metadata_to_affine_map(metadata, logical_shape)
+
+        for ep_rank in range(ep_size):
+            expected_shape = affine_map.shard_shapes[ep_rank] if affine_map is not None else local_shape
+            if torch.Size(expected_shape).numel() == 0:
+                continue
+            dp_ranks = _autoep_zero12_dp_ranks(ep_rank, dp_degree, ep_size, use_data_before_expert_parallel)
+            if any(not os.path.isfile(_zero12_fragment_path(temp_dir, param_name, "fp32", dp_rank))
+                   for dp_rank in dp_ranks):
+                fallback_param_names.add(param_name)
+                break
+
+    return fallback_param_names
+
+
 def _zero12_values_equal(left, right):
     if torch.is_tensor(left) and torch.is_tensor(right):
         return torch.equal(left, right)
     return left == right
 
 
-def consolidate_autoep_zero12_expert_states(temp_dir, output_dir, expert_param_info, slice_shapes, dp_degree,
-                                            tp_degree, use_data_before_expert_parallel):
+def consolidate_autoep_zero12_expert_states(temp_dir,
+                                            output_dir,
+                                            expert_param_info,
+                                            slice_shapes,
+                                            dp_degree,
+                                            tp_degree,
+                                            use_data_before_expert_parallel,
+                                            fp32_fallback_dir=None):
     """Consolidate AutoEP expert FP32 and Adam states from ZeRO-1/2 fragments."""
     if tp_degree != 1:
         raise NotImplementedError("ZeRO-1/2 Universal Checkpoint conversion for AutoEP with tensor parallelism "
@@ -288,19 +304,28 @@ def consolidate_autoep_zero12_expert_states(temp_dir, output_dir, expert_param_i
 
         ep_size = metadata['ep_size']
         num_experts = metadata['num_experts']
-        num_local_experts = metadata['num_local_experts']
+        placement = metadata.get('expert_placement')
 
         local_shape = tuple(slice_shapes[param_name])
-        if not local_shape or local_shape[0] != num_local_experts:
+        if not local_shape:
+            raise RuntimeError(f"AutoEP local shape is empty for {param_name}.")
+
+        affine_map = None
+        if placement is not None:
+            logical_shape = (num_experts, ) + local_shape[1:]
+            affine_map = autoep_metadata_to_affine_map(metadata, logical_shape)
+        elif local_shape[0] != metadata['num_local_experts']:
             raise RuntimeError(f"AutoEP local shape mismatch for {param_name}: shape={local_shape}, "
-                               f"num_local_experts={num_local_experts}.")
+                               f"num_local_experts={metadata['num_local_experts']}.")
 
         param_dir = os.path.join(output_dir, "zero", param_name)
         os.makedirs(param_dir, exist_ok=True)
 
         for state_name in ('fp32', 'exp_avg', 'exp_avg_sq'):
-            ep_tensors = []
+            ep_tensors = {}
+            fp32_fallback_tensor = None
             for ep_rank in range(ep_size):
+                expected_shape = affine_map.shard_shapes[ep_rank] if affine_map is not None else local_shape
                 fragments = []
                 dp_ranks = _autoep_zero12_dp_ranks(ep_rank, dp_degree, ep_size, use_data_before_expert_parallel)
                 for dp_rank in dp_ranks:
@@ -315,17 +340,53 @@ def consolidate_autoep_zero12_expert_states(temp_dir, output_dir, expert_param_i
                                            f"in {fragment_path}.")
                     fragments.append(fragment.flatten())
 
+                expected_numel = torch.Size(expected_shape).numel()
+                if not fragments and expected_numel == 0:
+                    local_tensor = torch.empty(expected_shape, dtype=torch.float32)
+                    ep_tensors[ep_rank] = local_tensor
+                    continue
                 if not fragments:
+                    fallback_path = (os.path.join(fp32_fallback_dir, param_name, "fp32.pt")
+                                     if fp32_fallback_dir is not None else os.path.join(param_dir, "fp32.pt"))
+                    if state_name == "fp32" and os.path.isfile(fallback_path):
+                        if fp32_fallback_tensor is None:
+                            fp32_fallback_state = torch.load(fallback_path, map_location='cpu', weights_only=False)
+                            fp32_fallback_tensor = fp32_fallback_state[PARAM]
+                        if affine_map is not None:
+                            local_tensor = affine_map.extract(fp32_fallback_tensor, ep_rank)
+                        else:
+                            start = ep_rank * metadata['num_local_experts']
+                            end = start + metadata['num_local_experts']
+                            local_tensor = fp32_fallback_tensor[start:end]
+                        ep_tensors[ep_rank] = local_tensor.reshape(expected_shape)
+                        continue
                     raise RuntimeError(f"Missing AutoEP {state_name} fragments for {param_name}, EP rank {ep_rank}.")
 
                 local_tensor = torch.cat(fragments, dim=0)
-                expected_numel = torch.Size(local_shape).numel()
                 if local_tensor.numel() != expected_numel:
+                    fallback_path = (os.path.join(fp32_fallback_dir, param_name, "fp32.pt")
+                                     if fp32_fallback_dir is not None else os.path.join(param_dir, "fp32.pt"))
+                    if (state_name == "fp32" and local_tensor.numel() < expected_numel
+                            and os.path.isfile(fallback_path)):
+                        if fp32_fallback_tensor is None:
+                            fp32_fallback_state = torch.load(fallback_path, map_location='cpu', weights_only=False)
+                            fp32_fallback_tensor = fp32_fallback_state[PARAM]
+                        if affine_map is not None:
+                            local_tensor = affine_map.extract(fp32_fallback_tensor, ep_rank)
+                        else:
+                            start = ep_rank * metadata['num_local_experts']
+                            end = start + metadata['num_local_experts']
+                            local_tensor = fp32_fallback_tensor[start:end]
+                        ep_tensors[ep_rank] = local_tensor.reshape(expected_shape)
+                        continue
                     raise RuntimeError(f"AutoEP {state_name} fragment size mismatch for {param_name}, "
                                        f"EP rank {ep_rank}: got {local_tensor.numel()}, expected {expected_numel}.")
-                ep_tensors.append(local_tensor.reshape(local_shape))
+                ep_tensors[ep_rank] = local_tensor.reshape(expected_shape)
 
-            full_tensor = torch.cat(ep_tensors, dim=0)
+            if affine_map is not None:
+                full_tensor = affine_map.rebuild(ep_tensors)
+            else:
+                full_tensor = torch.cat([ep_tensors[rank] for rank in range(ep_size)], dim=0)
             if full_tensor.shape[0] != num_experts:
                 raise RuntimeError(f"AutoEP consolidated expert count mismatch for {param_name}: "
                                    f"got {full_tensor.shape[0]}, expected {num_experts}.")
@@ -349,7 +410,11 @@ def consolidate_autoep_zero12_expert_states(temp_dir, output_dir, expert_param_i
         torch.save(step_values[0], os.path.join(param_dir, "step.pt"))
 
 
-def consolidate_autoep_expert_files(checkpoint_dir, output_dir, autoep_layers_metadata):
+def consolidate_autoep_expert_files(checkpoint_dir,
+                                    output_dir,
+                                    autoep_layers_metadata,
+                                    fp32_fallback_param_names=None,
+                                    fp32_fallback_dir=None):
     """Consolidate per-expert checkpoint files into full-expert universal format.
 
     For each AutoEP layer, loads all per-expert files, stacks into
@@ -359,6 +424,8 @@ def consolidate_autoep_expert_files(checkpoint_dir, output_dir, autoep_layers_me
         checkpoint_dir: Path to DeepSpeed checkpoint directory.
         output_dir: Path to universal checkpoint output directory.
         autoep_layers_metadata: AutoEP metadata list from main checkpoint.
+        fp32_fallback_param_names: Parameters whose ZeRO FP32 fragments are incomplete.
+        fp32_fallback_dir: Temporary directory for fallback tensors consumed by ZeRO consolidation.
 
     Raises:
         FileNotFoundError: If expected expert files are missing.
@@ -376,9 +443,16 @@ def consolidate_autoep_expert_files(checkpoint_dir, output_dir, autoep_layers_me
         moe_layer_id = layer_info['moe_layer_id']
         num_experts = layer_info['num_experts']
         prefix = layer_info['expert_key_prefix']
+        placement = layer_info.get(AUTOEP_EXPERT_PLACEMENT)
+        if placement is not None:
+            validate_autoep_placement_descriptor(placement)
+            if placement[AUTOEP_NUM_EXPERTS] != num_experts:
+                raise RuntimeError(f"AutoEP expert placement disagrees with num_experts for {prefix}.")
 
         for wname in ('w1', 'w2', 'w3'):
-            expert_tensors = []
+            param_name = f"{prefix}.{wname}"
+            save_fp32 = fp32_fallback_param_names is None or param_name in fp32_fallback_param_names
+            expert_tensors = [] if save_fp32 else None
             folding_metadata = None
             for global_eid in range(num_experts):
                 ckpt_path = resolve_expert_ckpt_path(checkpoint_dir, moe_layer_id, global_eid)
@@ -388,14 +462,17 @@ def consolidate_autoep_expert_files(checkpoint_dir, output_dir, autoep_layers_me
                 key = f"{prefix}.{wname}.{global_eid}"
                 if key not in sd:
                     raise RuntimeError(f"Expected key '{key}' not found in {ckpt_path}")
-                expert_tensors.append(sd[key])
+                if expert_tensors is not None:
+                    expert_tensors.append(sd[key])
 
             # Stack to full fused tensor [E_total, H, D]
+            if expert_tensors is None:
+                continue
             full_tensor = torch.stack(expert_tensors, dim=0)
 
-            # Save in universal format
-            param_name = f"{prefix}.{wname}"
-            param_dir = os.path.join(output_dir, "zero", param_name)
+            # Store fallbacks separately so the ZeRO merger writes each final fp32.pt once.
+            param_dir = (os.path.join(fp32_fallback_dir, param_name) if fp32_fallback_dir is not None
+                         and fp32_fallback_param_names is not None else os.path.join(output_dir, "zero", param_name))
             os.makedirs(param_dir, exist_ok=True)
             universal_state = {
                 PARAM: full_tensor,
@@ -406,129 +483,3 @@ def consolidate_autoep_expert_files(checkpoint_dir, output_dir, autoep_layers_me
             if folding_metadata is not None:
                 universal_state[FOLDING_METADATA_KEY] = folding_metadata
             torch.save(universal_state, os.path.join(param_dir, "fp32.pt"))
-
-
-def consolidate_autoep_optimizer_states(checkpoint_dir, output_dir, autoep_layers_metadata, ep_size):
-    """Consolidate expert optimizer states from expp_rank files into universal format.
-
-    Loads optimizer states from all expp_rank_*_optim_states.pt files,
-    extracts per-expert-parameter states (exp_avg, exp_avg_sq, etc.),
-    concatenates along the expert dimension (dim 0) to form full
-    [E_total, H, D] optimizer states, and saves alongside the model
-    parameter in universal format.
-
-    Args:
-        checkpoint_dir: Path to DeepSpeed checkpoint directory.
-        output_dir: Path to universal checkpoint output directory.
-        autoep_layers_metadata: AutoEP metadata list from main checkpoint.
-        ep_size: Expert parallel world size (number of expp_rank files to load).
-
-    Raises:
-        FileNotFoundError: If expected optimizer state files are missing.
-        RuntimeError: If expert parameter states cannot be extracted.
-    """
-    if autoep_layers_metadata is None:
-        raise RuntimeError("AutoEP metadata is missing. Cannot consolidate optimizer states.")
-
-    # Load all expp_rank optimizer states
-    optim_states = []
-    for rank in range(ep_size):
-        pattern = os.path.join(checkpoint_dir, f'expp_rank_{rank}_mp_rank_*_optim_states.pt')
-        matches = glob.glob(pattern)
-        if not matches:
-            # No optimizer state files (e.g., ZeRO handles optimizer differently)
-            return
-        optim_path = matches[0]
-        sd = torch.load(optim_path, map_location='cpu', weights_only=False)
-        optim_states.append(sd)
-
-    if not optim_states:
-        return
-
-    # Extract optimizer state dict
-    optim_sd = optim_states[0].get('optimizer')
-    if optim_sd is None:
-        logger.warning("AutoEP per-expert optimizer checkpoint has no optimizer payload; ZeRO-1/2 checkpoints "
-                       "must be consolidated from their ZeRO optimizer shards instead.")
-        return
-
-    state = optim_sd.get('state', {})
-
-    if not state:
-        return
-
-    ordered_param_ids = _ordered_param_ids(optim_sd)
-    name_to_param_id = _param_name_to_id(optim_sd)
-    consumed_param_ids = set()
-
-    # For each AutoEP layer, extract and consolidate optimizer states
-    for layer_info in autoep_layers_metadata:
-        prefix = layer_info['expert_key_prefix']
-        num_experts = layer_info['num_experts']
-        num_local = layer_info['num_local_experts']
-        layer_param_ids = {}
-
-        # If optimizer state carries param names, map weights by exact identity.
-        for wname in ('w1', 'w2', 'w3'):
-            param_name = f"{prefix}.{wname}"
-            param_id = name_to_param_id.get(param_name)
-            if param_id is None:
-                continue
-            layer_param_ids[wname] = param_id
-            consumed_param_ids.add(str(param_id))
-
-        # Fallback: consume expert-like params in optimizer param_groups order.
-        missing_wnames = [w for w in ('w1', 'w2', 'w3') if w not in layer_param_ids]
-        if missing_wnames:
-            candidates = []
-            for param_id in ordered_param_ids:
-                if str(param_id) in consumed_param_ids:
-                    continue
-                param_state = _state_entry(state, param_id)
-                if param_state is None:
-                    continue
-                if not _is_expert_optimizer_state(param_state, num_local):
-                    continue
-                candidates.append(param_id)
-
-            for wname, param_id in zip(missing_wnames, candidates):
-                layer_param_ids[wname] = param_id
-                consumed_param_ids.add(str(param_id))
-
-        for wname in ('w1', 'w2', 'w3'):
-            param_name = f"{prefix}.{wname}"
-            param_dir = os.path.join(output_dir, "zero", param_name)
-            os.makedirs(param_dir, exist_ok=True)
-            param_id = layer_param_ids.get(wname)
-            if param_id is None:
-                continue
-
-            # Consolidate optimizer states for this specific expert parameter id.
-            for state_key in ('exp_avg', 'exp_avg_sq'):
-                rank_tensors = []
-
-                for rank in range(ep_size):
-                    rank_optim_sd = optim_states[rank].get('optimizer', {})
-                    rank_state = rank_optim_sd.get('state', {})
-                    param_state = _state_entry(rank_state, param_id)
-                    if param_state is None:
-                        rank_tensors = []
-                        break
-                    tensor = param_state.get(state_key)
-                    if tensor is None:
-                        rank_tensors = []
-                        break
-                    if tensor.dim() != 3 or tensor.shape[0] != num_local:
-                        rank_tensors = []
-                        break
-                    rank_tensors.append(tensor)
-
-                if len(rank_tensors) == ep_size:
-                    full_tensor = torch.cat(rank_tensors, dim=0)
-                    torch.save(
-                        {
-                            PARAM: full_tensor,
-                            CAT_DIM: 0,
-                            EP_IS_EXPERT_PARAM: True,
-                            EP_NUM_EXPERTS: num_experts,
-                        }, os.path.join(param_dir, f"{state_key}.pt"))

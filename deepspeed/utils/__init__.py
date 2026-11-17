@@ -5,7 +5,6 @@
 
 from .logging import logger, log_dist, log_dist_once, set_log_level_from_string
 from .comms_logging import get_caller_func
-#from .distributed import init_distributed
 from .init_on_device import OnDevice
 from .groups import *
 from .nvtx import instrument_w_nvtx
@@ -21,3 +20,4 @@ from .z3_leaf_module import set_z3_leaf_modules, unset_z3_leaf_modules, get_z3_l
 from .mixed_precision_linkage import link_hp_params, lazy_init_hp_params_optimizer_state
 from deepspeed.runtime.dataloader import RepeatingLoader
 from .numa import get_numactl_cmd
+from .module_utils import recursive_getattr, recursive_setattr

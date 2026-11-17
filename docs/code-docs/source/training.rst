@@ -123,8 +123,8 @@ in the stage-2 path.
 
 .. note::
    Unmanaged mode supports ZeRO stage 0/1/2/3 (and DDP), including ZeRO optimizer-state and parameter
-   offload (CPU/NVMe). It is incompatible with pipeline parallelism, DeepCompile, and Apex AMP, which
-   are rejected at initialization. ZeRO ``overlap_comm`` is supported only with ZeRO stage 2
+   offload (CPU/NVMe). It is incompatible with pipeline parallelism and DeepCompile, which are
+   rejected at initialization. ZeRO ``overlap_comm`` is supported only with ZeRO stage 2
    (rejected for stage 0/1, where reduction is deferred to ``step()``).
 
 .. autofunction:: deepspeed.DeepSpeedEngine.set_gradient_accumulation_boundary
@@ -719,6 +719,8 @@ config and calling ``prepare_autosp_inputs()`` to prepare inputs before each for
 .. note::
    AutoSP requires ZeRO stage 0 (no ZeRO optimization). Using AutoSP with ZeRO stages 1, 2, or 3 is not currently supported.
    AutoSP also requires ``torch.nn.functional.scaled_dot_product_attention()`` as the attention backend.
+   The sequence length and the number of query, key, and value heads of every SDPA call must be divisible by
+   ``sequence_parallel_size``.
 
 Input Preparation
 ~~~~~~~~~~~~~~~~~
@@ -740,6 +742,8 @@ automatic sharding:
     )
 
 This serves as a hint to the compiler to know which inputs should be sharded across which dimension.
+``seq_dim`` applies to every prepared tensor, so use ``seq_dim=0`` for sequence-first ``[seq, batch]`` inputs.
+The compiler records it on the tagged inputs and shards along that dimension.
 
 Memory Optimization
 ~~~~~~~~~~~~~~~~~~~
@@ -757,3 +761,12 @@ Limitations
 AutoSP currently supports only ``torch.nn.functional.scaled_dot_product_attention``. Other attention patterns require additional pattern matching logic.
 
 AutoSP requires a fully connected computation graph without breaks. Graph breaks destroy the use-def chains across graphs and the compiler cannot propoaget sequence dimension sharding information.
+
+An ``attn_mask`` passed to ``scaled_dot_product_attention()`` may be built from the sharded sequence along its query
+dimension: AutoSP gathers the query rows across the sequence parallel group before attention. Its key dimension must
+cover the full sequence, for example by building it from the unsharded 2D padding ``attention_mask``. Masks whose key
+dimension comes from sharded tensors are rejected at compile time. The mask head dimension (the third-to-last
+dimension of a 3D or 4D mask) may be 1 or the number of query heads; a per-head mask is redistributed like the query,
+so each rank keeps the heads it attends with. Without sequence sharding (``sequence_parallel_size`` 1) the mask is
+used as is. Masks may
+require gradients, for example a learnable position bias.

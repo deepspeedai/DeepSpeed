@@ -12,7 +12,7 @@ from collections.abc import Iterable
 import os
 import psutil
 import gc
-from math import sqrt
+from math import isfinite, sqrt
 
 from numpy import prod
 
@@ -24,6 +24,7 @@ except ModuleNotFoundError:
     from torch import inf
 from typing import Union, List, Dict, Sequence
 from deepspeed import comm as dist
+from deepspeed.comm import pg_utils
 from deepspeed.moe.utils import is_moe_param
 from deepspeed.utils import groups, logger
 from deepspeed.utils.bwc import (bwc_tensor_model_parallel_rank, bwc_pipeline_parallel_world_size,
@@ -45,6 +46,13 @@ class DummyOptim():
     def __init__(self, params):
         self.param_groups = []
         self.param_groups.append({'params': params})
+
+
+def view_as_uint8(tensor):
+    # PyTorch cannot reinterpret a scalar as a dtype with a different element size.
+    if tensor.ndim == 0:
+        tensor = tensor.unsqueeze(0)
+    return tensor.view(torch.uint8)
 
 
 def filter_empty_parameters(params):
@@ -84,27 +92,6 @@ def filter_empty_parameters(params):
     else:
         # params is a list of Parameters
         return [p for p in params if p.numel() > 0]
-
-
-graph_cache = {}
-
-
-def graph_process(replay_first_step, func, *args, **kwargs):
-    # `func` should only contain operations on the GPU
-    # Please ensure that the memory address of the data required by 'func' remains constant
-    if func.__name__ not in graph_cache:
-        cuda_stream = get_accelerator().Stream()
-        cuda_stream.wait_stream(get_accelerator().current_stream())
-        with get_accelerator().stream(cuda_stream):
-            func(*args, **kwargs)
-        get_accelerator().current_stream().wait_stream(cuda_stream)
-        graph_cache[func.__name__] = get_accelerator().create_graph()
-        with get_accelerator().capture_to_graph(graph_cache[func.__name__]):
-            func(*args, **kwargs)
-        if replay_first_step:
-            get_accelerator().replay_graph(graph_cache[func.__name__])
-    else:
-        get_accelerator().replay_graph(graph_cache[func.__name__])
 
 
 def noop_decorator(func):
@@ -218,7 +205,6 @@ def get_norm_with_moe_layers_fast(all_groups_norm, group):
     scaled_norm_tensor = torch.tensor(scaled_norm, device=get_accelerator().current_device_name(), dtype=torch.float)
     dist.all_reduce(scaled_norm_tensor, group=group)
     all_groups_norm = scaled_norm_tensor.item()
-    #print(f"old = {all_groups_norm_old} and new = {all_groups_norm} at rank: {deepspeed.comm.get_rank()}")
     return all_groups_norm
 
 
@@ -235,8 +221,9 @@ def has_inf_or_nan(x):
     ``bool`` get one from ordinary truthiness.
 
     An empty tensor holds no non-finite value, and the guard is required rather than defensive: ``amax``
-    raises on an empty input. A sparse tensor reaches this on the ``sparse_gradients`` path, where only the
-    stored entries can be non-finite -- the implicit zeros cannot -- so the reduction runs over those.
+    raises on an empty input. A sparse tensor reaches this when the model itself produces natively sparse
+    gradients, where only the stored entries can be non-finite -- the implicit zeros cannot -- so the
+    reduction runs over those.
     """
     if x.is_sparse:
         # ``amax``/``amin`` have no sparse implementation, and the public ``values()`` rejects uncoalesced
@@ -245,6 +232,12 @@ def has_inf_or_nan(x):
     if x.numel() == 0:
         return torch.tensor(False, device=x.device)
     return torch.isfinite(x.amax()).logical_and(torch.isfinite(x.amin())).logical_not()
+
+
+def is_invalid_grad_norm(norm):
+    if torch.is_tensor(norm):
+        return bool((~torch.isfinite(norm) | (norm < 0)).any())
+    return not isfinite(float(norm)) or norm < 0
 
 
 class CheckOverflow(object):
@@ -265,7 +258,7 @@ class CheckOverflow(object):
 
     def check_using_norm(self, norm_group, reduce_overflow=True):
         # TODO: I don't think reduce_overflow is needed if mpu is None
-        overflow = -1 in norm_group
+        overflow = any(is_invalid_grad_norm(norm) for norm in norm_group)
         overflow_gpu = get_accelerator().FloatTensor([overflow])
         if self.has_moe_params:
             # In this case, we need to do an all_reduce across
@@ -314,9 +307,6 @@ class CheckOverflow(object):
         # Since each model parallel GPU carries only part of the model,
         # make sure overflow flag is synced across all the model parallel GPUs
         overflow_gpu = get_accelerator().ByteTensor([overflow])
-        # deepspeed.comm.all_reduce(overflow_gpu,
-        #                             op=deepspeed.comm.ReduceOp.MAX,
-        #                             group=mpu.get_model_parallel_group())
         if has_moe_params:
             # All reduce this across expert_parallel_group, so that if an expert
             # overflows, we detect it here
@@ -357,10 +347,11 @@ def _handle_overflow(cpu_sum, x, i):
 def get_global_norm(norm_list):
     """ Compute total from a list of norms
     """
+    if any(is_invalid_grad_norm(norm) for norm in norm_list):
+        return float("inf")
     total_norm = 0.0
     for norm in norm_list:
         total_norm += norm**2.0
-    # logger.info(f'norm_list = {norm_list} global = {sqrt(total_norm)}')
     return sqrt(total_norm)
 
 
@@ -387,20 +378,81 @@ def clip_grad_norm_(parameters, max_norm, norm_type=2, mpu=None):
     """
     if isinstance(parameters, torch.Tensor):
         parameters = [parameters]
-    parameters = list(filter(lambda p: p.grad is not None, parameters))
+    parameters = list(parameters)
     norm_type = float(norm_type)
+
+    # Expert parameters are not replicated across the data parallel group, so the
+    # rank-averaging below cannot reconstruct a global norm from them: each rank's
+    # norm covers a different set of experts. Combine those the way the bf16 and
+    # fp16 optimizers already do, over the expert parallel group.
+    #
+    # Read ownership from the parameters, before dropping the ones with no gradient.
+    # The two branches below issue different collectives, so this decision has to
+    # come out the same on every rank -- and a rank whose experts received no tokens
+    # this step has expert parameters but no expert gradients.
+    # The registry of expert groups is built identically on every rank, so an empty one
+    # means no MoE is configured anywhere and the choice is already made: take the
+    # original path, with no collective and no host sync. This is a per-step call from
+    # `_take_model_step`, so the common case must not pay for the MoE one.
+    registry = sorted(getattr(groups, "_EXPERT_PARALLEL_GROUP", None) or {})
+    expert_group_names = []
+    if registry:
+        # A rank can legitimately own no expert at all -- under pipeline parallelism, a
+        # stage holding only dense layers -- so reading ownership locally cannot guarantee
+        # the same choice everywhere. One scalar settles it, and it has to be reduced over
+        # the world rather than the data parallel group: under pipeline parallelism that
+        # group is one stage wide (`PipelineParallelGrid.get_data_parallel_group`), while
+        # the expert norm below reduces over the pipeline group, which spans stages. A
+        # per-stage vote let an expert stage and a dense stage issue different collectives
+        # on that group. The second slot carries "an expert here has no group name", which
+        # has no expert parallel group to reduce over, so such a call stays on the
+        # original path rather than guessing which group the parameter belongs to.
+        vote = torch.tensor([
+            float(any(is_moe_param(p) and getattr(p, "group_name", None) is not None for p in parameters)),
+            float(any(is_moe_param(p) and getattr(p, "group_name", None) is None for p in parameters)),
+        ],
+                            device=get_accelerator().current_device_name(),
+                            dtype=torch.float)
+        dist.all_reduce(vote, group=groups._clone_world_group())
+        if vote[0].item() > 0 and vote[1].item() == 0:
+            expert_group_names = registry
+
+    parameters = list(filter(lambda p: p.grad is not None, parameters))
+
+    expert_tensors: Dict[str, List[torch.Tensor]] = {}
+    if expert_group_names:
+        # `get_norm_with_moe_layers` issues one collective per entry, so every rank has to
+        # walk the groups in the same order. Start from the registry's order rather than
+        # the order this rank's parameters happen to come in.
+        expert_tensors = {group_name: [] for group_name in expert_group_names}
+        for p in parameters:
+            if is_moe_param(p):
+                expert_tensors.setdefault(p.group_name, []).append(p.grad.data)
+        # Every rank has to reduce over every group, whether or not its own experts
+        # were used this step; a zero contributes nothing to the sum of p-th powers
+        # and nothing to a max over absolute values.
+        zero = torch.zeros(1, device=get_accelerator().current_device_name())
+        for tensors in expert_tensors.values():
+            if not tensors:
+                tensors.append(zero)
+
+    norm_parameters = [p for p in parameters if not is_moe_param(p)] if expert_tensors else parameters
+
     all_norms = []
     if norm_type == inf:
-        for p in parameters:
+        for p in norm_parameters:
             all_norms.append(p.grad.data.abs().max().float())
-        total_norm = torch.stack(all_norms).max()
+        # Everything may be an expert, leaving nothing replicated to take a max over.
+        # Zero is the identity here: these are absolute values.
+        total_norm = torch.stack(all_norms).max() if all_norms \
+            else torch.zeros((), device=get_accelerator().current_device_name())
         total_norm = total_norm.to(get_accelerator().current_device_name())
         # Take max across all GPUs.
         if mpu is not None:
             dist.all_reduce(total_norm, op=dist.ReduceOp.MAX, group=mpu.get_model_parallel_group())
     else:
         total_norm = 0
-        for p in parameters:
+        for p in norm_parameters:
             if mpu is not None:
                 if (mpu.get_model_parallel_rank() == 0) or is_model_parallel_parameter(p):
                     param_norm = p.grad.data.detach().float().norm(norm_type)
@@ -421,14 +473,26 @@ def clip_grad_norm_(parameters, max_norm, norm_type=2, mpu=None):
             dist.all_reduce(total_norm, op=dist.ReduceOp.SUM, group=mpu.get_model_parallel_group())
         total_norm = total_norm.pow(1. / norm_type)
 
-    # Need to average total_norm across different GPUs due to the presence of moe params
-    pg = groups._get_data_parallel_group()
-    scaled_norm = total_norm * 1.0 / float(dist.get_world_size(group=pg))
-    scaled_norm_tensor = scaled_norm
+    if expert_tensors:
+        # `total_norm` now covers only the replicated parameters, so it is already the
+        # same on every rank. Fold the experts in over their own group, counting each
+        # expert once, rather than averaging norms that describe different parameters.
+        moe_norm = get_norm_with_moe_layers(total_norm, mpu=mpu, expert_tensors=expert_tensors, norm_type=norm_type)
+        # That helper reports a non-finite norm as -1. Left as-is it would make
+        # `clip_coef` negative and flip the sign of every gradient; inf keeps the
+        # behaviour the averaging path already had, which is to scale them to zero.
+        if moe_norm == -1:
+            moe_norm = float('inf')
+        total_norm = torch.tensor([float(moe_norm)], device=total_norm.device, dtype=torch.float)
+    else:
+        # Need to average total_norm across different GPUs due to the presence of moe params
+        pg = groups._get_data_parallel_group()
+        scaled_norm = total_norm * 1.0 / float(dist.get_world_size(group=pg))
+        scaled_norm_tensor = scaled_norm
 
-    dist.all_reduce(scaled_norm_tensor, group=pg)
-    total_norm = scaled_norm_tensor
-    total_norm = total_norm.to(parameters[0].device)
+        dist.all_reduce(scaled_norm_tensor, group=pg)
+        total_norm = scaled_norm_tensor
+        total_norm = total_norm.to(parameters[0].device)
 
     max_norm = torch.tensor([float(max_norm)], device=total_norm.device)
     clip_coef = max_norm / (total_norm + 1e-6)
@@ -823,6 +887,19 @@ def empty_cache():
     get_accelerator().reset_peak_memory_stats()
 
 
+def is_optimized_parameter(param):
+    """Whether an optimizer wrapper should own ``param``: trainable, with at least one element.
+
+    Frozen parameters have always been left out of the optimizer groups. A zero-element
+    parameter is left out the same way: it has nothing to optimize, and binding it to a flat
+    buffer loses its shape, because torch's ``unflatten_dense_tensors`` hands back a 1-D
+    ``zeros({0})`` for it. Checkpointing records such parameters with the frozen ones (see
+    ``DeepSpeedEngine._get_zero_frozen_param_attributes``) so they are rebuilt with their shape.
+    """
+    numel = param.ds_numel if hasattr(param, "ds_numel") else param.numel()
+    return param.requires_grad and numel > 0
+
+
 def see_memory_usage(message, force=False):
     if not force:
         return
@@ -886,7 +963,25 @@ def mask_nan_or_inf_with_val_inplace(input, device=None, val=-1.):
     input.masked_fill_(inf_or_nan, err)
 
 
-def get_global_norm_of_tensors(input_tensors, norm_type=2, mpu=None, use_graph=False, moe_ep_group=None):
+def combine_grad_norm_groups(norm_groups, norm_type=2):
+    """L2-combine per-group gradient norms without laundering the -1 invalid sentinel.
+
+    Several DeepSpeed helpers replace inf/NaN group norms with -1. Combining those
+    with ``vector_norm`` squares the sentinel to 1.0, so clipping treats a failed
+    group as a healthy unit-norm group. Non-finite or negative group norms stay
+    invalid (positive infinity) instead.
+    """
+    norm_groups = list(norm_groups)
+    device = next((norm.device for norm in norm_groups if torch.is_tensor(norm)), None)
+    stacked = torch.stack([
+        norm if torch.is_tensor(norm) else torch.tensor(norm, dtype=torch.float, device=device) for norm in norm_groups
+    ])
+    invalid = (~torch.isfinite(stacked) | (stacked < 0)).any()
+    combined = torch.linalg.vector_norm(stacked, ord=norm_type)
+    return torch.where(invalid, torch.full_like(combined, float("inf")), combined)
+
+
+def get_global_norm_of_tensors(input_tensors, norm_type=2, mpu=None, moe_ep_group=None):
     """Get norm of an iterable of tensors.
 
     This is adapted from torch.nn.utils.clip_grad.clip_grad_norm_ and
@@ -898,7 +993,7 @@ def get_global_norm_of_tensors(input_tensors, norm_type=2, mpu=None, use_graph=F
             infinity norm.
 
     Returns:
-        Total norm of the tensors (viewed as a single vector).
+        Total norm of the tensors (viewed as a single vector), as a detached float32 scalar tensor.
     """
     assert isinstance(input_tensors, Iterable), f'expected Iterable type not {type(input_tensors)}'
     assert all([torch.is_tensor(t) for t in input_tensors]), 'expected list of only tensors'
@@ -920,31 +1015,17 @@ def get_global_norm_of_tensors(input_tensors, norm_type=2, mpu=None, use_graph=F
                 dist.all_reduce(device_total_norm, op=dist.ReduceOp.MAX, group=bwc_pipeline_parallel_group(mpu))
 
         # MoE grads: max across expert parallel group
-        if moe_ep_group is not None:
+        if pg_utils.is_parallel(moe_ep_group):
             dist.all_reduce(device_total_norm, op=dist.ReduceOp.MAX, group=moe_ep_group)
         total_norm = device_total_norm.to(input_tensors[0].device)
     else:
 
-        if 'norm_tensors_compute_buffer' not in graph_cache or len(
-                graph_cache['norm_tensors_compute_buffer']) != len(input_tensors):
-            graph_cache['norm_tensors_compute_buffer'] = [
-                torch.empty([], dtype=torch.float, device=get_accelerator().current_device_name())
-                for t in input_tensors
-            ]
-        compute_buffer = graph_cache['norm_tensors_compute_buffer']
-
-        def _norm_tensors(tensor_list, _compute_buffer, _norm_type):
-            for i, t in enumerate(tensor_list):
-                _compute_buffer[i].data.copy_(t.data.float().norm(_norm_type)**_norm_type)
-                if i != 0:
-                    _compute_buffer[0].data.add_(_compute_buffer[i].data)
-
-        if use_graph:
-            graph_process(False, _norm_tensors, input_tensors, compute_buffer, norm_type)
-        else:
-            _norm_tensors(input_tensors, compute_buffer, norm_type)
-
-        device_total_norm = compute_buffer[0].float().detach()
+        device = get_accelerator().current_device_name()
+        for tensor in input_tensors:
+            tensor_norm = tensor.detach().float().norm(norm_type)
+            all_norms.append(tensor_norm.to(device))
+        norm_powers = torch.stack(all_norms).pow(norm_type)
+        device_total_norm = norm_powers.sum()
 
         # Sum across model parallel
         if mpu is not None:
@@ -956,7 +1037,7 @@ def get_global_norm_of_tensors(input_tensors, norm_type=2, mpu=None, use_graph=F
                 dist.all_reduce(device_total_norm, op=dist.ReduceOp.SUM, group=bwc_pipeline_parallel_group(mpu))
 
         # MoE grads: sum across expert parallel group
-        if moe_ep_group is not None:
+        if pg_utils.is_parallel(moe_ep_group):
             dist.all_reduce(device_total_norm, op=dist.ReduceOp.SUM, group=moe_ep_group)
         total_norm = device_total_norm.to(input_tensors[0].device).pow(1. / norm_type)
 
@@ -965,10 +1046,11 @@ def get_global_norm_of_tensors(input_tensors, norm_type=2, mpu=None, use_graph=F
     return total_norm
 
 
-def clip_tensors_by_global_norm(input_tensors, max_norm=1.0, global_norm=None, mpu=None, eps=1e-6, use_graph=False):
+def clip_tensors_by_global_norm(input_tensors, max_norm=1.0, global_norm=None, mpu=None, eps=1e-6):
     """Clip list of tensors by global norm.
     Args:
         input_tensors: List of tensors to be clipped
+        max_norm (float, optional): Max norm used for clipping. Defaults to 1.0
         global_norm (float, optional): Precomputed norm. Defaults to None.
         mpu (optional): model parallelism unit. Defaults to None.
         eps (float, optional): epsilon value added to grad norm. Defaults to 1e-6
@@ -976,26 +1058,11 @@ def clip_tensors_by_global_norm(input_tensors, max_norm=1.0, global_norm=None, m
         float: the global norm
     """
     if global_norm is None:
-        global_norm = get_global_norm_of_tensors(input_tensors, mpu=mpu, use_graph=use_graph)
+        global_norm = get_global_norm_of_tensors(input_tensors, mpu=mpu)
     clip_coef = max_norm / (global_norm + eps)
     if clip_coef < 1:
-        if use_graph:
-
-            def clip_tensors(_tensor_list, _clip_coef_tensor):
-                for t in _tensor_list:
-                    t.detach().mul_(_clip_coef_tensor)
-
-            if 'clip_coef_tensor' not in graph_cache:
-                # Alloc memory
-                graph_cache['clip_coef_tensor'] = torch.tensor(clip_coef,
-                                                               dtype=torch.float32).to(get_accelerator().device_name())
-            clip_coef_tensor = graph_cache['clip_coef_tensor']
-            clip_coef_tensor.copy_(torch.tensor(clip_coef, dtype=torch.float32))
-            graph_process(False, clip_tensors, input_tensors, clip_coef_tensor)
-
-        else:
-            for t in input_tensors:
-                t.detach().mul_(clip_coef)
+        for tensor in input_tensors:
+            tensor.detach().mul_(clip_coef)
     return global_norm
 
 
@@ -1139,13 +1206,12 @@ def get_norm_with_moe_layers(non_expert_norm, mpu, expert_tensors, norm_type=2):
         group_norm = get_global_norm_of_tensors(input_tensors=tensors,
                                                 mpu=mpu,
                                                 norm_type=norm_type,
-                                                use_graph=False,
                                                 moe_ep_group=groups._get_expert_parallel_group(exp_name))
         group_norms.append(group_norm)
 
     # check if all norms are valid
     group_norms = torch.stack([to_tensor(norm) for norm in group_norms])
-    if group_norms.eq(-1).any():
+    if is_invalid_grad_norm(group_norms):
         return -1
 
     # combine norms

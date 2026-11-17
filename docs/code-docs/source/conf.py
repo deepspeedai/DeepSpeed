@@ -98,4 +98,4 @@ add_module_names = True
 
 autoclass_content = 'both'
 
-autodoc_mock_imports = ["apex", "mpi4py", "tensorboardX", "numpy", "cupy", "einops", "transformers", "msgpack"]
+autodoc_mock_imports = ["apex", "mpi4py", "tensorboardX", "numpy", "einops", "transformers", "msgpack"]

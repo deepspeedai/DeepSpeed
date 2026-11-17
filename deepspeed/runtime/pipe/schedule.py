@@ -324,6 +324,148 @@ class DataParallelSchedule(PipeSchedule):
         return 1
 
 
+class DualPipeVSchedule(PipeSchedule):
+    """The DualPipeV schedule of DeepSeek-V3.
+
+    GitHub Repo: https://github.com/deepseek-ai/DualPipe
+
+    Every rank holds two pipeline stages: stage ``stage_id`` (phase 0, activations flow
+    towards the last rank) and stage ``2 * stages - 1 - stage_id`` (phase 1, activations
+    flow back towards rank 0). Micro-batches enter phase 0 on rank 0, turn around on the
+    last rank and finish in phase 1 on rank 0, which is therefore both the first and the
+    loss stage. Interleaving the two phases fills the 1F1B bubble.
+
+    Sends and receives are queued and launched as one batch by :class:`CommitP2P`, so an
+    instruction's communication is only complete once the next ``CommitP2P`` has run.
+    The reference implementation also defers weight gradients ("zero bubble"); this
+    schedule keeps them inside :class:`BackwardPass`.
+
+    Args:
+        micro_batches (int): Must be at least ``2 * stages``.
+        stages (int): The number of pipeline ranks (each holds two stages).
+        stage_id (int): The pipeline rank that will execute the generated schedule.
+        forward_only (bool): Skip backward passes and gradient exchanges.
+    """
+
+    def __init__(self, micro_batches, stages, stage_id, forward_only=False):
+        super().__init__(micro_batches, stages, stage_id)
+        if micro_batches < 2 * stages:
+            raise ValueError(f'DualPipeV needs at least 2 * {stages} micro-batches, got {micro_batches}')
+        self.forward_only = forward_only
+
+    def num_pipe_buffers(self):
+        """One slot per (phase, micro-batch): ``phase * micro_batches + micro_batch``."""
+        return 2 * self.micro_batches
+
+    def steps(self):
+        rank = self.stage_id
+        num_ranks = self.stages
+        is_first = rank == 0
+        is_last = rank == num_ranks - 1
+        counters = {name: [0, 0] for name in ('fwd', 'bwd', 'send_fwd', 'send_bwd', 'recv_fwd', 'recv_bwd')}
+
+        def buffer(phase, counter):
+            micro_batch = counters[counter][phase]
+            counters[counter][phase] += 1
+            return phase * self.micro_batches + micro_batch
+
+        def recv_forward(phase):
+            if (is_first and phase == 0) or (is_last and phase == 1):
+                return []
+            return [RecvActivation(buffer(phase, 'recv_fwd'), phase=phase)]
+
+        def send_forward(phase):
+            if (is_first and phase == 1) or (is_last and phase == 0):
+                return []
+            return [SendActivation(buffer(phase, 'send_fwd'), phase=phase)]
+
+        def recv_backward(phase):
+            if self.forward_only or (is_first and phase == 1) or (is_last and phase == 0):
+                return []
+            return [RecvGrad(buffer(phase, 'recv_bwd'), phase=phase)]
+
+        def send_backward(phase):
+            if self.forward_only or (is_first and phase == 0) or (is_last and phase == 1):
+                return []
+            return [SendGrad(buffer(phase, 'send_bwd'), phase=phase)]
+
+        def forward(phase):
+            buffer_id = buffer(phase, 'fwd')
+            load = [LoadMicroBatch(buffer_id)] if is_first and phase == 0 else []
+            return load + [ForwardPass(buffer_id, phase=phase)]
+
+        def backward(phase):
+            if self.forward_only:
+                return []
+            return [BackwardPass(buffer(phase, 'bwd'), phase=phase)]
+
+        def forward_chunk(phase, recv=True, send=True):
+            cmds = recv_forward(phase) if recv else []
+            cmds += [CommitP2P()] + forward(phase)
+            return cmds + (send_forward(phase) if send else [])
+
+        def backward_chunk(phase, send=True):
+            cmds = recv_backward(phase) + [CommitP2P()] + backward(phase)
+            return cmds + (send_backward(phase) if send else [])
+
+        def forward_backward_chunk(phase0, phase1, recv0=True):
+            cmds = recv_forward(phase0) if recv0 else []
+            cmds += recv_backward(phase1) + [CommitP2P()] + forward(phase0) + backward(phase1)
+            return cmds + send_forward(phase0) + send_backward(phase1)
+
+        def weight_chunk():
+            return [] if self.forward_only else [CommitP2P()]
+
+        # Step 1: nF0
+        for _ in range((num_ranks - rank - 1) * 2):
+            yield forward_chunk(0)
+
+        # Step 2: nF0F1
+        step_2 = rank + 1
+        yield recv_forward(0)
+        for i in range(step_2):
+            cmds = forward_chunk(0, recv=False, send=False) + recv_forward(0)
+            cmds += forward_chunk(1, send=(not is_last) or (i < step_2 - 1))
+            yield cmds + send_forward(0)
+
+        # Step 3: nB1W1F1
+        for _ in range(num_ranks - rank - 1):
+            yield backward_chunk(1) + recv_forward(1) + weight_chunk() + forward_chunk(1, recv=False)
+
+        # Step 4 (main step): nF0B1F1B0
+        for i in range(self.micro_batches - num_ranks * 2 + rank + 1):
+            if i == 0:
+                if is_last:
+                    cmds = forward_chunk(0, recv=False, send=False) + send_forward(1)
+                    cmds += backward_chunk(1, send=False) + send_forward(0) + send_backward(1)
+                else:
+                    cmds = forward_backward_chunk(0, 1, recv0=False)
+            else:
+                cmds = forward_backward_chunk(0, 1)
+            yield cmds + forward_backward_chunk(1, 0)
+
+        # Step 5: nB1F1B0
+        for _ in range(num_ranks - rank - 1):
+            yield backward_chunk(1) + forward_backward_chunk(1, 0)
+
+        # Step 6: nB1B0
+        for _ in range(rank + 1):
+            yield backward_chunk(1) + backward_chunk(0)
+
+        # Step 7: nWB0
+        for _ in range(num_ranks - rank - 1):
+            yield weight_chunk() + backward_chunk(0)
+
+        # Step 8: nW
+        for _ in range(rank + 1):
+            yield weight_chunk()
+
+        cmds = [CommitP2P()]
+        if not self.forward_only:
+            cmds += [ReduceTiedGrads(), ReduceGrads(), OptimizerStep()]
+        yield cmds
+
+
 class PipeInstruction:
     """Base class for all instructions to be executed by the pipeline engine.
 
@@ -482,6 +624,15 @@ class RecvGrad(BufferOpInstruction):
     .. note::
         The communication is blocking and must be paired with a :class:`SendGrad`
         on the next pipeline stage to avoid deadlock.
+    """
+    pass
+
+
+class CommitP2P(PipeInstruction):
+    """Launch the queued asynchronous sends and receives as one batch and wait for them.
+
+    Used by schedules whose communication instructions only queue work, such as
+    :class:`DualPipeVSchedule`.
     """
     pass
 
