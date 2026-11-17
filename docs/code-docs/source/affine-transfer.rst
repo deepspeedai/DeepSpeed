@@ -45,23 +45,32 @@ moves data::
 
     from deepspeed.checkpoint.affine_transfer_executor import prepare_transfers
 
-    prepared = prepare_transfers(requests, endpoints, dtype, budget)
+    prepared = prepare_transfers(build_requests(), endpoints, dtype, budget)
     for step in steps:
         ...  # update the source buffers in place
-        prepared.run()
+        prepared.run(build_requests())
 
+Here ``build_requests`` stands for building the requests from the live state,
+for example with fresh ``zero_param_storage_shard`` views.
 ``prepare_transfers`` is collective and refuses a batch exactly as
-``execute_transfers`` does; ``execute_transfers`` is ``prepare_transfers``
-followed by one run. The handle keeps the buffers it was prepared with and its
-arenas stay allocated, so buffers must stay where they are and every process
-must run the handle the same number of times. By default ``run`` checks both
-before any data moves, with one small all-gather: if a buffer moved or changed
-shape on any process, or the processes are not running the same handle for the
-same time, every process raises and the batch has to be prepared again. Pass the
-requests rebuilt from the live state, such as fresh ``zero_param_storage_shard``
-views after ``reload_states``, as ``run(requests)`` to check those instead of
-the tensors the handle holds. ``run(check=False)`` skips the all-gather, so
-every process must pass the same ``check``.
+``execute_transfers`` does; ``execute_transfers`` runs the same preflight but
+builds each round's views only when it reaches that round, and keeps none of
+them. The handle keeps the buffers it was prepared with and its arenas stay
+allocated, so buffers must stay where they are and every process must run the
+handle the same number of times. By default ``run`` checks both before any data
+moves, with one small all-gather: if a buffer moved or changed shape on any
+process, or the processes are not running the same handle for the same time,
+every process raises and the batch has to be prepared again.
+
+``run(requests)`` checks the requests it is given; ``run()`` checks the tensors
+the handle holds, which catches a buffer re-pointed in place (``.data = ...``)
+but not a view taken before its storage moved. ``zero_param_storage_shard``
+returns such a view, and ZeRO-3 ``reload_states`` re-points the partition behind
+it, so a handle over these views needs the rebuilt requests to notice the move.
+The handle also keeps every buffer it holds allocated: drop it before
+``offload_states`` if the partitions' memory should be freed, and prepare the
+batch again after ``reload_states``. ``run(check=False)`` skips the all-gather,
+so every process must pass the same ``check``.
 
 Planning a sync with replica policies
 -------------------------------------
