@@ -549,6 +549,11 @@ class DeepSpeedEngine(Module):
         self.warn_unscaled_loss = True
         self.config = config
         self._config = config_class
+        # Reject incompatible layouts before changing process-wide mesh or expert state.
+        # An explicit mpu replaces groups.mpu; a data/sequence parallel mesh does not.
+        requested_tp_size = self.autotp_size()
+        if requested_tp_size > 1 or (self.mpu is None and groups.mpu is groups):
+            groups._check_existing_tp_groups(tensor_model_parallel_size=max(requested_tp_size, 1))
         if self._config.deterministic_mode:
             from .determinism import apply_determinism
             apply_determinism(self._config)
@@ -611,12 +616,6 @@ class DeepSpeedEngine(Module):
             # Head counts were recorded against the whole model; the parameters are shards now.
             from deepspeed import resolve_per_head_muon_after_sharding
             resolve_per_head_muon_after_sharding(model)
-        elif self.mpu is None and groups.mpu is groups:
-            # Without an mpu of its own, this engine inherits groups.mpu. When an earlier AutoTP engine set it,
-            # that means its data parallel group, which covers only part of the ranks. An mpu passed to a later
-            # engine replaces groups.mpu, and then the cached AutoTP groups are not used. A data/sequence parallel
-            # mesh does not replace it either: the model parallel size and rank are still read from groups.mpu.
-            groups._check_existing_tp_groups(tensor_model_parallel_size=1)
         see_memory_usage("DeepSpeed Engine: After args sanity test", force=self.memory_breakdown())
         self._set_distributed_vars(args)
 
