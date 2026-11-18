@@ -31,6 +31,7 @@ import torch
 
 from deepspeed.checkpoint.affine import (AffinePiece, ParamAffineMap, block_gather_map, contiguous_split_map,
                                          replicated_map, segmented_map, sub_param_map)
+from deepspeed.checkpoint.affine_geometry import LogicalBox, boxes_disjoint
 from deepspeed.checkpoint.affine_transfer import (AffineTransferError, InvalidMapError, PlanBudget, TransferSegment,
                                                   UnsupportedLayoutError, plan_transfer)
 
@@ -397,13 +398,98 @@ def test_two_pieces_claiming_one_shard_range_are_refused():
         plan_transfer(replicated_map((4, 4), 1), source)
 
 
-def test_a_shard_described_with_the_wrong_rank_is_refused():
-    """A flat shard against a matrix parameter has no axis correspondence to plan along."""
-    source = ParamAffineMap(logical_shape=(4, 4),
-                            shard_shapes={0: (16, )},
-                            pieces_by_rank={0: [AffinePiece((4, 4), 0, (4, 1), 0, (4, 1), [0])]})
+def test_a_flat_shard_holds_a_dense_box_of_a_matrix():
+    """Flat storage, as ZeRO keeps it, may hold boxes of a matrix as dense runs of addresses."""
+    full = torch.arange(32.).reshape(4, 8)
+    # Columns [0, 3) then columns [3, 8), each stored densely one after the other.
+    source = ParamAffineMap(logical_shape=(4, 8),
+                            shard_shapes={0: (32, )},
+                            pieces_by_rank={
+                                0: [
+                                    AffinePiece((4, 3), 0, (8, 1), 0, (3, 1), [0]),
+                                    AffinePiece((4, 5), 3, (8, 1), 12, (5, 1), [0]),
+                                ]
+                            })
+    storage = torch.cat([full[:, :3].reshape(-1), full[:, 3:].reshape(-1)])
+    target = contiguous_split_map((4, 8), [2, 3, 3], 1)
 
-    with pytest.raises(UnsupportedLayoutError, match='number of axes'):
+    plan = plan_transfer(target, source)
+
+    written = {rank: torch.full(shape, float('nan')) for rank, shape in target.shard_shapes.items()}
+    for segment in plan.segments:
+        torch.as_strided(written[segment.target_rank], segment.shape, segment.target_strides,
+                         segment.target_offset).copy_(
+                             torch.as_strided(storage, segment.shape, segment.source_strides, segment.source_offset))
+    for rank, shard in written.items():
+        assert torch.equal(shard, target.extract(full, rank))
+
+
+def _zero_cut_mid_row():
+    # ZeRO cuts the flattened (4, 8) parameter at element 13, inside row 1.
+    return ParamAffineMap(logical_shape=(4, 8),
+                          shard_shapes={
+                              0: (13, ),
+                              1: (19, )
+                          },
+                          pieces_by_rank={
+                              0: [
+                                  AffinePiece((1, 8), 0, (8, 1), 0, (8, 1), [0]),
+                                  AffinePiece((1, 5), 8, (8, 1), 8, (5, 1), [0]),
+                              ],
+                              1: [
+                                  AffinePiece((1, 3), 13, (8, 1), 0, (3, 1), [1]),
+                                  AffinePiece((2, 8), 16, (8, 1), 3, (8, 1), [1]),
+                              ],
+                          }), {
+                              0: lambda full: full.reshape(-1)[:13],
+                              1: lambda full: full.reshape(-1)[13:]
+                          }
+
+
+def _flat_and_matrix_shards():
+    # One rank keeps rows [0, 2) flat while the other keeps rows [2, 4) as a matrix.
+    return ParamAffineMap(logical_shape=(4, 8),
+                          shard_shapes={
+                              0: (16, ),
+                              1: (2, 8)
+                          },
+                          pieces_by_rank={
+                              0: [AffinePiece((2, 8), 0, (8, 1), 0, (8, 1), [0])],
+                              1: [AffinePiece((2, 8), 16, (8, 1), 0, (8, 1), [1])],
+                          }), {
+                              0: lambda full: full[:2].reshape(-1),
+                              1: lambda full: full[2:]
+                          }
+
+
+@pytest.mark.parametrize('make_target', [_zero_cut_mid_row, _flat_and_matrix_shards],
+                         ids=['flat_target_cut_mid_row', 'flat_and_matrix_shards'])
+def test_flat_storage_is_written_as_well_as_read(make_target):
+    """Restoring into ZeRO storage writes flat shards; one map may also mix flat and matrix shards."""
+    full = torch.arange(32.).reshape(4, 8)
+    source = contiguous_split_map((4, 8), [3, 5], 1)
+    target, expected = make_target()
+
+    plan = plan_transfer(target, source)
+
+    written = {rank: torch.full(shape, float('nan')) for rank, shape in target.shard_shapes.items()}
+    for segment in plan.segments:
+        read = torch.as_strided(source.extract(full, segment.source_rank), segment.shape, segment.source_strides,
+                                segment.source_offset)
+        torch.as_strided(written[segment.target_rank], segment.shape, segment.target_strides,
+                         segment.target_offset).copy_(read)
+    for rank, shard in written.items():
+        assert torch.equal(shard, expected[rank](full))
+
+
+@pytest.mark.parametrize('shard_shape, dest_strides', [((32, ), (8, 1)), ((2, 2, 4), (4, 1))],
+                         ids=['flat_but_not_dense', 'other_rank'])
+def test_a_shard_without_axis_correspondence_is_refused(shard_shape, dest_strides):
+    source = ParamAffineMap(logical_shape=(4, 4),
+                            shard_shapes={0: shard_shape},
+                            pieces_by_rank={0: [AffinePiece((4, 4), 0, (4, 1), 0, dest_strides, [0])]})
+
+    with pytest.raises(UnsupportedLayoutError):
         plan_transfer(replicated_map((4, 4), 1), source)
 
 
@@ -579,6 +665,142 @@ def test_merge_comparisons_have_their_own_budget():
     target = ParamAffineMap((rows, 2), {0: (rows, 2)}, {0: pieces})
     with pytest.raises(AffineTransferError, match='max_merge_checks'):
         plan_transfer(target, source, PlanBudget(max_merge_checks=10))
+
+
+def test_many_consistent_pieces_need_no_pairwise_holder_checks():
+    rows, ranks = 1024, 8
+    source = block_gather_map((rows, 2), {rank: list(range(rank, rows, ranks)) for rank in range(ranks)}, 1, 0)
+    target = contiguous_split_map((rows, 2), [rows // ranks] * ranks, 0)
+    assert rows**2 > PlanBudget().max_pair_checks
+    full = torch.arange(rows * 2, dtype=torch.float64).reshape(rows, 2)
+    copied = _apply_plan(plan_transfer(target, source), target, _shards(source, lambda m, r: m.extract(full, r)))
+    for rank, shard in copied.items():
+        torch.testing.assert_close(shard, target.extract(full, rank))
+
+
+def test_many_pieces_on_one_rank_need_no_pairwise_address_checks():
+    rows, ranks = 2048, 2
+    source = block_gather_map((rows, 2), {rank: list(range(rank, rows, ranks)) for rank in range(ranks)}, 1, 0)
+    target = contiguous_split_map((rows, 2), [rows // ranks] * ranks, 0)
+    assert (rows // ranks)**2 > PlanBudget().max_pair_checks
+    full = torch.arange(rows * 2, dtype=torch.float64).reshape(rows, 2)
+    # Merging this many segments is a separate quadratic step with its own budget.
+    plan = plan_transfer(target, source, PlanBudget(max_merge_checks=1 << 30))
+    copied = _apply_plan(plan, target, _shards(source, lambda m, r: m.extract(full, r)))
+    for rank, shard in copied.items():
+        torch.testing.assert_close(shard, target.extract(full, rank))
+
+
+def test_sweep_comparisons_count_against_the_pair_budget():
+    """A disjoint layout can keep every box open for the whole sweep, so the sweep is budgeted too.
+
+    h full-height one-column boxes plus 2h one-element boxes beside them tile a (2h, h+1) parameter.
+    Sweeping rows, each one-element box meets all h columns: 2h**2 comparisons for 3h pieces.
+    """
+    h = 32
+    rows, cols = 2 * h, h + 1
+    pieces = [AffinePiece((rows, 1), column, (cols, 1), column * rows, (1, 1), [0]) for column in range(h)]
+    pieces += [AffinePiece((1, 1), row * cols + h, (cols, 1), h * rows + row, (1, 1), [0]) for row in range(rows)]
+    source = ParamAffineMap((rows, cols), {0: (rows * cols, )}, {0: pieces})
+    target = replicated_map((rows, cols), 1)
+    assert boxes_disjoint([LogicalBox((0, column), (rows, 1))
+                           for column in range(h)] + [LogicalBox((row, h), (1, 1)) for row in range(rows)])
+
+    full = torch.arange(rows * cols, dtype=torch.float64).reshape(rows, cols)
+    copied = _apply_plan(plan_transfer(target, source), target, _shards(source, lambda m, r: m.extract(full, r)))
+    torch.testing.assert_close(copied[0], target.extract(full, 0))
+    with pytest.raises(AffineTransferError, match='max_pair_checks'):
+        plan_transfer(target, source, PlanBudget(max_pair_checks=2 * h * h - 1))
+
+
+def _random_holder_map(rng, rows, cols, ranks):
+    """Row blocks on every rank, sometimes split at a replica's own points, with holders sometimes wrong."""
+    shared = sorted(rng.sample(range(1, rows), rng.randint(0, rows - 1)))
+    blocks_of = {}
+    for rank in range(ranks):
+        cuts = shared if rng.random() < 0.7 else sorted(rng.sample(range(1, rows), rng.randint(0, rows - 1)))
+        bounds = list(zip([0] + cuts, cuts + [rows]))
+        held = [block for block in bounds if rank == 0 or rng.random() < 0.6]
+        if rank and rng.random() < 0.1 and held:
+            low, high = held[0]
+            held.append((low, min(rows, high + 1)))
+        blocks_of[rank] = held
+    pieces, shapes = {}, {}
+    for rank, blocks in blocks_of.items():
+        offset, pieces[rank] = 0, []
+        for low, high in blocks:
+            # A replica may hold this block as several smaller pieces, so cover it by union.
+            holders = [
+                other for other, theirs in blocks_of.items() if all(
+                    any(a <= row < b for a, b in theirs) for row in range(low, high))
+            ]
+            if rng.random() < 0.15:
+                holders = sorted(set(holders) ^ {rng.randrange(ranks)}) or [rank]
+            shape = (high - low, cols)
+            pieces[rank].append(AffinePiece(shape, low * cols, (cols, 1), offset, (cols, 1), holders))
+            offset += _product(shape)
+        shapes[rank] = (offset, )
+    return ParamAffineMap((rows, cols), shapes, pieces)
+
+
+def _holders_are_exact(map_):
+    """Element-by-element reading of the holder contract, independent of the planner.
+
+    No rank may hold an element twice, and every element of a piece must be held by
+    exactly the ranks the piece names.
+    """
+    full = torch.arange(_product(map_.logical_shape))
+    elements_of = {}
+    held_by = {}
+    for rank, pieces in map_.pieces_by_rank.items():
+        for piece in pieces:
+            elements = full.as_strided(piece.shape, piece.source_strides, piece.source_offset).flatten().tolist()
+            elements_of[(rank, id(piece))] = (elements, set(piece.locations))
+            for element in elements:
+                ranks = held_by.setdefault(element, [])
+                if rank in ranks:
+                    return False
+                ranks.append(rank)
+    return all(
+        set(held_by[element]) == locations for elements, locations in elements_of.values() for element in elements)
+
+
+@pytest.mark.parametrize('seed', range(200))
+def test_holder_check_matches_an_element_level_oracle(seed):
+    """Replicas split at different points must still plan; a wrong holder set must be refused."""
+    rng = random.Random(seed)
+    rows, cols, ranks = rng.randint(1, 6), rng.randint(1, 3), rng.randint(1, 4)
+    mapped = _random_holder_map(rng, rows, cols, ranks)
+    other = replicated_map((rows, cols), 1)
+    target, source = (mapped, other) if seed % 2 else (other, mapped)
+    budget = PlanBudget(max_pair_checks=1 << 30)
+    if not _holders_are_exact(mapped):
+        with pytest.raises(InvalidMapError):
+            plan_transfer(target, source, budget)
+        return
+    try:
+        plan = plan_transfer(target, source, budget)
+    except UnsupportedLayoutError:
+        # A valid source whose replicas are cut at different points is a documented planner
+        # limitation, not a holder error; a target with such replicas must still plan.
+        assert source is mapped
+        return
+    full = torch.arange(rows * cols, dtype=torch.float64).reshape(rows, cols)
+    copied = _apply_plan(plan, target, _shards(source, lambda m, r: m.extract(full, r)))
+    for rank in target.shard_shapes:
+        torch.testing.assert_close(copied[rank], target.extract(full, rank))
+
+
+@pytest.mark.parametrize('seed', range(100))
+def test_boxes_disjoint_agrees_with_all_pairs(seed):
+    rng = random.Random(seed)
+    ndim = rng.randint(1, 3)
+    boxes = []
+    for _ in range(rng.randint(0, 8)):
+        origin = tuple(rng.randint(0, 4) for _ in range(ndim))
+        boxes.append(LogicalBox(origin, tuple(rng.randint(0, 3) for _ in range(ndim))))
+    overlapping = any(not a.intersection(b).is_empty for a, b in itertools.combinations(boxes, 2))
+    assert boxes_disjoint(boxes) == (not overlapping)
 
 
 # ---------------------------------------------------------------- never materializing

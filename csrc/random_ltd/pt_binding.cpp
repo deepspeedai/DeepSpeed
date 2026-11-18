@@ -29,14 +29,6 @@ torch::Tensor token_gather(torch::Tensor& activations,
 {
     // Activations may be in either [N, S, C] or [S, N, C] while sorted_indices is
     // always in [N, retained]
-    /*
-        TORCH_CHECK(sorted_indices.size(0) == activations.size(0) ||
-                        sorted_indices.size(0) == activations.size(1),
-                    "Unable to match the batch size of the sorted indices to the activation
-       shape."); TORCH_CHECK(activations.size(2) % 8 == 0, "Channels must be divisible by 8 to align
-       with vectorized loads.");
-    */
-    // bool batch_first = sorted_indices.size(0) == activations.size(0);
 
     const int64_t dim_0 = (batch_first) ? sorted_indices.size(0) : sorted_indices.size(1);
     const int64_t dim_1 = (batch_first) ? sorted_indices.size(1) : sorted_indices.size(0);
@@ -88,14 +80,6 @@ torch::Tensor token_scatter_(torch::Tensor& all_activations,
 {
     // Activations may be in either [N, S, C] or [S, N, C] while sorted_indices is
     // always in [N, retained]
-    /*
-        TORCH_CHECK(sorted_indices.size(0) == all_activations.size(0) ||
-                        sorted_indices.size(0) == all_activations.size(1),
-                    "Unable to match the batch size of the sorted indices to the activation
-       shape."); TORCH_CHECK(all_activations.size(2) % 8 != 0, "Channels must be divisible by 8 to
-       align with vectorized loads.");
-    */
-    // bool batch_first = sorted_indices.size(0) == all_activations.size(0);
 
     const int batch_size = sorted_indices.size(0);
     const int channels = all_activations.size(2);
@@ -140,14 +124,8 @@ torch::Tensor token_scatter_(torch::Tensor& all_activations,
 
 torch::Tensor mask_gather_bert(torch::Tensor& dense_mask, torch::Tensor& sorted_indices)
 {
-    // TORCH_CHECK(dense_mask.dim() == 4)
-
     const int batch_size = dense_mask.size(0);
     const int layers = sorted_indices.size(0);
-    /*
-        TORCH_CHECK(layers * batch_size == sorted_indices.size(0),
-                    "Mismatch between the indices and the mask");
-    */
     const int orig_seq_len = dense_mask.size(3);
     const int truncated_seq_len = sorted_indices.size(2);
 
@@ -179,8 +157,6 @@ torch::Tensor mask_gather_bert(torch::Tensor& dense_mask, torch::Tensor& sorted_
 
 torch::Tensor mask_gather_gpt(torch::Tensor dense_mask, int truncated_seq_len)
 {
-    // TORCH_CHECK(dense_mask.dim() == 4)
-
     const int batch_size = dense_mask.size(0);
     const int orig_seq_len = dense_mask.size(3);
 

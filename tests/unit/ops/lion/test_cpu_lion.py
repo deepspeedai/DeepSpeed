@@ -82,7 +82,6 @@ def test_cpu_lion_matches_reference(model_size, weight_decay):
                          [
                              (64),
                              (22),
-                             #(55),
                              (128),
                              (1024),
                              (1048576),

@@ -166,15 +166,15 @@ class TestStage12ParamAlignment(DistributedTest):
         engine.save_checkpoint(checkpoint_dir, tag="padded-layout")
         expected = {name: param.detach().clone() for name, param in engine.module.named_parameters()}
 
-        for load_kwargs in ({"load_module_only": True}, {"load_optimizer_states": False}):
-            loaded = _init_alignment_engine(zero_stage, parameter_alignment=False)
-            loaded.load_checkpoint(checkpoint_dir, tag="padded-layout", **load_kwargs)
-            for name, param in loaded.module.named_parameters():
-                assert torch.equal(param, expected[name])
+        module_only = _init_alignment_engine(zero_stage, parameter_alignment=False)
+        module_only.load_checkpoint(checkpoint_dir, tag="padded-layout", load_module_only=True)
+        for name, param in module_only.module.named_parameters():
+            assert torch.equal(param, expected[name])
 
-        loaded = _init_alignment_engine(zero_stage, parameter_alignment=False)
-        with pytest.raises(RuntimeError, match="parameter-alignment layout"):
-            loaded.load_checkpoint(checkpoint_dir, tag="padded-layout")
+        for load_kwargs in ({"load_optimizer_states": False}, {}):
+            loaded = _init_alignment_engine(zero_stage, parameter_alignment=False)
+            with pytest.raises(RuntimeError, match="parameter-alignment layout"):
+                loaded.load_checkpoint(checkpoint_dir, tag="padded-layout", **load_kwargs)
 
     @pytest.mark.parametrize("load_parameter_alignment", [False, True], ids=["unpadded", "aligned"])
     def test_legacy_unpadded_checkpoint_migrates_across_layouts(self, tmpdir, zero_stage, load_parameter_alignment):

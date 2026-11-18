@@ -61,6 +61,11 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
                                                                    pin_memory=self.offload_optimizer_pin_memory)
 
     def _create_fp16_sub_groups(self, params_group):
+        # Split by dtype first, as the base class does; calling this method for each dtype keeps the
+        # bookkeeping below per sub group.
+        dtype_groups = self._split_by_partition_dtype(params_group)
+        if len(dtype_groups) > 1:
+            return [sub_group for params in dtype_groups for sub_group in self._create_fp16_sub_groups(params)]
 
         params_group_numel = sum([param.partition_numel() for param in params_group])
         sub_group_size = self.sub_group_size
@@ -146,10 +151,10 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
                 grad_buffer.copy_(grad_partition, non_blocking=True)
                 grad_buffer = grad_buffer.to(grad_partition.device, non_blocking=True)
             elif get_accelerator().on_accelerator(grad_buffer):
-                grad_buffer.add_(grad_partition.to(self.gradient_accumulation_dtype).view(grad_buffer.shape))
+                grad_buffer.add_(grad_partition.to(grad_buffer.dtype).view(grad_buffer.shape))
             else:
                 cuda_grad_buffer = grad_buffer.to(grad_partition.device, non_blocking=True)
-                cuda_grad_buffer.add_(grad_partition.to(self.gradient_accumulation_dtype).view(cuda_grad_buffer.shape))
+                cuda_grad_buffer.add_(grad_partition.to(grad_buffer.dtype).view(cuda_grad_buffer.shape))
                 grad_buffer.copy_(cuda_grad_buffer, non_blocking=True)
                 grad_buffer = cuda_grad_buffer
 

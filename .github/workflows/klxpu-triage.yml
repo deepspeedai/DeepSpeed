@@ -1,0 +1,79 @@
+name: klxpu-triage
+
+# Auto-file an issue when a nightly (scheduled) klxpu v1 run has test failures,
+# following the nightly-triage.yml pattern: a cloud-hosted workflow_run job reads
+# the completed klxpu run's log and reports through ci/nightly_report.sh, which
+# labels the issue and comments on an existing open one instead of filing a
+# duplicate when the same regression recurs. Pure infra/setup failures (no
+# FAILED test files) are left untriaged.
+#
+# Only scheduled runs on the default branch are triaged; PR/push/dispatch
+# failures are interactive and need no issue. The self-hosted klxpu job keeps
+# contents:read only -- issue filing runs here, on a cloud runner.
+
+on:
+  workflow_run:
+    workflows: [klxpu]
+    types: [completed]
+
+permissions:
+  contents: read
+
+jobs:
+  report:
+    if: >-
+      github.event.workflow_run.event == 'schedule' &&
+      github.event.workflow_run.conclusion == 'failure' &&
+      github.event.workflow_run.head_branch == github.event.repository.default_branch
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+      issues: write
+    steps:
+      - name: Checkout report script at the nightly SHA
+        uses: actions/checkout@v4
+        with:
+          # Same revision the nightly ran, so the reporter matches that run.
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Collect failing test files from the klxpu run log
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KLXPU_RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          # run-tests.sh ends with "FAILED: tests/unit/v1/....py" per failed file.
+          gh run view "$KLXPU_RUN_ID" --repo "$GITHUB_REPOSITORY" --log \
+            | grep -oE 'FAILED: tests/unit/v1/[^[:space:]]*\.py' \
+            | sed 's/^FAILED: //' | sort -u > failing-tests.txt || true
+          cat failing-tests.txt || true
+
+      - name: File or update the triage issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          KLXPU_RUN_URL: ${{ github.event.workflow_run.html_url }}
+          KLXPU_SHA: ${{ github.event.workflow_run.head_sha }}
+        # SHA-free titles: a recurring regression is one tracked issue that
+        # collects a comment per night, not a new issue each time. Pure infra
+        # failures (no FAILED test files, e.g. a checkout/image-pull/job kill)
+        # are left untriaged -- only real test failures open an issue.
+        run: |
+          if [ ! -s failing-tests.txt ]; then
+            echo "No FAILED test files in the run log; treating as infra/setup failure, not filing an issue."
+            exit 0
+          fi
+          {
+            echo "The nightly klxpu v1 unit run at $KLXPU_SHA failed with test-file failures."
+            echo
+            echo "Failing files:"
+            sed 's/^/- /' failing-tests.txt
+            echo
+            echo "Run: $KLXPU_RUN_URL"
+          } > issue-body.txt
+          bash ci/nightly_report.sh \
+            "klxpu nightly regression: v1 unit suite failed" \
+            issue-body.txt "$KLXPU_RUN_URL"
