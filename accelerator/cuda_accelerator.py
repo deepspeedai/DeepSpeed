@@ -360,7 +360,7 @@ class CUDA_Accelerator(DeepSpeedAccelerator):
             return "deepspeed.ops.op_builder"
 
     # dict that holds class name <--> class type mapping i.e.
-    # 'AsyncIOBuilder': <class 'op_builder.async_io.AsyncIOBuilder'>
+    # 'FusedAdamBuilder': <class 'op_builder.fused_adam.FusedAdamBuilder'>
     # this dict will be filled at init stage
     class_dict = None
 
@@ -386,10 +386,10 @@ class CUDA_Accelerator(DeepSpeedAccelerator):
                         ) and member_name != "OpBuilder" and member_name != "CUDAOpBuilder":  # avoid abstract classes
                             if not member_name in self.class_dict:
                                 self.class_dict[member_name] = getattr(module, member_name)
-            # Host-side optimizers run on the CPU wherever the model lives,
-            # so they share their builders with the CPU accelerator.
+            # Host-side ops (the CPU optimizers, and async I/O, which stages device tensors through
+            # host memory) need no CUDA to build, so they share their builders with the CPU accelerator.
             cpu_op_builder_module = importlib.import_module("{}.cpu".format(op_builder_dir))
-            for member_name in ["CPUAdamBuilder", "CPUAdagradBuilder", "CPULionBuilder"]:
+            for member_name in ["CPUAdamBuilder", "CPUAdagradBuilder", "CPULionBuilder", "AsyncIOBuilder"]:
                 self.class_dict[member_name] = getattr(cpu_op_builder_module, member_name)
             # end initialize for create_op_builder()
 

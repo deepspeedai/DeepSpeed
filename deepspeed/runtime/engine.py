@@ -848,7 +848,12 @@ class DeepSpeedEngine(Module):
             pp_size = bwc_pipeline_parallel_world_size(self.mpu)
 
         world_size = dist.get_world_size()
-        validate_autoep_config(autoep_config, world_size, pp_size, tp_size, sp_size)
+        validate_autoep_config(autoep_config,
+                               world_size,
+                               pp_size,
+                               tp_size,
+                               sp_size,
+                               zero_stage=self.zero_optimization_stage())
         folding_spec = build_folding_spec(
             world_size=world_size,
             pp_size=pp_size,
@@ -5867,6 +5872,13 @@ class DeepSpeedEngine(Module):
             logger.info(
                 f"Currently AutoSP does not compose with ZeRO stage 2 and 3. Falling back to the torch compiler.")
             return None
+
+        autosp_size = self._config._param_dict.get("sequence_parallel_size", 1)
+        if self.sequence_parallel_size != autosp_size:
+            raise ValueError(f"AutoSP shards the sequence over sequence_parallel_size={autosp_size} ranks, "
+                             f"but the engine reduces gradients over a sequence parallel group of "
+                             f"{self.sequence_parallel_size} ranks. Do not pass an mpu or a mesh_param whose "
+                             "sequence parallel dimension differs from sequence_parallel_size.")
 
         compile_config = self._config.compile_config
         compile_kwargs['fullgraph'] = True

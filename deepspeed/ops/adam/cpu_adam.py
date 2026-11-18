@@ -3,11 +3,36 @@
 
 # DeepSpeed Team
 
+import os
+
+import psutil
 import torch
 from deepspeed.utils import logger
 from deepspeed.utils.logging import should_log_le
 from deepspeed.ops.cpu_optimizer import DeepSpeedCPUOptimizer
 from deepspeed.ops.op_builder import CPUAdamBuilder
+
+
+def single_thread_warning():
+    """Return a warning if the CPU optimizer's OpenMP loop is limited to one thread while this rank has more cores.
+
+    torchrun exports OMP_NUM_THREADS=1 when --nproc_per_node > 1 unless the variable is already set, so ZeRO-Offload
+    jobs started with torchrun step the CPU optimizer on a single thread unless the user overrides it.
+    """
+    if os.environ.get("OMP_NUM_THREADS") != "1":
+        return None
+    # Physical cores: the optimizer loop is dense, so hyperthreads do not add throughput.
+    cores = psutil.cpu_count(logical=False) or os.cpu_count() or 1
+    try:
+        cores = min(cores, len(os.sched_getaffinity(0)))
+    except AttributeError:  # not available on macOS
+        pass
+    cores_per_rank = cores // max(int(os.environ.get("LOCAL_WORLD_SIZE", "1")), 1)
+    if cores_per_rank < 2:
+        return None
+    return (f"OMP_NUM_THREADS=1, so DeepSpeedCPUAdam steps on one thread although this rank can use {cores_per_rank} "
+            "cores. torchrun sets OMP_NUM_THREADS=1 when --nproc_per_node > 1; set OMP_NUM_THREADS to the number of "
+            "cores per rank, or launch with `deepspeed --bind_cores_to_rank`.")
 
 
 class DeepSpeedCPUAdam(DeepSpeedCPUOptimizer):
@@ -88,6 +113,10 @@ class DeepSpeedCPUAdam(DeepSpeedCPUOptimizer):
 
         self.opt_id = DeepSpeedCPUAdam.optimizer_id
         DeepSpeedCPUAdam.optimizer_id = DeepSpeedCPUAdam.optimizer_id + 1
+        if self.opt_id == 0:
+            message = single_thread_warning()
+            if message:
+                logger.warning(message)
         self.adam_w_mode = adamw_mode
         try:
             self.ds_opt_adam = CPUAdamBuilder().load()
@@ -114,7 +143,7 @@ class DeepSpeedCPUAdam(DeepSpeedCPUOptimizer):
             group.setdefault('amsgrad', False)
 
     @torch.no_grad()
-    def step(self, closure=None):
+    def step(self, closure=None, grad_scale=1.0, bf16_copy=None):
         """Update the model parameters.
 
         .. note::
@@ -126,10 +155,28 @@ class DeepSpeedCPUAdam(DeepSpeedCPUOptimizer):
         Args:
             closure (callable, optional): closure to compute the loss.
                 Defaults to ``None``.
+            grad_scale (float, optional): every gradient is multiplied by this
+                factor as the kernel loads it, the same float multiply as
+                ``grad.mul_(grad_scale)`` before the step but without a separate
+                pass over the gradients (which are left unchanged). Defaults to 1.
+            bf16_copy (tuple, optional): ``(piece_numel, before_piece, after_piece)``
+                to also write a bfloat16 copy of the updated float32 parameters in
+                the same kernel pass. Each parameter is updated in pieces of
+                ``aligned_piece_numel(piece_numel)`` elements: ``out =
+                before_piece(param, start, count)`` returns a contiguous bfloat16
+                CPU tensor of ``count`` elements, the kernel updates the piece and
+                writes it into ``out`` rounded to nearest even (as ``out.copy_``
+                would), then ``after_piece(param, start, count, out)`` is called.
+                Parameters and moments are bitwise equal to a call without it.
+                Needs ``copy_supported()``. Defaults to ``None``.
 
         Returns:
             loss: if ``closure`` is provided. Otherwise ``None``.
         """
+        if bf16_copy is not None:
+            assert self.copy_supported(), "bf16_copy needs AVX512, NEON or the scalar CPU Adam kernel"
+        if grad_scale != 1.0:
+            assert self.grad_scale_supported(), "grad_scale is not supported by this CPU Adam build (RVV)"
 
         loss = None
         if closure is not None:
@@ -164,10 +211,50 @@ class DeepSpeedCPUAdam(DeepSpeedCPUOptimizer):
                 state['step'] += 1
                 beta1, beta2 = group['betas']
 
-                self.ds_opt_adam.adam_update(self.opt_id, state['step'], group['lr'], beta1, beta2, group['eps'],
-                                             group['weight_decay'], group['bias_correction'], p.data, p.grad.data,
-                                             state['exp_avg'], state['exp_avg_sq'])
+                if bf16_copy is not None:
+                    self._step_in_pieces_with_copy(p, state, group, grad_scale, *bf16_copy)
+                elif grad_scale != 1.0:
+                    self.ds_opt_adam.adam_update_scaled(self.opt_id, state['step'], group['lr'], beta1, beta2,
+                                                        group['eps'], group['weight_decay'], group['bias_correction'],
+                                                        p.data, p.grad.data, state['exp_avg'], state['exp_avg_sq'],
+                                                        grad_scale)
+                else:
+                    self.ds_opt_adam.adam_update(self.opt_id, state['step'], group['lr'], beta1, beta2, group['eps'],
+                                                 group['weight_decay'], group['bias_correction'], p.data, p.grad.data,
+                                                 state['exp_avg'], state['exp_avg_sq'])
         return loss
+
+    def copy_supported(self):
+        """Whether step(bf16_copy=...) can write a bfloat16 copy of the updated parameters (needs AVX512, NEON or the
+        scalar kernel)."""
+        return bool(self.ds_opt_adam.adam_copy_supported())
+
+    def grad_scale_supported(self):
+        """Whether step(grad_scale=...) is available (every kernel but RVV)."""
+        return bool(self.ds_opt_adam.adam_grad_scale_supported())
+
+    def aligned_piece_numel(self, piece_numel):
+        """The piece size step(bf16_copy=...) uses for ``piece_numel``: rounded down to a multiple of the kernel's
+        widest vector block (at least one block), so every element goes through the same code, with the same rounding,
+        as in one call on the whole parameter."""
+        block = int(self.ds_opt_adam.adam_block_numel())
+        return max(block, piece_numel - piece_numel % block)
+
+    def _step_in_pieces_with_copy(self, p, state, group, grad_scale, piece_numel, before_piece, after_piece):
+        assert p.dtype == torch.float32, f"bf16_copy needs float32 parameters, got {p.dtype}"
+        piece_numel = self.aligned_piece_numel(piece_numel)
+        beta1, beta2 = group['betas']
+        param, grad = p.data.view(-1), p.grad.data.view(-1)
+        exp_avg, exp_avg_sq = state['exp_avg'].view(-1), state['exp_avg_sq'].view(-1)
+        for start in range(0, param.numel(), piece_numel):
+            count = min(piece_numel, param.numel() - start)
+            out = before_piece(p, start, count)
+            piece = slice(start, start + count)
+            self.ds_opt_adam.adam_update_scaled_copy(self.opt_id, state['step'], group['lr'], beta1, beta2,
+                                                     group['eps'], group['weight_decay'], group['bias_correction'],
+                                                     param[piece], grad[piece], exp_avg[piece], exp_avg_sq[piece],
+                                                     grad_scale, out)
+            after_piece(p, start, count, out)
 
     @torch.no_grad()
     def step_subgroup(self, subgroup_id: int, closure=None):
