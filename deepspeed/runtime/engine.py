@@ -1045,6 +1045,9 @@ class DeepSpeedEngine(Module):
         tp_config.tensor_parallel.tp_size = tp_size
         if tp_config.tensor_parallel.tp_group is None:
             tp_config.tensor_parallel.tp_group = groups.get_tensor_model_parallel_group()
+        if tp_config.vocab_parallel_embedding and self.is_deepcompile_enabled() and self.compile_autotp():
+            # The pass rewrites only linear layers, so engine.compile() would reject the sharded embedding.
+            raise ValueError("vocab_parallel_embedding does not support the DeepCompile 'autotp' pass")
 
         from deepspeed.module_inject.auto_tp import AutoTP
 
@@ -1078,9 +1081,7 @@ class DeepSpeedEngine(Module):
 
         def finalize_autotp(autotp=None, attach_uc_metadata=False, require_vocab_parallel_lm_head=False):
             if tp_config.vocab_parallel_embedding:
-                from deepspeed.module_inject.layers import shard_untied_input_embedding
-                sharded = shard_untied_input_embedding(model, tp_config.tensor_parallel.tp_group,
-                                                       getattr(autotp, "tp_meta", None))
+                sharded = autotp._replace_untied_input_embedding()
                 if sharded is not None:
                     log_dist(f"AutoTP: vocab_parallel_embedding shards '{sharded}' along the vocabulary", ranks=[0])
             if autotp is not None:
@@ -1260,8 +1261,25 @@ class DeepSpeedEngine(Module):
         if vocab_head_autotp is not None:
             vocab_head_autotp._replace_vocab_parallel_lm_head()
             replacement_sources.update(vocab_head_autotp.replacement_sources)
-        finalize_autotp(attach_uc_metadata=True,
+        # vocab_parallel_embedding needs this model's tensor-parallel metadata and the ZeRO-3 gather of an AutoTP.
+        embedding_autotp = None
+        if tp_config.vocab_parallel_embedding:
+            embedding_autotp = AutoTP(module=model,
+                                      all_reduce_linears=(),
+                                      prefix="",
+                                      state_dict=None,
+                                      linear_layer_setting=(torch.nn.Linear, torch.nn.Embedding),
+                                      orig_layer_impl=None,
+                                      keep_module_on_host=tp_config.keep_module_on_host,
+                                      model_config=model_config,
+                                      tp_grain_size=tp_config.tensor_parallel.tp_grain_size,
+                                      training_mode=True)
+            embedding_autotp.set_tensor_parallel_config(tp_size, tp_config.tensor_parallel.tp_group)
+        finalize_autotp(embedding_autotp,
+                        attach_uc_metadata=True,
                         require_vocab_parallel_lm_head=tp_config.vocab_parallel_lm_head is True)
+        if embedding_autotp is not None:
+            replacement_sources.update(embedding_autotp.replacement_sources)
         return replacement_sources
 
     def __del__(self):

@@ -61,7 +61,8 @@ class TPTrainingConfig(DeepSpeedConfigModel):
     """
     Shard an input embedding that is not tied to the output layer along the vocabulary: each rank keeps 1/tp of the
     rows, looks up the tokens in its part and the partial results are summed over the tensor-parallel group. A tied
-    embedding follows vocab_parallel_lm_head instead.
+    embedding is sharded with its output head instead (vocab_parallel_lm_head or a row-parallel head), and raises an
+    error when that head stays replicated.
     """
 
     tensor_parallel: TPConfig = Field({}, alias="tp")

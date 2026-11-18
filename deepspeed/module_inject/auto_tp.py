@@ -4,6 +4,7 @@
 # DeepSpeed Team
 
 # Automatic Tensor Parallelism
+import dataclasses
 import logging
 import re
 
@@ -813,6 +814,51 @@ class AutoTP():
         if getattr(parent, child_name) is not child:
             raise RuntimeError(f"Vocab-parallel LM head '{full_name}' changed during AutoTP partitioning")
         setattr(parent, child_name, self._create_vocab_parallel_layer(child, full_name))
+
+    def _replace_untied_input_embedding(self):
+        """Shard the input embedding along the vocabulary (``tensor_parallel.vocab_parallel_embedding``).
+
+        Returns the replaced module's name, or None when the embedding is tied to an output head that
+        AutoTP already sharded, which leaves the embedding sharded with that head.
+        """
+        get_input_embeddings = getattr(self.module, "get_input_embeddings", None)
+        embedding = get_input_embeddings() if callable(get_input_embeddings) else None
+        if isinstance(embedding, TensorParallel_Layer):
+            # A VocabParallelEmbedding or HiddenParallelEmbedding sharing its tied head's shard;
+            # sharding it again would break the tie.
+            return None
+        if not isinstance(embedding, nn.Embedding):
+            raise ValueError(
+                "vocab_parallel_embedding needs a model whose get_input_embeddings() returns nn.Embedding, "
+                f"got {type(embedding).__name__}")
+        name = next(name for name, module in self.module.named_modules() if module is embedding)
+        if hasattr(embedding.weight, DS_AUTOTP_UC_META):
+            # _slice_embedding has already split it along the hidden dimension for a matching spec.
+            raise ValueError(
+                f"vocab_parallel_embedding: '{name}' is already partitioned by a matching tensor-parallel "
+                "spec; remove that spec or make it 'skip' to shard the embedding along the vocabulary")
+        for other_name, module in self.module.named_modules():
+            if module is not embedding and getattr(module, "weight", None) is embedding.weight:
+                raise NotImplementedError(f"vocab_parallel_embedding: the embedding weight is shared with "
+                                          f"{other_name!r}; a tied embedding is sharded with its output head "
+                                          "instead (vocab_parallel_lm_head or a row-parallel head)")
+        self._gather_zero3_params(embedding)
+        # The vocabulary is not made of attention heads, so it is split evenly like the vocabulary-parallel
+        # output head. A split by key-value head count leaves ranks beyond that count with no rows.
+        vocab_meta = dataclasses.replace(self.tp_meta, num_kv_heads=None)
+        sharded = VocabParallelEmbedding(embedding, self.mp_group, name=name, tp_meta=vocab_meta)
+        setattr(sharded, "replaced", True)
+        # named_modules() lists a module once, but a model may register it under several names (T5's
+        # set_input_embeddings() gives the encoder and decoder the same module). A name left on the old
+        # module would look up its one shard as if it were the whole table.
+        owners = []
+        for parent in self.module.modules():
+            for child_name, child in parent._modules.items():
+                if child is embedding:
+                    owners.append((parent, child_name))
+        for parent, child_name in owners:
+            setattr(parent, child_name, sharded)
+        return name
 
     def _configure_gathered_column_tie_fallbacks(self):
         """Configure a replicated fallback for gathered output layers tied to embeddings."""
