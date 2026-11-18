@@ -665,6 +665,14 @@ class TestArenaWeightViews:
         after an in-place sync (review finding: the lookup only read
         _ki_gdn_op, leaving the gate|up concat stale on dense models)."""
         pytest.importorskip("transformers")
+        # the backend cat cache exists only behind a real FusedGLUBuilder.
+        # Accelerators that register no builder (NotImplementedBuilder — the
+        # CPU accelerator) never inject, so there is no cache to stale: skip.
+        # A CUDA host whose JIT build FAILS is an environment defect and must
+        # fail loudly, not skip.
+        builder = get_accelerator().create_op_builder("FusedGLUBuilder")
+        if builder is None or builder.__name__ == "NotImplementedBuilder":
+            pytest.skip("accelerator registers no FusedGLUBuilder; no injection, no backend cache to stale")
         glu_model = os.environ.get("DS_SEGMENT_KI_GLU_TEST_MODEL", "Qwen/Qwen3-0.6B")
         try:
             from transformers import AutoTokenizer
@@ -689,8 +697,8 @@ class TestArenaWeightViews:
 
         from deepspeed.runtime.rollout.hybrid_engine_rollout import HybridEngineRollout, HybridEngineRolloutConfig
         graphs_ok = get_accelerator().device_name() != "cpu"
-        rollout = HybridEngineRollout(Shim(m), tok, HybridEngineRolloutConfig(use_graph_capture=graphs_ok,
-                                                                              use_segki=True))
+        rollout = HybridEngineRollout(Shim(m), tok,
+                                      HybridEngineRolloutConfig(use_graph_capture=graphs_ok, use_segki=True))
         self._gen(rollout, ids)  # builds every derived cache (incl. the C++ concat)
 
         # the injection on a dense model carries the handle on _ki_dual_op only
@@ -706,8 +714,8 @@ class TestArenaWeightViews:
         out_refreshed = self._gen(rollout, ids)
 
         m2 = AutoModelForCausalLM.from_pretrained(glu_model, dtype=torch.bfloat16).to(get_accelerator().device_name())
-        rollout2 = HybridEngineRollout(Shim(m2), tok, HybridEngineRolloutConfig(use_graph_capture=graphs_ok,
-                                                                                use_segki=True))
+        rollout2 = HybridEngineRollout(Shim(m2), tok,
+                                       HybridEngineRolloutConfig(use_graph_capture=graphs_ok, use_segki=True))
         with torch.no_grad():
             for p2, p in zip(m2.parameters(), m.parameters()):
                 p2.copy_(p)

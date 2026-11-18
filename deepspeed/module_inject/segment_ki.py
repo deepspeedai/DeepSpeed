@@ -768,10 +768,8 @@ def segki_refresh(model: torch.nn.Module) -> None:
     # the GLU concat cache is process-wide in the backend; any injected
     # backend handle reaches it. GLU-only models carry theirs on the MLP
     # modules as _ki_dual_op (no GDN layers exist to hold _ki_gdn_op).
-    gdn_op = op or next((getattr(m, attr, None)
-                         for m in model.modules()
-                         for attr in ("_ki_gdn_op", "_ki_dual_op")
-                         if getattr(m, attr, None) is not None), None)
+    gdn_op = op or next((getattr(m, attr, None) for m in model.modules()
+                         for attr in ("_ki_gdn_op", "_ki_dual_op") if getattr(m, attr, None) is not None), None)
     if gdn_op is not None and hasattr(gdn_op, "clear_glu_cat_cache"):
         gdn_op.clear_glu_cat_cache()
 
