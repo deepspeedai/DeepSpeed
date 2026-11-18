@@ -140,7 +140,12 @@ def _global_sp_sum(local_value, sp_group):
     return local_value + (global_value - local_value.detach())
 
 
-def _validate_vocab_shard_bounds(local_vocab_size, vocab_start_index, vocab_end_index, tp_group, device):
+def _validate_vocab_shard_bounds(local_vocab_size,
+                                 vocab_start_index,
+                                 vocab_end_index,
+                                 tp_group,
+                                 device,
+                                 allow_empty_shards=False):
     tp_world_size = dist.get_world_size(tp_group) if tp_group is not None else 1
     if tp_world_size == 1:
         if vocab_start_index != 0 or vocab_end_index != local_vocab_size:
@@ -157,7 +162,7 @@ def _validate_vocab_shard_bounds(local_vocab_size, vocab_start_index, vocab_end_
     for rank, (shard_start, shard_end, shard_size) in enumerate(gathered_metadata.view(tp_world_size, 3).tolist()):
         if shard_end - shard_start != shard_size:
             raise ValueError(f"Vocabulary shard bounds for TP rank {rank} do not match its local vocabulary size")
-        if shard_size <= 0:
+        if shard_size < 0 or (shard_size == 0 and not allow_empty_shards):
             raise ValueError(f"TP rank {rank} received an empty vocabulary shard; the vocabulary must be at least "
                              f"as large as the tensor-parallel size")
         if shard_start != expected_start:
@@ -167,7 +172,12 @@ def _validate_vocab_shard_bounds(local_vocab_size, vocab_start_index, vocab_end_
     return expected_start
 
 
-def _resolve_vocab_metadata(local_vocab_size, vocab_start_index, vocab_end_index, tp_group, device):
+def _resolve_vocab_metadata(local_vocab_size,
+                            vocab_start_index,
+                            vocab_end_index,
+                            tp_group,
+                            device,
+                            allow_empty_shards=False):
     """Infer (if needed) and collectively validate the vocabulary shard layout.
 
     This always re-runs the validation collective; it does not cache across calls. A
@@ -190,8 +200,12 @@ def _resolve_vocab_metadata(local_vocab_size, vocab_start_index, vocab_end_index
                 raise ValueError("Explicit vocabulary shard bounds are required for uneven tensor-parallel shards")
         vocab_start_index = tp_rank * local_vocab_size
         vocab_end_index = vocab_start_index + local_vocab_size
-    global_vocab_size = _validate_vocab_shard_bounds(local_vocab_size, vocab_start_index, vocab_end_index, tp_group,
-                                                     device)
+    global_vocab_size = _validate_vocab_shard_bounds(local_vocab_size,
+                                                     vocab_start_index,
+                                                     vocab_end_index,
+                                                     tp_group,
+                                                     device,
+                                                     allow_empty_shards=allow_empty_shards)
     return vocab_start_index, vocab_end_index, global_vocab_size
 
 

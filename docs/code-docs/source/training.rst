@@ -21,6 +21,13 @@ Starting from v0.18.3, DeepSpeed also supports direct calls to ``tensor.backward
 ``loss.backward()`` or ``tensor.backward(out_grad)`` when your PyTorch version supports the necessary APIs.
 If your PyTorch version does not support these APIs, a direct call to ``tensor.backward()`` will raise an error.
 
+Vocabulary-Parallel Streamed Scoring
+-----------------------------------
+Compute per-token scores from hidden states and resident, vocabulary-sharded
+linear-head parameters without materializing the full logits shard:
+
+.. autofunction:: deepspeed.sequence.linear_logprobs.vocab_parallel_linear_logprobs
+
 Forward Propagation
 -------------------
 .. autofunction:: deepspeed.DeepSpeedEngine.forward

@@ -439,6 +439,70 @@ without changing the accelerator-wide Triton flag or the dispatch of existing op
 It still consumes materialized local logits; this is not fused-linear JSD and does not
 automatically integrate with TRL or the OPSD example.
 
+### Streamed Per-Token Scoring
+
+`vocab_parallel_linear_logprobs` computes selected-token log-probabilities and
+optional entropy directly from hidden states and resident LM-head parameters.
+Unlike the logits-based ops above, it tiles the projection over both tokens and
+the local vocabulary, and recomputes tiles in backward. A boolean position mask
+skips unscored positions **before** the LM-head projection; prompt and tool-output
+tokens must still be processed by the backbone as context.
+
+```python
+from deepspeed.sequence.linear_logprobs import vocab_parallel_linear_logprobs
+
+head = model.get_output_embeddings()
+hidden = model.get_decoder()(input_ids=input_ids, attention_mask=attention_mask,
+                             use_cache=False).last_hidden_state
+targets = input_ids[:, 1:]
+score_mask = loss_mask[:, 1:].bool()  # True only for model-generated target tokens
+logprobs, entropy = vocab_parallel_linear_logprobs(
+    hidden[:, :-1], head.weight, targets,
+    bias=head.bias,
+    position_mask=score_mask,
+    tp_group=head.mp_group,
+    vocab_start_index=head.vocab_start_index,
+    vocab_end_index=head.vocab_end_index,
+    temperature=1.0,
+    return_entropy=True,
+    chunk_size=256,
+    vocab_chunk_size=8192,
+)
+# Illustrative policy-gradient objective; advantages come from the trainer.
+loss = -(logprobs * advantages[:, None]).sum() / score_mask.sum().clamp_min(1)
+```
+
+The function returns `(logprobs, entropy_or_None)` with FP32 tensors shaped like
+`targets`. Masked and `ignore_index=-100` positions return zero and have zero
+scoring gradient, including an entirely masked batch. There is no implicit
+causal shift or loss reduction. Projection dtype follows autocast, or the
+promoted hidden/weight dtype otherwise. Only first-order derivatives are supported.
+
+Pass the original decoder hidden states, not the output of the head's
+TP input-gradient mapping: this primitive replaces the head and all-reduces its
+hidden gradients itself. Every TP rank must score identical positions and target
+IDs with the same options and backpropagate the same loss. Uneven and empty local
+vocabulary shards are accepted with explicit contiguous bounds, provided the
+global vocabulary is nonempty. `tp_group=None` means local scoring, not the
+distributed world group.
+
+This opt-in API supports plain resident linear heads, not ZeRO-3 parameters,
+quantized heads, sequence-sharded hidden states or automatic model-forward
+replacement. It computes the full-vocabulary distribution after temperature;
+it does not apply model-specific soft-capping, top-k/top-p filtering or repetition
+penalties. Recorded rollout log-probabilities are interchangeable with these
+scores only under an explicitly matched probability contract, and incremental
+decode can still differ numerically from a training forward.
+
+The implementation uses bounded PyTorch tiles and reuses the fused CE path's
+projection and FP32 gradient-accumulation helpers. This is not a fused GRPO loss,
+and does not automatically integrate with a rollout engine or external trainer.
+Avoid wrapping its projection in another checkpoint solely to recompute the
+same tiles. Smaller tiles trade memory for additional GEMMs and kernel launches;
+measure whole-step memory and throughput before choosing sizes.
+
+Contact: [@jinyouzhi](https://github.com/jinyouzhi).
+
 ## Custom Patterns
 
 If you are training a custom model, define regex-based patterns and partition rules in `tensor_parallel.partition_config`:
