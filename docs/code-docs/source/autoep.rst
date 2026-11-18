@@ -375,6 +375,83 @@ GEMM), ZeRO stage is 1 or 2 (not 0 or 3), and PyTorch provides both
 ``torch._C._get_sm_carveout_experimental`` and
 ``torch._C._set_sm_carveout_experimental``.
 
+**Staging expert weight gradients across microbatches (experimental):**
+
+With hundreds of experts, or with small microbatches, each expert receives few
+rows per backward. The weight-gradient GEMMs (dW) then write three full-size
+gradients for a handful of rows each, and autograd adds each of them to the
+accumulated gradient: the backward is bound by memory bandwidth over the expert
+weights' footprint, not by arithmetic. ``deferred_dw_flush_period`` runs those
+GEMMs once for several backward passes instead:
+
+.. code-block:: json
+
+    {
+      "gradient_accumulation_steps": 16,
+      "expert_parallel": {
+        "enabled": true,
+        "autoep_size": 8,
+        "deferred_dw_flush_period": 8,
+        "deferred_dw_rows_per_expert": 256
+      }
+    }
+
+A backward that stages computes the experts' input gradient as usual, copies
+the rows the dW GEMMs read (the expert input, the activation output and their
+gradients, without alignment padding) behind each expert's cursor in a
+per-layer staging buffer, and returns no expert weight gradient. A flush
+gathers the staged rows of all experts and runs the dW GEMMs once over them. It
+runs:
+
+* in one backward of every ``deferred_dw_flush_period``;
+* early, when the rows of a backward do not fit behind an expert's cursor. The
+  staged rows are flushed and the new ones staged in the emptied buffer, without
+  moving the period. A backward that does not fit even an empty buffer computes
+  its own dW at once;
+* in the backward that closes a gradient accumulation window, which the engine
+  marks, so no staged row outlives the optimizer step it belongs to.
+  ``engine.step()`` raises if rows are still staged at a boundary.
+
+A flush returns its gradients through autograd from the backward that runs it,
+so gradient reduction, clipping and the optimizer see what they saw before:
+the sum over the window. Between flushes the expert weights have no new
+gradient. The sum is formed in one GEMM rather than by adding per-backward
+results, so values differ by floating-point summation order; in bf16 the
+staged sum was the closer of the two to an fp64 reference in every measured
+case.
+
+Each MoE layer on each rank holds ``local experts * deferred_dw_rows_per_expert``
+rows of ``2 * hidden + 3 * intermediate`` values in the compute dtype for as
+long as it trains. ``deferred_dw_rows_per_expert`` defaults to ``0``, which
+sizes the buffer on the first backward to ``deferred_dw_flush_period`` times
+the larger of that backward's busiest expert and twice its mean rows per
+expert.
+
+Whether this helps depends on the rows each expert receives per backward. On one
+H200 (PyTorch 2.8.0, bf16), timing only the grouped expert MLP's forward and
+backward for 128 local experts with hidden size 2048 and intermediate size 768
+(``gate_up_impl="fused"``), evenly routed, over windows of 8 backward passes:
+
+==================  ===========  ===========  ===========  ====================
+Rows per expert     period 2     period 4     period 8     Staging at period 8
+==================  ===========  ===========  ===========  ====================
+8                   1.22x        1.49x        1.68x        0.20 GiB
+32                  1.21x        1.46x        1.63x        0.78 GiB
+128                 1.06x        1.23x        1.34x        3.13 GiB
+512                 0.80x        0.86x        0.88x        12.50 GiB
+==================  ===========  ===========  ===========  ====================
+
+Speedups are against the same module without staging; values below 1 are
+slowdowns. These are module-level timings, not end-to-end training steps, and
+no convergence run has been done with this option yet.
+
+``deferred_dw_flush_period`` above ``1`` is rejected, rather than silently
+ignored, unless the experts run ``torch._grouped_mm`` (``use_grouped_mm=true``,
+and ``disable_triton_grouped_mm=true`` on devices that select the Triton
+grouped GEMM), ZeRO stage is 0, 1 or 2, and ``managed_gradient_accumulation``
+is on. It cannot be combined with ``overlap_weight_grad``, AutoEP+AutoTP
+folding, ZenFlow or DeepCompile. It supports first-order gradients only.
+
 **DeepEP row weighting implementation (experimental):**
 
 DeepEP dispatch returns one received row per routed assignment and one FP32

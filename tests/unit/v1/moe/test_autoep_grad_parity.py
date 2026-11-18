@@ -769,6 +769,110 @@ def test_async_master_snapshot_requires_real_fp32_parameters():
         _trainable_parameters(engine)
 
 
+def _make_deferred_dw_config(zero_stage, ep_size, flush_period):
+    return {
+        # torch._grouped_mm runs bf16 on CUDA.
+        "bf16": {
+            "enabled": True
+        },
+        "train_micro_batch_size_per_gpu": 1,
+        "gradient_accumulation_steps": 4,
+        "gradient_clipping": 0.0,
+        "optimizer": {
+            "type": "AdamW",
+            "params": {
+                "lr": 3e-3
+            },
+        },
+        "zero_optimization": {
+            "stage": zero_stage,
+        },
+        "expert_parallel": {
+            "enabled": True,
+            "autoep_size": ep_size,
+            "preset_model": "mixtral",
+            "load_balance_coeff": None,
+            "use_grouped_mm": True,
+            "disable_triton_grouped_mm": True,
+            "deferred_dw_flush_period": flush_period,
+        },
+    }
+
+
+def _skip_unless_cuda_grouped_mm():
+    if get_accelerator().device_name() != "cuda" or not hasattr(torch, "_grouped_mm"):
+        pytest.skip("staging expert weight gradients needs CUDA with torch._grouped_mm")
+    if get_accelerator().prefer_triton_grouped_mm():
+        pytest.skip("torch._grouped_mm needs compute capability 9.0 or newer")
+
+
+class TestAutoEPDeferredDwParity(DistributedTest):
+    """Staging expert weight gradients across microbatches leaves what each accumulation window applies unchanged."""
+    world_size = 2
+
+    @pytest.mark.parametrize("zero_stage", [0, 1, 2])
+    def test_staged_expert_gradients_match_unstaged_over_two_updates(self, zero_stage):
+        _skip_unless_cuda_grouped_mm()
+        ep_size = 2
+        seed = 4567
+        _seed_everything(seed)
+        reference_state = _make_async_split_model().state_dict()
+
+        # Per engine, the expert gradients each of two accumulation windows hands to the optimizer. The second
+        # window starts from the first window's update, so it also covers what that update applied.
+        window_grads = {}
+        for flush_period in (1, 3):
+            model = _make_async_split_model()
+            model.load_state_dict(reference_state)
+            engine, _, _, _ = deepspeed.initialize(model=model,
+                                                   config=_make_deferred_dw_config(zero_stage, ep_size, flush_period))
+            window_grads[flush_period] = []
+            for window in range(2):
+                _run_until_boundary(engine,
+                                    logical_dp_world_size=self.world_size // ep_size,
+                                    logical_dp_rank=0,
+                                    grad_accum=4,
+                                    seed=seed + 100 * window)
+                window_grads[flush_period].append(_collect_autoep_expert_grads(engine))
+                engine.step()
+            if flush_period > 1:
+                # A period of 3 in windows of 4: one periodic flush and one closing flush per window. A layer
+                # that never staged would pass the comparison below without testing anything.
+                stagings = [m.dw_staging for m in engine.module.modules() if isinstance(m, AutoEPMoELayer)]
+                assert stagings and all(staging.num_flushes == 4 for staging in stagings)
+                assert not any(staging.has_staged_rows for staging in stagings)
+            engine.destroy()
+
+        dist.barrier()
+        if dist.get_rank() != 0:
+            return
+        for window, (staged, unstaged) in enumerate(zip(window_grads[3], window_grads[1])):
+            assert staged.keys() == unstaged.keys()
+            for name, expected in unstaged.items():
+                # bf16 GEMM rounding scales with the gradient's magnitude; a microbatch dropped from or counted
+                # twice in a window moves the gradient by a quarter of it.
+                torch.testing.assert_close(staged[name],
+                                           expected,
+                                           rtol=0,
+                                           atol=2e-2 * expected.abs().max().item(),
+                                           msg=f"window {window}: {name}")
+
+    @pytest.mark.world_size(1)
+    def test_step_refuses_to_leave_staged_gradients_behind(self):
+        _skip_unless_cuda_grouped_mm()
+        _seed_everything(5678)
+        engine, _, _, _ = deepspeed.initialize(model=_make_async_split_model(),
+                                               config=_make_deferred_dw_config(zero_stage=1, ep_size=1,
+                                                                               flush_period=4))
+        # The caller declares the boundary only after the backward, so that backward stages instead of flushing.
+        engine.set_gradient_accumulation_boundary(False)
+        batch = torch.randn((1, 16, 128), dtype=_engine_input_dtype(engine), device=engine.device)
+        engine.backward(engine(batch).mean())
+        engine.set_gradient_accumulation_boundary(True)
+        with pytest.raises(RuntimeError, match="still staged at an optimizer step"):
+            engine.step()
+
+
 class TestAutoEPAsyncSplitPlanParity(DistributedTest):
     """Training after inference warmup across checkpoint and caller-stream modes."""
 

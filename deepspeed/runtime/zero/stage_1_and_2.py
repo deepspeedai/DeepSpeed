@@ -1524,6 +1524,10 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             return
 
         grad_reduc = self.get_gradient_for_reduction(param)
+        if grad_reduc is None:
+            # The hook also fires when the backward delivered no gradient for a parameter in the graph, as when
+            # AutoEP stages an expert weight gradient for a later backward. There is nothing to reduce yet.
+            return
         comm_dtype = self.get_param_comm_dtype(param)
         bucket = self.ipg_buckets[comm_dtype]
         if bucket.elements + param.numel() > self.reduce_bucket_size:
