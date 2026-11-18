@@ -145,6 +145,9 @@ def _get_cross_entropy_arg(loss_node: Node, name: str, position: int, default):
 _RANK_PRESERVING_METHODS = {"contiguous", "float", "to", "long", "int", "half", "bfloat16"}
 _RESHAPE_METHODS = {"view", "reshape", "flatten"}
 _RESHAPE_FUNCTIONS = {torch.reshape, torch.flatten}
+# Each rank holds only its shard of the logits, so these would reorder positions within the shard only.
+_SEQUENCE_REORDERING_METHODS = {"roll", "flip", "fliplr", "flipud"}
+_SEQUENCE_REORDERING_FUNCTIONS = {torch.roll, torch.flip, torch.fliplr, torch.flipud}
 
 
 def _is_rank_preserving(node: Node) -> bool:
@@ -155,6 +158,24 @@ def _is_reshape(node: Node) -> bool:
     if node.op == "call_method":
         return node.target in _RESHAPE_METHODS
     return node.op == "call_function" and node.target in _RESHAPE_FUNCTIONS
+
+
+def _is_sequence_reordering(node: Node) -> bool:
+    if node.op == "call_method":
+        return node.target in _SEQUENCE_REORDERING_METHODS
+    return node.op == "call_function" and node.target in _SEQUENCE_REORDERING_FUNCTIONS
+
+
+def _reshape_uses_symbol_of(node: Node, length: torch.SymInt) -> bool:
+    """Whether a size argument of the reshape ``node`` is derived from the symbolic ``length``."""
+    symbols = length.node.expr.free_symbols
+    for size_node in node.all_input_nodes:
+        if size_node is node.args[0]:
+            continue
+        size = get_node_shape_meta(size_node)
+        if isinstance(size, torch.SymInt) and size.node.expr.free_symbols & symbols:
+            return True
+    return False
 
 
 def _is_tensor_getitem(node: Node) -> bool:
@@ -228,6 +249,9 @@ def _undo_logits_seq_slices(input_node: Node, seq_len: torch.SymInt, sharded_nod
     if node not in sharded_nodes:
         raise RuntimeError(f"AutoSP could not trace the cross entropy input back to sequence-sharded logits; "
                            f"stopped at {node.format_node()}")
+    if _is_sequence_reordering(node):
+        raise RuntimeError(f"AutoSP cannot shard cross entropy logits reordered by {node.format_node()}, as each "
+                           f"rank would only reorder its own shard of the sequence")
 
     seq_dim = _find_seq_dim(node, seq_len)
     start, stop = 0, 0
@@ -237,6 +261,12 @@ def _undo_logits_seq_slices(input_node: Node, seq_len: torch.SymInt, sharded_nod
         stop += slice_stop
     if slices and any(len(chain_node.users) != 1 for chain_node in chain):
         raise RuntimeError("AutoSP cannot remove the sequence slice of cross entropy logits used elsewhere")
+    for chain_node in chain:
+        if slices and _is_reshape(chain_node) and _reshape_uses_symbol_of(chain_node, seq_len):
+            # Once the slice is removed, a size computed from the sliced sequence no longer fits the logits.
+            raise RuntimeError(f"AutoSP cannot reshape sliced cross entropy logits with sizes derived from the "
+                               f"sequence length in {chain_node.format_node()}; flatten them with "
+                               f"view(-1, vocab_size) instead")
     for slice_node in slices:
         slice_node.replace_all_uses_with(slice_node.args[0])
         slice_node.graph.erase_node(slice_node)
@@ -255,6 +285,12 @@ def _localize_cross_entropy_target(gm: GraphModule, loss_node: Node, window, seq
             # A size taken from the full sequence would not fit this rank's shorter target.
             raise RuntimeError(f"AutoSP cannot reshape a cross entropy target with explicit symbolic sizes in "
                                f"{target.format_node()}; flatten it with view(-1) instead")
+        if len(target.users) > 1:
+            # Another cross entropy may share this transform. Rewire a copy so that its target stays whole.
+            with gm.graph.inserting_after(target):
+                target_copy = gm.graph.node_copy(target)
+            consumer.replace_input_with(target, target_copy)
+            target = target_copy
         consumer = target
         target = target.args[0]
 
@@ -273,10 +309,15 @@ def _localize_cross_entropy_target(gm: GraphModule, loss_node: Node, window, seq
         for width, at_front in ((start, True), (-stop, False)):
             if width == 0:
                 continue
+            # Expand a single position, as a large shift can be wider than the target itself.
             with gm.graph.inserting_after(anchor):
-                anchor = gm.graph.call_function(torch.narrow, args=(target, seq_dim, 0, width))
+                anchor = gm.graph.call_function(torch.narrow, args=(target, seq_dim, 0, 1))
             with gm.graph.inserting_after(anchor):
                 anchor = gm.graph.call_function(torch.full_like, args=(anchor, ignore_index))
+            sizes = [-1] * target_val.ndim
+            sizes[seq_dim] = width
+            with gm.graph.inserting_after(anchor):
+                anchor = gm.graph.call_method("expand", args=(anchor, *sizes))
             pieces.insert(0 if at_front else len(pieces), anchor)
         with gm.graph.inserting_after(anchor):
             padded = gm.graph.call_function(torch.cat, args=(pieces, seq_dim))
@@ -371,8 +412,9 @@ def pass_shard_label_ids(gm: GraphModule, example_inputs):
         with gm.graph.inserting_after(valid_mask):
             valid_tokens = gm.graph.call_function(torch.sum, args=(valid_mask, ))
 
-        # Sum the per-token losses in FP32: a half-precision sum over a long shard overflows even
-        # where the mean the model asked for would not.
+        # Sum the per-token losses in at least FP32: a half-precision sum over a long shard overflows
+        # even where the mean the model asked for would not.
+        sum_dtype = torch.promote_types(loss_dtype, torch.float32)
         if "reduction" in loss_node.kwargs or len(loss_node.args) <= 6:
             loss_node.update_kwarg("reduction", "none")
         else:
@@ -384,7 +426,7 @@ def pass_shard_label_ids(gm: GraphModule, example_inputs):
                 loss_node.update_arg(position, None)
 
         with gm.graph.inserting_after(loss_node):
-            token_losses = gm.graph.call_method("float", args=(loss_node, ))
+            token_losses = gm.graph.call_method("to", args=(loss_node, sum_dtype))
         with gm.graph.inserting_after(token_losses):
             local_loss_sum = gm.graph.call_function(torch.sum, args=(token_losses, ))
         with gm.graph.inserting_after(local_loss_sum):
