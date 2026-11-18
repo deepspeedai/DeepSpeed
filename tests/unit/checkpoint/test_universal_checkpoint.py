@@ -378,18 +378,33 @@ class TestUniversalCheckpointAcrossZeROStages(DistributedTest):
         hidden_dim = 10
         steps_before_save = 2
 
+        group_lrs = [0.1, 0.05]
+
         def build(stage, load_universal):
-            ds_config = {"train_batch_size": 2, "zero_optimization": {"stage": stage}}
+            # A small sub_group_size splits ZeRO-3's groups into several sub-groups.
+            ds_config = {"train_batch_size": 2, "zero_optimization": {"stage": stage, "sub_group_size": 100}}
             if load_universal:
                 ds_config["checkpoint"] = {"load_universal": True}
             model = SimpleModel(hidden_dim, nlayers=2)
+            # Two groups with their own settings. The target starts from other settings, so the check below
+            # sees what the load restored.
+            param_groups = [{
+                "params": list(layer.parameters()),
+                "lr": 1.0 if load_universal else lr,
+                "weight_decay": 0.0 if load_universal else 0.01 * i
+            } for i, (layer, lr) in enumerate(zip(model.linears, group_lrs))]
             engine, _, _, _ = deepspeed.initialize(config=ds_config,
                                                    model=model,
-                                                   optimizer=torch.optim.Adam(model.parameters(), lr=0.1))
+                                                   optimizer=torch.optim.Adam(param_groups))
             return engine
 
         source = build(source_stage, load_universal=False)
         _train(source, hidden_dim, steps_before_save)
+        if source_stage < 3:
+            # ZeRO-1/2 links optimizer state after the first group's step only, so later groups' moments are not
+            # visible to safe_get_full_optimizer_state until #8956. Link them again now that all groups have state.
+            source.optimizer._hp_optimizer_states_linked = False
+            source.optimizer._lazy_init_hp_params_optimizer_state()
         expected = _full_optimizer_states(source)
         source.save_checkpoint(tmpdir, tag=CP_TAG, client_state={UNIVERSAL_CHECKPOINT_INFO: {}})
         source.destroy()
@@ -420,6 +435,11 @@ class TestUniversalCheckpointAcrossZeROStages(DistributedTest):
         for state in optimizer_states:
             assert int(state["step"]) == steps_before_save
 
-        # The restored optimizer must also be able to keep training.
+        for i, (param_group, lr) in enumerate(zip(target.optimizer.param_groups, group_lrs)):
+            assert param_group["lr"] == lr and param_group["weight_decay"] == 0.01 * i, param_group
+
+        # The restored optimizer must also be able to keep training, advancing every state's step once.
         _train(target, hidden_dim, 1)
+        for state in target.optimizer.optimizer.state.values():
+            assert int(state["step"]) == steps_before_save + 1
         target.destroy()

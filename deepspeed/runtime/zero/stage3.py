@@ -3767,15 +3767,20 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                 if key == "fp32":
                     self.fp32_partitioned_groups_flat[sub_group_id].data.copy_(key_tensor)
                     if state_step is not None:
-                        self.optimizer.state[fp32_param]['step'] = state_step
+                        # Each sub-group's optimizer advances its step in place, so give it its own copy.
+                        self.optimizer.state[fp32_param]['step'] = (state_step.clone()
+                                                                    if torch.is_tensor(state_step) else state_step)
                 else:
                     self.optimizer.state[fp32_param][key] = key_tensor
 
-        for param_group in self.optimizer.param_groups:
-            # Generally, the hyperparameters of each parameter should be the same, we can obtain from any parameter.
-            # A ZeRO-1/2 source has no OPTIMIZER_STATE_DICT, only the top-level PARAM_GROUPS.
-            param_groups = optim_sd.get(PARAM_GROUPS) or optim_sd[OPTIMIZER_STATE_DICT][PARAM_GROUPS]
-            for key, value in param_groups[0].items():
+        # A ZeRO-1/2 source has no OPTIMIZER_STATE_DICT, only the top-level PARAM_GROUPS. Both list the
+        # optimizer's own parameter groups in order, as self.optimizer.param_groups does.
+        saved_param_groups = optim_sd.get(PARAM_GROUPS) or optim_sd[OPTIMIZER_STATE_DICT][PARAM_GROUPS]
+        if len(saved_param_groups) != len(self.optimizer.param_groups):
+            raise ValueError(f"The universal checkpoint in {checkpoint_dir} has {len(saved_param_groups)} optimizer "
+                             f"parameter groups, but this optimizer has {len(self.optimizer.param_groups)}.")
+        for param_group, saved_param_group in zip(self.optimizer.param_groups, saved_param_groups):
+            for key, value in saved_param_group.items():
                 if key == 'params':
                     param_group['params'] = []
                 else:

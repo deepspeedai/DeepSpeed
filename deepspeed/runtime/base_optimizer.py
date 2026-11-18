@@ -405,7 +405,8 @@ class ZeROOptimizer(DeepSpeedOptimizer):
                     global_step = load_universal_optimizer_step(optim_sd, checkpoint_dir, [])
                 steps[0] = global_step
             if steps[0] is not None:
-                self.optimizer.state[hp_param]['step'] = steps[0]
+                # The optimizer advances step in place, and a ZeRO-3 source's step is shared by every group.
+                self.optimizer.state[hp_param]['step'] = steps[0].clone() if torch.is_tensor(steps[0]) else steps[0]
 
             map_to_flat_opt_states(hp_param, lp_groups[i], self.optimizer.state, opt_keys)
 
