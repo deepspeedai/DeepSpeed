@@ -671,7 +671,8 @@ class TestArenaWeightViews:
         # A CUDA host whose JIT build FAILS is an environment defect and must
         # fail loudly, not skip.
         builder = get_accelerator().create_op_builder("FusedGLUBuilder")
-        if builder is None or builder.__name__ == "NotImplementedBuilder":
+        builder_name = type(builder).__name__ if builder is not None else "None"
+        if builder is None or builder_name == "NotImplementedBuilder":
             pytest.skip("accelerator registers no FusedGLUBuilder; no injection, no backend cache to stale")
         glu_model = os.environ.get("DS_SEGMENT_KI_GLU_TEST_MODEL", "Qwen/Qwen3-0.6B")
         try:
