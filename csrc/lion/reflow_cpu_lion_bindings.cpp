@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // DeepSpeed Team
 
-#include "reflow_bindings.h"
+#include <torch/extension.h>
 #include "reflow_cpu_lion.h"
 
 // Memory fence to enforce store ordering after non-temporal (streaming) stores.
@@ -66,7 +66,7 @@ static inline int reflow_ds_lion_state_step_halfgrad_gilfree(int optimizer_id,
                                               skip_increment_step);
 }
 
-void bind_reflow_lion(pybind11::module_& m)
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
 {
     m.def("reflow_create_lion",
           &reflow_create_lion_optimizer,

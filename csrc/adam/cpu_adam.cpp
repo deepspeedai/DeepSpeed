@@ -5,7 +5,6 @@
 
 #include "cpu_adam.h"
 #include <pybind11/pybind11.h>
-#include "reflow_bindings.h"
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
 {
@@ -67,6 +66,4 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
           "ZenFlowAdam cross-process exit (C++)",
           pybind11::call_guard<pybind11::gil_scoped_release>());
 #endif
-
-    bind_reflow_adam(m);
 }

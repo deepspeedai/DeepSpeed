@@ -18,7 +18,7 @@ variants required by the Reflow async CPU-offload optimizer:
   optimizer can run on gradient buckets as they arrive during backward.
 
 It registers its native optimizer instance in a separate Reflow registry inside the
-``cpu_adam`` C++ extension (the ``reflow_*`` entry points), with its own opt_id space.
+``reflow_cpu_adam`` C++ extension (the ``reflow_*`` entry points), with its own opt_id space.
 This keeps its C++ state isolated from any :class:`DeepSpeedCPUAdam` instances running
 in the same process.
 """
@@ -28,7 +28,7 @@ from cpuinfo import get_cpu_info
 
 from deepspeed.utils import logger
 from deepspeed.utils.logging import should_log_le
-from deepspeed.ops.op_builder import CPUAdamBuilder
+from deepspeed.ops.op_builder.cpu.reflow_cpu_adam import ReflowCPUAdamBuilder
 from deepspeed.ops.adam.cpu_adam import DeepSpeedCPUAdam
 
 _CPU_DEVICE = torch.device('cpu')
@@ -92,7 +92,7 @@ class ReflowCPUAdam(DeepSpeedCPUAdam):
         # None means "use all available cores"; converted to -1 at call time.
         self.num_threads = num_threads
 
-        self.ds_opt_adam = CPUAdamBuilder().load()
+        self.ds_opt_adam = ReflowCPUAdamBuilder().load()
         num_threads = int(self.num_threads) if self.num_threads is not None else -1
         self.ds_opt_adam.reflow_create_adam(self.opt_id, lr, betas[0], betas[1], eps, weight_decay, adamw_mode,
                                             should_log_le("info"), num_threads)
@@ -116,7 +116,7 @@ class ReflowCPUAdam(DeepSpeedCPUAdam):
         and share the same dtype (BF16 or FP16). Used to accumulate gradients across micro-steps.
         """
         if not hasattr(cls, '_cpu_adam_module'):
-            cls._cpu_adam_module = CPUAdamBuilder().load()
+            cls._cpu_adam_module = ReflowCPUAdamBuilder().load()
         cls._cpu_adam_module.reflow_bf16_accumulate(dst, src)
 
     def __del__(self):

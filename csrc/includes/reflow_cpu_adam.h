@@ -219,7 +219,7 @@ void Reflow_Adam_Optimizer::Step_AVX_HalfGrad(size_t* rounded_size,
 
     // Pick the loop specialized for this step's flags, so no per-element branch remains.
     // A negative scale folds maximizing into the existing gradient multiply, before weight decay.
-    bool unscale_grads = (combined_scale > 1.0f || combined_scale < 0.0f);
+    bool unscale_grads = (combined_scale != 1.0f);
     bool decay_grad = (_weight_decay > 0 && !_adamw_mode);
     bool decay_param = (_weight_decay > 0 && _adamw_mode);
     using G = ds_grad_precision_t;

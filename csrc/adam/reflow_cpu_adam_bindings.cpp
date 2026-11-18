@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // DeepSpeed Team
 
-#include "reflow_bindings.h"
+#include <torch/extension.h>
 #include "reflow_cpu_adam.h"
 
 // Memory fence to enforce store ordering after non-temporal (streaming) stores.
@@ -88,7 +88,7 @@ static inline int reflow_ds_bf16_accumulate_gilfree(torch::Tensor& dst, torch::T
     return reflow_ds_bf16_accumulate(dst, src);
 }
 
-void bind_reflow_adam(pybind11::module_& m)
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
 {
     m.def("reflow_create_adam",
           &reflow_create_adam_optimizer,

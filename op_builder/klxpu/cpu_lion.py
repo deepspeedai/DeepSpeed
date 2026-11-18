@@ -15,10 +15,7 @@ class CPULionBuilder(KLXPUOpBuilder):
         return f'deepspeed.ops.lion.{self.NAME}_op'
 
     def sources(self):
-        return [
-            'csrc/lion/cpu_lion.cpp', 'csrc/lion/cpu_lion_impl.cpp', 'csrc/lion/reflow_cpu_lion_impl.cpp',
-            'csrc/lion/reflow_cpu_lion_bindings.cpp'
-        ]
+        return ['csrc/lion/cpu_lion.cpp', 'csrc/lion/cpu_lion_impl.cpp']
 
     def include_paths(self):
         args = super().include_paths()

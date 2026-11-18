@@ -13,12 +13,16 @@ The reference is the base ``DeepSpeedCPUAdam`` / ``DeepSpeedCPULion`` step, so t
 kernels are a faithful drop-in. They run purely on CPU; no GPU/distributed env is required.
 """
 
+from functools import lru_cache
+
 import pytest
 import torch
 from cpuinfo import get_cpu_info
 
 import deepspeed
 from deepspeed.ops.op_builder import CPUAdamBuilder, CPULionBuilder
+from deepspeed.ops.op_builder.cpu.reflow_cpu_adam import ReflowCPUAdamBuilder
+from deepspeed.ops.op_builder.cpu.reflow_cpu_lion import ReflowCPULionBuilder
 from deepspeed.runtime.reflow.reflow_cpu_adam import ReflowCPUAdam
 from deepspeed.runtime.reflow.reflow_cpu_lion import ReflowCPULion
 
@@ -39,6 +43,7 @@ def _skip_amd_fp16(grad_dtype):
         pytest.skip("cpu optimizers with half precision not supported on AMD CPUs")
 
 
+@lru_cache(maxsize=None)
 def _skip_without_avx(builder):
     # The Reflow kernels exist only for AVX2/AVX-512; on other builds creating the optimizer raises.
     if builder().simd_width() not in ("-D__AVX512__", "-D__AVX256__"):
@@ -52,7 +57,8 @@ def test_reflow_optimizer_rejects_low_precision_states(optimizer_type):
         optimizer_type([param], fp32_optimizer_states=False)
 
 
-@pytest.mark.parametrize("optimizer_type, builder", [(ReflowCPUAdam, CPUAdamBuilder), (ReflowCPULion, CPULionBuilder)])
+@pytest.mark.parametrize("optimizer_type, builder", [(ReflowCPUAdam, ReflowCPUAdamBuilder),
+                                                     (ReflowCPULion, ReflowCPULionBuilder)])
 def test_reflow_optimizer_rejects_direct_step(optimizer_type, builder):
     if not deepspeed.ops.__compatible_ops__.get(builder.NAME, False):
         pytest.skip("the CPU optimizer builder is not supported on this accelerator")
@@ -67,43 +73,73 @@ def test_reflow_optimizer_rejects_direct_step(optimizer_type, builder):
     assert not optimizer.state
 
 
-def test_every_builder_of_the_shared_bindings_compiles_the_reflow_kernels():
-    """The Reflow entry points are bound in the shared cpu_adam.cpp / cpu_lion.cpp, so a builder that compiles those
-    without the Reflow implementation produces an extension that fails to import with an undefined reflow_* symbol.
-    The accelerator-specific builders import accelerator packages, so read their source lists instead of loading them.
-    """
+@pytest.mark.parametrize("builder", [ReflowCPUAdamBuilder, ReflowCPULionBuilder])
+def test_reflow_builder_rejects_non_avx_cpu(builder, monkeypatch):
+    # A compatible normal CPU optimizer must not imply that Reflow works on non-x86 hosts.
+    monkeypatch.setattr(builder, "simd_width", lambda self: "-D__SCALAR__")
+    assert not builder().is_compatible()
+
+
+@pytest.mark.parametrize("builder", [ReflowCPUAdamBuilder, ReflowCPULionBuilder])
+def test_reflow_builder_falls_back_to_avx2_when_avx512_is_incomplete(builder, monkeypatch):
+    from deepspeed.ops.op_builder.cpu.builder import CPUOpBuilder
+
+    monkeypatch.setattr(CPUOpBuilder, "simd_width", lambda self: "-D__AVX512__")
+    monkeypatch.setattr(builder, "_cpu_flags", lambda self: {"avx2", "fma", "f16c", "avx512f"})
+    assert builder().simd_width() == "-D__AVX256__"
+    assert builder().is_compatible()
+
+
+@pytest.mark.parametrize("builder", [ReflowCPUAdamBuilder, ReflowCPULionBuilder])
+def test_reflow_builder_rejects_missing_fma(builder, monkeypatch):
+    from deepspeed.ops.op_builder.cpu.builder import CPUOpBuilder
+
+    monkeypatch.setattr(CPUOpBuilder, "simd_width", lambda self: "-D__AVX256__")
+    monkeypatch.setattr(builder, "_cpu_flags", lambda self: {"avx2", "f16c"})
+    assert not builder().is_compatible()
+
+
+@pytest.mark.parametrize("builder", [ReflowCPUAdamBuilder, ReflowCPULionBuilder])
+def test_reflow_builder_rejects_unvalidated_accelerator(builder, monkeypatch):
+    from types import SimpleNamespace
+    import accelerator
+
+    monkeypatch.setattr(accelerator, "get_accelerator", lambda: SimpleNamespace(_name="npu"))
+    assert not builder().is_compatible()
+
+
+@pytest.mark.parametrize("normal, reflow, symbol", [
+    (CPUAdamBuilder, ReflowCPUAdamBuilder, "reflow_create_adam"),
+    (CPULionBuilder, ReflowCPULionBuilder, "reflow_create_lion"),
+])
+def test_reflow_extension_is_independent(normal, reflow, symbol):
+    if not reflow().is_compatible() or not normal().is_compatible():
+        pytest.skip("requires compatible CPU optimizers")
+    normal_module = normal().load()
+    reflow_module = reflow().load()
+    assert not hasattr(normal_module, symbol)
+    assert hasattr(reflow_module, symbol)
+    assert normal_module is not reflow_module
+
+
+def test_standard_cpu_optimizer_builders_do_not_include_reflow():
     import ast
     import pathlib
-
     import op_builder
 
-    bindings = {
-        "csrc/adam/cpu_adam.cpp": "csrc/adam/reflow_cpu_adam_impl.cpp",
-        "csrc/lion/cpu_lion.cpp": "csrc/lion/reflow_cpu_lion_impl.cpp",
-    }
-    missing = []
-    checked = 0
-    for path in sorted(pathlib.Path(op_builder.__file__).parent.rglob("*.py")):
-        sources = []
-        for node in ast.walk(ast.parse(path.read_text())):
-            if isinstance(node, ast.FunctionDef) and node.name == "sources":
-                sources += [
-                    sub.value for sub in ast.walk(node)
-                    if isinstance(sub, ast.Constant) and isinstance(sub.value, str)
-                ]
-        for binding, reflow_impl in bindings.items():
-            if binding in sources:
-                checked += 1
-                reflow_bindings = reflow_impl.replace("_impl.cpp", "_bindings.cpp")
-                for required in (reflow_impl, reflow_bindings):
-                    if required not in sources:
-                        missing.append(f"{path.name} compiles {binding} without {required}")
-    assert checked > 0, "no builder compiles the shared bindings; the paths above are stale"
-    assert not missing, missing
+    for path in pathlib.Path(op_builder.__file__).parent.rglob("*.py"):
+        if path.name not in ("cpu_adam.py", "cpu_lion.py"):
+            continue
+        source = ast.parse(path.read_text())
+        reflow_sources = [
+            node.value for node in ast.walk(source) if isinstance(node, ast.Constant) and isinstance(node.value, str)
+            and "csrc/" in node.value and "reflow_" in node.value
+        ]
+        assert not reflow_sources, f"{path} includes Reflow: {reflow_sources}"
 
 
-@pytest.mark.skipif(not deepspeed.ops.__compatible_ops__[CPUAdamBuilder.NAME],
-                    reason="CPUAdamBuilder is not compatible on this system.")
+@pytest.mark.skipif(not deepspeed.ops.__compatible_ops__.get(ReflowCPUAdamBuilder.NAME, False),
+                    reason="ReflowCPUAdamBuilder is not compatible on this system.")
 @pytest.mark.parametrize('model_size', [22, 128, 1000, 1024, 4096])
 @pytest.mark.parametrize('grad_dtype', [torch.bfloat16, torch.half], ids=["bf16grad", "fp16grad"])
 @pytest.mark.parametrize('adamw_mode, weight_decay', [(True, 0.0), (True, 0.01), (False, 0.01)],
@@ -116,7 +152,7 @@ class TestReflowCPUAdamDropIn:
     def test_two_phase_step_matches_base(self, model_size, grad_dtype, adamw_mode, weight_decay):
         from deepspeed.ops.adam import DeepSpeedCPUAdam
         _skip_amd_fp16(grad_dtype)
-        _skip_without_avx(CPUAdamBuilder)
+        _skip_without_avx(ReflowCPUAdamBuilder)
         lr, b1, b2, eps = self.LR, self.BETA1, self.BETA2, self.EPS
         torch.manual_seed(1234 + model_size)
         param_fp32 = torch.randn(model_size, dtype=torch.float)
@@ -132,7 +168,7 @@ class TestReflowCPUAdamDropIn:
                                     weight_decay=weight_decay,
                                     adamw_mode=adamw_mode)
 
-        module = CPUAdamBuilder().load()
+        module = ReflowCPUAdamBuilder().load()
         opt_id = _next_opt_id()
         module.reflow_create_adam(opt_id, lr, b1, b2, eps, weight_decay, adamw_mode, False, -1)
         # Several steps, so bias correction and non-zero moments are exercised.
@@ -175,8 +211,8 @@ def _base_lion_step(param_fp32, exp_avg, grad_fp32, lr, beta1, beta2, weight_dec
     return p.data.detach().clone(), opt.state[p]['exp_avg'].detach().clone()
 
 
-@pytest.mark.skipif(not deepspeed.ops.__compatible_ops__[CPULionBuilder.NAME],
-                    reason="CPULionBuilder is not compatible on this system.")
+@pytest.mark.skipif(not deepspeed.ops.__compatible_ops__.get(ReflowCPULionBuilder.NAME, False),
+                    reason="ReflowCPULionBuilder is not compatible on this system.")
 @pytest.mark.parametrize('model_size', [22, 128, 1000, 1024, 4096])
 @pytest.mark.parametrize('grad_dtype', [torch.bfloat16, torch.half], ids=["bf16grad", "fp16grad"])
 @pytest.mark.parametrize('weight_decay', [0.0, 0.01], ids=["wd0", "wd0.01"])
@@ -193,14 +229,14 @@ class TestReflowCPULionDropIn:
 
     def test_phase2_halfgrad_matches_base(self, model_size, grad_dtype, weight_decay):
         _skip_amd_fp16(grad_dtype)
-        _skip_without_avx(CPULionBuilder)
+        _skip_without_avx(ReflowCPULionBuilder)
         lr, b1, b2 = self.LR, self.BETA1, self.BETA2
         param_fp32, exp_avg, grad_half = self._inputs(model_size, grad_dtype)
         # The reflow kernel promotes the half grad to FP32 exactly, so the base reference gets the same
         # promoted gradient.
         param_ref, exp_avg_ref = _base_lion_step(param_fp32, exp_avg, grad_half.float(), lr, b1, b2, weight_decay)
 
-        module = CPULionBuilder().load()
+        module = ReflowCPULionBuilder().load()
         opt_id = _next_opt_id()
         module.reflow_create_lion(opt_id, lr, b1, b2, weight_decay, False, -1)
         module.reflow_lion_update_state_halfgrad(opt_id, 1, lr, b1, b2, weight_decay, param_fp32, grad_half, exp_avg,
@@ -213,7 +249,7 @@ class TestReflowCPULionDropIn:
 
     def test_phase1_produces_bf16_and_defers(self, model_size, grad_dtype, weight_decay):
         _skip_amd_fp16(grad_dtype)
-        _skip_without_avx(CPULionBuilder)
+        _skip_without_avx(ReflowCPULionBuilder)
         lr, b1, b2 = self.LR, self.BETA1, self.BETA2
         param_fp32, exp_avg, grad_half = self._inputs(model_size, grad_dtype)
         param_before = param_fp32.clone()
@@ -222,7 +258,7 @@ class TestReflowCPULionDropIn:
         param_ref, _ = _base_lion_step(param_fp32, exp_avg, grad_half.float(), lr, b1, b2, weight_decay)
         half_params = torch.zeros(model_size, dtype=grad_dtype)
 
-        module = CPULionBuilder().load()
+        module = ReflowCPULionBuilder().load()
         opt_id = _next_opt_id()
         module.reflow_create_lion(opt_id, lr, b1, b2, weight_decay, False, -1)
         module.reflow_lion_update_params_halfgrad(opt_id, 1, lr, b1, b2, weight_decay, param_fp32, grad_half, exp_avg,
@@ -248,8 +284,8 @@ def test_reused_kernel_threads_follow_the_worker_cpu_mask(optimizer_kind):
     cpus = sorted(os.sched_getaffinity(0))
     if len(cpus) < 4:
         pytest.skip("requires four available CPUs")
-    builder = CPUAdamBuilder if optimizer_kind == "adam" else CPULionBuilder
-    if not deepspeed.ops.__compatible_ops__[builder.NAME]:
+    builder = ReflowCPUAdamBuilder if optimizer_kind == "adam" else ReflowCPULionBuilder
+    if not deepspeed.ops.__compatible_ops__.get(builder.NAME, False):
         pytest.skip("CPU optimizer builder is not compatible")
     _skip_without_avx(builder)
     module = builder().load()
@@ -303,11 +339,11 @@ def test_accumulation_matches_addition_on_restricted_worker_cpus(dtype, size):
 
     if not hasattr(os, "sched_getaffinity"):
         pytest.skip("requires Linux thread affinity")
-    if not deepspeed.ops.__compatible_ops__[CPUAdamBuilder.NAME]:
-        pytest.skip("CPUAdamBuilder is not compatible")
-    _skip_without_avx(CPUAdamBuilder)
+    if not deepspeed.ops.__compatible_ops__.get(ReflowCPUAdamBuilder.NAME, False):
+        pytest.skip("ReflowCPUAdamBuilder is not compatible")
+    _skip_without_avx(ReflowCPUAdamBuilder)
     _skip_amd_fp16(dtype)
-    module = CPUAdamBuilder().load()
+    module = ReflowCPUAdamBuilder().load()
     cpus = sorted(os.sched_getaffinity(0))
     generator = torch.Generator().manual_seed(1234)
     dst = torch.randn(size, generator=generator).to(dtype)
@@ -326,13 +362,13 @@ def test_accumulation_matches_addition_on_restricted_worker_cpus(dtype, size):
 
 @pytest.mark.parametrize('adamw_mode', [False, True], ids=['adam', 'adamw'])
 @pytest.mark.parametrize('model_size', [7, 129, 4099])
-@pytest.mark.parametrize('combined_scale', [1.0, 8.0])
+@pytest.mark.parametrize('combined_scale', [0.5, 1.0, 2.0, 8.0])
 def test_adam_maximize_groups_match_pytorch(adamw_mode, model_size, combined_scale):
     # Catch dropped per-group directions, incorrect decay, scalar-tail omissions, and a
     # deferred commit that reads changed live flags instead of the submitted step's snapshot.
-    if not deepspeed.ops.__compatible_ops__[CPUAdamBuilder.NAME]:
-        pytest.skip('CPUAdamBuilder is not compatible')
-    _skip_without_avx(CPUAdamBuilder)
+    if not deepspeed.ops.__compatible_ops__.get(ReflowCPUAdamBuilder.NAME, False):
+        pytest.skip('ReflowCPUAdamBuilder is not compatible')
+    _skip_without_avx(ReflowCPUAdamBuilder)
     generator = torch.Generator().manual_seed(4321)
     params = [torch.nn.Parameter(torch.randn(model_size, generator=generator)) for _ in range(2)]
     references = [torch.nn.Parameter(p.detach().clone()) for p in params]
@@ -398,3 +434,70 @@ def test_adam_maximize_groups_match_pytorch(adamw_mode, model_size, combined_sca
             torch.testing.assert_close(p, references[i], rtol=2e-6, atol=2e-7)
             torch.testing.assert_close(state['exp_avg'], expected['exp_avg'], rtol=2e-6, atol=2e-7)
             torch.testing.assert_close(state['exp_avg_sq'], expected['exp_avg_sq'], rtol=2e-6, atol=2e-7)
+
+
+@pytest.mark.parametrize("optimizer_kind", ["adam", "lion"])
+@pytest.mark.parametrize("gradient_dtype", [torch.float16, torch.bfloat16], ids=["fp16", "bf16"])
+@pytest.mark.parametrize("combined_scale", [0.5, 1.0, 2.0])
+@pytest.mark.parametrize("model_size", [7, 129])
+def test_two_phase_updates_unscale_below_and_above_one(optimizer_kind, gradient_dtype, combined_scale, model_size):
+    """The vector prefix and scalar tail must apply the same loss scale in both phases."""
+    _skip_amd_fp16(gradient_dtype)
+    builder = ReflowCPUAdamBuilder if optimizer_kind == "adam" else ReflowCPULionBuilder
+    if not builder().is_compatible():
+        pytest.skip("Reflow CPU optimizer is not compatible")
+    from deepspeed.ops.adam import DeepSpeedCPUAdam
+    from deepspeed.ops.lion import DeepSpeedCPULion
+
+    lr, beta1, beta2, weight_decay = 0.01, 0.5, 0.9, 0.01
+    master = torch.linspace(-0.5, 0.5, model_size)
+    momentum = torch.full_like(master, -0.3)
+    gradient = torch.full((model_size, ), 0.25, dtype=gradient_dtype)
+    original_master = master.clone()
+    original_momentum = momentum.clone()
+    reference_param = torch.nn.Parameter(master.clone())
+    if optimizer_kind == "adam":
+        reference = DeepSpeedCPUAdam([reference_param],
+                                     lr=lr,
+                                     betas=(beta1, beta2),
+                                     eps=1e-8,
+                                     weight_decay=weight_decay,
+                                     adamw_mode=True)
+        variance = torch.full_like(master, 0.2)
+        original_variance = variance.clone()
+        reference.state[reference_param].update(step=0, exp_avg=momentum.clone(), exp_avg_sq=variance.clone())
+    else:
+        reference = DeepSpeedCPULion([reference_param], lr=lr, betas=(beta1, beta2), weight_decay=weight_decay)
+        reference.state[reference_param].update(step=0, exp_avg=momentum.clone())
+    reference_param.grad = gradient.float() / combined_scale
+    reference.step()
+    reference_state = reference.state[reference_param]
+
+    module = builder().load()
+    optimizer_id = _next_opt_id()
+    output = torch.empty(model_size, dtype=gradient_dtype)
+    if optimizer_kind == "adam":
+        module.reflow_create_adam(optimizer_id, lr, beta1, beta2, 1e-8, weight_decay, True, False, 1)
+        common = [optimizer_id, 1, lr, beta1, beta2, 1e-8, weight_decay, True, master, gradient, momentum, variance]
+    else:
+        module.reflow_create_lion(optimizer_id, lr, beta1, beta2, weight_decay, False, 1)
+        common = [optimizer_id, 1, lr, beta1, beta2, weight_decay, master, gradient, momentum]
+    try:
+        ready = getattr(module, f"reflow_{optimizer_kind}_update_params_halfgrad")
+        persist = getattr(module, f"reflow_{optimizer_kind}_update_state_halfgrad")
+        ready(*common, output, combined_scale, False)
+        module_fence = getattr(module, f"reflow_{optimizer_kind}_memory_fence")
+        module_fence()
+        assert torch.equal(output, reference_param.detach().to(gradient_dtype))
+        assert torch.equal(master, original_master)
+        assert torch.equal(momentum, original_momentum)
+        if optimizer_kind == "adam":
+            assert torch.equal(variance, original_variance)
+        persist(*common, combined_scale, False)
+        module_fence()
+        torch.testing.assert_close(master, reference_param.detach(), rtol=1e-6, atol=1e-7)
+        torch.testing.assert_close(momentum, reference_state["exp_avg"], rtol=1e-6, atol=1e-7)
+        if optimizer_kind == "adam":
+            torch.testing.assert_close(variance, reference_state["exp_avg_sq"], rtol=1e-6, atol=1e-7)
+    finally:
+        getattr(module, f"reflow_destroy_{optimizer_kind}")(optimizer_id)

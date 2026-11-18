@@ -23,6 +23,8 @@ from deepspeed.checkpoint.constants import FP32_FLAT_GROUPS
 from deepspeed.ops.adam import DeepSpeedCPUAdam
 from deepspeed.ops.lion import DeepSpeedCPULion
 from deepspeed.ops.op_builder import CPUAdamBuilder, CPULionBuilder
+from deepspeed.ops.op_builder.cpu.reflow_cpu_adam import ReflowCPUAdamBuilder
+from deepspeed.ops.op_builder.cpu.reflow_cpu_lion import ReflowCPULionBuilder
 from deepspeed.runtime.config import DeepSpeedConfig
 from deepspeed.runtime.reflow.reflow_cpu_adam import ReflowCPUAdam
 from deepspeed.runtime.reflow.reflow_cpu_lion import ReflowCPULion
@@ -270,8 +272,8 @@ needs_gpu_accelerator = pytest.mark.skipif(get_accelerator().device_name() == "c
 
 
 def skip_if_reflow_training_unsupported():
-    if not deepspeed.ops.__compatible_ops__[CPUAdamBuilder.NAME]:
-        pytest.skip("CPUAdamBuilder is not compatible on this system.")
+    if not deepspeed.ops.__compatible_ops__.get(ReflowCPUAdamBuilder.NAME, False):
+        pytest.skip("ReflowCPUAdamBuilder is not compatible on this system.")
     if not get_accelerator().is_bf16_supported():
         pytest.skip("bf16 is not supported on this accelerator.")
 
@@ -498,13 +500,60 @@ class TestReflowVariantsMatchZeroOffload(DistributedTest):
 
 @pytest.mark.parametrize("optimizer_kind", ["adam", "lion"])
 @needs_gpu_accelerator
+class TestReflowSmallLossScaleMatchesZeroOffload(DistributedTest):
+    world_size = [1, 2]
+
+    def test_fp16_training_matches_zero_offload(self, optimizer_kind):
+        skip_if_reflow_training_unsupported()
+        torch.manual_seed(1234)
+        initial_model = SimpleModel(hidden_dim=16, nlayers=2)
+        batches = make_batches(16, count=4, dtype=torch.float16)
+
+        def run(reflow):
+            model = copy.deepcopy(initial_model)
+            config = get_variant_config(reflow, optimizer_kind)
+            config["bf16"] = {"enabled": False}
+            config["fp16"] = {"enabled": True, "loss_scale": 0.5}
+            engine, optimizer, _, _ = deepspeed.initialize(model=model,
+                                                           model_parameters=model.parameters(),
+                                                           config=config)
+            try:
+                assert optimizer.loss_scale == 0.5
+                losses = []
+                for batch in batches:
+                    loss = engine(*batch)
+                    engine.backward(loss)
+                    engine.step()
+                    losses.append(loss.detach().clone())
+                params = [safe_get_full_fp32_param(param).clone() for param in engine.module.parameters()]
+                moments = [
+                    safe_get_full_optimizer_state(param, "exp_avg").clone() for param in engine.module.parameters()
+                ]
+                variances = ([
+                    safe_get_full_optimizer_state(param, "exp_avg_sq").clone() for param in engine.module.parameters()
+                ] if optimizer_kind == "adam" else [])
+                return losses, params, moments, variances, engine.skipped_steps, type(optimizer.optimizer)
+            finally:
+                engine.destroy()
+
+        expected = run(False)
+        actual = run(True)
+        assert issubclass(actual[-1], ReflowCPUAdam if optimizer_kind == "adam" else ReflowCPULion)
+        assert expected[-2] == actual[-2] == 0
+        for expected_group, actual_group in zip(expected[:4], actual[:4]):
+            for want, got in zip(expected_group, actual_group):
+                assert torch.equal(got, want)
+
+
+@pytest.mark.parametrize("optimizer_kind", ["adam", "lion"])
+@needs_gpu_accelerator
 class TestReflowMultipleOptimizerGroupsMatchZeroOffload(DistributedTest):
     world_size = 1
 
     def test_group_hyperparameters_stay_isolated(self, optimizer_kind):
         # Large groups keep bucket workers active long enough to overlap across optimizer groups.
         skip_if_reflow_training_unsupported()
-        if optimizer_kind == "lion" and not deepspeed.ops.__compatible_ops__[CPULionBuilder.NAME]:
+        if optimizer_kind == "lion" and not deepspeed.ops.__compatible_ops__.get(ReflowCPULionBuilder.NAME, False):
             pytest.skip("CPULionBuilder is not compatible on this system.")
 
         hidden_dim = 2049
@@ -738,8 +787,8 @@ class TestReflowOptimizerRequiresOptIn(DistributedTest):
         finally:
             engine.destroy()
 
-    @pytest.mark.parametrize("optimizer_type, builder", [(ReflowCPUAdam, CPUAdamBuilder),
-                                                         (ReflowCPULion, CPULionBuilder)])
+    @pytest.mark.parametrize("optimizer_type, builder", [(ReflowCPUAdam, ReflowCPUAdamBuilder),
+                                                         (ReflowCPULion, ReflowCPULionBuilder)])
     def test_rejects_reflow_optimizer_without_reflow_config(self, optimizer_type, builder):
         if not deepspeed.ops.__compatible_ops__.get(builder.NAME, False):
             pytest.skip("the CPU optimizer builder is not supported on this accelerator")
@@ -769,6 +818,8 @@ class TestReflowPrecisionValidation(DistributedTest):
 
     @pytest.mark.parametrize("precision", ["bf16", "fp16"])
     def test_initializes_half_precision_zero_init_model(self, precision):
+        if precision == "fp16" and not get_accelerator().is_fp16_supported():
+            pytest.skip("the accelerator does not support FP16")
         if not deepspeed.ops.__compatible_ops__.get(CPUAdamBuilder.NAME, False):
             pytest.skip("the CPU optimizer builder is not supported on this accelerator")
         config = get_variant_config(reflow=True, variant="offload_param")
@@ -787,11 +838,14 @@ class TestReflowPrecisionValidation(DistributedTest):
             engine.destroy()
 
     @pytest.mark.parametrize("dtype", [torch.float32])
-    def test_rejects_zero_init_model_with_unsupported_dtype(self, dtype):
+    @pytest.mark.parametrize("fp16_supported", [False, True])
+    def test_rejects_zero_init_model_with_unsupported_dtype(self, dtype, fp16_supported):
         # zero.Init bypasses the engine's model cast, so its actual parameters must still be half precision.
         config = get_variant_config(reflow=True, variant="offload_param")
-        with deepspeed.zero.Init(config_dict_or_path=config, dtype=dtype):
-            model = SimpleModel(hidden_dim=16, nlayers=2)
+        with patch.object(get_accelerator(), "is_fp16_supported", return_value=fp16_supported):
+            with deepspeed.zero.Init(config_dict_or_path=config, dtype=dtype):
+                model = SimpleModel(hidden_dim=16, nlayers=2)
+        assert all(param.dtype == dtype for param in model.parameters())
         with pytest.raises(ValueError, match="requires FP16 or BF16 model parameters"):
             deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config)
 

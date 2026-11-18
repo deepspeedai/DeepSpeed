@@ -170,8 +170,7 @@ void Reflow_Lion_Optimizer::Step_AVX_HalfGrad(size_t* rounded_size,
     if (_weight_decay > 0) after_decay_4.data = SIMD_SET(after_decay);
     bool use_weight_decay = (_weight_decay > 0);
 
-    // Unscale (after FP32 promotion) only when combined_scale > 1.
-    bool need_unscale = (combined_scale > 1.0f);
+    bool need_unscale = (combined_scale != 1.0f);
     AVX_Data unscale_factor;
     if (need_unscale) { unscale_factor.data = SIMD_SET(1.0f / combined_scale); }
 
@@ -264,7 +263,7 @@ void Reflow_Lion_Optimizer::Step_AVX_FP16_HalfGrad(size_t* rounded_size,
     if (_weight_decay > 0) after_decay_4.data = SIMD_SET(after_decay);
     bool use_weight_decay = (_weight_decay > 0);
 
-    bool need_unscale = (combined_scale > 1.0f);
+    bool need_unscale = (combined_scale != 1.0f);
     AVX_Data unscale_factor;
     if (need_unscale) { unscale_factor.data = SIMD_SET(1.0f / combined_scale); }
 

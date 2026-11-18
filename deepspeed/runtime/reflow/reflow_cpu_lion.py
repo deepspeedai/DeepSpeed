@@ -21,7 +21,7 @@ Lion keeps a single momentum tensor (``exp_avg``); there is no second moment, no
 eps, and no bias correction, so the optimizer state is half the size of Adam's.
 
 It registers its native optimizer instance in a separate Reflow registry inside the
-``cpu_lion`` C++ extension (the ``reflow_*`` entry points), with its own opt_id space.
+``reflow_cpu_lion`` C++ extension (the ``reflow_*`` entry points), with its own opt_id space.
 This keeps its C++ state isolated from any :class:`DeepSpeedCPULion` instances running
 in the same process.
 """
@@ -31,7 +31,7 @@ from cpuinfo import get_cpu_info
 
 from deepspeed.utils import logger
 from deepspeed.utils.logging import should_log_le
-from deepspeed.ops.op_builder import CPULionBuilder
+from deepspeed.ops.op_builder.cpu.reflow_cpu_lion import ReflowCPULionBuilder
 from deepspeed.ops.lion.cpu_lion import DeepSpeedCPULion
 
 _CPU_DEVICE = torch.device('cpu')
@@ -82,7 +82,7 @@ class ReflowCPULion(DeepSpeedCPULion):
         # None means "use all available cores"; converted to -1 at call time.
         self.num_threads = num_threads
 
-        self.ds_opt_lion = CPULionBuilder().load()
+        self.ds_opt_lion = ReflowCPULionBuilder().load()
         num_threads = int(self.num_threads) if self.num_threads is not None else -1
         self.ds_opt_lion.reflow_create_lion(self.opt_id, lr, betas[0], betas[1], weight_decay, should_log_le("info"),
                                             num_threads)

@@ -81,13 +81,18 @@ a disjoint NUMA-local core slice) plus a single chained async-state worker.
 |---|---|
 | `reflow_stage3.py` | `ReflowOptimizer_Stage3` (ZeRO-3 subclass): the bucketwise pipeline, the grad-copy / H2D streams, the split `step()`, the worker pools, and the affinity wiring. |
 | `reflow_cpu_adam.py` | `ReflowCPUAdam` (extends `DeepSpeedCPUAdam`): the half-grad / state-only / per-range Adam variants. Registers its native optimizer in a **separate** Reflow C++ registry with its own `opt_id` space, isolating it from any plain `DeepSpeedCPUAdam` in the process. |
-| `reflow_cpu_lion.py` | `ReflowCPULion` (extends `DeepSpeedCPULion`): the same half-grad / state-only / per-range variants for Lion's single-momentum update. Its own Reflow C++ registry in the `cpu_lion` extension. |
+| `reflow_cpu_lion.py` | `ReflowCPULion` (extends `DeepSpeedCPULion`): the same half-grad / state-only / per-range variants for Lion's single-momentum update. Its own Reflow C++ registry in the `reflow_cpu_lion` extension. |
 | `reflow_utils.py` | `plan_cpu_core_layout()` — NUMA-aware affinity planning (reads each GPU's PCIe→NUMA node) — plus contiguous-range helpers for the bucketwise pipeline. Pure helpers, no optimizer state. |
 | `csrc/adam/reflow_cpu_adam_impl.cpp`, `csrc/includes/reflow_cpu_adam.h` | The AVX CPU-Adam kernels and the `reflow_*` C++ entry points (half-grad param generation, half-grad state commit, and half-precision gradient accumulation). |
 | `csrc/lion/reflow_cpu_lion_impl.cpp`, `csrc/includes/reflow_cpu_lion.h` | The matching AVX CPU-Lion kernels and `reflow_lion_*` C++ entry points (single-momentum, sign-based update). |
 | `csrc/includes/reflow_cpu_affinity.h` | Applies each worker CPU mask to its retained OpenMP helper threads when the worker moves or the state commit widens for backward. |
 | `csrc/includes/reflow_simd.h` | Reflow-only SIMD conversions and streaming stores, layered on the shared `simd.h`. |
-| `csrc/adam/reflow_cpu_adam_bindings.cpp`, `csrc/lion/reflow_cpu_lion_bindings.cpp` | Reflow Python bindings and GIL-released worker wrappers, registered through `csrc/includes/reflow_bindings.h` in the existing CPU optimizer modules. |
+| `csrc/adam/reflow_cpu_adam_bindings.cpp`, `csrc/lion/reflow_cpu_lion_bindings.cpp` | Reflow Python bindings and GIL-released worker wrappers, built as independent ReFlow CPU optimizer modules. |
+
+ReFlow builds its CPU Adam and Lion kernels independently from the standard CPU optimizer extensions.
+The ReFlow builders require an x86 CPU with AVX2 or AVX-512 and currently support CPU and CUDA
+accelerator configurations. They build on first use by default; set `DS_BUILD_REFLOW_CPU_ADAM=1`
+or `DS_BUILD_REFLOW_CPU_LION=1` to pre-build the corresponding extension.
 
 A client that passes a plain `DeepSpeedCPUAdam` / `DeepSpeedCPULion` is auto-remapped to
 `ReflowCPUAdam` / `ReflowCPULion` when the `reflow` block is set (see
