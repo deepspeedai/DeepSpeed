@@ -66,9 +66,6 @@ void launch_fuse_transpose_bias_kernel<float>(const float* inp,
                                               int cols,
                                               cudaStream_t stream)
 {
-    // assert(rows % TILE_DIM == 0);
-    // assert(cols % TILE_DIM == 0);
-
     dim3 grid_dim((cols - 1) / TILE_DIM + 1);
     dim3 block_dim(TILE_DIM, TILE_DIM);
 
@@ -82,9 +79,6 @@ void launch_fuse_transpose_bias_kernel<__half>(const __half* inp,
                                                int cols,
                                                cudaStream_t stream)
 {
-    // assert(rows % TILE_DIM == 0);
-    // assert(cols % TILE_DIM == 0);
-
     dim3 grid_dim((cols - 1) / TILE_DIM + 1);
     dim3 block_dim(TILE_DIM, TILE_DIM);
 

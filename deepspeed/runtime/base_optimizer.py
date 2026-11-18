@@ -33,6 +33,20 @@ def _get_universal_checkpoint_ep_info() -> tuple[int, int]:
         return 0, 1
 
 
+def place_restored_optimizer_step(state: dict, param: torch.Tensor, param_group: dict) -> None:
+    """Give a restored ``step`` the placement torch.optim expects for its param group.
+
+    Universal checkpoint loading writes ``step`` into the optimizer state directly, so it skips the
+    placement ``torch.optim.Optimizer.load_state_dict`` applies. Fused and capturable groups need a
+    float32 step on the parameter's device; other groups keep the step as loaded.
+    """
+    if 'step' not in state:
+        return
+    if not (param_group.get('fused') or param_group.get('capturable')):
+        return
+    state['step'] = torch.as_tensor(state['step'], dtype=torch.float32, device=param.device)
+
+
 class BackwardHookStateManager:
     """Manages backward pass state for ZeRO optimizers.
 
@@ -372,7 +386,6 @@ class ZeROOptimizer(DeepSpeedOptimizer):
             steps = []
             for lp in lp_groups[i]:
                 if lp._hp_mapping is not None:
-                    #print(f"Loading {self.param_names[lp]} {tp_rank=} {tp_world_size=}")
                     step = lp.load_hp_checkpoint_state(os.path.join(checkpoint_dir, self.param_names[lp]),
                                                        tp_rank,
                                                        tp_world_size,
@@ -393,6 +406,9 @@ class ZeROOptimizer(DeepSpeedOptimizer):
                 if key == 'params':
                     continue
                 param_group[key] = value
+
+            # The restored group settings decide where step belongs, so place it after them.
+            place_restored_optimizer_step(self.optimizer.state[hp_param], hp_param, param_group)
 
     def report_ipg_memory_usage(self, tag, param_elems, dtype=None):
         dtypes = self.ipg_buckets.keys() if dtype is None else [dtype]

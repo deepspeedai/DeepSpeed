@@ -189,10 +189,12 @@ def set_autotp_mode(training=False):
         DEEPSPEED_AUTOTP_MODE = AUTOTP_MODE.INFERENCE
 
 
-def add_bias(input, bias):
+def add_bias(input, bias, training=None):
     if bias is None:
         return input
-    if is_autotp_training_mode():
+    if training is None:
+        training = is_autotp_training_mode()
+    if training:
         # Training mode - avoid inplace to ensure correct autograd
         input = input + bias
         return input
@@ -219,10 +221,14 @@ class RowParallel(torch.autograd.Function):
         ctx.group = group
         if not pg_utils.is_parallel(group):
             return input
-        if is_inference_mode:
-            dist.inference_all_reduce(input, group=group)
+        # contiguous() may hand back a copy — the reduction must land in
+        # the caller's tensor, not a discarded temporary
+        red = input.contiguous()
+        if is_inference_mode or not ctx.needs_input_grad[1]:
+            dist.inference_all_reduce(red, group=group)
         else:
-            dist.all_reduce(input.contiguous(), group=group)
+            dist.all_reduce(red, group=group)
+        if red is not input: input.copy_(red)
         return input
 
     @staticmethod
@@ -258,7 +264,7 @@ class ScatterToTensorParallelRegion(torch.autograd.Function):
 class AsyncColumnParallel(torch.autograd.Function):
 
     @staticmethod
-    def forward(ctx: Any, group: dist.ProcessGroup, input: torch.Tensor, weight, bias) -> torch.Tensor:
+    def forward(ctx: Any, group: dist.ProcessGroup, input: torch.Tensor, weight, bias, training: bool) -> torch.Tensor:
         """
         Forward pass.
         """
@@ -266,7 +272,7 @@ class AsyncColumnParallel(torch.autograd.Function):
         ctx.group = group
         output = torch.matmul(input, weight.transpose(-1, -2))
         if bias is not None:
-            output = add_bias(output, bias)
+            output = add_bias(output, bias, training)
 
         ctx.save_for_backward(input, weight)
 
@@ -281,7 +287,7 @@ class AsyncColumnParallel(torch.autograd.Function):
         grad_weight = grad_output.view(-1, grad_output.shape[-1]).t().matmul(input.view(-1, input.shape[-1]))
         grad_bias = grad_output.sum(0) if ctx.use_bias else None
         handle.wait()
-        return None, grad_input, grad_weight, grad_bias
+        return None, grad_input, grad_weight, grad_bias, None
 
 
 class ColumnParallel(torch.autograd.Function):
@@ -568,8 +574,12 @@ class TensorParallel_Layer(nn.Module, ABC):
         return self.mp_group is not None
 
     def is_training_mode(self):
-        global DEEPSPEED_AUTOTP_MODE
-        return DEEPSPEED_AUTOTP_MODE == AUTOTP_MODE.TRAINING
+        # A model keeps the mode it was sharded in, so a frozen inference teacher and a training
+        # student can live in one process without sharing the process-wide AutoTP mode. Layers
+        # built without an explicit mode keep following set_autotp_mode.
+        if self.tp_meta.training is None:
+            return is_autotp_training_mode()
+        return self.tp_meta.training
 
     def _freeze_partition_sizes(self, total_size):
         """Resolve the tensor parallel split of this layer once, while the layer is built.
@@ -899,7 +909,7 @@ class LinearAllreduce(TensorParallel_Layer):
         if not self.defer_collectives_to_compiler:
             output = RowParallel.apply(self.mp_group, output, not self.is_training_mode())
         if self.bias is not None:
-            output = add_bias(output, self.bias)
+            output = add_bias(output, self.bias, self.is_training_mode())
         return output
 
     @torch.no_grad()
@@ -995,9 +1005,9 @@ class LinearLayer(TensorParallel_Layer):
                 input = ColumnParallel.apply(self.mp_group, input)
             output = torch.matmul(input, self.weight.transpose(-1, -2))
             if self.bias is not None:
-                output = add_bias(output, self.bias)
+                output = add_bias(output, self.bias, self.is_training_mode())
         else:
-            output = AsyncColumnParallel.apply(self.mp_group, input, self.weight, self.bias)
+            output = AsyncColumnParallel.apply(self.mp_group, input, self.weight, self.bias, self.is_training_mode())
 
         if self.gather_output:
             if self.defer_collectives_to_compiler:
@@ -1781,7 +1791,7 @@ class LmHeadLinearAllreduce(LinearAllreduce):
         if pg_utils.is_parallel(self.mp_group):
             dist.inference_all_reduce(output, group=self.mp_group)
         if self.bias is not None:
-            output = add_bias(output, self.bias)
+            output = add_bias(output, self.bias, self.is_training_mode())
         return output
 
 
@@ -2209,7 +2219,7 @@ class SubParamLinearLayer(TensorParallel_Layer):
             input = ColumnParallel.apply(self.mp_group, input)
         output = torch.matmul(input, self.weight.transpose(-1, -2))
         if self.bias is not None:
-            output = add_bias(output, self.bias)
+            output = add_bias(output, self.bias, self.is_training_mode())
         return output
 
     @torch.no_grad()
@@ -2338,7 +2348,7 @@ class SubParamLinearAllreduce(TensorParallel_Layer):
         if not self.defer_collectives_to_compiler:
             output = RowParallel.apply(self.mp_group, output, not self.is_training_mode())
         if self.bias is not None:
-            output = add_bias(output, self.bias)
+            output = add_bias(output, self.bias, self.is_training_mode())
         return output
 
     @torch.no_grad()

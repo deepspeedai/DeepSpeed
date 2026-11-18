@@ -130,6 +130,10 @@ class BF16_Optimizer(ZeROOptimizer):
             for p in self.bf16_groups[i]:
                 if getattr(p, '_hp_mapping', None):
                     p._hp_mapping = None
+                # _update_hp_grad() leaves a view of the fp32 gradient buffer here; a model kept after
+                # destroy() would otherwise keep the whole buffer alive.
+                if getattr(p, '_hp_grad', None) is not None:
+                    p._hp_grad = None
         for hook in self._grad_acc_hooks:
             hook.remove()
         print_rank_0("Removed grad acc hooks")
@@ -675,7 +679,6 @@ class BF16_Optimizer(ZeROOptimizer):
 
         if load_optimizer_states:
             self.clip_grad = current_rank_sd.get(CLIP_GRAD, self.clip_grad)
-            print("_load_legacy_checkpoint current_rank_sd[BASE_OPTIMIZER_STATE]")
             self.optimizer.load_state_dict(current_rank_sd[BASE_OPTIMIZER_STATE])
 
         if load_from_fp32_weights:
@@ -683,6 +686,8 @@ class BF16_Optimizer(ZeROOptimizer):
                                       current_rank_sd[SINGLE_PARTITION_OF_FP32_GROUPS]):
                 src_tensor = _get_padded_tensor(saved, current.numel())
                 current.data.copy_(src_tensor.data)
+        else:
+            self._restore_from_bit16_weights()
 
         if load_optimizer_states:
             self._link_all_hp_params()

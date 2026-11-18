@@ -65,3 +65,12 @@ def test_graph_ops_run_eagerly_without_graph_support():
 
     accel.replay_graph(graph)  # no-op: must not raise nor touch the value
     assert value.item() == 1.0
+
+
+def test_xpu_opt_in_matches_torch_xpu_stream_capture_capability():
+    import torch.xpu
+    from deepspeed.accelerator.xpu_accelerator import XPU_Accelerator
+
+    accelerator = object.__new__(XPU_Accelerator)
+    torch_can_capture = torch.xpu.is_available() and hasattr(torch.xpu, 'is_current_stream_capturing')
+    assert accelerator.is_graph_capture_supported() == torch_can_capture
