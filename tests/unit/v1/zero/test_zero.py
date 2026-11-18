@@ -1168,7 +1168,11 @@ class TestZero3ParamPartitioningBase(DistributedTest):
         # taking an optimizer step invalidates all parameters, make sure everything
         # has been partitioned afterwards
         _assert_partition_status(ds_engine, {ZeroParamStatus.NOT_AVAILABLE})
-        assert not math.isclose(ds_engine.optimizer._global_grad_norm, 0.0)
+        if zero_grad:
+            # zero_grad() after the last backward discarded its gradients.
+            assert math.isclose(ds_engine.optimizer._global_grad_norm, 0.0)
+        else:
+            assert not math.isclose(ds_engine.optimizer._global_grad_norm, 0.0)
 
         ds_engine.destroy()
 
