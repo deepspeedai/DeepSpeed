@@ -82,6 +82,33 @@ def test_report_is_json_ready_and_labels_paths():
     assert len(summary['messages']) == len(report.messages) == 2
 
 
+def test_local_copies_use_the_custom_local_label():
+    """A path_of that names each process's local copies, as calibrate_links records them."""
+    source = contiguous_split_map((4, 4), [2, 2], 0)
+    target = contiguous_split_map((4, 4), [2, 2], 1)
+    endpoints = TransferEndpoints(source={0: 0, 1: 1}, target={0: 0, 1: 1})
+
+    def path_of(from_process, to_process):
+        return f'hbm{from_process}' if from_process == to_process else 'link'
+
+    report = analyze_transfers([plan_transfer(target, source)], endpoints, FP32, path_of=path_of)
+    summary = report_to_dict(report)
+    assert summary['paths'] == {
+        'link': {
+            'messages': 2,
+            'bytes': 32
+        },
+        'hbm0': {
+            'messages': 0,
+            'bytes': 16
+        },
+        'hbm1': {
+            'messages': 0,
+            'bytes': 16
+        },
+    }
+
+
 def _join_transfer_group():
     if not dist.is_initialized():
         dist.init_distributed(dist_backend=get_accelerator().communication_backend_name(), init_method='env://')

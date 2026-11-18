@@ -130,9 +130,9 @@ The report covers volume (logical, moved, local-copy and remote bytes), the
 number of chunks, the distribution of segment and message sizes, the number of rounds, every
 process's sent and received bytes, peers, messages, pack and unpack bytes and
 staging arena size, and bytes per process pair and per path label. Each message
-is labelled with ``path_of(from_process, to_process)``, the same hook
-``calibrate_links`` uses, so per-path totals can be priced with ``fit_links``
-results. ``expected_stats(report, process)`` gives the ``TransferStats`` that
+is labelled with ``path_of(from_process, to_process)``, and each process's local
+copies with ``path_of(process, process)``, the same hook ``calibrate_links``
+uses, so per-path totals can be priced with ``fit_links`` results. ``expected_stats(report, process)`` gives the ``TransferStats`` that
 process will return, which makes the prediction checkable after a run.
 
 Processes are the transport-group ranks ``TransferEndpoints`` binds, and the

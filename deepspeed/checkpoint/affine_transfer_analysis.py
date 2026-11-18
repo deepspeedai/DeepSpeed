@@ -50,6 +50,8 @@ class ProcessReport:
     sent_bytes: int = 0
     received_bytes: int = 0
     local_copy_bytes: int = 0
+    # path_of(process, process), the label calibrate_links gives this process's local copies.
+    local_copy_path: str = LOCAL
     send_messages: int = 0
     receive_messages: int = 0
     rounds: int = 0
@@ -128,6 +130,7 @@ def analyze_transfers(plans: Sequence[TransferPlan],
                           sent_bytes=total_bytes(schedule.sends),
                           received_bytes=total_bytes(schedule.receives),
                           local_copy_bytes=schedule.local_copy_elements * element_size,
+                          local_copy_path=path_of(process, process),
                           send_messages=sum(len(rounds) for rounds in schedule.sends.values()),
                           receive_messages=sum(len(rounds) for rounds in schedule.receives.values()),
                           rounds=schedule.rounds,
@@ -215,10 +218,10 @@ def report_to_dict(report: PlanReport, include_messages: bool = False) -> Dict[s
         path = paths.setdefault(message.path, {'messages': 0, 'bytes': 0})
         path['messages'] += 1
         path['bytes'] += message.nbytes
-    local_bytes = report.local_copy_bytes
-    if local_bytes:
-        local = paths.setdefault(LOCAL, {'messages': 0, 'bytes': 0})
-        local['bytes'] += local_bytes
+    for entry in report.processes:
+        if entry.local_copy_bytes:
+            local = paths.setdefault(entry.local_copy_path, {'messages': 0, 'bytes': 0})
+            local['bytes'] += entry.local_copy_bytes
 
     sent = [entry.sent_bytes for entry in report.processes]
     received = [entry.received_bytes for entry in report.processes]
