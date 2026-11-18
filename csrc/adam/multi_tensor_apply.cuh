@@ -13,7 +13,6 @@ This file is adapted from fused adam in NVIDIA/apex, commit a109f85
 #include <ATen/cuda/CUDAContext.h>
 #include <ATen/cuda/Exceptions.h>
 #include <c10/cuda/CUDAGuard.h>
-#include "compat.h"
 
 #include <assert.h>
 
@@ -62,10 +61,8 @@ void multi_tensor_apply(int64_t block_size,
         for (int t = 0; t < tensor_lists[l].size(); t++) {
             // TODO:  Print which tensor fails.
             bool contiguous_memory = tensor_lists[l][t].is_contiguous();
-#ifdef VERSION_GE_1_5
             contiguous_memory = (contiguous_memory ||
                                  tensor_lists[l][t].is_contiguous(at::MemoryFormat::ChannelsLast));
-#endif
             TORCH_CHECK(contiguous_memory, "A tensor was not contiguous.");
             TORCH_CHECK(tensor_lists[l][t].device() == ref_device,
                         "A tensor was not on the same device as the first tensor");
@@ -102,7 +99,7 @@ void multi_tensor_apply(int64_t block_size,
             bool last_chunk = (t == ntensors - 1 && chunk == chunks_this_tensor - 1);
             if (tensors_full || blocks_full || last_chunk) {
                 multi_tensor_apply_kernel<<<loc_block_info, block_size, 0, stream>>>(
-                    chunk_size, noop_flag.DATA_PTR<int>(), tl, callable, args...);
+                    chunk_size, noop_flag.data_ptr<int>(), tl, callable, args...);
 
                 AT_CUDA_CHECK(cudaGetLastError());
 

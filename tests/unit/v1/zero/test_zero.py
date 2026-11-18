@@ -164,9 +164,12 @@ class TestGradientAllreduceOpTraining(DistributedTest):
             if zero_stage > 0:
                 config_dict["zero_optimization"]["reduce_scatter"] = True
             if use_muon:
+                # SUM divides the loss by the world size. Without loss scaling that rounds fp16 gradients
+                # small enough to be subnormal, and Muon's fp16 Newton-Schulz grows the difference beyond
+                # the tolerance. A static scale keeps the gradients in the normal range.
                 config_dict["fp16"] = {
                     "enabled": True,
-                    "loss_scale": 1.0,
+                    "loss_scale": 1024.0,
                 }
             return config_dict
 
@@ -1165,7 +1168,11 @@ class TestZero3ParamPartitioningBase(DistributedTest):
         # taking an optimizer step invalidates all parameters, make sure everything
         # has been partitioned afterwards
         _assert_partition_status(ds_engine, {ZeroParamStatus.NOT_AVAILABLE})
-        assert not math.isclose(ds_engine.optimizer._global_grad_norm, 0.0)
+        if zero_grad:
+            # zero_grad() after the last backward discarded its gradients.
+            assert math.isclose(ds_engine.optimizer._global_grad_norm, 0.0)
+        else:
+            assert not math.isclose(ds_engine.optimizer._global_grad_norm, 0.0)
 
         ds_engine.destroy()
 

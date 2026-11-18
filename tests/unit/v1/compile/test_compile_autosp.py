@@ -182,6 +182,346 @@ class TestAutoSPSeqDim(DistributedTest):
         engine.destroy()
 
 
+class _CausalLMModel(torch.nn.Module):
+    """
+    Single-layer causal LM whose labels are already shifted to the next token, like ``shift_labels``.
+    ``reduction`` is either a reduction name or the reduction keyword arguments of the cross entropy.
+    """
+
+    def __init__(self,
+                 reduction,
+                 vocab_size=64,
+                 hidden=32,
+                 num_heads=2,
+                 keyword_args=False,
+                 logit_scale=1.0,
+                 probability_targets=False,
+                 autocast_dtype=None):
+        super().__init__()
+        self.reduction_kwargs = {"reduction": reduction} if isinstance(reduction, str) else reduction
+        self.keyword_args = keyword_args
+        self.probability_targets = probability_targets
+        self.autocast_dtype = autocast_dtype
+        self.logit_scale = logit_scale
+        self.num_heads = num_heads
+        self.embed = torch.nn.Embedding(vocab_size, hidden)
+        self.pos_embed = torch.nn.Embedding(1024, hidden)
+        self.qkv = torch.nn.Linear(hidden, 3 * hidden)
+        self.out = torch.nn.Linear(hidden, hidden)
+        self.head = torch.nn.Linear(hidden, vocab_size)
+
+    def forward(self, input_ids, labels, position_ids):
+        batch, seq_len = input_ids.shape
+        x = self.embed(input_ids) + self.pos_embed(position_ids)
+        q, k, v = self.qkv(x).chunk(3, dim=-1)
+
+        def to_heads(t):
+            return t.view(batch, seq_len, self.num_heads, -1).transpose(1, 2)
+
+        attn = F.scaled_dot_product_attention(to_heads(q), to_heads(k), to_heads(v), is_causal=True)
+        x = x + self.out(attn.transpose(1, 2).reshape(batch, seq_len, -1))
+        if self.autocast_dtype is None:
+            return self.loss(x, labels)
+        with torch.autocast(device_type=x.device.type, dtype=self.autocast_dtype):
+            return self.loss(x, labels)
+
+    def loss(self, x, labels):
+        logits = self.head(x) * self.logit_scale
+        if self.probability_targets:
+            labels = F.one_hot(labels, logits.size(-1)).float().view(-1, logits.size(-1))
+        else:
+            labels = labels.reshape(-1)
+        if self.keyword_args:
+            return F.cross_entropy(input=logits.view(-1, logits.size(-1)),
+                                   target=labels,
+                                   ignore_index=-100,
+                                   **self.reduction_kwargs)
+        return F.cross_entropy(logits.view(-1, logits.size(-1)), labels, ignore_index=-100, **self.reduction_kwargs)
+
+
+class TestAutoSPCausalLoss(DistributedTest):
+    """The loss and parameter updates of AutoSP match training on the full, unsharded sequence."""
+    world_size = 4
+    non_daemonic_procs = True
+
+    @pytest.mark.sequential
+    @pytest.mark.parametrize(
+        "zero_stage, reduction, keyword_args, explicit_mesh, empty_shard",
+        [
+            (0, "mean", False, False, False),
+            (1, "mean", False, False, False),
+            (0, "sum", False, False, False),
+            (1, "sum", False, False, False),
+            (0, "mean", True, False, False),
+            (0, "mean", False, False, True),
+            (0, "mean", False, True, False),
+            (1, "sum", False, True, False),
+            # The deprecated argument overrides the default mean reduction.
+            (0, {
+                "size_average": False
+            }, True, False, False),
+        ])
+    def test_matches_full_sequence_reference(self, zero_stage, reduction, keyword_args, explicit_mesh, empty_shard):
+        import copy
+        import deepspeed
+        import deepspeed.comm as dist
+        from deepspeed.compile.passes.sp_compile import prepare_autosp_inputs
+
+        if get_accelerator().device_name() == "cpu":
+            pytest.skip("CPU does not support this test yet")
+
+        sp_size = 2
+        dp_size = self.world_size // sp_size
+        dp_rank = dist.get_rank() // sp_size
+        seq_len, batch, vocab_size, lr = 16, 2, 64, 0.1
+        device = get_accelerator().current_device_name()
+
+        def make_batch(step, rank):
+            generator = torch.Generator().manual_seed(1000 * step + rank)
+            input_ids = torch.randint(0, vocab_size, (batch, seq_len), generator=generator)
+            labels = torch.randint(0, vocab_size, (batch, seq_len), generator=generator)
+            # Ignore most of the second half so the two shards hold different numbers of valid tokens.
+            labels[:, seq_len // 2 + 2:] = -100
+            if empty_shard:
+                labels[:, seq_len // 2:] = -100
+            else:
+                labels[0, -1] = 7
+            position_ids = torch.arange(seq_len).unsqueeze(0).expand(batch, seq_len)
+            return [t.to(device).contiguous() for t in (input_ids, labels, position_ids)]
+
+        torch.manual_seed(0)
+        reference = _CausalLMModel(reduction, vocab_size=vocab_size, keyword_args=keyword_args).to(device)
+        reference_optimizer = torch.optim.SGD(reference.parameters(), lr=lr)
+        model = copy.deepcopy(reference)
+        config = {
+            "train_micro_batch_size_per_gpu": batch,
+            "zero_optimization": {
+                "stage": zero_stage
+            },
+            "zero_allow_untested_optimizer": True,
+            # Clipping would hide a wrongly scaled gradient.
+            "gradient_clipping": 0.0,
+            "compile": {
+                "deepcompile": True,
+                "passes": ["autosp"]
+            },
+            "sequence_parallel_size": sp_size,
+        }
+        if explicit_mesh:
+            config["data_parallel_size"] = dp_size
+        engine, _, _, _ = deepspeed.initialize(config=config,
+                                               model=model,
+                                               optimizer=torch.optim.SGD(model.parameters(), lr=lr))
+        engine.compile()
+
+        for step in range(2):
+            # The reference trains on the full sequences of every DP group and averages over DP.
+            reference_optimizer.zero_grad()
+            for rank in range(dp_size):
+                reference_loss = reference(*make_batch(step, rank))
+                (reference_loss / dp_size).backward()
+                if rank == dp_rank:
+                    expected_loss = reference_loss.detach()
+            reference_optimizer.step()
+
+            loss = engine(*prepare_autosp_inputs(*make_batch(step, dp_rank))[:3])
+            engine.backward(loss)
+            engine.step()
+
+            torch.testing.assert_close(loss.detach(), expected_loss, rtol=1e-4, atol=1e-5)
+            for (name, param), expected in zip(engine.module.named_parameters(), reference.parameters()):
+                torch.testing.assert_close(param.detach(),
+                                           expected.detach(),
+                                           rtol=1e-4,
+                                           atol=1e-5,
+                                           msg=lambda m, name=name: f"{name}: {m}")
+
+        engine.destroy()
+
+    def test_rejects_mesh_with_different_sequence_parallel_size(self):
+        import deepspeed
+
+        if get_accelerator().device_name() == "cpu":
+            pytest.skip("CPU does not support this test yet")
+
+        model = _CausalLMModel("mean").to(get_accelerator().current_device_name())
+        config = {
+            "train_micro_batch_size_per_gpu": 2,
+            "compile": {
+                "deepcompile": True,
+                "passes": ["autosp"]
+            },
+            "sequence_parallel_size": 2,
+        }
+        # The engine would sum gradients over 4 SP ranks while AutoSP shards the sequence over 2.
+        engine, _, _, _ = deepspeed.initialize(config=config, model=model, mesh_param=(1, self.world_size))
+        with pytest.raises(ValueError, match="sequence_parallel_size=2"):
+            engine.compile()
+        engine.destroy()
+
+    @pytest.mark.parametrize("zero_stage", [2, 3])
+    def test_rejects_zero_stages_without_autosp(self, zero_stage):
+        import deepspeed
+
+        if get_accelerator().device_name() == "cpu":
+            pytest.skip("CPU does not support this test yet")
+
+        model = _CausalLMModel("mean").to(get_accelerator().current_device_name())
+        config = {
+            "train_micro_batch_size_per_gpu": 2,
+            "zero_optimization": {
+                "stage": zero_stage
+            },
+            "compile": {
+                "deepcompile": True,
+                "passes": ["autosp"]
+            },
+            "sequence_parallel_size": 2,
+        }
+        # These stages compile without AutoSP, so each rank would train on its full sequence while the
+        # engine summed gradients over the sequence parallel ranks.
+        with pytest.raises(ValueError, match="AutoSP does not support ZeRO stage"):
+            deepspeed.initialize(config=config, model=model, optimizer=torch.optim.SGD(model.parameters(), lr=0.1))
+
+    @pytest.mark.sequential
+    @pytest.mark.parametrize("reduction, probability_targets, error", [
+        ({
+            "reduce": False
+        }, False, "reduction 'mean' or 'sum'"),
+        ("mean", True, "class index targets only"),
+    ])
+    def test_rejects_unsupported_cross_entropy(self, reduction, probability_targets, error):
+        import deepspeed
+        from deepspeed.compile.passes.sp_compile import prepare_autosp_inputs
+
+        if get_accelerator().device_name() == "cpu":
+            pytest.skip("CPU does not support this test yet")
+
+        seq_len, batch, vocab_size = 16, 2, 64
+        device = get_accelerator().current_device_name()
+        config = {
+            "train_micro_batch_size_per_gpu": batch,
+            "compile": {
+                "deepcompile": True,
+                "passes": ["autosp"]
+            },
+            "sequence_parallel_size": 2,
+        }
+        model = _CausalLMModel(reduction, vocab_size=vocab_size, probability_targets=probability_targets)
+        engine, _, _, _ = deepspeed.initialize(config=config, model=model)
+        engine.compile()
+
+        # A per-token loss cannot be combined over the shards, and probability targets have no ignored
+        # tokens to count, so the full-sequence loss would be wrong.
+        input_ids = torch.randint(0, vocab_size, (batch, seq_len), device=device)
+        labels = torch.randint(0, vocab_size, (batch, seq_len), device=device)
+        position_ids = torch.arange(seq_len, device=device).unsqueeze(0).expand(batch, seq_len).contiguous()
+        with pytest.raises(Exception, match=error):
+            engine(*prepare_autosp_inputs(input_ids, labels, position_ids)[:3])
+        engine.destroy()
+
+
+class TestAutoSPHalfPrecisionLoss(DistributedTest):
+    world_size = 2
+    non_daemonic_procs = True
+
+    @pytest.mark.sequential
+    def test_mean_loss_does_not_overflow_in_shard_sum(self):
+        import deepspeed
+        import deepspeed.comm as dist
+        from deepspeed.compile.passes.sp_compile import prepare_autosp_inputs
+
+        if get_accelerator().device_name() == "cpu":
+            pytest.skip("CPU does not support this test yet")
+
+        seq_len, batch, vocab_size = 64, 2, 64
+        device = get_accelerator().current_device_name()
+
+        # Scaled logits make every token's loss large, so a shard's summed loss exceeds the FP16
+        # maximum (65504) while the mean the model returns stays well within range.
+        torch.manual_seed(0)
+        model = _CausalLMModel("mean", vocab_size=vocab_size, logit_scale=1e4).to(device).half()
+        reference = copy.deepcopy(model).float()
+        config = {
+            "train_micro_batch_size_per_gpu": batch,
+            "train_batch_size": batch,
+            "zero_optimization": {
+                "stage": 0
+            },
+            "compile": {
+                "deepcompile": True,
+                "passes": ["autosp"]
+            },
+            "sequence_parallel_size": self.world_size,
+        }
+        engine, _, _, _ = deepspeed.initialize(config=config, model=model)
+        engine.compile()
+
+        torch.manual_seed(100)
+        input_ids = torch.randint(0, vocab_size, (batch, seq_len), device=device)
+        labels = torch.randint(0, vocab_size, (batch, seq_len), device=device)
+        position_ids = torch.arange(seq_len, device=device).unsqueeze(0).expand(batch, seq_len).contiguous()
+
+        with torch.no_grad():
+            reference_loss = reference(input_ids, labels, position_ids)
+            loss = engine(*prepare_autosp_inputs(input_ids.clone(), labels.clone(), position_ids.clone())[:3])
+
+        local_tokens = batch * seq_len // self.world_size
+        assert reference_loss.item() * local_tokens > torch.finfo(torch.float16).max
+        assert loss.dtype == torch.float16
+        torch.testing.assert_close(loss.float(), reference_loss, rtol=1e-2, atol=0)
+        # Each rank returns the full-sequence loss, so the ranks agree.
+        losses = [torch.empty_like(loss) for _ in range(self.world_size)]
+        dist.all_gather(losses, loss)
+        assert all(torch.equal(other, loss) for other in losses)
+
+        engine.destroy()
+
+    @pytest.mark.sequential
+    def test_autocast_loss_keeps_cross_entropy_dtype(self):
+        import deepspeed
+        from deepspeed.compile.passes.sp_compile import prepare_autosp_inputs
+
+        skip_on_arch(min_arch=8)
+        if not bf16_required_version_check():
+            pytest.skip("BFloat16 is not supported")
+        if get_accelerator().device_name() == "cpu":
+            pytest.skip("CPU does not support this test yet")
+
+        seq_len, batch, vocab_size = 16, 2, 64
+        device = get_accelerator().current_device_name()
+        torch.manual_seed(0)
+        model = _CausalLMModel("mean", vocab_size=vocab_size, autocast_dtype=torch.bfloat16).to(device)
+        reference = copy.deepcopy(model)
+        config = {
+            "train_micro_batch_size_per_gpu": batch,
+            "train_batch_size": batch,
+            "compile": {
+                "deepcompile": True,
+                "passes": ["autosp"]
+            },
+            "sequence_parallel_size": self.world_size,
+        }
+        engine, _, _, _ = deepspeed.initialize(config=config, model=model)
+        engine.compile()
+
+        torch.manual_seed(100)
+        input_ids = torch.randint(0, vocab_size, (batch, seq_len), device=device)
+        labels = torch.randint(0, vocab_size, (batch, seq_len), device=device)
+        position_ids = torch.arange(seq_len, device=device).unsqueeze(0).expand(batch, seq_len).contiguous()
+
+        with torch.no_grad():
+            reference_loss = reference(input_ids, labels, position_ids)
+            loss = engine(*prepare_autosp_inputs(input_ids.clone(), labels.clone(), position_ids.clone())[:3])
+
+        # Autocast runs cross entropy in FP32, so the loss must not be rounded to the BF16 logits.
+        assert reference_loss.dtype == torch.float32
+        assert loss.dtype == reference_loss.dtype
+        torch.testing.assert_close(loss, reference_loss, rtol=1e-2, atol=1e-2)
+
+        engine.destroy()
+
+
 class TestAutoSPMeshRegistry(DistributedTest):
     """Re-registering the mesh an engine already uses keeps the existing process groups."""
     world_size = 4
@@ -363,7 +703,6 @@ class TestAutoSPAttentionMask(DistributedTest):
     def test_query_sharded_mask_matches_full_sequence_reference(self, mask_as_kwarg):
         import copy
         import deepspeed
-        import deepspeed.comm as dist
         from deepspeed.compile.passes.sp_compile import prepare_autosp_inputs
 
         if get_accelerator().device_name() == "cpu":
@@ -406,12 +745,7 @@ class TestAutoSPAttentionMask(DistributedTest):
                                                   attention_mask.clone())
             loss = engine(*autosp_inputs, mask_as_kwarg)
 
-            # Every rank holds the mean over an equally sized sequence shard, so their average
-            # over the SP group (the whole world here) is the full-sequence mean.
-            global_loss = loss.detach().clone()
-            dist.all_reduce(global_loss)
-            global_loss /= sp_size
-            torch.testing.assert_close(global_loss, reference_loss, rtol=1e-4, atol=1e-5)
+            torch.testing.assert_close(loss.detach(), reference_loss, rtol=1e-4, atol=1e-5)
 
         engine.destroy()
 
@@ -468,15 +802,13 @@ class TestAutoSPAttentionMask(DistributedTest):
         with engine.no_sync():
             engine.backward(loss)
 
-        # Every rank holds the mean over an equally sized sequence shard, so the full-sequence loss
-        # and its gradients are the averages over the SP group (the whole world here).
-        global_loss = loss.detach().clone()
-        dist.all_reduce(global_loss)
-        torch.testing.assert_close(global_loss / sp_size, reference_loss.detach(), rtol=1e-4, atol=1e-5)
+        # Every rank returns the full-sequence loss, and each shard's gradient is its contribution to
+        # it, so the full-sequence gradients are the sums over the SP group (the whole world here).
+        torch.testing.assert_close(loss.detach(), reference_loss.detach(), rtol=1e-4, atol=1e-5)
         for (name, param), expected in zip(engine.module.named_parameters(), reference.parameters()):
             grad = param.grad.clone()
             dist.all_reduce(grad)
-            torch.testing.assert_close(grad / sp_size,
+            torch.testing.assert_close(grad,
                                        expected.grad,
                                        rtol=1e-4,
                                        atol=1e-5,
