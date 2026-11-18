@@ -659,6 +659,64 @@ class TestArenaWeightViews:
             out_fresh), (f"refresh path diverged from fresh injection: "
                          f"{(out_refreshed != out_fresh).sum().item()} of {out_fresh.numel()} tokens differ")
 
+    def test_glu_only_model_refresh_clears_backend_cat_cache(self):
+        """GLU-only (dense) models carry the backend handle on _ki_dual_op;
+        segki_refresh must still reach the process-wide g_glu_cat_cache
+        after an in-place sync (review finding: the lookup only read
+        _ki_gdn_op, leaving the gate|up concat stale on dense models)."""
+        pytest.importorskip("transformers")
+        glu_model = os.environ.get("DS_SEGMENT_KI_GLU_TEST_MODEL", "Qwen/Qwen3-0.6B")
+        try:
+            from transformers import AutoTokenizer
+            tok = AutoTokenizer.from_pretrained(glu_model)
+        except Exception as e:
+            pytest.skip(f"model {glu_model} unavailable: {e}")
+        object.__setattr__(tok, "eos_token_id", -1)
+
+        from transformers import AutoModelForCausalLM
+        torch.manual_seed(13)
+        ids = torch.randint(1000, 50000, (2, 128), device=get_accelerator().device_name())
+        m = AutoModelForCausalLM.from_pretrained(glu_model, dtype=torch.bfloat16).to(get_accelerator().device_name())
+        layer_types = getattr(getattr(m.config, "text_config", m.config), "layer_types", None) or []
+        if any("linear" in lt for lt in layer_types):
+            pytest.skip(f"{glu_model} has linear-attention layers; need a dense GLU-only model")
+
+        class Shim:
+
+            def __init__(self, m):
+                self.module = m
+                self._cfg = m.config
+
+        from deepspeed.runtime.rollout.hybrid_engine_rollout import HybridEngineRollout, HybridEngineRolloutConfig
+        graphs_ok = get_accelerator().device_name() != "cpu"
+        rollout = HybridEngineRollout(Shim(m), tok, HybridEngineRolloutConfig(use_graph_capture=graphs_ok,
+                                                                              use_segki=True))
+        self._gen(rollout, ids)  # builds every derived cache (incl. the C++ concat)
+
+        # the injection on a dense model carries the handle on _ki_dual_op only
+        duals = [mod for mod in m.modules() if getattr(mod, "_ki_dual_op", None) is not None]
+        gdns = [mod for mod in m.modules() if getattr(mod, "_ki_gdn_op", None) is not None]
+        assert duals and not gdns, "dense model must be injected GLU-only"
+
+        with torch.no_grad():
+            for p in m.parameters():
+                p.mul_(1.5)  # arena-sync semantics: same storage
+        from deepspeed.module_inject.segment_ki import segki_refresh
+        segki_refresh(m)
+        out_refreshed = self._gen(rollout, ids)
+
+        m2 = AutoModelForCausalLM.from_pretrained(glu_model, dtype=torch.bfloat16).to(get_accelerator().device_name())
+        rollout2 = HybridEngineRollout(Shim(m2), tok, HybridEngineRolloutConfig(use_graph_capture=graphs_ok,
+                                                                                use_segki=True))
+        with torch.no_grad():
+            for p2, p in zip(m2.parameters(), m.parameters()):
+                p2.copy_(p)
+        self._gen(rollout2, ids)
+        out_fresh = self._gen(rollout2, ids)
+
+        assert torch.equal(out_refreshed, out_fresh), ("dense-model refresh diverged from fresh injection: "
+                                                       f"{(out_refreshed != out_fresh).sum().item()} tokens differ")
+
     def test_arena_view_binding_survives_inplace_writes(self):
         pytest.importorskip("transformers")
         try:
