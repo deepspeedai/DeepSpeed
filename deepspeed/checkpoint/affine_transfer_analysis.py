@@ -95,6 +95,11 @@ def analyze_transfers(plans: Sequence[TransferPlan],
 
     The schedule comes from the executor's ``schedule_transfers``, so the counts match what each
     process will return in ``TransferStats`` and the staging is what it will allocate.
+
+    ``element_size`` must be the element size of the tensors the batch will run on, which
+    ``execute_transfers`` takes from their dtype (``torch.empty((), dtype=dtype).element_size()``).
+    A different value is not detected: chunks, rounds and byte counts are then predicted for
+    another dtype.
     """
     if path_of is None:
         path_of = default_path_of
@@ -104,6 +109,8 @@ def analyze_transfers(plans: Sequence[TransferPlan],
     for from_process, schedule in schedules.items():
         for to_process, sent_rounds in schedule.sends.items():
             received_rounds = schedules[to_process].receives[from_process]
+            # Both sides split a pair's chunks into the same rounds, so the rounds pair up one to one.
+            assert len(sent_rounds) == len(received_rounds), (from_process, to_process)
             for round_index, (sent, received) in enumerate(zip(sent_rounds, received_rounds)):
                 messages.append(
                     TransferMessage(round=round_index,
@@ -166,7 +173,11 @@ def analyze_transfers(plans: Sequence[TransferPlan],
 
 
 def expected_stats(report: PlanReport, process: int) -> Dict[str, int]:
-    """The ``TransferStats`` fields ``process`` should return for the analyzed batch."""
+    """The ``TransferStats`` fields ``process`` should return for the analyzed batch.
+
+    ``segments`` and ``chunks`` count the whole batch, so every process returns the same values;
+    the other fields are that process's own.
+    """
     entry = report.process(process)
     return {
         'segments': report.segments,
@@ -179,10 +190,13 @@ def expected_stats(report: PlanReport, process: int) -> Dict[str, int]:
 
 
 def distribution(values: Sequence[float]) -> Dict[str, float]:
-    """Count, sum and order statistics, with nearest-rank percentiles."""
+    """Count, sum and order statistics, with nearest-rank percentiles.
+
+    Empty input has the same keys, with ``None`` for the order statistics and the mean.
+    """
     ordered = sorted(values)
     if not ordered:
-        return {'count': 0, 'sum': 0}
+        return {'count': 0, 'sum': 0, 'min': None, 'p50': None, 'p90': None, 'max': None, 'mean': None}
 
     def percentile(fraction):
         index = max(0, math.ceil(fraction * len(ordered)) - 1)

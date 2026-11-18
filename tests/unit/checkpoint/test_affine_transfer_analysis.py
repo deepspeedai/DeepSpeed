@@ -3,6 +3,7 @@
 """Transfer analysis is checked against hand-derived counts and against the executor's own stats."""
 
 import math
+import json
 import os
 from dataclasses import asdict
 
@@ -80,6 +81,16 @@ def test_report_is_json_ready_and_labels_paths():
     assert summary['paths'] == {INTRA_NODE: {'messages': 2, 'bytes': 32}, LOCAL: {'messages': 0, 'bytes': 32}}
     assert summary['pairs'] == {'0->1': {'messages': 1, 'bytes': 16}, '1->0': {'messages': 1, 'bytes': 16}}
     assert len(summary['messages']) == len(report.messages) == 2
+
+
+def test_empty_batch_summary_keeps_its_keys():
+    endpoints = TransferEndpoints(source={0: 0, 1: 1}, target={0: 0, 1: 1})
+    summary = report_to_dict(analyze_transfers([], endpoints, FP32))
+    for name in ('segments', 'messages'):
+        stats = summary['granularity'][name]
+        assert set(stats) == {'count', 'sum', 'min', 'p50', 'p90', 'max', 'mean'}
+        assert stats['count'] == 0 and stats['max'] is None
+    json.dumps(summary)
 
 
 def test_local_copies_use_the_custom_local_label():
