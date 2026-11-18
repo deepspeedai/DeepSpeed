@@ -219,6 +219,12 @@ class NPUInference:
         is_promt = seq_len > 1
         if not InferenceContext.kv_caches:
             InferenceContext.kv_caches = [[None, None, 0] for _ in range(num_layers)]
+        # layer_id is derived from DeepSpeedSelfAttention.num_layers, a process-wide
+        # counter that only ever grows (ds_attention.py:24-25): a second engine built
+        # in the same process sees layer_ids beyond the first engine's num_layers.
+        # Grow the cache on demand instead of trusting num_layers to cover them.
+        while len(InferenceContext.kv_caches) <= layer_id:
+            InferenceContext.kv_caches.append([None, None, 0])
         if is_promt:
             InferenceContext.reset_tokens(seq_len)
             # Keep the previous buffer when it fits, so fixed-length workloads (e.g.
@@ -278,19 +284,22 @@ class NPUInference:
         layer_scale = max(1, layer_id) if len(alibi.size()) > 1 else 1.0
         alpha = norm_factor * norm_factor / layer_scale
 
-        output = torch_npu.npu_fusion_attention(q,
-                                                k_buf[:, :kv_len],
-                                                v_buf[:, :kv_len],
-                                                heads,
-                                                "BSH",
-                                                pse=None,
-                                                padding_mask=None,
-                                                atten_mask=attn_mask.bool(),
-                                                scale=alpha,
-                                                pre_tockens=65536,
-                                                next_tockens=65536,
-                                                keep_prob=1,
-                                                inner_precise=0)[0]
+        # v3 is the graph-mode version of npu_fusion_attention: v1/v2 launch work on
+        # an internal secondary stream that CANN capture rejects (107025), v3 does not.
+        # (torch_npu documents aclgraph support for BNSD only, but BSH captures fine.)
+        output = torch_npu.npu_fusion_attention_v3(q,
+                                                   k_buf[:, :kv_len],
+                                                   v_buf[:, :kv_len],
+                                                   heads,
+                                                   "BSH",
+                                                   pse=None,
+                                                   padding_mask=None,
+                                                   atten_mask=attn_mask.bool(),
+                                                   scale=alpha,
+                                                   pre_tockens=65536,
+                                                   next_tockens=65536,
+                                                   keep_prob=1,
+                                                   inner_precise=0)[0]
 
         # Align with the CUDA csrc (pt_binding.cpp:548): increment the token count after the
         # last layer's forward, so the next decode token's seq_offset (soft_len-1) lands on

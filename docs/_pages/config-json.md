@@ -4,6 +4,20 @@ toc: true
 toc_label: "Contents"
 ---
 
+### Deterministic Execution
+
+`deterministic_mode` is a JSON boolean, default `false`. On NVIDIA CUDA, enabling it
+selects strict PyTorch deterministic algorithms, disables TF32 and cuDNN
+benchmarking, and enables deterministic cuDNN algorithms at engine initialization.
+Set `CUBLAS_WORKSPACE_CONFIG=:4096:8` or `:16:8` before CUDA use.
+Enabling it on any accelerator other than NVIDIA CUDA, including a CUDA-compatible accelerator such as KLXPU, is currently unsupported; disabled behavior is unchanged.
+
+The flag does not change precision, NCCL algorithm, parallelism or overlap.
+PyTorch checks do not cover all custom kernels or distributed scheduling;
+configuration acceptance does not certify workload bitwise repeatability or
+Megatron compatibility. Settings are process-global and not restored at teardown.
+See [Deterministic Mode](/tutorials/deterministic-mode/) for details.
+
 ### Batch Size Related Parameters
 
 **Note:** <i>**train_batch_size**</i> must be equal to  <i>**train_micro_batch_size_per_gpu**</i> * <i>**gradient_accumulation_steps**</i> * number of GPUs. For simplicity, you can choose to only specify two of the three parameters, the last one will be inferred automatically by DeepSpeed.
@@ -142,7 +156,7 @@ By default, non-Muon parameters use `FusedAdam`. When optimizer state is offload
     }
   }
 ```
-The Adam optimizer also supports the following two params keys/values in addition to the standard parameters from [torch.optim.Adam](https://pytorch.org/docs/stable/_modules/torch/optim/adam.html#Adam):
+The Adam optimizer also supports the following two params keys/values in addition to the standard parameters from [torch.optim.Adam](https://docs.pytorch.org/docs/stable/generated/torch.optim.Adam.html):
 
 | "params" key  | Description                                                                 | Default |
 | ------------- | --------------------------------------------------------------------------- | ------- |
@@ -489,8 +503,8 @@ reduction and offload ordering and is not covered; a warning is logged.
 <i>**load_from_fp32_weights**</i>: [boolean]
 
 | Description                                                                                                                                                                                                                          | Default |
-| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------- |
-| Initialize fp32 master weights from fp32 copies in checkpoint (no precision loss) or from model's fp16 copies (with precision loss). This can be used to initialize optimizer state even when checkpoint is missing optimizer state. | `True`  |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| Deprecated and ignored by `DeepSpeedEngine.load_checkpoint`. Full ZeRO checkpoint loads always restore saved fp32 master weights. Module-only loads rebuild ZeRO-1/2 fp32 master weights from the loaded model weights, while ZeRO-3 still reads fp32 weights because its model checkpoint is empty. | `True`  |
 
 ***round_robin_gradients***: [boolean]
 
@@ -883,17 +897,17 @@ The Hybrid Engine (`DeepSpeedHybridEngine`) switches a model between training mo
     "release_inference_cache": false,
     "pin_parameters": true,
     "tp_gather_partition_size": 8,
-    "enable_cuda_graph": false
+    "enable_graph_capture": false
   }
 ```
 
-***enable_cuda_graph***: [boolean]
+***enable_graph_capture***: [boolean]
 
 | Description                                                                                                                                                                                                                                                                                                                                        | Default |
 | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| Capture token generation into CUDA graphs. Generation issues on the order of a thousand kernel launches per token and is bound by CPU launch overhead rather than by the GPU, so replaying a captured graph removes most of the per-token cost. One graph is captured per decode position, and generated tokens are unchanged. | `false` |
+| Capture token generation into device graphs. Generation issues on the order of a thousand kernel launches per token and is bound by CPU launch overhead rather than by the accelerator, so replaying a captured graph removes most of the per-token cost. One graph is captured per decode position, and generated tokens are unchanged. The previous key `enable_cuda_graph` is deprecated: its value migrates to this field with a warning, so existing configs keep working. | `false` |
 
-`enable_cuda_graph` requires a pinned generation length (`min_new_tokens` equal to `max_new_tokens`) and `max_out_tokens` large enough to cover the longest generation. It is ignored, with a warning, when any of the following apply, since captured graphs would not stay valid:
+`enable_graph_capture` requires a pinned generation length (`min_new_tokens` equal to `max_new_tokens`) and `max_out_tokens` large enough to cover the longest generation. It is ignored, with a warning, when any of the following apply, since captured graphs would not stay valid:
 
 * ZeRO stage 3, where parameters are gathered into fresh buffers for each generation
 * `release_inference_cache: true`, which frees the buffers the graphs write into
@@ -1022,6 +1036,18 @@ smoke coverage used for this AutoEP surface produced the following version gates
 | -------------------------------------------------------------------------------------------------------------- | -------- |
 | How the grouped experts compute their gate and up projections. `"separate"` runs two grouped GEMMs. `"fused"` is experimental and runs one `torch._grouped_mm` over the gate and up weights concatenated on each call, followed by an activation that reads the two halves of its output in place; for `swiglu` this is a Triton kernel with first-order gradients only (`create_graph=True` raises). Parameters, checkpoints and optimizer state keep the separate `w1`/`w3` layout. The forward expression and parameter-gradient semantics are unchanged, but exact numerical equality is not guaranteed across GEMM shapes/backends; the input gradient accumulates both projections in one FP32 GEMM instead of adding two rounded results. Requires `use_grouped_mm=true` and the `torch._grouped_mm` path (set `disable_triton_grouped_mm=true` on devices that prefer the Triton grouped GEMM); unsupported configurations fail rather than falling back. | `"separate"` |
 
+***overlap_weight_grad***: [boolean]
+
+| Description                                                                                                    | Default  |
+| -------------------------------------------------------------------------------------------------------------- | -------- |
+| Experimental. In the DeepEP backward, send the experts' input gradient back while computing their weight gradients. The expert backward returns its input gradient first and defers its weight-gradient GEMMs to the DeepEP dispatch backward, which launches its combine asynchronously, runs those GEMMs with `comm_num_sm` SMs withheld so the combine can run beside them, and waits before returning, including when weight-gradient computation raises. Parameter-gradient semantics are unchanged; exact cross-backend equality is not guaranteed. First-order gradients only (`create_graph=True` raises). Requires `comm_backend="deepep"` with `autoep_size > 1`, the `torch._grouped_mm` expert path (`use_grouped_mm=true`, and `disable_triton_grouped_mm=true` on devices that prefer the Triton grouped GEMM), ZeRO stage 1 or 2 (not 0 or 3), and PyTorch's SM carveout getter/setter APIs; unsupported configurations fail rather than falling back. | `false` |
+
+***skip_recompute_combine***: [boolean]
+
+| Description                                                                                                    | Default  |
+| -------------------------------------------------------------------------------------------------------------- | -------- |
+| Experimental. In the reentrant recompute of a decoder layer, record the DeepEP route's post-expert row weighting and combine without running them: nothing reads that recomputed output, and their backward is unchanged. The skipped output is NaN. Requires `comm_backend="deepep"` with `autoep_size > 1`, a preset whose decoder layer adds the MoE output to the residual (`deepseek_v2`, `deepseek_v3`, `minimax_m3`, `mixtral`, `qwen3_5_moe`, `qwen3_moe`), and a decoder layer in training mode with Hugging Face per-layer gradient checkpointing and `use_reentrant=True`. Eval-mode outer recomputes are rejected because the decoder does not checkpoint; ordinary eval forwards are unchanged. Any non-null `moe_layer_pattern` is rejected, even alongside an explicit or auto-detected supported preset, because the override can select an unvalidated decoder parent. Leave the pattern unset or disable the skip; custom patterns are unchanged when the option is off. Unsupported settings are rejected rather than ignored. | `false` |
+
 ***route_norm***: [boolean]
 
 | Description                                                                                                     | Default |
@@ -1110,7 +1136,7 @@ smoke coverage used for this AutoEP surface produced the following version gates
 
 | Description                                                                                              | Default |
 | -------------------------------------------------------------------------------------------------------- | ------- |
-| How the expert MLP combines its gate and up projections, by a name registered in `deepspeed.moe.ep_experts.EXPERT_ACTIVATIONS`: `"swiglu"` (`silu(gate) * up`), `"geglu_tanh"` (`gelu_tanh(gate) * up`, Gemma-4), `"swiglu_clamped"` (`silu(clamp(gate)) * clamp(up)`, DeepSeek-V4) or `"swiglu_oai"` (`(clamp(up) + 1) * clamp(gate) * sigmoid(alpha * clamp(gate))`, GPT-OSS and MiniMax-M3). `null` = use preset default, which is `"swiglu"` for every built-in preset. AutoEP checks the name against the model: a clamp limit on the experts module or the model config, or an experts `act_fn` that is not the named form's gate function, is an error unless this key is set. The clamp limit and alpha are taken from the model when it states them. `deepspeed.moe.ep_experts.register_expert_activation` adds a form. | `null`  |
+| How the expert MLP combines its gate and up projections, by a name registered in `deepspeed.moe.ep_experts.EXPERT_ACTIVATIONS`: `"swiglu"` (`silu(gate) * up`), `"geglu_tanh"` (`gelu_tanh(gate) * up`, Gemma-4), `"swiglu_clamped"` (`silu(clamp(gate)) * clamp(up)`, DeepSeek-V4) or `"swiglu_oai"` (`(clamp(up) + 1) * clamp(gate) * sigmoid(alpha * clamp(gate))`, GPT-OSS and MiniMax-M3). `null` = use preset default, which is `"swiglu"` for every built-in preset. AutoEP checks the name against the model: a clamp limit on the experts module or the model config, or an experts `act_fn` that is not the named form's gate function, is an error unless this key is set. The clamp limit and alpha are taken from the model when it states them. With Triton on an accelerator, `"swiglu"` and the two clamped forms run a fused Triton kernel (one kernel forward, one backward, only the gate and up projections kept for backward); `"geglu_tanh"`, and every form on the CPU, runs in plain PyTorch. `deepspeed.moe.ep_experts.register_expert_activation` adds a form. | `null`  |
 
 #### Custom Model Example
 
@@ -1794,4 +1820,4 @@ The offload pass is **not** in the default DeepCompile schedule; enable it only 
 
 | Description | Default |
 | ----------- | ------- |
-| Buffers kept in fp32 while the model trains in bf16 or fp16. `"auto"` uses the model's Hugging Face transformers lists: `_keep_in_fp32_modules_strict`, plus `_keep_in_fp32_modules` under fp16. An example is the MoE routing bias `e_score_correction_bias` of DeepSeek-V3, GLM-4.5 and GLM-5, whose values bf16 cannot tell apart. A list gives name patterns, matched the way transformers matches them: `*` stands for any characters and a pattern may match anywhere in the buffer name. `[]` keeps nothing in fp32. Under ZeRO-3, `deepspeed.zero.Init` converts the buffers when it finishes building each module, before a checkpoint is loaded into them. Listed buffers stay fp32 even when `buffer_dtype` is set. Parameters named by the lists still follow the training dtype. | `"auto"` |
+| Parameters and buffers kept in fp32 while the model trains in bf16 or fp16. `"auto"` uses the model's Hugging Face transformers lists: `_keep_in_fp32_modules_strict`, plus `_keep_in_fp32_modules` under fp16. An example is the MoE routing bias `e_score_correction_bias` of DeepSeek-V3, GLM-4.5 and GLM-5, whose values bf16 cannot tell apart. A list gives name patterns, matched the way transformers matches them: `*` stands for any characters and a pattern may match anywhere in the parameter or buffer name. `[]` keeps nothing in fp32. Under ZeRO-3, `deepspeed.zero.Init` converts them when it finishes building each module, before a checkpoint is loaded into them. Listed buffers stay fp32 even when `buffer_dtype` is set. Listed parameters stay fp32 only under ZeRO stage 3 without parameter offload, where their gradients are also reduced and accumulated in fp32; with other stages or with parameter offload they follow the training dtype, with a warning for `"auto"` and an error for an explicit list. Frozen parameters stored quantized (`zero_quantized_nontrainable_weights`) stay quantized, with a warning. | `"auto"` |

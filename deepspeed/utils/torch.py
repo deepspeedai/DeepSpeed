@@ -5,6 +5,7 @@
 
 import logging
 import sys
+from itertools import chain
 
 from packaging import version as pkg_version
 
@@ -44,6 +45,24 @@ def register_grad_hook(param, hook):
         param_tmp = param.expand_as(param)
         grad_acc = param_tmp.grad_fn.next_functions[0][0]
         return grad_acc.register_hook(hook)
+
+
+def restore_optimizer_state_dtype(optimizer, state_dict, dtype):
+    """Reload the floating-point states of ``state_dict`` as ``dtype`` after ``optimizer.load_state_dict(state_dict)``.
+
+    ``torch.optim.Optimizer.load_state_dict`` casts them to the parameter dtype, which rounds fp32 states of
+    low-precision parameters.
+    """
+    saved_ids = chain.from_iterable(group["params"] for group in state_dict["param_groups"])
+    params = chain.from_iterable(group["params"] for group in optimizer.param_groups)
+    for saved_id, param in zip(saved_ids, params):
+        saved_state = state_dict["state"].get(saved_id, {})
+        for key, saved_value in saved_state.items():
+            # Like torch.optim, keep "step" as saved.
+            if key == "step" or not torch.is_tensor(saved_value) or not saved_value.is_floating_point():
+                continue
+            if optimizer.state[param][key].dtype != dtype:
+                optimizer.state[param][key] = saved_value.to(device=param.device, dtype=dtype)
 
 
 def jit_script_compat(fn):

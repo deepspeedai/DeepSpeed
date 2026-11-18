@@ -656,6 +656,9 @@ class AutoEP:
             deepep_scope=self.deepep_scope,
         )
 
+        if self.config.skip_recompute_combine:
+            replacement.attach_decoder_layer(parent)
+
         # Collected before the source module leaves the tree, and only when a caller-supplied
         # optimizer needs it: the values are the discarded pre-shard expert weights.
         sources = (collect_replacement_sources(source_module, replacement, spec, ep_size, ep_rank)

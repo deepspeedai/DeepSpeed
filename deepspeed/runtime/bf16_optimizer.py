@@ -130,6 +130,10 @@ class BF16_Optimizer(ZeROOptimizer):
             for p in self.bf16_groups[i]:
                 if getattr(p, '_hp_mapping', None):
                     p._hp_mapping = None
+                # _update_hp_grad() leaves a view of the fp32 gradient buffer here; a model kept after
+                # destroy() would otherwise keep the whole buffer alive.
+                if getattr(p, '_hp_grad', None) is not None:
+                    p._hp_grad = None
         for hook in self._grad_acc_hooks:
             hook.remove()
         print_rank_0("Removed grad acc hooks")
@@ -673,10 +677,8 @@ class BF16_Optimizer(ZeROOptimizer):
         assert ckpt_version, "Empty ds_version in checkpoint, not clear how to proceed"
         ckpt_version = pkg_version.parse(ckpt_version)
 
-        self.clip_grad = current_rank_sd.get(CLIP_GRAD, self.clip_grad)
-
         if load_optimizer_states:
-            print("_load_legacy_checkpoint current_rank_sd[BASE_OPTIMIZER_STATE]")
+            self.clip_grad = current_rank_sd.get(CLIP_GRAD, self.clip_grad)
             self.optimizer.load_state_dict(current_rank_sd[BASE_OPTIMIZER_STATE])
 
         if load_from_fp32_weights:
@@ -684,12 +686,16 @@ class BF16_Optimizer(ZeROOptimizer):
                                       current_rank_sd[SINGLE_PARTITION_OF_FP32_GROUPS]):
                 src_tensor = _get_padded_tensor(saved, current.numel())
                 current.data.copy_(src_tensor.data)
+        else:
+            self._restore_from_bit16_weights()
 
         if load_optimizer_states:
             self._link_all_hp_params()
 
     def _load_universal_checkpoint(self, checkpoint_folder, load_optimizer_states, load_from_fp32_weights):
-        self.load_hp_checkpoint_state_from_checkpoint_dir("bf16_groups", checkpoint_folder)
+        self.load_hp_checkpoint_state_from_checkpoint_dir("bf16_groups",
+                                                          checkpoint_folder,
+                                                          load_optimizer_states=load_optimizer_states)
 
     def _load_global_state(self, sd):
         pass
