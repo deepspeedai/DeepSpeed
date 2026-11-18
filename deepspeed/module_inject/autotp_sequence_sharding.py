@@ -22,9 +22,12 @@ Requirements, checked when it is applied:
   - every tensor-parallel linear inside the decoder layers belongs to a block: the parent module of a row-parallel
     linear, whose first tensor argument (or ``hidden_states``) is the input of its column-parallel linears;
   - every decoder layer of the layer list has at least one block;
+  - no AutoEP MoE layer is inside the decoder layers;
   - the sequence length is divisible by the tensor-parallel size.
 Every replicated parameter inside the decoder layers (norm weights, row-parallel biases) then sees only this rank's
-part of the sequence or of the heads, so its gradient is summed over the tensor-parallel group.
+part of the sequence or of the heads, so its gradient is summed over the tensor-parallel group. The modules of a
+decoder layer outside its blocks run on this rank's part of the sequence, so they must act on each token alone: an
+attention module left unsharded would attend over the wrong tokens.
 """
 
 import torch
@@ -194,9 +197,11 @@ class ColumnGroupFromSequenceShards(torch.autograd.Function):
             grad_in = grad_in + grad_x_full
         grad_shard, handle = _reduce_scatter(grad_in, ctx.dim, ctx.group, ctx.world_size, async_op=True)
         gather.wait()
+        # The weights follow x_shard, group and dim in the inputs. A frozen weight needs no weight-gradient GEMM.
+        weights_need_grad = ctx.needs_input_grad[3:]
         grad_weights = []
-        for grad_out in grad_outs:
-            if grad_out is None:
+        for grad_out, needs_grad in zip(grad_outs, weights_need_grad):
+            if grad_out is None or not needs_grad:
                 grad_weights.append(None)
             else:
                 grad_weights.append(torch.matmul(grad_out.reshape(-1, grad_out.shape[-1]).t(), x_2d))
@@ -216,6 +221,11 @@ class _BlockState:
     def can_fuse(self):
         weights = [layer.weight for layer in self.readers]
         if not weights or any(is_zero_param(w) or w.dim() != 2 for w in weights):
+            return False
+        # PyTorch skips the tensor hooks of a weight that a custom autograd function saves inside non-reentrant
+        # activation checkpointing, so a weight with such hooks (the sum of GPTBigCode's shared key/value rows, for
+        # example) stays on the plain path, where its own matmul keeps the hooks running.
+        if any(w._backward_hooks for w in weights):
             return False
         return len({(w.dtype, w.device, w.shape[1]) for w in weights}) == 1
 
@@ -262,12 +272,13 @@ def apply_autotp_sequence_sharding(model, group, seq_dim=1, overlap=True, zero_s
     """Split the hidden states between AutoTP blocks along ``seq_dim`` over ``group``. Call after AutoTP has
     replaced the linears. ``overlap``: run the column-parallel linears that read a block input in one autograd node
     and overlap their backward reduce-scatter (ColumnGroupFromSequenceShards). ``zero_stage``: the ZeRO stage, which
-    decides how the replicated parameters' gradients are summed. Returns the number of blocks."""
+    decides how the replicated parameters' gradients are summed. Returns the ``(name, param)`` pairs of the replicated
+    parameters skipped because they were frozen: they get no gradient sum, so they must stay frozen."""
     from deepspeed.module_inject.layers import (DS_TENSOR_MODEL_PARALLEL, LinearAllreduce, LinearLayer,
                                                 TensorParallel_Layer)
 
     if not pg_utils.is_parallel(group) or getattr(model, SEQUENCE_SHARDING_ATTR, False):
-        return 0
+        return []
 
     row_layers = {name: m for name, m in model.named_modules() if isinstance(m, LinearAllreduce)}
     if not row_layers:
@@ -292,6 +303,12 @@ def apply_autotp_sequence_sharding(model, group, seq_dim=1, overlap=True, zero_s
     if missing:
         raise ValueError(f"AutoTP sequence sharding: decoder layers {missing} of {list_name!r} have no "
                          "tensor-parallel block; their ops would see a split sequence")
+
+    # AutoEP + AutoTP folding expects every tensor-parallel rank to hold the whole sequence: it splits the routed
+    # tokens over the ranks and gathers the expert outputs back, which would mix the ranks' different tokens here.
+    for name, m in layers.named_modules(prefix=list_name):
+        if getattr(m, "_is_autoep_layer", False):
+            raise NotImplementedError(f"AutoTP sequence sharding does not support AutoEP MoE layers ({name!r})")
 
     # Every tensor-parallel layer inside the decoder layers must belong to a block, and column outputs must stay
     # sharded (a gathered column output would mix a split sequence and a full one).
@@ -376,12 +393,30 @@ def apply_autotp_sequence_sharding(model, group, seq_dim=1, overlap=True, zero_s
 
     # Replicated parameters in the decoder layers see this rank's part of the sequence (norms, row biases) or of
     # the heads (q_norm/k_norm, which AutoTP may already reduce), so their gradients are partial sums.
-    def make_hook():
+    def make_hook(param):
 
         def hook(grad):
             grad = grad.contiguous()
             dist.all_reduce(grad, group=group)
+            param._ds_sequence_sharding_grad_summed = True
             return grad
+
+        return hook
+
+    # PyTorch (2.8, 2.9) stops calling a parameter's tensor hooks once a custom autograd function saves it inside
+    # non-reentrant activation checkpointing (a fused norm kernel, for example) and accumulates its partial gradient
+    # unsummed. Its post-accumulate hooks still run: fail there instead of training on the partial gradient.
+    def make_check_hook(name, param):
+
+        def hook(*unused):
+            if not getattr(param, "_ds_sequence_sharding_grad_summed", False):
+                raise RuntimeError(
+                    f"AutoTP sequence sharding: the tensor-parallel gradient sum of {name!r} did not run, so its "
+                    "gradient covers only this rank's part of the sequence. PyTorch skips the tensor hooks of a "
+                    "parameter that a custom autograd function (such as a fused norm kernel) saves inside "
+                    "non-reentrant activation checkpointing. Use ZeRO stage 3, which sums these gradients after "
+                    "accumulation, or a version of this layer without a custom autograd function.")
+            param._ds_sequence_sharding_grad_summed = False
 
         return hook
 
@@ -398,15 +433,20 @@ def apply_autotp_sequence_sharding(model, group, seq_dim=1, overlap=True, zero_s
         return hook
 
     reduced = []
+    frozen = []
     for name, param in layers.named_parameters(prefix=list_name):
-        if not param.requires_grad or getattr(param, DS_TENSOR_MODEL_PARALLEL, False):
+        if getattr(param, DS_TENSOR_MODEL_PARALLEL, False):
+            continue
+        if not param.requires_grad:
+            frozen.append((name, param))
             continue
         if getattr(param, "_ds_grad_allreduce_registered", False):
             continue
         if zero_stage == 3:
             register_grad_hook(param, make_accumulated_grad_hook(param))
         else:
-            param.register_hook(make_hook())
+            param.register_hook(make_hook(param))
+            register_grad_hook(param, make_check_hook(name, param))
         param._ds_grad_allreduce_registered = True
         reduced.append(name)
 
@@ -416,4 +456,4 @@ def apply_autotp_sequence_sharding(model, group, seq_dim=1, overlap=True, zero_s
         f"{seq_dim}, overlap={overlap}; tensor-parallel gradient sum for {len(reduced)} replicated parameters"
         f"{', e.g. ' + repr(reduced[0]) if reduced else ''}",
         ranks=[0])
-    return len(blocks)
+    return frozen

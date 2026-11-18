@@ -89,7 +89,7 @@ def tp_shared_input_ids(vocab_size, seq_len, step):
 
 @pytest.mark.parametrize("checkpointing", [False, True])
 @pytest.mark.parametrize("mode", list(MODES))
-@pytest.mark.parametrize("zero_stage", [1, 3])
+@pytest.mark.parametrize("zero_stage", [1, 2, 3])
 class TestAutoTPSequenceSharding(DistributedTest):
     world_size = 2
 
@@ -232,6 +232,92 @@ class TestAutoTPSequenceShardingUnreadColumn(DistributedTest):
         assert not any(alive), alive
 
 
+class TestAutoTPSequenceShardingWeightHooks(DistributedTest):
+    """A column-parallel weight may carry a tensor hook (AutoTP sums GPTBigCode's shared key/value rows in one).
+    PyTorch stops calling such a hook once a custom autograd function saves the weight inside non-reentrant activation
+    checkpointing, so in the overlap mode the hook must still run on every step."""
+    world_size = 2
+
+    def test_column_weight_hooks_run_every_step(self):
+        skip_on_device()
+        pytest.importorskip("transformers")
+
+        config, model = build_qwen3_model()
+        model.gradient_checkpointing_enable()
+        engine, _, _, _ = deepspeed.initialize(model=model,
+                                               model_parameters=model.parameters(),
+                                               config=build_config(zero_stage=1, mode="overlap"))
+        calls = []
+        for layer in engine.module.model.layers:
+            layer.self_attn.q_proj.weight.register_hook(lambda grad: calls.append(grad.shape))
+
+        steps = 3
+        for step in range(steps):
+            input_ids = tp_shared_input_ids(config.vocab_size, 16, step)
+            loss = engine(input_ids=input_ids, labels=input_ids).loss
+            engine.backward(loss)
+            engine.step()
+
+        # One call per decoder layer and step, also after the first step, from which the overlap mode would run the
+        # block's linears in one autograd node.
+        assert len(calls) == steps * config.num_hidden_layers, calls
+
+
+class _ScaleSavingWeight(torch.autograd.Function):
+    """``x * weight`` with the weight saved for backward, as fused norm kernels do."""
+
+    @staticmethod
+    def forward(ctx, x, weight):
+        ctx.save_for_backward(x, weight)
+        return x * weight
+
+    @staticmethod
+    def backward(ctx, grad):
+        x, weight = ctx.saved_tensors
+        return grad * weight, (grad * x).reshape(-1, x.shape[-1]).sum(0)
+
+
+class _FusedStyleRMSNorm(torch.nn.Module):
+    """RMSNorm that applies its weight through a custom autograd function, like a fused kernel."""
+
+    def __init__(self, norm):
+        super().__init__()
+        self.weight = norm.weight
+        self.variance_epsilon = norm.variance_epsilon
+
+    def forward(self, hidden_states):
+        variance = hidden_states.pow(2).mean(-1, keepdim=True)
+        normed = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
+        return _ScaleSavingWeight.apply(normed, self.weight)
+
+
+def build_glm4_moe_model():
+    from transformers import AutoModelForCausalLM, Glm4MoeConfig
+
+    # One dense decoder layer, then one MoE layer for AutoEP to replace.
+    config = Glm4MoeConfig(
+        vocab_size=128,
+        hidden_size=64,
+        intermediate_size=128,
+        moe_intermediate_size=32,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=16,
+        n_routed_experts=4,
+        num_experts_per_tok=2,
+        n_shared_experts=1,
+        first_k_dense_replace=1,
+        n_group=1,
+        topk_group=1,
+        max_position_embeddings=128,
+        tie_word_embeddings=False,
+        use_cache=False,
+    )
+    torch.manual_seed(0)
+    return config, AutoModelForCausalLM.from_config(config)
+
+
 class TestAutoTPSequenceShardingRejects(DistributedTest):
     world_size = 2
 
@@ -250,4 +336,73 @@ class TestAutoTPSequenceShardingRejects(DistributedTest):
             raised = False
         except ValueError as error:
             raised = "not divisible by the tensor-parallel size" in str(error)
+        assert raised
+
+    def test_autoep_moe_layers(self):
+        """AutoEP + AutoTP folding expects every TP rank to hold the whole sequence. With sequence sharding each rank
+        holds other tokens, so the MoE outputs would be wrong; initialization must refuse the combination."""
+        skip_on_device()
+        pytest.importorskip("transformers")
+        if get_accelerator().device_name() == "cpu":
+            pytest.skip("AutoEP folding runs on an accelerator")
+
+        config, model = build_glm4_moe_model()
+        ds_config = build_config(zero_stage=1, mode="overlap")
+        ds_config["tensor_parallel"]["partition_config"] = ATTENTION_ONLY_PARTITION
+        ds_config["expert_parallel"] = {
+            "enabled": True,
+            "autoep_size": 2,
+            "preset_model": "deepseek_v3",
+            "use_grouped_mm": False,
+        }
+        try:
+            deepspeed.initialize(model=model, model_parameters=model.parameters(), config=ds_config)
+            raised = False
+        except NotImplementedError as error:
+            raised = "AutoEP" in str(error)
+        assert raised
+
+    def test_skipped_gradient_sum(self):
+        """PyTorch skips the tensor hooks of a weight that a custom autograd function saves inside non-reentrant
+        activation checkpointing. At ZeRO-1 the decoder norms' gradient sum runs in such a hook, so backward must
+        fail instead of leaving each rank with the gradient of its own tokens."""
+        skip_on_device()
+        pytest.importorskip("transformers")
+
+        config, model = build_qwen3_model()
+        for layer in model.model.layers:
+            layer.post_attention_layernorm = _FusedStyleRMSNorm(layer.post_attention_layernorm)
+        model.gradient_checkpointing_enable()
+        engine, _, _, _ = deepspeed.initialize(model=model,
+                                               model_parameters=model.parameters(),
+                                               config=build_config(zero_stage=1, mode="overlap"))
+        input_ids = tp_shared_input_ids(config.vocab_size, 16, 0)
+        loss = engine(input_ids=input_ids, labels=input_ids).loss
+        try:
+            engine.backward(loss)
+            raised = False
+        except RuntimeError as error:
+            raised = "post_attention_layernorm" in str(error)
+        assert raised
+
+    def test_unfrozen_after_initialize(self):
+        """A replicated decoder-layer parameter frozen at initialization gets no gradient sum. Unfrozen later, it
+        would train on the gradient of this rank's tokens only, so backward must refuse."""
+        skip_on_device()
+        pytest.importorskip("transformers")
+
+        config, model = build_qwen3_model()
+        norm_weight = model.model.layers[0].input_layernorm.weight
+        norm_weight.requires_grad_(False)
+        engine, _, _, _ = deepspeed.initialize(model=model,
+                                               model_parameters=model.parameters(),
+                                               config=build_config(zero_stage=1, mode="overlap"))
+        norm_weight.requires_grad_(True)
+        input_ids = tp_shared_input_ids(config.vocab_size, 16, 0)
+        loss = engine(input_ids=input_ids, labels=input_ids).loss
+        try:
+            engine.backward(loss)
+            raised = False
+        except RuntimeError as error:
+            raised = "model.layers.0.input_layernorm.weight" in str(error)
         assert raised

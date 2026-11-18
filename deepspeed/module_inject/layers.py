@@ -1016,7 +1016,7 @@ class LinearLayer(TensorParallel_Layer):
             if output is None:
                 output = torch.matmul(input, self.weight.transpose(-1, -2))
             if self.bias is not None:
-                output = add_bias(output, self.bias)
+                output = add_bias(output, self.bias, self.is_training_mode())
         elif not self.__class__.tp_overlap_comm:
             if getattr(self, 'mp_group', None) is not None and not self.defer_collectives_to_compiler:
                 input = ColumnParallel.apply(self.mp_group, input)

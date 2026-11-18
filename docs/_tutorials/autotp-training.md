@@ -190,7 +190,9 @@ parallelism; it is unrelated to DeepSpeed's Ulysses sequence parallelism
 `sequence_sharding_overlap` (default `true`) runs the column-parallel linears that
 read a block input in one autograd node, saves only this rank's part of the input
 for backward, and overlaps the backward reduce-scatter with the weight-gradient
-GEMMs. ZeRO-3 partitioned weights use the plain path.
+GEMMs. ZeRO-3 partitioned weights use the plain path, and so do weights with
+tensor hooks (such as the sum of GPTBigCode's shared key/value rows), whose hooks
+PyTorch would skip under non-reentrant activation checkpointing.
 
 Requirements, checked at `deepspeed.initialize()`:
 
@@ -200,6 +202,20 @@ Requirements, checked at `deepspeed.initialize()`:
 - The sequence length is divisible by `autotp_size` (checked in the forward pass).
 - No column-parallel layer gathers its output, and the DeepCompile `autotp` pass is
   not used.
+- No AutoEP MoE layer is inside the decoder layers: AutoEP + AutoTP folding expects
+  every TP rank to hold the whole sequence.
+
+The modules of a decoder layer outside its blocks (an MLP left unsharded, for
+example) run on this rank's part of the sequence, so they must act on each token
+alone. Shard every attention module: an unsharded attention would attend over the
+wrong tokens, and this is not checked.
+
+At ZeRO stages 0, 1 and 2 the gradient sum of a replicated parameter runs in a
+tensor hook. PyTorch skips that hook when a custom autograd function, such as a
+fused norm kernel, saves the parameter inside non-reentrant activation
+checkpointing (the Hugging Face `gradient_checkpointing_enable()` default); the
+backward pass then raises an error instead of training on a partial gradient.
+ZeRO-3 sums these gradients after accumulation and is not affected.
 
 The hidden states are gathered again after the last decoder layer, so the final
 norm, output layer and loss see the whole sequence. Combine with
