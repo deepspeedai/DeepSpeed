@@ -893,6 +893,32 @@ class TestDeferredDwStaging:
             assert weight.grad is not None
             assert torch.count_nonzero(weight.grad) == 0
 
+    def test_released_weights_are_not_kept_allocated_for_the_backward(self):
+        from torch.multiprocessing.reductions import StorageWeakRef
+
+        device, dtype = self._device_and_dtype()
+        plain, staged = self._experts_pair(device, dtype, "separate")
+        weights = (staged.w1, staged.w2, staged.w3)
+        values = [weight.data.clone() for weight in weights]
+        gathered = [StorageWeakRef(weight.data.untyped_storage()) for weight in weights]
+        x, grad_out, counts, valid_counts = self._backward_inputs(device, dtype, padded=True)[0]
+        staging = MoeDeferredDwStaging(4, flush_period=2)
+        staging.flush_on_stage = True
+
+        output = staged(x, counts, dw_staging=staging, num_valid_tokens_per_expert=valid_counts)
+        # ZeRO-3 releases a module's gathered weights when its forward returns. A weight the graph still held
+        # would stay allocated in every layer until its backward runs.
+        for weight in weights:
+            weight.data = torch.empty(0, device=device, dtype=dtype)
+        assert all(storage.expired() for storage in gathered)
+
+        # ZeRO-3 gathers them again for the backward, into another allocation.
+        for weight, value in zip(weights, values):
+            weight.data = value
+        output.backward(grad_out)
+        plain(x, counts).backward(grad_out)
+        self._assert_weight_grads_match(staged, plain)
+
     @pytest.mark.parametrize("gate_up_impl", ["separate", "fused"])
     @pytest.mark.parametrize("trainable", [(False, True, True), (True, False, True), (True, True, False),
                                            (False, False, False)])

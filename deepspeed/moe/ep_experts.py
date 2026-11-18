@@ -706,19 +706,21 @@ class _DeferredWeightGradExperts(torch.autograd.Function):
                 num_valid_tokens_per_expert=None):
         offsets = torch.cumsum(num_tokens_per_expert, dim=0, dtype=torch.int32)
         dtype = x.dtype
-        # Detached aliases, not the parameters: ZeRO-3 swaps a parameter's data once the module's forward returns,
-        # and the backward must read the weights this forward used.
         w1c, w2c, w3c = (_grouped_mm_weight(weight.detach(), dtype) for weight in (w1, w2, w3))
+        # The parameters are saved, not the tensors computed with: ZeRO-3 releases a parameter's gathered data once
+        # the module's forward returns and gathers it again for the backward, and a saved alias or copy would keep
+        # every layer's expert weights allocated in between. The packed gate+up weight is this forward's own copy
+        # and is kept, since packing it again in the backward costs more than the staging saves.
         if fused_gate_up:
             w13 = torch.cat([w1c, w3c], dim=1)
             gate_up = torch._grouped_mm(x, w13.transpose(-2, -1), offs=offsets)
             h = apply_packed_expert_activation(gate_up, activation, alpha, limit)
-            ctx.save_for_backward(x, offsets, w2c, h, w13, gate_up)
+            ctx.save_for_backward(x, offsets, w2, h, w13, gate_up)
         else:
             gate = torch._grouped_mm(x, w1c.transpose(-2, -1), offs=offsets)
             up = torch._grouped_mm(x, w3c.transpose(-2, -1), offs=offsets)
             h = apply_expert_activation(gate, up, activation, alpha, limit)
-            ctx.save_for_backward(x, offsets, w2c, h, w1c, w3c, gate, up)
+            ctx.save_for_backward(x, offsets, w2, h, w1, w3, gate, up)
         ctx.slot = slot
         ctx.dw_staging = dw_staging
         ctx.num_valid_tokens_per_expert = num_valid_tokens_per_expert
@@ -732,7 +734,8 @@ class _DeferredWeightGradExperts(torch.autograd.Function):
         if torch.is_grad_enabled():
             raise RuntimeError("Deferred expert gradients have no second derivative; "
                                "backward with create_graph=True is not supported")
-        x, offsets, w2c, h, *projection = ctx.saved_tensors
+        x, offsets, w2, h, *projection = ctx.saved_tensors
+        w2c = _grouped_mm_weight(w2.detach(), x.dtype)
         grad_out = grad_out.contiguous()
         grad_h = torch._grouped_mm(grad_out, w2c, offs=offsets)
         if ctx.fused_gate_up:
@@ -740,7 +743,8 @@ class _DeferredWeightGradExperts(torch.autograd.Function):
             grad_gate_up = _packed_expert_activation_backward(grad_h, gate_up, *ctx.activation)
             grad_x = torch._grouped_mm(grad_gate_up, w13, offs=offsets)
         else:
-            w1c, w3c, gate, up = projection
+            w1, w3, gate, up = projection
+            w1c, w3c = _grouped_mm_weight(w1.detach(), x.dtype), _grouped_mm_weight(w3.detach(), x.dtype)
             grad_gate, grad_up = _expert_activation_backward(grad_h, gate, up, *ctx.activation)
             grad_x = torch._grouped_mm(grad_gate, w1c, offs=offsets) + torch._grouped_mm(grad_up, w3c, offs=offsets)
 
