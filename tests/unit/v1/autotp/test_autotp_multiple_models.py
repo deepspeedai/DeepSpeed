@@ -135,7 +135,7 @@ class WorldMPU:
         return dist.get_world_group()
 
 
-def build_engine(tp_size, mpu=None):
+def build_engine(tp_size, mpu=None, mesh_param=None):
     config = {"train_micro_batch_size_per_gpu": 1}
     if tp_size > 1:
         # Nothing is sharded; the test is about which groups the engine runs on.
@@ -150,7 +150,11 @@ def build_engine(tp_size, mpu=None):
             },
         }
     model = SimpleModel(hidden_dim=8)
-    engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config, mpu=mpu)
+    engine, _, _, _ = deepspeed.initialize(model=model,
+                                           model_parameters=model.parameters(),
+                                           config=config,
+                                           mpu=mpu,
+                                           mesh_param=mesh_param)
     return engine
 
 
@@ -170,8 +174,15 @@ class TestAutoTPEnginesShareProcessGroups(DistributedTest):
         # Before the check, a TP4 engine silently ran on the first engine's TP2 groups, and a TP1 engine took
         # their data parallel group and then failed deep inside initialize.
         build_engine(tp_size=2)
-        with pytest.raises(RuntimeError):
+        with pytest.raises(RuntimeError, match="9081"):
             build_engine(tp_size=second_tp_size)
+
+    def test_mesh_engine_after_autotp_raises(self):
+        # A data/sequence parallel mesh does not replace groups.mpu, so without the check this engine read the
+        # TP2 groups' model parallel size and then failed on its missing mpu.
+        build_engine(tp_size=2)
+        with pytest.raises(RuntimeError, match="9081"):
+            build_engine(tp_size=1, mesh_param=(dist.get_world_size(), 1))
 
     def test_engine_without_mpu_inherits_a_later_explicit_mpu(self):
         # An explicit mpu replaces groups.mpu, so a third engine without one inherits that layout, not the
