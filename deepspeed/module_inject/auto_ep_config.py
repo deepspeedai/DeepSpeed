@@ -257,10 +257,6 @@ def validate_autoep_config(
         if tp_size > 1:
             raise ValueError("deferred_dw_flush_period does not support AutoEP+AutoTP folding yet. Set "
                              "tensor_parallel.autotp_size to 1, or leave deferred_dw_flush_period unset.")
-        if zero_stage not in (0, 1, 2):
-            raise ValueError("deferred_dw_flush_period leaves the expert weights without a gradient on the "
-                             f"backward passes that stage, which has not been validated with ZeRO stage "
-                             f"{zero_stage}. Use ZeRO stage 0, 1 or 2, or leave deferred_dw_flush_period unset.")
     elif rows_per_expert != 0:
         raise ValueError("deferred_dw_rows_per_expert sizes the staging that deferred_dw_flush_period > 1 enables. "
                          "Set deferred_dw_flush_period, or leave deferred_dw_rows_per_expert unset.")

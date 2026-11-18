@@ -319,6 +319,18 @@ def _zero_empty_expert_grad(weight: torch.Tensor, num_tokens_per_expert: torch.T
     return _ZeroEmptyExpertGrad.apply(weight, num_tokens_per_expert)
 
 
+def _grouped_mm_weight(weight: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
+    """``weight`` in ``dtype``, at an address ``torch._grouped_mm`` accepts.
+
+    The CUDA grouped GEMM needs 16-byte aligned operands. A tensor's own allocation is, but ZeRO-3 gathers a
+    parameter into a slice of a shared flat buffer, which starts wherever the parameters before it end.
+    """
+    weight = weight.to(dtype)
+    if weight.data_ptr() % 16 != 0:
+        weight = weight.clone()
+    return weight
+
+
 def _run_experts_grouped_mm(
     w1: torch.Tensor,
     w2: torch.Tensor,
@@ -352,18 +364,18 @@ def _run_experts_grouped_mm(
     w3 = _zero_empty_expert_grad(w3, num_tokens_per_expert)
     gate = torch._grouped_mm(
         x.to(cast_dtype),
-        w1.to(cast_dtype).transpose(-2, -1),
+        _grouped_mm_weight(w1, cast_dtype).transpose(-2, -1),
         offs=offsets,
     )
     up = torch._grouped_mm(
         x.to(cast_dtype),
-        w3.to(cast_dtype).transpose(-2, -1),
+        _grouped_mm_weight(w3, cast_dtype).transpose(-2, -1),
         offs=offsets,
     )
     h = apply_expert_activation(gate, up, activation, alpha, limit)
     out = torch._grouped_mm(
         h,
-        w2.to(cast_dtype).transpose(-2, -1),
+        _grouped_mm_weight(w2, cast_dtype).transpose(-2, -1),
         offs=offsets,
     ).type_as(x)
 
@@ -405,7 +417,7 @@ def _run_experts_grouped_mm_fused_gate_up(
     h = apply_packed_expert_activation(gate_up, activation, alpha, limit)
     out = torch._grouped_mm(
         h,
-        w2.to(cast_dtype).transpose(-2, -1),
+        _grouped_mm_weight(w2, cast_dtype).transpose(-2, -1),
         offs=offsets,
     ).type_as(x)
 
@@ -694,7 +706,9 @@ class _DeferredWeightGradExperts(torch.autograd.Function):
                 num_valid_tokens_per_expert=None):
         offsets = torch.cumsum(num_tokens_per_expert, dim=0, dtype=torch.int32)
         dtype = x.dtype
-        w1c, w2c, w3c = w1.to(dtype), w2.to(dtype), w3.to(dtype)
+        # Detached aliases, not the parameters: ZeRO-3 swaps a parameter's data once the module's forward returns,
+        # and the backward must read the weights this forward used.
+        w1c, w2c, w3c = (_grouped_mm_weight(weight.detach(), dtype) for weight in (w1, w2, w3))
         if fused_gate_up:
             w13 = torch.cat([w1c, w3c], dim=1)
             gate_up = torch._grouped_mm(x, w13.transpose(-2, -1), offs=offsets)

@@ -814,7 +814,8 @@ class TestAutoEPDeferredDwParity(DistributedTest):
     def _window_grads(self, zero_stage, ep_size, flush_period, reference_state, seed, rows_per_expert=0):
         """The expert gradients each of two accumulation windows hands to the optimizer, and the layers' stagings.
 
-        The second window starts from the first window's update, so it also covers what that update applied.
+        The second window starts from the first window's update, so it also covers what that update applied, and
+        under ZeRO-3 it accumulates into buffers that still hold the first window's gradients.
         """
         model = _make_async_split_model()
         model.load_state_dict(reference_state)
@@ -848,7 +849,7 @@ class TestAutoEPDeferredDwParity(DistributedTest):
                                            atol=2e-2 * expected.abs().max().item(),
                                            msg=f"window {window}: {name}")
 
-    @pytest.mark.parametrize("zero_stage", [0, 1, 2])
+    @pytest.mark.parametrize("zero_stage", [0, 1, 2, 3])
     def test_staged_expert_gradients_match_unstaged_over_two_updates(self, zero_stage):
         _skip_unless_cuda_grouped_mm()
         ep_size = 2
@@ -864,7 +865,7 @@ class TestAutoEPDeferredDwParity(DistributedTest):
         assert not any(staging.has_staged_rows for staging in stagings)
         self._assert_window_grads_match(staged, unstaged)
 
-    @pytest.mark.parametrize("zero_stage", [1, 2])
+    @pytest.mark.parametrize("zero_stage", [1, 2, 3])
     def test_replicas_that_fill_their_buffers_in_different_backwards_still_reduce_together(self, zero_stage):
         _skip_unless_cuda_grouped_mm()
         # Both ranks hold every expert and train on different data, so each expert weight is reduced across them.

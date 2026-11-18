@@ -931,6 +931,34 @@ class TestDeferredDwStaging:
         with pytest.raises(RuntimeError, match="not both"):
             experts(torch.randn(4, 8), torch.tensor([2, 2]), ExpertWeightGradSlot(), dw_staging=staging)
 
+    @pytest.mark.parametrize("staged", [False, True])
+    @pytest.mark.parametrize("gate_up_impl", ["separate", "fused"])
+    def test_weights_inside_a_flat_buffer_run(self, gate_up_impl, staged):
+        device, dtype = self._device_and_dtype()
+        plain, in_buffer = self._experts_pair(device, dtype, gate_up_impl)
+        # ZeRO-3 hands the module its weights as slices of one gathered buffer, which need not start at the
+        # 16-byte boundary the CUDA grouped GEMM requires of its operands.
+        weights = (in_buffer.w1, in_buffer.w2, in_buffer.w3)
+        flat = torch.empty(sum(weight.numel() + 1 for weight in weights), device=device, dtype=dtype)
+        offset = 0
+        for weight in weights:
+            offset += 1
+            gathered = flat.narrow(0, offset, weight.numel()).view(weight.shape)
+            gathered.copy_(weight.data)
+            weight.data = gathered
+            offset += weight.numel()
+        x, grad_out, counts, valid_counts = self._backward_inputs(device, dtype, padded=True)[0]
+        staging_kwargs = {}
+        if staged:
+            staging = MoeDeferredDwStaging(4, flush_period=2)
+            staging.flush_on_stage = True
+            staging_kwargs = dict(dw_staging=staging, num_valid_tokens_per_expert=valid_counts)
+        x_plain, x_in_buffer = x.clone().requires_grad_(True), x.clone().requires_grad_(True)
+        plain(x_plain, counts).backward(grad_out)
+        in_buffer(x_in_buffer, counts, **staging_kwargs).backward(grad_out)
+        torch.testing.assert_close(x_in_buffer.grad, x_plain.grad, rtol=0, atol=0)
+        self._assert_weight_grads_match(in_buffer, plain)
+
     def test_settings_are_validated(self, monkeypatch):
 
         def validate(zero_stage=1, tp_size=1, **settings):
@@ -938,7 +966,7 @@ class TestDeferredDwStaging:
             validate_autoep_config(config, 2 * tp_size, 1, tp_size, 1, zero_stage=zero_stage)
 
         assert parse_autoep_config({"enabled": True}).deferred_dw_flush_period == 1
-        for stage in (0, 1, 2):
+        for stage in (0, 1, 2, 3):
             validate(deferred_dw_flush_period=4, deferred_dw_rows_per_expert=256, zero_stage=stage)
         for period in (0, 1.5, True, "4"):
             with pytest.raises(ValueError, match="deferred_dw_flush_period must be a positive integer"):
@@ -950,8 +978,6 @@ class TestDeferredDwStaging:
             validate(deferred_dw_rows_per_expert=256)
         with pytest.raises(ValueError, match="sequential expert loop"):
             validate(deferred_dw_flush_period=4, use_grouped_mm=False)
-        with pytest.raises(ValueError, match="ZeRO stage 3"):
-            validate(deferred_dw_flush_period=4, zero_stage=3)
         with pytest.raises(ValueError, match="Enable one of them"):
             validate(deferred_dw_flush_period=4,
                      overlap_weight_grad=True,
