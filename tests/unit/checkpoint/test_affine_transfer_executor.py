@@ -17,9 +17,9 @@ from deepspeed.checkpoint.affine import (ParamAffineMap, contiguous_split_map, n
                                          union_affine_maps)
 from deepspeed.checkpoint.affine_transfer import PlanBudget, plan_transfer
 from deepspeed.checkpoint.affine_transfer_executor import (AffineTransferExecutionError, StagingBudget,
-                                                           TransferEndpoints, TransferRequest, _is_packed,
-                                                           execute_transfer, execute_transfers, prepare_transfers,
-                                                           schedule_transfers)
+                                                           TransferEndpoints, TransferRequest, TransferWindow,
+                                                           _is_packed, execute_transfer, execute_transfers,
+                                                           prepare_transfers, schedule_transfers)
 from deepspeed.checkpoint.affine_transfer_copy import fused_copies, sequential_copies
 from deepspeed.checkpoint.zero_affine import zero_storage_affine_map
 from unit.common import DistributedTest
@@ -333,6 +333,24 @@ class TestB2Prepared(DistributedTest):
             assert torch.equal(storage[5 + size:], torch.full((12 - 5, ), -17.0, device=storage.device))
 
     @pytest.mark.parametrize('world_size', [2, 4])
+    def test_a_released_handle_stages_again_on_its_next_run(self, world_size):
+        _join_transfer_group()
+        endpoints, requests, checks, guards = _mixed_batch(world_size, dist.get_rank())
+        budget = StagingBudget(64)
+        prepared = prepare_transfers(requests, endpoints, torch.float32, budget, copier=fused_copies)
+        once = execute_transfers(requests, endpoints, torch.float32, budget)
+        for run in range(4):
+            if run:
+                _refill(requests, 1000.0)
+            prepared.release_staging()
+            assert prepared.run(check=run % 2 == 0) == once
+            for targets, target_map, full in checks:
+                _assert_matches(targets, target_map, full + 1000.0 * run)
+        for storage, size in guards:
+            assert torch.equal(storage[:5], torch.full((5, ), -17.0, device=storage.device))
+            assert torch.equal(storage[5 + size:], torch.full((12 - 5, ), -17.0, device=storage.device))
+
+    @pytest.mark.parametrize('world_size', [2, 4])
     def test_a_buffer_moved_on_one_process_stops_every_process(self, world_size):
         _join_transfer_group()
         rank = dist.get_rank()
@@ -431,6 +449,85 @@ class TestB2Prepared(DistributedTest):
             _assert_matches(targets, target_map, full)
         for targets, target_map, full in other_checks:
             _assert_matches(targets, target_map, full + 1000.0)
+
+
+def _window_batch(window, placement, dtype):
+    """A row-to-column batch whose sources, targets, both or neither are carved from ``window``."""
+    world_size, rank = dist.get_world_size(), dist.get_rank()
+    source, target = _row_to_column(world_size)
+    endpoints = TransferEndpoints(source={loc: loc
+                                          for loc in source.shard_shapes},
+                                  target={loc: loc
+                                          for loc in target.shard_shapes})
+    in_source = placement in ('source', 'both_pull', 'both_push')
+    in_target = placement in ('target', 'both_pull', 'both_push')
+    sources, targets = {}, {}
+    for map_, bindings, buffers, windowed in ((source, endpoints.source, sources, in_source),
+                                              (target, endpoints.target, targets, in_target)):
+        for location, shape in map_.shard_shapes.items():
+            if bindings[location] == rank:
+                buffer = window.tensor(shape, dtype) if windowed else torch.empty(shape, dtype=dtype, device=_device())
+                buffers[location] = buffer.fill_(UNWRITTEN)
+    request = TransferRequest('weight', plan_transfer(target, source, PlanBudget()), sources, targets)
+    windowed = (set(source.shard_shapes) if in_source else set(), set(target.shard_shapes) if in_target else set())
+    return endpoints, request, source, target, windowed
+
+
+class TestWindowTransfer(DistributedTest):
+    # With four processes the copiers have several peers each, which exercises the staggered copy order.
+    world_size = [2, 4]
+
+    @pytest.mark.parametrize('copier', [sequential_copies, fused_copies])
+    @pytest.mark.parametrize('placement', ['source', 'target', 'both_pull', 'both_push', 'neither'])
+    def test_window_shards_are_copied_in_place_on_every_run(self, placement, copier):
+        if get_accelerator().device_name() not in ('cuda', 'xpu'):
+            pytest.skip('symmetric memory needs a CUDA or XPU device')
+        _join_transfer_group()
+        dtype = torch.bfloat16
+        world_size, rank = dist.get_world_size(), dist.get_rank()
+        # Shard sizes differ between processes, so each one asks for its own window size.
+        window = TransferWindow((1 << 20) + rank * 4096, direction='push' if placement == 'both_push' else 'pull')
+        endpoints, request, source, target, windowed = _window_batch(window, placement, dtype)
+        budget = StagingBudget()
+        prepared = prepare_transfers([request], endpoints, dtype, budget, copier=copier, window=window)
+        schedule = schedule_transfers([request.plan], endpoints, budget, 2, rank, [windowed])[rank]
+
+        full = _full(16, 16, dtype)
+        # Each run must see the sources as rewritten in place since the previous one, unchecked runs included.
+        for run, values in enumerate((full, full.flip(0), full.flip(1))):
+            for location, buffer in request.source_buffers.items():
+                buffer.copy_(source.extract(values, location))
+            stats = prepared.run(check=run == 0)
+            _assert_matches(request.target_buffers, target, values)
+        for buffer in request.target_buffers.values():
+            buffer.fill_(UNWRITTEN)
+        assert execute_transfers([request], endpoints, dtype, budget, window=window) == stats
+        _assert_matches(request.target_buffers, target, values)
+
+        assert schedule.rounds == stats.rounds
+        assert sum(r.elements for rounds in schedule.sends.values() for r in rounds) * 2 == stats.sent_bytes
+        # Processes 0 and 1 hold the source rows; a target block is local only where its process holds them,
+        # which is 1/world_size of the matrix in total.
+        remote = full.numel() * (world_size - 1) // world_size * full.element_size()
+        moved = torch.tensor([stats.mapped_bytes, stats.sent_bytes, stats.received_bytes], device=_device())
+        dist.all_reduce(moved)
+        if placement == 'neither':
+            assert moved.tolist() == [0, remote, remote]
+        else:
+            assert moved.tolist() == [remote, 0, 0], 'window shards must bypass staged messages'
+
+    def test_ranks_disagreeing_about_the_window_refuse_everywhere(self):
+        if get_accelerator().device_name() not in ('cuda', 'xpu'):
+            pytest.skip('symmetric memory needs a CUDA or XPU device')
+        _join_transfer_group()
+        dtype = torch.bfloat16
+        # Each rank would make itself the copier, so both would write every target.
+        window = TransferWindow(1 << 20, direction='pull' if dist.get_rank() == 0 else 'push')
+        endpoints, request, _, _, _ = _window_batch(window, 'both_pull', dtype)
+        with pytest.raises(AffineTransferExecutionError, match='disagree'):
+            prepare_transfers([request], endpoints, dtype, window=window)
+        for buffer in request.target_buffers.values():
+            assert buffer.isnan().all(), 'a refused batch must not write'
 
 
 class TestB2DisjointEndpoints(DistributedTest):
@@ -694,6 +791,24 @@ class TestB2TransferCPU:
                 schedule_transfers([], endpoints, budget, 4)
         with pytest.raises(AffineTransferExecutionError, match='not named'):
             schedule_transfers([plan], endpoints, StagingBudget(8), 4, process=1)
+
+    def test_schedule_leaves_window_copies_out_of_the_rounds(self):
+        source = contiguous_split_map((6, 4), [3, 3], 0)
+        target = contiguous_split_map((6, 4), [2, 2], 1)
+        plan = plan_transfer(target, source)
+        endpoints = TransferEndpoints({0: 0, 1: 1}, {0: 0, 1: 1})
+        staged = schedule_transfers([plan, plan], endpoints, StagingBudget(8), 4)
+        assert staged[0].sends and staged[0].receives
+        # Only the first parameter's sources lie in a window, so only its cross-process chunks leave the rounds.
+        locations = [({0, 1}, set()), (set(), set())]
+        windowed = schedule_transfers([plan, plan], endpoints, StagingBudget(8), 4, window_locations=locations)
+        single = schedule_transfers([plan], endpoints, StagingBudget(8), 4)
+        for process in (0, 1):
+            assert windowed[process].sends == single[process].sends
+            assert windowed[process].receives == single[process].receives
+            assert windowed[process].local_copy_elements == staged[process].local_copy_elements
+        with pytest.raises(AffineTransferExecutionError, match='window_locations'):
+            schedule_transfers([plan, plan], endpoints, StagingBudget(8), 4, window_locations=locations[:1])
 
     def test_shared_plan_uses_each_buffer_and_rechecks_each_call(self):
         map_ = replicated_map((3, 4), 1)
