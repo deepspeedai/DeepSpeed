@@ -348,6 +348,59 @@ class TestB2RelayBandInPlace(DistributedTest):
         assert stats.sent_bytes == stats.received_bytes == (world_size - 1) * band * cols * 4
 
 
+class TestB2LazyViewsRefused(DistributedTest):
+    """A conjugate or negative view is refused before data moves, wherever its copy would run.
+
+    Such a view of a destination is not the destination itself, so it cannot stand for a relay band,
+    and point-to-point transport does not carry the lazy bit.
+    """
+    world_size = 2
+
+    @staticmethod
+    def _values(kind):
+        if kind == 'conj':
+            return torch.complex(torch.arange(6.), torch.arange(1., 7.)).to(_device())
+        return torch.arange(1., 7., device=_device())
+
+    @staticmethod
+    def _lazy(buffer, kind):
+        return buffer.conj() if kind == 'conj' else torch._neg_view(buffer)
+
+    @pytest.mark.parametrize('kind', ['conj', 'neg'])
+    def test_a_lazy_view_of_the_destination_is_refused(self, kind):
+        _join_transfer_group()
+        rank, world = dist.get_rank(), dist.get_world_size()
+        map_ = replicated_map((6, ), world)
+        own = {location: location for location in range(world)}
+        endpoints = TransferEndpoints(own, dict(own))
+        base = self._values(kind)
+        before = base.clone()
+        with pytest.raises(AffineTransferExecutionError, match='rejected the transfer batch') as refused:
+            execute_transfer(plan_transfer(map_, map_), {rank: self._lazy(base, kind)}, {rank: base}, endpoints,
+                             base.dtype)
+        assert 'conjugate or negative view' in str(refused.value.__cause__)
+        assert torch.equal(base, before)
+
+    @pytest.mark.parametrize('kind', ['conj', 'neg'])
+    @pytest.mark.parametrize('side', ['source', 'target'])
+    def test_a_lazy_view_crossing_processes_is_refused_on_both(self, kind, side):
+        _join_transfer_group()
+        rank = dist.get_rank()
+        map_ = replicated_map((6, ), 1)
+        endpoints = TransferEndpoints({0: 0}, {0: 1})
+        values = self._values(kind)
+        store = torch.zeros_like(values)
+        if rank == 0:
+            sources, targets = {0: self._lazy(values, kind) if side == 'source' else values}, {}
+        else:
+            sources, targets = {}, {0: self._lazy(store, kind) if side == 'target' else store}
+        with pytest.raises(AffineTransferExecutionError, match='rejected the transfer batch') as refused:
+            execute_transfer(plan_transfer(map_, map_), sources, targets, endpoints, values.dtype)
+        if rank == (0 if side == 'source' else 1):
+            assert 'conjugate or negative view' in str(refused.value.__cause__)
+        assert not store.any()
+
+
 class TestB2TransferCPU:
 
     def test_packed_regions_are_exactly_the_contiguous_views(self):

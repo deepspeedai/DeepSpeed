@@ -273,9 +273,9 @@ def _validate_aliases(requests: Sequence[TransferRequest], lane: '_Lane',
     """
 
     def extent(buffers, location, offset, shape, strides) -> Tuple[int, int]:
-        start = buffers[location].data_ptr() + offset * element_size
-        reach = sum((size - 1) * stride for size, stride in zip(shape, strides))
-        return start, start + (reach + 1) * element_size
+        start = buffers[location].data_ptr()
+        low, high = address_range(offset, shape, strides)
+        return start + low * element_size, start + (high + 1) * element_size
 
     def source_extent(item, operation):
         return extent(requests[item].source_buffers, operation.segment.source_rank, operation.source_offset,
@@ -495,6 +495,9 @@ def schedule_transfers(plans: Sequence[TransferPlan],
     into rounds. Returns a ``ProcessSchedule`` for ``process``, or for every process the endpoints
     name. ``execute_transfers`` builds its own rounds and arenas from the same computation, so a
     cost model or policy reading this sees the messages and staging memory the executor will use.
+    It sees no buffers, so a local copy that ``execute_transfers`` drops as in place (source and
+    target the same memory at the same strides) still counts in ``local_copy_chunks`` and
+    ``local_copy_elements``; ``TransferStats.local_copy_bytes`` does not count it.
     """
     if not isinstance(element_size, int) or isinstance(element_size, bool) or element_size <= 0:
         raise AffineTransferExecutionError('element_size must be a positive integer')
@@ -718,6 +721,11 @@ def _flat(location: int, buffers: Mapping[int, torch.Tensor], dtype: torch.dtype
         raise AffineTransferExecutionError(f'location {location} is bound to this process but holds no buffer')
     if buffer.layout != torch.strided or not buffer.is_contiguous():
         raise AffineTransferExecutionError(f'location {location}: shard is not contiguous in its own storage')
+    if buffer.is_conj() or buffer.is_neg():
+        # Point-to-point transport does not carry the lazy bit, and such a view of a destination is not
+        # the destination itself. Refusing it here refuses it wherever the copy would run.
+        raise AffineTransferExecutionError(f'location {location}: shard is a conjugate or negative view; '
+                                           'pass it resolved (resolve_conj, resolve_neg)')
     if buffer.dtype != dtype:
         raise AffineTransferExecutionError(f'location {location}: {buffer.dtype} is not {dtype}')
     return buffer.view(-1)
