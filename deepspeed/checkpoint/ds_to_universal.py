@@ -687,6 +687,12 @@ def _autoep_expert_param_info(autoep_metadata):
 
 
 def _autoep_expert_param_names_by_rank(model_files):
+    """Return the AutoEP expert parameter names and each model-state file's AutoEP metadata.
+
+    The metadata is keyed by ``(tp_rank, dp_rank)``, read from the file name
+    ``zero_pp_rank_{dp_rank}_mp_rank_{tp_rank}``: under AutoEP + AutoTP folding the files of
+    different tensor-parallel ranks share a data-parallel rank.
+    """
     expert_param_names = set()
     metadata_by_rank = {}
     for model_file in model_files:
@@ -815,7 +821,6 @@ def _consolidate_zero3_autoep_expert_states(output_dir, model_files, optim_files
         for rank, model_state in model_states_by_rank.items() if _get_autoep_metadata(model_state) is not None
     }
     _validate_autoep_expert_shapes(model_states_by_rank, metadata_by_rank)
-    dp_degree = len({dp_rank for _, dp_rank in model_states_by_rank})
     # Together the optimizer files hold every optimizer state of the model, more than one host holds for a large
     # model, so they are read one at a time and the expert fragments wait in files until every rank is read.
     fragment_dir = os.path.join(output_dir, "tmp", "autoep_expert_fragments")
@@ -852,9 +857,15 @@ def _consolidate_zero3_autoep_expert_states(output_dir, model_files, optim_files
                 'exp_avg': optimizer_sub_state.get('exp_avg'),
                 'exp_avg_sq': optimizer_sub_state.get('exp_avg_sq'),
             }
+            # Expert sub-groups are partitioned over the expert-data-parallel group, not the dense one, so no
+            # default can stand in for the recorded partition. Every partition-native AutoEP ZeRO-3 checkpoint
+            # records it.
             partition_metadata = partition_groups[sub_group_id] if sub_group_id < len(partition_groups) else {}
-            partition_count = partition_metadata.get('partition_count', dp_degree)
-            partition_rank = partition_metadata.get('partition_rank', rank[1])
+            if 'partition_count' not in partition_metadata or 'partition_rank' not in partition_metadata:
+                raise RuntimeError(f"ZeRO rank {rank} optimizer state has no ds_zero_partition_groups entry for "
+                                   f"sub-group {sub_group_id}; cannot locate its AutoEP expert partitions.")
+            partition_count = partition_metadata['partition_count']
+            partition_rank = partition_metadata['partition_rank']
 
             offset = 0
             for param_name, shape in sub_group_shape.items():
