@@ -86,6 +86,31 @@ bitwise, so the result matches the default copier exactly. Building the table
 compiles the kernel once, which makes prepare slower, so it pays off only for
 handles that run many times.
 
+Symmetric-memory windows
+------------------------
+
+Processes whose devices can address each other's memory (one node over PCIe,
+NVLink or Xe Link) can skip staging altogether. A ``TransferWindow`` is a
+symmetric-memory pool, created collectively once; shards carved from it with
+``window.tensor(shape, dtype)`` are published to the group by
+``prepare_transfers``. An operation between two processes whose source or
+target lies in a window is then copied in place by one of them -- the target
+pulls, or the source pushes; ``direction`` decides when both lie in a window --
+with no message, arena or budget. Everything else runs as before::
+
+    from deepspeed.checkpoint.affine_transfer_executor import TransferWindow
+
+    window = TransferWindow(nbytes, group=group, direction='pull')
+    prepared = prepare_transfers(requests, endpoints, dtype, budget, group, window=window)
+
+Every process must pass the same window. The handle keeps a view of each
+region it copies, peer memory included. A run with window copies anywhere in
+the group ends with a group barrier, so no peer touches a window shard while
+another copies it, and ``TransferStats.mapped_bytes`` reports what this process
+copied. ``schedule_transfers`` cannot see buffers, so pass the window's
+locations per plan as ``window_locations`` to leave those operations out of the
+rounds it reports.
+
 Planning a sync with replica policies
 -------------------------------------
 
