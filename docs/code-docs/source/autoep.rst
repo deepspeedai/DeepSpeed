@@ -400,21 +400,25 @@ A backward that stages computes the experts' input gradient as usual, copies
 the rows the dW GEMMs read (the expert input, the activation output and their
 gradients, without alignment padding) behind each expert's cursor in a
 per-layer staging buffer, and returns no expert weight gradient. A flush
-gathers the staged rows of all experts and runs the dW GEMMs once over them. It
-runs:
+gathers the staged rows of all experts, runs the dW GEMMs once over them and
+returns the result through autograd. It runs:
 
 * in one backward of every ``deferred_dw_flush_period``;
-* early, when the rows of a backward do not fit behind an expert's cursor. The
-  staged rows are flushed and the new ones staged in the emptied buffer, without
-  moving the period. A backward that does not fit even an empty buffer computes
-  its own dW at once;
 * in the backward that closes a gradient accumulation window, which the engine
   marks, so no staged row outlives the optimizer step it belongs to.
   ``engine.step()`` raises if rows are still staged at a boundary.
 
-A flush returns its gradients through autograd from the backward that runs it,
-so gradient reduction, clipping and the optimizer see what they saw before:
-the sum over the window. Between flushes the expert weights have no new
+When the rows of a backward do not fit behind an expert's cursor, the dW GEMMs
+run early over the staged rows to empty the buffer, without moving the period,
+and a backward that does not fit even an empty buffer computes its own dW at
+once. Either result is held, at the size of the expert weight gradients, and
+returned by the next flush. Which backward returns expert weight gradients
+therefore depends only on the count of backward passes, not on the routing:
+ranks that hold replicas of the same experts receive different rows, and ZeRO
+stage 2 reduces a gradient across them in the backward that returns it.
+
+Gradient reduction, clipping and the optimizer see what they saw before: the
+sum over the window. Between flushes the expert weights have no new
 gradient. The sum is formed in one GEMM rather than by adding per-backward
 results, so values differ by floating-point summation order; in bf16 the
 staged sum was the closer of the two to an fp64 reference in every measured

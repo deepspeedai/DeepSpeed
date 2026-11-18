@@ -848,7 +848,7 @@ class TestDeferredDwStaging:
             for weight in staged.parameters():
                 assert torch.count_nonzero(weight.grad[1]) == 0
 
-    def test_flushes_are_periodic_and_forced_early_by_a_full_expert(self):
+    def test_only_a_backward_that_closes_a_period_returns_weight_gradients(self):
         device, dtype = self._device_and_dtype()
         plain, staged = self._experts_pair(device, dtype, "separate")
         staging = MoeDeferredDwStaging(4, flush_period=3, rows_per_expert=10)
@@ -864,20 +864,34 @@ class TestDeferredDwStaging:
         assert all(weight.grad is None for weight in staged.parameters())
         assert staging.has_staged_rows
 
-        # Expert 2 holds 7 rows and receives 6 more: the overflow flushes the first backward and stages this one.
+        # Expert 2 holds 7 rows and receives 6 more, which empties the buffer early. Ranks that hold replicas of
+        # these experts route other rows and reduce a gradient in the backward that returns it, so a full buffer
+        # must not make this backward return one.
         backward(staged, 2, dw_staging=staging)
-        backward(plain, 0)
-        self._assert_weight_grads_match(staged, plain)
-        assert (staging.num_flushes, staging.num_overflow_flushes) == (1, 1)
+        assert staging.num_overflow_flushes == 1
+        assert all(weight.grad is None for weight in staged.parameters())
         assert staging.has_staged_rows
 
-        # The early flush does not move the period: the third backward fits, and still flushes.
+        # The early flush does not move the period: the third backward closes it, for all three.
         backward(staged, 3, dw_staging=staging)
-        backward(plain, 2)
-        backward(plain, 3)
+        for index in (0, 2, 3):
+            backward(plain, index)
         self._assert_weight_grads_match(staged, plain)
-        assert (staging.num_flushes, staging.num_overflow_flushes) == (2, 1)
         assert not staging.has_staged_rows
+
+    def test_a_period_without_rows_still_returns_a_gradient(self):
+        device, dtype = self._device_and_dtype()
+        _, staged = self._experts_pair(device, dtype, "separate")
+        staging = MoeDeferredDwStaging(4, flush_period=2)
+        x, grad_out, counts, _ = self._backward_inputs(device, dtype, padded=True)[0]
+        # Every row is alignment padding: none of this rank's experts was routed a token.
+        staging_kwargs = dict(dw_staging=staging, num_valid_tokens_per_expert=torch.zeros_like(counts))
+        for _ in range(2):
+            staged(torch.zeros_like(x), counts, **staging_kwargs).backward(torch.zeros_like(grad_out))
+        # A replica of these experts that did receive rows returns a gradient now, and reduces it against this one.
+        for weight in staged.parameters():
+            assert weight.grad is not None
+            assert torch.count_nonzero(weight.grad) == 0
 
     @pytest.mark.parametrize("gate_up_impl", ["separate", "fused"])
     @pytest.mark.parametrize("trainable", [(False, True, True), (True, False, True), (True, True, False),

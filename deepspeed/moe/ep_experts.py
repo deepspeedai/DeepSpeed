@@ -511,11 +511,15 @@ class MoeDeferredDwStaging:
     weight-gradient GEMMs write three full-size gradients for a handful of rows: they are bound by memory
     bandwidth, not arithmetic. A backward that stages appends each expert's rows behind that expert's cursor and
     returns no weight gradient. One backward in every ``flush_period`` runs the GEMMs once over everything staged
-    and returns the result, which is the sum the staged backwards would have accumulated one at a time.
+    and returns the result, which is the sum the staged backwards would have accumulated one at a time. So does
+    every backward while ``flush_on_stage`` is set. The engine sets it for the backward that closes a gradient
+    accumulation window, so no staged row outlives the optimizer step it belongs to.
 
-    A flush also runs early when an expert's cursor would pass ``rows_per_expert``, and on every backward while
-    ``flush_on_stage`` is set. The engine sets it for the backward that closes a gradient accumulation window, so
-    no staged row outlives the optimizer step it belongs to.
+    Which backward returns a weight gradient therefore depends on the count of backward passes alone, never on the
+    rows. Ranks that hold replicas of the same experts route different rows, and ZeRO reduces a gradient across
+    them in the backward that returns it, so they must all return it in the same one. When an expert's cursor
+    would pass ``rows_per_expert`` the GEMMs do run early to empty the buffer, but their result is held and
+    returned with the next of those backwards.
 
     Args:
         num_experts: Experts the staged MLP holds.
@@ -535,12 +539,14 @@ class MoeDeferredDwStaging:
         self._buffers = None
         self._cursor = None
         self._staged_rows = 0
+        self._held_grads = None
         self._backwards_in_period = 0
         self._flush_args = None
 
     @property
     def has_staged_rows(self) -> bool:
-        return self._staged_rows > 0
+        """Whether a later backward still owes the weight gradients of rows staged so far."""
+        return self._staged_rows > 0 or self._held_grads is not None
 
     def stage(self, rows, group_counts, valid_counts, flush_args, compute_now):
         """Stage one backward's rows, and return the weight gradients of any flush this backward runs.
@@ -555,7 +561,7 @@ class MoeDeferredDwStaging:
             compute_now: Runs this backward's own weight-gradient GEMMs, for rows no cursor can hold.
 
         Returns:
-            ``(grad_w1, grad_w2, grad_w3)``; all ``None`` when nothing was flushed.
+            ``(grad_w1, grad_w2, grad_w3)``; all ``None`` unless this backward closes a period.
         """
         has_padding = valid_counts is not None
         if valid_counts is None:
@@ -579,30 +585,37 @@ class MoeDeferredDwStaging:
         closes_period = self.flush_on_stage or self._backwards_in_period + 1 >= self.flush_period
         self._backwards_in_period = 0 if closes_period else self._backwards_in_period + 1
 
-        flushed = None
         if fullest_cursor > self.rows_per_expert:
             self.num_overflow_flushes += 1
-            if self.has_staged_rows:
-                flushed = self._flush()
-            if busiest_expert > self.rows_per_expert:
-                # Not even the emptied buffer holds this backward.
-                return _add_weight_grads(flushed, compute_now())
-
-        if num_rows > 0:
+            if self._staged_rows > 0:
+                self._held_grads = _add_weight_grads(self._held_grads, self._flush())
+        if busiest_expert > self.rows_per_expert:
+            # Not even the emptied buffer holds this backward.
+            self._held_grads = _add_weight_grads(self._held_grads, compute_now())
+        elif num_rows > 0:
             self._append(rows, group_counts if has_padding else None, valid_counts, num_rows)
-        if closes_period and self.has_staged_rows:
-            flushed = _add_weight_grads(flushed, self._flush())
-        if flushed is None:
+
+        if not closes_period:
             return None, None, None
-        return flushed
+        grads = self._held_grads
+        self._held_grads = None
+        if self._staged_rows > 0:
+            grads = _add_weight_grads(grads, self._flush())
+        if grads is None:
+            # No expert received a row in this period. The other ranks still return a gradient now, so return
+            # this backward's own, which is zero.
+            grads = compute_now()
+        return grads
 
     @property
     def _zero_row(self) -> int:
         # One row past every expert's slice stays zero; a flush reads it for experts that staged nothing.
         return self.num_experts * self.rows_per_expert
 
-    def _require_empty(self, what_changed: str) -> None:
-        if self.has_staged_rows:
+    def _require_empty(self, what_changed: str, buffers_only: bool = False) -> None:
+        # Gradients held from an early flush do not depend on the layout of the buffers.
+        has_staged_rows = self._staged_rows > 0 if buffers_only else self.has_staged_rows
+        if has_staged_rows:
             raise RuntimeError(f"{what_changed} while expert weight gradients were staged; it may only change "
                                "after the backward that flushes them")
 
@@ -611,7 +624,7 @@ class MoeDeferredDwStaging:
             buffer.dtype == row.dtype and buffer.device == row.device and buffer.shape[1] == row.shape[1]
             and buffer.shape[0] == self._zero_row + 1 for buffer, row in zip(self._buffers, rows))
         if not reusable:
-            self._require_empty("the dtype, device or width of the expert rows changed")
+            self._require_empty("the dtype, device or width of the expert rows changed", buffers_only=True)
             self._buffers = [row.new_empty((self._zero_row + 1, row.shape[1])) for row in rows]
             for buffer in self._buffers:
                 buffer[self._zero_row] = 0
