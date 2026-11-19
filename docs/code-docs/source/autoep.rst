@@ -68,7 +68,9 @@ Checkpoint conversion, also with AutoTP folding. Optimizer-including
 Universal Checkpoint loads can
 resume with a different data-parallel world size, a different ``autoep_size``,
 a different ``tensor_parallel.autotp_size`` (folded or not), or any
-combination, when the target ``autoep_size`` divides the model's expert count.
+combination, when the target ``autoep_size`` divides the model's expert count
+and, with ``tensor_parallel.autotp_size > 1``, is greater than 1 (folding
+requires expert parallelism).
 Weights-only/module-only Universal Checkpoint loads use the converted
 ``fp32.pt`` parameter files and support the same data-parallel,
 ``autoep_size`` and ``tensor_parallel.autotp_size`` changes.
