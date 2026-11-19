@@ -92,6 +92,20 @@ class ScaledQwen3(torch.nn.Module):
         return self.model(input_ids=input_ids).logits * self.logit_scale
 
 
+class ShiftedQwen3(torch.nn.Module):
+    """tiny_qwen3 with a learned scale and shift of its logits, a parameter of two elements that a forward can leave out
+    (``shift=False``). Over four ranks its partition holds data on ranks 0 and 1 and only padding on ranks 2 and 3."""
+
+    def __init__(self):
+        super().__init__()
+        self.model = tiny_qwen3()
+        self.scale_shift = torch.nn.Parameter(torch.tensor([1.0, 0.0]))
+
+    def forward(self, input_ids, shift=True):
+        logits = self.model(input_ids=input_ids).logits
+        return logits * self.scale_shift[0] + self.scale_shift[1] if shift else logits
+
+
 def full_state(engine):
     """Every trainable parameter's full fp32 master and moments (collective over the engine's ranks)."""
     state = {}
@@ -279,6 +293,61 @@ class TestZero3Repartition(DistributedTest):
             got = full_state(engine)
             bad = [k for k in expected if not torch.equal(got[k], expected[k])]
             assert not bad, f"{len(bad)} of {len(expected)} differ from the engine that stayed on four ranks: {bad[:3]}"
+
+    def test_unused_parameter_after_a_change(self):
+        # At each accumulation boundary ZeRO-3 zeroes the gradient partitions that the window did not write, so that a
+        # parameter without a gradient (a skipped branch, an unused expert) is not updated again with its last one. It
+        # lists the parameters that have data in this rank's partition once, at the first boundary, and that list
+        # depends on the layout. B shrinks to ranks 2 and 3, where scale_shift has data on both while it had only
+        # padding there over four ranks, trains a step that uses scale_shift and one that does not, then grows back and
+        # does the same. A list kept from the old layout leaves scale_shift out on ranks 2 and 3, which then apply the
+        # first step's gradient again. C trains on four ranks throughout.
+        device = torch.device(get_accelerator().current_device_name())
+        rank = dist.get_rank()
+        b4, b23, c_mpu = (TrainerMPU(ranks) for ranks in ([0, 1, 2, 3], [2, 3], [0, 1, 2, 3]))
+        engines = []
+        for mpu in (b4, c_mpu):
+            model = ShiftedQwen3()
+            engines.append(
+                deepspeed.initialize(model=model, model_parameters=model.parameters(), config=CONFIG, mpu=mpu)[0])
+        engine, plain = engines
+        problems = []
+
+        def agree(where):
+            everyone = [None] * dist.get_world_size()
+            dist.all_gather_object(everyone, problems)
+            failed = {r: p for r, p in enumerate(everyone) if p}
+            assert not failed, f"{where}: {failed}"
+
+        def train(step, ranks, shift):
+            batch = torch.randint(1, 101, (4, 6), generator=torch.Generator().manual_seed(400 + step)).to(device)
+            for e, members in ((engine, ranks), (plain, [0, 1, 2, 3])):
+                if rank in members:
+                    for _ in range(4 // len(members)):
+                        e.backward(e(batch, shift=shift).float().mean())
+                        e.step()
+                dist.barrier()
+
+        def check_against_plain(where, ranks):
+            expected = full_state(plain)
+            if rank in ranks:
+                got = full_state(engine)
+                bad = [k for k in expected if not torch.equal(got[k], expected[k])]
+                if bad:
+                    problems.append(f"{where}: {len(bad)} of {len(expected)} differ from C: {bad[:6]}")
+            agree(where)
+
+        to_two, to_four = Zero3Repartition(engine, b23), Zero3Repartition(engine, b4)
+        for step in range(2):
+            train(step, [0, 1, 2, 3], shift=True)
+        to_two.execute()
+        train(2, [2, 3], shift=True)
+        train(3, [2, 3], shift=False)
+        check_against_plain("on ranks 2 and 3", [2, 3])
+        to_four.execute()
+        train(4, [0, 1, 2, 3], shift=True)
+        train(5, [0, 1, 2, 3], shift=False)
+        check_against_plain("back on four ranks", [0, 1, 2, 3])
 
     def test_parameters_kept_in_fp32(self):
         # data_types.keep_in_fp32_modules keeps ScaledQwen3's logit_scale in fp32 beside the bf16 weights (applied by

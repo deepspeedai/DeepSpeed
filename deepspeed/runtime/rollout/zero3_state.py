@@ -621,6 +621,10 @@ class Zero3Repartition:
                 bucket.buffer = torch.empty(bucket.buffer.numel(), dtype=bucket.buffer.dtype, device=device)
         opt.grad_position = {}
         opt.set_grad_positions()
+        # The parameters with data in this rank's gradient partition, which ZeRO-3 lists once to zero the ones a window
+        # did not reach, depend on the layout: it lists them again at the next boundary.
+        if hasattr(opt, "_params_with_grad_partition"):
+            opt._params_with_grad_partition = None
         opt.averaged_gradients = {}
         opt._released_storages = None
         opt._repartition_member = True
