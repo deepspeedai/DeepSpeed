@@ -2000,7 +2000,7 @@ class HybridEngineRollout(RolloutEngine):
                 # only accepts CUDA bf16 logits — fp16 models must keep the
                 # PyTorch argmax path instead of failing during capture.
                 is_greedy = sampling is None or sampling.temperature <= 0.0
-                if (graph_op is not None and is_greedy and repetition_penalty == 1.0
+                if (batch_size == 1 and graph_op is not None and is_greedy and repetition_penalty == 1.0
                         and static_logits.dtype is torch.bfloat16 and get_accelerator().on_accelerator(static_logits)):
                     graph_op.decode_step_graph(static_logits[:, -1, :].contiguous(), static_token.view(batch_size, 1),
                                                write_pos, static_attn, full_token_buf)
@@ -2066,6 +2066,10 @@ class HybridEngineRollout(RolloutEngine):
         # graph: mounting is conditional (b=1, CUDA bf16 logits), and a
         # kernel-less graph replay would read a token buffer nobody wrote.
         if step_kernel_mounted:
+            # This path avoids a device sync on every b=1 replay. EOS can be
+            # late by up to 15 steps, which is padded away below; batched
+            # graph+Python decode checks each step because one dead replay is
+            # multiplied by every active row.
             eos_check_every = 16
             for step in range(max_new_tokens - 1):
                 get_accelerator().replay_graph(graph)
