@@ -62,7 +62,6 @@ def test_layer_norm(batch, seq_len, channels, dtype, use_triton_ops):
         new_output = ds_implementation(vals, gamma, beta, epsilon)
 
     if not allclose(new_output, ref_output):
-        #print(new_output - ref_output)
         assert allclose(new_output, ref_output)
 
 

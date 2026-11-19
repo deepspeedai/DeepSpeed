@@ -13,7 +13,8 @@ from deepspeed.module_inject.auto_ep_presets.base import (
     AutoEPPresetAdapter,
     MoEModelPreset,
 )
-from deepspeed.module_inject.auto_ep_presets import deepseek_v2, deepseek_v3, mixtral, qwen3_5_moe, qwen3_moe
+from deepspeed.module_inject.auto_ep_presets import (deepseek_v2, deepseek_v3, minimax_m3, mixtral, qwen3_5_moe,
+                                                     qwen3_moe)
 from deepspeed.utils import logger
 
 _PRESET_MODULES = (
@@ -22,6 +23,7 @@ _PRESET_MODULES = (
     qwen3_5_moe,
     deepseek_v2,
     deepseek_v3,
+    minimax_m3,
 )
 
 PRESET_MODELS: dict[str, MoEModelPreset] = {module.PRESET_NAME: module.PRESET for module in _PRESET_MODULES}
@@ -145,6 +147,8 @@ def apply_config_overrides(config: AutoEPConfig, preset: MoEModelPreset) -> MoEM
         overrides["shared_experts_pattern"] = config.shared_experts_pattern
     if config.shared_experts_gate_pattern is not None:
         overrides["shared_experts_gate_pattern"] = config.shared_experts_gate_pattern
+    if config.expert_activation is not None:
+        overrides["expert_activation"] = config.expert_activation
     if not overrides:
         return preset
     return replace(preset, **overrides)
@@ -208,4 +212,5 @@ def _build_custom_preset(config: AutoEPConfig) -> MoEModelPreset:
         has_shared_experts=(config.has_shared_experts if config.has_shared_experts is not None else False),
         shared_experts_pattern=config.shared_experts_pattern or "",
         shared_experts_gate_pattern=config.shared_experts_gate_pattern or "",
+        expert_activation=config.expert_activation or "swiglu",
     )

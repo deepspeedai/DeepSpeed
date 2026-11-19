@@ -12,12 +12,14 @@ from torch._subclasses.fake_tensor import FakeTensorMode, maybe_get_fake_mode
 from torch.fx import GraphModule, Node
 from torch.fx.passes.fake_tensor_prop import FakeTensorProp
 from torch.fx.experimental.symbolic_shapes import ShapeEnv
+from torch.nn._reduction import legacy_get_string
 
 from deepspeed.compile import constants
 
 from ..custom_ops import all_to_all, sp_dp_registry  # noqa: F401
-from ..fx import find_node_by_name, get_node_shape_meta
-from ..util import get_input_id_node, get_label_id_node, get_position_id_node, shard_tensor_node, get_sdpa_nodes
+from ..fx import find_node_by_name, get_node_shape_meta, is_impure_for_dce
+from ..util import (get_autosp_seq_dim, get_input_id_node, get_label_id_node, get_position_id_node, shard_tensor_node,
+                    get_sdpa_nodes)
 
 
 def prepare_autosp_inputs(input_id: torch.Tensor,
@@ -43,6 +45,8 @@ def prepare_autosp_inputs(input_id: torch.Tensor,
 
     if seq_dim < 0 or seq_dim >= input_id.ndim:
         raise ValueError(f"seq_dim {seq_dim} must be a valid index for input_id with shape {input_id.shape}")
+    if seq_dim >= label_id.ndim:
+        raise ValueError(f"seq_dim {seq_dim} is out of bounds for label_id with shape {label_id.shape}")
 
     if position_id is not None:
         if seq_dim >= position_id.ndim:
@@ -60,10 +64,11 @@ def prepare_autosp_inputs(input_id: torch.Tensor,
     if attention_mask is not None:
         torch._dynamo.decorators.mark_dynamic(attention_mask, seq_dim)
 
-    input_id.tag = constants.AUTOSP_INPUT_ID_KEY
-    label_id.tag = constants.AUTOSP_LABEL_ID_KEY
+    # Dynamo only carries the `tag` attribute into graph metadata, so seq_dim must travel inside it.
+    input_id.tag = (constants.AUTOSP_INPUT_ID_KEY, seq_dim)
+    label_id.tag = (constants.AUTOSP_LABEL_ID_KEY, seq_dim)
     if position_id is not None:
-        position_id.tag = constants.AUTOSP_POSITION_ID_KEY
+        position_id.tag = (constants.AUTOSP_POSITION_ID_KEY, seq_dim)
 
     return input_id, label_id, position_id, attention_mask
 
@@ -77,7 +82,7 @@ def pass_shard_seq_dim(gm: GraphModule, example_inputs):
 
     input_ids_node = get_input_id_node(gm)
     val = get_node_shape_meta(input_ids_node)
-    seq_symint = val.shape[1]
+    seq_symint = val.shape[get_autosp_seq_dim(input_ids_node)]
     assert isinstance(
         seq_symint,
         torch.SymInt), f"expected sequence dimension to be of type {torch.SymInt!r} but found {type(seq_symint)!r}"
@@ -131,9 +136,88 @@ def pass_shard_input_ids(gm: GraphModule, example_inputs):
     shard_tensor_node(gm, input_ids_node)
 
 
+def _get_cross_entropy_arg(loss_node: Node, name: str, position: int, default):
+    if name in loss_node.kwargs:
+        return loss_node.kwargs[name]
+    if len(loss_node.args) > position:
+        return loss_node.args[position]
+    return default
+
+
 def pass_shard_label_ids(gm: GraphModule, example_inputs):
+    """
+    Shard the labels and make every cross entropy on them return the loss of the full sequence.
+
+    Each cross entropy is summed per shard and combined over the SP group, which weights shards
+    with different numbers of valid tokens correctly.
+    """
     label_ids_node = get_label_id_node(gm)
+
+    label_users = set()
+    worklist = [label_ids_node]
+    while worklist:
+        node = worklist.pop()
+        if node not in label_users:
+            label_users.add(node)
+            worklist.extend(node.users)
+
+    loss_nodes = [
+        node for node in gm.graph.nodes if node.target is torch.nn.functional.cross_entropy
+        and _get_cross_entropy_arg(node, "target", 1, None) in label_users
+    ]
     shard_tensor_node(gm, label_ids_node)
+
+    for loss_node in loss_nodes:
+        weight = _get_cross_entropy_arg(loss_node, "weight", 2, None)
+        if weight is not None:
+            raise RuntimeError("AutoSP does not support class-weighted cross entropy on sequence-sharded labels")
+        reduction = _get_cross_entropy_arg(loss_node, "reduction", 6, "mean")
+        size_average = _get_cross_entropy_arg(loss_node, "size_average", 3, None)
+        reduce = _get_cross_entropy_arg(loss_node, "reduce", 5, None)
+        if size_average is not None or reduce is not None:
+            # The deprecated arguments override reduction inside cross entropy.
+            reduction = legacy_get_string(size_average, reduce, emit_warning=False)
+        if reduction not in ("mean", "sum"):
+            raise RuntimeError(f"AutoSP supports cross entropy with reduction 'mean' or 'sum', got {reduction!r}")
+        ignore_index = _get_cross_entropy_arg(loss_node, "ignore_index", 4, -100)
+
+        target_node = _get_cross_entropy_arg(loss_node, "target", 1, None)
+        if get_node_shape_meta(target_node).dtype.is_floating_point:
+            # Class probability targets have no ignore_index, so counting valid tokens does not apply.
+            raise RuntimeError("AutoSP supports cross entropy with class index targets only, not class probabilities")
+        # Under autocast, cross entropy returns FP32 even for half-precision logits.
+        loss_dtype = get_node_shape_meta(loss_node).dtype
+        with gm.graph.inserting_after(target_node):
+            valid_mask = gm.graph.call_function(operator.ne, args=(target_node, ignore_index))
+        with gm.graph.inserting_after(valid_mask):
+            valid_tokens = gm.graph.call_function(torch.sum, args=(valid_mask, ))
+
+        # Sum the per-token losses in FP32: a half-precision sum over a long shard overflows even
+        # where the mean the model asked for would not.
+        if "reduction" in loss_node.kwargs or len(loss_node.args) <= 6:
+            loss_node.update_kwarg("reduction", "none")
+        else:
+            loss_node.update_arg(6, "none")
+        for name, position in (("size_average", 3), ("reduce", 5)):
+            if name in loss_node.kwargs:
+                loss_node.update_kwarg(name, None)
+            elif len(loss_node.args) > position:
+                loss_node.update_arg(position, None)
+
+        with gm.graph.inserting_after(loss_node):
+            token_losses = gm.graph.call_method("float", args=(loss_node, ))
+        with gm.graph.inserting_after(token_losses):
+            local_loss_sum = gm.graph.call_function(torch.sum, args=(token_losses, ))
+        with gm.graph.inserting_after(local_loss_sum):
+            aggregated = gm.graph.call_function(torch.ops.autosp.aggregate_loss.default,
+                                                args=(local_loss_sum, valid_tokens, reduction == "mean"))
+        with gm.graph.inserting_after(aggregated):
+            global_loss = gm.graph.call_function(operator.getitem, args=(aggregated, 0))
+        with gm.graph.inserting_after(global_loss):
+            # Return the loss in the dtype cross entropy would have produced.
+            output_loss = gm.graph.call_method("to", args=(global_loss, loss_dtype))
+        loss_node.replace_all_uses_with(output_loss)
+        token_losses.update_arg(0, loss_node)
 
 
 def pass_shard_position_ids(gm: GraphModule, example_inputs):
@@ -142,6 +226,79 @@ def pass_shard_position_ids(gm: GraphModule, example_inputs):
         print("[WARNING] position id node not found. Skipping sharding of position ids.")
         return
     shard_tensor_node(gm, position_ids_node)
+
+
+def get_sdpa_attn_mask(attn_node: Node):
+    """Return SDPA's attn_mask argument and whether it was passed as a keyword."""
+    if "attn_mask" in attn_node.kwargs:
+        return attn_node.kwargs["attn_mask"], True
+    if len(attn_node.args) > 3:
+        return attn_node.args[3], False
+    return None, True
+
+
+def set_sdpa_attn_mask(attn_node: Node, attn_mask, as_kwarg: bool):
+    if as_kwarg:
+        attn_node.update_kwarg("attn_mask", attn_mask)
+    else:
+        attn_node.update_arg(3, attn_mask)
+
+
+def gather_attn_mask_queries(gm: GraphModule, attn_mask: Node, q: Node, k: Node) -> Node:
+    """
+    Rewrite an SDPA mask for the layout after the Q/K/V all-to-all, where each rank attends with
+    the full query sequence and its own block of heads.
+
+    A mask computed from the local sequence shard only holds this rank's query rows, so the rows
+    are gathered across the SP group. A mask with a full head dimension must also be reduced to
+    this rank's heads.
+    """
+    mask_meta = get_node_shape_meta(attn_mask)
+    if mask_meta is None or mask_meta.ndim < 2:
+        return attn_mask
+    # Without sharding every rank already holds the full mask, and its full key dimension is
+    # indistinguishable from a sharded one.
+    if sp_dp_registry.sp_size() == 1:
+        return attn_mask
+
+    if mask_meta.ndim == 3 and mask_meta.shape[0] != 1:
+        # SDPA aligns a 3D mask as [heads, queries, keys]; add the batch dimension so the head
+        # redistribution below sees heads in dimension 1.
+        with gm.graph.inserting_after(attn_mask):
+            attn_mask = gm.graph.call_function(torch.unsqueeze, args=(attn_mask, 0))
+        attn_mask.meta["val"] = mask_meta.unsqueeze(0)
+        mask_meta = attn_mask.meta["val"]
+
+    q_meta = get_node_shape_meta(q)
+    mask_keys = mask_meta.shape[-1]
+    # A key dimension of 1 is broadcast by SDPA, not sharded.
+    if mask_keys != 1 and str(mask_keys) == str(get_node_shape_meta(k).shape[2]):
+        # The other ranks' key columns were never computed here, so they cannot be gathered.
+        raise RuntimeError("AutoSP cannot rebuild an attention mask whose key dimension is sharded along the "
+                           f"sequence (mask shape {tuple(mask_meta.shape)}). Build the mask from the full, "
+                           "unsharded sequence length instead, for example from the 2D padding attention_mask.")
+    query_sharded = str(mask_meta.shape[-2]) == str(q_meta.shape[2])
+    per_head = mask_meta.ndim == 4 and mask_meta.shape[1] != 1
+
+    if per_head:
+        if str(mask_meta.shape[1]) != str(q_meta.shape[1]):
+            raise RuntimeError(f"AutoSP expects the head dimension of the attention mask {tuple(mask_meta.shape)} "
+                               f"to be 1 or the number of query heads ({q_meta.shape[1]})")
+        if query_sharded:
+            # Same redistribution as the query: [B, N, S/P, S] -> [B, N/P, S, S].
+            with gm.graph.inserting_after(attn_mask):
+                return gm.graph.call_function(torch.ops.autosp.all_to_all.default, args=(attn_mask, 1, 2, "attn_mask"))
+        # The query all-to-all hands rank r the r-th contiguous block of heads.
+        sp_size = sp_dp_registry.sp_size()
+        local_heads = q_meta.shape[1] // sp_size
+        sp_rank = dist.get_rank() % sp_size
+        with gm.graph.inserting_after(attn_mask):
+            return gm.graph.call_function(torch.narrow, args=(attn_mask, 1, sp_rank * local_heads, local_heads))
+
+    if not query_sharded:
+        return attn_mask
+    with gm.graph.inserting_after(attn_mask):
+        return gm.graph.call_function(torch.ops.autosp.all_gather_sequence.default, args=(attn_mask, -2))
 
 
 def pass_insert_attention_all_to_all(gm: GraphModule, real_inputs):
@@ -157,6 +314,7 @@ def pass_insert_attention_all_to_all(gm: GraphModule, real_inputs):
             a2a_node.update_arg(0, node)
         return a2a_node
 
+    sp_size = sp_dp_registry.sp_size()
     attention_nodes = get_sdpa_nodes(gm)
     if len(attention_nodes) == 0:
         raise RuntimeError("AutoSP currently supports torch.nn.functional.scaled_dot_product_attention as the "
@@ -164,9 +322,30 @@ def pass_insert_attention_all_to_all(gm: GraphModule, real_inputs):
                            "Please ensure your model uses torch.nn.functional.scaled_dot_product_attention "
                            "for AutoSP to work as expected.")
 
+    # Layers commonly share one mask node, so gather it once.
+    gathered_masks = {}
     for idx, attn_node in enumerate(attention_nodes):
         q, k, v = attn_node.args[:3]
         suffix = f"_{idx}" if len(attention_nodes) > 1 else ""
+
+        # Q/K/V are checked separately: with GQA, K/V can have fewer heads than Q.
+        for role, tensor in (("query", q), ("key", k), ("value", v)):
+            meta = get_node_shape_meta(tensor) if isinstance(tensor, Node) else None
+            if meta is None:
+                continue
+            if meta.ndim != 4:
+                raise RuntimeError(f"AutoSP expects 4D [batch, heads, seq, head_dim] SDPA {role} tensors, "
+                                   f"but got shape {tuple(meta.shape)}")
+            num_heads = meta.shape[1]
+            if isinstance(num_heads, int) and num_heads % sp_size != 0:
+                raise ValueError(f"AutoSP requires the number of {role} heads ({num_heads}) to be divisible by "
+                                 f"sequence_parallel_size ({sp_size})")
+
+        attn_mask, mask_as_kwarg = get_sdpa_attn_mask(attn_node)
+        if isinstance(attn_mask, Node):
+            if attn_mask not in gathered_masks:
+                gathered_masks[attn_mask] = gather_attn_mask_queries(gm, attn_mask, q, k)
+            set_sdpa_attn_mask(attn_node, gathered_masks[attn_mask], mask_as_kwarg)
 
         # QKV: [B, N, S/P, H] -> [B, N/P, S, H]
         insert_a2a(q, scatter_idx=1, gather_idx=2, name=f"q{suffix}")
@@ -178,7 +357,7 @@ def pass_insert_attention_all_to_all(gm: GraphModule, real_inputs):
 
 
 def pass_canonicalize(gm: GraphModule, real_inputs):
-    gm.graph.eliminate_dead_code()
+    gm.graph.eliminate_dead_code(is_impure_node=is_impure_for_dce)
     gm.graph.lint()
     gm.recompile()
 
@@ -218,18 +397,18 @@ def pass_propagate_shapes(gm: torch.fx.GraphModule, real_inputs):
     # SDPA output shapes are still determined by Q/K/V shapes, not mask values.
     saved_sdpa_masks = []
     for attn_node in get_sdpa_nodes(gm):
-        attn_mask = attn_node.kwargs.get("attn_mask")
+        attn_mask, mask_as_kwarg = get_sdpa_attn_mask(attn_node)
         if attn_mask is not None:
-            saved_sdpa_masks.append((attn_node, attn_mask))
-            attn_node.update_kwarg("attn_mask", None)
+            saved_sdpa_masks.append((attn_node, attn_mask, mask_as_kwarg))
+            set_sdpa_attn_mask(attn_node, None, mask_as_kwarg)
 
     try:
         # fake_inputs are already created under fake_mode above, so run
         # propagation without reconverting them into a different fake mode.
         FakeTensorProp(gm, mode=fake_mode).propagate_dont_convert_inputs(*fake_inputs)
     finally:
-        for attn_node, attn_mask in saved_sdpa_masks:
-            attn_node.update_kwarg("attn_mask", attn_mask)
+        for attn_node, attn_mask, mask_as_kwarg in saved_sdpa_masks:
+            set_sdpa_attn_mask(attn_node, attn_mask, mask_as_kwarg)
 
 
 def apply_autosp(gm: GraphModule,
@@ -247,8 +426,6 @@ def apply_autosp(gm: GraphModule,
         debug: If True, print graph before/after each pass
         passes: Optional custom list of passes (default: DEFAULT_PASSES)
     """
-    assert sp_size * dp_size <= dist.get_world_size(), 'Insufficient device count for mesh size'
-
     sp_dp_registry.populate_registry(sp_size, dp_size)
 
     AUTOSP_PASSES = [
@@ -256,6 +433,8 @@ def apply_autosp(gm: GraphModule,
         pass_shard_input_ids,
         pass_shard_label_ids,
         pass_shard_position_ids,
+        # The attention pass compares mask and Q/K/V shapes after sharding, so refresh them first.
+        pass_propagate_shapes,
         pass_insert_attention_all_to_all,
         pass_propagate_shapes,
         pass_canonicalize,

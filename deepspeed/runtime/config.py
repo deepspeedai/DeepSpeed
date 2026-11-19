@@ -363,7 +363,9 @@ class HybridEngineConfig(DeepSpeedConfigModel):
     release_inference_cache: bool = False
     pin_parameters: bool = True
     tp_gather_partition_size: int = 8
-    enable_cuda_graph: bool = False
+    enable_graph_capture: bool = False
+    # Deprecated alias for enable_graph_capture; the value migrates with a warning.
+    enable_cuda_graph: bool = Field(False, json_schema_extra={"deprecated": True, "new_param": "enable_graph_capture"})
 
 
 def get_hybrid_engine_config(param_dict):
@@ -477,6 +479,8 @@ class DeepSpeedConfig(object):
         param_dict = copy.copy(self._param_dict)
         self._initialize_params(param_dict)
         self._configure_train_batch_size()
+        from .determinism import configure_determinism
+        configure_determinism(self, param_dict)
         self._do_sanity_check()
 
     def _initialize_params(self, param_dict):
@@ -559,6 +563,12 @@ class DeepSpeedConfig(object):
         self.param_dtype = data_types_params.get(PARAM_DTYPE, PARAM_DTYPE_DEFAULT)
         # buffer_dtype=None keeps buffers at their loaded dtype.
         self.buffer_dtype = data_types_params.get(BUFFER_DTYPE, BUFFER_DTYPE_DEFAULT)
+        # Buffers kept in fp32 under bf16/fp16 training (deepspeed/runtime/keep_in_fp32.py).
+        self.keep_in_fp32_modules = data_types_params.get(KEEP_IN_FP32_MODULES, KEEP_IN_FP32_MODULES_DEFAULT)
+        if self.keep_in_fp32_modules != KEEP_IN_FP32_MODULES_DEFAULT and not (isinstance(
+                self.keep_in_fp32_modules, list) and all(isinstance(n, str) for n in self.keep_in_fp32_modules)):
+            raise DeepSpeedConfigError(f"data_types.{KEEP_IN_FP32_MODULES} must be \"auto\" or a list of name "
+                                       f"patterns, got {self.keep_in_fp32_modules!r}")
 
         par_write_pipe = get_checkpoint_parallel_write_pipeline(checkpoint_params)
         self.checkpoint_parallel_write_pipeline = par_write_pipe
@@ -604,8 +614,6 @@ class DeepSpeedConfig(object):
         micro_batch = self.train_micro_batch_size_per_gpu
         grad_acc = self.gradient_accumulation_steps
 
-        #print(f"in: train_batch = {train_batch}, micro_batch={micro_batch}")
-
         # all values are provided nothing needs to be set
         if train_batch is not None and micro_batch is not None and grad_acc is not None:
             return
@@ -642,8 +650,6 @@ class DeepSpeedConfig(object):
         else:
             assert False, \
                 'Either train_batch_size or train_micro_batch_size_per_gpu needs to be provided'
-
-        #print(f"final: {self.train_batch_size=} {self.train_micro_batch_size_per_gpu=} {self.gradient_accumulation_steps=}")
 
     def _configure_train_batch_size(self):
         self._set_batch_related_parameters()

@@ -206,7 +206,6 @@ class ContiguousMemoryAllocator(object):
                     dest_buffer.data.copy_(src_buffer.data)
                 else:
 
-                    #print_rank_0(f'empty addr : {empty_addr}, empty size {empty_size} tensor addr {tensor_addr} tensor size {tensor_size}')
                     src_addr = tensor_addr
                     dest_addr = empty_addr
                     while src_addr < (tensor_addr + tensor_size):

@@ -22,6 +22,7 @@ sized at construction and are expensive to rebuild.
 from __future__ import annotations
 
 import itertools
+import weakref
 
 import torch
 
@@ -252,6 +253,9 @@ class DeepEPExchange:
         # handle each layer needs for its backward is held by its autograd
         # node, not here.
         self.last_handle = None
+        # The last forward dispatch's checkpoint-replay entry, handed to the
+        # combine that consumes its handle, whose autograd node then owns it.
+        self.last_pending = None
         # Layers holding this buffer. Sharing is the point, so the last holder
         # to let go is the one that may free it.
         self.holders = 0
@@ -298,8 +302,36 @@ class DeepEPExchange:
             tokens,
             handle=handle,
             num_sms=self.num_sms,
+            # DeepEP takes do_expand from this argument, defaulting to False, even
+            # for a cached dispatch, while combine reads it from the handle. The
+            # forward dispatch is expanded, so the replay must ask for it too.
+            do_expand=handle.do_expand,
         )
         return recv_x
+
+    def replay_dispatch(self, tokens: torch.Tensor, topk_idx: torch.Tensor, topk_weights: torch.Tensor, handle):
+        """Repeat a forward dispatch in the layout its handle recorded.
+
+        Used when activation checkpointing recomputes a forward dispatch. The
+        routing must be the one the handle was built from; a different routing
+        cannot be reproduced from it.
+        """
+        recorded = handle.topk_idx
+        selected = topk_idx.to(recorded.dtype)
+        if selected.shape != recorded.shape:
+            raise RuntimeError(f"activation checkpointing recomputed a DeepEP dispatch with routing of shape "
+                               f"{tuple(selected.shape)}, but its forward pass routed {tuple(recorded.shape)}")
+        # Checked on the device: comparing on the host would stall every recomputed layer.
+        torch._assert_async((selected == recorded).all(), "activation checkpointing recomputed a different routing")
+        recv_x, _, recv_weights, _, _ = self.buffer.dispatch(
+            tokens,
+            topk_weights=None if topk_weights is None else topk_weights.float(),
+            handle=handle,
+            num_sms=self.num_sms,
+            do_expand=handle.do_expand,
+        )
+        self.last_handle = handle
+        return recv_x, recv_weights, handle
 
     def combine_with_weight_grad(self, rows: torch.Tensor, handle, weight_grads=None):
         """Combine that also reduces the routing-weight gradient.
@@ -314,6 +346,18 @@ class DeepEPExchange:
                                                             topk_weights=weight_grads,
                                                             num_sms=self.num_sms)
         return combined, combined_weights
+
+    def combine_with_weight_grad_async(self, rows: torch.Tensor, handle, weight_grads=None):
+        """:meth:`combine_with_weight_grad` on DeepEP's stream, returning the event to wait on before reading.
+
+        The current stream does not wait for it, so work queued next runs while the combine is in flight.
+        """
+        combined, combined_weights, event = self.buffer.combine(rows,
+                                                                handle=handle,
+                                                                topk_weights=weight_grads,
+                                                                num_sms=self.num_sms,
+                                                                async_with_compute_stream=True)
+        return combined, combined_weights, event
 
     def combine(self, rows: torch.Tensor, handle) -> torch.Tensor:
         """Reduce expert outputs back to the tokens they came from.
@@ -350,6 +394,78 @@ class DeepEPExchange:
         self.buffer.destroy()
 
 
+def run_with_sm_carveout(num_sms: int, compute):
+    """Run ``compute`` with ``num_sms`` SMs withheld from the GEMMs it launches.
+
+    torch._grouped_mm launches persistent kernels sized to every SM, which would leave a concurrent communication
+    kernel nowhere to run.
+    """
+    previous = torch._C._get_sm_carveout_experimental()
+    torch._C._set_sm_carveout_experimental(num_sms)
+    try:
+        return compute()
+    finally:
+        torch._C._set_sm_carveout_experimental(previous)
+
+
+def _in_backward() -> bool:
+    """Whether this thread is running inside an autograd backward pass."""
+    return torch._C._current_graph_task_id() != -1
+
+
+class _PendingDispatch:
+    """One forward dispatch's handle, owned by the autograd node of the combine that used it."""
+
+    __slots__ = ("handle", "__weakref__")
+
+    def __init__(self, handle):
+        self.handle = handle
+
+
+class DeepEPCheckpointReplay:
+    """Gives a checkpoint recompute of one layer the handle of the forward it repeats.
+
+    DeepEP's received row order depends on arrival timing. A reentrant
+    checkpoint is unaffected: its recompute builds a new graph, so the nodes
+    that run backward use the recomputed handle. A non-reentrant checkpoint
+    keeps the forward's nodes, holding the forward's handle, and only replaces
+    the activations they saved. If the recompute dispatched afresh, combine's
+    backward would scatter gradient rows in the forward's order onto expert
+    activations in the recompute's order. The recompute therefore repeats the
+    forward's dispatch on the forward's handle.
+
+    Dispatches inside backward can either recompute an existing graph or
+    build an inner graph under a reentrant checkpoint. An existing graph's
+    handle is reusable only when exactly one forward graph remains alive.
+    An earlier replay does not eliminate it: retain_graph may need it again.
+    Sequential micro-batch forward/backward schedules satisfy this constraint.
+    More than one live graph is an error, never a guess.
+    """
+
+    def __init__(self):
+        self._entries = []
+
+    def record(self, handle) -> _PendingDispatch:
+        entry = _PendingDispatch(handle)
+        self._entries = [ref for ref in self._entries if ref() is not None]
+        self._entries.append(weakref.ref(entry))
+        return entry
+
+    def forward_handle(self):
+        """The handle a recompute must reuse, or None when no forward graph can need one."""
+        live = [entry for entry in (ref() for ref in self._entries) if entry is not None]
+        if len(live) > 1:
+            raise RuntimeError(
+                f"An activation-checkpoint recompute of an AutoEP layer using the DeepEP backend matches "
+                f"{len(live)} forward passes whose autograd graphs are still alive. It must repeat its own "
+                "forward's dispatch layout, so with non-reentrant checkpointing each micro-batch must run backward "
+                "before the layer's next forward, and earlier graphs must not be kept for another backward. "
+                "Use reentrant checkpointing (use_reentrant=True) to run several forwards before their backwards.")
+        if not live:
+            return None
+        return live[0].handle
+
+
 def _conform_rows(tensor: torch.Tensor, shape) -> torch.Tensor:
     """Trim or zero-extend ``tensor`` to ``shape``'s row count.
 
@@ -372,9 +488,22 @@ class _DeepEPDispatch(torch.autograd.Function):
     """Forward dispatch whose backward is the matching combine."""
 
     @staticmethod
-    def forward(ctx, exchange: DeepEPExchange, tokens: torch.Tensor, topk_idx: torch.Tensor,
-                topk_weights: torch.Tensor):
-        received, recv_weights, handle = exchange.dispatch(tokens, topk_idx, topk_weights)
+    def forward(ctx,
+                exchange: DeepEPExchange,
+                tokens: torch.Tensor,
+                topk_idx: torch.Tensor,
+                topk_weights: torch.Tensor,
+                recorded_handle=None,
+                weight_grad_slot=None,
+                *expert_weights):
+        if recorded_handle is None:
+            received, recv_weights, handle = exchange.dispatch(tokens, topk_idx, topk_weights)
+        else:
+            received, recv_weights, handle = exchange.replay_dispatch(tokens, topk_idx, topk_weights, recorded_handle)
+        # With a slot, the experts leave their weight gradients there, and this backward returns them: the expert
+        # weights are inputs here, though the dispatch does not read them.
+        ctx.weight_grad_slot = weight_grad_slot
+        ctx.num_expert_weights = len(expert_weights)
         ctx.exchange = exchange
         ctx.handle = handle
         ctx.tokens_shape = tokens.shape
@@ -387,15 +516,35 @@ class _DeepEPDispatch(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_received, grad_recv_weights):
-        grad_tokens, grad_weights = ctx.exchange.combine_with_weight_grad(
-            grad_received.contiguous(),
-            ctx.handle,
-            None if grad_recv_weights is None else grad_recv_weights.contiguous(),
-        )
+        rows = grad_received.contiguous()
+        row_weights = None if grad_recv_weights is None else grad_recv_weights.contiguous()
+        expert_grads = (None, ) * ctx.num_expert_weights
+        if ctx.weight_grad_slot is None:
+            grad_tokens, grad_weights = ctx.exchange.combine_with_weight_grad(rows, ctx.handle, row_weights)
+        else:
+            # Send the experts' input gradient first, and compute their weight gradients while it is in flight.
+            grad_tokens, grad_weights, event = ctx.exchange.combine_with_weight_grad_async(
+                rows, ctx.handle, row_weights)
+            try:
+                expert_grads = run_with_sm_carveout(ctx.exchange.num_sms, ctx.weight_grad_slot.run)
+            finally:
+                event.current_stream_wait()
         conformed_weights = None
         if grad_weights is not None and ctx.weights_shape is not None:
             conformed_weights = _conform_rows(grad_weights, ctx.weights_shape).reshape(ctx.weights_shape)
-        return None, _conform_rows(grad_tokens, ctx.tokens_shape), None, conformed_weights
+        return (None, _conform_rows(grad_tokens, ctx.tokens_shape), None, conformed_weights, None, None, *expert_grads)
+
+
+def _save_combine_context(ctx, exchange: DeepEPExchange, rows: torch.Tensor, handle) -> None:
+    pending = getattr(exchange, "last_pending", None)
+    if pending is not None and pending.handle is handle:
+        # Keeps the forward's replay entry alive exactly as long as the graph that needs its layout.
+        ctx.pending = pending
+        exchange.last_pending = None
+    ctx.exchange = exchange
+    ctx.handle = handle
+    # The backward dispatch hands back a whole buffer, while autograd requires the gradient to match its input.
+    ctx.rows_shape = rows.shape
 
 
 class _DeepEPCombine(torch.autograd.Function):
@@ -403,11 +552,7 @@ class _DeepEPCombine(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, exchange: DeepEPExchange, rows: torch.Tensor, handle):
-        ctx.exchange = exchange
-        ctx.handle = handle
-        # The backward dispatch hands back a whole buffer, while autograd
-        # requires the gradient to match the input it is the gradient of.
-        ctx.rows_shape = rows.shape
+        _save_combine_context(ctx, exchange, rows, handle)
         return exchange.combine(rows, handle)
 
     @staticmethod
@@ -416,12 +561,53 @@ class _DeepEPCombine(torch.autograd.Function):
         return None, _conform_rows(grad_rows, ctx.rows_shape), None
 
 
-def deepep_dispatch(exchange: DeepEPExchange, tokens: torch.Tensor, topk_idx: torch.Tensor,
-                    topk_weights: torch.Tensor):
-    """Dispatch tokens and their routing weights, keeping both differentiable."""
-    received, recv_weights = _DeepEPDispatch.apply(exchange, tokens, topk_idx, topk_weights)
+class _RecordedDeepEPCombine(_DeepEPCombine):
+    """A combine whose result nobody reads: records the same backward and skips the transfer.
+
+    For ``skip_recompute_combine``. The output is NaN, so that a reader the layer's contract rules out fails
+    loudly instead of training on garbage.
+    """
+
+    @staticmethod
+    def forward(ctx, exchange: DeepEPExchange, rows: torch.Tensor, handle):
+        _save_combine_context(ctx, exchange, rows, handle)
+        # The handle keeps the [tokens, top_k] routing it was dispatched with.
+        num_tokens = handle.topk_idx.shape[0]
+        return rows.new_full((num_tokens, rows.shape[1]), float("nan"))
+
+
+def deepep_dispatch(exchange: DeepEPExchange,
+                    tokens: torch.Tensor,
+                    topk_idx: torch.Tensor,
+                    topk_weights: torch.Tensor,
+                    replay: DeepEPCheckpointReplay | None = None,
+                    *,
+                    weight_grad_slot=None,
+                    expert_weights=()):
+    """Dispatch tokens and their routing weights, keeping both differentiable.
+
+    ``weight_grad_slot`` and ``expert_weights`` overlap the backward: the experts leave the weight gradients of
+    ``expert_weights`` in the slot, and this dispatch's backward computes them while it sends the experts' input
+    gradient back.
+
+    ``replay`` is the calling layer's record of its forward dispatches, which
+    makes non-reentrant activation checkpointing recompute them faithfully.
+    """
+    inside_backward = replay is not None and _in_backward()
+    recorded_handle = replay.forward_handle() if inside_backward else None
+    received, recv_weights = _DeepEPDispatch.apply(exchange, tokens, topk_idx, topk_weights, recorded_handle,
+                                                   weight_grad_slot, *expert_weights)
+    # An outer reentrant checkpoint can build an inner graph during backward. A fresh grad-enabled dispatch
+    # still needs recording there; only a dispatch actually replaying a handle can reuse its existing entry.
+    if replay is not None and recorded_handle is None and torch.is_grad_enabled():
+        exchange.last_pending = replay.record(exchange.last_handle)
     return received, recv_weights, exchange
 
 
 def deepep_combine(exchange: DeepEPExchange, rows: torch.Tensor, handle) -> torch.Tensor:
     return _DeepEPCombine.apply(exchange, rows, handle)
+
+
+def deepep_record_combine(exchange: DeepEPExchange, rows: torch.Tensor, handle) -> torch.Tensor:
+    """Record :func:`deepep_combine`'s backward without running the combine; the result is all NaN."""
+    return _RecordedDeepEPCombine.apply(exchange, rows, handle)

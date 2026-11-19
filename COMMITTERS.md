@@ -4,10 +4,11 @@
 |--- | ---- | --- |
 | Olatunji Ruwase | [tjruwase](https://github.com/tjruwase)     | SnowFlake |
 | Logan Adams     | [loadams](https://github.com/loadams)      | Microsoft |
-| Masahiro Tanaka | [tohtana](https://github.com/tohtana)      | Anyscale |
+| Masahiro Tanaka | [tohtana](https://github.com/tohtana)      | Yui AI Labs |
 | Jeff Rasley     | [jeffra](https://github.com/jeffra)       | SnowFlake  |
 | Minjia Zhang    | [minjiazhang](https://github.com/minjiazhang)  | UIUC  |
 | Ashwin Aji      | [ashwinma](https://github.com/ashwinma)        | AMD   |
 | Sam Foreman     | [saforem2](https://github.com/saforem2)        | Argonne National Laboratory |
 | Zhipeng Wang    | [PKUWZP](https://github.com/PKUWZP)       | Google  |
 | Guokai Ma       | [delock](https://github.com/delock)       | Intel  |
+| Fengchun Hua    | [hipudding](https://github.com/hipudding)    | Huawei  |

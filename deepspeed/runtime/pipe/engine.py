@@ -221,9 +221,6 @@ class PipelineEngine(DeepSpeedEngine):
 
         self.module.checkpoint_parallel_write_pipeline = self._config.checkpoint_parallel_write_pipeline
 
-        if self.is_last_stage():
-            self.loss_model = self.module.loss_fn
-
         self.has_attention_mask = self.module.__class__.__name__ == 'GPT2ModelPipe'
         # Initialize pipeline communicators. Just send a 0.
         if is_even(self.stage_id):
@@ -369,9 +366,7 @@ class PipelineEngine(DeepSpeedEngine):
 
         # Do the work
         self.timers(TRAIN_BATCH_TIMER).start()
-        sched = schedule.TrainSchedule(micro_batches=self.micro_batches,
-                                       stages=self.num_stages,
-                                       stage_id=self.stage_id)
+        sched = self._train_schedule()
         self._exec_schedule(sched)
 
         with torch.no_grad():
@@ -381,7 +376,7 @@ class PipelineEngine(DeepSpeedEngine):
 
         if self.steps_per_print() is not None and self.global_steps % self.steps_per_print() == 0:
             if self.global_rank == 0:
-                elapsed = self.timers(TRAIN_BATCH_TIMER).elapsed(reset=True) / 1000.0
+                elapsed = self.timers(TRAIN_BATCH_TIMER).elapsed_total(reset=True) / 1000.0
                 iter_time = elapsed / self.steps_per_print()
                 tput = self.train_batch_size() / iter_time
                 log_str = f'steps: {self.global_steps} loss: {self.agg_train_loss:0.4f} '
@@ -459,7 +454,7 @@ class PipelineEngine(DeepSpeedEngine):
         micro_batches = self.micro_batches if num_micro_batches is None else num_micro_batches
 
         # Do the work
-        sched = schedule.InferenceSchedule(micro_batches=micro_batches, stages=self.num_stages, stage_id=self.stage_id)
+        sched = self._inference_schedule(micro_batches)
 
         # prevent dead-lock with multiple evals sequence
         dist.barrier()
@@ -501,6 +496,16 @@ class PipelineEngine(DeepSpeedEngine):
         """
         super().set_train_batch_size(train_batch_size)
         self.micro_batches = self.gradient_accumulation_steps()
+
+    def _train_schedule(self):
+        return schedule.TrainSchedule(micro_batches=self.micro_batches, stages=self.num_stages, stage_id=self.stage_id)
+
+    def _inference_schedule(self, micro_batches):
+        return schedule.InferenceSchedule(micro_batches=micro_batches, stages=self.num_stages, stage_id=self.stage_id)
+
+    def _loss_stage_global_rank(self):
+        """Global rank of the stage that computes the loss."""
+        return self.grid.stage_to_global(self.num_stages - 1)
 
     def is_first_stage(self):
         """True if this process is in the first stage in the pipeline."""
@@ -553,7 +558,7 @@ class PipelineEngine(DeepSpeedEngine):
     def _bcast_pipe_scalar(self, data, src_rank=None, dtype=torch.float32):
         # Default to last stage (e.g., for broadcasting loss)
         if src_rank is None:
-            src_rank = self.grid.stage_to_global(self.num_stages - 1)
+            src_rank = self._loss_stage_global_rank()
         assert src_rank in self.grid.pp_group
 
         if self.global_rank == src_rank:
@@ -579,7 +584,6 @@ class PipelineEngine(DeepSpeedEngine):
 
             self.dp_group_loss = loss.clone().detach()
             agg_loss = self.dp_group_loss.clone().detach()
-            #print(f'RANK={self.global_rank} bcast SENDER src={self.global_rank} group={self.grid.pp_group}', flush=True)
 
             # Average loss across all data-parallel groups
             if self.is_data_parallel:
@@ -614,7 +618,7 @@ class PipelineEngine(DeepSpeedEngine):
                 dist.broadcast(tensor=losses, src=self.global_rank, group=self.mpu.get_pipe_parallel_group())
         else:
             # Get loss from last stage
-            src_rank = self.grid.stage_to_global(self.num_stages - 1)
+            src_rank = self._loss_stage_global_rank()
             assert src_rank in self.grid.pp_group
             # losses to reduce are: dp_group_loss, agg_loss, model additional losses
             # therefore: 2 + n_additional_losses
@@ -820,7 +824,6 @@ class PipelineEngine(DeepSpeedEngine):
 
         grad_tensors = self.grad_layer
         if self.is_grad_partitioned:
-            #print(f'RANK={self.global_rank} BEFORE-BWD restoring grad={self.grad_layer[0].size()} {self.grad_layer[1].size()}')
             if self.grad_partition_grad_layer_meta_cache is None:
                 self.grad_partition_grad_layer_meta_cache = self.grad_layer[0].to('cpu')
             part_grad = PartitionedTensor.from_meta(meta=self.grad_partition_grad_layer_meta_cache,
@@ -828,7 +831,6 @@ class PipelineEngine(DeepSpeedEngine):
                                                     group=self.grid.get_slice_parallel_group())
             grad_tensors = (part_grad.full(), *grad_tensors[2:])
             part_grad = None
-            #print(f'RANK={self.global_rank} BEFORE-BWD restored grad={self.grad_layer[0].size()} {self.grad_layer[1].size()}')
 
         if self.using_bf16_optimizer and not self.is_last_stage():
             # manually call because we don't call optimizer.backward()
@@ -969,12 +971,6 @@ class PipelineEngine(DeepSpeedEngine):
 
         else:
             raise NotImplementedError(f'Could not send meta type {type(buffer)}')
-
-        # Useful for performance debugging.
-        '''
-        if self.grid.data_parallel_id == 0:
-            print(f'STAGE={self.stage_id} pipe-send-volume: {send_bytes/1024**2:0.2f}MB')
-        '''
 
     def _recv_tensor_meta(self, send_stage):
         """Receive metadata about upcoming p2p transfers and return allocated buffers.
