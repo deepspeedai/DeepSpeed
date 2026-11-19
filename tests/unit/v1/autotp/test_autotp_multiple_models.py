@@ -295,6 +295,42 @@ class TestAutoTPEnginesWithDifferentLayouts(DistributedTest):
         assert engine.mpu is None
         assert groups.mpu is None
 
+    def test_autotp_engine_shares_another_engines_groups(self):
+        build_engine(tp_size=2)
+        second = build_engine(tp_size=4)
+        third = build_engine(tp_size=4, mpu=second.mpu)
+        assert third.mpu is second.mpu
+        assert third.data_parallel_group is second.data_parallel_group
+        assert third.dp_world_size == dist.get_world_size() // 4
+        assert groups.get_tensor_model_parallel_world_size() == 2
+
+    def test_shared_groups_must_have_the_engines_tensor_parallel_size(self):
+        build_engine(tp_size=2)
+        second = build_engine(tp_size=4)
+        with pytest.raises(ValueError, match="tensor parallel size 4"):
+            build_engine(tp_size=2, mpu=second.mpu)
+
+    def test_engines_over_all_ranks_share_groups_around_a_subset_engine(self):
+        # #9074 moves training from every rank to half of them and back: DP4 -> DP2 -> DP4.
+        first = build_engine(tp_size=1)
+        subset = build_engine(tp_size=1, mpu=HalvesMPU())
+        world = build_engine(tp_size=1)
+        again = build_engine(tp_size=1, mpu=world.mpu, optimizer=lambda params: torch.optim.SGD(params, lr=0.1))
+        assert first.dp_world_size == dist.get_world_size()
+        assert subset.dp_world_size == dist.get_world_size() // 2
+        assert world.dp_world_size == dist.get_world_size()
+        assert again.mpu is world.mpu
+        assert again.dp_world_size == dist.get_world_size()
+        # Like an engine with groups of its own, one sharing them cannot have what still reads groups.mpu.
+        with pytest.raises(ValueError, match="MoE.*9081"):
+            build_engine(tp_size=1, mpu=world.mpu, model=SimpleMoEModel(hidden_dim=8))
+
+        inputs = torch.ones(1, 8, device=again.device)
+        labels = torch.zeros(1, dtype=torch.long, device=again.device)
+        loss = again(inputs, labels)
+        again.backward(loss)
+        again.step()
+
 
 class MLP(torch.nn.Module):
 

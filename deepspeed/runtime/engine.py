@@ -987,8 +987,12 @@ class DeepSpeedEngine(Module):
         # conversion) gather across both the ZeRO data-parallel and the tensor-parallel
         # dimensions, so saved/converted weights are complete.
 
-        # This engine's own TP/DP groups: the process-wide ones when they have its layout, else new ones (#9081).
-        tp_groups = groups._get_or_create_tp_groups(tensor_model_parallel_size=self.autotp_size())
+        # This engine's own TP/DP groups: another engine's groups passed as mpu, the process-wide ones when they
+        # have its layout, else new ones (#9081).
+        if isinstance(self.mpu, groups.TensorParallelGroups) and self.mesh_device is None:
+            tp_groups = self.mpu
+        else:
+            tp_groups = groups._get_or_create_tp_groups(tensor_model_parallel_size=self.autotp_size())
         # With a data/sequence parallel mesh, the data parallel layout comes from the mesh, which the module
         # getters read first.
         self.mpu = groups if self.mesh_device is not None else tp_groups
@@ -1504,6 +1508,17 @@ class DeepSpeedEngine(Module):
 
     def _will_hold_other_groups(self, mesh_device, requested_tp_size):
         """Whether this engine will run on TP/DP groups other than the process-wide ones (#9081)."""
+        if isinstance(self.mpu, groups.TensorParallelGroups):
+            # Another engine's groups, passed as mpu to share them.
+            if mesh_device is not None:
+                raise ValueError("An engine with a data/sequence parallel mesh cannot use another engine's groups "
+                                 "as its mpu.")
+            borrowed_tp_size = self.mpu.get_tensor_model_parallel_world_size()
+            if borrowed_tp_size != max(requested_tp_size, 1):
+                raise ValueError(f"The mpu passed to this engine holds another engine's groups with tensor parallel "
+                                 f"size {borrowed_tp_size}, but this engine has tensor parallel size "
+                                 f"{max(requested_tp_size, 1)}.")
+            return not self.mpu.process_wide
         if requested_tp_size > 1:
             return not groups._existing_tp_groups_match(requested_tp_size)
         if self.mpu is not None or groups.mpu is None:
