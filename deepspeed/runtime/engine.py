@@ -565,6 +565,7 @@ class DeepSpeedEngine(Module):
         self._global_grad_norm = None
         self.use_ds_comm = False  # False --> Use torch.dist, True --> Use ds.comm backend.
         self.checkpoint_engine = None
+        self._warned_existing_checkpoint_tags = set()
         self.optimizer = None
         self.basic_optimizer = None
         self.lr_scheduler = None
@@ -4979,11 +4980,15 @@ class DeepSpeedEngine(Module):
 
     def _warn_if_checkpoint_tag_exists(self, save_dir, tag):
         tag_dir = os.path.join(save_dir, tag)
+        if tag_dir in self._warned_existing_checkpoint_tags:
+            return
         try:
             existing = os.listdir(tag_dir)
         except OSError:
             return
         if existing:
+            # Warn once per tag directory, so intentional re-saves under a fixed tag do not log on every save.
+            self._warned_existing_checkpoint_tags.add(tag_dir)
             logger.warning(f"save_checkpoint: '{tag_dir}' already contains {len(existing)} entries; this save "
                            "overwrites them in place, one rank at a time. If the job crashes during the save, the "
                            f"tag '{tag}' can be left with files from two different saves, which load_checkpoint "
