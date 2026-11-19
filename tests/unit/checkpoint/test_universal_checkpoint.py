@@ -7,6 +7,7 @@ import os
 import re
 import glob
 import math
+import traceback
 
 import deepspeed
 from types import SimpleNamespace
@@ -437,16 +438,18 @@ class TestUniversalCheckpointPipelineToZeRO3(DistributedTest):
     world_size = 4
 
     def test_load(self, tmpdir):
-        hidden, tp, steps_before_save = 8, 2, 2
+        hidden, tp, steps_before_save, steps_after_load = 8, 2, 2, 3
         dims = [(hidden, 2 * hidden), (2 * hidden, hidden)] * 2
+        row_weight, row_bias = r"^[13]\.weight$", r"^[13]\.bias$"
 
         def full_layers():
             torch.manual_seed(0)
             return [torch.nn.Linear(i, o) for i, o in dims]
 
+        # Two micro-batches per step: the source accumulates both, the target's 4 ranks see each twice.
         generator = torch.Generator().manual_seed(1)
         batches = [(torch.randn(1, hidden, generator=generator), torch.randn(1, hidden, generator=generator))
-                   for _ in range(2 * (steps_before_save + 1))]
+                   for _ in range(2 * (steps_before_save + steps_after_load))]
 
         topology = PipeModelDataParallelTopology(num_pp=2, num_mp=tp, num_dp=1)
         tp_rank = topology.get_coord(dist.get_rank()).model
@@ -461,6 +464,7 @@ class TestUniversalCheckpointPipelineToZeRO3(DistributedTest):
         config = {
             "train_micro_batch_size_per_gpu": 1,
             "gradient_accumulation_steps": 2,
+            "gradient_clipping": 0.0,
             "zero_optimization": {
                 "stage": 1
             },
@@ -476,50 +480,65 @@ class TestUniversalCheckpointPipelineToZeRO3(DistributedTest):
         for _ in range(steps_before_save):
             source.train_batch(data_iter=loader)
 
-        # Each rank holds one TP block of its stage's parameters; put the whole tensors together.
-        local = {name: [s.cpu() for s in states] for name, states in _full_optimizer_states(source).items()}
-        everyone = [None] * self.world_size
-        dist.all_gather_object(everyone, (tp_rank, local))
-        blocks = {}
-        for rank_tp, rank_states in everyone:
-            for name, states in rank_states.items():
-                blocks.setdefault(name, {})[rank_tp] = states
-        row_weight, row_bias = r"^[13]\.weight$", r"^[13]\.bias$"
-        expected = {}
-        for name, by_tp in blocks.items():
-            per_state = list(zip(*(by_tp[r] for r in range(tp))))
-            if re.match(row_bias, name):
-                assert all(torch.equal(s[0], s[1]) for s in per_state), name
-                expected[name] = [s[0] for s in per_state]
-            else:
-                expected[name] = [torch.cat(s, dim=1 if re.match(row_weight, name) else 0) for s in per_state]
-        assert len(expected) == 2 * len(dims)
+        def whole_source_states():
+            # Each rank holds one TP block of its stage's parameters; put the whole tensors together.
+            local = {name: [s.cpu() for s in states] for name, states in _full_optimizer_states(source).items()}
+            everyone = [None] * self.world_size
+            dist.all_gather_object(everyone, (tp_rank, local))
+            blocks = {}
+            for rank_tp, rank_states in everyone:
+                for name, states in rank_states.items():
+                    blocks.setdefault(name, {})[rank_tp] = states
+            whole = {}
+            for name, by_tp in blocks.items():
+                per_state = list(zip(*(by_tp[r] for r in range(tp))))
+                if re.match(row_bias, name):
+                    assert all(torch.equal(s[0], s[1]) for s in per_state), name
+                    whole[name] = [s[0] for s in per_state]
+                else:
+                    whole[name] = [torch.cat(s, dim=1 if re.match(row_weight, name) else 0) for s in per_state]
+            assert len(whole) == 2 * len(dims)
+            return whole
 
+        expected = whole_source_states()
         uc_info = {
             PARAMETER_WITH_ROW_PARALLELISM_PATTERNS: [row_weight],
             TP_REPLICATED_PARAMETER_PATTERNS: [row_bias],
         }
         source.save_checkpoint(tmpdir, tag=CP_TAG, client_state={UNIVERSAL_CHECKPOINT_INFO: uc_info})
+
+        # The run that never stopped, for the target to follow after the load.
+        uninterrupted = []
+        for _ in range(steps_after_load):
+            loss = source.train_batch(data_iter=loader)
+            uninterrupted.append((loss.item(), whole_source_states()))
         source.destroy()
         # A real resume starts new processes; here the pipeline grid would stay registered as the global mpu.
         groups.mpu = None
 
         cp_dir = os.path.join(tmpdir, CP_TAG)
         dist.barrier()
+        # Rank 0 converts alone; share its outcome so a failure fails every rank instead of leaving them waiting.
+        error = [None]
         if dist.get_rank() == 0:
-            convert_to_universal(
-                SimpleNamespace(input_folder=cp_dir,
-                                output_folder=f"{cp_dir}_universal",
-                                num_extract_workers=1,
-                                num_merge_workers=1,
-                                keep_temp_folder=False,
-                                strict=True,
-                                inject_missing_state=False))
-        dist.barrier()
+            try:
+                convert_to_universal(
+                    SimpleNamespace(input_folder=cp_dir,
+                                    output_folder=f"{cp_dir}_universal",
+                                    num_extract_workers=1,
+                                    num_merge_workers=1,
+                                    keep_temp_folder=False,
+                                    strict=True,
+                                    inject_missing_state=False))
+            except Exception:
+                error = [traceback.format_exc()]
+        dist.broadcast_object_list(error, src=0)
+        assert error[0] is None, f"ds_to_universal failed on rank 0:\n{error[0]}"
 
         dense = _DenseStack(full_layers())
         target, _, _, _ = deepspeed.initialize(config={
             "train_batch_size": self.world_size,
+            "gradient_clipping": 0.0,
             "zero_optimization": {
                 "stage": 3
             },
@@ -534,18 +553,33 @@ class TestUniversalCheckpointPipelineToZeRO3(DistributedTest):
         loaded = _full_optimizer_states(target)
         assert loaded.keys() == expected.keys()
         for name, states in expected.items():
+            assert len(loaded[name]) == len(states) == 3, name
             for expected_state, loaded_state in zip(states, loaded[name]):
                 assert torch.equal(expected_state, loaded_state), name
         assert target.optimizer.param_groups[0]["lr"] == 0.01
         for state in target.optimizer.optimizer.state.values():
             assert int(state["step"]) == steps_before_save
 
-        x, y = batches[0]
-        loss = target(x.to(target.device), y.to(target.device))
-        target.backward(loss)
-        target.step()
+        # Rank r takes micro-batch r % 2 of the source's pair, so the data-parallel mean of the gradients is the
+        # source's accumulated gradient. The TP all-reduces sum in another order, so the match is close, not exact.
+        for step, (source_loss, source_states) in enumerate(uninterrupted):
+            x, y = batches[2 * (steps_before_save + step) + dist.get_rank() % 2]
+            loss = target(x.to(target.device), y.to(target.device))
+            target.backward(loss)
+            target.step()
+            mean_loss = loss.detach().clone()
+            dist.all_reduce(mean_loss)
+            torch.testing.assert_close(mean_loss.item() / self.world_size, source_loss, rtol=1e-5, atol=1e-6)
+            for name, states in _full_optimizer_states(target).items():
+                for kind, source_state, target_state, atol in zip(("fp32", "exp_avg", "exp_avg_sq"),
+                                                                  source_states[name], states, (1e-6, 1e-7, 1e-9)):
+                    torch.testing.assert_close(target_state,
+                                               source_state,
+                                               rtol=1e-5,
+                                               atol=atol,
+                                               msg=lambda m: f"step {step + 1}, {name} {kind}: {m}")
         for state in target.optimizer.optimizer.state.values():
-            assert int(state["step"]) == steps_before_save + 1
+            assert int(state["step"]) == steps_before_save + steps_after_load
         target.destroy()
 
 
