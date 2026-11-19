@@ -15,7 +15,6 @@ from deepspeed.accelerator import get_accelerator
 from .replace_policy import replace_policies, generic_policies
 from .auto_tp import AutoTP, ReplaceWithTensorSlicing, Loading
 from .layers import TensorParallelOcShardConv2d, TensorParallelIcShardConv2d
-from deepspeed.module_inject.layers import is_autotp_training_mode
 from deepspeed import comm as dist
 
 from .load_checkpoint import load_model_with_checkpoint
@@ -154,12 +153,6 @@ def generic_injection(module, dtype=None, enable_cuda_graph=True):
         except ImportError:
             new_policies = {}
 
-        #replace_transformer_layer(None,
-        #                          module.text_encoder,
-        #                          training=False,
-        #                          replace_with_kernel_inject=True,
-        #                          triangular_masking=True,
-        #                          max_out_tokens=8192)
         from ..model_implementations.transformers.clip_encoder import DSClipEncoder
         cg_encoder = DSClipEncoder(module.text_encoder, enable_cuda_graph=enable_cuda_graph)
         setattr(module, 'text_encoder', cg_encoder)
@@ -279,8 +272,6 @@ def replace_transformer_layer(orig_layer_impl,
         return _container.module
 
     def replace_wo_policy(module, all_reduce_linears, prefix="", state_dict=None):
-        #mp_replace = ReplaceWithTensorSlicing(mp_group=config.tensor_parallel.tp_group)
-
         # Get the configurable partition_config if available
         partition_config = None
         if hasattr(config, 'get_partition_config_object'):
@@ -330,7 +321,7 @@ def replace_transformer_layer(orig_layer_impl,
 
     def replace_fn(child, _policy, layer_id=0, prefix="", state_dict=None):
         # copy relevant state from child -> new module
-        if not is_autotp_training_mode() and config.replace_with_kernel_inject:
+        if not training_mode and config.replace_with_kernel_inject:
             new_module = replace_with_policy(child,
                                              _policy,
                                              config.triangular_masking,
@@ -342,7 +333,7 @@ def replace_transformer_layer(orig_layer_impl,
         return new_module
 
     def set_lm_head(module):
-        if is_autotp_training_mode():
+        if training_mode:
             # we need to handle autoTP training mode separately.
             return
 
@@ -486,7 +477,7 @@ def replace_transformer_layer(orig_layer_impl,
         set_lm_head(replaced_module)
         print(f"checkpoint loading time at rank {rank}: {time.time()-start_time} sec")
 
-    if not is_autotp_training_mode() and config.save_mp_checkpoint_path is not None:
+    if not training_mode and config.save_mp_checkpoint_path is not None:
         from collections import OrderedDict
         import json
         num_partitions = 8
@@ -566,7 +557,6 @@ def revert_transformer_layer(orig_layer_impl, model, config, preln=False):
     """
 
     def replace_fn(child, _replace_policy, layer_id):
-        #from turing.nvidia_modelingpreln import BertLayer
         orig_module = orig_layer_impl(config)
 
         # copy relevant state from child -> original module

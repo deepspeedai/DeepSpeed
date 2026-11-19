@@ -10,7 +10,7 @@ import torch.nn.functional as F
 import pytest
 import deepspeed
 from deepspeed.runtime.zero import GatheredParameters
-from deepspeed.ops.op_builder import OpBuilder
+from deepspeed.ops.op_builder.builder import CUDAOpBuilder
 from deepspeed.utils import safe_get_full_grad
 import numpy.testing as npt
 from unit.common import DistributedTest
@@ -22,7 +22,7 @@ if not deepspeed.ops.__compatible_ops__[InferenceBuilder.NAME]:
 
 from transformers import (AutoConfig, AutoTokenizer, AutoModelForCausalLM)
 
-rocm_version = OpBuilder.installed_rocm_version()
+rocm_version = CUDAOpBuilder.installed_rocm_version()
 if rocm_version != (0, 0):
     pytest.skip("skip inference tests on rocm for now", allow_module_level=True)
 

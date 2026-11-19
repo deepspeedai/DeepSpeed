@@ -148,6 +148,8 @@ You can build specifically for a desired range of architectures by setting a `TO
 TORCH_CUDA_ARCH_LIST="6.1;7.5;8.6" pip install ...
 ```
 
+Entries can be separated by `;` or spaces, and can use `+PTX` or the `a` suffix (for example `9.0a`). Architecture names such as `Ampere` are not supported. If no entry has `+PTX`, DeepSpeed adds PTX for the highest entry without a suffix, so the ops can also run on newer GPUs.
+
 It will also make the build faster when you only build for a few architectures.
 
 This is also recommended to ensure your exact architecture is used. Due to a variety of technical reasons, a distributed PyTorch binary isn't built to fully support all architectures, skipping binary compatible ones, at a potential cost of underutilizing your full card's compute capabilities. To see which architectures get included during the DeepSpeed build from source - save the log and grep for `-gencode` arguments.

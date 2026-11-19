@@ -29,7 +29,7 @@ class KLXPUOpBuilder(OpBuilder):
     def cxx_args(self):
         CPU_ARCH = self.cpu_arch()
         SIMD_WIDTH = self.simd_width()
-        return ['-O3', '-std=c++17', '-g', '-Wno-reorder', '-fopenmp', CPU_ARCH, SIMD_WIDTH]
+        return ['-O3', '-g', '-Wno-reorder', '-fopenmp', CPU_ARCH, SIMD_WIDTH]
 
     def libraries_args(self):
         return []

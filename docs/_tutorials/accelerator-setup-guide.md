@@ -67,6 +67,13 @@ Launching DeepSpeed model on multiple CPU nodes is similar to other accelerators
 deepspeed --hostfile=<hostfile> --bind_cores_to_rank --launcher impi --master_addr <master-ip> <deepspeed-model-script>
 ```
 
+## Memory limits in containers on Intel Architecture CPU
+In a container, a Kubernetes pod or a Slurm job step, the process can use only its cgroup memory limit. ZeRO, the inference v2 KV cache and the `deepspeed.compile` passes size their buffers from `get_accelerator().total_memory()` and `available_memory()`, so on the CPU accelerator these use the cgroup limit. `total_memory()` is the smallest memory limit from the cgroup of the process up to the cgroup root, and `available_memory()` is the smallest free headroom over those cgroups. Without a limit, both report host RAM. cgroup v1 and v2 are supported. To report host RAM in all cases, set:
+```
+export DS_CPU_RESPECT_CGROUP_MEMORY=0
+```
+The `deepspeed` launcher forwards the variable to every node.
+
 ## Install with Intel Extension for PyTorch and oneCCL
 Although not mandatory, Intel Extension for PyTorch and Intel oneCCL provide better optimizations for LLM models.  Intel oneCCL also provide optimization when running LLM model on multi-node.  To use DeepSpeed with Intel Extension for PyTorch and oneCCL, use the following steps:
 1. Install Intel Extension for PyTorch.  This is suggested if you want to get better LLM inference performance on CPU.

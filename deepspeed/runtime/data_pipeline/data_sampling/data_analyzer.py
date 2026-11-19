@@ -490,7 +490,6 @@ class DistributedDataAnalyzer(object):
         # comm_group and worker_id+num_workers are mutually exclusive
         self.comm_group = comm_group
         if self.comm_group is None:
-            # self.comm_group = deepspeed.utils.groups._clone_world_group()
             self.num_workers = num_workers
             self.worker_id = worker_id
         else:

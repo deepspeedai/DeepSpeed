@@ -172,8 +172,6 @@ def _sync_memory_profile_complete(profile_complete: bool, process_group=None) ->
 
 def evaluate_symint_from_shape_env(sym_int_v):
     assert isinstance(sym_int_v, torch.SymInt)
-    # shape_env = sym_int_v.node.shape_env
-    # v = shape_env.evaluate_sym_node(sym_int_v.node)
     return sym_int_v.node.hint
 
 
@@ -443,8 +441,6 @@ def make_backend(backend, compile_config, compile_kwargs={}, process_group=None,
                 bwd=True,
                 debug_log=debug_log,
                 process_group=process_group)
-
-            # assert graph_id in param_manager, f"Graph {graph_id} not found in param_manager"
 
             if free_activation:
                 param_names = [n.name for n in param_nodes_bw]

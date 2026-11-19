@@ -9,6 +9,7 @@ ZeRO layer on top: it describes what each global rank actually stores.
 """
 
 from deepspeed.checkpoint.affine import AFFINE_MAP_FORMAT_VERSION, AffinePiece, ParamAffineMap, nest_affine_maps
+from deepspeed.checkpoint.affine_geometry import product as _product, row_major_strides as _row_major_strides
 from deepspeed.checkpoint.affine_transfer import plan_transfer
 from deepspeed.checkpoint.zero_affine import zero_storage_affine_map
 from deepspeed.checkpoint.constants import (AFFINE_MAP, AFFINE_MAP_PARAMS, AFFINE_MAP_VERSION, AUTOEP_AFFINE_MAPS,
@@ -334,17 +335,3 @@ def _positive_int(value, name):
     if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
         raise ValueError(f'{name} must be a positive integer; got {value!r}.')
     return value
-
-
-def _product(shape):
-    count = 1
-    for dim in shape:
-        count *= dim
-    return count
-
-
-def _row_major_strides(shape):
-    strides = [1] * len(shape)
-    for axis in range(len(shape) - 2, -1, -1):
-        strides[axis] = strides[axis + 1] * shape[axis + 1]
-    return tuple(strides)

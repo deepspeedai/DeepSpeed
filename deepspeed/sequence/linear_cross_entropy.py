@@ -10,6 +10,7 @@ at a time, so each weight-gradient block comes from a single GEMM over all token
 """
 
 import functools
+import inspect
 import math
 
 import torch
@@ -17,7 +18,13 @@ from torch.autograd.function import once_differentiable
 
 import deepspeed.comm as dist
 from deepspeed.comm import pg_utils
-from deepspeed.sequence.cross_entropy import _global_sp_sum, _resolve_vocab_metadata
+from deepspeed.sequence.cross_entropy import (VocabParallelCausalLMLoss, _global_sp_sum, _resolve_vocab_metadata,
+                                              _set_vocab_parallel_loss)
+from deepspeed.utils.logging import logger
+
+# Smaller blocks turn the projection into many skinny GEMMs and add two all-reduces per block,
+# which made the loss ~2.7x slower on an NVIDIA L20 at 4K valid tokens (49-row blocks).
+_MIN_CHUNK_ROWS = 256
 
 
 def _default_chunk_rows(num_tokens, global_vocab_size, tp_world_size, hidden_size):
@@ -27,7 +34,8 @@ def _default_chunk_rows(num_tokens, global_vocab_size, tp_world_size, hidden_siz
     # even when the vocabulary is split unevenly.
     max_local_vocab_size = math.ceil(global_vocab_size / tp_world_size)
     num_chunks = max(1, math.ceil(max_local_vocab_size / hidden_size))
-    return max(1, math.ceil(num_tokens / num_chunks))
+    memory_bound_rows = math.ceil(num_tokens / num_chunks)
+    return max(1, min(num_tokens, max(memory_bound_rows, _MIN_CHUNK_ROWS)))
 
 
 _MIXED_GEMM_INPUT_DTYPES = (torch.float16, torch.bfloat16)
@@ -71,16 +79,14 @@ def _accumulate_matmul(accumulator, mat1, mat2):
 def _fp32_logits(hidden, weight, bias=None, row_offset=None):
     """``hidden @ weight.T + bias + row_offset`` in fp32; ``row_offset`` has shape ``[tokens, 1]``.
 
-    Producing fp32 straight from the GEMM, with the offset applied in its epilogue, saves
+    Producing fp32 straight from the GEMM, with the bias applied in its epilogue, saves
     separate upcast and add passes over the ``[tokens, vocab]`` block.
     """
     if hidden.dtype in _MIXED_GEMM_INPUT_DTYPES and _has_mixed_gemm(hidden.device.type):
         if bias is not None:
             logits = torch.addmm(bias.float(), hidden, weight.t(), out_dtype=torch.float32)
-        elif row_offset is not None:
-            return torch.addmm(row_offset, hidden, weight.t(), out_dtype=torch.float32)
         else:
-            return torch.mm(hidden, weight.t(), out_dtype=torch.float32)
+            logits = torch.mm(hidden, weight.t(), out_dtype=torch.float32)
         return logits if row_offset is None else logits.add_(row_offset)
     # Add the bias inside the GEMM as F.linear does, so a large product that the bias cancels
     # does not overflow a low-precision output first.
@@ -225,8 +231,10 @@ def vocab_parallel_linear_cross_entropy(hidden,
 
     ``chunk_size`` sets the number of tokens per forward chunk; backward recomputes the
     logits in vocabulary blocks of the same size. By default each fp32 logits block is about
-    as large as ``hidden``. ``reduction="none"`` returns the per-token losses in the shape of
-    ``target``, with zeros at ignored positions, and does not reduce over ``sp_group``.
+    as large as ``hidden``, with at least 256 tokens per chunk. Tokens whose target is ``ignore_index`` are dropped before the
+    projection, so they cost neither GEMMs nor collectives. ``reduction="none"`` returns the
+    per-token losses in the shape of ``target``, with zeros at ignored positions, and does not
+    reduce over ``sp_group``.
     """
     if reduction not in ("none", "sum", "mean"):
         raise ValueError(f"Unsupported reduction: {reduction}")
@@ -243,17 +251,30 @@ def vocab_parallel_linear_cross_entropy(hidden,
         weight.shape[0], vocab_start_index, vocab_end_index, tp_group, hidden.device)
     target_shape = target.shape
     target = target.reshape(-1).to(dtype=torch.long)
-    invalid_target = (target != ignore_index) & ((target < 0) | (target >= global_vocab_size))
-    if invalid_target.any().item():
+    valid = target != ignore_index
+    invalid_target = valid & ((target < 0) | (target >= global_vocab_size))
+    # One host sync for both the range check and the compacted length.
+    any_invalid, num_valid = torch.stack([invalid_target.any().long(), valid.sum()]).tolist()
+    if any_invalid:
         raise ValueError(f"Target is out of range for vocabulary size {global_vocab_size}")
 
-    hidden = hidden.reshape(-1, hidden.shape[-1]).contiguous()
+    hidden = hidden.reshape(-1, hidden.shape[-1])
     weight = weight.contiguous()
     num_tokens = hidden.shape[0]
 
+    # Project only the tokens that contribute to the loss: prompt and padding positions are often
+    # half of an SFT batch. TP ranks hold the same targets, so they agree on the compacted length
+    # and issue the same collectives.
+    valid_index = None
+    if num_valid < num_tokens:
+        valid_index = valid.nonzero().squeeze(-1)
+        hidden = hidden.index_select(0, valid_index)
+        target = target.index_select(0, valid_index)
+    hidden = hidden.contiguous()
+
     if chunk_size is None:
         tp_world_size = dist.get_world_size(tp_group) if tp_group is not None else 1
-        chunk_size = _default_chunk_rows(num_tokens, global_vocab_size, tp_world_size, hidden.shape[1])
+        chunk_size = _default_chunk_rows(num_valid, global_vocab_size, tp_world_size, hidden.shape[1])
     device_type = hidden.device.type
     compute_dtype = _autocast_dtype(device_type)
     if compute_dtype is None:
@@ -264,12 +285,166 @@ def vocab_parallel_linear_cross_entropy(hidden,
                                                                 vocab_start_index, vocab_end_index, ignore_index,
                                                                 chunk_size, compute_dtype)
     if reduction == "none":
+        if valid_index is not None:
+            per_token_loss = per_token_loss.new_zeros(num_tokens).index_copy(0, valid_index, per_token_loss)
         return per_token_loss.view(target_shape)
 
     loss = per_token_loss.sum()
     if reduction == "mean":
-        valid_tokens = (target != ignore_index).sum().to(torch.float32)
+        valid_tokens = torch.tensor(num_valid, dtype=torch.float32, device=loss.device)
         if sp_group is not None and dist.get_world_size(sp_group) > 1:
             dist.all_reduce(valid_tokens, op=dist.ReduceOp.SUM, group=sp_group)
         loss = loss / valid_tokens.clamp(min=1.0)
     return _global_sp_sum(loss, sp_group)
+
+
+# Config attributes of HuggingFace models whose causal-LM forward soft-caps or rescales the
+# logits between the head and the loss. The fused loss never sees those logits, so it would
+# silently train against different ones. Soft-capping changes the logits for any cap, while a
+# scale of one is the identity.
+_LOGIT_SOFTCAP_ATTRS = ("final_logit_softcapping", )
+_LOGIT_SCALE_ATTRS = ("logit_scale", "logits_scaling")
+
+
+def _reject_logit_postprocessing(model):
+    config = getattr(model, "config", None)
+    if config is None:
+        return
+    configs = [config]
+    if hasattr(config, "get_text_config"):
+        configs.append(config.get_text_config())
+    for model_config in configs:
+        for name in _LOGIT_SOFTCAP_ATTRS + _LOGIT_SCALE_ATTRS:
+            value = getattr(model_config, name, None)
+            if value is not None and (name in _LOGIT_SOFTCAP_ATTRS or value != 1):
+                raise ValueError(f"vocab_parallel_ce_backend='fused_linear' cannot apply the model's {name}={value} "
+                                 "to logits it never materializes; use the 'torch' backend for this model")
+
+
+class _HiddenCapture:
+    """Hands one forward's LM-head input to the installed loss in place of the logits."""
+
+    def __init__(self):
+        self.armed = False
+        self.hidden = None
+
+    def take(self, hidden):
+        self.armed = False
+        self.hidden = hidden
+        # Zero-width logits keep the model's output plumbing working, and a caller that reads
+        # ``outputs.logits`` sees an empty vocabulary instead of values that were never computed.
+        return hidden.new_empty(*hidden.shape[:-1], 0)
+
+    def pop(self):
+        hidden = self.hidden
+        self.hidden = None
+        return hidden
+
+    def reset(self):
+        self.armed = False
+        self.hidden = None
+
+
+class VocabParallelLinearCausalLMLoss:
+    """HuggingFace ``loss_function`` that fuses a :class:`VocabParallelLinear` head into the loss.
+
+    When the head deferred its projection for this forward, the loss is computed from the head's
+    input with :func:`vocab_parallel_linear_cross_entropy`. Otherwise the head returned ordinary
+    rank-local logits and the loss falls back to :class:`VocabParallelCausalLMLoss`. ``sp_group``
+    follows the same convention as that class.
+    """
+
+    def __init__(self, head, capture, sp_group=None, ignore_index=-100, chunk_size=None):
+        self.head = head
+        self.capture = capture
+        self.sp_group = sp_group
+        self.ignore_index = ignore_index
+        self.chunk_size = chunk_size
+        self.logits_loss = VocabParallelCausalLMLoss(tp_group=head.mp_group,
+                                                     sp_group=sp_group,
+                                                     vocab_start_index=head.vocab_start_index,
+                                                     vocab_end_index=head.vocab_end_index,
+                                                     ignore_index=ignore_index)
+
+    def __call__(self, logits, labels=None, vocab_size=None, shift_labels=None, num_items_in_batch=None, **kwargs):
+        hidden = self.capture.pop()
+        if hidden is None:
+            return self.logits_loss(logits,
+                                    labels=labels,
+                                    vocab_size=vocab_size,
+                                    shift_labels=shift_labels,
+                                    num_items_in_batch=num_items_in_batch,
+                                    **kwargs)
+
+        if shift_labels is None:
+            if labels is None:
+                raise ValueError("labels or shift_labels must be provided")
+            # Padding the labels instead of dropping the last position keeps ``hidden`` unsliced,
+            # so it is not copied; the padded position is ignored.
+            padded_labels = torch.nn.functional.pad(labels, (0, 1), value=self.ignore_index)
+            shift_labels = padded_labels[..., 1:]
+        if vocab_size is not None and vocab_size != self.head.vocab_size:
+            logger.warning_once(f"Vocab-parallel LM head holds vocab_size={self.head.vocab_size}, but the caller "
+                                f"described vocab_size={vocab_size}; the LM head's weights win")
+
+        reduction = "sum" if num_items_in_batch is not None else "mean"
+        loss = vocab_parallel_linear_cross_entropy(hidden,
+                                                   self.head.weight,
+                                                   shift_labels.to(hidden.device),
+                                                   bias=self.head.bias,
+                                                   tp_group=self.head.mp_group,
+                                                   sp_group=self.sp_group,
+                                                   vocab_start_index=self.head.vocab_start_index,
+                                                   vocab_end_index=self.head.vocab_end_index,
+                                                   ignore_index=self.ignore_index,
+                                                   reduction=reduction,
+                                                   chunk_size=self.chunk_size)
+        if num_items_in_batch is not None:
+            denominator = torch.as_tensor(num_items_in_batch, device=loss.device, dtype=loss.dtype)
+            loss = loss / denominator.clamp_min(1)
+        return loss
+
+
+def configure_fused_linear_vocab_parallel_loss(model, vocab_parallel_head, sp_group=None, ignore_index=-100):
+    """Install a causal-LM loss that fuses ``vocab_parallel_head`` into the cross entropy.
+
+    In a training-mode forward that receives ``labels``, the head skips its projection and the
+    installed loss computes the cross entropy straight from the head's input, so the
+    ``[tokens, vocab / tp]`` logits are never materialized and ``outputs.logits`` has an empty
+    vocabulary dimension. Every other forward returns the usual rank-local logits.
+    """
+    _reject_logit_postprocessing(model)
+    capture = _HiddenCapture()
+    loss_fn = VocabParallelLinearCausalLMLoss(vocab_parallel_head,
+                                              capture,
+                                              sp_group=sp_group,
+                                              ignore_index=ignore_index)
+    original_loss_function = _set_vocab_parallel_loss(model, loss_fn)
+    forward_signature = inspect.signature(model.forward)
+
+    def arm_capture(module, args, kwargs):
+        capture.reset()
+        try:
+            labels = forward_signature.bind_partial(*args, **kwargs).arguments.get("labels")
+        except TypeError:
+            labels = kwargs.get("labels")
+        # HuggingFace only calls the loss when ``labels`` are given; without them the caller
+        # asked for the logits themselves.
+        capture.armed = module.training and labels is not None
+
+    def disarm_capture(module, args, output):
+        # A conforming forward always hands the capture to the installed loss, so one left here
+        # means the caller computed its own loss from the empty logits; name the cause here
+        # rather than leave a shape error or NaN to surface in the caller's code.
+        if capture.hidden is not None:
+            logger.warning_once("vocab_parallel_ce_backend='fused_linear': labels were passed but the installed "
+                                "loss never consumed the LM-head capture, so outputs.logits is empty (vocabulary "
+                                "dim 0). Compute the loss through model.loss_function or use the 'torch' backend.")
+        # Drop a capture the forward never consumed, so neither a stale activation nor a later
+        # direct call of the head is affected.
+        capture.reset()
+
+    model.register_forward_pre_hook(arm_capture, with_kwargs=True)
+    model.register_forward_hook(disarm_capture)
+    vocab_parallel_head.fused_loss_capture = capture
+    return original_loss_function
