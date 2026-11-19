@@ -114,7 +114,7 @@ class TestGroupCacheTeardown(DistributedTest):
 
     @pytest.mark.world_size(1)
     @pytest.mark.parametrize("explicit_world", [False, True])
-    def test_default_destroy_releases_cached_groups(self, explicit_world):
+    def test_default_destroy_releases_cached_groups(self, explicit_world, tmpdir):
 
         class MPU:
             pass
@@ -151,7 +151,12 @@ class TestGroupCacheTeardown(DistributedTest):
                 groups.expert_tensor_parallel_world_size) == (None, None, 1)
         assert groups.mpu is None
 
-        dist.init_distributed(dist_backend="gloo")
+        second_store = tmpdir.join("default-destroy-reinit")
+        dist.init_distributed(dist_backend="gloo",
+                              auto_mpi_discovery=False,
+                              init_method=f"file://{second_store}",
+                              rank=0,
+                              world_size=1)
         groups._init_tp_groups_with_new_group(tensor_model_parallel_size=1, data_parallel_size=1)
         fresh_group = groups._TENSOR_MODEL_PARALLEL_GROUP
         assert fresh_group is not None

@@ -10,7 +10,7 @@ from deepspeed.runtime.zero.stage3 import DeepSpeedZeroOptimizer_Stage3
 from deepspeed.utils import safe_get_local_grad, safe_set_local_grad
 from deepspeed.accelerator import get_accelerator
 from unit.simple_model import SimpleModel
-from unit.common import DistributedTest
+from unit.common import DistributedTest, get_master_port
 import os
 
 
@@ -101,7 +101,7 @@ class TestZeroGradClip():
         os.environ['RANK'] = '0'
         os.environ['WORLD_SIZE'] = '1'
         os.environ['MASTER_ADDR'] = '127.0.0.1'
-        os.environ['MASTER_PORT'] = '29500'
+        os.environ['MASTER_PORT'] = get_master_port()
 
         try:
             model_engine, optimizer, _, _ = deepspeed.initialize(args=None,

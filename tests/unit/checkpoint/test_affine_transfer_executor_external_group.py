@@ -10,7 +10,6 @@ RL frameworks build their trainer <-> engine weight-update group. In that group 
 member's default-world rank 0 to group rank 0, so the executor must take the rank from the group itself.
 """
 import datetime
-import os
 import tempfile
 
 import pytest
@@ -20,7 +19,7 @@ import torch.multiprocessing as mp
 from deepspeed.accelerator import get_accelerator
 
 
-def _worker(rank, port, tmp):
+def _worker(rank, tmp):
     # Using torch.distributed directly is intended: RL frameworks build this group outside deepspeed.comm.
     import torch.distributed as tdist
     from torch.distributed.distributed_c10d import PrefixStore, _new_process_group_helper, _world
@@ -28,7 +27,10 @@ def _worker(rank, port, tmp):
     tdist.init_process_group('gloo', init_method=f'file://{tmp}/default-{rank}', rank=0, world_size=1)
     import deepspeed
     deepspeed.init_distributed(dist_backend='gloo')
-    store = tdist.TCPStore('127.0.0.1', port, 2, rank == 0, timeout=datetime.timedelta(seconds=60))
+    # A file store, not a TCP port: a fixed or pid-derived port can collide with the ports the test harness hands
+    # to xdist workers.
+    store = tdist.FileStore(f'{tmp}/weight-update-store', 2)
+    store.set_timeout(datetime.timedelta(seconds=60))
     group, _ = _new_process_group_helper(2,
                                          rank, [],
                                          tdist.Backend('gloo'),
@@ -74,4 +76,4 @@ def _worker(rank, port, tmp):
                     reason='gloo groups over host buffers; CPU accelerator only')
 def test_transfer_over_a_weight_update_group_outside_the_default_world():
     with tempfile.TemporaryDirectory() as tmp:
-        mp.spawn(_worker, args=(29000 + os.getpid() % 1000, tmp), nprocs=2, join=True)
+        mp.spawn(_worker, args=(tmp, ), nprocs=2, join=True)
