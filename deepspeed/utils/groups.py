@@ -156,17 +156,12 @@ def _release_process_group_references(group=None):
         _DATA_PARALLEL_GROUP = None
 
 
-def _init_tp_groups_with_new_group(tensor_model_parallel_size=1, data_parallel_size=None):
-    """Initialize TP/DP groups with explicit rank lists.
+def _new_tp_groups(tensor_model_parallel_size=1, data_parallel_size=None):
+    """Create (data_parallel_group, tensor_model_parallel_group) with explicit rank lists.
 
     This mirrors a 2D DeviceMesh shaped as (data_parallel, tensor_parallel),
     while avoiding DeviceMesh's optimized split_group path.
     """
-
-    global _DATA_PARALLEL_GROUP
-    global _MODEL_PARALLEL_GROUP
-    global _TENSOR_MODEL_PARALLEL_GROUP
-
     world_size = dist.get_world_size()
     _ensure_divisibility(world_size, tensor_model_parallel_size)
 
@@ -196,9 +191,17 @@ def _init_tp_groups_with_new_group(tensor_model_parallel_size=1, data_parallel_s
 
     assert data_parallel_group is not None, 'data parallel group is not initialized'
     assert tensor_model_parallel_group is not None, 'tensor parallel group is not initialized'
+    return data_parallel_group, tensor_model_parallel_group
 
-    _DATA_PARALLEL_GROUP = data_parallel_group
-    _TENSOR_MODEL_PARALLEL_GROUP = tensor_model_parallel_group
+
+def _init_tp_groups_with_new_group(tensor_model_parallel_size=1, data_parallel_size=None):
+    """Initialize the process-wide TP/DP groups with explicit rank lists."""
+
+    global _DATA_PARALLEL_GROUP
+    global _MODEL_PARALLEL_GROUP
+    global _TENSOR_MODEL_PARALLEL_GROUP
+
+    _DATA_PARALLEL_GROUP, _TENSOR_MODEL_PARALLEL_GROUP = _new_tp_groups(tensor_model_parallel_size, data_parallel_size)
     _MODEL_PARALLEL_GROUP = _TENSOR_MODEL_PARALLEL_GROUP
 
     return _DATA_PARALLEL_GROUP, _MODEL_PARALLEL_GROUP
@@ -225,8 +228,33 @@ def _check_existing_tp_groups(tensor_model_parallel_size, data_parallel_size=Non
     raise RuntimeError(
         f"A {requested} was requested, but this process already has {existing}, "
         "created by an earlier engine or model. "
-        "DeepSpeed keeps these groups process-wide, so engines with different tensor parallel sizes "
-        "cannot be built in the same process yet (see https://github.com/deepspeedai/DeepSpeed/issues/9081).")
+        "These groups are process-wide; an engine created by deepspeed.initialize gets groups of its own "
+        "for another layout, but this path cannot yet (see https://github.com/deepspeedai/DeepSpeed/issues/9081).")
+
+
+def _build_tp_groups(tensor_model_parallel_size, data_parallel_size=None):
+    """Create (data_parallel_group, tensor_model_parallel_group) for a (DP, TP) layout of the world.
+
+    Collective: every rank must call it with the same sizes. Nothing process-wide is written.
+    """
+    if data_parallel_size is None:
+        data_parallel_size = dist.get_world_size() // tensor_model_parallel_size
+
+    if os.environ.get("TORCH_DISTRIBUTED_DEBUG", "").upper() == "DETAIL":
+        log_dist("TORCH_DISTRIBUTED_DEBUG=DETAIL detected; initializing TP mesh groups with new_group", ranks=[0])
+        return _new_tp_groups(tensor_model_parallel_size, data_parallel_size)
+
+    try:
+        mesh_device = dist.initialize_mesh_device((data_parallel_size, tensor_model_parallel_size),
+                                                  ("data_parallel", "tensor_parallel"))
+    except RuntimeError as exc:
+        if _DEVICE_MESH_SPLIT_UNSUPPORTED not in str(exc):
+            raise
+        log_dist("DeviceMesh process-group splitting is unsupported; falling back to new_group TP mesh groups",
+                 ranks=[0])
+        return _new_tp_groups(tensor_model_parallel_size, data_parallel_size)
+
+    return mesh_device.get_group(mesh_dim="data_parallel"), mesh_device.get_group(mesh_dim="tensor_parallel")
 
 
 def _init_tp_mesh_device(tensor_model_parallel_size=1, data_parallel_size=None):
@@ -240,25 +268,8 @@ def _init_tp_mesh_device(tensor_model_parallel_size=1, data_parallel_size=None):
         _check_existing_tp_groups(tensor_model_parallel_size, data_parallel_size)
         return
 
-    if data_parallel_size is None:
-        data_parallel_size = dist.get_world_size() // tensor_model_parallel_size
-
-    if os.environ.get("TORCH_DISTRIBUTED_DEBUG", "").upper() == "DETAIL":
-        log_dist("TORCH_DISTRIBUTED_DEBUG=DETAIL detected; initializing TP mesh groups with new_group", ranks=[0])
-        return _init_tp_groups_with_new_group(tensor_model_parallel_size, data_parallel_size)
-
-    try:
-        mesh_device = dist.initialize_mesh_device((data_parallel_size, tensor_model_parallel_size),
-                                                  ("data_parallel", "tensor_parallel"))
-    except RuntimeError as exc:
-        if _DEVICE_MESH_SPLIT_UNSUPPORTED not in str(exc):
-            raise
-        log_dist("DeviceMesh process-group splitting is unsupported; falling back to new_group TP mesh groups",
-                 ranks=[0])
-        return _init_tp_groups_with_new_group(tensor_model_parallel_size, data_parallel_size)
-
-    _TENSOR_MODEL_PARALLEL_GROUP = mesh_device.get_group(mesh_dim="tensor_parallel")
-    _DATA_PARALLEL_GROUP = mesh_device.get_group(mesh_dim="data_parallel")
+    _DATA_PARALLEL_GROUP, _TENSOR_MODEL_PARALLEL_GROUP = _build_tp_groups(tensor_model_parallel_size,
+                                                                          data_parallel_size)
 
     # They are always equal only in 2D (DP + TP) parallelism.
     # _MODEL_PARALLEL_GROUP is assigned the same value as _TENSOR_MODEL_PARALLEL_GROUP
@@ -266,6 +277,66 @@ def _init_tp_mesh_device(tensor_model_parallel_size=1, data_parallel_size=None):
     _MODEL_PARALLEL_GROUP = _TENSOR_MODEL_PARALLEL_GROUP
 
     return _DATA_PARALLEL_GROUP, _MODEL_PARALLEL_GROUP
+
+
+class TensorParallelGroups:
+    """The TP/DP groups of one engine, with the interface of an mpu.
+
+    The process-wide groups of this module belong to the first engine that creates them. An engine that needs
+    another layout in the same process gets its own groups in one of these (#9081).
+    """
+
+    def __init__(self, data_parallel_group, tensor_model_parallel_group):
+        self._data_parallel_group = data_parallel_group
+        self._tensor_model_parallel_group = tensor_model_parallel_group
+
+    @classmethod
+    def create(cls, tensor_model_parallel_size, data_parallel_size=None):
+        return cls(*_build_tp_groups(tensor_model_parallel_size, data_parallel_size))
+
+    def get_tensor_model_parallel_group(self):
+        return self._tensor_model_parallel_group
+
+    def get_tensor_model_parallel_world_size(self):
+        return dist.get_world_size(group=self._tensor_model_parallel_group)
+
+    def get_tensor_model_parallel_rank(self):
+        return dist.get_rank(group=self._tensor_model_parallel_group)
+
+    def get_tensor_model_parallel_src_rank(self):
+        return dist.get_global_rank(self._tensor_model_parallel_group, 0)
+
+    def get_model_parallel_group(self):
+        return self._tensor_model_parallel_group
+
+    def get_model_parallel_world_size(self):
+        return self.get_tensor_model_parallel_world_size()
+
+    def get_model_parallel_rank(self):
+        return self.get_tensor_model_parallel_rank()
+
+    def get_data_parallel_group(self):
+        return self._data_parallel_group
+
+    def get_data_parallel_world_size(self):
+        return dist.get_world_size(group=self._data_parallel_group)
+
+    def get_data_parallel_rank(self):
+        return dist.get_rank(group=self._data_parallel_group)
+
+
+def _get_or_create_tp_groups(tensor_model_parallel_size, data_parallel_size=None):
+    """Return the TP/DP groups for an engine: this module when the process-wide groups have the requested
+    layout (creating them if there are none yet), otherwise new TensorParallelGroups.
+    """
+    if _TENSOR_MODEL_PARALLEL_GROUP is None:
+        _init_tp_mesh_device(tensor_model_parallel_size, data_parallel_size)
+        return sys.modules[__name__]
+    try:
+        _check_existing_tp_groups(tensor_model_parallel_size, data_parallel_size)
+        return sys.modules[__name__]
+    except RuntimeError:
+        return TensorParallelGroups.create(tensor_model_parallel_size, data_parallel_size)
 
 
 def get_tensor_model_parallel_group():

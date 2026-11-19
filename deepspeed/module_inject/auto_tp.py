@@ -404,8 +404,13 @@ class AutoTP():
     def set_tensor_parallel_config(self, mp_size, mp_group):
 
         if self.training_mode:
-            self.mp_group = groups.get_tensor_model_parallel_group()
-            self.mp_size = groups.get_tensor_model_parallel_world_size()
+            # An engine with groups of its own (#9081) passes them; otherwise use the process-wide ones.
+            if mp_group is None or mp_group is groups.get_tensor_model_parallel_group():
+                self.mp_group = groups.get_tensor_model_parallel_group()
+                self.mp_size = groups.get_tensor_model_parallel_world_size()
+            else:
+                self.mp_group = mp_group
+                self.mp_size = dist.get_world_size(group=mp_group)
             return
 
         self.mp_size = mp_size
