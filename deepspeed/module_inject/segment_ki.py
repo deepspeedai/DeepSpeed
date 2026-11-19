@@ -759,6 +759,8 @@ def segki_refresh(model: torch.nn.Module) -> None:
     redesigned cache scheme) is still under design; expect this entry
     point to change.
     """
+    # Decode graphs that captured the dropped tensors key on this to recapture.
+    model._ki_refresh_generation = getattr(model, "_ki_refresh_generation", 0) + 1
     op = None
     for module in model.modules():
         for attr in ("_ki_tp_cat_w", "_ki_attn_cat_w", "_ki_conv_w_local", "_ki_gates_cache"):
