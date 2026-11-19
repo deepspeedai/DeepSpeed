@@ -3,17 +3,19 @@
 
 from .builder import CPUOpBuilder
 
+try:
+    from op_builder import __deepspeed__  # noqa: F401 # type: ignore
+    from op_builder.builder import _cpu_info
+except ImportError:
+    from deepspeed.ops.op_builder.builder import _cpu_info
+
 
 class ReflowCPUOp(CPUOpBuilder):
     """Host kernels are currently validated only on x86 CPU and CUDA configurations."""
 
     def _cpu_flags(self):
-        try:
-            from cpuinfo import get_cpu_info
-            cpu_info = get_cpu_info()
-        except Exception:
-            cpu_info = self._backup_cpuinfo()
-        return set(cpu_info.get('flags', [])) if cpu_info else set()
+        _, flags = _cpu_info()
+        return flags
 
     def simd_width(self):
         width = super().simd_width()

@@ -74,6 +74,26 @@ def test_reflow_optimizer_rejects_direct_step(optimizer_type, builder):
 
 
 @pytest.mark.parametrize("builder", [ReflowCPUAdamBuilder, ReflowCPULionBuilder])
+def test_reflow_builder_uses_shared_cpu_info_fallback(builder, monkeypatch):
+    import importlib
+    import cpuinfo
+    from deepspeed.ops.op_builder.cpu import reflow
+
+    cpu_info_module = importlib.import_module(reflow._cpu_info.__module__)
+
+    def unavailable_cpuinfo():
+        raise RuntimeError("CPU information unavailable")
+
+    monkeypatch.setattr(cpuinfo, "get_cpu_info", unavailable_cpuinfo)
+    monkeypatch.setattr(cpu_info_module, "_lscpu_cpu_info", lambda: ("X86_64", frozenset({"avx2", "fma", "f16c"})))
+    reflow._cpu_info.cache_clear()
+    try:
+        assert builder()._cpu_flags() == {"avx2", "fma", "f16c"}
+    finally:
+        reflow._cpu_info.cache_clear()
+
+
+@pytest.mark.parametrize("builder", [ReflowCPUAdamBuilder, ReflowCPULionBuilder])
 def test_reflow_builder_rejects_non_avx_cpu(builder, monkeypatch):
     # A compatible normal CPU optimizer must not imply that Reflow works on non-x86 hosts.
     monkeypatch.setattr(builder, "simd_width", lambda self: "-D__SCALAR__")

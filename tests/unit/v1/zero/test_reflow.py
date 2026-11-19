@@ -271,11 +271,20 @@ needs_gpu_accelerator = pytest.mark.skipif(get_accelerator().device_name() == "c
                                            reason="Reflow training tests need a GPU accelerator.")
 
 
-def skip_if_reflow_training_unsupported():
-    if not deepspeed.ops.__compatible_ops__.get(ReflowCPUAdamBuilder.NAME, False):
-        pytest.skip("ReflowCPUAdamBuilder is not compatible on this system.")
+def skip_if_reflow_training_unsupported(optimizer_kind="adam"):
+    builder = ReflowCPULionBuilder if optimizer_kind == "lion" else ReflowCPUAdamBuilder
+    if not deepspeed.ops.__compatible_ops__.get(builder.NAME, False):
+        pytest.skip(f"{builder.__name__} is not compatible on this system.")
     if not get_accelerator().is_bf16_supported():
         pytest.skip("bf16 is not supported on this accelerator.")
+
+
+@pytest.mark.parametrize("optimizer_kind", ["adam", "lion"])
+def test_training_compatibility_checks_selected_reflow_builder(optimizer_kind, monkeypatch):
+    monkeypatch.setitem(deepspeed.ops.__compatible_ops__, ReflowCPUAdamBuilder.NAME, optimizer_kind == "lion")
+    monkeypatch.setitem(deepspeed.ops.__compatible_ops__, ReflowCPULionBuilder.NAME, optimizer_kind == "adam")
+    with pytest.raises(pytest.skip.Exception):
+        skip_if_reflow_training_unsupported(optimizer_kind)
 
 
 def make_batches(hidden_dim, count, dtype=torch.bfloat16):
@@ -466,7 +475,7 @@ class TestReflowVariantsMatchZeroOffload(DistributedTest):
     world_size = [1, 2]
 
     def test_matches_zero_offload(self, variant, precision):
-        skip_if_reflow_training_unsupported()
+        skip_if_reflow_training_unsupported(variant)
         hidden_dim = 16
         dtype = torch.float16 if precision == "fp16" else torch.bfloat16
         num_steps = 4
@@ -504,7 +513,7 @@ class TestReflowSmallLossScaleMatchesZeroOffload(DistributedTest):
     world_size = [1, 2]
 
     def test_fp16_training_matches_zero_offload(self, optimizer_kind):
-        skip_if_reflow_training_unsupported()
+        skip_if_reflow_training_unsupported(optimizer_kind)
         torch.manual_seed(1234)
         initial_model = SimpleModel(hidden_dim=16, nlayers=2)
         batches = make_batches(16, count=4, dtype=torch.float16)
@@ -552,9 +561,7 @@ class TestReflowMultipleOptimizerGroupsMatchZeroOffload(DistributedTest):
 
     def test_group_hyperparameters_stay_isolated(self, optimizer_kind):
         # Large groups keep bucket workers active long enough to overlap across optimizer groups.
-        skip_if_reflow_training_unsupported()
-        if optimizer_kind == "lion" and not deepspeed.ops.__compatible_ops__.get(ReflowCPULionBuilder.NAME, False):
-            pytest.skip("CPULionBuilder is not compatible on this system.")
+        skip_if_reflow_training_unsupported(optimizer_kind)
 
         hidden_dim = 2049
         torch.manual_seed(1234)
@@ -820,8 +827,8 @@ class TestReflowPrecisionValidation(DistributedTest):
     def test_initializes_half_precision_zero_init_model(self, precision):
         if precision == "fp16" and not get_accelerator().is_fp16_supported():
             pytest.skip("the accelerator does not support FP16")
-        if not deepspeed.ops.__compatible_ops__.get(CPUAdamBuilder.NAME, False):
-            pytest.skip("the CPU optimizer builder is not supported on this accelerator")
+        if not deepspeed.ops.__compatible_ops__.get(ReflowCPUAdamBuilder.NAME, False):
+            pytest.skip("the ReFlow CPU Adam builder is not supported on this accelerator")
         config = get_variant_config(reflow=True, variant="offload_param")
         dtype = torch.float16 if precision == "fp16" else torch.bfloat16
         if precision == "fp16":
