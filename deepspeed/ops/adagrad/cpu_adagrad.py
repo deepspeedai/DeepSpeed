@@ -6,19 +6,19 @@
 import torch
 from deepspeed.ops.op_builder import CPUAdagradBuilder
 from deepspeed.utils.logging import should_log_le
+from deepspeed.ops.cpu_optimizer import DeepSpeedCPUOptimizer
 
 
-class DeepSpeedCPUAdagrad(torch.optim.Optimizer):
+class DeepSpeedCPUAdagrad(DeepSpeedCPUOptimizer):
     optimizer_id = 0
 
     def __init__(self, model_params, lr=1e-2, eps=1e-10, weight_decay=0, amsgrad=False, fp32_optimizer_states=True):
 
         default_args = dict(lr=lr, eps=eps, weight_decay=weight_decay, amsgrad=amsgrad)
-        super(DeepSpeedCPUAdagrad, self).__init__(model_params, default_args)
+        super(DeepSpeedCPUAdagrad, self).__init__(model_params, default_args, fp32_optimizer_states)
 
         self.opt_id = DeepSpeedCPUAdagrad.optimizer_id
         DeepSpeedCPUAdagrad.optimizer_id = DeepSpeedCPUAdagrad.optimizer_id + 1
-        self.fp32_optimizer_states = fp32_optimizer_states
         try:
             self.ds_opt_adagrad = CPUAdagradBuilder().load()
         except Exception as e:
@@ -75,16 +75,13 @@ class DeepSpeedCPUAdagrad(torch.optim.Optimizer):
                 state = self.state[p]
                 # State initialization
                 if len(state) == 0:
-                    #print(f'group {group_id} param {param_id} = {p.numel()}')
                     state['step'] = 0
 
                     #use full precision by default unless self.fp32_optimizer_states is off
                     state_dtype = torch.float if self.fp32_optimizer_states else p.dtype
 
-                    #memory_format=torch.preserve_format)
                     # gradient variances
                     state['exp_avg_sq'] = torch.zeros_like(p.data, dtype=state_dtype, device='cpu')
-                    #memory_format=torch.preserve_format)
 
                 state['step'] += 1
 
