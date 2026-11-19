@@ -199,16 +199,27 @@ Requirements, checked at `deepspeed.initialize()`:
 - Every tensor-parallel linear inside the decoder layers belongs to a block (the
   parent module of a row-parallel linear), the blocks are inside one numbered layer
   list (such as `model.layers`), and every decoder layer has at least one block.
+- A block is neither a whole decoder layer nor inside another block: the
+  row-parallel linears sit inside the attention and MLP modules, not directly in the
+  decoder layer (as OPT's `fc2` does), because the decoder layer adds the residual to
+  the block output.
 - The sequence length is divisible by `autotp_size` (checked in the forward pass).
 - No column-parallel layer gathers its output, and the DeepCompile `autotp` pass is
   not used.
 - No AutoEP MoE layer is inside the decoder layers: AutoEP + AutoTP folding expects
   every TP rank to hold the whole sequence.
+- No other routed MoE layer (a module with `experts` and a `gate` or `router`) is
+  inside the decoder layers: the TP ranks hold different tokens, so they could call
+  different experts, and a gradient sum or block gather that runs on some ranks only
+  would hang.
 
 The modules of a decoder layer outside its blocks (an MLP left unsharded, for
 example) run on this rank's part of the sequence, so they must act on each token
-alone. Shard every attention module: an unsharded attention would attend over the
-wrong tokens, and this is not checked.
+alone, and they must use every one of their parameters on every rank whatever the
+tokens are: a replicated parameter's gradient is summed over the TP group, and a
+rank whose tokens skip the parameter would not join that sum. Shard every attention
+module: an unsharded attention would attend over the wrong tokens. These two
+conditions are not checked.
 
 At ZeRO stages 0, 1 and 2 the gradient sum of a replicated parameter runs in a
 tensor hook. PyTorch skips that hook when a custom autograd function, such as a

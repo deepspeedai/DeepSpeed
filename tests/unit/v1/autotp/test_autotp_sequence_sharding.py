@@ -136,6 +136,41 @@ class TestAutoTPSequenceSharding(DistributedTest):
             torch.testing.assert_close(norm.detach(), reference_norm.detach(), rtol=1e-5, atol=1e-6)
 
 
+class TestAutoTPSequenceShardingTwoForwards(DistributedTest):
+    """Checkpointing recomputes each forward pass's blocks during backward, and a recomputation must take the path its
+    forward took. With two forward passes before the first backward (a contrastive or DPO loss), the second pass must
+    not start running the blocks' linears in one autograd node before the first pass has been recomputed."""
+    world_size = 2
+
+    def test_two_forwards_before_one_backward(self):
+        skip_on_device()
+        pytest.importorskip("transformers")
+
+        config, model = build_qwen3_model()
+        reference = copy.deepcopy(model).to(get_accelerator().current_device_name())
+        reference_optimizer = torch.optim.SGD(reference.parameters(), lr=0.1)
+        model.gradient_checkpointing_enable()
+        engine, _, _, _ = deepspeed.initialize(model=model,
+                                               model_parameters=model.parameters(),
+                                               config=build_config(zero_stage=1, mode="overlap"))
+
+        # The first step learns which linears read each block input; the second runs them in one autograd node.
+        for step in range(2):
+            first = tp_shared_input_ids(config.vocab_size, 16, 2 * step)
+            second = tp_shared_input_ids(config.vocab_size, 16, 2 * step + 1)
+            loss = engine(input_ids=first, labels=first).loss + engine(input_ids=second, labels=second).loss
+            engine.backward(loss)
+            engine.step()
+
+            reference_loss = (reference(input_ids=first, labels=first).loss +
+                              reference(input_ids=second, labels=second).loss)
+            reference_loss.backward()
+            reference_optimizer.step()
+            reference_optimizer.zero_grad()
+
+            torch.testing.assert_close(loss.detach(), reference_loss.detach(), rtol=1e-5, atol=1e-5)
+
+
 ATTENTION_ONLY_PARTITION = {
     "use_default_specs":
     False,
@@ -318,6 +353,37 @@ def build_glm4_moe_model():
     return config, AutoModelForCausalLM.from_config(config)
 
 
+def build_opt_model():
+    from transformers import AutoModelForCausalLM, OPTConfig
+
+    # OPT keeps fc1 and fc2 directly in the decoder layer, next to the self_attn module.
+    config = OPTConfig(vocab_size=128,
+                       hidden_size=64,
+                       ffn_dim=128,
+                       num_hidden_layers=2,
+                       num_attention_heads=4,
+                       max_position_embeddings=128,
+                       word_embed_proj_dim=64)
+    torch.manual_seed(0)
+    return config, AutoModelForCausalLM.from_config(config)
+
+
+OPT_PARTITION = {
+    "use_default_specs":
+    False,
+    "layer_specs": [
+        {
+            "patterns": [r".*\.self_attn\.out_proj\.weight$", r".*\.fc2\.weight$"],
+            "partition_type": "row"
+        },
+        {
+            "patterns": [r".*\.self_attn\.[qkv]_proj\.weight$", r".*\.fc1\.weight$"],
+            "partition_type": "column"
+        },
+    ],
+}
+
+
 class TestAutoTPSequenceShardingRejects(DistributedTest):
     world_size = 2
 
@@ -360,6 +426,40 @@ class TestAutoTPSequenceShardingRejects(DistributedTest):
             raised = False
         except NotImplementedError as error:
             raised = "AutoEP" in str(error)
+        assert raised
+
+    def test_row_parallel_linear_in_decoder_layer(self):
+        """OPT's fc2 is a row-parallel linear directly in the decoder layer. The whole layer would become a block: it
+        would gather its input a second time around the attention block and reduce-scatter before the residual add,
+        so initialization must refuse the layout."""
+        skip_on_device()
+        pytest.importorskip("transformers")
+
+        config, model = build_opt_model()
+        ds_config = build_config(zero_stage=1, mode="overlap")
+        ds_config["tensor_parallel"]["partition_config"] = OPT_PARTITION
+        try:
+            deepspeed.initialize(model=model, model_parameters=model.parameters(), config=ds_config)
+            raised = False
+        except ValueError as error:
+            raised = "model.decoder.layers.0" in str(error)
+        assert raised
+
+    def test_routed_moe_layers(self):
+        """A routed MoE layer calls only the experts its tokens chose. With sequence sharding each rank holds other
+        tokens, so ranks could use different experts and a gradient sum on some ranks only would hang;
+        initialization must refuse the layer."""
+        skip_on_device()
+        pytest.importorskip("transformers")
+
+        config, model = build_glm4_moe_model()
+        ds_config = build_config(zero_stage=1, mode="overlap")
+        ds_config["tensor_parallel"]["partition_config"] = ATTENTION_ONLY_PARTITION
+        try:
+            deepspeed.initialize(model=model, model_parameters=model.parameters(), config=ds_config)
+            raised = False
+        except NotImplementedError as error:
+            raised = "model.layers.1.mlp" in str(error)
         assert raised
 
     def test_skipped_gradient_sum(self):

@@ -22,7 +22,8 @@ Requirements, checked when it is applied:
   - every tensor-parallel linear inside the decoder layers belongs to a block: the parent module of a row-parallel
     linear, whose first tensor argument (or ``hidden_states``) is the input of its column-parallel linears;
   - every decoder layer of the layer list has at least one block;
-  - no AutoEP MoE layer is inside the decoder layers;
+  - a block is neither a whole decoder layer nor inside another block;
+  - no AutoEP or other routed MoE layer is inside the decoder layers;
   - the sequence length is divisible by the tensor-parallel size.
 Every replicated parameter inside the decoder layers (norm weights, row-parallel biases) then sees only this rank's
 part of the sequence or of the heads, so its gradient is summed over the tensor-parallel group. The modules of a
@@ -217,6 +218,7 @@ class _BlockState:
         self.readers = []
         self.passes = passes  # one-element list: the model's forward passes so far
         self.learned_in = None  # the pass that recorded the readers
+        self.fusable = False  # set only between forward passes, by the model's forward pre-hook
 
     def can_fuse(self):
         weights = [layer.weight for layer in self.readers]
@@ -257,6 +259,15 @@ def _replace_hidden_states(args, kwargs, fn, where):
         return args, kwargs
     raise RuntimeError(f"AutoTP sequence sharding: {where} was called without a tensor as its first argument or "
                        "as hidden_states")
+
+
+def _is_routed_moe(module):
+    """A mixture-of-experts layer: experts chosen per token by a gate or router module."""
+    experts = getattr(module, "experts", None)
+    router = getattr(module, "gate", None)
+    if not isinstance(router, nn.Module):
+        router = getattr(module, "router", None)
+    return isinstance(experts, nn.Module) and isinstance(router, nn.Module)
 
 
 def _layer_list_of(block_name):
@@ -304,11 +315,27 @@ def apply_autotp_sequence_sharding(model, group, seq_dim=1, overlap=True, zero_s
         raise ValueError(f"AutoTP sequence sharding: decoder layers {missing} of {list_name!r} have no "
                          "tensor-parallel block; their ops would see a split sequence")
 
-    # AutoEP + AutoTP folding expects every tensor-parallel rank to hold the whole sequence: it splits the routed
-    # tokens over the ranks and gathers the expert outputs back, which would mix the ranks' different tokens here.
+    # The decoder layer adds the residual to a block's output on this rank's part of the sequence, so the block's
+    # row-parallel linear must produce the block output. A row-parallel linear directly in the decoder layer (OPT's
+    # fc2) would make the whole layer a block: it would gather its input a second time around the attention block
+    # and reduce-scatter before the residual add.
+    for block_name in blocks:
+        if block_name == f"{list_name}.{_layer_list_of(block_name)[1]}":
+            raise ValueError(f"AutoTP sequence sharding: decoder layer {block_name!r} holds a row-parallel linear "
+                             "directly; it supports row-parallel linears inside the attention and MLP modules only")
+        inner = sorted(other for other in blocks if other.startswith(block_name + "."))
+        if inner:
+            raise ValueError(f"AutoTP sequence sharding: block {block_name!r} contains the blocks {inner}")
+
     for name, m in layers.named_modules(prefix=list_name):
+        # AutoEP + AutoTP folding expects every tensor-parallel rank to hold the whole sequence: it splits the routed
+        # tokens over the ranks and gathers the expert outputs back, which would mix the ranks' different tokens here.
         if getattr(m, "_is_autoep_layer", False):
             raise NotImplementedError(f"AutoTP sequence sharding does not support AutoEP MoE layers ({name!r})")
+        # A routed MoE layer calls only the experts its tokens chose. Each rank holds other tokens, so the ranks could
+        # use different experts, and a gradient sum or block gather that runs on some ranks only would hang.
+        if _is_routed_moe(m):
+            raise NotImplementedError(f"AutoTP sequence sharding does not support routed MoE layers ({name!r})")
 
     # Every tensor-parallel layer inside the decoder layers must belong to a block, and column outputs must stay
     # sharded (a gathered column output would mix a split sequence and a full one).
@@ -331,9 +358,9 @@ def apply_autotp_sequence_sharding(model, group, seq_dim=1, overlap=True, zero_s
     def make_gather_hook(state):
 
         def gather(x):
-            # Fused only from the pass after the one that recorded the readers: activation checkpointing recomputes
-            # the block in backward within the same pass, and the recomputation must save what the forward saved.
-            if overlap and state.learned_in is not None and state.passes[0] > state.learned_in and state.can_fuse():
+            # Fused only once the forward pre-hook has allowed it (see count_pass): activation checkpointing
+            # recomputes the block in backward, and the recomputation must save what the forward saved.
+            if overlap and state.fusable and state.can_fuse():
                 readers = state.readers
                 weights = [layer.weight for layer in readers]
                 x_full, *outs = ColumnGroupFromSequenceShards.apply(x, group, seq_dim, *weights)
@@ -362,9 +389,22 @@ def apply_autotp_sequence_sharding(model, group, seq_dim=1, overlap=True, zero_s
         return hook
 
     passes = [0]
+    # Set when a gradient reaches the decoder layers' output; read when the next forward pass starts.
+    backward_seen = [False]
+    states = []
 
     def count_pass(module, args):
         passes[0] += 1
+        # A block is fused only in forward passes that start after a backward that followed the pass that recorded
+        # its readers. Checkpointing recomputes a forward pass's blocks during backward, and each recomputation must
+        # take the path its forward took; switching only here keeps that true also when several forward passes come
+        # before one backward (a contrastive or DPO loss). It does not cover a forward pass that starts between two
+        # backward passes while an earlier forward pass still awaits its backward; checkpointing then raises.
+        if backward_seen[0]:
+            backward_seen[0] = False
+            for state in states:
+                if state.learned_in is not None:
+                    state.fusable = True
 
     model.register_forward_pre_hook(count_pass)
 
@@ -374,6 +414,7 @@ def apply_autotp_sequence_sharding(model, group, seq_dim=1, overlap=True, zero_s
             if isinstance(m, LinearLayer) and getattr(m, "sequence_sharding", False)
         ]
         state = _BlockState(columns, passes)
+        states.append(state)
         block.register_forward_pre_hook(make_gather_hook(state), with_kwargs=True)
         block.register_forward_hook(make_release_hook(state))
 
@@ -381,11 +422,20 @@ def apply_autotp_sequence_sharding(model, group, seq_dim=1, overlap=True, zero_s
         return _replace_hidden_states(args, kwargs, lambda x: ScatterToSequenceShards.apply(x, group, seq_dim),
                                       type(module).__name__)
 
+    def mark_backward(grad):
+        backward_seen[0] = True
+
+    def gather_output(output):
+        gathered = GatherFromSequenceShards.apply(output, group, seq_dim)
+        if gathered.requires_grad:
+            gathered.register_hook(mark_backward)
+        return gathered
+
     def leave(module, args, output):
         if torch.is_tensor(output):
-            return GatherFromSequenceShards.apply(output, group, seq_dim)
+            return gather_output(output)
         if isinstance(output, tuple) and output and torch.is_tensor(output[0]):
-            return (GatherFromSequenceShards.apply(output[0], group, seq_dim), *output[1:])
+            return (gather_output(output[0]), *output[1:])
         raise RuntimeError(f"AutoTP sequence sharding: {type(module).__name__} returned {type(output).__name__}")
 
     layers[0].register_forward_pre_hook(enter, with_kwargs=True)
