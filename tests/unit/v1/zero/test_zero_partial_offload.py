@@ -17,6 +17,8 @@ from unit.common import DistributedTest
 
 if not deepspeed.ops.__compatible_ops__[CPUAdamBuilder.NAME]:
     pytest.skip("cpu-adam is not compatible", allow_module_level=True)
+if not get_accelerator().is_bf16_supported():
+    pytest.skip("the tests train in bf16", allow_module_level=True)
 
 HIDDEN = 64
 
@@ -113,6 +115,8 @@ class TestPartialOffloadHyperparameters(DistributedTest):
     def test_first_step_at_zero_lr(self, super_offload):
         if super_offload and get_accelerator().device_name() != "cuda":
             pytest.skip("SuperOffload supports only CUDA")
+        if get_accelerator().device_name() == "cpu":
+            pytest.skip("With the CPU accelerator no sub-group is kept on another device")
         config = _config(ratio=0.5, super_offload=super_offload)
         config["scheduler"] = {
             "type": "WarmupLR",
@@ -230,3 +234,15 @@ class TestPartialOffloadAdamSettings(DistributedTest):
         config["optimizer"]["params"]["bias_correction"] = False
         with pytest.raises(ValueError, match="bias_correction"):
             _engine(config)
+
+    def test_bias_correction_off_in_checkpoint_is_rejected(self, tmpdir):
+        """A checkpoint saved with bias_correction=False restores it to the param groups of the CPU optimizer."""
+        config = _config(ratio=1.0)
+        config["optimizer"]["params"]["bias_correction"] = False
+        engine = _engine(config)
+        _train(engine, 1)
+        engine.save_checkpoint(str(tmpdir), tag="t")
+        engine = _engine(_config(ratio=0.5))
+        engine.load_checkpoint(str(tmpdir), tag="t")
+        with pytest.raises(ValueError, match="bias_correction"):
+            _train(engine, 1)

@@ -61,6 +61,10 @@ INIT_OPTIMIZER_TIMER = 'init_optimizer_state'
 OPTIMIZER_SWAP_OUT_STATE_TIMER = 'optimizer_swap_out_state'
 OPTIMIZER_STEP_TIMER = 'optimizer_step'
 
+PARTIAL_OFFLOAD_NO_BIAS_CORRECTION = ("offload_optimizer.ratio < 1 steps the sub-groups kept on the device with torch "
+                                      "Adam, which always applies bias correction; bias_correction=False is not "
+                                      "supported.")
+
 
 def print_rank_0(message, debug=False, force=False):
     rank = dist.get_rank()
@@ -327,9 +331,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             backup_gpu_param = torch.nn.Parameter(backup_gpu_tensor)
             assert type(init_optimizer) == DeepSpeedCPUAdam, 'Hybrid Optimizer Only Supports DeepSpeedCPUAdam'
             if not all(group.get("bias_correction", True) for group in self.optimizer.param_groups):
-                raise ValueError(
-                    "offload_optimizer.ratio < 1 steps the sub-groups kept on the device with torch Adam, "
-                    "which always applies bias correction; bias_correction=False is not supported.")
+                raise ValueError(PARTIAL_OFFLOAD_NO_BIAS_CORRECTION)
             # The same update as DeepSpeedCPUAdam: decoupled weight decay, or L2 when adam_w_mode is off.
             backup_optimizer_class = torch.optim.AdamW if init_optimizer.adam_w_mode else torch.optim.Adam
             self.backup_optimizer = backup_optimizer_class([backup_gpu_param],
@@ -1316,6 +1318,9 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         """
         backup_group = self.backup_optimizer.param_groups[param_group_id]
         main_group = self.optimizer.param_groups[param_group_id]
+        # __init__ rejects bias_correction=False, but a checkpoint load can restore it.
+        if not main_group.get("bias_correction", True):
+            raise ValueError(PARTIAL_OFFLOAD_NO_BIAS_CORRECTION)
         for key in ("lr", "betas", "eps", "weight_decay"):
             backup_group[key] = main_group[key]
 
