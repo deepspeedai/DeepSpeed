@@ -550,6 +550,19 @@ class DeepSpeedEngine(Module):
         self.warn_unscaled_loss = True
         self.config = config
         self._config = config_class
+        # Reject incompatible layouts before changing process-wide mesh or expert state.
+        # An explicit mpu replaces groups.mpu; a data/sequence parallel mesh does not.
+        requested_tp_size = self.autotp_size()
+        if requested_tp_size > 1 and mesh_device is None and groups.mesh_device is not None:
+            # The data parallel getters read groups.mesh_device before any mpu, so this engine would run on the
+            # earlier engine's data/sequence parallel mesh instead of its own TP layout.
+            raise RuntimeError(
+                "An AutoTP engine cannot be built after an engine with a data/sequence parallel mesh in the same "
+                "process yet (see https://github.com/deepspeedai/DeepSpeed/issues/9081).")
+        if ((requested_tp_size > 1 or (self.mpu is None and groups.mpu is groups))
+                and not groups._existing_tp_groups_match(max(requested_tp_size, 1))):
+            # This engine will get TP/DP groups of its own (#9081).
+            self._check_supported_with_own_groups(model, mesh_device, max(requested_tp_size, 1))
         if self._config.deterministic_mode:
             from .determinism import apply_determinism
             apply_determinism(self._config)
@@ -616,12 +629,8 @@ class DeepSpeedEngine(Module):
             # Without an mpu of its own, this engine would inherit groups.mpu. When an earlier AutoTP engine set it,
             # that means its data parallel group, which covers only part of the ranks, so this engine gets groups
             # of its own instead. An mpu passed to a later engine replaces groups.mpu, and then the cached AutoTP
-            # groups are not used. A data/sequence parallel mesh does not replace it either, and the model parallel
-            # size and rank are still read from groups.mpu, which is not supported yet.
-            if self.mesh_device is not None:
-                groups._check_existing_tp_groups(tensor_model_parallel_size=1)
-            else:
-                self.mpu = groups._get_or_create_tp_groups(tensor_model_parallel_size=1)
+            # groups are not used.
+            self.mpu = groups._get_or_create_tp_groups(tensor_model_parallel_size=1)
         see_memory_usage("DeepSpeed Engine: After args sanity test", force=self.memory_breakdown())
         self._set_distributed_vars(args)
 
@@ -981,18 +990,6 @@ class DeepSpeedEngine(Module):
 
         # The process-wide groups when they have this engine's layout, else groups owned by this engine (#9081).
         self.mpu = groups._get_or_create_tp_groups(tensor_model_parallel_size=self.autotp_size())
-        if self._owns_parallel_groups():
-            if self.mesh_device is not None:
-                raise ValueError(
-                    "An AutoTP engine whose tensor parallel size differs from an earlier engine's "
-                    "cannot use mesh_param yet (see https://github.com/deepspeedai/DeepSpeed/issues/9081).")
-            if self._autoep_folding_spec is not None:
-                raise ValueError("An AutoTP engine whose tensor parallel size differs from an earlier engine's "
-                                 "cannot use AutoEP yet (see https://github.com/deepspeedai/DeepSpeed/issues/9081).")
-            if self.is_deepcompile_enabled() and self.compile_autotp():
-                raise ValueError("An AutoTP engine whose tensor parallel size differs from an earlier engine's "
-                                 "cannot use the DeepCompile 'autotp' pass yet "
-                                 "(see https://github.com/deepspeedai/DeepSpeed/issues/9081).")
 
         self.first_dataloader_check = None
 
@@ -1502,6 +1499,23 @@ class DeepSpeedEngine(Module):
         if random_ltd_config[RANDOM_LTD_LAYER_TOKEN_LR_SCHEDULE][RANDOM_LTD_LAYER_TOKEN_LR_ENABLED]:
             assert self.client_lr_scheduler is None
             raise ValueError('not yet support')
+
+    def _check_supported_with_own_groups(self, model, mesh_device, tensor_model_parallel_size):
+        """Raise for what still reads the process-wide groups, before this engine changes any state (#9081)."""
+        if mesh_device is not None:
+            # A data/sequence parallel mesh does not replace groups.mpu, and the model parallel size and rank
+            # are still read from it.
+            groups._check_existing_tp_groups(tensor_model_parallel_size)
+        unsupported = "An engine whose tensor parallel size differs from an earlier engine's cannot use {} yet " \
+                      "(see https://github.com/deepspeedai/DeepSpeed/issues/9081)."
+        autoep_config = self._config.expert_parallel_config
+        if autoep_config is not None and autoep_config.enabled:
+            raise ValueError(unsupported.format("AutoEP"))
+        if self.is_deepcompile_enabled() and self.compile_autotp():
+            raise ValueError(unsupported.format("the DeepCompile 'autotp' pass"))
+        # Expert groups are still built from the process-wide groups.
+        if any(isinstance(module, MoE) for module in model.modules()):
+            raise ValueError(unsupported.format("MoE layers"))
 
     def _owns_parallel_groups(self):
         """Whether this engine runs on TP/DP groups of its own rather than the process-wide ones (#9081)."""
@@ -2216,11 +2230,6 @@ class DeepSpeedEngine(Module):
             elif _AutoEPMoELayer is not None and isinstance(module, _AutoEPMoELayer):
                 self.has_moe_layers = True
                 self.num_experts.append(module.num_experts)
-
-        if self.has_moe_layers and self._owns_parallel_groups():
-            # Expert groups are still built from the process-wide groups.
-            raise ValueError("An engine whose tensor parallel size differs from an earlier engine's cannot have "
-                             "MoE layers yet (see https://github.com/deepspeedai/DeepSpeed/issues/9081).")
 
         if self.has_moe_layers:
             for _, module in self.module.named_modules():
@@ -5915,6 +5924,13 @@ class DeepSpeedEngine(Module):
             logger.info(
                 f"Currently AutoSP does not compose with ZeRO stage 2 and 3. Falling back to the torch compiler.")
             return None
+
+        autosp_size = self._config._param_dict.get("sequence_parallel_size", 1)
+        if self.sequence_parallel_size != autosp_size:
+            raise ValueError(f"AutoSP shards the sequence over sequence_parallel_size={autosp_size} ranks, "
+                             f"but the engine reduces gradients over a sequence parallel group of "
+                             f"{self.sequence_parallel_size} ranks. Do not pass an mpu or a mesh_param whose "
+                             "sequence parallel dimension differs from sequence_parallel_size.")
 
         compile_config = self._config.compile_config
         compile_kwargs['fullgraph'] = True

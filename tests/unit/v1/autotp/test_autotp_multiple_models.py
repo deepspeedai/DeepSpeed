@@ -138,8 +138,8 @@ class WorldMPU:
         return dist.get_world_group()
 
 
-def build_engine(tp_size, mpu=None, mesh_param=None, model=None, extra_config=None):
-    config = {"train_micro_batch_size_per_gpu": 1, **(extra_config or {})}
+def build_engine(tp_size, mpu=None, mesh_param=None, model=None, optimizer=None, extra_config=None):
+    config = {"train_micro_batch_size_per_gpu": 1, "gradient_clipping": 0.0, **(extra_config or {})}
     if tp_size > 1:
         # Nothing is sharded; the test is about which groups the engine runs on.
         config["tensor_parallel"] = {
@@ -156,6 +156,7 @@ def build_engine(tp_size, mpu=None, mesh_param=None, model=None, extra_config=No
         model = SimpleModel(hidden_dim=8)
     engine, _, _, _ = deepspeed.initialize(model=model,
                                            model_parameters=model.parameters(),
+                                           optimizer=optimizer,
                                            config=config,
                                            mpu=mpu,
                                            mesh_param=mesh_param)
@@ -192,12 +193,37 @@ class TestAutoTPEnginesWithDifferentLayouts(DistributedTest):
         assert first.dp_world_size == 2
         assert first.get_tensor_parallel_rank() == dist.get_rank() % 2
 
-    def test_mesh_engine_after_autotp_raises(self):
-        # A data/sequence parallel mesh does not replace groups.mpu, so this engine would read the TP2 groups'
-        # model parallel size.
-        build_engine(tp_size=2)
+    @pytest.mark.parametrize("second_tp_size", [1, 4])
+    def test_mesh_engine_after_autotp_raises(self, second_tp_size):
+        # A rejected engine must not replace the mesh used by the first engine.
+        first = build_engine(tp_size=2, optimizer=lambda params: torch.optim.SGD(params, lr=0.1))
+        mesh_device = groups.mesh_device
+        reference = SimpleModel(hidden_dim=8).to(first.device)
+        reference.load_state_dict(first.module.state_dict())
+        reference_optimizer = torch.optim.SGD(reference.parameters(), lr=0.1)
+
         with pytest.raises(RuntimeError, match="9081"):
-            build_engine(tp_size=1, mesh_param=(dist.get_world_size(), 1))
+            build_engine(tp_size=second_tp_size, mesh_param=(dist.get_world_size(), 1))
+
+        assert groups.mesh_device is mesh_device
+        inputs = torch.ones(1, 8, device=first.device)
+        labels = torch.zeros(1, dtype=torch.long, device=first.device)
+        expected_loss = reference(inputs, labels)
+        expected_loss.backward()
+        reference_optimizer.step()
+        loss = first(inputs, labels)
+        torch.testing.assert_close(loss, expected_loss)
+        first.backward(loss)
+        first.step()
+        for actual, expected in zip(first.module.parameters(), reference.parameters()):
+            torch.testing.assert_close(actual, expected)
+
+    def test_autotp_engine_after_mesh_raises(self):
+        # The data parallel getters read groups.mesh_device first, so this engine would run on the mesh's
+        # data parallel group, which spans ranks that hold different TP shards.
+        build_engine(tp_size=1, mesh_param=(dist.get_world_size(), 1))
+        with pytest.raises(RuntimeError, match="mesh.*9081"):
+            build_engine(tp_size=2)
 
     def test_moe_engine_with_its_own_groups_raises(self):
         # Expert groups are still built from the process-wide groups, which describe the TP2 engine.

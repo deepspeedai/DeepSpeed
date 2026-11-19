@@ -10,7 +10,8 @@ from dataclasses import dataclass
 from typing import List, Optional, Sequence, Tuple
 
 __all__ = [
-    'LogicalBox', 'coordinate', 'dot', 'product', 'row_major_range_boxes', 'row_major_strides', 'strided_address'
+    'LogicalBox', 'address_range', 'coordinate', 'dot', 'overlaps_itself', 'product', 'row_major_range_boxes',
+    'row_major_strides', 'strided_address'
 ]
 
 
@@ -44,6 +45,35 @@ def coordinate(offset: int, strides: Tuple[int, ...], shape: Tuple[int, ...]) ->
 
 def dot(index, strides):
     return sum(position * stride for position, stride in zip(index, strides))
+
+
+def address_range(offset: int, shape: Sequence[int], strides: Sequence[int]) -> Tuple[int, int]:
+    """The lowest and highest address a strided view reaches, both inclusive."""
+    low = offset
+    high = offset
+    for size, stride in zip(shape, strides):
+        reach = (size - 1) * stride
+        if reach < 0:
+            low += reach
+        else:
+            high += reach
+    return low, high
+
+
+def overlaps_itself(shape: Sequence[int], strides: Sequence[int]) -> bool:
+    """Whether two positions of a view with this shape and these strides share an address.
+
+    Taking the axes that move in order of stride, the view is free of overlap when each stride
+    clears every address the axes before it reach. That holds for every layout the builders
+    produce. A view that interleaves its axes some other way is refused even where it would not
+    collide, which keeps this to a few comparisons per view instead of a walk over its elements.
+    """
+    reach = 0
+    for stride, size in sorted((stride, size) for size, stride in zip(shape, strides) if size > 1):
+        if stride <= reach:
+            return True
+        reach += stride * (size - 1)
+    return False
 
 
 def strided_address(shape, offset, strides, index):
