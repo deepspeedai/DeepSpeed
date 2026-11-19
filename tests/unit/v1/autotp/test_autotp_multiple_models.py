@@ -228,8 +228,12 @@ class TestAutoTPEnginesWithDifferentLayouts(DistributedTest):
     def test_moe_engine_with_its_own_groups_raises(self):
         # Expert groups are still built from the process-wide groups, which describe the TP2 engine.
         build_engine(tp_size=2)
+        model = SimpleMoEModel(hidden_dim=8)
         with pytest.raises(ValueError, match="MoE.*9081"):
-            build_engine(tp_size=4, model=SimpleMoEModel(hidden_dim=8))
+            build_engine(tp_size=4, model=model)
+        # It raises before initialize changes the model or creates any groups.
+        assert all(param.device.type == "cpu" for param in model.parameters())
+        assert groups.get_tensor_model_parallel_world_size() == 2
 
     def test_checkpoint_writer_uses_the_engines_own_groups(self, monkeypatch):
         # The writer read the layout from groups.mpu, which describes the TP2 engine.
@@ -287,13 +291,15 @@ class TestAutoTPEnginesWithDifferentTPSizesTrain(DistributedTest):
     @pytest.mark.parametrize("zero_stage", [0, 1, 2, 3])
     @pytest.mark.parametrize("tp_sizes", [(2, 4), (4, 2)])
     def test_each_engine_matches_an_unsharded_model(self, tp_sizes, zero_stage):
-        hidden_dim, lr = 8, 1e-2
+        hidden_dim, lr, clip = 8, 1e-2, 0.1
+        global_batch = dist.get_world_size()
         torch.manual_seed(0)
         reference = MLP(hidden_dim)
         engines = []
         for tp_size in tp_sizes:
             config = {
-                "train_micro_batch_size_per_gpu": 2,
+                "train_micro_batch_size_per_gpu": global_batch * tp_size // dist.get_world_size(),
+                "gradient_clipping": clip,
                 "optimizer": {
                     "type": "Adam",
                     "params": {
@@ -325,16 +331,21 @@ class TestAutoTPEnginesWithDifferentTPSizesTrain(DistributedTest):
         reference = reference.to(device)
         reference_optimizer = torch.optim.Adam(reference.parameters(), lr=lr)
         generator = torch.Generator().manual_seed(1)
-        for _ in range(3):
-            # Every rank sees the same batch, so the data parallel average leaves the gradient unchanged.
-            x = torch.randn(2, hidden_dim, generator=generator).to(device)
-            y = torch.randint(0, hidden_dim, (2, ), generator=generator).to(device)
-            reference_loss = reference(x, y)
-            reference_optimizer.zero_grad()
-            reference_loss.backward()
-            reference_optimizer.step()
+        for _ in range(4):
+            # Each data parallel rank gets its own part of the batch, so a wrong data parallel group shows up as
+            # a different update. The loss compares the parameters left by the previous step.
+            x = torch.randn(global_batch, hidden_dim, generator=generator).to(device)
+            y = torch.randint(0, hidden_dim, (global_batch, ), generator=generator).to(device)
             for engine in engines:
-                loss = engine(x, y)
+                dp_size, dp_rank = engine.dp_world_size, engine.get_data_parallel_rank()
+                part = slice(dp_rank * global_batch // dp_size, (dp_rank + 1) * global_batch // dp_size)
+                with torch.no_grad():
+                    expected_loss = reference(x[part], y[part])
+                loss = engine(x[part], y[part])
+                torch.testing.assert_close(loss, expected_loss, rtol=1e-4, atol=1e-5)
                 engine.backward(loss)
                 engine.step()
-                torch.testing.assert_close(loss, reference_loss, rtol=1e-4, atol=1e-5)
+            reference_optimizer.zero_grad()
+            reference(x, y).backward()
+            torch.nn.utils.clip_grad_norm_(reference.parameters(), clip)
+            reference_optimizer.step()
