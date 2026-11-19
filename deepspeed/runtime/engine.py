@@ -575,8 +575,12 @@ class DeepSpeedEngine(Module):
                 "An engine with a data/sequence parallel mesh cannot be built after an AutoTP engine or an engine "
                 "with an explicit mpu in the same process yet (see https://github.com/deepspeedai/DeepSpeed/issues/9081)."
             )
+        from deepspeed.module_inject.layers import TensorParallel_Layer
         for module in model.modules():
             sharded_tp_size = getattr(module, "ds_autotp_size", None)
+            if sharded_tp_size is None and isinstance(module, TensorParallel_Layer) and module.tp_world_size > 1:
+                # A layer sharded for another engine, passed without the model it was sharded in.
+                sharded_tp_size = module.tp_world_size
             if sharded_tp_size is not None and sharded_tp_size != max(requested_tp_size, 1):
                 # Its layers keep the groups they were sharded with, and would be overwritten by a broadcast over
                 # this engine's data parallel group.
@@ -1101,12 +1105,16 @@ class DeepSpeedEngine(Module):
         # The layers must shard over the engine's TP group: the engine broadcasts and reduces over its DP group.
         engine_tp_group = self.mpu.get_tensor_model_parallel_group()
         requested_tp_group = tp_config.tensor_parallel.tp_group
-        if requested_tp_group is not None and requested_tp_group is not engine_tp_group:
+        if requested_tp_group is not None:
 
             def group_ranks(group):
                 return [dist.get_global_rank(group, r) for r in range(dist.get_world_size(group=group))]
 
-            if group_ranks(requested_tp_group) != group_ranks(engine_tp_group):
+            # Ranks whose groups match would otherwise wait in the next collective for the ranks that raise.
+            mismatch = torch.tensor([int(group_ranks(requested_tp_group) != group_ranks(engine_tp_group))],
+                                    device=get_accelerator().current_device_name())
+            dist.all_reduce(mismatch, op=dist.ReduceOp.MAX)
+            if mismatch.item():
                 raise ValueError(f"The tensor parallel group passed to tp_model_init has ranks "
                                  f"{group_ranks(requested_tp_group)}, but this engine's tensor parallel group has "
                                  f"ranks {group_ranks(engine_tp_group)}.")
@@ -1573,7 +1581,10 @@ class DeepSpeedEngine(Module):
     def _sequence_parallel_from_groups_mpu(self):
         """Whether this engine's config asks for sequence parallelism without a mesh, which only groups.mpu, such as
         an earlier engine's Ulysses mpu, provides. Such an engine keeps inheriting groups.mpu."""
-        return self._config._param_dict.get("sequence_parallel_size", 1) > 1
+        if self._config._param_dict.get("sequence_parallel_size", 1) <= 1:
+            return False
+        get_sp_world_size = getattr(groups.mpu, "get_sequence_parallel_world_size", None)
+        return get_sp_world_size is not None and get_sp_world_size() > 1
 
     def _check_supported_with_own_groups(self, model, mesh_device, tensor_model_parallel_size):
         """Raise for what still reads the process-wide groups, before this engine changes any state (#9081)."""

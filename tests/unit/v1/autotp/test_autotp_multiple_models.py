@@ -159,17 +159,17 @@ class HalvesMPU(WorldMPU):
         return self.data_parallel_group
 
 
-def build_engine(tp_size, mpu=None, mesh_param=None, model=None, optimizer=None, extra_config=None):
+def build_engine(tp_size, mpu=None, mesh_param=None, model=None, optimizer=None, extra_config=None, shard=False):
     config = {"train_micro_batch_size_per_gpu": 1, "gradient_clipping": 0.0, **(extra_config or {})}
     if tp_size > 1:
-        # Nothing is sharded; the test is about which groups the engine runs on.
+        # Unless asked to shard, nothing is; the test is about which groups the engine runs on.
         config["tensor_parallel"] = {
             "autotp_size": tp_size,
             "partition_config": {
                 "use_default_specs": False,
                 "layer_specs": [{
                     "patterns": [".*\\.weight$"],
-                    "partition_type": "skip",
+                    "partition_type": "column" if shard else "skip",
                 }],
             },
         }
@@ -297,6 +297,15 @@ class TestAutoTPEnginesWithDifferentLayouts(DistributedTest):
         # The same tensor parallel size is still accepted.
         build_engine(tp_size=2, model=first.module)
 
+    def test_layer_sharded_for_another_engine_raises(self):
+        # Without the model it was sharded in, the layer carried no ds_autotp_size, and the TP1 engine's broadcast
+        # overwrote the first engine's shards.
+        from deepspeed.module_inject.layers import TensorParallel_Layer
+        first = build_engine(tp_size=2, shard=True)
+        layer = next(m for m in first.module.modules() if isinstance(m, TensorParallel_Layer) and m.tp_world_size == 2)
+        with pytest.raises(ValueError, match="already sharded"):
+            build_engine(tp_size=1, model=torch.nn.Sequential(layer))
+
     def test_tp_model_init_engine_gets_its_own_groups(self, monkeypatch):
         # tp_model_init created process-wide groups of its size, which failed after an engine with another one.
         from deepspeed.runtime.tensor_parallel import init_utils
@@ -308,7 +317,7 @@ class TestAutoTPEnginesWithDifferentLayouts(DistributedTest):
         assert second.mpu.get_tensor_model_parallel_world_size() == 4
         assert groups.get_tensor_model_parallel_world_size() == 2
 
-    @pytest.mark.parametrize("matching_ranks", [True, False])
+    @pytest.mark.parametrize("matching_ranks", ["all", "none", "some"])
     def test_tp_model_init_group_must_match_the_engines(self, monkeypatch, matching_ranks):
         # The layers sharded over the tp_model_init group while the engine broadcast over its own DP group.
         from deepspeed.runtime.tensor_parallel import init_utils
@@ -317,15 +326,17 @@ class TestAutoTPEnginesWithDifferentLayouts(DistributedTest):
         # Printing the config fails on the process group it holds, independently of this test.
         monkeypatch.setattr(DeepSpeedConfig, "print_user_config", lambda self: None)
         build_engine(tp_size=2)
-        if matching_ranks:
-            tp_groups = [dist.new_group(ranks=[0, 1]), dist.new_group(ranks=[2, 3])]
-            tp_group = tp_groups[dist.get_rank() // 2]
+        engine_layout = [dist.new_group(ranks=[0, 1]), dist.new_group(ranks=[2, 3])]
+        other_layout = [dist.new_group(ranks=[0, 2]), dist.new_group(ranks=[1, 3])]
+        rank = dist.get_rank()
+        if matching_ranks == "all" or (matching_ranks == "some" and rank < 2):
+            tp_group = engine_layout[rank // 2]
         else:
-            tp_groups = [dist.new_group(ranks=[0, 2]), dist.new_group(ranks=[1, 3])]
-            tp_group = tp_groups[dist.get_rank() % 2]
+            # With only some ranks mismatched, the others used to wait for them in the next collective.
+            tp_group = other_layout[rank % 2]
         model = SimpleModel(hidden_dim=8)
         deepspeed.tp_model_init(model, tp_size=2, dtype=torch.float32, tp_group=tp_group)
-        if matching_ranks:
+        if matching_ranks == "all":
             build_engine(tp_size=2, model=model)
         else:
             with pytest.raises(ValueError, match="tensor parallel group"):
@@ -414,12 +425,37 @@ class TestAutoTPEnginesWithDifferentLayouts(DistributedTest):
         assert second.sequence_parallel_size == 2
         assert second.seq_dp_world_size == dist.get_world_size()
 
+    @pytest.mark.parametrize("earlier", ["autotp", "explicit_mpu"])
+    def test_sequence_parallel_config_without_a_sequence_parallel_mpu(self, earlier):
+        # Without a sequence parallel mpu to inherit, the engine still gets groups of its own: it crashed after an
+        # AutoTP engine, and took the explicit mpu's data parallel group over half of the ranks.
+        if earlier == "autotp":
+            build_engine(tp_size=2)
+        else:
+            build_engine(tp_size=1, mpu=HalvesMPU())
+        second = build_engine(tp_size=1, extra_config={"sequence_parallel_size": 2})
+        assert second.mpu.get_tensor_model_parallel_world_size() == 1
+        assert second.dp_world_size == dist.get_world_size()
+
     def test_engine_without_mpu_after_autotp_and_explicit_mpu(self):
         build_engine(tp_size=2)
         build_engine(tp_size=1, mpu=WorldMPU())
         third = build_engine(tp_size=1)
         assert third.mpu.get_tensor_model_parallel_world_size() == 1
         assert third.dp_world_size == dist.get_world_size()
+
+    def test_storage_maps_of_a_model_on_groups_of_its_own(self):
+        # The default TP group was the process-wide one, which an engine after an explicit mpu does not create.
+        from deepspeed.checkpoint.zero_affine import autotp_storage_affine_maps
+        build_engine(tp_size=1, mpu=HalvesMPU())
+        zero1 = {"zero_allow_untested_optimizer": True, "zero_optimization": {"stage": 1}}
+        autotp = build_engine(tp_size=2,
+                              shard=True,
+                              optimizer=lambda params: torch.optim.SGD(params, lr=0.1),
+                              extra_config=zero1)
+        assert not autotp.mpu.process_wide
+        maps = autotp_storage_affine_maps(autotp.module)
+        assert set(maps) == {name for name, _ in autotp.module.named_parameters()}
 
     def test_autotp_engine_after_an_explicit_mpu_keeps_it(self):
         # The AutoTP engine used to publish its groups over groups.mpu, so the earlier engine's code that still
