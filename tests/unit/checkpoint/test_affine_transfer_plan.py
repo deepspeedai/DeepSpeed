@@ -1141,24 +1141,25 @@ def test_a_column_cut_keeps_every_zero3_element_where_it_is():
 
 
 def test_a_union_refuses_layouts_it_cannot_merge():
+    # The planner's error types, so a caller that falls back on an AffineTransferError catches these too.
     shard = contiguous_split_map((4, 6), [2, 2], 0)
     with pytest.raises(ValueError, match='at least one map'):
         union_affine_maps([])
     # Both layouts name locations 0 and 1, so one location would stand for two buffers.
-    with pytest.raises(ValueError, match='appear in both layouts'):
+    with pytest.raises(InvalidMapError, match='appear in both layouts'):
         union_affine_maps([shard, contiguous_split_map((4, 6), [3, 3], 1)])
-    with pytest.raises(ValueError, match='shape'):
+    with pytest.raises(InvalidMapError, match='shape'):
         union_affine_maps([shard, _surviving(contiguous_split_map((6, 4), [3, 3], 0), [0], first_location=10)])
     # A transposed block has no corner and extent in the parameter's coordinates to cut at.
     transposed = ParamAffineMap((4, 6), {20: (6, 4)}, {20: [AffinePiece((6, 4), 0, (1, 6), 0, (4, 1), {20})]})
-    with pytest.raises(NotImplementedError, match='axis-aligned block'):
+    with pytest.raises(UnsupportedLayoutError, match='axis-aligned block'):
         union_affine_maps([shard, transposed])
     # Row-major strides, but eight elements from the start of a six-wide row run into the next row.
     wrapping = ParamAffineMap(
         (4, 6), {30: (24, )},
         {30: [AffinePiece((1, 8), 0, (6, 1), 0, (8, 1), {30}),
               AffinePiece((1, 16), 8, (6, 1), 8, (16, 1), {30})]})
-    with pytest.raises(NotImplementedError, match='axis-aligned block'):
+    with pytest.raises(UnsupportedLayoutError, match='axis-aligned block'):
         union_affine_maps([shard, wrapping])
 
 
