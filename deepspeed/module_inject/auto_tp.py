@@ -19,7 +19,7 @@ from .fusedqkv_utils import require_tp_fused_qkvw
 from deepspeed.module_inject.tp_shard import AutoTPMeta, get_shard_size, get_shard_size_list
 from deepspeed.utils import groups
 from deepspeed.utils.logging import log_dist, print_dist
-from deepspeed.module_inject.layers import is_autotp_training_mode
+from deepspeed.module_inject.layers import DS_TENSOR_MODEL_PARALLEL, is_autotp_training_mode
 from deepspeed.module_inject.layers import _build_param_uc_restore_meta
 from deepspeed.checkpoint.constants import DS_AUTOTP_UC_META
 from .autotp_config import TPLayerSpec, AutoTPConfig, PartitionType
@@ -846,6 +846,12 @@ class AutoTP():
         # The vocabulary is not made of attention heads, so it is split evenly like the vocabulary-parallel
         # output head. A split by key-value head count leaves ranks beyond that count with no rows.
         vocab_meta = dataclasses.replace(self.tp_meta, num_kv_heads=None)
+        # A rank with no rows would fail its lookup while the other ranks wait in the all-reduce.
+        vocab_size = TensorParallel_Layer._shape_before_zero3_partition(embedding.weight)[0]
+        if min(get_shard_size_list(vocab_size, self.mp_size, vocab_meta, name)) == 0:
+            raise ValueError(
+                f"vocab_parallel_embedding requires nonempty vocabulary shards for tp_size={self.mp_size}, "
+                f"but '{name}' has {vocab_size} rows with tp_grain_size={vocab_meta.tp_grain_size}")
         sharded = VocabParallelEmbedding(embedding, self.mp_group, name=name, tp_meta=vocab_meta)
         setattr(sharded, "replaced", True)
         # named_modules() lists a module once, but a model may register it under several names (T5's
@@ -1014,6 +1020,10 @@ class AutoTP():
         for param_name, param in model.named_parameters():
             spec = self.partition_config.find_matching_spec(param_name, model_type)
             if spec is None or not spec.grad_allreduce:
+                continue
+            # vocab_parallel_embedding and vocab_parallel_lm_head shard their weight even when a skip spec names it.
+            # The ranks then hold different rows, so summing their gradients would mix those rows.
+            if getattr(param, DS_TENSOR_MODEL_PARALLEL, False):
                 continue
             # A frozen parameter, such as one of a distillation teacher, has no gradient to reduce,
             # and PyTorch refuses hooks on tensors that do not require gradients.

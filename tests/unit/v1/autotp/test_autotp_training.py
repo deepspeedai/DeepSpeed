@@ -2196,6 +2196,7 @@ class TestVocabParallelEmbedding(DistributedTest):
         ("hf_tp_plan", 3, True, None),
         ("hf_tp_plan", 0, False, True),
         ("preset_model", 1, False, None),
+        ("skip_grad_allreduce_spec", 1, False, None),
         ("heuristic", 1, False, True),
     ])
     def test_matches_single_device_training(self, path, zero_stage, zero_init, vocab_parallel_lm_head):
@@ -2204,8 +2205,18 @@ class TestVocabParallelEmbedding(DistributedTest):
         tp_options = {}
         if vocab_parallel_lm_head is not None:
             tp_options["vocab_parallel_lm_head"] = vocab_parallel_lm_head
-        if path == "preset_model":
+        if path in ("preset_model", "skip_grad_allreduce_spec"):
             tp_options["preset_model"] = "llama"
+        if path == "skip_grad_allreduce_spec":
+            # The option shards the embedding anyway, so the spec's gradient sum over the tensor-parallel group
+            # would add the gradients of different vocabulary rows.
+            tp_options["partition_config"] = {
+                "layer_specs": [{
+                    "patterns": [r".*embed_tokens\.weight$"],
+                    "partition_type": "skip",
+                    "grad_allreduce": True
+                }],
+            }
         config = self._config(zero_stage, **tp_options)
         reference = self._model(tie_word_embeddings=False, hf_tp_plan=path != "heuristic").to(device)
         if zero_init:
@@ -2297,7 +2308,8 @@ class TestVocabParallelEmbedding(DistributedTest):
         restored_loss = loaded_engine(input_ids=input_ids, labels=input_ids).loss
         torch.testing.assert_close(restored_loss, saved_loss)
 
-    @pytest.mark.parametrize("conflict", ["tied_replicated_head", "embedding_spec", "deepcompile_autotp"])
+    @pytest.mark.parametrize("conflict",
+                             ["tied_replicated_head", "embedding_spec", "deepcompile_autotp", "empty_shard"])
     def test_rejects_conflicting_request(self, conflict):
         skip_on_device()
         model = self._model(tie_word_embeddings=conflict == "tied_replicated_head")
@@ -2317,6 +2329,9 @@ class TestVocabParallelEmbedding(DistributedTest):
                     "partition_type": "row"
                 }],
             }
+        elif conflict == "empty_shard":
+            # One grain of all 66 rows leaves the second rank no rows to look up.
+            tp_options["tp"] = {"tp_grain_size": 66}
         config = self._config(zero_stage=0, **tp_options)
         if conflict == "deepcompile_autotp":
             # The pass rewrites only linear layers, so engine.compile() would reject the sharded embedding.
