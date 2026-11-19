@@ -176,9 +176,12 @@ class _StaticGraphState:
     write_position: torch.Tensor
     static_input: torch.Tensor
     static_attention: torch.Tensor
-    token_buffer: Optional[torch.Tensor]
+    token_buffer: torch.Tensor
+    # Token positions the repetition penalty counts.
+    penalized_tokens: torch.Tensor
+    # Rows that have produced EOS.
+    finished: torch.Tensor
     graph: object = None
-    static_logits: Optional[torch.Tensor] = None
     step_kernel_mounted: bool = False
 
 
@@ -190,6 +193,9 @@ class HybridEngineRollout(RolloutEngine):
         tokenizer: HuggingFace tokenizer (must have pad_token_id or eos_token_id).
         cfg: Optional HybridEngineRolloutConfig.
     """
+
+    # Decode steps between the graph path's EOS checks, each of which waits for the device.
+    _EOS_CHECK_INTERVAL = 16
 
     def __init__(self, engine, tokenizer, cfg=None):
         self.engine = engine
@@ -1835,7 +1841,11 @@ class HybridEngineRollout(RolloutEngine):
         }
 
     def _generate_graph(self, prompt_ids, prompt_attn, max_new_tokens, pad_token_id, module, device, sampling):
-        """Decode with DeepSpeedStaticCache + graph capture, greedy or sampled per ``sampling``."""
+        """Decode with DeepSpeedStaticCache + graph capture, greedy or sampled per ``sampling``.
+
+        One replay runs a whole decode step: the forward, the choice of the next
+        token, and the update of the position, attention mask and output buffer.
+        """
         from transformers import StaticCache
         from deepspeed.utils.static_cache import DSStaticGDNSlot
 
@@ -1845,27 +1855,20 @@ class HybridEngineRollout(RolloutEngine):
         batch_size = prompt_ids.shape[0]
         prompt_len = prompt_ids.shape[1]
         max_len = prompt_len + max_new_tokens
-        eos_token_id = self.tokenizer.eos_token_id
         model_dtype = next(module.parameters()).dtype
         select_next_tokens = self._token_selector(sampling)
         repetition_penalty = self._repetition_penalty(module)
-        output_ids = [prompt_ids]
-
-        def next_tokens(logits):
-            if repetition_penalty != 1.0:
-                logits = self._apply_repetition_penalty(logits, torch.cat(output_ids, dim=1), repetition_penalty,
-                                                        prompt_attn)
-            return select_next_tokens(logits)
+        eos_ids = self._eos_ids(device)
 
         # Hybrid models take a per-type mask dict (GDN must see None; a 2D
         # mask corrupts its conv-state init); standard models take a tensor.
         is_hybrid = "linear_attention" in (getattr(getattr(module.config, "text_config", module.config), "layer_types",
                                                    None) or [])
-        # The b=1 step kernel picks the greedy token inside the graph, where no
-        # repetition penalty is applied.
+        # The b=1 step kernel picks the greedy token without a repetition penalty;
+        # every other decode setup picks it with PyTorch ops inside the graph.
         use_step_kernel = batch_size == 1 and sampling.temperature <= 0.0 and repetition_penalty == 1.0
         state = self._get_static_graph_state(module, batch_size, max_len, device, model_dtype, is_hybrid,
-                                             use_step_kernel)
+                                             use_step_kernel, sampling, repetition_penalty, eos_ids)
 
         # --- Prefill with HF StaticCache (correct attention semantics) ---
         prefill_cache = state.prefill_cache
@@ -1884,8 +1887,11 @@ class HybridEngineRollout(RolloutEngine):
             cache_position=torch.arange(prompt_len, device=device),
             **self._last_logits_kwargs(module),
         )
-        next_token = next_tokens(prefill_out.logits[:, -1, :])
-        output_ids.append(next_token)
+        prefill_logits = self._apply_repetition_penalty(prefill_out.logits[:, -1, :], prompt_ids, repetition_penalty,
+                                                        prompt_attn)
+        next_token = select_next_tokens(prefill_logits)
+        if max_new_tokens == 1:
+            return torch.cat([prompt_ids, next_token], dim=1)
 
         # --- Copy prefill KV into the decode cache ---
         # Linear-attention (GDN) slots are bound to the retained prefill cache's
@@ -1903,112 +1909,79 @@ class HybridEngineRollout(RolloutEngine):
             ds_layer.keys[:, :, :prompt_len, :].copy_(hf_keys[:, :, :prompt_len, :])
             ds_layer.values[:, :, :prompt_len, :].copy_(hf_values[:, :, :prompt_len, :])
 
-        write_pos = state.write_position
-        static_token = state.static_input
-        static_attn = state.static_attention
-        full_token_buf = state.token_buffer
+        # Prompt tokens the repetition penalty counts, as _apply_repetition_penalty does.
+        penalized_prompt = prompt_attn.bool() if self._repetition_penalty_ignores_padding() else True
 
         def load_decode_inputs():
-            write_pos.fill_(prompt_len)
-            static_token.copy_(next_token)
+            state.write_position.fill_(prompt_len)
+            state.static_input.copy_(next_token)
+            static_attn = state.static_attention
             static_attn.zero_()
             static_attn[:, :, :, :prompt_len] = prompt_attn.unsqueeze(1).unsqueeze(1).bool()
             static_attn[:, :, :, prompt_len] = True
-            if full_token_buf is not None:
-                full_token_buf.zero_()
-                full_token_buf[:, :prompt_len] = prompt_ids
-                full_token_buf[:, prompt_len] = next_token.view(-1)  # first generated token per row
+            token_buffer = state.token_buffer
+            token_buffer.zero_()
+            token_buffer[:, :prompt_len] = prompt_ids
+            token_buffer[:, prompt_len] = next_token.view(-1)  # first generated token per row
+            penalized = state.penalized_tokens
+            penalized.zero_()
+            penalized[:, :prompt_len] = penalized_prompt
+            penalized[:, prompt_len] = True
+            if eos_ids is None:
+                state.finished.zero_()
+            else:
+                state.finished.copy_((next_token == eos_ids).any(dim=-1))
 
         load_decode_inputs()
         if state.graph is None:
-            self._capture_static_graph(module, state, max_len, device, model_dtype, is_hybrid, use_step_kernel)
+            decode_step = self._static_decode_step(module, state, model_dtype, device, is_hybrid, use_step_kernel,
+                                                   select_next_tokens, repetition_penalty, eos_ids)
+            self._capture_static_graph(module, state, decode_step, max_len, device, model_dtype)
             # Warmup and capture may have advanced the decode inputs.
             load_decode_inputs()
-        graph = state.graph
-        static_logits = state.static_logits
 
-        # --- Decode loop: full-step graph (b=1) > graph+Python (b>1) > Python loop ---
-        if batch_size > 1:
-            # Graph forward + Python argmax for b>1: the graph eliminates kernel
-            # launch overhead for the forward pass; argmax and buffer updates
-            # stay in Python (PyTorch argmax is batch-native).  The Python
-            # overhead (~50us/step) is a smaller fraction of the larger GPU
-            # workload at higher batch.
-            # 1 = check every step: EOS-heavy rollouts (RL responses end
-            # early; max_new_tokens is only a cap) would otherwise replay up
-            # to eos_check_every - 1 dead steps after the last row finishes,
-            # which costs far more than the per-step sync saves (measured
-            # +0.1-0.3% at b=32 without EOS vs up to ~20% with early EOS).
-            eos_check_every = 1
-            eos_mask = torch.zeros(batch_size, dtype=torch.bool, device=device)
-            for step in range(max_new_tokens - 1):
-                static_token.copy_(next_token)
-                pos = prompt_len + step
-                write_pos.fill_(pos)
-                # Reveal only the current token's own slot: the pos+1 slot has
-                # not been written yet (warmup/capture leftovers), and SDPA at
-                # b>1 attends every slot the mask reveals.
-                static_attn[:, :, :, pos] = True
-                get_accelerator().replay_graph(graph)
-                next_token = next_tokens(static_logits[:, -1, :])
-                output_ids.append(next_token)
-                # eos_mask.all() is a device->host sync; running it every step
-                # serializes the ~50us of Python glue against the replay and
-                # idles the GPU between steps. Amortize it like the b=1 path:
-                # check every eos_check_every steps and break with a bulk pad.
-                # Tokens generated after a row's EOS (at most
-                # eos_check_every - 1 of them) are padded away by
-                # _pad_after_eos, so the output is identical.
-                if eos_token_id is None:
-                    continue
-                eos_mask |= (next_token.view(batch_size) == eos_token_id)
-                if step % eos_check_every == eos_check_every - 1 and bool(eos_mask.all()):
-                    remaining = max_new_tokens - 2 - step
-                    if remaining > 0:
-                        output_ids.append(
-                            torch.full((batch_size, remaining), pad_token_id, dtype=torch.long, device=device))
-                    break
-            return torch.cat(output_ids, dim=1)
-
-        # Full-step graph requires the step kernel to actually be in the
-        # graph: mounting is conditional (b=1, CUDA bf16 logits), and a
-        # kernel-less graph replay would read a token buffer nobody wrote.
-        if state.step_kernel_mounted:
-            eos_check_every = 16
-            for step in range(max_new_tokens - 1):
-                get_accelerator().replay_graph(graph)
-                if eos_token_id is not None and step % eos_check_every == eos_check_every - 1:
-                    if bool((static_token.view(-1) == eos_token_id).all().item()):
-                        break
-            # pad each row's tail after its own first EOS (response region only;
-            # a prompt may legitimately contain the EOS id as content)
-            if eos_token_id is not None:
-                resp = full_token_buf[:, prompt_len:]
-                is_eos = resp == eos_token_id
-                first_eos = torch.where(is_eos.any(dim=1),
-                                        is_eos.float().argmax(dim=1), torch.full_like(write_pos[0], resp.shape[1]))
-                for r in (first_eos < resp.shape[1]).nonzero(as_tuple=True)[0].tolist():
-                    full_token_buf[r, prompt_len + first_eos[r].item() + 1:] = pad_token_id
-            gen_ids = full_token_buf[:, prompt_len:prompt_len + max_new_tokens]
-            return torch.cat([prompt_ids, gen_ids], dim=1)
-
-        eos_mask = torch.zeros(batch_size, dtype=torch.bool, device=device)
+        # --- Decode loop: each replay picks the next token and advances the static state on the device ---
+        generated_len = prompt_len + 1
         for step in range(max_new_tokens - 1):
-            if eos_mask.all():
-                output_ids.append(torch.full((batch_size, 1), pad_token_id, dtype=torch.long, device=device))
-                continue
-            static_token.copy_(next_token)
-            pos = prompt_len + step
-            write_pos.fill_(pos)
-            static_attn[:, :, :, pos] = True
-            get_accelerator().replay_graph(graph)
-            next_token = next_tokens(static_logits[:, -1, :])
-            output_ids.append(next_token)
-            eos_mask |= (next_token.view(1) == eos_token_id)
-        return torch.cat(output_ids, dim=1)
+            # Checking for EOS synchronizes with the device, so poll only periodically.
+            if eos_ids is not None and step % self._EOS_CHECK_INTERVAL == 0 and bool(state.finished.all()):
+                break
+            get_accelerator().replay_graph(state.graph)
+            generated_len += 1
 
-    def _get_static_graph_state(self, module, batch_size, max_len, device, model_dtype, is_hybrid, use_step_kernel):
-        """Return the fixed-batch decode state for this shape, reset for a new prompt.
+        output_len = generated_len
+        if eos_ids is not None and generated_len > prompt_len + 1 and bool(state.finished.all()):
+            # Like generate(), end at the step where the last row produced EOS; the
+            # periodic check may have replayed a few steps past it. The caller pads
+            # each row after its own first EOS.
+            response = state.token_buffer[:, prompt_len:generated_len]
+            first_eos = torch.isin(response, eos_ids).int().argmax(dim=1)
+            output_len = prompt_len + int(first_eos.max()) + 1
+        return state.token_buffer[:, :output_len].clone()
+
+    def _eos_ids(self, device):
+        eos_token_id = self.tokenizer.eos_token_id
+        if eos_token_id is None:
+            return None
+        return torch.as_tensor(eos_token_id, dtype=torch.long, device=device).flatten()
+
+    @staticmethod
+    def _graph_repetition_penalty(logits, token_ids, penalized, repetition_penalty):
+        """Penalize the tokens of ``token_ids`` marked in ``penalized``, as ``_apply_repetition_penalty`` does.
+
+        Columns not marked map to an extra vocabulary slot that is dropped, so the
+        ops keep fixed shapes and need no host synchronization.
+        """
+        logits = logits.float()
+        vocab_size = logits.shape[-1]
+        present = torch.zeros((logits.shape[0], vocab_size + 1), dtype=torch.bool, device=logits.device)
+        present.scatter_(1, torch.where(penalized, token_ids, vocab_size), True)
+        scores = torch.where(logits < 0, logits * repetition_penalty, logits / repetition_penalty)
+        return torch.where(present[:, :vocab_size], scores, logits)
+
+    def _get_static_graph_state(self, module, batch_size, max_len, device, model_dtype, is_hybrid, use_step_kernel,
+                                sampling, repetition_penalty, eos_ids):
+        """Return the fixed-batch decode state for this shape and decoding setup, reset for a new prompt.
 
         A new state, allocated when the signature changes, has no graph yet: the
         caller prefills, loads the prompt and then captures.
@@ -2016,7 +1989,10 @@ class HybridEngineRollout(RolloutEngine):
         from transformers import StaticCache
         from deepspeed.utils.static_cache import DeepSpeedStaticCache, DSStaticGDNSlot
 
-        signature = self._graph_signature(module, batch_size, max_len, device, model_dtype) + (use_step_kernel, )
+        # Token selection is captured with the forward, so the decoding settings are part of the graph.
+        decode_signature = (use_step_kernel, sampling.temperature, sampling.top_k, sampling.top_p, repetition_penalty,
+                            None if eos_ids is None else tuple(eos_ids.tolist()))
+        signature = self._graph_signature(module, batch_size, max_len, device, model_dtype) + (decode_signature, )
         state = self._static_graph_state
         if self._group_needs_capture(state is None or state.signature != signature):
             # Free the stale cache and graph pool before allocating replacements.
@@ -2041,11 +2017,13 @@ class HybridEngineRollout(RolloutEngine):
                 prefill_cache,
                 write_pos,
                 static_input=torch.zeros(batch_size, 1, dtype=torch.long, device=device),
-                # Full-width causal mask for the full-attention layers; revealed
-                # one position per decode step by in-place writes (graph-replay safe).
+                # Full-width causal mask for the full-attention layers; each step
+                # reveals the position of its output token in place (graph-replay safe).
                 static_attention=torch.zeros(batch_size, 1, 1, max_len, dtype=torch.bool, device=device),
-                token_buffer=torch.zeros(batch_size, max_len, dtype=torch.long, device=device)
-                if use_step_kernel else None,
+                # Prompt and generated tokens; each step writes its output token one position ahead.
+                token_buffer=torch.zeros(batch_size, max_len, dtype=torch.long, device=device),
+                penalized_tokens=torch.zeros(batch_size, max_len, dtype=torch.bool, device=device),
+                finished=torch.zeros(batch_size, dtype=torch.bool, device=device),
             )
             self._static_graph_state = state
 
@@ -2055,27 +2033,36 @@ class HybridEngineRollout(RolloutEngine):
             state.prefill_cache.reset()
         return state
 
-    def _capture_static_graph(self, module, state, max_len, device, model_dtype, is_hybrid, use_step_kernel):
-        """Capture the decode step for ``state`` from its loaded prompt."""
+    def _static_decode_step(self, module, state, model_dtype, device, is_hybrid, use_step_kernel, select_next_tokens,
+                            repetition_penalty, eos_ids):
+        """Return the decode step that ``_capture_static_graph`` captures for ``state``."""
         batch_size = state.static_input.shape[0]
         ds_cache = state.cache
         write_pos = state.write_position
         static_token = state.static_input
         static_attn = state.static_attention
+        token_buffer = state.token_buffer
+        penalized = state.penalized_tokens
         # Persistent decode position tensors as VIEWS of write_pos: the
-        # captured forwards read this memory, and the in-graph step kernel
-        # advances write_pos itself — so replays see the new position with
-        # no host-side mirror updates. (A clone here would freeze the
-        # captured value and desync the b=1 full-step path.)
+        # captured forwards read this memory, and the step advances write_pos
+        # itself — so replays see the new position with no host-side updates.
         static_cache_pos = write_pos[:1]
         static_pos_ids = write_pos.unsqueeze(1)
-
         # Eager attention adds the mask to the scores, so it needs an additive
-        # mask. It is built inside the graph from the boolean one, which the
-        # Python loop or the step kernel advances.
+        # mask. It is built inside the graph from the boolean one.
         additive_mask = getattr(module.config, "_attn_implementation", None) == "eager"
 
-        def decode_forward():
+        step_op = None
+        if use_step_kernel:
+            try:
+                from deepspeed.ops.module_inject import get_fused_glu_op
+                candidate = get_fused_glu_op()
+                if hasattr(candidate, "decode_step_graph"):
+                    step_op = candidate
+            except Exception:
+                step_op = None
+
+        def decode_step():
             causal_mask = static_attn
             if additive_mask:
                 causal_mask = torch.zeros(static_attn.shape, dtype=model_dtype,
@@ -2084,14 +2071,42 @@ class HybridEngineRollout(RolloutEngine):
             # Decode-step mask argument: the per-type dict for hybrid models,
             # the plain 4-D tensor for standard full-attention ones.
             decode_mask = {"full_attention": causal_mask, "linear_attention": None} if is_hybrid else causal_mask
-            return module(
+            logits = module(
                 static_token,
                 attention_mask=decode_mask,
                 past_key_values=ds_cache,
                 use_cache=True,
                 cache_position=static_cache_pos,
                 position_ids=static_pos_ids,
-            )
+            ).logits[:, -1, :]
+            # The fused kernel takes only CUDA bf16 logits; other dtypes keep the PyTorch step.
+            state.step_kernel_mounted = (step_op is not None and logits.dtype is torch.bfloat16
+                                         and get_accelerator().on_accelerator(logits))
+            if state.step_kernel_mounted:
+                # argmax -> next input token -> advance write_pos -> reveal mask -> output buffer
+                step_op.decode_step_graph(logits.contiguous(), static_token.view(batch_size, 1), write_pos,
+                                          static_attn, token_buffer)
+                next_token = static_token
+            else:
+                if repetition_penalty != 1.0:
+                    logits = self._graph_repetition_penalty(logits, token_buffer, penalized, repetition_penalty)
+                next_token = select_next_tokens(logits)
+                static_token.copy_(next_token)
+                write_pos.add_(1)
+                # The output token is the next step's input, at the advanced position.
+                next_pos = write_pos.unsqueeze(1)
+                token_buffer.scatter_(1, next_pos, next_token)
+                penalized.scatter_(1, next_pos, True)
+                static_attn.view(batch_size, -1).scatter_(1, next_pos, True)
+            if eos_ids is not None:
+                state.finished.logical_or_((next_token == eos_ids).any(dim=-1))
+
+        return decode_step
+
+    def _capture_static_graph(self, module, state, decode_step, max_len, device, model_dtype):
+        """Capture ``decode_step`` for ``state`` from its loaded prompt."""
+        ds_cache = state.cache
+        write_pos = state.write_position
 
         # Replace SDPA in the full-attention layers with the custom
         # decode_attn kernel for the b=1 decode steps (prefill and any
@@ -2151,57 +2166,36 @@ class HybridEngineRollout(RolloutEngine):
         saved_post = dict(module._forward_hooks)
         module._forward_pre_hooks.clear()
         module._forward_hooks.clear()
+        # Warmup draws random numbers when sampling; restore the generator so the
+        # rollout draws the same ones as without capture.
+        rng_state = get_accelerator().get_rng_state()
+        start_pos = write_pos.clone()
 
         try:
-            # Warmup on side stream
+            # Warmup on side stream. Each step advances the position, so every
+            # warmup starts from the prompt to stay inside the cache.
             s = get_accelerator().Stream()
             s.wait_stream(get_accelerator().current_stream())
             with get_accelerator().stream(s):
                 for _ in range(3):
-                    decode_forward()
+                    write_pos.copy_(start_pos)
+                    decode_step()
             get_accelerator().current_stream().wait_stream(s)
+            write_pos.copy_(start_pos)
             restore_gdn_states()
 
-            # Capture: full-step graph (forward + argmax + buffer updates).
-            # The step-update kernel indexes token_buf via write_pos (a GPU
-            # tensor the kernel itself advances), so no host-side step counter
-            # is needed — the graph is fully self-contained for replay.
-            graph_op = None
-            if use_step_kernel:
-                try:
-                    from deepspeed.ops.module_inject import get_fused_glu_op
-                    candidate = get_fused_glu_op()
-                    if hasattr(candidate, "decode_step_graph"):
-                        graph_op = candidate
-                except Exception:
-                    graph_op = None
-
-            step_kernel_mounted = False
             graph = get_accelerator().create_graph()
             with get_accelerator().capture_to_graph(graph):
-                static_logits = decode_forward().logits
-                # decode_step_graph kernel is b=1 only (single-sequence argmax);
-                # for b>1 the graph captures forward only and Python handles
-                # argmax + buffer updates outside the graph. The kernel also
-                # only accepts CUDA bf16 logits — fp16 models must keep the
-                # PyTorch argmax path instead of failing during capture.
-                if (graph_op is not None and static_logits.dtype is torch.bfloat16
-                        and get_accelerator().on_accelerator(static_logits)):
-                    graph_op.decode_step_graph(static_logits[:, -1, :].contiguous(), static_token.view(batch_size, 1),
-                                               write_pos, static_attn, state.token_buffer)
-                    step_kernel_mounted = True
-
-            # Restore the GDN states unconditionally, whether or not
-            # decode_step_graph was mounted, so the first replay does not start
-            # from a state that already consumed the first decode token.
+                decode_step()
+            # Restore the GDN states, so the first replay does not start from a
+            # state that already consumed the first decode token.
             restore_gdn_states()
         finally:
             module._forward_pre_hooks.update(saved_pre)
             module._forward_hooks.update(saved_post)
+            get_accelerator().set_rng_state(rng_state)
 
         state.graph = graph
-        state.static_logits = static_logits
-        state.step_kernel_mounted = step_kernel_mounted
 
     def sync_weights(self, step: int) -> None:  # noqa: ARG002
         """Invalidate derived-weight caches after in-place weight updates.
