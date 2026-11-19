@@ -304,6 +304,110 @@ class TestGroupedExpertsActivation:
         torch.testing.assert_close(gate.grad, gate32.grad.to(out.dtype), **close)
         torch.testing.assert_close(up.grad, up32.grad.to(out.dtype), **close)
 
+    @pytest.mark.parametrize("activation", tuple(EXPERT_ACTIVATIONS))
+    def test_row_weights_are_the_fp32_product_rounded_once(self, activation):
+        torch.manual_seed(0)
+        gate = torch.randn(6, 8).bfloat16()
+        up = torch.randn(6, 8).bfloat16()
+        weights = torch.rand(6)
+
+        got = apply_expert_activation(gate, up, activation, 1.5, 1.0, fused=False, row_weights=weights)
+
+        fp32 = EXPERT_ACTIVATIONS[activation].fn(gate.float(), up.float(), 1.5, 1.0) * weights[:, None]
+        assert torch.equal(got, fp32.bfloat16())
+        written = _written_out(gate.float(), up.float(), activation, 1.5, 1.0) * weights[:, None]
+        torch.testing.assert_close(got.float(), written, rtol=1e-2, atol=1e-2)
+
+    @pytest.mark.parametrize("activation", tuple(EXPERT_ACTIVATIONS))
+    def test_expert_row_weights_reject_incompatible_metadata(self, activation):
+        experts = GroupedExperts(dim=16, hidden_dim=32, num_experts=4, use_grouped_mm=False, activation=activation)
+        inputs = torch.ones((4, 16))
+        counts = torch.ones(4, dtype=torch.int64)
+        bad_weights = (torch.ones(4, dtype=torch.bfloat16), torch.ones(3), torch.ones(4,
+                                                                                      1), torch.ones(4, device="meta"))
+        for weights in bad_weights:
+            with pytest.raises(ValueError, match="row_weights"):
+                experts(inputs, counts, row_weights=weights)
+
+    @pytest.mark.parametrize("activation", tuple(EXPERT_ACTIVATIONS))
+    def test_row_weights_scale_each_expert_output_row(self, activation):
+        # The down projection is linear and has no bias, so weighting its input row weights its output row.
+        torch.manual_seed(0)
+        experts = GroupedExperts(dim=16,
+                                 hidden_dim=32,
+                                 num_experts=4,
+                                 use_grouped_mm=False,
+                                 activation=activation,
+                                 activation_alpha=1.5,
+                                 activation_limit=1.0)
+        for weight in (experts.w1, experts.w2, experts.w3):
+            nn.init.normal_(weight, std=0.5)
+        counts = torch.tensor([1, 4, 0, 5])  # an empty expert, and two padding rows after the routed ones
+        x = torch.randn(12, 16, requires_grad=True)
+        weights = torch.rand(12, requires_grad=True)
+        x_post = x.detach().clone().requires_grad_(True)
+        weights_post = weights.detach().clone().requires_grad_(True)
+
+        out = experts(x, counts, row_weights=weights)
+        post = experts(x_post, counts) * weights_post[:, None]
+        grad_out = torch.randn_like(out)
+        out.backward(grad_out)
+        post.backward(grad_out)
+
+        torch.testing.assert_close(out, post, rtol=1e-5, atol=1e-5)
+        torch.testing.assert_close(x.grad, x_post.grad, rtol=1e-5, atol=1e-5)
+        torch.testing.assert_close(weights.grad[:10], weights_post.grad[:10], rtol=1e-4, atol=1e-5)
+        # Padding rows produce zeros whatever their weight.
+        assert not out[10:].any()
+
+    @pytest.mark.parametrize("path", ["grouped_mm", "triton_grouped_mm", "fused_gate_up"])
+    @pytest.mark.parametrize("activation", tuple(EXPERT_ACTIVATIONS))
+    def test_grouped_gemm_paths_take_row_weights_like_the_for_loop(self, activation, path):
+        # For swiglu the grouped paths run the fused weighted kernel; the for-loop path, plain PyTorch.
+        from deepspeed.ops.triton_ops import is_triton_available
+
+        if get_accelerator().device_name() == "cpu":
+            pytest.skip("needs an accelerator")
+        if path in ("grouped_mm", "fused_gate_up") and not hasattr(torch, "_grouped_mm"):
+            pytest.skip("this PyTorch build has no torch._grouped_mm")
+        if path == "triton_grouped_mm" and not is_triton_available():
+            pytest.skip("the Triton grouped GEMM needs Triton")
+        device = get_accelerator().current_device_name()
+        torch.manual_seed(0)
+        shape = dict(dim=64, hidden_dim=128, num_experts=4)
+        act = dict(activation=activation, activation_alpha=1.5, activation_limit=1.0)
+        loop = GroupedExperts(use_grouped_mm=False, **shape, **act)
+        for weight in (loop.w1, loop.w2, loop.w3):
+            nn.init.normal_(weight, std=0.1)
+        grouped = GroupedExperts(use_grouped_mm=True,
+                                 disable_triton_grouped_mm=True,
+                                 gate_up_impl="fused" if path == "fused_gate_up" else "separate",
+                                 **shape,
+                                 **act)
+        grouped.load_state_dict(loop.state_dict())
+        grouped.use_triton_grouped_mm = path == "triton_grouped_mm"
+        loop.to(device=device, dtype=torch.bfloat16)
+        grouped.to(device=device, dtype=torch.bfloat16)
+
+        counts = torch.tensor([16, 32, 16, 64], device=device)
+        x = torch.randn(int(counts.sum()), 64, device=device, dtype=torch.bfloat16)
+        weights = torch.rand(int(counts.sum()), device=device)
+        inputs = {name: (x.clone().requires_grad_(True), weights.clone().requires_grad_(True)) for name in "lg"}
+        out_loop = loop(inputs["l"][0], counts, row_weights=inputs["l"][1])
+        out_grouped = grouped(inputs["g"][0], counts, row_weights=inputs["g"][1])
+        grad_out = torch.randn_like(out_loop)
+        out_loop.backward(grad_out)
+        out_grouped.backward(grad_out)
+
+        def assert_same(got, want):
+            torch.testing.assert_close(got, want, rtol=2e-2, atol=2e-2 * want.abs().max().item())
+
+        assert_same(out_grouped, out_loop)
+        for index in range(2):
+            assert_same(inputs["g"][index].grad, inputs["l"][index].grad)
+        for name in ("w1", "w2", "w3"):
+            assert_same(getattr(grouped, name).grad, getattr(loop, name).grad)
+
     def test_for_loop_path_does_not_need_the_triton_kernel(self, monkeypatch):
         # The for-loop path is the reference path and runs on CPU tensors. It must not reach the
         # Triton kernel, which exists whenever Triton is installed.
@@ -611,7 +715,7 @@ def _grouped_mm_runs_on(device):
 class TestDeferredExpertWeightGrad:
     """Deferred gradients obey the plain path's contract; only their computation schedule changes."""
 
-    def _compare(self, device, dtype, activation, gate_up_impl, deferred):
+    def _compare(self, device, dtype, activation, gate_up_impl, deferred, weighted=False):
         torch.manual_seed(0)
         kwargs = dict(dim=16,
                       hidden_dim=8,
@@ -632,11 +736,14 @@ class TestDeferredExpertWeightGrad:
         counts = torch.tensor([5, 0, 7, 12], device=device)
         x = torch.randn(24, 16, device=device, dtype=dtype)
         grad_out = torch.randn(24, 16, device=device, dtype=dtype)
+        weights = torch.rand(24, device=device, dtype=torch.float32) if weighted else None
+        weights_plain = None if weights is None else weights.clone().requires_grad_(True)
+        weights_overlap = None if weights is None else weights.clone().requires_grad_(True)
         x_plain, x_overlapped = x.clone().requires_grad_(True), x.clone().requires_grad_(True)
-        out_plain = plain(x_plain, counts)
+        out_plain = plain(x_plain, counts, row_weights=weights_plain)
         out_plain.backward(grad_out)
         slot = ExpertWeightGradSlot() if deferred else None
-        out_overlapped = overlapped(x_overlapped, counts, slot)
+        out_overlapped = overlapped(x_overlapped, counts, slot, row_weights=weights_overlap)
         out_overlapped.backward(grad_out)
         if deferred:
             assert all(weight.grad is None for weight in overlapped.parameters())
@@ -647,6 +754,29 @@ class TestDeferredExpertWeightGrad:
         torch.testing.assert_close(x_overlapped.grad, x_plain.grad, rtol=0, atol=0)
         for name in ("w1", "w2", "w3"):
             torch.testing.assert_close(getattr(overlapped, name).grad, getattr(plain, name).grad, rtol=0, atol=0)
+        if weighted:
+            torch.testing.assert_close(weights_overlap.grad, weights_plain.grad, rtol=1e-4, atol=1e-5)
+            assert weights_overlap.grad.dtype == torch.float32
+
+    @pytest.mark.parametrize("activation", tuple(EXPERT_ACTIVATIONS))
+    @pytest.mark.parametrize("gate_up_impl", ["separate", "fused"])
+    def test_weighted_gradients_compose_with_deferral_on_cpu(self, activation, gate_up_impl):
+        if not _grouped_mm_runs_on("cpu"):
+            pytest.skip("this PyTorch build has no CPU torch._grouped_mm")
+        for dtype in (torch.float32, torch.bfloat16):
+            self._compare("cpu", dtype, activation, gate_up_impl, True, weighted=True)
+
+    @pytest.mark.parametrize("activation", tuple(EXPERT_ACTIVATIONS))
+    @pytest.mark.parametrize("gate_up_impl", ["separate", "fused"])
+    def test_weighted_gradients_compose_with_deferral_on_cuda(self, activation, gate_up_impl):
+        if get_accelerator().device_name() != "cuda" or not hasattr(torch, "_grouped_mm"):
+            pytest.skip("needs CUDA with torch._grouped_mm")
+        self._compare(get_accelerator().current_device_name(),
+                      torch.bfloat16,
+                      activation,
+                      gate_up_impl,
+                      True,
+                      weighted=True)
 
     @pytest.mark.parametrize("deferred", [False, True])
     @pytest.mark.parametrize("gate_up_impl", ["separate", "fused"])

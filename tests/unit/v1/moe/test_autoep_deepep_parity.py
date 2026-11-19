@@ -682,6 +682,73 @@ class TestDeepEPMatchesCollective(DistributedTest):
         assert torch.count_nonzero(all_routes == 3) == 0
         assert torch.count_nonzero(all_routes == 1) > torch.count_nonzero(all_routes == 2)
 
+    @pytest.mark.parametrize("use_grouped_mm", [False, True])
+    @pytest.mark.parametrize("activation_checkpointing, skewed_routing", [(False, False), (False, True),
+                                                                          (True, False)])
+    def test_row_weighting_in_activation_matches_eager(self, activation_checkpointing, skewed_routing, use_grouped_mm):
+        # The grouped GEMM path runs the fused weighted SwiGLU kernel; the for-loop path, plain PyTorch.
+        skip_unless_h100_tests_enabled("row weighting in the activation needs H100s and a DeepEP build")
+        seed = 8642
+        runs = {}
+        for impl in ("eager", "activation"):
+            runs[impl] = _run_one_step("deepep",
+                                       self.world_size,
+                                       seed,
+                                       activation_checkpointing=activation_checkpointing,
+                                       reentrant_checkpointing=True,
+                                       skewed_routing=skewed_routing,
+                                       row_weighting_impl=impl,
+                                       use_grouped_mm=use_grouped_mm)
+        eager, activation = runs["eager"], runs["activation"]
+        # The same function with the BF16 rounding moved into the activation: compared by relative error, not
+        # bitwise. Adam's first update can turn a near-zero gradient's rounding into a learning-rate-scale step,
+        # so the parameter deltas are not compared.
+        for (name, route), (_, expected_route) in zip(activation["routes"], eager["routes"]):
+            assert torch.equal(route, expected_route), name
+        for name in ("output", "input_gradient"):
+            _assert_native_fused_gradient_close(activation[name], eager[name], name=name)
+        assert activation["gradients"].keys() == eager["gradients"].keys()
+        for name, gradient in eager["gradients"].items():
+            if gradient.norm() == 0:
+                # Skewed routing leaves an expert without tokens on the rank that owns it.
+                assert activation["gradients"][name].norm() == 0, f"{name} gradient should be zero"
+                continue
+            _assert_native_fused_gradient_close(activation["gradients"][name], gradient, name=name)
+
+    @pytest.mark.parametrize("gate_up_impl", ["separate", "fused"])
+    @pytest.mark.parametrize("skewed_routing", [False, True])
+    @pytest.mark.parametrize("zero_stage", [1, 2])
+    def test_activation_weighting_composes_with_backward_overlap(self, gate_up_impl, skewed_routing, zero_stage):
+        skip_unless_h100_tests_enabled("weighted activation/overlap composition needs H100s and DeepEP")
+        seed = 8748
+        common = dict(gate_up_impl=gate_up_impl,
+                      skewed_routing=skewed_routing,
+                      zero_stage=zero_stage,
+                      use_grouped_mm=True,
+                      disable_triton_grouped_mm=True,
+                      activation_checkpointing=True,
+                      reentrant_checkpointing=True)
+        eager = _run_one_step("deepep", self.world_size, seed, row_weighting_impl="eager", **common)
+        serial = _run_one_step("deepep", self.world_size, seed, row_weighting_impl="activation", **common)
+        overlap = _run_one_step("deepep",
+                                self.world_size,
+                                seed,
+                                row_weighting_impl="activation",
+                                overlap_weight_grad=True,
+                                **common)
+        for result in (serial, overlap):
+            assert result["gradients"].keys() == eager["gradients"].keys()
+            for (_, route), (_, expected_route) in zip(result["routes"], eager["routes"]):
+                assert torch.equal(route, expected_route)
+            for name in ("output", "input_gradient"):
+                _assert_native_fused_gradient_close(result[name], eager[name], name=name)
+            for name, expected in eager["gradients"].items():
+                if expected.norm() == 0:
+                    assert result["gradients"][name].norm() == 0, f"{name} must remain zero"
+                else:
+                    _assert_native_fused_gradient_close(result["gradients"][name], expected, name=name)
+        assert torch._C._get_sm_carveout_experimental() is None, "SM carveout leaked from weighted overlap"
+
     @pytest.mark.parametrize("gate_up_impl", ["separate", "fused"])
     @pytest.mark.parametrize("skewed_routing", [False, True])
     @pytest.mark.parametrize("zero_stage", [1, 2])
@@ -792,7 +859,7 @@ class TestDeepEPMatchesCollective(DistributedTest):
         dist.barrier()
 
     @pytest.mark.parametrize("skewed_routing", [False, True])
-    @pytest.mark.parametrize("row_weighting_impl", ["eager", "fused"])
+    @pytest.mark.parametrize("row_weighting_impl", ["eager", "fused", "activation"])
     def test_skipping_the_recomputed_combine_matches_the_normal_recompute(self, row_weighting_impl, skewed_routing):
         if row_weighting_impl == "fused":
             _skip_unless_fused_row_weighting_enabled("fused DeepEP row weighting needs H100s and a DeepEP build")
