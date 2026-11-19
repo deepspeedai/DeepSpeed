@@ -751,7 +751,9 @@ AutoSP gives each ``torch.nn.functional.cross_entropy`` the part of its target t
 Between the logits and the cross entropy, the logits may only be sliced on the sequence dimension by static
 amounts, such as ``logits[..., :-1, :]``, before being reshaped or cast; the labels may only flow into
 cross entropy targets and cannot be combined with sequence-sharded tensors such as the input ids. AutoSP raises
-an error for any other pattern instead of pairing logits with the wrong targets.
+an error for the unsupported patterns it detects, but it cannot recognize every equivalent rewrite: an op that
+moves logits along the sequence dimension in another way, such as ``torch.cat((logits[:, 1:], logits[:, :1]), dim=1)``,
+may go undetected and silently produce an incorrect loss.
 Each rank then returns the loss of the full sequence: AutoSP sums the loss and the number of non-ignored
 tokens over the sequence-parallel group, for both ``reduction="mean"`` and ``reduction="sum"``. The per-token
 losses are summed in FP32, so half-precision training does not overflow the shard sum, and the result is returned
