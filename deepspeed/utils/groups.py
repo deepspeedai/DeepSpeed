@@ -279,15 +279,17 @@ def _init_tp_mesh_device(tensor_model_parallel_size=1, data_parallel_size=None):
 
 
 class TensorParallelGroups:
-    """The TP/DP groups of one engine, with the interface of an mpu.
+    """The TP/DP groups of one engine, with the interface of an mpu (#9081).
 
-    The process-wide groups of this module belong to the first engine that creates them. An engine that needs
-    another layout in the same process gets its own groups in one of these (#9081).
+    The process-wide groups of this module belong to the first engine that creates them, and the module getters
+    keep describing that layout. An engine with the same layout holds those groups here (``process_wide`` is
+    True); an engine with another layout holds new groups.
     """
 
-    def __init__(self, data_parallel_group, tensor_model_parallel_group):
+    def __init__(self, data_parallel_group, tensor_model_parallel_group, process_wide=False):
         self._data_parallel_group = data_parallel_group
         self._tensor_model_parallel_group = tensor_model_parallel_group
+        self.process_wide = process_wide
 
     @classmethod
     def create(cls, tensor_model_parallel_size, data_parallel_size=None):
@@ -335,14 +337,13 @@ class TensorParallelGroups:
 
 
 def _get_or_create_tp_groups(tensor_model_parallel_size, data_parallel_size=None):
-    """Return the TP/DP groups for an engine: this module when the process-wide groups have the requested
-    layout (creating them if there are none yet), otherwise new TensorParallelGroups.
+    """Return an engine's TensorParallelGroups: the process-wide groups when they have the requested layout
+    (creating them if there are none yet), otherwise new groups.
     """
     if _TENSOR_MODEL_PARALLEL_GROUP is None:
         _init_tp_mesh_device(tensor_model_parallel_size, data_parallel_size)
-        return sys.modules[__name__]
     if _existing_tp_groups_match(tensor_model_parallel_size):
-        return sys.modules[__name__]
+        return TensorParallelGroups(_DATA_PARALLEL_GROUP, _TENSOR_MODEL_PARALLEL_GROUP, process_wide=True)
     return TensorParallelGroups.create(tensor_model_parallel_size, data_parallel_size)
 
 

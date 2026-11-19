@@ -138,6 +138,25 @@ class WorldMPU:
         return dist.get_world_group()
 
 
+class HalvesMPU(WorldMPU):
+    """An mpu with no tensor parallelism and two data parallel groups, each over half of the ranks."""
+
+    def __init__(self):
+        super().__init__()
+        half = dist.get_world_size() // 2
+        halves = [dist.new_group(ranks=list(range(start, start + half))) for start in (0, half)]
+        self.data_parallel_group = halves[dist.get_rank() // half]
+
+    def get_data_parallel_rank(self):
+        return dist.get_rank(group=self.data_parallel_group)
+
+    def get_data_parallel_world_size(self):
+        return dist.get_world_size(group=self.data_parallel_group)
+
+    def get_data_parallel_group(self):
+        return self.data_parallel_group
+
+
 def build_engine(tp_size, mpu=None, mesh_param=None, model=None, optimizer=None, extra_config=None):
     config = {"train_micro_batch_size_per_gpu": 1, "gradient_clipping": 0.0, **(extra_config or {})}
     if tp_size > 1:
@@ -169,10 +188,16 @@ class TestAutoTPEnginesWithDifferentLayouts(DistributedTest):
     reuse_dist_env = False
 
     def test_same_tp_size_reuses_the_groups(self):
-        build_engine(tp_size=2)
+        first = build_engine(tp_size=2)
         second = build_engine(tp_size=2)
-        assert second.mpu is groups
-        assert second.dp_world_size == 2
+        # Each engine has its own groups object; with the same layout, both hold the process-wide groups.
+        assert first.mpu is not second.mpu
+        for engine in (first, second):
+            assert isinstance(engine.mpu, groups.TensorParallelGroups)
+            assert engine.mpu.get_tensor_model_parallel_group() is groups.get_tensor_model_parallel_group()
+            assert engine.mpu.get_data_parallel_group() is groups.get_data_parallel_group()
+            assert engine.dp_world_size == 2
+        assert groups.mpu is groups
 
     @pytest.mark.parametrize("second_tp_size", [1, 4])
     def test_different_tp_size_gets_its_own_groups(self, second_tp_size):
@@ -181,7 +206,7 @@ class TestAutoTPEnginesWithDifferentLayouts(DistributedTest):
         first = build_engine(tp_size=2)
         second = build_engine(tp_size=second_tp_size)
         world_size = dist.get_world_size()
-        assert second.mpu is not groups
+        assert not second.mpu.process_wide
         assert second.mpu.get_tensor_model_parallel_world_size() == second_tp_size
         assert second.dp_world_size == world_size // second_tp_size
         assert dist.get_world_size(second.data_parallel_group) == world_size // second_tp_size
@@ -246,14 +271,29 @@ class TestAutoTPEnginesWithDifferentLayouts(DistributedTest):
         assert dp_writer.world_size == 1
         assert dp_writer.rank == 0
 
-    def test_engine_without_mpu_inherits_a_later_explicit_mpu(self):
-        # An explicit mpu replaces groups.mpu, so a third engine without one inherits that layout, not the
-        # cached AutoTP groups of the first engine.
+    def test_engine_without_mpu_does_not_inherit_an_explicit_mpu(self):
+        # An explicit mpu replaces groups.mpu. A later engine without one used to inherit it, and with it a data
+        # parallel group over part of the ranks (#9081).
+        explicit = build_engine(tp_size=1, mpu=HalvesMPU())
+        assert explicit.dp_world_size == dist.get_world_size() // 2
+        second = build_engine(tp_size=1)
+        assert second.dp_world_size == dist.get_world_size()
+        assert second.mpu.get_tensor_model_parallel_world_size() == 1
+        assert dist.get_world_size(second.seq_data_parallel_group) == dist.get_world_size()
+        # The process-wide getters keep describing the engine that passed the mpu.
+        assert groups._get_data_parallel_world_size() == dist.get_world_size() // 2
+
+    def test_engine_without_mpu_after_autotp_and_explicit_mpu(self):
         build_engine(tp_size=2)
         build_engine(tp_size=1, mpu=WorldMPU())
         third = build_engine(tp_size=1)
-        assert third.mpu is None
+        assert third.mpu.get_tensor_model_parallel_world_size() == 1
         assert third.dp_world_size == dist.get_world_size()
+
+    def test_first_engine_without_mpu_is_unchanged(self):
+        engine = build_engine(tp_size=1)
+        assert engine.mpu is None
+        assert groups.mpu is None
 
 
 class MLP(torch.nn.Module):
