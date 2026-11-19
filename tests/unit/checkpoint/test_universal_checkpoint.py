@@ -4,6 +4,7 @@
 # DeepSpeed Team
 
 import os
+import re
 import glob
 import math
 
@@ -13,9 +14,12 @@ from torch.utils._pytree import tree_map
 
 from deepspeed.utils.torch import required_torch_version
 from deepspeed.checkpoint import UNIVERSAL_CHECKPOINT_INFO
-from deepspeed.checkpoint.constants import OPTIMIZER_STATE_DICT
+from deepspeed.checkpoint.constants import (OPTIMIZER_STATE_DICT, PARAMETER_WITH_ROW_PARALLELISM_PATTERNS,
+                                            TP_REPLICATED_PARAMETER_PATTERNS)
+from deepspeed.pipe import PipelineModule
+from deepspeed.runtime.pipe.topology import PipeModelDataParallelTopology
 from deepspeed.checkpoint.ds_to_universal import main as convert_to_universal
-from deepspeed.utils import safe_get_full_fp32_param, safe_get_full_optimizer_state
+from deepspeed.utils import groups, safe_get_full_fp32_param, safe_get_full_optimizer_state
 
 from unit.common import DistributedTest, DistributedFixture
 from unit.simple_model import *
@@ -356,6 +360,193 @@ class TestUniversalCheckpointFusedTorchAdamW(DistributedTest):
         for state in optimizer_states:
             assert state["step"].item() == steps_before_save + steps_after_load
         engine.destroy()
+
+
+class _CopyToTensorParallel(torch.autograd.Function):
+
+    @staticmethod
+    def forward(ctx, x, group):
+        ctx.group = group
+        return x
+
+    @staticmethod
+    def backward(ctx, grad):
+        grad = grad.clone()
+        dist.all_reduce(grad, group=ctx.group)
+        return grad, None
+
+
+class _ReduceFromTensorParallel(torch.autograd.Function):
+
+    @staticmethod
+    def forward(ctx, x, group):
+        x = x.clone()
+        dist.all_reduce(x, group=group)
+        return x
+
+    @staticmethod
+    def backward(ctx, grad):
+        return grad, None
+
+
+class _ColumnParallelLinear(torch.nn.Module):
+    """Megatron's column-parallel linear: this rank keeps a block of output rows of weight and bias."""
+
+    def __init__(self, full, tp_rank, tp_size):
+        super().__init__()
+        self.weight = torch.nn.Parameter(full.weight.detach().chunk(tp_size, dim=0)[tp_rank].clone())
+        self.bias = torch.nn.Parameter(full.bias.detach().chunk(tp_size, dim=0)[tp_rank].clone())
+        self.group = None
+
+    def forward(self, x):
+        return torch.nn.functional.gelu(
+            torch.nn.functional.linear(_CopyToTensorParallel.apply(x, self.group), self.weight, self.bias))
+
+
+class _RowParallelLinear(torch.nn.Module):
+    """Megatron's row-parallel linear: a block of weight columns, the bias replicated and added after the sum."""
+
+    def __init__(self, full, tp_rank, tp_size):
+        super().__init__()
+        self.weight = torch.nn.Parameter(full.weight.detach().chunk(tp_size, dim=1)[tp_rank].clone())
+        self.bias = torch.nn.Parameter(full.bias.detach().clone())
+        self.group = None
+
+    def forward(self, x):
+        return _ReduceFromTensorParallel.apply(torch.nn.functional.linear(x, self.weight), self.group) + self.bias
+
+
+class _DenseStack(torch.nn.Module):
+    """The same layers unsharded, named as PipelineModule names them, for the ZeRO-3 target."""
+
+    def __init__(self, layers):
+        super().__init__()
+        for i, layer in enumerate(layers):
+            self.add_module(str(i), layer)
+
+    def forward(self, x, y):
+        for i, layer in enumerate(self.children()):
+            x = layer(x)
+            if i % 2 == 0:
+                x = torch.nn.functional.gelu(x)
+        return torch.nn.functional.mse_loss(x, y)
+
+
+class TestUniversalCheckpointPipelineToZeRO3(DistributedTest):
+    """A TP2 x PP2 run under ZeRO-1, the most a pipeline engine allows, resumed as ZeRO-3 over 4 data-parallel ranks."""
+    world_size = 4
+
+    def test_load(self, tmpdir):
+        hidden, tp, steps_before_save = 8, 2, 2
+        dims = [(hidden, 2 * hidden), (2 * hidden, hidden)] * 2
+
+        def full_layers():
+            torch.manual_seed(0)
+            return [torch.nn.Linear(i, o) for i, o in dims]
+
+        generator = torch.Generator().manual_seed(1)
+        batches = [(torch.randn(1, hidden, generator=generator), torch.randn(1, hidden, generator=generator))
+                   for _ in range(2 * (steps_before_save + 1))]
+
+        topology = PipeModelDataParallelTopology(num_pp=2, num_mp=tp, num_dp=1)
+        tp_rank = topology.get_coord(dist.get_rank()).model
+        layers = [(_ColumnParallelLinear if i % 2 == 0 else _RowParallelLinear)(full, tp_rank, tp)
+                  for i, full in enumerate(full_layers())]
+        model = PipelineModule(layers=layers,
+                               topology=topology,
+                               loss_fn=torch.nn.MSELoss(),
+                               partition_method="uniform")
+        for layer in layers:
+            layer.group = model._grid.get_slice_parallel_group()
+        config = {
+            "train_micro_batch_size_per_gpu": 1,
+            "gradient_accumulation_steps": 2,
+            "zero_optimization": {
+                "stage": 1
+            },
+            "pipeline": {
+                "activation_checkpoint_interval": 0
+            },
+        }
+        source, _, _, _ = deepspeed.initialize(config=config,
+                                               model=model,
+                                               optimizer=torch.optim.Adam(model.parameters(), lr=0.01))
+        device = source.device
+        loader = iter([(x.to(device), y.to(device)) for x, y in batches])
+        for _ in range(steps_before_save):
+            source.train_batch(data_iter=loader)
+
+        # Each rank holds one TP block of its stage's parameters; put the whole tensors together.
+        local = {name: [s.cpu() for s in states] for name, states in _full_optimizer_states(source).items()}
+        everyone = [None] * self.world_size
+        dist.all_gather_object(everyone, (tp_rank, local))
+        blocks = {}
+        for rank_tp, rank_states in everyone:
+            for name, states in rank_states.items():
+                blocks.setdefault(name, {})[rank_tp] = states
+        row_weight, row_bias = r"^[13]\.weight$", r"^[13]\.bias$"
+        expected = {}
+        for name, by_tp in blocks.items():
+            per_state = list(zip(*(by_tp[r] for r in range(tp))))
+            if re.match(row_bias, name):
+                assert all(torch.equal(s[0], s[1]) for s in per_state), name
+                expected[name] = [s[0] for s in per_state]
+            else:
+                expected[name] = [torch.cat(s, dim=1 if re.match(row_weight, name) else 0) for s in per_state]
+        assert len(expected) == 2 * len(dims)
+
+        uc_info = {
+            PARAMETER_WITH_ROW_PARALLELISM_PATTERNS: [row_weight],
+            TP_REPLICATED_PARAMETER_PATTERNS: [row_bias],
+        }
+        source.save_checkpoint(tmpdir, tag=CP_TAG, client_state={UNIVERSAL_CHECKPOINT_INFO: uc_info})
+        source.destroy()
+        # A real resume starts new processes; here the pipeline grid would stay registered as the global mpu.
+        groups.mpu = None
+
+        cp_dir = os.path.join(tmpdir, CP_TAG)
+        dist.barrier()
+        if dist.get_rank() == 0:
+            convert_to_universal(
+                SimpleNamespace(input_folder=cp_dir,
+                                output_folder=f"{cp_dir}_universal",
+                                num_extract_workers=1,
+                                num_merge_workers=1,
+                                keep_temp_folder=False,
+                                strict=True,
+                                inject_missing_state=False))
+        dist.barrier()
+
+        dense = _DenseStack(full_layers())
+        target, _, _, _ = deepspeed.initialize(config={
+            "train_batch_size": self.world_size,
+            "zero_optimization": {
+                "stage": 3
+            },
+            "checkpoint": {
+                "load_universal": True
+            },
+        },
+                                               model=dense,
+                                               optimizer=torch.optim.Adam(dense.parameters(), lr=1.0))
+        target.load_checkpoint(tmpdir, tag=f"{CP_TAG}_universal")
+
+        loaded = _full_optimizer_states(target)
+        assert loaded.keys() == expected.keys()
+        for name, states in expected.items():
+            for expected_state, loaded_state in zip(states, loaded[name]):
+                assert torch.equal(expected_state, loaded_state), name
+        assert target.optimizer.param_groups[0]["lr"] == 0.01
+        for state in target.optimizer.optimizer.state.values():
+            assert int(state["step"]) == steps_before_save
+
+        x, y = batches[0]
+        loss = target(x.to(target.device), y.to(target.device))
+        target.backward(loss)
+        target.step()
+        for state in target.optimizer.optimizer.state.values():
+            assert int(state["step"]) == steps_before_save + 1
+        target.destroy()
 
 
 def _full_optimizer_states(engine):
