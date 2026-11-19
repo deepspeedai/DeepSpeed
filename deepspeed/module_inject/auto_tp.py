@@ -405,7 +405,7 @@ class AutoTP():
 
         if self.training_mode:
             # An engine with groups of its own (#9081) passes them; otherwise use the process-wide ones.
-            if mp_group is None or mp_group is groups.get_tensor_model_parallel_group():
+            if mp_group is None:
                 self.mp_group = groups.get_tensor_model_parallel_group()
                 self.mp_size = groups.get_tensor_model_parallel_world_size()
             else:

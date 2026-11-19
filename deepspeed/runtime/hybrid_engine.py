@@ -18,7 +18,7 @@ import math
 from deepspeed import comm as dist
 from deepspeed.accelerator import get_accelerator
 from torch import nn
-from deepspeed.utils import logger
+from deepspeed.utils import groups, logger
 from deepspeed.module_inject.layers import LinearLayer, Normalize, EmbeddingLayer, OPTEmbedding
 from ..ops.transformer.inference.op_binding.workspace import WorkspaceOp
 from .hybrid_engine_graph import (DecodeGraphCache, decode_steps_from_generate_kwargs, validate_graph_capture_support)
@@ -37,6 +37,9 @@ class DeepSpeedHybridEngine(DeepSpeedEngine):
         dist.broadcast(_rng_state, 0)
         get_accelerator().set_rng_state(_rng_state.cpu())
 
+        # An engine's own TP1 groups (#9081) are plain data parallelism: the inference TP groups are built here,
+        # as without an mpu.
+        self._inference_mpu = None if groups._is_dense_data_parallel(self.mpu) else self.mpu
         self.Z3_enabled = (self._config.zero_config.stage == 3)
         self.gather_all_layers = self._config.hybrid_engine.pin_parameters
 
@@ -106,13 +109,14 @@ class DeepSpeedHybridEngine(DeepSpeedEngine):
             layer_id=layer_id,
             child=orig_layer)
 
-        if self.mpu is not None:
-            if hasattr(self.mpu, 'get_model_parallel_world_size'):
-                _container.set_tensor_parallel_config(self.mpu.get_model_parallel_world_size(),
-                                                      self.mpu.get_model_parallel_group())
+        mpu = self._inference_mpu
+        if mpu is not None:
+            if hasattr(mpu, 'get_model_parallel_world_size'):
+                _container.set_tensor_parallel_config(mpu.get_model_parallel_world_size(),
+                                                      mpu.get_model_parallel_group())
             else:
-                _container.set_tensor_parallel_config(self.mpu.get_tensor_model_parallel_world_size(),
-                                                      self.mpu.get_tensor_model_parallel_group())
+                _container.set_tensor_parallel_config(mpu.get_tensor_model_parallel_world_size(),
+                                                      mpu.get_tensor_model_parallel_group())
         else:
             _container.set_tensor_parallel_config(self._config.hybrid_engine.inference_tp_size, self.mp_group)
         _container.initialize_tensors(enable_training=True)
@@ -268,7 +272,7 @@ class DeepSpeedHybridEngine(DeepSpeedEngine):
                             if len(self.all_lora_params) > 0:
                                 self._fuse_lora_layer(layer_id)
 
-                            if self.mpu is not None:
+                            if self._inference_mpu is not None:
                                 self._inference_containers[layer_id].apply_tensor_parallelism(self.mp_replace,
                                                                                               reversed_dim=True)
 
@@ -385,7 +389,7 @@ class DeepSpeedHybridEngine(DeepSpeedEngine):
         self._orig_fwds_others = []
 
         if self._config.hybrid_engine.inference_tp_size > 1:
-            if self.mpu is None:
+            if self._inference_mpu is None:
                 global_rank = dist.get_rank()
                 world_size = dist.get_world_size()
                 mp_group_id = global_rank // self._config.hybrid_engine.inference_tp_size
@@ -410,8 +414,9 @@ class DeepSpeedHybridEngine(DeepSpeedEngine):
                             in_dim=1)
 
             else:
-                self.mp_group = self.mpu.get_model_parallel_group() if hasattr(self.mpu, 'get_model_parallel_group') else \
-                    self.mpu.get_tensor_model_parallel_group()
+                self.mp_group = self._inference_mpu.get_model_parallel_group() if hasattr(
+                    self._inference_mpu, 'get_model_parallel_group') else \
+                    self._inference_mpu.get_tensor_model_parallel_group()
 
                 from deepspeed.module_inject import ReplaceWithTensorSlicing
                 self.mp_replace = ReplaceWithTensorSlicing(mp_group=self.mp_group,

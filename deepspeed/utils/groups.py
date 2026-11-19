@@ -336,15 +336,29 @@ class TensorParallelGroups:
         return 0
 
 
-def _get_or_create_tp_groups(tensor_model_parallel_size, data_parallel_size=None):
+def _get_or_create_tp_groups(tensor_model_parallel_size, data_parallel_size=None, process_wide=True):
     """Return an engine's TensorParallelGroups: the process-wide groups when they have the requested layout
     (creating them if there are none yet), otherwise new groups.
+
+    With ``process_wide=False`` the engine cannot publish its groups to ``groups.mpu``, which holds an mpu
+    passed to an earlier engine: existing groups with its layout are reused, but none are made process-wide.
     """
-    if _TENSOR_MODEL_PARALLEL_GROUP is None:
+    if _TENSOR_MODEL_PARALLEL_GROUP is None and process_wide:
         _init_tp_mesh_device(tensor_model_parallel_size, data_parallel_size)
-    if _existing_tp_groups_match(tensor_model_parallel_size):
-        return TensorParallelGroups(_DATA_PARALLEL_GROUP, _TENSOR_MODEL_PARALLEL_GROUP, process_wide=True)
+    if _TENSOR_MODEL_PARALLEL_GROUP is not None and _existing_tp_groups_match(tensor_model_parallel_size):
+        return TensorParallelGroups(_DATA_PARALLEL_GROUP, _TENSOR_MODEL_PARALLEL_GROUP, process_wide=process_wide)
     return TensorParallelGroups.create(tensor_model_parallel_size, data_parallel_size)
+
+
+def _holds_explicit_mpu():
+    """Whether ``groups.mpu`` is an mpu passed to an earlier engine, rather than this module's groups."""
+    return mpu is not None and mpu is not sys.modules[__name__]
+
+
+def _is_dense_data_parallel(engine_mpu):
+    """Whether an engine's mpu is its own TP1 groups, which are plain data parallelism over every rank."""
+    return (isinstance(engine_mpu, TensorParallelGroups) and engine_mpu.get_tensor_model_parallel_world_size() == 1
+            and engine_mpu.get_data_parallel_world_size() == dist.get_world_size())
 
 
 def get_tensor_model_parallel_group():

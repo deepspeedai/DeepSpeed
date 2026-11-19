@@ -635,10 +635,8 @@ class DeepSpeedEngine(Module):
         elif self.mpu is None and groups.mpu is not None and self.mesh_device is None:
             # Without an mpu of its own, this engine would inherit groups.mpu: the layout of an earlier engine,
             # whose data parallel group may cover only part of the ranks. It gets groups of its own instead.
-            if groups.mpu is groups:
-                self.mpu = groups._get_or_create_tp_groups(tensor_model_parallel_size=1)
-            else:
-                self.mpu = groups.TensorParallelGroups.create(tensor_model_parallel_size=1)
+            self.mpu = groups._get_or_create_tp_groups(tensor_model_parallel_size=1,
+                                                       process_wide=not groups._holds_explicit_mpu())
         see_memory_usage("DeepSpeed Engine: After args sanity test", force=self.memory_breakdown())
         self._set_distributed_vars(args)
 
@@ -1003,7 +1001,8 @@ class DeepSpeedEngine(Module):
         if isinstance(self.mpu, groups.TensorParallelGroups) and self.mesh_device is None:
             tp_groups = self.mpu
         else:
-            tp_groups = groups._get_or_create_tp_groups(tensor_model_parallel_size=self.autotp_size())
+            tp_groups = groups._get_or_create_tp_groups(tensor_model_parallel_size=self.autotp_size(),
+                                                        process_wide=not groups._holds_explicit_mpu())
         # With a data/sequence parallel mesh, the data parallel layout comes from the mesh, which the module
         # getters read first.
         self.mpu = groups if self.mesh_device is not None else tp_groups
@@ -1529,9 +1528,10 @@ class DeepSpeedEngine(Module):
                 raise ValueError(f"The mpu passed to this engine holds another engine's groups with tensor parallel "
                                  f"size {borrowed_tp_size}, but this engine has tensor parallel size "
                                  f"{max(requested_tp_size, 1)}.")
-            return not self.mpu.process_wide
+            return not self.mpu.process_wide or groups._holds_explicit_mpu()
         if requested_tp_size > 1:
-            return not groups._existing_tp_groups_match(requested_tp_size)
+            # groups.mpu holds an mpu passed to an earlier engine; this engine cannot replace it.
+            return groups._holds_explicit_mpu() or not groups._existing_tp_groups_match(requested_tp_size)
         if self.mpu is not None or groups.mpu is None:
             return False
         # Without an mpu of its own, this engine gets TP1 groups instead of inheriting groups.mpu.
@@ -2284,7 +2284,7 @@ class DeepSpeedEngine(Module):
         # Pass the mpu from here to groups, for the code that still queries groups. The module getters keep
         # describing the engine that created the process-wide TP groups; other groups of an engine stay with it.
         if self._owns_parallel_groups():
-            if self.mpu.process_wide:
+            if self.mpu.process_wide and not groups._holds_explicit_mpu():
                 groups.mpu = groups
         elif self.mpu is not None:
             groups.mpu = self.mpu

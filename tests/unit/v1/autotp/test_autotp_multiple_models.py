@@ -292,6 +292,83 @@ class TestAutoTPEnginesWithDifferentLayouts(DistributedTest):
         assert third.mpu.get_tensor_model_parallel_world_size() == 1
         assert third.dp_world_size == dist.get_world_size()
 
+    def test_autotp_engine_after_an_explicit_mpu_keeps_it(self):
+        # The AutoTP engine used to publish its groups over groups.mpu, so the earlier engine's code that still
+        # queries groups (gradient clipping among it) ran on the AutoTP engine's data parallel group.
+        explicit_mpu = HalvesMPU()
+        build_engine(tp_size=1, mpu=explicit_mpu)
+        autotp = build_engine(tp_size=2, optimizer=lambda params: torch.optim.SGD(params, lr=0.1))
+        assert groups.mpu is explicit_mpu
+        assert groups._get_data_parallel_group() is explicit_mpu.get_data_parallel_group()
+        assert not autotp.mpu.process_wide
+        rank = dist.get_rank()
+        assert autotp.mpu.get_data_parallel_group_ranks() == [rank % 2, rank % 2 + 2]
+        # No process-wide TP groups were created for it, and it trains on its own.
+        inputs = torch.ones(1, 8, device=autotp.device)
+        labels = torch.zeros(1, dtype=torch.long, device=autotp.device)
+        loss = autotp(inputs, labels)
+        autotp.backward(loss)
+        autotp.step()
+
+    def test_autotp_engine_after_autotp_and_explicit_mpu(self):
+        first = build_engine(tp_size=2)
+        explicit_mpu = WorldMPU()
+        build_engine(tp_size=1, mpu=explicit_mpu)
+        third = build_engine(tp_size=2)
+        assert groups.mpu is explicit_mpu
+        assert not third.mpu.process_wide
+        # It has the first engine's layout, so it holds the same groups instead of new ones.
+        assert third.mpu.get_tensor_model_parallel_group() is first.mpu.get_tensor_model_parallel_group()
+
+    def test_bf16_muon_engine_after_an_autotp_engine(self):
+        # The engine's own TP1 groups are dense data parallelism, which BF16 Muon supports.
+        build_engine(tp_size=2)
+        muon = {
+            "bf16": {
+                "enabled": True
+            },
+            "data_types": {
+                "grad_accum_dtype": "fp32"
+            },
+            "zero_optimization": {
+                "stage": 1,
+                "reduce_scatter": False
+            },
+            "optimizer": {
+                "type": "Muon",
+                "params": {
+                    "lr": 1e-3,
+                    "momentum": 0.95
+                }
+            },
+        }
+        engine = build_engine(tp_size=1, extra_config=muon)
+        assert isinstance(engine.mpu, groups.TensorParallelGroups)
+        assert engine.optimizer._uses_muon
+
+    def test_hybrid_engine_after_an_autotp_engine_builds_inference_groups(self):
+        # The engine's own TP1 groups must not stand in for the inference tensor parallel groups.
+        transformers = pytest.importorskip("transformers")
+        build_engine(tp_size=2)
+        config = transformers.OPTConfig(vocab_size=64,
+                                        hidden_size=32,
+                                        ffn_dim=64,
+                                        num_hidden_layers=2,
+                                        num_attention_heads=4,
+                                        max_position_embeddings=128)
+        model = transformers.OPTForCausalLM(config)
+        engine, _, _, _ = deepspeed.initialize(model=model,
+                                               optimizer=torch.optim.SGD(model.parameters(), lr=0.01),
+                                               config={
+                                                   "train_micro_batch_size_per_gpu": 1,
+                                                   "hybrid_engine": {
+                                                       "enabled": True,
+                                                       "inference_tp_size": 2
+                                                   },
+                                               })
+        assert isinstance(engine.mpu, groups.TensorParallelGroups)
+        assert dist.get_world_size(group=engine.mp_group) == 2
+
     def test_first_engine_without_mpu_is_unchanged(self):
         engine = build_engine(tp_size=1)
         assert engine.mpu is None
