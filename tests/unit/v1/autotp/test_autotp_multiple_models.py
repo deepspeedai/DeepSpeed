@@ -291,6 +291,9 @@ class TestAutoTPEnginesWithDifferentLayouts(DistributedTest):
         with pytest.raises(ValueError, match="already sharded"):
             build_engine(tp_size=second_tp_size, model=first.module)
         assert groups.get_tensor_model_parallel_world_size() == 2
+        with pytest.raises(ValueError, match="already sharded"):
+            build_engine(tp_size=second_tp_size, model=torch.nn.Sequential(first.module))
+        assert groups.get_tensor_model_parallel_world_size() == 2
         # The same tensor parallel size is still accepted.
         build_engine(tp_size=2, model=first.module)
 
@@ -304,6 +307,78 @@ class TestAutoTPEnginesWithDifferentLayouts(DistributedTest):
         second = build_engine(tp_size=4, model=model)
         assert second.mpu.get_tensor_model_parallel_world_size() == 4
         assert groups.get_tensor_model_parallel_world_size() == 2
+
+    @pytest.mark.parametrize("matching_ranks", [True, False])
+    def test_tp_model_init_group_must_match_the_engines(self, monkeypatch, matching_ranks):
+        # The layers sharded over the tp_model_init group while the engine broadcast over its own DP group.
+        from deepspeed.runtime.tensor_parallel import init_utils
+        from deepspeed.runtime.config import DeepSpeedConfig
+        monkeypatch.setattr(init_utils, "_TP_MODEL_INIT_ARGS", None)
+        # Printing the config fails on the process group it holds, independently of this test.
+        monkeypatch.setattr(DeepSpeedConfig, "print_user_config", lambda self: None)
+        build_engine(tp_size=2)
+        if matching_ranks:
+            tp_groups = [dist.new_group(ranks=[0, 1]), dist.new_group(ranks=[2, 3])]
+            tp_group = tp_groups[dist.get_rank() // 2]
+        else:
+            tp_groups = [dist.new_group(ranks=[0, 2]), dist.new_group(ranks=[1, 3])]
+            tp_group = tp_groups[dist.get_rank() % 2]
+        model = SimpleModel(hidden_dim=8)
+        deepspeed.tp_model_init(model, tp_size=2, dtype=torch.float32, tp_group=tp_group)
+        if matching_ranks:
+            build_engine(tp_size=2, model=model)
+        else:
+            with pytest.raises(ValueError, match="tensor parallel group"):
+                build_engine(tp_size=2, model=model)
+
+    def test_zero3_engine_without_hpz_after_an_hpz_engine(self):
+        # The hpZ group of the first engine was used by a later engine with hpZ disabled.
+        sgd = lambda params: torch.optim.SGD(params, lr=0.1)
+        hpz = {"zero_allow_untested_optimizer": True, "zero_optimization": {"stage": 3, "zero_hpz_partition_size": 2}}
+        build_engine(tp_size=1, optimizer=sgd, extra_config=hpz)
+        zero3 = {"zero_allow_untested_optimizer": True, "zero_optimization": {"stage": 3}}
+        second = build_engine(tp_size=2, optimizer=sgd, extra_config=zero3)
+        assert all(param.ds_secondary_tensor is None for param in second.module.parameters())
+
+    def test_prebuilt_autoep_layers_with_their_own_groups_raise(self):
+        # The guard only looked for MoE layers; AutoEP layers built by an earlier engine also use expert groups.
+        autoep = make_autoep_config(ep_size=2, mixed_precision=False)
+        autoep["optimizer"]["params"]["torch_adam"] = True
+        first = build_engine(tp_size=1, model=MockMoEOnlyTransformer(), extra_config=autoep)
+        build_engine(tp_size=2)
+        with pytest.raises(ValueError, match="MoE layers"):
+            build_engine(tp_size=1, model=first.module)
+
+    def test_hybrid_engine_with_a_mesh_after_autotp_raises(self):
+        # The hybrid engine was not given the mesh, so it ran on TP1 groups over every rank instead.
+        transformers = pytest.importorskip("transformers")
+        build_engine(tp_size=2)
+        config = transformers.OPTConfig(vocab_size=64,
+                                        hidden_size=32,
+                                        ffn_dim=64,
+                                        num_hidden_layers=2,
+                                        num_attention_heads=4,
+                                        max_position_embeddings=128)
+        model = transformers.OPTForCausalLM(config)
+        with pytest.raises(RuntimeError, match="9081"):
+            deepspeed.initialize(model=model,
+                                 optimizer=torch.optim.SGD(model.parameters(), lr=0.01),
+                                 config={
+                                     "train_micro_batch_size_per_gpu": 1,
+                                     "hybrid_engine": {
+                                         "enabled": True
+                                     },
+                                 },
+                                 mesh_param=(2, 2))
+
+    def test_tp_model_init_at_tp1_after_an_autotp_engine(self, monkeypatch):
+        from deepspeed.runtime.tensor_parallel import init_utils
+        monkeypatch.setattr(init_utils, "_TP_MODEL_INIT_ARGS", None)
+        build_engine(tp_size=2)
+        model = SimpleModel(hidden_dim=8)
+        deepspeed.tp_model_init(model, tp_size=1, dtype=torch.float32)
+        second = build_engine(tp_size=1, model=model)
+        assert second.dp_world_size == dist.get_world_size()
 
     def test_engine_without_mpu_does_not_inherit_an_explicit_mpu(self):
         # An explicit mpu replaces groups.mpu. A later engine without one used to inherit it, and with it a data

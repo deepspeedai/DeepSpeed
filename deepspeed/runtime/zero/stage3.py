@@ -276,7 +276,9 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         #num of ranks in a ZeRO param partitioning group
         self.zero_hpz_partition_size = zero_hpz_partition_size
 
-        zero_param_parallel_group = groups._get_zero_param_intra_parallel_group()
+        # Another engine's hpZ group, built for its layout, is not used when hpZ is disabled.
+        zero_param_parallel_group = (groups._get_zero_param_intra_parallel_group()
+                                     if self.zero_hpz_partition_size > 1 else None)
         print_rank_0(
             f"ZeRO Stage 3 param partitioning group {self.zero_hpz_partition_size} {zero_param_parallel_group}",
             force=False)

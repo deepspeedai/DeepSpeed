@@ -586,6 +586,7 @@ def initialize(
                                            dist_init_required=dist_init_required,
                                            collate_fn=collate_fn,
                                            config=config,
+                                           mesh_device=mesh_device,
                                            config_class=config_class)
         else:
             engine = DeepSpeedEngine(args=args,

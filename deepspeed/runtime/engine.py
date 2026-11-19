@@ -575,12 +575,14 @@ class DeepSpeedEngine(Module):
                 "An engine with a data/sequence parallel mesh cannot be built after an AutoTP engine or an engine "
                 "with an explicit mpu in the same process yet (see https://github.com/deepspeedai/DeepSpeed/issues/9081)."
             )
-        sharded_tp_size = getattr(model, "ds_autotp_size", None)
-        if sharded_tp_size is not None and sharded_tp_size != max(requested_tp_size, 1):
-            # Its layers keep the groups they were sharded with, and would be overwritten by a broadcast over
-            # this engine's data parallel group.
-            raise ValueError(f"The model was already sharded by AutoTP with tensor parallel size {sharded_tp_size}, "
-                             f"but this engine has tensor parallel size {max(requested_tp_size, 1)}.")
+        for module in model.modules():
+            sharded_tp_size = getattr(module, "ds_autotp_size", None)
+            if sharded_tp_size is not None and sharded_tp_size != max(requested_tp_size, 1):
+                # Its layers keep the groups they were sharded with, and would be overwritten by a broadcast over
+                # this engine's data parallel group.
+                raise ValueError(
+                    f"The model was already sharded by AutoTP with tensor parallel size {sharded_tp_size}, "
+                    f"but this engine has tensor parallel size {max(requested_tp_size, 1)}.")
         if self._will_hold_other_groups(mesh_device, requested_tp_size):
             self._check_supported_with_own_groups(model, mesh_device, max(requested_tp_size, 1))
         if self._config.deterministic_mode:
@@ -1095,8 +1097,19 @@ class DeepSpeedEngine(Module):
             raise ValueError(f"tensor_parallel.tp.tp_size ({tp_config.tensor_parallel.tp_size}) "
                              f"does not match tensor_parallel.autotp_size ({tp_size}).")
         tp_config.tensor_parallel.tp_size = tp_size
-        if tp_config.tensor_parallel.tp_group is None:
-            tp_config.tensor_parallel.tp_group = self.mpu.get_tensor_model_parallel_group()
+        # The layers must shard over the engine's TP group: the engine broadcasts and reduces over its DP group.
+        engine_tp_group = self.mpu.get_tensor_model_parallel_group()
+        requested_tp_group = tp_config.tensor_parallel.tp_group
+        if requested_tp_group is not None and requested_tp_group is not engine_tp_group:
+
+            def group_ranks(group):
+                return [dist.get_global_rank(group, r) for r in range(dist.get_world_size(group=group))]
+
+            if group_ranks(requested_tp_group) != group_ranks(engine_tp_group):
+                raise ValueError(f"The tensor parallel group passed to tp_model_init has ranks "
+                                 f"{group_ranks(requested_tp_group)}, but this engine's tensor parallel group has "
+                                 f"ranks {group_ranks(engine_tp_group)}.")
+        tp_config.tensor_parallel.tp_group = engine_tp_group
 
         from deepspeed.module_inject.auto_tp import AutoTP
 
@@ -1570,7 +1583,8 @@ class DeepSpeedEngine(Module):
         if self.is_deepcompile_enabled() and self.compile_autotp():
             raise ValueError(unsupported.format("the DeepCompile 'autotp' pass"))
         # Expert groups are still built from the process-wide groups.
-        if any(isinstance(module, MoE) for module in model.modules()):
+        from deepspeed.module_inject.auto_ep_layer import AutoEPMoELayer
+        if any(isinstance(module, (MoE, AutoEPMoELayer)) for module in model.modules()):
             raise ValueError(unsupported.format("MoE layers"))
 
     def _owns_parallel_groups(self):
@@ -2905,7 +2919,9 @@ class DeepSpeedEngine(Module):
                 self._resolve_zero3_param_placement()
             if isinstance(optimizer, DummyOptim):
                 log_dist("Creating ZeRO Offload", ranks=[0])
-                zero_param_parallel_group = groups._get_zero_param_intra_parallel_group()
+                # Another engine's hpZ group, built for its layout, is not used when hpZ is disabled.
+                zero_param_parallel_group = (groups._get_zero_param_intra_parallel_group()
+                                             if self.zero_hpz_partition_size() > 1 else None)
                 if self.zero_hpz_partition_size() > 1 and zero_param_parallel_group is None:
                     self._set_zero_group_parallelism()
                     zero_param_parallel_group = groups._get_zero_param_intra_parallel_group()
