@@ -350,6 +350,13 @@ class Zero3Repartition:
         if any(hasattr(p, "ds_id") and id(p) not in optimized for p in engine.module.parameters()):
             # Frozen parameters (e.g. a LoRA base) are partitioned too and would need their own move.
             raise NotImplementedError("re-partition supports only engines whose ZeRO-3 parameters are all trained")
+        if opt.zero_hpz_partition_size > 1 or getattr(opt, "use_muon", False):
+            raise NotImplementedError("re-partition does not support hpZ or Muon")
+        group = opt.dp_process_group
+        if any(hasattr(p, "ds_id") and p.ds_process_group is not group for p in engine.module.parameters()):
+            # zero.Init partitions over its data_parallel_group (the world when none is given, also with an mpu).
+            raise NotImplementedError("re-partition needs every parameter partitioned over the engine's data-parallel "
+                                      "group, e.g. zero.Init(data_parallel_group=mpu.get_data_parallel_group())")
         if opt.micro_step_id != 0:
             raise RuntimeError("re-partition only between optimizer steps (pending micro-steps)")
         train_batch = engine.train_batch_size()
@@ -509,12 +516,9 @@ class Zero3Repartition:
         """Give every holder of the engine's data-parallel group the new group (a handle's re-point)."""
         from deepspeed.utils import groups
         opt = _zero3_optimizer(engine)
-        old = opt.dp_process_group
         group = self.new_group
         for p in engine.module.parameters():
-            if hasattr(p, "ds_id"):
-                if p.ds_process_group is not old:
-                    raise NotImplementedError("a parameter is partitioned over a group other than the engine's")
+            if hasattr(p, "ds_id"):  # partitioned over the engine's group (checked in _check)
                 p.ds_process_group = group
                 p.ds_zero_partition_rank = dist.get_rank(group=group)
                 p.ds_zero_partition_world_size = dist.get_world_size(group=group)
@@ -537,8 +541,6 @@ class Zero3Repartition:
         acc = get_accelerator()
         device = acc.current_device_name()
         opt = _zero3_optimizer(engine)
-        if opt.zero_hpz_partition_size > 1 or getattr(opt, "use_muon", False):
-            raise NotImplementedError("re-partition does not support hpZ or Muon")
         self._repoint(engine)
         n = len(self.new_ranks)
         last = dist.get_rank(group=self.new_group) == n - 1
@@ -576,11 +578,17 @@ class Zero3Repartition:
         opt.groups_padding = [[p.padding_size() if last else 0 for p in g] for g in opt.fp16_groups]
         opt._partition_group_spans_model_parallel.clear()
 
-        # fp32 master partitions and the optimizer's moments: same objects (the optimizer's state is keyed by them).
-        opt._point_aliased_fp32_partitions_at_lp_buffer()
+        # fp32 master partitions and the optimizer's moments: same objects (the optimizer's state is keyed by them). A
+        # sub-group whose weights are already in the master dtype (an fp32 model, or parameters kept in fp32) has no
+        # separate master: it views the sub-group's new partition and is again the sub-group's flat, as ZeRO-3 builds it.
+        # (ZeRO-3's own _point_aliased_fp32_partitions_at_lp_buffer slices the training dtype's buffer only, which with
+        # parameters kept in fp32 would make their master a view of bf16 / fp16 weights.)
         for i, flat in enumerate(opt.fp32_partitioned_groups_flat):
             numel = opt.fp16_partitioned_groups_flat_numel[i]
-            if i not in opt.aliased_fp32_sub_groups:
+            if i in opt.aliased_fp32_sub_groups:
+                flat.data = opt.fp16_partitioned_groups_flat[i].data
+                opt.fp16_partitioned_groups_flat[i] = flat
+            else:
                 flat.data = torch.zeros(numel, dtype=flat.dtype, device=device)
             state = opt.optimizer.state[flat]
             for k in moments:

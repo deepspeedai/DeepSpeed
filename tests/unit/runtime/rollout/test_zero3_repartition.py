@@ -32,6 +32,9 @@ from deepspeed.utils import safe_get_full_fp32_param, safe_get_full_optimizer_st
 from unit.common import DistributedTest
 
 transformers = pytest.importorskip("transformers")
+# zero.Init replaces torch.Tensor.__new__, and the first use of a transformers model class imports torch._dynamo, whose
+# polyfill of Tensor.__new__ rejects the replacement: load the class before a test builds the model under zero.Init.
+Qwen3ForCausalLM = transformers.Qwen3ForCausalLM
 
 CONFIG = {
     "train_micro_batch_size_per_gpu": 1,
@@ -51,7 +54,9 @@ CONFIG = {
 MOMENTS = ("exp_avg", "exp_avg_sq")
 
 
-def tiny_qwen3():
+def tiny_qwen3(spread_norms=True):
+    """A two-layer Qwen3. ``spread_norms`` draws the norm weights from [0.5, 1.5] instead of leaving them at 1 (not
+    under zero.Init, where the parameters are already partitioned when it would write them)."""
     cfg = transformers.Qwen3Config(vocab_size=101,
                                    hidden_size=64,
                                    intermediate_size=96,
@@ -63,12 +68,28 @@ def tiny_qwen3():
                                    tie_word_embeddings=False,
                                    attn_implementation="eager")
     torch.manual_seed(0)
-    model = transformers.Qwen3ForCausalLM(cfg)
-    with torch.no_grad():
-        for name, p in model.named_parameters():
-            if "norm" in name:
-                p.uniform_(0.5, 1.5)
+    model = Qwen3ForCausalLM(cfg)
+    if spread_norms:
+        with torch.no_grad():
+            for name, p in model.named_parameters():
+                if "norm" in name:
+                    p.uniform_(0.5, 1.5)
     return model
+
+
+class ScaledQwen3(torch.nn.Module):
+    """tiny_qwen3 with its logits scaled per token by ``logit_scale``, which starts at 1, for keeping in fp32: bf16
+    logits times an fp32 parameter are fp32, as models use the parameters they keep in fp32 (attention sinks, for
+    one). Qwen3's own weights cannot stay fp32 in bf16 training without autocast: a norm's fp32 output reaches a bf16
+    Linear."""
+
+    def __init__(self):
+        super().__init__()
+        self.model = tiny_qwen3(spread_norms=False)
+        self.logit_scale = torch.nn.Parameter(torch.ones(self.model.config.vocab_size))
+
+    def forward(self, input_ids):
+        return self.model(input_ids=input_ids).logits * self.logit_scale
 
 
 def full_state(engine):
@@ -258,3 +279,94 @@ class TestZero3Repartition(DistributedTest):
             got = full_state(engine)
             bad = [k for k in expected if not torch.equal(got[k], expected[k])]
             assert not bad, f"{len(bad)} of {len(expected)} differ from the engine that stayed on four ranks: {bad[:3]}"
+
+    def test_parameters_kept_in_fp32(self):
+        # data_types.keep_in_fp32_modules keeps ScaledQwen3's logit_scale in fp32 beside the bf16 weights (applied by
+        # zero.Init): ZeRO-3 then holds a low-precision buffer and a gradient buffer per dtype, and the kept parameter's
+        # fp32 master is its partition itself. The engine (B) shrinks to two ranks, trains, grows back and trains. It
+        # must keep both dtypes, move its state bit for bit and match C, which trains on four ranks throughout; the kept
+        # parameter's forward value must stay its fp32 master. The scale starts at 1, where bf16 values are 2**-8 and
+        # 2**-7 apart and Adam moves it by about the learning rate, so a kept parameter stored, reduced or updated in
+        # bf16 differs.
+        if not get_accelerator().is_bf16_supported():
+            pytest.skip("bf16 is not supported")
+        device = torch.device(get_accelerator().current_device_name())
+        rank = dist.get_rank()
+        config = copy.deepcopy(CONFIG)
+        config["bf16"] = {"enabled": True}
+        config["data_types"] = {"keep_in_fp32_modules": ["logit_scale"]}
+        b4, b2, c_mpu = (TrainerMPU(ranks) for ranks in ([0, 1, 2, 3], [0, 1], [0, 1, 2, 3]))
+        engines = []
+        for mpu in (b4, c_mpu):
+            # zero.Init partitions over data_parallel_group (the world when none is given), not over mpu's group.
+            with deepspeed.zero.Init(config_dict_or_path=config, data_parallel_group=mpu.get_data_parallel_group()):
+                model = ScaledQwen3()
+            engines.append(
+                deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config, mpu=mpu)[0])
+        engine, plain = engines
+        expected_dtypes = {
+            n: torch.float32 if n == "logit_scale" else torch.bfloat16
+            for n, _ in engine.module.named_parameters()
+        }
+        problems = []
+
+        def agree(where):
+            everyone = [None] * dist.get_world_size()
+            dist.all_gather_object(everyone, problems)
+            failed = {r: p for r, p in enumerate(everyone) if p}
+            assert not failed, f"{where}: {failed}"
+
+        def dtypes():
+            return {n: p.ds_tensor.dtype for n, p in engine.module.named_parameters()}
+
+        def check_kept(where):
+            # On the engine's ranks (collective over them).
+            if dtypes() != expected_dtypes:
+                problems.append(f"{where}: partition dtypes {dtypes()}")
+            p = engine.module.logit_scale
+            master = safe_get_full_fp32_param(p)
+            with deepspeed.zero.GatheredParameters([p]):
+                if not torch.equal(p.data, master):
+                    problems.append(f"{where}: logit_scale's forward value is not its fp32 master")
+
+        def check_against_plain(where, ranks):
+            expected = full_state(plain)
+            if rank in ranks:
+                got = full_state(engine)
+                bad = [k for k in expected if not torch.equal(got[k], expected[k])]
+                if bad:
+                    problems.append(f"{where}: {len(bad)} of {len(expected)} differ from C, e.g. {bad[:3]}")
+                check_kept(where)
+            agree(where)
+
+        def train(step, ranks):
+            batch = torch.randint(1, 101, (4, 6), generator=torch.Generator().manual_seed(300 + step)).to(device)
+            for e, members in ((engine, ranks), (plain, [0, 1, 2, 3])):
+                if rank in members:
+                    for _ in range(4 // len(members)):
+                        e.backward(e(batch).mean())
+                        e.step()
+                dist.barrier()
+
+        assert dtypes() == expected_dtypes, f"zero.Init kept no parameter in fp32, nothing to test: {dtypes()}"
+        to_two, to_four = Zero3Repartition(engine, b2), Zero3Repartition(engine, b4)
+        for step in range(3):
+            train(step, [0, 1, 2, 3])
+        check_against_plain("on four ranks", [0, 1, 2, 3])
+        before = full_state(engine)
+        to_two.execute()
+        if rank in (0, 1):
+            if any(not torch.equal(v, before[k]) for k, v in full_state(engine).items()):
+                problems.append("the move to two ranks changed the state")
+        agree("after the shrink")
+        for step in range(3, 5):
+            train(step, [0, 1])
+        check_against_plain("on two ranks", [0, 1])
+        before = full_state(engine) if rank in (0, 1) else None
+        to_four.execute()
+        after = full_state(engine)
+        if rank in (0, 1) and any(not torch.equal(v, before[k]) for k, v in after.items()):
+            problems.append("the move back to four ranks changed the state")
+        agree("after the grow")
+        train(5, [0, 1, 2, 3])
+        check_against_plain("back on four ranks", [0, 1, 2, 3])
