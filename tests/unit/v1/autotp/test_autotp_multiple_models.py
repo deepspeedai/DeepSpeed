@@ -203,6 +203,13 @@ class TestAutoTPEnginesShareProcessGroups(DistributedTest):
         for actual, expected in zip(first.module.parameters(), reference.parameters()):
             torch.testing.assert_close(actual, expected)
 
+    def test_autotp_engine_after_mesh_raises(self):
+        # The data parallel getters read groups.mesh_device first, so this engine would run on the mesh's
+        # data parallel group, which spans ranks that hold different TP shards.
+        build_engine(tp_size=1, mesh_param=(dist.get_world_size(), 1))
+        with pytest.raises(RuntimeError, match="mesh.*9081"):
+            build_engine(tp_size=2)
+
     def test_engine_without_mpu_inherits_a_later_explicit_mpu(self):
         # An explicit mpu replaces groups.mpu, so a third engine without one inherits that layout, not the
         # cached AutoTP groups of the first engine.
