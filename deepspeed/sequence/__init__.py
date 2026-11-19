@@ -10,3 +10,4 @@ from deepspeed.sequence.autosp_fusion import (ModalityFusionSPAdapter, LlavaFusi
 from deepspeed.sequence.auto_sp import auto_wrap_model_for_sp
 from deepspeed.sequence.cross_entropy import (VocabParallelCausalLMLoss, VocabParallelCrossEntropyLoss,
                                               configure_vocab_parallel_loss, vocab_parallel_cross_entropy)
+from deepspeed.sequence.layer import DistributedAttention

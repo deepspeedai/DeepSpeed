@@ -238,8 +238,10 @@ def test_zero3_affine_rebuild_allows_omitted_empty_rank():
     assert torch.equal(_rebuild_zero3_autoep_rank_tensors(shards, placement, full.shape, "test"), full)
 
 
-def test_zero3_partition_native_consolidation_uses_affine_placement(tmp_path):
-    param_names = [f"layer.experts.w{index}" for index in range(1, 4)]
+# A registered module name may contain "/"; the converter must still write every file it uses.
+@pytest.mark.parametrize("module_path", ["layer", "blocks/0/layer"])
+def test_zero3_partition_native_consolidation_uses_affine_placement(tmp_path, module_path):
+    param_names = [f"{module_path}.experts.w{index}" for index in range(1, 4)]
     placement = make_autoep_placement_descriptor(4, [[2, 0, 3], [1]])
     full = torch.arange(8, dtype=torch.float32).view(4, 2)
     rank_tensors = {
@@ -251,11 +253,11 @@ def test_zero3_partition_native_consolidation_uses_affine_placement(tmp_path):
     for rank, local_tensor in rank_tensors.items():
         layer_info = {
             'moe_layer_id': 0,
-            'module_path': 'layer',
+            'module_path': module_path,
             'num_experts': 4,
             'num_local_experts': local_tensor.shape[0],
             'ep_size': 2,
-            'expert_key_prefix': 'layer.experts',
+            'expert_key_prefix': f'{module_path}.experts',
             AUTOEP_EXPERT_PLACEMENT: placement,
             AUTOEP_ZERO3_EXPERT_STATE_FORMAT_KEY: AUTOEP_ZERO3_PARTITIONED_EXPERT_STATE_FORMAT,
             AUTOEP_ZERO3_EXPERT_STATE_FORMAT_VERSION_KEY: AUTOEP_ZERO3_EXPERT_STATE_FORMAT_VERSION,

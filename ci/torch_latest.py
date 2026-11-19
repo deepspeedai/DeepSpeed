@@ -94,9 +94,16 @@ AWS_PROJECT_TAG = "deepspeed-ci"
 EXIT_TEST_FAILURE = 1
 EXIT_INFRA = 75  # EX_TEMPFAIL: no GPU instance was provisioned, so no test ever ran
 EXIT_TIMEOUT = 124
+# pytest's documented "no tests were collected" code. A diff-selected (subset) run whose
+# only targets skip on this runner collects nothing and exits 5; that is a legitimate green
+# no-op, not a failure. See the sibling guard in cpu-torch-latest-v1-multirank.yml (PR #9032).
+EXIT_NO_TESTS = 5
 # The Sandbox server-side lifetime can kill a run slightly before the local clock crosses the
 # nominal budget, so classify a failure as a timeout just inside the limit.
 SANDBOX_TIMEOUT_GRACE_SECONDS = 120
+# Shared wording for a subset selection that collected no tests (EXIT_NO_TESTS); both backends
+# print it so the green no-op reads the same in Modal and AWS logs.
+EMPTY_SELECTION_MESSAGE = "No tests ran for this selection; every selected test was skipped on this runner."
 MAX_TEST_LIST_BYTES = 64 * 1024
 MAX_TEST_TARGETS = 1024
 MAX_DISPLAY_BYTES_PER_COMMAND = 16 * 1024 * 1024
@@ -1689,6 +1696,9 @@ def run_controller(env: Mapping[str, str], modal_module: Any | None = None) -> i
     if primary_error is not None and cleanup_error is not None:
         raise ControllerCleanupError(primary_error, cleanup_error) from primary_error
     if primary_error is not None:
+        if _is_empty_pytest_selection(primary_error, inputs):
+            print(EMPTY_SELECTION_MESSAGE, flush=True)
+            return 0
         return _report_primary_failure(primary_error, sandbox_started_at)
     if cleanup_error is not None:
         raise RuntimeError(f"Sandbox cleanup failed: {cleanup_error}") from cleanup_error
@@ -1743,6 +1753,18 @@ def run_modal_infrastructure_smoke(env: Mapping[str, str], modal_module: Any | N
     if cleanup_error is not None:
         raise RuntimeError(f"Sandbox cleanup failed: {cleanup_error}") from cleanup_error
     return 0
+
+
+def _is_empty_pytest_selection(error: BaseException, inputs: ControllerInputs) -> bool:
+    """True when pytest found nothing to run for a legitimately empty subset selection.
+
+    A diff-selected (subset) run can hold targets that all skip on this runner, so pytest
+    collects zero items and exits with EXIT_NO_TESTS. Only subset runs can be empty this way:
+    mode=all runs the whole tests/unit/v1 scope, where an empty collection means the selector
+    or a collection guard broke and must still fail.
+    """
+    return (isinstance(error, RemoteCommandError) and error.label == "run pytest"
+            and error.return_code == EXIT_NO_TESTS and inputs.selection_mode == "subset")
 
 
 def _report_primary_failure(error: BaseException, sandbox_started_at: float | None) -> int:
@@ -1840,6 +1862,9 @@ def run_aws_controller(
         if test_code == EXIT_TIMEOUT:
             print("DS_CI_FAILURE_CLASS=timeout: no test progress for 300 seconds", flush=True)
             outcome = EXIT_TIMEOUT
+        elif test_code == EXIT_NO_TESTS and inputs.selection_mode == "subset":
+            print(EMPTY_SELECTION_MESSAGE, flush=True)
+            outcome = 0
         elif test_code:
             print(f"DS_CI_FAILURE_CLASS=test: AWS pytest failed with exit code {test_code}", flush=True)
             outcome = EXIT_TEST_FAILURE

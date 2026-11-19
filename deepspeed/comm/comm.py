@@ -170,7 +170,6 @@ def init_deepspeed_backend(ds_backend, timeout, init_method):
 
 
 def is_initialized() -> bool:
-    #assert cdb is not None, 'DeepSpeed backend not set, please initialize it using init_process_group()'
     if cdb is None:
         return False
     else:
@@ -694,12 +693,7 @@ def all_reduce(tensor,
                prof=False,
                log_name='all_reduce',
                debug=get_caller_func()):
-    #if profile_comm:
-    # context of the timers?
-    # timers.start()
-    # TensorBoard logging for comm calls.?
     global cdb
-    #print(f'op = {op}, cdb= {cdb.name}')
     return cdb.all_reduce(tensor, op, group, async_op)
 
 
@@ -790,6 +784,14 @@ def get_global_rank(group: Optional[Any] = None, group_rank: int = 0) -> int:
     assert cdb is not None and cdb.is_initialized(
     ), 'DeepSpeed backend not set, please initialize it using init_process_group()'
     return cdb.get_global_rank(group, group_rank)
+
+
+def get_backend(group: Optional[Any] = None) -> str:
+    """Name of the backend that runs ``group``'s collectives, the default group's if none is given."""
+    global cdb
+    assert cdb is not None and cdb.is_initialized(
+    ), 'DeepSpeed backend not set, please initialize it using init_process_group()'
+    return cdb.get_backend(group)
 
 
 def get_all_ranks_from_group(group=None):

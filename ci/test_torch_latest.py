@@ -741,6 +741,37 @@ def test_controller_propagates_command_and_cleanup_failures():
         shutil.rmtree(root, ignore_errors=True)
 
 
+def test_controller_treats_empty_subset_selection_as_success():
+    # A subset selection whose only target skips on this runner collects nothing: pytest
+    # exits EXIT_NO_TESTS and the run is a green no-op, not a candidate failure.
+    root, path = _selection_file("tests/unit/v1/test_one.py\n")
+    try:
+        env = _valid_env(path, DS_TEST_SELECTION_MODE="subset")
+        fake, _, sandbox = _fake_modal("a" * 40, fail_label="pytest", fail_code=torch_latest.EXIT_NO_TESTS)
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            code = torch_latest.run_controller(env, fake)
+        assert code == 0
+        assert torch_latest.EMPTY_SELECTION_MESSAGE in stdout.getvalue()
+        assert "DS_CI_FAILURE_CLASS" not in stdout.getvalue()
+        assert sandbox.terminated
+
+        # mode=all runs the whole v1 scope, so an empty collection is a real failure.
+        all_root, all_path = _selection_file("tests/unit/v1\n")
+        try:
+            all_env = _valid_env(all_path, DS_TEST_SELECTION_MODE="all")
+            fake_all, _, _ = _fake_modal("a" * 40, fail_label="pytest", fail_code=torch_latest.EXIT_NO_TESTS)
+            with contextlib.redirect_stdout(io.StringIO()):
+                _expect_error(torch_latest.run_controller,
+                              all_env,
+                              fake_all,
+                              exception=torch_latest.RemoteCommandError)
+        finally:
+            shutil.rmtree(all_root, ignore_errors=True)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def test_none_mode_creates_no_modal_resources():
     root, path = _selection_file("")
     try:
@@ -1040,6 +1071,14 @@ def test_aws_controller_runs_one_backend_and_always_terminates():
         stalled = FakeAwsCli(test_code=torch_latest.EXIT_TIMEOUT)
         assert torch_latest.run_aws_controller(env, stalled) == torch_latest.EXIT_TIMEOUT
         assert len([call for call, _ in stalled.calls if call[2:4] == ("ec2", "run-instances")]) == 1
+
+        # A subset selection that collects nothing exits EXIT_NO_TESTS; treat it as a green no-op.
+        empty = FakeAwsCli(test_code=torch_latest.EXIT_NO_TESTS)
+        empty_stdout = io.StringIO()
+        with contextlib.redirect_stdout(empty_stdout):
+            assert torch_latest.run_aws_controller(env, empty) == 0
+        assert torch_latest.EMPTY_SELECTION_MESSAGE in empty_stdout.getvalue()
+        assert len([call for call, _ in empty.calls if call[2:4] == ("ec2", "terminate-instances")]) == 1
     finally:
         shutil.rmtree(root, ignore_errors=True)
 

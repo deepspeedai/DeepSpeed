@@ -10,7 +10,8 @@ import deepspeed.comm as dist
 import deepspeed.sequence.vocab_parallel_ops as vocab_parallel_ops
 from deepspeed.accelerator import get_accelerator
 from deepspeed.module_inject.tp_shard import AutoTPMeta, get_shard_size_list
-from deepspeed.sequence.vocab_parallel_ops import vocab_parallel_entropy, vocab_parallel_kl_div, vocab_parallel_logprobs
+from deepspeed.sequence.vocab_parallel_ops import (vocab_parallel_entropy, vocab_parallel_jsd, vocab_parallel_kl_div,
+                                                   vocab_parallel_logprobs)
 from unit.common import DistributedTest
 
 
@@ -32,6 +33,18 @@ def reference_kl(student_logits, teacher_logits, reverse):
     if reverse:
         return F.kl_div(log_p, log_q, reduction="none", log_target=True).sum(dim=-1)
     return F.kl_div(log_q, log_p, reduction="none", log_target=True).sum(dim=-1)
+
+
+def reference_jsd(student_logits, teacher_logits, beta):
+    log_q = F.log_softmax(student_logits.double(), dim=-1)
+    log_p = F.log_softmax(teacher_logits.double(), dim=-1)
+    if beta == 0:
+        return F.kl_div(log_q, log_p, reduction="none", log_target=True).sum(-1)
+    if beta == 1:
+        return F.kl_div(log_p, log_q, reduction="none", log_target=True).sum(-1)
+    mixture = (1 - beta) * log_q.exp() + beta * log_p.exp()
+    return ((1 - beta) * F.kl_div(mixture.log(), log_q, reduction="none", log_target=True) +
+            beta * F.kl_div(mixture.log(), log_p, reduction="none", log_target=True)).sum(-1)
 
 
 def leaf(tensor):
@@ -94,6 +107,146 @@ def test_kl_div_matches_reference_for_student_and_teacher(reverse):
     torch.testing.assert_close(actual_teacher.grad, expected_teacher.grad)
 
 
+@pytest.mark.parametrize("beta", [0.0, 0.1, 0.5, 0.9, 1.0])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("frozen", ["neither", "teacher", "student"])
+def test_jsd_matches_dense_oracle(beta, dtype, frozen):
+    torch.manual_seed(12)
+    # A sequence slice exercises the non-contiguous causal-shift layout.
+    student = torch.randn(2, 4, 19).to(dtype)[:, :-1]
+    teacher = torch.randn(2, 4, 19).to(dtype)[:, :-1]
+    actual_student = student.detach().requires_grad_(frozen != "student")
+    actual_teacher = teacher.detach().requires_grad_(frozen != "teacher")
+    expected_student, expected_teacher = leaf(student.double()), leaf(teacher.double())
+    weight = torch.randn(2, 3)
+    actual = vocab_parallel_jsd(actual_student, actual_teacher, beta=beta)
+    expected = reference_jsd(expected_student, expected_teacher, beta)
+    assert actual.dtype == torch.float32
+    torch.testing.assert_close(actual.double(), expected, atol=1e-6, rtol=1e-5)
+    (actual * weight).sum().backward()
+    (expected * weight).sum().backward()
+    atol, rtol = (1e-6, 1e-5) if dtype == torch.float32 else (1e-3, 1e-2)
+    for actual_input, expected_input in [(actual_student, expected_student), (actual_teacher, expected_teacher)]:
+        if actual_input.requires_grad:
+            torch.testing.assert_close(actual_input.grad.double(), expected_input.grad, atol=atol, rtol=rtol)
+        else:
+            assert actual_input.grad is None
+
+
+def test_jsd_disjoint_support_and_undefined_rows():
+    student = leaf(torch.tensor([[0.0, -float("inf")], [-float("inf"), -float("inf")]]))
+    teacher = leaf(torch.tensor([[-float("inf"), 0.0], [1.0, 0.0]]))
+    actual = vocab_parallel_jsd(student, teacher)
+    torch.testing.assert_close(actual[:1], torch.tensor([2.0]).log())
+    assert torch.isnan(actual[1])
+    actual.masked_fill_(torch.tensor([False, True]), 0).sum().backward()
+    torch.testing.assert_close(student.grad, torch.zeros_like(student))
+    torch.testing.assert_close(teacher.grad, torch.zeros_like(teacher))
+
+
+def test_jsd_independent_logit_shifts():
+    base = torch.tensor([[0.0, 8.0, -8.0, 16.0]])
+    other = torch.tensor([[16.0, -8.0, 8.0, 0.0]])
+    shifted_student, shifted_teacher = leaf(base + 1e8), leaf(other - 1e8)
+    student, teacher = leaf(base), leaf(other)
+    actual = vocab_parallel_jsd(shifted_student, shifted_teacher, beta=0.3)
+    expected = vocab_parallel_jsd(student, teacher, beta=0.3)
+    torch.testing.assert_close(actual, expected)
+    actual.sum().backward()
+    expected.sum().backward()
+    torch.testing.assert_close(shifted_student.grad, student.grad)
+    torch.testing.assert_close(shifted_teacher.grad, teacher.grad)
+
+
+@pytest.mark.parametrize("beta", [-0.1, 1.1, float("nan")])
+def test_jsd_rejects_invalid_beta(beta):
+    with pytest.raises(ValueError, match="beta"):
+        vocab_parallel_jsd(torch.randn(2, 7), torch.randn(2, 7), beta=beta)
+
+
+def test_jsd_rejects_invalid_logits():
+    with pytest.raises(ValueError, match="same shape"):
+        vocab_parallel_jsd(torch.randn(2, 7), torch.randn(2, 8))
+    with pytest.raises(ValueError, match="vocabulary dimension"):
+        vocab_parallel_jsd(torch.tensor(1.0), torch.tensor(2.0))
+    with pytest.raises(ValueError, match="floating point"):
+        vocab_parallel_jsd(torch.ones(2, 7, dtype=torch.long), torch.randn(2, 7))
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("layout,beta", [("contiguous", 0.1), ("sequence_slice", 0.5), ("strided_vocab", 0.9)])
+def test_jsd_triton_matches_eager(dtype, layout, beta):
+    device = torch.device(get_accelerator().current_device_name())
+    probe = torch.empty(0, device=device)
+    if not vocab_parallel_ops._use_jsd_triton(probe, probe):
+        pytest.skip("JSD Triton kernels are not supported on this device")
+    torch.manual_seed(15)
+    student = (torch.randn(6, 5000) * 3).to(dtype)
+    teacher = (torch.randn(6, 5000) * 3).to(dtype)
+    student[1, :2500] = -float("inf")
+    teacher[1, 2500:] = -float("inf")
+    student[2] = -float("inf")
+    student[3, :2500] = -float("inf")
+    teacher[3, :2500] = -float("inf")
+    student[4] = teacher[4]  # coincident distributions
+    expected_student, expected_teacher = leaf(student), leaf(teacher)
+    expected = vocab_parallel_jsd(expected_student, expected_teacher, beta=beta)
+    weight = torch.linspace(-1, 1, 6)
+    expected.masked_fill(torch.isnan(expected), 0).mul(weight).sum().backward()
+
+    def embed(logits):
+        if layout == "sequence_slice":
+            padded = torch.full((2, 4, 5000), float("nan"), dtype=dtype)
+            padded[:, :-1] = logits.view(2, 3, 5000)
+            padded = leaf(padded.to(device))
+            return padded, padded[:, :-1]
+        if layout == "strided_vocab":
+            padded = torch.full((6, 10000), float("nan"), dtype=dtype)
+            padded[:, ::2] = logits
+            padded = leaf(padded.to(device))
+            return padded, padded[:, ::2]
+        padded = leaf(logits.to(device))
+        return padded, padded
+
+    padded_student, local_student = embed(student)
+    padded_teacher, local_teacher = embed(teacher)
+    actual = vocab_parallel_jsd(local_student, local_teacher, beta=beta)
+    actual.masked_fill(torch.isnan(actual), 0).mul(weight.to(device).view_as(actual)).sum().backward()
+    torch.testing.assert_close(actual.detach().cpu().reshape(6), expected, atol=1e-5, rtol=1e-4, equal_nan=True)
+    atol, rtol = (1e-6, 1e-4) if dtype == torch.float32 else (1e-3, 2e-2)
+    for padded, reference in [(padded_student, expected_student), (padded_teacher, expected_teacher)]:
+        grad = padded.grad
+        if layout == "sequence_slice":
+            torch.testing.assert_close(grad[:, -1], torch.zeros_like(grad[:, -1]))
+            grad = grad[:, :-1]
+        elif layout == "strided_vocab":
+            torch.testing.assert_close(grad[:, 1::2], torch.zeros_like(grad[:, 1::2]))
+            grad = grad[:, ::2]
+        torch.testing.assert_close(grad.cpu().reshape(6, 5000), reference.grad, atol=atol, rtol=rtol)
+
+
+@pytest.mark.parametrize("frozen", ["student", "teacher"])
+def test_jsd_triton_frozen_inputs_and_extreme_logits(frozen):
+    device = torch.device(get_accelerator().current_device_name())
+    probe = torch.empty(0, device=device)
+    if not vocab_parallel_ops._use_jsd_triton(probe, probe):
+        pytest.skip("JSD Triton kernels are not supported on this device")
+    student = torch.full((2, 5000), -3e38, device=device)
+    student[0, 0] = 3e38
+    student[1, -1] = 3e38
+    teacher = student.clone()
+    student.requires_grad_(frozen != "student")
+    teacher.requires_grad_(frozen != "teacher")
+    out = vocab_parallel_jsd(student, teacher, beta=0.3)
+    out.sum().backward()
+    torch.testing.assert_close(out, torch.zeros_like(out), atol=1e-7, rtol=0)
+    for tensor in (student, teacher):
+        if tensor.requires_grad:
+            torch.testing.assert_close(tensor.grad, torch.zeros_like(tensor), atol=1e-7, rtol=0)
+        else:
+            assert tensor.grad is None
+
+
 def test_top_k_teacher_forward_kl():
     # Distillation from a teacher that only exposes top-k (id, logprob) pairs: the student
     # gradient must match the same loss computed on full-vocabulary student log-probabilities.
@@ -125,9 +278,11 @@ def test_row_chunking_matches_reference(monkeypatch):
     expected_student, expected_teacher = leaf(student), leaf(teacher)
 
     actual = (vocab_parallel_logprobs(actual_student, index).sum(dim=-1) + vocab_parallel_entropy(actual_student) +
-              vocab_parallel_kl_div(actual_student, actual_teacher, reverse=True))
+              vocab_parallel_kl_div(actual_student, actual_teacher, reverse=True) +
+              vocab_parallel_jsd(actual_student, actual_teacher))
     expected = (reference_logprobs(expected_student, index).sum(dim=-1) + reference_entropy(expected_student) +
-                reference_kl(expected_student, expected_teacher, True))
+                reference_kl(expected_student, expected_teacher, True) +
+                reference_jsd(expected_student, expected_teacher, 0.5).float())
 
     torch.testing.assert_close(actual, expected)
     actual.sum().backward()
@@ -144,10 +299,11 @@ def test_empty_token_batch():
         vocab_parallel_logprobs(logits, torch.zeros(0, 3, dtype=torch.long)),
         vocab_parallel_entropy(logits),
         vocab_parallel_kl_div(logits, torch.randn(0, 11)),
+        vocab_parallel_jsd(logits, torch.randn(0, 11)),
     ]
     sum(output.sum() for output in outputs).backward()
 
-    assert [tuple(output.shape) for output in outputs] == [(0, ), (0, 3), (0, ), (0, )]
+    assert [tuple(output.shape) for output in outputs] == [(0, ), (0, 3), (0, ), (0, ), (0, )]
     assert logits.grad.shape == logits.shape
 
 
@@ -589,3 +745,83 @@ class TestVocabParallelOpsTP(DistributedTest):
                                     tp_group=tp_group,
                                     vocab_start_index=start,
                                     vocab_end_index=end)
+
+
+class TestVocabParallelJSDTP(DistributedTest):
+    world_size = [1, 2, 4]
+
+    @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+    @pytest.mark.parametrize("beta", [0.0, 0.2, 0.5, 1.0])
+    def test_loss_and_gradients_match_dense(self, dtype, beta):
+        device = torch.device(get_accelerator().current_device_name())
+        group = dist.get_world_group()
+        tp_size = dist.get_world_size(group)
+        torch.manual_seed(13)
+        student = torch.randn(2, 3, 17, device=device).to(dtype)
+        teacher = torch.randn_like(student)
+        weight = torch.randn(2, 3, device=device)
+        rank = dist.get_rank()
+        start = sum(t.shape[-1] for t in torch.tensor_split(student, tp_size, dim=-1)[:rank])
+        local_student = leaf(torch.tensor_split(student, tp_size, dim=-1)[rank])
+        local_teacher = leaf(torch.tensor_split(teacher, tp_size, dim=-1)[rank])
+        full_student, full_teacher = leaf(student.double()), leaf(teacher.double())
+        actual = vocab_parallel_jsd(local_student, local_teacher, beta=beta, tp_group=group)
+        expected = reference_jsd(full_student, full_teacher, beta)
+        torch.testing.assert_close(actual.double(), expected, atol=1e-6, rtol=1e-5)
+        (actual * weight).sum().backward()
+        (expected * weight).sum().backward()
+        end = start + local_student.shape[-1]
+        atol, rtol = (1e-6, 1e-5) if dtype == torch.float32 else (1e-3, 1e-2)
+        torch.testing.assert_close(local_student.grad.double(),
+                                   full_student.grad[..., start:end],
+                                   atol=atol,
+                                   rtol=rtol)
+        torch.testing.assert_close(local_teacher.grad.double(),
+                                   full_teacher.grad[..., start:end],
+                                   atol=atol,
+                                   rtol=rtol)
+
+    def test_empty_shard_and_fully_masked_local_support(self):
+        device = torch.device(get_accelerator().current_device_name())
+        group = dist.get_world_group()
+        tp_size = dist.get_world_size(group)
+        # With TP4 two ranks have empty shards, and the two distributions live on different ranks.
+        full_student = torch.tensor([[0.0, -float("inf")]], device=device)
+        full_teacher = full_student.flip(-1)
+        rank = dist.get_rank()
+        student = leaf(torch.tensor_split(full_student, tp_size, dim=-1)[rank])
+        teacher = leaf(torch.tensor_split(full_teacher, tp_size, dim=-1)[rank])
+        actual = vocab_parallel_jsd(student, teacher, tp_group=group)
+        torch.testing.assert_close(actual, torch.tensor([2.0], device=device).log())
+        actual.sum().backward()
+        torch.testing.assert_close(student.grad, torch.zeros_like(student))
+        torch.testing.assert_close(teacher.grad, torch.zeros_like(teacher))
+
+    def test_head_optimizer_updates_match_dense(self):
+        device = torch.device(get_accelerator().current_device_name())
+        group = dist.get_world_group()
+        torch.manual_seed(14)
+        weight = torch.randn(17, 8, device=device) * 0.1
+        teacher = torch.randn(2, 3, 17, device=device)
+        rank, tp_size = dist.get_rank(), dist.get_world_size(group)
+        local_weight = leaf(torch.tensor_split(weight, tp_size, dim=0)[rank])
+        full_weight = leaf(weight)
+        local_optimizer = torch.optim.SGD([local_weight], lr=0.1)
+        full_optimizer = torch.optim.SGD([full_weight], lr=0.1)
+        local_teacher = torch.tensor_split(teacher, tp_size, dim=-1)[rank].contiguous()
+        mask = torch.tensor([[True, False, True], [False, True, True]], device=device)
+        for _ in range(3):
+            hidden = torch.randn(2, 3, 8, device=device)
+            actual = vocab_parallel_jsd(F.linear(hidden, local_weight), local_teacher, beta=0.3, tp_group=group)
+            expected = reference_jsd(F.linear(hidden, full_weight), teacher, 0.3)
+            actual_loss = actual.masked_fill(~mask, 0).sum() / mask.sum()
+            expected_loss = expected.masked_fill(~mask, 0).sum() / mask.sum()
+            torch.testing.assert_close(actual_loss.double(), expected_loss, atol=1e-6, rtol=1e-5)
+            local_optimizer.zero_grad()
+            full_optimizer.zero_grad()
+            actual_loss.backward()
+            expected_loss.backward()
+            local_optimizer.step()
+            full_optimizer.step()
+            torch.testing.assert_close(local_weight, torch.tensor_split(full_weight, tp_size, dim=0)[rank])
+        assert not torch.equal(full_weight, weight)

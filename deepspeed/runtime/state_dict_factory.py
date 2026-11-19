@@ -93,7 +93,6 @@ class SDLoaderBase(ABC):
         merge_count = 1
         if num_ckpt == mp_world_size:
             assert os.path.exists(load_path)
-            #logger.info(f'rank: {mp_rank} loading checkpoint: {load_path}')
             sd = self.checkpoint_engine.load(load_path, map_location=lambda storage, \
                 loc: storage)
 
@@ -164,7 +163,6 @@ class SDLoaderBase(ABC):
         return sd
 
     def check_ckpt_list(self):
-        #logger.info(f'checkpoint file list: {self.ckpt_list}')
         assert len(self.ckpt_list) > 0
 
         sd = self.checkpoint_engine.load(self.ckpt_list[0], map_location=lambda storage, loc: storage)
@@ -354,8 +352,6 @@ class MegatronSDLoader(SDLoaderBase):
                          quantize_bits=8,
                          groups=64,
                          mlp_extra_grouping=True):
-        #self.sanity_check(self.ckpt_list[0])
-
         sd, num_to_split, ckpt_offset = self.get_split_state_dict(mp_world_size, mp_rank)
         ds_sd = copy.deepcopy(sd)
         new_client_sd = collections.OrderedDict()
