@@ -11,7 +11,6 @@ import hashlib
 import logging
 from collections import defaultdict, OrderedDict, deque
 from shutil import copyfile
-from types import SimpleNamespace
 import gc
 
 from torch.nn.modules import Module
@@ -242,6 +241,16 @@ def _offload_device(offload_config):
     if offload_config is None:
         return None
     return OffloadDeviceEnum(offload_config.device).value
+
+
+class _GroupsWithMPU:
+    """The groups module with another engine's mpu; expert-group queries still go to the module."""
+
+    def __init__(self, mpu):
+        self.mpu = mpu
+
+    def __getattr__(self, name):
+        return getattr(groups, name)
 
 
 def _model_parameters_need_remap(model_parameters):
@@ -857,7 +866,9 @@ class DeepSpeedEngine(Module):
         tp_size = self.autotp_size()
         sp_size = self._autoep_sequence_parallel_world_size()
         pp_size = 1
-        if self.mpu is not None:
+        # The process-wide AutoTP groups, passed as another engine's mpu, are the groups AutoEP folds over.
+        borrows_process_wide_groups = isinstance(self.mpu, groups.TensorParallelGroups) and self.mpu.process_wide
+        if self.mpu is not None and not borrows_process_wide_groups:
             from deepspeed.utils.bwc import bwc_pipeline_parallel_world_size, bwc_tensor_model_parallel_world_size
             bwc_tp_size = bwc_tensor_model_parallel_world_size(self.mpu)
             if bwc_tp_size != 1:
@@ -2050,7 +2061,7 @@ class DeepSpeedEngine(Module):
         # Enable optimization to parallelize checkpointing of DP state
         optimize_dp_state = not self.zero_optimization_partition_weights()
         # The checkpoint writer reads the layout from groups.mpu, which may describe another engine (#9081).
-        checkpoint_groups = SimpleNamespace(mpu=self.mpu) if self._owns_parallel_groups() else groups
+        checkpoint_groups = _GroupsWithMPU(self.mpu) if self._owns_parallel_groups() else groups
         self.checkpoint_engine = create_checkpoint_engine(config_params=self._config,
                                                           groups=checkpoint_groups,
                                                           zero_stage=self.zero_optimization_stage(),

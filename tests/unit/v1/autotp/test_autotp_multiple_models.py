@@ -17,11 +17,13 @@ from types import SimpleNamespace
 
 from unit.common import DistributedTest
 from unit.simple_model import SimpleModel, SimpleMoEModel
+from unit.v1.moe.autoep_test_utils import MockMoEOnlyTransformer, engine_input_dtype, make_autoep_config
 
 import deepspeed
 import deepspeed.comm as dist
 from deepspeed.constants import CROSS_RANK, CROSS_SIZE
 from deepspeed.utils import groups
+from deepspeed.module_inject.auto_ep_layer import AutoEPMoELayer
 from deepspeed.module_inject.auto_tp import AutoTP
 from deepspeed.module_inject.autotp_config import AutoTPConfig
 from deepspeed.module_inject.tp_shard import get_shard_size_list
@@ -295,14 +297,40 @@ class TestAutoTPEnginesWithDifferentLayouts(DistributedTest):
         assert engine.mpu is None
         assert groups.mpu is None
 
+    def test_checkpoint_writer_with_moe_layers(self, monkeypatch):
+        # The writer also queries the expert groups, which only the groups module has.
+        monkeypatch.setenv(CROSS_RANK, "0")
+        monkeypatch.setenv(CROSS_SIZE, "1")
+        writer = {"checkpoint": {"writer": {"type": "mock"}}}
+        engine = build_engine(tp_size=2, model=SimpleMoEModel(hidden_dim=8), extra_config=writer)
+        assert engine.has_moe_layers
+        assert engine.checkpoint_engine is not None
+
     def test_autotp_engine_shares_another_engines_groups(self):
         build_engine(tp_size=2)
-        second = build_engine(tp_size=4)
-        third = build_engine(tp_size=4, mpu=second.mpu)
+        # Passing the groups keeps the batch sizes of an engine without an mpu.
+        batch = {"train_batch_size": 4, "gradient_accumulation_steps": 1}
+        second = build_engine(tp_size=4, extra_config=batch)
+        third = build_engine(tp_size=4, mpu=second.mpu, extra_config=batch)
         assert third.mpu is second.mpu
         assert third.data_parallel_group is second.data_parallel_group
         assert third.dp_world_size == dist.get_world_size() // 4
+        assert third.train_batch_size() == second.train_batch_size()
         assert groups.get_tensor_model_parallel_world_size() == 2
+
+    def test_autoep_engine_shares_the_process_wide_groups(self):
+        first = build_engine(tp_size=2)
+        autoep = make_autoep_config(ep_size=2, mixed_precision=False)
+        autoep["optimizer"]["params"]["torch_adam"] = True
+        second = build_engine(tp_size=2, mpu=first.mpu, model=MockMoEOnlyTransformer(), extra_config=autoep)
+        assert second.mpu is first.mpu
+        assert any(isinstance(module, AutoEPMoELayer) for module in second.module.modules())
+        x = torch.randn(1, 4, 64, device=second.device, dtype=engine_input_dtype(second))
+        dist.broadcast(x, groups.get_tensor_model_parallel_src_rank(), group=groups.get_tensor_model_parallel_group())
+        loss = second(x).float().mean()
+        second.backward(loss)
+        second.step()
+        assert torch.isfinite(loss.detach()).item()
 
     def test_shared_groups_must_have_the_engines_tensor_parallel_size(self):
         build_engine(tp_size=2)
