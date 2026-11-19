@@ -11,6 +11,7 @@ import hashlib
 import logging
 from collections import defaultdict, OrderedDict, deque
 from shutil import copyfile
+from types import SimpleNamespace
 import gc
 
 from torch.nn.modules import Module
@@ -2005,8 +2006,11 @@ class DeepSpeedEngine(Module):
     def _configure_checkpointing(self):
         # Enable optimization to parallelize checkpointing of DP state
         optimize_dp_state = not self.zero_optimization_partition_weights()
+        # The checkpoint writer reads the layout from groups.mpu, which describes another engine when this
+        # one owns its groups (#9081).
+        checkpoint_groups = SimpleNamespace(mpu=self.mpu) if self._owns_parallel_groups() else groups
         self.checkpoint_engine = create_checkpoint_engine(config_params=self._config,
-                                                          groups=groups,
+                                                          groups=checkpoint_groups,
                                                           zero_stage=self.zero_optimization_stage(),
                                                           has_moe_layers=self.has_moe_layers,
                                                           optimize_dp_state=optimize_dp_state)

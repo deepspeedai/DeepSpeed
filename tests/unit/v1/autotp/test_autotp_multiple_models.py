@@ -20,6 +20,7 @@ from unit.simple_model import SimpleModel, SimpleMoEModel
 
 import deepspeed
 import deepspeed.comm as dist
+from deepspeed.constants import CROSS_RANK, CROSS_SIZE
 from deepspeed.utils import groups
 from deepspeed.module_inject.auto_tp import AutoTP
 from deepspeed.module_inject.autotp_config import AutoTPConfig
@@ -137,8 +138,8 @@ class WorldMPU:
         return dist.get_world_group()
 
 
-def build_engine(tp_size, mpu=None, mesh_param=None, model=None):
-    config = {"train_micro_batch_size_per_gpu": 1}
+def build_engine(tp_size, mpu=None, mesh_param=None, model=None, extra_config=None):
+    config = {"train_micro_batch_size_per_gpu": 1, **(extra_config or {})}
     if tp_size > 1:
         # Nothing is sharded; the test is about which groups the engine runs on.
         config["tensor_parallel"] = {
@@ -203,6 +204,17 @@ class TestAutoTPEnginesWithDifferentLayouts(DistributedTest):
         build_engine(tp_size=2)
         with pytest.raises(ValueError, match="MoE.*9081"):
             build_engine(tp_size=4, model=SimpleMoEModel(hidden_dim=8))
+
+    def test_checkpoint_writer_uses_the_engines_own_groups(self, monkeypatch):
+        # The writer read the layout from groups.mpu, which describes the TP2 engine.
+        monkeypatch.setenv(CROSS_RANK, "0")
+        monkeypatch.setenv(CROSS_SIZE, "1")
+        build_engine(tp_size=2)
+        writer = {"checkpoint": {"writer": {"type": "mock", "data_parallel": "replica"}}}
+        second = build_engine(tp_size=4, extra_config=writer)
+        dp_writer = second.checkpoint_engine._writer._data_parallel_writer
+        assert dp_writer.world_size == 1
+        assert dp_writer.rank == 0
 
     def test_engine_without_mpu_inherits_a_later_explicit_mpu(self):
         # An explicit mpu replaces groups.mpu, so a third engine without one inherits that layout, not the
