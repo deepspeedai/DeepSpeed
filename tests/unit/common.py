@@ -138,6 +138,18 @@ def set_accelerator_visible():
     os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(dev_id_list)
 
 
+class _NoFinalizeProcess(mp.Process):
+    """Spawned process that exits like a forked one: ``os._exit`` after ``_bootstrap``.
+
+    multiprocessing's fork/forkserver children end with ``os._exit`` but spawn children run full interpreter
+    finalization. A process group kept alive past the test (e.g. by a compiled graph) keeps its gloo worker
+    threads running; one that releases a Python-owned tensor during finalization aborts the worker (#9089).
+    """
+
+    def _bootstrap(self, *args, **kwargs):
+        os._exit(super()._bootstrap(*args, **kwargs))
+
+
 class DistributedExec(ABC):
     """
     Base class for distributed execution of functions/methods. Contains common
@@ -227,7 +239,8 @@ class DistributedExec(ABC):
         prev_start_method = mp.get_start_method()
         mp.set_start_method('spawn', force=True)
         for local_rank in range(num_procs):
-            p = mp.Process(target=self._dist_run, args=(local_rank, num_procs, master_port, init_method, skip_msg))
+            p = _NoFinalizeProcess(target=self._dist_run,
+                                   args=(local_rank, num_procs, master_port, init_method, skip_msg))
             p.start()
             processes.append(p)
         mp.set_start_method(prev_start_method, force=True)

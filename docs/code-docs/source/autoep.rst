@@ -321,6 +321,60 @@ not run ``torch._grouped_mm``: with ``use_grouped_mm=false``, or on devices that
 select the Triton grouped GEMM (compute capability below 9.0) unless
 ``disable_triton_grouped_mm=true``.
 
+**Overlapping expert weight gradients with the DeepEP backward (experimental):**
+
+In the backward pass, the experts compute their input gradient (dX), which
+DeepEP then combines back to the ranks the tokens came from, and their weight
+gradients (dW). The two are independent, but normally run one after the other:
+a grouped GEMM's backward computes dX and dW together, before the combine
+starts. ``overlap_weight_grad`` runs them side by side:
+
+.. code-block:: json
+
+    {
+      "expert_parallel": {
+        "enabled": true,
+        "autoep_size": 8,
+        "comm_backend": "deepep",
+        "comm_max_tokens_per_rank": 16384,
+        "gate_up_impl": "fused",
+        "overlap_weight_grad": true
+      }
+    }
+
+The expert backward returns dX at once and leaves its dW GEMMs in a slot. The
+DeepEP dispatch, which takes the expert weights as extra inputs, launches its
+backward combine of dX on DeepEP's stream, runs the dW GEMMs on the compute
+stream, waits for the combine, and returns dW through autograd, so ZeRO's
+gradient handling is unchanged. ``torch._grouped_mm`` launches persistent
+kernels sized to every SM, which would leave the combine nowhere to run, so the
+dW GEMMs are launched with ``comm_num_sm`` SMs withheld through PyTorch's
+experimental SM carveout, restored immediately afterwards.
+The asynchronous combine is waited on even if a weight-gradient GEMM raises.
+Frozen expert weights omit their dW GEMMs and return no gradient. With fused
+gate+up, the shared dW GEMM is omitted only when both projections are frozen.
+
+The same gradient products autograd forms for ``torch._grouped_mm`` run in a
+different schedule; exact numerical equality across algorithms or hardware
+is not guaranteed. This path supports first-order gradients only and rejects
+``create_graph=True`` rather than constructing an incomplete derivative.
+
+On Qwen3-30B-A3B with 8 H100s (expert parallel size 8, micro-batch 4, 16
+accumulation steps, sequence length 4096, reentrant activation checkpointing,
+``gate_up_impl="fused"``), a full optimizer step went from 21.57 s to 21.10 s
+(-2.2%) in two pairs measured in the same job; overlapping without the SM
+carveout recovered only -0.7%. A kernel profile showed DeepEP running alongside
+the grouped GEMMs for 1.3 s of the step, against none before. Peak allocated
+memory was unchanged and reserved memory about 0.7 GB higher.
+
+``overlap_weight_grad`` is rejected, rather than silently ignored, unless
+``comm_backend="deepep"`` with ``autoep_size > 1``, the experts run
+``torch._grouped_mm`` (``use_grouped_mm=true``, and
+``disable_triton_grouped_mm=true`` on devices that select the Triton grouped
+GEMM), ZeRO stage is 1 or 2 (not 0 or 3), and PyTorch provides both
+``torch._C._get_sm_carveout_experimental`` and
+``torch._C._set_sm_carveout_experimental``.
+
 **DeepEP row weighting implementation (experimental):**
 
 DeepEP dispatch returns one received row per routed assignment and one FP32
@@ -373,6 +427,72 @@ weighting. The separate MoE gradient-norm correction affects the
 The model-level gradient comparison samples gradients before the wrapper
 computes the norm and clips them in ``engine.step()``. GPU validation applies
 both independent corrections; neither is part of this opt-in change.
+
+**Skipping the recomputed combine (experimental):**
+
+With reentrant activation checkpointing, backward recomputes each decoder layer
+only to rebuild its autograd graph, and never reads the recomputed outputs. In a
+decoder layer that adds the MoE output to the residual, nothing reads the
+recomputed MoE output either. ``skip_recompute_combine`` lets the DeepEP route
+record the post-expert row weighting and the combine in that recompute without
+running them. Their backward is unchanged: a cached dispatch on the same handle,
+and the row-weighting gradients. The dispatch and the experts still run, because
+backward needs their activations.
+
+.. code-block:: json
+
+    {
+      "expert_parallel": {
+        "enabled": true,
+        "autoep_size": 8,
+        "comm_backend": "deepep",
+        "comm_max_tokens_per_rank": 16384,
+        "skip_recompute_combine": true
+      }
+    }
+
+On Qwen3-30B-A3B with 8 H100s (expert parallel size 8, micro-batch 4, 16
+accumulation steps, sequence length 4096, DeepEP with 28 SMs), an equivalent
+benchmark prototype cut the step from 20.57 s to 19.94 s (-3.1%). Gradients
+matched the normal recompute within the measured numerical bounds. Peak
+allocated memory was unchanged; peak reserved memory was 0.25 GB lower.
+These are same-allocation prototype measurements, not a retiming of every
+supported model or of this branch after upstream integration.
+
+Recorded and normal combines share the backward context, including ownership
+of the dispatch replay entry. That entry is released with its autograd graph,
+so a later reentrant step cannot reuse a previous step's routing.
+
+The skip relies on nothing reading the skipped output, so it is guarded:
+
+- The recompute is recognized as a grad-enabled forward that runs inside a
+  backward pass. Each time, AutoEP checks that the MoE layer's decoder layer is
+  in training mode and has
+  Hugging Face gradient checkpointing enabled with ``use_reentrant=True``, for
+  example via ``model.gradient_checkpointing_enable(
+  gradient_checkpointing_kwargs={"use_reentrant": True})``, and raises
+  otherwise. Hugging Face does not checkpoint an eval-mode decoder, even if
+  checkpointing remains configured. Such an outer recompute is rejected;
+  an ordinary eval forward is unchanged.
+  Transformers 5 defaults to non-reentrant checkpointing, so the
+  argument is required there. A checkpoint that spans several layers would
+  feed the skipped output to the next layer. Non-reentrant checkpointing and
+  DeepSpeed's own checkpointing API are also rejected.
+- Only presets whose decoder layer adds the MoE output straight to the residual
+  are accepted: ``deepseek_v2``, ``deepseek_v3``, ``minimax_m3``, ``mixtral``,
+  ``qwen3_5_moe`` and ``qwen3_moe``. Other presets are rejected at conversion.
+  Any non-null ``moe_layer_pattern`` is rejected during configuration validation,
+  even with an explicit or auto-detected supported preset: overriding the pattern
+  changes the decoder parent, so the preset name no longer establishes its
+  output-consumer contract. Leave the pattern unset or disable the skip;
+  custom patterns remain supported when this option is off.
+- The skipped combine returns NaN rather than uninitialized memory. If
+  something outside the contract reads it in a value-dependent operation,
+  it can produce non-finite outputs or gradients. The sentinel is not a
+  general runtime proof that no consumer reads the value.
+- It requires ``comm_backend="deepep"`` and ``autoep_size > 1``. Both
+  ``row_weighting_impl`` values are supported; the recorded eager weighting
+  takes autograd's own steps through the eager expression.
 
 Requirements and limits:
 
@@ -447,6 +567,28 @@ applies the kernels directly and raises on unsupported inputs instead.
 Where the kernels run, results are not bitwise identical to eager RMSNorm: the
 kernels' FP32 reductions sum in a different order, so a small fraction of
 outputs and gradients differ in their last bits.
+
+For norms at most 128 wide, the fused kernels schedule several rows per
+program and combine the input- and weight-gradient reads in backward. Small
+inputs cap the row tile at the next power of two of their row count, so a
+single row does not instantiate a full 4096-element tile. Larger inputs keep
+the existing tile size. Wider norms retain the one-row kernels. The numerical
+tests do not require bitwise equality with eager. For narrow input gradients
+they allow at most 8 ULPs or an absolute error of 1e-7 per element, since
+near-zero gradients can have large ULP distances after cancellation. At least
+95% must still be within one ULP; forward, weight-gradient and wide-path
+thresholds are unchanged.
+At width one, the pre-gamma input derivative in exact arithmetic is
+``eps / (x**2 + eps)**(3/2)``, which is nonzero when ``eps > 0``. With a
+very small epsilon and large ``abs(x)``, low-precision rounding can hide this
+gradient; width-one tests use a measurable positive epsilon and an FP64
+reference rather than assuming the derivative is zero.
+
+Performance depends on the GPU and workload. The measured H100 attention
+training cases benefited from this scheduling, but review measurements on an
+RTX PRO 4500 found narrow forward 11-16% slower than the parent row kernels.
+That is a forward-only observation, not an E2E result; this opt-in path does
+not promise a speedup on every supported device or shape.
 
 Requirements and limits:
 
@@ -605,6 +747,24 @@ Requirements and limits:
 - DeepSeek-V2 and DeepSeek-V3 AutoEP do not support load-balance expert bias
   yet. The built-in DeepSeek presets disable it by default; explicit non-null
   values fail.
+
+Gradient clipping under folding
+-------------------------------
+
+For AutoEP with AutoTP at ZeRO stages 1 and 2, the routed-expert gradient norm
+sums squared partition contributions over expert data parallelism and then
+expert parallelism. Every expert owner contributes, including owners whose
+tensor-parallel rank is nonzero. This expert total does not receive another
+tensor-parallel sum. Replicated and tensor-parallel dense parameters retain
+their existing norm reductions. Native MoE groups in the same optimizer
+retain their model-parallel reduction and expert-norm averaging.
+
+The clipping coefficient in ``engine.step()`` therefore uses each logical
+expert once. The sharded-attention regression checks complete gradients,
+the global norm, and actual FP32 SGD updates against the unsharded reference.
+Thresholds at half and twice the reference norm cover active clipping and
+an unclipped control, including models built under ``deepspeed.zero.Init``
+at ZeRO stage 3.
 
 Chunked causal-LM loss
 ----------------------

@@ -339,9 +339,6 @@ def load_hp_checkpoint_state(self, folder, tp_rank, tp_world_size, ep_rank=0, ep
             assert full_param_numel == tp_world_size * tp_slice_numel, \
                 f'Loading {ckpt_file} full param numel {full_param_numel} != tensor slice numel {tp_slice_numel} * tp_world_size {tp_world_size}'
 
-            #        print(f"{full_hp_param.shape=} {full_param_numel=} {folder=}")
-            #        print(f"{dst_tensor.shape=} {dst_tensor.numel()=}{folder=}")
-
             sub_param_shape = ckpt_dict.get(SUB_PARAM_SHAPE, None)
             # since when we do many to 1 on tp we cat sometimes on dim=0 and other times on dim=1 we have to do exactly the same in reverse
             # special case is when a single parameter is effectively a container for multiple sub parameters
@@ -379,10 +376,6 @@ def load_hp_checkpoint_state(self, folder, tp_rank, tp_world_size, ep_rank=0, ep
 
         lp_frag_address = hp_mapping.lp_fragment_address
         tp_hp_fragment = tp_hp_slice.narrow(0, lp_frag_address.start, lp_frag_address.numel)
-
-        #        print(f"{key} SHAPE: {tp_hp_slice.shape=}")
-        #        print(f"{key} SHAPE: {dst_tensor.shape=}")
-        #        print(f"{key} SHAPE: {tp_hp_fragment.shape=}")
 
         if key == FP32_WEIGHT_KEY:
             dst_tensor = hp_mapping.get_hp_fragment()

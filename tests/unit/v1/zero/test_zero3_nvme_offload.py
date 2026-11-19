@@ -18,16 +18,16 @@ IN, ODD, HIDDEN = 1000, 999, 1024
 BATCH, STEPS = 4, 3
 
 
-def _skip_if_unsupported():
+def _skip_if_unsupported(dtype=torch.bfloat16):
     if not deepspeed.ops.__compatible_ops__[AsyncIOBuilder.NAME]:
         pytest.skip("async_io is not compatible")
     if not deepspeed.ops.__compatible_ops__[CPUAdamBuilder.NAME]:
         pytest.skip("cpu_adam is not compatible")
-    if not get_accelerator().is_bf16_supported():
+    if dtype == torch.bfloat16 and not get_accelerator().is_bf16_supported():
         pytest.skip("bf16 is not supported")
 
 
-def _config(nvme_path, optimizer_device, param_device, pipeline=False, fast_init=False):
+def _config(nvme_path, optimizer_device, param_device, pipeline=False, fast_init=False, dtype=torch.bfloat16):
     offload_optimizer = {"device": optimizer_device}
     if optimizer_device == "nvme":
         offload_optimizer.update(nvme_path=nvme_path,
@@ -51,7 +51,7 @@ def _config(nvme_path, optimizer_device, param_device, pipeline=False, fast_init
             }
         },
         "bf16": {
-            "enabled": True
+            "enabled": dtype == torch.bfloat16
         },
         "zero_optimization": {
             "stage": 3,
@@ -63,7 +63,7 @@ def _config(nvme_path, optimizer_device, param_device, pipeline=False, fast_init
     }
 
 
-def _train(config):
+def _train(config, dtype):
     with deepspeed.zero.Init(config_dict_or_path=config):
         torch.manual_seed(0)
         model = torch.nn.Sequential(torch.nn.Linear(IN, ODD), torch.nn.LayerNorm(ODD), torch.nn.Linear(ODD, HIDDEN),
@@ -72,7 +72,7 @@ def _train(config):
     generator = torch.Generator().manual_seed(1)
     losses = []
     for _ in range(STEPS):
-        x = torch.randn(BATCH, IN, generator=generator).to(engine.device, torch.bfloat16)
+        x = torch.randn(BATCH, IN, generator=generator).to(engine.device, dtype)
         y = torch.randint(0, 10, (BATCH, ), generator=generator).to(engine.device)
         loss = torch.nn.functional.cross_entropy(engine(x).float(), y)
         engine.backward(loss)
@@ -86,9 +86,10 @@ def _train(config):
     return losses, weights
 
 
-def _assert_trains_like_cpu_offload(tmpdir, optimizer_device, param_device, **nvme_options):
-    expected_losses, expected_weights = _train(_config(None, "cpu", "cpu" if param_device == "nvme" else "none"))
-    losses, weights = _train(_config(str(tmpdir), optimizer_device, param_device, **nvme_options))
+def _assert_trains_like_cpu_offload(tmpdir, optimizer_device, param_device, dtype=torch.bfloat16, **nvme_options):
+    expected_config = _config(None, "cpu", "cpu" if param_device == "nvme" else "none", dtype=dtype)
+    expected_losses, expected_weights = _train(expected_config, dtype)
+    losses, weights = _train(_config(str(tmpdir), optimizer_device, param_device, dtype=dtype, **nvme_options), dtype)
     assert losses == expected_losses, f"losses {losses}, with CPU offload {expected_losses}"
     for i, (weight, expected) in enumerate(zip(weights, expected_weights)):
         assert torch.equal(weight, expected), f"parameter {i} differs by up to {(weight - expected).abs().max()}"
@@ -110,3 +111,9 @@ class TestZero3NVMeOffload(DistributedTest):
     def test_param_and_optimizer(self, tmpdir, fast_init):
         _skip_if_unsupported()
         _assert_trains_like_cpu_offload(tmpdir, "nvme", "nvme", fast_init=fast_init)
+
+    # The tests above train in bf16 only (#9095).
+    @pytest.mark.parametrize("fast_init", [False, True])
+    def test_param_and_optimizer_fp32(self, tmpdir, fast_init):
+        _skip_if_unsupported(torch.float32)
+        _assert_trains_like_cpu_offload(tmpdir, "nvme", "nvme", dtype=torch.float32, fast_init=fast_init)
