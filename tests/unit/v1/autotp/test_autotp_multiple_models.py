@@ -283,6 +283,28 @@ class TestAutoTPEnginesWithDifferentLayouts(DistributedTest):
         assert groups.mesh_device is None
         assert groups._get_data_parallel_world_size() == dist.get_world_size() // 2
 
+    @pytest.mark.parametrize("second_tp_size", [1, 4])
+    def test_sharded_model_with_another_tp_size_raises(self, second_tp_size):
+        # The TP1 engine broadcast rank 0's shard over the other ranks, overwriting the first engine's weights;
+        # a TP4 engine kept the layers on the TP2 groups.
+        first = build_engine(tp_size=2)
+        with pytest.raises(ValueError, match="already sharded"):
+            build_engine(tp_size=second_tp_size, model=first.module)
+        assert groups.get_tensor_model_parallel_world_size() == 2
+        # The same tensor parallel size is still accepted.
+        build_engine(tp_size=2, model=first.module)
+
+    def test_tp_model_init_engine_gets_its_own_groups(self, monkeypatch):
+        # tp_model_init created process-wide groups of its size, which failed after an engine with another one.
+        from deepspeed.runtime.tensor_parallel import init_utils
+        monkeypatch.setattr(init_utils, "_TP_MODEL_INIT_ARGS", None)
+        build_engine(tp_size=2)
+        model = SimpleModel(hidden_dim=8)
+        deepspeed.tp_model_init(model, tp_size=4, dtype=torch.float32)
+        second = build_engine(tp_size=4, model=model)
+        assert second.mpu.get_tensor_model_parallel_world_size() == 4
+        assert groups.get_tensor_model_parallel_world_size() == 2
+
     def test_engine_without_mpu_does_not_inherit_an_explicit_mpu(self):
         # An explicit mpu replaces groups.mpu. A later engine without one used to inherit it, and with it a data
         # parallel group over part of the ranks (#9081).

@@ -575,6 +575,12 @@ class DeepSpeedEngine(Module):
                 "An engine with a data/sequence parallel mesh cannot be built after an AutoTP engine or an engine "
                 "with an explicit mpu in the same process yet (see https://github.com/deepspeedai/DeepSpeed/issues/9081)."
             )
+        sharded_tp_size = getattr(model, "ds_autotp_size", None)
+        if sharded_tp_size is not None and sharded_tp_size != max(requested_tp_size, 1):
+            # Its layers keep the groups they were sharded with, and would be overwritten by a broadcast over
+            # this engine's data parallel group.
+            raise ValueError(f"The model was already sharded by AutoTP with tensor parallel size {sharded_tp_size}, "
+                             f"but this engine has tensor parallel size {max(requested_tp_size, 1)}.")
         if self._will_hold_other_groups(mesh_device, requested_tp_size):
             self._check_supported_with_own_groups(model, mesh_device, max(requested_tp_size, 1))
         if self._config.deterministic_mode:
@@ -989,7 +995,10 @@ class DeepSpeedEngine(Module):
     def _configure_tensor_parallel(self, model, tp_config):
         self._configure_tensor_parallel_states(model)
         configure_tensor_parallel_runtime(tp_config)
-        return self._apply_autotp_partitioning(model, tp_config)
+        replacement_sources = self._apply_autotp_partitioning(model, tp_config)
+        if not hasattr(model, "ds_autotp_size"):
+            setattr(model, "ds_autotp_size", self.autotp_size())
+        return replacement_sources
 
     def _configure_tensor_parallel_states(self, model):
         """
