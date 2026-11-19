@@ -220,7 +220,7 @@ class TestAutoTPEnginesWithDifferentLayouts(DistributedTest):
         assert first.dp_world_size == 2
         assert first.get_tensor_parallel_rank() == dist.get_rank() % 2
 
-    @pytest.mark.parametrize("second_tp_size", [1, 4])
+    @pytest.mark.parametrize("second_tp_size", [1, 2, 4])
     def test_mesh_engine_after_autotp_raises(self, second_tp_size):
         # A rejected engine must not replace the mesh used by the first engine.
         first = build_engine(tp_size=2, optimizer=lambda params: torch.optim.SGD(params, lr=0.1))
@@ -262,16 +262,26 @@ class TestAutoTPEnginesWithDifferentLayouts(DistributedTest):
         assert all(param.device.type == "cpu" for param in model.parameters())
         assert groups.get_tensor_model_parallel_world_size() == 2
 
-    def test_checkpoint_writer_uses_the_engines_own_groups(self, monkeypatch):
+    @pytest.mark.parametrize("second_tp_size", [1, 4])
+    def test_checkpoint_writer_uses_the_engines_own_groups(self, monkeypatch, second_tp_size):
         # The writer read the layout from groups.mpu, which describes the TP2 engine.
         monkeypatch.setenv(CROSS_RANK, "0")
         monkeypatch.setenv(CROSS_SIZE, "1")
         build_engine(tp_size=2)
         writer = {"checkpoint": {"writer": {"type": "mock", "data_parallel": "replica"}}}
-        second = build_engine(tp_size=4, extra_config=writer)
+        second = build_engine(tp_size=second_tp_size, extra_config=writer)
         dp_writer = second.checkpoint_engine._writer._data_parallel_writer
-        assert dp_writer.world_size == 1
-        assert dp_writer.rank == 0
+        assert dp_writer.world_size == dist.get_world_size() // second_tp_size
+        assert dp_writer.rank == dist.get_rank() // second_tp_size
+
+    @pytest.mark.parametrize("second_tp_size", [1, 2])
+    def test_mesh_engine_after_an_explicit_mpu_raises(self, second_tp_size):
+        # The mesh would replace the data parallel group the module getters return for the explicit mpu.
+        build_engine(tp_size=1, mpu=HalvesMPU())
+        with pytest.raises(RuntimeError, match="9081"):
+            build_engine(tp_size=second_tp_size, mesh_param=(dist.get_world_size(), 1))
+        assert groups.mesh_device is None
+        assert groups._get_data_parallel_world_size() == dist.get_world_size() // 2
 
     def test_engine_without_mpu_does_not_inherit_an_explicit_mpu(self):
         # An explicit mpu replaces groups.mpu. A later engine without one used to inherit it, and with it a data

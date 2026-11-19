@@ -568,6 +568,13 @@ class DeepSpeedEngine(Module):
             raise RuntimeError(
                 "An AutoTP engine cannot be built after an engine with a data/sequence parallel mesh in the same "
                 "process yet (see https://github.com/deepspeedai/DeepSpeed/issues/9081).")
+        if mesh_device is not None and groups.mpu is not None and groups.mesh_device is None:
+            # groups.mpu holds an earlier engine's layout, whose data parallel group the module getters would
+            # replace with this engine's mesh.
+            raise RuntimeError(
+                "An engine with a data/sequence parallel mesh cannot be built after an AutoTP engine or an engine "
+                "with an explicit mpu in the same process yet (see https://github.com/deepspeedai/DeepSpeed/issues/9081)."
+            )
         if self._will_hold_other_groups(mesh_device, requested_tp_size):
             self._check_supported_with_own_groups(model, mesh_device, max(requested_tp_size, 1))
         if self._config.deterministic_mode:

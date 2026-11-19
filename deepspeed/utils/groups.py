@@ -326,7 +326,12 @@ class TensorParallelGroups:
         return dist.get_rank(group=self._data_parallel_group)
 
     def get_data_parallel_group_ranks(self):
-        return dist.get_all_ranks_from_group(self._data_parallel_group)
+        # Not dist.get_all_ranks_from_group: it probes until get_global_rank raises, which it never does for
+        # the world group, the data parallel group of TP1 groups.
+        return [
+            dist.get_global_rank(self._data_parallel_group, group_rank)
+            for group_rank in range(dist.get_world_size(group=self._data_parallel_group))
+        ]
 
     # An AutoTP engine has no pipeline stages; the checkpoint writer reads these from an mpu.
     def get_pipeline_model_parallel_world_size(self):
