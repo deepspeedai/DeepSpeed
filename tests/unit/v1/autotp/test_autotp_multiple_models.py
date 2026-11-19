@@ -392,6 +392,28 @@ class TestAutoTPEnginesWithDifferentLayouts(DistributedTest):
         # The process-wide getters keep describing the engine that passed the mpu.
         assert groups._get_data_parallel_world_size() == dist.get_world_size() // 2
 
+    @pytest.mark.parametrize("zero_stage", [1, 3])
+    def test_engine_without_mpu_keeps_an_earlier_sequence_parallel_mpu(self, zero_stage):
+        # Its config asks for sequence parallelism, which only the earlier engine's Ulysses mpu provides.
+        from deepspeed.runtime.sequence_parallel import parallel_state_sp
+        parallel_state_sp.initialize_sequence_parallel(2)
+        extra_config = {
+            "sequence_parallel_size": 2,
+            "zero_optimization": {
+                "stage": zero_stage
+            },
+            "zero_allow_untested_optimizer": True
+        }
+        engines = []
+        for mpu in (parallel_state_sp, None):
+            model = SimpleModel(hidden_dim=8)
+            optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+            engines.append(
+                build_engine(tp_size=1, mpu=mpu, model=model, optimizer=optimizer, extra_config=extra_config))
+        second = engines[1]
+        assert second.sequence_parallel_size == 2
+        assert second.seq_dp_world_size == dist.get_world_size()
+
     def test_engine_without_mpu_after_autotp_and_explicit_mpu(self):
         build_engine(tp_size=2)
         build_engine(tp_size=1, mpu=WorldMPU())

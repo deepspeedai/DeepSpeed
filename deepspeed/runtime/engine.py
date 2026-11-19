@@ -647,7 +647,8 @@ class DeepSpeedEngine(Module):
             # Head counts were recorded against the whole model; the parameters are shards now.
             from deepspeed import resolve_per_head_muon_after_sharding
             resolve_per_head_muon_after_sharding(model)
-        elif self.mpu is None and groups.mpu is not None and self.mesh_device is None:
+        elif self.mpu is None and groups.mpu is not None and self.mesh_device is None \
+                and not self._sequence_parallel_from_groups_mpu():
             # Without an mpu of its own, this engine would inherit groups.mpu: the layout of an earlier engine,
             # whose data parallel group may cover only part of the ranks. It gets groups of its own instead.
             self.mpu = groups._get_or_create_tp_groups(tensor_model_parallel_size=1,
@@ -1561,13 +1562,18 @@ class DeepSpeedEngine(Module):
         if requested_tp_size > 1:
             # groups.mpu holds an mpu passed to an earlier engine; this engine cannot replace it.
             return groups._holds_explicit_mpu() or not groups._existing_tp_groups_match(requested_tp_size)
-        if self.mpu is not None or groups.mpu is None:
+        if self.mpu is not None or groups.mpu is None or self._sequence_parallel_from_groups_mpu():
             return False
         # Without an mpu of its own, this engine gets TP1 groups instead of inheriting groups.mpu.
         if groups.mpu is groups:
             return not groups._existing_tp_groups_match(1)
         # A data/sequence parallel mesh engine still reads its layout through the module getters.
         return mesh_device is None
+
+    def _sequence_parallel_from_groups_mpu(self):
+        """Whether this engine's config asks for sequence parallelism without a mesh, which only groups.mpu, such as
+        an earlier engine's Ulysses mpu, provides. Such an engine keeps inheriting groups.mpu."""
+        return self._config._param_dict.get("sequence_parallel_size", 1) > 1
 
     def _check_supported_with_own_groups(self, model, mesh_device, tensor_model_parallel_size):
         """Raise for what still reads the process-wide groups, before this engine changes any state (#9081)."""
