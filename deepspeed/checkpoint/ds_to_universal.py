@@ -17,7 +17,6 @@ import re
 import shutil
 import torch
 import tqdm
-#from pprint import pprint
 
 from deepspeed.checkpoint import DeepSpeedCheckpoint
 from deepspeed.checkpoint import (
@@ -134,13 +133,10 @@ def extract_zero_shards(dir, ds_checkpoint, indices_3D):
     pp_index, tp_index, dp_index = indices_3D
     sd = ds_checkpoint.get_zero_checkpoint_state(pp_index=pp_index, tp_index=tp_index, dp_index=dp_index)
 
-    # pprint(f"Processing {dp_index=} {pp_index=}, {tp_index=}")
-
     optim_sd = sd[OPTIMIZER_STATE_DICT]
     param_slice_mappings = optim_sd[PARAM_SLICE_MAPPINGS]
     universal_checkpoint_info = ds_checkpoint.get_checkpoint_info(UNIVERSAL_CHECKPOINT_INFO)
     pipeline_replicated_params = universal_checkpoint_info.get(PIPELINE_REPLICATED_PARAMETER_PATTERNS, [])
-    # print(f'{pipeline_replicated_params=}')
 
     # dict
     state_groups = optim_sd[BASE_OPTIMIZER_STATE]["state"]
@@ -164,7 +160,6 @@ def extract_zero_shards(dir, ds_checkpoint, indices_3D):
                 # Skip tied weights that are replicated in first and last pp stages
                 continue
 
-            # pprint(f"dpt{dp_index}{pp_index}{tp_index} {param_group_id} {name} => {fragment_mapping.start}:{fragment_mapping.numel}")
             for state_key in flat_state.keys():
                 dump_param_fragment(dir, tp_index, dp_index, state_key, flat_state[state_key], name,
                                     fragment_mapping.start, fragment_mapping.numel)
@@ -230,8 +225,6 @@ def dump_param_fragment(dir, tp_index, dp_index, state_name, state_flat_tensor, 
     cnt += 1
 
     path = os.path.join(param_base_path, f"{state_name}.{dp_index_to_str(dp_index)}")
-
-    #print(f"{param_name}: {offset}: {numel} => {path}")
 
     # State might be a python int or a tensor
     if state_name != "step" and torch.is_tensor(state_flat_tensor):
@@ -382,8 +375,6 @@ def merge_tp_slices(uc_info, dir, slice_dir, tp_degree, name_and_shapes):
         slices = _merge_zero_shards(slice_base_path, state, tp_degree, per_tp_shapes)
         final_path = os.path.join(param_base_path, f"{state}.pt")
 
-        #print(f"Expected shape: {shape}")
-        #print(f"Fragment sizes:", list(frag.shape for frag in slices))
         ckpt_dict = {}
         if matched_affine_map is not None:
             # The pieces say where every element of the parameter lives, so none of the
@@ -396,10 +387,8 @@ def merge_tp_slices(uc_info, dir, slice_dir, tp_degree, name_and_shapes):
             if len(slices) > 1:
                 assert all([slices[0].equal(other_slice) for other_slice in slices[1:]])
             param = slices[0]
-            # print(f'replicate {name} using first slice')
         elif get_matched_pattern(parameters_to_average, name):
             param = sum(slices) / len(slices)
-            # print(f'merge {name} using average')
         elif get_matched_pattern(parameters_with_2_sub_params_cat_dim_0, name):
             cat_dim = 0
             chunked_slices = [torch.chunk(s, 2, dim=cat_dim) for s in slices]
@@ -501,19 +490,15 @@ def merge_tp_slices(uc_info, dir, slice_dir, tp_degree, name_and_shapes):
                 # below, so there is no optimizer tensor to merge here.
                 continue
             cat_dim = 1 if get_matched_pattern(parameters_with_row_parallelism, name) else 0
-            # print(f"merge {name} with CAT DIM: {cat_dim}")
             param = torch.cat(slices, dim=cat_dim)
             ckpt_dict[CAT_DIM] = cat_dim
 
         if get_matched_pattern(vocabulary_parameters, name):
-            #print(f"Before {param.shape=}")
             # strip padding
             original_vocab_size = universal_checkpoint_info['original_vocab_size']
             param = param[:original_vocab_size, :]
             ckpt_dict[VOCAB_TENSOR] = True
-            #print(f"After {param.shape=}")
 
-        #print(f"Final shape: {param.shape}")
         ckpt_dict[PARAM] = param
         _save_checkpoint(final_path, ckpt_dict)
 
@@ -569,7 +554,6 @@ def _extract_zero_shard_files(args, ds_checkpoint, temp_dir):
     _3d_range_list = list(
         itertools.product(range(ds_checkpoint.pp_degree), range(ds_checkpoint.tp_degree),
                           range(ds_checkpoint.dp_degree)))
-    #pprint(f'{_3d_range_list=}')
 
     do_work = partial(extract_zero_shards, temp_dir, ds_checkpoint)
     _do_parallel_work(do_work, _3d_range_list, args.num_extract_workers)
@@ -827,15 +811,15 @@ def _consolidate_zero3_autoep_expert_states(output_dir, model_files, optim_files
         rank: torch.load(model_file, map_location=torch.device('cpu'), weights_only=False)
         for rank, model_file in model_rank_map.items()
     }
-    optim_states_by_rank = {
-        rank: torch.load(optim_file, map_location=torch.device('cpu'), weights_only=False)
-        for rank, optim_file in optim_rank_map.items()
-    }
     metadata_by_rank = {
         rank: _get_autoep_metadata(model_state)
         for rank, model_state in model_states_by_rank.items() if _get_autoep_metadata(model_state) is not None
     }
     _validate_autoep_expert_shapes(model_states_by_rank, metadata_by_rank)
+    # Together the optimizer files hold every optimizer state of the model, more than one host holds for a large
+    # model, so they are read one at a time and the expert fragments wait in files until every rank is read.
+    fragment_dir = os.path.join(output_dir, "tmp", "autoep_expert_fragments")
+    os.makedirs(fragment_dir, exist_ok=True)
 
     expert_fragments = {}
     num_experts_by_param = {}
@@ -846,13 +830,15 @@ def _consolidate_zero3_autoep_expert_states(output_dir, model_files, optim_files
     affine_map_by_param = {}
 
     for rank, model_state in model_states_by_rank.items():
-        optim_state = optim_states_by_rank.get(rank)
-        if optim_state is None:
+        optim_file = optim_rank_map.get(rank)
+        if optim_file is None:
             raise FileNotFoundError(f"Missing ZeRO optimizer checkpoint for rank {rank}")
 
         autoep_metadata = _get_autoep_metadata(model_state)
         if not _uses_zero3_partitioned_autoep_metadata(autoep_metadata):
             continue
+
+        optim_state = torch.load(optim_file, map_location=torch.device('cpu'), weights_only=False)
 
         expert_info = _autoep_expert_param_info(autoep_metadata)
         param_shapes = model_state[PARAM_SHAPES]
@@ -911,11 +897,21 @@ def _consolidate_zero3_autoep_expert_states(output_dir, model_files, optim_files
                         if flat_tensor is None:
                             raise RuntimeError(f"Missing optimizer state '{state_key}' for AutoEP expert "
                                                f"parameter {param_name} on ZeRO rank {rank}")
+                        # clone(): saving the narrowed view would write the whole flat tensor behind it.
                         fragment = flat_tensor.narrow(0, offset, padding_free_numel).clone()
+                        # One directory per parameter and EP rank, created first, as for the dense fragments: a
+                        # parameter name may contain "/" (a registered module name may).
+                        fragment_param_dir = os.path.join(fragment_dir, param_name, f"ep{ep_rank}")
+                        os.makedirs(fragment_param_dir, exist_ok=True)
+                        fragment_path = os.path.join(fragment_param_dir, f"{state_key}.part{partition_rank}.pt")
+                        torch.save(fragment, fragment_path)
                         key = (param_name, state_key, ep_rank)
-                        expert_fragments.setdefault(key, []).append((partition_rank, fragment, shape))
+                        expert_fragments.setdefault(key, []).append((partition_rank, fragment_path, shape))
 
                 offset += partitioned_numel
+        # Drop every reference into this rank's optimizer state, including the loop variables, before the
+        # next file is read.
+        optim_state = zero_optim_state = optimizer_sub_state = flat_state = flat_tensor = None
 
     grouped_by_param = {}
     for (param_name, state_key, ep_rank), fragments in expert_fragments.items():
@@ -948,8 +944,14 @@ def _consolidate_zero3_autoep_expert_states(output_dir, model_files, optim_files
             if any(tuple(fragment_shape) != tuple(shape) for _, _, fragment_shape in fragments):
                 raise RuntimeError(f"Inconsistent AutoEP expert fragment shapes for {param_name}/{state_key} "
                                    f"EP rank {ep_rank}")
-            full_flat = torch.cat([fragment for _, fragment, _ in fragments], dim=0)[:_shape_numel(shape)]
+            fragment_paths = [path for _, path, _ in fragments]
+            full_flat = torch.cat([torch.load(path, weights_only=True) for path in fragment_paths],
+                                  dim=0)[:_shape_numel(shape)]
             ep_tensors[ep_rank] = full_flat.view(shape)
+            # Each fragment is read only once. Removing it now means the disk never holds every fragment and
+            # every universal file at the same time.
+            for path in fragment_paths:
+                os.remove(path)
 
         if not ep_tensors:
             continue
@@ -1171,7 +1173,6 @@ def main(args):
         _check_for_required_state(ds_checkpoint)
 
         iteration = ds_checkpoint.get_iteration()
-        #_create_latest_file(args.output_folder, iteration)
         checkpoint_paths = _create_checkpoint_paths(args.output_folder, iteration, ds_checkpoint.tp_degree,
                                                     ds_checkpoint.pp_degree)
 
@@ -1286,6 +1287,12 @@ def main(args):
         if not has_zero3_partitioned_autoep:
             autoep_expert_param_names = set()
         else:
+            # The AutoEP files are matched by data-parallel rank alone, so the files of different
+            # tensor-parallel ranks under AutoEP + AutoTP folding cannot be told apart.
+            _, autoep_tp_degree, _ = _build_zero3_rank_grid(model_files)
+            if autoep_tp_degree > 1:
+                raise NotImplementedError("Universal checkpoint conversion of an AutoEP + AutoTP folded ZeRO-3 "
+                                          "checkpoint is not supported yet. Load it with the same topology.")
             _validate_zero3_model_optim_rank_sets(model_files, optim_files)
         param_shapes = _parse_model_states_stage3(model_files)
         # Recover the tensor-parallel / data-parallel grid from the file names. With

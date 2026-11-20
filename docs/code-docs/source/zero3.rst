@@ -485,7 +485,7 @@ The DeepSpeed engine maintains a set of states in device memory (e.g., CUDA memo
 You can selectively offload specific states by specifying the ``OffloadStateTypeEnum`` in the include argument. ``OffloadStateTypeEnum`` is an enum that defines the states that can be offloaded. The following states are supported:
 
 * ``OffloadStateTypeEnum.optim_states``: Optimizer states. Currently, only states of DeepSpeed's FusedAdam optimizer are supported.
-* ``OffloadStateTypeEnum.hp_params``: FP32 parameters.
+* ``OffloadStateTypeEnum.hp_params``: FP32 parameters. When the model weights are already FP32 and the optimizer is not offloaded, ZeRO-3 uses each weight partition as its FP32 copy; those copies move only with ``lp_params``, so offloading ``hp_params`` alone frees no device memory for them.
 * ``OffloadStateTypeEnum.lp_params``: BF16/FP16 parameters.
 * ``OffloadStateTypeEnum.lp_grads``: BF16/FP16 gradients.
 * ``OffloadStateTypeEnum.contiguous_grad_buffer``: The contiguous gradient buffer for reduce operations.

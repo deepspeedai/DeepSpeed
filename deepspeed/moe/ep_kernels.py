@@ -12,7 +12,7 @@ Token reordering and permutation utilities for expert parallelism.
 
 Ported from TorchTitan's Triton kernels and alignment
 utilities with adaptations for DeepSpeed:
-  - Triton import guarded with try/except; pure-PyTorch fallback provided
+  - Triton availability from the shared deepspeed.ops.triton_ops check; pure-PyTorch fallback provided
   - Alignment config exposed as TOKEN_GROUP_ALIGN_SIZE_M
 
 This module is self-contained: no imports from deepspeed.module_inject
@@ -24,19 +24,15 @@ from typing import Callable
 
 import torch
 
+from deepspeed.ops.triton_ops._triton import _TRITON_AVAILABLE, triton, tl
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Try to import Triton; fall back gracefully
+# Fall back gracefully when Triton is not available
 # ---------------------------------------------------------------------------
 
-_TRITON_AVAILABLE = False
-try:
-    import triton
-    import triton.language as tl
-
-    _TRITON_AVAILABLE = True
-except ImportError:
+if not _TRITON_AVAILABLE:
     logger.info("Triton not available; using pure-PyTorch CPU fallback for "
                 "permutation index generation.")
 
