@@ -80,6 +80,7 @@ from deepspeed.checkpoint.constants import (
     EXPERT_PARAMETER_PATTERNS,
     FOLDING_METADATA_KEY,
     FROZEN_PARAM_FRAGMENTS,
+    FROZEN_PARAM_SHAPES,
     OPTIMIZER_STATE_DICT,
     UNIVERSAL_CHECKPOINT_INFO,
     UNIVERSAL_CHECKPOINT_VERSION_KEY,
@@ -4434,6 +4435,100 @@ class DeepSpeedEngine(Module):
                 else:
                     param.data.copy_(saved_frozen_params[name].data)
 
+    def _load_universal_module_state(self, checkpoint, load_dir, tag):
+        """Restore the module state that a universal checkpoint keeps outside its zero/ layout.
+
+        ds_to_universal writes zero/<param>/fp32.pt only for the parameters the optimizer owns, so
+        registered buffers and frozen parameters are carried by the model-state files it copies
+        alongside them and by nothing else. Restoring them here is what keeps a universal resume
+        from silently continuing with the freshly constructed model's buffers and frozen weights.
+        """
+        # A PipelineModule stores its weights in per-layer files instead, and ds_to_universal does
+        # not copy those, so nothing in the universal folder can restore them.
+        saved_module_state = checkpoint['module'] or {}
+
+        named_buffers = dict(self.module.named_buffers())
+        expected_shapes = {name: named_buffers[name].shape for name in self._get_buffer_names()}
+        frozen_params = [param for param in self.module.parameters() if not is_optimized_parameter(param)]
+        # ZeRO-3 partitions the module before saving, so its model-state files hold an empty
+        # placeholder for every parameter and carry frozen weights as per-rank fragments only.
+        frozen_params_are_partitioned = self.zero_optimization_partition_weights()
+        if not frozen_params_are_partitioned:
+            for param in frozen_params:
+                expected_shapes[self.param_names[param]] = self._get_param_shape_func(param)
+
+        module_state_to_load = {}
+        unrestored_names = []
+        for name, expected_shape in expected_shapes.items():
+            saved_tensor = saved_module_state.get(name)
+            # A shape mismatch means the saved tensor belongs to a differently shaped or
+            # differently sharded model, so loading it would corrupt this one.
+            if saved_tensor is None or saved_tensor.shape != expected_shape:
+                unrestored_names.append(name)
+            else:
+                module_state_to_load[name] = saved_tensor
+
+        params_to_fetch = []
+        if frozen_params and frozen_params_are_partitioned:
+            merged_frozen_params = self._merge_universal_frozen_params(frozen_params, checkpoint, load_dir, tag)
+            module_state_to_load.update(merged_frozen_params)
+            for param in frozen_params:
+                name = self.param_names[param]
+                if name in merged_frozen_params:
+                    params_to_fetch.append(param)
+                else:
+                    unrestored_names.append(name)
+
+        if unrestored_names:
+            logger.warning("Universal checkpoint carries no usable state for these buffers and frozen parameters, "
+                           f"which keep the values of the freshly constructed model: {sorted(unrestored_names)}")
+
+        if module_state_to_load:
+            # strict=False because every optimizer-owned parameter is deliberately absent here:
+            # the zero/ shards restore those.
+            self.load_module_state_dict(checkpoint={'module': module_state_to_load},
+                                        strict=False,
+                                        z3_params_to_fetch=params_to_fetch)
+
+    def _merge_universal_frozen_params(self, frozen_params, checkpoint, load_dir, tag):
+        """Rebuild whole ZeRO-3 frozen parameters from the fragments that every saved rank holds.
+
+        A universal load may run on a different number of data-parallel ranks than the save did, so
+        no single rank's fragment is usable on its own. Concatenating the fragments of all saved
+        ranks gives back the full parameter, which the caller then repartitions.
+        """
+        frozen_param_shapes = checkpoint.get(FROZEN_PARAM_SHAPES) or {}
+        wanted_params = [param for param in frozen_params if self.param_names[param] in frozen_param_shapes]
+        if not wanted_params:
+            return {}
+
+        flat_fragments = {self.param_names[param]: [] for param in wanted_params}
+        for dp_rank in range(checkpoint['dp_world_size']):
+            ckpt_name = self._get_ckpt_name(load_dir, tag, pp_placeholder=str(dp_rank))
+            if not os.path.isfile(ckpt_name):
+                logger.warning(f'Universal checkpoint has no {ckpt_name}, so its frozen parameters cannot be '
+                               'rebuilt from the per-rank fragments')
+                return {}
+            rank_state = self.checkpoint_engine.load(ckpt_name, map_location=torch.device('cpu'))
+            rank_fragments = rank_state.get(FROZEN_PARAM_FRAGMENTS) or {}
+            missing_names = [name for name in flat_fragments if name not in rank_fragments]
+            if missing_names:
+                logger.warning(f'{ckpt_name} holds no frozen parameter fragment for {sorted(missing_names)}, '
+                               'so no frozen parameter can be rebuilt')
+                return {}
+            for name in flat_fragments:
+                flat_fragments[name].append(rank_fragments[name].flatten())
+
+        merged_params = {}
+        for param in wanted_params:
+            name = self.param_names[param]
+            if torch.Size(frozen_param_shapes[name]) != param.ds_shape:
+                continue
+            # Every rank pads its fragment up to a common partition size, so the padding of the
+            # whole parameter sits at the tail of the concatenation.
+            merged_params[name] = torch.cat(flat_fragments[name])[:param.ds_numel].view(param.ds_shape)
+        return merged_params
+
     def _get_zero_ckpt_prefix(self, dp_rank, bf16_mode):
         return f'{"bf16_" if bf16_mode else ""}zero_pp_rank_{dp_rank}'
 
@@ -4777,7 +4872,9 @@ class DeepSpeedEngine(Module):
                     for _, module in self.module.named_modules():
                         if isinstance(module, _AutoEPMoELayer):
                             z3_params_to_fetch.extend(module.experts.parameters())
-        if not self.load_universal_checkpoint():
+        if self.load_universal_checkpoint():
+            self._load_universal_module_state(checkpoint, load_dir, tag)
+        else:
             self.load_module_state_dict(checkpoint=checkpoint,
                                         strict=load_module_strict,
                                         custom_load_fn=custom_load_fn,

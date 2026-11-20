@@ -298,6 +298,100 @@ def _train(engine, hidden_dim, steps):
         engine.step()
 
 
+class FrozenAndBufferModel(torch.nn.Module):
+    """A model whose state is not entirely optimizer-owned.
+
+    The frozen linear and the BatchNorm running statistics are exactly the kinds of tensor the
+    universal zero/ layout does not carry, so they only come back if the load path restores them
+    from the model-state files.
+    """
+
+    def __init__(self, hidden_dim):
+        super().__init__()
+        self.trainable = torch.nn.Linear(hidden_dim, hidden_dim)
+        self.norm = torch.nn.BatchNorm1d(hidden_dim)
+        self.frozen = torch.nn.Linear(hidden_dim, hidden_dim)
+        self.frozen.requires_grad_(False)
+        self.cross_entropy_loss = torch.nn.CrossEntropyLoss()
+
+    def forward(self, x, y):
+        hidden = self.frozen(self.norm(self.trainable(x)))
+        return self.cross_entropy_loss(hidden, y)
+
+
+def _frozen_and_buffer_state(engine):
+    frozen_names = [name for name, param in engine.module.named_parameters() if not param.requires_grad]
+    buffer_names = [name for name, _ in engine.module.named_buffers()]
+    frozen_params = [param for param in engine.module.parameters() if not param.requires_grad]
+    with deepspeed.zero.GatheredParameters(frozen_params):
+        state_dict = engine.module.state_dict()
+        return {name: state_dict[name].detach().cpu().clone() for name in frozen_names + buffer_names}
+
+
+@pytest.mark.parametrize("zero_stage", [1, 2, 3])
+class TestUniversalCheckpointFrozenParamsAndBuffers(DistributedTest):
+    world_size = 2
+
+    def test_restored(self, tmpdir, zero_stage):
+        # Without the fix every tensor compared below keeps the value of the freshly constructed
+        # model: trainable weights come back from zero/<param>/fp32.pt, but ds_to_universal writes
+        # no such file for frozen parameters or buffers and the load path restored nothing else.
+        hidden_dim = 10
+        ds_config = {
+            "train_batch_size": 4,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "torch_adam": True
+                }
+            },
+            "zero_optimization": {
+                "stage": zero_stage
+            }
+        }
+
+        torch.manual_seed(1)
+        model = FrozenAndBufferModel(hidden_dim)
+        engine, _, _, _ = deepspeed.initialize(config=ds_config,
+                                               model=model,
+                                               model_parameters=[p for p in model.parameters() if p.requires_grad])
+        _train(engine, hidden_dim, 8)
+        engine.save_checkpoint(tmpdir, tag=CP_TAG, client_state={UNIVERSAL_CHECKPOINT_INFO: {}})
+        saved_state = _frozen_and_buffer_state(engine)
+        engine.destroy()
+
+        cp_dir = os.path.join(tmpdir, CP_TAG)
+        univ_cp_dir = f"{cp_dir}_universal"
+        dist.barrier()
+        if dist.get_rank() == 0:
+            convert_to_universal(
+                SimpleNamespace(input_folder=cp_dir,
+                                output_folder=univ_cp_dir,
+                                num_extract_workers=1,
+                                num_merge_workers=1,
+                                keep_temp_folder=False,
+                                strict=True,
+                                inject_missing_state=False))
+        dist.barrier()
+
+        # Another seed, so every frozen weight differs from the checkpoint and the untrained
+        # BatchNorm statistics are still at their defaults. A load that skips them cannot pass.
+        torch.manual_seed(2)
+        univ_model = FrozenAndBufferModel(hidden_dim)
+        ds_config["checkpoint"] = {"load_universal": True}
+        univ_engine, _, _, _ = deepspeed.initialize(
+            config=ds_config,
+            model=univ_model,
+            model_parameters=[p for p in univ_model.parameters() if p.requires_grad])
+        univ_engine.load_checkpoint(tmpdir, tag=f"{CP_TAG}_universal")
+
+        loaded_state = _frozen_and_buffer_state(univ_engine)
+        assert sorted(loaded_state) == sorted(saved_state)
+        for name, saved_tensor in saved_state.items():
+            assert torch.equal(loaded_state[name], saved_tensor), f'{name} was not restored'
+        univ_engine.destroy()
+
+
 @pytest.mark.parametrize("zero_stage", [1, 2, 3])
 @pytest.mark.parametrize("int_step", [False, True])
 class TestUniversalCheckpointFusedTorchAdamW(DistributedTest):
