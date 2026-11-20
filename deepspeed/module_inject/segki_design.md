@@ -63,12 +63,16 @@ A backend porting segKI implements these methods — nothing else is the contrac
 
 ### 2.2 kernel_reference.py — the executable specification
 
-Exactly 7 functions, one per compute interface method (gdn_recurrent_step's
-oracle is FLA's public API; decode_step_graph is contract-tested). Three roles:
-(1) specification for a porting agent, (2) runtime fallback when no kernel,
-(3) test oracle. **Tests anchor on these, never on inline math** — when a
-reference was added for `repeat_qk`, it caught a real stride bug (B*S stride
-vs Hk stride, masked by B=1) that months of e2e parity had missed.
+Exactly 7 functions — 5 compute-method references plus the 2 glue ops
+(`repeat_qk`, `silu_mul`). Two compute methods intentionally have no
+function here, and porters must anchor them elsewhere:
+`gdn_recurrent_step`'s oracle is FLA's public API (TP path — see §2.1);
+`decode_step_graph` is contract-tested directly (the `decode_step_graph`
+tests in test_segment_ki_kernels.py). Three roles: (1) specification for a
+porting agent, (2) runtime fallback when no kernel, (3) test oracle.
+**Tests anchor on these, never on inline math** — when a reference was
+added for `repeat_qk`, it caught a real stride bug (B*S stride vs Hk
+stride, masked by B=1) that months of e2e parity had missed.
 
 ### 2.3 Weight shape is the interface
 
