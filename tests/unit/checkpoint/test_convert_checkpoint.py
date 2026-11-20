@@ -317,3 +317,38 @@ class TestCheckpointConvertFrozenParams(DistributedTest):
             assert set(state_dict) == {n for n in expected if not n.startswith("frozen.")}
         dist.barrier()
         engine.destroy()
+
+
+def test_zero3_extra_module_tensor_is_not_treated_as_frozen_param(tmp_path):
+    # A ZeRO-3 model state without frozen metadata may still hold a non-buffer tensor in its module
+    # state (for example one emitted by a custom state_dict). It must not be read as a frozen fragment.
+    shape = torch.Size([2, 3])
+    weight = torch.arange(6.0).view(shape)
+    checkpoint_dir = tmp_path / "step1"
+    checkpoint_dir.mkdir()
+    torch.save(
+        {
+            "module": {
+                "weight": torch.empty(0),
+                "extra_state": torch.ones(2, 3)
+            },
+            "buffer_names": [],
+            "param_shapes": [{
+                "weight": shape
+            }],
+            "shared_params": {},
+            "frozen_param_shapes": None,
+            "frozen_param_fragments": None,
+            "ds_version": "0.0.0",
+        }, checkpoint_dir / "zero_pp_rank_0_mp_rank_00_model_states.pt")
+    torch.save(
+        {"optimizer_state_dict": {
+            "zero_stage": 3,
+            "partition_count": 1,
+            "fp32_flat_groups": [weight.flatten()],
+        }}, checkpoint_dir / "zero_pp_rank_0_mp_rank_00_optim_states.pt")
+
+    state_dict = zero_to_fp32.get_fp32_state_dict_from_zero_checkpoint(tmp_path, tag="step1")
+
+    assert set(state_dict) == {"weight"}
+    torch.testing.assert_close(state_dict["weight"], weight, rtol=0, atol=0)

@@ -46,6 +46,9 @@ class zero_model_state:
     ds_version: int
     frozen_param_shapes: dict()
     frozen_param_fragments: dict()
+    # True when the frozen parameters were inferred from the module state (ZeRO-1 fallback) rather than
+    # read from the checkpoint's frozen parameter metadata.
+    frozen_params_inferred: bool = False
 
 
 debug = 0
@@ -179,6 +182,7 @@ def parse_model_states(files):
         # handle shared params
         shared_params = [[k, v] for k, v in state_dict["shared_params"].items()]
 
+        frozen_params_inferred = False
         if frozen_param_shapes is None:
             # ZeRO-1 does not record frozen parameters separately, but it does not partition
             # parameters either, so they are stored whole in the module state: any tensor
@@ -193,6 +197,7 @@ def parse_model_states(files):
             if module_frozen:
                 frozen_param_shapes = {k: v.shape for k, v in module_frozen.items()}
                 frozen_param_fragments = module_frozen
+                frozen_params_inferred = True
 
         if frozen_param_shapes is not None:
             if debug:
@@ -206,7 +211,8 @@ def parse_model_states(files):
                                          shared_params=shared_params,
                                          ds_version=ds_version,
                                          frozen_param_shapes=frozen_param_shapes,
-                                         frozen_param_fragments=frozen_param_fragments)
+                                         frozen_param_fragments=frozen_param_fragments,
+                                         frozen_params_inferred=frozen_params_inferred)
         zero_model_states.append(z_model_state)
 
     return zero_model_states
@@ -278,6 +284,14 @@ def _get_fp32_state_dict_from_zero_checkpoint(ds_checkpoint_dir, exclude_frozen_
         return _get_fp32_state_dict_from_zero2_checkpoint(world_size, fp32_flat_groups, zero_model_states,
                                                           exclude_frozen_parameters, param_alignment_paddings)
     elif zero_stage == 3:
+        # The module-state inference is only valid for unpartitioned ZeRO-1/2 module states. A ZeRO-3
+        # module state may hold other non-buffer tensors (for example from a custom state_dict), which
+        # are not flattened per-rank frozen fragments.
+        for model_state in zero_model_states:
+            if model_state.frozen_params_inferred:
+                model_state.frozen_param_shapes = None
+                model_state.frozen_param_fragments = None
+                model_state.frozen_params_inferred = False
         return _get_fp32_state_dict_from_zero3_checkpoint(world_size, fp32_flat_groups, zero_model_states,
                                                           exclude_frozen_parameters)
 
