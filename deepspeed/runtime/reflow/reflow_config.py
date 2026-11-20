@@ -20,6 +20,7 @@ class ReflowConfig(DeepSpeedConfigModel):
 
     main_thread_cores: int = Field(3, ge=1)
     """Cores reserved for the main thread; the rest go to the optimizer workers.
+    The reservation shrinks if needed to leave a worker core; a single available core is shared.
     Worker placement uses this even when ``enable_cpu_affinity`` is false."""
 
     main_thread_core_type: Literal["logical", "physical"] = "logical"

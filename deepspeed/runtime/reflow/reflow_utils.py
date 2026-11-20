@@ -202,10 +202,10 @@ def physical_cpu_groups(cpus):
 
 
 def partition_physical_cpus(cpus, ranks, position):
-    """Give each local rank whole physical cores so its SMT siblings cannot belong to another rank."""
+    """Assign whole physical cores, sharing only when there are fewer cores than ranks."""
     groups = physical_cpu_groups(cpus)
     if len(groups) < ranks:
-        raise ValueError("Reflow physical CPU placement requires at least one physical core per local rank")
+        return list(groups[position % len(groups)])
     base, remainder = divmod(len(groups), ranks)
     start = position * base + min(position, remainder)
     count = base + (position < remainder)
@@ -222,9 +222,7 @@ def split_cpu_worker_cores(rank_cores,
     if main_thread_core_type == "physical" or worker_core_type == "physical":
         physical_groups = physical_cpu_groups(rank_cores)
     if main_thread_core_type == "physical":
-        if len(physical_groups) < 2:
-            raise ValueError("Reflow physical main-thread reservation requires at least two physical cores per rank")
-        count = min(main_thread_cores, len(physical_groups) - 1)
+        count = min(main_thread_cores, max(1, len(physical_groups) - 1))
         main_cores = [cpu for group in physical_groups[:count] for cpu in group]
     else:
         count = min(max(1, int(main_thread_cores)), max(1, len(rank_cores) - 1))
@@ -237,6 +235,8 @@ def split_cpu_worker_cores(rank_cores,
             available = [cpu for cpu in group if cpu not in main_set]
             if available:
                 worker_set.add(available[0])
+        if not worker_set:
+            worker_set.add(physical_groups[0][0])
     node_worker_groups = [[cpu for cpu in group if cpu in worker_set] for group in node_groups]
     node_worker_groups = [group for group in node_worker_groups if group]
     if not node_worker_groups:
@@ -270,20 +270,14 @@ def heuristic_rank_cores(numa_nodes, local_rank, local_world_size, physical=Fals
         start = pos * base + min(pos, remainder)
         count = base + (pos < remainder)
         return node[start:start + count]
-    # Extreme oversubscription (more co-located ranks than cores): split the node's cores into
-    # disjoint slices via a base size + remainder so co-located ranks never share a core. Ranks
-    # past the core count fall back to a degenerate (<1 core/rank) split, so warn once on rank 0.
+    # More ranks than cores requires sharing at least one CPU between ranks.
     if local_rank == 0:
         logger.warning(f"Reflow NUMA affinity hint: {ranks_per_node} co-located ranks but only "
                        f"{len(node)} cores on this NUMA node; cores cannot be split disjointly.")
-    base = len(node) // ranks_per_node
-    remainder = len(node) % ranks_per_node
-    start = pos * base + min(pos, remainder)
-    size = base + (1 if pos < remainder else 0)
-    return node[start:start + size]
+    return [node[pos % len(node)]]
 
 
-def _isolate_rank_cpu_sets(rank_cores, main_thread_cores, main_thread_core_type, worker_core_type, pin_main_thread):
+def _isolate_rank_cpu_sets(rank_cores, main_thread_core_type, worker_core_type, pin_main_thread):
     """Split shared rank CPU sets and reject ambiguous overlaps before pinning any thread."""
     physical = main_thread_core_type == "physical" or worker_core_type == "physical"
     units = physical_cpu_groups(rank_cores) if physical else [[cpu] for cpu in rank_cores]
@@ -292,8 +286,6 @@ def _isolate_rank_cpu_sets(rank_cores, main_thread_cores, main_thread_core_type,
         "cpus": sorted(rank_cores),
         "units": units,
         "pin": pin_main_thread,
-        "main_count": main_thread_cores,
-        "main_type": main_thread_core_type,
     }
     if dist.is_initialized() and dist.get_world_size() > 1:
         layouts = [None] * dist.get_world_size()
@@ -329,22 +321,14 @@ def _isolate_rank_cpu_sets(rank_cores, main_thread_cores, main_thread_core_type,
             for position, peer in enumerate(peers):
                 start = position * base + min(position, remainder)
                 count = base + (position < remainder)
-                assignments[peer] = [cpu for unit in shared_units[start:start + count] for cpu in unit]
+                if count == 0:
+                    assignments[peer] = list(shared_units[position % len(shared_units)])
+                else:
+                    assignments[peer] = [cpu for unit in shared_units[start:start + count] for cpu in unit]
         else:
             for peer in peers:
                 assignments[peer] = layouts[peer]["cpus"]
 
-    for index, layout in enumerate(layouts):
-        if not layout["pin"]:
-            continue
-        assigned = set(assignments[index])
-        if layout["main_type"] == "physical":
-            available = sum(bool(assigned.intersection(unit)) for unit in layout["units"])
-        else:
-            available = len(assigned)
-        if available <= layout["main_count"]:
-            raise ValueError("Reflow needs enough CPUs per rank for the requested main_thread_cores and at least "
-                             "one worker CPU.")
     return sorted(assignments[rank])
 
 
@@ -405,7 +389,10 @@ def plan_cpu_core_layout(main_thread_cores,
                     base, remainder = divmod(len(node_cores), n_on_node)
                     start = my_pos * base + min(my_pos, remainder)
                     count = base + (my_pos < remainder)
-                    rank_cores = node_cores[start:start + count]
+                    if count:
+                        rank_cores = node_cores[start:start + count]
+                    else:
+                        rank_cores = [node_cores[my_pos % len(node_cores)]]
             else:
                 rank_cores = node_cores
         else:
@@ -417,8 +404,7 @@ def plan_cpu_core_layout(main_thread_cores,
         else:
             total = psutil.cpu_count(logical=False) or 1
             rank_cores = list(range(total))
-    rank_cores = _isolate_rank_cpu_sets(sorted(rank_cores), main_thread_cores, main_thread_core_type, worker_core_type,
-                                        pin_main_thread)
+    rank_cores = _isolate_rank_cpu_sets(sorted(rank_cores), main_thread_core_type, worker_core_type, pin_main_thread)
     total_cpus = len(rank_cores)
 
     # Group this rank's cores by NUMA node so worker masks stay within a single node.
@@ -436,6 +422,9 @@ def plan_cpu_core_layout(main_thread_cores,
         node_groups = [rank_cores]
     main_cores, node_worker_groups, worker_cores = split_cpu_worker_cores(rank_cores, node_groups, main_thread_cores,
                                                                           main_thread_core_type, worker_core_type)
+    if pin_main_thread and set(main_cores).intersection(worker_cores):
+        logger.warning("Reflow has too few CPUs to isolate the main thread; main and optimizer workers will share "
+                       "at least one CPU.")
     return total_cpus, rank_cores, node_worker_groups, main_cores, worker_cores
 
 

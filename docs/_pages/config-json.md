@@ -751,7 +751,7 @@ The `reflow` block enables it, so an empty block is enough to run with the defau
 
 | Description | Default |
 | ----------- | ------- |
-| CPUs or physical cores reserved for the initializing thread, according to `main_thread_core_type`. Ranks sharing a CPU set divide it before reserving their main CPUs. Partially overlapping rank affinities are rejected when pinning is enabled. | `3` |
+| CPUs or physical cores reserved for the initializing thread, according to `main_thread_core_type`. Ranks sharing a CPU set divide it before reserving their main CPUs. The reservation shrinks to leave a worker CPU when possible; a single CPU is shared by main and worker. Ranks also share CPUs if there are fewer CPUs than ranks. Partially overlapping rank affinities are rejected when pinning is enabled. | `3` |
 
 ***main_thread_core_type***: [string]
 

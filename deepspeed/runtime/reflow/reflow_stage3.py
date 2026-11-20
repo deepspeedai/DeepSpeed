@@ -68,6 +68,7 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
         self._reflow_boundary_grad_ids = set()
         self._reflow_gradient_partitions = None
         self._reflow_checkpoint_param_ids = set()
+        self._reflow_modified_gradient_ids = set()
         self._last_state_update_future = None
         self._pending_state_updates_by_subgroup = {}
         self._state_commit_overlaps_forward = False
@@ -785,6 +786,7 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
         self._reflow_window_grad_ids.clear()
         self._reflow_boundary_grad_ids.clear()
         self._reflow_checkpoint_param_ids.clear()
+        self._reflow_modified_gradient_ids.clear()
         self._pending_grad_ready = False
 
         # Reset per-iteration pending/inflight state.
@@ -1480,8 +1482,8 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
                 self._wait_for_pending_state_updates(sub_group_id=sub_group_id)
             self._optimizer_states_and_gradient_swap_out(sub_group_id, timer_names)
 
-    def _bucketwise_run_full_partition_updates(self, combined_scale):
-        # Clipping path: re-shard and re-run each group's full range, then transfer.
+    def _bucketwise_run_full_partition_updates(self, combined_scale, param_ids=None):
+        # Re-shard full groups for clipping, or only changed gradients for local API updates.
 
         full_update_futures = []
         for sub_group_id in range(len(self.fp16_groups)):
@@ -1492,6 +1494,8 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
                 if not param.requires_grad:
                     continue
                 param_id = self.get_param_id(param)
+                if param_ids is not None and param_id not in param_ids:
+                    continue
                 pos = self.grad_position.get(param_id, None)
                 if pos is None:
                     continue
@@ -1681,6 +1685,11 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
             self._bucketwise_cancel_inflight_updates()
             self._bucketwise_wait_inflight_updates()
             self._bucketwise_run_full_partition_updates(combined_scale=combined_scale)
+        elif self._reflow_modified_gradient_ids:
+            # Unchanged ranges still need their original Ready work to finish.
+            self._bucketwise_wait_inflight_updates()
+            self._bucketwise_run_full_partition_updates(combined_scale=combined_scale,
+                                                        param_ids=self._reflow_modified_gradient_ids)
 
         timer_names = set()
         # Param updates already ran bucketwise during backward; here we only commit per-group
@@ -1829,6 +1838,69 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
     def set_fp32_grad_for_param(self, value, param):
         raise NotImplementedError(_REFLOW_FLAT_GRAD_FREED_MSG.format(api="set_fp32_grad_for_param"))
 
+    def get_local_fp32_grad_for_param(self, param) -> Tensor:
+        if not param.requires_grad:
+            return None
+        param_id = self.get_param_id(param)
+        sub_group_id, offset, numel = self.grad_position[param_id]
+        device = get_accelerator().current_device_name()
+        has_partition = param.partition_numel() * self._get_param_partition_rank(param) < param.ds_numel
+        if param_id not in self._reflow_window_grad_ids or not has_partition:
+            return torch.zeros(numel, dtype=torch.float32, device=device)
+        self._wait_for_accum_gradient(param_id)
+        if self._bucketwise_worker_error is not None:
+            raise self._bucketwise_worker_error
+        self.copy_grad_stream.synchronize()
+        gradient = self._get_cpu_grad_buffer(sub_group_id, pending=True).narrow(0, offset, numel)
+        return gradient.to(device=device, dtype=torch.float32)
+
+    def set_local_grad_for_param(self, value, param):
+        if not param.requires_grad:
+            return
+        param_id = self.get_param_id(param)
+        sub_group_id, offset, numel = self.grad_position[param_id]
+        assert value.numel() == numel, f"Number of elements do not match: {value.numel()} != {numel}"
+        if param.partition_numel() * self._get_param_partition_rank(param) >= param.ds_numel:
+            return
+
+        # Ready may already be reading this gradient. Join it before changing the buffer;
+        # the step will regenerate previews after the final clipping scale is known.
+        if self.dtype == torch.float16:
+            self._wait_for_accum_gradient()
+        else:
+            self._wait_for_accum_gradient(param_id)
+        self._bucketwise_drain_enq_executor()
+        self._bucketwise_wait_inflight_updates()
+        self.copy_grad_stream.synchronize()
+        if self._single_grad_buffer:
+            self._wait_for_pending_state_updates(sub_group_id=sub_group_id)
+        if self._bucketwise_worker_error is not None:
+            raise self._bucketwise_worker_error
+        gradient = self._get_cpu_grad_buffer(sub_group_id, pending=True).narrow(0, offset, numel)
+        gradient.copy_(value.detach().reshape(-1), non_blocking=False)
+        self._reflow_window_grad_ids.add(param_id)
+        self._pending_grad_ready = True
+        self._reflow_modified_gradient_ids.add(param_id)
+        gradient_on_device = gradient.to(get_accelerator().current_device_name(), non_blocking=True)
+        self.norm_for_param_grads[param_id] = self._constant_buffered_norm2(gradient_on_device)
+
+        if self.dtype == torch.float16:
+            # A replacement can remove an earlier overflow, so rebuild the flag from
+            # this window's stored gradients rather than keeping a stale sticky bit.
+            invalid = False
+            for active_id in self._reflow_window_grad_ids:
+                group, start, length = self.grad_position[active_id]
+                active_gradient = self._get_cpu_grad_buffer(group, pending=True).narrow(0, start, length)
+                if not torch.isfinite(active_gradient).all():
+                    invalid = True
+                    break
+            if self._reflow_grad_overflow is None:
+                self._reflow_grad_overflow = torch.zeros((), dtype=torch.uint8, device=gradient_on_device.device)
+            self._reflow_grad_overflow.fill_(invalid)
+
+    def get_fp32_grad_partitions(self):
+        raise NotImplementedError(_REFLOW_FLAT_GRAD_FREED_MSG.format(api="get_fp32_grad_partitions"))
+
     def offload_states(self,
                        include: Container[OffloadStateTypeEnum] = None,
                        device: OffloadDeviceEnum = OffloadDeviceEnum.cpu,
@@ -1894,7 +1966,27 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
             raise self._bucketwise_worker_error
         return super().get_lean_optimizer_state()
 
+    def get_full_hp_param(self, param, optim_state_key=None) -> Tensor:
+        if not param.requires_grad:
+            return None
+        # The inherited full-parameter getter is collective; report a failure on all
+        # participating ranks before any one of them exits the following all-gather.
+        self._wait_for_pending_state_updates()
+        local_error = self._bucketwise_worker_error
+        process_group = self._get_param_partition_group(param)
+        if dist.get_world_size(group=process_group) > 1:
+            error_flag = get_accelerator().ByteTensor([1 if local_error is not None else 0])
+            dist.all_reduce(error_flag, op=dist.ReduceOp.MAX, group=process_group)
+            if error_flag[0].item() and local_error is None:
+                raise RuntimeError(
+                    "Reflow asynchronous optimizer update failed on another rank; aborting state access")
+        if local_error is not None:
+            raise local_error
+        return super().get_full_hp_param(param, optim_state_key=optim_state_key)
+
     def _get_fp32_opt_state_partition(self, param, release_swap_buffers, optim_state_key=None):
         # Every get/set hp-param API goes through here.
         self._wait_for_pending_state_updates()
+        if self._bucketwise_worker_error is not None:
+            raise self._bucketwise_worker_error
         return super()._get_fp32_opt_state_partition(param, release_swap_buffers, optim_state_key=optim_state_key)

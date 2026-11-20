@@ -14,7 +14,7 @@ Adding a `reflow` block to `zero_optimization` turns on three cooperating behavi
 2. **Half-precision gradient transfer.** Gradients are copied to CPU in BF16 and promoted to FP32 inside the AVX kernel. This halves the GPU-to-CPU traffic and removes the CPU-side FP32 gradient buffer.
 3. **Asynchronous state commit.** The foreground only produces the new BF16 parameters. The FP32 master weights and optimizer state are committed by a background worker after the gradient clipping and overflow checks, overlapping the next forward.
 
-Checkpoint APIs (`state_dict`, `load_state_dict`, and the `safe_get_*`/`safe_set_*` helpers) wait for that background commit. If a worker fails, `engine.save_checkpoint()` aborts on every rank before writing checkpoint files. Direct `state_dict()` and `get_lean_optimizer_state()` calls raise any recorded local worker error. Checkpoint preparation shares one error flag across ranks; this adds no collectives to the training or direct state-read paths.
+Checkpoint and FP32 parameter/state access APIs wait for that background commit. If a worker fails, `engine.save_checkpoint()` aborts on every rank before writing checkpoint files, and direct state reads report the failure. A full FP32 parameter or optimizer-state read uses an additional collective over the parameter partition group so all participating ranks see a failed commit; the training path adds no collective. Local gradient inspection and modification before `step()` use Reflow’s CPU buffers for the current accumulation window. Reads return FP32 values; writes are stored in the model’s FP16/BF16 gradient dtype and rounded accordingly. Changing a gradient requires Ready to regenerate the affected update. Full gradient helpers remain unsupported because Reflow releases the standard FP32 gradient buffer.
 
 ## Configuration
 
@@ -52,7 +52,7 @@ Launch with `--bind_cores_to_rank` so each rank runs on the CPU cores local to i
 deepspeed --bind_cores_to_rank train.py --deepspeed_config ds_config.json
 ```
 
-By default Reflow pins the initializing thread to `main_thread_cores` CPU IDs and divides the remaining CPUs among optimizer workers. Local ranks sharing a CPU set divide it before reserving their main CPUs; partially overlapping rank affinities are rejected. The state commit may use all worker CPUs unless `state_update_cores` or `state_update_backward_cores` sets a limit. `enable_cpu_affinity` additionally restricts the main process to its NUMA-local CPU slice.
+By default Reflow pins the initializing thread to `main_thread_cores` CPU IDs and divides the remaining CPUs among optimizer workers. Local ranks sharing a CPU set divide it before reserving their main CPUs; partially overlapping rank affinities are rejected. If the requested reservation leaves no worker CPU, Reflow reduces it to leave at least one CPU each for the main thread and workers. If only one CPU is available, they share it; ranks also share CPUs when there are fewer CPUs than ranks. The state commit may use all worker CPUs unless `state_update_cores` or `state_update_backward_cores` sets a limit. `enable_cpu_affinity` additionally restricts the main process to its NUMA-local CPU slice.
 
 ## Gradient clipping
 
