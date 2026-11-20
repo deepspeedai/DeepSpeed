@@ -3282,6 +3282,13 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                                             device=get_accelerator().current_device_name())
                         bucket.buffer.append(buf_1)
 
+                if self._gradient_stream_safety_enabled() and not get_accelerator().resolves_data_dependency():
+                    # The allocator may reuse a block that still has work queued on this stream: order first writes.
+                    allocated = get_accelerator().Event()
+                    allocated.record(get_accelerator().current_stream())
+                    for bucket in self.ipg_buckets.values():
+                        bucket.reuse_events = dict.fromkeys(range(len(bucket.buffer)), allocated)
+
             self.ready_for_gradients = True
 
     def backward_epilogue(self, *args, **kwargs):

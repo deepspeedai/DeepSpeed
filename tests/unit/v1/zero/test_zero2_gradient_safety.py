@@ -348,6 +348,33 @@ def test_released_gradient_waits_for_its_reduction(monkeypatch, cpu_offload):
     assert stream in users or producer.ordered_after.get(stream, 0) >= operation
 
 
+def test_first_bucket_write_waits_for_the_allocating_stream(monkeypatch):
+    # The caching allocator may give the new bucket a block whose previous tensor still has work queued on the
+    # allocating stream, so a hook on another stream must not write the bucket before that work is done.
+    opt, param, _ = make_optimizer(cpu_offload=False)
+    opt.ready_for_gradients = False
+    opt.reduce_bucket_size = 2 * param.numel()
+    opt._record_gradient_stream = lambda tensor, stream: None
+    allocating, writer = FakeStream(), FakeStream()
+    allocating.operations = 1
+    accelerator = fake_accelerator(allocating)
+    accelerator.current_device_name = lambda: param.device
+    monkeypatch.setattr(zero, "get_accelerator", lambda: accelerator)
+    opt.setup_buckets()
+    accelerator.current_stream = lambda: writer
+    ordered_at_write = []
+    original_copy = torch.Tensor.copy_
+
+    def tracked_copy(destination, source, *args, **kwargs):
+        ordered_at_write.append(writer.ordered_after.get(allocating, 0))
+        return original_copy(destination, source, *args, **kwargs)
+
+    monkeypatch.setattr(torch.Tensor, "copy_", tracked_copy)
+    param.grad = torch.ones_like(param)
+    opt.reduce_independent_p_g_buckets_and_remove_grads(param, 0)
+    assert ordered_at_write == [1]
+
+
 @pytest.mark.parametrize("producers", [1, 2])
 def test_bucket_reuse_waits_for_previous_consumer(monkeypatch, producers):
     opt, param, _ = make_optimizer()
