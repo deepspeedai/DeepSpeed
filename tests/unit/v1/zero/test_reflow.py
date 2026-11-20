@@ -39,7 +39,7 @@ from deepspeed.runtime.zero.stage3 import DeepSpeedZeroOptimizer_Stage3
 from deepspeed.runtime.zero.muon.muon_optimizer import MuonWithAuxAdam
 from deepspeed.runtime.zero.utils import ZeRORuntimeException
 from deepspeed.utils import (safe_get_full_fp32_param, safe_get_full_optimizer_state, safe_get_local_grad,
-                             safe_set_local_grad)
+                             safe_set_local_grad, safe_update_full_grad_vectorized)
 from deepspeed.utils.numa import parse_range_list
 from unit.common import DistributedTest
 from unit.simple_model import SimpleModel
@@ -1358,6 +1358,179 @@ class TestReflowLocalGradientAccess(DistributedTest):
 
 
 @needs_gpu_accelerator
+class TestReflowFullGradientUpdate(DistributedTest):
+    world_size = [1, 2]
+    non_daemonic_procs = True
+
+    @pytest.mark.parametrize("optimizer_kind,precision,clip", [("adam", "bf16", 0.0), ("lion", "fp16", 0.1)])
+    def test_edits_drive_ready_persist_and_overflow(self, optimizer_kind, precision, clip):
+        skip_if_reflow_training_unsupported(optimizer_kind)
+        dtype = torch.bfloat16 if precision == "bf16" else torch.float16
+        torch.manual_seed(8719)
+        initial_model = SimpleModel(hidden_dim=16, nlayers=2)
+        batches = make_batches(16, count=8, dtype=dtype)
+
+        def run(reflow):
+            model = copy.deepcopy(initial_model)
+            config = get_variant_config(reflow, optimizer_kind)
+            config["gradient_accumulation_steps"] = 2
+            config["gradient_clipping"] = clip
+            config["zero_optimization"]["reduce_bucket_size"] = 128
+            if precision == "fp16":
+                config["bf16"] = {"enabled": False}
+                config["fp16"] = {"enabled": True, "loss_scale": 128}
+            engine, opt, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config)
+            params = list(engine.module.parameters())
+            results = []
+            try:
+                for step in range(4):
+                    for micro in range(2):
+                        inputs, labels = batches[2 * step + micro]
+                        loss = engine(inputs, labels)
+                        engine.backward(loss)
+                        if micro == 1:
+
+                            def edit(grad, param):
+                                assert grad.shape == param.ds_shape and grad.dtype == torch.float32
+                                if step in (1, 2) and param is params[0]:
+                                    return grad.fill_(float("inf"))
+                                # Reverse across rank boundaries and return values that need rounding.
+                                value = grad.flip((0, )).add_(0.0137)
+                                return value if reflow else value.to(dtype)
+
+                            safe_update_full_grad_vectorized(params, edit)
+                            if step == 1:
+                                safe_update_full_grad_vectorized([params[0]], lambda g, p: torch.zeros_like(g))
+                            results.extend(safe_get_local_grad(p).clone() for p in params)
+                        engine.step()
+                    results.extend([loss.detach(), engine.get_global_grad_norm(), engine.skipped_steps])
+                    results.extend(int(opt.optimizer.state[p]["step"]) for p in opt.fp32_partitioned_groups_flat)
+                    for param in params:
+                        results.append(safe_get_full_fp32_param(param).clone())
+                        results.append(safe_get_full_optimizer_state(param, "exp_avg").clone())
+                        if optimizer_kind == "adam":
+                            results.append(safe_get_full_optimizer_state(param, "exp_avg_sq").clone())
+                assert engine.skipped_steps == 1
+                return results
+            finally:
+                engine.destroy()
+
+        torch.testing.assert_close(run(True), run(False), rtol=0, atol=0)
+
+    def test_padded_and_unused_gradients_between_microsteps(self):
+        skip_if_reflow_training_unsupported()
+
+        class Model(torch.nn.Module):
+
+            def __init__(self):
+                super().__init__()
+                self.weight = torch.nn.Parameter(torch.arange(9, dtype=torch.float32).reshape(3, 3))
+                self.bias = torch.nn.Parameter(torch.ones(1))
+
+            def forward(self, inputs, bias_scale):
+                loss = (self.weight * inputs).sum()
+                return loss if bias_scale is None else loss + self.bias.sum() * bias_scale
+
+        def run(reflow):
+            model = Model()
+            config = get_variant_config(reflow, "adam")
+            config["gradient_accumulation_steps"] = 2
+            engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config)
+            params = list(engine.module.parameters())
+            try:
+                inputs = torch.arange(9, device=engine.device, dtype=torch.bfloat16).reshape(3, 3)
+                for step in range(2):
+                    for micro in range(2):
+                        editing = step == 1 and micro == 0
+                        # The ZeRO reference obtains the edited gradients directly from its loss.
+                        data = inputs.t() if editing and not reflow else inputs
+                        bias_scale = 4 if step == 0 else (1 if editing and not reflow else None)
+                        engine.backward(engine(data, bias_scale))
+                        if editing and reflow:
+
+                            def edit(grad, param):
+                                if param is engine.module.bias:
+                                    assert grad.shape == (1, ) and grad.item() == 0
+                                    return grad.fill_(0.5)
+                                torch.testing.assert_close(grad, inputs.float() / 2, rtol=0, atol=0)
+                                return grad.t().cpu()
+
+                            safe_update_full_grad_vectorized(params, edit)
+                        engine.step()
+                return ([safe_get_full_fp32_param(p).clone()
+                         for p in params], [safe_get_full_optimizer_state(p, "exp_avg").clone()
+                                            for p in params], engine.get_global_grad_norm())
+            finally:
+                engine.destroy()
+
+        torch.testing.assert_close(run(True), run(False), rtol=0, atol=0)
+
+    @pytest.mark.world_size(2)
+    def test_update_on_owning_partition_group(self):
+        # Only rank zero edits its expert shard. A world collective in the API would hang its peer.
+        skip_if_reflow_training_unsupported()
+        rank = dist.get_rank()
+        singleton_groups = [dist.new_group(ranks=[r]) for r in range(dist.get_world_size())]
+        torch.manual_seed(8719)
+        initial_model = SimpleModel(hidden_dim=16, nlayers=2)
+        inputs, labels = make_batches(16, 1)[0]
+
+        def run(reflow):
+            model = copy.deepcopy(initial_model)
+            weight = model.linears[0].weight
+            weight.ds_zero_partition_process_group = singleton_groups[rank]
+            config = get_variant_config(reflow, "adam")
+            config["zero_optimization"]["sub_group_size"] = 1
+            engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config)
+            try:
+                engine.backward(engine(inputs, labels))
+                if rank == 0:
+                    safe_update_full_grad_vectorized([weight], lambda g, p: g.flip((0, )))
+                engine.step()
+                master = safe_get_full_fp32_param(weight).clone()
+                momentum = safe_get_full_optimizer_state(weight, "exp_avg").clone()
+                return master, momentum
+            finally:
+                engine.destroy()
+
+        torch.testing.assert_close(run(True), run(False), rtol=0, atol=0)
+
+    def test_rank_local_callback_failure_can_retry_without_backward(self):
+        skip_if_reflow_training_unsupported()
+        torch.manual_seed(8719)
+        initial_model = SimpleModel(hidden_dim=16, nlayers=2)
+        inputs, labels = make_batches(16, 1)[0]
+
+        def run(reflow):
+            model = copy.deepcopy(initial_model)
+            config = get_variant_config(reflow, "adam")
+            config["zero_optimization"]["reduce_bucket_size"] = 128
+            engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config)
+            params = list(engine.module.parameters())
+            try:
+                engine.backward(engine(inputs, labels))
+                if reflow:
+
+                    def edit(grad, param):
+                        if param is params[1] and dist.get_rank() == 0:
+                            raise ValueError("invalid gradient edit")
+                        return grad.neg_()
+
+                    with pytest.raises((ValueError, RuntimeError)):
+                        safe_update_full_grad_vectorized(params, edit)
+                    safe_update_full_grad_vectorized(params[1:], lambda g, p: g.neg_())
+                else:
+                    safe_update_full_grad_vectorized(params, lambda g, p: g.neg_())
+                engine.step()
+                return ([safe_get_full_fp32_param(p).clone()
+                         for p in params], [safe_get_full_optimizer_state(p, "exp_avg").clone() for p in params])
+            finally:
+                engine.destroy()
+
+        torch.testing.assert_close(run(True), run(False), rtol=0, atol=0)
+
+
+@needs_gpu_accelerator
 class TestReflowLocalGradientInvalid(DistributedTest):
     world_size = [1, 2]
     non_daemonic_procs = True
@@ -2309,7 +2482,8 @@ class TestReflowNVMeConditionalGradients(DistributedTest):
                     assert torch.equal(got, want), f"NVMe parameter or optimizer state differs at step {step}"
 
     @pytest.mark.parametrize("optimizer_kind", ["adam", "lion"])
-    def test_local_gradient_access_matches_zero(self, tmpdir, optimizer_kind):
+    @pytest.mark.parametrize("vectorized", [False, True], ids=["local", "full"])
+    def test_local_gradient_access_matches_zero(self, tmpdir, optimizer_kind, vectorized):
         skip_if_reflow_training_unsupported(optimizer_kind)
         if not deepspeed.ops.__compatible_ops__.get(AsyncIOBuilder.NAME, False):
             pytest.skip("NVMe offload requires the async_io extension")
@@ -2336,7 +2510,10 @@ class TestReflowNVMeConditionalGradients(DistributedTest):
                 inputs = torch.randn(2, width, device=engine.device, dtype=torch.bfloat16)
                 engine.backward(engine(inputs, True))
                 gradient = safe_get_local_grad(param).clone()
-                safe_set_local_grad(param, (-0.5 * gradient).to(torch.bfloat16))
+                if vectorized:
+                    safe_update_full_grad_vectorized([param], lambda g, p: (-0.5 * g).to(torch.bfloat16))
+                else:
+                    safe_set_local_grad(param, (-0.5 * gradient).to(torch.bfloat16))
                 engine.step()
                 params = [safe_get_full_fp32_param(p).clone() for p in engine.module.parameters()]
                 states = [safe_get_full_optimizer_state(p, "exp_avg").clone() for p in engine.module.parameters()]

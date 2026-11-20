@@ -1102,7 +1102,7 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
                 # to overlap here. Use the final scale for their first Ready if clipping is enabled.
                 if has_boundary_norm and self.clip_grad > 0.:
                     ready_after_norm.add(param_id)
-                else:
+                elif param_id not in ready_after_norm:
                     self._bucketwise_schedule_enqueue_range(sub_group_id, offset, numel)
                     enqueued_ready = True
         return enqueued_ready, ready_after_norm
@@ -1954,10 +1954,8 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
         return bool(overflow)
 
     # ------------------------------------------------------------------ #
-    # auxiliary APIs unsupported under reflow
+    # gradient access
     # ------------------------------------------------------------------ #
-    # Reflow frees the flat grad buffer and leaves the FP32 .grad unset, so these APIs would fail with an
-    # opaque AttributeError; raise a clear NotImplementedError instead.
 
     def get_fp32_grad_for_param(self, param) -> Tensor:
         raise NotImplementedError(_REFLOW_FLAT_GRAD_FREED_MSG.format(api="get_fp32_grad_for_param"))
@@ -1990,30 +1988,42 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
         if param.partition_numel() * self._get_param_partition_rank(param) >= param.ds_numel:
             return
 
-        # Ready may already be reading this gradient. Join it before changing the buffer;
-        # the step will regenerate previews after the final clipping scale is known.
+        self._wait_for_gradient_edits([param_id])
+        if self._bucketwise_worker_error is not None:
+            raise self._bucketwise_worker_error
+        gradient = self._get_cpu_grad_buffer(sub_group_id, pending=True).narrow(0, offset, numel)
+        rounded = value.detach().reshape(-1).to(dtype=gradient.dtype)
+        self._write_gradient_partition(param_id, gradient, rounded)
+        self._refresh_edited_gradient_overflow()
+
+    def _wait_for_gradient_edits(self, param_ids):
+        # Join readers once per API call. In FP16 the overflow rescan also reads unedited partitions.
         if self.dtype == torch.float16:
             self._wait_for_accum_gradient()
         else:
-            self._wait_for_accum_gradient(param_id)
+            for param_id in param_ids:
+                self._wait_for_accum_gradient(param_id)
         self._bucketwise_drain_enq_executor()
         self._bucketwise_wait_inflight_updates()
         self.copy_grad_stream.synchronize()
         if self._single_grad_buffer:
-            self._wait_for_pending_state_updates(sub_group_id=sub_group_id)
-        if self._bucketwise_worker_error is not None:
-            raise self._bucketwise_worker_error
-        gradient = self._get_cpu_grad_buffer(sub_group_id, pending=True).narrow(0, offset, numel)
-        gradient.copy_(value.detach().reshape(-1), non_blocking=False)
+            for group in {self.grad_position[param_id][0] for param_id in param_ids}:
+                self._wait_for_pending_state_updates(sub_group_id=group)
+
+    def _write_gradient_partition(self, param_id, gradient, rounded):
+        # Compute the norm from the rounded values that Ready and Persist will actually read.
+        norm = self._constant_buffered_norm2(rounded.to(get_accelerator().current_device_name()))
+        gradient[:rounded.numel()].copy_(rounded)
+        if rounded.numel() < gradient.numel():
+            gradient[rounded.numel():].zero_()
         self._reflow_window_grad_ids.add(param_id)
         self._pending_grad_ready = True
         self._reflow_modified_gradient_ids.add(param_id)
-        gradient_on_device = gradient.to(get_accelerator().current_device_name(), non_blocking=True)
-        self.norm_for_param_grads[param_id] = self._constant_buffered_norm2(gradient_on_device)
+        self.norm_for_param_grads[param_id] = norm
 
+    def _refresh_edited_gradient_overflow(self):
         if self.dtype == torch.float16:
-            # A replacement can remove an earlier overflow, so rebuild the flag from
-            # this window's stored gradients rather than keeping a stale sticky bit.
+            # A replacement can remove an earlier overflow. Scan the window once after all edits.
             invalid = False
             for active_id in self._reflow_window_grad_ids:
                 group, start, length = self.grad_position[active_id]
@@ -2021,9 +2031,75 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
                 if not torch.isfinite(active_gradient).all():
                     invalid = True
                     break
-            if self._reflow_grad_overflow is None:
-                self._reflow_grad_overflow = torch.zeros((), dtype=torch.uint8, device=gradient_on_device.device)
-            self._reflow_grad_overflow.fill_(invalid)
+            # partition_grads and has_overflow both access this flag on the reduction stream.
+            with get_accelerator().stream(self.reduce_and_partition_stream):
+                if self._reflow_grad_overflow is None:
+                    self._reflow_grad_overflow = get_accelerator().ByteTensor([0])
+                self._reflow_grad_overflow.fill_(invalid)
+
+    def _full_gradient_edit_error(self, error, group):
+        if dist.get_world_size(group=group) > 1:
+            flag = get_accelerator().ByteTensor([int(error is not None)])
+            dist.all_reduce(flag, op=dist.ReduceOp.MAX, group=group)
+            if flag.item() and error is None:
+                return RuntimeError("Reflow full gradient update failed on another rank")
+        return error
+
+    def _update_full_gradient_partition(self, param, group, update_func):
+        param_id = self.get_param_id(param)
+        subgroup, offset, numel = self.grad_position[param_id]
+        gradient = self._get_cpu_grad_buffer(subgroup, pending=True).narrow(0, offset, numel)
+        ranks = dist.get_world_size(group=group)
+        start = self._get_param_partition_rank(param) * numel
+        # Gather the stored halves directly into rank order. Only the callback needs an FP32 tensor.
+        gathered = torch.empty(ranks * numel, dtype=gradient.dtype, device=param.device)
+        partition = gathered.narrow(0, start, numel)
+        if param_id in self._reflow_window_grad_ids:
+            partition.copy_(gradient, non_blocking=True)
+        else:
+            partition.zero_()
+        if ranks > 1:
+            dist.all_gather_into_tensor(gathered, partition, group=group)
+        full_grad = gathered[:param.ds_numel].view(param.ds_shape).float()
+        del gathered, partition
+
+        error = None
+        try:
+            value = update_func(full_grad, param)
+            if value.numel() != param.ds_numel:
+                raise ValueError(f"Expected {param.ds_numel} gradient elements, got {value.numel()}")
+            # A callback can return a non-contiguous tensor. Select only the real elements on this rank.
+            shard = value.detach().reshape(-1)[start:start + numel].to(dtype=gradient.dtype)
+        except Exception as exc:
+            error = exc
+        # A rank-local callback failure must leave this parameter intact on every owner. Vote before
+        # writing its shards, so a caller can fix the callback and retry without repeating backward.
+        error = self._full_gradient_edit_error(error, group)
+        if error is None and start < param.ds_numel:
+            self._write_gradient_partition(param_id, gradient, shard)
+        elif error is not None and ranks == 1 and not get_accelerator().is_synchronized_device():
+            # With no distributed vote or write-back, the H2D may still own the pinned input.
+            get_accelerator().current_stream().synchronize()
+        return error
+
+    def update_fp32_grad_for_param_vectorized(self, update_func, param_list):
+        params = [p for p in param_list if p.requires_grad]
+        if not params:
+            return
+        self._wait_for_gradient_edits([self.get_param_id(p) for p in params])
+        # A caller may own expert parameters in a different group. Finish each group's collectives
+        # even if another group failed, and never require ranks outside the parameter's group.
+        group_errors = {}
+        for param in params:
+            group = self._get_param_partition_group(param)
+            if group not in group_errors:
+                group_errors[group] = self._full_gradient_edit_error(self._bucketwise_worker_error, group)
+            if group_errors[group] is None:
+                group_errors[group] = self._update_full_gradient_partition(param, group, update_func)
+        self._refresh_edited_gradient_overflow()
+        for error in group_errors.values():
+            if error is not None:
+                raise error
 
     def get_fp32_grad_partitions(self):
         raise NotImplementedError(_REFLOW_FLAT_GRAD_FREED_MSG.format(api="get_fp32_grad_partitions"))
