@@ -445,6 +445,39 @@ def test_first_bucket_write_waits_for_the_allocating_stream(monkeypatch):
     assert ordered_at_write == [1]
 
 
+def test_noncontiguous_reduction_waits_for_and_keeps_its_input(monkeypatch):
+    # Without contiguous gradients a flush reads the gradients themselves: it must wait for the streams that
+    # produced them, and a rank that does not own one must not free it before the flush has read it.
+    opt, param, _ = make_optimizer(cpu_offload=False)
+    opt.contiguous_gradients = False
+    opt.reduce_bucket_size = param.numel()
+    opt.is_param_in_current_partition = {0: False}
+    opt.sequence_parallel_size = 1
+    opt.gradient_average = False
+    opt.unflatten = torch._utils._unflatten_dense_tensors
+    producer, flusher = FakeStream(), FakeStream()
+    producer.operations = 1
+    ordered_at_read, recorded = [], set()
+
+    def flatten(grads):
+        ordered_at_read.append(flusher.ordered_after.get(producer, 0))
+        return torch._utils._flatten_dense_tensors(grads)
+
+    opt.flatten = flatten
+    monkeypatch.setattr(dist, "all_reduce", lambda tensor, group=None: None)
+    monkeypatch.setattr(torch.Tensor, "record_stream", lambda tensor, stream: recorded.add(
+        (tensor.data_ptr(), stream)))
+    monkeypatch.setattr(zero, "get_accelerator", lambda: fake_accelerator(producer))
+    param.grad = torch.ones_like(param)
+    address = param.grad.data_ptr()
+    opt.reduce_independent_p_g_buckets_and_remove_grads(param, 0)
+    monkeypatch.setattr(zero, "get_accelerator", lambda: fake_accelerator(flusher))
+    opt.reduce_ipg_grads()
+    assert param.grad is None
+    assert ordered_at_read == [1]
+    assert (address, flusher) in recorded
+
+
 @pytest.mark.parametrize("producers", [1, 2])
 def test_bucket_reuse_waits_for_previous_consumer(monkeypatch, producers):
     opt, param, _ = make_optimizer()
