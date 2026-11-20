@@ -4,7 +4,7 @@
 # DeepSpeed Team
 """ZeRO-1/2 offload gradient storage ownership and stream ordering tests."""
 
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 import copy
 import os
 from datetime import timedelta
@@ -166,9 +166,11 @@ class FakeEvent:
         self.producer = None
         self.synced = False
         self.on_sync = on_sync
+        self.completes = {}
 
     def record(self, stream):
         self.producer = stream
+        self.completes = stream.issued()
 
     def synchronize(self):
         self.on_sync()
@@ -180,12 +182,24 @@ class FakeStream:
     def __init__(self):
         self.waited = []
         self.waited_streams = []
+        self.operations = 0
+        # How many operations of each stream finish before this stream's next operation.
+        self.ordered_after = {}
+
+    def issued(self):
+        return {**self.ordered_after, self: self.operations}
 
     def wait_event(self, event):
         self.waited.append(event)
+        self._order_after(event.completes)
 
     def wait_stream(self, stream):
         self.waited_streams.append(stream)
+        self._order_after(stream.issued())
+
+    def _order_after(self, completes):
+        for stream, operations in completes.items():
+            self.ordered_after[stream] = max(self.ordered_after.get(stream, 0), operations)
 
 
 def fake_accelerator(current):
@@ -223,15 +237,17 @@ def test_average_waits_all_producers_even_without_overlap(monkeypatch, overlap):
 
 
 @pytest.mark.parametrize("overlap", [False, True])
-def test_reduction_waits_for_producer_streams_without_offload(monkeypatch, overlap):
-    opt, param, _ = make_optimizer(cpu_offload=False)
-    opt.reduce_bucket_size = 12
+@pytest.mark.parametrize("cpu_offload", [False, True])
+def test_bucket_accesses_are_ordered_across_hook_streams(monkeypatch, overlap, cpu_offload):
+    opt, param, _ = make_optimizer(cpu_offload=cpu_offload)
+    opt.reduce_bucket_size = 8
     opt.overlap_comm = overlap
     opt.reduction_stream = FakeStream()
     opt.reduce_scatter = False
+    opt._record_gradient_stream = lambda tensor, stream: None
     opt.ipg_buckets[torch.float32].buffer.append(torch.empty(16, dtype=param.dtype, device=param.device))
     params = [param]
-    for index, numel in enumerate([8, 16], start=1):
+    for index, numel in enumerate([4, 4, 16], start=1):
         extra = torch.nn.Parameter(torch.zeros(numel, dtype=param.dtype, device=param.device))
         extra.param_idx_in_group = index
         opt.param_id[id(extra)] = index
@@ -239,27 +255,63 @@ def test_reduction_waits_for_producer_streams_without_offload(monkeypatch, overl
         opt.params_already_reduced.append(False)
         params.append(extra)
     opt.is_param_in_current_partition = {index: False for index in range(len(params))}
-    streams = [FakeStream() for _ in range(len(params) + 1)]
-    producer_waited, reduced = [], []
+    current = [None]
+
+    @contextmanager
+    def on_stream(stream):
+        previous, current[0] = current[0], stream
+        try:
+            yield
+        finally:
+            current[0] = previous
+
+    accelerator = SimpleNamespace(resolves_data_dependency=lambda: False,
+                                  current_stream=lambda: current[0],
+                                  Event=FakeEvent,
+                                  stream=on_stream)
+    monkeypatch.setattr(zero, "get_accelerator", lambda: accelerator)
+    first, second, flusher, oversized = FakeStream(), FakeStream(), FakeStream(), FakeStream()
+    names = {first: "A", second: "B", flusher: "C", oversized: "D", opt.reduction_stream: "R"}
+    # Every access here writes its elements: hook copies, the in-place reduction, autograd's gradient.
+    accesses, unordered, reductions = [], [], []
+
+    def access(tensor):
+        stream = current[0]
+        stream.operations += 1
+        # Holding a view keeps the storage alive, so no later tensor can reuse its address.
+        view = tensor.view(-1)
+        for earlier, operation, previous in accesses:
+            same_storage = previous.untyped_storage().data_ptr() == view.untyped_storage().data_ptr()
+            overlaps = (previous.storage_offset() < view.storage_offset() + view.numel()
+                        and view.storage_offset() < previous.storage_offset() + previous.numel())
+            ordered = earlier is stream or stream.ordered_after.get(earlier, 0) >= operation
+            if same_storage and overlaps and not ordered:
+                unordered.append(f"{names[earlier]}{operation} -> {names[stream]}{stream.operations}")
+        accesses.append((stream, stream.operations, view))
+
+    original_copy = torch.Tensor.copy_
+
+    def tracked_copy(destination, source, *args, **kwargs):
+        access(destination)
+        return original_copy(destination, source, *args, **kwargs)
 
     def reduce(tensor, dtype):
-        fill = len(reduced)
-        reducing = opt.reduction_stream if overlap else streams[fill + 1]
-        producer_waited.append(streams[fill] in reducing.waited_streams)
-        reduced.append(tensor.clone())
+        access(tensor)
+        reductions.append(tensor)
 
+    monkeypatch.setattr(torch.Tensor, "copy_", tracked_copy)
     opt.gradient_reduction_w_predivide = reduce
-    # Each hook runs on its own stream: the second hook flushes the first gradient, the oversized third
-    # gradient's hook flushes the second, and a flush on a fourth stream reduces the oversized gradient.
-    for index, param in enumerate(params):
-        monkeypatch.setattr(zero, "get_accelerator", lambda: fake_accelerator(streams[index]))
-        param.grad = torch.full_like(param, index + 1)
-        opt.reduce_independent_p_g_buckets_and_remove_grads(param, 0)
-    monkeypatch.setattr(zero, "get_accelerator", lambda: fake_accelerator(streams[-1]))
-    opt.reduce_ipg_grads()
-    assert producer_waited == [True, True, True]
-    for index, tensor in enumerate(reduced):
-        assert torch.equal(tensor, torch.full_like(params[index], index + 1))
+    # Hooks on A, B, A, D: B's hook flushes A's gradient, the second A hook rewrites elements that flush read,
+    # the oversized gradient's hook on D flushes the bucket again, and a flush on C reduces the oversized one.
+    for param, stream in zip(params, [first, second, first, oversized]):
+        with on_stream(stream):
+            param.grad = torch.ones_like(param)
+            access(param.grad)
+            opt.reduce_independent_p_g_buckets_and_remove_grads(param, 0)
+    with on_stream(flusher):
+        opt.reduce_ipg_grads()
+    assert len(reductions) == 3
+    assert unordered == []
 
 
 @pytest.mark.parametrize("producers", [1, 2])
@@ -588,4 +640,37 @@ def test_cuda_producer_handoff(overlap, cpu_offload, bucket_size):
     with get_accelerator().stream(consumer):
         opt.average_tensor(param.grad.view(-1), torch.float32)
     consumer.synchronize()
+    assert torch.equal(result[0].cpu(), torch.full((8, ), 7, dtype=torch.bfloat16))
+
+
+@pytest.mark.skipif(get_accelerator().device_name() != "cuda" or not get_accelerator().is_available(),
+                    reason="CUDA required for actual stream ordering")
+@pytest.mark.parametrize("cpu_offload", [False, True])
+def test_cuda_bucket_rewrite_waits_for_reduction(cpu_offload):
+    opt, param, _ = make_optimizer(device="cuda", cpu_offload=cpu_offload)
+    opt.reduce_bucket_size = 8
+    opt.reduce_scatter = False
+    later = torch.nn.Parameter(torch.zeros(4, dtype=param.dtype, device="cuda"))
+    later.param_idx_in_group = 1
+    opt.param_id[id(later)] = 1
+    opt.bit16_groups[0].append(later)
+    opt.params_already_reduced.append(False)
+    opt.is_param_in_current_partition = {0: False, 1: False}
+    result = []
+    opt.gradient_reduction_w_predivide = lambda tensor, dtype: result.append(tensor.clone())
+    writer, reducer = get_accelerator().Stream(), get_accelerator().Stream()
+    writer.wait_stream(get_accelerator().current_stream())
+    with get_accelerator().stream(writer):
+        param.grad = torch.full_like(param, 7)
+        opt.reduce_independent_p_g_buckets_and_remove_grads(param, 0)
+    reducer.wait_stream(writer)
+    # The flush reads the bucket late, as when it is queued behind a collective, while the next hook
+    # writes the same elements from another stream.
+    with get_accelerator().stream(reducer):
+        torch.cuda._sleep(2_000_000)  #ignore-cuda
+        opt.reduce_ipg_grads()
+    with get_accelerator().stream(writer):
+        later.grad = torch.full_like(later, 9)
+        opt.reduce_independent_p_g_buckets_and_remove_grads(later, 0)
+    reducer.synchronize()
     assert torch.equal(result[0].cpu(), torch.full((8, ), 7, dtype=torch.bfloat16))
