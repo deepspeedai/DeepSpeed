@@ -32,6 +32,7 @@ from deepspeed.moe.ep_experts import (
     EXPERT_ACTIVATIONS,
     ExpertWeightGradSlot,
     GroupedExperts,
+    MoeDeferredDwStaging,
     _zero_empty_expert_grad,
     apply_expert_activation,
     apply_packed_expert_activation,
@@ -751,6 +752,237 @@ class TestDeferredExpertWeightGrad:
         experts = GroupedExperts(dim=8, hidden_dim=16, num_experts=2, use_grouped_mm=False)
         with pytest.raises(RuntimeError, match="torch._grouped_mm path"):
             experts(torch.randn(4, 8), torch.tensor([2, 2]), ExpertWeightGradSlot())
+
+
+class TestDeferredDwStaging:
+    """Staging moves the weight-gradient GEMMs to a later backward; what a window accumulates stays the plain path's."""
+
+    # Rows each of four experts receives in successive backward passes. Expert 1 never receives any.
+    VALID_COUNTS = [[5, 0, 7, 3], [2, 0, 1, 9], [4, 0, 6, 2], [1, 0, 3, 5], [6, 0, 2, 4]]
+
+    def _device_and_dtype(self):
+        if get_accelerator().device_name() == "cuda":
+            if not hasattr(torch, "_grouped_mm") or get_accelerator().prefer_triton_grouped_mm():
+                pytest.skip("this device does not run the experts as torch._grouped_mm")
+            return get_accelerator().current_device_name(), torch.bfloat16
+        if not _grouped_mm_runs_on("cpu"):
+            pytest.skip("this PyTorch build has no CPU torch._grouped_mm")
+        return "cpu", torch.float32
+
+    def _experts_pair(self, device, dtype, gate_up_impl, trainable=(True, True, True)):
+        torch.manual_seed(0)
+        kwargs = dict(dim=16,
+                      hidden_dim=8,
+                      num_experts=4,
+                      disable_triton_grouped_mm=True,
+                      activation="geglu_tanh",
+                      gate_up_impl=gate_up_impl)
+        plain, staged = GroupedExperts(**kwargs), GroupedExperts(**kwargs)
+        for weight in plain.parameters():
+            nn.init.normal_(weight, std=0.4)
+        staged.load_state_dict(plain.state_dict())
+        for experts in (plain, staged):
+            experts.to(device=device, dtype=dtype)
+            for name, requires_grad in zip(("w1", "w2", "w3"), trainable):
+                getattr(experts, name).requires_grad_(requires_grad)
+        return plain, staged
+
+    def _backward_inputs(self, device, dtype, padded, min_rows=0):
+        """Per backward: rows, their output gradient, rows per group, and valid rows per group when padded.
+
+        Padded groups are laid out as the AutoEP layer lays them out: at least one alignment unit per expert,
+        with zero rows and zero output gradient behind each expert's valid rows.
+        """
+        generator = torch.Generator().manual_seed(1)
+        inputs = []
+        for valid in self.VALID_COUNTS:
+            valid = [max(count, min_rows) for count in valid]
+            group = [max(8, -(-count // 8) * 8) for count in valid] if padded else valid
+            is_valid = torch.cat(
+                [torch.arange(group_rows) < valid_rows for group_rows, valid_rows in zip(group, valid)]).unsqueeze(1)
+            x = torch.randn(sum(group), 16, generator=generator) * is_valid
+            grad_out = torch.randn(sum(group), 16, generator=generator) * is_valid
+            valid_counts = torch.tensor(valid, device=device) if padded else None
+            inputs.append((x.to(device, dtype), grad_out.to(device, dtype), torch.tensor(group,
+                                                                                         device=device), valid_counts))
+        return inputs
+
+    def _assert_weight_grads_match(self, staged, plain):
+        for name in ("w1", "w2", "w3"):
+            actual, expected = getattr(staged, name).grad, getattr(plain, name).grad
+            if expected is None:
+                assert actual is None, name
+            elif expected.dtype == torch.bfloat16:
+                _assert_bf16_gemm_close(actual, expected)
+            else:
+                # One GEMM over the staged rows adds the same products in another order.
+                torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-5, msg=name)
+
+    # (flush_period, rows_per_expert): periodic flushes; only the closing flush; an automatically sized buffer;
+    # a buffer one expert overflows in the third backward; one too small for the first two backward passes.
+    @pytest.mark.parametrize("flush_period,rows_per_expert", [(2, 64), (100, 64), (100, 0), (100, 12), (100, 6)])
+    @pytest.mark.parametrize("padded", [False, True])
+    @pytest.mark.parametrize("gate_up_impl", ["separate", "fused"])
+    def test_a_window_accumulates_the_plain_weight_gradients(self, gate_up_impl, padded, flush_period,
+                                                             rows_per_expert):
+        device, dtype = self._device_and_dtype()
+        # The CUDA grouped GEMM cannot run a group without rows, so there the plain path can only leave an expert
+        # empty in the padded layout.
+        has_empty_expert = padded or device == "cpu"
+        plain, staged = self._experts_pair(device, dtype, gate_up_impl)
+        staging = MoeDeferredDwStaging(4, flush_period, rows_per_expert)
+        backward_inputs = self._backward_inputs(device, dtype, padded, min_rows=0 if has_empty_expert else 1)
+        for index, (x, grad_out, counts, valid_counts) in enumerate(backward_inputs):
+            x_plain, x_staged = x.clone().requires_grad_(True), x.clone().requires_grad_(True)
+            plain(x_plain, counts).backward(grad_out)
+            # The caller sets this for the backward that closes the window.
+            staging.flush_on_stage = index == len(backward_inputs) - 1
+            output = staged(x_staged, counts, dw_staging=staging, num_valid_tokens_per_expert=valid_counts)
+            output.backward(grad_out)
+            torch.testing.assert_close(x_staged.grad, x_plain.grad, rtol=0, atol=0)
+
+        assert not staging.has_staged_rows
+        self._assert_weight_grads_match(staged, plain)
+        if has_empty_expert:
+            # An expert no backward routed a row to gets a gradient of exactly zero, not an undefined one.
+            for weight in staged.parameters():
+                assert torch.count_nonzero(weight.grad[1]) == 0
+
+    def test_only_a_backward_that_closes_a_period_returns_weight_gradients(self):
+        device, dtype = self._device_and_dtype()
+        plain, staged = self._experts_pair(device, dtype, "separate")
+        staging = MoeDeferredDwStaging(4, flush_period=3, rows_per_expert=10)
+        backward_inputs = self._backward_inputs(device, dtype, padded=True)
+
+        def backward(experts, index, **staging_kwargs):
+            x, grad_out, counts, valid_counts = backward_inputs[index]
+            if staging_kwargs:
+                staging_kwargs["num_valid_tokens_per_expert"] = valid_counts
+            experts(x.clone().requires_grad_(True), counts, **staging_kwargs).backward(grad_out)
+
+        backward(staged, 0, dw_staging=staging)
+        assert all(weight.grad is None for weight in staged.parameters())
+        assert staging.has_staged_rows
+
+        # Expert 2 holds 7 rows and receives 6 more, which empties the buffer early. Ranks that hold replicas of
+        # these experts route other rows and reduce a gradient in the backward that returns it, so a full buffer
+        # must not make this backward return one.
+        backward(staged, 2, dw_staging=staging)
+        assert staging.num_overflow_flushes == 1
+        assert all(weight.grad is None for weight in staged.parameters())
+        assert staging.has_staged_rows
+
+        # The early flush does not move the period: the third backward closes it, for all three.
+        backward(staged, 3, dw_staging=staging)
+        for index in (0, 2, 3):
+            backward(plain, index)
+        self._assert_weight_grads_match(staged, plain)
+        assert not staging.has_staged_rows
+
+    def test_a_period_without_rows_still_returns_a_gradient(self):
+        device, dtype = self._device_and_dtype()
+        _, staged = self._experts_pair(device, dtype, "separate")
+        staging = MoeDeferredDwStaging(4, flush_period=2)
+        x, grad_out, counts, _ = self._backward_inputs(device, dtype, padded=True)[0]
+        # Every row is alignment padding: none of this rank's experts was routed a token.
+        staging_kwargs = dict(dw_staging=staging, num_valid_tokens_per_expert=torch.zeros_like(counts))
+        for _ in range(2):
+            staged(torch.zeros_like(x), counts, **staging_kwargs).backward(torch.zeros_like(grad_out))
+        # A replica of these experts that did receive rows returns a gradient now, and reduces it against this one.
+        for weight in staged.parameters():
+            assert weight.grad is not None
+            assert torch.count_nonzero(weight.grad) == 0
+
+    @pytest.mark.parametrize("gate_up_impl", ["separate", "fused"])
+    @pytest.mark.parametrize("trainable", [(False, True, True), (True, False, True), (True, True, False),
+                                           (False, False, False)])
+    def test_frozen_weights_get_no_gradient(self, gate_up_impl, trainable):
+        device, dtype = self._device_and_dtype()
+        plain, staged = self._experts_pair(device, dtype, gate_up_impl, trainable)
+        staging = MoeDeferredDwStaging(4, flush_period=2)
+        for x, grad_out, counts, valid_counts in self._backward_inputs(device, dtype, padded=True)[:2]:
+            x_plain, x_staged = x.clone().requires_grad_(True), x.clone().requires_grad_(True)
+            plain(x_plain, counts).backward(grad_out)
+            staged(x_staged, counts, dw_staging=staging, num_valid_tokens_per_expert=valid_counts).backward(grad_out)
+            torch.testing.assert_close(x_staged.grad, x_plain.grad, rtol=0, atol=0)
+        assert not staging.has_staged_rows
+        self._assert_weight_grads_match(staged, plain)
+
+    def test_unfreezing_a_weight_with_rows_staged_is_rejected(self):
+        device, dtype = self._device_and_dtype()
+        _, staged = self._experts_pair(device, dtype, "separate", trainable=(True, False, True))
+        staging = MoeDeferredDwStaging(4, flush_period=3)
+        x, grad_out, counts, valid_counts = self._backward_inputs(device, dtype, padded=True)[0]
+        staging_kwargs = dict(dw_staging=staging, num_valid_tokens_per_expert=valid_counts)
+        staged(x, counts, **staging_kwargs).backward(grad_out)
+        # The rows already staged would get a w2 gradient that their own backward did not ask for.
+        staged.w2.requires_grad_(True)
+        with pytest.raises(RuntimeError, match="were staged"):
+            staged(x, counts, **staging_kwargs).backward(grad_out)
+
+    def test_staging_needs_the_grouped_mm_path_and_no_slot(self):
+        staging = MoeDeferredDwStaging(2, flush_period=2)
+        experts = GroupedExperts(dim=8, hidden_dim=16, num_experts=2, use_grouped_mm=False)
+        with pytest.raises(RuntimeError, match="torch._grouped_mm path"):
+            experts(torch.randn(4, 8), torch.tensor([2, 2]), dw_staging=staging)
+        if not hasattr(torch, "_grouped_mm"):
+            pytest.skip("this PyTorch build has no torch._grouped_mm")
+        experts = GroupedExperts(dim=8, hidden_dim=16, num_experts=2, disable_triton_grouped_mm=True)
+        with pytest.raises(RuntimeError, match="not both"):
+            experts(torch.randn(4, 8), torch.tensor([2, 2]), ExpertWeightGradSlot(), dw_staging=staging)
+
+    def test_settings_are_validated(self, monkeypatch):
+
+        def validate(zero_stage=1, tp_size=1, **settings):
+            config = parse_autoep_config({"enabled": True, "autoep_size": 2, **settings})
+            validate_autoep_config(config, 2 * tp_size, 1, tp_size, 1, zero_stage=zero_stage)
+
+        assert parse_autoep_config({"enabled": True}).deferred_dw_flush_period == 1
+        for stage in (0, 1, 2):
+            validate(deferred_dw_flush_period=4, deferred_dw_rows_per_expert=256, zero_stage=stage)
+        for period in (0, 1.5, True, "4"):
+            with pytest.raises(ValueError, match="deferred_dw_flush_period must be a positive integer"):
+                validate(deferred_dw_flush_period=period)
+        for rows in (-1, 2.0, True):
+            with pytest.raises(ValueError, match="deferred_dw_rows_per_expert must be a non-negative integer"):
+                validate(deferred_dw_flush_period=4, deferred_dw_rows_per_expert=rows)
+        with pytest.raises(ValueError, match="Set deferred_dw_flush_period"):
+            validate(deferred_dw_rows_per_expert=256)
+        with pytest.raises(ValueError, match="sequential expert loop"):
+            validate(deferred_dw_flush_period=4, use_grouped_mm=False)
+        with pytest.raises(ValueError, match="ZeRO stage 3"):
+            validate(deferred_dw_flush_period=4, zero_stage=3)
+        with pytest.raises(ValueError, match="Enable one of them"):
+            validate(deferred_dw_flush_period=4,
+                     overlap_weight_grad=True,
+                     comm_backend="deepep",
+                     comm_max_tokens_per_rank=64)
+
+        monkeypatch.setattr(type(get_accelerator()), "prefer_triton_grouped_mm", lambda self: True)
+        model = _custom_pattern_model()
+        auto_ep = AutoEP(
+            model, _runtime_config(moe_layer_pattern=MOE_PATTERN, use_grouped_mm=True, deferred_dw_flush_period=4))
+        [spec] = auto_ep.ep_parser()
+        with pytest.raises(ValueError, match="disable_triton_grouped_mm=true"):
+            auto_ep.replace_moe_layer(spec, ep_size=1, ep_rank=0)
+
+    @pytest.mark.parametrize("unsupported,message", [("unmanaged_accumulation", "managed_gradient_accumulation=true"),
+                                                     ("zenflow", "ZenFlow"), ("deepcompile", "DeepCompile")])
+    def test_engine_rejects_modes_that_read_gradients_before_the_flush(self, monkeypatch, unsupported, message):
+        from deepspeed.runtime import engine as engine_module
+
+        config = parse_autoep_config({"enabled": True, "autoep_size": 2, "deferred_dw_flush_period": 4})
+        shell = SimpleNamespace(_config=SimpleNamespace(expert_parallel_config=config),
+                                mpu=None,
+                                autotp_size=lambda: 1,
+                                _autoep_sequence_parallel_world_size=lambda: 1,
+                                zero_optimization_stage=lambda: 1,
+                                managed_gradient_accumulation=lambda: unsupported != "unmanaged_accumulation",
+                                zenflow_config=lambda: object() if unsupported == "zenflow" else None,
+                                is_deepcompile_enabled=lambda: unsupported == "deepcompile")
+        monkeypatch.setattr(engine_module.dist, "get_world_size", lambda: 2)
+        with pytest.raises(ValueError, match=message):
+            engine_module.DeepSpeedEngine._configure_expert_parallel(shell, nn.Identity())
 
 
 class TestPresetAndConfig:
