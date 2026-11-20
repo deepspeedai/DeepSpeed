@@ -271,6 +271,13 @@ class ZeROOptimizer(DeepSpeedOptimizer):
         # during backward. Prefer get/set methods over touching the private field.
         self._is_gradient_accumulation_boundary = True
 
+    def _rescale_muon_momentum(self, momentum):
+        # The loss scaler is checkpointed with the optimizer. Older checkpoints carry no momentum scale.
+        scale = self.loss_scale
+        previous = getattr(self.loss_scaler, "muon_momentum_scale", scale)
+        if previous != scale:
+            momentum.mul_(scale / previous)
+
     def is_gradient_accumulation_boundary(self) -> bool:
         """Whether the current micro-batch is a gradient accumulation boundary.
 

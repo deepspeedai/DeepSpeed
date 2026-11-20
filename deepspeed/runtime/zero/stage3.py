@@ -1935,6 +1935,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                 param = round_params[rank]
                 g = round_grads[rank]
                 m = round_momentums[rank]
+                self._rescale_muon_momentum(m)
                 update = muon_update(g,
                                      m,
                                      beta=self.muon_beta,
@@ -2043,6 +2044,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                     if num_elements > 0:
                         partition.narrow(0, 0, num_elements).copy_(update.view(-1).narrow(0, offset, num_elements))
                 start = end
+        self.loss_scaler.muon_momentum_scale = self.loss_scale
 
     @instrument_w_nvtx
     def __avg_scatter_contiguous_grads(self, buffer_to_reduce: Tensor,

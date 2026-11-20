@@ -3112,10 +3112,13 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             staged = torch.empty_like(committed)
         self._muon_pending_momentum[param_group_idx] = (staged, flatten_copy)
         staged.copy_(committed)
+        self._rescale_muon_momentum(staged)
         return staged
 
-    def _commit_muon_momentum(self):
+    def _commit_muon_momentum(self, backward_scale):
         """Move this step's momentum into the optimizer state, now that the step survived."""
+        if self._muon_pending_momentum:
+            self.loss_scaler.muon_momentum_scale = backward_scale
         for staged, flatten_copy in self._muon_pending_momentum.values():
             self.optimizer.state[flatten_copy]["momentum_buffer"].copy_(staged)
         # The buffers are kept rather than dropped: staging re-copies from the committed
@@ -3160,7 +3163,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         prev_scale = self.loss_scale
         self._update_scale(self.overflow)
         if not self.overflow:
-            self._commit_muon_momentum()
+            self._commit_muon_momentum(prev_scale)
         if self.overflow:
             if self.compute_grad_norm:
                 self._global_grad_norm = float("inf")
