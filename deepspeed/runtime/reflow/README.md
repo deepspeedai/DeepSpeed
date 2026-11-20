@@ -70,8 +70,9 @@ next fwd:   the async-state worker runs concurrently with the forward; the param
 
 Streams: `copy_grad_stream` (D2H grads), `_bucketwise_h2d_stream` (H2D updated weights, least
 priority so it never preempts compute), and the standard ZeRO-3 `reduce_and_partition_stream` /
-`__allgather_stream`. The CPU side uses a `ThreadPoolExecutor` of bucketwise workers (each pinned to
-a disjoint NUMA-local core slice) plus a single chained async-state worker.
+`__allgather_stream`. Ready, gradient accumulation and Persist use the same CPU worker pool.
+A separate enqueue thread merges ranges and submits work. Each bucketwise team uses its
+NUMA-local CPU mask, and a worker restores that mask after running Persist.
 
 ---
 
@@ -168,7 +169,7 @@ rejected when main-thread pinning is enabled. The following options allow other 
 | `pin_main_thread` | `true` | Pins the initializing thread to the reserved main CPUs; `engine.destroy()` restores its original affinity. |
 | `worker_core_type` | `"logical"` | `"physical"` uses one logical CPU per remaining physical core. |
 | `bucketwise_cores_per_worker` | `8` | Maximum logical CPUs per bucketwise worker; the last mask within a NUMA node may be smaller. |
-| `bucketwise_worker_affinity` | `"thread"` | `"task"` assigns CPU masks round-robin; `"thread"` fixes each pool thread to a mask at startup, reducing migrations and preserving its OpenMP team placement. |
+| `bucketwise_worker_affinity` | `"thread"` | `"task"` assigns CPU masks round-robin; `"thread"` reuses a fixed mask per thread for bucketwise work. Persist temporarily uses its phase-specific mask. |
 | `state_update_cores` | `null` | Caps the worker CPU IDs used by the state commit during forward; `null` uses all worker CPUs. |
 | `state_update_backward_cores` | `null` | Caps the number of worker CPU IDs used by the state commit during backward; `null` uses all worker CPUs. `state_update_cores` still controls its forward mask. |
 
@@ -248,13 +249,22 @@ accumulation, params on GPU, NVMe offload) logs a warning and falls back to the 
 - **Single-GPU is the stress case.** With one GPU the optimizer is the *full* (unpartitioned) model
   and must hide inside a single backward, so the bucketwise CPU-Adam workers must run truly in
   parallel across the NUMA-local cores (see the mutex note under Correctness).
-- **The state commit can overlap the forward.** By default it can use all worker CPUs in both forward
-  and backward. Set `state_update_cores` or `state_update_backward_cores` to limit its affinity during
-  either phase; changes take effect between commit slices.
+- **Ready and Persist share one optimizer worker pool.** A pool worker commits resident subgroups in
+  order during the next forward. Set `state_update_cores` or `state_update_backward_cores` to cap
+  its CPU team in each phase. A Ready team with disjoint CPUs can start once its subgroup is
+  committed. Teams whose CPUs overlap either commit mask resume after the batch finishes.
+  GPU backward and gradient transfers can continue during the commit.
 - **Gradient clipping re-runs the update inside `step()`.** The bucketwise workers apply the update
-  during backward, before the global grad norm is known. When a step needs clipping
-  (`gradient_clipping > 0` and the grad norm exceeds it), the in-flight work is cancelled and every
-  range is recomputed with the clipped scale in `step()`, so that step pays the full optimizer cost.
+  during backward, before the global grad norm is known. On a clipped step, `step()` waits for
+  preview copies to finish before reusing their output buffers. It generates every range with the
+  clipped scale, including pending ranges that have yet to run Ready. With a fixed loss scale,
+  checkpointed ranges that first become safe in `step()` can use the final scale on their first
+  pass. Their boundary norms are already available from backward.
+  With clipping disabled and a fixed loss scale, Ready can compute checkpointed ranges during
+  backward when optimizer state is resident and parameters are on the GPU. It writes the existing
+  CPU output slot. After recomputation and the overflow check, `step()` copies accepted weights
+  to the GPU as their Ready jobs finish. A weight used by multiple checkpoint segments in the
+  same micro-step runs Ready once its contributions have accumulated.
   DeepSpeed defaults `gradient_clipping` to `1.0`; set `"gradient_clipping": 0.0` when clipping is not
   wanted. On OPT-350m with one RTX 5080, `step` took ~58 ms unclipped vs ~139 ms with every step clipped.
 
@@ -311,9 +321,8 @@ The implementation was built and hardened across many commits; the major themes:
 - **NUMA affinity** — bind the main thread and per-NUMA-node worker groups to GPU-local cores; pin
   the main process to the full NUMA-local slice (not only the reserved main cores) so it does not
   throttle the launch-bound forward.
-- **Stream scheduling** — least-priority H2D stream (so weight copies never preempt compute); move
-  the top-of-step device sync after the CPU step setup; allow more in-flight reduce events; order
-  overlap_comm all-gathers after the H2D weight writes.
+- **Stream scheduling** — allow multiple in-flight reduce events and wait for the gradient-copy stream
+  after CPU step setup. The least-priority H2D stream publishes the weights before `overlap_comm` all-gathers.
 - **Concurrency** — narrow the param CPU-Adam mutex to the scalar update so the bucketwise workers
   run concurrently across the rank's cores (the key to hiding the optimizer when the per-rank shard
   is large, e.g. single-GPU).

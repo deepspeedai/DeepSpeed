@@ -12,6 +12,7 @@ import os
 import threading
 import weakref
 from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import ExitStack
 from unittest.mock import Mock, patch
 from types import SimpleNamespace
 
@@ -33,6 +34,7 @@ from deepspeed.runtime.reflow.reflow_cpu_adam import ReflowCPUAdam
 from deepspeed.runtime.reflow.reflow_cpu_lion import ReflowCPULion
 from deepspeed.runtime.reflow.reflow_stage3 import ReflowOptimizer_Stage3
 from deepspeed.runtime.reflow import reflow_utils
+from deepspeed.runtime.utils import combine_grad_norm_groups
 from deepspeed.runtime.zero.stage3 import DeepSpeedZeroOptimizer_Stage3
 from deepspeed.runtime.zero.muon.muon_optimizer import MuonWithAuxAdam
 from deepspeed.runtime.zero.utils import ZeRORuntimeException
@@ -632,6 +634,149 @@ class TestReflowMultipleOptimizerGroupsMatchZeroOffload(DistributedTest):
             assert torch.equal(got, want), f"loss differs at step {step}: {got} vs {want}"
         for index, (want, got) in enumerate(zip(expected["fp32_params"], actual["fp32_params"])):
             assert torch.equal(got, want), f"fp32 param {index} differs"
+
+
+@needs_gpu_accelerator
+class TestReflowSharedOptimizerWorker(DistributedTest):
+    world_size = 1
+
+    @pytest.mark.parametrize("invalid", [False, True])
+    def test_norm_progresses_while_ready_is_running(self, invalid):
+        # A running preview must allow the clipping/overflow decision to proceed, yet its
+        # late weight publication must never overwrite the clipped or restored weights.
+        skip_if_reflow_training_unsupported()
+        torch.manual_seed(1234)
+        model = SimpleModel(hidden_dim=16, nlayers=4)
+        batches = make_batches(16, count=3)
+
+        def run(reflow):
+            config = get_offload_clip_config(reflow, gradient_clipping=0.01, sub_group_size=512)
+            config["zero_optimization"]["reduce_bucket_size"] = 128
+            net = copy.deepcopy(model)
+            engine, opt, _, _ = deepspeed.initialize(model=net, model_parameters=net.parameters(), config=config)
+            snapshots = []
+            try:
+                for index, (inputs, labels) in enumerate(batches):
+                    loss = engine(inputs, labels)
+                    if index == 1 and invalid:
+                        loss = loss * float("inf")
+                    if reflow and index == 1:
+                        native = opt.optimizer.ds_opt_adam
+                        ready = native.reflow_adam_update_params_halfgrad
+                        started, norm_finished = threading.Event(), threading.Event()
+
+                        def delayed_ready(*args):
+                            started.set()
+                            if not norm_finished.wait(10):
+                                norm_finished.set()
+                                raise RuntimeError("gradient norm waited for a running Ready")
+                            return ready(*args)
+
+                        def observe_norm(*args):
+                            norm = combine_grad_norm_groups(*args)
+                            norm_finished.set()
+                            return norm
+
+                        with patch.object(native, "reflow_adam_update_params_halfgrad", delayed_ready), \
+                                patch("deepspeed.runtime.reflow.reflow_stage3.combine_grad_norm_groups", observe_norm):
+                            engine.backward(loss)
+                            assert started.wait(10)
+                            engine.step()
+                    else:
+                        engine.backward(loss)
+                        engine.step()
+                    for param in net.parameters():
+                        snapshots.extend([
+                            param.ds_tensor.detach().clone(),
+                            safe_get_full_fp32_param(param).clone(),
+                            safe_get_full_optimizer_state(param, "exp_avg").clone(),
+                            safe_get_full_optimizer_state(param, "exp_avg_sq").clone(),
+                        ])
+                steps = [int(opt.optimizer.state[p]["step"]) for p in opt.fp32_partitioned_groups_flat]
+                return snapshots, steps, engine.skipped_steps
+            finally:
+                engine.destroy()
+
+        expected, expected_steps, expected_skips = run(False)
+        actual, steps, skips = run(True)
+        assert steps == expected_steps and skips == expected_skips == int(invalid)
+        for want, got in zip(expected, actual):
+            torch.testing.assert_close(got, want, rtol=0, atol=0)
+
+    @pytest.mark.parametrize("disjoint_teams", [False, True])
+    def test_delayed_commit(self, disjoint_teams):
+        # Same-core Ready must wait for Persist. A Ready on disjoint CPUs with a
+        # committed master must be able to finish while a later subgroup is stalled.
+        skip_if_reflow_training_unsupported()
+        torch.manual_seed(1234)
+        model = SimpleModel(hidden_dim=512, nlayers=3)
+        batches = make_batches(512, count=3)
+        config = get_variant_config(False, "adam")
+        config["zero_optimization"].update(sub_group_size=262144, reduce_bucket_size=262144)
+        expected = train_and_collect(copy.deepcopy(model), config, batches)
+        cpus, _ = available_physical_cpus()
+        if disjoint_teams and len(cpus) < 4:
+            pytest.skip("requires a main CPU and three optimizer CPU teams")
+        config["zero_optimization"]["reflow"] = {
+            "main_thread_cores": 1,
+            "bucketwise_cores_per_worker": 1,
+            "state_update_cores": 1,
+            "state_update_backward_cores": 1,
+        }
+        last_commit_cpus, conflicting_cpus = set(), set()
+        started, disjoint_ready, release = threading.Event(), threading.Event(), threading.Event()
+        workers = {"params": set(), "state": set()}
+        engine = None
+        try:
+            os.sched_setaffinity(0, sorted(cpus)[:4 if disjoint_teams else 1])
+            engine, optimizer, _, _ = deepspeed.initialize(model=model,
+                                                           model_parameters=model.parameters(),
+                                                           config=config)
+            native = optimizer.optimizer.ds_opt_adam
+            ready, persist = native.reflow_adam_update_params_halfgrad, native.reflow_adam_update_state_halfgrad
+            last_master = optimizer.fp32_partitioned_groups_flat[0].data_ptr()
+
+            def record_ready(*args, **kwargs):
+                workers["params"].add(threading.get_native_id())
+                if started.is_set() and not release.is_set():
+                    mask = os.sched_getaffinity(0)
+                    conflicting_cpus.update(mask & last_commit_cpus)
+                    if mask.isdisjoint(last_commit_cpus):
+                        disjoint_ready.set()
+                return ready(*args, **kwargs)
+
+            def delay_last_commit(*args, **kwargs):
+                workers["state"].add(threading.get_native_id())
+                if args[8].data_ptr() == last_master and not started.is_set():
+                    last_commit_cpus.update(os.sched_getaffinity(0))
+                    started.set()
+                    assert release.wait(30), "next backward did not finish with Persist outstanding"
+                return persist(*args, **kwargs)
+
+            with patch.object(native, "reflow_adam_update_params_halfgrad", record_ready), \
+                    patch.object(native, "reflow_adam_update_state_halfgrad", delay_last_commit):
+                for step, batch in enumerate(batches):
+                    if step == 1:
+                        assert started.wait(30)
+                    loss = engine(*batch)
+                    engine.backward(loss)
+                    if step == 1:
+                        if disjoint_teams:
+                            assert disjoint_ready.wait(20), "independent Ready was blocked by the later subgroup"
+                        release.set()
+                    engine.step()
+                    assert torch.equal(loss.detach(), expected["losses"][step])
+                for param, want in zip(model.parameters(), expected["fp32_params"]):
+                    assert torch.equal(safe_get_full_fp32_param(param), want)
+                assert not conflicting_cpus
+                if not disjoint_teams:
+                    assert workers["params"] == workers["state"]
+                    assert len(workers["state"]) == 1
+        finally:
+            release.set()
+            if engine is not None:
+                engine.destroy()
+            os.sched_setaffinity(0, cpus)
 
 
 @pytest.mark.parametrize("worker_affinity", ["task", "thread"])
@@ -1320,6 +1465,37 @@ class TestReflowFailedCommitStateAccess(DistributedTest):
         finally:
             engine.destroy()
 
+    @needs_gpu_accelerator
+    def test_failed_native_commit_aborts_next_step(self):
+        # Fail partway through a shared Persist batch. Readers on every rank, including
+        # readers of a later subgroup, must be released and the next step must abort.
+        skip_if_reflow_training_unsupported()
+        torch.manual_seed(1234)
+        model = SimpleModel(hidden_dim=768, nlayers=3)
+        config = get_offload_clip_config(True, gradient_clipping=0., sub_group_size=262144)
+        config["zero_optimization"]["reduce_bucket_size"] = 262144
+        engine, optimizer, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config)
+        try:
+            native = optimizer.optimizer.ds_opt_adam
+            persist = native.reflow_adam_update_state_halfgrad
+            target = optimizer.fp32_partitioned_groups_flat[1].data_ptr()
+
+            def commit(*args, **kwargs):
+                if dist.get_rank() == 0 and args[8].data_ptr() == target:
+                    raise RuntimeError("injected subgroup commit failure")
+                return persist(*args, **kwargs)
+
+            first, second = make_batches(768, count=2)
+            with patch.object(native, "reflow_adam_update_state_halfgrad", commit):
+                engine.backward(engine(*first))
+                engine.step()
+                engine.backward(engine(*second))
+                with pytest.raises(RuntimeError,
+                                   match="injected subgroup commit failure|worker failed on another rank"):
+                    engine.step()
+        finally:
+            engine.destroy()
+
 
 @needs_gpu_accelerator
 class TestReflowCheckpointResume(DistributedTest):
@@ -1573,6 +1749,38 @@ class TestReflowConditionalGradients(DistributedTest):
                 for want, got in zip(expected_group, actual_group):
                     assert torch.equal(got, want), f"parameter or optimizer state differs at step {step}"
 
+    def test_norm_after_replacing_an_earlier_microstep_gradient(self):
+        skip_if_reflow_training_unsupported()
+
+        def run(reflow):
+            torch.manual_seed(1234)
+            model = ConditionalGradientModel()
+            weight = model.optional.weight
+            # Zero the same first contribution in the reference before ZeRO partitions it.
+            if not reflow:
+                weight.register_hook(lambda grad: torch.zeros_like(grad) if micro_step == 0 else grad)
+            config = get_variant_config(reflow, "adam")
+            config["data_types"] = {"grad_accum_dtype": "bf16"}
+            config["gradient_accumulation_steps"] = 3
+            config["gradient_clipping"] = 0.01
+            engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config)
+            try:
+                for micro_step, use_optional in enumerate((True, True, False)):
+                    torch.manual_seed(900 + micro_step)
+                    inputs = torch.randn(2, 16, device=engine.device, dtype=torch.bfloat16)
+                    engine.backward(engine(inputs, use_optional))
+                    if reflow and micro_step == 0:
+                        safe_set_local_grad(weight, torch.zeros_like(safe_get_local_grad(weight)))
+                    engine.step()
+                return engine.get_global_grad_norm(), safe_get_full_optimizer_state(weight, "exp_avg").clone()
+            finally:
+                engine.destroy()
+
+        expected_norm, expected_moment = run(False)
+        actual_norm, actual_moment = run(True)
+        assert actual_norm == expected_norm
+        assert torch.equal(actual_moment, expected_moment)
+
     def test_skipped_step_does_not_reuse_invalid_gradient(self):
         skip_if_reflow_training_unsupported()
         schedule = [(True, False), (True, True), (False, False), (False, True)]
@@ -1677,18 +1885,24 @@ class TestReflowReentrantGradients(DistributedTest):
     world_size = [1, 2]
 
     @pytest.mark.parametrize("optimizer_kind", ["adam", "lion"])
-    @pytest.mark.parametrize("gradient_accumulation_steps", [1, 2])
-    def test_matches_zero_offload(self, optimizer_kind, gradient_accumulation_steps):
+    @pytest.mark.parametrize("gradient_accumulation_steps, clip, precision", [(1, 0., "bf16"), (1, 1000., "bf16"),
+                                                                              (2, 0.1, "bf16"), (1, 0.0001, "fp16"),
+                                                                              (1, 0., "fp16")])
+    def test_matches_zero_offload(self, optimizer_kind, gradient_accumulation_steps, clip, precision):
         skip_if_reflow_training_unsupported(optimizer_kind)
 
         def run(reflow):
             torch.manual_seed(1234)
             model = ReentrantGradientModel()
             config = get_variant_config(reflow, optimizer_kind)
-            config["data_types"] = {"grad_accum_dtype": "bf16"}
+            config["data_types"] = {"grad_accum_dtype": precision}
+            dtype = torch.bfloat16
+            if precision == "fp16":
+                dtype = torch.float16
+                config["bf16"] = {"enabled": False}
+                config["fp16"] = {"enabled": True, "initial_scale_power": 3, "loss_scale_window": 1, "hysteresis": 1}
             config["gradient_accumulation_steps"] = gradient_accumulation_steps
-            if gradient_accumulation_steps > 1:
-                config["gradient_clipping"] = 0.1
+            config["gradient_clipping"] = clip
             config["zero_optimization"]["reduce_bucket_size"] = 256
             engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config)
             snapshots = []
@@ -1696,21 +1910,166 @@ class TestReflowReentrantGradients(DistributedTest):
                 for step in range(3):
                     for micro_step in range(gradient_accumulation_steps):
                         torch.manual_seed(900 + step * gradient_accumulation_steps + micro_step)
-                        inputs = torch.randn(2, 16, device=engine.device, dtype=torch.bfloat16)
-                        engine.backward(engine(inputs))
+                        inputs = torch.randn(2, 16, device=engine.device, dtype=dtype)
+                        loss = engine(inputs)
+                        if precision == "fp16" and step == 1 and dist.get_rank() == 0:
+                            loss = loss * float("inf")
+                        engine.backward(loss)
                         engine.step()
+                    with deepspeed.zero.GatheredParameters(list(engine.module.parameters())):
+                        published = [p.detach().clone() for p in engine.module.parameters()]
                     params = [safe_get_full_fp32_param(p).clone() for p in engine.module.parameters()]
                     states = [safe_get_full_optimizer_state(p, "exp_avg").clone() for p in engine.module.parameters()]
-                    snapshots.append((params, states))
+                    snapshots.append((published, params, states, engine.get_global_grad_norm(),
+                                      engine.optimizer.loss_scale, engine.skipped_steps))
                 return snapshots
             finally:
                 engine.destroy()
 
         for step, (expected, actual) in enumerate(zip(run(False), run(True))):
-            for expected_group, actual_group in zip(expected, actual):
+            assert actual[3:] == expected[3:], f"gradient norm, loss scale or skipped steps differ at step {step}"
+            for expected_group, actual_group in zip(expected[:3], actual[:3]):
                 for want, got in zip(expected_group, actual_group):
                     assert torch.equal(got, want), (f"parameter or optimizer state differs at step {step}: "
                                                     f"max diff {(got - want).abs().max().item()}")
+
+    @pytest.mark.parametrize("precision", ["bf16", "fp16"])
+    def test_unclipped_checkpoint_ready_preserves_forward_weights(self, precision):
+        # Ready may finish in backward, but recomputation still owns the published weights.
+        skip_if_reflow_training_unsupported()
+
+        class CheckpointedLayers(torch.nn.Sequential):
+
+            def forward(self, inputs):
+                inputs = checkpoint(self[0], inputs, use_reentrant=True).tanh()
+                inputs = checkpoint(self[1], inputs, use_reentrant=True).tanh()
+                return checkpoint(self[0], inputs, use_reentrant=True).float().square().mean()
+
+        def run(reflow):
+            torch.manual_seed(731)
+            model = CheckpointedLayers(torch.nn.Linear(16, 16, bias=False), torch.nn.Linear(16, 16, bias=False))
+            config = get_offload_clip_config(reflow, gradient_clipping=0., sub_group_size=1)
+            dtype = torch.bfloat16
+            if precision == "fp16":
+                dtype = torch.float16
+                config["bf16"] = {"enabled": False}
+                config["fp16"] = {"enabled": True, "loss_scale": 0.5}
+            config["zero_optimization"]["reduce_bucket_size"] = 32
+            engine, opt, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config)
+            snapshots = []
+            try:
+                for step in range(3):
+                    inputs = torch.randn(2, 16, dtype=dtype, device=engine.device, requires_grad=True)
+                    loss = engine(inputs)
+                    if step == 1 and dist.get_rank() == 0:
+                        loss = loss * float("inf")
+                    with ExitStack() as patches:
+                        if reflow:
+                            weights = [param.ds_tensor.clone() for param in model.parameters()]
+                            native = opt.optimizer.ds_opt_adam
+                            ready = native.reflow_adam_update_params_halfgrad
+                            ready_finished = threading.Event()
+                            processed = []
+
+                            def observe_ready(*args):
+                                result = ready(*args)
+                                processed.append(args[8].numel())
+                                ready_finished.set()
+                                return result
+
+                            patches.enter_context(
+                                patch.object(native, "reflow_adam_update_params_halfgrad", observe_ready))
+                        engine.backward(loss)
+                        if reflow:
+                            assert ready_finished.wait(10), "checkpoint Ready was held until step()"
+                        if step == 2:
+                            # Replace the gradient of the weight that already has a staged Ready.
+                            weight = model[1].weight
+                            safe_set_local_grad(weight, torch.full_like(safe_get_local_grad(weight), 0.125))
+                        if reflow:
+                            # The local setter joins outstanding previews. A premature copy
+                            # is now visible regardless of worker ordering.
+                            get_accelerator().synchronize()
+                            for param, original in zip(model.parameters(), weights):
+                                assert torch.equal(param.ds_tensor, original)
+                        engine.step()
+                        if reflow and step == 0:
+                            # The tied weight receives two gradients but needs only one Ready.
+                            assert sum(processed) == sum(weight.numel() for weight in weights)
+                    for param in model.parameters():
+                        snapshots.extend([
+                            param.ds_tensor.clone(),
+                            safe_get_full_fp32_param(param).clone(),
+                            safe_get_full_optimizer_state(param, "exp_avg").clone(),
+                            safe_get_full_optimizer_state(param, "exp_avg_sq").clone()
+                        ])
+                steps = [int(opt.optimizer.state[p]["step"]) for p in opt.fp32_partitioned_groups_flat]
+                return snapshots, steps, engine.skipped_steps
+            finally:
+                engine.destroy()
+
+        expected, expected_steps, expected_skips = run(False)
+        actual, steps, skips = run(True)
+        assert steps == expected_steps and skips == expected_skips == 1
+        for want, got in zip(expected, actual):
+            torch.testing.assert_close(got, want, rtol=0, atol=0)
+
+    @pytest.mark.parametrize("dynamic, failure", [(False, "kernel"), (True, "kernel"), (True, "executor")])
+    def test_deferred_ready_failure_aborts_before_persist(self, dynamic, failure):
+        # A rank-local error published after the norm decision must abort all ranks
+        # before any state, master weight or optimizer step counter is committed.
+        skip_if_reflow_training_unsupported()
+        torch.manual_seed(1234)
+        model = ReentrantGradientModel()
+        config = get_offload_clip_config(True, gradient_clipping=0.0001)
+        if dynamic:
+            config["bf16"] = {"enabled": False}
+            config["fp16"] = {"enabled": True, "initial_scale_power": 3, "loss_scale_window": 1}
+        # Keep repeated uses in separate reduction buckets, as in the ZeRO-3 oracle above.
+        config["zero_optimization"]["reduce_bucket_size"] = 256
+        engine, optimizer, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config)
+        try:
+            dtype = torch.float16 if dynamic else torch.bfloat16
+            inputs = torch.randn(2, 16, device=engine.device, dtype=dtype)
+            engine.backward(engine(inputs))
+            engine.step()
+            optimizer.state_dict()
+            masters = optimizer.fp32_partitioned_groups_flat
+            snapshots = [(p.detach().clone(), copy.deepcopy(optimizer.optimizer.state[p])) for p in masters]
+            engine.backward(engine(inputs))
+            native = optimizer.optimizer.ds_opt_adam
+            ready = native.reflow_adam_update_params_halfgrad
+
+            scale_before = optimizer.loss_scale
+            if dynamic:
+                iteration_before = optimizer.loss_scaler.cur_iter
+
+            def fail_on_one_rank(*args, **kwargs):
+                if dist.get_rank() == 0 and float(args[13]) > optimizer.loss_scale:
+                    raise RuntimeError("injected final Ready failure")
+                return ready(*args, **kwargs)
+
+            if failure == "executor" and dist.get_rank() == 0:
+                # An executor can fail a Future before the Ready kernel gets a chance to report it.
+                failed = Future()
+                failed.set_exception(RuntimeError("injected final Ready failure"))
+                failure_patch = patch.object(optimizer._bucketwise_update_executor, "submit", return_value=failed)
+            else:
+                failure_patch = patch.object(native, "reflow_adam_update_params_halfgrad", fail_on_one_rank)
+            with failure_patch:
+                with pytest.raises(RuntimeError, match="injected final Ready failure|worker failed on another rank"):
+                    engine.step()
+            assert optimizer.loss_scale == scale_before
+            if dynamic:
+                assert optimizer.loss_scaler.cur_iter == iteration_before
+            for param, (master, state) in zip(masters, snapshots):
+                assert torch.equal(param, master)
+                now = optimizer.optimizer.state[param]
+                assert now["step"] == state["step"]
+                for key in ("exp_avg", "exp_avg_sq"):
+                    assert torch.equal(now[key], state[key])
+        finally:
+            engine.destroy()
 
 
 @needs_gpu_accelerator
@@ -1875,7 +2234,8 @@ class TestReflowInvalidGradient(DistributedTest):
         torch.manual_seed(1234)
         config = get_variant_config(reflow=True, variant="offload_param" if offload_param else "adam")
         config["zero_optimization"]["offload_optimizer"]["pin_memory"] = pin_memory
-        config["zero_optimization"]["reduce_bucket_size"] = 1_000_000
+        # Submit Ready during backward so overflow must restore an actual parameter preview.
+        config["zero_optimization"]["reduce_bucket_size"] = 128
         if precision == "fp16":
             config["bf16"] = {"enabled": False}
             config["fp16"] = {"enabled": True, "loss_scale": 128}

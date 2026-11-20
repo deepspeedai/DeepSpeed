@@ -6,8 +6,8 @@
 import gc
 import os
 import threading
-from concurrent.futures import ThreadPoolExecutor
-from typing import Container, List
+from concurrent.futures import CancelledError, Future, ThreadPoolExecutor, as_completed
+from typing import Container, List, NamedTuple
 
 import psutil
 import torch
@@ -33,6 +33,11 @@ _DEFAULT_BUCKETWISE_MIN_SUBMIT_ELEMS = 262144
 # A power of two, so every full slice is a whole number of SIMD blocks and the kernel's scalar tail is the same
 # elements as in an unsliced call; the sliced commit stays bit-exact.
 _STATE_COMMIT_SLICE_ELEMS = 1 << 25
+
+
+class _StagedReady(NamedTuple):
+    sub_group_id: int
+    ranges: list
 
 
 class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
@@ -67,7 +72,7 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
         self._reflow_window_grad_ids = set()
         self._reflow_boundary_grad_ids = set()
         self._reflow_gradient_partitions = None
-        self._reflow_checkpoint_param_ids = set()
+        self._reflow_checkpoint_visits = {}
         self._reflow_modified_gradient_ids = set()
         self._last_state_update_future = None
         self._pending_state_updates_by_subgroup = {}
@@ -93,7 +98,7 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
         self.copy_grad_stream = get_accelerator().Stream() if get_accelerator().is_synchronized_device() is False \
             else get_accelerator().default_stream()
 
-        self._setup_async_state_executor()
+        self._setup_optimizer_workers()
         # The stream-level waits in step() do not keep the next forward's all-gather from reading a partition
         # before its H2D write-back lands; without this host sync OPT-30B showed loss spikes. Leave it on except
         # for measurement.
@@ -127,7 +132,10 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
             if not torch.is_grad_enabled():
                 for param in iter_params(sub_module, recurse=z3_leaf_module(sub_module)):
                     if hasattr(param, "ds_id") and param.requires_grad:
-                        self._reflow_checkpoint_param_ids.add(self.get_param_id(param))
+                        param_id = self.get_param_id(param)
+                        last_step, _ = self._reflow_checkpoint_visits.get(param_id, (None, False))
+                        self._reflow_checkpoint_visits[param_id] = (self.micro_step_id,
+                                                                    last_step == self.micro_step_id)
             return original_forward(sub_module)
 
         self.parameter_offload.pre_sub_module_forward_function = track_forward
@@ -145,7 +153,7 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
                                        "parallelism) is not validated and may produce wrong results.")
                     return
 
-    def _setup_async_state_executor(self):
+    def _setup_optimizer_workers(self):
         self._reset_bucketwise_handles()
         self._worker_cpu_affinity_mask = None
         self._state_update_cpu_affinity_mask = None
@@ -170,6 +178,8 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
         backward_count = self._reflow_config.state_update_backward_cores
         backward_cores = worker_cores[-backward_count:] if backward_count is not None else worker_cores
         self._state_backward_cpu_affinity_mask = set(backward_cores)
+        # A running Persist slice may still use its forward mask when backward starts.
+        self._state_commit_reserved_cpus = set(state_update_cores).union(backward_cores)
 
         original_affinity = None
         if self._reflow_config.pin_main_thread:
@@ -197,8 +207,6 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
                         f"{len(main_cores)} main-thread cores {sorted(main_cores)}, "
                         f"{len(worker_cores)} optimizer-worker cores {sorted(worker_cores)}"
                         f"{', affinity isolation ENABLED' if enable_cpu_affinity else ''}")
-
-        self._state_update_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="reflow_state_update")
 
         self._setup_bucketwise_executors()
 
@@ -248,27 +256,40 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
                 self._pin_current_thread(mask)
 
         self._bucketwise_update_executor = ThreadPoolExecutor(max_workers=max_bucketwise_workers,
-                                                              thread_name_prefix="reflow_bucketwise_update",
+                                                              thread_name_prefix="reflow_optimizer",
                                                               initializer=initializer)
 
         def _submit_bucketwise_task(fn, *args, **kwargs):
-            if initializer is not None:
+            commit = self._last_state_update_future
+            if commit is not None and commit.done():
+                commit = None
+            if initializer is not None and commit is None:
                 return self._bucketwise_update_executor.submit(fn, *args, **kwargs)
 
-            # Select the mask only here: selecting again in a caller would skip masks in an even-sized pool.
-            worker_idx = self._bucketwise_worker_idx
-            self._bucketwise_worker_idx = (self._bucketwise_worker_idx + 1) % len(
-                self._bucketwise_worker_cpu_affinity_masks)
-            affinity_mask = self._bucketwise_worker_cpu_affinity_masks[worker_idx]
+            mask = None
+            if initializer is None:
+                worker_idx = self._bucketwise_worker_idx
+                masks = self._bucketwise_worker_cpu_affinity_masks
+                mask = masks[worker_idx]
+                self._bucketwise_worker_idx = (worker_idx + 1) % len(masks)
 
-            def wrapped_fn(*a, **kw):
-                self._pin_current_thread(affinity_mask)
-                return fn(*a, **kw)
+            def run():
+                if mask is not None:
+                    self._pin_current_thread(mask)
+                if commit is not None and not commit.done():
+                    # The entire older commit is already running or queued first. It never waits
+                    # on new work from this pool. Disjoint teams can proceed independently.
+                    try:
+                        cpus = os.sched_getaffinity(0)
+                    except (AttributeError, OSError):
+                        cpus = None
+                    if cpus is None or not self._state_commit_reserved_cpus.isdisjoint(cpus):
+                        commit.result()
+                return fn(*args, **kwargs)
 
-            return self._bucketwise_update_executor.submit(wrapped_fn, *args, **kwargs)
+            return self._bucketwise_update_executor.submit(run)
 
         self._bucketwise_update_submit = _submit_bucketwise_task
-        self._bucketwise_update_futures = []
         self._bucketwise_inflight_futures = []
         # Backward and step own this registry; executor workers never access it.
         self._bucketwise_accumulation_futures = {}
@@ -283,7 +304,10 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
         self._bucketwise_enq_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="reflow_bucketwise_enq")
         self._bucketwise_enq_submit = self._bucketwise_enq_executor.submit
 
-        self._bucketwise_group_step_incremented = set()
+        self._published_ready_groups = set()
+        self._pending_checkpoint_groups = set()
+        # An early join retains completed ranges here until their replacements finish.
+        self._staged_ready_ranges = {}
         self._bucketwise_group_target_step = {}
         self._bucketwise_inflight_h2d_events = []
         self._bucketwise_cancel_version = 0
@@ -294,7 +318,7 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
                                                   _DEFAULT_BUCKETWISE_SHARD_ELEMS)
         self._bucketwise_min_submit_range_elems = _DEFAULT_BUCKETWISE_MIN_SUBMIT_ELEMS
         self._bucketwise_enqueue_lock = threading.Lock()
-        self._bucketwise_pending_events = {}
+        self._bucketwise_last_copy_event_by_group = {}
         # First real (non-cancel) error raised by a bucketwise worker this iteration; step()
         # all-reduces a flag derived from it and re-raises so the step aborts on every rank.
         self._bucketwise_worker_error = None
@@ -303,7 +327,6 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
     def _reset_bucketwise_handles(self):
         self._bucketwise_update_executor = None
         self._bucketwise_update_submit = None
-        self._bucketwise_update_futures = None
         self._bucketwise_inflight_futures = None
         self._bucketwise_worker_cpu_affinity_masks = None
         self._worker_node_groups = None
@@ -311,6 +334,7 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
         self._bucketwise_h2d_stream = None
         self._bucketwise_enq_executor = None
         self._bucketwise_enq_submit = None
+        self._last_enqueue_future = None
 
     def destroy(self):
         """
@@ -327,7 +351,7 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
                 drain()
             except Exception:
                 pass
-        for attr in ("_bucketwise_enq_executor", "_bucketwise_update_executor", "_state_update_executor"):
+        for attr in ("_bucketwise_enq_executor", "_bucketwise_update_executor"):
             executor = getattr(self, attr, None)
             if executor is not None:
                 try:
@@ -406,14 +430,34 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
         except (OSError, AttributeError):
             pass
 
-    def _drain_update_futures_collecting_h2d_events(self, futures):
-        for f in futures:
+    def _drain_update_futures_collecting_h2d_events(self, futures, publish_staged=False):
+        # A drain for a reentrant gradient or a local edit can leave overlapping old
+        # previews. Join their replacements before copying that output slot. Otherwise
+        # disjoint shards can start H2D as soon as their own native writer finishes.
+        publish_each = publish_staged and not any(self._staged_ready_ranges.values())
+        if publish_each and self._staged_ready_ranges and len(futures) > 1:
+            futures = as_completed(futures)
+        for future in futures:
             try:
-                ev = f.result()
-                if ev is not None:
-                    self._bucketwise_inflight_h2d_events.append(ev)
-            except Exception:
-                pass
+                result = future.result()
+                if isinstance(result, _StagedReady):
+                    if not publish_each:
+                        self._staged_ready_ranges[result.sub_group_id].extend(result.ranges)
+                    elif self._bucketwise_worker_error is None:
+                        self._publish_staged_ready(result.sub_group_id, result.ranges)
+                elif result is not None:
+                    self._bucketwise_inflight_h2d_events.append(result)
+            except CancelledError:
+                continue
+            except Exception as error:
+                self._record_bucketwise_worker_error(error)
+        if publish_staged and not publish_each and self._bucketwise_worker_error is None:
+            try:
+                for group, ranges in self._staged_ready_ranges.items():
+                    if ranges:
+                        self._publish_staged_ready(group, reflow_utils.merge_contiguous_ranges(ranges))
+            except Exception as error:
+                self._record_bucketwise_worker_error(error)
 
     def _coalesce_bucketwise_h2d_events(self):
         """Return one event covering all pending bucketwise H2D copies."""
@@ -628,6 +672,8 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
         stream_needs_sync = copy_grad_stream != current_stream
         is_sync_device = get_accelerator().is_synchronized_device()
         accumulate_submit = getattr(self, "_bucketwise_update_submit", None)
+        # This output slot is separate from the GPU weights read by checkpoint recomputation.
+        stage_checkpoints = self.clip_grad <= 0. and not self.dynamic_loss_scale and not self.offload_param
 
         for param, grad_partition in zip(params_to_release, grad_partitions):
             copy_event = None
@@ -644,6 +690,14 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
             param_id = self.get_param_id(param)
             grad_position_entry = self.grad_position[param_id]
             sub_group_id, dest_offset, _ = grad_position_entry
+            checkpoint_step, shared = self._reflow_checkpoint_visits.get(param_id, (None, False))
+            checkpointed = checkpoint_step is not None
+            # A shared checkpoint weight can receive multiple reductions in this micro-step.
+            # Leave its Ready until step() so it only runs on the complete gradient.
+            enqueue_ready = (is_boundary and (not checkpointed or (stage_checkpoints and not shared))
+                             and not self._swappable_optimizer_subgroup(sub_group_id))
+            stage_checkpoint = enqueue_ready and checkpointed
+            boundary_grad = is_boundary and (not checkpointed or stage_checkpoint)
             first_grad = param_id not in self._reflow_window_grad_ids
             self._reflow_window_grad_ids.add(param_id)
             if is_boundary and param_id in self._reflow_boundary_grad_ids:
@@ -666,7 +720,7 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
                 converted_grad = grad_partition.to(self.gradient_accumulation_dtype)
             else:
                 converted_grad = grad_partition
-            if self._reflow_checkpoint_param_ids and stream_needs_sync:
+            if self._reflow_checkpoint_visits and stream_needs_sync:
                 # Reentrant reductions can reuse their GPU source before the async copy finishes.
                 converted_grad = converted_grad.clone()
             # The base flat grad buffer that has_overflow normally scans is freed on this path, so
@@ -695,8 +749,9 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
                     copy_grad_stream.wait_stream(current_stream)
                 with get_accelerator().stream(copy_grad_stream):
                     pending_slice.copy_(converted_grad.view(pending_slice.shape), non_blocking=True)
-                    copy_event = get_accelerator().Event()
-                    copy_event.record(copy_grad_stream)
+                    if enqueue_ready:
+                        copy_event = get_accelerator().Event()
+                        copy_event.record(copy_grad_stream)
                 # No gradient accumulation: this micro-step is also the boundary, so use the GPU
                 # grad tensor directly for the norm/enqueue below.
                 if is_boundary:
@@ -711,11 +766,13 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
                     with get_accelerator().stream(copy_grad_stream):
                         accum_gpu = dst_slice.to(converted_grad.device, non_blocking=True)
                         accum_gpu.add_(converted_grad.view(accum_gpu.shape))
-                        accum_event = get_accelerator().Event()
-                        accum_event.record(copy_grad_stream)
+                        if stream_needs_sync:
+                            accum_event = get_accelerator().Event()
+                            accum_event.record(copy_grad_stream)
                         dst_slice.copy_(accum_gpu, non_blocking=True)
-                        copy_event = get_accelerator().Event()
-                        copy_event.record(copy_grad_stream)
+                        if enqueue_ready:
+                            copy_event = get_accelerator().Event()
+                            copy_event.record(copy_grad_stream)
                     if stream_needs_sync:
                         current_stream.wait_event(accum_event)
                         # accum_gpu is allocated on copy_grad_stream but read by the grad-norm on
@@ -757,18 +814,13 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
                     grad_numel = grad_buffer.numel()
 
             if is_boundary:
-                self.norm_for_param_grads[param_id] = self._constant_buffered_norm2(grad_buffer)
-                # NVMe subgroups have no resident optimizer state during backward, so their CPU step waits for
-                # step(); only mark the buffer ready. Other subgroups run the range during backward.
                 self._pending_grad_ready = True
-                if param_id not in self._reflow_checkpoint_param_ids:
+                if boundary_grad:
                     self._reflow_boundary_grad_ids.add(param_id)
-                if (param_id not in self._reflow_checkpoint_param_ids
-                        and not self._swappable_optimizer_subgroup(sub_group_id)):
-                    self._bucketwise_schedule_enqueue_range(sub_group_id,
-                                                            dest_offset,
-                                                            grad_numel,
-                                                            copy_event=copy_event)
+                if enqueue_ready:
+                    self._bucketwise_schedule_enqueue_range(sub_group_id, dest_offset, grad_numel, copy_event,
+                                                            stage_checkpoint)
+                self.norm_for_param_grads[param_id] = self._constant_buffered_norm2(grad_buffer)
 
             if not is_sync_device:
                 if param.grad is not None:
@@ -785,20 +837,20 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
         super().reset_cpu_buffers()
         self._reflow_window_grad_ids.clear()
         self._reflow_boundary_grad_ids.clear()
-        self._reflow_checkpoint_param_ids.clear()
+        self._reflow_checkpoint_visits.clear()
         self._reflow_modified_gradient_ids.clear()
         self._pending_grad_ready = False
 
         # Reset per-iteration pending/inflight state.
-        self._bucketwise_group_step_incremented.clear()
+        self._published_ready_groups.clear()
+        self._pending_checkpoint_groups.clear()
+        self._staged_ready_ranges.clear()
         self._bucketwise_group_target_step.clear()
         for sub_group_id in range(len(self._bucketwise_pending_ranges_by_group)):
             self._bucketwise_pending_ranges_by_group[sub_group_id].clear()
             self._bucketwise_pending_elems_by_group[sub_group_id] = 0
         self._bucketwise_inflight_h2d_events.clear()
-        self._bucketwise_pending_events.clear()
-        if getattr(self, "_bucketwise_update_futures", None) is not None:
-            self._bucketwise_update_futures.clear()
+        self._bucketwise_last_copy_event_by_group.clear()
         if self._bucketwise_inflight_futures is not None:
             self._bucketwise_inflight_futures.clear()
         self._bucketwise_cancel_version = 0
@@ -818,99 +870,106 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
                 if event is not None:
                     event.synchronize()
             self.copy_grad_stream.synchronize()
-            touched_groups = {self.grad_position[param_id][0] for param_id in self._reflow_boundary_grad_ids}
-            for sub_group_id in touched_groups:
+            for sub_group_id in self._published_ready_groups:
                 self._restore_fp16_params_from_master(sub_group_id)
             if self._reflow_grad_overflow is not None:
                 self._reflow_grad_overflow.zero_()
-            checkpoint_params = set(self._reflow_checkpoint_param_ids)
+            checkpoint_visits = self._reflow_checkpoint_visits.copy()
             worker_error = self._bucketwise_worker_error
             self.reset_cpu_buffers()
             self._bucketwise_worker_error = worker_error
-            self._reflow_checkpoint_param_ids.update(checkpoint_params)
+            self._reflow_checkpoint_visits.update(checkpoint_visits)
         return super().zero_grad(set_to_none=set_to_none)
 
     def _overflow_clean_up(self, prev_scale):
+        # A staged CPU result has not changed the GPU weight. Restore resident groups
+        # that could have published a preview, as well as NVMe parameter partitions.
+        restore_groups = [
+            i for i, flat in enumerate(self.fp16_partitioned_groups_flat)
+            if flat is None or i in self._published_ready_groups
+        ]
         self._reflow_in_overflow_cleanup = True
         try:
-            return super()._overflow_clean_up(prev_scale)
+            super()._overflow_clean_up(prev_scale)
         finally:
             self._reflow_in_overflow_cleanup = False
+        if restore_groups:
+            if self._bucketwise_h2d_stream is not None:
+                self._bucketwise_h2d_stream.synchronize()
+            for sub_group_id in restore_groups:
+                self._restore_fp16_params_from_master(sub_group_id)
 
     # ------------------------------------------------------------------ #
     # async state update workers
     # ------------------------------------------------------------------ #
-    def _maybe_update_async_state(self, sub_group_id, combined_scale=None):
-        if combined_scale is None:
-            combined_scale = getattr(self, '_current_combined_scale', self.loss_scale)
+    def _submit_state_updates(self, sub_group_ids, combined_scale):
+        # Capture the gradient slot and LR scheduler values before step() returns. One pool
+        # job commits subgroups in order because they temporarily share group['params'].
+        # Per-subgroup completion still releases readers as soon as their master is ready.
+        commits = []
+        for sub_group_id in sub_group_ids:
+            group_id = self.sub_group_to_group_id[sub_group_id]
+            group = self.optimizer.param_groups[group_id]
+            hyperparams = {key: value for key, value in group.items() if key != 'params'}
+            grad = self._cpu_grad_double_buffers[sub_group_id][self._active_grad_buffer_idx]
+            commits.append((sub_group_id, group_id, {group_id: hyperparams}, grad))
+        if not commits:
+            return
 
-        param_group_id = self.sub_group_to_group_id[sub_group_id]
-        # The commit runs after step() returns, and the engine steps the LR scheduler right after step(), so capture
-        # this step's hyperparameters now instead of letting the worker read the live param group later.
-        live_group = self.optimizer.param_groups[param_group_id]
-        group_hyperparams = {param_group_id: {key: value for key, value in live_group.items() if key != 'params'}}
+        # The executor's own Future covers the last (often only) subgroup.
+        earlier = {entry[0]: Future() for entry in commits[:-1]}
 
-        def _state_worker(pin_to_worker_cores=False, half_grad_buffer=None, combined_scale=None):
-            if pin_to_worker_cores:
-                self._pin_current_thread(self._state_commit_cpu_affinity_mask())
-
-            original = self.optimizer.param_groups[param_group_id]['params']
+        def commit_all():
+            original_cpus = os.sched_getaffinity(0) if hasattr(os, "sched_getaffinity") else None
             try:
-                self.optimizer.param_groups[param_group_id]['params'] = \
-                    [self.fp32_partitioned_groups_flat[sub_group_id]]
-                # Align the buffer to param_groups by index, so a param group other than group 0
-                # (e.g. the no-decay group of a decay/no-decay split) is updated with its buffer
-                # and every other group is skipped (None).
-                buffers = [None] * len(self.optimizer.param_groups)
-                buffers[param_group_id] = half_grad_buffer
-                numel = self.fp32_partitioned_groups_flat[sub_group_id].numel()
-                for start in range(0, numel, _STATE_COMMIT_SLICE_ELEMS):
-                    # Re-pick the cores for every slice so the commit widens as soon as backward starts.
-                    if pin_to_worker_cores:
-                        self._pin_current_thread(self._state_commit_cpu_affinity_mask())
-                    slice_numel = min(_STATE_COMMIT_SLICE_ELEMS, numel - start)
-                    self.optimizer.step_state_halfgrad(half_grad_buffers=buffers,
-                                                       combined_scale=combined_scale,
-                                                       element_range=(start, slice_numel),
-                                                       group_hyperparams=group_hyperparams)
-                # Flush the non-temporal (streaming) optimizer-state stores so the updated state
-                # is globally visible before this worker's future completes, matching the fence the
-                # foreground param path issues; otherwise a later read can see partial/stale state.
-                self.optimizer.memory_fence()
+                for sub_group_id, group_id, hyperparams, grad in commits:
+                    self._commit_subgroup_state(sub_group_id, group_id, hyperparams, grad, combined_scale)
+                    if sub_group_id in earlier:
+                        earlier[sub_group_id].set_result(None)
             finally:
-                self.optimizer.param_groups[param_group_id]['params'] = original
+                self._pin_current_thread(original_cpus)
 
-        # initialize_optimizer_states gives every subgroup a CPU half-precision grad buffer.
-        half_grad_buffer = self._cpu_grad_double_buffers[sub_group_id][self._active_grad_buffer_idx]
+        try:
+            tail = self._bucketwise_update_executor.submit(commit_all)
+        except Exception as error:
+            tail = Future()
+            tail.set_exception(error)
 
-        executor = getattr(self, '_state_update_executor', None)
-        if executor is not None:
-            previous_future = self._last_state_update_future
+        if earlier:
 
-            def chained_worker():
-                # Wait for the previous future so workers complete in submission order.
-                if previous_future is not None:
-                    previous_future.result()
-                _state_worker(True, half_grad_buffer, combined_scale)
+            def release_readers_on_failure(done):
+                try:
+                    done.result()
+                except BaseException as error:
+                    # Also release readers if the executor failed before commit_all could start.
+                    for completed in earlier.values():
+                        if not completed.done():
+                            completed.set_exception(error)
 
-            try:
-                future = executor.submit(chained_worker)
-            except Exception as e:
-                # submit() can fail (e.g. executor shut down); surface it through the all-reduced
-                # bucketwise flag so every rank aborts together at the next _check, not this one alone.
-                logger.warning(f"Reflow async state-update submit failed (rank {dist.get_rank()}): {e}")
-                self._record_state_update_error(e)
-                return
-            self._last_state_update_future = future
-            self._pending_state_updates_by_subgroup[sub_group_id] = future
-        else:
-            # Synchronous fallback (no async-state executor). Surface a failure through the same
-            # all-reduced flag so every rank aborts together at the next _check, rather than this rank
-            # raising alone and hanging its peers at the following collective.
-            try:
-                _state_worker(False, half_grad_buffer, combined_scale)
-            except Exception as e:
-                self._record_state_update_error(e)
+            tail.add_done_callback(release_readers_on_failure)
+            self._pending_state_updates_by_subgroup.update(earlier)
+        self._pending_state_updates_by_subgroup[commits[-1][0]] = tail
+        self._last_state_update_future = tail
+
+    def _commit_subgroup_state(self, sub_group_id, group_id, hyperparams, grad, combined_scale):
+        group = self.optimizer.param_groups[group_id]
+        original_params = group['params']
+        param = self.fp32_partitioned_groups_flat[sub_group_id]
+        group['params'] = [param]
+        try:
+            buffers = [None] * len(self.optimizer.param_groups)
+            buffers[group_id] = grad
+            numel = param.numel()
+            for start in range(0, numel, _STATE_COMMIT_SLICE_ELEMS):
+                self._pin_current_thread(self._state_commit_cpu_affinity_mask())
+                slice_numel = min(_STATE_COMMIT_SLICE_ELEMS, numel - start)
+                self.optimizer.step_state_halfgrad(half_grad_buffers=buffers,
+                                                   combined_scale=combined_scale,
+                                                   element_range=(start, slice_numel),
+                                                   group_hyperparams=hyperparams)
+            self.optimizer.memory_fence()
+        finally:
+            group['params'] = original_params
 
     def _record_state_update_error(self, error):
         # Surface a state-update worker failure through the same all-reduced flag the bucketwise
@@ -939,7 +998,7 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
             if future is None:
                 return
             try:
-                # The last future chains all previous ones, so waiting for it drains them all.
+                # One pool job owns every resident subgroup in this step.
                 future.result()
             except Exception as e:
                 if dist.get_rank() == 0:
@@ -989,41 +1048,46 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
                     if position is not None and position[2] > 0:
                         self._reflow_gradient_partitions.append((param_id, sub_group_id, position[1], position[2]))
         if len(self._reflow_boundary_grad_ids) == len(self._reflow_gradient_partitions):
-            return False
+            return False, self._reflow_modified_gradient_ids
+        ready_after_norm = self._reflow_modified_gradient_ids.copy()
+        enqueued_ready = False
         for param_id, sub_group_id, offset, numel in self._reflow_gradient_partitions:
             if param_id in self._reflow_boundary_grad_ids:
                 continue
             grad_buffer = self._get_cpu_grad_buffer(sub_group_id, pending=True).narrow(0, offset, numel)
+            has_boundary_norm = (param_id in self.norm_for_param_grads
+                                 and param_id not in self._reflow_modified_gradient_ids)
             if param_id not in self._reflow_window_grad_ids:
                 if self._single_grad_buffer:
                     self._wait_for_pending_state_updates(sub_group_id=sub_group_id)
                 grad_buffer.zero_()
                 self.norm_for_param_grads[param_id] = 0.0
-            else:
+            elif not has_boundary_norm:
+                # A local gradient setter can leave a norm from an earlier micro-step.
                 self._wait_for_accum_gradient(param_id)
                 grad_for_norm = grad_buffer.to(get_accelerator().current_device_name(), non_blocking=True)
                 self.norm_for_param_grads[param_id] = self._constant_buffered_norm2(grad_for_norm)
             self._pending_grad_ready = True
             if not self._swappable_optimizer_subgroup(sub_group_id):
-                self._bucketwise_schedule_enqueue_range(sub_group_id, offset, numel)
-        return True
+                # Checkpointed gradients with a final norm have no backward or norm computation left
+                # to overlap here. Use the final scale for their first Ready if clipping is enabled.
+                if has_boundary_norm and self.clip_grad > 0.:
+                    ready_after_norm.add(param_id)
+                else:
+                    self._bucketwise_schedule_enqueue_range(sub_group_id, offset, numel)
+                    enqueued_ready = True
+        return enqueued_ready, ready_after_norm
 
-    def _activate_pending_cpu_grads_if_ready(self, flush_completed_window=False):
-        if not self._pending_grad_ready:
-            return False
-        # Gradient buffers are written directly by the bucketwise workers; drain them and flip
-        # the active/pending double buffer.
+    def _activate_pending_cpu_grads_if_ready(self, flush_pending):
+        # The enqueue thread chooses the gradient slot at submission. Once it drains, every
+        # running Ready owns its slot and can finish while the host decides clipping/overflow.
         self._bucketwise_drain_enq_executor()
-        if flush_completed_window:
-            # Start Ready while the GPU computes norms for earlier-micro-step gradients.
-            self._bucketwise_flush_all_pending(force=True, use_pending_buffer=True, combined_scale=self.loss_scale)
-        self._bucketwise_wait_inflight_updates()
-        # Single-buffer mode has only slot 0: keep the active index pinned there (no flip). The
-        # workers already wrote the params into fp16_flat, and Phase-2 reads the grads from slot 0.
-        if not self._single_grad_buffer:
-            self._active_grad_buffer_idx = 1 - self._active_grad_buffer_idx
-        self._pending_grad_ready = False
-        return True
+        if self._pending_grad_ready:
+            if flush_pending:
+                self._bucketwise_flush_all_pending(force=True, use_pending_buffer=True, combined_scale=self.loss_scale)
+            if not self._single_grad_buffer:
+                self._active_grad_buffer_idx = self._pending_grad_buffer_idx
+            self._pending_grad_ready = False
 
     # ------------------------------------------------------------------ #
     # cpu_bucketwise pipeline
@@ -1035,28 +1099,36 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
         flushing we must ensure every gradient range has landed in the pending structures,
         otherwise a range is dropped and the parameter update is silently skipped.
         """
-        enq_executor = getattr(self, "_bucketwise_enq_executor", None)
-        if enq_executor is None:
-            return
-        try:
-            sentinel = enq_executor.submit(lambda: None)
-            sentinel.result(timeout=30.0)
-        except Exception as e:
-            self._record_bucketwise_worker_error(e)
+        # A single FIFO worker makes the last real job a fence for all earlier enqueues.
+        future = self._last_enqueue_future
+        if future is not None:
+            try:
+                future.result(timeout=30.0)
+            except Exception as e:
+                self._record_bucketwise_worker_error(e)
+            else:
+                self._last_enqueue_future = None
 
-    def _bucketwise_schedule_enqueue_range(self, sub_group_id, dest_offset, num_elements, copy_event=None):
+    def _bucketwise_schedule_enqueue_range(self,
+                                           sub_group_id,
+                                           dest_offset,
+                                           num_elements,
+                                           copy_event=None,
+                                           stage_checkpoint=False):
         """Schedule a range enqueue off the main thread (falls back to sync if no executor)."""
         if not self.is_gradient_accumulation_boundary():
             return
 
         enq_submit = getattr(self, "_bucketwise_enq_submit", None)
         if enq_submit is None:
-            self._bucketwise_enqueue_range(sub_group_id, dest_offset, num_elements, copy_event)
+            self._bucketwise_enqueue_range(sub_group_id, dest_offset, num_elements, copy_event, stage_checkpoint)
             return
         try:
-            enq_submit(self._bucketwise_enqueue_range, sub_group_id, dest_offset, num_elements, copy_event)
+            self._last_enqueue_future = enq_submit(self._bucketwise_enqueue_range, sub_group_id, dest_offset,
+                                                   num_elements, copy_event, stage_checkpoint)
         except Exception:
-            self._bucketwise_enqueue_range(sub_group_id, dest_offset, num_elements, copy_event)
+            self._bucketwise_drain_enq_executor()
+            self._bucketwise_enqueue_range(sub_group_id, dest_offset, num_elements, copy_event, stage_checkpoint)
 
     def _bucketwise_get_valid_partition_element_count(self, sub_group_id: int) -> int:
         """Return the flat-buffer bound, including padding between parameters."""
@@ -1076,7 +1148,7 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
             ranges = work_item["ranges"]
             grad_buffer_index = work_item["grad_buffer_index"]
             combined_scale = work_item["combined_scale"]
-            copy_events = work_item.get("copy_events", [])
+            last_copy_event = work_item["last_copy_event"]
             cancel_version = work_item.get("cancel_version", 0)
             increment_step = work_item.get("increment_step", False)
             target_step = work_item.get("target_step", None)
@@ -1085,7 +1157,6 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
                 return None
 
             # Wait for the GPU->CPU grad copy (only the last event, the stream is sequential).
-            last_copy_event = copy_events[-1] if copy_events else None
             if last_copy_event is not None:
                 last_copy_event.synchronize()
 
@@ -1201,24 +1272,9 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
             if fp16_flat is None:
                 return None
 
-            src = half_params_buffer.data.view(-1)
-            dst = fp16_flat.data.view(-1)
-
-            merged_ranges = reflow_utils.merge_contiguous_ranges(ranges)
-            stream = getattr(self, "_bucketwise_h2d_stream", None)
-            if stream is None:
-                stream = get_accelerator().current_stream()
-
-            with get_accelerator().stream(stream):
-                for off, sz in merged_ranges:
-                    dst.narrow(0, off, sz).copy_(src.narrow(0, off, sz), non_blocking=True)
-                if not get_accelerator().is_synchronized_device():
-                    h2d_event = get_accelerator().Event()
-                    h2d_event.record(stream)
-                else:
-                    h2d_event = None
-
-            return h2d_event
+            if work_item["stage_copy"]:
+                return _StagedReady(sub_group_id, ranges)
+            return self._copy_ready_ranges(fp16_flat, half_params_buffer, ranges)
         except Exception as e:
             # A cooperative cancel (version bump) can race the kernel and surface as a transient
             # error; if this work item has been cancelled, treat it as a clean no-op like the
@@ -1230,7 +1286,32 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
             logger.warning(f"Reflow bucketwise worker error (rank {dist.get_rank()}): {e}")
             return None
 
-    def _bucketwise_enqueue_range(self, sub_group_id, dest_offset, num_elements, copy_event=None):
+    def _copy_ready_ranges(self, fp16_flat, output, ranges):
+        stream = self._bucketwise_h2d_stream
+        if stream is None:
+            stream = get_accelerator().current_stream()
+        dst, src = fp16_flat.detach().view(-1), output.detach().view(-1)
+        with get_accelerator().stream(stream):
+            for offset, size in ranges:
+                dst.narrow(0, offset, size).copy_(src.narrow(0, offset, size), non_blocking=True)
+            if not get_accelerator().is_synchronized_device():
+                event = get_accelerator().Event()
+                event.record(stream)
+                return event
+
+    def _publish_staged_ready(self, sub_group_id, ranges):
+        self._published_ready_groups.add(sub_group_id)
+        output = self._cpu_grad_double_buffers[sub_group_id][1 - self._active_grad_buffer_idx]
+        event = self._copy_ready_ranges(self.fp16_partitioned_groups_flat[sub_group_id], output, ranges)
+        if event is not None:
+            self._bucketwise_inflight_h2d_events.append(event)
+
+    def _bucketwise_enqueue_range(self,
+                                  sub_group_id,
+                                  dest_offset,
+                                  num_elements,
+                                  copy_event=None,
+                                  stage_checkpoint=False):
         # Accumulate a scheduled grad range; flush once the shard threshold is reached.
         try:
             clipped_range = self._bucketwise_clip_range_to_valid_partition(sub_group_id, dest_offset, num_elements)
@@ -1246,8 +1327,10 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
                         self._bucketwise_pending_ranges_by_group.append([])
                         self._bucketwise_pending_elems_by_group.append(0)
 
+                if stage_checkpoint:
+                    self._pending_checkpoint_groups.add(sub_group_id)
                 if copy_event is not None:
-                    self._bucketwise_pending_events.setdefault(sub_group_id, []).append(copy_event)
+                    self._bucketwise_last_copy_event_by_group[sub_group_id] = copy_event
 
                 self._bucketwise_pending_ranges_by_group[sub_group_id].append((dest_offset, num_elements))
                 self._bucketwise_pending_elems_by_group[sub_group_id] += num_elements
@@ -1306,16 +1389,11 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
 
         grad_buffer_index = self._pending_grad_buffer_idx if use_pending_buffer else self._active_grad_buffer_idx
 
-        copy_events_snapshot = self._bucketwise_pending_events.get(sub_group_id, [])
-        self._bucketwise_pending_events[sub_group_id] = []
+        last_copy_event = self._bucketwise_last_copy_event_by_group.pop(sub_group_id, None)
 
         lock = self._get_enqueue_lock()
 
         def _prepare_state_and_params():
-            increment_step = (sub_group_id not in self._bucketwise_group_step_incremented)
-            if increment_step:
-                self._bucketwise_group_step_incremented.add(sub_group_id)
-
             param_group_id = self.sub_group_to_group_id[sub_group_id]
             group = self.optimizer.param_groups[param_group_id]
             # The previous step's async state worker may still be iterating group['params'].
@@ -1331,7 +1409,8 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
             # at the end of step() instead of mutating it in the worker.
             current_step = int(state.get('step', 0))
             target_step = self._bucketwise_group_target_step.get(sub_group_id, None)
-            if target_step is None:
+            increment_step = target_step is None
+            if increment_step:
                 target_step = current_step + 1
                 self._bucketwise_group_target_step[sub_group_id] = target_step
 
@@ -1357,12 +1436,23 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
                     return None
                 increment_step, target_step, lr, beta1, beta2, eps, weight_decay, bias_correction, maximize = result
 
+        # A mixed shard can include weights a checkpoint will gather again. A rerun
+        # after a local edit can also overwrite staged output in this subgroup.
+        stage_copy = sub_group_id in self._pending_checkpoint_groups or (not use_pending_buffer
+                                                                         and sub_group_id in self._staged_ready_ranges)
+        if not self._bucketwise_pending_ranges_by_group[sub_group_id]:
+            self._pending_checkpoint_groups.discard(sub_group_id)
+        if stage_copy:
+            self._staged_ready_ranges.setdefault(sub_group_id, [])
+        else:
+            self._published_ready_groups.add(sub_group_id)
         work_item = {
+            "stage_copy": stage_copy,
             "sub_group_id": sub_group_id,
             "ranges": submit_ranges,
             "grad_buffer_index": grad_buffer_index,
             "combined_scale": combined_scale,
-            "copy_events": copy_events_snapshot,
+            "last_copy_event": last_copy_event,
             "cancel_version": getattr(self, "_bucketwise_cancel_version", 0),
             "increment_step": increment_step,
             "target_step": target_step,
@@ -1376,8 +1466,6 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
         }
 
         future = self._bucketwise_update_submit(self._bucketwise_chunk_update_worker, work_item)
-        if getattr(self, "_bucketwise_update_futures", None) is not None:
-            self._bucketwise_update_futures.append(future)
         self._bucketwise_inflight_futures.append(future)
         return future
 
@@ -1389,7 +1477,7 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
                                          combined_scale=combined_scale)
 
     def _bucketwise_cancel_inflight_updates(self):
-        # Best-effort cancel of inflight workers when clipping is needed.
+        # An explicit zero_grad also discards previews that are already running.
         self._bucketwise_cancel_version += 1
         for f in list(getattr(self, "_bucketwise_inflight_futures", [])):
             try:
@@ -1423,19 +1511,18 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
         state = self.optimizer._ensure_param_state(param)
         self._bucketwise_group_target_step[sub_group_id] = int(state.get('step', 0)) + 1
 
-    def _bucketwise_wait_inflight_updates(self):
+    def _bucketwise_wait_inflight_updates(self, discard_queued=False, publish_staged=False):
         # Wait for submitted bucketwise work (optimizer + H2D submit). H2D completion itself is
         # synchronized later via CUDA events.
 
-        futures = list(getattr(self, "_bucketwise_update_futures", []) or [])
-        if not futures:
-            futures = list(getattr(self, "_bucketwise_inflight_futures", []) or [])
-
-        self._drain_update_futures_collecting_h2d_events(futures)
-
-        if getattr(self, "_bucketwise_update_futures", None) is not None:
-            self._bucketwise_update_futures.clear()
-        self._bucketwise_inflight_futures.clear()
+        futures = self._bucketwise_inflight_futures
+        if not futures and not (publish_staged and self._staged_ready_ranges):
+            return
+        if discard_queued:
+            for future in futures:
+                future.cancel()
+        self._drain_update_futures_collecting_h2d_events(futures, publish_staged=publish_staged)
+        futures.clear()
 
     def _nvme_optimizer_step_subgroups(self, combined_scale, timer_names):
         """NVMe optimizer offload: a swappable-optimizer subgroup's state (fp32 master + the optimizer
@@ -1478,14 +1565,16 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
                 self._bucketwise_commit_group_steps()
                 # Optimizer-state (momentum) update; then join both the param-update worker and the
                 # state worker before swapping the now-final state out to nvme.
-                self._maybe_update_async_state(sub_group_id, combined_scale)
+                self._submit_state_updates([sub_group_id], combined_scale)
                 self._wait_for_pending_state_updates(sub_group_id=sub_group_id)
             self._optimizer_states_and_gradient_swap_out(sub_group_id, timer_names)
 
     def _bucketwise_run_full_partition_updates(self, combined_scale, param_ids=None):
-        # Re-shard full groups for clipping, or only changed gradients for local API updates.
+        # An earlier H2D can still read the pinned output that the new Ready kernels will overwrite.
+        if param_ids is None or self._reflow_modified_gradient_ids:
+            for event in self._coalesce_bucketwise_h2d_events():
+                event.synchronize()
 
-        full_update_futures = []
         for sub_group_id in range(len(self.fp16_groups)):
             if self._swappable_optimizer_subgroup(sub_group_id):
                 continue  # nvme optimizer subgroups are handled in _nvme_optimizer_step_subgroups
@@ -1514,26 +1603,20 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
                 if shard_elems >= self._bucketwise_element_shard_size:
                     self._bucketwise_pending_ranges_by_group[sub_group_id] = shard_ranges
                     self._bucketwise_pending_elems_by_group[sub_group_id] = shard_elems
-                    future = self._bucketwise_flush_group(sub_group_id,
-                                                          force=True,
-                                                          use_pending_buffer=False,
-                                                          combined_scale=combined_scale)
-                    if future is not None:
-                        full_update_futures.append(future)
+                    self._bucketwise_flush_group(sub_group_id,
+                                                 force=True,
+                                                 use_pending_buffer=False,
+                                                 combined_scale=combined_scale)
                     shard_ranges = []
                     shard_elems = 0
 
             if shard_ranges:
                 self._bucketwise_pending_ranges_by_group[sub_group_id] = shard_ranges
                 self._bucketwise_pending_elems_by_group[sub_group_id] = shard_elems
-                future = self._bucketwise_flush_group(sub_group_id,
-                                                      force=True,
-                                                      use_pending_buffer=False,
-                                                      combined_scale=combined_scale)
-                if future is not None:
-                    full_update_futures.append(future)
-
-        self._drain_update_futures_collecting_h2d_events(full_update_futures)
+                self._bucketwise_flush_group(sub_group_id,
+                                             force=True,
+                                             use_pending_buffer=False,
+                                             combined_scale=combined_scale)
 
     def backward_prologue(self):
         # The pending state commit no longer overlaps a forward, so let it use every worker core.
@@ -1626,23 +1709,17 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
         """
         self._wait_for_accum_gradient()
         self._wait_for_pending_state_updates()
-        # This setup only touches param handles and the FP32 master, so run it before the device sync to overlap
-        # the GPU drain from backward. Everything below that reads GPU results still follows the sync.
         self._pre_step()
         self._partition_all_parameters()
-        get_accelerator().synchronize()
-        completed_window = self._complete_pending_gradient_window()
-        bucketwise_drained = self._activate_pending_cpu_grads_if_ready(flush_completed_window=completed_window)
-        # Activation already joined the backward workers when it flipped the buffers. Otherwise
-        # join them before overflow cleanup discards their handles.
-        if not bucketwise_drained:
-            self._bucketwise_drain_enq_executor()
-            self._bucketwise_wait_inflight_updates()
-        # Workers swallow their own exceptions (a cancel and a real error both return None), so
-        # surface any real kernel/OOM failure here and abort deterministically on all ranks before
-        # the overflow check advances the loss scale / optimizer state.
-        self._check_bucketwise_worker_error()
-
+        # The backward epilogue orders the reductions. Missing gradients and NVMe subgroups
+        # can read the host buffers without a Ready event, so finish their D2H writes.
+        if self.copy_grad_stream is not None:
+            self.copy_grad_stream.synchronize()
+        enqueued_ready, ready_after_norm = self._complete_pending_gradient_window()
+        # With a fixed unclipped scale, even a below-threshold tail already knows its
+        # Ready transform. Publish from the captured slot while the GPU finishes the norm.
+        flushed_before_norm = enqueued_ready or (self.clip_grad <= 0. and not self.dynamic_loss_scale)
+        self._activate_pending_cpu_grads_if_ready(flush_pending=flushed_before_norm)
         self._overflow_check_and_loss_scale_update(update_scale=False)
         scaled_global_grad_norm = None
         if not self.overflow:
@@ -1651,50 +1728,55 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
             if is_invalid_grad_norm(scaled_global_grad_norm):
                 self.overflow = True
 
+        if self.overflow:
+            # Cleanup drops the work handles, so collect real failures before restoring weights.
+            self._bucketwise_wait_inflight_updates(discard_queued=True)
+            self._check_bucketwise_worker_error()
+        preview_scale = self.loss_scale
+        # ZeRO uses the updated scale for a successful step. Keep the scaler's counters
+        # as well as its scale recoverable until the final Ready succeeds on every rank.
+        scaler_state = vars(self.loss_scaler).copy() if self.dynamic_loss_scale and not self.overflow else None
         if self._loss_scale_update_and_overflow_cleanup():
             if self.swap_optimizer:
                 self.optimizer_swapper.log_timers()
-            # Discard the step like the base optimizer. The workers already wrote new FP16/BF16 params to the GPU
-            # during backward, so restore them from the untouched FP32 master.
-            self._bucketwise_cancel_version += 1
-            if not get_accelerator().is_synchronized_device():
-                get_accelerator().synchronize()
-            for sub_group_id in range(len(self.fp16_groups)):
-                self._restore_fp16_params_from_master(sub_group_id)
             return
 
-        self._global_grad_norm = scaled_global_grad_norm / self.loss_scale
+        global_grad_norm = scaled_global_grad_norm / self.loss_scale
 
         combined_scale = self.loss_scale
-        needs_clipping = False
         if self.clip_grad > 0.:
             # norm is in fact norm*scale, so unscale.
-            clip = ((scaled_global_grad_norm / self.loss_scale) + 1e-6) / self.clip_grad
-            # Re-run the update exactly when the clip factor changes the scale, like the base optimizer. A plain
-            # norm > clip_grad test misses norms just below the threshold, which the base still clips, and would
-            # commit the clipped state under params that were computed unclipped during backward.
-            needs_clipping = clip > 1.0
-            clip = max(clip, 1.0)
-            combined_scale = clip * self.loss_scale
+            clip = (global_grad_norm + 1e-6) / self.clip_grad
+            if clip > 1.0:
+                combined_scale = clip * self.loss_scale
         self._current_combined_scale = combined_scale
 
-        self._bucketwise_flush_all_pending(force=True, use_pending_buffer=False, combined_scale=self.loss_scale)
-        if needs_clipping:
-            # cancel() does not wait. Join the cancelled workers first so their unclipped H2D writes are enqueued
-            # before the clipped re-run's and cannot land last.
-            self._bucketwise_cancel_inflight_updates()
-            self._bucketwise_wait_inflight_updates()
+        if combined_scale != preview_scale:
+            # Clipping and dynamic scale growth both invalidate old-scale previews. Join
+            # started work before the final pass fences H2D and reuses its pinned output.
+            self._bucketwise_wait_inflight_updates(discard_queued=True)
             self._bucketwise_run_full_partition_updates(combined_scale=combined_scale)
-        elif self._reflow_modified_gradient_ids:
-            # Unchanged ranges still need their original Ready work to finish.
-            self._bucketwise_wait_inflight_updates()
-            self._bucketwise_run_full_partition_updates(combined_scale=combined_scale,
-                                                        param_ids=self._reflow_modified_gradient_ids)
+        else:
+            if not flushed_before_norm:
+                self._bucketwise_flush_all_pending(force=True,
+                                                   use_pending_buffer=False,
+                                                   combined_scale=self.loss_scale)
+            if ready_after_norm:
+                if self._reflow_modified_gradient_ids:
+                    self._bucketwise_wait_inflight_updates()
+                self._bucketwise_run_full_partition_updates(combined_scale=combined_scale, param_ids=ready_after_norm)
 
         timer_names = set()
         # Param updates already ran bucketwise during backward; here we only commit per-group
         # step counters and submit the deferred async state updates.
-        self._bucketwise_wait_inflight_updates()
+        self._bucketwise_wait_inflight_updates(publish_staged=True)
+        try:
+            self._check_bucketwise_worker_error()
+        except Exception:
+            if scaler_state is not None:
+                vars(self.loss_scaler).update(scaler_state)
+            raise
+        self._global_grad_norm = global_grad_norm
         # NVMe optimizer subgroups deferred their CPU-Adam (state not resident during backward); run
         # it now with the state swapped in around it, before committing step counters / the async loop.
         if self.swap_optimizer:
@@ -1706,22 +1788,22 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
         self._bucketwise_commit_group_steps()
         # The commits submitted below overlap the next forward until its backward starts.
         self._state_commit_overlaps_forward = True
-        for sub_group_id in reversed(range(len(self.fp16_groups))):
-            if self._swappable_optimizer_subgroup(sub_group_id):
-                continue  # nvme: already updated above with its state swapped in
-            self._maybe_update_async_state(sub_group_id, combined_scale)
+        resident_groups = (i for i in reversed(range(len(self.fp16_groups)))
+                           if not self._swappable_optimizer_subgroup(i))
+        self._submit_state_updates(resident_groups, combined_scale)
         if self._bucketwise_inflight_h2d_events:
-            # Instead of blocking on the workers' H2D copies, make every stream that reads the params wait on them.
-            # With overlap_comm the all-gather has its own stream, so a compute-stream wait alone is not enough.
+            # Host completion covers every reader. In asynchronous mode the next forward's
+            # compute and all-gather and the next gradient-slot reuse each need a stream edge.
             h2d_events = self._coalesce_bucketwise_h2d_events()
-            compute_stream = get_accelerator().current_stream()
-            for h2d_event in h2d_events:
-                if h2d_event is not None:
-                    if self._sync_bucketwise_h2d_before_forward:
-                        h2d_event.synchronize()
-                    compute_stream.wait_event(h2d_event)
-                    self.copy_grad_stream.wait_event(h2d_event)
-            self._get_param_coordinator().wait_for_external_allgather_dependencies(h2d_events)
+            if self._sync_bucketwise_h2d_before_forward:
+                for event in h2d_events:
+                    event.synchronize()
+            else:
+                compute_stream = get_accelerator().current_stream()
+                for event in h2d_events:
+                    compute_stream.wait_event(event)
+                    self.copy_grad_stream.wait_event(event)
+                self._get_param_coordinator().wait_for_external_allgather_dependencies(h2d_events)
         # NVMe param offload: the bucketwise workers leave the updated FP16/BF16 weights in the CPU
         # half buffer (an nvme subgroup has no GPU param to H2D into), so swap them out to nvme here,
         # on the main thread -- the partitioned param swapper holds single shared mutable state and is

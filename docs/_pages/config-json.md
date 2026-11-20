@@ -775,7 +775,7 @@ The `reflow` block enables it, so an empty block is enough to run with the defau
 
 | Description | Default |
 | ----------- | ------- |
-| Assign a CPU mask per submitted task (`task`) or pin each pool thread to its initial mask (`thread`). | `"thread"` |
+| Assign a CPU mask per bucketwise task (`task`) or reuse a fixed bucketwise mask on each pool thread (`thread`). A thread running a state commit temporarily uses the commit mask. | `"thread"` |
 
 ***bucketwise_cores_per_worker***: [integer]
 

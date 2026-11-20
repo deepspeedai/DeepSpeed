@@ -33,7 +33,7 @@ class ReflowConfig(DeepSpeedConfigModel):
     """Use all worker CPU IDs, or one logical CPU per worker physical core."""
 
     bucketwise_worker_affinity: Literal["task", "thread"] = "thread"
-    """Choose a CPU mask for each task, or keep each pool thread on its initial mask."""
+    """Choose a CPU mask per bucketwise task, or reuse a fixed bucketwise mask on each pool thread."""
 
     bucketwise_cores_per_worker: int = Field(8, ge=1)
     """Cores per bucketwise optimizer worker. The worker count follows from the cores available

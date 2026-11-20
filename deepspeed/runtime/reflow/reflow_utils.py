@@ -429,15 +429,15 @@ def plan_cpu_core_layout(main_thread_cores,
 
 
 def merge_contiguous_ranges(ranges):
-    # Merge contiguous (offset, size) tuples to reduce copy call overhead.
+    # Repeated gradients can replace part of a staged range in the same output slot.
     if not ranges:
         return []
     ranges_sorted = sorted(ranges, key=lambda x: x[0])
     merged = []
     cur_off, cur_sz = ranges_sorted[0]
     for off, sz in ranges_sorted[1:]:
-        if off == cur_off + cur_sz:
-            cur_sz += sz
+        if off <= cur_off + cur_sz:
+            cur_sz = max(cur_sz, off + sz - cur_off)
         else:
             merged.append((cur_off, cur_sz))
             cur_off, cur_sz = off, sz
