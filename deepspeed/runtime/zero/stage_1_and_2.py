@@ -2208,6 +2208,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         self.grads_in_partition_offset += param.numel()
 
     def reduce_ipg_grads(self, comm_dtype=None):
+        stream = self.reduction_stream if self.overlap_comm else get_accelerator().current_stream()
         dtypes = sort_dtypes(self.ipg_buckets.keys())
         if comm_dtype is not None:
             dtypes = [comm_dtype]
@@ -2233,6 +2234,11 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 else:
                     self.average_tensor(bucket.buffer[bucket.index].narrow(0, 0, bucket.elements), comm_dtype)
             else:
+                # The fallback reads the gradients themselves, which a non-owner frees right after this flush.
+                for event in bucket.ready_events.values():
+                    stream.wait_event(event)
+                for grad in bucket.grads:
+                    self._record_gradient_stream(grad, stream)
                 if any(self._use_compact_grad_partition_buffer(group_idx) for group_idx, _, _ in bucket.params):
                     self._buffered_reduce_fallback_preserving_fp32(bucket.grads,
                                                                    bucket.params,
@@ -2240,16 +2246,6 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                                                                    elements_per_buffer=bucket.elements)
                 else:
                     self.buffered_reduce_fallback(None, bucket.grads, comm_dtype, elements_per_buffer=bucket.elements)
-
-        if self.overlap_comm:
-            stream = self.reduction_stream
-        elif self.cpu_offload:
-            # TODO: copy_grad_stream is disabled because of race with reduce. This hurts perf and should be fixed.
-            #            get_accelerator().synchronize()
-            #            stream = self.copy_grad_stream
-            stream = get_accelerator().current_stream()
-        else:
-            stream = get_accelerator().current_stream()
 
         with get_accelerator().stream(stream):
             for comm_dtype in dtypes:
