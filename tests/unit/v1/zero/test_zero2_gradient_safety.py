@@ -384,6 +384,40 @@ def test_bucket_accesses_are_ordered_across_hook_streams(monkeypatch, overlap, c
     assert unordered == []
 
 
+@pytest.mark.parametrize("cpu_offload", [False, True])
+def test_released_gradient_waits_for_its_reduction(monkeypatch, cpu_offload):
+    opt, param, _ = make_optimizer(cpu_offload=cpu_offload)
+    opt.reduce_scatter = False
+    opt.is_param_in_current_partition = {0: False}
+    producer, flusher = FakeStream(), FakeStream()
+    # The caching allocator gives a freed block to the next allocation on the block's own stream at once,
+    # unless record_stream named the other streams still using it.
+    recorded, reads = {}, []
+    monkeypatch.setattr(
+        torch.Tensor, "record_stream",
+        lambda tensor, stream: recorded.setdefault(tensor.untyped_storage().data_ptr(), set()).add(stream))
+
+    def reduce(tensor, dtype):
+        if tensor.numel():
+            stream = zero.get_accelerator().current_stream()
+            stream.operations += 1
+            reads.append((stream, stream.operations, tensor))
+
+    opt.gradient_reduction_w_predivide = reduce
+    # The oversized gradient comes from its hook's stream; the next flush reduces it on another stream, and a
+    # rank that does not own it releases it right after.
+    monkeypatch.setattr(zero, "get_accelerator", lambda: fake_accelerator(producer))
+    param.grad = torch.ones_like(param)
+    opt.reduce_independent_p_g_buckets_and_remove_grads(param, 0)
+    monkeypatch.setattr(zero, "get_accelerator", lambda: fake_accelerator(flusher))
+    opt.reduce_ipg_grads()
+    assert param.grad is None
+    [(stream, operation, tensor)] = reads
+    assert stream is not producer
+    users = recorded.get(tensor.untyped_storage().data_ptr(), set())
+    assert stream in users or producer.ordered_after.get(stream, 0) >= operation
+
+
 @pytest.mark.parametrize("producers", [1, 2])
 def test_bucket_reuse_waits_for_previous_consumer(monkeypatch, producers):
     opt, param, _ = make_optimizer()
