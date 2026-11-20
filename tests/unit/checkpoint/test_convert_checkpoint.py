@@ -267,3 +267,53 @@ class TestCheckpointConvertBuffers(DistributedTest):
             torch.testing.assert_close(restored(inputs.cpu()), reference(inputs.cpu()), rtol=0, atol=0)
         dist.barrier()
         engine.destroy()
+
+
+class ModelWithFrozenParams(nn.Module):
+
+    def __init__(self):
+        super().__init__()
+        self.frozen = nn.Linear(4, 4)
+        self.frozen.requires_grad_(False)
+        self.trainable = nn.Linear(4, 4)
+        self.register_buffer("scale", torch.tensor(0.5))
+
+    def forward(self, inputs):
+        return (self.trainable(self.frozen(inputs)) * self.scale).sum()
+
+
+class TestCheckpointConvertFrozenParams(DistributedTest):
+    world_size = 1
+
+    @pytest.mark.parametrize("zero_stage", [1, 2])
+    def test_frozen_params_are_recovered(self, tmp_path, zero_stage):
+        config = {
+            "train_micro_batch_size_per_gpu": 1,
+            "zero_allow_untested_optimizer": True,
+            "zero_optimization": {
+                "stage": zero_stage
+            },
+        }
+        model = ModelWithFrozenParams()
+        engine, _, _, _ = deepspeed.initialize(model=model,
+                                               optimizer=torch.optim.SGD(
+                                                   [p for p in model.parameters() if p.requires_grad], lr=0.01),
+                                               config=config)
+        inputs = torch.ones(1, 4, device=get_accelerator().device_name(engine.local_rank))
+        engine.backward(engine(inputs))
+        engine.step()
+        expected = {name: value.detach().cpu().float() for name, value in engine.module.state_dict().items()}
+        checkpoint_dir = tmp_path / "checkpoint"
+        engine.save_checkpoint(checkpoint_dir, tag="step1")
+
+        if dist.get_rank() == 0:
+            state_dict = zero_to_fp32.get_fp32_state_dict_from_zero_checkpoint(checkpoint_dir)
+            assert set(state_dict) == set(expected)
+            for name, value in expected.items():
+                torch.testing.assert_close(state_dict[name], value, rtol=0, atol=0)
+
+            state_dict = zero_to_fp32.get_fp32_state_dict_from_zero_checkpoint(checkpoint_dir,
+                                                                               exclude_frozen_parameters=True)
+            assert set(state_dict) == {n for n in expected if not n.startswith("frozen.")}
+        dist.barrier()
+        engine.destroy()

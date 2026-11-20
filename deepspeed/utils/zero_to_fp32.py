@@ -174,17 +174,32 @@ def parse_model_states(files):
 
         # update with frozen parameters
         frozen_param_shapes = state_dict.get(FROZEN_PARAM_SHAPES, None)
+        frozen_param_fragments = state_dict.get(FROZEN_PARAM_FRAGMENTS, None)
+
+        # handle shared params
+        shared_params = [[k, v] for k, v in state_dict["shared_params"].items()]
+
+        if frozen_param_shapes is None:
+            # ZeRO-1 does not record frozen parameters separately, but it does not partition
+            # parameters either, so they are stored whole in the module state: any tensor
+            # there that is neither a buffer, an optimizer-owned parameter nor a tied alias.
+            # ZeRO-3 module states only hold empty placeholders, so those are skipped.
+            known_names = set(buffer_names) | set(param_names) | {name for name, _ in shared_params}
+            module_frozen = {
+                k: v
+                for k, v in state_dict["module"].items()
+                if k not in known_names and isinstance(v, torch.Tensor) and v.numel() > 0
+            }
+            if module_frozen:
+                frozen_param_shapes = {k: v.shape for k, v in module_frozen.items()}
+                frozen_param_fragments = module_frozen
+
         if frozen_param_shapes is not None:
             if debug:
                 print(f"Found frozen_param_shapes: {frozen_param_shapes}")
             param_names += list(frozen_param_shapes.keys())
 
-        # handle shared params
-        shared_params = [[k, v] for k, v in state_dict["shared_params"].items()]
-
         ds_version = state_dict.get(DS_VERSION, None)
-
-        frozen_param_fragments = state_dict.get(FROZEN_PARAM_FRAGMENTS, None)
 
         z_model_state = zero_model_state(buffers=buffers,
                                          param_shapes=param_shapes,
