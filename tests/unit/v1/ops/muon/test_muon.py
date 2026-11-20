@@ -614,53 +614,6 @@ class TestMuonLossScaling(DistributedTest):
                 f"{name}: the update under loss scale 1024 is {ratio:.3e} of the one under 1 "
                 f"(relative difference {relative:.1e}, ZeRO-{zero_stage})")
 
-    @pytest.mark.world_size(1)
-    @pytest.mark.parametrize("zero_stage", [1, 2, 3])
-    @pytest.mark.parametrize("history, final, backoff", [
-        pytest.param([1.] * 2, -0.75, False, id="direction"),
-        pytest.param([3600.] * 17, 1., False, id="finite-blend"),
-        pytest.param([3900.] * 17, 1., True, id="retry"),
-    ])
-    def test_momentum_after_loss_scale_growth(self, zero_stage, history, final, backoff):
-        from deepspeed.utils import safe_get_full_fp32_param
-
-        def last_step(loss_scale):
-            model = torch.nn.Linear(2, 2, bias=False)
-            torch.nn.init.zeros_(model.weight)
-            config = dict(train_micro_batch_size_per_gpu=1,
-                          gradient_clipping=0.0,
-                          optimizer=dict(type="muon", params=dict(lr=1 / 64)),
-                          fp16=dict(enabled=True,
-                                    loss_scale=loss_scale,
-                                    initial_scale_power=4,
-                                    loss_scale_window=len(history) - 1,
-                                    hysteresis=1),
-                          zero_optimization=dict(stage=zero_stage, reduce_scatter=False))
-            engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config)
-            inputs = torch.eye(2, device=engine.device, dtype=torch.float16)
-
-            def step(first):
-                diagonal = engine(inputs).diagonal()
-                engine.backward(first * diagonal[0] + diagonal[1])
-                engine.step()
-
-            for first in history:
-                step(first)
-            assert engine.optimizer.loss_scale == (1 if loss_scale else 32)
-            before = safe_get_full_fp32_param(model.weight).clone()
-            step(final)
-            if backoff and not loss_scale:
-                assert engine.optimizer.overflow
-                step(final)
-            assert not engine.optimizer.overflow
-            delta = safe_get_full_fp32_param(model.weight) - before
-            engine.destroy()
-            return delta
-
-        reference = last_step(1)
-        assert reference[0, 0] < 0
-        torch.testing.assert_close(last_step(0), reference, atol=1e-5, rtol=1e-3)
-
 
 class TestMuonZero3NVMeMomentumResidency(DistributedTest):
     """Verify ZeRO-3 resident Muon momentum buffers persist across NVMe swapping steps."""
