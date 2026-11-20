@@ -541,11 +541,19 @@ def initialize(
     if not isinstance(config, dict):
         config = load_ds_config(config)
 
-    zero_stage = config.get("zero_optimization", {}).get("stage", 0)
-    if _autosp_sequence_parallel_size(config) > 1 and zero_stage >= 2:
-        # The engine would fall back to the plain torch compiler, which does not shard the sequence, while
-        # still summing gradients over the sequence parallel ranks.
-        raise ValueError(f"AutoSP does not support ZeRO stage {zero_stage}; use ZeRO stage 0 or 1")
+    if _autosp_sequence_parallel_size(config) > 1:
+        # Without the AutoSP backend each rank trains on its full sequence, while the engine still sums
+        # gradients over the sequence parallel ranks. Only DeepCompile runs that backend, and not with ZeRO 2/3.
+        if not config.get("compile", {}).get("deepcompile", False):
+            raise ValueError("AutoSP requires DeepCompile; set compile.deepcompile to true")
+        zero_config = config.get("zero_optimization", {})
+        if isinstance(zero_config, bool):
+            # The deprecated boolean form selects stage 1 or 0.
+            zero_stage = int(zero_config)
+        else:
+            zero_stage = zero_config.get("stage", 0)
+        if zero_stage >= 2:
+            raise ValueError(f"AutoSP does not support ZeRO stage {zero_stage}; use ZeRO stage 0 or 1")
 
     mesh_device = None
     if mesh_param:
