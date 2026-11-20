@@ -10,8 +10,10 @@ test runs the same model and batches through plain ZeRO-Offload as the oracle an
 import copy
 import os
 import threading
+import weakref
 from concurrent.futures import ThreadPoolExecutor
-from unittest.mock import patch
+from unittest.mock import Mock, patch
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -28,7 +30,9 @@ from deepspeed.ops.op_builder.cpu.reflow_cpu_lion import ReflowCPULionBuilder
 from deepspeed.runtime.config import DeepSpeedConfig
 from deepspeed.runtime.reflow.reflow_cpu_adam import ReflowCPUAdam
 from deepspeed.runtime.reflow.reflow_cpu_lion import ReflowCPULion
+from deepspeed.runtime.reflow.reflow_stage3 import ReflowOptimizer_Stage3
 from deepspeed.runtime.reflow import reflow_utils
+from deepspeed.runtime.zero.stage3 import DeepSpeedZeroOptimizer_Stage3
 from deepspeed.runtime.zero.muon.muon_optimizer import MuonWithAuxAdam
 from deepspeed.runtime.zero.utils import ZeRORuntimeException
 from deepspeed.utils import safe_get_full_fp32_param, safe_get_full_optimizer_state
@@ -857,6 +861,93 @@ class TestReflowPrecisionValidation(DistributedTest):
             deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config)
 
 
+def test_reflow_releases_every_parent_gradient_dtype():
+    optimizer = object.__new__(ReflowOptimizer_Stage3)
+    optimizer.offload_optimizer_pin_memory = True
+    references = []
+    released = []
+
+    def create_parent_buffers(parent):
+        buffers = {dtype: torch.zeros(4, dtype=dtype) for dtype in (torch.float16, torch.float32)}
+        references.extend(weakref.ref(buffer) for buffer in buffers.values())
+        parent.grad_partitions_flat_buffers = buffers
+        parent.grad_partitions_flat_buffer = buffers[torch.float16]
+        parent._DeepSpeedZeroOptimizer_Stage3__param_id_to_grad_partition = {
+            i: buffer.narrow(0, 0, 2)
+            for i, buffer in enumerate(buffers.values())
+        }
+
+    accelerator = SimpleNamespace(unpin_memory=lambda buffer: released.append(id(buffer)))
+    with patch.object(DeepSpeedZeroOptimizer_Stage3, "_setup_for_real_optimizer", create_parent_buffers), \
+            patch("deepspeed.runtime.reflow.reflow_stage3.get_accelerator", return_value=accelerator):
+        optimizer._setup_for_real_optimizer()
+    assert len(released) == len(set(released)) == 2
+    assert all(reference() is None for reference in references)
+    assert not optimizer.grad_partitions_flat_buffers
+    assert optimizer.grad_partitions_flat_buffer is None
+    assert not optimizer._DeepSpeedZeroOptimizer_Stage3__param_id_to_grad_partition
+
+
+@pytest.mark.parametrize("nvme_parameter", [False, True])
+def test_reflow_overflow_keeps_nvme_restore_paths(nvme_parameter):
+    # NVMe parameters must be re-swapped from the unchanged master; swapped optimizer
+    # subgroups never published a preview and must not attempt a master copy.
+    optimizer = SimpleNamespace(fp16_partitioned_groups_flat=[None if nvme_parameter else torch.zeros(4)],
+                                fp32_partitioned_groups_flat=[torch.ones(4)],
+                                _partitioned_params_swap_out=Mock(),
+                                _swappable_optimizer_subgroup=Mock(return_value=not nvme_parameter),
+                                _copy_pinned_master_to_device=Mock(),
+                                _unflatten_partitioned_parameters=Mock())
+    ReflowOptimizer_Stage3._restore_fp16_params_from_master(optimizer, 0)
+    if nvme_parameter:
+        optimizer._partitioned_params_swap_out.assert_called_once_with(0)
+    else:
+        optimizer._partitioned_params_swap_out.assert_not_called()
+    optimizer._copy_pinned_master_to_device.assert_not_called()
+    optimizer._unflatten_partitioned_parameters.assert_not_called()
+
+
+@needs_gpu_accelerator
+class TestReflowReleasesParentGradientBuffers(DistributedTest):
+    world_size = 1
+
+    @pytest.mark.parametrize("pin_memory", [False, True])
+    def test_releases_all_parent_gradient_buffers(self, pin_memory):
+        skip_if_reflow_training_unsupported()
+        original_setup = DeepSpeedZeroOptimizer_Stage3._setup_for_real_optimizer
+        accelerator = get_accelerator()
+        original_unpin = accelerator.unpin_memory
+        parent_buffers = []
+        unpinned = []
+
+        def capture_parent_buffers(optimizer):
+            original_setup(optimizer)
+            parent_buffers.extend(weakref.ref(buffer) for buffer in optimizer.grad_partitions_flat_buffers.values())
+
+        def record_unpin(buffer):
+            if any(reference() is buffer for reference in parent_buffers):
+                unpinned.append(id(buffer))
+            return original_unpin(buffer)
+
+        config = get_variant_config(reflow=True, variant="adam")
+        config["zero_optimization"]["offload_optimizer"]["pin_memory"] = pin_memory
+        model = SimpleModel(hidden_dim=16, nlayers=2)
+        with patch.object(DeepSpeedZeroOptimizer_Stage3, "_setup_for_real_optimizer", capture_parent_buffers), \
+                patch.object(accelerator, "unpin_memory", record_unpin):
+            engine, optimizer, _, _ = deepspeed.initialize(model=model,
+                                                           model_parameters=model.parameters(),
+                                                           config=config)
+            try:
+                assert parent_buffers
+                assert all(reference() is None for reference in parent_buffers)
+                assert not optimizer.grad_partitions_flat_buffers
+                assert optimizer.grad_partitions_flat_buffer is None
+            finally:
+                engine.destroy()
+        assert len(unpinned) == (len(parent_buffers) if pin_memory else 0)
+        assert len(set(unpinned)) == len(unpinned)
+
+
 @needs_gpu_accelerator
 class TestReflowRejectsUnsupportedClientOptimizer(DistributedTest):
     world_size = 1
@@ -1185,14 +1276,17 @@ class TestReflowMaximizeTraining(DistributedTest):
 
 @pytest.mark.parametrize("precision", ["bf16", "fp16"])
 @pytest.mark.parametrize("invalid_value", [float("nan"), float("inf")])
+@pytest.mark.parametrize("pin_memory", [False, True])
+@pytest.mark.parametrize("offload_param", [False, True])
 @needs_gpu_accelerator
 class TestReflowInvalidGradient(DistributedTest):
     world_size = [1, 2]
 
-    def test_invalid_step_preserves_parameters_and_state(self, precision, invalid_value):
+    def test_invalid_step_preserves_parameters_and_state(self, precision, invalid_value, pin_memory, offload_param):
         skip_if_reflow_training_unsupported()
         torch.manual_seed(1234)
-        config = get_variant_config(reflow=True, variant="adam")
+        config = get_variant_config(reflow=True, variant="offload_param" if offload_param else "adam")
+        config["zero_optimization"]["offload_optimizer"]["pin_memory"] = pin_memory
         config["zero_optimization"]["reduce_bucket_size"] = 1_000_000
         if precision == "fp16":
             config["bf16"] = {"enabled": False}
@@ -1208,16 +1302,25 @@ class TestReflowInvalidGradient(DistributedTest):
             before_params = [safe_get_full_fp32_param(p).clone() for p in engine.module.parameters()]
             before_states = [safe_get_full_optimizer_state(p, "exp_avg").clone() for p in engine.module.parameters()]
             before_steps = [int(state["step"]) for state in optimizer.optimizer.state.values()]
+            with deepspeed.zero.GatheredParameters(list(engine.module.parameters())):
+                before_low_precision = [p.detach().clone() for p in engine.module.parameters()]
             skipped_steps = engine.skipped_steps
             loss = engine(*batches[1])
             if dist.get_rank() == 0:
                 loss = loss * invalid_value
             engine.backward(loss)
-            engine.step()
+            with patch.object(optimizer,
+                              "_copy_pinned_master_to_device",
+                              wraps=optimizer._copy_pinned_master_to_device) as pinned_copy:
+                engine.step()
+            assert bool(pinned_copy.call_count) == (pin_memory and not offload_param)
             assert engine.skipped_steps == skipped_steps + 1
             assert [int(state["step"]) for state in optimizer.optimizer.state.values()] == before_steps
             for param, before_param, before_state in zip(engine.module.parameters(), before_params, before_states):
                 assert torch.equal(safe_get_full_fp32_param(param), before_param)
                 assert torch.equal(safe_get_full_optimizer_state(param, "exp_avg"), before_state)
+            with deepspeed.zero.GatheredParameters(list(engine.module.parameters())):
+                for param, before_param in zip(engine.module.parameters(), before_low_precision):
+                    assert torch.equal(param, before_param)
         finally:
             engine.destroy()

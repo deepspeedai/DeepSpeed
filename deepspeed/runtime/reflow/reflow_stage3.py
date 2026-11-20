@@ -346,6 +346,8 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
         # parent setup unconditionally allocates it, so free it (and its pinned backing) to
         # reclaim ~2 bytes/param of CPU memory in the bucketwise case.
         super()._setup_for_real_optimizer()
+        grad_buffers = self.grad_partitions_flat_buffers
+        self.grad_partitions_flat_buffers = {}
         self.grad_partitions_flat_buffer = None
         # GPU-side inf/nan accumulator for the offloaded grads, since the flat buffer that the base
         # has_overflow scans is freed above (lazily created on the grad device in partition_grads).
@@ -353,7 +355,14 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
         # Clear the name-mangled __param_id_to_grad_partition dict so the narrow() views into
         # the buffer freed above are dropped and its storage can actually be reclaimed.
         self._DeepSpeedZeroOptimizer_Stage3__param_id_to_grad_partition = {}
-        # The parent pins grad_partitions_flat_buffer, so dropping the references above only returns
+        # Native pinning requires an explicit release; remove the parent's references first so
+        # its destroy path cannot release these allocations a second time.
+        while grad_buffers:
+            _, grad_buffer = grad_buffers.popitem()
+            if self.offload_optimizer_pin_memory:
+                get_accelerator().unpin_memory(grad_buffer)
+            del grad_buffer
+        # When the parent pins these buffers, dropping the references above only returns
         # the block to torch's pinned-host caching allocator, which keeps the physical memory resident
         # (the one large block is never reused by the smaller per-subgroup bucketwise buffers). Empty
         # the host cache so the ~2 bytes/param of pinned memory is actually returned to the OS.
@@ -1611,7 +1620,12 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
             # pre-step weight. The FP32 master lives on nvme (swapped out), so there is nothing to
             # copy from here -- the discarded step leaves both the param and the state untouched.
             return
-        fp16_flat.data.copy_(fp32_flat.data)
+        dst = fp16_flat.data
+        src = fp32_flat.data
+        if dst.device.type != "cpu" and self._master_pinned_at_construction(sub_group_id):
+            self._copy_pinned_master_to_device(dst, src)
+        else:
+            dst.copy_(src)
         self._unflatten_partitioned_parameters(sub_group_id)
 
     @instrument_w_nvtx
