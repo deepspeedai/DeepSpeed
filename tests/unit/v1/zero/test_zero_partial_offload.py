@@ -93,6 +93,11 @@ def _close(engine):
         engine.optimizer.superoffload_cpu_optimizer.close()
 
 
+def _skip_without_device_sub_groups():
+    if get_accelerator().device_name() == "cpu":
+        pytest.skip("With the CPU accelerator no sub-group is kept on another device")
+
+
 def _device_params(engine):
     optimizer = engine.optimizer
     return [optimizer.fp32_partitioned_groups_flat[i] for i, d in optimizer.subgroup_to_device.items() if d != "cpu"]
@@ -115,8 +120,7 @@ class TestPartialOffloadHyperparameters(DistributedTest):
     def test_first_step_at_zero_lr(self, super_offload):
         if super_offload and get_accelerator().device_name() != "cuda":
             pytest.skip("SuperOffload supports only CUDA")
-        if get_accelerator().device_name() == "cpu":
-            pytest.skip("With the CPU accelerator no sub-group is kept on another device")
+        _skip_without_device_sub_groups()
         config = _config(ratio=0.5, super_offload=super_offload)
         config["scheduler"] = {
             "type": "WarmupLR",
@@ -237,6 +241,7 @@ class TestPartialOffloadAdamSettings(DistributedTest):
 
     def test_bias_correction_off_in_checkpoint_is_rejected(self, tmpdir):
         """A checkpoint saved with bias_correction=False restores it to the param groups of the CPU optimizer."""
+        _skip_without_device_sub_groups()
         config = _config(ratio=1.0)
         config["optimizer"]["params"]["bias_correction"] = False
         engine = _engine(config)
