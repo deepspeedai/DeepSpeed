@@ -445,6 +445,13 @@ def merge_contiguous_ranges(ranges):
     return merged
 
 
+def iter_range_chunks(ranges, chunk_elems):
+    """Split each contiguous range independently so DMA never crosses a gap between Ready weights."""
+    for offset, size in ranges:
+        for start in range(0, size, chunk_elems):
+            yield offset + start, min(chunk_elems, size - start)
+
+
 def clip_range_to_valid_partition(valid_partition_element_count, dest_offset, num_elements):
     """Clamp a single (dest_offset, num_elements) range to the valid partition.
 

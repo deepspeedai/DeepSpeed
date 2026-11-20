@@ -294,6 +294,44 @@ class TestReflowCPULionDropIn:
 
 
 @pytest.mark.parametrize("optimizer_kind", ["adam", "lion"])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("offset", [0, 1, 8, 16])
+def test_ready_writers_publish_aligned_and_unaligned_output(optimizer_kind, dtype, offset):
+    builder = ReflowCPUAdamBuilder if optimizer_kind == "adam" else ReflowCPULionBuilder
+    if not deepspeed.ops.__compatible_ops__.get(builder.NAME, False):
+        pytest.skip("Reflow optimizer builder unavailable")
+    _skip_amd_fp16(dtype)
+    module = builder().load()
+    opt_id = _next_opt_id()
+    size = 65539
+    master = torch.linspace(-2, 2, size)
+    # Include FP32 ties for both low precisions, infinities and a NaN in the vector prefix.
+    special = [1 + 2**-8, 1 + 3 * 2**-8, 1 + 2**-11, 1 + 3 * 2**-11, float("inf"), -float("inf"), float("nan")]
+    grad = torch.ones(size, dtype=dtype)
+    momentum = torch.zeros_like(master)
+    start = 32 + offset
+    storage = torch.full((start + size + 32, ), -123, dtype=dtype)
+    output = storage.narrow(0, start, size)
+    if optimizer_kind == "adam":
+        module.reflow_create_adam(opt_id, 0., 0.9, 0.99, 1e-8, 0., True, False, 4)
+        args = [opt_id, 1, 0., 0.9, 0.99, 1e-8, 0., True, master, grad, momentum, torch.zeros_like(master)]
+    else:
+        module.reflow_create_lion(opt_id, 0., 0.9, 0.99, 0., False, 4)
+        args = [opt_id, 1, 0., 0.9, 0.99, 0., master, grad, momentum]
+    try:
+        for _ in range(3):
+            master.neg_()
+            master[:len(special)] = torch.tensor(special)
+            output.fill_(-123)
+            getattr(module, f"reflow_{optimizer_kind}_update_params_halfgrad")(*args, output, 1., False)
+            # The return from Ready itself publishes every writer's output, including its scalar tail.
+            torch.testing.assert_close(output, master.to(dtype), rtol=0, atol=0, equal_nan=True)
+            assert (storage[:start] == -123).all() and (storage[start + size:] == -123).all()
+    finally:
+        getattr(module, f"reflow_destroy_{optimizer_kind}")(opt_id)
+
+
+@pytest.mark.parametrize("optimizer_kind", ["adam", "lion"])
 def test_reused_kernel_threads_follow_the_worker_cpu_mask(optimizer_kind):
     import os
     from concurrent.futures import ThreadPoolExecutor

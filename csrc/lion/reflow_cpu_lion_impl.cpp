@@ -115,27 +115,22 @@ void Reflow_Lion_Optimizer::Step_8_FP16_HalfGrad(float* _params_fp32,
             size_t copy_size = TILE;
             if ((t + TILE) > _param_size) copy_size = _param_size - t;
             size_t offset = copy_size + t;
-            ReflowCPUAffinity affinity;
-#pragma omp parallel
-            {
-                affinity.apply();
-#pragma omp for schedule(static) nowait
-                for (size_t k = t; k < offset; k++) {
-                    float grad = static_cast<float>(grads_half[k]) * unscale_factor;
-                    float param = _params_fp32[k];
-                    float momentum = static_cast<float>(_exp_avg[k]);
-                    float tmp = momentum * _betta1;
-                    tmp = grad * betta1_minus1 + tmp;
-                    tmp = -std::copysignf(alpha, tmp);
-                    if (_weight_decay > 0) {
-                        param = param * after_decay + tmp;
-                    } else {
-                        param = param + tmp;
-                    }
-                    // Store param to FP16/BF16 buffer only; the FP32 master and state are skipped.
-                    half_params[k] = ds_store_precision_t(param);
+            reflow_ready_loop(offset - t, 1, single_ready_writer, false, [&](size_t index) {
+                const size_t k = t + index;
+                float grad = static_cast<float>(grads_half[k]) * unscale_factor;
+                float param = _params_fp32[k];
+                float momentum = static_cast<float>(_exp_avg[k]);
+                float tmp = momentum * _betta1;
+                tmp = grad * betta1_minus1 + tmp;
+                tmp = -std::copysignf(alpha, tmp);
+                if (_weight_decay > 0) {
+                    param = param * after_decay + tmp;
+                } else {
+                    param = param + tmp;
                 }
-            }
+                // Store param to FP16/BF16 buffer only; the FP32 master and state are skipped.
+                half_params[k] = ds_store_precision_t(param);
+            });
         }
     }
 }
@@ -268,8 +263,11 @@ int reflow_ds_lion_step_params_halfgrad(int optimizer_id,
                                         torch::Tensor& exp_avg,
                                         torch::Tensor& half_params,
                                         float combined_scale,
-                                        bool skip_increment_step)
+                                        bool skip_increment_step,
+                                        ReflowReadyWork* work,
+                                        size_t destination_offset)
 {
+    TORCH_CHECK(!work || half_params.is_contiguous(), "Deferred Ready requires contiguous output");
     auto params_c = params_fp32.contiguous();
     auto grads_c = grads.contiguous();
     auto exp_avg_c = exp_avg.contiguous();
@@ -312,54 +310,55 @@ int reflow_ds_lion_step_params_halfgrad(int optimizer_id,
     unsigned int reflow_total_cpus = reflow_lion_get_available_cpu_count();
     unsigned int reflow_max_omp_threads =
         reflow_lion_resolve_omp_threads(worker_opt.get_num_threads(), reflow_total_cpus);
-    int reflow_original_omp_threads = omp_get_max_threads();
-    omp_set_num_threads(reflow_max_omp_threads);
-#if defined(__AVX512__) or defined(__AVX256__)
-    if (store_type == torch::kFloat16 && grad_type == torch::kFloat16 &&
-        state_type == torch::kFloat32) {
-        worker_opt.Step_8_FP16_HalfGrad<c10::Half, c10::Half, float>(
-            params_c.data_ptr<float>(),
-            grads_c.data_ptr<c10::Half>(),
-            exp_avg_c.data_ptr<float>(),
-            param_size,
-            half_params_c.data_ptr<c10::Half>(),
-            combined_scale);
-    } else if (store_type == torch::kFloat16 && grad_type == torch::kFloat16 &&
+    auto dispatch = [&](auto half, auto state) {
+        using Half = decltype(half);
+        using State = decltype(state);
+        auto* params = params_c.data_ptr<float>();
+        auto* grad = grads_c.data_ptr<Half>();
+        auto* momentum = exp_avg_c.data_ptr<State>();
+
+        auto* output = half_params_c.data_ptr<Half>();
+        worker_opt.single_ready_writer = work != nullptr;
+        auto kernel = [=](size_t start, size_t size) mutable {
+            worker_opt.Step_8_FP16_HalfGrad<Half, Half, State>(params + start,
+                                                               grad + start,
+                                                               momentum + start,
+                                                               size,
+                                                               output + start,
+                                                               combined_scale);
+        };
+        if (work) {
+            work->add(destination_offset,
+                      reflow_max_omp_threads,
+                      half_params_c,
+                      {params_c, grads_c, exp_avg_c},
+                      std::move(kernel));
+        } else {
+            const int previous_threads = omp_get_max_threads();
+            omp_set_num_threads(reflow_max_omp_threads);
+            kernel(0, param_size);
+            omp_set_num_threads(previous_threads);
+        }
+    };
+#if defined(__AVX512__) || defined(__AVX256__)
+    if (store_type == grad_type && grad_type == torch::kFloat16 && state_type == torch::kFloat32) {
+        dispatch(c10::Half{}, float{});
+    } else if (store_type == grad_type && grad_type == torch::kFloat16 &&
                state_type == torch::kFloat16) {
-        worker_opt.Step_8_FP16_HalfGrad<c10::Half, c10::Half, c10::Half>(
-            params_c.data_ptr<float>(),
-            grads_c.data_ptr<c10::Half>(),
-            exp_avg_c.data_ptr<c10::Half>(),
-            param_size,
-            half_params_c.data_ptr<c10::Half>(),
-            combined_scale);
-    } else if (store_type == torch::kBFloat16 && grad_type == torch::kBFloat16 &&
+        dispatch(c10::Half{}, c10::Half{});
+    } else if (store_type == grad_type && grad_type == torch::kBFloat16 &&
                state_type == torch::kFloat32) {
-        worker_opt.Step_8_FP16_HalfGrad<c10::BFloat16, c10::BFloat16, float>(
-            params_c.data_ptr<float>(),
-            grads_c.data_ptr<c10::BFloat16>(),
-            exp_avg_c.data_ptr<float>(),
-            param_size,
-            half_params_c.data_ptr<c10::BFloat16>(),
-            combined_scale);
-    } else if (store_type == torch::kBFloat16 && grad_type == torch::kBFloat16 &&
+        dispatch(c10::BFloat16{}, float{});
+    } else if (store_type == grad_type && grad_type == torch::kBFloat16 &&
                state_type == torch::kBFloat16) {
-        worker_opt.Step_8_FP16_HalfGrad<c10::BFloat16, c10::BFloat16, c10::BFloat16>(
-            params_c.data_ptr<float>(),
-            grads_c.data_ptr<c10::BFloat16>(),
-            exp_avg_c.data_ptr<c10::BFloat16>(),
-            param_size,
-            half_params_c.data_ptr<c10::BFloat16>(),
-            combined_scale);
+        dispatch(c10::BFloat16{}, c10::BFloat16{});
     } else
 #endif
     {
-        omp_set_num_threads(reflow_original_omp_threads);
         throw std::runtime_error(
             "reflow_ds_lion_step_params_halfgrad: unsupported combination of store/grad/state "
             "dtypes");
     }
-    omp_set_num_threads(reflow_original_omp_threads);
     return 0;
 }
 

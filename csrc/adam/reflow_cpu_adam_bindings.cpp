@@ -27,7 +27,9 @@ static inline int reflow_ds_adam_step_params_halfgrad_gilfree(int optimizer_id,
                                                               torch::Tensor& half_params,
                                                               float combined_scale,
                                                               bool skip_increment_step = false,
-                                                              bool maximize = false)
+                                                              bool maximize = false,
+                                                              ReflowReadyWork* work = nullptr,
+                                                              size_t destination_offset = 0)
 {
     pybind11::gil_scoped_release release;
     return reflow_ds_adam_step_params_halfgrad(optimizer_id,
@@ -45,7 +47,9 @@ static inline int reflow_ds_adam_step_params_halfgrad_gilfree(int optimizer_id,
                                                half_params,
                                                combined_scale,
                                                skip_increment_step,
-                                               maximize);
+                                               maximize,
+                                               work,
+                                               destination_offset);
 }
 
 static inline int reflow_ds_adam_state_step_halfgrad_gilfree(int optimizer_id,
@@ -90,6 +94,7 @@ static inline int reflow_ds_bf16_accumulate_gilfree(torch::Tensor& dst, torch::T
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
 {
+    bind_reflow_ready_work(m);
     m.def("reflow_create_adam",
           &reflow_create_adam_optimizer,
           "Reflow CPU Adam create (C++)",
@@ -121,7 +126,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
           pybind11::arg("half_params"),
           pybind11::arg("combined_scale"),
           pybind11::arg("skip_increment_step") = false,
-          pybind11::arg("maximize") = false);
+          pybind11::arg("maximize") = false,
+          pybind11::arg("ready_work") = nullptr,
+          pybind11::arg("destination_offset") = 0);
     m.def("reflow_adam_update_state_halfgrad",
           &reflow_ds_adam_state_step_halfgrad_gilfree,
           "Reflow CPU Adam update state stream with half gradients, GIL-released (C++)",

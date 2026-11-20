@@ -35,9 +35,12 @@ class ReflowConfig(DeepSpeedConfigModel):
     bucketwise_worker_affinity: Literal["task", "thread"] = "thread"
     """Choose a CPU mask per bucketwise task, or reuse a fixed bucketwise mask on each pool thread."""
 
-    bucketwise_cores_per_worker: int = Field(8, ge=1)
-    """Cores per bucketwise optimizer worker. The worker count follows from the cores available
-    to the rank divided by this value."""
+    bucketwise_cores_per_worker: Optional[int] = Field(None, ge=1)
+    """By default one optimizer worker uses the rank's worker CPUs. Set a limit to split
+    each NUMA-local CPU set among multiple workers."""
+
+    h2d_chunk_size_mib: int = Field(16, ge=1)
+    """Maximum MiB per host-to-device transfer of Ready parameters."""
 
     state_update_cores: Optional[int] = Field(None, ge=1)
     """Limit worker CPUs used by the background state commit during forward; ``None`` uses all worker CPUs."""

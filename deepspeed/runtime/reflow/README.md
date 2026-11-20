@@ -124,8 +124,7 @@ to the original optimizer cannot follow the remapping and is rejected.
     "reflow": {
         "enable_cpu_affinity": true,        // restrict the main process to NUMA-local cores; workers are always pinned
         "main_thread_cores": 2,             // cores reserved for the forward/backward (main) thread
-        "bucketwise_cores_per_worker": 7,   // cores per bucketwise CPU-Adam worker; worker count =
-                                            //   (rank worker cores) / this value
+        "bucketwise_cores_per_worker": null, // one optimizer worker for this rank's remaining CPUs
         "state_update_cores": 2             // optional forward limit for the background state commit
                                             //   (default: all worker CPUs)
         // "num_threads": <int>             // CPU-Adam threads (default: all available cores)
@@ -168,7 +167,7 @@ rejected when main-thread pinning is enabled. The following options allow other 
 | `main_thread_core_type` | `"logical"` | `"physical"` counts physical cores and reserves all their available SMT siblings. |
 | `pin_main_thread` | `true` | Pins the initializing thread to the reserved main CPUs; `engine.destroy()` restores its original affinity. |
 | `worker_core_type` | `"logical"` | `"physical"` uses one logical CPU per remaining physical core. |
-| `bucketwise_cores_per_worker` | `8` | Maximum logical CPUs per bucketwise worker; the last mask within a NUMA node may be smaller. |
+| `bucketwise_cores_per_worker` | `null` | One optimizer worker uses the rank's worker CPUs by default. A positive limit splits each NUMA-local CPU set into groups of at most that size. |
 | `bucketwise_worker_affinity` | `"thread"` | `"task"` assigns CPU masks round-robin; `"thread"` reuses a fixed mask per thread for bucketwise work. Persist temporarily uses its phase-specific mask. |
 | `state_update_cores` | `null` | Caps the worker CPU IDs used by the state commit during forward; `null` uses all worker CPUs. |
 | `state_update_backward_cores` | `null` | Caps the number of worker CPU IDs used by the state commit during backward; `null` uses all worker CPUs. `state_update_cores` still controls its forward mask. |

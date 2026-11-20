@@ -21,6 +21,7 @@ inline void omp_set_num_threads(int) {}
 #include <cassert>
 #include <cstdint>
 #include "reflow_cpu_affinity.h"
+#include "reflow_ready.h"
 #include "reflow_simd.h"
 
 /* Enable madvise(MADV_HUGEPAGE) hints in the streaming kernels (Linux only).
@@ -131,6 +132,7 @@ public:
     /* -1 (the default) means "use all available cores"; a positive value caps the
      * OpenMP thread count for the CPU-Adam state update.
      */
+    bool single_ready_writer = false;
     inline void set_num_threads(int num_threads) { _num_threads = num_threads; }
     inline int get_num_threads() const { return _num_threads; }
 
@@ -197,7 +199,7 @@ void Reflow_Adam_Optimizer::Step_AVX_HalfGrad(size_t* rounded_size,
     size_t new_rounded_size = ROUND_DOWN(_param_size, SIMD_WIDTH * span);
 
 #if defined(__linux__) && USE_HUGE_PAGE
-    if (new_rounded_size > 0) {
+    if (!single_ready_writer && new_rounded_size > 0) {
         size_t page_size = 4096;
         auto madvise_bytes = [&](size_t elem_size) {
             return (_param_size * elem_size + page_size - 1) & ~(page_size - 1);
@@ -332,12 +334,9 @@ void Reflow_Adam_Optimizer::Step_AVX_HalfGrad_Loop(size_t rounded_size,
     AVX_Data unscale_factor;
     if (unscale_grads) { unscale_factor.data = SIMD_SET(1.0f / combined_scale); }
 
-    ReflowCPUAffinity affinity;
-#pragma omp parallel
-    {
-        affinity.apply();
-#pragma omp for schedule(static) nowait
-        for (size_t i = 0; i < rounded_size; i += SIMD_WIDTH * span) {
+    const bool stream_output = store_half_params && reflow_stream_ready_output<span>(half_params);
+    reflow_ready_loop(
+        rounded_size, SIMD_WIDTH * span, single_ready_writer, stream_output, [&](size_t i) {
             AVX_Data grad_4[span];
             reflow_simd_load<span>(grad_4, grads_half + i);
             if (unscale_grads) { simd_mul<span>(grad_4, grad_4, unscale_factor); }
@@ -360,16 +359,15 @@ void Reflow_Adam_Optimizer::Step_AVX_HalfGrad_Loop(size_t rounded_size,
             if (decay_param) { simd_fma<span>(param_4, param_4, weight_decay4, param_4); }
             simd_fma<span>(param_4, grad_4, step_size_4, param_4);
 
-            if (store_half_params) {
+            if constexpr (store_half_params) {
                 // Param generation leaves the FP32 master and the state to the later commit.
-                reflow_simd_store_stream<span>(half_params + i, param_4);
+                reflow_simd_store_ready<span>(half_params + i, param_4, stream_output);
             } else {
                 reflow_simd_store<span>(_params_fp32 + i, param_4);
                 reflow_simd_store<span>(_exp_avg + i, momentum_4);
                 reflow_simd_store<span>(_exp_avg_sq + i, variance_4);
             }
-        }
-    }
+        });
 }
 
 #endif
@@ -399,7 +397,9 @@ int reflow_ds_adam_step_params_halfgrad(int optimizer_id,
                                         torch::Tensor& half_params,
                                         float combined_scale = 1.0f,
                                         bool skip_increment_step = false,
-                                        bool maximize = false);
+                                        bool maximize = false,
+                                        ReflowReadyWork* work = nullptr,
+                                        size_t destination_offset = 0);
 
 int reflow_ds_adam_state_step_halfgrad(int optimizer_id,
                                        size_t step,

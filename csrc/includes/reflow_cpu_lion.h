@@ -30,6 +30,7 @@ inline void omp_set_num_threads(int) {}
 #include <cassert>
 #include <cstdint>
 #include "reflow_cpu_affinity.h"
+#include "reflow_ready.h"
 #include "reflow_simd.h"
 
 /* Enable madvise(MADV_HUGEPAGE) hints in the streaming kernels (Linux only).
@@ -117,6 +118,7 @@ public:
     /* -1 (the default) means "use all available cores"; a positive value caps the
      * OpenMP thread count for the CPU-Lion state update.
      */
+    bool single_ready_writer = false;
     inline void set_num_threads(int num_threads) { _num_threads = num_threads; }
     inline int get_num_threads() const { return _num_threads; }
 
@@ -270,7 +272,7 @@ void Reflow_Lion_Optimizer::Step_AVX_FP16_HalfGrad(size_t* rounded_size,
     new_rounded_size = ROUND_DOWN(_param_size, SIMD_WIDTH * span);
 
 #if defined(__linux__) && USE_HUGE_PAGE
-    if (new_rounded_size > 0) {
+    if (!single_ready_writer && new_rounded_size > 0) {
         size_t page_size = 4096;
         auto madvise_bytes = [&](size_t elem_size) {
             return (_param_size * elem_size + page_size - 1) & ~(page_size - 1);
@@ -289,12 +291,9 @@ void Reflow_Lion_Optimizer::Step_AVX_FP16_HalfGrad(size_t* rounded_size,
 
     // Phase-1 reads the OLD momentum but never overwrites it, so the momentum EMA
     // (m_new) is intentionally not computed here -- it is committed in Phase-2.
-    ReflowCPUAffinity affinity;
-#pragma omp parallel
-    {
-        affinity.apply();
-#pragma omp for schedule(static) nowait
-        for (size_t i = 0; i < new_rounded_size; i += SIMD_WIDTH * span) {
+    const bool stream_output = reflow_stream_ready_output<span>(half_params);
+    reflow_ready_loop(
+        new_rounded_size, SIMD_WIDTH * span, single_ready_writer, stream_output, [&](size_t i) {
             AVX_Data grad_4[span];
             reflow_simd_load<span>(grad_4, grads_half + i);
             if (need_unscale) { simd_mul<span>(grad_4, grad_4, unscale_factor); }
@@ -313,9 +312,8 @@ void Reflow_Lion_Optimizer::Step_AVX_FP16_HalfGrad(size_t* rounded_size,
             } else {
                 simd_add<span>(param_4, param_4, tmp_4);
             }
-            reflow_simd_store_stream<span>(half_params + i, param_4);
-        }
-    }
+            reflow_simd_store_ready<span>(half_params + i, param_4, stream_output);
+        });
 
     *rounded_size = new_rounded_size;
 }
@@ -347,7 +345,9 @@ int reflow_ds_lion_step_params_halfgrad(int optimizer_id,
                                         torch::Tensor& exp_avg,
                                         torch::Tensor& half_params,
                                         float combined_scale,
-                                        bool skip_increment_step = false);
+                                        bool skip_increment_step = false,
+                                        ReflowReadyWork* work = nullptr,
+                                        size_t destination_offset = 0);
 
 // Half/BFloat16 gradient params (FP32 master) + state commit.
 int reflow_ds_lion_state_step_halfgrad(int optimizer_id,

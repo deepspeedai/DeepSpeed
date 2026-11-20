@@ -730,7 +730,8 @@ The `reflow` block enables it, so an empty block is enough to run with the defau
     "pin_main_thread": true,
     "worker_core_type": "logical",
     "bucketwise_worker_affinity": "thread",
-    "bucketwise_cores_per_worker": 8,
+    "bucketwise_cores_per_worker": null,
+    "h2d_chunk_size_mib": 16,
     "state_update_cores": null,
     "state_update_backward_cores": null
   }
@@ -777,11 +778,17 @@ The `reflow` block enables it, so an empty block is enough to run with the defau
 | ----------- | ------- |
 | Assign a CPU mask per bucketwise task (`task`) or reuse a fixed bucketwise mask on each pool thread (`thread`). A thread running a state commit temporarily uses the commit mask. | `"thread"` |
 
-***bucketwise_cores_per_worker***: [integer]
+***bucketwise_cores_per_worker***: [integer or null]
 
 | Description | Default |
 | ----------- | ------- |
-| Maximum worker CPU IDs per bucketwise worker. Each NUMA group is split into chunks of this size; the final chunk may be smaller. One pool thread is created per chunk. | `8` |
+| By default one optimizer worker uses the CPUs assigned to the rank after the main-thread reservation. A positive integer splits each NUMA-local group into workers with at most that many CPU IDs. | `null` |
+
+***h2d_chunk_size_mib*** (positive integer)
+
+| Description | Default |
+| ----------- | ------- |
+| Maximum size in MiB (1,048,576 bytes) of a Ready parameter copy from CPU to the accelerator. Each completed chunk can transfer while the CPU computes the next one. Checkpointed ranges wait until they are safe to publish. | `16` |
 
 ***state_update_cores***: [integer or null]
 

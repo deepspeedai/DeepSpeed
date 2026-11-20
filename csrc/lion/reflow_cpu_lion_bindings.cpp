@@ -23,7 +23,9 @@ static inline int reflow_ds_lion_step_params_halfgrad_gilfree(int optimizer_id,
                                                               torch::Tensor& exp_avg,
                                                               torch::Tensor& half_params,
                                                               float combined_scale,
-                                                              bool skip_increment_step = false)
+                                                              bool skip_increment_step = false,
+                                                              ReflowReadyWork* work = nullptr,
+                                                              size_t destination_offset = 0)
 {
     pybind11::gil_scoped_release release;
     return reflow_ds_lion_step_params_halfgrad(optimizer_id,
@@ -37,7 +39,9 @@ static inline int reflow_ds_lion_step_params_halfgrad_gilfree(int optimizer_id,
                                                exp_avg,
                                                half_params,
                                                combined_scale,
-                                               skip_increment_step);
+                                               skip_increment_step,
+                                               work,
+                                               destination_offset);
 }
 
 static inline int reflow_ds_lion_state_step_halfgrad_gilfree(int optimizer_id,
@@ -68,6 +72,7 @@ static inline int reflow_ds_lion_state_step_halfgrad_gilfree(int optimizer_id,
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
 {
+    bind_reflow_ready_work(m);
     m.def("reflow_create_lion",
           &reflow_create_lion_optimizer,
           "Reflow CPU Lion create (C++)",
@@ -93,7 +98,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
           pybind11::arg("exp_avg"),
           pybind11::arg("half_params"),
           pybind11::arg("combined_scale"),
-          pybind11::arg("skip_increment_step") = false);
+          pybind11::arg("skip_increment_step") = false,
+          pybind11::arg("ready_work") = nullptr,
+          pybind11::arg("destination_offset") = 0);
     m.def("reflow_lion_update_state_halfgrad",
           &reflow_ds_lion_state_step_halfgrad_gilfree,
           "Reflow CPU Lion update state stream with half gradients, GIL-released (C++)",

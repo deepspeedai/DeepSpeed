@@ -31,8 +31,7 @@ Reflow needs no model code changes. Enable it in the DeepSpeed configuration:
     },
     "reflow": {
       "enable_cpu_affinity": true,
-      "main_thread_cores": 2,
-      "bucketwise_cores_per_worker": 8
+      "main_thread_cores": 2
     }
   },
   "optimizer": {
@@ -52,7 +51,9 @@ Launch with `--bind_cores_to_rank` so each rank runs on the CPU cores local to i
 deepspeed --bind_cores_to_rank train.py --deepspeed_config ds_config.json
 ```
 
-By default Reflow pins the initializing thread to `main_thread_cores` CPU IDs and divides the remaining CPUs among optimizer workers. Local ranks sharing a CPU set divide it before reserving their main CPUs; partially overlapping rank affinities are rejected. If the requested reservation leaves no worker CPU, Reflow reduces it to leave at least one CPU each for the main thread and workers. If only one CPU is available, they share it; ranks also share CPUs when there are fewer CPUs than ranks. The state commit may use all worker CPUs unless `state_update_cores` or `state_update_backward_cores` sets a limit. `enable_cpu_affinity` additionally restricts the main process to its NUMA-local CPU slice.
+By default Reflow pins the initializing thread to `main_thread_cores` CPU IDs and gives the remaining CPUs assigned to the rank to one optimizer worker. Set `bucketwise_cores_per_worker` to split each NUMA-local group among multiple workers. Local ranks sharing a CPU set divide it before reserving their main CPUs; partially overlapping rank affinities are rejected. If the requested reservation leaves no worker CPU, Reflow reduces it to leave at least one CPU each for the main thread and workers. If only one CPU is available, they share it; ranks also share CPUs when there are fewer CPUs than ranks. The state commit may use all worker CPUs unless `state_update_cores` or `state_update_backward_cores` sets a limit. `enable_cpu_affinity` additionally restricts the main process to its NUMA-local CPU slice.
+
+Reflow copies each contiguous range of Ready weights to the accelerator in chunks of at most 16 MiB. Set `zero_optimization.reflow.h2d_chunk_size_mib` to a positive integer to change this limit. CPU computation can overlap the transfer of an earlier chunk. Weights needed by checkpoint recomputation wait for their normal publication point. With one optimizer worker using multiple CPU threads and pinned gradients, large direct CUDA transfers share an OpenMP team. Each writer can start its portion of the next independent chunk after fencing its own stores. The last writer submits the completed chunk to the copy stream.
 
 ## Gradient clipping
 

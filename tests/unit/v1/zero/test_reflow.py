@@ -55,7 +55,8 @@ def minimal_reflow_config(reflow=None, **zero_overrides):
 def test_reflow_block_configures_the_optimizer():
     config = DeepSpeedConfig(minimal_reflow_config({"state_update_cores": 4}))
     assert config.zero_config.reflow.state_update_cores == 4
-    assert config.zero_config.reflow.bucketwise_cores_per_worker == 8
+    assert config.zero_config.reflow.bucketwise_cores_per_worker is None
+    assert config.zero_config.reflow.h2d_chunk_size_mib == 16
     assert config.zero_config.reflow.bucketwise_worker_affinity == "thread"
     assert config.zero_config.reflow.pin_main_thread is True
     assert DeepSpeedConfig(minimal_reflow_config()).zero_config.reflow.state_update_cores is None
@@ -66,6 +67,12 @@ def test_reflow_block_configures_the_optimizer():
 
     with pytest.raises(ValueError):
         DeepSpeedConfig(minimal_reflow_config({"state_update_cores": 0}))
+
+
+@pytest.mark.parametrize("size", [0, -1])
+def test_reflow_rejects_nonpositive_h2d_chunks(size):
+    with pytest.raises(ValueError, match="h2d_chunk_size_mib"):
+        DeepSpeedConfig(minimal_reflow_config({"h2d_chunk_size_mib": size}))
 
 
 def test_cpu_placement_options_are_validated():
@@ -480,7 +487,7 @@ def get_variant_config(reflow, variant):
     return config
 
 
-def train_and_collect(model, config, batches, client_optimizer=None, on_initialize=None):
+def train_and_collect(model, config, batches, client_optimizer=None, on_initialize=None, state_keys=()):
     engine, _, _, _ = deepspeed.initialize(model=model,
                                            model_parameters=model.parameters(),
                                            optimizer=client_optimizer,
@@ -494,12 +501,15 @@ def train_and_collect(model, config, batches, client_optimizer=None, on_initiali
             engine.backward(loss)
             engine.step()
             losses.append(loss.detach().clone())
-        return {
+        result = {
             "losses": losses,
             "fp32_params": [safe_get_full_fp32_param(param).clone() for param in engine.module.parameters()],
             "skipped_steps": engine.skipped_steps,
             "cpu_optimizer": type(engine.optimizer.optimizer),
         }
+        for key in state_keys:
+            result[key] = [safe_get_full_optimizer_state(param, key).clone() for param in engine.module.parameters()]
+        return result
     finally:
         engine.destroy()
 
@@ -639,6 +649,182 @@ class TestReflowMultipleOptimizerGroupsMatchZeroOffload(DistributedTest):
 @needs_gpu_accelerator
 class TestReflowSharedOptimizerWorker(DistributedTest):
     world_size = 1
+
+    @pytest.mark.parametrize("optimizer_kind, dtype, clip", [("adam", torch.bfloat16, 0.01),
+                                                             ("lion", torch.float16, 0.)])
+    def test_training_across_h2d_chunk_boundaries(self, optimizer_kind, dtype, clip):
+        skip_if_reflow_training_unsupported(optimizer_kind)
+        torch.manual_seed(1234)
+        # A single weight is larger than one 1 MiB transfer. Later forwards consume both pieces.
+        model = SimpleModel(hidden_dim=768, nlayers=2)
+        batches = make_batches(768, count=4, dtype=dtype)
+
+        state_keys = ("exp_avg", "exp_avg_sq") if optimizer_kind == "adam" else ("exp_avg", )
+
+        def run(reflow):
+            config = get_variant_config(reflow, optimizer_kind)
+            config["gradient_clipping"] = clip
+            if dtype == torch.float16:
+                config["bf16"]["enabled"] = False
+                config["fp16"] = {"enabled": True, "loss_scale": 16}
+            if reflow:
+                config["zero_optimization"]["reflow"]["h2d_chunk_size_mib"] = 1
+            return train_and_collect(copy.deepcopy(model), config, batches, state_keys=state_keys)
+
+        expected, actual = run(False), run(True)
+        assert expected["skipped_steps"] == actual["skipped_steps"] == 0
+        for key in ("losses", "fp32_params", *state_keys):
+            for want, got in zip(expected[key], actual[key]):
+                assert torch.equal(want, got)
+
+    def test_failed_ready_restores_cpu_partition(self):
+        skip_if_reflow_training_unsupported()
+        torch.manual_seed(1234)
+        model = torch.nn.Linear(16, 16, bias=False)
+        config = get_variant_config(True, "offload_param")
+        config["gradient_clipping"] = 0.
+        config["optimizer"]["params"]["lr"] = 0.25
+        engine, optimizer, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config)
+        try:
+            partition = model.weight.ds_tensor
+            expected = partition.clone()
+            inputs = torch.randn(2, 16, dtype=torch.bfloat16, device=engine.device)
+            native = optimizer.optimizer.ds_opt_adam
+            ready = native.reflow_adam_update_params_halfgrad
+
+            def fail_after_write(*args):
+                ready(*args)
+                raise RuntimeError("injected failure after CPU Ready store")
+
+            with patch.object(native, "reflow_adam_update_params_halfgrad", fail_after_write):
+                engine.backward(engine(inputs).sum())
+                with pytest.raises(RuntimeError, match="injected failure after CPU Ready store"):
+                    engine.step()
+            assert torch.equal(partition, expected)
+        finally:
+            engine.destroy()
+
+    @pytest.mark.parametrize("optimizer_kind,dtype", [("adam", torch.bfloat16), ("lion", torch.float16)])
+    @pytest.mark.parametrize("outcome", ["complete", "cancel", "failure"])
+    def test_team_publishes_only_finished_ranges(self, optimizer_kind, dtype, outcome):
+        # The next Ready can have different scalars and an unrelated destination. Each DMA
+        # must see every writer's data and leave gaps and a cancelled successor untouched.
+        skip_if_reflow_training_unsupported(optimizer_kind)
+        accelerator = get_accelerator()
+        if accelerator.device_name() != "cuda":
+            pytest.skip("requires CUDA Ready transfers")
+        torch.manual_seed(8719)
+        model = SimpleModel(hidden_dim=16)
+        config = get_variant_config(True, optimizer_kind)
+        engine, opt, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config)
+        try:
+            cpu_opt = opt.optimizer
+            native = cpu_opt.ds_opt_adam if optimizer_kind == "adam" else cpu_opt.ds_opt_lion
+            update = getattr(native, f"reflow_{optimizer_kind}_update_params_halfgrad")
+            stream = accelerator.Stream()
+            size, chunk = 262151, 65536
+            master = torch.randn(size)
+            grad, momentum = torch.randn(size, dtype=dtype), torch.randn(size)
+            variance = torch.rand(size)
+            jobs, destinations, expected = [], [], []
+            for step, start in enumerate((0, 5, 16), 1):
+                dst = torch.full((size + 32, ), -77, device=engine.device, dtype=dtype)
+                source = torch.empty(size + 32, dtype=dtype, pin_memory=True)[start:start + size]
+                reference = torch.empty_like(source, pin_memory=False)
+                job = native.ReadyWork(dst, stream, chunk)
+                args = [cpu_opt.opt_id, step, 0.1 / step, 0.8, 0.99]
+                if optimizer_kind == "adam":
+                    args.extend((1e-8, 0.01, True, master, grad, momentum, variance))
+                else:
+                    args.extend((0.01, master, grad, momentum))
+                flags = [0.5 * step, False]
+                if optimizer_kind == "adam":
+                    flags.append(step == 2)
+                update(*args, reference, *flags)
+                update(*args, source, *flags, job, start)
+                want = torch.full((size + 32, ), -77, dtype=dtype)
+                want[start:start + size].copy_(reference)
+                jobs.append(job)
+                destinations.append(dst)
+                expected.append(want)
+
+            stream.wait_stream(accelerator.current_stream())
+
+            def next_job():
+                nonlocal admissions
+                admissions += 1
+                if admissions == 1:
+                    return jobs[1]
+                if outcome == "failure":
+                    raise RuntimeError("injected Ready admission failure")
+                if outcome == "cancel":
+                    jobs[0].cancel()
+                    return jobs[2]
+                return None
+
+            admissions = 0
+            if outcome == "failure":
+                with pytest.raises(RuntimeError, match="injected Ready admission failure"):
+                    jobs[0].run(next_job)
+            else:
+                jobs[0].run(next_job)
+            if outcome == "failure":
+                assert admissions == 2  # A failed admission must be propagated exactly once.
+            stream.synchronize()
+            for dst, want, start in zip(destinations[:2], expected[:2], (0, 5)):
+                got = dst.cpu()
+                if outcome == "complete":
+                    assert torch.equal(got, want)
+                else:
+                    assert (got[:start] == -77).all() and (got[start + size:] == -77).all()
+                    for offset in range(start, start + size, chunk):
+                        end = min(offset + chunk, start + size)
+                        actual = got[offset:end]
+                        assert torch.equal(actual, want[offset:end]) or (actual == -77).all()
+            assert (destinations[2].cpu() == -77).all()
+        finally:
+            engine.destroy()
+
+    def test_cancelled_chunk_keeps_prior_h2d_and_range_gaps(self):
+        # Cancellation can happen after a prefix has reached the copy stream but before
+        # the rest is ready. The returned event must still protect that prefix's source.
+        skip_if_reflow_training_unsupported()
+        config = get_variant_config(True, "adam")
+        config["zero_optimization"]["reflow"]["h2d_chunk_size_mib"] = 1
+        model = SimpleModel(hidden_dim=16)
+        engine, opt, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config)
+        event = None
+        try:
+            chunk = (1 << 20) // 2
+            ranges = [(3, chunk + 11), (chunk + 32, chunk + 7)]
+            host = torch.zeros(2 * chunk + 64, dtype=torch.bfloat16, pin_memory=True)
+            device = torch.full_like(host, -1, device=engine.device)
+            opt._bucketwise_h2d_stream.wait_stream(get_accelerator().current_stream())
+            prepared = []
+
+            def prepare(offset, size, source):
+                prepared.append((offset, size))
+                source.fill_(len(prepared))
+                return len(prepared) < 4
+
+            event = opt._copy_ready_ranges(device, host, ranges, prepare=prepare)
+            assert event is not None
+            assert prepared == [(3, chunk), (3 + chunk, 11), (chunk + 32, chunk), (2 * chunk + 32, 7)]
+            expected = torch.full_like(host, -1)
+            expected[3:chunk + 3] = 1
+            expected[chunk + 3:chunk + 14] = 2
+            expected[chunk + 32:2 * chunk + 32] = 3
+        finally:
+            unpin = get_accelerator().unpin_memory
+
+            def unpin_after_copy(buffer):
+                if event is not None:
+                    assert event.query(), "teardown released pinned memory before the last Ready copy completed"
+                return unpin(buffer)
+
+            with patch.object(get_accelerator(), "unpin_memory", unpin_after_copy):
+                engine.destroy()
+        assert torch.equal(device.cpu(), expected)
 
     @pytest.mark.parametrize("invalid", [False, True])
     def test_norm_progresses_while_ready_is_running(self, invalid):
@@ -950,7 +1136,7 @@ class TestReflowRankCoreBinding(DistributedTest):
             expected_workers = rank_cpus - expected_main or rank_cpus
             assert main_cpus == expected_main
             assert worker_masks
-            assert all(mask <= expected_workers for mask in worker_masks)
+            assert all(mask == expected_workers for mask in worker_masks)
             assert state_masks
             assert all(mask == expected_workers for mask in state_masks)
             placements = [None] * dist.get_world_size()
@@ -1885,16 +2071,20 @@ class TestReflowReentrantGradients(DistributedTest):
     world_size = [1, 2]
 
     @pytest.mark.parametrize("optimizer_kind", ["adam", "lion"])
-    @pytest.mark.parametrize("gradient_accumulation_steps, clip, precision", [(1, 0., "bf16"), (1, 1000., "bf16"),
-                                                                              (2, 0.1, "bf16"), (1, 0.0001, "fp16"),
-                                                                              (1, 0., "fp16")])
-    def test_matches_zero_offload(self, optimizer_kind, gradient_accumulation_steps, clip, precision):
+    @pytest.mark.parametrize("gradient_accumulation_steps, clip, precision, offload_params",
+                             [(1, 0., "bf16", False), (1, 1000., "bf16", False), (2, 0.1, "bf16", False),
+                              (1, 0.0001, "fp16", False), (1, 0., "fp16", False),
+                              pytest.param(2, 0.1, "bf16", True, id="cpu-partitions-bf16"),
+                              pytest.param(1, 0., "fp16", True, id="cpu-partitions-fp16")])
+    def test_matches_zero_offload(self, optimizer_kind, gradient_accumulation_steps, clip, precision, offload_params):
         skip_if_reflow_training_unsupported(optimizer_kind)
 
         def run(reflow):
             torch.manual_seed(1234)
             model = ReentrantGradientModel()
             config = get_variant_config(reflow, optimizer_kind)
+            if offload_params:
+                config["zero_optimization"]["offload_param"] = {"device": "cpu", "pin_memory": True}
             config["data_types"] = {"grad_accum_dtype": precision}
             dtype = torch.bfloat16
             if precision == "fp16":
