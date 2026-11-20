@@ -783,6 +783,9 @@ class PreparedTransfer:
         moved or changed shape on any process, or if the processes are not running the same handle for
         the same time. Prepare the batch again after a refusal. ``check=False`` skips that collective,
         for a caller that already guarantees all three; every process must pass the same ``check``.
+        The aliases between buffers, and which local copies are dropped because their source and target
+        are the same memory, were decided at prepare too, so ``check=False`` cannot see that a moved
+        buffer changed them.
         """
         if check:
             self._check(requests)
@@ -939,7 +942,7 @@ def _buffer_layout(requests: Sequence[TransferRequest]) -> Tuple:
             for location in sorted(buffers):
                 buffer = buffers[location]
                 layout.append((request.key, request.plan, side, location, buffer.data_ptr(), tuple(buffer.shape),
-                               buffer.stride(), buffer.dtype, buffer.device))
+                               buffer.stride(), buffer.dtype, buffer.device, buffer.is_conj(), buffer.is_neg()))
     return tuple(layout)
 
 

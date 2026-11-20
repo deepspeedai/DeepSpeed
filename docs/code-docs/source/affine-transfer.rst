@@ -60,7 +60,11 @@ allocated, so buffers must stay where they are and every process must run the
 handle the same number of times. By default ``run`` checks both before any data
 moves, with one small all-gather: if a buffer moved or changed shape on any
 process, or the processes are not running the same handle for the same time,
-every process raises and the batch has to be prepared again.
+every process raises and the batch has to be prepared again. Aliases between
+buffers are decided at prepare as well, including which local copies are dropped
+because source and target are the same memory, as a relay band held as a view
+of its own destination is; a moved buffer is refused rather than run on that
+decision.
 
 ``run(requests)`` checks the requests it is given; ``run()`` checks the tensors
 the handle holds, which catches a buffer re-pointed in place (``.data = ...``)
