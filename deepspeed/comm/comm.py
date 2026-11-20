@@ -835,6 +835,22 @@ def enable_symm_mem_for_group(group_name: str):
         raise RuntimeError(f"Backend {cdb.name} does not support symmetric memory initialization")
 
 
+def symm_mem_rendezvous(numel: int, dtype, group=None):
+    global cdb
+    assert cdb is not None and cdb.is_initialized(
+    ), 'DeepSpeed backend not set, please initialize it using init_process_group()'
+    if not hasattr(cdb, 'symm_mem_rendezvous'):
+        raise RuntimeError(f"Backend {cdb.name} does not support symmetric memory")
+    return cdb.symm_mem_rendezvous(numel, dtype, group)
+
+
+def symm_mem_peer_tensor(handle, peer: int, numel: int, dtype):
+    global cdb
+    if not hasattr(cdb, 'symm_mem_peer_tensor'):
+        raise RuntimeError(f"Backend {cdb.name} does not support symmetric memory")
+    return cdb.symm_mem_peer_tensor(handle, peer, numel, dtype)
+
+
 # Main DeepSpeed Comms. public API.
 def init_distributed(dist_backend: Optional[str] = None,
                      auto_mpi_discovery: bool = True,
