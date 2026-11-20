@@ -2851,7 +2851,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                                          self.optimizer.param_groups[param_group_idx]['momentum'],
                                          ns_method=ns_method,
                                          is_expert_group=getattr(tensor, 'is_expert_group', False),
-                                         num_heads=getattr(tensor, 'muon_num_heads', None))
+                                         num_heads=getattr(tensor, 'muon_num_heads', None),
+                                         momentum_scale_ratio=self._muon_momentum_scale_ratio())
             tensor = grad_accum
             buffer_idx += tensor.numel()
             param_id = self.get_param_id(tensor_list[i])
@@ -2961,7 +2962,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                                          self.optimizer.param_groups[param_group_idx]['momentum'],
                                          ns_method=ns_method,
                                          is_expert_group=getattr(tensor, 'is_expert_group', False),
-                                         num_heads=getattr(tensor, 'muon_num_heads', None))
+                                         num_heads=getattr(tensor, 'muon_num_heads', None),
+                                         momentum_scale_ratio=self._muon_momentum_scale_ratio())
             tensor = grad_accum
             num_elements = tensor.numel()
             buffer_idx += num_elements
@@ -3112,7 +3114,6 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             staged = torch.empty_like(committed)
         self._muon_pending_momentum[param_group_idx] = (staged, flatten_copy)
         staged.copy_(committed)
-        self._rescale_muon_momentum(staged)
         return staged
 
     def _commit_muon_momentum(self, backward_scale):
