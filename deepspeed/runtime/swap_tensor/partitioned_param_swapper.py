@@ -71,7 +71,7 @@ class AsyncPartitionedParameterSwapper(object):
         self.partitioned_swap_buffer = None
         self.partitioned_swap_pool = None
 
-        self.invalid_buffer = torch.tensor(1).half()
+        self.invalid_buffer = torch.tensor(1, dtype=self.dtype)
 
         if dist.get_rank() == 0:
             exclude_list = ['aio_read_handle', 'aio_write_handle', 'buffers']

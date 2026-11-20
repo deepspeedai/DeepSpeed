@@ -51,6 +51,7 @@ from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 import torch
 from deepspeed.accelerator import get_accelerator
 
+from .affine_geometry import address_range, dot
 from .affine_transfer import TransferPlan, TransferSegment
 
 __all__ = [
@@ -137,16 +138,13 @@ def _chunks(segment: TransferSegment, max_elements: int):
     origins = [range(0, extent, step) for extent, step in zip(segment.shape, tile)]
     for origin in product(*origins):
         shape = tuple(min(step, extent - low) for step, extent, low in zip(tile, segment.shape, origin))
-        yield TransferSegment(
-            source_rank=segment.source_rank,
-            source_offset=segment.source_offset + sum(low * stride
-                                                      for low, stride in zip(origin, segment.source_strides)),
-            source_strides=segment.source_strides,
-            target_rank=segment.target_rank,
-            target_offset=segment.target_offset + sum(low * stride
-                                                      for low, stride in zip(origin, segment.target_strides)),
-            target_strides=segment.target_strides,
-            shape=shape)
+        yield TransferSegment(source_rank=segment.source_rank,
+                              source_offset=segment.source_offset + dot(origin, segment.source_strides),
+                              source_strides=segment.source_strides,
+                              target_rank=segment.target_rank,
+                              target_offset=segment.target_offset + dot(origin, segment.target_strides),
+                              target_strides=segment.target_strides,
+                              shape=shape)
 
 
 def build_operations(plan: TransferPlan, endpoints: TransferEndpoints, budget: StagingBudget,
@@ -236,7 +234,7 @@ def _validate_buffers(plan: TransferPlan, source_buffers: Mapping[int, torch.Ten
                 continue
             if location not in buffers:
                 raise AffineTransferExecutionError(f'{which} location {location} is owned here but holds no buffer')
-            reach = offset + sum((size - 1) * stride for size, stride in zip(segment.shape, strides))
+            _, reach = address_range(offset, segment.shape, strides)
             if reach >= buffers[location].numel():
                 raise AffineTransferExecutionError(
                     f'{which} of {segment!r} reaches element {reach} of a {buffers[location].numel()}-element buffer')

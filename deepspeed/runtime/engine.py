@@ -2927,6 +2927,9 @@ class DeepSpeedEngine(Module):
         if self.mpu is not None:
             data_parallel_world_size = self.mpu.get_data_parallel_world_size()
             data_parallel_rank = self.mpu.get_data_parallel_rank()
+        elif self.mesh_device is not None:
+            # The ranks of a sequence parallel group must load the same samples.
+            data_parallel_rank = dist.get_rank(group=self.mesh_device.get_group(mesh_dim="data_parallel"))
 
         if data_sampler is None and (route == ROUTE_PREDICT or route == ROUTE_EVAL):
             data_sampler = torch.utils.data.DistributedSampler(
@@ -5869,6 +5872,13 @@ class DeepSpeedEngine(Module):
             logger.info(
                 f"Currently AutoSP does not compose with ZeRO stage 2 and 3. Falling back to the torch compiler.")
             return None
+
+        autosp_size = self._config._param_dict.get("sequence_parallel_size", 1)
+        if self.sequence_parallel_size != autosp_size:
+            raise ValueError(f"AutoSP shards the sequence over sequence_parallel_size={autosp_size} ranks, "
+                             f"but the engine reduces gradients over a sequence parallel group of "
+                             f"{self.sequence_parallel_size} ranks. Do not pass an mpu or a mesh_param whose "
+                             "sequence parallel dimension differs from sequence_parallel_size.")
 
         compile_config = self._config.compile_config
         compile_kwargs['fullgraph'] = True
