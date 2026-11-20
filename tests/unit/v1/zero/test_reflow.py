@@ -10,7 +10,6 @@ test runs the same model and batches through plain ZeRO-Offload as the oracle an
 import copy
 import os
 import threading
-import weakref
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import ExitStack
 from unittest.mock import Mock, patch
@@ -35,7 +34,6 @@ from deepspeed.runtime.reflow.reflow_cpu_lion import ReflowCPULion
 from deepspeed.runtime.reflow.reflow_stage3 import ReflowOptimizer_Stage3
 from deepspeed.runtime.reflow import reflow_utils
 from deepspeed.runtime.utils import combine_grad_norm_groups
-from deepspeed.runtime.zero.stage3 import DeepSpeedZeroOptimizer_Stage3
 from deepspeed.runtime.zero.muon.muon_optimizer import MuonWithAuxAdam
 from deepspeed.runtime.zero.utils import ZeRORuntimeException
 from deepspeed.utils import (safe_get_full_fp32_param, safe_get_full_optimizer_state, safe_get_local_grad,
@@ -1579,33 +1577,6 @@ class TestReflowLocalGradientInvalid(DistributedTest):
                 assert torch.equal(want, got)
 
 
-def test_reflow_releases_every_parent_gradient_dtype():
-    optimizer = object.__new__(ReflowOptimizer_Stage3)
-    optimizer.offload_optimizer_pin_memory = True
-    references = []
-    released = []
-
-    def create_parent_buffers(parent):
-        buffers = {dtype: torch.zeros(4, dtype=dtype) for dtype in (torch.float16, torch.float32)}
-        references.extend(weakref.ref(buffer) for buffer in buffers.values())
-        parent.grad_partitions_flat_buffers = buffers
-        parent.grad_partitions_flat_buffer = buffers[torch.float16]
-        parent._DeepSpeedZeroOptimizer_Stage3__param_id_to_grad_partition = {
-            i: buffer.narrow(0, 0, 2)
-            for i, buffer in enumerate(buffers.values())
-        }
-
-    accelerator = SimpleNamespace(unpin_memory=lambda buffer: released.append(id(buffer)))
-    with patch.object(DeepSpeedZeroOptimizer_Stage3, "_setup_for_real_optimizer", create_parent_buffers), \
-            patch("deepspeed.runtime.reflow.reflow_stage3.get_accelerator", return_value=accelerator):
-        optimizer._setup_for_real_optimizer()
-    assert len(released) == len(set(released)) == 2
-    assert all(reference() is None for reference in references)
-    assert not optimizer.grad_partitions_flat_buffers
-    assert optimizer.grad_partitions_flat_buffer is None
-    assert not optimizer._DeepSpeedZeroOptimizer_Stage3__param_id_to_grad_partition
-
-
 @pytest.mark.parametrize("nvme_parameter", [False, True])
 def test_reflow_overflow_keeps_nvme_restore_paths(nvme_parameter):
     # NVMe parameters must be re-swapped from the unchanged master; swapped optimizer
@@ -1625,45 +1596,112 @@ def test_reflow_overflow_keeps_nvme_restore_paths(nvme_parameter):
     optimizer._unflatten_partitioned_parameters.assert_not_called()
 
 
+def delay_reflow_gradient_copies(engine, cycles=200_000_000):
+    copy_tensor = torch.Tensor.copy_
+
+    def delayed_offload_copy(dst, src, *args, **kwargs):
+        if (dst.device.type == "cpu" and isinstance(src, torch.Tensor) and src.device == engine.device
+                and get_accelerator().current_stream() == engine.optimizer.copy_grad_stream):
+            # Delay the actual DMA, including a boundary copy submitted after the GPU accumulation event.
+            torch.cuda._sleep(cycles)  #ignore-cuda
+        return copy_tensor(dst, src, *args, **kwargs)
+
+    return patch.object(torch.Tensor, "copy_", delayed_offload_copy)
+
+
 @needs_gpu_accelerator
-class TestReflowReleasesParentGradientBuffers(DistributedTest):
+class TestReflowGradientStorage(DistributedTest):
     world_size = 1
 
     @pytest.mark.parametrize("pin_memory", [False, True])
-    def test_releases_all_parent_gradient_buffers(self, pin_memory):
+    def test_no_discarded_model_sized_gradient(self, pin_memory):
         skip_if_reflow_training_unsupported()
-        original_setup = DeepSpeedZeroOptimizer_Stage3._setup_for_real_optimizer
-        accelerator = get_accelerator()
-        original_unpin = accelerator.unpin_memory
-        parent_buffers = []
-        unpinned = []
-
-        def capture_parent_buffers(optimizer):
-            original_setup(optimizer)
-            parent_buffers.extend(weakref.ref(buffer) for buffer in optimizer.grad_partitions_flat_buffers.values())
-
-        def record_unpin(buffer):
-            if any(reference() is buffer for reference in parent_buffers):
-                unpinned.append(id(buffer))
-            return original_unpin(buffer)
-
+        model = SimpleModel(hidden_dim=16, nlayers=2)
+        numel = sum(param.numel() for param in model.parameters())
         config = get_variant_config(reflow=True, variant="adam")
         config["zero_optimization"]["offload_optimizer"]["pin_memory"] = pin_memory
-        model = SimpleModel(hidden_dim=16, nlayers=2)
-        with patch.object(DeepSpeedZeroOptimizer_Stage3, "_setup_for_real_optimizer", capture_parent_buffers), \
-                patch.object(accelerator, "unpin_memory", record_unpin):
+        config["zero_optimization"]["sub_group_size"] = 128
+
+        # The parent's per-dtype zero allocation used to live only until the subclass returned from setup.
+        # A whole-model allocation is fine if the optimizer actually uses that storage for its gradient slots.
+        flat_allocations = set()
+        zeros = torch.zeros
+
+        def track_zeros(*args, **kwargs):
+            tensor = zeros(*args, **kwargs)
+            if tensor.device.type == "cpu" and tensor.dtype == torch.bfloat16 and tensor.numel() == numel:
+                flat_allocations.add(tensor.untyped_storage().data_ptr())
+            return tensor
+
+        with patch.object(torch, "zeros", track_zeros):
             engine, optimizer, _, _ = deepspeed.initialize(model=model,
                                                            model_parameters=model.parameters(),
                                                            config=config)
-            try:
-                assert parent_buffers
-                assert all(reference() is None for reference in parent_buffers)
-                assert not optimizer.grad_partitions_flat_buffers
-                assert optimizer.grad_partitions_flat_buffer is None
-            finally:
+        try:
+            slots = [t for group in optimizer._cpu_grad_double_buffers for t in group]
+            assert all(get_accelerator().is_pinned(t) == pin_memory for t in slots)
+            assert flat_allocations.issubset({t.untyped_storage().data_ptr() for t in slots})
+        finally:
+            engine.destroy()
+
+    def test_destroy_finishes_gradient_copy_before_unpinning(self):
+        skip_if_reflow_training_unsupported()
+        accelerator = get_accelerator()
+        if accelerator.device_name() != "cuda":
+            pytest.skip("Requires a CUDA copy stream for the delayed DMA")
+        model = torch.nn.Linear(32, 1, bias=False)
+        config = get_variant_config(True, "adam")
+        config["gradient_accumulation_steps"] = 2
+        config["zero_optimization"]["reduce_bucket_size"] = 32
+        engine, optimizer, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config)
+        copies_done = accelerator.Event()
+        slots = {buf.data_ptr() for group in optimizer._cpu_grad_double_buffers for buf in group}
+        unpin = accelerator.unpin_memory
+        completed_at_release = []
+
+        def check_release(buffer):
+            if buffer.data_ptr() in slots:
+                completed_at_release.append(copies_done.query())
+                # Keep the native allocator safe even when testing a regressed release order.
+                copies_done.synchronize()
+            return unpin(buffer)
+
+        try:
+            loss = engine(torch.ones((1, 32), device=engine.device, dtype=torch.bfloat16)).float().sum()
+            with delay_reflow_gradient_copies(engine, cycles=600_000_000):
+                engine.backward(loss)
+        finally:
+            copies_done.record(optimizer.copy_grad_stream)
+            with patch.object(accelerator, "unpin_memory", check_release):
                 engine.destroy()
-        assert len(unpinned) == (len(parent_buffers) if pin_memory else 0)
-        assert len(set(unpinned)) == len(unpinned)
+        assert completed_at_release and all(completed_at_release)
+
+    @pytest.mark.parametrize("contiguous_gradients", [True, False])
+    def test_pinned_restore_bounds_device_scratch(self, contiguous_gradients):
+        skip_if_reflow_training_unsupported()
+        torch.manual_seed(8719)
+        model = torch.nn.Linear(1025, 1024, bias=False)
+        config = get_variant_config(True, "adam")
+        config["zero_optimization"].update(contiguous_gradients=contiguous_gradients, reduce_bucket_size=(1 << 20) + 1)
+        config["zero_optimization"]["reflow"]["h2d_chunk_size_mib"] = 1
+        engine, optimizer, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config)
+        try:
+            master = optimizer.fp32_partitioned_groups_flat[0].detach()
+            dst = optimizer.fp16_partitioned_groups_flat[0]
+            expected = master.to(dst.device).to(dst.dtype)
+            dst.zero_()
+            accelerator = get_accelerator()
+            accelerator.synchronize()
+            accelerator.reset_peak_memory_stats()
+            baseline = accelerator.memory_allocated()
+            # Isolate the restore from the rest of a skipped step. A subgroup is larger than the
+            # configured transfer size and its final chunk is short.
+            optimizer._restore_fp16_params_from_master(0)
+            peak = accelerator.max_memory_allocated() - baseline
+            assert torch.equal(dst, expected)
+            assert peak <= (0 if contiguous_gradients else 1 << 20)
+        finally:
+            engine.destroy()
 
 
 @needs_gpu_accelerator
@@ -2041,6 +2079,66 @@ class TestReflowAccumulationBufferReuse(DistributedTest):
 
 class TestReflowAccumulationBufferReuseDistributed(TestReflowAccumulationBufferReuse):
     world_size = 2
+
+
+@needs_gpu_accelerator
+class TestReflowReductionBucketReuse(DistributedTest):
+    world_size = [1, 2]
+
+    @pytest.mark.parametrize("precision, reduce_scatter, accumulation_steps, mixed_sizes", [("bf16", True, 1, False),
+                                                                                            ("fp16", True, 4, False),
+                                                                                            ("bf16", False, 1, False),
+                                                                                            ("bf16", True, 4, True)])
+    def test_slow_gradient_copy_keeps_its_source(self, precision, reduce_scatter, accumulation_steps, mixed_sizes):
+        skip_if_reflow_training_unsupported()
+        if get_accelerator().device_name() != "cuda":
+            pytest.skip("Requires a CUDA copy stream for the delayed DMA")
+        width = 32768
+        # Backward reduces the two small weights before the large one rewrites the bucket, including its tail.
+        widths = [8 * width, width, width] if mixed_sizes else [width] * 4
+
+        class WeightedSum(torch.nn.ModuleList):
+
+            def forward(self, inputs):
+                return sum(layer(inputs[:, :layer.in_features]).float().sum() * 2**i for i, layer in enumerate(self))
+
+        torch.manual_seed(8719)
+        model = WeightedSum([torch.nn.Linear(n, 1, bias=False) for n in widths])
+        config = get_variant_config(True, "adam")
+        config["gradient_accumulation_steps"] = accumulation_steps
+        config["optimizer"]["params"]["betas"] = [0.5, 0.75]
+        config["zero_optimization"].update(contiguous_gradients=True,
+                                           reduce_scatter=reduce_scatter,
+                                           overlap_comm=True,
+                                           reduce_bucket_size=8 * width if mixed_sizes else width)
+        config["zero_optimization"]["offload_optimizer"]["pin_memory"] = True
+        if precision == "fp16":
+            config.pop("bf16")
+            config["fp16"] = {"enabled": True, "loss_scale": 1}
+        dtype = torch.float16 if precision == "fp16" else torch.bfloat16
+        engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config)
+        try:
+            inputs = torch.ones((1, max(widths)), dtype=dtype, device=engine.device)
+            for step in range(2):
+                for micro_step in range(accumulation_steps):
+                    loss = engine(inputs)
+                    if step == 1 and micro_step in (0, accumulation_steps - 1):
+                        with delay_reflow_gradient_copies(engine):
+                            engine.backward(loss)
+                    else:
+                        engine.backward(loss)
+                    if step == 1 and micro_step == accumulation_steps - 1:
+                        for i, param in enumerate(model.parameters()):
+                            grad = safe_get_local_grad(param)
+                            assert torch.equal(grad, torch.full_like(grad, 2**i))
+                    engine.step()
+            expected_norm = sum(n * 4**i for i, n in enumerate(widths))**0.5
+            assert float(engine.get_global_grad_norm()) == pytest.approx(expected_norm, rel=1e-7)
+            for i, param in enumerate(model.parameters()):
+                moment = safe_get_full_optimizer_state(param, "exp_avg")
+                assert torch.equal(moment, torch.full_like(moment, 0.75 * 2**i))
+        finally:
+            engine.destroy()
 
 
 class ConditionalGradientModel(torch.nn.Module):

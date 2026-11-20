@@ -3,7 +3,6 @@
 
 # DeepSpeed Team
 
-import gc
 import os
 import threading
 from concurrent.futures import CancelledError, Future, ThreadPoolExecutor, as_completed
@@ -23,12 +22,13 @@ from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum, OffloadStat
 from deepspeed.runtime.zero.partition_parameters import Parameter, Tensor
 from deepspeed.runtime.zero.partitioned_param_coordinator import iter_params
 from deepspeed.runtime.zero.stage3 import DeepSpeedZeroOptimizer_Stage3, INIT_OPTIMIZER_TIMER
+from deepspeed.runtime.zero.utils import get_norm_dtype
 from deepspeed.runtime.utils import (combine_grad_norm_groups, has_inf_or_nan, is_invalid_grad_norm,
                                      mask_nan_or_inf_with_val_inplace)
 from deepspeed.utils import logger, z3_leaf_module
 from deepspeed.utils.nvtx import instrument_w_nvtx
 
-_REFLOW_FLAT_GRAD_FREED_MSG = ("Reflow frees the flat grad buffer; {api} is not supported under reflow.")
+_REFLOW_FLAT_GRAD_MSG = "Reflow uses its own gradient buffers; {api} is not supported under reflow."
 _DEFAULT_BUCKETWISE_SHARD_ELEMS = 50000000
 # A power of two, so every full slice is a whole number of SIMD blocks and the kernel's scalar tail is the same
 # elements as in an unsliced call; the sliced commit stays bit-exact.
@@ -64,8 +64,7 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
                              "are not supported.")
         self._reflow_config = reflow_config
         # These attributes must exist before super().__init__ runs: the parent constructor
-        # calls _setup_for_real_optimizer / initialize_optimizer_states, which are overridden
-        # here and read these fields.
+        # calls initialize_optimizer_states, which sizes the Reflow gradient slots.
         self._cpu_grad_double_buffers = []
         self._active_grad_buffer_idx = 0
         self._pending_grad_ready = False
@@ -74,6 +73,7 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
         self._reflow_gradient_partitions = None
         self._reflow_checkpoint_visits = {}
         self._reflow_modified_gradient_ids = set()
+        self._ipg_read_events = {}
         self._last_state_update_future = None
         self._pending_state_updates_by_subgroup = {}
         self._state_commit_overlaps_forward = False
@@ -385,29 +385,35 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
                     executor.shutdown(wait=True)
                 except Exception:
                     pass
-        # A finished or cancelled Ready may still have DMA reading its pinned output.
-        h2d_stream = getattr(self, "_bucketwise_h2d_stream", None)
-        if h2d_stream is not None:
-            h2d_stream.synchronize()
-        # The base _unpin_offload_buffers does not know Reflow's half-precision grad buffers; under the native
-        # pinning backend they would otherwise stay page-locked after destroy. Safe now that no worker uses them.
-        # The native unpin frees the memory, so drop the references too.
-        for grad_buffers in getattr(self, "_cpu_grad_double_buffers", None) or []:
-            for grad_buffer in grad_buffers or []:
-                if grad_buffer is not None and grad_buffer.device.type == 'cpu':
-                    get_accelerator().unpin_memory(grad_buffer)
-        self._cpu_grad_double_buffers = []
         original_forward = getattr(self, "_reflow_original_pre_sub_module_forward", None)
         if original_forward is not None:
             self.parameter_offload.pre_sub_module_forward_function = original_forward
             self._reflow_original_pre_sub_module_forward = None
+        # ZeRO clears its bucket mapping before its existing device synchronization. Keep the borrowed
+        # storage alive through that synchronization, including copies unassociated with a worker future.
+        ipg_buckets = self.ipg_buckets.copy()
         try:
             super().destroy()
+            self._ipg_read_events.clear()
+        except BaseException:
+            # Synchronization may have failed after ZeRO cleared the mapping. Retain ownership for a retry.
+            self.ipg_buckets.update(ipg_buckets)
+            raise
         finally:
             if self._main_thread_affinity is not None:
                 thread_id, cpus = self._main_thread_affinity
                 self._main_thread_affinity = None
                 os.sched_setaffinity(thread_id, cpus)
+
+    def _unpin_offload_buffers(self):
+        # The parent finishes device copies before calling this hook, including D2H for a first micro-step
+        # with no accumulation worker and H2D from a cancelled Ready. Native unpin frees the underlying memory.
+        for group in self._cpu_grad_double_buffers:
+            for buffer in group or ():
+                if buffer is not None and buffer.device.type == 'cpu':
+                    get_accelerator().unpin_memory(buffer)
+        self._cpu_grad_double_buffers = []
+        super()._unpin_offload_buffers()
 
     # ------------------------------------------------------------------ #
     # offload / partition setup
@@ -422,32 +428,20 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
         self.main_thread_cores = self._reflow_config.main_thread_cores
         self.state_update_cores = self._reflow_config.state_update_cores
 
+    def _create_fp32_partitions(self):
+        super()._create_fp32_partitions(create_offloaded_master=self._create_offloaded_master)
+
+    def _create_offloaded_master(self, partition, device):
+        dtype = self.master_weights_and_grads_dtype
+        if self.offload_optimizer_pin_memory and device == 'cpu':
+            master = get_accelerator().pin_empty_like(partition, dtype=dtype)
+            master.copy_(partition.detach())
+            return master
+        return partition.detach().to(device=device, dtype=dtype, copy=True)
+
     def _setup_for_real_optimizer(self):
-        # cpu_bucketwise stores gradients exclusively in _cpu_grad_double_buffers, so the
-        # large flat grad buffer (grad_partitions_flat_buffer) is wasted memory here. The
-        # parent setup unconditionally allocates it, so free it (and its pinned backing) to
-        # reclaim ~2 bytes/param of CPU memory in the bucketwise case.
-        super()._setup_for_real_optimizer()
-        grad_buffers = self.grad_partitions_flat_buffers
-        self.grad_partitions_flat_buffers = {}
-        self.grad_partitions_flat_buffer = None
-        # Clear the name-mangled __param_id_to_grad_partition dict so the narrow() views into
-        # the buffer freed above are dropped and its storage can actually be reclaimed.
-        self._DeepSpeedZeroOptimizer_Stage3__param_id_to_grad_partition = {}
-        # Native pinning requires an explicit release; remove the parent's references first so
-        # its destroy path cannot release these allocations a second time.
-        while grad_buffers:
-            _, grad_buffer = grad_buffers.popitem()
-            if self.offload_optimizer_pin_memory:
-                get_accelerator().unpin_memory(grad_buffer)
-            del grad_buffer
-        # When the parent pins these buffers, dropping the references above only returns
-        # the block to torch's pinned-host caching allocator, which keeps the physical memory resident
-        # (the one large block is never reused by the smaller per-subgroup bucketwise buffers). Empty
-        # the host cache so the ~2 bytes/param of pinned memory is actually returned to the OS.
-        gc.collect()
-        if hasattr(torch._C, "_host_emptyCache"):
-            torch._C._host_emptyCache()
+        # initialize_optimizer_states already creates the CPU slots used for accumulation and Ready output.
+        super()._setup_for_real_optimizer(allocate_grad_partitions=False)
 
     def _pin_current_thread(self, cpu_affinity_mask):
         if cpu_affinity_mask is None:
@@ -651,6 +645,31 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
     # ------------------------------------------------------------------ #
     # gradient partitioning
     # ------------------------------------------------------------------ #
+    def _add_grad_to_ipg_bucket(self, param):
+        # Only a write into this bucket can overwrite a still-pending copy. Oversized gradients bypass it.
+        if self._ipg_read_events:
+            dtype = self.get_param_comm_dtype(param)
+            event = self._ipg_read_events.get(dtype)
+            if event is not None:
+                bucket = self.ipg_buckets[dtype]
+                if bucket.elements + param.grad.numel() <= self._ipg_bucket_capacity(bucket):
+                    self.reduce_and_partition_stream.wait_event(event)
+                    del self._ipg_read_events[dtype]
+        super()._add_grad_to_ipg_bucket(param)
+
+    @staticmethod
+    def _unused_ipg_buffer(bucket, dtype):
+        buffer = bucket.buffer
+        if buffer is None:
+            return None
+        # Keep scratch outside all live gradient views and aligned for vectorized reductions.
+        start = (bucket.elements * buffer.element_size() + 255) // 256 * 256
+        element_size = torch.finfo(dtype).bits // 8
+        end = buffer.numel() * buffer.element_size() // element_size * element_size
+        if start >= end:
+            return None
+        return buffer.view(torch.uint8)[start:end].view(dtype)
+
     @instrument_w_nvtx
     def partition_grads(self, params_to_release: List[Parameter], grad_partitions: List[Tensor]) -> None:
         buffers = []
@@ -662,6 +681,18 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
         stream_needs_sync = copy_grad_stream != current_stream
         is_sync_device = get_accelerator().is_synchronized_device()
         accumulate_submit = getattr(self, "_bucketwise_update_submit", None)
+        if not params_to_release:
+            return buffers
+        comm_dtype = self.get_param_comm_dtype(params_to_release[0])
+        bucket = self.ipg_buckets[comm_dtype]
+        norm_staging = self._unused_ipg_buffer(bucket, get_norm_dtype()) if is_boundary else None
+        accum_staging = None
+        ipg_storage = None
+        if stream_needs_sync and bucket.buffer is not None:
+            ipg_storage = bucket.buffer.untyped_storage().data_ptr()
+        wait_for_reduction = stream_needs_sync
+        checkpoint_grads = bool(self._reflow_checkpoint_visits)
+        check_source = stream_needs_sync and (ipg_storage is not None or checkpoint_grads)
         # This output slot is separate from the GPU weights read by checkpoint recomputation.
         stage_checkpoints = self.clip_grad <= 0. and not self.dynamic_loss_scale and not self.offload_param
 
@@ -710,9 +741,18 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
                 converted_grad = grad_partition.to(self.gradient_accumulation_dtype)
             else:
                 converted_grad = grad_partition
-            if self._reflow_checkpoint_visits and stream_needs_sync:
-                # Reentrant reductions can reuse their GPU source before the async copy finishes.
-                converted_grad = converted_grad.clone()
+            reads_ipg = False
+            if check_source and converted_grad is grad_partition:
+                storage = converted_grad.untyped_storage().data_ptr()
+                reads_ipg = storage == ipg_storage
+                if (checkpoint_grads and not reads_ipg and param.grad is not None
+                        and storage == param.grad.untyped_storage().data_ptr()):
+                    # Autograd can reuse an unbucketed checkpoint gradient during recomputation.
+                    converted_grad = converted_grad.clone()
+            # One handoff covers the reduced bucket. Only a new producer-side cast or clone needs another.
+            if wait_for_reduction or (stream_needs_sync and converted_grad is not grad_partition):
+                copy_grad_stream.wait_stream(current_stream)
+                wait_for_reduction = False
             if self.dtype == torch.float16:
                 self.inf_or_nan_tracker.logical_or_(has_inf_or_nan(converted_grad))
 
@@ -730,13 +770,13 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
                 pending_buffer = self._get_cpu_grad_buffer(sub_group_id, pending=True)
                 pending_slice = pending_buffer.narrow(0, dest_offset, grad_numel)
 
-                if stream_needs_sync:
-                    copy_grad_stream.wait_stream(current_stream)
                 with get_accelerator().stream(copy_grad_stream):
                     pending_slice.copy_(converted_grad.view(pending_slice.shape), non_blocking=True)
-                    if enqueue_ready:
+                    if enqueue_ready or reads_ipg:
                         copy_event = get_accelerator().Event()
                         copy_event.record(copy_grad_stream)
+                        if reads_ipg:
+                            self._ipg_read_events[comm_dtype] = copy_event
                 # No gradient accumulation: this micro-step is also the boundary, so use the GPU
                 # grad tensor directly for the norm/enqueue below.
                 if is_boundary:
@@ -746,24 +786,35 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
                 if is_boundary:
                     pending_buffer = self._get_cpu_grad_buffer(sub_group_id, pending=True)
                     dst_slice = pending_buffer.narrow(0, dest_offset, grad_numel)
-                    if stream_needs_sync:
-                        copy_grad_stream.wait_stream(current_stream)
+                    if accum_staging is None and norm_staging is not None:
+                        # Norms on the reduction stream reuse the prefix. Give each simultaneous copy-stream
+                        # accumulation its own slice beyond the largest norm, so neither stream waits for reuse.
+                        largest_partition = max(part.numel() for part in grad_partitions)
+                        accum_staging = norm_staging[largest_partition:].view(converted_grad.dtype)
+                        norm_staging = norm_staging[:largest_partition]
+                    use_bucket_staging = accum_staging is not None and grad_numel <= accum_staging.numel()
+                    # The norm only needs the sum. The next bucket write must also wait for its D2H copy.
+                    staging_read_needs_event = use_bucket_staging and stream_needs_sync
                     with get_accelerator().stream(copy_grad_stream):
-                        accum_gpu = dst_slice.to(converted_grad.device, non_blocking=True)
+                        if use_bucket_staging:
+                            accum_gpu = accum_staging[:grad_numel]
+                            accum_staging = accum_staging[grad_numel:]
+                            accum_gpu.copy_(dst_slice, non_blocking=True)
+                        else:
+                            accum_gpu = dst_slice.to(converted_grad.device, non_blocking=True)
                         accum_gpu.add_(converted_grad.view(accum_gpu.shape))
                         if stream_needs_sync:
                             accum_event = get_accelerator().Event()
                             accum_event.record(copy_grad_stream)
                         dst_slice.copy_(accum_gpu, non_blocking=True)
-                        if enqueue_ready:
+                        if enqueue_ready or staging_read_needs_event:
                             copy_event = get_accelerator().Event()
                             copy_event.record(copy_grad_stream)
+                            if staging_read_needs_event:
+                                self._ipg_read_events[comm_dtype] = copy_event
                     if stream_needs_sync:
                         current_stream.wait_event(accum_event)
-                        # accum_gpu is allocated on copy_grad_stream but read by the grad-norm on
-                        # current_stream below; the wait_event orders that read but does not keep the
-                        # block alive, so record it against current_stream too or the allocator can
-                        # recycle it (into copy_grad_stream's free list) before the norm read runs.
+                        # A temporary allocated on the copy stream must also stay live through the norm read.
                         accum_gpu.record_stream(current_stream)
                     grad_buffer = accum_gpu
                     grad_numel = grad_buffer.numel()
@@ -777,12 +828,12 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
                     src_slice = active_buffer.narrow(0, dest_offset, grad_numel)
                     pending_buffer = self._get_cpu_grad_buffer(sub_group_id, pending=True)
                     dst_slice = pending_buffer.narrow(0, dest_offset, grad_numel)
-                    if stream_needs_sync:
-                        copy_grad_stream.wait_stream(current_stream)
                     with get_accelerator().stream(copy_grad_stream):
                         src_slice.copy_(converted_grad.view(src_slice.shape), non_blocking=True)
                     copy_event = get_accelerator().Event()
                     copy_event.record(copy_grad_stream)
+                    if reads_ipg:
+                        self._ipg_read_events[comm_dtype] = copy_event
                     if accumulate_submit is not None:
                         # Capture values eagerly via default args (avoid late-binding closure bug).
                         def _accumulate_worker(_copy_event=copy_event, _dst_slice=dst_slice, _src_slice=src_slice):
@@ -805,6 +856,11 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
                 if enqueue_ready:
                     self._bucketwise_schedule_enqueue_range(sub_group_id, dest_offset, grad_numel, copy_event,
                                                             stage_checkpoint)
+                if norm_staging is not None and grad_numel <= norm_staging.numel():
+                    # The copy and the norm both run on the bucket's producer stream before its next write.
+                    norm_input = norm_staging[:grad_numel]
+                    norm_input.copy_(grad_buffer.view(-1))
+                    grad_buffer = norm_input
                 self.norm_for_param_grads[param_id] = self._constant_buffered_norm2(grad_buffer)
 
             if not is_sync_device:
@@ -1725,6 +1781,44 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
     # ------------------------------------------------------------------ #
     # overflow
     # ------------------------------------------------------------------ #
+    def _copy_pinned_master_to_device(self, dst, src):
+        if src.numel() == 0:
+            return super()._copy_pinned_master_to_device(dst, src)
+        chunk_elems = min(src.numel(), (self._reflow_config.h2d_chunk_size_mib << 20) // src.element_size())
+        for comm_dtype, bucket in self.ipg_buckets.items():
+            if bucket.elements:
+                continue
+            staging = self._unused_ipg_buffer(bucket, src.dtype)
+            if staging is None or staging.device != dst.device or staging.numel() < chunk_elems:
+                continue
+            # A logically empty bucket can still have a reduction or a D2H read in flight.
+            stream = get_accelerator().current_stream()
+            if self.reduce_and_partition_stream is not None and self.reduce_and_partition_stream != stream:
+                stream.wait_stream(self.reduce_and_partition_stream)
+            event = self._ipg_read_events.get(comm_dtype)
+            if event is not None:
+                stream.wait_event(event)
+                del self._ipg_read_events[comm_dtype]
+            break
+        else:
+            if src.numel() == chunk_elems:
+                return super()._copy_pinned_master_to_device(dst, src)
+            staging = dst.new_empty((chunk_elems, ), dtype=src.dtype)
+
+        copies_done = get_accelerator().Event()
+        try:
+            for offset in range(0, src.numel(), chunk_elems):
+                count = min(chunk_elems, src.numel() - offset)
+                chunk = staging[:count]
+                chunk.copy_(src.narrow(0, offset, count), non_blocking=True)
+                dst.narrow(0, offset, count).copy_(chunk)
+            copies_done.record()
+        except BaseException:
+            # A later chunk may fail after an earlier copy started using the borrowed storage.
+            get_accelerator().current_stream().synchronize()
+            raise
+        copies_done.synchronize()
+
     def _restore_fp16_params_from_master(self, sub_group_id):
         """Undo a discarded (overflow) step: re-cast the FP32 master weights to FP16/BF16 and
         scatter them back onto the GPU params, overwriting any FP16 preview the bucketwise workers
@@ -1753,10 +1847,10 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
     # ------------------------------------------------------------------ #
 
     def get_fp32_grad_for_param(self, param) -> Tensor:
-        raise NotImplementedError(_REFLOW_FLAT_GRAD_FREED_MSG.format(api="get_fp32_grad_for_param"))
+        raise NotImplementedError(_REFLOW_FLAT_GRAD_MSG.format(api="get_fp32_grad_for_param"))
 
     def set_fp32_grad_for_param(self, value, param):
-        raise NotImplementedError(_REFLOW_FLAT_GRAD_FREED_MSG.format(api="set_fp32_grad_for_param"))
+        raise NotImplementedError(_REFLOW_FLAT_GRAD_MSG.format(api="set_fp32_grad_for_param"))
 
     def _pending_gradient_partition(self, param_id):
         subgroup, offset, length = self.grad_position[param_id]
@@ -1894,14 +1988,14 @@ class ReflowOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
                 raise error
 
     def get_fp32_grad_partitions(self):
-        raise NotImplementedError(_REFLOW_FLAT_GRAD_FREED_MSG.format(api="get_fp32_grad_partitions"))
+        raise NotImplementedError(_REFLOW_FLAT_GRAD_MSG.format(api="get_fp32_grad_partitions"))
 
     def offload_states(self,
                        include: Container[OffloadStateTypeEnum] = None,
                        device: OffloadDeviceEnum = OffloadDeviceEnum.cpu,
                        pin_memory: bool = True,
                        non_blocking: bool = False):
-        raise NotImplementedError(_REFLOW_FLAT_GRAD_FREED_MSG.format(api="offload_states"))
+        raise NotImplementedError(_REFLOW_FLAT_GRAD_MSG.format(api="offload_states"))
 
     def finalize_gradient_accumulation_boundary(self):
         # Unmanaged gradient accumulation marks the boundary only after backward, but Reflow submits its CPU

@@ -1923,6 +1923,18 @@ class TestZeroOffloadOptim(DistributedTest):
             model, _, _, _ = deepspeed.initialize(model=model, optimizer=optimizer, config=config_dict)
 
 
+def test_zero3_failed_master_copy_preserves_original_error(monkeypatch):
+    from deepspeed.runtime.zero.stage3 import DeepSpeedZeroOptimizer_Stage3
+
+    # Under memory pressure, creating a completion event can itself fail and hide the original copy error.
+    def unavailable_event(self):
+        raise MemoryError("cannot allocate completion event")
+
+    monkeypatch.setattr(type(get_accelerator()), "Event", unavailable_event)
+    with pytest.raises(RuntimeError):
+        DeepSpeedZeroOptimizer_Stage3._copy_pinned_master_to_device(None, torch.empty(2), torch.ones(3))
+
+
 @pytest.mark.skipif(not get_accelerator().is_bf16_supported(), reason="bf16 is not supported on this accelerator")
 @pytest.mark.parametrize("ratio", [1.0, 0.5])
 class TestZero3OffloadPinnedCopyBack(DistributedTest):
