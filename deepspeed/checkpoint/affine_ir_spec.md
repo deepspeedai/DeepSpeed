@@ -672,10 +672,26 @@ against an N-D one of the same parameter. Matching rank namespaces is the caller
 interval of its flattened buffer, which is generally not one box of the N-D parameter: it is
 a partial row, then whole rows, then a partial row, recursively over the axes, so at most
 `2 * ndim - 1` boxes. Each box is dense in the buffer (its storage strides are its own
-row-major strides). `plan_transfer` accepts such a piece in a 1-D shard and treats its
-storage as the interval `[dest_offset, dest_offset + numel)`; any other shard must have the
-logical parameter's rank. Describing the flattened parameter instead would cut a column of a
+row-major strides). Describing the flattened parameter instead would cut a column of a
 row-major weight, such as a row-parallel shard, into one piece per row.
+
+`plan_transfer` accepts a multi-axis piece in a 1-D shard in two forms; any other shard must
+have the logical parameter's rank.
+- *Dense*: the storage strides are the box's own row-major strides, as above. Its storage is
+  the interval `[dest_offset, dest_offset + numel)`, and the shard is tiled when these
+  intervals are disjoint and their lengths sum to the shard's size.
+- *In parameter order*: the storage strides are the logical parameter's row-major strides, so
+  the element at row-major index `i` of the parameter sits at address `i + s`, where the shift
+  `s` is `dest_offset` minus the row-major index of the box's origin. A box narrower than the
+  rows a flat shard stores, such as a column block of a ZeRO-3 partition of the whole
+  parameter, is stored this way, and the address ranges of such boxes interleave. With one
+  shift for the whole shard, `i -> i + s` is injective, so the shard is tiled when the boxes
+  are disjoint in the parameter, every address lies in the shard and the volumes sum to its
+  size.
+
+If any piece of a shard is in parameter order, every piece of that shard must be at the
+parameter's strides with the same shift (a box of whole rows is both dense and in parameter
+order); a shard that mixes the forms, or holds several shifts, is refused.
 
 **10.3 Derivation.** A storage map is derived, never hand-built:
 `storage = nest_affine_maps(layout, {layout rank: inner})`, where `inner` describes how one
@@ -685,7 +701,11 @@ pieces that describe the same block on several layout ranks are one block whose 
 the union of every rank's holders, and the block is cut wherever any of those holders'
 storage begins or ends; each resulting interval becomes the boxes of 10.2. A layout piece
 that is not dense within its layout shard, such as a block narrower than the shard's rows,
-cannot be merged across those rows and keeps one piece per row. Callers:
+cannot be merged across those rows and keeps one piece per row: nesting emits dense boxes
+only. The parameter-order form of 10.2 fits such a block only when the shard's flattening is
+a run of the parameter's own, that is, when the shard is the whole parameter or a split along
+its first axis; inside any other layout shard the row stride differs from the parameter's.
+Callers:
 - `zero_param_storage_affine_map` and `zero_optimizer_storage_affine_maps` describe a dense
   parameter (no layout, so they are already the storage map).
 - `autotp_storage_affine_maps(model)` nests each parameter's published AutoTP layout map

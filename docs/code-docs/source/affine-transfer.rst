@@ -26,6 +26,7 @@ from target locations::
 Use ``execute_transfers`` with uniquely keyed ``TransferRequest`` objects to pack
 multiple parameters into peer messages. Each process supplies only its own
 contiguous buffers; strided plan regions and buffer storage offsets are retained.
+Conjugate and negative views are refused; pass them resolved.
 All participants must agree on requests, endpoints, dtype and staging budget.
 Preflight refusal leaves targets untouched. Return guarantees target readiness;
 a transport failure after payload begins can leave partially written targets.
