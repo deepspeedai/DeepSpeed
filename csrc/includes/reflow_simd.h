@@ -8,33 +8,6 @@
 #if defined(__AVX512__)
 #define REFLOW_STREAM_PACKED(dst, value) _mm256_stream_si256(dst, value)
 #define REFLOW_PACK_FP16(value) _mm512_cvtps_ph(value, _MM_FROUND_TO_NEAREST_INT)
-// Reflow BF16 aliases (the stock AVX-512 BF16 conversion works as-is).
-#define SIMD_LOAD_BF16_REFLOW(x) load_16_bf16_as_f32(x)
-#define SIMD_STORE_BF16_REFLOW(x, d) store_16_f32_as_bf16_nearest(d, x)
-
-static inline __m256i reflow_pack_bf16(__m512 v)
-{
-    __m512i u32 = readAs<__m512i>(&v);
-
-    __m512i b = _mm512_srli_epi32(u32, 16);
-    __m512i lsb_mask = _mm512_set1_epi32(0x00000001);
-    __m512i c = _mm512_and_si512(b, lsb_mask);
-    __m512i bias_constant = _mm512_set1_epi32(0x00007fff);
-    __m512i rounding_bias = _mm512_add_epi32(c, bias_constant);
-
-    __m512i d = _mm512_add_epi32(u32, rounding_bias);
-    __m512i e = _mm512_srli_epi32(d, 16);
-    __m256i non_nan_res = _mm512_cvtusepi32_epi16(e);
-
-    __m512i mask_out_sign = _mm512_set1_epi32(0x7fffffff);
-    __m512i non_sign_bits = _mm512_and_si512(u32, mask_out_sign);
-    __m512i nan_threshold = _mm512_set1_epi32(0x7f800000);
-    __mmask16 nan_mask = _mm512_cmp_epi32_mask(non_sign_bits, nan_threshold, _MM_CMPINT_GT);
-
-    __m256i nans = _mm256_set1_epi16(0x7fc0);
-    return _mm256_mask_mov_epi16(non_nan_res, nan_mask, nans);
-}
-
 #elif defined(__AVX256__)
 #define REFLOW_STREAM_PACKED(dst, value) _mm_stream_si128(dst, value)
 #define REFLOW_PACK_FP16(value) _mm256_cvtps_ph(value, _MM_FROUND_TO_NEAREST_INT)
@@ -57,7 +30,7 @@ static inline __m128i reflow_pack_low16_x8(__m256i x)
     return _mm256_castsi256_si128(p);
 }
 
-static inline __m128i reflow_pack_bf16(__m256 v)
+static inline __m128i pack_f32_as_bf16_nearest(__m256 v)
 {
     __m256i u32 = readAs<__m256i>(&v);
     // round to nearest, ties to even: rounding_bias = ((u32 >> 16) & 1) + 0x7fff
@@ -73,9 +46,24 @@ static inline __m128i reflow_pack_bf16(__m256 v)
     return _mm_blendv_epi8(non_nan_res, _mm_set1_epi16((short)0x7fc0), nan_mask16);
 }
 
-// Reflow-specific AVX-256 BF16 support (the stock SIMD_*_BF16 above are AVX-512-only).
-#define SIMD_LOAD_BF16_REFLOW(x) reflow_load_8_bf16_as_f32(x)
-#define SIMD_STORE_BF16_REFLOW(x, d) writeAs(x, reflow_pack_bf16(d))
+// The stock AVX2 helpers support FP16 and FP32. ReFlow also transfers and accumulates BF16.
+template <int span>
+inline void reflow_simd_store(c10::BFloat16* dst, AVX_Data* src)
+{
+#pragma unroll
+    for (size_t i = 0; i < span; ++i) {
+        writeAs(dst + SIMD_WIDTH * i, pack_f32_as_bf16_nearest(src[i].data));
+    }
+}
+
+template <int span>
+inline void reflow_simd_load(AVX_Data* dst, c10::BFloat16* src)
+{
+#pragma unroll
+    for (size_t i = 0; i < span; ++i) {
+        dst[i].data = reflow_load_8_bf16_as_f32(src + SIMD_WIDTH * i);
+    }
+}
 #endif
 
 #if defined(__AVX512__) or defined(__AVX256__)
@@ -94,7 +82,7 @@ inline void reflow_simd_store_ready(T* dst, AVX_Data* src, bool stream_output)
     for (size_t i = 0; i < span; ++i) {
         INTV packed;
         if constexpr (std::is_same_v<T, c10::BFloat16>) {
-            packed = reflow_pack_bf16(src[i].data);
+            packed = pack_f32_as_bf16_nearest(src[i].data);
         } else {
             static_assert(std::is_same_v<T, c10::Half>);
             packed = REFLOW_PACK_FP16(src[i].data);
@@ -108,41 +96,14 @@ inline void reflow_simd_store_ready(T* dst, AVX_Data* src, bool stream_output)
     }
 }
 
-// Reflow load/store: BF16 uses the Reflow BF16 path (incl. AVX-256); other dtypes delegate
-// to the stock simd_load/simd_store so the standard DeepSpeedCPUAdam path is untouched.
 template <int span, typename T>
-inline typename std::enable_if_t<std::is_same_v<T, c10::BFloat16>, void> reflow_simd_store(
-    T* dst,
-    AVX_Data* src)
-{
-    size_t width = SIMD_WIDTH;
-#pragma unroll
-    for (size_t i = 0; i < span; ++i) {
-        SIMD_STORE_BF16_REFLOW((float*)(dst + width * i), src[i].data);
-    }
-}
-template <int span, typename T>
-inline typename std::enable_if_t<!std::is_same_v<T, c10::BFloat16>, void> reflow_simd_store(
-    T* dst,
-    AVX_Data* src)
+inline void reflow_simd_store(T* dst, AVX_Data* src)
 {
     simd_store<span>(dst, src);
 }
+
 template <int span, typename T>
-inline typename std::enable_if_t<std::is_same_v<T, c10::BFloat16>, void> reflow_simd_load(
-    AVX_Data* dst,
-    T* src)
-{
-    size_t width = SIMD_WIDTH;
-#pragma unroll
-    for (size_t i = 0; i < span; ++i) {
-        dst[i].data = SIMD_LOAD_BF16_REFLOW((float*)(src + width * i));
-    }
-}
-template <int span, typename T>
-inline typename std::enable_if_t<!std::is_same_v<T, c10::BFloat16>, void> reflow_simd_load(
-    AVX_Data* dst,
-    T* src)
+inline void reflow_simd_load(AVX_Data* dst, T* src)
 {
     simd_load<span>(dst, src);
 }

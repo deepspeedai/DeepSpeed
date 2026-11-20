@@ -2440,11 +2440,13 @@ class TestReflowNVMeConditionalGradients(DistributedTest):
     world_size = 1
 
     @pytest.mark.parametrize("optimizer_kind", ["adam", "lion"])
-    def test_matches_zero_offload(self, tmpdir, optimizer_kind):
+    @pytest.mark.parametrize("nvme_target", ["offload_optimizer", "offload_param"])
+    def test_matches_zero_offload(self, tmpdir, optimizer_kind, nvme_target):
         skip_if_reflow_training_unsupported(optimizer_kind)
         if not deepspeed.ops.__compatible_ops__.get(AsyncIOBuilder.NAME, False):
             pytest.skip("NVMe offload requires the async_io extension")
-        width = 384
+        # Parameter I/O requires at least 1 MiB per BF16 weight. Optimizer I/O uses the FP32 subgroup.
+        width = 768 if nvme_target == "offload_param" else 384
 
         def run(reflow):
             torch.manual_seed(1234)
@@ -2453,16 +2455,25 @@ class TestReflowNVMeConditionalGradients(DistributedTest):
             config["data_types"] = {"grad_accum_dtype": "bf16"}
             config["gradient_accumulation_steps"] = 2
             config["zero_optimization"]["reduce_bucket_size"] = 1_000_000
-            config["zero_optimization"]["offload_optimizer"] = {
+            config["zero_optimization"][nvme_target] = {
                 "device": "nvme",
                 "nvme_path": str(tmpdir.join("reflow" if reflow else "zero"))
             }
+            if nvme_target == "offload_param":
+                # One large weight per subgroup keeps the pinned swap pools small for both runs.
+                zero_config = config["zero_optimization"]
+                zero_config["sub_group_size"] = width * width
+                zero_config[nvme_target].update(max_in_cpu=0, buffer_size=width * width, buffer_count=2)
+                zero_config["offload_optimizer"]["pin_memory"] = False
             engine, optimizer, _, _ = deepspeed.initialize(model=model,
                                                            model_parameters=model.parameters(),
                                                            config=config)
-            assert any(optimizer._swappable_optimizer_subgroup(i) for i in range(len(optimizer.fp16_groups)))
             snapshots = []
             try:
+                if nvme_target == "offload_param":
+                    assert any(p.ds_tensor.final_location == "nvme" for p in engine.module.parameters())
+                else:
+                    assert any(optimizer._swappable_optimizer_subgroup(i) for i in range(len(optimizer.fp16_groups)))
                 for step, uses in enumerate(((True, True), (True, False), (False, False), (False, True))):
                     for micro_step, use_optional in enumerate(uses):
                         torch.manual_seed(900 + step * 2 + micro_step)
@@ -2471,7 +2482,12 @@ class TestReflowNVMeConditionalGradients(DistributedTest):
                         engine.step()
                     params = [safe_get_full_fp32_param(p).clone() for p in engine.module.parameters()]
                     states = [safe_get_full_optimizer_state(p, "exp_avg").clone() for p in engine.module.parameters()]
-                    snapshots.append((params, states))
+                    # Reading through the public gather also checks the weights Ready published to the swap file.
+                    weights = []
+                    for param in engine.module.parameters():
+                        with deepspeed.zero.GatheredParameters([param]):
+                            weights.append(param.detach().cpu().clone())
+                    snapshots.append((params, states, weights))
                 return snapshots
             finally:
                 engine.destroy()

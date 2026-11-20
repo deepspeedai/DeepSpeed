@@ -48,11 +48,10 @@ public:
         TORCH_CHECK(offset <= static_cast<size_t>(destination_.numel()) &&
                     size <= static_cast<size_t>(destination_.numel()) - offset &&
                     destination_.scalar_type() == output.scalar_type());
-        TORCH_CHECK(output.device().is_cpu() && output.dim() == 1 && output.is_contiguous());
-        inputs.push_back(output);
-        for (const auto& tensor : inputs) {
+        TORCH_CHECK(output.dim() == 1);
+        auto prepare_tensor = [size](const at::Tensor& tensor) {
             TORCH_CHECK(tensor.device().is_cpu() && tensor.is_contiguous() &&
-                        tensor.numel() == output.numel());
+                        static_cast<size_t>(tensor.numel()) == size);
 #if defined(__linux__)
             // Advise once per range, before splitting it among writers.
             constexpr uintptr_t page_size = 4096;
@@ -60,8 +59,9 @@ public:
             const auto page = addr & ~(page_size - 1);
             madvise(reinterpret_cast<void*>(page), addr - page + tensor.nbytes(), MADV_HUGEPAGE);
 #endif
-        }
-        inputs.pop_back();  // The output view is owned separately below.
+        };
+        prepare_tensor(output);
+        for (const auto& input : inputs) prepare_tensor(input);
         threads_ = threads;
         for (size_t start = 0; start < size; start += chunk_elems_)
             chunks_.emplace_back(ranges_.size(), start, std::min(size - start, chunk_elems_));
@@ -110,29 +110,17 @@ public:
                     };
                     for (auto& chunk : work->chunks_) {
                         if (cancelled_.load(std::memory_order_acquire)) break;
-                        // Preserve the same SIMD and scalar tails as the unsplit Ready kernel.
-                        constexpr size_t block = 128;
-                        const size_t blocks = std::max<size_t>(1, chunk.size / block);
-                        const size_t writers = std::min(team, blocks);
-                        if (writer >= writers) continue;
-                        const size_t begin = (blocks * writer / writers) * block;
-                        const size_t end = writer + 1 == writers
-                                               ? chunk.size
-                                               : (blocks * (writer + 1) / writers) * block;
                         const auto& range = work->ranges_[chunk.range];
-                        range.kernel(chunk.start + begin, end - begin);
-                        // The kernel fences on the issuing thread. The last arrival acquires
-                        // all earlier writers' releases before handing the pinned range to DMA.
-                        if (chunk.finished.fetch_add(1, std::memory_order_acq_rel) + 1 == writers &&
-                            !cancelled_.load(std::memory_order_acquire)) {
-                            if (!copy_stream.current_stream())
-                                copy_stream.reset_stream(work->stream_);
-                            work->destination_.narrow(0, range.offset + chunk.start, chunk.size)
-                                .copy_(range.output.narrow(0, chunk.start, chunk.size), true);
-                            // Prepare one independent successor during the remaining CPU work.
-                            if (&chunk == &work->chunks_.front() && work->chunks_.size() > 1)
-                                std::call_once(work->prefetch_, prepare_next);
-                        }
+                        if (!chunk.write_partition(range.kernel, writer, team) ||
+                            cancelled_.load(std::memory_order_acquire))
+                            continue;
+
+                        if (!copy_stream.current_stream()) copy_stream.reset_stream(work->stream_);
+                        work->destination_.narrow(0, range.offset + chunk.start, chunk.size)
+                            .copy_(range.output.narrow(0, chunk.start, chunk.size), true);
+                        // Prepare one independent successor during the remaining CPU work.
+                        if (&chunk == &work->chunks_.front() && work->chunks_.size() > 1)
+                            std::call_once(work->prefetch_, prepare_next);
                     }
                     std::call_once(work->admit_, [&] {
                         // A leading writer can reach the boundary before the first DMA.
@@ -168,6 +156,22 @@ private:
         size_t range, start, size;
         std::atomic<size_t> finished{0};
         Chunk(size_t range, size_t start, size_t size) : range(range), start(start), size(size) {}
+
+        // Only the last writer may submit this chunk to DMA.
+        bool write_partition(const Kernel& kernel, size_t writer, size_t team)
+        {
+            // Whole SIMD blocks keep the scalar tail identical to the unsplit kernel.
+            constexpr size_t block = 128;
+            const size_t blocks = std::max<size_t>(1, size / block);
+            const size_t writers = std::min(team, blocks);
+            if (writer >= writers) return false;
+            const size_t begin = (blocks * writer / writers) * block;
+            const size_t end = writer + 1 == writers ? size
+                                                     : (blocks * (writer + 1) / writers) * block;
+            kernel(start + begin, end - begin);
+            // Each kernel fences its own stores. The last arrival acquires all those releases.
+            return finished.fetch_add(1, std::memory_order_acq_rel) + 1 == writers;
+        }
     };
     at::Tensor destination_;
     c10::Stream stream_;

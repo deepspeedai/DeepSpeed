@@ -12,86 +12,6 @@ static void reflow_adam_memory_fence()
 #endif
 }
 
-static inline int reflow_ds_adam_step_params_halfgrad_gilfree(int optimizer_id,
-                                                              size_t step,
-                                                              float lr,
-                                                              float beta1,
-                                                              float beta2,
-                                                              float epsilon,
-                                                              float weight_decay,
-                                                              bool bias_correction,
-                                                              torch::Tensor& params_fp32,
-                                                              torch::Tensor& grads,
-                                                              torch::Tensor& exp_avg,
-                                                              torch::Tensor& exp_avg_sq,
-                                                              torch::Tensor& half_params,
-                                                              float combined_scale,
-                                                              bool skip_increment_step = false,
-                                                              bool maximize = false,
-                                                              ReflowReadyWork* work = nullptr,
-                                                              size_t destination_offset = 0)
-{
-    pybind11::gil_scoped_release release;
-    return reflow_ds_adam_step_params_halfgrad(optimizer_id,
-                                               step,
-                                               lr,
-                                               beta1,
-                                               beta2,
-                                               epsilon,
-                                               weight_decay,
-                                               bias_correction,
-                                               params_fp32,
-                                               grads,
-                                               exp_avg,
-                                               exp_avg_sq,
-                                               half_params,
-                                               combined_scale,
-                                               skip_increment_step,
-                                               maximize,
-                                               work,
-                                               destination_offset);
-}
-
-static inline int reflow_ds_adam_state_step_halfgrad_gilfree(int optimizer_id,
-                                                             size_t step,
-                                                             float lr,
-                                                             float beta1,
-                                                             float beta2,
-                                                             float epsilon,
-                                                             float weight_decay,
-                                                             bool bias_correction,
-                                                             torch::Tensor& params_fp32,
-                                                             torch::Tensor& grads,
-                                                             torch::Tensor& exp_avg,
-                                                             torch::Tensor& exp_avg_sq,
-                                                             float combined_scale,
-                                                             bool skip_increment_step = false,
-                                                             bool maximize = false)
-{
-    pybind11::gil_scoped_release release;
-    return reflow_ds_adam_state_step_halfgrad(optimizer_id,
-                                              step,
-                                              lr,
-                                              beta1,
-                                              beta2,
-                                              epsilon,
-                                              weight_decay,
-                                              bias_correction,
-                                              params_fp32,
-                                              grads,
-                                              exp_avg,
-                                              exp_avg_sq,
-                                              combined_scale,
-                                              skip_increment_step,
-                                              maximize);
-}
-
-static inline int reflow_ds_bf16_accumulate_gilfree(torch::Tensor& dst, torch::Tensor& src)
-{
-    pybind11::gil_scoped_release release;
-    return reflow_ds_bf16_accumulate(dst, src);
-}
-
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
 {
     bind_reflow_ready_work(m);
@@ -109,7 +29,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
           pybind11::arg("num_threads") = -1);
     m.def("reflow_destroy_adam", &reflow_destroy_adam_optimizer, "Reflow CPU Adam destroy (C++)");
     m.def("reflow_adam_update_params_halfgrad",
-          &reflow_ds_adam_step_params_halfgrad_gilfree,
+          &reflow_ds_adam_step_params_halfgrad,
+          pybind11::call_guard<pybind11::gil_scoped_release>(),
           "Reflow CPU Adam update FP16 with half gradients, GIL-released (C++)",
           pybind11::arg("optimizer_id"),
           pybind11::arg("step"),
@@ -130,7 +51,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
           pybind11::arg("ready_work") = nullptr,
           pybind11::arg("destination_offset") = 0);
     m.def("reflow_adam_update_state_halfgrad",
-          &reflow_ds_adam_state_step_halfgrad_gilfree,
+          &reflow_ds_adam_state_step_halfgrad,
+          pybind11::call_guard<pybind11::gil_scoped_release>(),
           "Reflow CPU Adam update state stream with half gradients, GIL-released (C++)",
           pybind11::arg("optimizer_id"),
           pybind11::arg("step"),
@@ -151,7 +73,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
           &reflow_adam_memory_fence,
           "Reflow CPU Adam memory fence (C++)");
     m.def("reflow_bf16_accumulate",
-          &reflow_ds_bf16_accumulate_gilfree,
+          &reflow_ds_bf16_accumulate,
+          pybind11::call_guard<pybind11::gil_scoped_release>(),
           "Reflow CPU BF16/FP16 gradient accumulate using AVX, GIL-released (C++)",
           pybind11::arg("dst"),
           pybind11::arg("src"));

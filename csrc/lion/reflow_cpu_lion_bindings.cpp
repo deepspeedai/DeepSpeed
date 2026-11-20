@@ -12,64 +12,6 @@ static void reflow_lion_memory_fence()
 #endif
 }
 
-static inline int reflow_ds_lion_step_params_halfgrad_gilfree(int optimizer_id,
-                                                              size_t step,
-                                                              float lr,
-                                                              float beta1,
-                                                              float beta2,
-                                                              float weight_decay,
-                                                              torch::Tensor& params_fp32,
-                                                              torch::Tensor& grads,
-                                                              torch::Tensor& exp_avg,
-                                                              torch::Tensor& half_params,
-                                                              float combined_scale,
-                                                              bool skip_increment_step = false,
-                                                              ReflowReadyWork* work = nullptr,
-                                                              size_t destination_offset = 0)
-{
-    pybind11::gil_scoped_release release;
-    return reflow_ds_lion_step_params_halfgrad(optimizer_id,
-                                               step,
-                                               lr,
-                                               beta1,
-                                               beta2,
-                                               weight_decay,
-                                               params_fp32,
-                                               grads,
-                                               exp_avg,
-                                               half_params,
-                                               combined_scale,
-                                               skip_increment_step,
-                                               work,
-                                               destination_offset);
-}
-
-static inline int reflow_ds_lion_state_step_halfgrad_gilfree(int optimizer_id,
-                                                             size_t step,
-                                                             float lr,
-                                                             float beta1,
-                                                             float beta2,
-                                                             float weight_decay,
-                                                             torch::Tensor& params_fp32,
-                                                             torch::Tensor& grads,
-                                                             torch::Tensor& exp_avg,
-                                                             float combined_scale,
-                                                             bool skip_increment_step = false)
-{
-    pybind11::gil_scoped_release release;
-    return reflow_ds_lion_state_step_halfgrad(optimizer_id,
-                                              step,
-                                              lr,
-                                              beta1,
-                                              beta2,
-                                              weight_decay,
-                                              params_fp32,
-                                              grads,
-                                              exp_avg,
-                                              combined_scale,
-                                              skip_increment_step);
-}
-
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
 {
     bind_reflow_ready_work(m);
@@ -85,7 +27,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
           pybind11::arg("num_threads") = -1);
     m.def("reflow_destroy_lion", &reflow_destroy_lion_optimizer, "Reflow CPU Lion destroy (C++)");
     m.def("reflow_lion_update_params_halfgrad",
-          &reflow_ds_lion_step_params_halfgrad_gilfree,
+          &reflow_ds_lion_step_params_halfgrad,
+          pybind11::call_guard<pybind11::gil_scoped_release>(),
           "Reflow CPU Lion update FP16 with half gradients, GIL-released (C++)",
           pybind11::arg("optimizer_id"),
           pybind11::arg("step"),
@@ -102,7 +45,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
           pybind11::arg("ready_work") = nullptr,
           pybind11::arg("destination_offset") = 0);
     m.def("reflow_lion_update_state_halfgrad",
-          &reflow_ds_lion_state_step_halfgrad_gilfree,
+          &reflow_ds_lion_state_step_halfgrad,
+          pybind11::call_guard<pybind11::gil_scoped_release>(),
           "Reflow CPU Lion update state stream with half gradients, GIL-released (C++)",
           pybind11::arg("optimizer_id"),
           pybind11::arg("step"),

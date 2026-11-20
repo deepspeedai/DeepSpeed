@@ -474,21 +474,3 @@ def clip_ranges_to_valid_partition(ranges, valid_partition_element_count):
         if clipped_range is not None:
             clipped.append(clipped_range)
     return clipped
-
-
-def split_ranges_by_min_size(merged_ranges, min_range_elems):
-    """Partition merged ranges into (submit, pending) by a minimum element threshold.
-
-    Ranges whose size is >= min_range_elems are returned in ``submit``; smaller ranges are
-    returned in ``pending`` and their total element count is returned as ``pending_elems``.
-    """
-    submit = []
-    pending = []
-    pending_elems = 0
-    for off, sz in merged_ranges:
-        if sz >= min_range_elems:
-            submit.append((off, sz))
-        else:
-            pending.append((off, sz))
-            pending_elems += sz
-    return submit, pending, pending_elems

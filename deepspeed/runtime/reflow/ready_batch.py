@@ -49,40 +49,36 @@ class ReadyBatch:
             if self.active is not None:
                 self.active.cancel()
 
-    def _take(self, wait):
+    def _take_eligible(self):
+        # Native writers can take a successor early only when both of its inputs are ready.
         with self.lock:
             if not self.pending:
-                if wait:
-                    self.closed = True
                 return None
             item = self.pending[0]
-            if not wait:
-                event = item["last_copy_event"]
-                commit = self.optimizer._pending_state_updates_by_subgroup.get(item["sub_group_id"])
-                if commit is not None and not commit.done():
+            commit = self.optimizer._pending_state_updates_by_subgroup.get(item["sub_group_id"])
+            event = item["last_copy_event"]
+            if commit is not None and not commit.done():
+                return None
+            if event is not None:
+                if not event.query():
                     return None
-                if event is not None:
-                    if not event.query():
-                        return None
-                    # This job owns its event reference. A successful query already
-                    # observed the D2H completion required by the CPU kernel.
-                    item["last_copy_event"] = None
+                item["last_copy_event"] = None  # The worker no longer needs to wait for this copy.
             self.pending.popleft()
         return self.optimizer._bucketwise_chunk_update_worker(item, defer=True)
-
-    def _take_eligible(self):
-        return self._take(wait=False)
 
     def run(self):
         stream = self.optimizer._bucketwise_h2d_stream
         started = False
         try:
             while True:
-                work = self._take(wait=True)
+                with self.lock:
+                    if not self.pending:
+                        # Close before releasing the lock so no submission can join an empty batch.
+                        self.closed = True
+                        break
+                    item = self.pending.popleft()
+                work = self.optimizer._bucketwise_chunk_update_worker(item, defer=True)
                 if work is None:
-                    with self.lock:
-                        if self.closed:
-                            break
                     continue
                 with self.lock:
                     if self.closed:
