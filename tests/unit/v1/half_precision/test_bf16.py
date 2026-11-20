@@ -14,6 +14,7 @@ from unit.util import bf16_required_version_check
 from deepspeed import comm as dist
 from deepspeed.accelerator import get_accelerator
 from deepspeed.runtime.bf16_optimizer import BF16_Optimizer
+from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer
 from deepspeed.utils import safe_get_full_fp32_param, safe_get_full_grad
 from unit.v1.zero.test_zero_user_backward import (initialize_distributed, create_ddp_model, collect_ddp_gradients,
                                                   collect_gradients_safe, compare_gradients)
@@ -669,3 +670,133 @@ class TestBF16FullGradientReconstruction(DistributedTest):
                                            msg=f"{name} at step {step}")
                 before[name] = after.clone()
         engine.destroy()
+
+
+_SR_NUMEL = (1 << 16) + 1  # odd, so the last rank's partition ends in padding
+_SR_STEPS = 8
+_SR_LR = 1e-4  # 8 steps move a master by 8e-4, less than half the bf16 spacing of any |w| in [0.3, 1)
+
+
+class _ConstantGradientModel(torch.nn.Module):
+    """Every element's gradient is 1, so each Adam step moves every fp32 master by exactly -lr."""
+
+    def __init__(self):
+        super().__init__()
+        generator = torch.Generator().manual_seed(0)
+        magnitude = torch.rand(_SR_NUMEL, generator=generator) * 0.7 + 0.3
+        sign = torch.randint(0, 2, (_SR_NUMEL, ), generator=generator) * 2 - 1
+        self.weight = torch.nn.Parameter((sign * magnitude).to(torch.bfloat16).float())
+
+    def forward(self):
+        return self.weight.float().sum()
+
+
+def _bf16_neighbours(master):
+    """The bf16 values just below and just above each fp32 ``master`` (equal when it is a bf16 value)."""
+    nearest = master.to(torch.bfloat16)
+    up = torch.nextafter(nearest, torch.full_like(nearest, float("inf")))
+    down = torch.nextafter(nearest, torch.full_like(nearest, float("-inf")))
+    master = master.double()
+    low = torch.where(nearest.double() <= master, nearest, down).double()
+    high = torch.where(nearest.double() >= master, nearest, up).double()
+    return low, high
+
+
+@pytest.mark.parametrize("stochastic", [False, True])
+@pytest.mark.parametrize("zero_stage, offload, grad_accum_dtype, optimizer_type", [
+    (1, False, "fp32", BF16_Optimizer),
+    (2, False, "bf16", DeepSpeedZeroOptimizer),
+    (2, True, "bf16", DeepSpeedZeroOptimizer),
+])
+class TestBF16StochasticRoundParams(DistributedTest):
+    world_size = 2
+
+    def test_bf16_params_track_fp32_masters(self, stochastic, zero_stage, offload, grad_accum_dtype, optimizer_type):
+        if not bf16_required_version_check():
+            pytest.skip(
+                " DeepSpeed BFloat16 tests need torch >= 1.10, NCCL >= 2.10.3, CUDA > =11.0 and HW support for BFloat16 to run correctly"
+            )
+        zero_config = {"stage": zero_stage}
+        if offload:
+            zero_config["offload_optimizer"] = {"device": "cpu"}
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 1,
+            "bf16": {
+                "enabled": True,
+                "stochastic_round_params": stochastic
+            },
+            "data_types": {
+                "grad_accum_dtype": grad_accum_dtype
+            },
+            "zero_optimization": zero_config,
+            "zero_force_ds_cpu_optimizer": False,
+        }
+        model = _ConstantGradientModel()
+        optimizer = torch.optim.Adam(model.parameters(), lr=_SR_LR)
+        engine, _, _, _ = deepspeed.initialize(config=config_dict, model=model, optimizer=optimizer)
+        assert type(engine.optimizer) is optimizer_type
+        assert getattr(engine.optimizer, "cpu_offload", False) == offload
+
+        weight = engine.module.weight
+        initial = weight.detach().cpu().clone()
+        for _ in range(_SR_STEPS):
+            engine.backward(engine())
+            engine.step()
+        served = weight.detach().cpu()
+        master = safe_get_full_fp32_param(weight).detach().cpu()
+
+        gathered = [torch.empty(_SR_NUMEL, device=weight.device) for _ in range(dist.get_world_size())]
+        dist.all_gather(gathered, weight.detach().float())
+        assert all(torch.equal(g, gathered[0]) for g in gathered)
+        expected_master = initial.double() - _SR_STEPS * _SR_LR
+        torch.testing.assert_close(master.double(), expected_master, rtol=0, atol=1e-6)
+
+        if not stochastic:
+            # Round-to-nearest: no master moved half a bf16 spacing, so no bf16 parameter moved.
+            assert torch.equal(served, master.to(torch.bfloat16))
+            assert torch.equal(served, initial)
+        else:
+            low, high = _bf16_neighbours(master)
+            served = served.double()
+            assert ((served == low) | (served == high)).all()
+            between = high > low
+            spacing = (high - low)[between]
+            fraction = (master.double() - low)[between] / spacing
+            # Unbiased: the summed error is within 5 standard errors of 0. Round-to-nearest misses by ~200.
+            error = ((served - master.double())[between] / spacing).sum()
+            standard_error = (fraction * (1 - fraction)).sum().sqrt()
+            assert error.abs() < 5 * standard_error, (error, standard_error)
+        engine.destroy()
+
+
+@pytest.mark.parametrize("zero_config, bf16_config", [
+    ({
+        "stage": 3
+    }, {}),
+    ({
+        "stage": 2
+    }, {
+        "bf16_master_weights_and_grads": True
+    }),
+])
+class TestBF16StochasticRoundParamsUnsupported(DistributedTest):
+    world_size = 1
+
+    def test_refused(self, zero_config, bf16_config):
+        if not bf16_required_version_check():
+            pytest.skip(
+                " DeepSpeed BFloat16 tests need torch >= 1.10, NCCL >= 2.10.3, CUDA > =11.0 and HW support for BFloat16 to run correctly"
+            )
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 1,
+            "bf16": {
+                "enabled": True,
+                "stochastic_round_params": True,
+                **bf16_config
+            },
+            "zero_optimization": zero_config,
+        }
+        model = _ConstantGradientModel()
+        optimizer = torch.optim.Adam(model.parameters(), lr=_SR_LR)
+        with pytest.raises(ValueError, match="stochastic_round_params"):
+            deepspeed.initialize(config=config_dict, model=model, optimizer=optimizer)

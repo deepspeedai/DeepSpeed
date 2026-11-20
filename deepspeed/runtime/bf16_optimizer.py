@@ -10,6 +10,7 @@ from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
 from deepspeed import comm as dist
 from deepspeed.runtime.constants import PIPE_REPLICATED
 from deepspeed.runtime.base_optimizer import ZeROOptimizer
+from deepspeed.runtime.stochastic_rounding import StochasticRoundingCopy
 from packaging import version as pkg_version
 from deepspeed.git_version_info import version
 from deepspeed.runtime.utils import (get_global_norm_of_tensors, clip_tensors_by_global_norm, DummyOptim,
@@ -88,6 +89,9 @@ class BF16_Optimizer(ZeROOptimizer):
         self.allgather_bucket_size = int(allgather_bucket_size)
         self.dp_process_group = dp_process_group
         self.dp_rank = dist.get_rank(group=self.dp_process_group)
+        self._copy_to_lp = torch.Tensor.copy_
+        if bfloat16_config.stochastic_round_params:
+            self._copy_to_lp = StochasticRoundingCopy(self.dp_rank)
         self.has_moe_layers = has_moe_layers
         self.non_expert_gradients = []
         self.real_dp_process_group = [dp_process_group for i in range(len(self.optimizer.param_groups))]
@@ -599,7 +603,7 @@ class BF16_Optimizer(ZeROOptimizer):
         for i, (bf16_partitions,
                 fp32_partition) in enumerate(zip(self.bf16_partitioned_groups, self.fp32_groups_flat_partition)):
             partition_id = dist.get_rank(group=self.real_dp_process_group[i])
-            bf16_partitions[partition_id].data.copy_(fp32_partition.data)
+            self._copy_to_lp(bf16_partitions[partition_id].data, fp32_partition.data)
 
         all_gather_dp_groups(groups_flat=self.bf16_groups_flat,
                              partitioned_param_groups=self.bf16_partitioned_groups,
