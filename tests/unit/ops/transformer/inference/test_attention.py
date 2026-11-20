@@ -91,3 +91,48 @@ def test_attention(BATCH, H, N_CTX, D_HEAD, causal, use_flash, dtype=torch.float
                                     use_ds_attention=False)
     tri_out = tri_out.reshape((BATCH, N_CTX, H, D_HEAD)).permute(0, 2, 1, 3)
     assert (allclose(ref_out, tri_out))
+
+
+# The non-flash path applies the attention mask through the Triton softmax; an encoder's padding mask has one row
+# per example ([BATCH, 1, 1, N_CTX]) and must be broadcast over heads and queries, not read as one row per score row.
+@pytest.mark.inference_ops
+@pytest.mark.parametrize("BATCH", [2, 4])
+@pytest.mark.parametrize("N_CTX", [16, 128])
+def test_attention_per_example_mask(BATCH, N_CTX, H=12, D_HEAD=64, dtype=torch.float16):
+    if not deepspeed.get_accelerator().is_triton_supported():
+        pytest.skip("triton is not supported on this system")
+    if not deepspeed.HAS_TRITON:
+        pytest.skip("triton is not installed")
+
+    minus_inf = -65504.0
+    dev = deepspeed.accelerator.get_accelerator().device_name()
+    from deepspeed.ops.transformer.inference.triton.matmul_ext import fp16_matmul
+    fp16_matmul.skip_autotune()
+
+    from deepspeed.ops.transformer.inference.triton.attention import _triton_attention
+    torch.manual_seed(20)
+    q, k, v = (torch.empty((BATCH, H, N_CTX, D_HEAD), dtype=dtype, device=dev).normal_(mean=0, std=.5)
+               for _ in range(3))
+    sm_scale = 0.3
+
+    # each example keeps a different number of keys
+    mask = torch.zeros((BATCH, 1, 1, N_CTX), dtype=dtype, device=dev)
+    for b in range(BATCH):
+        mask[b, ..., N_CTX - 3 * b - 1:] = minus_inf
+    ref_out = ref_torch_attention(q, k, v, mask, sm_scale)
+
+    qkv = torch.empty((BATCH, N_CTX, 3 * H * D_HEAD), dtype=dtype, device=dev)
+    for i, t in enumerate((q, k, v)):
+        qkv[:, :, i * H * D_HEAD:(i + 1) * H * D_HEAD] = t.permute(0, 2, 1, 3).reshape((BATCH, N_CTX, H * D_HEAD))
+    tri_out = _triton_attention(qkv,
+                                input_mask=mask,
+                                layer_past=None,
+                                alibi=None,
+                                scale=sm_scale,
+                                head_size=D_HEAD,
+                                triangular=False,
+                                use_cuda_flash=False,
+                                use_triton_flash=False,
+                                use_ds_attention=False)
+    tri_out = tri_out.reshape((BATCH, N_CTX, H, D_HEAD)).permute(0, 2, 1, 3)
+    assert (allclose(ref_out, tri_out))
