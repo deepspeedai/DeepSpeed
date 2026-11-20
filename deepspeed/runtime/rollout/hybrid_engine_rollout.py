@@ -2041,6 +2041,7 @@ class HybridEngineRollout(RolloutEngine):
                 # not been written yet (warmup/capture leftovers), and SDPA at
                 # b>1 attends every slot the mask reveals.
                 static_attn[:, pos] = True
+                self._update_static_causal_attention(static_attn, static_causal_attn)
                 get_accelerator().replay_graph(graph)
                 next_token = next_tokens(static_logits[:, -1, :])
                 output_ids.append(next_token)
@@ -2097,6 +2098,7 @@ class HybridEngineRollout(RolloutEngine):
             pos = prompt_len + step
             write_pos.fill_(pos)
             static_attn[:, pos] = True
+            self._update_static_causal_attention(static_attn, static_causal_attn)
             get_accelerator().replay_graph(graph)
             next_token = next_tokens(static_logits[:, -1, :])
             output_ids.append(next_token)
