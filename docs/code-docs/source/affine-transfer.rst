@@ -26,12 +26,55 @@ from target locations::
 Use ``execute_transfers`` with uniquely keyed ``TransferRequest`` objects to pack
 multiple parameters into peer messages. Each process supplies only its own
 contiguous buffers; strided plan regions and buffer storage offsets are retained.
+Conjugate and negative views are refused; pass them resolved.
 All participants must agree on requests, endpoints, dtype and staging budget.
 Preflight refusal leaves targets untouched. Return guarantees target readiness;
 a transport failure after payload begins can leave partially written targets.
 The budget applies to each peer direction, not total device memory. Weights must
 remain frozen during transfer; optimizer migration and live AutoEP swaps are outside
 this API. Maintenance contact: ``@0z5a``.
+
+Repeated transfers
+------------------
+
+A weight sync moves the same batch every step. ``prepare_transfers`` does
+everything ``execute_transfers`` does before data moves -- validation, the
+schedule agreement, the staging arenas and a view of every region each round
+packs, unpacks or copies locally -- once, and returns a handle whose ``run`` only
+moves data::
+
+    from deepspeed.checkpoint.affine_transfer_executor import prepare_transfers
+
+    prepared = prepare_transfers(build_requests(), endpoints, dtype, budget)
+    for step in steps:
+        ...  # update the source buffers in place
+        prepared.run(build_requests())
+
+Here ``build_requests`` stands for building the requests from the live state,
+for example with fresh ``zero_param_storage_shard`` views.
+``prepare_transfers`` is collective and refuses a batch exactly as
+``execute_transfers`` does; ``execute_transfers`` runs the same preflight but
+builds each round's views only when it reaches that round, and keeps none of
+them. The handle keeps the buffers it was prepared with and its arenas stay
+allocated, so buffers must stay where they are and every process must run the
+handle the same number of times. By default ``run`` checks both before any data
+moves, with one small all-gather: if a buffer moved or changed shape on any
+process, or the processes are not running the same handle for the same time,
+every process raises and the batch has to be prepared again. Aliases between
+buffers are decided at prepare as well, including which local copies are dropped
+because source and target are the same memory, as a relay band held as a view
+of its own destination is; a moved buffer is refused rather than run on that
+decision.
+
+``run(requests)`` checks the requests it is given; ``run()`` checks the tensors
+the handle holds, which catches a buffer re-pointed in place (``.data = ...``)
+but not a view taken before its storage moved. ``zero_param_storage_shard``
+returns such a view, and ZeRO-3 ``reload_states`` re-points the partition behind
+it, so a handle over these views needs the rebuilt requests to notice the move.
+The handle also keeps every buffer it holds allocated: drop it before
+``offload_states`` if the partitions' memory should be freed, and prepare the
+batch again after ``reload_states``. ``run(check=False)`` skips the all-gather,
+so every process must pass the same ``check``.
 
 Planning a sync with replica policies
 -------------------------------------
@@ -104,8 +147,9 @@ Pass the plans in request order, since that order fixes how chunks are packed
 into rounds. Each ``ProcessSchedule`` lists, per peer and direction, the rounds
 with their element and chunk counts and whether the round is sent or received in
 place, the staging arena each peer direction allocates, the local copies, and the
-round count that ``TransferStats.rounds`` reports. ``execute_transfers`` builds
-its rounds and arenas from the same computation, so the two cannot drift apart.
+round count that ``TransferStats.rounds`` reports. ``execute_transfers`` and
+``prepare_transfers`` build their rounds and arenas from the same computation,
+so the two cannot drift apart.
 The schedule follows the current transport described above and changes with it.
 
 Calibrating links
