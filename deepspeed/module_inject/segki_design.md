@@ -1,6 +1,5 @@
 # segKI Design Document
 
-**Status: draft — to be submitted after PR #8602 merges.**
 **Audience: AI coding agents (and humans who want the reasoning, not just the what).**
 
 This document is the design guide for segKI. Agents and humans modifying
