@@ -17,6 +17,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from torch.utils.checkpoint import checkpoint
 
 import deepspeed
 import deepspeed.comm as dist
@@ -24,7 +25,7 @@ from deepspeed.accelerator import get_accelerator
 from deepspeed.checkpoint.constants import FP32_FLAT_GROUPS
 from deepspeed.ops.adam import DeepSpeedCPUAdam
 from deepspeed.ops.lion import DeepSpeedCPULion
-from deepspeed.ops.op_builder import CPUAdamBuilder, CPULionBuilder
+from deepspeed.ops.op_builder import AsyncIOBuilder, CPUAdamBuilder, CPULionBuilder
 from deepspeed.ops.op_builder.cpu.reflow_cpu_adam import ReflowCPUAdamBuilder
 from deepspeed.ops.op_builder.cpu.reflow_cpu_lion import ReflowCPULionBuilder
 from deepspeed.runtime.config import DeepSpeedConfig
@@ -1213,6 +1214,258 @@ class TestReflowAccumulationBufferReuse(DistributedTest):
 
 class TestReflowAccumulationBufferReuseDistributed(TestReflowAccumulationBufferReuse):
     world_size = 2
+
+
+class ConditionalGradientModel(torch.nn.Module):
+
+    def __init__(self, width=16):
+        super().__init__()
+        self.scale = torch.nn.Parameter(torch.ones(1))
+        self.always = torch.nn.Linear(width, width)
+        self.optional = torch.nn.Linear(width, width)
+
+    def forward(self, inputs, use_optional):
+        result = self.always(inputs)
+        if use_optional:
+            result = result + self.optional(inputs)
+        return self.scale.float() * result.float().square().mean()
+
+
+@needs_gpu_accelerator
+class TestReflowConditionalGradients(DistributedTest):
+    world_size = [1, 2]
+
+    @pytest.mark.parametrize("optimizer_kind", ["adam", "lion"])
+    @pytest.mark.parametrize("accumulation_steps", [2, 4])
+    def test_matches_zero_offload_across_accumulation_windows(self, optimizer_kind, accumulation_steps):
+        skip_if_reflow_training_unsupported(optimizer_kind)
+        if accumulation_steps == 2:
+            schedule = [(True, True), (True, False), (False, False), (False, True), (True, True)]
+        else:
+            schedule = [(True, True, True, False), (False, False, False, False), (False, False, True, True),
+                        (True, True, True, True)]
+
+        def run(reflow):
+            torch.manual_seed(1234)
+            model = ConditionalGradientModel()
+            config = get_variant_config(reflow, optimizer_kind)
+            config["data_types"] = {"grad_accum_dtype": "bf16"}
+            config["gradient_accumulation_steps"] = accumulation_steps
+            config["zero_optimization"]["reduce_bucket_size"] = 1000
+            config["zero_optimization"]["sub_group_size"] = 1
+            engine, optimizer, _, _ = deepspeed.initialize(model=model,
+                                                           model_parameters=model.parameters(),
+                                                           config=config)
+            snapshots = []
+            try:
+                for step, uses in enumerate(schedule):
+                    for micro_step, use_optional in enumerate(uses):
+                        torch.manual_seed(900 + step * accumulation_steps + micro_step)
+                        inputs = torch.randn(2, 16, device=engine.device, dtype=torch.bfloat16)
+                        engine.backward(engine(inputs, use_optional))
+                        engine.step()
+                    params = [safe_get_full_fp32_param(p).clone() for p in engine.module.parameters()]
+                    states = [safe_get_full_optimizer_state(p, "exp_avg").clone() for p in engine.module.parameters()]
+                    steps = [int(optimizer.optimizer.state[p]["step"]) for p in optimizer.fp32_partitioned_groups_flat]
+                    snapshots.append((params, states, steps))
+                return snapshots
+            finally:
+                engine.destroy()
+
+        expected = run(False)
+        actual = run(True)
+        for step, (reference, result) in enumerate(zip(expected, actual)):
+            assert reference[2] == result[2], (f"optimizer steps differ at step {step} rank {dist.get_rank()}: "
+                                               f"expected {reference[2]}, got {result[2]}")
+            for expected_group, actual_group in zip(reference[:2], result[:2]):
+                for want, got in zip(expected_group, actual_group):
+                    assert torch.equal(got, want), f"parameter or optimizer state differs at step {step}"
+
+    def test_skipped_step_does_not_reuse_invalid_gradient(self):
+        skip_if_reflow_training_unsupported()
+        schedule = [(True, False), (True, True), (False, False), (False, True)]
+
+        def run(reflow):
+            torch.manual_seed(1234)
+            model = ConditionalGradientModel()
+            config = get_variant_config(reflow, "adam")
+            config["bf16"] = {"enabled": False}
+            config["fp16"] = {"enabled": True, "loss_scale": 128}
+            config["data_types"] = {"grad_accum_dtype": "fp16"}
+            config["gradient_accumulation_steps"] = 2
+            config["zero_optimization"]["sub_group_size"] = 256
+            engine, optimizer, _, _ = deepspeed.initialize(model=model,
+                                                           model_parameters=model.parameters(),
+                                                           config=config)
+            snapshots = []
+            try:
+                for step, uses in enumerate(schedule):
+                    for micro_step, use_optional in enumerate(uses):
+                        torch.manual_seed(900 + step * 2 + micro_step)
+                        inputs = torch.randn(2, 16, device=engine.device, dtype=torch.float16)
+                        loss = engine(inputs, use_optional)
+                        if step == 1 and micro_step == 0 and dist.get_rank() == 0:
+                            loss = loss * float("inf")
+                        engine.backward(loss)
+                        engine.step()
+                    params = [safe_get_full_fp32_param(p).clone() for p in engine.module.parameters()]
+                    states = [safe_get_full_optimizer_state(p, "exp_avg").clone() for p in engine.module.parameters()]
+                    steps = [int(optimizer.optimizer.state[p]["step"]) for p in optimizer.fp32_partitioned_groups_flat]
+                    with deepspeed.zero.GatheredParameters(list(engine.module.parameters())):
+                        low_params = [p.detach().clone() for p in engine.module.parameters()]
+                    snapshots.append((params, states, steps, engine.skipped_steps, low_params))
+                return snapshots
+            finally:
+                engine.destroy()
+
+        for step, (expected, actual) in enumerate(zip(run(False), run(True))):
+            assert expected[2:4] == actual[2:4], f"step counters differ at step {step}"
+            for kind, (expected_group,
+                       actual_group) in enumerate(zip((expected[4], *expected[:2]), (actual[4], *actual[:2]))):
+                for index, (want, got) in enumerate(zip(expected_group, actual_group)):
+                    if not torch.equal(got, want):
+                        max_index = (got - want).abs().argmax().item()
+                        raise AssertionError(
+                            f"kind {kind} index {index} differs at step {step} rank {dist.get_rank()}: "
+                            f"low={want.flatten()[max_index].item()},{got.flatten()[max_index].item()} "
+                            f"master={expected[0][index].flatten()[max_index].item()},"
+                            f"{actual[0][index].flatten()[max_index].item()}")
+
+    def test_zero_grad_discards_pending_invalid_gradient(self):
+        skip_if_reflow_training_unsupported()
+
+        def run(reflow):
+            torch.manual_seed(1234)
+            model = ConditionalGradientModel()
+            config = get_variant_config(reflow, "adam")
+            config["bf16"] = {"enabled": False}
+            config["fp16"] = {"enabled": True, "loss_scale": 128}
+            config["data_types"] = {"grad_accum_dtype": "fp16"}
+            config["zero_optimization"]["reduce_bucket_size"] = 256
+            engine, optimizer, _, _ = deepspeed.initialize(model=model,
+                                                           model_parameters=model.parameters(),
+                                                           config=config)
+            try:
+                torch.manual_seed(900)
+                inputs = torch.randn(2, 16, device=engine.device, dtype=torch.float16)
+                engine.backward(engine(inputs, True) * float("inf"))
+                optimizer.zero_grad()
+                engine.backward(engine(inputs, False))
+                engine.step()
+                params = [safe_get_full_fp32_param(p).clone() for p in engine.module.parameters()]
+                states = [safe_get_full_optimizer_state(p, "exp_avg").clone() for p in engine.module.parameters()]
+                return params, states, engine.skipped_steps
+            finally:
+                engine.destroy()
+
+        expected, actual = run(False), run(True)
+        assert expected[2] == actual[2] == 0
+        for expected_group, actual_group in zip(expected[:2], actual[:2]):
+            for want, got in zip(expected_group, actual_group):
+                assert torch.equal(got, want)
+
+
+class ReentrantGradientModel(torch.nn.Module):
+
+    def __init__(self):
+        super().__init__()
+        self.input = torch.nn.Linear(16, 16)
+        self.shared = torch.nn.Linear(16, 16)
+        self.output = torch.nn.Linear(16, 1)
+
+    def forward(self, inputs):
+        hidden = self.input(inputs).tanh()
+        for _ in range(2):
+            hidden = checkpoint(self.shared, hidden, use_reentrant=True).tanh()
+        return self.output(hidden).float().square().mean()
+
+
+@needs_gpu_accelerator
+class TestReflowReentrantGradients(DistributedTest):
+    world_size = [1, 2]
+
+    @pytest.mark.parametrize("optimizer_kind", ["adam", "lion"])
+    @pytest.mark.parametrize("gradient_accumulation_steps", [1, 2])
+    def test_matches_zero_offload(self, optimizer_kind, gradient_accumulation_steps):
+        skip_if_reflow_training_unsupported(optimizer_kind)
+
+        def run(reflow):
+            torch.manual_seed(1234)
+            model = ReentrantGradientModel()
+            config = get_variant_config(reflow, optimizer_kind)
+            config["data_types"] = {"grad_accum_dtype": "bf16"}
+            config["gradient_accumulation_steps"] = gradient_accumulation_steps
+            if gradient_accumulation_steps > 1:
+                config["gradient_clipping"] = 0.1
+            config["zero_optimization"]["reduce_bucket_size"] = 256
+            engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config)
+            snapshots = []
+            try:
+                for step in range(3):
+                    for micro_step in range(gradient_accumulation_steps):
+                        torch.manual_seed(900 + step * gradient_accumulation_steps + micro_step)
+                        inputs = torch.randn(2, 16, device=engine.device, dtype=torch.bfloat16)
+                        engine.backward(engine(inputs))
+                        engine.step()
+                    params = [safe_get_full_fp32_param(p).clone() for p in engine.module.parameters()]
+                    states = [safe_get_full_optimizer_state(p, "exp_avg").clone() for p in engine.module.parameters()]
+                    snapshots.append((params, states))
+                return snapshots
+            finally:
+                engine.destroy()
+
+        for step, (expected, actual) in enumerate(zip(run(False), run(True))):
+            for expected_group, actual_group in zip(expected, actual):
+                for want, got in zip(expected_group, actual_group):
+                    assert torch.equal(got, want), (f"parameter or optimizer state differs at step {step}: "
+                                                    f"max diff {(got - want).abs().max().item()}")
+
+
+@needs_gpu_accelerator
+class TestReflowNVMeConditionalGradients(DistributedTest):
+    world_size = 1
+
+    @pytest.mark.parametrize("optimizer_kind", ["adam", "lion"])
+    def test_matches_zero_offload(self, tmpdir, optimizer_kind):
+        skip_if_reflow_training_unsupported(optimizer_kind)
+        if not deepspeed.ops.__compatible_ops__.get(AsyncIOBuilder.NAME, False):
+            pytest.skip("NVMe offload requires the async_io extension")
+        width = 384
+
+        def run(reflow):
+            torch.manual_seed(1234)
+            model = ConditionalGradientModel(width)
+            config = get_variant_config(reflow, optimizer_kind)
+            config["data_types"] = {"grad_accum_dtype": "bf16"}
+            config["gradient_accumulation_steps"] = 2
+            config["zero_optimization"]["reduce_bucket_size"] = 1_000_000
+            config["zero_optimization"]["offload_optimizer"] = {
+                "device": "nvme",
+                "nvme_path": str(tmpdir.join("reflow" if reflow else "zero"))
+            }
+            engine, optimizer, _, _ = deepspeed.initialize(model=model,
+                                                           model_parameters=model.parameters(),
+                                                           config=config)
+            assert any(optimizer._swappable_optimizer_subgroup(i) for i in range(len(optimizer.fp16_groups)))
+            snapshots = []
+            try:
+                for step, uses in enumerate(((True, True), (True, False), (False, False), (False, True))):
+                    for micro_step, use_optional in enumerate(uses):
+                        torch.manual_seed(900 + step * 2 + micro_step)
+                        inputs = torch.randn(2, width, device=engine.device, dtype=torch.bfloat16)
+                        engine.backward(engine(inputs, use_optional))
+                        engine.step()
+                    params = [safe_get_full_fp32_param(p).clone() for p in engine.module.parameters()]
+                    states = [safe_get_full_optimizer_state(p, "exp_avg").clone() for p in engine.module.parameters()]
+                    snapshots.append((params, states))
+                return snapshots
+            finally:
+                engine.destroy()
+
+        for step, (expected, actual) in enumerate(zip(run(False), run(True))):
+            for expected_group, actual_group in zip(expected, actual):
+                for want, got in zip(expected_group, actual_group):
+                    assert torch.equal(got, want), f"NVMe parameter or optimizer state differs at step {step}"
 
 
 class TestReflowMaximizeClientInitialization(DistributedTest):
