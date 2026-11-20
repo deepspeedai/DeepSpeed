@@ -1172,6 +1172,48 @@ Use a built-in preset but override specific naming/weight fields for a fine-tune
 - AutoEP with ZeRO Stage 3 is supported only without sequence parallelism, hpZeRO secondary tensor groups, non-1 `expert_tensor_parallel_size`, or quantized gradients
 - ZeRO Stage 3 saves AutoEP checkpoints partition-natively and supports same-topology save/load, module-only loads, optimizer-state-skipping loads, and universal checkpoint conversion (not yet with AutoTP folding). Universal loads can resume at a different data-parallel world size, a different `autoep_size`, or both (when the target `autoep_size` divides the expert count), including weights-only/module-only loads from the converted `fp32.pt` parameter files
 
+### Subchannel quantized training
+
+<i>**quantization**</i>: [dictionary]
+
+| Description | Default |
+| ----------- | ------- |
+| Low-precision training recipes, one subsection per recipe. `subchannel` quantizes the GEMMs of `nn.Linear` modules and AutoEP grouped experts to FP8 or INT8 with one scale per block of the reduction dimension. Parameters, gradients, optimizer state and module outputs keep their usual precision; only the GEMM operands are quantized, on the fly. | None |
+
+```json
+"quantization": {
+  "subchannel": {
+    "enabled": true,
+    "modules": ["*"],
+    "exclude_modules": ["*lm_head*", "*router*", "*.gate"],
+    "forward": {"format": "e4m3", "block_size": 128, "hadamard_size": 0, "stochastic_rounding": false},
+    "dx": {"format": "e4m3", "block_size": 128, "hadamard_size": 0, "stochastic_rounding": true},
+    "dw": {"format": "e4m3", "block_size": 128, "hadamard_size": 0, "stochastic_rounding": true}
+  }
+}
+```
+
+| Parameter | Type | Default | Description |
+| --------- | ---- | ------- | ----------- |
+| **enabled** | boolean | `false` | Convert the selected modules. |
+| **modules** | list | `["*"]` | `fnmatch` patterns over qualified module names. Matching `nn.Linear` modules (exact type) and AutoEP grouped experts are converted. Initialization fails if nothing matches. |
+| **exclude_modules** | list | `["*lm_head*", "*router*", "*.gate"]` | Patterns of modules left in full precision. The defaults keep the output head and MoE routers unquantized, since quantized router logits change which experts tokens reach. |
+| **forward** / **dx** / **dw** | dictionary | see below | Settings of the forward GEMM (`y = x W^T`), the input-gradient GEMM (`dx = dy W`) and the weight-gradient GEMM (`dW = dy^T x`). Each is configured independently. |
+
+Per-GEMM settings:
+
+| Parameter | Type | Default | Description |
+| --------- | ---- | ------- | ----------- |
+| **format** | string | `"e4m3"` | `"e4m3"` or `"e5m2"` (FP8), `"int8"`, or `"none"` to run this GEMM unquantized. |
+| **block_size** | integer | `128` | Elements of the reduction dimension sharing one FP32 scale: 32, 64, 128 or 256. For the weight gradient the reduction runs over tokens, and blocks restart at every expert. `0` gives each operand row a single scale over the whole reduction dimension (one per expert in the weight gradient); it requires an FP8 format and `hadamard_size` 0. See the performance note below. |
+| **hadamard_size** | integer | `0` | Rotate every `hadamard_size` chunk of a block by an orthonormal Hadamard matrix before quantizing, as a fused butterfly transform; the rotations of the two operands cancel in the product. A power of two up to `block_size`; `0` disables it. It spreads outlier channels across the block, which mainly helps `int8`: FP8 already gives every element of a block the same relative precision. |
+| **stochastic_rounding** | boolean | `false` forward, `true` for `dx` and `dw` | Round up or down at random with probabilities that make the rounding unbiased, so rounding errors average out over steps instead of accumulating. |
+
+**Constraints:**
+- The fused Triton kernels need Triton and a CUDA device of compute capability 8.9 or newer for FP8, 8.0 or newer for INT8. Elsewhere the GEMMs run on a PyTorch reference implementation that simulates the same quantization and multiplies in FP32, with a warning.
+- Performance: block scales have to be applied between tensor-core dot products, which keeps a block-scaled GEMM below BF16 speed; use it for its numerics. With `block_size` 0 the scales are applied once per output element and the FP8 GEMM itself runs about 1.6x faster than BF16, but both operands are still quantized in separate passes at every call. On an H200 a full layer step (forward, `dx` and `dw`) measured 1.16x to 1.39x faster than BF16 for layers 8192 wide with 16k or more tokens, and slower than BF16 for layers 4096 wide or narrower, including typical MoE experts.
+- Validated with ZeRO stages 1-3 for `nn.Linear`, and AutoEP with ZeRO-2. AutoEP's `gate_up_impl="fused"` and `overlap_weight_grad` are rejected for quantized experts. PipelineModule and AutoTP are not supported yet.
+
 ### Python cyclic garbage collection
 
 <i>**disable_python_gc**</i>: [boolean]

@@ -176,6 +176,11 @@ def get_expert_parallel_config(param_dict):
     return AutoEPConfig()
 
 
+def get_quantization_config(param_dict):
+    from deepspeed.runtime.quantization.config import get_quantization_config as _get_quantization_config
+    return _get_quantization_config(param_dict)
+
+
 def get_torch_autocast_enabled(param_dict):
     if TORCH_AUTOCAST in param_dict.keys():
         return get_scalar_param(param_dict[TORCH_AUTOCAST], TORCH_AUTOCAST_ENABLED, TORCH_AUTOCAST_ENABLED_DEFAULT)
@@ -542,6 +547,7 @@ class DeepSpeedConfig(object):
         self.hybrid_engine = get_hybrid_engine_config(param_dict)
 
         self.pipeline = get_pipeline_config(param_dict)
+        self.quantization_config = get_quantization_config(param_dict)
 
         self.data_efficiency_enabled = get_data_efficiency_enabled(param_dict)
         self.data_efficiency_config = get_data_efficiency_config(param_dict)
