@@ -292,6 +292,46 @@ def test_average_waits_all_producers_even_without_overlap(monkeypatch, overlap):
     assert bucket.reuse_events
 
 
+@pytest.mark.parametrize("overlap", [False, True])
+def test_reduction_waits_for_producer_streams_without_offload(monkeypatch, overlap):
+    opt, param, _ = make_optimizer(cpu_offload=False)
+    opt.reduce_bucket_size = 12
+    opt.overlap_comm = overlap
+    opt.reduction_stream = FakeStream()
+    opt.reduce_scatter = False
+    opt.ipg_buckets[torch.float32].buffer.append(torch.empty(16, dtype=param.dtype, device=param.device))
+    params = [param]
+    for index, numel in enumerate([8, 16], start=1):
+        extra = torch.nn.Parameter(torch.zeros(numel, dtype=param.dtype, device=param.device))
+        extra.param_idx_in_group = index
+        opt.param_id[id(extra)] = index
+        opt.bit16_groups[0].append(extra)
+        opt.params_already_reduced.append(False)
+        params.append(extra)
+    opt.is_param_in_current_partition = {index: False for index in range(len(params))}
+    streams = [FakeStream() for _ in range(len(params) + 1)]
+    producer_waited, reduced = [], []
+
+    def reduce(tensor, dtype):
+        fill = len(reduced)
+        reducing = opt.reduction_stream if overlap else streams[fill + 1]
+        producer_waited.append(streams[fill] in reducing.waited_streams)
+        reduced.append(tensor.clone())
+
+    opt.gradient_reduction_w_predivide = reduce
+    # Each hook runs on its own stream: the second hook flushes the first gradient, the oversized third
+    # gradient's hook flushes the second, and a flush on a fourth stream reduces the oversized gradient.
+    for index, param in enumerate(params):
+        monkeypatch.setattr(zero, "get_accelerator", lambda: fake_accelerator(streams[index]))
+        param.grad = torch.full_like(param, index + 1)
+        opt.reduce_independent_p_g_buckets_and_remove_grads(param, 0)
+    monkeypatch.setattr(zero, "get_accelerator", lambda: fake_accelerator(streams[-1]))
+    opt.reduce_ipg_grads()
+    assert producer_waited == [True, True, True]
+    for index, tensor in enumerate(reduced):
+        assert torch.equal(tensor, torch.full_like(params[index], index + 1))
+
+
 @pytest.mark.parametrize("producers", [1, 2])
 def test_bucket_reuse_waits_for_previous_consumer(monkeypatch, producers):
     opt, param, _ = make_optimizer()
@@ -719,16 +759,23 @@ def test_two_rank_offload_and_nonoffload_training(tmp_path):
 @pytest.mark.skipif(get_accelerator().device_name() != "cuda" or not get_accelerator().is_available(),
                     reason="CUDA required for actual stream ordering")
 @pytest.mark.parametrize("overlap", [False, True])
-def test_cuda_oversized_producer_handoff(overlap):
-    opt, param, _ = make_optimizer(device="cuda")
+@pytest.mark.parametrize("cpu_offload", [False, True])
+@pytest.mark.parametrize("bucket_size", [4, 16], ids=["oversized", "bucketed"])
+def test_cuda_producer_handoff(overlap, cpu_offload, bucket_size):
+    opt, param, _ = make_optimizer(device="cuda", cpu_offload=cpu_offload)
+    opt.reduce_bucket_size = bucket_size
     producer, consumer = get_accelerator().Stream(), get_accelerator().Stream()
     opt.reduction_stream = consumer
     opt.overlap_comm = overlap
     opt.reduce_ipg_grads = lambda **kwargs: None
+    # A reduction that does not wait for the producer reads these zeros instead of the gradient.
+    param.grad = torch.zeros_like(param)
+    opt.ipg_buckets[torch.float32].buffer[0].zero_()
     producer.wait_stream(get_accelerator().current_stream())
+    consumer.wait_stream(get_accelerator().current_stream())
     with get_accelerator().stream(producer):
         torch.cuda._sleep(2_000_000)  #ignore-cuda
-        param.grad = torch.full_like(param, 7)
+        param.grad.fill_(7)
         opt.reduce_independent_p_g_buckets_and_remove_grads(param, 0)
     opt.reduce_scatter = False
     result = []
