@@ -56,7 +56,8 @@ the boundary.
 | `gdn_recurrent_step` | compute | in-place recurrent update (TP=1 path; FLA wins at TP) |
 | `decode_step_graph` | compute | single-token full step incl. argmax (b=1) |
 | `repeat_qk`, `silu_mul` | glue | have `hasattr` eager fallbacks |
-| `capabilities`, `refresh_weights` | mgmt | backend-owned derived-state invalidation (`clear_glu_cat_cache` is its alias; optional — a stateless backend omits it, §2.4) |
+| `capabilities` | mgmt | backend capability report (dtype/batch limits, §2.2) |
+| `refresh_weights` | mgmt | drop backend-owned derived-state caches after an in-place weight sync (§2.4); optional — a stateless backend omits it |
 
 A backend porting segKI implements these methods — nothing else is the contract.
 
@@ -93,10 +94,14 @@ the opbuilder boundary the cache lives on:
 - **Backend-side caches** (inside the compiled extension): invisible to the
   Python registry by design — reaching in would expose internal state. The
   backend owns them and implements a uniform `refresh_weights()` opbuilder
-  method (`clear_glu_cat_cache` becomes its alias). The dispatcher calls it
-  once; what it clears and how is private knowledge. A stateless backend
-  simply does not implement it (hasattr discovery): *no derived state, no
-  refresh obligation; own a cache, own its invalidation.*
+  method; what it clears and how is private knowledge (the FusedGLU
+  backend's `refresh_weights` drops its concat cache, whose
+  `clear_glu_cat_cache` binding stays internal). `segki_refresh()` walks the
+  injected modules, collects every opbuilder handle (`_ki_gdn_op`,
+  `_ki_dual_op`), and calls `refresh_weights()` on each — it names no
+  backend-internal hook. A stateless backend simply does not implement it
+  (hasattr discovery): *no derived state, no refresh obligation; own a
+  cache, own its invalidation.*
 
 `segki_refresh()` (engine entry: `refresh_weights`) is the pure dispatcher
 over both tiers. Known interim flaws, both tracked:

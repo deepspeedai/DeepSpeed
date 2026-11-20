@@ -754,24 +754,31 @@ def segki_refresh(model: torch.nn.Module) -> None:
     after every in-place weight update; a fresh injection rebuilds the
     same state automatically.
 
+    Two tiers: Python-side ``_ki_*`` module attributes are deleted here;
+    backend-side caches are left to each injected opbuilder, reached only
+    through its ``refresh_weights()`` contract method (see segki_design.md
+    §2.4). No backend-internal hook names appear in this file.
+
     NOTE: this explicit-call contract is PROVISIONAL — the final
     weight-sync handshake (automatic detection vs explicit call vs a
     redesigned cache scheme) is still under design; expect this entry
     point to change.
     """
-    op = None
+    backend_ops = []
     for module in model.modules():
         for attr in ("_ki_tp_cat_w", "_ki_attn_cat_w", "_ki_conv_w_local", "_ki_gates_cache"):
             if hasattr(module, attr):
                 delattr(module, attr)
-                op = op if op is not None else getattr(module, "_ki_gdn_op", None)
-    # the GLU concat cache is process-wide in the backend; any injected
-    # backend handle reaches it. GLU-only models carry theirs on the MLP
-    # modules as _ki_dual_op (no GDN layers exist to hold _ki_gdn_op).
-    gdn_op = op or next((getattr(m, attr, None) for m in model.modules()
-                         for attr in ("_ki_gdn_op", "_ki_dual_op") if getattr(m, attr, None) is not None), None)
-    if gdn_op is not None and hasattr(gdn_op, "clear_glu_cat_cache"):
-        gdn_op.clear_glu_cat_cache()
+        for attr in ("_ki_gdn_op", "_ki_dual_op"):
+            backend_op = getattr(module, attr, None)
+            if backend_op is not None and backend_op not in backend_ops:
+                backend_ops.append(backend_op)
+    # Backend-side caches are the opbuilder's private state: the dispatcher
+    # only calls the refresh_weights() contract method on every injected
+    # opbuilder (a stateless backend omits it — nothing to refresh).
+    for backend_op in backend_ops:
+        if hasattr(backend_op, "refresh_weights"):
+            backend_op.refresh_weights()
 
 
 def _load_native_op():

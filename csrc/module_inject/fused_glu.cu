@@ -1536,7 +1536,7 @@ at::Tensor silu_mul(at::Tensor gu, int64_t n)
 
 // Pointer-keyed cache of concatenated GLU weights (see grouped_linear).
 // In-place weight writes (arena/reshard syncs) keep their addresses, so
-// the sync path calls clear_glu_cat_cache() to drop stale concats.
+// the sync path calls refresh_weights() to drop stale concats.
 struct PairKey {
     uint64_t a, b;
     bool operator==(const PairKey& o) const { return a == o.a && b == o.b; }
@@ -1547,6 +1547,11 @@ struct PairHash {
 static std::unordered_map<PairKey, at::Tensor, PairHash> g_glu_cat_cache;
 
 void clear_glu_cat_cache() { g_glu_cat_cache.clear(); }
+
+// segKI opbuilder contract: segki_refresh() calls refresh_weights() on every
+// op handle it injected. This backend owns the concat cache, so its refresh
+// drops it; a stateless backend simply does not expose the method.
+void refresh_weights() { clear_glu_cat_cache(); }
 
 // Arch-adaptive batch routing threshold: on Ada the WMMA grouped kernel
 // beats cuBLAS for M<=32 (launch overhead dominates); on Ampere cuBLAS
@@ -1788,6 +1793,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
     m.def("clear_glu_cat_cache",
           &clear_glu_cat_cache,
           "drop stale concat caches after in-place weight writes");
+    m.def("refresh_weights",
+          &refresh_weights,
+          "segKI refresh contract: drop backend-owned derived-state caches after in-place weight "
+          "writes");
     m.def("capabilities", &segki_capabilities, "segKI backend capability report");
     m.def("gdn_recurrent_step",
           &gdn_recurrent_step,
