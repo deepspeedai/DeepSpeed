@@ -448,7 +448,8 @@ class TestB2RelayBandInPlace(DistributedTest):
 
     @pytest.mark.parametrize('world_size', [2, 4])
     @pytest.mark.parametrize('swapped', [False, True])
-    def test_every_rank_completes_its_copy_around_its_own_band(self, world_size, swapped):
+    @pytest.mark.parametrize('prepared', [False, True])
+    def test_every_rank_completes_its_copy_around_its_own_band(self, world_size, swapped, prepared):
         _join_transfer_group()
         rank, dtype = dist.get_rank(), torch.float32
         rows, cols = 4 * world_size, 6
@@ -468,8 +469,16 @@ class TestB2RelayBandInPlace(DistributedTest):
         before = mine.clone()
 
         def call():
-            return execute_transfer(plan_transfer(target, source), {rank: view}, {rank: mine}, endpoints, dtype,
-                                    StagingBudget(band * cols * 4))
+            plan, budget = plan_transfer(target, source), StagingBudget(band * cols * 4)
+            if not prepared:
+                return execute_transfer(plan, {rank: view}, {rank: mine}, endpoints, dtype, budget)
+            # The band is kept in place by the decision made at prepare, for every run.
+            handle = prepare_transfers([TransferRequest('weight', plan, {rank: view}, {rank: mine})], endpoints, dtype,
+                                       budget)
+            handle.run()
+            assert torch.equal(mine, full)
+            mine.copy_(before)
+            return handle.run()
 
         if swapped:
             with pytest.raises(AffineTransferExecutionError, match='rejected the transfer batch') as refused:
@@ -481,6 +490,46 @@ class TestB2RelayBandInPlace(DistributedTest):
         assert torch.equal(mine, full)
         assert stats.local_copy_bytes == 0
         assert stats.sent_bytes == stats.received_bytes == (world_size - 1) * band * cols * 4
+
+    def test_a_prepared_band_rebuilt_at_run_is_checked(self):
+        # Whether the band onto itself is copied was decided at prepare. A band that is no longer that view
+        # of the destination, or newly is one, is refused on every process before any data moves.
+        _join_transfer_group()
+        rank, world_size, dtype = dist.get_rank(), dist.get_world_size(), torch.float32
+        rows, cols = 4 * world_size, 6
+        full = _full(rows, cols, dtype)
+        band = rows // world_size
+        own = slice(rank * band, (rank + 1) * band)
+        plan = plan_transfer(replicated_map((rows, cols), world_size),
+                             contiguous_split_map((rows, cols), [band] * world_size, 0))
+        bindings = {location: location for location in range(world_size)}
+        endpoints, budget = TransferEndpoints(bindings, dict(bindings)), StagingBudget(band * cols * 4)
+        mine = torch.full((rows, cols), UNWRITTEN, dtype=dtype, device=_device())
+        mine[own] = full[own]
+        start = mine.clone()
+        kept = [TransferRequest('weight', plan, {rank: mine[own]}, {rank: mine})]
+        apart = [TransferRequest('weight', plan, {rank: full[own].clone()}, {rank: mine})]
+        in_place = prepare_transfers(kept, endpoints, dtype, budget)
+        copied = prepare_transfers(apart, endpoints, dtype, budget)
+        assert in_place.run([replace(kept[0], source_buffers={rank: mine[own]})]).local_copy_bytes == 0
+        assert torch.equal(mine, full)
+        assert copied.run(apart).local_copy_bytes == band * cols * 4
+        assert torch.equal(mine, full)
+
+        mine.copy_(start)
+        last = rank == world_size - 1
+        rebuilt = [
+            # The band copied to new storage on one process: the copy it skips would now be needed.
+            (in_place, [replace(kept[0], source_buffers={rank: mine[own].clone()})] if last else kept),
+            # The band as a negative view on one process.
+            (in_place, [replace(kept[0], source_buffers={rank: torch._neg_view(mine[own])})] if last else kept),
+            # A band prepared on its own storage, now a view of the destination on one process.
+            (copied, kept if last else apart),
+        ]
+        for handle, requests in rebuilt:
+            with pytest.raises(AffineTransferExecutionError, match='moved or changed'):
+                handle.run(requests)
+        assert torch.equal(mine.isnan(), start.isnan()) and torch.equal(mine.nan_to_num(), start.nan_to_num())
 
 
 class TestB2LazyViewsRefused(DistributedTest):
@@ -501,8 +550,16 @@ class TestB2LazyViewsRefused(DistributedTest):
     def _lazy(buffer, kind):
         return buffer.conj() if kind == 'conj' else torch._neg_view(buffer)
 
+    @staticmethod
+    def _transfer(prepared, plan, sources, targets, endpoints, dtype):
+        if prepared:
+            # Refused when the handle is prepared, before it can run.
+            return prepare_transfers([TransferRequest('weight', plan, sources, targets)], endpoints, dtype)
+        return execute_transfer(plan, sources, targets, endpoints, dtype)
+
     @pytest.mark.parametrize('kind', ['conj', 'neg'])
-    def test_a_lazy_view_of_the_destination_is_refused(self, kind):
+    @pytest.mark.parametrize('prepared', [False, True])
+    def test_a_lazy_view_of_the_destination_is_refused(self, kind, prepared):
         _join_transfer_group()
         rank, world = dist.get_rank(), dist.get_world_size()
         map_ = replicated_map((6, ), world)
@@ -511,14 +568,15 @@ class TestB2LazyViewsRefused(DistributedTest):
         base = self._values(kind)
         before = base.clone()
         with pytest.raises(AffineTransferExecutionError, match='rejected the transfer batch') as refused:
-            execute_transfer(plan_transfer(map_, map_), {rank: self._lazy(base, kind)}, {rank: base}, endpoints,
-                             base.dtype)
+            self._transfer(prepared, plan_transfer(map_, map_), {rank: self._lazy(base, kind)}, {rank: base},
+                           endpoints, base.dtype)
         assert 'conjugate or negative view' in str(refused.value.__cause__)
         assert torch.equal(base, before)
 
     @pytest.mark.parametrize('kind', ['conj', 'neg'])
     @pytest.mark.parametrize('side', ['source', 'target'])
-    def test_a_lazy_view_crossing_processes_is_refused_on_both(self, kind, side):
+    @pytest.mark.parametrize('prepared', [False, True])
+    def test_a_lazy_view_crossing_processes_is_refused_on_both(self, kind, side, prepared):
         _join_transfer_group()
         rank = dist.get_rank()
         map_ = replicated_map((6, ), 1)
@@ -530,7 +588,7 @@ class TestB2LazyViewsRefused(DistributedTest):
         else:
             sources, targets = {}, {0: self._lazy(store, kind) if side == 'target' else store}
         with pytest.raises(AffineTransferExecutionError, match='rejected the transfer batch') as refused:
-            execute_transfer(plan_transfer(map_, map_), sources, targets, endpoints, values.dtype)
+            self._transfer(prepared, plan_transfer(map_, map_), sources, targets, endpoints, values.dtype)
         if rank == (0 if side == 'source' else 1):
             assert 'conjugate or negative view' in str(refused.value.__cause__)
         assert not store.any()
