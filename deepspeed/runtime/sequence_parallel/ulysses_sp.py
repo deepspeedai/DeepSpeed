@@ -31,6 +31,7 @@ https://github.com/snowflakedb/ArcticTraining/blob/main/projects/sequence-parall
 
 from collections import defaultdict, deque
 from deepspeed.sequence.layer import _dim_zero_all_to_all, register_all_to_all_group
+from deepspeed.runtime.zero.linear import autocast_custom_fwd, autocast_custom_bwd
 from deepspeed.utils.logging import logger
 from einops import rearrange
 from packaging import version
@@ -1088,7 +1089,8 @@ class TiledFusedLogitsLoss(torch.autograd.Function):
     Returns:
     - the computed `loss`
 
-    Note, that since this autograd function is typically the last one in the call stack, it performs `backward` inside `forward` and compensates for `output_reduction` artificially. This removes the need to re-run `forward` a second time inside `backward`
+    Each tile is recomputed during backward so that external loss weighting, normalization and loss
+    scaling apply to both hidden-state and parameter gradients without retaining the full logits.
 
     For a generic tiled compute implementation that can handle many other types of `forward` see `SequenceTiledCompute`.
 
@@ -1118,6 +1120,7 @@ class TiledFusedLogitsLoss(torch.autograd.Function):
     """
 
     @staticmethod
+    @autocast_custom_fwd
     def forward(
         ctx,
         fn,
@@ -1144,86 +1147,43 @@ class TiledFusedLogitsLoss(torch.autograd.Function):
             if mask.shape != x.shape[:2]:
                 raise ValueError(f"mask shape must match x and y batch/seq")
 
-        compute_params = [p for p in compute_params if p.requires_grad]
-
+        ctx.x_shape = x.shape
         x_requires_grad = x.requires_grad
-        x = x.detach().requires_grad_(x_requires_grad)
-
-        bs, seqlen = x.shape[:2]
-
-        # flatten bs+seqlen to avoid having stride issues when narrowing into seqlen w/ bs>1
-        # reshape rather than view: a caller may pass a non-contiguous x, y or mask (a transposed or
-        # channel-sliced activation), for which view cannot produce the flattened shape
-        x = x.reshape(-1, *x.shape[2:])
-        y = y.reshape(-1, *y.shape[2:])
+        # Use one flattened sequence so the generic tiler preserves this function's tile boundaries.
+        x = x.reshape(1, -1, *x.shape[2:]).requires_grad_(x_requires_grad)
+        y = y.reshape(1, -1, *y.shape[2:])
+        inputs = dict(x=x, y=y)
         if mask is not None:
-            mask = mask.reshape(-1)
-        incoming_grad = torch.tensor(1.0, dtype=x.dtype, device=x.device)
+            inputs["mask"] = mask.reshape(1, -1)
+        shards = len(torch.chunk(x, chunks=shards, dim=1))
 
-        # we are faking the incoming gradient, and since we perform a reduction outside of `autograd.backward` below we need to pre-adjust the incoming gradient. in the case of "sum" the gradient is 1.0, in the case of "mean" it's 1.0/num_elements, which in this case is 1/shards.
-        if output_reduction == "mean":
-            incoming_grad /= shards
-
-        # XXX: deal with the use case of running in inference mode, where we don't need backward
-        x_grad = torch.zeros_like(x) if x_requires_grad else None
-        x_shards = list(torch.chunk(x, chunks=shards, dim=0))
-        y_shards = list(torch.chunk(y, chunks=shards, dim=0))
-        if mask is not None:
-            mask_shards = list(torch.chunk(mask, chunks=shards, dim=0))
-
-        output_shards = []
-        for i, (x_shard, y_shard) in enumerate(zip(x_shards, y_shards)):
-            # Tell deepspeed not to add a new grad to its ipg bucket until the last shard is run
-            # XXX: DDP, FSDP will need something similar to make it work
-            if compute_params is not None:
-                if i + 1 < shards:
-                    for param in compute_params:
-                        param.ds_grad_is_ready = False
-                else:
-                    # last shard, can add the grad
-                    for param in compute_params:
-                        param.ds_grad_is_ready = True
-
-            x_shard.requires_grad_(x_requires_grad)
-
-            # if seqlen is not exactly divisible by shards the last step will be shorter than shard_step
-            shard_step = x_shards[i].shape[0]
-            shard_offset = i * x_shards[0].shape[0]
-
-            args = (self, x_shard, y_shard)
+        def loss_fn(x, y, mask=None):
+            args = (self, x.squeeze(0), y.squeeze(0))
             if mask is not None:
-                args += (mask_shards[i], )
-            if x_grad is not None:
-                x_shard.grad = x_grad.narrow(0, shard_offset, shard_step).view_as(x_shard)
-                with torch.enable_grad():
-                    output = fn(*args)
-                    output_shards.append(output)
-                torch.autograd.backward(output, incoming_grad)
-            else:
-                output = fn(*args)
-                output_shards.append(output)
+                args += (mask.squeeze(0), )
+            return fn(*args)
 
-        output_unsharded = torch.cat([l.unsqueeze(0) for l in output_shards], dim=0)
-
-        if output_reduction == "mean":
-            output = output_unsharded.mean()
-        elif output_reduction == "sum":
-            output = output_unsharded.sum()
-
-        # unflatten
-        if x_grad is not None:
-            x_grad = x_grad.view(bs, seqlen, *x_grad.shape[1:])
-            ctx.save_for_backward(x_grad.detach())
-
-        return output
+        return SequenceTiledCompute.forward(
+            ctx,
+            loss_fn,
+            x.shape[1],
+            shards,
+            list(inputs),
+            [],
+            "x",
+            compute_params if compute_params is not None else [],
+            0,
+            output_reduction,
+            *inputs.values(),
+        )
 
     @staticmethod
+    @autocast_custom_bwd
     def backward(ctx, *grads) -> torch.Tensor:
-        (x_grad, ) = ctx.saved_tensors
-        # grads[0] should normally be 1.0 as it should be coming from loss.backward()
-        if grads[0] != 1.0:
-            x_grad *= grads[0]
-        return (None, None, x_grad, None, None, None, None, None, None)
+        # The generic mean reduction adjusts its incoming gradient in place.
+        grad_outputs = SequenceTiledCompute.backward(ctx, grads[0].clone())
+        x_grad = grad_outputs[9].reshape(ctx.x_shape)
+        return (None, None, x_grad, None, None, None, None, None)
 
 
 class AutogradComputeMLP(torch.autograd.Function):
