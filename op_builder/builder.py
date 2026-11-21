@@ -925,7 +925,7 @@ class CUDAOpBuilder(OpBuilder):
                 if nvcc_threads <= 0:
                     raise ValueError("")
             except ValueError:
-                nvcc_threads = min(os.cpu_count(), 8)
+                nvcc_threads = min(os.cpu_count() or 1, 8)
 
             args += [
                 '-allow-unsupported-compiler' if sys.platform == "win32" else '', '--use_fast_math',
