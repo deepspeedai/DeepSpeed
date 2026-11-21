@@ -1745,6 +1745,9 @@ class DeepSpeedEngine(Module):
     def bf16_optimizer_states(self):
         return self._config.bfloat16_config.bf16_optimizer_states
 
+    def bf16_stochastic_round_params(self):
+        return self.bfloat16_enabled() and self._config.bfloat16_config.stochastic_round_params
+
     def torch_autocast_enabled(self) -> bool:
         return self._config.torch_autocast_enabled
 
@@ -2465,6 +2468,12 @@ class DeepSpeedEngine(Module):
         else:
             self.optimizer = basic_optimizer
 
+        # Subclasses such as ZenFlow's override the step that applies the rounding, so match exact types.
+        if self.bf16_stochastic_round_params() and type(
+                self.optimizer) not in (BF16_Optimizer, DeepSpeedZeroOptimizer):
+            raise ValueError("bf16.stochastic_round_params supports BF16_Optimizer and ZeRO stage 1/2 "
+                             f"(DeepSpeedZeroOptimizer); this engine uses {type(self.optimizer).__name__}")
+
         self._configure_autoep_folding_optimizer_gradient_reduction()
         log_dist("DeepSpeed Final Optimizer = {}".format(self.optimizer.__class__.__name__), ranks=[0])
 
@@ -2799,6 +2808,7 @@ class DeepSpeedEngine(Module):
                 fp16_master_weights_and_gradients=self.fp16_master_weights_and_gradients(),
                 bf16_master_weights_and_gradients=self.bf16_master_weights_and_gradients(),
                 bf16_optimizer_states=self.bf16_optimizer_states(),
+                bf16_stochastic_round_params=self.bf16_stochastic_round_params(),
                 gradient_accumulation_dtype=gradient_accumulation_dtype,
                 communication_data_type=self.communication_data_type,
                 elastic_checkpoint=self.zero_elastic_checkpoint(),
