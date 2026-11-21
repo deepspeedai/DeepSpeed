@@ -2,6 +2,7 @@
 # DeepSpeed Team
 """Accelerator-backed v1 HybridEngineRollout tests."""
 
+import copy
 import gc
 import os
 from types import SimpleNamespace
@@ -12,6 +13,7 @@ from transformers import PretrainedConfig
 from transformers.cache_utils import Cache
 
 import deepspeed
+import deepspeed.comm as dist
 from deepspeed.accelerator import get_accelerator
 from deepspeed.runtime.rollout.base import RolloutRequest, SamplingConfig
 from deepspeed.runtime.rollout.hybrid_engine_rollout import HybridEngineRollout, HybridEngineRolloutConfig
@@ -42,7 +44,9 @@ class _LocalKVModel(torch.nn.Module):
                                            layer_idx=0,
                                            cache_kwargs={"cache_position": cache_position})
         if attention_mask.dim() == 4:
-            valid = attention_mask[:, 0, 0, :] == 0
+            mask = attention_mask[:, 0, 0, :]
+            # Boolean masks mark valid columns True, additive ones with 0.
+            valid = mask if mask.dtype == torch.bool else mask == 0
         else:
             valid = torch.zeros((values.shape[0], values.shape[2]), dtype=torch.bool, device=input_ids.device)
             valid[:, :attention_mask.shape[1]] = attention_mask.bool()
@@ -194,6 +198,82 @@ class TestAutoTPContinuousRollout(DistributedTest):
             accelerator.synchronize()
 
 
+class TestAutoTPGraphRecapture(DistributedTest):
+    world_size = 2
+
+    @pytest.mark.parametrize("continuous_batch_size", [None, 2])
+    def test_ranks_recapture_together(self, continuous_batch_size, monkeypatch):
+        accelerator = get_accelerator()
+        if accelerator.create_graph() is None:
+            pytest.skip("requires graph capture")
+
+        from transformers import AutoModelForCausalLM, LlamaConfig
+
+        config = LlamaConfig(vocab_size=128,
+                             hidden_size=64,
+                             intermediate_size=128,
+                             num_hidden_layers=2,
+                             num_attention_heads=4,
+                             num_key_value_heads=4,
+                             max_position_embeddings=64)
+        torch.manual_seed(0)
+        model = AutoModelForCausalLM.from_config(config)
+        ds_config = {
+            "train_micro_batch_size_per_gpu": 1,
+            "tensor_parallel": {
+                "autotp_size": 2
+            },
+            "zero_optimization": {
+                "stage": 0
+            },
+        }
+        engine, _, _, _ = deepspeed.initialize(model=model, config=ds_config)
+        model.eval()
+
+        device = torch.device(accelerator.current_device_name())
+        prompt_ids = torch.tensor([[5, 17, 42, 9], [33, 8, 71, 2]], device=device)
+        prompt_attn = torch.ones_like(prompt_ids)
+        new_tokens = 6
+        with torch.no_grad():
+            expected = model.generate(prompt_ids,
+                                      attention_mask=prompt_attn,
+                                      max_new_tokens=new_tokens,
+                                      do_sample=False,
+                                      eos_token_id=None,
+                                      pad_token_id=0)
+
+        original_capture_to_graph = accelerator.capture_to_graph
+        capture_count = 0
+
+        def counted_capture_to_graph(*args, **kwargs):
+            nonlocal capture_count
+            capture_count += 1
+            return original_capture_to_graph(*args, **kwargs)
+
+        monkeypatch.setattr(accelerator, "capture_to_graph", counted_capture_to_graph)
+        rollout = HybridEngineRollout(engine,
+                                      SimpleNamespace(pad_token_id=0, eos_token_id=-1),
+                                      cfg=HybridEngineRolloutConfig(use_graph_capture=True))
+        sampling = SamplingConfig(max_new_tokens=new_tokens,
+                                  temperature=0,
+                                  continuous_batch_size=continuous_batch_size)
+        try:
+            for step in range(2):
+                if step == 1 and dist.get_rank() == 1:
+                    # Only this rank's signature changes; its peer must capture with it,
+                    # since capture runs forwards that hold TP collectives.
+                    weight = model.model.layers[0].mlp.down_proj.weight
+                    weight.data = weight.data.clone()
+                output = rollout.generate(RolloutRequest(prompt_ids, prompt_attn), sampling)
+                assert torch.equal(output.input_ids, expected)
+            assert capture_count == 2
+        finally:
+            # A live graph holding NCCL work hangs process-group teardown.
+            del rollout
+            gc.collect()
+            accelerator.synchronize()
+
+
 @pytest.mark.parametrize("attn_implementation", ["eager", "sdpa"])
 def test_static_graph_matches_native_llama_generation(attn_implementation):
     accelerator = get_accelerator()
@@ -233,6 +313,95 @@ def test_static_graph_matches_native_llama_generation(attn_implementation):
                               SamplingConfig(max_new_tokens=new_tokens, temperature=0))
 
     assert output.input_ids.tolist() == expected.tolist()
+
+
+def test_static_graph_is_reused_across_rollouts_with_the_same_decode_shape(monkeypatch):
+    accelerator = get_accelerator()
+    if not accelerator.is_available() or accelerator.create_graph() is None:
+        pytest.skip("requires graph capture")
+
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    torch.manual_seed(1234)
+    config = LlamaConfig(vocab_size=64,
+                         hidden_size=64,
+                         intermediate_size=128,
+                         num_hidden_layers=2,
+                         num_attention_heads=4,
+                         num_key_value_heads=2,
+                         max_position_embeddings=128)
+    config._attn_implementation = "sdpa"
+    device = torch.device(accelerator.device_name())
+    model = LlamaForCausalLM(config).to(device).eval()
+    generator = torch.Generator().manual_seed(1)
+    short_prompts = torch.randint(1, 64, (4, 8), generator=generator).to(device)
+    long_prompts = torch.randint(1, 64, (4, 12), generator=generator).to(device)
+    # eos -1 never matches, so every row generates the full length.
+    rollout = HybridEngineRollout(SimpleNamespace(module=model),
+                                  SimpleNamespace(pad_token_id=0, eos_token_id=-1),
+                                  cfg=HybridEngineRolloutConfig(use_graph_capture=True))
+
+    original_capture_to_graph = accelerator.capture_to_graph
+    capture_count = 0
+
+    def counted_capture_to_graph(*args, **kwargs):
+        nonlocal capture_count
+        capture_count += 1
+        return original_capture_to_graph(*args, **kwargs)
+
+    monkeypatch.setattr(accelerator, "capture_to_graph", counted_capture_to_graph)
+    # The decode graph depends on the batch size and prompt width plus max_new_tokens, not on the
+    # prompt width alone: 8 + 16 and 12 + 12 share one graph, while 8 + 8 needs another.
+    outputs = []
+    for step, (prompt_ids, new_tokens) in enumerate(
+        ((short_prompts, 16), (short_prompts, 16), (long_prompts, 12), (short_prompts, 8))):
+        if step == 1:
+            # Apply the same in-place update an optimizer step would make.
+            with torch.no_grad():
+                for parameter in model.parameters():
+                    parameter.add_(torch.randn_like(parameter) * 0.05)
+        attention_mask = torch.ones_like(prompt_ids)
+        with torch.no_grad():
+            expected = model.generate(prompt_ids,
+                                      attention_mask=attention_mask,
+                                      max_new_tokens=new_tokens,
+                                      do_sample=False,
+                                      eos_token_id=None,
+                                      pad_token_id=0)
+        output = rollout.generate(RolloutRequest(prompt_ids, attention_mask),
+                                  SamplingConfig(max_new_tokens=new_tokens, temperature=0))
+        assert output.input_ids.tolist() == expected.tolist()
+        outputs.append(output.input_ids)
+
+    # The update must change the tokens, otherwise a graph replaying stale weights would also pass.
+    assert not torch.equal(outputs[0], outputs[1])
+    assert capture_count == 2
+
+    # A graph captured in eval mode must not be replayed in training mode.
+    model.train()
+    rollout.generate(RolloutRequest(short_prompts, torch.ones_like(short_prompts)),
+                     SamplingConfig(max_new_tokens=8, temperature=0))
+    model.eval()
+    assert capture_count == 3
+
+    # Nor may a graph captured without autocast be replayed under it. Autocast
+    # still changes kernels at the model's own dtype, e.g. softmax runs in fp32.
+    bf16_rollout = HybridEngineRollout(SimpleNamespace(module=copy.deepcopy(model).to(torch.bfloat16)),
+                                       SimpleNamespace(pad_token_id=0, eos_token_id=-1),
+                                       cfg=HybridEngineRolloutConfig(use_graph_capture=True))
+    bf16_request = RolloutRequest(short_prompts, torch.ones_like(short_prompts))
+    bf16_rollout.generate(bf16_request, SamplingConfig(max_new_tokens=8, temperature=0))
+    with torch.autocast(device_type=accelerator.device_name(), dtype=torch.bfloat16):
+        bf16_rollout.generate(bf16_request, SamplingConfig(max_new_tokens=8, temperature=0))
+    bf16_rollout.shutdown()
+    assert capture_count == 5
+
+    head_dim = config.hidden_size // config.num_attention_heads
+    # Keys and values for every layer at batch 4 and cache length 8 + 8.
+    cache_bytes = 2 * config.num_hidden_layers * 4 * config.num_key_value_heads * 16 * head_dim * 4
+    allocated = accelerator.memory_allocated()
+    rollout.shutdown()
+    assert accelerator.memory_allocated() <= allocated - cache_bytes
 
 
 def test_continuous_generation_profile_on_accelerator():
