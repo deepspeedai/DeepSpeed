@@ -40,7 +40,7 @@ want to attempt to install all of our ops by setting the `DS_BUILD_OPS`
 environment variable to `1`, for example:
 
 ```bash
-DS_BUILD_OPS=1 pip install deepspeed
+DS_BUILD_OPS=1 pip install --no-build-isolation deepspeed
 ```
 
 DeepSpeed will only install any ops that are compatible with your machine.
@@ -52,7 +52,7 @@ with `DS_BUILD` environment variables at installation time. For example, to
 install DeepSpeed with only the `FusedLamb` op use:
 
 ```bash
-DS_BUILD_FUSED_LAMB=1 pip install deepspeed
+DS_BUILD_FUSED_LAMB=1 pip install --no-build-isolation deepspeed
 ```
 
 Available `DS_BUILD` options include:
