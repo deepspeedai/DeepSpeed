@@ -454,7 +454,7 @@ class TestOneCycle(DistributedTest):
 
         # Verify decay phase
         if decay_rate > 0:
-            _verify_continuous_increase(step_moms[(step_size * 2):])
+            _verify_continuous_decrease(step_moms[(step_size * 2):])
 
 
 class TestWarmupCosineLR(DistributedTest):
@@ -875,6 +875,72 @@ def test_one_cycle_rejects_wrong_length_per_group_lists(kwargs):
 
     with pytest.raises(ValueError):
         OneCycle(optimizer=optimizer, **{**defaults, **kwargs})
+
+
+def test_one_cycle_decays_momentum_below_the_cycle_maximum():
+    # decay_mom_rate is documented as a decay rate, and _get_decay_lr divides the lr by
+    # (1 + rate * interval). _get_decay_mom built the same factor and multiplied by it, so
+    # momentum grew without bound instead of decaying: with cycle_max_mom 0.95 and a rate
+    # of 0.1, betas[0] passed 1.0 during the third decay interval and kept rising, a value
+    # torch.optim.Adam rejects in its own constructor and nothing revalidates here.
+    param = torch.nn.Parameter(torch.zeros(1))
+    optimizer = torch.optim.Adam([param], lr=0.0001, betas=(0.9, 0.99))
+
+    scheduler = OneCycle(optimizer=optimizer,
+                         cycle_min_lr=0.0001,
+                         cycle_max_lr=0.001,
+                         cycle_first_step_size=10,
+                         cycle_second_step_size=10,
+                         decay_step_size=10,
+                         decay_lr_rate=0.1,
+                         decay_mom_rate=0.1,
+                         cycle_min_mom=0.85,
+                         cycle_max_mom=0.95)
+
+    moms = []
+    for step in range(61):
+        scheduler.step(step)
+        betas = optimizer.param_groups[0]["betas"]
+        assert 0.0 <= betas[0] < 1.0, f"betas[0] left [0, 1) at step {step}: {betas[0]}"
+        assert 0.0 <= betas[1] < 1.0, f"betas[1] left [0, 1) at step {step}: {betas[1]}"
+        moms.append(betas[0])
+
+    # The cycle spans 20 steps, so step 20 is the first decay step and decay_batch_iteration
+    # there is 1. Hand derived from cycle_max_mom / (1 + decay_mom_rate * iteration / 10):
+    # 0.95 / 1.01, 0.95 / 1.11 and 0.95 / 1.21 at steps 20, 30 and 40.
+    assert moms[20] == pytest.approx(0.9405940594059405)
+    assert moms[30] == pytest.approx(0.8558558558558559)
+    assert moms[40] == pytest.approx(0.7851239669421488)
+
+    # Momentum decays from the cycle maximum and keeps decreasing, the way the lr does.
+    assert moms[19] == pytest.approx(0.95)
+    decay_phase = moms[20:]
+    assert all(later < earlier for earlier, later in zip(decay_phase, decay_phase[1:]))
+
+    # decay_lr_rate and decay_mom_rate are equal here, so both hyperparameters shrink by
+    # the same factor from their cycle endpoint at every decay step.
+    assert optimizer.param_groups[0]["lr"] == pytest.approx(0.0001 * moms[60] / 0.95)
+
+
+def test_one_cycle_keeps_momentum_at_the_cycle_maximum_without_a_decay_rate():
+    # The default decay_mom_rate of 0 sets skip_mom_decay, and that path must stay put at
+    # cycle_max_mom rather than follow the decayed one.
+    param = torch.nn.Parameter(torch.zeros(1))
+    optimizer = torch.optim.Adam([param], lr=0.0001, betas=(0.9, 0.99))
+
+    scheduler = OneCycle(optimizer=optimizer,
+                         cycle_min_lr=0.0001,
+                         cycle_max_lr=0.001,
+                         cycle_first_step_size=10,
+                         cycle_second_step_size=10,
+                         decay_step_size=10,
+                         decay_lr_rate=0.1,
+                         cycle_min_mom=0.85,
+                         cycle_max_mom=0.95)
+
+    for step in range(21, 41):
+        scheduler.step(step)
+        assert optimizer.param_groups[0]["betas"][0] == pytest.approx(0.95)
 
 
 def test_lr_range_test_staircase_is_an_opt_in_flag():
