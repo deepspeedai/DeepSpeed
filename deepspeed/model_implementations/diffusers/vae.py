@@ -118,8 +118,9 @@ class DSVAE(CUDAGraph, torch.nn.Module):
         return self.static_output
 
     def forward(self, *inputs, **kwargs):
-        if self.enable_cuda_graph:
-            if self.cuda_graph_created:
+        # A captured graph cannot use a caller's generator, so a seeded call runs eagerly
+        if self.enable_cuda_graph and kwargs.get("generator") is None:
+            if self.all_cuda_graph_created:
                 outputs = self._graph_replay(*inputs, **kwargs)
             else:
                 self._create_cuda_graph(*inputs, **kwargs)
@@ -147,5 +148,5 @@ class DSVAE(CUDAGraph, torch.nn.Module):
 
         self.all_cuda_graph_created = True
 
-    def _forward(self, sample, timestamp, encoder_hidden_states, return_dict=True):
-        return self.vae(sample, timestamp, encoder_hidden_states, return_dict)
+    def _forward(self, sample, sample_posterior=False, return_dict=True, generator=None):
+        return self.vae(sample, sample_posterior=sample_posterior, return_dict=return_dict, generator=generator)
