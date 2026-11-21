@@ -7,7 +7,7 @@ from dataclasses import dataclass
 import collections
 from collections import UserDict
 import threading
-from typing import Deque, Dict, Set
+from typing import Deque, Dict, FrozenSet, Set, Tuple
 
 from deepspeed import comm as dist
 from deepspeed.utils import z3_leaf_module
@@ -119,6 +119,8 @@ class PartitionedParameterCoordinator:
         # queue for parameters to fetch. parameters will be popped off the left
         # side of the dequeue as they are fetched
         self.__param_queue: Deque[__class__.__ParamInTrace] = None
+        # (submodule ds_id, step_id) -> ds_ids of the params that can be released after that step
+        self.__params_to_release_cache: Dict[Tuple[int, int], FrozenSet[int]] = {}
         self.__prefetch_bucket_sz: int = prefetch_bucket_sz
         self.__prefetch_nvme: bool = prefetch_nvme
         self.hierarchy: int = 0
@@ -179,6 +181,9 @@ class PartitionedParameterCoordinator:
         # pop an empty deque (IndexError) after trace invalidation.
         self.__step_id_module_fetched_for = collections.defaultdict(lambda: collections.deque())
         self.__param_queue = None
+        self.__params_to_release_cache.clear()
+        if hasattr(self.__params_to_release, "cache_clear"):
+            self.__params_to_release.cache_clear()
 
     def is_complete_trace(self) -> bool:
         return self.__trace_mode == ZeRoTraceMode.COMPLETE
@@ -502,7 +507,7 @@ class PartitionedParameterCoordinator:
             assert self.__active_backward_submodules, "active_backward_submodules is empty during backward pass"
             # Persistent params must stay resident even when attributed to a recompute owner.
             recompute_params = set([p.ds_id for p in submodule.ds_recompute_parameters if not p.ds_persist])
-            params_to_release.update(recompute_params)
+            params_to_release = params_to_release | recompute_params
 
         current_bwd_id = next(reversed(
             self.__active_backward_submodules)) if self.__active_backward_submodules else None
@@ -634,6 +639,13 @@ class PartitionedParameterCoordinator:
         if not self.is_complete_trace():
             raise RuntimeError("expected trace to be complete")
 
+        # Cached per coordinator (not via a class-level lru_cache, which pins the coordinator and its modules
+        # forever) and dropped together with the trace, since it is only valid for the trace it was built from.
+        key = (submodule_to_release.ds_id, step_id)
+        cached = self.__params_to_release_cache.get(key)
+        if cached is not None:
+            return cached
+
         params_to_release = set(
             p.ds_id for p in iter_params(submodule_to_release, recurse=z3_leaf_module(submodule_to_release))
             if not p.ds_persist)
@@ -660,7 +672,9 @@ class PartitionedParameterCoordinator:
                 params_to_release.discard(param.ds_id)
                 params_traversed += param.ds_numel
 
-        return params_to_release
+        result = frozenset(params_to_release)
+        self.__params_to_release_cache[key] = result
+        return result
 
     @instrument_w_nvtx
     def __prefetch_nvme_param_partitions(self) -> None:
