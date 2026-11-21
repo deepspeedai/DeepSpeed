@@ -375,6 +375,11 @@ class TestSelector:
             hit = self._resolve_candidate(name, module_index)
             if hit is not None:
                 deps.add(hit)
+            parts = name.split(".")
+            for end in range(1, len(parts)):
+                parent = module_index.get(".".join(parts[:end]))
+                if parent is not None and parent.name == "__init__.py":
+                    deps.add(parent)
 
         def add_bare(top: str) -> None:
             if opaque:
