@@ -659,6 +659,48 @@ class TestArenaWeightViews:
             out_fresh), (f"refresh path diverged from fresh injection: "
                          f"{(out_refreshed != out_fresh).sum().item()} of {out_fresh.numel()} tokens differ")
 
+    @pytest.mark.parametrize("batch_size", [1, 2])
+    def test_graph_reused_until_refresh(self, batch_size, monkeypatch):
+        """The decode graph is captured once per shape and replayed by later
+        rollouts; segki_refresh frees the derived tensors it captured, so the
+        next rollout must capture again."""
+        pytest.importorskip("transformers")
+        accelerator = get_accelerator()
+        if accelerator.device_name() == "cpu" or accelerator.create_graph() is None:
+            pytest.skip("requires graph capture")
+        try:
+            from transformers import AutoTokenizer
+            tok = AutoTokenizer.from_pretrained(_TEST_MODEL)
+        except Exception as e:
+            pytest.skip(f"model {_TEST_MODEL} unavailable: {e}")
+        object.__setattr__(tok, "eos_token_id", -1)
+        torch.manual_seed(17)
+        ids = torch.randint(1000, 50000, (batch_size, 64), device=accelerator.device_name())
+
+        original_capture_to_graph = accelerator.capture_to_graph
+        capture_count = 0
+
+        def counted_capture_to_graph(*args, **kwargs):
+            nonlocal capture_count
+            capture_count += 1
+            return original_capture_to_graph(*args, **kwargs)
+
+        monkeypatch.setattr(accelerator, "capture_to_graph", counted_capture_to_graph)
+        rollout, m = self._make_rollout(tok)
+        first = self._gen(rollout, ids)
+        assert torch.equal(self._gen(rollout, ids), first)
+        assert capture_count == 1
+
+        from deepspeed.module_inject.segment_ki import segki_refresh
+        segki_refresh(m)
+        assert torch.equal(self._gen(rollout, ids), first)
+        assert capture_count == 2
+
+        rollout.refresh_weights()
+        assert torch.equal(self._gen(rollout, ids), first)
+        assert capture_count == 3
+        rollout.shutdown()
+
     def test_glu_only_model_refresh_clears_backend_cat_cache(self):
         """GLU-only (dense) models carry the backend handle on _ki_dual_op;
         segki_refresh must still reach the process-wide g_glu_cat_cache

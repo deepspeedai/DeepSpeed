@@ -63,17 +63,31 @@ forward. Results remain in the user-requested matrix order.
 HybridEngine Rollout CUDA Graph Decode
 --------------------------------------
 
-``HybridEngineRolloutConfig(use_graph_capture=True)`` captures the decode
-forward pass in a CUDA graph and replays it for every generated token. Only the
-model forward is captured; the next token is chosen from the graph's output
-logits after each replay. Greedy decoding (``temperature <= 0``) takes the
-argmax. Sampling applies the ``temperature``, ``top_k`` and ``top_p`` settings
-of ``SamplingConfig`` with Hugging Face's logits warpers, in the order
-``generate()`` applies them, so both paths sample from the same distribution.
+``HybridEngineRolloutConfig(use_graph_capture=True)`` captures one decode step
+in a CUDA graph and replays it for every generated token. The step is the model
+forward followed by the choice of the next token and the update of the decode
+position, attention mask and output buffer, so a replay needs no host work. The
+host checks for EOS every 16 steps and stops once every row has produced it.
+Greedy decoding (``temperature <= 0``) takes the argmax. Sampling applies the
+``temperature``, ``top_k`` and ``top_p`` settings of ``SamplingConfig`` with
+Hugging Face's logits warpers, in the order ``generate()`` applies them, so both
+paths sample from the same distribution.
 Both greedy decoding and sampling first apply the repetition penalty from the
 model's ``generation_config``, as ``generate()`` does. Other
 ``generation_config`` settings are not applied on the graph path. Continuous
 batching, with or without graph capture, picks tokens the same way.
+
+The captured graph and its static cache are reused by later ``generate()``
+calls with the same batch size, prompt width plus ``max_new_tokens``, device,
+dtype, parameter layout, training mode and autocast setting. The prompt is still
+prefilled eagerly on every call, so one graph serves all prompt widths with the
+same total length. In-place weight updates, such as an optimizer step, are
+replayed without recapturing. The graph and cache stay allocated between
+rollouts until the shape changes or ``rollout.shutdown()`` releases them.
+Because the graph also selects the tokens, changing the sampling settings, the
+repetition penalty or the EOS ids captures it again. With
+``use_segki=True``, ``sync_weights()`` and ``refresh_weights()`` also release
+them, because the injected kernels cache tensors derived from the weights.
 
 Shared Prompt Prefill
 ---------------------
@@ -108,13 +122,14 @@ Scope and semantics
 
 - **Throughput numbers** count executed decode steps (all rows step together);
   tokens produced after a row's EOS are padded, so valid-token rates can be
-  lower at early EOS. Graph warm-up + capture happens per ``generate()`` call
-  (~1–1.5 s on a 4B model) and is excluded from decode-rate measurements.
-- **Graph reuse**: a fresh graph is captured on every ``generate()`` call, so
-  weights updated by training between calls are picked up. Replaying one
-  captured graph across a training step (weight mutation without recapture)
-  is not supported — the capture reads current parameter memory, so stale
-  addresses could otherwise persist.
+  lower at early EOS. Graph warm-up + capture (~1–1.5 s on a 4B model) runs
+  on the first ``generate()`` call for a decode shape and is excluded from
+  decode-rate measurements.
+- **Graph reuse**: later calls with the same decode shape replay the captured
+  graph. ``sync_weights()`` / ``refresh_weights()`` drop the derived weight
+  caches and release the graph, so the next call recaptures with the trained
+  weights. Updating weights without calling either of them is not supported
+  while segment kernels are enabled.
 - **Packed (varlen) sequences**: the GDN conv/scan wrappers forward the
   packed-sequence boundary markers (``seq_idx`` / ``cu_seqlens``) exactly as
   the native forward does; packed *training* (gradients through the packed
