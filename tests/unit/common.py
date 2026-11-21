@@ -94,13 +94,17 @@ def set_accelerator_visible():
                 nvidia_smi = subprocess.check_output(['nvidia-smi', '--list-gpus'])
                 num_accelerators = len(nvidia_smi.decode('utf-8').strip().split('\n'))
         elif get_accelerator().device_name() == 'xpu':
-            clinfo = subprocess.check_output(['clinfo'])
-            lines = clinfo.decode('utf-8').strip().split('\n')
-            num_accelerators = 0
-            for line in lines:
-                match = re.search('Device Type.*GPU', line)
-                if match:
-                    num_accelerators += 1
+            try:
+                clinfo = subprocess.check_output(['clinfo'])
+                lines = clinfo.decode('utf-8').strip().split('\n')
+                num_accelerators = 0
+                for line in lines:
+                    match = re.search('Device Type.*GPU', line)
+                    if match:
+                        num_accelerators += 1
+            except FileNotFoundError:
+                # clinfo is an optional OpenCL tool; the runtime counts the same devices.
+                num_accelerators = get_accelerator().device_count()
         elif get_accelerator().device_name() == 'hpu':
             try:
                 hl_smi = subprocess.check_output(['hl-smi', "-L"])
