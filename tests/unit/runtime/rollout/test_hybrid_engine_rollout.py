@@ -76,6 +76,8 @@ def test_config_defaults():
     assert cfg.enable_profiling is False
     assert cfg.use_shared_prefill is False
     assert cfg.align_decode_fronts is False
+    assert cfg.adaptive_prefill is False
+    assert cfg.prefill_max_tokens == 65536
     assert cfg.enable_cache_trimming is False
     assert cfg.continuous_cache_capacity is None
 
@@ -112,8 +114,10 @@ def test_constructor_defaults_without_cfg():
     assert rollout.continuous_cache_capacity is None
 
 
-def test_continuous_generation_rejects_unsupported_inputs():
-    rollout = HybridEngineRollout(_make_engine(), _make_tokenizer())
+@pytest.mark.parametrize("adaptive_prefill", [False, True])
+def test_continuous_generation_rejects_unsupported_inputs(adaptive_prefill):
+    rollout = HybridEngineRollout(_make_engine(), _make_tokenizer(),
+                                  HybridEngineRolloutConfig(adaptive_prefill=adaptive_prefill))
     request = RolloutRequest(
         prompt_ids=torch.tensor([[0, 1, 2]]),
         prompt_attention_mask=torch.tensor([[0, 1, 1]]),
@@ -124,6 +128,9 @@ def test_continuous_generation_rejects_unsupported_inputs():
         rollout.generate(empty_request, SamplingConfig(max_new_tokens=2, continuous_batch_size=1))
     with pytest.raises(ValueError, match="positive"):
         rollout.generate(request, SamplingConfig(max_new_tokens=2, continuous_batch_size=0))
+    if adaptive_prefill:
+        with pytest.raises(ValueError, match="adaptive prefill.*greedy"):
+            rollout.generate(request, SamplingConfig(max_new_tokens=2, temperature=0.7, continuous_batch_size=1))
 
 
 @pytest.mark.parametrize(
@@ -336,7 +343,7 @@ def test_continuous_graph_keeps_cache_position_alive_for_replay():
 
     module = DecodeModule()
     rollout = HybridEngineRollout(SimpleNamespace(module=module), _make_tokenizer())
-    state = rollout._get_continuous_graph_state(module, 1, 3, 5, torch.device(accelerator.current_device_name()),
+    state = rollout._get_continuous_graph_state(module, 1, 5, torch.device(accelerator.current_device_name()),
                                                 torch.float32, DeepSpeedStaticCache)
     gc.collect()
 
@@ -347,7 +354,7 @@ def test_continuous_graph_keeps_cache_position_alive_for_replay():
     assert torch.equal(state.static_logits, torch.full_like(state.static_logits, 11))
 
 
-def test_continuous_graph_state_reuses_matching_capture_and_rebuilds_for_weight_updates():
+def test_continuous_graph_state_survives_in_place_weight_updates():
 
     class GraphCache:
 
@@ -364,24 +371,43 @@ def test_continuous_graph_state_reuses_matching_capture_and_rebuilds_for_weight_
 
         def __init__(self):
             super().__init__()
-            self.weight = torch.nn.Parameter(torch.zeros(1))
+            self.weight = torch.nn.Parameter(torch.zeros(2, 3))
+            self.register_buffer("inv_freq", torch.ones(3), persistent=False)
             self.config = SimpleNamespace()
 
     module = DecodeModule()
     rollout = HybridEngineRollout(SimpleNamespace(module=module), _make_tokenizer())
     graph = MagicMock()
     logits = torch.empty((1, 1, 8))
+    device = torch.device("cpu")
 
     with patch.object(rollout, "_capture_continuous_graph", return_value=(graph, logits)) as capture:
-        first = rollout._get_continuous_graph_state(module, 1, 3, 5, torch.device("cpu"), torch.float32, GraphCache)
-        second = rollout._get_continuous_graph_state(module, 1, 3, 5, torch.device("cpu"), torch.float32, GraphCache)
+        first = rollout._get_continuous_graph_state(module, 1, 5, device, torch.float32, GraphCache)
+        # An optimizer step writes in place, so replay already reads the new values.
         with torch.no_grad():
             module.weight.add_(1)
-        third = rollout._get_continuous_graph_state(module, 1, 3, 5, torch.device("cpu"), torch.float32, GraphCache)
+        updated = rollout._get_continuous_graph_state(module, 1, 5, device, torch.float32, GraphCache)
+        # Captured kernels keep the old strides even when the address is unchanged.
+        with torch.no_grad():
+            module.weight.transpose_(0, 1)
+        relaid = rollout._get_continuous_graph_state(module, 1, 5, device, torch.float32, GraphCache)
+        # A replaced parameter lives at an address the captured kernels never read.
+        module.weight = torch.nn.Parameter(torch.zeros(2, 3))
+        moved = rollout._get_continuous_graph_state(module, 1, 5, device, torch.float32, GraphCache)
+        # Re-registering a buffer, e.g. a rotary inv_freq or quant scale, moves it too.
+        module.register_buffer("inv_freq", torch.full((3, ), 2.0), persistent=False)
+        rebuffered = rollout._get_continuous_graph_state(module, 1, 5, device, torch.float32, GraphCache)
+        resized = rollout._get_continuous_graph_state(module, 1, 6, device, torch.float32, GraphCache)
+        rollout.shutdown()
+        released = rollout._get_continuous_graph_state(module, 1, 6, device, torch.float32, GraphCache)
 
-    assert first is second
-    assert third is not first
-    assert capture.call_count == 2
+    assert updated is first
+    assert relaid is not first
+    assert moved is not relaid
+    assert rebuffered is not moved
+    assert resized is not rebuffered
+    assert released is not resized
+    assert capture.call_count == 6
 
 
 def test_static_cache_constructor_supports_max_batch_keyword():
@@ -406,7 +432,9 @@ def test_continuous_cache_span_does_not_sum_independent_requests():
     assert cache_len < 64 + 64 * 100
 
 
-def test_continuous_generation_validates_each_request_length():
+@pytest.mark.parametrize("adaptive_prefill", [False, True])
+@pytest.mark.parametrize("length,max_positions", [(3, 4), (65536, 32768)])
+def test_continuous_generation_validates_each_request_length(adaptive_prefill, length, max_positions):
 
     class LimitedModel(torch.nn.Module):
 
@@ -415,11 +443,13 @@ def test_continuous_generation_validates_each_request_length():
         def __init__(self):
             super().__init__()
             self.weight = torch.nn.Parameter(torch.zeros(1))
-            self.config = SimpleNamespace(max_position_embeddings=4)
+            self.config = SimpleNamespace(max_position_embeddings=max_positions)
 
     model = LimitedModel()
-    rollout = HybridEngineRollout(SimpleNamespace(module=model), SimpleNamespace(eos_token_id=None))
-    request = RolloutRequest(torch.tensor([[1, 2, 3]]), torch.ones((1, 3), dtype=torch.long))
+    rollout = HybridEngineRollout(SimpleNamespace(module=model), SimpleNamespace(eos_token_id=None),
+                                  HybridEngineRolloutConfig(adaptive_prefill=adaptive_prefill))
+    prompt = torch.ones((1, length), dtype=torch.long)
+    request = RolloutRequest(prompt, torch.ones_like(prompt))
 
     with pytest.raises(ValueError, match="request exceeds"):
         rollout.generate(request, SamplingConfig(max_new_tokens=2, temperature=0, continuous_batch_size=1))
@@ -746,7 +776,8 @@ def test_aligned_continuous_generation_reclaims_dead_prefix_when_cache_would_exh
     assert rollout.get_last_continuous_stats()["trim_count"] == 1
 
 
-def test_continuous_generation_trims_cache_after_staggered_eos():
+@pytest.mark.parametrize("adaptive_prefill", [False, True])
+def test_continuous_generation_trims_cache_after_staggered_eos(adaptive_prefill):
 
     class CacheClassModel(torch.nn.Module):
         _supports_cache_class = True
@@ -777,7 +808,7 @@ def test_continuous_generation_trims_cache_after_staggered_eos():
     rollout = HybridEngineRollout(
         SimpleNamespace(module=model),
         SimpleNamespace(pad_token_id=0, eos_token_id=2),
-        cfg=HybridEngineRolloutConfig(enable_cache_trimming=True),
+        cfg=HybridEngineRolloutConfig(enable_cache_trimming=True, adaptive_prefill=adaptive_prefill),
     )
     request = RolloutRequest(
         torch.tensor([[1, 2, 3], [1, 2, 4], [1, 2, 5], [1, 2, 6], [1, 2, 7], [1, 2, 8]]),
@@ -1283,6 +1314,20 @@ class TestZero3SynchronizedEarlyStop(DistributedTest):
         assert result.input_ids[0, 1 + target_eos_step].item() == 2
 
 
+def test_continuous_repetition_penalty_matches_hf_in_bfloat16():
+    from transformers import RepetitionPenaltyLogitsProcessor
+
+    logits = torch.tensor([[1.0, 0.333984375]], dtype=torch.bfloat16)
+    prompt = torch.tensor([[0]])
+    request = RolloutRequest(prompt, torch.ones_like(prompt))
+    model = SimpleNamespace(generation_config=SimpleNamespace(repetition_penalty=3.0))
+    expected = RepetitionPenaltyLogitsProcessor(3.0)(prompt, logits.float()).argmax(dim=-1, keepdim=True)
+    # Pin the BF16 rounding bug: dividing in BF16 ties the scores and incorrectly selects token 0.
+    actual = HybridEngineRollout._continuous_next_tokens(logits, (0, ), {0: request}, {0: ()}, model, _argmax)
+    assert expected.tolist() == [[1]]
+    assert torch.equal(actual, expected)
+
+
 @patch("deepspeed.runtime.rollout.hybrid_engine_rollout.time.perf_counter")
 @patch("deepspeed.runtime.rollout.hybrid_engine_rollout.get_accelerator")
 def test_generate_records_profile_when_enabled(mock_get_accelerator, mock_perf_counter):
@@ -1565,12 +1610,106 @@ def test_engine_pairs_shared_prefill_cache_tensors():
     workspace.repeat_kv_cache.assert_called_once_with(2, 2)
 
 
-# -- sync_weights is no-op ---------------------------------------------
+# -- sync_weights invalidates derived caches ---------------------------
 
 
-def test_sync_weights_is_noop():
-    rollout = HybridEngineRollout(_make_engine(), _make_tokenizer())
-    assert rollout.sync_weights(step=0) is None
+def test_sync_weights_drops_derived_caches():
+    # refresh_weights resolves the module through engine.module; the mock
+    # engine only has to expose it. A fake derived cache on the module
+    # must vanish after the training-step hook fires.
+    engine = _make_engine()
+    # a real module, not the mock's auto-attribute: segki_refresh walks
+    # .modules() and delattr must actually remove
+    engine.module = torch.nn.Identity()
+    engine.module._ki_tp_cat_w = object()  # a derived-weight cache stand-in
+    rollout = HybridEngineRollout(engine, _make_tokenizer())
+    rollout.sync_weights(step=0)
+    assert not hasattr(engine.module, "_ki_tp_cat_w")
+
+
+def test_sync_weights_continuous_graph_safe():
+    """Continuous graph + weight sync must not replay freed derived tensors.
+
+    The retained continuous graph captures the derived tensors' addresses
+    (GLU concat cache, attention cat weights); a refresh that drops them
+    while the graph survives leaves replays reading freed memory. The
+    graph must be released across a sync (interim contract) until refresh
+    refills derived tensors in place."""
+    pytest.importorskip("transformers")
+    from deepspeed.accelerator import get_accelerator
+    if get_accelerator().device_name() == "cpu":
+        pytest.skip("segKI injection needs an accelerator")
+
+    model = _make_small_qwen()
+    device = next(model.parameters()).device
+
+    def make_rollout():
+        return HybridEngineRollout(SimpleNamespace(module=model), SimpleNamespace(pad_token_id=0, eos_token_id=None),
+                                   HybridEngineRolloutConfig(use_segki=True, use_graph_capture=True))
+
+    prompt = torch.randint(3, 28, (2, 8), device=device)
+    sampling = SamplingConfig(max_new_tokens=8, temperature=0, continuous_batch_size=2)
+
+    rollout = make_rollout()
+    rollout.generate(RolloutRequest(prompt, torch.ones_like(prompt)), sampling)  # capture
+    rollout.generate(RolloutRequest(prompt, torch.ones_like(prompt)), sampling)  # reuse -> retained
+    # the hazard only exists when the graph actually survives across calls
+    assert rollout._continuous_graph_state is not None, "expected the continuous graph to be retained"
+
+    with torch.no_grad():
+        for p in model.parameters():
+            p.mul_(3.0)
+    rollout.sync_weights(step=0)
+    # interim contract: the sync must release the retained graph. It captures
+    # the derived tensors' addresses wherever they exist (TP>1 cat weights,
+    # Ampere/Hopper GLU concat cache, GDN gates); refresh drops those tensors,
+    # so a surviving graph would replay freed memory. On configs without any
+    # derived tensor the replay would stay correct by luck -- pin the release
+    # so every config is safe by construction.
+    assert rollout._continuous_graph_state is None, "sync must release the retained continuous graph"
+    synced = rollout.generate(RolloutRequest(prompt, torch.ones_like(prompt)), sampling)
+
+    fresh = make_rollout().generate(RolloutRequest(prompt, torch.ones_like(prompt)), sampling)
+    assert torch.equal(synced.input_ids, fresh.input_ids), \
+        "post-sync continuous generate must match a fresh injection"
+
+
+def test_sync_weights_generate_matches_fresh_injection():
+    """Rollout-path weight sync: inject -> generate -> in-place write ->
+    sync_weights -> generate must equal a fresh injection of the same
+    weights (derived caches rebuilt, live reads see the new values)."""
+    pytest.importorskip("transformers")
+    from deepspeed.accelerator import get_accelerator
+    from transformers import AutoModelForCausalLM
+    if get_accelerator().device_name() == "cpu":
+        pytest.skip("segKI injection needs an accelerator")
+
+    torch.manual_seed(0)
+    device = torch.device(get_accelerator().device_name())
+    try:
+        model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen3.5-0.8B-Base", dtype=torch.bfloat16).to(device).eval()
+    except Exception as e:
+        pytest.skip(f"model unavailable: {e}")
+
+    def make_rollout():
+        return HybridEngineRollout(SimpleNamespace(module=model), SimpleNamespace(pad_token_id=0, eos_token_id=None),
+                                   HybridEngineRolloutConfig(use_segki=True, use_graph_capture=False))
+
+    prompt = torch.randint(3, 1500, (2, 16), device=device)
+    sampling = SamplingConfig(max_new_tokens=8, temperature=0)
+
+    rollout = make_rollout()
+    rollout.generate(RolloutRequest(prompt, torch.ones_like(prompt)), sampling)  # build caches
+
+    # in-place weight write, the arena/reshard contract
+    with torch.no_grad():
+        for p in model.parameters():
+            p.add_(0.01)
+    rollout.sync_weights(step=0)
+    synced = rollout.generate(RolloutRequest(prompt, torch.ones_like(prompt)), sampling)
+
+    fresh = make_rollout().generate(RolloutRequest(prompt, torch.ones_like(prompt)), sampling)
+    assert torch.equal(synced.input_ids, fresh.input_ids), "post-sync generate must match a fresh injection"
 
 
 # -- generate dispatches correctly -------------------------------------
@@ -1858,3 +1997,505 @@ def test_static_graph_capture_receives_a_prebuilt_4d_mask(mock_get_accelerator):
         expected[:, :prompt_len] = prompt_attention == 0
         expected[:, prompt_len:position + 1] = False
         assert torch.equal(masked, expected), f"replay {step}"
+
+
+def _make_small_qwen(max_position_embeddings=64):
+    from transformers import Qwen2Config, Qwen2ForCausalLM
+    from deepspeed.accelerator import get_accelerator
+
+    torch.manual_seed(8497)
+    device = get_accelerator().device_name()
+    config = Qwen2Config(vocab_size=32,
+                         hidden_size=32,
+                         intermediate_size=64,
+                         num_hidden_layers=2,
+                         num_attention_heads=4,
+                         num_key_value_heads=2,
+                         max_position_embeddings=max_position_embeddings,
+                         pad_token_id=0,
+                         eos_token_id=None)
+    return Qwen2ForCausalLM(config).to(device).eval()
+
+
+@pytest.mark.parametrize("lengths,capacity,strategy", [
+    ([4, 4, 3, 3], 4, "batched"),
+    ([4, 4, 3, 3], 2, "bucketed"),
+    ([16, 1, 1, 1], 4, "batched"),
+    ([4, 2, 1, 1], 4, "batched"),
+    ([1], 1, "batched"),
+])
+def test_adaptive_generation_matches_single_request_eager(lengths, capacity, strategy):
+    model = _make_small_qwen()
+    device = next(model.parameters()).device
+    tokenizer = SimpleNamespace(pad_token_id=0, eos_token_id=None)
+    width = max(lengths)
+    prompt_ids = torch.zeros((len(lengths), width), dtype=torch.long, device=device)
+    mask = torch.zeros_like(prompt_ids, dtype=torch.float32)
+    expected = []
+    with torch.no_grad():
+        for row, length in enumerate(lengths):
+            prompt = torch.arange(1, length + 1, device=device).unsqueeze(0)
+            prompt_ids[row, -length:] = prompt
+            mask[row, -length:] = 1
+            expected.append(model.generate(prompt, max_new_tokens=3, do_sample=False)[0, length:])
+        rollout = HybridEngineRollout(
+            SimpleNamespace(module=model), tokenizer,
+            HybridEngineRolloutConfig(adaptive_prefill=True, enable_profiling=True, align_decode_fronts=True))
+        sampling = SamplingConfig(max_new_tokens=3, temperature=0, continuous_batch_size=capacity)
+        result = rollout.generate(RolloutRequest(prompt_ids, mask), sampling)
+
+    assert torch.equal(result.input_ids[:, width:], torch.stack(expected))
+    assert torch.equal(result.input_ids[:, :width], prompt_ids)
+    assert torch.equal(result.attention_mask[:, :width], mask)
+    assert result.response_start_idx.tolist() == [width] * len(lengths)
+    assert rollout.get_last_profile()["generation_strategy"] == strategy
+    assert sampling.continuous_batch_size == capacity
+    assert rollout.align_decode_fronts is True
+    if strategy == "batched":
+        assert rollout.get_last_continuous_stats() is None
+    else:
+        assert rollout.get_last_profile()["active_batch_size"] <= capacity
+
+
+@pytest.mark.parametrize("adaptive_prefill", [False, True])
+def test_continuous_opt_matches_eager_with_static_cache(adaptive_prefill):
+    from deepspeed.accelerator import get_accelerator
+    from transformers import OPTConfig, OPTForCausalLM
+
+    torch.manual_seed(8497)
+    config = OPTConfig(vocab_size=32,
+                       hidden_size=32,
+                       ffn_dim=64,
+                       num_hidden_layers=2,
+                       num_attention_heads=4,
+                       max_position_embeddings=32,
+                       pad_token_id=0,
+                       eos_token_id=None,
+                       attn_implementation="sdpa")
+    model = OPTForCausalLM(config).to(get_accelerator().device_name()).eval()
+    prompt = torch.tensor([[1, 4, 5], [0, 4, 5]], device=next(model.parameters()).device)
+    mask = prompt.ne(0).long()
+    with torch.no_grad():
+        expected = model.generate(prompt, attention_mask=mask, max_new_tokens=3, do_sample=False)
+    rollout = HybridEngineRollout(SimpleNamespace(module=model), SimpleNamespace(pad_token_id=0, eos_token_id=None),
+                                  HybridEngineRolloutConfig(adaptive_prefill=adaptive_prefill))
+    result = rollout.generate(RolloutRequest(prompt, mask),
+                              SamplingConfig(max_new_tokens=3, temperature=0, continuous_batch_size=1))
+    assert torch.equal(result.input_ids, expected)
+    assert result.attention_mask[:, :3].tolist() == mask.tolist()
+
+
+@pytest.mark.parametrize("name,value", [
+    ("prefill_fixed_cost_ms", -1.0),
+    ("prefill_token_cost_ms", float("nan")),
+    ("prefill_attention_cost_ms", float("inf")),
+    ("prefill_max_tokens", 0),
+])
+def test_adaptive_prefill_rejects_invalid_cost_settings(name, value):
+    with pytest.raises(ValueError, match=name):
+        HybridEngineRollout(_make_engine(), _make_tokenizer(),
+                            HybridEngineRolloutConfig(adaptive_prefill=True, **{name: value}))
+
+
+@patch("deepspeed.comm.get_world_size", return_value=2)
+@patch("deepspeed.comm.is_initialized", return_value=True)
+def test_adaptive_prefill_rejects_unsynchronized_distributed_selection(_initialized, _world_size):
+    rollout = HybridEngineRollout(_make_engine(), _make_tokenizer(), HybridEngineRolloutConfig(adaptive_prefill=True))
+    with pytest.raises(ValueError, match="single-process"):
+        rollout.generate(_make_request(), SamplingConfig(max_new_tokens=2, temperature=0, continuous_batch_size=2))
+
+
+def test_config_preserves_legacy_positional_arguments():
+    cfg = HybridEngineRolloutConfig(False, False, False, False, True, 16)
+    assert cfg.enable_cache_trimming is True
+    assert cfg.continuous_cache_capacity == 16
+    assert cfg.adaptive_prefill is False
+    assert cfg.prefill_max_tokens == 65536
+
+
+@pytest.mark.parametrize("setting,value", [
+    ("no_repeat_ngram_size", 1),
+    ("num_beams", 2),
+    ("return_dict_in_generate", True),
+])
+@pytest.mark.parametrize("config_source", ["generation", "model"])
+def test_adaptive_generation_rejects_unsupported_generation_settings(setting, value, config_source):
+    model = _make_small_qwen()
+    config = model.generation_config if config_source == "generation" else model.config
+    setattr(config, setting, value)
+    prompt = torch.tensor([[1, 2, 3, 4], [1, 2, 3, 4]], device=next(model.parameters()).device)
+    rollout = HybridEngineRollout(SimpleNamespace(module=model), SimpleNamespace(pad_token_id=0, eos_token_id=None),
+                                  HybridEngineRolloutConfig(adaptive_prefill=True))
+    with pytest.raises(ValueError, match=setting):
+        rollout.generate(RolloutRequest(prompt, torch.ones_like(prompt)),
+                         SamplingConfig(max_new_tokens=4, temperature=0, continuous_batch_size=2))
+
+
+@pytest.mark.parametrize("value", [True, False, None])
+@pytest.mark.parametrize("config_source", ["generation", "prepared"])
+def test_adaptive_generation_rejects_unknown_public_settings(value, config_source):
+    from transformers import Qwen2Config, Qwen2ForCausalLM
+
+    model = Qwen2ForCausalLM(
+        Qwen2Config(vocab_size=32,
+                    hidden_size=32,
+                    intermediate_size=64,
+                    num_hidden_layers=1,
+                    num_attention_heads=4,
+                    num_key_value_heads=2)).eval()
+    native_prepare = model._prepare_generation_config
+    if config_source == "generation":
+        model.generation_config.custom_generation_switch = value
+
+    def prepare(*args, **kwargs):
+        config, model_kwargs = native_prepare(*args, **kwargs)
+        if config_source == "prepared":
+            config.custom_generation_switch = value
+        return config, model_kwargs
+
+    prompt = torch.tensor([[1, 2, 3]])
+    rollout = HybridEngineRollout(SimpleNamespace(module=model), SimpleNamespace(pad_token_id=0, eos_token_id=None),
+                                  HybridEngineRolloutConfig(adaptive_prefill=True))
+    with patch.object(model, "_prepare_generation_config", side_effect=prepare):
+        with pytest.raises(ValueError, match="custom_generation_switch"):
+            rollout.generate(RolloutRequest(prompt, torch.ones_like(prompt)),
+                             SamplingConfig(max_new_tokens=1, temperature=0, continuous_batch_size=1))
+
+
+@pytest.mark.parametrize("capacity", [1, 2])
+@pytest.mark.parametrize("stop_at_first", [True, False])
+def test_adaptive_profile_counts_only_productive_tokens_after_eos(capacity, stop_at_first):
+    model = _make_small_qwen()
+    device = next(model.parameters()).device
+    prompt_tokens = [1, 2, 3, 4] if stop_at_first else [1, 5]
+    width = len(prompt_tokens)
+    prompt = torch.tensor([prompt_tokens, prompt_tokens], device=device)
+    with torch.no_grad():
+        if stop_at_first:
+            eos = model.generate(prompt[:1], max_new_tokens=1, do_sample=False)[0, -1].item()
+        else:
+            # A zero output head deterministically emits PAD 0 before EOS 2.
+            model.lm_head.weight.zero_()
+            eos = 2
+    tokenizer = SimpleNamespace(pad_token_id=0, eos_token_id=eos)
+    rollout = HybridEngineRollout(SimpleNamespace(module=model), tokenizer,
+                                  HybridEngineRolloutConfig(adaptive_prefill=True, enable_profiling=True))
+    result = rollout.generate(
+        RolloutRequest(prompt, torch.ones_like(prompt)),
+        SamplingConfig(max_new_tokens=4 if stop_at_first else 1, temperature=0, continuous_batch_size=capacity))
+    profile = rollout.get_last_profile()
+    assert result.attention_mask[:, width:].sum().item() == 2
+    if not stop_at_first:
+        assert result.input_ids[:, width:].tolist() == [[0], [0]]
+    assert profile["num_generated_tokens"] == 2
+    if stop_at_first:
+        assert profile["num_decode_forwards"] == 0
+        assert result.input_ids.shape[1] == width + 1
+    assert profile["tokens_per_second"] == pytest.approx(2 * 1000 / profile["total_ms"])
+    assert profile["active_batch_size"] == min(capacity, 2)
+    assert profile["continuous_batch_size"] == capacity
+
+
+@pytest.mark.parametrize("capacity", [1, 2])
+@pytest.mark.parametrize("config_source", ["generation", "model"])
+def test_adaptive_generation_applies_repetition_penalty_from_first_token(capacity, config_source):
+    from transformers import GenerationConfig
+
+    model = _make_small_qwen()
+    model._supports_cache_class = True
+    if config_source == "generation":
+        # An explicitly changed generation config takes precedence over legacy model settings.
+        if hasattr(model.config, "_get_non_default_generation_parameters"):
+            model.config.num_beams = 2
+        model.generation_config.repetition_penalty = 3.0
+        expected_config = model.generation_config
+    else:
+        model.config.repetition_penalty = 3.0
+        expected_config = GenerationConfig.from_model_config(model.config)
+    prompt = torch.tensor([[11, 1, 2, 3, 4], [11, 1, 2, 3, 4]], device=next(model.parameters()).device)
+    if config_source == "model" and not hasattr(model.config, "_get_non_default_generation_parameters"):
+        with pytest.raises(ValueError, match="model.generation_config"):
+            model.generate(prompt, max_new_tokens=2, do_sample=False)
+        rollout = HybridEngineRollout(SimpleNamespace(module=model), SimpleNamespace(pad_token_id=0,
+                                                                                     eos_token_id=None),
+                                      HybridEngineRolloutConfig(adaptive_prefill=True))
+        with pytest.raises(ValueError, match="model.generation_config"):
+            rollout.generate(RolloutRequest(prompt, torch.ones_like(prompt)),
+                             SamplingConfig(max_new_tokens=2, temperature=0, continuous_batch_size=capacity))
+        return
+    with torch.no_grad():
+        # Passing the oracle config explicitly leaves the target's stale default untouched.
+        expected = model.generate(prompt[:1], generation_config=expected_config, max_new_tokens=2, do_sample=False)[0,
+                                                                                                                    5:]
+    rollout = HybridEngineRollout(SimpleNamespace(module=model), SimpleNamespace(pad_token_id=0, eos_token_id=None),
+                                  HybridEngineRolloutConfig(adaptive_prefill=True))
+    result = rollout.generate(RolloutRequest(prompt, torch.ones_like(prompt)),
+                              SamplingConfig(max_new_tokens=2, temperature=0, continuous_batch_size=capacity))
+    assert torch.equal(result.input_ids[:, 5:], expected.unsqueeze(0).expand(2, -1))
+
+
+@pytest.mark.parametrize("cache_support,bucketed,adaptive_prefill", [(True, True, True), (True, False, True),
+                                                                     (None, True, True), (None, False, True),
+                                                                     (True, True, False)])
+def test_adaptive_generation_preserves_padded_repetition_history(cache_support, bucketed, adaptive_prefill):
+    model = _make_small_qwen()
+    model._supports_cache_class = cache_support
+    model.generation_config.repetition_penalty = 3.0
+    device = next(model.parameters()).device
+    prompt = torch.full((8, 16), 11, dtype=torch.long, device=device)
+    mask = torch.zeros_like(prompt)
+    prompt[0] = torch.arange(1, 17, device=device)
+    mask[0] = 1
+    prompt[1:, -4:] = torch.arange(1, 5, device=device)
+    mask[1:, -4:] = 1
+    with torch.no_grad():
+        expected = torch.cat([
+            model.generate(prompt[row:row + 1],
+                           attention_mask=mask[row:row + 1],
+                           max_new_tokens=1,
+                           do_sample=False,
+                           eos_token_id=None,
+                           pad_token_id=11)[:, -1:] for row in range(8)
+        ])
+    rollout = HybridEngineRollout(
+        SimpleNamespace(module=model), SimpleNamespace(pad_token_id=11, eos_token_id=11),
+        HybridEngineRolloutConfig(adaptive_prefill=adaptive_prefill,
+                                  align_decode_fronts=not adaptive_prefill,
+                                  prefill_fixed_cost_ms=0.01 if bucketed else 1e6,
+                                  prefill_token_cost_ms=1.0,
+                                  prefill_attention_cost_ms=0.0,
+                                  prefill_kv_cost_ms=0.0,
+                                  continuous_decode_cost_ms=0.0))
+    result = rollout.generate(RolloutRequest(prompt, mask),
+                              SamplingConfig(max_new_tokens=1, temperature=0, continuous_batch_size=8))
+    assert torch.equal(result.input_ids[:, 16:], expected)
+    assert result.attention_mask[:, 16:].tolist() == [[1]] * 8
+
+
+@pytest.mark.parametrize("cache_support", [True, None])
+@pytest.mark.parametrize("capacity,prefill_forwards", [(4, 2), (2, 3)])
+def test_dp_prefill_groups_requests_and_matches_eager(cache_support, capacity, prefill_forwards):
+    model = _make_small_qwen()
+    model._supports_cache_class = cache_support
+    device = next(model.parameters()).device
+    lengths = [1, 16, 2, 3]
+    prompt = torch.zeros((4, 16), dtype=torch.long, device=device)
+    mask = torch.zeros_like(prompt)
+    expected = []
+    with torch.no_grad():
+        for row, length in enumerate(lengths):
+            prompt[row, -length:] = torch.arange(1, length + 1, device=device)
+            mask[row, -length:] = 1
+            expected.append(
+                model.generate(prompt[row:row + 1],
+                               attention_mask=mask[row:row + 1],
+                               max_new_tokens=3,
+                               do_sample=False)[0, 16:])
+    cfg = HybridEngineRolloutConfig(adaptive_prefill=True,
+                                    enable_profiling=True,
+                                    prefill_fixed_cost_ms=2.0,
+                                    prefill_token_cost_ms=1.0,
+                                    prefill_attention_cost_ms=0.0,
+                                    prefill_kv_cost_ms=0.0,
+                                    continuous_decode_cost_ms=0.0)
+    rollout = HybridEngineRollout(SimpleNamespace(module=model), SimpleNamespace(pad_token_id=0, eos_token_id=None),
+                                  cfg)
+    result = rollout.generate(RolloutRequest(prompt, mask),
+                              SamplingConfig(max_new_tokens=3, temperature=0, continuous_batch_size=capacity))
+    assert torch.equal(result.input_ids[:, 16:], torch.stack(expected))
+    assert torch.equal(result.attention_mask[:, :16], mask)
+    assert result.response_start_idx.tolist() == [16] * 4
+    assert rollout.get_last_profile()["generation_strategy"] == "bucketed"
+    assert rollout.get_last_profile()["num_prefill_forwards"] == prefill_forwards
+
+
+def test_dp_prefill_rejects_single_prompt_above_forward_limit():
+    model = _make_small_qwen()
+    prompt = torch.ones((1, 17), dtype=torch.long, device=next(model.parameters()).device)
+    rollout = HybridEngineRollout(SimpleNamespace(module=model), SimpleNamespace(pad_token_id=0, eos_token_id=None),
+                                  HybridEngineRolloutConfig(adaptive_prefill=True, prefill_max_tokens=16))
+    with pytest.raises(ValueError, match="prefill.*limit"):
+        rollout.generate(RolloutRequest(prompt, torch.ones_like(prompt)),
+                         SamplingConfig(max_new_tokens=1, temperature=0, continuous_batch_size=1))
+
+
+def test_adaptive_short_batch_does_not_read_one_gpu_scalar_per_request():
+    model = _make_small_qwen()
+    prompt = torch.ones((128, 4), dtype=torch.long, device=next(model.parameters()).device)
+    request = RolloutRequest(prompt, torch.ones_like(prompt))
+    tokenizer = SimpleNamespace(pad_token_id=0, eos_token_id=None)
+    scalar_reads = []
+    outputs = []
+    for adaptive in (False, True):
+        rollout = HybridEngineRollout(SimpleNamespace(module=model), tokenizer,
+                                      HybridEngineRolloutConfig(adaptive_prefill=adaptive))
+        with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU]) as profile:
+            output = rollout.generate(
+                request,
+                SamplingConfig(max_new_tokens=2, temperature=0, continuous_batch_size=128 if adaptive else None))
+        outputs.append(output.input_ids)
+        # Pin the reported regression: per-row mask.any() caused 128 device-to-host scalar reads.
+        scalar_reads.append(
+            sum(event.count for event in profile.key_averages() if event.key == "aten::_local_scalar_dense"))
+    assert torch.equal(*outputs)
+    assert scalar_reads[1] <= scalar_reads[0] + 4
+
+
+@pytest.mark.parametrize("capacity", [1, 2])
+@pytest.mark.parametrize("trigger", ["budget", "eos"])
+@pytest.mark.parametrize(("name", "value"), [("min_length", 5), ("do_sample", True), ("max_new_tokens", 1)])
+def test_adaptive_generation_resolves_custom_generation_config(capacity, trigger, name, value):
+    model = _make_small_qwen()
+    native_prepare = model._prepare_generation_config
+
+    def prepare(*args, **kwargs):
+        config, model_kwargs = native_prepare(*args, **kwargs)
+        if ((trigger == "budget" and kwargs.get("max_new_tokens") == 2)
+                or (trigger == "eos" and kwargs.get("eos_token_id") == 2)):
+            setattr(config, name, value)
+        return config, model_kwargs
+
+    prompt = torch.ones((2, 4), dtype=torch.long, device=next(model.parameters()).device)
+    rollout = HybridEngineRollout(SimpleNamespace(module=model), SimpleNamespace(pad_token_id=0, eos_token_id=2),
+                                  HybridEngineRolloutConfig(adaptive_prefill=True))
+    with patch.object(model, "_prepare_generation_config", side_effect=prepare):
+        with pytest.raises(ValueError, match=name):
+            rollout.generate(RolloutRequest(prompt, torch.ones_like(prompt)),
+                             SamplingConfig(max_new_tokens=2, temperature=0, continuous_batch_size=capacity))
+
+
+@pytest.mark.parametrize("capacity", [1, 2])
+@pytest.mark.parametrize("mode", ["clone", "in_place", "drop"])
+def test_adaptive_generation_rejects_mask_changed_by_custom_preparer(capacity, mode):
+    model = _make_small_qwen()
+    native_prepare = model._prepare_generation_config
+
+    def prepare(*args, **kwargs):
+        config, model_kwargs = native_prepare(*args, **kwargs)
+        if mode == "drop":
+            # generate() would infer an all-ones mask instead of using the request mask.
+            del model_kwargs["attention_mask"]
+            return config, model_kwargs
+        mask = model_kwargs["attention_mask"]
+        if mode == "clone":
+            mask = model_kwargs["attention_mask"] = mask.clone()
+        # Hide the first prompt token from generate() only.
+        mask[:, 0] = 0
+        return config, model_kwargs
+
+    prompt = torch.ones((2, 4), dtype=torch.long, device=next(model.parameters()).device)
+    rollout = HybridEngineRollout(SimpleNamespace(module=model), SimpleNamespace(pad_token_id=0, eos_token_id=2),
+                                  HybridEngineRolloutConfig(adaptive_prefill=True))
+    with patch.object(model, "_prepare_generation_config", side_effect=prepare):
+        with pytest.raises(ValueError, match="model kwargs"):
+            rollout.generate(RolloutRequest(prompt, torch.ones_like(prompt)),
+                             SamplingConfig(max_new_tokens=2, temperature=0, continuous_batch_size=capacity))
+
+
+@pytest.mark.parametrize("align_decode_fronts", [False, True])
+def test_aligned_generation_counts_bfloat16_mask_lengths_exactly(align_decode_fronts):
+    if not get_accelerator().is_bf16_supported():
+        pytest.skip("BF16 is not supported on this accelerator")
+    model = _make_small_qwen(max_position_embeddings=512)
+    # A BF16 sum rounds 257 real tokens to 256, which no longer matches the selected prompt tokens.
+    prompt = torch.ones((2, 257), dtype=torch.long, device=next(model.parameters()).device)
+    cfg = HybridEngineRolloutConfig(adaptive_prefill=not align_decode_fronts, align_decode_fronts=align_decode_fronts)
+    rollout = HybridEngineRollout(SimpleNamespace(module=model), SimpleNamespace(pad_token_id=0, eos_token_id=None),
+                                  cfg)
+    sampling = SamplingConfig(max_new_tokens=2, temperature=0, continuous_batch_size=1)
+
+    expected = rollout.generate(RolloutRequest(prompt, torch.ones_like(prompt)), sampling)
+    actual = rollout.generate(RolloutRequest(prompt, torch.ones_like(prompt, dtype=torch.bfloat16)), sampling)
+
+    assert torch.equal(actual.input_ids, expected.input_ids)
+
+
+@pytest.mark.parametrize("cache_support", [True, None])
+@pytest.mark.parametrize("capacity", [1, 2])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
+def test_adaptive_generation_uses_resolved_penalty_on_both_routes(cache_support, capacity, dtype):
+    from transformers import GenerationConfig
+
+    if dtype == torch.bfloat16 and not get_accelerator().is_bf16_supported():
+        pytest.skip("BF16 is not supported on this accelerator")
+    model = _make_small_qwen().to(dtype=dtype)
+    model._supports_cache_class = cache_support
+    native_prepare = model._prepare_generation_config
+    original_penalty = model.generation_config.repetition_penalty
+    prompt = torch.tensor([[11, 1, 2, 3, 4], [11, 1, 2, 3, 4]], device=next(model.parameters()).device)
+    expected_config = GenerationConfig.from_model_config(model.config)
+    expected_config.repetition_penalty = 3.0
+    with torch.no_grad():
+        expected = model.generate(prompt, generation_config=expected_config, max_new_tokens=3, do_sample=False)
+        unpenalized = model.generate(prompt, max_new_tokens=3, do_sample=False)
+    assert not torch.equal(expected[:, 5:], unpenalized[:, 5:])
+
+    prepared_penalties = []
+
+    def prepare(*args, **kwargs):
+        config, model_kwargs = native_prepare(*args, **kwargs)
+        config.repetition_penalty = (config.repetition_penalty or 1.0) * 3.0
+        prepared_penalties.append(config.repetition_penalty)
+        return config, model_kwargs
+
+    rollout = HybridEngineRollout(SimpleNamespace(module=model), SimpleNamespace(pad_token_id=0, eos_token_id=None),
+                                  HybridEngineRolloutConfig(adaptive_prefill=True))
+    with patch.object(model, "_prepare_generation_config", side_effect=prepare):
+        result = rollout.generate(RolloutRequest(prompt, torch.ones_like(prompt)),
+                                  SamplingConfig(max_new_tokens=3, temperature=0, continuous_batch_size=capacity))
+    assert torch.equal(result.input_ids, expected)
+    assert prepared_penalties and all(penalty == 3.0 for penalty in prepared_penalties)
+    assert model.generation_config.repetition_penalty == original_penalty
+    assert (rollout.get_last_continuous_stats() is None) == (capacity == 2)
+
+
+@pytest.mark.parametrize("align_decode_fronts", [False, True])
+def test_manual_continuous_generation_omits_unsupported_output_logits(align_decode_fronts):
+    model = _make_small_qwen()
+    model._supports_cache_class = None
+    native_generate = model.generate
+    prompt = torch.tensor([[1, 2, 3, 4], [1, 2, 3, 4]], device=next(model.parameters()).device)
+    with torch.no_grad():
+        expected = native_generate(prompt, max_new_tokens=2, do_sample=False)
+
+    def legacy_generate(*args, **kwargs):
+        if "output_logits" in kwargs:
+            raise ValueError("output_logits is not supported by this generation API")
+        return native_generate(*args, **kwargs)
+
+    rollout = HybridEngineRollout(SimpleNamespace(module=model), SimpleNamespace(pad_token_id=0, eos_token_id=None),
+                                  HybridEngineRolloutConfig(align_decode_fronts=align_decode_fronts))
+    with patch.object(model, "generate", side_effect=legacy_generate):
+        result = rollout.generate(RolloutRequest(prompt, torch.ones_like(prompt)),
+                                  SamplingConfig(max_new_tokens=2, temperature=0, continuous_batch_size=1))
+    assert torch.equal(result.input_ids, expected)
+
+
+@pytest.mark.parametrize("force_cb", [False, True])
+def test_adaptive_profile_includes_route_planning_time(force_cb):
+    model = _make_small_qwen()
+    native_prepare = model._prepare_generation_config
+    device = next(model.parameters()).device
+    prompt = torch.ones((1024, 4), dtype=torch.long, device=device)
+    rollout = HybridEngineRollout(
+        SimpleNamespace(module=model), SimpleNamespace(pad_token_id=0, eos_token_id=None),
+        HybridEngineRolloutConfig(adaptive_prefill=True, enable_profiling=True, enable_cache_trimming=force_cb))
+    # The clock advances only inside the model's generation-config preparer, which Auto calls while planning.
+    clock = [0.0]
+
+    def slow_prepare(*args, **kwargs):
+        clock[0] += 1.0
+        return native_prepare(*args, **kwargs)
+
+    with patch("deepspeed.runtime.rollout.hybrid_engine_rollout.time.perf_counter", side_effect=lambda: clock[0]):
+        with patch.object(model, "_prepare_generation_config", side_effect=slow_prepare):
+            result = rollout.generate(RolloutRequest(prompt, torch.ones_like(prompt)),
+                                      SamplingConfig(max_new_tokens=1, temperature=0, continuous_batch_size=1024))
+    profile = rollout.get_last_profile()
+    # The former profile excluded initial DP planning and over-reported throughput.
+    assert profile["generation_strategy"] == ("bucketed" if force_cb else "batched")
+    assert clock[0] > 0
+    assert profile["total_ms"] == pytest.approx(clock[0] * 1000)
+    assert profile["num_generated_tokens"] == result.attention_mask[:, 4:].sum().item()
+    if force_cb:
+        assert rollout.get_last_continuous_stats()["end_to_end_ms"] == pytest.approx(clock[0] * 1000)

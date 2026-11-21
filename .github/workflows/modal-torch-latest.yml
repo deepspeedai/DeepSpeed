@@ -7,11 +7,11 @@ name: modal-torch-latest
 # configured AWS regions. Under
 # pull_request_target, every GitHub-side checkout and Python entrypoint comes
 # from the trusted base commit; merge queue runs resolve that trusted base from
-# merge_group.base_sha. A GPU backend runs only for merge queue entries, the
-# nightly scheduled full run, and manual runs, so plain PR events never spend
-# GPU quota. Master receives no direct pushes (the merge queue lands every
-# entry, and each merge_group run already tested the merged tree), so there is
-# no push trigger; cross-entry interaction regressions are covered by the
+# merge_group.base_sha. A GPU backend runs only for opted-in merge queue
+# entries, the nightly scheduled full run, and manual runs, so plain PR events
+# never spend GPU quota. Master receives no direct pushes, and the merge queue
+# evaluates every entry before landing, so there is no push trigger. Cross-entry
+# interaction regressions are covered by the
 # nightly full suite, which feeds regression triage
 # (.github/workflows/nightly-triage.yml). See .github/workflows/TEST_SELECTION.md.
 
@@ -59,7 +59,8 @@ on:
 
   # Required checks must also trigger on merge queue entries, otherwise the
   # merge fails waiting for a status that is never reported. This is the only
-  # PR-related event that spends GPU quota.
+  # PR-related event eligible to spend GPU quota; the entry PR must carry the
+  # exact needs-gpu-test label.
   merge_group:
     types: [checks_requested]
     branches:
@@ -191,8 +192,10 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: read
+      pull-requests: read
     outputs:
       mode: ${{ steps.select.outputs.mode }}
+      run_gpu: ${{ steps.gpu-gate.outputs.run_gpu }}
 
     steps:
       - name: Checkout trusted workflow code
@@ -205,6 +208,42 @@ jobs:
           persist-credentials: false
           lfs: false
           submodules: false
+
+      - name: Read merge queue entry GPU opt-in
+        id: gpu-gate
+        if: github.event_name == 'merge_group'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MERGE_GROUP_HEAD_REF: ${{ github.event.merge_group.head_ref }}
+        run: |
+          set -euo pipefail
+          head_ref="${MERGE_GROUP_HEAD_REF#refs/heads/}"
+          if [[ ! "$head_ref" =~ ^gh-readonly-queue/master/pr-([1-9][0-9]*)-[0-9a-fA-F]{40}$ ]]; then
+            echo "::error::Merge queue head ref does not identify one master entry PR"
+            exit 1
+          fi
+          pull_number="${BASH_REMATCH[1]}"
+          if ! response="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$pull_number")"; then
+            echo "::error::Could not read merge queue entry PR #$pull_number"
+            exit 1
+          fi
+          if ! run_gpu="$(jq -r '
+            if type == "object"
+              and (.labels | type) == "array"
+              and all(.labels[]; type == "object" and (.name | type) == "string")
+            then any(.labels[]; .name == "needs-gpu-test")
+            else error("invalid pull-request labels payload")
+            end
+          ' <<< "$response")"; then
+            echo "::error::GitHub returned invalid labels for merge queue entry PR #$pull_number"
+            exit 1
+          fi
+          case "$run_gpu" in
+            true|false) ;;
+            *) echo "::error::GPU opt-in decision was not boolean"; exit 1 ;;
+          esac
+          echo "run_gpu=$run_gpu" >> "$GITHUB_OUTPUT"
+          echo "Merge queue entry PR #$pull_number: needs-gpu-test=$run_gpu"
 
       - name: Fetch candidate tree as data
         if: github.event_name == 'pull_request_target' || github.event_name == 'merge_group'
@@ -270,14 +309,17 @@ jobs:
 
     # Preserve the Required check on failures and no-test selections. A selector
     # failure enters this job and fails explicitly; mode=none skips GPU execution.
+    # Merge queue GPU execution is opt-in through the entry PR's exact label.
     # pull_request_target runs skip the backend entirely (a skipped dependent
     # job still satisfies the Required check), so the tests gate the merge queue
     # entry instead of every PR update.
-    if: ${{ (github.event_name != 'workflow_dispatch' || inputs.infrastructure_smoke != true) && !cancelled() && (needs.collect-tests.result != 'success' || (needs.collect-tests.outputs.mode != 'none' && github.event_name != 'pull_request_target')) }}
+    if: ${{ (github.event_name != 'workflow_dispatch' || inputs.infrastructure_smoke != true) && !cancelled() && (needs.collect-tests.result != 'success' || (needs.collect-tests.outputs.mode != 'none' && github.event_name != 'pull_request_target' && (github.event_name != 'merge_group' || needs.collect-tests.outputs.run_gpu == 'true'))) }}
     steps:
-      - name: Fail if test selection failed
+      - name: Fail if collection failed
         if: needs.collect-tests.result != 'success'
-        run: exit 1
+        run: |
+          echo "::error::GPU opt-in evaluation or test selection failed; inspect the collect-tests job"
+          exit 1
 
       - name: Checkout trusted controller code
         uses: actions/checkout@v7

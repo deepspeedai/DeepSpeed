@@ -44,6 +44,7 @@ mover should be perturbing.
 
 import sys
 import zlib
+from bisect import bisect_right
 from dataclasses import dataclass
 from itertools import product
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple
@@ -51,11 +52,12 @@ from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 import torch
 from deepspeed.accelerator import get_accelerator
 
+from .affine_geometry import address_range, dot
 from .affine_transfer import TransferPlan, TransferSegment
 
 __all__ = [
     'AffineTransferExecutionError', 'TransferEndpoints', 'StagingBudget', 'TransferStats', 'TransferRequest',
-    'plan_digest', 'execute_transfer', 'execute_transfers'
+    'plan_digest', 'execute_transfer', 'execute_transfers', 'ScheduledRound', 'ProcessSchedule', 'schedule_transfers'
 ]
 
 
@@ -137,16 +139,13 @@ def _chunks(segment: TransferSegment, max_elements: int):
     origins = [range(0, extent, step) for extent, step in zip(segment.shape, tile)]
     for origin in product(*origins):
         shape = tuple(min(step, extent - low) for step, extent, low in zip(tile, segment.shape, origin))
-        yield TransferSegment(
-            source_rank=segment.source_rank,
-            source_offset=segment.source_offset + sum(low * stride
-                                                      for low, stride in zip(origin, segment.source_strides)),
-            source_strides=segment.source_strides,
-            target_rank=segment.target_rank,
-            target_offset=segment.target_offset + sum(low * stride
-                                                      for low, stride in zip(origin, segment.target_strides)),
-            target_strides=segment.target_strides,
-            shape=shape)
+        yield TransferSegment(source_rank=segment.source_rank,
+                              source_offset=segment.source_offset + dot(origin, segment.source_strides),
+                              source_strides=segment.source_strides,
+                              target_rank=segment.target_rank,
+                              target_offset=segment.target_offset + dot(origin, segment.target_strides),
+                              target_strides=segment.target_strides,
+                              shape=shape)
 
 
 def build_operations(plan: TransferPlan, endpoints: TransferEndpoints, budget: StagingBudget,
@@ -236,13 +235,17 @@ def _validate_buffers(plan: TransferPlan, source_buffers: Mapping[int, torch.Ten
                 continue
             if location not in buffers:
                 raise AffineTransferExecutionError(f'{which} location {location} is owned here but holds no buffer')
-            reach = offset + sum((size - 1) * stride for size, stride in zip(segment.shape, strides))
+            _, reach = address_range(offset, segment.shape, strides)
             if reach >= buffers[location].numel():
                 raise AffineTransferExecutionError(
                     f'{which} of {segment!r} reaches element {reach} of a {buffers[location].numel()}-element buffer')
 
 
-def _validate_aliases(requests: Sequence[TransferRequest]) -> None:
+def _buffers_alias(requests: Sequence[TransferRequest]) -> bool:
+    """Whether a target buffer shares storage with a source or with another target of the batch.
+
+    Usually none does, and then no region can alias. Otherwise ``_validate_aliases`` decides from the
+    regions this process actually reads and writes."""
     sources = [
         _data_range(buffer) for request in requests for buffer in request.source_buffers.values() if buffer.numel()
     ]
@@ -251,10 +254,61 @@ def _validate_aliases(requests: Sequence[TransferRequest]) -> None:
     ]
     for low, high in targets:
         if any(low < source_high and source_low < high for source_low, source_high in sources):
-            raise AffineTransferExecutionError('a source and a target overlap within the transfer batch')
+            return True
     for index, (low, high) in enumerate(targets):
         if any(low < other_high and other_low < high for other_low, other_high in targets[:index]):
+            return True
+    return False
+
+
+def _validate_aliases(requests: Sequence[TransferRequest], lane: '_Lane',
+                      element_size: int) -> List[Tuple[int, '_Operation']]:
+    """Refuse a region this process writes that it also reads, or writes twice; return the local copies to run.
+
+    A local copy whose source and target are the same memory at the same strides moves nothing. That is
+    how a relay rank holds its band: as a view of its own destination, which it sends to its peers and
+    keeps in place. Such a copy is dropped and its region counts as read, so any other write into it is
+    still refused. Regions are compared by the bytes they span, so strided regions that interleave
+    without sharing an element are refused as well.
+    """
+
+    def extent(buffers, location, offset, shape, strides) -> Tuple[int, int]:
+        start = buffers[location].data_ptr()
+        low, high = address_range(offset, shape, strides)
+        return start + low * element_size, start + (high + 1) * element_size
+
+    def source_extent(item, operation):
+        return extent(requests[item].source_buffers, operation.segment.source_rank, operation.source_offset,
+                      operation.chunk_shape, operation.segment.source_strides)
+
+    def target_extent(item, operation):
+        return extent(requests[item].target_buffers, operation.segment.target_rank, operation.target_offset,
+                      operation.chunk_shape, operation.segment.target_strides)
+
+    reads, writes, copies = [], [], []
+    for item, operation in lane.local_copies:
+        read, write = source_extent(item, operation), target_extent(item, operation)
+        reads.append(read)
+        in_place = read[0] == write[0] and all(size <= 1 or source == target for size, source, target in zip(
+            operation.chunk_shape, operation.segment.source_strides, operation.segment.target_strides))
+        if not in_place:
+            writes.append(write)
+            copies.append((item, operation))
+    for rounds, side, regions in ((lane.send_rounds, source_extent, reads), (lane.recv_rounds, target_extent, writes)):
+        for peer_rounds in rounds.values():
+            for entries, _ in peer_rounds:
+                regions.extend(side(item, operation) for item, operation, _ in entries)
+
+    writes.sort()
+    for (_, high), (low, _) in zip(writes, writes[1:]):
+        if low < high:
             raise AffineTransferExecutionError('two targets overlap within the transfer batch')
+    highs = [high for _, high in writes]
+    for low, high in reads:
+        index = bisect_right(highs, low)
+        if index < len(writes) and writes[index][0] < high:
+            raise AffineTransferExecutionError('a source and a target overlap within the transfer batch')
+    return copies
 
 
 def execute_transfer(plan: TransferPlan,
@@ -285,9 +339,33 @@ def _packed_rounds(indexed_operations: Sequence[Tuple[int, _Operation]], max_ele
     return rounds
 
 
-def _direct_payload(entries, requests, dtype, source):
+def _is_packed(shape: Sequence[int], strides: Sequence[int]) -> bool:
+    """Whether a region is one run of consecutive elements in row-major order.
+
+    This is ``Tensor.is_contiguous`` for the ``as_strided`` view ``_region`` builds over a packed
+    shard, decided from geometry alone: axes of extent 1 place no constraint on their stride.
+    """
+    if 0 in shape:
+        return True
+    expected = 1
+    for size, stride in zip(reversed(shape), reversed(strides)):
+        if size != 1:
+            if stride != expected:
+                return False
+            expected *= size
+    return True
+
+
+def _round_is_direct(entries, source: bool) -> bool:
+    # A view can replace staging only when the transport sees the same packed element order.
     if len(entries) != 1:
-        return None
+        return False
+    _, operation, _ = entries[0]
+    return _is_packed(operation.chunk_shape,
+                      operation.segment.source_strides if source else operation.segment.target_strides)
+
+
+def _direct_payload(entries, requests, dtype, source):
     item, operation, _ = entries[0]
     request, segment = requests[item], operation.segment
     if source:
@@ -296,9 +374,158 @@ def _direct_payload(entries, requests, dtype, source):
     else:
         flat = _flat(segment.target_rank, request.target_buffers, dtype)
         offset, strides = operation.target_offset, segment.target_strides
-    region = _region(flat, offset, operation.chunk_shape, strides)
-    # A view can replace staging only when the transport sees the same packed element order.
-    return region.view(-1) if region.is_contiguous() else None
+    return _region(flat, offset, operation.chunk_shape, strides).view(-1)
+
+
+def _indexed_operations(plans: Sequence[TransferPlan], endpoints: TransferEndpoints, budget: StagingBudget,
+                        element_size: int) -> List[Tuple[int, _Operation]]:
+    """Every chunk of a batch in execution order, tagged with the index of its plan.
+
+    Many parameters share one plan object; its geometry is built once per call.
+    """
+    built: Dict[int, List[_Operation]] = {}
+    indexed: List[Tuple[int, _Operation]] = []
+    for item, plan in enumerate(plans):
+        if id(plan) not in built:
+            built[id(plan)] = build_operations(plan, endpoints, budget, element_size)
+        indexed.extend((item, operation) for operation in built[id(plan)])
+    return indexed
+
+
+@dataclass
+class _Lane:
+    """One process's share of a batch schedule, before any buffer is touched."""
+    local_copies: List[Tuple[int, _Operation]]
+    recv_rounds: Dict[int, list]
+    send_rounds: Dict[int, list]
+    recv_direct: Dict[int, List[bool]]
+    send_direct: Dict[int, List[bool]]
+    # Elements of the staging arena for each peer direction that stages at least one round.
+    recv_arena: Dict[int, int]
+    send_arena: Dict[int, int]
+
+
+def _lanes(indexed: Sequence[Tuple[int, _Operation]], processes: Sequence[int], max_elements: int) -> Dict[int, _Lane]:
+    local = {process: [] for process in processes}
+    incoming: Dict[int, Dict[int, List[Tuple[int, _Operation]]]] = {process: {} for process in processes}
+    outgoing: Dict[int, Dict[int, List[Tuple[int, _Operation]]]] = {process: {} for process in processes}
+    for item, operation in indexed:
+        if operation.from_process == operation.to_process:
+            if operation.from_process in local:
+                local[operation.from_process].append((item, operation))
+            continue
+        if operation.to_process in incoming:
+            incoming[operation.to_process].setdefault(operation.from_process, []).append((item, operation))
+        if operation.from_process in outgoing:
+            outgoing[operation.from_process].setdefault(operation.to_process, []).append((item, operation))
+
+    def arenas(rounds_by_peer, direct_by_peer):
+        sizes = {}
+        for peer, rounds in rounds_by_peer.items():
+            staged = [count for (_, count), direct in zip(rounds, direct_by_peer[peer]) if not direct]
+            if staged:
+                sizes[peer] = max(staged)
+        return sizes
+
+    lanes = {}
+    for process in processes:
+        recv_rounds = {peer: _packed_rounds(ops, max_elements) for peer, ops in incoming[process].items()}
+        send_rounds = {peer: _packed_rounds(ops, max_elements) for peer, ops in outgoing[process].items()}
+        recv_direct = {
+            peer: [_round_is_direct(entries, False) for entries, _ in rounds]
+            for peer, rounds in recv_rounds.items()
+        }
+        send_direct = {
+            peer: [_round_is_direct(entries, True) for entries, _ in rounds]
+            for peer, rounds in send_rounds.items()
+        }
+        lanes[process] = _Lane(local[process], recv_rounds, send_rounds, recv_direct, send_direct,
+                               arenas(recv_rounds, recv_direct), arenas(send_rounds, send_direct))
+    return lanes
+
+
+@dataclass(frozen=True)
+class ScheduledRound:
+    """One message to or from a peer: ``elements`` packed from ``chunks`` plan chunks.
+
+    ``direct`` means this side sends or receives the region in place rather than through its arena.
+    """
+    elements: int
+    chunks: int
+    direct: bool
+
+
+@dataclass(frozen=True)
+class ProcessSchedule:
+    """What one process does for a batch, exactly as ``execute_transfers`` runs it.
+
+    ``sends`` and ``receives`` map each peer to its rounds in order. ``send_arena_elements`` and
+    ``receive_arena_elements`` give the staging arena, in elements, that each peer direction
+    allocates; peers whose rounds are all direct allocate none. ``rounds`` is the most rounds this
+    process has with any one peer, which ``TransferStats.rounds`` reports.
+    """
+    process: int
+    sends: Mapping[int, Tuple[ScheduledRound, ...]]
+    receives: Mapping[int, Tuple[ScheduledRound, ...]]
+    send_arena_elements: Mapping[int, int]
+    receive_arena_elements: Mapping[int, int]
+    local_copy_chunks: int
+    local_copy_elements: int
+    rounds: int
+
+
+def _scheduled_rounds(rounds_by_peer, direct_by_peer) -> Dict[int, Tuple[ScheduledRound, ...]]:
+    return {
+        peer:
+        tuple(
+            ScheduledRound(count, len(entries), direct)
+            for (entries, count), direct in zip(rounds, direct_by_peer[peer]))
+        for peer, rounds in sorted(rounds_by_peer.items())
+    }
+
+
+def schedule_transfers(plans: Sequence[TransferPlan],
+                       endpoints: TransferEndpoints,
+                       budget: StagingBudget,
+                       element_size: int,
+                       process: Optional[int] = None) -> Dict[int, ProcessSchedule]:
+    """The schedule ``execute_transfers`` would run for a batch, without buffers or communication.
+
+    ``plans`` are the batch's plans in request order, since that order fixes how chunks are packed
+    into rounds. Returns a ``ProcessSchedule`` for ``process``, or for every process the endpoints
+    name. ``execute_transfers`` builds its own rounds and arenas from the same computation, so a
+    cost model or policy reading this sees the messages and staging memory the executor will use.
+    It sees no buffers, so a local copy that ``execute_transfers`` drops as in place (source and
+    target the same memory at the same strides) still counts in ``local_copy_chunks`` and
+    ``local_copy_elements``; ``TransferStats.local_copy_bytes`` does not count it.
+    """
+    if not isinstance(element_size, int) or isinstance(element_size, bool) or element_size <= 0:
+        raise AffineTransferExecutionError('element_size must be a positive integer')
+    if (not isinstance(budget.bytes_per_peer, int) or isinstance(budget.bytes_per_peer, bool)
+            or budget.bytes_per_peer < element_size):
+        raise AffineTransferExecutionError('the staging budget must hold at least one element')
+    for plan in plans:
+        for segment in plan.segments:
+            if segment.source_rank not in endpoints.source or segment.target_rank not in endpoints.target:
+                raise AffineTransferExecutionError(f'{segment!r} names a location with no endpoint binding')
+    indexed = _indexed_operations(plans, endpoints, budget, element_size)
+    named = set(endpoints.source.values()) | set(endpoints.target.values())
+    if process is not None and process not in named:
+        raise AffineTransferExecutionError(f'process {process} is not named by the endpoints')
+    processes = sorted(named) if process is None else [process]
+    schedules = {}
+    for member, lane in _lanes(indexed, processes, budget.bytes_per_peer // element_size).items():
+        queues = list(lane.recv_rounds.values()) + list(lane.send_rounds.values())
+        schedules[member] = ProcessSchedule(process=member,
+                                            sends=_scheduled_rounds(lane.send_rounds, lane.send_direct),
+                                            receives=_scheduled_rounds(lane.recv_rounds, lane.recv_direct),
+                                            send_arena_elements=dict(sorted(lane.send_arena.items())),
+                                            receive_arena_elements=dict(sorted(lane.recv_arena.items())),
+                                            local_copy_chunks=len(lane.local_copies),
+                                            local_copy_elements=sum(operation.elements
+                                                                    for _, operation in lane.local_copies),
+                                            rounds=max((len(queue) for queue in queues), default=0))
+    return schedules
 
 
 @torch.no_grad()
@@ -344,60 +571,47 @@ def execute_transfers(requests: Sequence[TransferRequest],
         keys = [request.key for request in requests]
         if any(not isinstance(key, str) or not key for key in keys) or len(set(keys)) != len(keys):
             raise AffineTransferExecutionError('transfer batch keys must be distinct non-empty strings')
-        schedules = {}
-        for item, request in enumerate(requests):
+        for request in requests:
             if request.preflight_error is not None:
                 raise AffineTransferExecutionError(request.preflight_error)
             if request.plan is None:
                 raise AffineTransferExecutionError('a transfer request has no plan')
             _validate_buffers(request.plan, request.source_buffers, request.target_buffers, dtype, device, endpoints,
                               rank)
-            # Many parameters share the same plan. Reuse only geometry within this call;
-            # every request still validates its own buffers and participates in the digest.
-            identity = id(request.plan)
-            if identity not in schedules:
-                schedules[identity] = (build_operations(request.plan, endpoints, budget, element_size),
-                                       plan_digest(request.plan, endpoints, budget, element_size))
-            indexed.extend((item, operation) for operation in schedules[identity][0])
-        _validate_aliases(requests)
+        aliased = _buffers_alias(requests)
+        # Many parameters share the same plan. Reuse only geometry within this call;
+        # every request still validates its own buffers and participates in the digest.
+        plans = [request.plan for request in requests]
+        indexed = _indexed_operations(plans, endpoints, budget, element_size)
+        digests = {}
+        for plan in plans:
+            if id(plan) not in digests:
+                digests[id(plan)] = plan_digest(plan, endpoints, budget, element_size)
         fingerprint = (3, str(dtype), budget.bytes_per_peer, tuple(sorted(endpoints.source.items())),
                        tuple(sorted(endpoints.target.items())),
-                       tuple((request.key, schedules[id(request.plan)][1]) for request in requests))
+                       tuple((request.key, digests[id(request.plan)]) for request in requests))
         digest = zlib.crc32(repr(fingerprint).encode())
-        incoming: Dict[int, List[Tuple[int, _Operation]]] = {}
-        outgoing: Dict[int, List[Tuple[int, _Operation]]] = {}
-        for item, operation in indexed:
-            if operation.from_process == operation.to_process == rank:
-                local_copies.append((item, operation))
-            elif operation.to_process == rank:
-                incoming.setdefault(operation.from_process, []).append((item, operation))
-            elif operation.from_process == rank:
-                outgoing.setdefault(operation.to_process, []).append((item, operation))
-        max_elements = budget.bytes_per_peer // element_size
-        recv_rounds = {peer: _packed_rounds(ops, max_elements) for peer, ops in incoming.items()}
-        send_rounds = {peer: _packed_rounds(ops, max_elements) for peer, ops in outgoing.items()}
+        # The same computation as schedule_transfers, so what it reports is what runs here.
+        lane = _lanes(indexed, [rank], budget.bytes_per_peer // element_size)[rank]
+        local_copies, recv_rounds, send_rounds = lane.local_copies, lane.recv_rounds, lane.send_rounds
+        if aliased:
+            local_copies = _validate_aliases(requests, lane, element_size)
         recv_direct = {
-            peer: [_direct_payload(entries, requests, dtype, False) for entries, _ in rounds]
+            peer: [
+                _direct_payload(entries, requests, dtype, False) if direct else None
+                for (entries, _), direct in zip(rounds, lane.recv_direct[peer])
+            ]
             for peer, rounds in recv_rounds.items()
         }
         send_direct = {
-            peer: [_direct_payload(entries, requests, dtype, True) for entries, _ in rounds]
+            peer: [
+                _direct_payload(entries, requests, dtype, True) if direct else None
+                for (entries, _), direct in zip(rounds, lane.send_direct[peer])
+            ]
             for peer, rounds in send_rounds.items()
         }
-        recv_arenas = {
-            peer:
-            torch.empty(max(count for index, (_, count) in enumerate(rounds) if recv_direct[peer][index] is None),
-                        dtype=dtype,
-                        device=device)
-            for peer, rounds in recv_rounds.items() if any(payload is None for payload in recv_direct[peer])
-        }
-        send_arenas = {
-            peer:
-            torch.empty(max(count for index, (_, count) in enumerate(rounds) if send_direct[peer][index] is None),
-                        dtype=dtype,
-                        device=device)
-            for peer, rounds in send_rounds.items() if any(payload is None for payload in send_direct[peer])
-        }
+        recv_arenas = {peer: torch.empty(size, dtype=dtype, device=device) for peer, size in lane.recv_arena.items()}
+        send_arenas = {peer: torch.empty(size, dtype=dtype, device=device) for peer, size in lane.send_arena.items()}
     except (ValueError, TypeError, KeyError, AttributeError, RuntimeError, OverflowError, MemoryError) as caught:
         error = caught
         rejected = 1
@@ -507,6 +721,11 @@ def _flat(location: int, buffers: Mapping[int, torch.Tensor], dtype: torch.dtype
         raise AffineTransferExecutionError(f'location {location} is bound to this process but holds no buffer')
     if buffer.layout != torch.strided or not buffer.is_contiguous():
         raise AffineTransferExecutionError(f'location {location}: shard is not contiguous in its own storage')
+    if buffer.is_conj() or buffer.is_neg():
+        # Point-to-point transport does not carry the lazy bit, and such a view of a destination is not
+        # the destination itself. Refusing it here refuses it wherever the copy would run.
+        raise AffineTransferExecutionError(f'location {location}: shard is a conjugate or negative view; '
+                                           'pass it resolved (resolve_conj, resolve_neg)')
     if buffer.dtype != dtype:
         raise AffineTransferExecutionError(f'location {location}: {buffer.dtype} is not {dtype}')
     return buffer.view(-1)

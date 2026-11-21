@@ -48,7 +48,9 @@ class _LocalKVModel(torch.nn.Module):
             valid[:, :attention_mask.shape[1]] = attention_mask.bool()
         cache_sums = (values * valid[:, None, :, None]).sum(dim=(1, 2, 3)).long()
         next_tokens = cache_sums.remainder(29) + 3
-        logits = torch.zeros((input_ids.shape[0], input_ids.shape[1], 32), device=input_ids.device)
+        logits = torch.zeros((input_ids.shape[0], input_ids.shape[1], 32),
+                             dtype=self.weight.dtype,
+                             device=input_ids.device)
         logits.scatter_(2, next_tokens[:, None, None].expand(-1, input_ids.shape[1], 1), 1)
         return SimpleNamespace(logits=logits)
 
@@ -76,6 +78,17 @@ def _count_replays(monkeypatch, accelerator):
     return counter
 
 
+def test_static_graph_attention_mask_uses_additive_values():
+    attention = torch.tensor([[1, 1, 0], [0, 1, 1]], dtype=torch.bool)
+    causal = torch.empty(2, 1, 1, 3)
+
+    HybridEngineRollout._update_static_causal_attention(attention, causal)
+
+    minimum = torch.finfo(causal.dtype).min
+    assert torch.equal(causal[0, 0, 0], torch.tensor([0, 0, minimum], dtype=causal.dtype))
+    assert torch.equal(causal[1, 0, 0], torch.tensor([minimum, 0, 0], dtype=causal.dtype))
+
+
 @pytest.mark.parametrize("local_heads", [4, 2, 1])
 def test_static_graph_uses_prefill_kv_shape(local_heads, monkeypatch):
     accelerator = get_accelerator()
@@ -97,6 +110,39 @@ def test_static_graph_uses_prefill_kv_shape(local_heads, monkeypatch):
     assert output.input_ids.tolist() == _local_kv_tokens(prompts, new_tokens, local_heads)
     assert counter["replays"] == new_tokens - 1
     assert model.config.num_key_value_heads == 4
+
+
+@pytest.mark.parametrize("batch_size, repetition_penalty", [(1, 1.3), (2, 1.0)])
+def test_static_graph_full_step_kernel_preconditions(batch_size, repetition_penalty, monkeypatch):
+    accelerator = get_accelerator()
+    if not accelerator.is_available() or accelerator.create_graph() is None:
+        pytest.skip("requires graph capture")
+
+    from deepspeed.ops import module_inject
+
+    calls = []
+
+    class GraphOp:
+
+        def decode_step_graph(self, *args):
+            calls.append(args)
+
+    monkeypatch.setattr(module_inject, "get_fused_glu_op", GraphOp)
+    device = torch.device(accelerator.device_name())
+    model = _LocalKVModel(2).to(device).to(torch.bfloat16).eval()
+    model.generation_config = SimpleNamespace(repetition_penalty=repetition_penalty)
+    rollout = HybridEngineRollout(SimpleNamespace(module=model),
+                                  SimpleNamespace(pad_token_id=0, eos_token_id=-1),
+                                  cfg=HybridEngineRolloutConfig(use_graph_capture=True))
+    prompt_ids = torch.tensor([[1, 3, 4]] * batch_size, device=device)
+
+    output = rollout.generate(RolloutRequest(prompt_ids, torch.ones_like(prompt_ids)),
+                              SamplingConfig(max_new_tokens=3, temperature=0))
+
+    assert output.input_ids.shape == (batch_size, 6)
+    # The captured step kernel cannot apply penalties and is reserved for
+    # the single-row fast path, so neither case may mount it.
+    assert calls == []
 
 
 @pytest.mark.parametrize("use_graph", [False, True])
@@ -425,6 +471,65 @@ def test_continuous_rollout_matches_native_llama_generation_on_accelerator(attn_
     assert capture_count == 1
 
 
+@pytest.mark.parametrize("align_decode_fronts", [False, True])
+def test_bucketed_prefill_refills_fixed_graph_slot_on_accelerator(monkeypatch, align_decode_fronts):
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    accelerator = get_accelerator()
+    if not accelerator.is_graph_capture_supported():
+        pytest.skip("requires graph capture")
+    torch.manual_seed(1234)
+    config = LlamaConfig(vocab_size=64,
+                         hidden_size=32,
+                         intermediate_size=64,
+                         num_hidden_layers=2,
+                         num_attention_heads=4,
+                         num_key_value_heads=2,
+                         max_position_embeddings=64,
+                         pad_token_id=0,
+                         eos_token_id=None,
+                         attn_implementation="sdpa")
+    device = accelerator.device_name()
+    model = LlamaForCausalLM(config).to(device).eval()
+    # The first request retires while the second continues. The shorter refill
+    # must overwrite physical slot zero and leave slot one's history intact.
+    ids = torch.tensor([[0, 0, 0, 0, 1, 2, 3, 4], [1, 6, 7, 8, 9, 10, 11, 12], [0, 0, 0, 0, 0, 0, 13, 14]],
+                       device=device)
+    mask = ids.ne(0).long()
+    eos = model.generate(ids[:1], attention_mask=mask[:1], max_new_tokens=1, do_sample=False)[0, -1].item()
+    expected = [
+        model.generate(row[None], attention_mask=attn[None], max_new_tokens=4, eos_token_id=eos,
+                       do_sample=False)[0, ids.shape[1]:] for row, attn in zip(ids, mask)
+    ]
+    assert len(expected[0]) == 1 and len(expected[1]) >= 3 and len(expected[2]) >= 2
+    rollout = HybridEngineRollout(
+        SimpleNamespace(module=model), SimpleNamespace(pad_token_id=0, eos_token_id=eos),
+        HybridEngineRolloutConfig(use_graph_capture=True,
+                                  adaptive_prefill=True,
+                                  align_decode_fronts=align_decode_fronts,
+                                  enable_profiling=True,
+                                  prefill_max_tokens=8))
+    capture = accelerator.capture_to_graph
+    captures = []
+
+    def counted_capture(*args, **kwargs):
+        captures.append(1)
+        return capture(*args, **kwargs)
+
+    monkeypatch.setattr(accelerator, "capture_to_graph", counted_capture)
+    for _ in range(2):
+        result = rollout.generate(RolloutRequest(ids, mask),
+                                  SamplingConfig(max_new_tokens=4, temperature=0, continuous_batch_size=2))
+        for i, tokens in enumerate(expected):
+            response = result.input_ids[i, ids.shape[1]:]
+            valid = result.attention_mask[i, ids.shape[1]:].bool()
+            assert torch.equal(response[valid], tokens)
+        profile = rollout.get_last_profile()
+        assert profile["generation_strategy"] == "bucketed_graph"
+        assert profile["num_prefill_forwards"] == 3
+    assert len(captures) == 1
+
+
 def test_continuous_graph_matches_pretrained_model_when_enabled():
     model_name = os.getenv("DEEPSPEED_PRETRAINED_ROLLOUT_MODEL")
     if not model_name:
@@ -560,6 +665,8 @@ def test_decode_repetition_penalty_matches_hf_generate(temperature, use_graph_ca
     model = _tiny_llama(device)
     new_tokens = 32
     request = _random_request(batch_size=8, prompt_len=8, device=device)
+    request.prompt_ids[:4, :3] = 0
+    request.prompt_attention_mask[:4, :3] = 0
     sampling = SamplingConfig(max_new_tokens=new_tokens,
                               temperature=temperature,
                               top_k=0,
@@ -594,3 +701,85 @@ def test_decode_repetition_penalty_matches_hf_generate(temperature, use_graph_ca
     output = _rollout(model, use_graph_capture).generate(request, sampling)
 
     assert output.input_ids.tolist() == expected
+
+
+def test_continuous_graph_recaptures_only_when_tensor_layout_changes():
+    accelerator = get_accelerator()
+    if not accelerator.is_available() or accelerator.create_graph() is None:
+        pytest.skip("graph capture is required for continuous graph rollout coverage")
+
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    device = torch.device(accelerator.device_name())
+    torch.manual_seed(0)
+    config = LlamaConfig(vocab_size=64,
+                         hidden_size=64,
+                         intermediate_size=128,
+                         num_hidden_layers=2,
+                         num_attention_heads=4,
+                         num_key_value_heads=2,
+                         max_position_embeddings=64)
+    config._attn_implementation = "sdpa"
+    eager_model = LlamaForCausalLM(config).to(device).eval()
+    graph_model = LlamaForCausalLM(config).to(device).eval()
+    graph_model.load_state_dict(eager_model.state_dict())
+    tokenizer = SimpleNamespace(pad_token_id=0, eos_token_id=-1)
+    eager_rollout = HybridEngineRollout(SimpleNamespace(module=eager_model), tokenizer)
+    # A pinned capacity keeps the decode shape fixed across prompt widths.
+    graph_rollout = HybridEngineRollout(
+        SimpleNamespace(module=graph_model),
+        tokenizer,
+        cfg=HybridEngineRolloutConfig(use_graph_capture=True, continuous_cache_capacity=24),
+    )
+    eager_sampling = SamplingConfig(max_new_tokens=8, temperature=0)
+    graph_sampling = SamplingConfig(max_new_tokens=8, temperature=0, continuous_batch_size=2)
+    generator = torch.Generator().manual_seed(1)
+    short_prompts = torch.randint(1, 64, (3, 8), generator=generator).to(device)
+    long_prompts = torch.randint(1, 64, (3, 12), generator=generator).to(device)
+
+    # The continuous path also calls create_graph() as a support probe, so count captures instead.
+    original_capture_to_graph = accelerator.capture_to_graph
+    capture_count = [0]
+
+    def counted_capture_to_graph(*args, **kwargs):
+        capture_count[0] += 1
+        return original_capture_to_graph(*args, **kwargs)
+
+    accelerator.capture_to_graph = counted_capture_to_graph
+    try:
+        outputs = []
+        for step, prompt_ids in enumerate((short_prompts, short_prompts, long_prompts, short_prompts, short_prompts)):
+            if step == 1:
+                # Apply the same in-place update an optimizer step would make.
+                with torch.no_grad():
+                    for eager_param, graph_param in zip(eager_model.parameters(), graph_model.parameters()):
+                        delta = torch.randn_like(eager_param) * 0.05
+                        eager_param.add_(delta)
+                        graph_param.add_(delta)
+            if step == 3:
+                # Same address, new strides: replay would read the old layout.
+                with torch.no_grad():
+                    eager_model.lm_head.weight.transpose_(0, 1)
+                    graph_model.lm_head.weight.transpose_(0, 1)
+            if step == 4:
+                # A re-registered buffer lives at an address the captured kernels never read.
+                for model in (eager_model, graph_model):
+                    rotary = model.model.rotary_emb
+                    rotary.register_buffer("inv_freq", rotary.inv_freq * 0.5, persistent=False)
+            request = RolloutRequest(prompt_ids, torch.ones_like(prompt_ids))
+            expected = eager_rollout.generate(request, eager_sampling)
+            output = graph_rollout.generate(request, graph_sampling)
+            assert torch.equal(output.input_ids, expected.input_ids)
+            outputs.append(output.input_ids)
+    finally:
+        accelerator.capture_to_graph = original_capture_to_graph
+
+    # The update must change the tokens, otherwise stale weights would also pass.
+    assert not torch.equal(outputs[0], outputs[1])
+    assert not torch.equal(outputs[3], outputs[4])
+    assert capture_count[0] == 3
+
+    cache_bytes = graph_rollout.get_last_continuous_stats()["cache_memory_bytes"]
+    allocated = accelerator.memory_allocated()
+    graph_rollout.shutdown()
+    assert accelerator.memory_allocated() <= allocated - cache_bytes

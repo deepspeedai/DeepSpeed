@@ -124,10 +124,14 @@ class AutoEPConfig:
     combine_impl: Literal["auto", "weighted_sum", "fused_weighted_sum", "legacy_bmm"] = "auto"
     row_weighting_impl: Literal["auto", "eager", "fused"] = "auto"
     gate_up_impl: Literal["separate", "fused"] = "separate"
+    overlap_weight_grad: bool = False
+    deferred_dw_flush_period: int = 1
+    deferred_dw_rows_per_expert: int = 0
     comm_backend: Literal["comm", "deepep"] = "comm"
     comm_num_sm: int = 12
     comm_qp_margin: int = 4
     comm_max_tokens_per_rank: int = 0
+    skip_recompute_combine: bool = False
     num_expert_groups: int | None = None
     num_limited_groups: int | None = None
     score_func: Literal["auto", "softmax", "sigmoid"] = "auto"

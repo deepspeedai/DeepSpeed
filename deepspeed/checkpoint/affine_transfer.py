@@ -28,11 +28,11 @@ and ``_covers_exactly`` states what that argument does and does not buy.
 import collections.abc
 import json
 from dataclasses import dataclass
-from typing import Callable, Dict, FrozenSet, List, Mapping, Optional, Sequence, Tuple, Union
+from typing import Callable, Dict, FrozenSet, List, Mapping, Optional, Sequence, Set, Tuple, Union
 
 from .affine import AffinePiece, ParamAffineMap
-from .affine_geometry import (LogicalBox, coordinate as _coordinate, product as _product, row_major_strides as
-                              _row_major_strides)
+from .affine_geometry import (LogicalBox, boxes_disjoint, coordinate as _coordinate, product as _product,
+                              row_major_strides as _row_major_strides)
 
 __all__ = [
     'AffineTransferError', 'InvalidMapError', 'InvalidReplicaPolicyError', 'UnsupportedLayoutError', 'PlanBudget',
@@ -108,6 +108,11 @@ class _Frame:
     offset: int
     strides: Tuple[int, ...]
     shard_numel: int
+    # Only for a flat shard: ``offset`` minus the box origin's row-major index in the logical
+    # parameter, when the piece is stored in the parameter's own row-major order (None otherwise),
+    # and whether it is stored that way rather than as a dense run of its own.
+    shift: Optional[int] = None
+    in_order: bool = False
 
     def address(self, box: LogicalBox) -> int:
         """Shard offset of a sub-box of this frame's region, in this shard's own addressing."""
@@ -235,7 +240,9 @@ def _frame_of(piece: AffinePiece, rank: int, side: str, logical_shape: Tuple[int
     the box arithmetic below valid and what every builder in ``affine.py`` already emits. An axis the
     piece does not span is absent from storage, so its stride is not compared -- that is also where a
     permutation would hide, and a permutation is not one box. A flat shard is the one exception: it may
-    hold a multi-axis box as a dense run, which is how ZeRO stores a tensor-parallel shard.
+    hold a multi-axis box as a dense run, which is how ZeRO stores a tensor-parallel shard, or at the
+    parameter's own row-major strides, which is how a ZeRO partition holds a box cut out of the rows it
+    stores. ``_shards_tile`` proves the second kind by its shift, not by its address interval.
     """
     where = f'{side} rank {rank} piece {piece!r}'
     if len(piece.shape) != len(logical_shape):
@@ -261,10 +268,15 @@ def _frame_of(piece: AffinePiece, rank: int, side: str, logical_shape: Tuple[int
         if size > 1 and got != want:
             raise UnsupportedLayoutError(f'{where}: source axis {axis} strides {got}, expected {want}')
     flat_storage = len(shard_shape) == 1 and len(piece.shape) != 1
+    in_order = False
     if flat_storage:
         # A flat shard, as ZeRO stores one, holds a box of a multi-axis parameter as one run of
-        # addresses: the box's own row-major strides. Its place in the shard is that run.
+        # addresses: the box's own row-major strides. Its place in the shard is that run. A box cut out
+        # of the rows a partition stores is instead at the parameter's own strides.
         shard_strides = _row_major_strides(tuple(piece.shape))
+        if not _strides_match(piece.dest_strides, shard_strides, piece.shape):
+            if _strides_match(piece.dest_strides, logical_strides, piece.shape):
+                shard_strides, in_order = logical_strides, True
     for axis, (got, want, size) in enumerate(zip(piece.dest_strides, shard_strides, piece.shape)):
         if size > 1 and got != want:
             raise UnsupportedLayoutError(f'{where}: dest axis {axis} strides {got}, expected {want}')
@@ -274,7 +286,8 @@ def _frame_of(piece: AffinePiece, rank: int, side: str, logical_shape: Tuple[int
     if not LogicalBox(tuple([0] * len(logical_shape)), logical_shape).contains(box):
         raise InvalidMapError(f'{where}: covers {box!r}, outside the logical parameter of {logical_shape}')
     if flat_storage:
-        local = LogicalBox((piece.dest_offset, ), (piece.numel, ))
+        reach = sum((size - 1) * stride for size, stride in zip(piece.shape, shard_strides))
+        local = LogicalBox((piece.dest_offset, ), (reach + 1, ))
     else:
         local = LogicalBox(_origin(piece.dest_offset, shard_strides, shard_shape, where, 'dest'), tuple(piece.shape))
     if not LogicalBox(tuple([0] * len(shard_shape)), shard_shape).contains(local):
@@ -285,7 +298,15 @@ def _frame_of(piece: AffinePiece, rank: int, side: str, logical_shape: Tuple[int
                   local=local,
                   offset=piece.dest_offset,
                   strides=shard_strides,
-                  shard_numel=_product(shard_shape))
+                  shard_numel=_product(shard_shape),
+                  shift=(piece.dest_offset - sum(o * st for o, st in zip(origin, logical_strides)) if flat_storage
+                         and _strides_match(piece.dest_strides, logical_strides, piece.shape) else None),
+                  in_order=in_order)
+
+
+def _strides_match(got: Sequence[int], want: Sequence[int], shape: Sequence[int]) -> bool:
+    """Strides agree wherever they address more than one element."""
+    return all(size <= 1 or g == w for g, w, size in zip(got, want, shape))
 
 
 def _origin(offset: int, strides: Tuple[int, ...], shape: Tuple[int, ...], where: str, which: str) -> Tuple[int, ...]:
@@ -338,12 +359,21 @@ def _shards_tile(frames: List[_Frame], side: str, limits: PlanBudget) -> None:
     of them land on the same addresses of the shard, and their numels still sum to the shard size. A
     shard that two pieces claim cannot be read or written by address, so a plan built on such a map is
     wrong in whichever direction it is used.
+
+    A rank whose pieces sweep as disjoint and fill the shard passes without pairwise comparisons; any
+    other rank takes the pairwise walk, which names the pieces at fault.
     """
     by_rank: Dict[int, List[_Frame]] = {}
     for frame in frames:
         by_rank.setdefault(frame.rank, []).append(frame)
 
     for rank, held in sorted(by_rank.items()):
+        if any(frame.in_order for frame in held):
+            _in_order_shard_tiles(rank, held, side, limits)
+            continue
+        if boxes_disjoint([frame.local for frame in held], limits.max_pair_checks) and sum(
+                frame.local.volume for frame in held) == held[0].shard_numel:
+            continue
         if len(held)**2 > limits.max_pair_checks:
             raise AffineTransferError(f'{side}: rank {rank} holds {len(held)} pieces, over the budget for '
                                       'address checks')
@@ -359,8 +389,54 @@ def _shards_tile(frames: List[_Frame], side: str, limits: PlanBudget) -> None:
                                   'shard elements')
 
 
+def _in_order_shard_tiles(rank: int, held: List[_Frame], side: str, limits: PlanBudget) -> None:
+    """Tile a flat shard that stores the parameter's row-major order, shifted by one constant.
+
+    Such pieces interleave by address -- two column halves of the same rows alternate -- so their
+    address intervals overlap even when no address is shared, and the interval proof does not apply.
+    With one shift ``s`` for the whole shard, an element at logical row-major index ``i`` sits at
+    ``i + s``. That map is injective, so pieces with disjoint logical boxes occupy disjoint addresses;
+    with every address inside the shard and the volumes summing to it, they fill it exactly.
+    """
+    shifts = {frame.shift for frame in held}
+    if len(shifts) != 1 or None in shifts:
+        raise UnsupportedLayoutError(f'{side}: rank {rank} mixes pieces stored in the parameter\'s row-major '
+                                     'order with pieces stored otherwise, or at different shifts')
+    if not boxes_disjoint([frame.box for frame in held], limits.max_pair_checks):
+        # The sweep gives up only when n**2 exceeds the budget; under it, False is a real overlap.
+        if len(held)**2 > limits.max_pair_checks:
+            raise AffineTransferError(f'{side}: rank {rank} holds {len(held)} pieces, over the budget for '
+                                      'address checks')
+        raise InvalidMapError(f'{side}: rank {rank} pieces overlap in the parameter, so they share shard addresses')
+    low = min(frame.local.origin[0] for frame in held)
+    high = max(frame.local.upper()[0] for frame in held)
+    volume = sum(frame.box.volume for frame in held)
+    if low < 0 or high > held[0].shard_numel or volume != held[0].shard_numel:
+        raise InvalidMapError(f'{side}: rank {rank} pieces account for {volume} of its {held[0].shard_numel} '
+                              'shard elements')
+
+
 def _validate_holders(frames: List[_Frame], side: str, limits: PlanBudget) -> None:
-    """A piece's declared holders must cover exactly its logical box on every named rank."""
+    """A piece's declared holders must cover exactly its logical box on every named rank.
+
+    Most maps pass without comparing pieces pairwise: when no two distinct boxes overlap, a rank covers
+    a box exactly when it holds that very box, so the holders of each box can be read off a table.
+    Anything else, such as replicas split at different places, takes the pairwise walk, which also
+    names the piece at fault.
+    """
+    holders: Dict[LogicalBox, Set[int]] = {}
+    repeated = False
+    for frame in frames:
+        ranks = holders.setdefault(frame.box, set())
+        repeated = repeated or frame.rank in ranks
+        ranks.add(frame.rank)
+    if not repeated and boxes_disjoint(list(holders), limits.max_pair_checks):
+        if all(holders[frame.box] == frame.locations for frame in frames):
+            return
+    _validate_holders_pairwise(frames, side, limits)
+
+
+def _validate_holders_pairwise(frames: List[_Frame], side: str, limits: PlanBudget) -> None:
     if len(frames)**2 > limits.max_pair_checks:
         raise AffineTransferError(f'{side}: holder checks exceed max_pair_checks {limits.max_pair_checks}')
     by_rank: Dict[int, List[_Frame]] = {}
@@ -403,18 +479,20 @@ def _sources(frames: List[_Frame], limits: PlanBudget) -> List[Tuple[LogicalBox,
             by_box.setdefault(frame.box, []).append(frame)
 
     regions = sorted(by_box, key=lambda box: (box.origin, box.extent))
+    if not boxes_disjoint(regions, limits.max_pair_checks):
+        _name_overlapping_regions(regions, limits)
+    return [(box, tuple(sorted(by_box[box], key=lambda frame: frame.rank))) for box in regions]
+
+
+def _name_overlapping_regions(regions: List[LogicalBox], limits: PlanBudget) -> None:
     if len(regions)**2 > limits.max_pair_checks:
         raise AffineTransferError(f'{len(regions)} source regions would take {len(regions)**2} checks, over '
                                   f'max_pair_checks {limits.max_pair_checks}')
-    grouped = []
     for index, box in enumerate(regions):
-        holders = by_box[box]
         for other in regions[index + 1:]:
             if not box.intersection(other).is_empty:
                 raise UnsupportedLayoutError(f'source: replicas of {box!r} and {other!r} have different '
                                              'piece boundaries')
-        grouped.append((box, tuple(sorted(holders, key=lambda frame: frame.rank))))
-    return grouped
 
 
 def _covers_exactly(region: LogicalBox, parts: Sequence[LogicalBox]) -> bool:
