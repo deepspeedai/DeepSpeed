@@ -267,3 +267,95 @@ class TestCheckpointConvertBuffers(DistributedTest):
             torch.testing.assert_close(restored(inputs.cpu()), reference(inputs.cpu()), rtol=0, atol=0)
         dist.barrier()
         engine.destroy()
+
+
+class TestCheckpointReexport(DistributedTest):
+    world_size = 1
+
+    @pytest.mark.parametrize("safe_serialization", [False, True])
+    def test_reexport_replaces_previous_weights(self, tmp_path, safe_serialization):
+        hub = pytest.importorskip("huggingface_hub")
+        pytest.importorskip("safetensors")
+        config = {
+            "train_micro_batch_size_per_gpu": 1,
+            "zero_allow_untested_optimizer": True,
+            "zero_optimization": {
+                "stage": 2
+            },
+        }
+        checkpoint_dir = tmp_path / "checkpoint"
+        for value in (1, 2):
+            model = nn.Sequential(*(nn.Linear(4, 4, bias=False) for _ in range(3)))
+            with torch.no_grad():
+                for parameter in model.parameters():
+                    parameter.fill_(value)
+            engine, _, _, _ = deepspeed.initialize(model=model,
+                                                   optimizer=torch.optim.SGD(model.parameters(), lr=0.01),
+                                                   config=config)
+            engine.save_checkpoint(checkpoint_dir, tag=str(value))
+            engine.destroy()
+
+        output_dir = tmp_path / "converted"
+        output_dir.mkdir()
+        sentinels = {
+            "config.json": "{}",
+            "tokenizer.json": "{}",
+            "pytorch_model.bin.backup": "keep",
+            "pytorch_model-00001-of-00003.bin.backup": "keep",
+            "model.safetensors.index.json.backup": "keep",
+            "model-00001-of-00003.safetensors.index.json": "keep",
+        }
+        for filename, content in sentinels.items():
+            (output_dir / filename).write_text(content)
+
+        # Exercise both layout directions, a changed shard count, and format
+        # switches with old single-file as well as old sharded exports.
+        exports = [
+            (1, torch.float32, 64, safe_serialization, 3),
+            (2, torch.bfloat16, None, safe_serialization, 1),
+            (1, torch.float32, 64, safe_serialization, 3),
+            (2, torch.bfloat16, 64, safe_serialization, 2),
+            (1, torch.float32, None, not safe_serialization, 1),
+            (2, torch.bfloat16, 64, safe_serialization, 2),
+        ]
+        for value, dtype, max_shard_size, safe, shard_count in exports:
+            # These names match converter shards, but directories are not exports.
+            directories = [
+                output_dir / "pytorch_model-00099-of-00099.bin",
+                output_dir / "model-00099-of-00099.safetensors",
+            ]
+            for directory in directories:
+                directory.mkdir()
+            convert_zero_checkpoint_to_state_dict(checkpoint_dir,
+                                                  output_dir,
+                                                  tag=str(value),
+                                                  dtype=dtype,
+                                                  max_shard_size=max_shard_size,
+                                                  safe_serialization=safe)
+            for directory in directories:
+                assert directory.is_dir()
+                # The hub's single-file discovery also glob-matches directories.
+                directory.rmdir()
+
+            weights_name = "model.safetensors" if safe else "pytorch_model.bin"
+            index_name = weights_name + ".index.json"
+            if shard_count == 1:
+                expected_files = {weights_name}
+            else:
+                index = json.loads((output_dir / index_name).read_text())
+                shards = set(index["weight_map"].values())
+                assert len(shards) == shard_count
+                expected_files = shards | {index_name}
+            assert {path.name for path in output_dir.iterdir()} == expected_files | set(sentinels)
+            for filename, content in sentinels.items():
+                assert (output_dir / filename).read_text() == content
+
+            restored = nn.Sequential(*(nn.Linear(4, 4, bias=False) for _ in range(3))).to(dtype)
+            # strict=True in the hub reader checks individual shards against the
+            # whole model. Check every loaded value instead, including missing keys.
+            with torch.no_grad():
+                for parameter in restored.parameters():
+                    parameter.zero_()
+            hub.load_torch_model(restored, output_dir, strict=False, safe=safe, weights_only=True)
+            for tensor in restored.state_dict().values():
+                torch.testing.assert_close(tensor, torch.full_like(tensor, value), rtol=0, atol=0)
