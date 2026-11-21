@@ -199,6 +199,19 @@ constructed, including when the caller supplied a lazily initialized process
 group. This initialization does not run on subsequent forwards. The standard
 ``comm`` and ``autoep_size=1`` paths are unchanged.
 
+With AutoEP+AutoTP folding (``tensor_parallel.autotp_size`` greater than 1),
+the tensor-parallel peers of a group hold the same tokens and split the routed
+assignments between them by the same rule as the collective path. On the DeepEP
+path a peer marks the assignments it does not keep with an expert index of -1,
+which DeepEP's dispatch reads as "no selection", and zeroes their routing
+weights, so it sends only its share. DeepEP's combine returns the peer's partial
+output, one row per token summed over the assignments it kept, and an
+all-reduce over the tensor-parallel group adds the peers' partial outputs in the
+activation dtype. The backward of that all-reduce all-reduces the gradient too,
+so every gradient carries the same ``tp_size`` factor as on the collective path
+and the folded gradient corrections apply unchanged. ``overlap_weight_grad`` is
+rejected with folding until it has been validated there.
+
 Received rows and routing weights are passed through without a prefix slice
 when their buffers already contain exactly the arrived rows. Overallocated
 buffers are still trimmed independently to the handle's row count. This avoids
@@ -810,7 +823,8 @@ Requirements and limits:
 - AutoEP combines with AutoTP (``tensor_parallel.autotp_size > 1``) by
   folding: on the same ranks, AutoTP shards the layers its partition
   specification names and AutoEP distributes the routed experts. Folding
-  supports ZeRO stages 0 to 3 with ``expert_tensor_parallel_size=1``. With
+  supports ZeRO stages 0 to 3 with ``expert_tensor_parallel_size=1``, with
+  either ``comm_backend``. With
   ZeRO stage 3 the optimizer can be offloaded to the CPU
   (``offload_optimizer.device: "cpu"``); folding rejects optimizer offload
   with ZeRO stages 1 and 2 or to NVMe, Muon with optimizer offload, parameter

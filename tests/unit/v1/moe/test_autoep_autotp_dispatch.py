@@ -16,6 +16,8 @@ from deepspeed.moe.ep_tp_dispatch import (
     dispatch_counters,
     partition_assignments,
     restore_combined,
+    sum_partial_rows_over_tp,
+    tp_keep_mask,
 )
 import deepspeed.moe.ep_tp_dispatch as dispatch
 from unit.v1.moe.autoep_test_utils import run_cpu_gloo_test
@@ -253,3 +255,80 @@ def test_tp_payload_consistency_detects_divergent_large_payload(monkeypatch):
 
     with pytest.raises(RuntimeError, match="routing decisions differ"):
         assert_tp_payload_consistent(payload, tp_group=object(), tp_size=2)
+
+
+def _payload_for_routing(selected_experts):
+    """The folded payload the AutoEP layer builds from a ``[tokens, top_k]`` routing."""
+    num_tokens, top_k = selected_experts.shape
+    token_indices_sorted = torch.argsort(selected_experts.reshape(-1), stable=True)
+    expert_indices = selected_experts.reshape(-1).index_select(0, token_indices_sorted)
+    no_assignments = torch.zeros_like(expert_indices, dtype=torch.bool)
+    payload = RoutedAssignmentPayload(
+        token_indices=token_indices_sorted // top_k,
+        expert_indices=expert_indices,
+        assignment_indices=assignment_ordinals_by_expert(expert_indices),
+        capacity_slots=token_indices_sorted % top_k,
+        combine_weights=torch.ones(expert_indices.numel()),
+        drop_mask=no_assignments,
+        pad_mask=no_assignments.clone(),
+        input_splits=[expert_indices.numel()],
+        output_splits=[expert_indices.numel()],
+        extra={
+            "destination_ranks": torch.zeros_like(expert_indices),
+            "num_tokens": torch.tensor(num_tokens, dtype=torch.long),
+        },
+    )
+    return payload, token_indices_sorted
+
+
+@pytest.mark.parametrize("num_tokens, top_k, num_experts, tp_size", [(40, 3, 8, 3), (2, 1, 8, 4)])
+def test_tp_keep_mask_gives_every_assignment_to_exactly_one_peer(num_tokens, top_k, num_experts, tp_size):
+    generator = torch.Generator().manual_seed(num_tokens * 31 + tp_size)
+    selected_experts = torch.rand(num_tokens, num_experts, generator=generator).argsort(dim=1)[:, :top_k]
+    payload, token_indices_sorted = _payload_for_routing(selected_experts)
+
+    masks = []
+    for tp_rank in range(tp_size):
+        _, ctx = partition_assignments(payload, tp_group=None, tp_rank=tp_rank, tp_size=tp_size)
+        keep = tp_keep_mask(token_indices_sorted, ctx, num_tokens, top_k)
+        assert keep.shape == (num_tokens, top_k)
+        assert int(keep.sum()) == ctx.counters["assignments_local"]
+        # The mask names the same (token, slot) pairs as the row list the collective path dispatches.
+        kept_rows = set(
+            zip(
+                payload.token_indices.index_select(0, ctx.local_indices).tolist(),
+                payload.capacity_slots.index_select(0, ctx.local_indices).tolist()))
+        tokens, slots = keep.nonzero(as_tuple=True)
+        assert set(zip(tokens.tolist(), slots.tolist())) == kept_rows
+        masks.append(keep)
+
+    # A second peer sending an assignment would double its contribution; a peer missing one would drop it.
+    assert torch.equal(torch.stack(masks).sum(dim=0), torch.ones(num_tokens, top_k, dtype=torch.long))
+
+
+def _sum_partial_rows_worker(rank, world_size, _shared_tmpdir):
+    tp_group = dist.get_world_group()
+    base = torch.arange(6, dtype=torch.float32).reshape(3, 2)
+    partial = (base * (rank + 1)).requires_grad_(True)
+    # Every peer holds the same upstream gradient, as it does in training: the layers after the
+    # MoE layer consume the replicated full output identically.
+    upstream = torch.tensor([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]])
+
+    summed = sum_partial_rows_over_tp(partial, tp_group, world_size)
+    torch.testing.assert_close(summed, base * sum(peer + 1 for peer in range(world_size)))
+    summed.backward(upstream)
+    # The folded gradient convention: the restore leaves a tp_size factor on every gradient that
+    # passes through it, which AVERAGE and EXPERT_TP_CANCEL then divide out. A plain identity
+    # backward here would leave those gradients tp_size times too small.
+    assert torch.equal(partial.grad, upstream * world_size)
+
+    # record_only: nothing reads the output, so no collective runs, but the backward is the same.
+    recorded = partial.detach().clone().requires_grad_(True)
+    out = sum_partial_rows_over_tp(recorded, tp_group, world_size, record_only=True)
+    assert torch.equal(out, recorded.detach())
+    out.backward(upstream)
+    assert torch.equal(recorded.grad, upstream * world_size)
+
+
+def test_sum_partial_rows_over_tp_sums_forward_and_keeps_the_tp_factor_backward(tmpdir):
+    run_cpu_gloo_test(_sum_partial_rows_worker, tmpdir, world_size=2)

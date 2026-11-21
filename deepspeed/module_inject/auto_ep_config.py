@@ -232,6 +232,10 @@ def validate_autoep_config(
             raise ValueError("overlap_weight_grad returns expert weight gradients from the DeepEP dispatch, which "
                              f"has not been validated with ZeRO stage {zero_stage}. Use ZeRO stage 1 or 2, or "
                              "leave overlap_weight_grad unset.")
+        if tp_size > 1:
+            raise ValueError("overlap_weight_grad returns expert weight gradients from the DeepEP dispatch, which "
+                             "has not been validated with AutoEP+AutoTP folding (tensor_parallel.autotp_size="
+                             f"{tp_size}). Set tensor_parallel.autotp_size to 1, or leave overlap_weight_grad unset.")
         if not all(
                 hasattr(torch._C, name)
                 for name in ("_get_sm_carveout_experimental", "_set_sm_carveout_experimental")):

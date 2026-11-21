@@ -976,13 +976,6 @@ class AutoEPMoELayer(nn.Module):
                 raise ValueError('combine_impl="fused_weighted_sum" does not support folded tensor parallelism '
                                  f"(tensor_parallel.autotp_size={folding_group_handles.spec.tp_size}). Set "
                                  'tensor_parallel.autotp_size to 1, or leave combine_impl unset.')
-            if self.comm_backend == DEEPEP_BACKEND and folding_group_handles.spec.tp_size > 1:
-                # DeepEP's combine returns token-major rows, which folded TP's
-                # assignment-metadata restore can't consume. Refuse rather than
-                # silently fall back to a backend the job didn't ask for.
-                raise ValueError(f'comm_backend="{DEEPEP_BACKEND}" does not support folded tensor parallelism '
-                                 f"(expert_tensor_parallel_size={folding_group_handles.spec.tp_size}). Set "
-                                 'expert_tensor_parallel_size to 1, or comm_backend to "comm".')
             self.ep_group_name = folding_group_handles.ep_group_name
             self.ep_group = folding_group_handles.ep_group
             self.tp_group = folding_group_handles.tp_group
@@ -1029,7 +1022,82 @@ class AutoEPMoELayer(nn.Module):
                 "gradient_checkpointing_kwargs={'use_reentrant': True}), so that nothing reads the skipped output. "
                 "Leave skip_recompute_combine unset for other checkpointing.")
 
-    def _deepep_route(self, tokens: torch.Tensor, ro: "RouterOutput") -> torch.Tensor:
+    def _partition_assignments_over_tp(self, token_indices_sorted: torch.Tensor, top_scores_sorted: torch.Tensor,
+                                       expert_indices_sorted: torch.Tensor, *, num_tokens: int):
+        """Split the expert-sorted assignments across the TP folding group.
+
+        Returns this peer's share of the assignments and the context that restores the full output.
+        """
+        from deepspeed.moe.ep_tp_dispatch import (
+            RoutedAssignmentPayload,
+            assignment_ordinals_by_expert,
+            assert_tp_payload_consistent,
+            partition_assignments,
+        )
+        payload = RoutedAssignmentPayload(
+            token_indices=(token_indices_sorted // self.top_k).to(torch.long),
+            expert_indices=expert_indices_sorted.to(torch.long),
+            assignment_indices=assignment_ordinals_by_expert(expert_indices_sorted.to(torch.long)),
+            capacity_slots=(token_indices_sorted % self.top_k).to(torch.long),
+            combine_weights=top_scores_sorted if self.score_apply == "post" else torch.ones_like(top_scores_sorted),
+            drop_mask=torch.zeros_like(top_scores_sorted, dtype=torch.bool),
+            pad_mask=torch.zeros_like(top_scores_sorted, dtype=torch.bool),
+            input_splits=[0 for _ in range(self.ep_size)],
+            output_splits=[0 for _ in range(self.ep_size)],
+            extra={
+                "destination_ranks": (expert_indices_sorted // self.num_local_experts).to(torch.long),
+                "top_scores": top_scores_sorted,
+                "num_tokens": torch.tensor(num_tokens, device=token_indices_sorted.device, dtype=torch.long),
+            },
+        )
+        if self.validate_folding_routing:
+            assert_tp_payload_consistent(payload,
+                                         tp_group=self.tp_group,
+                                         tp_size=self.folding_group_handles.spec.tp_size)
+        tp_rank = dist.get_rank(group=self.tp_group)
+        return partition_assignments(payload,
+                                     tp_group=self.tp_group,
+                                     tp_rank=tp_rank,
+                                     tp_size=self.folding_group_handles.spec.tp_size)
+
+    def _partition_routing_over_tp(self, ro: "RouterOutput", *, num_tokens: int):
+        """The router output with the assignments other TP peers keep masked out, for DeepEP.
+
+        DeepEP takes the routing token-major and reads an expert index of -1 as "no selection", so a
+        peer sends only its share of the assignments by masking the others, instead of building the
+        partitioned row list the collective path dispatches. The same ``partition_assignments`` rule
+        decides the share, so the two backends split the work identically.
+        """
+        from deepspeed.moe.ep_tp_dispatch import tp_keep_mask
+        token_indices_sorted = torch.argsort(ro.selected_experts.view(-1), stable=True)
+        top_scores_sorted = ro.top_scores.view(-1)[token_indices_sorted]
+        expert_indices_sorted = ro.selected_experts.reshape(-1).index_select(0, token_indices_sorted)
+        _, restore_ctx = self._partition_assignments_over_tp(token_indices_sorted,
+                                                             top_scores_sorted,
+                                                             expert_indices_sorted,
+                                                             num_tokens=num_tokens)
+        keep = tp_keep_mask(token_indices_sorted, restore_ctx, num_tokens, self.top_k)
+        selected_experts = ro.selected_experts.masked_fill(~keep, -1)
+        # torch.where passes the routing-weight gradient to the kept slots only, whatever DeepEP returns
+        # for the masked ones.
+        top_scores = torch.where(keep, ro.top_scores, torch.zeros_like(ro.top_scores))
+        return RouterOutput(top_scores, selected_experts, ro.num_tokens_per_expert), restore_ctx
+
+    def _restore_folded_deepep(self, partial: torch.Tensor, restore_ctx, *, record_only: bool) -> torch.Tensor:
+        """Sum the TP peers' partial outputs: DeepEP's combine already reduced each peer's kept assignments."""
+        from deepspeed.moe.ep_tp_dispatch import dispatch_counters, sum_partial_rows_over_tp
+        tp_size = self.folding_group_handles.spec.tp_size
+        if self.validate_folding_routing and not record_only:
+            kept = torch.tensor([restore_ctx.counters["assignments_local"]], device=partial.device, dtype=torch.long)
+            dist.all_reduce(kept, group=self.tp_group)
+            if int(kept.item()) != restore_ctx.counters["assignments_total"]:
+                raise RuntimeError("AutoEP+AutoTP DeepEP coverage mismatch: the tensor-parallel peers dispatched "
+                                   f"{int(kept.item())} assignments for {restore_ctx.counters['assignments_total']}")
+        output = sum_partial_rows_over_tp(partial, self.tp_group, tp_size, record_only=record_only)
+        self._last_folding_dispatch_counters = dispatch_counters(restore_ctx)
+        return output
+
+    def _deepep_route(self, tokens: torch.Tensor, ro: "RouterOutput", restore_ctx=None) -> torch.Tensor:
         """Dispatch, run the experts, and combine through DeepEP.
 
         ``tokens`` is [T, H] before top-k expansion. DeepEP replicates each
@@ -1038,6 +1106,10 @@ class AutoEPMoELayer(nn.Module):
         sums them back. It therefore replaces the expansion and the reduction
         around the collectives, not just the collectives, and returns [T, H]
         ready for the shared tail of forward.
+
+        Under AutoEP+AutoTP folding ``ro`` carries only this peer's share of the
+        assignments and ``restore_ctx`` describes the split; the peers' partial
+        outputs are then summed over the TP group.
         """
         assert_dtype_supported(tokens.dtype)
 
@@ -1130,8 +1202,12 @@ class AutoEPMoELayer(nn.Module):
             expert_output = apply_deepep_row_weights(expert_output, weights, self.row_weighting_impl)
 
         if record_only:
-            return deepep_record_combine(exchange, expert_output, handle)
-        return deepep_combine(exchange, expert_output, handle)
+            combined = deepep_record_combine(exchange, expert_output, handle)
+        else:
+            combined = deepep_combine(exchange, expert_output, handle)
+        if restore_ctx is None:
+            return combined
+        return self._restore_folded_deepep(combined, restore_ctx, record_only=record_only)
 
     def _finalize_output(self, output: torch.Tensor, x: torch.Tensor, hidden_states: torch.Tensor,
                          hdim: int) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
@@ -1230,8 +1306,12 @@ class AutoEPMoELayer(nn.Module):
             self.tokens_per_expert.add_(ro.num_tokens_per_expert)
 
         if self.ep_size > 1 and self.comm_backend == DEEPEP_BACKEND:
-            output = self._deepep_route(x, ro).reshape(bsz, seqlen, hdim)
-            return self._finalize_output(output, x, hidden_states, hdim)
+            if folded_tp:
+                ro, restore_ctx = self._partition_routing_over_tp(ro, num_tokens=bsz * seqlen)
+                output = self._deepep_route(x, ro, restore_ctx=restore_ctx)
+            else:
+                output = self._deepep_route(x, ro)
+            return self._finalize_output(output.reshape(bsz, seqlen, hdim), x, hidden_states, hdim)
 
         # Reorder tokens into expert-contiguous order.
         token_indices_sorted = torch.argsort(ro.selected_experts.view(-1), stable=True)
@@ -1240,40 +1320,11 @@ class AutoEPMoELayer(nn.Module):
 
         restore_ctx = None
         if folded_tp:
-            from deepspeed.moe.ep_tp_dispatch import (
-                RoutedAssignmentPayload,
-                assignment_ordinals_by_expert,
-                assert_tp_payload_consistent,
-                dispatch_counters,
-                partition_assignments,
-                restore_combined,
-            )
-            payload = RoutedAssignmentPayload(
-                token_indices=(token_indices_sorted // self.top_k).to(torch.long),
-                expert_indices=expert_indices_sorted.to(torch.long),
-                assignment_indices=assignment_ordinals_by_expert(expert_indices_sorted.to(torch.long)),
-                capacity_slots=(token_indices_sorted % self.top_k).to(torch.long),
-                combine_weights=top_scores_sorted
-                if self.score_apply == "post" else torch.ones_like(top_scores_sorted),
-                drop_mask=torch.zeros_like(top_scores_sorted, dtype=torch.bool),
-                pad_mask=torch.zeros_like(top_scores_sorted, dtype=torch.bool),
-                input_splits=[0 for _ in range(self.ep_size)],
-                output_splits=[0 for _ in range(self.ep_size)],
-                extra={
-                    "destination_ranks": (expert_indices_sorted // self.num_local_experts).to(torch.long),
-                    "top_scores": top_scores_sorted,
-                    "num_tokens": torch.tensor(bsz * seqlen, device=hidden_states.device, dtype=torch.long),
-                },
-            )
-            if self.validate_folding_routing:
-                assert_tp_payload_consistent(payload,
-                                             tp_group=self.tp_group,
-                                             tp_size=self.folding_group_handles.spec.tp_size)
-            tp_rank = dist.get_rank(group=self.tp_group)
-            local_payload, restore_ctx = partition_assignments(payload,
-                                                               tp_group=self.tp_group,
-                                                               tp_rank=tp_rank,
-                                                               tp_size=self.folding_group_handles.spec.tp_size)
+            from deepspeed.moe.ep_tp_dispatch import dispatch_counters, restore_combined
+            local_payload, restore_ctx = self._partition_assignments_over_tp(token_indices_sorted,
+                                                                             top_scores_sorted,
+                                                                             expert_indices_sorted,
+                                                                             num_tokens=bsz * seqlen)
             token_indices_for_compute = token_indices_sorted.index_select(0, restore_ctx.local_indices)
             top_scores_for_compute = top_scores_sorted.index_select(0, restore_ctx.local_indices)
             expert_indices_for_plan = local_payload.expert_indices
