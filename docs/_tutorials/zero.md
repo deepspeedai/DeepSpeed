@@ -246,6 +246,70 @@ registration and this step is no longer needed.
 {: .notice--info}
 
 
+## Custom optimizers and flat parameter metadata
+
+ZeRO stages 1 and 2 replace each optimizer parameter group with a single flat
+FP32 partition per rank. The same layout is used by the BF16 optimizer wrapper
+(`bf16` with `data_types.grad_accum_dtype: fp32`, ZeRO stage 1, and no
+optimizer offload). A custom optimizer therefore sees 1-D tensors instead of
+the original parameter shapes and boundaries.
+
+DeepSpeed attaches metadata describing the original layout to every flat
+partition. Use `get_zero_flat_partition_metadata()` to retrieve it:
+
+```python
+from deepspeed.runtime.zero.flat_param_metadata import (
+    get_zero_flat_partition_metadata,
+)
+
+for group in optimizer.param_groups:
+    for flat_param in group["params"]:
+        metadata = get_zero_flat_partition_metadata(flat_param)
+        if metadata is None:
+            continue
+        print(
+            "group", metadata.group_index,
+            "rank partition", metadata.partition_start,
+            metadata.partition_numel,
+            "of", metadata.global_numel,
+        )
+        for param in metadata.params:
+            print(
+                "original index", param.original_index,
+                "flat index", param.flat_index,
+                "shape", tuple(param.shape),
+                "local slice", param.local_offset, param.local_numel,
+            )
+```
+
+`ZeROFlatPartitionMetadata` describes the whole group:
+
+- `group_index`: index of the optimizer parameter group.
+- `global_numel`: size of the padded flat group before partitioning.
+- `partition_start` / `partition_numel`: this rank's slice of the flat group.
+- `dp_group` / `dp_world_size`: the data parallel group that owns the group.
+- `params`: one `ZeROFlatParamMetadata` per original parameter, ordered by
+  `flat_index`.
+
+Each `ZeROFlatParamMetadata` describes one parameter:
+
+- `original_index`: position in the optimizer group before any ZeRO
+  round-robin reordering. With `round_robin_gradients`, `flat_index` and
+  `original_index` intentionally differ.
+- `shape` / `numel`: original parameter shape and number of elements.
+- `flat_offset` / `padding`: offset in the padded flat group and the alignment
+  padding inserted after the parameter. The BF16 wrapper uses group-end
+  padding only, so its per-parameter `padding` is `0`.
+- `local_offset` / `local_numel`: the overlap with this rank's partition.
+  `local_offset` is `-1` when the parameter does not overlap the local
+  partition.
+- `requires_grad`: whether the original parameter required gradients.
+
+The metadata is attached when DeepSpeed initializes the optimizer and is not
+stored in checkpoints. Re-query it from the optimizer after each
+`deepspeed.initialize()` call. It describes the layout only; the flat tensor
+layout itself is unchanged.
+
 ## Extracting weights
 
 If you need to take the pretrained weights out of Deepspeed here is what you can do for getting fp16 weights:

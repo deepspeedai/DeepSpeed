@@ -10,6 +10,7 @@ from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
 from deepspeed import comm as dist
 from deepspeed.runtime.constants import PIPE_REPLICATED
 from deepspeed.runtime.base_optimizer import ZeROOptimizer
+from deepspeed.runtime.zero.flat_param_metadata import (ZeROFlatParamMetadata, ZeROFlatPartitionMetadata)
 from packaging import version as pkg_version
 from deepspeed.git_version_info import version
 from deepspeed.runtime.utils import (get_global_norm_of_tensors, clip_tensors_by_global_norm, DummyOptim,
@@ -187,6 +188,42 @@ class BF16_Optimizer(ZeROOptimizer):
             self.fp32_groups_flat_partition[i].requires_grad = True
 
             num_elem_list = [t.numel() for t in self.bf16_groups[i]]
+
+            # Expose the original parameter layout on the flat optimizer tensor so
+            # custom optimizers can recover shapes and boundaries, matching the
+            # metadata that the standard ZeRO-1/2 optimizer attaches.
+            partition_start = partition_id * partition_size
+            partition_end = partition_start + partition_size
+            flat_offset = 0
+            flat_params = []
+            for flat_index, param in enumerate(self.bf16_groups[i]):
+                numel = num_elem_list[flat_index]
+                overlap_start = max(flat_offset, partition_start)
+                overlap_end = min(flat_offset + numel, partition_end)
+                local_numel = max(0, overlap_end - overlap_start)
+                local_offset = overlap_start - partition_start if local_numel else -1
+                flat_params.append(
+                    ZeROFlatParamMetadata(original_index=flat_index,
+                                          flat_index=flat_index,
+                                          shape=param.shape,
+                                          numel=numel,
+                                          flat_offset=flat_offset,
+                                          padding=0,
+                                          local_offset=local_offset,
+                                          local_numel=local_numel,
+                                          requires_grad=param.requires_grad))
+                flat_offset += numel
+            fp32_partition = self.fp32_groups_flat_partition[i]
+            fp32_partition.ds_zero_flat_partition = True
+            fp32_partition.ds_zero_flat_partition_metadata = ZeROFlatPartitionMetadata(
+                group_index=i,
+                global_numel=self.bf16_groups_flat[i].numel(),
+                partition_start=partition_start,
+                partition_numel=partition_size,
+                dp_group=self.real_dp_process_group[i],
+                dp_world_size=real_dp_world_size,
+                params=tuple(flat_params))
+
             self._muon_exchange_layouts.append(
                 self._build_muon_exchange_layout(num_elem_list, partition_size, real_dp_world_size, partition_id
                                                  ) if param_group.get('use_muon', False) else None)
