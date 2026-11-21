@@ -40,8 +40,13 @@ def calc_bw_log(comm_op, size, duration):
     if comm_op == "all_to_all_single" or comm_op == "all_to_all":
         tput = (size / duration)
         busbw = (size / duration) * ((n - 1) / n)
-    elif comm_op == "all_gather" or comm_op == "all_gather_into_tensor" or comm_op == "reduce_scatter" or comm_op == "reduce_scatter_tensor":
+    elif comm_op == "all_gather" or comm_op == "all_gather_into_tensor":
         size *= n
+        tput = (size / duration)
+        busbw = (size / duration) * ((n - 1) / n)
+    elif comm_op == "reduce_scatter" or comm_op == "reduce_scatter_tensor":
+        # The logged size of a reduce-scatter is its input, which already covers all ranks,
+        # while an all-gather logs only the per-rank input that the branch above scales up.
         tput = (size / duration)
         busbw = (size / duration) * ((n - 1) / n)
     elif comm_op == "all_reduce" or comm_op == "all_reduce_coalesced" or comm_op == "inference_all_reduce":
