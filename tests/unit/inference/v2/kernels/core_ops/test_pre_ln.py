@@ -8,7 +8,8 @@ import torch
 
 from deepspeed.accelerator import get_accelerator
 from deepspeed.inference.v2.kernels.core_ops import CUDAFPPreLN
-from ....v2.inference_test_utils import get_dtypes, allclose
+from ....v2.inference_test_utils import (get_dtypes, allclose, allocate_output_with_canary, assert_rows_independent,
+                                         norm_tolerances, CANARY_VALUE)
 
 
 def reference_implementation(residual: torch.Tensor, hidden_states: torch.Tensor, gamma: torch.Tensor,
@@ -26,9 +27,15 @@ def reference_implementation(residual: torch.Tensor, hidden_states: torch.Tensor
 
 
 @pytest.mark.inference_v2_ops
-@pytest.mark.parametrize("tokens, channels", [(1, 4096), (37, 2048), (112, 14432), (1024, 6144)])
+# The shapes with <= 128 channels pack several rows into one thread block (16 to 256 rows per block, depending
+# on dtype and channels) and have one row more than fits in a block, so the last block is partially filled and
+# must not touch rows past the end. Together they cover every threads-per-row dispatch in fp32 and fp16.
+@pytest.mark.parametrize("tokens, channels", [(1, 4096), (37, 2048), (112, 14432), (1024, 6144), (33, 64), (33, 128),
+                                              (65, 32), (129, 16), (257, 8)])
 @pytest.mark.parametrize("dtype", get_dtypes())
 def test_cuda_pre_ln(tokens: int, channels: int, dtype: torch.dtype) -> None:
+    if dtype == torch.float32 and 64 < channels <= 128:
+        pytest.skip("fp32 with 65-128 channels launches no kernel, see #8827")
 
     # Input vals
     hidden_states = torch.randn((tokens, channels), dtype=dtype, device=get_accelerator().current_device_name())
@@ -42,10 +49,19 @@ def test_cuda_pre_ln(tokens: int, channels: int, dtype: torch.dtype) -> None:
 
     # New output
     pre_ln_kernel = CUDAFPPreLN(hidden_states.size(-1), residual.dtype)
-    ds_output_res = torch.empty_like(residual)
-    ds_output_hid = torch.empty_like(hidden_states)
+    ds_output_res, res_canary = allocate_output_with_canary(tokens, channels, dtype)
+    ds_output_hid, hid_canary = allocate_output_with_canary(tokens, channels, dtype)
     pre_ln_kernel(ds_output_res, ds_output_hid, residual, hidden_states, gamma, beta)
 
+    def run_rows(start: int, end: int):
+        res_single = torch.empty_like(hidden_states[start:end])
+        hid_single = torch.empty_like(hidden_states[start:end])
+        pre_ln_kernel(res_single, hid_single, residual[start:end], hidden_states[start:end], gamma, beta)
+        return res_single, hid_single
+
     # Check
-    assert allclose(ds_output_res, ref_output_res)
-    assert allclose(ds_output_hid, ref_output_hid)
+    assert allclose(ds_output_res, ref_output_res, norm_tolerances(dtype))
+    assert allclose(ds_output_hid, ref_output_hid, norm_tolerances(dtype))
+    assert (res_canary == CANARY_VALUE).all()
+    assert (hid_canary == CANARY_VALUE).all()
+    assert_rows_independent(run_rows, (ds_output_res, ds_output_hid))
