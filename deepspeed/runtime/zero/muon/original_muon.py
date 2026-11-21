@@ -194,7 +194,8 @@ def muon_update(grad,
                 nesterov=True,
                 ns_method="gram",
                 is_expert_group=False,
-                num_heads=None):
+                num_heads=None,
+                momentum_scale_ratio=1.0):
     """Muon update, optionally orthogonalizing each attention head separately.
 
     With ``num_heads`` set, the update for an attention projection of shape
@@ -212,7 +213,14 @@ def muon_update(grad,
     # momentum out of it, and let the non-finite gradient through so the overflow is still
     # seen and the step still skipped. Evaluated on device so this costs no synchronization.
     grad_is_finite = torch.isfinite(grad).all()
-    momentum.copy_(torch.where(grad_is_finite, momentum.lerp(grad, 1 - beta), momentum))
+    if momentum_scale_ratio != 1.0:
+        # The rebased history can exceed fp16 even when the blended momentum fits.
+        dtype = torch.promote_types(momentum.dtype, torch.float32)
+        blended = (momentum.to(dtype) * momentum_scale_ratio).lerp_(grad.to(dtype), 1 - beta)
+        blended = blended.to(momentum.dtype)
+    else:
+        blended = momentum.lerp(grad, 1 - beta)
+    momentum.copy_(torch.where(grad_is_finite, blended, momentum))
     update = grad.lerp_(momentum, beta) if nesterov else momentum
     if num_heads is not None:
         return _per_head_orthogonalize(update, num_heads, ns_steps, ns_method).to(orig_dtype)

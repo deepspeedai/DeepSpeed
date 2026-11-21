@@ -256,6 +256,10 @@ class DynamicLossScaler(LossScalerBase):
     def _has_inf_or_nan(x):
         return has_inf_or_nan(x)
 
+    def _is_growth_iteration(self, iteration):
+        stable_interval = iteration - self.last_overflow_iter - 1
+        return stable_interval > 0 and stable_interval % self.scale_window == 0
+
     # `overflow` is boolean indicating whether the gradient overflowed
     def update_scale(self, overflow):
         if overflow:
@@ -286,8 +290,7 @@ class DynamicLossScaler(LossScalerBase):
                     logger.info(hysteresis_msg)
                 self.cur_hysteresis = self.delayed_shift
 
-            stable_interval = (self.cur_iter - self.last_overflow_iter) - 1
-            if (stable_interval > 0) and (stable_interval % self.scale_window == 0):
+            if self._is_growth_iteration(self.cur_iter):
                 if not self.consecutive_hysteresis:
                     self.cur_hysteresis = self.delayed_shift
                 self.cur_scale *= self.scale_factor
