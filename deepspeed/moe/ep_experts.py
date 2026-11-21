@@ -300,16 +300,13 @@ class _ZeroEmptyExpertGrad(torch.autograd.Function):
         if grad is None:
             return None, None
         (num_tokens_per_expert, ) = ctx.saved_tensors
-        inactive = num_tokens_per_expert == 0
-        # Every expert is live on the common path. masked_fill would still copy each
-        # weight gradient; return the buffer the grouped GEMM already produced.
-        if not bool(inactive.any()):
-            return grad, None
         # Zero only the empty-expert rows. A non-contiguous grad cannot be written in place.
         if not grad.is_contiguous():
             grad = grad.contiguous()
-        grad[inactive] = 0
-        return grad, None
+        # Masked on the device, in the buffer the grouped GEMM produced. Asking the host whether any expert is
+        # empty would block it until the GPU caught up, once per expert weight in every backward.
+        inactive = (num_tokens_per_expert == 0).view(-1, *([1] * (grad.dim() - 1)))
+        return grad.masked_fill_(inactive, 0), None
 
 
 def _zero_empty_expert_grad(weight: torch.Tensor, num_tokens_per_expert: torch.Tensor) -> torch.Tensor:
