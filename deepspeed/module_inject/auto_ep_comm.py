@@ -21,7 +21,9 @@ sized at construction and are expensive to rebuild.
 
 from __future__ import annotations
 
+import contextlib
 import itertools
+import os
 import weakref
 
 import torch
@@ -352,11 +354,12 @@ class DeepEPExchange:
 
         The current stream does not wait for it, so work queued next runs while the combine is in flight.
         """
-        combined, combined_weights, event = self.buffer.combine(rows,
-                                                                handle=handle,
-                                                                topk_weights=weight_grads,
-                                                                num_sms=self.num_sms,
-                                                                async_with_compute_stream=True)
+        with _event_holds_async_tensors():
+            combined, combined_weights, event = self.buffer.combine(rows,
+                                                                    handle=handle,
+                                                                    topk_weights=weight_grads,
+                                                                    num_sms=self.num_sms,
+                                                                    async_with_compute_stream=True)
         return combined, combined_weights, event
 
     def combine(self, rows: torch.Tensor, handle) -> torch.Tensor:
@@ -392,6 +395,31 @@ class DeepEPExchange:
         if _SHARED_EXCHANGES.get(self.key) is self:
             del _SHARED_EXCHANGES[self.key]
         self.buffer.destroy()
+
+
+# DeepEP's V2 buffers read this on every asynchronous call (DeepEP csrc/elastic/buffer.hpp).
+_DEEPEP_AVOID_RECORD_STREAM = "EP_AVOID_RECORD_STREAM"
+
+
+@contextlib.contextmanager
+def _event_holds_async_tensors():
+    """Make DeepEP keep an asynchronous call's tensors in its returned event instead of recording them on streams.
+
+    By default DeepEP calls ``record_stream`` on every tensor of an asynchronous call, for the compute stream and for
+    its own stream. The caching allocator then cannot reuse their blocks until DeepEP's stream has passed that point,
+    which the host, queueing the backward ahead of the GPU, does not wait for. The unusable blocks accumulate until an
+    allocation fails and the allocator synchronizes and empties its cache, once per combine. Kept in the event, the
+    tensors are released when the caller drops the event after waiting on it, and their blocks are reusable at once.
+    """
+    previous = os.environ.get(_DEEPEP_AVOID_RECORD_STREAM)
+    os.environ[_DEEPEP_AVOID_RECORD_STREAM] = "1"
+    try:
+        yield
+    finally:
+        if previous is None:
+            del os.environ[_DEEPEP_AVOID_RECORD_STREAM]
+        else:
+            os.environ[_DEEPEP_AVOID_RECORD_STREAM] = previous
 
 
 def run_with_sm_carveout(num_sms: int, compute):
