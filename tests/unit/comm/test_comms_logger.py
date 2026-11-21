@@ -124,6 +124,31 @@ def test_timed_op_profiles_default_log_name_with_prof_ops(monkeypatch):
     assert 'barrier' in comm.comms_logger.comms_dict
 
 
+def test_profiled_op_accepts_tensor_passed_by_keyword(monkeypatch):
+    # The input tensor of all_gather_into_tensor is its second parameter. Passing it by
+    # keyword after a positional output used to raise IndexError once profiling was on.
+    from deepspeed.comm import comm
+
+    backend_op = Mock(return_value='done')
+    monkeypatch.setattr(
+        comm, 'cdb',
+        SimpleNamespace(using_mpi=False,
+                        is_initialized=lambda: True,
+                        get_world_size=lambda group=None: 2,
+                        all_gather_into_tensor=backend_op))
+    monkeypatch.setattr(comm, 'get_accelerator', lambda: SimpleNamespace(synchronize=lambda: None))
+    monkeypatch.setattr(comm, 'comms_logger', CommsLogger())
+    comm.comms_logger.enabled = True
+    comm.comms_logger.start_profiling_comms()
+
+    input_tensor = torch.ones(4)
+    output_tensor = torch.empty(8)
+    assert comm.all_gather_into_tensor(output_tensor, tensor=input_tensor) == 'done'
+
+    msg_size = input_tensor.numel() * input_tensor.element_size()
+    assert msg_size in comm.comms_logger.comms_dict['all_gather_into_tensor']
+
+
 @pytest.mark.parametrize('op_name', ['broadcast_object_list', 'all_to_all'])
 @pytest.mark.parametrize('positional', [False, True])
 @pytest.mark.parametrize('debug', [False, True])
