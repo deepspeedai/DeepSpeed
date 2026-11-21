@@ -170,6 +170,12 @@ void launch_fused_ln(T* output,
             LAUNCH_FUSED_LN(1, 8, maxThreads);
         } else if (threadsPerGroup == 16) {
             LAUNCH_FUSED_LN(1, 16, maxThreads);
+        } else if (threadsPerGroup == 32) {
+            // One row per block, as in the > 128 path: the kernel has no row bound, so a
+            // partially filled multi-row block would read and write past the last row.
+            const dim3 grid(rows);
+            const dim3 block(32);
+            LAUNCH_FUSED_LN(1, 32, 32);
         }
     } else if (external_unRoll == 1) {
         // 129 - 4096 elems
@@ -386,6 +392,12 @@ void launch_fused_residual_ln(T* output,
             LAUNCH_FUSED_RES_LN(1, 8, maxThreads);
         } else if (threadsPerGroup == 16) {
             LAUNCH_FUSED_RES_LN(1, 16, maxThreads);
+        } else if (threadsPerGroup == 32) {
+            // One row per block, as in the > 128 path: the kernel has no row bound, so a
+            // partially filled multi-row block would read and write past the last row.
+            const dim3 grid(rows);
+            const dim3 block(32);
+            LAUNCH_FUSED_RES_LN(1, 32, 32);
         }
     } else if (external_unRoll == 1) {
         // 129 - 4096 elems
@@ -460,6 +472,12 @@ void launch_fused_residual_ln_store_pre_ln_res(T* norm_output,
             LAUNCH_FUSED_RES_LN_STORE_PRE_LN_RES(1, 8, maxThreads);
         } else if (threadsPerGroup == 16) {
             LAUNCH_FUSED_RES_LN_STORE_PRE_LN_RES(1, 16, maxThreads);
+        } else if (threadsPerGroup == 32) {
+            // One row per block, as in the > 128 path: the kernel has no row bound, so a
+            // partially filled multi-row block would read and write past the last row.
+            const dim3 grid(rows);
+            const dim3 block(32);
+            LAUNCH_FUSED_RES_LN_STORE_PRE_LN_RES(1, 32, 32);
         }
     } else if (external_unRoll == 1) {
         // 129 - 4096 elems
