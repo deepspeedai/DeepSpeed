@@ -280,7 +280,9 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         #num of ranks in a ZeRO param partitioning group
         self.zero_hpz_partition_size = zero_hpz_partition_size
 
-        zero_param_parallel_group = groups._get_zero_param_intra_parallel_group()
+        # Another engine's hpZ group, built for its layout, is not used when hpZ is disabled.
+        zero_param_parallel_group = (groups._get_zero_param_intra_parallel_group()
+                                     if self.zero_hpz_partition_size > 1 else None)
         print_rank_0(
             f"ZeRO Stage 3 param partitioning group {self.zero_hpz_partition_size} {zero_param_parallel_group}",
             force=False)
@@ -385,7 +387,10 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         if self.use_muon and self.all2all_process_group is not None:
             raise ValueError("Muon and all2all process group cannot be used together")
         self.dp_process_group = self.parameter_offload.dp_process_group
-        self.sequence_parallel_size = groups._get_sequence_parallel_world_size()
+        # An engine with TP/DP groups of its own passes them as its mpu (#9081).
+        self._owned_parallel_groups = mpu if isinstance(mpu, groups.TensorParallelGroups) else None
+        self.sequence_parallel_size = (1 if self._owned_parallel_groups is not None else
+                                       groups._get_sequence_parallel_world_size())
 
         self.zero_quantized_nontrainable_weights = zero_quantized_nontrainable_weights
 
@@ -4204,7 +4209,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         if param is not None:
             from deepspeed.checkpoint.universal_checkpoint import _get_param_uc_restore_meta, _resolve_autotp_partition
             if _get_param_uc_restore_meta(param):
-                tp_group = groups.get_tensor_model_parallel_group()
+                tp_groups = self._owned_parallel_groups or groups
+                tp_group = tp_groups.get_tensor_model_parallel_group()
                 tp_shard = _resolve_autotp_partition(param, ckpt_dict, loaded_checkpoint_state,
                                                      dist.get_rank(tp_group), dist.get_world_size(tp_group))
                 if tp_shard is not None:

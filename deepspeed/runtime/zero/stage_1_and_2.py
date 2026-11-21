@@ -280,7 +280,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         self.device = get_accelerator().current_device_name() if not self.cpu_offload else 'cpu'
 
         self.dp_process_group = dp_process_group
-        self.sequence_parallel_size = groups._get_sequence_parallel_world_size()
+        self.sequence_parallel_size = (1 if isinstance(mpu, groups.TensorParallelGroups) else
+                                       groups._get_sequence_parallel_world_size())
         #expert parallel group
         self.ep_process_group = expert_parallel_group
 
