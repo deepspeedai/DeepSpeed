@@ -126,8 +126,9 @@ def generalized_jsd_loss(student_logits: torch.Tensor,
     if pointwise_clip is not None:
         pointwise_jsd = pointwise_jsd.clamp(max=pointwise_clip)
 
-    response_mask = response_mask.to(dtype=pointwise_jsd.dtype)
-    loss_sum = (pointwise_jsd.sum(dim=-1) * response_mask).sum()
-    valid_token_count = response_mask.sum().to(dtype=torch.long)
+    # Reduce in at least float32: a bf16 sum rounds token counts above 256 and an fp16 sum overflows past 65504.
+    accum_dtype = torch.promote_types(pointwise_jsd.dtype, torch.float32)
+    loss_sum = (pointwise_jsd.sum(dim=-1, dtype=accum_dtype) * response_mask).sum()
+    valid_token_count = response_mask.sum(dtype=torch.long)
     loss = loss_sum / valid_token_count.clamp_min(1)
     return JSDLossOutput(loss=loss, loss_sum=loss_sum, valid_token_count=valid_token_count)

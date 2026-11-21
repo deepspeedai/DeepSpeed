@@ -159,6 +159,22 @@ def test_generalized_jsd_loss_supports_top_k_and_empty_response_masks():
     assert empty.loss.item() == pytest.approx(0.0)
 
 
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+def test_generalized_jsd_loss_counts_tokens_exactly_for_low_precision_logits(dtype):
+    # 97992 valid tokens: not representable in bf16, and past fp16's largest finite value of 65504.
+    torch.manual_seed(0)
+    student_logits = torch.randn(24, 4096, 4).to(dtype)
+    teacher_logits = torch.randn(24, 4096, 4).to(dtype)
+    response_mask = torch.ones(24, 4096, dtype=torch.bool)
+    response_mask[:, :13] = False
+
+    output = generalized_jsd_loss(student_logits, teacher_logits, response_mask)
+    reference = generalized_jsd_loss(student_logits.float(), teacher_logits.float(), response_mask)
+
+    assert output.valid_token_count.item() == response_mask.sum().item()
+    assert output.loss.item() == pytest.approx(reference.loss.item(), rel=5e-2)
+
+
 # --- interface conformance via FakeRollout ---------------------------------
 
 
