@@ -13,6 +13,8 @@ Unit tests for AutoSP multimodal sequence parallelism:
   - Qwen2VLFusionAdapter: Qwen2-VL vision_start/end bounded splice
 """
 
+import logging
+
 import pytest
 import torch
 import torch.nn as nn
@@ -23,7 +25,6 @@ from deepspeed.sequence.autosp_fusion import (InternVLFusionAdapter, LlavaFusion
                                               Qwen2VLFusionAdapter)
 from deepspeed.sequence.autosp_vit import UlyssesSPViTAttention
 from deepspeed.sequence.auto_sp import _set_module_by_name, auto_wrap_model_for_sp
-from deepspeed.sequence.layer import DistributedAttention
 
 # ---------------------------------------------------------------------------
 # Minimal fake modules that mimic the interface of real attention layers
@@ -244,23 +245,31 @@ class TestAutoWrapModelForSP:
         _set_module_by_name(model, "vision_encoder.0", new_mod)
         assert model.vision_encoder[0] is new_mod
 
-    def test_llm_layers_replaced_with_distributed_attention(self):
-        """LLM attention layers must be wrapped with DistributedAttention."""
+    def test_llm_layers_left_unwrapped_with_warning(self, caplog):
+        """LLM attention layers use the HF hidden_states interface, which is
+        incompatible with DistributedAttention, so they are skipped with a warning."""
         pg = _make_mock_process_group(world_size=2, rank=0)
         model = _FakeLLMOnlyModel(num_layers=3)
-        auto_wrap_model_for_sp(model, pg)
-        for layer in model.layers:
-            assert isinstance(layer, DistributedAttention)
+        original_layers = list(model.layers)
+        with caplog.at_level(logging.WARNING, logger="deepspeed.sequence.auto_sp"):
+            auto_wrap_model_for_sp(model, pg)
+        for layer, original in zip(model.layers, original_layers):
+            assert layer is original
+        skip_warnings = [
+            r for r in caplog.records if r.levelno == logging.WARNING and "Skipping auto-wrap" in r.getMessage()
+        ]
+        assert len(skip_warnings) == 3
 
-    def test_multimodal_model_wraps_both_branches(self):
-        """Both ViT and LLM attention layers must be replaced in a combined model."""
+    def test_multimodal_model_wraps_vit_only(self):
+        """In a combined model only ViT attention is wrapped; LLM attention is left as-is."""
         pg = _make_mock_process_group(world_size=2, rank=0)
         model = _FakeMultimodalModel()
+        original_llm_attn = model.llm[0]
         returned = auto_wrap_model_for_sp(model, pg)
         # auto_wrap_model_for_sp must return the same object (in-place)
         assert returned is model
         assert isinstance(model.vision_encoder[0], UlyssesSPViTAttention)
-        assert isinstance(model.llm[0], DistributedAttention)
+        assert model.llm[0] is original_llm_attn
 
     def test_original_module_preserved_inside_wrapper(self):
         """The wrapped module should still be accessible inside the wrapper."""
