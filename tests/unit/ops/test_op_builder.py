@@ -540,3 +540,53 @@ def test_riscv_has_vector_agrees_with_kernel_hwcap():
     # kernel that accepted such a token also sets the HWCAP bit, so the two cannot
     # disagree on real hardware.
     assert make_builder()._riscv_has_vector() is _kernel_hwcap_has_vector()
+
+
+@pytest.mark.parametrize("original_arch", [None, "", "gfx1100;gfx1030"])
+@pytest.mark.parametrize("build_fails", [False, True])
+@pytest.mark.parametrize("rocm", [False, True])
+def test_jit_load_preserves_rocm_arch_environment(monkeypatch, request, tmp_path, original_arch, build_fails, rocm):
+    from torch.utils import cpp_extension
+
+    monkeypatch.setattr(builder_module.OpBuilder, "_loaded_ops", {})
+    monkeypatch.setattr(builder_module.OpBuilder, "_is_rocm_pytorch", None)
+    monkeypatch.setattr(CUDAOpBuilder, "_rocm_version", None)
+    CUDAOpBuilder._rocminfo_output.cache_clear()
+    request.addfinalizer(CUDAOpBuilder._rocminfo_output.cache_clear)
+    monkeypatch.setattr(builder_module.torch.version, "hip", "6.1" if rocm else None)
+    monkeypatch.setattr(builder_module.torch.version, "cuda", "12.8")
+    rocm_home = tmp_path / "rocm"
+    (rocm_home / ".info").mkdir(parents=True)
+    (rocm_home / ".info" / "version").write_text("6.1.0")
+    monkeypatch.setattr(cpp_extension, "ROCM_HOME", str(rocm_home))
+    monkeypatch.setattr(cpp_extension, "CUDA_HOME", "/usr/local/cuda")
+
+    def check_output(command, **kwargs):
+        if isinstance(command, list) and command[-1] == "-V":
+            return "nvcc release 12.8, V12.8.0"
+        return b"Name: gfx942\nWavefront Size: 64\n"
+
+    monkeypatch.setattr(subprocess, "check_output", check_output)
+    monkeypatch.setattr(cpp_extension, "verify_ninja_availability", lambda: None)
+    monkeypatch.setenv("TORCH_CUDA_ARCH_LIST", "8.9")
+    builder = make_builder(jit_mode=False)
+    if original_arch is None:
+        monkeypatch.delenv("PYTORCH_ROCM_ARCH", raising=False)
+    else:
+        monkeypatch.setenv("PYTORCH_ROCM_ARCH", original_arch)
+    op_module = object()
+
+    def load(**kwargs):
+        assert os.environ.get("PYTORCH_ROCM_ARCH") == ("gfx942" if rocm else original_arch)
+        if build_fails:
+            raise RuntimeError("extension build failed")
+        return op_module
+
+    monkeypatch.setattr(cpp_extension, "load", load)
+    if build_fails:
+        with pytest.raises(RuntimeError, match="extension build failed"):
+            builder.jit_load(verbose=False)
+    else:
+        assert builder.jit_load(verbose=False) is op_module
+    assert os.environ.get("PYTORCH_ROCM_ARCH") == original_arch
+    assert builder.jit_mode is False
