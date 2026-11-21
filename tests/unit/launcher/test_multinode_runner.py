@@ -62,6 +62,30 @@ def test_mpich_runner(runner_info):
     assert cmd[0] == 'mpirun'
 
 
+def test_impi_binding_without_local_numactl(runner_info, monkeypatch):
+    # MPI executes numactl on the workers, so its absence on the login node must
+    # not prevent building rank commands or setting their thread count.
+    env, resource_pool, world_info, args = runner_info
+    args.bind_cores_to_rank = True
+    args.bind_core_list = '0-7'
+    monkeypatch.delenv('KMP_AFFINITY', raising=False)
+    monkeypatch.setattr(mnrunner.shutil, 'which', lambda name: None)
+
+    def missing_command(*args, **kwargs):
+        raise FileNotFoundError('numactl is not installed on the login node')
+
+    monkeypatch.setattr(mnrunner.subprocess, 'check_output', missing_command)
+    runner = mnrunner.IMPIRunner(args, world_info, resource_pool)
+    cmd = runner.get_cmd(env, resource_pool)
+
+    assert cmd[0] == 'mpirun'
+    assert cmd[cmd.index('-hosts') + 1] == 'worker-0,worker-1'
+    assert cmd[cmd.index('OMP_NUM_THREADS') + 1] == '2'
+    assert cmd.count('numactl') == 8
+    assert cmd.index('numactl') > cmd.index('-hosts')
+    assert [cmd[i + 1] for i, token in enumerate(cmd) if token == '-C'] == ['0-1', '2-3', '4-5', '6-7'] * 2
+
+
 def test_slurm_runner(runner_info):
     env, resource_pool, world_info, args = runner_info
     active_resources = parse_inclusion_exclusion(resource_pool, args.include, args.exclude)
