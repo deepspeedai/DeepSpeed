@@ -85,6 +85,11 @@ class AutoTPMeta:
             if n_embd is not None:
                 break
         num_attention_heads = _attention_head_count_from(model_config)
+        if getattr(model_config, "model_type", None) == "gpt_bigcode" and getattr(model_config, "multi_query", False):
+            # Multi-query GPTBigCode reports one key/value head, but AutoTP gives every rank that
+            # head whole and shards only the query heads, so its attention splits by query head.
+            # Splitting by the single kv head would put every query head on rank 0.
+            num_kv_heads = num_attention_heads
         return cls(num_kv_heads=num_kv_heads,
                    num_attention_heads=num_attention_heads,
                    n_embd=n_embd,

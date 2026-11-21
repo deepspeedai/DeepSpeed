@@ -45,6 +45,21 @@ def test_meta_descends_only_when_text_config_is_set():
     assert meta == AutoTPMeta(num_kv_heads=3, num_attention_heads=6, n_embd=32)
 
 
+@pytest.mark.parametrize("tp_size,expected", [(2, [16, 16]), (4, [8, 8, 8, 8])])
+def test_multi_query_gpt_bigcode_shards_by_query_head(tp_size, expected):
+    # transformers reports num_key_value_heads=1 for multi-query GPTBigCode; sharding by that
+    # single head handed every query head to rank 0 and left the other ranks none.
+    config = SimpleNamespace(model_type="gpt_bigcode",
+                             multi_query=True,
+                             num_key_value_heads=1,
+                             num_attention_heads=4,
+                             n_embd=32)
+
+    meta = AutoTPMeta.from_model_config(config)
+
+    assert get_shard_size_list(32, tp_size, meta, "transformer.h.0.attn.c_attn") == expected
+
+
 # 6 kv heads over 4 ranks gives 2/2/1/1 heads, so an attention projection splits 384 as
 # 128/128/64/64. Every other layer kind keeps the near-even 96/96/96/96 split, either because
 # the dimension has no head structure or because even shards serve it better.
