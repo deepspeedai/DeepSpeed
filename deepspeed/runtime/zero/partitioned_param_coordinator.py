@@ -570,7 +570,7 @@ class PartitionedParameterCoordinator:
         quantized_params = []
         nonquantized_params = []
         for param in params:
-            if hasattr(param.ds_tensor, 'ds_quant_scale'):
+            if is_quantized_param(param):
                 quantized_params.append(param)
             else:
                 nonquantized_params.append(param)
