@@ -9,6 +9,7 @@ import deepspeed
 import deepspeed.runtime.utils as ds_utils
 from deepspeed.accelerator import get_accelerator
 from deepspeed.runtime.bf16_optimizer import BF16_Optimizer
+import deepspeed.runtime.superoffload.superoffload_stage3 as superoffload_stage3
 from deepspeed.runtime.superoffload.superoffload_stage3 import SuperOffloadOptimizer_Stage3
 from deepspeed.runtime.zero.stage3 import DeepSpeedZeroOptimizer_Stage3
 from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer
@@ -166,6 +167,42 @@ def test_superoffload_rolls_back_only_subgroups_submitted_this_step():
     assert [args[1] for args, _ in rollbacks] == [1]
     assert rollbacks[0][1]["rollback"]
     assert optimizer._submitted_cpu_sub_groups == set()
+
+
+def test_superoffload_skips_async_step_on_non_finite_grads(monkeypatch):
+    # Rolling back a step taken on an inf gradient zeroes the param and leaves nan Adam moments.
+    accelerator = SimpleNamespace(current_stream=lambda: SimpleNamespace(synchronize=lambda: None),
+                                  is_synchronized_device=lambda: True)
+    monkeypatch.setattr(superoffload_stage3, "get_accelerator", lambda: accelerator)
+    optimizer = object.__new__(SuperOffloadOptimizer_Stage3)
+    optimizer.grad_position = {0: (0, 0, 2), 1: (1, 0, 2)}
+    optimizer.get_param_id = lambda param: param.ds_id
+    optimizer._DeepSpeedZeroOptimizer_Stage3__param_id_to_grad_partition = {0: torch.zeros(2), 1: torch.zeros(2)}
+    optimizer.micro_step_id = 0
+    optimizer.is_gradient_accumulation_boundary = lambda: True
+    optimizer.norm_for_param_grads = {}
+    optimizer._constant_buffered_norm2 = lambda grad: grad.norm()
+    optimizer.fp32_partitioned_groups_flat = [
+        SimpleNamespace(data=torch.zeros(2), grad=torch.zeros(2)) for _ in range(2)
+    ]
+    optimizer.master_weights_and_grads_dtype = torch.float32
+    optimizer.sub_group_grad_partition_counts = {}
+    optimizer.sub_group_to_param_num = {0: 1, 1: 1}
+    optimizer.subgroup_to_device = {0: 'cpu', 1: 'cpu'}
+    optimizer.clip_grad = 0
+    optimizer.sub_group_to_group_id = {0: 0, 1: 0}
+    optimizer.optimizer = SimpleNamespace(param_groups=[{'lr': 0.1}])
+    steps = []
+    optimizer.superoffload_cpu_optimizer = SimpleNamespace(
+        async_step=lambda group_id, sub_group_id, *args, **kwargs: steps.append(sub_group_id), get_result=lambda: None)
+    optimizer._submitted_cpu_sub_groups = set()
+    optimizer.async_cpuadam_num = 0
+
+    params = [SimpleNamespace(ds_id=0, grad=None), SimpleNamespace(ds_id=1, grad=None)]
+    optimizer.partition_grads(params, [torch.tensor([1.0, float("inf")]), torch.tensor([1.0, 2.0])])
+
+    assert steps == [1]
+    assert optimizer._submitted_cpu_sub_groups == {1}
 
 
 class TestZeROBFloat16Stage3InvalidNormRecovery(DistributedTest):
