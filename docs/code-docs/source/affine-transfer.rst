@@ -80,8 +80,9 @@ Each round packs and unpacks many small strided regions, one ``copy_`` per
 region by default. ``prepare_transfers(..., copier=fused_copies)`` from
 ``deepspeed.checkpoint.affine_transfer_copy`` instead builds, at prepare time, a
 table of every region a copy list touches and moves the whole list with one
-Triton launch per alignment class. It applies to CUDA and XPU tensors when
-Triton is available and otherwise falls back to ``copy_``; the copies are
+Triton launch per alignment class. It applies to CUDA and XPU tensors whose
+elements are 1, 2, 4 or 8 bytes when Triton is available and otherwise falls
+back to ``copy_``; the copies are
 bitwise, so the result matches the default copier exactly. Building the table
 compiles the kernel once, which makes prepare slower, so it pays off only for
 handles that run many times.
@@ -103,7 +104,10 @@ with no message, arena or budget. Everything else runs as before::
     window = TransferWindow(nbytes, group=group, direction='pull')
     prepared = prepare_transfers(requests, endpoints, dtype, budget, group, window=window)
 
-Every process must pass the same window. The handle keeps a view of each
+Every process must pass the same window. Windows that disagree are refused, but
+a window passed on some processes and not on others, or a window that fails to
+build on one process, leaves the others waiting rather than refusing. The
+handle keeps a view of each
 region it copies, peer memory included. A run with window copies anywhere in
 the group ends with a group barrier, so no peer touches a window shard while
 another copies it, and ``TransferStats.mapped_bytes`` reports what this process

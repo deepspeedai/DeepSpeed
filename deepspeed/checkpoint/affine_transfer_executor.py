@@ -113,6 +113,10 @@ class TransferWindow:
     registration is paid once, not per transfer. ``direction`` decides who copies when both the source
     and the target of an operation lie in a window; which one is faster depends on the interconnect, so
     it is the caller's.
+
+    Pass the same window on every process or on none. Windows that disagree are refused, but a window
+    passed on some processes only, or one whose construction fails on one process (out of memory, say),
+    leaves the other processes waiting instead of refusing.
     """
     ALIGNMENT = 512
 
@@ -328,8 +332,12 @@ def _buffers_alias(requests: Sequence[TransferRequest]) -> bool:
     return False
 
 
-def _validate_aliases(requests: Sequence[TransferRequest], lane: '_Lane',
-                      element_size: int) -> List[Tuple[int, '_Operation']]:
+def _validate_aliases(
+    requests: Sequence[TransferRequest],
+    lane: '_Lane',
+    element_size: int,
+    rank: int,
+    window_operations: Sequence[Tuple[int, '_Operation']] = ()) -> List[Tuple[int, '_Operation']]:
     """Refuse a region this process writes that it also reads, or writes twice; return the local copies to run.
 
     A local copy whose source and target are the same memory at the same strides moves nothing. That is
@@ -337,6 +345,10 @@ def _validate_aliases(requests: Sequence[TransferRequest], lane: '_Lane',
     keeps in place. Such a copy is dropped and its region counts as read, so any other write into it is
     still refused. Regions are compared by the bytes they span, so strided regions that interleave
     without sharing an element are refused as well.
+
+    ``window_operations`` are the window copies between this process and a peer. They are not in the
+    lane, but they run while this process is in its rounds, whichever side copies: a source region here
+    counts as read and a target region here as written.
     """
 
     def extent(buffers, location, offset, shape, strides) -> Tuple[int, int]:
@@ -365,6 +377,11 @@ def _validate_aliases(requests: Sequence[TransferRequest], lane: '_Lane',
         for peer_rounds in rounds.values():
             for entries, _ in peer_rounds:
                 regions.extend(side(item, operation) for item, operation, _ in entries)
+    for item, operation in window_operations:
+        if operation.from_process == rank:
+            reads.append(source_extent(item, operation))
+        if operation.to_process == rank:
+            writes.append(target_extent(item, operation))
 
     writes.sort()
     for (_, high), (low, _) in zip(writes, writes[1:]):
@@ -845,7 +862,15 @@ def _agree(requests: Sequence[TransferRequest],
             lane = _lanes(indexed, [rank], budget.bytes_per_peer // element_size, window_locations)[rank]
             # A local copy whose source and target are the same memory moves nothing. It is dropped here,
             # before the agreement, for a one-shot move and for every run of a prepared handle.
-            copies = _validate_aliases(requests, lane, element_size) if aliased else lane.local_copies
+            if aliased:
+                window_operations = [] if window_locations is None else [
+                    (item, operation) for item, operation in indexed
+                    if rank in (operation.from_process, operation.to_process)
+                    and _mapped_direction(item, operation, window_locations, window.direction) is not None
+                ]
+                copies = _validate_aliases(requests, lane, element_size, rank, window_operations)
+            else:
+                copies = lane.local_copies
             recv_arenas = {
                 peer: torch.empty(size, dtype=dtype, device=device)
                 for peer, size in lane.recv_arena.items()
@@ -1087,9 +1112,10 @@ class PreparedTransfer:
         """Free the staging arenas between runs; the next ``run`` allocates them again.
 
         For a caller that needs the memory between syncs more than it needs the next run to be fast. The
-        buffers, the local copies and the window copies stay prepared, since they hold no staging. Every
-        process must release the same handle before the same run, so that they rebuild together. Local,
-        and idempotent.
+        buffers, the local copies and the window copies stay prepared, since they hold no staging. Local
+        and idempotent: a process may release on its own, because the next run rebuilds the same rounds and
+        messages. If allocating them again may fail, run with ``check``: a process that cannot then refuses
+        the run on every process, while without it that process raises alone and its peers wait for it.
         """
         self._rounds, self._packs, self._unpacks = [], [], []
         self._released = True
