@@ -62,6 +62,21 @@ class TokenChoiceTopKRouter(nn.Module):
         group_score_func: str = "top2_sum",
     ):
         super().__init__()
+        if not isinstance(top_k, int) or isinstance(top_k, bool) or top_k < 1:
+            raise ValueError(f"top_k must be a positive integer, got {top_k!r}")
+        if top_k > num_experts:
+            raise ValueError(f"top_k ({top_k}) must not exceed num_experts ({num_experts})")
+        if num_expert_groups is not None:
+            if num_expert_groups < 1 or num_experts % num_expert_groups != 0:
+                raise ValueError(f"num_expert_groups ({num_expert_groups}) must divide num_experts ({num_experts})")
+            if num_limited_groups is None or not 1 <= num_limited_groups <= num_expert_groups:
+                raise ValueError("num_limited_groups must be between 1 and num_expert_groups")
+            candidates = (num_experts // num_expert_groups) * num_limited_groups
+            if top_k > candidates:
+                raise ValueError(f"top_k ({top_k}) exceeds the {candidates} experts available in the selected "
+                                 f"{num_limited_groups} group(s)")
+        elif num_limited_groups is not None:
+            raise ValueError("num_limited_groups requires num_expert_groups")
         self.gate = nn.Linear(dim, num_experts, bias=gate_bias)
         self.num_experts = num_experts
         self.num_expert_groups = num_expert_groups
