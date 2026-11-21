@@ -10,6 +10,7 @@ from deepspeed.launcher.runner import (encode_world_info, parse_args, parse_incl
                                        apply_num_nodes_and_gpus)
 import os
 import pytest
+import shlex
 
 
 @pytest.fixture
@@ -27,6 +28,22 @@ def test_pdsh_runner(runner_info):
     cmd, kill_cmd, env = runner.get_cmd(env, resource_pool)
     assert cmd[0] == 'pdsh'
     assert env['PDSH_RCMD_TYPE'] == 'ssh'
+
+
+def test_pdsh_kill_cmd_with_venv_script(runner_info):
+    # pdsh hands the kill command to the remote shell as one line, so with --venv_script the
+    # "cd ...;" in the launch command must not leak into the pkill pattern and split it.
+    env, resource_pool, world_info, _ = runner_info
+    kill_cmds = []
+    for extra_args in ([], ['--venv_script', '/opt/venv/bin/activate']):
+        args = parse_args(extra_args + ['test_launcher.py'])
+        runner = mnrunner.PDSHRunner(args, world_info)
+        _, kill_cmd, _ = runner.get_cmd(deepcopy(env), resource_pool)
+        kill_cmds.append(kill_cmd)
+    assert kill_cmds[0] == kill_cmds[1]
+    remote_cmd = shlex.split(" ".join(kill_cmds[1][kill_cmds[1].index('pkill -f '):]))
+    assert remote_cmd[:2] == ['pkill', '-f']
+    assert len(remote_cmd) == 3 and 'deepspeed.launcher.launc' in remote_cmd[2]
 
 
 def test_openmpi_runner(runner_info):
