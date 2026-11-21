@@ -1105,7 +1105,8 @@ class TestAutoEPConfig:
             "model.layers.0.mlp.experts.w2",
             "model.layers.0.mlp.experts.w3",
         }
-        assert _uses_zero3_partitioned_autoep_metadata(metadata_by_rank[0])
+        # Keyed by (tensor-parallel rank, data-parallel rank), read from zero_pp_rank_{dp}_mp_rank_{tp}.
+        assert _uses_zero3_partitioned_autoep_metadata(metadata_by_rank[(0, 0)])
 
     def test_universal_stage3_extract_accepts_tuple_param_shapes(self, tmp_path):
         from deepspeed.checkpoint.constants import OPTIMIZER_STATE_DICT

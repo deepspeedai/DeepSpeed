@@ -18,7 +18,9 @@ gradient to be the same on every TP peer.
 """
 
 import copy
+import glob
 import os
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -28,15 +30,17 @@ import deepspeed
 import deepspeed.comm as dist
 from deepspeed.accelerator import get_accelerator
 from deepspeed.checkpoint import ds_to_universal
+from deepspeed.checkpoint.constants import (AFFINE_MAP, AFFINE_MAP_PARAMS, TP_REPLICATED_PARAMETER_PATTERNS,
+                                            UNIVERSAL_CHECKPOINT_INFO)
 from deepspeed.module_inject.auto_ep_folding import build_folding_spec
 from deepspeed.module_inject.auto_ep_layer import AutoEPMoELayer
 from deepspeed.module_inject.auto_tp import AutoTP
 from deepspeed.module_inject.layers import (HiddenParallelEmbedding, LinearAllreduce, LinearLayer,
                                             TensorParallel_Layer, VocabParallelLinear)
 from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer
-from deepspeed.utils import groups, safe_get_full_fp32_param, safe_get_full_grad
+from deepspeed.utils import groups, safe_get_full_fp32_param, safe_get_full_grad, safe_get_full_optimizer_state
 from deepspeed.utils.timer import SynchronizedWallClockTimer
-from unit.common import DistributedTest
+from unit.common import DistributedFixture, DistributedTest
 
 transformers = pytest.importorskip("transformers")
 
@@ -619,8 +623,7 @@ class TestZero3FoldedCheckpoint(DistributedTest):
 
     Train one step, save, load into an engine built the same way from a different random
     initialization, then train one more step on both: the losses and every parameter must agree.
-    SGD momentum makes that step depend on the restored optimizer state. Universal Checkpoint
-    conversion of such a checkpoint is not supported yet and must say so.
+    SGD momentum makes that step depend on the restored optimizer state.
     """
     world_size = 4
 
@@ -667,18 +670,285 @@ class TestZero3FoldedCheckpoint(DistributedTest):
             if not torch.allclose(got, want, rtol=1e-6, atol=1e-7):
                 differing.append(name)
 
-        conversion_error = None
-        args = SimpleNamespace(input_folder=os.path.join(save_dir, "step1"),
-                               output_folder=os.path.join(save_dir, f"universal_rank{dist.get_rank()}"))
-        try:
-            ds_to_universal.main(args)
-        except NotImplementedError as error:
-            conversion_error = str(error)
-
         torch.testing.assert_close(resumed_losses, losses, rtol=1e-6, atol=1e-6)
         assert not differing, f"{len(differing)} parameters differ after resuming: {differing}"
-        assert conversion_error is not None, "Universal conversion accepted a folded ZeRO-3 checkpoint"
-        assert "folded ZeRO-3 checkpoint is not supported" in conversion_error, conversion_error
+
+
+UNIVERSAL_SOURCE = (2, 2)  # TP, EP of the run that saves, on 4 ranks
+UNIVERSAL_STATES = ("fp32", "exp_avg", "exp_avg_sq")
+
+
+def _universal_config(tp_size, ep_size, precision, offload=False):
+    config = _folded_config(tp_size, ep_size, zero_stage=3, offload=offload)
+    # Universal Checkpointing converts Adam's states.
+    config["optimizer"] = {"type": "AdamW", "params": {"lr": 1e-3, "weight_decay": 0.01}}
+    if tp_size == 1:
+        del config["tensor_parallel"]
+    if precision == "bf16":
+        config["bf16"] = {"enabled": True}
+    return config
+
+
+def _build_universal_engine(tp_size, ep_size, precision, seed, load_universal=False, offload=False):
+    config = _universal_config(tp_size, ep_size, precision, offload=offload)
+    if load_universal:
+        config["checkpoint"] = {"load_universal": True}
+    torch.manual_seed(seed)
+    model = transformers.Glm4MoeForCausalLM(_tiny_glm4_moe_config()).float()
+    engine, _, _, _ = deepspeed.initialize(model=model, config=config)
+    return engine
+
+
+def _logical_state(engine, key, tp_size):
+    """Every parameter, or one of its Adam states, at full size under names every layout shares."""
+
+    def full(param):
+        if key == "fp32":
+            return safe_get_full_fp32_param(param)
+        return safe_get_full_optimizer_state(param, key)
+
+    values = {}
+    moe_layers = []
+    for module_name, module in engine.module.named_modules():
+        prefix = f"{module_name}." if module_name else ""
+        if isinstance(module, AutoEPMoELayer):
+            moe_layers.append((prefix, module))
+        for name, param in module.named_parameters(recurse=False):
+            value = full(param)
+            assert value is not None, f"{prefix}{name} has no {key}"
+            if tp_size > 1 and isinstance(module, LinearAllreduce) and name == "weight":
+                value = _gather_tp_shards(value, dim=1)
+            elif tp_size > 1 and isinstance(module, LinearLayer):
+                value = _gather_tp_shards(value, dim=0)
+            values[f"{prefix}{name}"] = value
+    # Each EP rank holds a block of experts; the full tensor stacks them in EP-rank order.
+    for prefix, module in moe_layers:
+        for wname in ("w1", "w2", "w3"):
+            local = values[f"{prefix}experts.{wname}"]
+            shards = [torch.empty_like(local) for _ in range(dist.get_world_size(group=module.ep_group))]
+            dist.all_gather(shards, local.contiguous(), group=module.ep_group)
+            values[f"{prefix}experts.{wname}"] = torch.cat(shards, dim=0)
+    return {name: value.detach().float().cpu() for name, value in values.items()}
+
+
+def _universal_mismatches(got, want, rtol, atol):
+    assert got.keys() == want.keys(), sorted(set(got) ^ set(want))
+    mismatches = []
+    for name, expected in want.items():
+        actual = got[name]
+        if actual.shape != expected.shape:
+            mismatches.append(f"{name}: shape {tuple(actual.shape)}, expected {tuple(expected.shape)}")
+        elif not torch.allclose(actual, expected, rtol=rtol, atol=atol):
+            relative = (actual - expected).abs().max().item() / max(expected.abs().max().item(), 1e-12)
+            mismatches.append(f"{name}: largest relative difference {relative:.3e}")
+    return mismatches
+
+
+def _rotary_part_of_key_bias(state):
+    """The state with each head of the attention key bias cut to its rotary dimensions.
+
+    The other key-bias dimensions add the same amount to every score of a query, which the softmax
+    cancels, so their true gradient is zero. Their computed gradient is rounding noise that another
+    layout adds up in another order, and AdamW turns that noise into steps of about lr. RoPE rotates
+    the rotary dimensions by position, so their bias entries have a real gradient and are compared.
+    """
+    config = _tiny_glm4_moe_config()
+    rotary_dim = int(config.head_dim * config.partial_rotary_factor)
+    cut = dict(state)
+    for name, value in state.items():
+        if name.endswith("k_proj.bias"):
+            cut[name] = value.view(-1, config.head_dim)[:, :rotary_dim]
+    return cut
+
+
+class _FoldedUniversalSource(DistributedFixture):
+    """Train a folded TP 2 x EP 2 run one step, save it, convert it, and record what a load must restore.
+
+    The record holds every parameter and Adam state at full size after the step, then the losses of
+    the next accumulation window and the parameters after the next step.
+    """
+    world_size = 4
+
+    def run(self, universal_precision, tmpdir):
+        tp_size, ep_size = UNIVERSAL_SOURCE
+        engine = _build_universal_engine(tp_size, ep_size, universal_precision, seed=1234)
+        logical_rank, logical_world_size = dist.get_rank() // tp_size, dist.get_world_size() // tp_size
+        _run_to_boundary(engine, logical_rank, logical_world_size)
+        engine.step()
+        save_dir = str(tmpdir)
+        engine.save_checkpoint(save_dir, tag="step1")
+
+        dist.barrier()
+        error = None
+        if dist.get_rank() == 0:
+            try:
+                ds_to_universal.main(
+                    SimpleNamespace(input_folder=os.path.join(save_dir, "step1"),
+                                    output_folder=os.path.join(save_dir, "step1_universal"),
+                                    num_extract_workers=1,
+                                    num_merge_workers=1,
+                                    keep_temp_folder=False,
+                                    strict=True,
+                                    inject_missing_state=False))
+            except Exception as exc:  # report on every rank instead of leaving them in the next collective
+                error = f"{type(exc).__name__}: {exc}"
+        errors = [None] * dist.get_world_size()
+        dist.all_gather_object(errors, error)
+        assert errors[0] is None, f"universal conversion failed: {errors[0]}"
+
+        states = {key: _logical_state(engine, key, tp_size) for key in UNIVERSAL_STATES}
+        losses = _run_to_boundary(engine, logical_rank, logical_world_size)
+        engine.step()
+        params_after = _logical_state(engine, "fp32", tp_size)
+        all_losses = [None] * dist.get_world_size()
+        dist.all_gather_object(all_losses, losses)
+        if dist.get_rank() == 0:
+            torch.save({
+                "states": states,
+                "next_losses": all_losses,
+                "next_params": params_after
+            }, os.path.join(save_dir, "source_record.pt"))
+        dist.barrier()
+
+
+@pytest.fixture(params=["fp32", "bf16"])
+def universal_precision(request):
+    return request.param
+
+
+@pytest.fixture
+def folded_universal_source(request):
+    _FoldedUniversalSource()(request)
+
+
+UNIVERSAL_TARGETS = [
+    (4, 2, 2, False),  # the same layout
+    (4, 2, 4, False),  # EP 4: each EP group spans both TP groups
+    (4, 2, 4, True),  # the same, with the optimizer offloaded to the CPU
+    (4, 4, 2, False),  # TP 4: one data-parallel group
+    (8, 4, 2, False),  # more ranks with the same 2 data-parallel groups
+    (2, 1, 2, False),  # AutoEP without AutoTP, 2 data-parallel groups
+    (4, 1, 4, False),  # AutoEP without AutoTP: dense data parallel 2 -> 4, expert data parallel 2 -> 1
+]
+
+
+@pytest.mark.parametrize("world_size, tp_size, ep_size, offload", UNIVERSAL_TARGETS)
+class TestZero3FoldedUniversalCheckpoint(DistributedTest):
+    """A folded ZeRO-3 checkpoint converted to the universal format loads into another layout.
+
+    Every parameter and Adam state must come back exactly. Layouts with the source's 2 data-parallel
+    groups read the same batches, so they must also repeat its next step.
+    """
+
+    def test_universal_load_restores_and_resumes(self, folded_universal_source, universal_precision, tmpdir,
+                                                 world_size, tp_size, ep_size, offload):
+        if get_accelerator().device_name() == "cpu":
+            pytest.skip("AutoEP folding runs on an accelerator")
+        save_dir = str(tmpdir)
+        record = torch.load(os.path.join(save_dir, "source_record.pt"), weights_only=False)
+        engine = _build_universal_engine(tp_size,
+                                         ep_size,
+                                         universal_precision,
+                                         seed=999,
+                                         load_universal=True,
+                                         offload=offload)
+        engine.load_checkpoint(save_dir, tag="step1_universal")
+
+        # Every rank finishes its collectives before any assertion, so a failure cannot leave others waiting.
+        problems = []
+        for key in UNIVERSAL_STATES:
+            loaded = _logical_state(engine, key, tp_size)
+            problems += [f"{key}: {m}" for m in _universal_mismatches(loaded, record["states"][key], 1e-6, 1e-8)]
+
+        source_tp, source_ep = UNIVERSAL_SOURCE
+        logical_world_size = world_size // tp_size
+        same_batches = logical_world_size == 4 // source_tp
+        same_layout = (world_size, tp_size, ep_size) == (4, source_tp, source_ep)
+        # In bf16 another TP split rounds the forward differently, so there only the same layout repeats the step.
+        if same_batches and (universal_precision == "fp32" or same_layout):
+            logical_rank = dist.get_rank() // tp_size
+            losses = _run_to_boundary(engine, logical_rank, logical_world_size)
+            engine.step()
+            want_losses = record["next_losses"][logical_rank * source_tp]
+            if max(abs(got - want) for got, want in zip(losses, want_losses)) > 1e-5:
+                problems.append(f"next losses {losses}, expected {want_losses}")
+            after = _rotary_part_of_key_bias(_logical_state(engine, "fp32", tp_size))
+            want = _rotary_part_of_key_bias(record["next_params"])
+            problems += [f"after the next step: {m}" for m in _universal_mismatches(after, want, 1e-4, 1e-6)]
+
+        assert not problems, f"{len(problems)} problems:\n" + "\n".join(problems[:40])
+
+
+@pytest.mark.parametrize(
+    "world_size, tp_size, ep_size",
+    [
+        (4, 2, 4),  # EP 4, with the source's 2 data-parallel groups
+        (4, 1, 4),  # AutoEP without AutoTP: dense data parallel 2 -> 4, expert data parallel 2 -> 1
+    ])
+class TestZero3FoldedUniversalModuleOnlyLoad(DistributedTest):
+    """A module-only load of the converted folded checkpoint restores the weights in another layout.
+
+    It reads only the converted fp32 parameter files. The fp32 weights must come back exactly, and
+    in fp32 a layout with the source's 2 data-parallel groups must compute the source's next losses.
+    """
+
+    def test_module_only_load_restores_weights(self, folded_universal_source, universal_precision, tmpdir, world_size,
+                                               tp_size, ep_size):
+        if get_accelerator().device_name() == "cpu":
+            pytest.skip("AutoEP folding runs on an accelerator")
+        save_dir = str(tmpdir)
+        record = torch.load(os.path.join(save_dir, "source_record.pt"), weights_only=False)
+        engine = _build_universal_engine(tp_size, ep_size, universal_precision, seed=999, load_universal=True)
+        engine.load_checkpoint(save_dir, tag="step1_universal", load_module_only=True)
+
+        # Every rank finishes its collectives before any assertion, so a failure cannot leave others waiting.
+        loaded = _logical_state(engine, "fp32", tp_size)
+        problems = _universal_mismatches(loaded, record["states"]["fp32"], 1e-6, 1e-8)
+        source_tp, _ = UNIVERSAL_SOURCE
+        logical_world_size = world_size // tp_size
+        # In bf16 another layout rounds the forward differently, so only fp32 repeats the losses.
+        if logical_world_size == 4 // source_tp and universal_precision == "fp32":
+            logical_rank = dist.get_rank() // tp_size
+            losses = _run_to_boundary(engine, logical_rank, logical_world_size)
+            want_losses = record["next_losses"][logical_rank * source_tp]
+            if max(abs(got - want) for got, want in zip(losses, want_losses)) > 1e-5:
+                problems.append(f"next losses {losses}, expected {want_losses}")
+
+        assert not problems, f"{len(problems)} problems:\n" + "\n".join(problems[:40])
+
+
+class TestFoldedUniversalSchemaLeavesOutExperts(DistributedTest):
+    """The AutoTP conversion schema of a folded checkpoint does not describe the routed experts.
+
+    Under folding the TP peers hold different experts, so describing an expert weight as
+    TP-replicated, with a map built from one peer's experts, would give any reader of the schema a
+    wrong layout. AutoEP records where the experts are in its own checkpoint metadata.
+    """
+    world_size = 4
+
+    def test_experts_are_not_described_as_tp_replicated(self, tmpdir):
+        if get_accelerator().device_name() == "cpu":
+            pytest.skip("AutoEP folding runs on an accelerator")
+        tp_size, ep_size = UNIVERSAL_SOURCE
+        engine = _build_universal_engine(tp_size, ep_size, "fp32", seed=1234)
+        expert_names = [
+            f"{module_name}.experts.{param_name}" for module_name, module in engine.module.named_modules()
+            if isinstance(module, AutoEPMoELayer) for param_name, _ in module.experts.named_parameters()
+        ]
+        save_dir = str(tmpdir)
+        engine.save_checkpoint(save_dir, tag="schema")
+        dist.barrier()
+
+        assert expert_names
+        model_state_files = sorted(glob.glob(os.path.join(save_dir, "schema", "*_model_states.pt")))
+        assert model_state_files
+        for path in model_state_files:
+            schema = torch.load(path, weights_only=False)[UNIVERSAL_CHECKPOINT_INFO]
+            replicated = schema[TP_REPLICATED_PARAMETER_PATTERNS]
+            mapped = schema.get(AFFINE_MAP, {}).get(AFFINE_MAP_PARAMS, {})
+            for name in expert_names:
+                assert not any(re.match(pattern, name) for pattern in replicated), f"{name} is TP-replicated in {path}"
+                assert not any(re.match(pattern, name) for pattern in mapped), f"{name} has a TP map in {path}"
 
 
 class _LlamaWithoutTPPlan(transformers.LlamaForCausalLM):
