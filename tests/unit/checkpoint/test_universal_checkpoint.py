@@ -15,8 +15,9 @@ from torch.utils._pytree import tree_map
 
 from deepspeed.utils.torch import required_torch_version
 from deepspeed.checkpoint import UNIVERSAL_CHECKPOINT_INFO
-from deepspeed.checkpoint.constants import (OPTIMIZER_STATE_DICT, PARAMETER_WITH_ROW_PARALLELISM_PATTERNS,
-                                            TP_REPLICATED_PARAMETER_PATTERNS)
+from deepspeed.checkpoint.affine import AFFINE_MAP_FORMAT_VERSION, contiguous_split_map, replicated_map
+from deepspeed.checkpoint.constants import (AFFINE_MAP, AFFINE_MAP_PARAMS, AFFINE_MAP_VERSION, OPTIMIZER_STATE_DICT,
+                                            PARAMETER_WITH_ROW_PARALLELISM_PATTERNS, TP_REPLICATED_PARAMETER_PATTERNS)
 from deepspeed.pipe import PipelineModule
 from deepspeed.runtime.pipe.topology import PipeModelDataParallelTopology
 from deepspeed.checkpoint.ds_to_universal import main as convert_to_universal
@@ -437,7 +438,9 @@ class TestUniversalCheckpointPipelineToZeRO3(DistributedTest):
     """A TP2 x PP2 run under ZeRO-1, the most a pipeline engine allows, resumed as ZeRO-3 over 4 data-parallel ranks."""
     world_size = 4
 
-    def test_load(self, tmpdir):
+    # The source describes its TP shards either with the Megatron name patterns or with affine maps, as AutoTP does.
+    @pytest.mark.parametrize("shard_info", ["patterns", "affine_maps"])
+    def test_load(self, tmpdir, shard_info):
         hidden, tp, steps_before_save, steps_after_load = 8, 2, 2, 3
         dims = [(hidden, 2 * hidden), (2 * hidden, hidden)] * 2
         row_weight, row_bias = r"^[13]\.weight$", r"^[13]\.bias$"
@@ -501,10 +504,27 @@ class TestUniversalCheckpointPipelineToZeRO3(DistributedTest):
             return whole
 
         expected = whole_source_states()
-        uc_info = {
-            PARAMETER_WITH_ROW_PARALLELISM_PATTERNS: [row_weight],
-            TP_REPLICATED_PARAMETER_PATTERNS: [row_bias],
-        }
+        if shard_info == "patterns":
+            uc_info = {
+                PARAMETER_WITH_ROW_PARALLELISM_PATTERNS: [row_weight],
+                TP_REPLICATED_PARAMETER_PATTERNS: [row_bias],
+            }
+        else:
+            block = [2 * hidden // tp] * tp
+            column_maps = {
+                "weight": contiguous_split_map((2 * hidden, hidden), block, 0),
+                "bias": contiguous_split_map((2 * hidden, ), block, 0),
+            }
+            row_maps = {
+                "weight": contiguous_split_map((hidden, 2 * hidden), block, 1),
+                "bias": replicated_map((hidden, ), tp),
+            }
+            params = {}
+            for layer in range(len(dims)):
+                maps = column_maps if layer % 2 == 0 else row_maps
+                for name, shard_map in maps.items():
+                    params[rf"^{layer}\.{name}$"] = shard_map.to_dict()
+            uc_info = {AFFINE_MAP: {AFFINE_MAP_VERSION: AFFINE_MAP_FORMAT_VERSION, AFFINE_MAP_PARAMS: params}}
         source.save_checkpoint(tmpdir, tag=CP_TAG, client_state={UNIVERSAL_CHECKPOINT_INFO: uc_info})
 
         # The run that never stopped, for the target to follow after the load.
