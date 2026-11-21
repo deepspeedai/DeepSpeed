@@ -305,6 +305,66 @@ class TestClipGradNormPNorm(DistributedTest):
             assert torch.allclose(actual.grad, expected.grad)
 
 
+class TestReplicatedKvGradNorm(DistributedTest):
+    world_size = 2
+
+    @pytest.mark.parametrize("norm_type, expected", [(2, 30**0.5), (1, 10), (float("inf"), 4)])
+    @pytest.mark.parametrize("max_norm", [1e9, 1.0])
+    def test_replicated_rows_count_once(self, norm_type, expected, max_norm):
+        groups._init_tp_mesh_device(tensor_model_parallel_size=2)
+        rank = dist.get_rank()
+        device = get_accelerator().device_name(rank)
+        grad = torch.tensor([1, 0, 0, 0, 3, 4] if rank == 0 else [0, 2, 0, 0, 3, 4], dtype=torch.float, device=device)
+        param = torch.nn.Parameter(torch.zeros_like(grad))
+        param.grad = grad.clone()
+        param.tensor_model_parallel = True
+        param.ds_tp_replicated_rows = (4, 2, 2)
+
+        # Query powers are 1 and 4; the shared K/V power of 25 must appear only once.
+        norm = ds_utils.clip_grad_norm_(param, max_norm=max_norm, norm_type=norm_type, mpu=groups)
+
+        assert float(norm) == pytest.approx(expected)
+        scale = min(1.0, max_norm / (expected + 1e-6))
+        torch.testing.assert_close(param.grad, grad * scale)
+
+    def test_unmarked_model_parallel_parameter(self):
+        groups._init_tp_mesh_device(tensor_model_parallel_size=2)
+        rank = dist.get_rank()
+        param = torch.nn.Parameter(torch.zeros(4, device=get_accelerator().device_name(rank)))
+        param.grad = torch.full_like(param, float(rank + 1))
+        param.tensor_model_parallel = True
+
+        norm = ds_utils.clip_grad_norm_(param, max_norm=1e9, mpu=groups)
+
+        assert float(norm) == pytest.approx(20**0.5)
+        torch.testing.assert_close(param.grad, torch.full_like(param, float(rank + 1)))
+
+    def test_bigcode_marks_weight_and_bias(self):
+        from deepspeed.module_inject.layers import fused_LinearLayer, is_autotp_training_mode, set_autotp_mode
+        from deepspeed.module_inject.tp_shard import AutoTPMeta, get_shard_size_list
+
+        groups._init_tp_mesh_device(tensor_model_parallel_size=2)
+        rank = dist.get_rank()
+        n_embd, kv_rows = 32, 16
+        meta = AutoTPMeta(n_embd=n_embd, num_kv_heads=4, num_attention_heads=4)
+        fused_module = type('GPTBigCodeBlock', (torch.nn.Module, ), {})()
+        training = is_autotp_training_mode()
+        try:
+            set_autotp_mode(training=True)
+            module = torch.nn.Linear(8, n_embd + kv_rows, bias=True).to(get_accelerator().device_name(rank))
+            layer = fused_LinearLayer(module,
+                                      mp_group=groups.get_model_parallel_group(),
+                                      name='c_attn',
+                                      fused_module=fused_module,
+                                      tp_meta=meta)
+
+            expected = (get_shard_size_list(n_embd, 2, meta)[rank], kv_rows, 2)
+            assert layer.weight.ds_tp_replicated_rows == expected
+            assert layer.bias.ds_tp_replicated_rows == expected
+        finally:
+            set_autotp_mode(training=training)
+
+
 class TestGlobalNormMoEGroup(DistributedTest):
     world_size = 2
 
