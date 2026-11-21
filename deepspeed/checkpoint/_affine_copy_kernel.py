@@ -21,6 +21,7 @@ def copy_tiles(source_addresses, destination_addresses, source_strides, destinat
     elif ELEMENT == 4:
         kind = tl.int32
     else:
+        tl.static_assert(ELEMENT == 8, "fused_copies tiles 1-, 2-, 4- and 8-byte elements only")
         kind = tl.int64
     source = tl.load(source_addresses + tile).to(tl.pointer_type(kind))
     destination = tl.load(destination_addresses + tile).to(tl.pointer_type(kind))

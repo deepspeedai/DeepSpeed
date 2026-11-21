@@ -11,9 +11,9 @@ callable once, at prepare time. ``sequential_copies`` is the default and runs on
 ``fused_copies`` describes the list as a table of tiles and copies every tile of the list with one
 Triton kernel launch, which removes the per-region launch and Python cost a round otherwise pays.
 
-The kernel copies bits, so it serves every dtype, and it takes regions whose last dimension is
-contiguous with at most one outer stride. Other views, host tensors, and devices without Triton keep
-``copy_``. Triton is imported only when ``fused_copies`` first builds a table on such a device.
+The kernel copies bits, so it serves every dtype whose elements are 1, 2, 4 or 8 bytes, and it takes
+regions whose last dimension is contiguous with at most one outer stride. Other views, wider elements
+(complex128), host tensors, and devices without Triton keep ``copy_``. Triton is imported only when ``fused_copies`` first builds a table on such a device.
 """
 
 from typing import Callable, Sequence, Tuple
@@ -28,6 +28,8 @@ CopyList = Sequence[Tuple[torch.Tensor, torch.Tensor]]
 # never copies a large region alone while the rest of the device idles.
 TILE_ELEMENTS = 1 << 15
 _ALIGN_BYTES = 16
+# The element sizes the kernel has an integer type for; anything else would be copied in the wrong units.
+_TILED_ELEMENT_SIZES = (1, 2, 4, 8)
 
 
 def _nothing() -> None:
@@ -114,8 +116,8 @@ class _TileTable:
                     and target_rows[0] * target_rows[1] == source_rows[1]):
                 source_rows = (target_rows[0], target_rows[1], target_rows[1])
             if (target_rows is None or source_rows is None or target_rows[:2] != source_rows[:2]
-                    or destination.device != device or source.device != device or source.element_size() != element
-                    or destination.element_size() != element):
+                    or element not in _TILED_ELEMENT_SIZES or destination.device != device or source.device != device
+                    or source.element_size() != element or destination.element_size() != element):
                 self.fallback.append((destination, source))
                 continue
             rows, columns = target_rows[0], target_rows[1]
