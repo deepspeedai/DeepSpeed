@@ -638,15 +638,26 @@ class PartitionedParameterCoordinator:
             p.ds_id for p in iter_params(submodule_to_release, recurse=z3_leaf_module(submodule_to_release))
             if not p.ds_persist)
 
-        # Problem: When prefetcher scans the param trace, it skips AVAILABLE params.
-        # This creates issues if those params are released before the skipped uses:
-        # 1) It hurts performance as the skipped uses are never prefetched.
-        # 2) For nvme params, we run out of swap buffers because the prefetch order
-        # diverges from the trace.
-        # Solution: Don't release params whose reuse was skipped by prefetch. This is
-        # possible because we detect such skips during prefetch and mark those params.
+        # Note: the prefetcher skips parameters that are already AVAILABLE, so a
+        # parameter can be reused later without having been prefetched again.
+        # Tracking that skip and unconditionally retaining the parameter would
+        # override `max_reuse_distance`: the prefetcher scans far enough ahead
+        # to observe backward reuse, which would keep forward-gathered
+        # parameters resident for the whole forward pass even when the user
+        # asked for aggressive release. The reuse-distance scan below already
+        # subsumes the skip bookkeeping: parameters reused within the window
+        # are retained, while parameters that are only reused farther away are
+        # released and re-gathered on demand.
+        #
+        # NVMe parameters are the exception: releasing one also returns its
+        # swap-in buffer. If a skipped use is released early, an intervening
+        # parameterless backward hook can prefetch later queue entries into
+        # that buffer, so the on-demand fetch later reaches `swap_in()` with no
+        # buffer available and hits the "Not enough buffers" assertion. Keep
+        # the skip-based retention for NVMe parameters so the prefetch order
+        # stays aligned with the trace.
         for param in iter_params(submodule_to_release, recurse=z3_leaf_module(submodule_to_release)):
-            if self.__most_recent_step_id_param_fetched_for[param] > step_id:
+            if param.nvme_swapper is not None and self.__most_recent_step_id_param_fetched_for[param] > step_id:
                 params_to_release.discard(param.ds_id)
 
         # examine all modules within `max_reuse_dist_in_numel` of the current step,
@@ -656,7 +667,7 @@ class PartitionedParameterCoordinator:
         for module in self.__submodule_order[step_id:]:
             if params_traversed >= self.__max_reuse_dist_in_numel:
                 break
-            for param in iter_params(module, recurse=z3_leaf_module(submodule_to_release)):
+            for param in iter_params(module, recurse=z3_leaf_module(module)):
                 params_to_release.discard(param.ds_id)
                 params_traversed += param.ds_numel
 
