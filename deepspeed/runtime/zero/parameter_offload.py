@@ -14,6 +14,7 @@ from deepspeed.runtime.zero.partition_parameters import _init_external_params
 from deepspeed.runtime.zero.partition_parameters import *
 from deepspeed.runtime.zero.partitioned_param_coordinator import PartitionedParameterCoordinator, InflightParamRegistry, iter_params
 from deepspeed.accelerator import get_accelerator
+from deepspeed import comm as dist
 from deepspeed import utils
 from deepspeed.utils.pin_memory_tracker import pinned_memory_summary
 
@@ -221,6 +222,7 @@ class DeepSpeedZeRoOffload(object):
             zero_quantized_nontrainable_weights=self.zero_quantized_nontrainable_weights,
             fast_sharding_for_leaf_module=self.fast_sharding_for_leaf_module,
             log_trace_cache_warnings=self.log_trace_cache_warnings,
+            process_group=self._trace_group(module),
         )
 
         self.forward_hooks = []
@@ -254,6 +256,24 @@ class DeepSpeedZeRoOffload(object):
 
     def empty_partition_cache(self):
         self.partition_all_parameters()
+
+    @staticmethod
+    def _trace_group(module):
+        """The ranks whose parameter traces must agree: the parameters' partition group when they all share one,
+        ``None`` (the world) otherwise or when that group is the world. The coordinator gathers the parameters over
+        their partition group (or, with hpZ, a subgroup of it), so this covers every rank a gather involves. It is
+        not the optimizer's data-parallel group: a model partitioned by ``zero.Init`` before AutoTP keeps the world
+        as its partition group while the optimizer works over a smaller one."""
+        found = {}  # id(group) -> (group, its global ranks)
+        for param in module.parameters():
+            group = getattr(param, "ds_process_group", None)
+            if group is not None and id(group) not in found:
+                size = dist.get_world_size(group=group)
+                found[id(group)] = (group, tuple(dist.get_global_rank(group, i) for i in range(size)))
+        if len({ranks for _, ranks in found.values()}) != 1:
+            return None
+        group, ranks = next(iter(found.values()))
+        return None if len(ranks) == dist.get_world_size() else group
 
     def _convert_to_zero_parameters(self, ds_config, module, mpu):
         non_zero_params = [p for p in module.parameters() if not is_zero_param(p)]

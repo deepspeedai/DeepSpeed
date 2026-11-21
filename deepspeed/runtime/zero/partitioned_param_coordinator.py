@@ -99,7 +99,10 @@ class PartitionedParameterCoordinator:
         zero_quantized_nontrainable_weights=False,
         fast_sharding_for_leaf_module=False,
         log_trace_cache_warnings=False,
+        process_group=None,
     ) -> None:
+        # the ranks whose traces must agree (the parameters' partition group; None: the world)
+        self.__process_group = process_group
         # mapping of param -> handle for each param that is currently in flight
         self.__inflight_param_registry = inflight_param_registry
         # keeps track of the number of submodules invoked so far.
@@ -260,14 +263,15 @@ class PartitionedParameterCoordinator:
 
         if not self.is_complete_trace():  # not self.trace_complete:
             # Make sure that recorded submodule orders are identical across ranks
-            assert_ints_same_as_other_ranks([m.ds_id for m in self.__submodule_order])
+            assert_ints_same_as_other_ranks([m.ds_id for m in self.__submodule_order], self.__process_group)
 
             if self.is_record_trace():
                 # Successfully recorded a trace
                 self.construct_parameter_trace_from_module_trace()
                 # Make sure that recorded parameter orders are identical across ranks
-                assert_ints_same_as_other_ranks([p.param.ds_id for p in self.__param_order])
-                assert_ints_same_as_other_ranks([p.step_id_last_used_at for p in self.__param_order])
+                assert_ints_same_as_other_ranks([p.param.ds_id for p in self.__param_order], self.__process_group)
+                assert_ints_same_as_other_ranks([p.step_id_last_used_at for p in self.__param_order],
+                                                self.__process_group)
 
                 self.__submodule_order = tuple(self.__submodule_order)  # freeze
                 self.__param_order = tuple(self.__param_order)  # freeze
