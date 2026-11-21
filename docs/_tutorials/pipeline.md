@@ -350,3 +350,78 @@ DualPipeV has the following requirements:
 * Boolean tensors cannot be passed between stages.
 * The `pipe_partitioned` and `grad_partitioned` options for model parallelism
   are not supported.
+* A stage must not pass a floating point tensor that it returns to another
+  operation in the same stage. See the warning below.
+
+**Warning:** During training, DualPipeV clears the data of a stage's outputs
+once they are sent to the next GPU. This saves memory, but the backward pass of
+any operation in the stage that took such an output as its input then computes
+wrong gradients. No error is raised.
+{: .notice--warning}
+
+```python
+def forward(self, x):
+    h = self.block(x)
+    return h, h * self.scale           # unsupported: h is returned and also used
+    return h.clone(), h * self.scale   # supported: the copy is cleared, h is kept
+```
+Integer tensors, such as token ids, and outputs that are views of another
+tensor are not cleared.
+
+#### Zero bubble
+DualPipeV can compute weight gradients later than the rest of a backward pass,
+while a GPU would otherwise wait for its neighbor. A layer opts in from the
+`backward()` of a custom `torch.autograd.Function`: when
+`WeightGradStore.enabled` is set, it passes the function that accumulates its
+weight gradient to `WeightGradStore.put()` instead of calling it.
+```python
+from deepspeed.pipe import WeightGradStore
+
+class LinearFunc(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, input, weight):
+        ctx.save_for_backward(input, weight)
+        return torch.nn.functional.linear(input, weight)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        input, weight = ctx.saved_tensors
+
+        def grad_weight_fn():
+            grad_2d = grad_output.reshape(-1, grad_output.shape[-1])
+            grad = grad_2d.T @ input.reshape(-1, input.shape[-1])
+            weight.grad = grad if weight.grad is None else weight.grad + grad
+
+        if WeightGradStore.enabled:
+            WeightGradStore.put(grad_weight_fn)
+        else:
+            grad_weight_fn()
+        return grad_output @ weight, None
+```
+Other layers need no changes. Deferring weight gradients is not supported with
+the BF16 optimizer.
+
+#### Overlapping forward and backward
+In the middle of a batch, a GPU runs the forward pass of one micro-batch and
+then the backward pass of another. Pass a function as
+`overlapped_forward_backward` to overlap the two. Without it, the forward pass
+runs first and the backward pass second.
+```python
+def overlap(forward, inputs, backward, tensors, grad_tensors):
+    # run the backward pass between the first layer and the rest of the forward pass
+    x = model.forward_funcs[0](inputs)
+    backward(tensors, grad_tensors)
+    for layer in model.forward_funcs[1:]:
+        x = layer(x)
+    return x
+
+model = DualPipeVModule(layers=net, loss_fn=torch.nn.CrossEntropyLoss(), num_stages=2,
+                        overlapped_forward_backward=overlap)
+```
+`model.forward_funcs` holds the layers of the forward pass, and
+`forward(inputs)` runs all of them. `backward` takes the arguments of
+`torch.autograd.backward`, and `tensors` and `grad_tensors` are the ones for the
+whole backward pass. The function must return the outputs of the forward pass.
+Splitting the forward pass only saves time when the part before `backward`
+starts asynchronous work, such as the all-to-all communication of an MoE
+layer, that the backward pass can hide.
