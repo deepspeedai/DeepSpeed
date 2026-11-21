@@ -2,9 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # DeepSpeed Team
+from dataclasses import replace
+from typing import Optional
+
 import torch
 from deepspeed.utils.logging import warning_once
-from deepspeed.module_inject.tp_shard import AutoTPMeta, get_shard_size, get_shard_size_list
+from deepspeed.module_inject.tp_shard import (AutoTPMeta, get_shard_size, get_shard_size_list, _MODULE_KV_HEAD_ATTRS,
+                                              _kv_head_count_from_module)
 
 
 def split_by_qkvlist_and_refuse(qkv_list, split_size, split_dim=0, cat_dim=0):
@@ -49,6 +53,68 @@ def get_fused_qkv_type(module):
     # There can be overlap with matches (e.g., "DecoderLayer" and "FalconDecoderLayer").
     # We take the longest matching module_name
     return FUSED_QKV_TYPE_DICT[max(module_name_matches, key=len)]
+
+
+_REPLICATED_KV_BLOCK_CLASS_NAMES = tuple(name for name, fused_type in FUSED_QKV_TYPE_DICT.items()
+                                         if fused_type == 'bigcodetype')
+
+
+def replicates_kv_block(module):
+    """Whether this model's fused qkv layout keeps the whole K/V block on every rank.
+
+    Uses class names instead of ``get_fused_qkv_type`` to avoid stringifying every module.
+    """
+    return any(
+        any(name in type(child).__name__ for name in _REPLICATED_KV_BLOCK_CLASS_NAMES) for child in module.modules())
+
+
+def is_replicated_kv_attention(module, replicated_kv):
+    """Whether ``module`` is an attention module using the replicated-K/V layout."""
+    return bool(replicated_kv and getattr(module, "multi_query", False))
+
+
+def replicated_kv_shard_meta(meta: AutoTPMeta, replicated_kv: bool) -> AutoTPMeta:
+    """Metadata whose shard unit is query heads for replicated K/V, otherwise K/V heads.
+
+    ``get_shard_size`` always reads ``num_kv_heads`` as the shard unit. Replacing that field
+    keeps the fused-qkv partition, the query-row widths, and the attribute sharding on the same
+    head count instead of each caller deriving it independently.
+    """
+    if not replicated_kv or meta.num_attention_heads is None:
+        return meta
+    return replace(meta, num_kv_heads=meta.num_attention_heads)
+
+
+def replicated_kv_shard_heads(meta: AutoTPMeta, replicated_kv: bool) -> Optional[int]:
+    """Number of attention heads that bound one rank's shard, or None when unspecified."""
+    if replicated_kv and meta.num_attention_heads is None:
+        return None
+    return replicated_kv_shard_meta(meta, replicated_kv).num_kv_heads
+
+
+def replicated_kv_query_widths(meta: AutoTPMeta, mp_size: int):
+    """Per-rank query-row widths for a replicated-K/V fused qkv layout, or None without n_embd."""
+    shard_meta = replicated_kv_shard_meta(meta, True)
+    if shard_meta.n_embd is None:
+        return None
+    return get_shard_size_list(shard_meta.n_embd, mp_size, shard_meta)
+
+
+def replicated_kv_row_start(meta: AutoTPMeta, mp_size: int, rank: int) -> Optional[int]:
+    """First K/V row in ``rank``'s local replicated-K/V shard."""
+    query_widths = replicated_kv_query_widths(meta, mp_size)
+    if query_widths is None:
+        return None
+    return query_widths[rank]
+
+
+def replicated_kv_group_count(module, local_num_heads: int) -> int:
+    """Query-to-K/V group count after the query heads have been sharded."""
+    kv_heads = _kv_head_count_from_module(module)
+    if not kv_heads:
+        raise RuntimeError(f"AutoTP cannot recompute num_key_value_groups for {type(module).__name__}: "
+                           f"none of the module K/V head attributes {_MODULE_KV_HEAD_ATTRS} is set.")
+    return local_num_heads // kv_heads
 
 
 def fused_qkv_subparam_sizes(module, weight_shape, meta: AutoTPMeta):
@@ -163,8 +229,7 @@ def prepare_tp_fused_qkvw(module, src, mp_size, gpu_index, meta: AutoTPMeta):
         assert n_embd is not None
         q = input[:n_embd]
         kv = input[n_embd:]
-        shape = q.shape
-        split_q = q.split(get_shard_size_list(shape[0], mp_size, meta), dim=0)
+        split_q = q.split(replicated_kv_query_widths(meta, mp_size), dim=0)
         return torch.cat((split_q[gpu_index], kv), dim=0)
 
     def _phi3_type_transpose(input, mp_size, meta=meta):
