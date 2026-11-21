@@ -1066,7 +1066,6 @@ class TestTpDataloaderCorrectness(DistributedTest):
                 "Data inconsistency within the TP group. Please check the Dataloader implementation to ensure consistency."
         ):
             for batch in data_loader:
-                # batch[0].requires_grad = requires_grad
                 batch[0] += dist.get_rank()
                 model(batch[0], batch[1])
 
@@ -1765,7 +1764,6 @@ class TiedRowParallelOutputTrainingModel(nn.Module):
         return self.lm_head(torch.tanh(self.projection(self.embed_tokens(input_ids))))
 
 
-# @pytest.mark.sequential
 class TestParamsGather(DistributedTest):
     world_size = 4
     reuse_dist_env = False

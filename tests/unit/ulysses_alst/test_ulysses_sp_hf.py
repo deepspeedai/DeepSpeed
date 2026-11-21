@@ -37,8 +37,6 @@ class TestUlyssesSPHF(DistributedTest):
     def test_ulysses_sp_hf(self, zero_stage):
         core_attn_implementation = "sdpa"
         model_name_or_path = 'hf-internal-testing/tiny-random-LlamaForCausalLM'
-        #model_name_or_path = 'Felladrin/Llama-160M-Chat-v1'
-        #model_name_or_path = 'Felladrin/Llama-160M-Chat-v1'
         seq_length = 64
         sequence_parallel_size = self.world_size
         micro_batch_size = 1
@@ -68,7 +66,6 @@ class TestUlyssesSPHF(DistributedTest):
         # Part 1. Baseline: Setup
         def collate_fn(batch):
             input_ids, position_ids = batch[0]
-            #print(f"{batch=}")
             return dict(input_ids=input_ids.unsqueeze(0),
                         position_ids=position_ids.unsqueeze(0),
                         labels=input_ids.unsqueeze(0))
@@ -80,7 +77,6 @@ class TestUlyssesSPHF(DistributedTest):
         # 1. Baseline: DataLoader calibration
         dl_a = torch.utils.data.DataLoader(ds, batch_size=micro_batch_size, collate_fn=collate_fn)
         batch_a = next(iter(dl_a))
-        #print(f"{rank=} {batch_a=}")
         expected_batch_a = {
             'input_ids': tensor([[1, 10, 10, 10, 2, 2]]),
             'position_ids': tensor([[0, 1, 2, 3, 4, 5]]),
@@ -97,11 +93,9 @@ class TestUlyssesSPHF(DistributedTest):
         batch_a = move_to_device(batch_a, model_a.device)
         loss_a = model_a(**batch_a).loss
         model_a.backward(loss_a)
-        #print(f"{loss_a=}")
 
         grad_a = get_grad(model_a.module.model.layers[0].self_attn.q_proj.weight, zero_stage)
         assert grad_a is not None
-        #print(f"{grad_a}")
 
         # Part 2. Ulysses: Setup
         mpu = UlyssesSPAttentionHF.register_with_transformers(
@@ -148,7 +142,6 @@ class TestUlyssesSPHF(DistributedTest):
         ]
 
         # here we expect each sample to be sharded in half, rank0 getting the first half and rank1 the other half
-        #print(f"{sp_rank=} {batch_b=}")
         torch_assert_dicts_of_tensors_equal(batch_b, expected_batch_b[sp_rank])
 
         # 4. UlyssesSPAttentionHF test
@@ -162,7 +155,6 @@ class TestUlyssesSPHF(DistributedTest):
             shift_labels=shift_labels,
             vocab_size=model_b.module.config.vocab_size,
         )
-        # print(f"{sp_rank=} {loss_b=}")
 
         # differentiable weighted per-shard-loss aggregation across ranks
         losses_per_rank = torch.distributed.nn.functional.all_gather(loss_b, group=sp_group)
@@ -171,12 +163,10 @@ class TestUlyssesSPHF(DistributedTest):
         total_loss = sum(losses_per_rank[rank] * good_tokens_per_rank[rank] for rank in range(sp_world_size))
         total_good_tokens = sum(good_tokens_per_rank)
         loss_b = total_loss / total_good_tokens
-        # print(f"{sp_rank=} gathered {loss_b=}")
         model_b.backward(loss_b)
 
         grad_b = get_grad(model_b.module.model.layers[0].self_attn.q_proj.weight, zero_stage)
         assert grad_b is not None
-        #print(f"{grad_b}")
 
         # compare loss of A (non-Ulysses Attention) and B (Ulyssses Attention)
         torch_assert_equal(loss_a, loss_b)
@@ -447,7 +437,6 @@ class TestUlyssesSPHFFlexAttention(DistributedTest):
         # Part 1. Baseline: Setup
         def collate_fn(batch):
             input_ids, position_ids = batch[0]
-            #print(f"{batch=}")
             return dict(input_ids=input_ids.unsqueeze(0),
                         position_ids=position_ids.unsqueeze(0),
                         labels=input_ids.unsqueeze(0))
@@ -459,7 +448,6 @@ class TestUlyssesSPHFFlexAttention(DistributedTest):
         # 1. Baseline: DataLoader calibration
         dl_a = torch.utils.data.DataLoader(ds, batch_size=micro_batch_size, collate_fn=collate_fn)
         batch_a = next(iter(dl_a))
-        #print(f"{rank=} {batch_a=}")
         expected_batch_a = {
             'input_ids': tensor([[1, 10, 10, 10, 2, 2]]),
             'position_ids': tensor([[0, 1, 2, 3, 4, 5]]),
@@ -477,11 +465,9 @@ class TestUlyssesSPHFFlexAttention(DistributedTest):
         batch_a = move_to_device(batch_a, model_a.device)
         loss_a = model_a(**batch_a).loss
         model_a.backward(loss_a)
-        #print(f"{loss_a=}")
 
         grad_a = get_grad(model_a.module.model.layers[0].self_attn.q_proj.weight, zero_stage)
         assert grad_a is not None
-        #print(f"{grad_a}")
 
         # Part 2. Ulysses: Setup
         mpu = UlyssesSPAttentionHF.register_with_transformers(
@@ -528,7 +514,6 @@ class TestUlyssesSPHFFlexAttention(DistributedTest):
         ]
 
         # here we expect each sample to be sharded in half, rank0 getting the first half and rank1 the other half
-        #print(f"{sp_rank=} {batch_b=}")
         torch_assert_dicts_of_tensors_equal(batch_b, expected_batch_b[sp_rank])
 
         # 4. UlyssesSPAttentionHF test
@@ -542,7 +527,6 @@ class TestUlyssesSPHFFlexAttention(DistributedTest):
             shift_labels=shift_labels,
             vocab_size=model_b.module.config.vocab_size,
         )
-        # print(f"{sp_rank=} {loss_b=}")
 
         # differentiable weighted per-shard-loss aggregation across ranks
         losses_per_rank = torch.distributed.nn.functional.all_gather(loss_b, group=sp_group)
@@ -551,12 +535,10 @@ class TestUlyssesSPHFFlexAttention(DistributedTest):
         total_loss = sum(losses_per_rank[rank] * good_tokens_per_rank[rank] for rank in range(sp_world_size))
         total_good_tokens = sum(good_tokens_per_rank)
         loss_b = total_loss / total_good_tokens
-        # print(f"{sp_rank=} gathered {loss_b=}")
         model_b.backward(loss_b)
 
         grad_b = get_grad(model_b.module.model.layers[0].self_attn.q_proj.weight, zero_stage)
         assert grad_b is not None
-        #print(f"{grad_b}")
 
         # compare loss of A (non-Ulysses Attention) and B (Ulyssses Attention)
         torch_assert_close(loss_a, loss_b, atol=1e-05, rtol=1e-05)

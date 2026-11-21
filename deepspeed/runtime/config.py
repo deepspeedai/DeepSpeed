@@ -614,8 +614,6 @@ class DeepSpeedConfig(object):
         micro_batch = self.train_micro_batch_size_per_gpu
         grad_acc = self.gradient_accumulation_steps
 
-        #print(f"in: train_batch = {train_batch}, micro_batch={micro_batch}")
-
         # all values are provided nothing needs to be set
         if train_batch is not None and micro_batch is not None and grad_acc is not None:
             return
@@ -652,8 +650,6 @@ class DeepSpeedConfig(object):
         else:
             assert False, \
                 'Either train_batch_size or train_micro_batch_size_per_gpu needs to be provided'
-
-        #print(f"final: {self.train_batch_size=} {self.train_micro_batch_size_per_gpu=} {self.gradient_accumulation_steps=}")
 
     def _configure_train_batch_size(self):
         self._set_batch_related_parameters()
