@@ -3,6 +3,8 @@
 
 # DeepSpeed Team
 
+from functools import wraps
+
 from deepspeed.accelerator import get_accelerator
 from deepspeed.runtime.compiler import is_compiling
 
@@ -27,6 +29,7 @@ def instrument_w_nvtx(func):
        Skips NVTX instrumentation when torch.compile is active to avoid graph breaks.
     """
 
+    @wraps(func)
     def wrapped_fn(*args, **kwargs):
         if enable_nvtx and not is_compiling():
             _range_push(get_accelerator(), func.__qualname__)
