@@ -21,6 +21,7 @@ or deepspeed.runtime.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Callable
 
@@ -460,8 +461,216 @@ class ExpertWeightGradSlot:
         return compute()
 
 
+def _grouped_mlp_weight_grads(grad_out, x, h, offsets, projection_grads, fused_gate_up, needs_w1, needs_w2, needs_w3):
+    """The weight gradients of the grouped-GEMM expert MLP in ``x.dtype``, or ``None`` where not needed.
+
+    The products are the ones autograd forms for ``torch._grouped_mm`` (``_grouped_mm_mat2_backward``).
+    """
+    grad_w1 = grad_w2 = grad_w3 = None
+    if needs_w2:
+        grad_w2 = torch._grouped_mm(grad_out.transpose(-2, -1), h, offs=offsets)
+    if fused_gate_up:
+        if needs_w1 or needs_w3:
+            (grad_gate_up, ) = projection_grads
+            grad_w13 = torch._grouped_mm(grad_gate_up.transpose(-2, -1), x, offs=offsets)
+            inter = grad_w13.shape[1] // 2
+            if needs_w1:
+                grad_w1 = grad_w13.narrow(1, 0, inter)
+            if needs_w3:
+                grad_w3 = grad_w13.narrow(1, inter, inter)
+    else:
+        grad_gate, grad_up = projection_grads
+        if needs_w1:
+            grad_w1 = torch._grouped_mm(grad_gate.transpose(-2, -1), x, offs=offsets)
+        if needs_w3:
+            grad_w3 = torch._grouped_mm(grad_up.transpose(-2, -1), x, offs=offsets)
+    return grad_w1, grad_w2, grad_w3
+
+
+def _add_weight_grads(first, second):
+    """Sum two ``(grad_w1, grad_w2, grad_w3)`` tuples, either of which may be ``None`` or hold ``None``."""
+    if first is None:
+        return second
+    if second is None:
+        return first
+    total = []
+    for a, b in zip(first, second):
+        if a is None:
+            total.append(b)
+        elif b is None:
+            total.append(a)
+        else:
+            total.append(a + b)
+    return tuple(total)
+
+
+class MoeDeferredDwStaging:
+    """Stages the rows an expert MLP's weight-gradient GEMMs read, per expert, across backward passes.
+
+    With hundreds of experts or small microbatches each expert receives few rows per backward, and the
+    weight-gradient GEMMs write three full-size gradients for a handful of rows: they are bound by memory
+    bandwidth, not arithmetic. A backward that stages appends each expert's rows behind that expert's cursor and
+    returns no weight gradient. One backward in every ``flush_period`` runs the GEMMs once over everything staged
+    and returns the result, which is the sum the staged backwards would have accumulated one at a time. So does
+    every backward while ``flush_on_stage`` is set. The engine sets it for the backward that closes a gradient
+    accumulation window, so no staged row outlives the optimizer step it belongs to.
+
+    Which backward returns a weight gradient therefore depends on the count of backward passes alone, never on the
+    rows. Ranks that hold replicas of the same experts route different rows, and ZeRO reduces a gradient across
+    them in the backward that returns it, so they must all return it in the same one. When an expert's cursor
+    would pass ``rows_per_expert`` the GEMMs do run early to empty the buffer, but their result is held and
+    returned with the next of those backwards.
+
+    Args:
+        num_experts: Experts the staged MLP holds.
+        flush_period: Backward passes between two periodic flushes.
+        rows_per_expert: Rows each expert can stage. ``0`` sizes it on the first backward, to ``flush_period``
+            times the larger of that backward's busiest expert and twice its mean rows per expert.
+    """
+
+    def __init__(self, num_experts: int, flush_period: int, rows_per_expert: int = 0):
+        self.num_experts = num_experts
+        self.flush_period = flush_period
+        self.rows_per_expert = rows_per_expert
+        self.flush_on_stage = False
+        #: Flushes run so far, and how many of them an expert's cursor forced.
+        self.num_flushes = 0
+        self.num_overflow_flushes = 0
+        self._buffers = None
+        self._cursor = None
+        self._staged_rows = 0
+        self._held_grads = None
+        self._backwards_in_period = 0
+        self._flush_args = None
+
+    @property
+    def has_staged_rows(self) -> bool:
+        """Whether a later backward still owes the weight gradients of rows staged so far."""
+        return self._staged_rows > 0 or self._held_grads is not None
+
+    def stage(self, rows, group_counts, valid_counts, flush_args, compute_now):
+        """Stage one backward's rows, and return the weight gradients of any flush this backward runs.
+
+        Args:
+            rows: ``(x, h, grad_out, *projection_grads)``, each with ``group_counts[e]`` consecutive rows per
+                expert.
+            group_counts: Rows per expert in ``rows``, shape ``(E,)``.
+            valid_counts: How many leading rows of each expert's group are real; the rest are alignment padding
+                that contributes nothing and is not staged. ``None`` stages every row.
+            flush_args: ``(fused_gate_up, needs_w1, needs_w2, needs_w3, weight_dtypes)`` of this backward.
+            compute_now: Runs this backward's own weight-gradient GEMMs, for rows no cursor can hold.
+
+        Returns:
+            ``(grad_w1, grad_w2, grad_w3)``; all ``None`` unless this backward closes a period.
+        """
+        has_padding = valid_counts is not None
+        if valid_counts is None:
+            valid_counts = group_counts
+        valid_counts = valid_counts.to(torch.long)
+        if self._cursor is None or self._cursor.device != valid_counts.device:
+            self._require_empty("the expert rows moved to another device")
+            self._cursor = torch.zeros_like(valid_counts)
+        if self._flush_args is not None and self._flush_args != flush_args:
+            self._require_empty("requires_grad or the dtype of an expert weight changed")
+        self._flush_args = flush_args
+
+        # Whether the rows fit has to be decided on the host; one synchronization reads all it needs.
+        stats = torch.stack(((self._cursor + valid_counts).max(), valid_counts.max(), valid_counts.sum()))
+        fullest_cursor, busiest_expert, num_rows = stats.tolist()
+        if self.rows_per_expert == 0 and num_rows > 0:
+            mean_rows = math.ceil(num_rows / self.num_experts)
+            self.rows_per_expert = self.flush_period * max(2 * mean_rows, busiest_expert)
+
+        # An early flush below does not move the period, and a closed accumulation window restarts it.
+        closes_period = self.flush_on_stage or self._backwards_in_period + 1 >= self.flush_period
+        self._backwards_in_period = 0 if closes_period else self._backwards_in_period + 1
+
+        if fullest_cursor > self.rows_per_expert:
+            self.num_overflow_flushes += 1
+            if self._staged_rows > 0:
+                self._held_grads = _add_weight_grads(self._held_grads, self._flush())
+        if busiest_expert > self.rows_per_expert:
+            # Not even the emptied buffer holds this backward.
+            self._held_grads = _add_weight_grads(self._held_grads, compute_now())
+        elif num_rows > 0:
+            self._append(rows, group_counts if has_padding else None, valid_counts, num_rows)
+
+        if not closes_period:
+            return None, None, None
+        grads = self._held_grads
+        self._held_grads = None
+        if self._staged_rows > 0:
+            grads = _add_weight_grads(grads, self._flush())
+        if grads is None:
+            # No expert received a row in this period. The other ranks still return a gradient now, so return
+            # this backward's own, which is zero.
+            grads = compute_now()
+        return grads
+
+    @property
+    def _zero_row(self) -> int:
+        # One row past every expert's slice stays zero; a flush reads it for experts that staged nothing.
+        return self.num_experts * self.rows_per_expert
+
+    def _require_empty(self, what_changed: str, buffers_only: bool = False) -> None:
+        # Gradients held from an early flush do not depend on the layout of the buffers.
+        has_staged_rows = self._staged_rows > 0 if buffers_only else self.has_staged_rows
+        if has_staged_rows:
+            raise RuntimeError(f"{what_changed} while expert weight gradients were staged; it may only change "
+                               "after the backward that flushes them")
+
+    def _append(self, rows, group_counts, valid_counts, num_rows):
+        reusable = self._buffers is not None and all(
+            buffer.dtype == row.dtype and buffer.device == row.device and buffer.shape[1] == row.shape[1]
+            and buffer.shape[0] == self._zero_row + 1 for buffer, row in zip(self._buffers, rows))
+        if not reusable:
+            self._require_empty("the dtype, device or width of the expert rows changed", buffers_only=True)
+            self._buffers = [row.new_empty((self._zero_row + 1, row.shape[1])) for row in rows]
+            for buffer in self._buffers:
+                buffer[self._zero_row] = 0
+
+        # Staged row r of this backward is the within-th valid row of its expert.
+        row_ids = torch.arange(num_rows, device=valid_counts.device)
+        valid_ends = torch.cumsum(valid_counts, dim=0)
+        expert = torch.searchsorted(valid_ends, row_ids, right=True)
+        within = row_ids - (valid_ends - valid_counts)[expert]
+        destination = expert * self.rows_per_expert + self._cursor[expert] + within
+        source = None
+        if group_counts is not None:
+            # Each expert's group ends in alignment padding, so its valid rows are not next to the following group's.
+            group_ends = torch.cumsum(group_counts.to(torch.long), dim=0)
+            source = (group_ends - group_counts)[expert] + within
+        for buffer, row in zip(self._buffers, rows):
+            staged = row[:num_rows] if source is None else row.index_select(0, source)
+            buffer.index_copy_(0, destination, staged)
+        self._cursor += valid_counts
+        self._staged_rows += num_rows
+
+    def _flush(self):
+        fused_gate_up, needs_w1, needs_w2, needs_w3, weight_dtypes = self._flush_args
+        cursor = self._cursor
+        # torch._grouped_mm does not return for a group without rows, so an expert that staged nothing gets one
+        # zero row, which also makes its gradient exactly zero.
+        group_sizes = cursor.clamp(min=1)
+        num_rows = self._staged_rows + int((cursor == 0).sum())
+        # Gather the rows of every expert next to each other, the layout the grouped GEMM reads.
+        row_ids = torch.arange(num_rows, device=cursor.device)
+        ends = torch.cumsum(group_sizes, dim=0)
+        expert = torch.searchsorted(ends, row_ids, right=True)
+        staged_index = expert * self.rows_per_expert + row_ids - (ends - group_sizes)[expert]
+        index = torch.where(cursor[expert] > 0, staged_index, self._zero_row)
+        x, h, grad_out, *projection_grads = [buffer.index_select(0, index) for buffer in self._buffers]
+        grads = _grouped_mlp_weight_grads(grad_out, x, h, ends.to(torch.int32), projection_grads, fused_gate_up,
+                                          needs_w1, needs_w2, needs_w3)
+        self._cursor = torch.zeros_like(cursor)
+        self._staged_rows = 0
+        self.num_flushes += 1
+        return tuple(grad.to(dtype) if grad is not None else None for grad, dtype in zip(grads, weight_dtypes))
+
+
 class _DeferredWeightGradExperts(torch.autograd.Function):
-    """The grouped-GEMM expert MLP, with its weight gradients optionally deferred to an :class:`ExpertWeightGradSlot`.
+    """The grouped-GEMM expert MLP, with its weight gradients optionally deferred to an :class:`ExpertWeightGradSlot`
+    or staged across backward passes in a :class:`MoeDeferredDwStaging`.
 
     Forward runs exactly what :func:`_run_experts_grouped_mm` (or its fused gate+up variant) runs. Backward forms the
     products autograd forms for ``torch._grouped_mm`` (``_grouped_mm_mat1_backward`` and
@@ -470,7 +679,19 @@ class _DeferredWeightGradExperts(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(ctx, x, num_tokens_per_expert, w1, w2, w3, slot, activation, alpha, limit, fused_gate_up):
+    def forward(ctx,
+                x,
+                num_tokens_per_expert,
+                w1,
+                w2,
+                w3,
+                slot,
+                activation,
+                alpha,
+                limit,
+                fused_gate_up,
+                dw_staging=None,
+                num_valid_tokens_per_expert=None):
         offsets = torch.cumsum(num_tokens_per_expert, dim=0, dtype=torch.int32)
         dtype = x.dtype
         w1c, w2c, w3c = w1.to(dtype), w2.to(dtype), w3.to(dtype)
@@ -485,6 +706,8 @@ class _DeferredWeightGradExperts(torch.autograd.Function):
             h = apply_expert_activation(gate, up, activation, alpha, limit)
             ctx.save_for_backward(x, offsets, w2c, h, w1c, w3c, gate, up)
         ctx.slot = slot
+        ctx.dw_staging = dw_staging
+        ctx.num_valid_tokens_per_expert = num_valid_tokens_per_expert
         ctx.activation = (activation, alpha, limit)
         ctx.fused_gate_up = fused_gate_up
         ctx.weight_dtypes = (w1.dtype, w2.dtype, w3.dtype)
@@ -508,32 +731,24 @@ class _DeferredWeightGradExperts(torch.autograd.Function):
             grad_x = torch._grouped_mm(grad_gate, w1c, offs=offsets) + torch._grouped_mm(grad_up, w3c, offs=offsets)
 
         needs_w1, needs_w2, needs_w3 = ctx.needs_input_grad[2:5]
+        projection_grads = (grad_gate_up, ) if ctx.fused_gate_up else (grad_gate, grad_up)
 
         def weight_grads():
-            grad_w1 = grad_w2 = grad_w3 = None
-            if needs_w2:
-                grad_w2 = torch._grouped_mm(grad_out.transpose(-2, -1), h, offs=offsets)
-            if ctx.fused_gate_up:
-                if needs_w1 or needs_w3:
-                    grad_w13 = torch._grouped_mm(grad_gate_up.transpose(-2, -1), x, offs=offsets)
-                    inter = grad_w13.shape[1] // 2
-                    if needs_w1:
-                        grad_w1 = grad_w13.narrow(1, 0, inter)
-                    if needs_w3:
-                        grad_w3 = grad_w13.narrow(1, inter, inter)
-            else:
-                if needs_w1:
-                    grad_w1 = torch._grouped_mm(grad_gate.transpose(-2, -1), x, offs=offsets)
-                if needs_w3:
-                    grad_w3 = torch._grouped_mm(grad_up.transpose(-2, -1), x, offs=offsets)
-            return tuple(
-                grad.to(dtype) if grad is not None else None
-                for grad, dtype in zip((grad_w1, grad_w2, grad_w3), ctx.weight_dtypes))
+            grads = _grouped_mlp_weight_grads(grad_out, x, h, offsets, projection_grads, ctx.fused_gate_up, needs_w1,
+                                              needs_w2, needs_w3)
+            return tuple(grad.to(dtype) if grad is not None else None for grad, dtype in zip(grads, ctx.weight_dtypes))
 
+        no_grads = (None, ) * 7
+        if ctx.dw_staging is not None and (needs_w1 or needs_w2 or needs_w3):
+            group_counts = torch.diff(offsets, prepend=offsets.new_zeros(1))
+            flush_args = (ctx.fused_gate_up, needs_w1, needs_w2, needs_w3, ctx.weight_dtypes)
+            staged_grads = ctx.dw_staging.stage((x, h, grad_out, *projection_grads), group_counts,
+                                                ctx.num_valid_tokens_per_expert, flush_args, weight_grads)
+            return (grad_x, None, *staged_grads, *no_grads)
         if ctx.slot is None:
-            return (grad_x, None, *weight_grads(), None, None, None, None, None)
+            return (grad_x, None, *weight_grads(), *no_grads)
         ctx.slot.defer(weight_grads)
-        return (grad_x, ) + (None, ) * 9
+        return (grad_x, None, None, None, None, *no_grads)
 
 
 # ---------------------------------------------------------------------------
@@ -677,6 +892,8 @@ class GroupedExperts(nn.Module):
         x: torch.Tensor,
         num_tokens_per_expert: torch.Tensor,
         weight_grad_slot: ExpertWeightGradSlot | None = None,
+        dw_staging: MoeDeferredDwStaging | None = None,
+        num_valid_tokens_per_expert: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         Args:
@@ -685,17 +902,24 @@ class GroupedExperts(nn.Module):
             weight_grad_slot: Where the backward leaves the weight-gradient GEMMs for a later backward to run;
                 the expert weights' gradients then reach them through that later backward. Needs the
                 ``torch._grouped_mm`` path.
+            dw_staging: Where the backward stages the rows of the weight-gradient GEMMs, to run them once over
+                several backward passes. Needs the ``torch._grouped_mm`` path.
+            num_valid_tokens_per_expert: With ``dw_staging``, how many leading rows of each expert's group are
+                real when ``num_tokens_per_expert`` counts alignment padding too, shape ``(E,)``.
 
         Returns:
             Output tensor of shape ``(T, dim)``.
         """
 
         act = (self.activation, self.activation_alpha, self.activation_limit)
-        if weight_grad_slot is not None:
+        if weight_grad_slot is not None or dw_staging is not None:
             if self.use_triton_grouped_mm or not self.use_grouped_mm:
                 raise RuntimeError("deferring expert weight gradients needs the torch._grouped_mm path")
+            if weight_grad_slot is not None and dw_staging is not None:
+                raise RuntimeError("expert weight gradients are either deferred to a slot or staged, not both")
             return _DeferredWeightGradExperts.apply(x, num_tokens_per_expert, self.w1, self.w2, self.w3,
-                                                    weight_grad_slot, *act, self.gate_up_impl == "fused")
+                                                    weight_grad_slot, *act, self.gate_up_impl == "fused", dw_staging,
+                                                    num_valid_tokens_per_expert)
         if self.use_triton_grouped_mm:
             return _run_experts_triton_grouped_mm(self.w1, self.w2, self.w3, x, num_tokens_per_expert, *act)
         elif self.use_grouped_mm:
