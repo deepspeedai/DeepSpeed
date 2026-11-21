@@ -346,6 +346,9 @@ def convert_to_subchannel_quantization(model: nn.Module, recipe: SubchannelQuant
         if getattr(experts, "grouped_mm_fn", None) is not None and getattr(module, "overlap_weight_grad", False):
             raise ValueError(f"quantization.subchannel does not support AutoEP overlap_weight_grad, which '{name}' "
                              "enables. Disable overlap_weight_grad or exclude the layer's experts.")
+        if getattr(experts, "grouped_mm_fn", None) is not None and getattr(module, "dw_staging", None) is not None:
+            raise ValueError(f"quantization.subchannel does not support AutoEP deferred_dw_flush_period > 1, which "
+                             f"'{name}' sets. Leave deferred_dw_flush_period unset or exclude the layer's experts.")
 
     if not converted:
         raise ValueError(f"quantization.subchannel is enabled but no nn.Linear or AutoEP expert module matches "

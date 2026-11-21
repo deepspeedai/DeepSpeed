@@ -1029,6 +1029,18 @@ smoke coverage used for this AutoEP surface produced the following version gates
 | -------------------------------------------------------------------------------------------------------------- | -------- |
 | Experimental. In the DeepEP backward, send the experts' input gradient back while computing their weight gradients. The expert backward returns its input gradient first and defers its weight-gradient GEMMs to the DeepEP dispatch backward, which launches its combine asynchronously, runs those GEMMs with `comm_num_sm` SMs withheld so the combine can run beside them, and waits before returning, including when weight-gradient computation raises. Parameter-gradient semantics are unchanged; exact cross-backend equality is not guaranteed. First-order gradients only (`create_graph=True` raises). Requires `comm_backend="deepep"` with `autoep_size > 1`, the `torch._grouped_mm` expert path (`use_grouped_mm=true`, and `disable_triton_grouped_mm=true` on devices that prefer the Triton grouped GEMM), ZeRO stage 1 or 2 (not 0 or 3), and PyTorch's SM carveout getter/setter APIs; unsupported configurations fail rather than falling back. | `false` |
 
+***deferred_dw_flush_period***: [integer]
+
+| Description                                                                                                    | Default  |
+| -------------------------------------------------------------------------------------------------------------- | -------- |
+| Experimental. Values above `1` stage the rows of the experts' weight-gradient GEMMs across backward passes instead of running the GEMMs in each one. A backward appends each expert's rows to a per-expert staging buffer and returns no expert weight gradient; one backward in every `deferred_dw_flush_period` runs the GEMMs once over everything staged. The backward that closes a gradient accumulation window always does the same, so every optimizer step sees the same accumulated gradient as before, up to floating-point summation order. This helps when each expert receives few rows per microbatch (many experts, small microbatches) and costs memory for the staged rows; with many rows per expert it is slower. First-order gradients only. Requires the `torch._grouped_mm` expert path (`use_grouped_mm=true`, and `disable_triton_grouped_mm=true` on devices that prefer the Triton grouped GEMM), ZeRO stage 0, 1 or 2, and `managed_gradient_accumulation=true`; it cannot be combined with `overlap_weight_grad`, AutoEP+AutoTP folding, ZenFlow or DeepCompile. Unsupported configurations fail rather than falling back. | `1` |
+
+***deferred_dw_rows_per_expert***: [integer]
+
+| Description                                                                                                    | Default  |
+| -------------------------------------------------------------------------------------------------------------- | -------- |
+| Rows each local expert can stage when `deferred_dw_flush_period` is above `1`. Each MoE layer on each rank allocates `local experts * deferred_dw_rows_per_expert` rows of `2 * hidden + 3 * intermediate` values in the compute dtype. `0` sizes the buffer on the first backward, to `deferred_dw_flush_period` times the larger of that backward's busiest expert and twice its mean rows per expert. A buffer that is too small is still correct: the GEMMs run early to empty it, or at once for a backward that does not fit alone, and the result is held, at the size of the expert weight gradients, until the next backward that returns gradients. | `0` |
+
 ***skip_recompute_combine***: [boolean]
 
 | Description                                                                                                    | Default  |
@@ -1212,7 +1224,7 @@ Per-GEMM settings:
 **Constraints:**
 - The fused Triton kernels need Triton and a CUDA device of compute capability 8.9 or newer for FP8, 8.0 or newer for INT8. Elsewhere the GEMMs run on a PyTorch reference implementation that simulates the same quantization and multiplies in FP32, with a warning.
 - Performance: block scales have to be applied between tensor-core dot products, which keeps a block-scaled GEMM below BF16 speed; use it for its numerics. With `block_size` 0 the scales are applied once per output element and the FP8 GEMM itself runs about 1.6x faster than BF16, but both operands are still quantized in separate passes at every call. On an H200 a full layer step (forward, `dx` and `dw`) measured 1.16x to 1.39x faster than BF16 for layers 8192 wide with 16k or more tokens, and slower than BF16 for layers 4096 wide or narrower, including typical MoE experts.
-- Validated with ZeRO stages 1-3 for `nn.Linear`, and AutoEP with ZeRO-2. AutoEP's `gate_up_impl="fused"` and `overlap_weight_grad` are rejected for quantized experts. PipelineModule and AutoTP are not supported yet.
+- Validated with ZeRO stages 1-3 for `nn.Linear`, and AutoEP with ZeRO-2. AutoEP's `gate_up_impl="fused"`, `overlap_weight_grad` and `deferred_dw_flush_period` above 1 are rejected for quantized experts. PipelineModule and AutoTP are not supported yet.
 
 ### Python cyclic garbage collection
 

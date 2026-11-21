@@ -118,6 +118,6 @@ On any other device the GEMMs run on a PyTorch reference implementation that app
 
 - Validated with ZeRO stages 1, 2 and 3 for `nn.Linear`, and with ZeRO-2 for AutoEP experts, all in BF16.
 - AutoTP and `PipelineModule` are rejected at initialization.
-- AutoEP's `gate_up_impl="fused"` and `overlap_weight_grad` are rejected for quantized experts.
+- AutoEP's `gate_up_impl="fused"`, `overlap_weight_grad` and `deferred_dw_flush_period` above 1 are rejected for quantized experts.
 - Not validated: FP16 and FP32 training, CPU or NVMe offload, ZeRO-3 with AutoEP, gradient accumulation and `torch.compile`.
 - The accuracy results above come from short continued-pretraining runs. Check convergence on your own workload before relying on it for a full training run.

@@ -289,6 +289,15 @@ def test_conversion_rejects_fused_gate_up_experts():
         convert_to_subchannel_quantization(experts, _recipe())
 
 
+def test_conversion_rejects_staged_expert_weight_grads():
+    # Staging hands the weight-gradient GEMMs to torch._grouped_mm, which would silently skip quantization.
+    layer = nn.Module()
+    layer.experts = GroupedExperts(64, 128, 4, use_grouped_mm=False)
+    layer.dw_staging = object()
+    with pytest.raises(ValueError, match="deferred_dw_flush_period"):
+        convert_to_subchannel_quantization(layer, _recipe())
+
+
 # ---------------------------------------------------------------------------
 # Engine integration
 # ---------------------------------------------------------------------------
