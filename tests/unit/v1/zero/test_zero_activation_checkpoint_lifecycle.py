@@ -3,6 +3,8 @@
 
 # DeepSpeed Team
 
+import copy
+
 import pytest
 import torch
 import torch.nn.functional as F
@@ -309,10 +311,101 @@ class _ExternalCheckpointModel(torch.nn.Module):
         return self.head(checkpoint(self._checkpointed, value, use_reentrant=False)).sum()
 
 
+class _AdapterBlock(torch.nn.Module):
+
+    def __init__(self):
+        super().__init__()
+        self.base_layer = torch.nn.Linear(8, 8, bias=False)
+        self.base_layer.weight.requires_grad_(False)
+        self.adapter_A = torch.nn.Linear(8, 2, bias=False)
+        self.adapter_B = torch.nn.Linear(2, 8, bias=False)
+
+    def forward(self, value):
+        result = self.base_layer(value)
+        # LoRA reads its adapter's dtype outside the adapter module's forward.
+        value = value.to(self.adapter_A.weight.dtype)
+        return result + self.adapter_B(self.adapter_A(value))
+
+
+class _AdapterCheckpointModel(torch.nn.Module):
+
+    def __init__(self, use_reentrant=None):
+        super().__init__()
+        self.adapter = _AdapterBlock()
+        self.use_reentrant = use_reentrant
+
+    def forward(self, value):
+        if self.use_reentrant is None:
+            output = self.adapter(value)
+        else:
+            output = checkpoint(self.adapter, value, use_reentrant=self.use_reentrant)
+        return output.square().mean()
+
+
 class TestZero3ActivationCheckpointLifecycle(DistributedTest):
     """Black-box ZeRO-3 activation-checkpoint lifecycle checks for PR #8148."""
 
     world_size = 1
+
+    @pytest.mark.world_size(2)
+    @pytest.mark.parametrize("param_persistence_threshold", [0, 16])
+    @pytest.mark.parametrize("offload_device", ["none", "cpu"])
+    @pytest.mark.parametrize("use_reentrant", [False, True])
+    def test_resume_with_external_persistent_adapter(self, tmpdir, param_persistence_threshold, offload_device,
+                                                     use_reentrant):
+        """Resume must preserve the plain-torch trajectory when adapter residency changes during backward."""
+        device, _, _ = initialize_distributed()
+        torch.manual_seed(42)
+        reference = _AdapterCheckpointModel().to(device)
+        initial_model = copy.deepcopy(reference)
+        reference_optimizer = torch.optim.AdamW([p for p in reference.parameters() if p.requires_grad], lr=1e-3)
+        reference_scheduler = torch.optim.lr_scheduler.StepLR(reference_optimizer, step_size=1, gamma=0.9)
+        config = _zero3_config(gradient_accumulation_steps=4)
+        del config["optimizer"]
+        config["zero_optimization"]["stage3_param_persistence_threshold"] = param_persistence_threshold
+        config["zero_optimization"]["offload_param"] = {"device": offload_device, "pin_memory": False}
+
+        for resumed in [False, True]:
+            model = copy.deepcopy(initial_model)
+            model.use_reentrant = use_reentrant
+            parameters = [p for p in model.parameters() if p.requires_grad]
+            optimizer = torch.optim.AdamW(parameters, lr=1e-3)
+            scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=0.9)
+            engine, _, _, _ = deepspeed.initialize(model=model,
+                                                   optimizer=optimizer,
+                                                   lr_scheduler=scheduler,
+                                                   config=config)
+            if resumed:
+                load_path, _ = engine.load_checkpoint(str(tmpdir), tag="seed")
+                assert load_path is not None
+                assert engine.global_steps == 1
+                assert engine.lr_scheduler.state_dict() == reference_scheduler.state_dict()
+                adapter_weight = next(engine.module.adapter.adapter_A.parameters())
+                assert adapter_weight.ds_persist is bool(param_persistence_threshold)
+                if adapter_weight.ds_persist:
+                    assert adapter_weight.ds_status == ZeroParamStatus.AVAILABLE
+
+            for microstep in range(4):
+                value = torch.arange(16, device=device, dtype=torch.float32).reshape(2, 8) / 16
+                value = value + (microstep + 4 * int(resumed)) / 100
+                reference_loss = reference(value.detach().requires_grad_())
+                loss = engine(value.detach().requires_grad_())
+                torch.testing.assert_close(loss, reference_loss)
+                (reference_loss / 4).backward()
+                engine.backward(loss)
+                engine.step()
+
+            reference_optimizer.step()
+            reference_scheduler.step()
+            reference_optimizer.zero_grad()
+            assert engine.global_steps == 1 + int(resumed)
+            assert engine.lr_scheduler.state_dict() == reference_scheduler.state_dict()
+            with deepspeed.zero.GatheredParameters(list(engine.module.parameters())):
+                for parameter, expected in zip(engine.module.parameters(), reference.parameters()):
+                    torch.testing.assert_close(parameter, expected)
+            if not resumed:
+                engine.save_checkpoint(str(tmpdir), tag="seed")
+            engine.destroy()
 
     @pytest.mark.parametrize("fast_sharding", [False, True])
     def test_reused_checkpointed_module_invocations_release_independently(self, fast_sharding):
