@@ -1029,16 +1029,8 @@ class AutoEPMoELayer(nn.Module):
                 "gradient_checkpointing_kwargs={'use_reentrant': True}), so that nothing reads the skipped output. "
                 "Leave skip_recompute_combine unset for other checkpointing.")
 
-    def _deepep_route(self, tokens: torch.Tensor, ro: "RouterOutput") -> torch.Tensor:
-        """Dispatch, run the experts, and combine through DeepEP.
-
-        ``tokens`` is [T, H] before top-k expansion. DeepEP replicates each
-        token to the ranks that need it rather than being handed one row per
-        selected expert, groups arrivals by expert for the grouped GEMM, and
-        sums them back. It therefore replaces the expansion and the reduction
-        around the collectives, not just the collectives, and returns [T, H]
-        ready for the shared tail of forward.
-        """
+    def _ensure_deepep_exchange(self, tokens: torch.Tensor) -> None:
+        """Build or reuse this layer's DeepEP buffer and check that ``tokens`` [T, H] fits it."""
         assert_dtype_supported(tokens.dtype)
 
         # The configured worst-case capacity is identical across ranks, so
@@ -1066,6 +1058,18 @@ class AutoEPMoELayer(nn.Module):
                 "comm_max_tokens_per_rank in the expert_parallel config to the largest per-rank token count this "
                 "job will produce, normally train_micro_batch_size_per_gpu * maximum padded sequence length, or "
                 'set comm_backend="comm".')
+
+    def _deepep_route(self, tokens: torch.Tensor, ro: "RouterOutput") -> torch.Tensor:
+        """Dispatch, run the experts, and combine through DeepEP.
+
+        ``tokens`` is [T, H] before top-k expansion. DeepEP replicates each
+        token to the ranks that need it rather than being handed one row per
+        selected expert, groups arrivals by expert for the grouped GEMM, and
+        sums them back. It therefore replaces the expansion and the reduction
+        around the collectives, not just the collectives, and returns [T, H]
+        ready for the shared tail of forward.
+        """
+        self._ensure_deepep_exchange(tokens)
 
         # With overlap, the experts' backward leaves their weight gradients in the slot, and the dispatch backward
         # computes them while it sends the experts' input gradient back.

@@ -891,3 +891,185 @@ class TestDeepEPColdStart(DistributedTest):
                                        rtol=5e-2,
                                        atol=5e-2,
                                        msg=f"cold-start gradient for {name}")
+
+
+def _run_tiny_qwen3_moe_accumulation(ep_size, seed, *, micro_batch_overlap, skewed_routing, num_micro_batches=3):
+    """One optimizer step of ``num_micro_batches`` micro-batches through a two-layer Qwen3-MoE on DeepEP.
+
+    Returns each micro-batch's loss and every parameter's accumulated gradient at the boundary, before the update.
+    """
+    transformers = pytest.importorskip("transformers")
+    from deepspeed.module_inject import auto_ep_microbatch_overlap
+
+    seed_everything(seed)
+    model_config = transformers.Qwen3MoeConfig(vocab_size=128,
+                                               hidden_size=HIDDEN_SIZE,
+                                               intermediate_size=INTERMEDIATE_SIZE,
+                                               moe_intermediate_size=INTERMEDIATE_SIZE,
+                                               num_hidden_layers=2,
+                                               num_attention_heads=4,
+                                               num_key_value_heads=2,
+                                               head_dim=64,
+                                               num_experts=2 * ep_size,
+                                               num_experts_per_tok=2,
+                                               max_position_embeddings=128,
+                                               tie_word_embeddings=False,
+                                               use_cache=False,
+                                               router_aux_loss_coef=0.0)
+    model = transformers.AutoModelForCausalLM.from_config(model_config, attn_implementation="sdpa")
+    model.gradient_checkpointing_enable()
+    batch, seq_len = 4, 32
+    config = {
+        "train_micro_batch_size_per_gpu": batch,
+        "gradient_accumulation_steps": num_micro_batches,
+        "bf16": {
+            "enabled": True
+        },
+        "optimizer": {
+            "type": "Adam",
+            "params": {
+                "lr": 1e-3
+            }
+        },
+        "zero_optimization": {
+            "stage": 2
+        },
+        "expert_parallel": {
+            "enabled": True,
+            "autoep_size": ep_size,
+            "preset_model": "qwen3_moe",
+            "comm_backend": "deepep",
+            "comm_max_tokens_per_rank": batch * seq_len,
+            "gate_up_impl": "fused",
+            "use_grouped_mm": True,
+            "disable_triton_grouped_mm": True,
+        },
+    }
+    engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config)
+    if skewed_routing:
+        _install_skewed_routing(engine)
+
+    # Different tokens on every rank, so each rank's experts receive rows from all the others.
+    seed_everything(seed + 1000 * dist.get_rank())
+    micro_batches = []
+    for _ in range(num_micro_batches):
+        input_ids = torch.randint(0, model_config.vocab_size, (batch, seq_len), device=engine.device)
+        micro_batches.append({"input_ids": input_ids, "labels": input_ids})
+
+    paired = {"steps": 0}
+    original_step = auto_ep_microbatch_overlap.MicroBatchOverlap._paired_layer_step
+
+    def counted_step(self, *args, **kwargs):
+        paired["steps"] += 1
+        return original_step(self, *args, **kwargs)
+
+    if micro_batch_overlap:
+        with mock.patch.object(auto_ep_microbatch_overlap.MicroBatchOverlap, "_paired_layer_step", counted_step):
+            losses = auto_ep_microbatch_overlap.MicroBatchOverlap(engine).forward_backward(micro_batches)
+    else:
+        losses = []
+        for position, micro_batch in enumerate(micro_batches):
+            loss = engine(input_ids=micro_batch["input_ids"], labels=micro_batch["labels"]).loss
+            engine.set_gradient_accumulation_boundary(position == num_micro_batches - 1)
+            engine.backward(loss)
+            losses.append(loss.detach())
+    gradients = {}
+    for name, parameter in engine.module.named_parameters():
+        gradient = safe_get_full_grad(parameter)
+        assert gradient is not None, f"no gradient for {name}"
+        gradients[name] = gradient.detach().float().clone()
+    destroy_exchanges(engine.module)
+    return {
+        "losses": [loss.float().item() for loss in losses],
+        "gradients": gradients,
+        "paired_steps": paired["steps"]
+    }
+
+
+class TestMicroBatchOverlap(DistributedTest):
+    """MicroBatchOverlap (each micro-batch's forward beside the previous one's backward) computes the same step."""
+    world_size = 4
+
+    @pytest.mark.parametrize("skewed_routing", [False, True])
+    def test_overlapped_micro_batches_match_the_plain_accumulation_loop(self, skewed_routing):
+        """Catches a forward that reads another micro-batch's rows or DeepEP handle, a backward that pairs the wrong
+        layer's saved input, a lost gradient piece (embedding, attention, router score, expert weight, output layer),
+        and a parameter gradient accumulated twice or not at all in one micro-batch."""
+        skip_unless_h100_tests_enabled("micro-batch overlap parity needs H100s and a DeepEP build")
+        plain = _run_tiny_qwen3_moe_accumulation(self.world_size,
+                                                 2718,
+                                                 micro_batch_overlap=False,
+                                                 skewed_routing=skewed_routing)
+        overlapped = _run_tiny_qwen3_moe_accumulation(self.world_size,
+                                                      2718,
+                                                      micro_batch_overlap=True,
+                                                      skewed_routing=skewed_routing)
+
+        # Three micro-batches over two layers: the second and third forwards each pair with a backward, layer by layer.
+        assert overlapped["paired_steps"] == 4
+        for position, (actual, expected) in enumerate(zip(overlapped["losses"], plain["losses"])):
+            assert abs(actual - expected) <= 1e-2 * abs(expected), f"micro-batch {position}: {actual} vs {expected}"
+        for name, expected in plain["gradients"].items():
+            actual = overlapped["gradients"][name]
+            if expected.norm() > 0:
+                error = ((actual - expected).norm() / expected.norm()).item()
+                assert error < 2e-2, f"{name} relative L2 error {error:.3e}"
+            else:
+                assert actual.norm() == 0, f"{name} has a gradient only with the micro-batch overlap"
+
+    def test_rejects_options_it_would_bypass(self):
+        """overlap_weight_grad and skip_recompute_combine act inside the layer's own forward, which the schedule does
+        not call; accepting them would silently drop what they promise."""
+        skip_unless_h100_tests_enabled("needs H100s and a DeepEP build")
+        transformers = pytest.importorskip("transformers")
+        from deepspeed.module_inject.auto_ep_microbatch_overlap import MicroBatchOverlap
+
+        model_config = transformers.Qwen3MoeConfig(vocab_size=128,
+                                                   hidden_size=HIDDEN_SIZE,
+                                                   intermediate_size=INTERMEDIATE_SIZE,
+                                                   moe_intermediate_size=INTERMEDIATE_SIZE,
+                                                   num_hidden_layers=1,
+                                                   num_attention_heads=4,
+                                                   num_key_value_heads=2,
+                                                   head_dim=64,
+                                                   num_experts=2 * self.world_size,
+                                                   num_experts_per_tok=2,
+                                                   tie_word_embeddings=False,
+                                                   use_cache=False)
+        model = transformers.AutoModelForCausalLM.from_config(model_config)
+        config = {
+            "train_micro_batch_size_per_gpu": 1,
+            "bf16": {
+                "enabled": True
+            },
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 1e-3
+                }
+            },
+            "zero_optimization": {
+                "stage": 2
+            },
+            "expert_parallel": {
+                "enabled": True,
+                "autoep_size": self.world_size,
+                "preset_model": "qwen3_moe",
+                "comm_backend": "deepep",
+                "comm_max_tokens_per_rank": 64,
+                "gate_up_impl": "fused",
+                "use_grouped_mm": True,
+                "disable_triton_grouped_mm": True,
+                "overlap_weight_grad": True,
+            },
+        }
+        engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config)
+        # try/except rather than pytest.raises: a failing pytest.raises inside a DistributedTest worker hangs the run.
+        error = None
+        try:
+            MicroBatchOverlap(engine)
+        except ValueError as raised:
+            error = str(raised)
+        finally:
+            destroy_exchanges(engine.module)
+        assert error is not None and "overlap_weight_grad" in error, error
