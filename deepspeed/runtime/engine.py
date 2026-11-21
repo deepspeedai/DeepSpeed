@@ -2446,6 +2446,7 @@ class DeepSpeedEngine(Module):
         log_dist("Removing param_group that has no 'params' in the basic Optimizer", ranks=[0])
 
         self._check_for_duplicates(basic_optimizer)
+        self._check_bf16_moments_with_fp32_master(basic_optimizer)
 
         self.basic_optimizer = basic_optimizer
         log_dist(f"DeepSpeed Basic Optimizer = {basic_optimizer.__class__.__name__}", ranks=[0])
@@ -2470,6 +2471,17 @@ class DeepSpeedEngine(Module):
         if configure is None:
             return
         configure(getattr(self, "_autoep_folding_spec", None))
+
+    def _check_bf16_moments_with_fp32_master(self, basic_optimizer):
+        if not self.bf16_optimizer_states() or self.bf16_master_weights_and_gradients():
+            return
+        # With fp32 master weights only FusedAdam can store its moments in bf16 (exp_avg_dtype). Any other optimizer
+        # would keep them in the master weights' fp32 and the setting would silently save nothing.
+        from deepspeed.ops.adam import FusedAdam
+        if not isinstance(basic_optimizer, FusedAdam) or basic_optimizer.exp_avg_dtype != torch.bfloat16:
+            raise ValueError("bf16_optimizer_states with fp32 master weights needs DeepSpeed's FusedAdam (optimizer "
+                             f"type Adam or AdamW, without torch_adam); got {type(basic_optimizer).__name__}. Enable "
+                             "bf16_master_weights_and_grads to keep the states of other optimizers in bf16.")
 
     def get_optimizer_configuration(self, optimizer_parameters, adam_w_mode, allow_legacy_fallback=False):
         torch_adam = optimizer_parameters.pop(TORCH_ADAM_PARAM, False)
@@ -2503,7 +2515,11 @@ class DeepSpeedEngine(Module):
                 raise
             logger.warning("FusedAdam is unavailable; falling back to Muon's inline Adam update.")
             return None, {}
-        return FusedAdam, {'adam_w_mode': adam_w_mode}
+        fused_adam_kwargs = {'adam_w_mode': adam_w_mode}
+        if self.bf16_optimizer_states() and not self.bf16_master_weights_and_gradients():
+            # fp32 master weights, bf16 Adam moments (see FusedAdam exp_avg_dtype).
+            fused_adam_kwargs['exp_avg_dtype'] = torch.bfloat16
+        return FusedAdam, fused_adam_kwargs
 
     # Which of the optimizer's config keys each half of a Muon param group accepts. Muon takes a
     # momentum and a Newton-Schulz method; the auxiliary Adam takes betas and eps.
