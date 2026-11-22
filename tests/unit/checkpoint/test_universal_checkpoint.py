@@ -688,3 +688,53 @@ class TestUniversalCheckpointAcrossZeROStages(DistributedTest):
         for state in target.optimizer.optimizer.state.values():
             assert int(state["step"]) == steps_before_save + 1
         target.destroy()
+
+
+@pytest.mark.parametrize("source_stage", [1, 2])
+class TestUniversalCheckpointBeforeFirstStepToZeRO3(DistributedTest):
+    world_size = 2
+
+    def test_load(self, tmpdir, source_stage):
+        """A ZeRO-1/2 checkpoint saved before the first step has no Adam state; ZeRO-3 starts it fresh."""
+        hidden_dim = 10
+
+        def build(stage, load_universal):
+            ds_config = {"train_batch_size": 2, "zero_optimization": {"stage": stage, "sub_group_size": 100}}
+            if load_universal:
+                ds_config["checkpoint"] = {"load_universal": True}
+            model = SimpleModel(hidden_dim, nlayers=2)
+            engine, _, _, _ = deepspeed.initialize(config=ds_config,
+                                                   model=model,
+                                                   optimizer=torch.optim.Adam(model.parameters(), lr=0.1))
+            return engine
+
+        source = build(source_stage, load_universal=False)
+        expected = {name: safe_get_full_fp32_param(param).cpu() for name, param in source.module.named_parameters()}
+        source.save_checkpoint(tmpdir, tag=CP_TAG, client_state={UNIVERSAL_CHECKPOINT_INFO: {}})
+        source.destroy()
+
+        cp_dir = os.path.join(tmpdir, CP_TAG)
+        dist.barrier()
+        if dist.get_rank() == 0:
+            convert_to_universal(
+                SimpleNamespace(input_folder=cp_dir,
+                                output_folder=f"{cp_dir}_universal",
+                                num_extract_workers=1,
+                                num_merge_workers=1,
+                                keep_temp_folder=False,
+                                strict=True,
+                                inject_missing_state=False))
+        dist.barrier()
+
+        target = build(3, load_universal=True)
+        target.load_checkpoint(tmpdir, tag=f"{CP_TAG}_universal")
+        for name, param in target.module.named_parameters():
+            assert torch.equal(safe_get_full_fp32_param(param).cpu(), expected[name]), name
+        assert not any(target.optimizer.optimizer.state.values())
+
+        _train(target, hidden_dim, 1)
+        optimizer_states = list(target.optimizer.optimizer.state.values())
+        assert optimizer_states
+        for state in optimizer_states:
+            assert int(state["step"]) == 1
+        target.destroy()
