@@ -14,6 +14,7 @@ from unit.util import bf16_required_version_check
 from deepspeed import comm as dist
 from deepspeed.accelerator import get_accelerator
 from deepspeed.runtime.bf16_optimizer import BF16_Optimizer
+from deepspeed.runtime.stochastic_rounding import stochastic_round_to_bf16_
 from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer
 from deepspeed.utils import safe_get_full_fp32_param, safe_get_full_grad
 from unit.v1.zero.test_zero_user_backward import (initialize_distributed, create_ddp_model, collect_ddp_gradients,
@@ -702,6 +703,38 @@ def _bf16_neighbours(master):
     return low, high
 
 
+def test_stochastic_round_to_bf16_kernel():
+    tiny = 2.0**-133  # the smallest bf16 subnormal
+    values = torch.tensor([1 + 2.0**-9, -(1 + 3 * 2.0**-9), 0.3, 2.5 * tiny, -1.25 * tiny])
+    draws = 1 << 16
+    src = values.repeat_interleave(draws)
+    dst = torch.empty_like(src, dtype=torch.bfloat16)
+    stochastic_round_to_bf16_(dst, src, torch.Generator().manual_seed(0))
+    # Unbiased for either sign and for subnormals: each value rounds to its upper neighbour with probability equal
+    # to its position between the two.
+    low, high = _bf16_neighbours(values)
+    fraction = (values.double() - low) / (high - low)
+    rounded = dst.double().view(len(values), draws)
+    assert ((rounded == low[:, None]) | (rounded == high[:, None])).all()
+    rounded_up = (rounded == high[:, None]).double().mean(dim=1)
+    assert ((rounded_up - fraction).abs() < 5 * (fraction * (1 - fraction) / draws).sqrt()).all(), rounded_up
+
+    # The same seed repeats the draw; another seed does not.
+    again = torch.empty_like(dst)
+    stochastic_round_to_bf16_(again, src, torch.Generator().manual_seed(0))
+    assert torch.equal(again, dst)
+    stochastic_round_to_bf16_(again, src, torch.Generator().manual_seed(1))
+    assert not torch.equal(again, dst)
+
+    # bf16 values are kept exactly. Non-finite values round to nearest, including NaNs whose low bits would carry.
+    exact = torch.tensor([0.0, -0.0, 1.0, -0.5, tiny, -tiny, torch.finfo(torch.bfloat16).max])
+    non_finite = torch.tensor([0x7F800000, -0x00800000, 0x7FFFFFFF, -1], dtype=torch.int32).view(torch.float32)
+    src = torch.cat([exact, non_finite]).repeat(1000)
+    out = torch.empty_like(src, dtype=torch.bfloat16)
+    stochastic_round_to_bf16_(out, src, torch.Generator().manual_seed(2))
+    assert torch.equal(out.view(torch.int16), src.to(torch.bfloat16).view(torch.int16))
+
+
 @pytest.mark.parametrize("stochastic", [False, True])
 @pytest.mark.parametrize("zero_stage, offload, grad_accum_dtype, optimizer_type", [
     (1, False, "fp32", BF16_Optimizer),
@@ -762,7 +795,7 @@ class TestBF16StochasticRoundParams(DistributedTest):
             between = high > low
             spacing = (high - low)[between]
             fraction = (master.double() - low)[between] / spacing
-            # Unbiased: the summed error is within 5 standard errors of 0. Round-to-nearest misses by ~200.
+            # Unbiased: the summed error is within 5 standard errors of 0. Round-to-nearest misses by about 150.
             error = ((served - master.double())[between] / spacing).sum()
             standard_error = (fraction * (1 - fraction)).sum().sqrt()
             assert error.abs() < 5 * standard_error, (error, standard_error)

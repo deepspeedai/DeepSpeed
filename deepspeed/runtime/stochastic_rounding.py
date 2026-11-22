@@ -13,13 +13,14 @@ def stochastic_round_to_bf16_(dst, src, generator):
     An element rounds away from zero with probability equal to its distance from the neighbour toward zero, as a
     fraction of the spacing between the two, so ``E[dst] == src``. An fp32 master update smaller than half a bf16
     spacing therefore still reaches ``dst`` in expectation, where round-to-nearest would leave ``dst`` unchanged.
-    Non-finite values round to nearest; finite values beyond the bf16 range can round to infinity.
+    Non-finite values round to nearest; finite values beyond the bf16 range can round to infinity. The rounding runs
+    on ``dst``'s device, where ``generator`` lives, so an offloaded master is copied there in fp32.
     """
     src = src.view(-1)
     dst = dst.view(-1)
     for start in range(0, src.numel(), _CHUNK_NUMEL):
         numel = min(_CHUNK_NUMEL, src.numel() - start)
-        chunk = src.narrow(0, start, numel)
+        chunk = src.narrow(0, start, numel).to(dst.device)
         # Adding 16 random bits below bf16's last mantissa bit and truncating them rounds the magnitude up with the
         # probability of the dropped fraction; fp32 is sign-magnitude, so this holds for either sign.
         noise = torch.randint(0, 1 << 16, (numel, ), dtype=torch.int32, device=chunk.device, generator=generator)
@@ -44,9 +45,7 @@ class StochasticRoundingCopy:
         if dst.dtype != torch.bfloat16:
             dst.copy_(src)
             return
-        generator = self.generators.get(src.device)
+        generator = self.generators.get(dst.device)
         if generator is None:
-            generator = torch.Generator(device=src.device)
-            generator.manual_seed(self.seed)
-            self.generators[src.device] = generator
+            generator = self.generators[dst.device] = torch.Generator(device=dst.device).manual_seed(self.seed)
         stochastic_round_to_bf16_(dst, src, generator)

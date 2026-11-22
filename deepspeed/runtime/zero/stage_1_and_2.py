@@ -3217,9 +3217,13 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 #    bit16_partitions[partition_id].data.copy_(fp32_partition.data)
                 bit16_partitions = self.parallel_partitioned_bit16_groups[i]
                 fp32_partition = self.single_partition_of_fp32_groups[i]
-                bit16_partition_buffer = self.param_buffer_of_bit16_for_cpu_offload_groups[i]
-                self._copy_to_bit16(bit16_partition_buffer.data, fp32_partition.data)
-                bit16_partitions[partition_id].data.copy_(bit16_partition_buffer.data, non_blocking=True)
+                if isinstance(self._copy_to_bit16, StochasticRoundingCopy):
+                    # Round on the accelerator: on the host the random draw is serial, about 5 ns per element.
+                    self._copy_to_bit16(bit16_partitions[partition_id].data, fp32_partition.data)
+                else:
+                    bit16_partition_buffer = self.param_buffer_of_bit16_for_cpu_offload_groups[i]
+                    bit16_partition_buffer.data.copy_(fp32_partition.data)
+                    bit16_partitions[partition_id].data.copy_(bit16_partition_buffer.data, non_blocking=True)
                 self._release_preflattened_grad_buffers(i)
                 self.averaged_gradients[i] = None
 
