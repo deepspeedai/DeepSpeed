@@ -20,6 +20,7 @@ import torch
 from cpuinfo import get_cpu_info
 
 import deepspeed
+from deepspeed.accelerator import get_accelerator
 from deepspeed.ops.op_builder import CPUAdamBuilder, CPULionBuilder
 from deepspeed.ops.op_builder.cpu.reflow_cpu_adam import ReflowCPUAdamBuilder
 from deepspeed.ops.op_builder.cpu.reflow_cpu_lion import ReflowCPULionBuilder
@@ -135,8 +136,10 @@ def test_reflow_builder_rejects_unvalidated_accelerator(builder, monkeypatch):
 def test_reflow_extension_is_independent(normal, reflow, symbol):
     if not reflow().is_compatible() or not normal().is_compatible():
         pytest.skip("requires compatible CPU optimizers")
+    reflow_builder = get_accelerator().create_op_builder(reflow.__name__)
+    assert reflow_builder is not None
     normal_module = normal().load()
-    reflow_module = reflow().load()
+    reflow_module = reflow_builder.load()
     assert not hasattr(normal_module, symbol)
     assert hasattr(reflow_module, symbol)
     assert normal_module is not reflow_module

@@ -7,6 +7,8 @@ optimizer as a separate serial phase *after* backward, it hides almost all of th
 backward pass. The result is ZeRO-3 CPU offloading where the CPU optimizer is largely overlapped with
 GPU compute and the inter-GPU gradient reduction.
 
+For the design and evaluation, see the [ASPLOS 2027 paper](https://dl.acm.org/doi/10.1145/3845814.3850051).
+
 **Optimizer support:** Adam/AdamW (`ReflowCPUAdam`) and Lion (`ReflowCPULion`). Lion keeps a single
 momentum tensor (`exp_avg`) — no second moment, no `eps`, no bias correction — so its offloaded state
 is half of Adam's; everything else in the pipeline below is identical.
