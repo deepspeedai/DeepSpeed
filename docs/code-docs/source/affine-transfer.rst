@@ -134,7 +134,12 @@ staging arena size, and bytes per process pair and per path label. Each message
 is labelled with ``path_of(from_process, to_process)``, and each process's local
 copies with ``path_of(process, process)``, the same hook ``calibrate_links``
 uses, so per-path totals can be priced with ``fit_links`` results. ``expected_stats(report, process)`` gives the ``TransferStats`` that
-process will return, which makes the prediction checkable after a run.
+process will return, which makes the prediction checkable after a run. Every
+field is exact except ``local_copy_bytes``, which is an upper bound: the report
+sees no buffers, so it also counts local copies that ``execute_transfers`` drops
+as in place (source and target the same memory at the same strides). A smaller
+``local_copy_bytes`` after a run is that known difference, not a prediction
+error.
 
 Processes are the transport-group ranks ``TransferEndpoints`` binds, and the
 summary records that as ``process_numbering``. Its pair and per-process figures

@@ -163,3 +163,41 @@ class TestPredictionMatchesExecutor(DistributedTest):
         stats = execute_transfers(requests, endpoints, dtype, budget)
         report = analyze_transfers(plans, endpoints, 4, budget)
         assert asdict(stats) == expected_stats(report, rank)
+
+
+@pytest.mark.skipif(get_accelerator().device_count() < 2, reason='requires two visible accelerator devices')
+class TestPredictionWithInPlaceCopies(DistributedTest):
+    world_size = 2
+
+    def test_local_copy_bytes_over_count_by_the_in_place_bytes(self):
+        """Each process keeps its own shard of two parameters; one is moved in place, the other copied.
+
+        The analysis counts both local copies, the executor only the one it runs. Every other field agrees.
+        """
+        device = _join_transfer_group()
+        rank = dist.get_rank()
+        dtype = torch.float32
+        split = contiguous_split_map((8, ), [4, 4], 0)
+        endpoints = TransferEndpoints(source={0: 0, 1: 1}, target={0: 0, 1: 1})
+        plan = plan_transfer(split, split)
+        shard = torch.arange(4, dtype=dtype, device=device) + 4 * rank
+        other = torch.full((4, ), float('nan'), dtype=dtype, device=device)
+        requests = [
+            TransferRequest('in-place', plan, {rank: shard}, {rank: shard}),
+            TransferRequest('copied', plan, {rank: shard.clone()}, {rank: other}),
+        ]
+
+        stats = execute_transfers(requests, endpoints, dtype)
+        expected = expected_stats(analyze_transfers([plan, plan], endpoints, FP32), rank)
+
+        in_place_bytes = shard.numel() * FP32
+        assert expected['local_copy_bytes'] == 2 * in_place_bytes
+        assert expected['local_copy_bytes'] - stats.local_copy_bytes == in_place_bytes
+        assert {
+            key: value
+            for key, value in asdict(stats).items() if key != 'local_copy_bytes'
+        } == {
+            key: value
+            for key, value in expected.items() if key != 'local_copy_bytes'
+        }
+        assert torch.equal(other, shard)

@@ -96,6 +96,11 @@ def analyze_transfers(plans: Sequence[TransferPlan],
     The schedule comes from the executor's ``schedule_transfers``, so the counts match what each
     process will return in ``TransferStats`` and the staging is what it will allocate.
 
+    Local-copy figures are the exception: the analysis sees no buffers, so they include copies that
+    ``execute_transfers`` drops as in place (source and target the same memory at the same strides),
+    which ``TransferStats.local_copy_bytes`` does not count. After a run, a smaller
+    ``local_copy_bytes`` is this known difference, not a prediction error.
+
     ``element_size`` must be the element size of the tensors the batch will run on, which
     ``execute_transfers`` takes from their dtype (``torch.empty((), dtype=dtype).element_size()``).
     A different value is not detected: chunks, rounds and byte counts are then predicted for
@@ -177,6 +182,9 @@ def expected_stats(report: PlanReport, process: int) -> Dict[str, int]:
 
     ``segments`` and ``chunks`` count the whole batch, so every process returns the same values;
     the other fields are that process's own.
+
+    ``local_copy_bytes`` is an upper bound: it includes the local copies ``execute_transfers`` drops
+    as in place, which the returned ``TransferStats`` leaves out. The other fields are exact.
     """
     entry = report.process(process)
     return {
