@@ -1835,22 +1835,6 @@ def test_sync_weights_drops_derived_caches():
     assert not hasattr(engine.module, "_ki_tp_cat_w")
 
 
-def test_sync_weights_without_segki_preserves_graph_states():
-    engine = SimpleNamespace(module=torch.nn.Identity())
-    engine.module._ki_tp_cat_w = object()
-    rollout = HybridEngineRollout(engine, _make_tokenizer())
-    continuous_state = object()
-    static_state = object()
-    rollout._continuous_graph_state = continuous_state
-    rollout._static_graph_state = static_state
-
-    rollout.sync_weights(step=0)
-
-    assert rollout._continuous_graph_state is continuous_state
-    assert rollout._static_graph_state is static_state
-    assert hasattr(engine.module, "_ki_tp_cat_w")
-
-
 def test_sync_weights_continuous_graph_safe():
     """Continuous graph + weight sync must not replay freed derived tensors.
 

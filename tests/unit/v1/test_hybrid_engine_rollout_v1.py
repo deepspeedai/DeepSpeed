@@ -543,6 +543,61 @@ def test_static_graph_is_reused_across_rollouts_with_the_same_decode_shape(monke
     assert accelerator.memory_allocated() <= allocated - cache_bytes
 
 
+@pytest.mark.parametrize("continuous_batch_size", [None, 2])
+def test_graph_revalidates_tensors_replaced_during_prefill(monkeypatch, continuous_batch_size):
+    accelerator = get_accelerator()
+    if not accelerator.is_available() or accelerator.create_graph() is None:
+        pytest.skip("requires graph capture")
+
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    torch.manual_seed(1234)
+    config = LlamaConfig(vocab_size=64,
+                         hidden_size=64,
+                         intermediate_size=128,
+                         num_hidden_layers=2,
+                         num_attention_heads=4,
+                         num_key_value_heads=2,
+                         max_position_embeddings=128)
+    config._attn_implementation = "eager"
+    device = torch.device(accelerator.device_name())
+    model = LlamaForCausalLM(config).to(device).eval()
+    prompt_ids = torch.randint(1, 64, (2, 8), generator=torch.Generator().manual_seed(1)).to(device)
+    attention_mask = torch.ones_like(prompt_ids)
+    sampling = SamplingConfig(max_new_tokens=6, temperature=0, continuous_batch_size=continuous_batch_size)
+    tokenizer = SimpleNamespace(pad_token_id=0, eos_token_id=-1)
+    rollout = HybridEngineRollout(SimpleNamespace(module=model),
+                                  tokenizer,
+                                  cfg=HybridEngineRolloutConfig(use_graph_capture=True))
+    capture_count = 0
+    original_capture_to_graph = accelerator.capture_to_graph
+
+    def counted_capture_to_graph(*args, **kwargs):
+        nonlocal capture_count
+        capture_count += 1
+        return original_capture_to_graph(*args, **kwargs)
+
+    monkeypatch.setattr(accelerator, "capture_to_graph", counted_capture_to_graph)
+    first = rollout.generate(RolloutRequest(prompt_ids, attention_mask), sampling)
+    assert capture_count == 1
+
+    replaced = [False]
+    handle = None
+
+    def replace_buffer_once(*_args, **_kwargs):
+        if not replaced[0]:
+            rotary = model.model.rotary_emb
+            rotary.inv_freq = rotary.inv_freq.clone()
+            replaced[0] = True
+            handle.remove()
+
+    handle = model.register_forward_pre_hook(replace_buffer_once)
+    second = rollout.generate(RolloutRequest(prompt_ids, attention_mask), sampling)
+    assert replaced[0]
+    assert torch.equal(second.input_ids, first.input_ids)
+    assert capture_count == 2
+
+
 def test_continuous_generation_profile_on_accelerator():
     accelerator = get_accelerator()
     if not accelerator.is_available():
@@ -725,7 +780,9 @@ def test_continuous_rollout_matches_native_llama_generation_on_accelerator(attn_
 
     monkeypatch.setattr(accelerator, "capture_to_graph", counted_capture_to_graph)
     # Three requests and two slots force refill; the second call also exercises graph reuse.
-    for rollout in (eager_rollout, graph_rollout, graph_rollout):
+    for rollout_index, rollout in enumerate((eager_rollout, graph_rollout, graph_rollout)):
+        if rollout_index == 2:
+            rollout.sync_weights(step=1)
         output = rollout.generate(request, sampling)
         assert torch.equal(output.input_ids, reference)
         assert torch.equal(output.attention_mask, expected_attention)

@@ -946,8 +946,13 @@ class HybridEngineRollout(RolloutEngine):
             request_by_id[request_id] = request
             responses[request_id] = []
 
-        state = self._get_continuous_graph_state(module, max_batch_size, max_cache_len, device, model_dtype,
-                                                 DeepSpeedStaticCache)
+        state = self._get_continuous_graph_state(module,
+                                                 max_batch_size,
+                                                 max_cache_len,
+                                                 device,
+                                                 model_dtype,
+                                                 DeepSpeedStaticCache,
+                                                 capture=False)
         cache = state.cache
         static_input = state.static_input
         static_attention = state.static_attention
@@ -1014,6 +1019,30 @@ class HybridEngineRollout(RolloutEngine):
                     generation_config=generation_config,
                 )
                 next_tokens.update(admitted_tokens)
+                post_prefill_signature = self._graph_signature(module, max_batch_size, max_cache_len, device,
+                                                               model_dtype)
+                needs_capture = graph is None or state.signature != post_prefill_signature
+                if self._group_needs_capture(needs_capture):
+                    if graph is not None:
+                        get_accelerator().synchronize()
+                    state.signature = post_prefill_signature
+                    state.graph = None
+                    state.static_logits = None
+                    # Capture at an unused cache position so prompt KV copied by
+                    # this prefill is not overwritten by warmup or capture.
+                    static_write_positions.fill_(max_cache_len - 1)
+                    graph, static_logits = self._capture_continuous_graph(
+                        module,
+                        cache,
+                        static_input,
+                        static_causal_attention,
+                        static_write_positions,
+                        state.static_cache_position,
+                        static_position_ids,
+                    )
+                    static_write_positions.zero_()
+                    state.graph = graph
+                    state.static_logits = static_logits
 
             decode_ids = tuple(request_id for request_id in update.active_ids if request_id not in admitted_ids)
             static_input.zero_()
@@ -1096,7 +1125,14 @@ class HybridEngineRollout(RolloutEngine):
                 and self.continuous_cache_capacity < prompt_len + sampling.max_new_tokens):
             raise ValueError("continuous_cache_capacity must fit the prompt and all generated tokens")
 
-    def _get_continuous_graph_state(self, module, max_batch_size, max_cache_len, device, model_dtype, cache_type):
+    def _get_continuous_graph_state(self,
+                                    module,
+                                    max_batch_size,
+                                    max_cache_len,
+                                    device,
+                                    model_dtype,
+                                    cache_type,
+                                    capture=True):
         signature = self._graph_signature(module, max_batch_size, max_cache_len, device, model_dtype)
         state = self._continuous_graph_state
         if self._group_needs_capture(state is None or state.signature != signature):
@@ -1117,15 +1153,17 @@ class HybridEngineRollout(RolloutEngine):
             # validity is represented by static_attention, so a fixed upper bound
             # lets one captured graph serve requests at different decode lengths.
             static_cache_position = torch.tensor([max_cache_len - 1], dtype=torch.long, device=device)
-            graph, static_logits = self._capture_continuous_graph(
-                module,
-                cache,
-                static_input,
-                static_causal_attention,
-                static_write_positions,
-                static_cache_position,
-                static_position_ids,
-            )
+            graph = static_logits = None
+            if capture:
+                graph, static_logits = self._capture_continuous_graph(
+                    module,
+                    cache,
+                    static_input,
+                    static_causal_attention,
+                    static_write_positions,
+                    static_cache_position,
+                    static_position_ids,
+                )
             state = _ContinuousGraphState(
                 signature,
                 cache,
@@ -1959,23 +1997,37 @@ class HybridEngineRollout(RolloutEngine):
         state = self._get_static_graph_state(module, batch_size, max_len, device, model_dtype, is_hybrid,
                                              use_step_kernel)
 
+        def run_prefill(cache):
+            prefill_mask = {"full_attention": None, "linear_attention": None} if is_hybrid else prompt_attn
+            return module(
+                prompt_ids,
+                attention_mask=prefill_mask,
+                past_key_values=cache,
+                use_cache=True,
+                # explicit position tensors: HF derives them from the cache
+                # otherwise, which D2H-syncs and aborts stream capture on some
+                # model/cache combinations (reproduced with LLaMA + StaticCache)
+                cache_position=torch.arange(prompt_len, device=device),
+                **self._last_logits_kwargs(module),
+            )
+
         # --- Prefill with a static cache (correct attention semantics) ---
         prefill_cache = state.prefill_cache
         if prefill_cache is None:
             prefill_cache = self._create_prefill_cache(StaticCache, module.config, batch_size, max_len, device,
                                                        model_dtype)
-        prefill_mask = {"full_attention": None, "linear_attention": None} if is_hybrid else prompt_attn
-        prefill_out = module(
-            prompt_ids,
-            attention_mask=prefill_mask,
-            past_key_values=prefill_cache,
-            use_cache=True,
-            # explicit position tensors: HF derives them from the cache
-            # otherwise, which D2H-syncs and aborts stream capture on some
-            # model/cache combinations (reproduced with LLaMA + StaticCache)
-            cache_position=torch.arange(prompt_len, device=device),
-            **self._last_logits_kwargs(module),
-        )
+        prefill_out = run_prefill(prefill_cache)
+        post_prefill_signature = self._graph_signature(module, batch_size, max_len, device,
+                                                       model_dtype) + (use_step_kernel, )
+        if state.signature != post_prefill_signature:
+            self._static_graph_state = None
+            state = self._get_static_graph_state(module, batch_size, max_len, device, model_dtype, is_hybrid,
+                                                 use_step_kernel)
+            prefill_cache = state.prefill_cache
+            if prefill_cache is None:
+                prefill_cache = self._create_prefill_cache(StaticCache, module.config, batch_size, max_len, device,
+                                                           model_dtype)
+            prefill_out = run_prefill(prefill_cache)
         next_token = next_tokens(prefill_out.logits[:, -1, :])
         output_ids.append(next_token)
 
