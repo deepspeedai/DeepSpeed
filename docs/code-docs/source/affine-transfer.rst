@@ -86,14 +86,23 @@ it. Each layout uses its own locations, one per buffer, and
 ``TransferEndpoints`` may bind several locations to one process::
 
     from deepspeed.checkpoint.affine import union_affine_maps
+    from deepspeed.checkpoint.affine_transfer import PlanBudget, plan_transfer
 
     source_map = union_affine_maps([zero3_storage_map, surviving_shard_map])
-    plan = plan_transfer(target_map, source_map)
+    # A union is cut at every layout's edges, so it has more pieces than either layout.
+    plan = plan_transfer(target_map, source_map, PlanBudget(max_pieces_per_map=1 << 16))
 
 Pieces are cut where the layouts' blocks meet and keep their strides, so each
-buffer is read as it is stored. The planner does not yet accept a ZeRO-3 block
-that a column edge cuts across several rows. Maintenance contact:
-``@Achyuthan-S``.
+buffer is read as it is stored. A ZeRO-3 block that a column edge cuts across
+several rows keeps its row-major strides and is read as a strided flat shard.
+
+The union's piece count grows with the number of partitions times the edges
+each one crosses, so it can exceed the default ``PlanBudget``, which allows
+4,096 pieces per map. For a (4096, 4096) parameter, ZeRO-3 partitions plus an
+8-way row split give 1,196 pieces at 200 partitions and 5,996 at 1,000; with
+an 8-way column split, 6,782 and 33,976. Raise ``max_pieces_per_map`` to fit.
+At 1,000 partitions with a column split, a plan into a column-split target also
+needs a larger ``max_merge_checks``. Maintenance contact: ``@Achyuthan-S``.
 
 Transport and staging
 ---------------------

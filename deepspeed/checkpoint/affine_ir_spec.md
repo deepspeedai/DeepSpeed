@@ -750,4 +750,5 @@ within one layout may cut a region at different edges), and each cut piece lists
 every layout, so P5 holds and the planner may read either copy.
 A cut keeps a piece's strides and moves its offsets, so every location keeps its storage. A
 ZeRO-3 block of several rows cut at a column edge keeps its row-major strides and its partition's
-offset, so it is not dense in its 1-D shard (10.2): it is described, but not yet planned.
+offset, so it is not dense in its 1-D shard: it is stored in parameter order (10.2), which the
+planner reads, so a column cut is planned as well as described.
