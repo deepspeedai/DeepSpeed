@@ -256,8 +256,11 @@ class HybridEngineRollout(RolloutEngine):
         PROVISIONAL contract — see segki_refresh; the final weight-sync
         handshake is still under design.
         """
+        if not self.use_segki:
+            return
+
         from deepspeed.module_inject.segment_ki import segki_refresh
-        if self.use_segki and (self._continuous_graph_state is not None or self._static_graph_state is not None):
+        if self._continuous_graph_state is not None or self._static_graph_state is not None:
             get_accelerator().synchronize()
             self._continuous_graph_state = None
             self._static_graph_state = None
@@ -1145,8 +1148,7 @@ class HybridEngineRollout(RolloutEngine):
         state.static_write_positions.zero_()
         return state
 
-    @staticmethod
-    def _graph_signature(module, max_batch_size, max_cache_len, device, model_dtype):
+    def _graph_signature(self, module, max_batch_size, max_cache_len, device, model_dtype):
         # Replay reads parameters and buffers through the address and layout fixed
         # at capture, so in-place value updates need no recapture, but a moved or
         # re-laid-out tensor does. Prefill runs eagerly, so the prompt width only
@@ -1163,7 +1165,7 @@ class HybridEngineRollout(RolloutEngine):
         autocast_dtype = _get_autocast_dtype(device.type) if autocast_enabled else None
         # segki_refresh frees the injected kernels' derived-weight tensors, which
         # a graph captured before it would still read.
-        segki_generation = getattr(module, "_ki_refresh_generation", 0)
+        segki_generation = getattr(module, "_ki_refresh_generation", 0) if self.use_segki else 0
         return (id(module), module.training, autocast_enabled, autocast_dtype, device.type, device_index, model_dtype,
                 max_batch_size, max_cache_len, segki_generation, tensor_signature)
 

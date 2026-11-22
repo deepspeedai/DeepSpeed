@@ -23,6 +23,7 @@ from deepspeed.accelerator import get_accelerator
 from deepspeed.ops.transformer.inference.op_binding.workspace import WorkspaceOp
 from deepspeed.runtime.hybrid_engine import DeepSpeedHybridEngine
 from deepspeed.runtime.rollout.base import RolloutRequest, SamplingConfig
+from deepspeed.runtime.zero.linear import _get_autocast_dtype, _is_autocast_enabled
 from deepspeed.runtime.rollout.hybrid_engine_rollout import (
     GlobalWorkRemaining,
     HybridEngineRollout,
@@ -46,6 +47,20 @@ def _make_tokenizer():
     tok.pad_token_id = 0
     tok.eos_token_id = 2
     return tok
+
+
+def test_graph_signature_supports_legacy_autocast_getters(monkeypatch):
+
+    def legacy_enabled():
+        return True
+
+    monkeypatch.setattr(torch, "is_autocast_enabled", legacy_enabled)
+    monkeypatch.setattr(torch, "is_autocast_cuda_enabled", lambda: True, raising=False)
+    monkeypatch.delattr(torch, "get_autocast_dtype")
+    monkeypatch.setattr(torch, "get_autocast_gpu_dtype", lambda: torch.bfloat16, raising=False)
+
+    assert _is_autocast_enabled("cuda")
+    assert _get_autocast_dtype("cuda") is torch.bfloat16
 
 
 def _make_request():
@@ -1815,8 +1830,25 @@ def test_sync_weights_drops_derived_caches():
     engine.module = torch.nn.Identity()
     engine.module._ki_tp_cat_w = object()  # a derived-weight cache stand-in
     rollout = HybridEngineRollout(engine, _make_tokenizer())
+    rollout.use_segki = True
     rollout.sync_weights(step=0)
     assert not hasattr(engine.module, "_ki_tp_cat_w")
+
+
+def test_sync_weights_without_segki_preserves_graph_states():
+    engine = SimpleNamespace(module=torch.nn.Identity())
+    engine.module._ki_tp_cat_w = object()
+    rollout = HybridEngineRollout(engine, _make_tokenizer())
+    continuous_state = object()
+    static_state = object()
+    rollout._continuous_graph_state = continuous_state
+    rollout._static_graph_state = static_state
+
+    rollout.sync_weights(step=0)
+
+    assert rollout._continuous_graph_state is continuous_state
+    assert rollout._static_graph_state is static_state
+    assert hasattr(engine.module, "_ki_tp_cat_w")
 
 
 def test_sync_weights_continuous_graph_safe():

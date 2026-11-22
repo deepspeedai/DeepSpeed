@@ -498,6 +498,7 @@ def test_static_graph_is_reused_across_rollouts_with_the_same_decode_shape(monke
             with torch.no_grad():
                 for parameter in model.parameters():
                     parameter.add_(torch.randn_like(parameter) * 0.05)
+            rollout.sync_weights(step=1)
         attention_mask = torch.ones_like(prompt_ids)
         with torch.no_grad():
             expected = model.generate(prompt_ids,
