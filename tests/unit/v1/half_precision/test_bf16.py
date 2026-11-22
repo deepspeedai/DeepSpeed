@@ -14,6 +14,7 @@ from unit.util import bf16_required_version_check
 from deepspeed import comm as dist
 from deepspeed.accelerator import get_accelerator
 from deepspeed.runtime.bf16_optimizer import BF16_Optimizer
+from deepspeed.runtime.config import DeepSpeedConfig
 from deepspeed.runtime.stochastic_rounding import stochastic_round_to_bf16_
 from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer
 from deepspeed.utils import safe_get_full_fp32_param, safe_get_full_grad
@@ -675,11 +676,11 @@ class TestBF16FullGradientReconstruction(DistributedTest):
 
 _SR_NUMEL = (1 << 16) + 1  # odd, so the last rank's partition ends in padding
 _SR_STEPS = 8
-_SR_LR = 1e-4  # 8 steps move a master by 8e-4, less than half the bf16 spacing of any |w| in [0.3, 1)
+_SR_LR = 1e-4  # 8 steps move a master by 8e-4, less than half the bf16 spacing of any |w| in [0.3, 1]
 
 
 class _ConstantGradientModel(torch.nn.Module):
-    """Every element's gradient is 1, so each Adam step moves every fp32 master by exactly -lr."""
+    """Every element's gradient is 1, so each Adam step moves every fp32 master by approximately -lr."""
 
     def __init__(self):
         super().__init__()
@@ -705,7 +706,7 @@ def _bf16_neighbours(master):
 
 def test_stochastic_round_to_bf16_kernel():
     tiny = 2.0**-133  # the smallest bf16 subnormal
-    values = torch.tensor([1 + 2.0**-9, -(1 + 3 * 2.0**-9), 0.3, 2.5 * tiny, -1.25 * tiny])
+    values = torch.tensor([1 + 2.0**-9, -(1 + 3 * 2.0**-9), 0.3, 2 - 2.0**-9, 2.5 * tiny, -1.25 * tiny])
     draws = 1 << 16
     src = values.repeat_interleave(draws)
     dst = torch.empty_like(src, dtype=torch.bfloat16)
@@ -755,8 +756,7 @@ class TestBF16StochasticRoundParams(DistributedTest):
         config_dict = {
             "train_micro_batch_size_per_gpu": 1,
             "bf16": {
-                "enabled": True,
-                "stochastic_round_params": stochastic
+                "enabled": True
             },
             "data_types": {
                 "grad_accum_dtype": grad_accum_dtype
@@ -764,6 +764,8 @@ class TestBF16StochasticRoundParams(DistributedTest):
             "zero_optimization": zero_config,
             "zero_force_ds_cpu_optimizer": False,
         }
+        if stochastic:
+            config_dict["bf16"]["stochastic_round_params"] = True
         model = _ConstantGradientModel()
         optimizer = torch.optim.Adam(model.parameters(), lr=_SR_LR)
         engine, _, _, _ = deepspeed.initialize(config=config_dict, model=model, optimizer=optimizer)
@@ -782,7 +784,9 @@ class TestBF16StochasticRoundParams(DistributedTest):
         dist.all_gather(gathered, weight.detach().float())
         assert all(torch.equal(g, gathered[0]) for g in gathered)
         expected_master = initial.double() - _SR_STEPS * _SR_LR
-        torch.testing.assert_close(master.double(), expected_master, rtol=0, atol=1e-6)
+        # Allow one fp32 epsilon per step for the update near unit magnitude.
+        master_atol = _SR_STEPS * torch.finfo(torch.float32).eps
+        torch.testing.assert_close(master.double(), expected_master, rtol=0, atol=master_atol)
 
         if not stochastic:
             # Round-to-nearest: no master moved half a bf16 spacing, so no bf16 parameter moved.
@@ -795,41 +799,56 @@ class TestBF16StochasticRoundParams(DistributedTest):
             between = high > low
             spacing = (high - low)[between]
             fraction = (master.double() - low)[between] / spacing
-            # Unbiased: the summed error is within 5 standard errors of 0. Round-to-nearest misses by about 150.
+            # Unbiased: the summed error is within 5 standard errors of 0.
             error = ((served - master.double())[between] / spacing).sum()
             standard_error = (fraction * (1 - fraction)).sum().sqrt()
             assert error.abs() < 5 * standard_error, (error, standard_error)
         engine.destroy()
 
 
-@pytest.mark.parametrize("zero_config, bf16_config", [
-    ({
-        "stage": 3
-    }, {}),
-    ({
-        "stage": 2
-    }, {
-        "bf16_master_weights_and_grads": True
-    }),
-])
+def test_bf16_stochastic_round_params_refuses_bf16_masters():
+    config = {
+        "train_micro_batch_size_per_gpu": 1,
+        "bf16": {
+            "enabled": True,
+            "stochastic_round_params": True,
+            "bf16_master_weights_and_grads": True
+        },
+        "zero_optimization": {
+            "stage": 2,
+            "offload_optimizer": {
+                "device": "cpu"
+            }
+        },
+    }
+    with pytest.raises(ValueError, match="stochastic_round_params"):
+        DeepSpeedConfig(config)
+
+
 class TestBF16StochasticRoundParamsUnsupported(DistributedTest):
     world_size = 1
 
-    def test_refused(self, zero_config, bf16_config):
+    def test_zero3_refused(self):
         if not bf16_required_version_check():
             pytest.skip(
                 " DeepSpeed BFloat16 tests need torch >= 1.10, NCCL >= 2.10.3, CUDA > =11.0 and HW support for BFloat16 to run correctly"
             )
         config_dict = {
+            "zero_optimization": {
+                "stage": 3
+            },
             "train_micro_batch_size_per_gpu": 1,
             "bf16": {
                 "enabled": True,
-                "stochastic_round_params": True,
-                **bf16_config
+                "stochastic_round_params": True
             },
-            "zero_optimization": zero_config,
         }
         model = _ConstantGradientModel()
         optimizer = torch.optim.Adam(model.parameters(), lr=_SR_LR)
-        with pytest.raises(ValueError, match="stochastic_round_params"):
-            deepspeed.initialize(config=config_dict, model=model, optimizer=optimizer)
+        try:
+            engine, _, _, _ = deepspeed.initialize(config=config_dict, model=model, optimizer=optimizer)
+        except ValueError as error:
+            assert "stochastic_round_params" in str(error)
+            return
+        engine.destroy()
+        raise AssertionError("Unsupported stochastic rounding configuration was accepted")

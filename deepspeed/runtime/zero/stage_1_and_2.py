@@ -204,11 +204,11 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                  fp16_master_weights_and_gradients=False,
                  bf16_master_weights_and_gradients=False,
                  bf16_optimizer_states=False,
-                 bf16_stochastic_round_params=False,
                  elastic_checkpoint=False,
                  check_grad_overflow=True,
                  compute_grad_norm=True,
-                 retain_gpu_grad_partition_until_step=False):
+                 retain_gpu_grad_partition_until_step=False,
+                 bf16_stochastic_round_params=False):
 
         super().__init__()
 
@@ -567,9 +567,9 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             weights_partition = self.parallel_partitioned_bit16_groups[i][partition_id].detach().clone().to(
                 device=self.device, dtype=self.master_weights_and_grads_dtype)
 
-            if self.cpu_offload:
-                if self.cpu_offload_pin_memory:
-                    weights_partition = get_accelerator().pin_memory(weights_partition)
+            if self.cpu_offload_pin_memory:
+                weights_partition = get_accelerator().pin_memory(weights_partition)
+            if self.cpu_offload and not bf16_stochastic_round_params:
                 temp_dtype = self.parallel_partitioned_bit16_groups[i][partition_id].dtype
                 temp_buffer_bit16 = torch.full(weights_partition.shape,
                                                fill_value=0.0,
@@ -3217,13 +3217,13 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 #    bit16_partitions[partition_id].data.copy_(fp32_partition.data)
                 bit16_partitions = self.parallel_partitioned_bit16_groups[i]
                 fp32_partition = self.single_partition_of_fp32_groups[i]
-                if isinstance(self._copy_to_bit16, StochasticRoundingCopy):
-                    # Round on the accelerator: on the host the random draw is serial, about 5 ns per element.
-                    self._copy_to_bit16(bit16_partitions[partition_id].data, fp32_partition.data)
-                else:
+                if self.param_buffer_of_bit16_for_cpu_offload_groups:
                     bit16_partition_buffer = self.param_buffer_of_bit16_for_cpu_offload_groups[i]
                     bit16_partition_buffer.data.copy_(fp32_partition.data)
                     bit16_partitions[partition_id].data.copy_(bit16_partition_buffer.data, non_blocking=True)
+                else:
+                    # No staging buffer: stochastic rounding runs on the accelerator, as the host draws serially.
+                    self._copy_to_bit16(bit16_partitions[partition_id].data, fp32_partition.data)
                 self._release_preflattened_grad_buffers(i)
                 self.averaged_gradients[i] = None
 

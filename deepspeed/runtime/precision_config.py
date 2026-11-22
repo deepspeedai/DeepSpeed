@@ -72,9 +72,9 @@ class DeepSpeedBF16Config(DeepSpeedConfigModel):
 
     stochastic_round_params: bool = False
     """
-    Round the bf16 parameters from their fp32 master weights stochastically instead of to nearest (after each optimizer
-    step and after a universal-checkpoint load), so updates smaller than half a bf16 spacing still reach the
-    parameters in expectation. Supported by ZeRO stages 1 and 2 and by BF16_Optimizer; requires fp32 master weights.
+    Stochastically round fp32 master weights into the bf16 parameters after each optimizer step and universal-checkpoint
+    load. The expected result equals the master within the finite bf16 range. Supported by ZeRO stages 1 and 2 and
+    BF16_Optimizer; requires fp32 master weights.
     """
 
     @model_validator(mode="after")

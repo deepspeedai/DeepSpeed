@@ -11,8 +11,7 @@ def stochastic_round_to_bf16_(dst, src, generator):
     """Copy fp32 ``src`` into bf16 ``dst``, rounding each element to one of its two bf16 neighbours at random.
 
     An element rounds away from zero with probability equal to its distance from the neighbour toward zero, as a
-    fraction of the spacing between the two, so ``E[dst] == src``. An fp32 master update smaller than half a bf16
-    spacing therefore still reaches ``dst`` in expectation, where round-to-nearest would leave ``dst`` unchanged.
+    fraction of the spacing between the two, so ``E[dst] == src`` for values within the finite bf16 range.
     Non-finite values round to nearest; finite values beyond the bf16 range can round to infinity. The rounding runs
     on ``dst``'s device, where ``generator`` lives, so an offloaded master is copied there in fp32.
     """
@@ -25,15 +24,15 @@ def stochastic_round_to_bf16_(dst, src, generator):
         # probability of the dropped fraction; fp32 is sign-magnitude, so this holds for either sign.
         noise = torch.randint(0, 1 << 16, (numel, ), dtype=torch.int32, device=chunk.device, generator=generator)
         truncated = noise.add_(chunk.view(torch.int32)).bitwise_and_(-(1 << 16)).view(torch.float32)
-        rounded = torch.where(torch.isfinite(chunk), truncated, chunk)
-        dst.narrow(0, start, numel).copy_(rounded)
+        torch.where(torch.isfinite(chunk), truncated, chunk, out=truncated)
+        dst.narrow(0, start, numel).copy_(truncated)
 
 
 class StochasticRoundingCopy:
     """``copy_(dst, src)`` replacement for the fp32-master to bf16-parameter copy (``bf16.stochastic_round_params``).
 
-    Draws come from one generator per device, seeded from ``torch.initial_seed()`` and the data-parallel rank, so
-    tensor-parallel ranks holding a replicated parameter at the same offsets round it identically. Draws are not
+    Each device's generator is seeded from ``torch.initial_seed()`` and the data-parallel rank. On like devices,
+    replicas with the same seed, partition layout and copy order use the same draws. Generator state is not
     checkpointed. Destinations that are not bf16 (parameters kept in fp32) are copied exactly.
     """
 
