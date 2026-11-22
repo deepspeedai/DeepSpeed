@@ -110,6 +110,9 @@ def test_reload_states_holds_pin_buffers_until_sync(monkeypatch):
         def _link_all_hp_params(self):
             pass
 
+        def _relink_hp_params_optimizer_state(self):
+            pass
+
     optimizer = _FakeZeroOptimizer()
     optimizer.offloaded_states = {OffloadStateTypeEnum.hp_params}
     optimizer.single_partition_of_fp32_groups = [hp_param]
