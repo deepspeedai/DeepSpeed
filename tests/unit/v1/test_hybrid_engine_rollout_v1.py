@@ -453,6 +453,62 @@ def test_static_graph_matches_native_llama_generation(attn_implementation):
     assert output.input_ids.tolist() == expected.tolist()
 
 
+def test_segki_graphs_recapture_after_refresh_or_a_shared_model_reinstall(monkeypatch):
+    accelerator = get_accelerator()
+    if not accelerator.is_available() or accelerator.create_graph() is None:
+        pytest.skip("requires graph capture")
+
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    torch.manual_seed(4321)
+    config = LlamaConfig(vocab_size=64,
+                         hidden_size=64,
+                         intermediate_size=128,
+                         num_hidden_layers=2,
+                         num_attention_heads=4,
+                         num_key_value_heads=2,
+                         max_position_embeddings=64)
+    config._attn_implementation = "sdpa"
+    device = torch.device(accelerator.device_name())
+    model = LlamaForCausalLM(config).to(device).eval()
+    prompt_ids = torch.randint(1, 64, (2, 8), generator=torch.Generator().manual_seed(2)).to(device)
+    attention_mask = torch.ones_like(prompt_ids)
+    sampling = SamplingConfig(max_new_tokens=8, temperature=0)
+    with torch.no_grad():
+        expected = model.generate(prompt_ids,
+                                  attention_mask=attention_mask,
+                                  max_new_tokens=8,
+                                  do_sample=False,
+                                  eos_token_id=None,
+                                  pad_token_id=0)
+
+    original_capture_to_graph = accelerator.capture_to_graph
+    capture_count = 0
+
+    def counted_capture_to_graph(*args, **kwargs):
+        nonlocal capture_count
+        capture_count += 1
+        return original_capture_to_graph(*args, **kwargs)
+
+    monkeypatch.setattr(accelerator, "capture_to_graph", counted_capture_to_graph)
+
+    def make_rollout():
+        return HybridEngineRollout(SimpleNamespace(module=model),
+                                   SimpleNamespace(pad_token_id=0, eos_token_id=-1),
+                                   cfg=HybridEngineRolloutConfig(use_graph_capture=True, use_segki=True))
+
+    first, second = make_rollout(), make_rollout()
+    # first, first (replay), second (reinstalls the model's decode kernels), first (must recapture),
+    # then a refresh, after which first must recapture once more and replay again.
+    for rollout, captures in ((first, 1), (first, 1), (second, 2), (first, 3), (first, 3), ("refresh", 4), (first, 4)):
+        if rollout == "refresh":
+            first.refresh_weights()
+            rollout = first
+        output = rollout.generate(RolloutRequest(prompt_ids, attention_mask), sampling)
+        assert output.input_ids.tolist() == expected.tolist()
+        assert capture_count == captures
+
+
 def test_static_graph_is_reused_across_rollouts_with_the_same_decode_shape(monkeypatch):
     accelerator = get_accelerator()
     if not accelerator.is_available() or accelerator.create_graph() is None:

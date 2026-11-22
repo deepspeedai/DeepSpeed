@@ -742,6 +742,15 @@ def _install_gdn_segment(seg: GDNSegment) -> bool:
 
 _NATIVE_OP_LOAD_WHY = None
 
+# Bumped whenever the backend's process-wide caches are emptied, which every
+# model's injected forwards may read, not only the refreshed model's.
+_BACKEND_GENERATION = 0
+
+
+def segki_backend_generation() -> int:
+    """How many times segKI's process-wide derived-weight caches were emptied."""
+    return _BACKEND_GENERATION
+
 
 def segki_refresh(model: torch.nn.Module) -> None:
     """Drop every derived-weight cache after an in-place weight write.
@@ -773,6 +782,8 @@ def segki_refresh(model: torch.nn.Module) -> None:
     gdn_op = op or next((getattr(m, attr, None) for m in model.modules()
                          for attr in ("_ki_gdn_op", "_ki_dual_op") if getattr(m, attr, None) is not None), None)
     if gdn_op is not None and hasattr(gdn_op, "clear_glu_cat_cache"):
+        global _BACKEND_GENERATION
+        _BACKEND_GENERATION += 1
         gdn_op.clear_glu_cat_cache()
 
 

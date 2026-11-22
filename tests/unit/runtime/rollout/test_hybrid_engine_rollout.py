@@ -77,6 +77,53 @@ def test_disable_autocast_weight_cache_restores_previous_setting(monkeypatch):
     assert state[0] is True
 
 
+def test_graph_signature_tracks_inference_mode_attention_and_segki_backend():
+    module = torch.nn.Linear(2, 2)
+    module.config = PretrainedConfig()
+    module.config._attn_implementation = "sdpa"
+    rollout = HybridEngineRollout(SimpleNamespace(module=module), _make_tokenizer())
+    rollout.use_segki = True
+    device = torch.device("cpu")
+
+    def signature():
+        return rollout._graph_signature(module, 1, 8, device, torch.float32)
+
+    base = signature()
+    with torch.inference_mode():
+        assert signature() != base
+    module.config._attn_implementation = "eager"
+    assert signature() != base
+    module.config._attn_implementation = "sdpa"
+    assert signature() == base
+
+    # Refreshing another model empties the backend's process-wide GLU cache, which this model's graph may read.
+    other = torch.nn.Linear(2, 2)
+    other._ki_dual_op = SimpleNamespace(clear_glu_cat_cache=lambda: None)
+    from deepspeed.module_inject.segment_ki import segki_refresh
+    segki_refresh(other)
+    assert signature() != base
+
+
+def test_recapture_is_agreed_over_the_hybrid_engine_inference_tp_group(monkeypatch):
+    engine = DeepSpeedHybridEngine.__new__(DeepSpeedHybridEngine)
+    engine.mp_group = object()
+    # inference_tp_size > 1 without AutoTP: only the hybrid engine's own group shards the decode forward.
+    engine.autotp_size = lambda: 1
+    rollout = HybridEngineRollout.__new__(HybridEngineRollout)
+    rollout.engine = engine
+    reduced = []
+
+    def all_reduce(tensor, op=None, group=None):
+        reduced.append(group)
+        tensor.fill_(1)
+
+    monkeypatch.setattr(dist, "get_world_size", lambda group=None: 2)
+    monkeypatch.setattr(dist, "all_reduce", all_reduce)
+    # A peer's signature changed, so this rank captures with it even though its own did not.
+    assert rollout._group_needs_capture(False)
+    assert reduced == [engine.mp_group]
+
+
 def _make_request():
     return RolloutRequest(
         prompt_ids=torch.tensor([[0, 1, 2], [0, 3, 4]]),

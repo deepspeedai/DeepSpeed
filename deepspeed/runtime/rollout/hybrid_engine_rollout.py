@@ -1040,8 +1040,8 @@ class HybridEngineRollout(RolloutEngine):
                     if graph is not None:
                         get_accelerator().synchronize()
                     state.signature = post_prefill_signature
-                    state.graph = None
-                    state.static_logits = None
+                    # Drop every reference to the old graph pool and logits before capturing their replacement.
+                    state.graph = state.static_logits = graph = static_logits = None
                     # Capture at an unused cache position so prompt KV copied by
                     # this prefill is not overwritten by warmup or capture.
                     static_write_positions.fill_(max_cache_len - 1)
@@ -1217,26 +1217,49 @@ class HybridEngineRollout(RolloutEngine):
         autocast_enabled = _is_autocast_enabled(device.type)
         autocast_dtype = _get_autocast_dtype(device.type) if autocast_enabled else None
         # segki_refresh frees the injected kernels' derived-weight tensors, which
-        # a graph captured before it would still read.
-        segki_generation = getattr(module, "_ki_refresh_generation", 0) if self.use_segki else 0
+        # a graph captured before it would still read, and also empties the
+        # backend's process-wide GLU cache that other models' graphs read.
+        segki_generation = 0
+        if self.use_segki:
+            from deepspeed.module_inject.segment_ki import segki_backend_generation
+            segki_generation = (getattr(module, "_ki_refresh_generation", 0), segki_backend_generation())
+        # Persistent buffers made under inference mode cannot be updated in place outside it, and
+        # decode replays the attention implementation (and its mask format) chosen at capture.
+        inference_mode = torch.is_inference_mode_enabled()
+        attn_implementation = getattr(getattr(module, "config", None), "_attn_implementation", None)
         return (id(module), module.training, autocast_enabled, autocast_dtype, device.type, device_index, model_dtype,
-                max_batch_size, max_cache_len, segki_generation, module_modes, tensor_signature)
+                max_batch_size, max_cache_len, segki_generation, inference_mode, attn_implementation, module_modes,
+                tensor_signature)
+
+    def _capture_groups(self):
+        """The tensor-parallel groups whose collectives a decode forward runs."""
+        capture_groups = []
+        autotp_size = getattr(self.engine, "autotp_size", None)
+        if callable(autotp_size) and autotp_size() > 1:
+            from deepspeed.utils import groups
+            capture_groups.append(groups.get_tensor_model_parallel_group())
+        # DeepSpeedHybridEngine with inference_tp_size > 1 shards the inference
+        # containers over its own mp_group, separate from the AutoTP group.
+        from deepspeed.runtime.hybrid_engine import DeepSpeedHybridEngine
+        mp_group = getattr(self.engine, "mp_group", None) if isinstance(self.engine, DeepSpeedHybridEngine) else None
+        if mp_group is not None and mp_group not in capture_groups and dist.get_world_size(group=mp_group) > 1:
+            capture_groups.append(mp_group)
+        return capture_groups
 
     def _group_needs_capture(self, local_needs_capture):
-        """Return whether any rank of the AutoTP group must capture again.
+        """Return whether any rank of the tensor-parallel groups must capture again.
 
         Capture runs forwards that hold TP collectives, so a rank whose own
         signature changed must not capture while its peers replay.
         """
-        autotp_size = getattr(self.engine, "autotp_size", None)
-        if not callable(autotp_size) or autotp_size() <= 1:
+        capture_groups = self._capture_groups()
+        if not capture_groups:
             return local_needs_capture
-        from deepspeed.utils import groups
-
         flag = torch.tensor(int(local_needs_capture),
                             dtype=torch.int32,
                             device=get_accelerator().current_device_name())
-        dist.all_reduce(flag, op=dist.ReduceOp.MAX, group=groups.get_tensor_model_parallel_group())
+        for group in capture_groups:
+            dist.all_reduce(flag, op=dist.ReduceOp.MAX, group=group)
         return bool(flag.item())
 
     @staticmethod
@@ -2263,6 +2286,10 @@ class HybridEngineRollout(RolloutEngine):
         # warmup forwards so the captured graph records the kernel.
         module._ki_fused_norm_patched = 0
         if self.use_segki:
+            # Installing replaces model-owned tensors (RoPE tables, norm scales) that
+            # another rollout's graph over this model may read, so advance the model's
+            # generation and keep this state's signature current, even after a partial install.
+            module._ki_refresh_generation = getattr(module, "_ki_refresh_generation", 0) + 1
             try:
                 from deepspeed.module_inject.segment_ki import install_decode_attention, install_fused_norm, install_lm_head
                 from deepspeed.ops.module_inject import get_fused_glu_op
@@ -2295,6 +2322,8 @@ class HybridEngineRollout(RolloutEngine):
                 logger.warning_once(f"segKI decode install failed; rollout falls back to the HF forward "
                                     f"({type(e).__name__}: {e}). Decode will run without the injected kernels.")
                 module._ki_fused_norm_patched = 0
+            state.signature = self._graph_signature(module, batch_size, max_len, device,
+                                                    model_dtype) + (use_step_kernel, )
 
         # Snapshot the GDN states right after prefill: the warmup forwards
         # advance conv/recurrent states by extra steps, so they must be
