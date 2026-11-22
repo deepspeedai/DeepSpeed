@@ -575,6 +575,7 @@ class DeepSpeedEngine(Module):
         self.mesh_device = mesh_device
         self._autoep_folding_spec = None
         self._autoep_folding_group_handles = None
+        self._autoep_dw_stagings = []
         self._python_gc_generation = None
 
         # Flag to indicate that scale() was called before manual backward pass
@@ -854,6 +855,20 @@ class DeepSpeedEngine(Module):
                                tp_size,
                                sp_size,
                                zero_stage=self.zero_optimization_stage())
+        if autoep_config.deferred_dw_flush_period > 1:
+            # The engine flushes staged expert weight gradients in the backward that closes an accumulation
+            # window, so it must know that backward while it runs and nothing may read gradients before it.
+            if not self.managed_gradient_accumulation():
+                raise ValueError("deferred_dw_flush_period needs the engine to know which backward closes a "
+                                 "gradient accumulation window. Set managed_gradient_accumulation=true, or leave "
+                                 "deferred_dw_flush_period unset.")
+            if self.zenflow_config() is not None:
+                raise ValueError("deferred_dw_flush_period does not support ZenFlow, which reads gradients between "
+                                 "accumulation boundaries. Disable ZenFlow, or leave deferred_dw_flush_period unset.")
+            if self.is_deepcompile_enabled():
+                raise ValueError("deferred_dw_flush_period stages expert weight gradients in an eager autograd "
+                                 "function, which DeepCompile does not trace. Disable DeepCompile, or leave "
+                                 "deferred_dw_flush_period unset.")
         folding_spec = build_folding_spec(
             world_size=world_size,
             pp_size=pp_size,
@@ -920,6 +935,10 @@ class DeepSpeedEngine(Module):
                 on_moe_layer_replaced=on_moe_layer_replaced,
             )
             logger.info(f"AutoEP: replaced {len(specs)} MoE layer(s) with ep_size={ep_size}")
+            for module in model.modules():
+                dw_staging = getattr(module, "dw_staging", None)
+                if dw_staging is not None:
+                    self._autoep_dw_stagings.append(dw_staging)
 
             # Re-tag optimizer flags for newly created AutoEP parameters
             from deepspeed import set_optimizer_flags
@@ -1059,16 +1078,19 @@ class DeepSpeedEngine(Module):
         # from_model_config descends into text_config itself, so multimodal outer configs
         # work here too.
         from deepspeed.module_inject.tp_shard import AutoTPMeta
+        from deepspeed.module_inject.fusedqkv_utils import replicates_kv_block, replicated_kv_shard_heads
 
-        num_kv_heads = AutoTPMeta.from_model_config(model_config).num_kv_heads
+        meta = AutoTPMeta.from_model_config(model_config)
+        # Replicated-K/V layouts are bounded by query heads, not K/V heads.
+        replicated_kv = replicates_kv_block(model)
+        shard_heads = replicated_kv_shard_heads(meta, replicated_kv)
 
-        # Ranks beyond the KV head count get no attention shard. This still computes the
-        # correct result because the row-parallel all-reduce sums their empty contribution,
-        # but attention work concentrates on the first num_kv_heads ranks.
-        if num_kv_heads is not None and tp_size > num_kv_heads:
+        # The replicated-K/V rejection lives in AutoTP.set_tensor_parallel_config and also
+        # covers inference; keep this warning only for non-replicated layouts.
+        if not replicated_kv and shard_heads is not None and tp_size > shard_heads:
             log_dist(
                 f"AutoTP: autotp_size ({tp_size}) exceeds the model's key-value head count "
-                f"({num_kv_heads}); ranks beyond the head count hold no attention shard and "
+                f"({shard_heads}); ranks beyond the head count hold no attention shard and "
                 "attention throughput will not scale past that point.",
                 ranks=[0],
                 level=logging.WARNING)
@@ -2927,6 +2949,9 @@ class DeepSpeedEngine(Module):
         if self.mpu is not None:
             data_parallel_world_size = self.mpu.get_data_parallel_world_size()
             data_parallel_rank = self.mpu.get_data_parallel_rank()
+        elif self.mesh_device is not None:
+            # The ranks of a sequence parallel group must load the same samples.
+            data_parallel_rank = dist.get_rank(group=self.mesh_device.get_group(mesh_dim="data_parallel"))
 
         if data_sampler is None and (route == ROUTE_PREDICT or route == ROUTE_EVAL):
             data_sampler = torch.utils.data.DistributedSampler(
@@ -3221,6 +3246,10 @@ class DeepSpeedEngine(Module):
                                "Please use engine.backward(loss) instead.")
 
         see_memory_usage("Engine before backward", force=self.memory_breakdown())
+
+        # The backward that closes an accumulation window must return every staged expert weight gradient.
+        for dw_staging in getattr(self, "_autoep_dw_stagings", ()):
+            dw_staging.flush_on_stage = self.is_gradient_accumulation_boundary()
 
         if self.is_deepcompile_active() and not self.uses_parallelization_pass_only():
             deepcompile_backward_prologue(self.is_gradient_accumulation_boundary())
@@ -3699,6 +3728,11 @@ class DeepSpeedEngine(Module):
         if self.is_gradient_accumulation_boundary():
             if self.checkpoint_engine.is_decoupled():
                 self._commit_decoupled_checkpoint()
+
+            if any(dw_staging.has_staged_rows for dw_staging in getattr(self, "_autoep_dw_stagings", ())):
+                raise RuntimeError("Expert weight gradients are still staged at an optimizer step, which would "
+                                   "apply them one step late. deferred_dw_flush_period needs the backward that "
+                                   "closes each gradient accumulation window to run through the engine.")
 
             self._take_model_step(lr_kwargs)
 
