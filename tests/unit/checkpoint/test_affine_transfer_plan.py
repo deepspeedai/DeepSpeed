@@ -1125,19 +1125,31 @@ def test_a_union_of_three_layouts_does_not_depend_on_their_order():
             assert torch.equal(produced[rank], target.extract(full, rank)), rank
 
 
-def test_a_column_cut_keeps_every_zero3_element_where_it_is():
+@pytest.mark.parametrize('rows,cols,sizes,survivors,partitions', [
+    (6, 5, [3, 2], [0], 2),
+    (7, 4, [2, 1, 1], [0, 2], 3),
+    (9, 4, [2, 2], [1], 7),
+])
+def test_a_column_cut_plans_from_the_surviving_column_shard(rows, cols, sizes, survivors, partitions):
     """Cut at a column edge, a ZeRO-3 block of several rows keeps its strides and its partition's offset.
 
-    The union stays exact either way; whether a plan may read such a block is the planner's question.
+    Such a block is not dense in its flat shard, so this also needs the planner to read strided flat shards.
     """
-    rows, cols = 6, 5
-    zero = _zero3_storage((rows, cols), 2, first_location=100)
-    shard = _surviving(contiguous_split_map((rows, cols), [3, 2], 1), [0], first_location=0)
+    zero = _zero3_storage((rows, cols), partitions, first_location=100)
+    shard = _surviving(contiguous_split_map((rows, cols), sizes, 1), survivors, first_location=0)
     source = union_affine_maps([zero, shard])
-    full = _full(rows, cols, seed=11)
+    full = _full(rows, cols, seed=rows * cols)
     _assert_union_holds_what_each_layout_holds(source, [zero, shard], full)
-    shards = {location: source.extract(full, location) for location in source.shard_shapes}
+    shards = _shards(source, lambda map_, rank: map_.extract(full, rank))
     assert torch.equal(source.rebuild(shards).view(rows, cols), full)
+
+    for target in (contiguous_split_map((rows, cols), _split(rows, 2),
+                                        0), contiguous_split_map((rows, cols), _split(cols, 3), 1)):
+        plan = plan_transfer(target, source)
+        produced = _apply_plan(plan, target, shards)
+        for rank in target.shard_shapes:
+            assert torch.equal(produced[rank], target.extract(full, rank)), rank
+        assert {segment.source_rank for segment in plan.segments} & set(survivors)
 
 
 def test_a_union_refuses_layouts_it_cannot_merge():
