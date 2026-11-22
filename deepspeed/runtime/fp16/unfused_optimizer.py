@@ -15,7 +15,7 @@ from deepspeed.runtime.base_optimizer import DeepSpeedOptimizer
 from deepspeed.runtime.utils import (CheckOverflow, get_global_norm, get_weight_norm, is_invalid_grad_norm,
                                      is_optimized_parameter)
 from deepspeed.runtime.fp16.loss_scaler import LossScaleConfig, LossScaleProfile
-from deepspeed.utils import logger
+from deepspeed.utils import log_dist, logger
 from deepspeed.utils.torch import required_torch_version
 from deepspeed.checkpoint.constants import OPTIMIZER_STATE_DICT
 from deepspeed.accelerator import get_accelerator
@@ -286,13 +286,16 @@ class FP16_UnfusedOptimizer(DeepSpeedOptimizer):
                         self.loss_scale_config.min_loss_scale)
                 self.loss_scale_config.last_overflow_iter = self.loss_scale_config.cur_iter
                 if self.verbose:
-                    logger.info("Grad overflow on iteration: %s", self.loss_scale_config.cur_iter)
+                    log_dist(f"Grad overflow on iteration: {self.loss_scale_config.cur_iter}", ranks=[0])
                     if self.loss_scale_config.cur_scale == prev_scale:
-                        logger.info(f"Keeping dynamic loss scale at {prev_scale}, "
-                                    f"hysteresis now {self.loss_scale_config.cur_hysteresis}")
+                        log_dist(
+                            f"Keeping dynamic loss scale at {prev_scale}, "
+                            f"hysteresis now {self.loss_scale_config.cur_hysteresis}",
+                            ranks=[0])
                     else:
-                        logger.info(
-                            f"Reducing dynamic loss scale from {prev_scale} to {self.loss_scale_config.cur_scale}")
+                        log_dist(
+                            f"Reducing dynamic loss scale from {prev_scale} to {self.loss_scale_config.cur_scale}",
+                            ranks=[0])
             else:
                 if self.loss_scale_config.consecutive_hysteresis:
                     self.loss_scale_config.cur_hysteresis = self.loss_scale_config.delayed_shift
@@ -302,13 +305,14 @@ class FP16_UnfusedOptimizer(DeepSpeedOptimizer):
                     self.loss_scale_config.cur_hysteresis = self.loss_scale_config.delayed_shift
                     self.loss_scale_config.cur_scale *= self.loss_scale_config.scale_factor
                     if self.verbose:
-                        logger.info(f"No Grad overflow for {self.loss_scale_config.scale_window} iterations")
-                        logger.info(
-                            f"Increasing dynamic loss scale from {prev_scale} to {self.loss_scale_config.cur_scale}")
+                        log_dist(f"No Grad overflow for {self.loss_scale_config.scale_window} iterations", ranks=[0])
+                        log_dist(
+                            f"Increasing dynamic loss scale from {prev_scale} to {self.loss_scale_config.cur_scale}",
+                            ranks=[0])
         else:
             if skip:
-                logger.info("Grad overflow on iteration %s", self.loss_scale_config.cur_iter)
-                logger.info("Using static loss scale of %s", self.loss_scale_config.cur_scale)
+                log_dist(f"Grad overflow on iteration {self.loss_scale_config.cur_iter}", ranks=[0])
+                log_dist(f"Using static loss scale of {self.loss_scale_config.cur_scale}", ranks=[0])
         self.loss_scale_config.cur_iter += 1
         return
 
