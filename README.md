@@ -225,22 +225,6 @@ Thanks so much to all of our amazing contributors!
   <img src="https://contrib.rocks/image?repo=microsoft/DeepSpeed&r="  width="800px"/>
 </a>
 
-## Developer Certificate of Origin
-This project welcomes contributions and suggestions. Most contributions require you to
-agree to a Developer Certificate of Origin [DCO](https://wiki.linuxfoundation.org/dco)
-stating that they agree to the terms published at https://developercertificate.org for
-that *particular* contribution.
-
-DCOs are per-commit, so each commit needs to be signed off.  These can be signed in
-the commit by adding the `-s` flag.  DCO enforcement can also be signed off in the PR
-itself by clicking on the DCO enforcement check.
-
-## Code of Conduct
-This project has adopted the [Microsoft Open Source Code of
-Conduct](https://opensource.microsoft.com/codeofconduct/). For more information see the
-[Code of Conduct FAQ](https://opensource.microsoft.com/codeofconduct/faq/) or contact
-[opencode@microsoft.com](mailto:opencode@microsoft.com) with any additional questions or comments.
-
 # Publications
 1. Samyam Rajbhandari, Jeff Rasley, Olatunji Ruwase, Yuxiong He. (2019) ZeRO: memory optimizations toward training trillion parameter models. [arXiv:1910.02054](https://arxiv.org/abs/1910.02054) and [In Proceedings of the International Conference for High Performance Computing, Networking, Storage and Analysis (SC '20)](https://dl.acm.org/doi/10.5555/3433701.3433727).
 2. Jeff Rasley, Samyam Rajbhandari, Olatunji Ruwase, and Yuxiong He. (2020) DeepSpeed: System Optimizations Enable Training Deep Learning Models with Over 100 Billion Parameters. [In Proceedings of the 26th ACM SIGKDD International Conference on Knowledge Discovery & Data Mining (KDD '20, Tutorial)](https://dl.acm.org/doi/10.1145/3394486.3406703).

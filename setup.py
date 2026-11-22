@@ -316,6 +316,7 @@ setup(name='deepspeed',
       packages=find_packages(include=['deepspeed', 'deepspeed.*']),
       include_package_data=True,
       scripts=scripts,
+      entry_points={'pytest_randomly.random_seeder': ['deepspeed = deepspeed.runtime.utils:set_random_seed']},
       classifiers=[
           'Programming Language :: Python :: 3.8', 'Programming Language :: Python :: 3.9',
           'Programming Language :: Python :: 3.10', 'Programming Language :: Python :: 3.11',

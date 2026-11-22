@@ -215,14 +215,6 @@ DeepSpeed 非常欢迎开源社区的贡献！关于代码格式化规范、单�
   <img src="https://contrib.rocks/image?repo=microsoft/DeepSpeed&r="  width="800px"/>
 </a>
 
-## 开发者原创性声明 (DCO)
-本项目欢迎任何建议与代码贡献。对于绝大多数贡献，您需要同意[开发者原创性声明 (DCO)](https://wiki.linuxfoundation.org/dco)，声明您认可发布于 https://developercertificate.org 的对应条款适用于该次特定贡献，并拥有授予相关贡献权限的合法权利。
-
-DCO 针对每次 Git Commit 生效，因此每个提交都需要附加签署声明（Sign-off）。您只需在提交代码时添加 `-s` 参数即可完成签署（例如 `git commit -s -m "Commit message"`）。在 Pull Request 界面中，也可以直接点击 DCO 检查项完成授权。
-
-## 行为准则
-本项目遵循 [Microsoft 开源行为准则](https://opensource.microsoft.com/codeofconduct/)。欲了解更多信息，请查阅[行为准则常见问题](https://opensource.microsoft.com/codeofconduct/faq/)，如有其他疑问或意见，亦可直接联系 [opencode@microsoft.com](mailto:opencode@microsoft.com)。
-
 # 代表性学术论文
 1. Samyam Rajbhandari, Jeff Rasley, Olatunji Ruwase, Yuxiong He. (2019) ZeRO: memory optimizations toward training trillion parameter models. [arXiv:1910.02054](https://arxiv.org/abs/1910.02054) and [In Proceedings of the International Conference for High Performance Computing, Networking, Storage and Analysis (SC '20)](https://dl.acm.org/doi/10.5555/3433701.3433727).
 2. Jeff Rasley, Samyam Rajbhandari, Olatunji Ruwase, and Yuxiong He. (2020) DeepSpeed: System Optimizations Enable Training Deep Learning Models with Over 100 Billion Parameters. [In Proceedings of the 26th ACM SIGKDD International Conference on Knowledge Discovery & Data Mining (KDD '20, Tutorial)](https://dl.acm.org/doi/10.1145/3394486.3406703).
