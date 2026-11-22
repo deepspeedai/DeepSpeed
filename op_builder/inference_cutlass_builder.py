@@ -11,6 +11,7 @@ class InferenceCutlassBuilder(CUDAOpBuilder):
     BUILD_VAR = "DS_BUILD_CUTLASS_OPS"
     NAME = "cutlass_ops"
     MIN_COMPUTE_CAPABILITY = 8  # Only support Ampere and newer.
+    ROCM_SUPPORTED = False  # The op links CUDA libraries from deepspeed-kernels.
 
     def __init__(self, name=None):
         name = self.NAME if name is None else name
@@ -35,6 +36,8 @@ class InferenceCutlassBuilder(CUDAOpBuilder):
         return sources
 
     def is_compatible(self, verbose=False):
+        if not super().is_compatible(verbose):
+            return False
         # The op links libraries shipped by the deepspeed-kernels package, which DeepSpeed does not install.
         try:
             import dskernels  # noqa: F401
@@ -44,7 +47,7 @@ class InferenceCutlassBuilder(CUDAOpBuilder):
             if verbose:
                 self.warning(self.error_log)
             return False
-        return super().is_compatible(verbose)
+        return True
 
     def extra_ldflags(self):
         import dskernels
