@@ -22,11 +22,11 @@ class GDSBuilder(CUDAOpBuilder):
         return f'deepspeed.ops.gds.{self.NAME}_op'
 
     def lib_sources(self):
-        src_list = ['csrc/gds/py_lib/deepspeed_py_gds_handle.cpp', 'csrc/gds/py_lib/deepspeed_gds_op.cpp']
+        src_list = ['csrc/gds/deepspeed_py_gds_handle.cpp', 'csrc/gds/deepspeed_gds_op.cpp']
         return self.async_io.lib_sources() + src_list
 
     def sources(self):
-        return self.lib_sources() + ['csrc/gds/py_lib/py_ds_gds.cpp']
+        return self.lib_sources() + ['csrc/gds/py_ds_gds.cpp']
 
     def cxx_args(self):
         return self.async_io.cxx_args() + ['-lcufile']
