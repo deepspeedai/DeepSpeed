@@ -10,11 +10,11 @@ Launch (from repo root):
 
     # SP degree 2 — two GPUs:
     NCCL_P2P_DISABLE=1 torchrun --nproc_per_node=2 \\
-        benchmarks/autosp/bench_multimodal_sp.py [args]
+        tests/benchmarks/bench_multimodal_sp.py [args]
 
     # Baseline — single GPU (all-gather/scatter are no-ops):
     torchrun --nproc_per_node=1 \\
-        benchmarks/autosp/bench_multimodal_sp.py [args]
+        tests/benchmarks/bench_multimodal_sp.py [args]
 
 Compare the two output tables to quantify memory savings and throughput scaling.
 

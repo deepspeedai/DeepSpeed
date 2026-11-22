@@ -203,6 +203,14 @@ If you are looking for examples using DeepSpeed please see the following resourc
 6. [DeepSpeed + PyTorch Lightning](https://lightning.ai/docs/pytorch/stable/api/lightning.pytorch.utilities.deepspeed.html)
 
 
+# DeepSpeed Benchmarks
+
+If you are looking for DeepSpeed benchmarks, please see the following resources:
+
+1. [Communication Benchmarking Suite](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/benchmarks/communication)
+2. [Inference Benchmarks](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/benchmarks/inference)
+
+
 # CI funding
 
 This being an open source project we rely on others to provide us resources for CI hardware. At this moment Modal is kindly supporting our GPU CI runs by funding the hardware for us. Modal is an AI infrastructure platform for inference, fine-tuning, batch jobs and more. Get started with $30/mo in free credits today at https://modal.com. We have been getting an amazing support from Modal's team and will surely recommend them to your business.

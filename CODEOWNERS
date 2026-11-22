@@ -8,7 +8,6 @@
 
 # top-level repo folders
 /.github/ @loadams
-/benchmarks/ @guanhuawang @tjruwase
 /bin/ @loadams
 /csrc/ @tjruwase
 /deepspeed/ @loadams @tjruwase

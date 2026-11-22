@@ -195,6 +195,14 @@ DeepSpeed 在 Windows 平台上对训练和推理均已支持大量核心功能�
 6. [DeepSpeed + PyTorch Lightning](https://lightning.ai/docs/pytorch/stable/api/lightning.pytorch.utilities.deepspeed.html)
 
 
+# DeepSpeed 基准测试
+
+如果您正在寻找 DeepSpeed 的基准测试，请参阅以下资源：
+
+1. [通信基准测试套件 (Communication Benchmarking Suite)](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/benchmarks/communication)
+2. [推理基准测试 (Inference Benchmarks)](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/benchmarks/inference)
+
+
 # 持续集成 (CI) 硬件赞助
 
 作为一个开源项目，我们依赖合作伙伴为持续集成（CI）流水线提供硬件计算资源。目前，Modal 慷慨地为我们资助了 GPU CI 运行所需的全部硬件。Modal 是一个专注于模型推理、微调与批处理任务的一站式 AI 基础设施平台。现在访问 https://modal.com 即可获取每月 30 美元的免费额度开启体验。DeepSpeed 团队得到了来自 Modal 团队全方位的鼎力支持，在此向您的业务强烈推荐 Modal 服务。
