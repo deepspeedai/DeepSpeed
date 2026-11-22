@@ -128,16 +128,19 @@ class AttentionStash:
         if key in self.entries:
             raise RuntimeError(f"attention stash: decoder layer {self.layer_index} kept two attention "
                                "outputs for the same input.")
-        self.entries[key] = kept
         # Dropped if the input's graph is freed without a backward through this layer.
-        weakref.finalize(layer_input, self.entries.pop, key, None)
+        cleanup = weakref.finalize(layer_input, self.entries.pop, key, None)
+        self.entries[key] = (kept, cleanup)
 
     def take(self) -> tuple:
-        kept = None if self.pending is None else self.entries.pop(self.pending[0], None)
-        if kept is None:
+        entry = None if self.pending is None else self.entries.pop(self.pending[0], None)
+        if entry is None:
             raise RuntimeError(f"attention stash: the recompute of decoder layer {self.layer_index} found no "
                                "attention output kept for its input. The forward must run inside the same reentrant "
                                "checkpoint, with an input that requires grad, and not modify that input in place.")
+        kept, cleanup = entry
+        # A later forward can reuse the same storage key after this entry is consumed.
+        cleanup.detach()
         return kept
 
 
@@ -211,9 +214,19 @@ def _stashing_sdpa(original,
 
 def _install_sdpa_wrapper() -> None:
     from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+    from transformers.integrations.sdpa_attention import sdpa_attention_forward
 
     current = ALL_ATTENTION_FUNCTIONS["sdpa"]
-    if getattr(current, _WRAPPER_MARKER, False):
+    original = current
+    own_wrapper = (isinstance(current, partial) and current.func is _stashing_sdpa
+                   and getattr(current, _WRAPPER_MARKER, False) and len(current.args) == 1)
+    if own_wrapper:
+        original = current.args[0]
+    if original is not sdpa_attention_forward:
+        raise ValueError("Attention stash requires the canonical Hugging Face SDPA entry, not an existing SDPA "
+                         "wrapper such as Ulysses sequence parallelism. It must not bypass that wrapper's "
+                         "communication or attention semantics.")
+    if own_wrapper:
         return
     # Attention modules without a stash pass straight through to the original function.
     wrapper = partial(_stashing_sdpa, current)

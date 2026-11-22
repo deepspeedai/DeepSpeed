@@ -764,8 +764,10 @@ all 48 layers took 826 ms (4.4%) for 6.5 GB.
 Each kept output is keyed by its decoder layer's input. The reentrant recompute
 runs on a detached alias of that same tensor, so a backward can only use the
 output its own forward kept. The output of a forward whose graph is freed
-without a backward is released with the forward's input. Reentrant
-checkpointing makes the embedding output require grad even under
+without a backward is released with the forward's input. Consuming an entry
+cancels that input's cleanup callback, so freeing an older
+same-storage input cannot remove a later forward's saved output.
+Reentrant checkpointing makes the embedding output require grad even under
 ``torch.no_grad()``, so such forwards in training mode may keep the first
 stashed layer's output briefly; it is released the same way.
 
@@ -787,6 +789,10 @@ Requirements and limits:
   stash call the original function. Installing twice on one layer raises
   before changing any other selected layer. Pending inputs are released even
   when the decoder forward raises.
+- The registry entry must be the canonical Hugging Face SDPA function, or
+  this installer's own wrapper around it. Existing Ulysses or custom SDPA
+  wrappers are rejected before any patch is installed; bypassing their
+  communication or attention semantics would be incorrect.
 - ``torch.compile`` and DeepSpeed's own activation checkpointing are not
   covered.
 

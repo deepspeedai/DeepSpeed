@@ -3,7 +3,9 @@
 """Attention-stash regressions in the accelerator CI test scope."""
 
 import gc
+import functools
 import os
+import weakref
 
 import pytest
 import torch
@@ -35,7 +37,18 @@ def _expand(tensor, rep):
     return tensor.repeat_interleave(rep, dim=1)
 
 
-def _cpu_forward(query, key, value, scale):
+def _cpu_forward(query,
+                 key,
+                 value,
+                 attn_bias,
+                 compute_log_sumexp,
+                 dropout_p=0.0,
+                 is_causal=False,
+                 return_debug_mask=False,
+                 *,
+                 scale=None):
+    assert attn_bias is None and compute_log_sumexp
+    assert dropout_p == 0.0 and is_causal and not return_debug_mask
     rep = query.shape[1] // key.shape[1]
     output, logsumexp = torch.ops.aten._scaled_dot_product_flash_attention_for_cpu(query,
                                                                                    _expand(key, rep),
@@ -43,10 +56,32 @@ def _cpu_forward(query, key, value, scale):
                                                                                    0.0,
                                                                                    True,
                                                                                    scale=scale)
-    return output, logsumexp, None, None, query.shape[2], key.shape[2], torch.empty(0), torch.empty(0), None
+    cumulative = torch.empty(0, dtype=torch.int32)
+    philox = torch.empty(0, dtype=torch.int64)
+    return output, logsumexp, cumulative, cumulative, query.shape[2], key.shape[2], philox, philox, torch.empty(0)
 
 
-def _cpu_backward(grad, query, key, value, output, logsumexp, seed, offset, cum_q, cum_k, max_q, max_k, scale):
+def _cpu_backward(grad,
+                  query,
+                  key,
+                  value,
+                  output,
+                  logsumexp,
+                  seed,
+                  offset,
+                  attn_bias,
+                  cum_q,
+                  cum_k,
+                  max_q,
+                  max_k,
+                  dropout_p,
+                  is_causal,
+                  *,
+                  scale=None):
+    assert attn_bias is None and dropout_p == 0.0 and is_causal
+    assert max_q == query.shape[2] and max_k == key.shape[2]
+    assert cum_q.dtype == cum_k.dtype == torch.int32
+    assert seed.dtype == offset.dtype == torch.int64
     rep = query.shape[1] // key.shape[1]
     grad_query, grad_key, grad_value = torch.ops.aten._scaled_dot_product_flash_attention_for_cpu_backward(
         grad, query, _expand(key, rep), _expand(value, rep), output, logsumexp, 0.0, True, scale=scale)
@@ -57,20 +92,24 @@ def _cpu_backward(grad, query, key, value, output, logsumexp, seed, offset, cum_
 
 @pytest.fixture
 def cpu_cudnn(monkeypatch):
-    """Stand in for the cuDNN SDPA calls with the CPU flash kernels, counting the kept and replayed outputs."""
+    """Schema-compatible ATen stand-ins keep the production argument wiring under test."""
     calls = {"kept": 0, "replayed": 0}
 
-    def forward(*args):
+    def forward(*args, **kwargs):
         calls["kept"] += 1
-        return _cpu_forward(*args)
+        return _cpu_forward(*args, **kwargs)
 
-    def backward(*args):
+    def backward(*args, **kwargs):
         calls["replayed"] += 1
-        return _cpu_backward(*args)
+        return _cpu_backward(*args, **kwargs)
 
-    monkeypatch.setattr(stash_module, "_cudnn_forward", forward)
-    monkeypatch.setattr(stash_module, "_cudnn_backward", backward)
-    monkeypatch.setattr(stash_module, "_sdp_backend", lambda *args: SDPBackend.CUDNN_ATTENTION.value)
+    def choose(query, key, value, attn_mask=None, dropout_p=0.0, is_causal=False, *, scale=None, enable_gqa=False):
+        assert attn_mask is None and dropout_p == 0.0 and is_causal and enable_gqa
+        return SDPBackend.CUDNN_ATTENTION.value
+
+    monkeypatch.setattr(torch.ops.aten, "_scaled_dot_product_cudnn_attention", forward)
+    monkeypatch.setattr(torch.ops.aten, "_scaled_dot_product_cudnn_attention_backward", backward)
+    monkeypatch.setattr(torch, "_fused_sdp_choice", choose)
     return calls
 
 
@@ -156,6 +195,66 @@ class TestAttentionStashCPU:
                 torch.testing.assert_close(param.grad, reference[name], rtol=1e-4, atol=1e-6, msg=name)
         assert cpu_cudnn == {"kept": 2 * NUM_LAYERS, "replayed": 2 * NUM_LAYERS}
         assert all(not stash.entries for stash in _stashes(model))
+
+    def test_consumed_input_cleanup_cannot_remove_a_new_alias_entry(self, cpu_cudnn):
+        input_ids = _batch(2)
+        embeddings = torch.randn(2, input_ids.shape[1], 32)
+        reference_model = _tiny_model(num_layers=1)
+        for _ in range(2):
+            reference_input = embeddings.clone().requires_grad_(True)
+            reference_loss = reference_model(inputs_embeds=reference_input, labels=input_ids).loss
+            reference_loss.backward()
+        reference = (reference_loss.detach(), {
+            name: parameter.grad.clone()
+            for name, parameter in reference_model.named_parameters() if parameter.grad is not None
+        })
+
+        model = _tiny_model(num_layers=1)
+        install_attention_stash(model, 1)
+        previous_input = embeddings.detach().requires_grad_(True)
+        previous_loss = model(inputs_embeds=previous_input, labels=input_ids).loss
+        previous_loss.backward()
+        assert all(not stash.entries for stash in _stashes(model))
+        new_input = embeddings.detach().requires_grad_(True)
+        assert new_input.data_ptr() == previous_input.data_ptr()
+        new_loss = model(inputs_embeds=new_input, labels=input_ids).loss
+        previous_ref = weakref.ref(previous_input)
+        del previous_loss, previous_input
+        gc.collect()
+        assert previous_ref() is None
+        new_loss.backward()
+        actual = (new_loss.detach(), {
+            name: parameter.grad.clone()
+            for name, parameter in model.named_parameters() if parameter.grad is not None
+        })
+        _assert_close(reference, actual)
+        torch.testing.assert_close(new_input.grad, reference_input.grad, rtol=1e-4, atol=1e-6)
+        assert all(not stash.entries for stash in _stashes(model))
+
+    def test_install_rejects_existing_sdpa_wrappers_without_mutation(self):
+        original = ALL_ATTENTION_FUNCTIONS["sdpa"]
+
+        @functools.wraps(original)
+        def wrapped(*args, **kwargs):
+            return original(*args, **kwargs)
+
+        ALL_ATTENTION_FUNCTIONS["sdpa"] = wrapped
+        model = _tiny_model()
+        with pytest.raises(ValueError, match="SDPA.*wrapper"):
+            install_attention_stash(model, 1)
+        assert ALL_ATTENTION_FUNCTIONS["sdpa"] is wrapped
+        assert not _stashes(model)
+
+    def test_two_models_reuse_the_stash_wrapper(self, cpu_cudnn):
+        first, second = _tiny_model(), _tiny_model()
+        install_attention_stash(first, 1)
+        wrapper = ALL_ATTENTION_FUNCTIONS["sdpa"]
+        install_attention_stash(second, 1)
+        assert ALL_ATTENTION_FUNCTIONS["sdpa"] is wrapper
+        _loss_and_grads(first, _batch(1))
+        _loss_and_grads(second, _batch(2))
+        assert cpu_cudnn == {"kept": 2, "replayed": 2}
+        assert all(not stash.entries for model in (first, second) for stash in _stashes(model))
 
     def test_forwards_without_a_recompute_retain_nothing(self, cpu_cudnn):
         model = _tiny_model()
@@ -250,13 +349,13 @@ class TestAttentionStashCPU:
         query = torch.randn(1, 2, 8, 4, requires_grad=True)
         key = torch.randn_like(query, requires_grad=True)
         value = torch.randn_like(query, requires_grad=True)
-        kept = (*_cpu_forward(query.detach(), key.detach(), value.detach(), 0.5)[:8], 0.5)
+        kept = (*stash_module._cudnn_forward(query.detach(), key.detach(), value.detach(), 0.5)[:8], 0.5)
         output = stash_module._StashedAttention.apply(query, key, value, kept)
         with pytest.raises(RuntimeError, match="create_graph=True"):
             torch.autograd.grad(output.sum(), (query, key, value), create_graph=True)
 
     def test_other_sdpa_backends_fail(self, cpu_cudnn, monkeypatch):
-        monkeypatch.setattr(stash_module, "_sdp_backend", lambda *args: SDPBackend.MATH.value)
+        monkeypatch.setattr(torch, "_fused_sdp_choice", lambda *args, **kwargs: SDPBackend.MATH.value)
         model = _tiny_model()
         install_attention_stash(model, 1)
         input_ids = _batch(6)
@@ -352,6 +451,32 @@ class TestAttentionStashCuDNN(DistributedTest):
         output = stash_module._StashedAttention.apply(query, key, value, kept)
         with pytest.raises(RuntimeError, match="create_graph=True"):
             torch.autograd.grad(output.sum(), (query, key, value), create_graph=True)
+
+    def test_same_storage_aliases_keep_their_own_cudnn_entry(self):
+        _skip_unless_cudnn_sdpa()
+        device = get_accelerator().current_device_name()
+        original = ALL_ATTENTION_FUNCTIONS["sdpa"]
+        model = _tiny_model(dtype=torch.bfloat16, device=device, hidden_size=256, num_layers=1)
+        input_ids = _batch(2, seq_len=128).to(device)
+        embeddings = model.get_input_embeddings()(input_ids).detach()
+        try:
+            install_attention_stash(model, 1)
+            previous_input = embeddings.detach().requires_grad_(True)
+            previous_loss = model(inputs_embeds=previous_input, labels=input_ids).loss
+            previous_loss.backward()
+            new_input = embeddings.detach().requires_grad_(True)
+            assert previous_input.data_ptr() == new_input.data_ptr()
+            new_loss = model(inputs_embeds=new_input, labels=input_ids).loss
+            previous_ref = weakref.ref(previous_input)
+            del previous_input, previous_loss
+            gc.collect()
+            assert previous_ref() is None
+            new_loss.backward()
+            assert torch.isfinite(new_input.grad).all()
+            assert all(torch.isfinite(p.grad).all() for p in model.parameters() if p.grad is not None)
+            assert all(not stash.entries for stash in _stashes(model))
+        finally:
+            ALL_ATTENTION_FUNCTIONS["sdpa"] = original
 
 
 @pytest.mark.skipif(os.environ.get("DS_ACCELERATOR") == "cpu", reason="attention stash needs CUDA and cuDNN")
