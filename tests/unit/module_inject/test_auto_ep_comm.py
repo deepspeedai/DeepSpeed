@@ -336,6 +336,14 @@ class TestGradientConformance(unittest.TestCase):
         self.assertEqual(tuple(_conform_rows(grad, (12, )).shape), (12, ))
 
 
+def stub_route_layer(**attributes):
+    """A stand-in layer with only what _deepep_route reads, and staging off as in a default config."""
+    layer = mock.Mock(dw_staging=None, **attributes)
+    # The route reaches the experts through this method, so the stub runs the real one.
+    layer._run_experts = functools.partial(auto_ep_layer.AutoEPMoELayer._run_experts, layer)
+    return layer
+
+
 class TestRoutingWeightsAreApplied(unittest.TestCase):
     """The layer must apply the routing weights itself.
 
@@ -375,7 +383,7 @@ class TestRoutingWeightsAreApplied(unittest.TestCase):
             seen["counts"] = counts
             return rows
 
-        layer = mock.Mock(
+        layer = stub_route_layer(
             _deepep_exchange=exchange,
             num_local_experts=self.LOCAL_EXPERTS,
             score_apply=score_apply,
@@ -452,7 +460,7 @@ class TestRoutingWeightsAreApplied(unittest.TestCase):
         def fake_fused(rows, weights):
             return (rows.float() * weights).to(rows.dtype)
 
-        layer = mock.Mock(
+        layer = stub_route_layer(
             _deepep_exchange=exchange,
             num_local_experts=2,
             score_apply="post",
@@ -573,14 +581,14 @@ class TestRoutingWeightsAreApplied(unittest.TestCase):
                         self.assertTrue(torch.equal(counts, expected_counts))
                         return rows.square()
 
-                    layer = mock.Mock(_deepep_exchange=exchange,
-                                      num_local_experts=self.LOCAL_EXPERTS,
-                                      score_apply=score_apply,
-                                      row_weighting_impl="eager",
-                                      overlap_weight_grad=False,
-                                      comm_num_sm=12,
-                                      comm_qp_margin=4,
-                                      experts=experts)
+                    layer = stub_route_layer(_deepep_exchange=exchange,
+                                             num_local_experts=self.LOCAL_EXPERTS,
+                                             score_apply=score_apply,
+                                             row_weighting_impl="eager",
+                                             overlap_weight_grad=False,
+                                             comm_num_sm=12,
+                                             comm_qp_margin=4,
+                                             experts=experts)
                     with mock.patch.object(auto_ep_layer, "deepep_dispatch",
                                            lambda *_args, **_kwargs: (received, recv_weights, exchange)), \
                             mock.patch.object(auto_ep_layer, "deepep_combine", lambda _exchange, rows, _handle: rows):
@@ -1478,6 +1486,7 @@ class TestSkipRecomputeCombine(unittest.TestCase):
         layer.row_weighting_impl = "eager"
         layer.skip_recompute_combine = skip
         layer.overlap_weight_grad = False
+        layer.dw_staging = None
         layer._decoder_layer = None
         return layer
 

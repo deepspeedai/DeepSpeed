@@ -613,6 +613,41 @@ def test_merge_tp_slices_uses_row_parallel_cat_dim(tmp_path):
     assert torch.equal(ckpt[PARAM], torch.cat([tp0, tp1], dim=1))
 
 
+def test_merge_tp_slices_keeps_each_vocabulary_size(tmp_path):
+    # An untied input embedding and an output head may have different vocabularies, but the
+    # published original_vocab_size is only the first one's. Cutting the head to it would drop rows.
+    from deepspeed.checkpoint.affine import AFFINE_MAP_FORMAT_VERSION, contiguous_split_map
+    from deepspeed.checkpoint.constants import AFFINE_MAP, AFFINE_MAP_PARAMS, AFFINE_MAP_VERSION, ORIGINAL_VOCAB_SIZE
+
+    slice_dir = tmp_path / "slices"
+    output_dir = tmp_path / "out"
+    param_name = "module.lm_head.weight"
+    full = torch.arange(30, dtype=torch.float32).view(10, 3)
+    _write_tp_states(slice_dir, param_name, 0, full[:5])
+    _write_tp_states(slice_dir, param_name, 1, full[5:])
+
+    pattern = rf"^{param_name}$"
+    uc_info = {
+        PARAMETER_WITH_ROW_PARALLELISM_PATTERNS: [],
+        TP_REPLICATED_PARAMETER_PATTERNS: [],
+        PARAMETER_WITH_SUB_PARAMS: [],
+        VOCABULARY_PARAMETER_PATTERNS: [r"^module\.embed_tokens\.weight$", pattern],
+        ORIGINAL_VOCAB_SIZE: 6,  # the input embedding's vocabulary
+        AFFINE_MAP: {
+            AFFINE_MAP_VERSION: AFFINE_MAP_FORMAT_VERSION,
+            AFFINE_MAP_PARAMS: {
+                pattern: contiguous_split_map((10, 3), [5, 5], 0).to_dict()
+            },
+        },
+    }
+
+    merge_tp_slices(uc_info, str(output_dir), str(slice_dir), 2,
+                    (param_name, [torch.Size([5, 3]), torch.Size([5, 3])]))
+
+    ckpt = torch.load(output_dir / param_name / "fp32.pt", weights_only=False)
+    assert torch.equal(ckpt[PARAM], full)
+
+
 def test_zero_optimizer_uc_info_comes_from_cached_state():
     param = _make_param((2, 2))
     expected_uc_info = {"key": "value"}
@@ -1585,13 +1620,13 @@ class AffineResumeModel(torch.nn.Module):
         return self.fc2(torch.tanh(self.fc1(x)))
 
 
-def _affine_resume_engine(tp_size, load_universal=False):
+def _affine_resume_engine(tp_size, load_universal=False, zero_stage=1):
     torch.manual_seed(1234)
     model = AffineResumeModel()
     config = {
         "train_micro_batch_size_per_gpu": 2,
         "zero_optimization": {
-            "stage": 1
+            "stage": zero_stage
         },
         "zero_allow_untested_optimizer": True,
         "checkpoint": {
@@ -1732,6 +1767,38 @@ class TestAffineUniversalCheckpointResume(DistributedTest):
                                            atol=2e-6,
                                            rtol=2e-5,
                                            msg=lambda message: f"snapshot {index}, {name}: {message}")
+        engine.destroy()
+
+
+class zero3_no_tp_checkpoint(DistributedFixture):
+    world_size = 1
+
+    def run(self, tmpdir):
+        engine = _affine_resume_engine(1, zero_stage=3)
+        for step in range(4):
+            _affine_resume_step(engine, 1, step)
+        engine.save_checkpoint(tmpdir, tag="zero3_no_tp")
+        _convert_to_universal(os.path.join(tmpdir, "zero3_no_tp"), os.path.join(tmpdir, "zero3_universal"))
+        torch.save(_affine_resume_state(engine, 1), os.path.join(tmpdir, "zero3_saved_state.pt"))
+        engine.destroy()
+
+
+@pytest.mark.parametrize("world_size", [1, 2], ids=["tp1", "tp2"])
+class TestZero3UniversalCheckpointWithoutTp(DistributedTest):
+    """ZeRO-3 conversion without TP stores each state as a bare tensor, not a dict.
+    An AutoTP target must still take its TP shard of it.
+    """
+
+    def test_restores_saved_state(self, zero3_no_tp_checkpoint, tmpdir, world_size):
+        tp_size = dist.get_world_size()
+        expected = torch.load(os.path.join(tmpdir, "zero3_saved_state.pt"), weights_only=False)
+        engine = _affine_resume_engine(tp_size, load_universal=True, zero_stage=3)
+        engine.load_checkpoint(tmpdir, tag="zero3_universal", load_optimizer_states=True)
+        restored = _affine_resume_state(engine, tp_size)
+        assert restored.keys() == expected.keys()
+        # Conversion and restore only copy elements, so every state must come back bit for bit.
+        for name in expected:
+            assert torch.equal(torch.as_tensor(restored[name]), torch.as_tensor(expected[name])), name
         engine.destroy()
 
 

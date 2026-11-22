@@ -35,7 +35,6 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
-from deepspeed.accelerator import get_accelerator
 from deepspeed.ops.triton_ops._triton import _TRITON_AVAILABLE, triton, tl
 
 if _TRITON_AVAILABLE:
@@ -377,7 +376,7 @@ def swiglu_weighted(gate: torch.Tensor, up: torch.Tensor, weights: torch.Tensor)
     Runs the fused kernel on CUDA when Triton is available and the eager expression otherwise.
     """
     _validate_weighted_inputs(gate, up, weights)
-    if not (_TRITON_AVAILABLE and get_accelerator().on_accelerator(gate)):
+    if not (_TRITON_AVAILABLE and gate.device.type == "cuda"):
         return _swiglu_weighted_eager(gate, up, weights)
     return _SwiGLUWeightedFn.apply(gate, up, weights)
 
@@ -407,7 +406,7 @@ def swiglu_weighted_backward(grad_out, gate, up, weights):
     """First-order gradient values of :func:`swiglu_weighted`, for custom autograd callers."""
     _validate_weighted_inputs(gate, up, weights)
     _validate_weighted_gradient(grad_out, gate)
-    if not (_TRITON_AVAILABLE and get_accelerator().on_accelerator(gate)):
+    if not (_TRITON_AVAILABLE and gate.device.type == "cuda"):
         with torch.enable_grad():
             gate, up, weights = (tensor.detach().requires_grad_(True) for tensor in (gate, up, weights))
             return torch.autograd.grad(_swiglu_weighted_eager(gate, up, weights), (gate, up, weights), grad_out)
@@ -428,7 +427,7 @@ def _packed_weighted_views(gate_up, weights):
 def swiglu_packed_weighted(gate_up, weights):
     """Weighted SwiGLU reading a packed [N, 2 * I] projection without copying its halves."""
     gate, up = _packed_weighted_views(gate_up, weights)
-    if not (_TRITON_AVAILABLE and get_accelerator().on_accelerator(gate_up)):
+    if not (_TRITON_AVAILABLE and gate_up.device.type == "cuda"):
         return _swiglu_weighted_eager(gate, up, weights)
     return _SwiGLUPackedWeightedFn.apply(gate_up, weights)
 
@@ -437,7 +436,7 @@ def swiglu_packed_weighted_backward(grad_out, gate_up, weights):
     """First-order packed projection and FP32 row-weight gradients, computed in one kernel pass."""
     gate, up = _packed_weighted_views(gate_up, weights)
     _validate_weighted_gradient(grad_out, gate)
-    if not (_TRITON_AVAILABLE and get_accelerator().on_accelerator(gate_up)):
+    if not (_TRITON_AVAILABLE and gate_up.device.type == "cuda"):
         with torch.enable_grad():
             gate_up, weights = (tensor.detach().requires_grad_(True) for tensor in (gate_up, weights))
             gate, up = gate_up.chunk(2, dim=-1)

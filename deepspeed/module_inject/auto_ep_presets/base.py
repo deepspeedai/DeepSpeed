@@ -125,6 +125,8 @@ class AutoEPConfig:
     row_weighting_impl: Literal["auto", "eager", "fused", "activation"] = "auto"
     gate_up_impl: Literal["separate", "fused"] = "separate"
     overlap_weight_grad: bool = False
+    deferred_dw_flush_period: int = 1
+    deferred_dw_rows_per_expert: int = 0
     comm_backend: Literal["comm", "deepep"] = "comm"
     comm_num_sm: int = 12
     comm_qp_margin: int = 4
