@@ -415,7 +415,7 @@ once. Either result is held, at the size of the expert weight gradients, and
 returned by the next flush. Which backward returns expert weight gradients
 therefore depends only on the count of backward passes, not on the routing:
 ranks that hold replicas of the same experts receive different rows, and ZeRO
-stage 2 reduces a gradient across them in the backward that returns it.
+stages 2 and 3 reduce a gradient across them in the backward that returns it.
 
 Gradient reduction, clipping and the optimizer see what they saw before: the
 sum over the window. Between flushes the expert weights have no new
@@ -452,9 +452,10 @@ no convergence run has been done with this option yet.
 ``deferred_dw_flush_period`` above ``1`` is rejected, rather than silently
 ignored, unless the experts run ``torch._grouped_mm`` (``use_grouped_mm=true``,
 and ``disable_triton_grouped_mm=true`` on devices that select the Triton
-grouped GEMM), ZeRO stage is 0, 1 or 2, and ``managed_gradient_accumulation``
-is on. It cannot be combined with ``overlap_weight_grad``, AutoEP+AutoTP
-folding, ZenFlow or DeepCompile. It supports first-order gradients only.
+grouped GEMM) and ``managed_gradient_accumulation`` is on. It cannot be
+combined with ``overlap_weight_grad``, AutoEP+AutoTP folding, ZenFlow or
+DeepCompile. It supports first-order gradients only. It runs with ZeRO stages
+0 to 3; optimizer and parameter offload have not been validated with it.
 
 **DeepEP row weighting implementation (experimental):**
 

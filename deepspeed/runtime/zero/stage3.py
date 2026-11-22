@@ -1784,6 +1784,10 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         # 0). Otherwise if the incoming param.ds_numel is large, this branch may get triggered on a
         # garbage data and `self.average_tensor()` will crash because its params_to_reduce will be
         # empty, while reduction_list will have that garbage data.
+        if param.grad is None:
+            # The hook also fires when the backward delivered no gradient for a parameter in the graph, as when
+            # AutoEP stages an expert weight gradient for a later backward. There is nothing to reduce yet.
+            return
         comm_dtype = self.get_param_comm_dtype(param)
         bucket = self.ipg_buckets[comm_dtype]
         param_process_group = self._get_param_partition_group(param)
