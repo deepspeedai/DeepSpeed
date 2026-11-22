@@ -494,9 +494,12 @@ def merge_tp_slices(uc_info, dir, slice_dir, tp_degree, name_and_shapes):
             ckpt_dict[CAT_DIM] = cat_dim
 
         if get_matched_pattern(vocabulary_parameters, name):
-            # strip padding
-            original_vocab_size = universal_checkpoint_info['original_vocab_size']
-            param = param[:original_vocab_size, :]
+            # A map already rebuilds the tensor at its own size, while original_vocab_size is the first
+            # vocabulary tensor's: an untied input embedding and output head may have different vocabularies.
+            if matched_affine_map is None:
+                # strip padding
+                original_vocab_size = universal_checkpoint_info['original_vocab_size']
+                param = param[:original_vocab_size, :]
             ckpt_dict[VOCAB_TENSOR] = True
 
         ckpt_dict[PARAM] = param

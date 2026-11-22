@@ -613,6 +613,41 @@ def test_merge_tp_slices_uses_row_parallel_cat_dim(tmp_path):
     assert torch.equal(ckpt[PARAM], torch.cat([tp0, tp1], dim=1))
 
 
+def test_merge_tp_slices_keeps_each_vocabulary_size(tmp_path):
+    # An untied input embedding and an output head may have different vocabularies, but the
+    # published original_vocab_size is only the first one's. Cutting the head to it would drop rows.
+    from deepspeed.checkpoint.affine import AFFINE_MAP_FORMAT_VERSION, contiguous_split_map
+    from deepspeed.checkpoint.constants import AFFINE_MAP, AFFINE_MAP_PARAMS, AFFINE_MAP_VERSION, ORIGINAL_VOCAB_SIZE
+
+    slice_dir = tmp_path / "slices"
+    output_dir = tmp_path / "out"
+    param_name = "module.lm_head.weight"
+    full = torch.arange(30, dtype=torch.float32).view(10, 3)
+    _write_tp_states(slice_dir, param_name, 0, full[:5])
+    _write_tp_states(slice_dir, param_name, 1, full[5:])
+
+    pattern = rf"^{param_name}$"
+    uc_info = {
+        PARAMETER_WITH_ROW_PARALLELISM_PATTERNS: [],
+        TP_REPLICATED_PARAMETER_PATTERNS: [],
+        PARAMETER_WITH_SUB_PARAMS: [],
+        VOCABULARY_PARAMETER_PATTERNS: [r"^module\.embed_tokens\.weight$", pattern],
+        ORIGINAL_VOCAB_SIZE: 6,  # the input embedding's vocabulary
+        AFFINE_MAP: {
+            AFFINE_MAP_VERSION: AFFINE_MAP_FORMAT_VERSION,
+            AFFINE_MAP_PARAMS: {
+                pattern: contiguous_split_map((10, 3), [5, 5], 0).to_dict()
+            },
+        },
+    }
+
+    merge_tp_slices(uc_info, str(output_dir), str(slice_dir), 2,
+                    (param_name, [torch.Size([5, 3]), torch.Size([5, 3])]))
+
+    ckpt = torch.load(output_dir / param_name / "fp32.pt", weights_only=False)
+    assert torch.equal(ckpt[PARAM], full)
+
+
 def test_zero_optimizer_uc_info_comes_from_cached_state():
     param = _make_param((2, 2))
     expected_uc_info = {"key": "value"}
