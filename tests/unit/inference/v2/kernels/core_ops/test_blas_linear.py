@@ -8,9 +8,14 @@ from typing import Tuple
 import pytest
 import torch
 
+import deepspeed
 from deepspeed.accelerator import get_accelerator
 from deepspeed.inference.v2.kernels.core_ops import BlasLibLinear
+from deepspeed.ops.op_builder import InferenceCoreBuilder
 from ....v2.inference_test_utils import allclose
+
+if not deepspeed.ops.__compatible_ops__[InferenceCoreBuilder.NAME]:
+    pytest.skip("Inference core ops are not available on this system", allow_module_level=True)
 
 # Note: only testing with FP16 and BF16 because we use TF32 on Ampere and we don't have a good
 # set of tolerances. Since this is just on top of BLAS though, the test is more about
