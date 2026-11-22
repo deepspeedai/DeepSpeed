@@ -34,6 +34,18 @@ class InferenceCutlassBuilder(CUDAOpBuilder):
         sources = [os.path.join(prefix, src) for src in sources]
         return sources
 
+    def is_compatible(self, verbose=False):
+        # The op links libraries shipped by the deepspeed-kernels package, which DeepSpeed does not install.
+        try:
+            import dskernels  # noqa: F401
+        except ImportError:
+            # Recorded even when not verbose, so that jit_load() can report it as the reason.
+            self.error_log = f"{self.name} requires dskernels, please pip install deepspeed-kernels"
+            if verbose:
+                self.warning(self.error_log)
+            return False
+        return super().is_compatible(verbose)
+
     def extra_ldflags(self):
         import dskernels
         lib_path = dskernels.library_path()
