@@ -1206,6 +1206,12 @@ Use a built-in preset but override specific naming/weight fields for a fine-tune
 | ----------------------------------------------------------------------- | ------- |
 | Enable timing of the latency of forward/backward/update training phases | `false` |
 
+<i>**memory_breakdown**</i>: [boolean]
+
+| Description                                                                                                                                              | Default |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| Report allocated and cached accelerator memory alongside the `wall_clock_breakdown` timings, and at the engine's memory checkpoints. Requires `wall_clock_breakdown` for the per-step timing report. | `false` |
+
 <i>**dump_state**</i>: [boolean]
 
 | Description                                                          | Default |

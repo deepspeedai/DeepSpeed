@@ -3,6 +3,8 @@
 
 # DeepSpeed Team
 
+import re
+
 import pytest
 import torch
 
@@ -68,3 +70,27 @@ def test_reset_starts_a_new_total(run_matmuls):
     assert timer.elapsed(reset=False) == pytest.approx(expected[0], abs=TOLERANCE_MS)
     assert timer.elapsed_total(reset=False) == pytest.approx(expected[0], abs=TOLERANCE_MS)
     assert timer.mean() == pytest.approx(expected[0], abs=TOLERANCE_MS)
+
+
+def test_log_reports_memory_only_with_memory_breakdown(capsys):
+    # The engine logs its micro timers with memory_breakdown taken from the config
+    # (DeepSpeedEngine._stop_timers), so a True flag that logs no memory leaves that config key
+    # with no effect, while a False flag that logs extra fields breaks wall_clock_breakdown parsers.
+    timers = SynchronizedWallClockTimer()
+    timers('op').start()
+    timers('op').stop()
+
+    timers.log(['op'], reset=False)
+    timings_only = capsys.readouterr().out.strip()
+    timers.log(['op'], reset=False, memory_breakdown=False)
+    assert capsys.readouterr().out.strip() == timings_only
+
+    # Sampled just before the log so the accelerator itself, not this test, is the oracle for the
+    # reported figure. GB is the unit every memory report in DeepSpeed uses.
+    expected_gb = get_accelerator().memory_allocated() / (1024**3)
+    timers.log(['op'], reset=False, memory_breakdown=True)
+    with_memory = capsys.readouterr().out.strip()
+
+    assert timings_only in with_memory
+    reported_gb = [float(value) for value in re.findall(r"(\d+\.\d+) GB", with_memory)]
+    assert any(gb == pytest.approx(expected_gb, abs=0.05) for gb in reported_gb), with_memory
