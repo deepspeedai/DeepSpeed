@@ -8,14 +8,12 @@
 
 # top-level repo folders
 /.github/ @loadams
-/azure/ @loadams
 /benchmarks/ @guanhuawang @tjruwase
 /bin/ @loadams
 /csrc/ @tjruwase
 /deepspeed/ @loadams @tjruwase
 /docker/ @loadams @guanhuawang
 /docs/ @loadams @tjruwase
-/examples/ @jomayeri @tohtana
 /op_builder/ @loadams @tjruwase @jomayeri
 /release/ @loadams @jomayeri
 /requirements/ @loadams

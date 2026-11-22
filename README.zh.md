@@ -33,7 +33,7 @@ DeepSpeed 于每月最后一个星期二美东时间 12:00（北京时间次日�
 
 * [2026/05] [在 DeepSpeed 中使用 Muon 优化器](https://github.com/deepspeedai/DeepSpeed/blob/master/blogs/muon-optimizer/README.md)
 
-* [2026/05] [针对 ZeRO-3 的系统 DMA (SDMA)：将集合通信算子从 AMD GPU 计算单元卸载，实现更优的通信与计算重叠](https://github.com/deepspeedai/DeepSpeed/blob/master/examples/sdma_allgather/README.md)
+* [2026/05] [针对 ZeRO-3 的系统 DMA (SDMA)：将集合通信算子从 AMD GPU 计算单元卸载，实现更优的通信与计算重叠](https://github.com/deepspeedai/DeepSpeedExamples/blob/master/training/sdma_allgather/README.md)
 
 * [2026/03] DeepSpeed 团队在 ASPLOS 2026 上开展了题为 [“Building Efficient Large-Scale Model Systems with DeepSpeed: From Open-Source Foundations to Emerging Research”](https://supercomputing-system-ai-lab.github.io/events/asplos2026-llm-tutorial/index.html) 的技术专题研讨
 
@@ -181,6 +181,18 @@ DeepSpeed 在 Windows 平台上对训练和推理均已支持大量核心功能�
 | [API 文档 (API Documentation)](https://deepspeed.readthedocs.io/en/latest/)                               |  DeepSpeed API 自动生成文档       |
 | [教程指南 (Tutorials)](https://www.deepspeed.ai/tutorials/)                                               |  官方系列技术实战教程                                   |
 | [技术博客 (Blogs)](https://www.deepspeed.ai/posts/)                                                       |  官方前沿技术深度博文                                   |
+
+
+# DeepSpeed 示例
+
+如果您正在寻找使用 DeepSpeed 的示例，请参阅以下资源：
+
+1. [DeepSpeedExamples](https://github.com/deepspeedai/DeepSpeedExamples)
+2. [Megatron-DeepSpeed](https://github.com/deepspeedai/Megatron-DeepSpeed)
+3. [DeepSpeed + AzureML](https://github.com/Azure/azureml-examples/tree/main/cli/jobs/deepspeed)
+4. [在 Azure 上快速上手 DeepSpeed (Getting Started with DeepSpeed on Azure)](https://www.deepspeed.ai/tutorials/azure/)
+5. [DeepSpeed + Hugging Face Transformers 集成](https://huggingface.co/docs/transformers/deepspeed)
+6. [DeepSpeed + PyTorch Lightning](https://lightning.ai/docs/pytorch/stable/api/lightning.pytorch.utilities.deepspeed.html)
 
 
 # 持续集成 (CI) 硬件赞助

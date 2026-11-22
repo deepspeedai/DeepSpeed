@@ -28,7 +28,7 @@ The meeting is hosted on Zoom and can be joined [here](https://zoom-lfx.platform
 
 * [2026/05] [Using Muon Optimizer with DeepSpeed](https://github.com/deepspeedai/DeepSpeed/blob/master/blogs/muon-optimizer/README.md)
 
-* [2026/05] [System DMA (SDMA) for ZeRO-3: offload collectives off compute units on AMD GPUs for better overlap](https://github.com/deepspeedai/DeepSpeed/blob/master/examples/sdma_allgather/README.md)
+* [2026/05] [System DMA (SDMA) for ZeRO-3: offload collectives off compute units on AMD GPUs for better overlap](https://github.com/deepspeedai/DeepSpeedExamples/blob/master/training/sdma_allgather/README.md)
 
 * [2026/03] DeepSpeed Team gave a tutorial at ASPLOS 2026 titled ["Building Efficient Large-Scale Model Systems with DeepSpeed: From Open-Source Foundations to Emerging Research" ](https://supercomputing-system-ai-lab.github.io/events/asplos2026-llm-tutorial/index.html)
 
@@ -189,6 +189,18 @@ All DeepSpeed documentation, tutorials, and blogs can be found on our website: [
 | [API Documentation](https://deepspeed.readthedocs.io/en/latest/)                               |  Generated DeepSpeed API documentation       |
 | [Tutorials](https://www.deepspeed.ai/tutorials/)                                               |  Tutorials                                   |
 | [Blogs](https://www.deepspeed.ai/posts/)                                                       |  Blogs                                   |
+
+
+# DeepSpeed Examples
+
+If you are looking for examples using DeepSpeed please see the following resources:
+
+1. [DeepSpeedExamples](https://github.com/deepspeedai/DeepSpeedExamples)
+2. [Megatron-DeepSpeed](https://github.com/deepspeedai/Megatron-DeepSpeed)
+3. [DeepSpeed + AzureML](https://github.com/Azure/azureml-examples/tree/main/cli/jobs/deepspeed)
+4. [Getting Started with DeepSpeed on Azure](https://www.deepspeed.ai/tutorials/azure/)
+5. [DeepSpeed + Hugging Face Transformers Integration](https://huggingface.co/docs/transformers/deepspeed)
+6. [DeepSpeed + PyTorch Lightning](https://lightning.ai/docs/pytorch/stable/api/lightning.pytorch.utilities.deepspeed.html)
 
 
 # CI funding

@@ -447,7 +447,7 @@ New features must include documentation updates — this is a hard requirement, 
 - New or changed config keys → `docs/_pages/config-json.md`
 - User-facing features → a tutorial under `docs/_tutorials/`
 - Public API additions → the API reference under `docs/code-docs/source/`
-- Usage examples → `examples/`, and for a full feature, a companion PR to
+- Usage examples → a companion PR to
   [DeepSpeedExamples](https://github.com/deepspeedai/DeepSpeedExamples) or
   [Megatron-DeepSpeed](https://github.com/deepspeedai/Megatron-DeepSpeed)
 
