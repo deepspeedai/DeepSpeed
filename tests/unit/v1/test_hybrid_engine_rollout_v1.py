@@ -523,6 +523,14 @@ def test_static_graph_is_reused_across_rollouts_with_the_same_decode_shape(monke
     model.eval()
     assert capture_count == 3
 
+    # Child module mode changes must also invalidate a retained graph.
+    child = model.model.layers[0]
+    child.train()
+    rollout.generate(RolloutRequest(short_prompts, torch.ones_like(short_prompts)),
+                     SamplingConfig(max_new_tokens=8, temperature=0))
+    child.eval()
+    assert capture_count == 4
+
     # Nor may a graph captured without autocast be replayed under it. Autocast
     # still changes kernels at the model's own dtype, e.g. softmax runs in fp32.
     bf16_rollout = HybridEngineRollout(SimpleNamespace(module=copy.deepcopy(model).to(torch.bfloat16)),
@@ -533,7 +541,7 @@ def test_static_graph_is_reused_across_rollouts_with_the_same_decode_shape(monke
     with torch.autocast(device_type=accelerator.device_name(), dtype=torch.bfloat16):
         bf16_rollout.generate(bf16_request, SamplingConfig(max_new_tokens=8, temperature=0))
     bf16_rollout.shutdown()
-    assert capture_count == 5
+    assert capture_count == 6
 
     head_dim = config.hidden_size // config.num_attention_heads
     # Keys and values for every layer at batch 4 and cache length 8 + 8.

@@ -51,6 +51,20 @@ def _full_vocabulary_logits(module):
             head.gather_output = gather_output
 
 
+@contextmanager
+def _disable_autocast_weight_cache():
+    cache_enabled = getattr(torch, "is_autocast_cache_enabled", None)
+    cache_setter = getattr(torch, "set_autocast_cache_enabled", None)
+    previous = cache_enabled() if cache_enabled is not None else None
+    if cache_setter is not None and previous:
+        cache_setter(False)
+    try:
+        yield
+    finally:
+        if cache_setter is not None and previous is not None:
+            cache_setter(previous)
+
+
 class _ForwardProfiler:
     """Measure top-level model forwards without synchronizing each call."""
 
@@ -1193,6 +1207,7 @@ class HybridEngineRollout(RolloutEngine):
         # matters through max_cache_len.
         tensor_signature = tuple((tensor.data_ptr(), tensor.device, tensor.dtype, tuple(tensor.shape), tensor.stride())
                                  for tensor in itertools.chain(module.parameters(), module.buffers()))
+        module_modes = tuple(child.training for child in module.modules())
         device_index = device.index
         if device_index is None and device.type == get_accelerator().device_name():
             # torch.device("cuda") and torch.device("cuda", 0) name the same device.
@@ -1205,7 +1220,7 @@ class HybridEngineRollout(RolloutEngine):
         # a graph captured before it would still read.
         segki_generation = getattr(module, "_ki_refresh_generation", 0) if self.use_segki else 0
         return (id(module), module.training, autocast_enabled, autocast_dtype, device.type, device_index, model_dtype,
-                max_batch_size, max_cache_len, segki_generation, tensor_signature)
+                max_batch_size, max_cache_len, segki_generation, module_modes, tensor_signature)
 
     def _group_needs_capture(self, local_needs_capture):
         """Return whether any rank of the AutoTP group must capture again.
@@ -1249,11 +1264,23 @@ class HybridEngineRollout(RolloutEngine):
                     cache_position=static_cache_position,
                     position_ids=static_position_ids,
                 )
-            warmup_stream = accelerator.Stream()
-            warmup_stream.wait_stream(accelerator.current_stream())
-            with accelerator.stream(warmup_stream):
-                for _ in range(3):
-                    module(
+            with _disable_autocast_weight_cache():
+                warmup_stream = accelerator.Stream()
+                warmup_stream.wait_stream(accelerator.current_stream())
+                with accelerator.stream(warmup_stream):
+                    for _ in range(3):
+                        module(
+                            static_input,
+                            attention_mask=static_attention,
+                            past_key_values=cache,
+                            use_cache=True,
+                            cache_position=static_cache_position,
+                            position_ids=static_position_ids,
+                        )
+                accelerator.current_stream().wait_stream(warmup_stream)
+                graph = accelerator.create_graph()
+                with accelerator.capture_to_graph(graph):
+                    output = module(
                         static_input,
                         attention_mask=static_attention,
                         past_key_values=cache,
@@ -1261,17 +1288,6 @@ class HybridEngineRollout(RolloutEngine):
                         cache_position=static_cache_position,
                         position_ids=static_position_ids,
                     )
-            accelerator.current_stream().wait_stream(warmup_stream)
-            graph = accelerator.create_graph()
-            with accelerator.capture_to_graph(graph):
-                output = module(
-                    static_input,
-                    attention_mask=static_attention,
-                    past_key_values=cache,
-                    use_cache=True,
-                    cache_position=static_cache_position,
-                    position_ids=static_position_ids,
-                )
         finally:
             module._forward_pre_hooks.update(saved_pre)
             module._forward_hooks.update(saved_post)
@@ -2019,8 +2035,11 @@ class HybridEngineRollout(RolloutEngine):
         prefill_out = run_prefill(prefill_cache)
         post_prefill_signature = self._graph_signature(module, batch_size, max_len, device,
                                                        model_dtype) + (use_step_kernel, )
-        if state.signature != post_prefill_signature:
+        if self._group_needs_capture(state.signature != post_prefill_signature):
             self._static_graph_state = None
+            prefill_out = None
+            prefill_cache = None
+            state = None
             state = self._get_static_graph_state(module, batch_size, max_len, device, model_dtype, is_hybrid,
                                                  use_step_kernel)
             prefill_cache = state.prefill_cache
@@ -2298,48 +2317,50 @@ class HybridEngineRollout(RolloutEngine):
         module._forward_hooks.clear()
 
         try:
-            # Warmup on side stream
-            s = get_accelerator().Stream()
-            s.wait_stream(get_accelerator().current_stream())
-            with get_accelerator().stream(s):
-                for _ in range(3):
-                    decode_forward()
-            get_accelerator().current_stream().wait_stream(s)
-            restore_gdn_states()
+            with _disable_autocast_weight_cache():
+                # Warmup on side stream
+                s = get_accelerator().Stream()
+                s.wait_stream(get_accelerator().current_stream())
+                with get_accelerator().stream(s):
+                    for _ in range(3):
+                        decode_forward()
+                get_accelerator().current_stream().wait_stream(s)
+                restore_gdn_states()
 
-            # Capture: full-step graph (forward + argmax + buffer updates).
-            # The step-update kernel indexes token_buf via write_pos (a GPU
-            # tensor the kernel itself advances), so no host-side step counter
-            # is needed — the graph is fully self-contained for replay.
-            graph_op = None
-            if use_step_kernel:
-                try:
-                    from deepspeed.ops.module_inject import get_fused_glu_op
-                    candidate = get_fused_glu_op()
-                    if hasattr(candidate, "decode_step_graph"):
-                        graph_op = candidate
-                except Exception:
-                    graph_op = None
+                # Capture: full-step graph (forward + argmax + buffer updates).
+                # The step-update kernel indexes token_buf via write_pos (a GPU
+                # tensor the kernel itself advances), so no host-side step counter
+                # is needed — the graph is fully self-contained for replay.
+                graph_op = None
+                if use_step_kernel:
+                    try:
+                        from deepspeed.ops.module_inject import get_fused_glu_op
+                        candidate = get_fused_glu_op()
+                        if hasattr(candidate, "decode_step_graph"):
+                            graph_op = candidate
+                    except Exception:
+                        graph_op = None
 
-            step_kernel_mounted = False
-            graph = get_accelerator().create_graph()
-            with get_accelerator().capture_to_graph(graph):
-                static_logits = decode_forward().logits
-                # decode_step_graph kernel is b=1 only (single-sequence argmax);
-                # for b>1 the graph captures forward only and Python handles
-                # argmax + buffer updates outside the graph. The kernel also
-                # only accepts CUDA bf16 logits — fp16 models must keep the
-                # PyTorch argmax path instead of failing during capture.
-                if (graph_op is not None and static_logits.dtype is torch.bfloat16
-                        and get_accelerator().on_accelerator(static_logits)):
-                    graph_op.decode_step_graph(static_logits[:, -1, :].contiguous(), static_token.view(batch_size, 1),
-                                               write_pos, static_attn, state.token_buffer)
-                    step_kernel_mounted = True
+                step_kernel_mounted = False
+                graph = get_accelerator().create_graph()
+                with get_accelerator().capture_to_graph(graph):
+                    static_logits = decode_forward().logits
+                    # decode_step_graph kernel is b=1 only (single-sequence argmax);
+                    # for b>1 the graph captures forward only and Python handles
+                    # argmax + buffer updates outside the graph. The kernel also
+                    # only accepts CUDA bf16 logits — fp16 models must keep the
+                    # PyTorch argmax path instead of failing during capture.
+                    if (graph_op is not None and static_logits.dtype is torch.bfloat16
+                            and get_accelerator().on_accelerator(static_logits)):
+                        graph_op.decode_step_graph(static_logits[:, -1, :].contiguous(),
+                                                   static_token.view(batch_size, 1), write_pos, static_attn,
+                                                   state.token_buffer)
+                        step_kernel_mounted = True
 
-            # Restore the GDN states unconditionally, whether or not
-            # decode_step_graph was mounted, so the first replay does not start
-            # from a state that already consumed the first decode token.
-            restore_gdn_states()
+                # Restore the GDN states unconditionally, whether or not
+                # decode_step_graph was mounted, so the first replay does not start
+                # from a state that already consumed the first decode token.
+                restore_gdn_states()
         finally:
             module._forward_pre_hooks.update(saved_pre)
             module._forward_hooks.update(saved_post)

@@ -30,6 +30,7 @@ from deepspeed.runtime.rollout.hybrid_engine_rollout import (
     HybridEngineRolloutConfig,
     _GlobalEosStoppingCriteria,
     _full_vocabulary_logits,
+    _disable_autocast_weight_cache,
 )
 from deepspeed.utils.static_cache import DeepSpeedStaticCache
 from unit.common import DistributedTest
@@ -61,6 +62,19 @@ def test_graph_signature_supports_legacy_autocast_getters(monkeypatch):
 
     assert _is_autocast_enabled("cuda")
     assert _get_autocast_dtype("cuda") is torch.bfloat16
+
+
+def test_disable_autocast_weight_cache_restores_previous_setting(monkeypatch):
+    state = [True]
+    monkeypatch.setattr(torch, "is_autocast_cache_enabled", lambda: state[0], raising=False)
+    monkeypatch.setattr(torch,
+                        "set_autocast_cache_enabled",
+                        lambda enabled: state.__setitem__(0, enabled),
+                        raising=False)
+
+    with _disable_autocast_weight_cache():
+        assert state[0] is False
+    assert state[0] is True
 
 
 def _make_request():
