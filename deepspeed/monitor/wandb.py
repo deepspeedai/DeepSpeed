@@ -36,3 +36,8 @@ class WandbMonitor(Monitor):
                 value = event[1]
                 step = event[2]
                 self.log({label: value}, step=step)
+
+    def update_config(self, config_dict):
+        if self.enabled and dist.get_rank() == 0:
+            import wandb
+            wandb.config.update(config_dict, allow_val_change=True)

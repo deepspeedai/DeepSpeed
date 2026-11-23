@@ -57,3 +57,14 @@ class MonitorMaster(Monitor):
                 self.csv_monitor.write_events(event_list)
             if self.comet_monitor is not None:
                 self.comet_monitor.write_events(event_list)
+
+    def update_config(self, config_dict):
+        if dist.get_rank() == 0:
+            if self.tb_monitor is not None:
+                self.tb_monitor.update_config(config_dict)
+            if self.wandb_monitor is not None:
+                self.wandb_monitor.update_config(config_dict)
+            if self.csv_monitor is not None:
+                self.csv_monitor.update_config(config_dict)
+            if self.comet_monitor is not None:
+                self.comet_monitor.update_config(config_dict)
