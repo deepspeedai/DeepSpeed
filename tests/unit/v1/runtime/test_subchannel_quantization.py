@@ -276,6 +276,34 @@ def test_converted_linear_forward_matches_unconverted():
     torch.testing.assert_close(model.down_proj(model.up_proj(x)), reference.down_proj(reference.up_proj(x)))
 
 
+@pytest.mark.parametrize("block_size", [128, 0])
+def test_torch_compile_matches_eager(block_size):
+    _require_fp8_kernels()
+    from deepspeed.runtime.compiler import is_compile_supported
+    if not is_compile_supported():
+        pytest.skip("torch.compile is not supported in this environment")
+    torch.manual_seed(5)
+    device = get_accelerator().current_device_name()
+    model = _Block(200).to(device, torch.bfloat16)
+    convert_to_subchannel_quantization(model, _recipe(block_size=block_size))
+    x = torch.randn(16, 200, device=device, dtype=torch.bfloat16)
+
+    def output_and_weight_grads(run):
+        model.zero_grad()
+        y = run(x)
+        y.float().square().mean().backward()
+        return y.detach().clone(), model.up_proj.weight.grad.clone(), model.down_proj.weight.grad.clone()
+
+    def forward(x):
+        return model.down_proj(F.gelu(model.up_proj(x)))
+
+    expected = output_and_weight_grads(forward)
+    compiled = output_and_weight_grads(torch.compile(forward))
+    # Nearest rounding is deterministic, so compiling may not change a single value.
+    for actual, reference in zip(compiled, expected):
+        torch.testing.assert_close(actual, reference, rtol=0, atol=0)
+
+
 def test_conversion_without_matches_fails():
     with pytest.raises(ValueError, match="no nn.Linear"):
         convert_to_subchannel_quantization(_Block(), _recipe(modules=["*does_not_exist*"]))

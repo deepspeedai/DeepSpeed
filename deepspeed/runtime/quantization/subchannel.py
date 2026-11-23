@@ -268,6 +268,12 @@ class _SubchannelGroupedMatmul(torch.autograd.Function):
         return grad_x, grad_weight, None, None
 
 
+# Keep torch.compile from tracing the host code around the kernels: traced, the kernels return silently wrong results
+# (row scaling most of all), so this function always runs eagerly inside a compiled model.
+_run_eagerly = getattr(getattr(torch, "compiler", None), "disable", lambda fn: fn)
+
+
+@_run_eagerly
 def subchannel_grouped_matmul(x: torch.Tensor, weight: torch.Tensor, group_ends: torch.Tensor,
                               recipe: SubchannelQuantizedMatmulConfig) -> torch.Tensor:
     """``y[m] = x[m] weight[e]^T`` for the rows ``m`` of group ``e``, with quantized forward and backward GEMMs.
