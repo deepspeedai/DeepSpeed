@@ -818,6 +818,12 @@ Explicit `true` requests fail instead of silently downgrading. See
 [Vocabulary-parallel LM Loss](/tutorials/autotp-training/#vocabulary-parallel-lm-loss)
 for supported embedding semantics and compiler limitations.
 
+***vocab_parallel_embedding***: [boolean]
+
+| Description | Default |
+| ----------- | ------- |
+| Shard an input embedding that is not tied to the output layer along the vocabulary: each rank keeps 1/tp of the rows and the partial lookups are summed over the tensor-parallel group. A tied embedding is sharded with its output head instead. Not supported with the DeepCompile `autotp` pass. See [Untied Input Embedding](/tutorials/autotp-training/#untied-input-embedding). | `false` |
+
 ***partition_config***: [dictionary]
 
 | Description                                                                                                                     | Default |
@@ -1033,7 +1039,7 @@ smoke coverage used for this AutoEP surface produced the following version gates
 
 | Description                                                                                                    | Default  |
 | -------------------------------------------------------------------------------------------------------------- | -------- |
-| Experimental. Values above `1` stage the rows of the experts' weight-gradient GEMMs across backward passes instead of running the GEMMs in each one. A backward appends each expert's rows to a per-expert staging buffer and returns no expert weight gradient; one backward in every `deferred_dw_flush_period` runs the GEMMs once over everything staged. The backward that closes a gradient accumulation window always does the same, so every optimizer step sees the same accumulated gradient as before, up to floating-point summation order. This helps when each expert receives few rows per microbatch (many experts, small microbatches) and costs memory for the staged rows; with many rows per expert it is slower. First-order gradients only. Requires the `torch._grouped_mm` expert path (`use_grouped_mm=true`, and `disable_triton_grouped_mm=true` on devices that prefer the Triton grouped GEMM), ZeRO stage 0, 1 or 2, and `managed_gradient_accumulation=true`; it cannot be combined with `overlap_weight_grad`, AutoEP+AutoTP folding, ZenFlow or DeepCompile. Unsupported configurations fail rather than falling back. | `1` |
+| Experimental. Values above `1` stage the rows of the experts' weight-gradient GEMMs across backward passes instead of running the GEMMs in each one. A backward appends each expert's rows to a per-expert staging buffer and returns no expert weight gradient; one backward in every `deferred_dw_flush_period` runs the GEMMs once over everything staged. The backward that closes a gradient accumulation window always does the same, so every optimizer step sees the same accumulated gradient as before, up to floating-point summation order. This helps when each expert receives few rows per microbatch (many experts, small microbatches) and costs memory for the staged rows; with many rows per expert it is slower. First-order gradients only. Requires the `torch._grouped_mm` expert path (`use_grouped_mm=true`, and `disable_triton_grouped_mm=true` on devices that prefer the Triton grouped GEMM), and `managed_gradient_accumulation=true`; it cannot be combined with `overlap_weight_grad`, AutoEP+AutoTP folding, ZenFlow or DeepCompile. Unsupported configurations fail rather than falling back. | `1` |
 
 ***deferred_dw_rows_per_expert***: [integer]
 
