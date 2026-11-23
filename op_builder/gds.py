@@ -11,6 +11,7 @@ from .cpu.async_io import AsyncIOBuilder
 class GDSBuilder(CUDAOpBuilder):
     BUILD_VAR = "DS_BUILD_GDS"
     NAME = "gds"
+    ROCM_SUPPORTED = False  # GPUDirect Storage (cuFile) is CUDA only.
 
     def __init__(self):
         super().__init__(name=self.NAME)
@@ -50,9 +51,7 @@ class GDSBuilder(CUDAOpBuilder):
         return super().load(verbose=verbose)
 
     def is_compatible(self, verbose=False):
-        if self.is_rocm_pytorch():
-            if verbose:
-                self.warning(f'{self.NAME} is not compatible with ROCM')
+        if not super().is_compatible(verbose):
             return False
 
         try:
@@ -77,4 +76,4 @@ class GDSBuilder(CUDAOpBuilder):
                                            ),
                                            verbose=verbose)
 
-        return gds_compatible and self.async_io.is_compatible(verbose) and super().is_compatible(verbose)
+        return gds_compatible and self.async_io.is_compatible(verbose)

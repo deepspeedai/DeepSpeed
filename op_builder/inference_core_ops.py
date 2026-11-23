@@ -12,6 +12,7 @@ class InferenceCoreBuilder(CUDAOpBuilder):
     BUILD_VAR = "DS_BUILD_INFERENCE_CORE_OPS"
     NAME = "inference_core_ops"
     MIN_COMPUTE_CAPABILITY = 6
+    ROCM_SUPPORTED = False  # The sources do not build with ROCm yet.
 
     def __init__(self, name=None):
         name = self.NAME if name is None else name

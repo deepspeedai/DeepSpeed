@@ -528,6 +528,27 @@ def test_graph_capture_dispatches_smaller_buckets_as_rows_retire(mock_get_accele
     assert stats["graph_captures"] == 2
 
 
+@pytest.mark.parametrize("layer_types, sliding_window, expect_deepspeed_cache", [
+    (None, None, True),
+    (["full_attention", "full_attention"], None, True),
+    (None, 4, False),
+    (["full_attention", "sliding_attention"], 4, False),
+    (["full_attention", "linear_attention"], None, False),
+])
+def test_prefill_cache_keeps_hf_static_cache_unless_full_attention_only(layer_types, sliding_window,
+                                                                        expect_deepspeed_cache):
+    # DeepSpeedStaticCache models every layer as full attention. Prefilling a sliding-window model into it
+    # would silently attend outside the window, and hybrid models bind their GDN slots to the HF cache.
+    from transformers import LlamaConfig, StaticCache
+
+    config = LlamaConfig(hidden_size=8, num_hidden_layers=2, num_attention_heads=2, num_key_value_heads=1)
+    config.layer_types = layer_types
+    config.sliding_window = sliding_window
+    cache = HybridEngineRollout._create_prefill_cache(StaticCache, config, 1, 4, torch.device("cpu"), torch.float32)
+
+    assert isinstance(cache, DeepSpeedStaticCache) == expect_deepspeed_cache
+
+
 def test_static_cache_constructor_supports_max_batch_keyword():
 
     class MaxBatchStaticCache:

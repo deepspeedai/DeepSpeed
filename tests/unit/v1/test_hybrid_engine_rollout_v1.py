@@ -617,6 +617,39 @@ def _random_request(batch_size, prompt_len, device):
     return RolloutRequest(prompt_ids.to(device), torch.ones_like(prompt_ids).to(device))
 
 
+@pytest.mark.parametrize("use_graph_capture, continuous_batch_size", [(True, None), (True, 2), (False, 2)])
+@pytest.mark.parametrize("supports_cache_class", [None, True])
+def test_rollout_under_autocast_matches_hf_generate(use_graph_capture, continuous_batch_size, supports_cache_class):
+    # Under autocast an fp32 model emits fp32 keys (rotary embeddings promote them) but bf16 values,
+    # which the pre-allocated KV caches used to reject with a dtype mismatch (#9102).
+    # Continuous prefill goes through generate() unless the model sets _supports_cache_class.
+    accelerator = get_accelerator()
+    if not accelerator.is_bf16_supported():
+        pytest.skip("bf16 autocast is not supported")
+    if use_graph_capture and not accelerator.is_graph_capture_supported():
+        pytest.skip("graph capture is not supported")
+
+    device = torch.device(accelerator.device_name())
+    model = _tiny_llama(device)
+    if supports_cache_class is not None:
+        model._supports_cache_class = supports_cache_class
+    new_tokens = 8
+    request = _random_request(batch_size=4, prompt_len=8, device=device)
+    sampling = SamplingConfig(max_new_tokens=new_tokens, temperature=0, continuous_batch_size=continuous_batch_size)
+
+    with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
+        output = _rollout(model, use_graph_capture).generate(request, sampling)
+        with torch.no_grad():
+            expected = model.generate(request.prompt_ids,
+                                      attention_mask=request.prompt_attention_mask,
+                                      max_new_tokens=new_tokens,
+                                      do_sample=False,
+                                      eos_token_id=None,
+                                      pad_token_id=0)
+
+    assert output.input_ids.tolist() == expected.tolist()
+
+
 @pytest.mark.parametrize("use_graph_capture, continuous_batch_size", [(True, None), (True, 8), (False, 8)])
 @pytest.mark.parametrize("temperature, top_k, top_p", [(1.0, 0, 1.0), (0.7, 5, 1.0), (1.0, 0, 0.8)])
 def test_decode_sampling_matches_hf_generate(temperature, top_k, top_p, use_graph_capture, continuous_batch_size):
