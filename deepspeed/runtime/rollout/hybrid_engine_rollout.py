@@ -1461,8 +1461,8 @@ class HybridEngineRollout(RolloutEngine):
             logits = prefill_output.logits[-1]
         else:
             prompt_len = prompt_ids.shape[1]
-            prefill_cache = self._create_static_cache(static_cache_type, module.config, prompt_ids.shape[0],
-                                                      prompt_len, device, model_dtype)
+            prefill_cache = self._create_prefill_cache(static_cache_type, module.config, prompt_ids.shape[0],
+                                                       prompt_len, device, model_dtype)
             prefill_output = self._call_model(
                 module,
                 prompt_ids,
@@ -1579,6 +1579,27 @@ class HybridEngineRollout(RolloutEngine):
         if not accepts_kwargs:
             kwargs = {name: value for name, value in kwargs.items() if name in parameters}
         return module(input_ids, **kwargs)
+
+    @classmethod
+    def _create_prefill_cache(cls, static_cache_type, config, batch_size, max_cache_len, device, dtype):
+        """Cache for a single prefill forward whose KV is then copied into the decode cache.
+
+        Under autocast, keys and values can come out in different dtypes (rotary embeddings promote
+        bf16 key projections to fp32), which HF StaticCache rejects. DeepSpeedStaticCache accepts them,
+        but models every layer as full attention, so sliding-window and linear-attention models keep
+        HF StaticCache.
+        """
+        text_config = getattr(config, "text_config", config)
+        layer_types = getattr(text_config, "layer_types", None) or []
+        full_attention_only = (getattr(text_config, "sliding_window", None) is None
+                               and all(layer_type == "full_attention" for layer_type in layer_types))
+        if not full_attention_only:
+            return cls._create_static_cache(static_cache_type, config, batch_size, max_cache_len, device, dtype)
+
+        from deepspeed.utils.static_cache import DeepSpeedStaticCache
+
+        # Sized lazily from the prefill keys, as AutoTP shards KV heads.
+        return DeepSpeedStaticCache(config, max_cache_len=max_cache_len)
 
     @staticmethod
     def _create_static_cache(static_cache_type, config, batch_size, max_cache_len, device, dtype):
@@ -1802,6 +1823,7 @@ class HybridEngineRollout(RolloutEngine):
         model_dtype = next(module.parameters()).dtype
         select_next_tokens = self._token_selector(sampling)
         repetition_penalty = self._repetition_penalty(module)
+        output_ids = [prompt_ids]
 
         def next_tokens(logits):
             if repetition_penalty != 1.0:
@@ -1809,8 +1831,9 @@ class HybridEngineRollout(RolloutEngine):
                                                         prompt_attn)
             return select_next_tokens(logits)
 
-        # --- Prefill with HF StaticCache (correct attention semantics) ---
-        prefill_cache = self._create_static_cache(StaticCache, module.config, batch_size, max_len, device, model_dtype)
+        # --- Prefill with a static cache (correct attention semantics) ---
+        prefill_cache = self._create_prefill_cache(StaticCache, module.config, batch_size, max_len, device,
+                                                   model_dtype)
         # Hybrid models take a per-type mask dict (GDN must see None; a 2D
         # mask corrupts its conv-state init); standard models take a tensor.
         is_hybrid = "linear_attention" in (getattr(getattr(module.config, "text_config", module.config), "layer_types",
@@ -1827,27 +1850,13 @@ class HybridEngineRollout(RolloutEngine):
             cache_position=torch.arange(prompt_len, device=device),
             **self._last_logits_kwargs(module),
         )
-        next_token = select_next_tokens(prefill_out.logits[:, -1, :])
+        next_token = next_tokens(prefill_out.logits[:, -1, :])
 
         # --- Copy prefill KV into DeepSpeedStaticCache ---
         # per-row positions: the batched step and decode-attention kernels
         # advance one entry per sequence (a shared scalar would race)
         write_pos = torch.full((batch_size, ), prompt_len, dtype=torch.long, device=device)
-        ds_tp_config = module.config
-        import deepspeed.comm as dist
-        if dist.is_initialized() and dist.get_world_size() > 1:
-            ds_tp_config = copy(module.config)
-            ds_tp_config.num_key_value_heads = max(1, module.config.num_key_value_heads // dist.get_world_size())
-            ds_tp_config.num_attention_heads = max(
-                1,
-                getattr(module.config, "num_attention_heads", 1) // dist.get_world_size())
-        ds_cache = DeepSpeedStaticCache(
-            ds_tp_config,
-            batch_size=batch_size,
-            max_cache_len=max_len,
-            device=device,
-            dtype=model_dtype,
-        )
+        ds_cache = DeepSpeedStaticCache(module.config, max_cache_len=max_len)
         ds_cache.set_write_position(write_pos)
         # Trigger lazy init then copy real data. Hybrid models carry
         # linear-attention (GDN) slots alongside KV slots; the GDN slots are
@@ -1867,7 +1876,7 @@ class HybridEngineRollout(RolloutEngine):
             ds_layer.keys[:, :, :prompt_len, :].copy_(hf_keys[:, :, :prompt_len, :])
             ds_layer.values[:, :, :prompt_len, :].copy_(hf_values[:, :, :prompt_len, :])
 
-        output_ids = [prompt_ids, next_token]
+        output_ids.append(next_token)
 
         # --- Static buffers for graph capture ---
         static_token = torch.zeros(batch_size, 1, dtype=torch.long, device=device)
@@ -1875,13 +1884,18 @@ class HybridEngineRollout(RolloutEngine):
         # one position per decode step by in-place writes (graph-replay safe).
         # GDN layers must receive None: their recurrence ignores attention masks
         # and a non-None value corrupts the conv-state updates.
-        static_attn = torch.zeros(batch_size, 1, 1, max_len, dtype=torch.bool, device=device)
-        static_attn[:, :, :, :prompt_len] = prompt_attn.unsqueeze(1).unsqueeze(1).bool()
-        static_attn[:, :, :, prompt_len] = True
+        static_attn = torch.zeros(batch_size, max_len, dtype=torch.bool, device=device)
+        static_attn[:, :prompt_len] = prompt_attn.bool()
+        static_attn[:, prompt_len] = True
+        static_causal_attn = torch.zeros((batch_size, 1, 1, max_len), dtype=model_dtype, device=device)
+        self._update_static_causal_attention(static_attn, static_causal_attn)
 
         # Decode-step mask argument: the per-type dict for hybrid models, the
         # plain 4-D tensor for standard full-attention ones.
-        decode_mask = {"full_attention": static_attn, "linear_attention": None} if is_hybrid else static_attn
+        decode_mask = ({
+            "full_attention": static_causal_attn,
+            "linear_attention": None
+        } if is_hybrid else static_causal_attn)
 
         # Persistent decode position tensors as VIEWS of write_pos: the
         # captured forwards read this memory, and the in-graph step kernel
@@ -1992,6 +2006,7 @@ class HybridEngineRollout(RolloutEngine):
 
             graph = get_accelerator().create_graph()
             with get_accelerator().capture_to_graph(graph):
+                self._update_static_causal_attention(static_attn, static_causal_attn)
                 out = module(
                     static_token,
                     attention_mask=decode_mask,
@@ -2007,8 +2022,8 @@ class HybridEngineRollout(RolloutEngine):
                 # only accepts CUDA bf16 logits — fp16 models must keep the
                 # PyTorch argmax path instead of failing during capture.
                 is_greedy = sampling is None or sampling.temperature <= 0.0
-                if (graph_op is not None and is_greedy and static_logits.dtype is torch.bfloat16
-                        and get_accelerator().on_accelerator(static_logits)):
+                if (batch_size == 1 and graph_op is not None and is_greedy and repetition_penalty == 1.0
+                        and static_logits.dtype is torch.bfloat16 and get_accelerator().on_accelerator(static_logits)):
                     graph_op.decode_step_graph(static_logits[:, -1, :].contiguous(), static_token.view(batch_size, 1),
                                                write_pos, static_attn, full_token_buf)
                     step_kernel_mounted = True
@@ -2020,6 +2035,7 @@ class HybridEngineRollout(RolloutEngine):
             # from a state that already consumed the first decode token.
             restore_gdn_states()
             write_pos.fill_(prompt_len)
+            static_attn[:, prompt_len + 1:].zero_()
             static_token.copy_(next_token)
         finally:
             module._forward_pre_hooks.update(saved_pre)
@@ -2046,9 +2062,10 @@ class HybridEngineRollout(RolloutEngine):
                 # Reveal only the current token's own slot: the pos+1 slot has
                 # not been written yet (warmup/capture leftovers), and SDPA at
                 # b>1 attends every slot the mask reveals.
-                static_attn[:, :, :, pos] = True
+                static_attn[:, pos] = True
+                self._update_static_causal_attention(static_attn, static_causal_attn)
                 get_accelerator().replay_graph(graph)
-                next_token = select_next_tokens(static_logits[:, -1, :])
+                next_token = next_tokens(static_logits[:, -1, :])
                 output_ids.append(next_token)
                 # eos_mask.all() is a device->host sync; running it every step
                 # serializes the ~50us of Python glue against the replay and
@@ -2072,6 +2089,10 @@ class HybridEngineRollout(RolloutEngine):
         # graph: mounting is conditional (b=1, CUDA bf16 logits), and a
         # kernel-less graph replay would read a token buffer nobody wrote.
         if step_kernel_mounted:
+            # This path avoids a device sync on every b=1 replay. EOS can be
+            # late by up to 15 steps, which is padded away below; batched
+            # graph+Python decode checks each step because one dead replay is
+            # multiplied by every active row.
             eos_check_every = 16
             for step in range(max_new_tokens - 1):
                 get_accelerator().replay_graph(graph)
@@ -2098,9 +2119,10 @@ class HybridEngineRollout(RolloutEngine):
             static_token.copy_(next_token)
             pos = prompt_len + step
             write_pos.fill_(pos)
-            static_attn[:, :, :, pos] = True
+            static_attn[:, pos] = True
+            self._update_static_causal_attention(static_attn, static_causal_attn)
             get_accelerator().replay_graph(graph)
-            next_token = select_next_tokens(static_logits[:, -1, :])
+            next_token = next_tokens(static_logits[:, -1, :])
             output_ids.append(next_token)
             eos_mask |= (next_token.view(1) == eos_token_id)
         return torch.cat(output_ids, dim=1)
