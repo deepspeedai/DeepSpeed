@@ -463,12 +463,16 @@ def test_continuous_rollout_matches_native_llama_generation_on_accelerator(attn_
 
     monkeypatch.setattr(accelerator, "capture_to_graph", counted_capture_to_graph)
     # Three requests and two slots force refill; the second call also exercises graph reuse.
+    captures_per_call = []
     for rollout in (eager_rollout, graph_rollout, graph_rollout):
         output = rollout.generate(request, sampling)
         assert torch.equal(output.input_ids, reference)
         assert torch.equal(output.attention_mask, expected_attention)
         assert torch.equal(output.response_start_idx, expected_response_start)
-    assert capture_count == 1
+        captures_per_call.append(capture_count)
+    # The ladder captures the width-2 graph for the first wave and the width-1 graph for
+    # the request that refills alone; the second graph call replays both.
+    assert captures_per_call == [0, 2, 2]
 
 
 @pytest.mark.parametrize("align_decode_fronts", [False, True])
@@ -527,7 +531,10 @@ def test_bucketed_prefill_refills_fixed_graph_slot_on_accelerator(monkeypatch, a
         profile = rollout.get_last_profile()
         assert profile["generation_strategy"] == "bucketed_graph"
         assert profile["num_prefill_forwards"] == 3
-    assert len(captures) == 1
+    # The ladder captures both widths on the first call: the width-2 graph for the
+    # two-request wave and the width-1 graph for the request left decoding alone; the
+    # second call replays both without capturing again.
+    assert len(captures) == 2
 
 
 def test_continuous_graph_matches_pretrained_model_when_enabled():
@@ -770,47 +777,40 @@ def test_continuous_graph_recaptures_only_when_tensor_layout_changes():
     short_prompts = torch.randint(1, 64, (3, 8), generator=generator).to(device)
     long_prompts = torch.randint(1, 64, (3, 12), generator=generator).to(device)
 
-    # The continuous path also calls create_graph() as a support probe, so count captures instead.
-    original_capture_to_graph = accelerator.capture_to_graph
-    capture_count = [0]
-
-    def counted_capture_to_graph(*args, **kwargs):
-        capture_count[0] += 1
-        return original_capture_to_graph(*args, **kwargs)
-
-    accelerator.capture_to_graph = counted_capture_to_graph
-    try:
-        outputs = []
-        for step, prompt_ids in enumerate((short_prompts, short_prompts, long_prompts, short_prompts, short_prompts)):
-            if step == 1:
-                # Apply the same in-place update an optimizer step would make.
-                with torch.no_grad():
-                    for eager_param, graph_param in zip(eager_model.parameters(), graph_model.parameters()):
-                        delta = torch.randn_like(eager_param) * 0.05
-                        eager_param.add_(delta)
-                        graph_param.add_(delta)
-            if step == 3:
-                # Same address, new strides: replay would read the old layout.
-                with torch.no_grad():
-                    eager_model.lm_head.weight.transpose_(0, 1)
-                    graph_model.lm_head.weight.transpose_(0, 1)
-            if step == 4:
-                # A re-registered buffer lives at an address the captured kernels never read.
-                for model in (eager_model, graph_model):
-                    rotary = model.model.rotary_emb
-                    rotary.register_buffer("inv_freq", rotary.inv_freq * 0.5, persistent=False)
-            request = RolloutRequest(prompt_ids, torch.ones_like(prompt_ids))
-            expected = eager_rollout.generate(request, eager_sampling)
-            output = graph_rollout.generate(request, graph_sampling)
-            assert torch.equal(output.input_ids, expected.input_ids)
-            outputs.append(output.input_ids)
-    finally:
-        accelerator.capture_to_graph = original_capture_to_graph
+    graph_captures = []
+    outputs = []
+    for step, prompt_ids in enumerate((short_prompts, short_prompts, long_prompts, short_prompts, short_prompts)):
+        if step == 1:
+            # Apply the same in-place update an optimizer step would make.
+            with torch.no_grad():
+                for eager_param, graph_param in zip(eager_model.parameters(), graph_model.parameters()):
+                    delta = torch.randn_like(eager_param) * 0.05
+                    eager_param.add_(delta)
+                    graph_param.add_(delta)
+        if step == 3:
+            # Same address, new strides: replay would read the old layout.
+            with torch.no_grad():
+                eager_model.lm_head.weight.transpose_(0, 1)
+                graph_model.lm_head.weight.transpose_(0, 1)
+        if step == 4:
+            # A re-registered buffer lives at an address the captured kernels never read.
+            for model in (eager_model, graph_model):
+                rotary = model.model.rotary_emb
+                rotary.register_buffer("inv_freq", rotary.inv_freq * 0.5, persistent=False)
+        request = RolloutRequest(prompt_ids, torch.ones_like(prompt_ids))
+        expected = eager_rollout.generate(request, eager_sampling)
+        output = graph_rollout.generate(request, graph_sampling)
+        assert torch.equal(output.input_ids, expected.input_ids)
+        outputs.append(output.input_ids)
+        graph_captures.append(graph_rollout.get_last_continuous_stats()["graph_captures"])
 
     # The update must change the tokens, otherwise stale weights would also pass.
     assert not torch.equal(outputs[0], outputs[1])
     assert not torch.equal(outputs[3], outputs[4])
-    assert capture_count[0] == 3
+    # Each rebuilt state lazily captures the two ladder widths (2 and 1). The in-place
+    # weight update and the long prompt, which still fits the pinned capacity, reuse the
+    # state; the stride and buffer changes rebuild it.
+    assert graph_captures == [2, 0, 0, 2, 2]
 
     cache_bytes = graph_rollout.get_last_continuous_stats()["cache_memory_bytes"]
     allocated = accelerator.memory_allocated()

@@ -441,16 +441,69 @@ def _mock_graph_accelerator(mock_get_accelerator):
     return accelerator
 
 
-def test_graph_capture_ladder_defaults_to_powers_of_two():
-    assert HybridEngineRollout._graph_capture_ladder(1) == (1, )
-    assert HybridEngineRollout._graph_capture_ladder(5) == (1, 2, 4, 5)
-    assert HybridEngineRollout._graph_capture_ladder(8) == (1, 2, 4, 8)
-    # A configured ladder still has to cover a full physical batch.
-    assert HybridEngineRollout._graph_capture_ladder(4, (1, 4)) == (1, 4)
-    assert HybridEngineRollout._graph_capture_ladder(4, (3, )) == (3, 4)
+class _RetiringModel(torch.nn.Module):
+    """Gives each row its own first token and retires the last row as soon as it decodes it."""
+
+    _supports_cache_class = True
+
+    def __init__(self):
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.zeros(1))
+        self.config = PretrainedConfig(
+            max_position_embeddings=32,
+            num_hidden_layers=1,
+            num_attention_heads=1,
+            num_key_value_heads=1,
+            hidden_size=1,
+            head_dim=1,
+        )
+
+    def forward(self,
+                input_ids,
+                attention_mask=None,
+                past_key_values=None,
+                use_cache=True,
+                cache_position=None,
+                position_ids=None,
+                **kwargs):
+        states = input_ids[:, None, :, None].to(dtype=torch.float32)
+        past_key_values.update(states, states, layer_idx=0, cache_position=cache_position)
+        if input_ids.shape[1] > 1:
+            next_tokens = 3 + torch.arange(input_ids.shape[0]).long()
+        else:
+            next_tokens = torch.where(input_ids[:, 0] == 5, 2, 3).long()
+        logits = torch.zeros((input_ids.shape[0], input_ids.shape[1], 8))
+        logits.scatter_(2, next_tokens[:, None, None].expand(-1, input_ids.shape[1], 1), 1)
+        return SimpleNamespace(logits=logits, past_key_values=past_key_values)
 
 
-def test_graph_capture_ladder_must_be_positive_and_fit_the_batch():
+def _ladder_stats(mock_get_accelerator, rows, continuous_batch_size, max_new_tokens, configured=None):
+    """Run one continuous-graph rollout on `_RetiringModel` and return its public stats."""
+    _mock_graph_accelerator(mock_get_accelerator)
+    rollout = HybridEngineRollout(
+        SimpleNamespace(module=_RetiringModel()),
+        SimpleNamespace(pad_token_id=0, eos_token_id=2),
+        cfg=HybridEngineRolloutConfig(use_graph_capture=True, graph_capture_batch_sizes=configured),
+    )
+    prompt = torch.cat([torch.arange(1, 6).repeat(rows, 1), (6 + torch.arange(rows)).unsqueeze(1)], dim=1)
+    rollout.generate(
+        RolloutRequest(prompt, torch.ones_like(prompt)),
+        SamplingConfig(max_new_tokens=max_new_tokens, temperature=0, continuous_batch_size=continuous_batch_size))
+    return rollout.get_last_continuous_stats()
+
+
+@patch("deepspeed.runtime.rollout.hybrid_engine_rollout.get_accelerator")
+def test_graph_capture_ladder_defaults_and_overrides(mock_get_accelerator):
+    """The reported ladder is the powers-of-two default, or the configured widths plus the full batch."""
+    stats = _ladder_stats(mock_get_accelerator, rows=3, continuous_batch_size=5, max_new_tokens=2)
+    assert stats["graph_capture_ladder"] == [1, 2, 4, 5]
+
+    stats = _ladder_stats(mock_get_accelerator, rows=3, continuous_batch_size=4, max_new_tokens=2, configured=(3, ))
+    assert stats["graph_capture_ladder"] == [3, 4]
+
+
+def test_graph_capture_ladder_must_be_positive_and_fit_the_batch(graph_capture_accelerator):
+    request = _make_request()
     for configured, message in (((0, ), "positive integers"), ((5, ), "cannot exceed continuous_batch_size")):
         rollout = HybridEngineRollout(
             _make_engine(),
@@ -458,68 +511,29 @@ def test_graph_capture_ladder_must_be_positive_and_fit_the_batch():
             cfg=HybridEngineRolloutConfig(use_graph_capture=True, graph_capture_batch_sizes=configured),
         )
         with pytest.raises(ValueError, match=message):
-            rollout._validate_continuous_graph_options(
-                2, SamplingConfig(max_new_tokens=2, temperature=0, continuous_batch_size=2))
+            rollout.generate(request, SamplingConfig(max_new_tokens=2, temperature=0, continuous_batch_size=2))
 
 
-def test_graph_capture_bucket_width_rounds_up():
-    assert HybridEngineRollout._bucket_width((1, 2, 4, 8), 1) == 1
-    assert HybridEngineRollout._bucket_width((1, 2, 4, 8), 3) == 4
-    assert HybridEngineRollout._bucket_width((1, 2, 4, 8), 8) == 8
+@patch("deepspeed.runtime.rollout.hybrid_engine_rollout.get_accelerator")
+def test_graph_capture_bucket_width_rounds_up_and_pads(mock_get_accelerator):
+    """A decode step replays the smallest captured width that holds its rows; the rest is padding."""
+    stats = _ladder_stats(mock_get_accelerator,
+                          rows=3,
+                          continuous_batch_size=8,
+                          max_new_tokens=4,
+                          configured=(1, 2, 4, 8))
+    # The three-row wave rounds up to the width-4 bucket (one padded row), then the two
+    # surviving rows fit the width-2 bucket exactly.
+    assert stats["decode_bucket_widths"] == {4: 1, 2: 2}
+    assert stats["decode_padded_rows"] == 1
+    assert stats["graph_captures"] == 2
 
 
 @patch("deepspeed.runtime.rollout.hybrid_engine_rollout.get_accelerator")
 def test_graph_capture_dispatches_smaller_buckets_as_rows_retire(mock_get_accelerator):
     """Decode steps pick the smallest captured width that holds the rows doing work."""
+    stats = _ladder_stats(mock_get_accelerator, rows=3, continuous_batch_size=3, max_new_tokens=4)
 
-    class RetiringModel(torch.nn.Module):
-        """Gives each row its own first token and retires the last row as soon as it decodes it."""
-
-        _supports_cache_class = True
-
-        def __init__(self):
-            super().__init__()
-            self.weight = torch.nn.Parameter(torch.zeros(1))
-            self.config = PretrainedConfig(
-                max_position_embeddings=32,
-                num_hidden_layers=1,
-                num_attention_heads=1,
-                num_key_value_heads=1,
-                hidden_size=1,
-                head_dim=1,
-            )
-
-        def forward(self,
-                    input_ids,
-                    attention_mask=None,
-                    past_key_values=None,
-                    use_cache=True,
-                    cache_position=None,
-                    position_ids=None,
-                    **kwargs):
-            states = input_ids[:, None, :, None].to(dtype=torch.float32)
-            past_key_values.update(states, states, layer_idx=0, cache_position=cache_position)
-            if input_ids.shape[1] > 1:
-                next_tokens = 3 + torch.arange(input_ids.shape[0]).long()
-            else:
-                next_tokens = torch.where(input_ids[:, 0] == 5, 2, 3).long()
-            logits = torch.zeros((input_ids.shape[0], input_ids.shape[1], 8))
-            logits.scatter_(2, next_tokens[:, None, None].expand(-1, input_ids.shape[1], 1), 1)
-            return SimpleNamespace(logits=logits, past_key_values=past_key_values)
-
-    model = RetiringModel()
-    _mock_graph_accelerator(mock_get_accelerator)
-    rollout = HybridEngineRollout(
-        SimpleNamespace(module=model),
-        SimpleNamespace(pad_token_id=0, eos_token_id=2),
-        cfg=HybridEngineRolloutConfig(use_graph_capture=True),
-    )
-    prompt = torch.tensor([[1, 2, 3, 4, 5, 6], [1, 2, 3, 4, 5, 7], [1, 2, 3, 4, 5, 8]])
-    request = RolloutRequest(prompt, torch.ones_like(prompt))
-
-    rollout.generate(request, SamplingConfig(max_new_tokens=4, temperature=0, continuous_batch_size=3))
-
-    stats = rollout.get_last_continuous_stats()
     # Ladder is (1, 2, 3): the three row batch retires to two rows after its first decode, so
     # only that step runs on the three wide graph, both widths are captured lazily, and no
     # step ever replays a graph wider than the rows doing work.

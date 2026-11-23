@@ -916,7 +916,6 @@ class HybridEngineRollout(RolloutEngine):
         stats = {
             "cache_capacity": max_cache_len,
             "peak_cache_length": prompt_len,
-            "cache_memory_bytes": self._continuous_cache_memory_bytes(cache, static_attention, static_write_positions),
             "trim_count": 0,
             "trimmed_columns": 0,
             "trim_latency_ms": 0.0,
@@ -1049,6 +1048,10 @@ class HybridEngineRollout(RolloutEngine):
             stats["tokens_per_second"] = None
         stats["trim_frequency"] = 0.0
         stats["graph_captures"] = state.captures - captures_before
+        # The cache layers are allocated lazily from the first forward, so the footprint is
+        # measured after the loop, as on the eager path.
+        stats["cache_memory_bytes"] = self._continuous_cache_memory_bytes(cache, static_attention,
+                                                                          static_write_positions)
         self._last_continuous_stats = stats
         if profile is not None:
             self._finish_continuous_profile(profile, original_request, responses, max_batch_size, prompt_len,

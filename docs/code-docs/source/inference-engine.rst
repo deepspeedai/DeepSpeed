@@ -73,7 +73,10 @@ of ``SamplingConfig`` with Hugging Face's logits warpers, in the order
 Both greedy decoding and sampling first apply the repetition penalty from the
 model's ``generation_config``, as ``generate()`` does. Other
 ``generation_config`` settings are not applied on the graph path. Continuous
-batching, with or without graph capture, picks tokens the same way.
+batching, with or without graph capture, picks tokens the same way; with
+continuous batching the captured decode uses a ladder of batch widths instead
+of one wide graph, and ``graph_capture_batch_sizes`` overrides the ladder
+described in the continuous batching section below.
 
 Shared Prompt Prefill
 ---------------------
@@ -321,6 +324,20 @@ dtype or device. Replays read these tensors in place, so in-place optimizer upda
 rollouts are picked up without recapturing. By default, the cache length is the
 prompt width plus ``max_new_tokens``. Set ``continuous_cache_capacity`` to reuse
 one graph across prompt widths that fit within that capacity.
+Each decode step replays the smallest captured batch width that covers the rows
+doing work. By default the captured widths are the powers of two up to
+``continuous_batch_size`` plus that full batch size itself, and each width is
+captured lazily on first use; a width whose capture fails runs its forwards
+eagerly for the rest of the rollout. Set
+``HybridEngineRolloutConfig(graph_capture_batch_sizes=(1, 4, 8))`` to override
+the ladder: widths must be positive integers no larger than
+``continuous_batch_size``, and the full batch size is always captured. A sparser
+ladder captures and stores fewer graphs but pads more rows into a wider replay,
+and a denser ladder trades captures for less padding.
+``get_last_continuous_stats()`` reports the ladder as ``graph_capture_ladder``,
+the steps per width as ``decode_bucket_widths``, the rows padded into a wider
+replay as ``decode_padded_rows``, and the captures performed by the call as
+``graph_captures``.
 Call ``rollout.shutdown()`` to release the graph and its
 static cache. The rollout stays usable and captures again on its next graph
 call. Under tensor parallelism the graph holds captured collectives, so call

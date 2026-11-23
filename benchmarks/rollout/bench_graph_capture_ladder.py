@@ -26,6 +26,8 @@ bit-exact, and the per-turn line still catches real regressions.
               as row-steps above the live rows.
   pad rows    rows a step carried that were not decoding, as reported by the rollout.
   tokens/s    the throughput price of the remaining padding.
+  caps        captures charged to the measured pass; the warmup runs capture the ladder,
+              so a warmed pass reports zero and the measured time is steady-state.
 
 Launch (from repo root):
 
@@ -49,7 +51,8 @@ Arguments:
     --mock-capture    exercise the captured path with a mocked accelerator, so the ladder
                       runs without a GPU; the timing is then meaningless (default: off)
     --trials          measured repetitions per configuration, best is reported (default: 3)
-    --warmup          unmeasured repetitions per configuration (default: 1)
+    --warmup          unmeasured repetitions per configuration; they run on the same rollout
+                      as the trials and absorb the lazy captures (default: 1)
     --seed            RNG seed for the prompts (and the random model when --model is
                       omitted), so a launch is reproducible (default: 0)
     --layers/--hidden-size/--heads/--vocab-size   shape of the random model
@@ -142,12 +145,27 @@ def build_request(conversations, device, pad_token_id=0):
     return RolloutRequest(prompt_ids, attention)
 
 
-def run_once(args, model, conversations, ladder, graph_capture, device):
+def cache_capacity(args):
+    """A cache span covering the widest prompt the workload reaches, plus one turn.
+
+    Pinning the capacity keeps the decode shape fixed as prompts grow turn over turn, so
+    the captured ladder stays valid instead of being rebuilt for every new prompt width.
+    """
+    return args.prompt_len + max(1, args.turns) * args.max_new_tokens
+
+
+def build_rollout(args, model, ladder, graph_capture):
+    """The rollout under test; the warmup and the measured trials share one instance."""
+    cfg = HybridEngineRolloutConfig(use_graph_capture=graph_capture,
+                                    graph_capture_batch_sizes=ladder,
+                                    continuous_cache_capacity=cache_capacity(args))
+    return HybridEngineRollout(SimpleNamespace(module=model),
+                               SimpleNamespace(pad_token_id=0, eos_token_id=None),
+                               cfg=cfg)
+
+
+def run_once(rollout, args, conversations, device):
     """One multi-turn rollout: generate a turn, append it, drop the conversations that ended."""
-    cfg = HybridEngineRolloutConfig(use_graph_capture=graph_capture, graph_capture_batch_sizes=ladder)
-    rollout = HybridEngineRollout(SimpleNamespace(module=model),
-                                  SimpleNamespace(pad_token_id=0, eos_token_id=None),
-                                  cfg=cfg)
     sampling = SamplingConfig(max_new_tokens=args.max_new_tokens,
                               temperature=0,
                               continuous_batch_size=args.max_batch_size)
@@ -212,15 +230,16 @@ def compare_token_streams(baseline, ladder, max_new_tokens):
 def measure(args, model, conversations, ladder, graph_capture, device):
     """Best of `--trials` runs after `--warmup` unmeasured ones.
 
-    A fresh rollout is built per run, because the graph cache and the captured buffers
-    are per rollout: timing then reflects steady-state generation, not first-call
-    initialization.
+    Warmup and trials share one rollout, because the decode ladder is captured lazily on
+    the first generate: a fresh rollout per run would charge the captures to the timed
+    window. With ``--warmup 0`` the reported time is a cold-start number that includes them.
     """
+    rollout = build_rollout(args, model, ladder, graph_capture)
     for _ in range(max(0, args.warmup)):
-        run_once(args, model, conversations, ladder, graph_capture, device)
+        run_once(rollout, args, conversations, device)
     best = None
     for _ in range(max(1, args.trials)):
-        run = run_once(args, model, conversations, ladder, graph_capture, device)
+        run = run_once(rollout, args, conversations, device)
         if best is None or run["elapsed_ms"] < best["elapsed_ms"]:
             best = run
     return best
@@ -275,7 +294,8 @@ def main():
     device = torch.device(args.device if args.device != "auto" else (
         accelerator.current_device_name() if accelerator.is_available() else "cpu"))
     dtype = DTYPES[args.dtype] if args.dtype else (torch.bfloat16 if device.type == "cuda" else torch.float32)
-    graph_capture = device.type == "cuda" and accelerator.create_graph() is not None
+    graph_capture = (device.type == accelerator.device_name() and accelerator.is_graph_capture_supported()
+                     and accelerator.create_graph() is not None)
     if args.graph == "on":
         graph_capture = True
     elif args.graph == "off":
@@ -290,12 +310,12 @@ def main():
 
     # Seed before any RNG draw (model weights when --model is omitted, prompts always).
     torch.manual_seed(args.seed)
-    torch.cuda.manual_seed_all(args.seed)
+    accelerator.manual_seed_all(args.seed)
     model = build_model(args, device, dtype)
     conversations = build_conversations(args, device)
     print(f"device={device} dtype={dtype} graph_capture={graph_capture} mocked={args.mock_capture} "
           f"seed={args.seed} conversations={args.conversations} slots={args.max_batch_size} "
-          f"prompt={args.prompt_len} new_tokens={args.max_new_tokens} "
+          f"cache={cache_capacity(args)} prompt={args.prompt_len} new_tokens={args.max_new_tokens} "
           f"turn_budgets={[c['turns'] for c in conversations]}\n")
 
     configs = [("one wide graph", (args.max_batch_size, )), ("ladder", None)]
