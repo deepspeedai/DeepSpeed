@@ -75,6 +75,35 @@ per-request ``replica_selector`` as a batch policy. Every rank must return the s
 cost inputs must come from data every rank shares, such as a link calibration gathered across
 ranks, never from a rank-local measurement.
 
+Several layouts as one source
+-----------------------------
+
+A parameter can be held in two layouts at once, such as a trainer's ZeRO-3
+partitions and an inference shard that is still current.
+``union_affine_maps`` from ``deepspeed.checkpoint.affine`` merges their maps into
+one source map, so the planner can read each block from any layout that holds
+it. Each layout uses its own locations, one per buffer, and
+``TransferEndpoints`` may bind several locations to one process::
+
+    from deepspeed.checkpoint.affine import union_affine_maps
+    from deepspeed.checkpoint.affine_transfer import PlanBudget, plan_transfer
+
+    source_map = union_affine_maps([zero3_storage_map, surviving_shard_map])
+    # A union is cut at every layout's edges, so it has more pieces than either layout.
+    plan = plan_transfer(target_map, source_map, PlanBudget(max_pieces_per_map=1 << 16))
+
+Pieces are cut where the layouts' blocks meet and keep their strides, so each
+buffer is read as it is stored. A ZeRO-3 block that a column edge cuts across
+several rows keeps its row-major strides and is read as a strided flat shard.
+
+The union's piece count grows with the number of partitions times the edges
+each one crosses, so it can exceed the default ``PlanBudget``, which allows
+4,096 pieces per map. For a (4096, 4096) parameter, ZeRO-3 partitions plus an
+8-way row split give 1,196 pieces at 200 partitions and 5,996 at 1,000; with
+an 8-way column split, 6,782 and 33,976. Raise ``max_pieces_per_map`` to fit.
+At 1,000 partitions with a column split, a plan into a column-split target also
+needs a larger ``max_merge_checks``. Maintenance contact: ``@Achyuthan-S``.
+
 Transport and staging
 ---------------------
 
