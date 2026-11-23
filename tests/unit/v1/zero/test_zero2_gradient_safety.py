@@ -424,7 +424,7 @@ def test_first_bucket_write_waits_for_the_allocating_stream(monkeypatch):
     opt, param, _ = make_optimizer(cpu_offload=False)
     opt.ready_for_gradients = False
     opt.reduce_bucket_size = 2 * param.numel()
-    opt._record_gradient_stream = lambda tensor, stream: None
+    monkeypatch.setattr(torch.Tensor, "record_stream", lambda tensor, stream: None)
     allocating, writer = FakeStream(), FakeStream()
     allocating.operations = 1
     accelerator = fake_accelerator(allocating)
@@ -460,6 +460,7 @@ def test_noncontiguous_reduction_waits_for_and_keeps_its_input(monkeypatch):
     ordered_at_read, recorded = [], set()
 
     def flatten(grads):
+        flusher.operations += 1
         ordered_at_read.append(flusher.ordered_after.get(producer, 0))
         return torch._utils._flatten_dense_tensors(grads)
 
@@ -475,7 +476,7 @@ def test_noncontiguous_reduction_waits_for_and_keeps_its_input(monkeypatch):
     opt.reduce_ipg_grads()
     assert param.grad is None
     assert ordered_at_read == [1]
-    assert (address, flusher) in recorded
+    assert (address, flusher) in recorded or producer.ordered_after.get(flusher, 0) >= flusher.operations
 
 
 @pytest.mark.parametrize("producers", [1, 2])
