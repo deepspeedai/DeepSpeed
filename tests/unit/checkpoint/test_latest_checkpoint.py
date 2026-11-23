@@ -65,8 +65,7 @@ class TestDecoupledCheckpointDestroy(DistributedTest):
     world_size = 2
     non_daemonic_procs = True
 
-    @pytest.mark.parametrize("save_latest", [True, False])
-    def test_final_checkpoint(self, tmp_path, save_latest):
+    def _engine_with_previous_checkpoint(self, tmp_path):
         os.environ.update(CROSS_RANK="0", CROSS_SIZE="1")
         config = {
             "train_micro_batch_size_per_gpu": 1,
@@ -85,8 +84,33 @@ class TestDecoupledCheckpointDestroy(DistributedTest):
         engine.save_checkpoint(str(tmp_path), tag="previous")
         engine.backward(engine(torch.ones(1, 2, device=engine.device)).sum())
         engine.step()
+        return engine
+
+    @pytest.mark.parametrize("save_latest", [True, False])
+    def test_final_checkpoint(self, tmp_path, save_latest):
+        engine = self._engine_with_previous_checkpoint(tmp_path)
         engine.save_checkpoint(str(tmp_path), tag="final", save_latest=save_latest)
         engine.destroy()
 
         assert (tmp_path / "final" / "mp_rank_00_model_states.pt").is_file()
         assert (tmp_path / "latest").read_text() == ("final" if save_latest else "previous")
+
+    @pytest.mark.world_size(1)
+    @pytest.mark.parametrize("retry_pending_tag", [False, True])
+    def test_failed_save(self, tmp_path, retry_pending_tag):
+
+        class Unpicklable:
+
+            def __reduce__(self):
+                raise ValueError("cannot serialize client state")
+
+        engine = self._engine_with_previous_checkpoint(tmp_path)
+        try:
+            if retry_pending_tag:
+                engine.save_checkpoint(str(tmp_path), tag="final")
+            with pytest.raises(ValueError, match="cannot serialize client state"):
+                engine.save_checkpoint(str(tmp_path), tag="final", client_state={"value": Unpicklable()})
+        finally:
+            engine.destroy()
+
+        assert (tmp_path / "latest").read_text() == "previous"

@@ -1310,12 +1310,21 @@ class DeepSpeedEngine(Module):
         if getattr(self, "_destroyed", False):
             return
         try:
-            self.destroy()
+            self._release_resources()
         except Exception as exc:
             # Avoid destructor-time exceptions for partially initialized engines.
             logger.debug("DeepSpeedEngine.__del__ cleanup skipped: %s", exc, exc_info=True)
 
     def destroy(self):
+        """Release engine resources. All ranks must call this with a pending decoupled checkpoint."""
+        try:
+            last_submission = self.__dict__.pop("_submitted_checkpoint", None)
+            if last_submission is not None and self.checkpoint_engine.get_commit_info() is last_submission:
+                self._commit_decoupled_checkpoint(wait_for_all_ranks=True)
+        finally:
+            self._release_resources()
+
+    def _release_resources(self):
         self._destroyed = True
         try:
             # DeepEP buffers ask the library not to reclaim them, so they outlive
@@ -5131,10 +5140,12 @@ class DeepSpeedEngine(Module):
                     fd.write(tag)
 
         dist.barrier()
+        if self.checkpoint_engine.is_decoupled():
+            self._submitted_checkpoint = commit_info
 
         return True
 
-    def _commit_decoupled_checkpoint(self):
+    def _commit_decoupled_checkpoint(self, *, wait_for_all_ranks=False):
         assert self.checkpoint_engine.is_decoupled(), \
             f'{self.checkpoint_engine} is not a Decoupled Checkpoint Engine'
 
@@ -5143,6 +5154,8 @@ class DeepSpeedEngine(Module):
             return
 
         self.checkpoint_engine.commit(commit_info)
+        if wait_for_all_ranks:
+            dist.barrier()
 
         if self.global_rank == 0 and commit_info.save_latest:
             with open(os.path.join(commit_info.save_dir, 'latest'), 'w') as fd:
