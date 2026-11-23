@@ -159,6 +159,36 @@ def test_cpu_adam_concurrent_updates(fused):
         list(executor.map(update, cases))
 
 
+def test_cpu_adam_concurrent_grad_scale_same_optimizer():
+    params = [torch.zeros(1 << 18, device='cpu', dtype=torch.float32) for _ in range(2)]
+    beta1, beta2 = 0.5, 0.75
+    optimizer = DeepSpeedCPUAdam(params, betas=(beta1, beta2))
+    if not optimizer.grad_scale_supported():
+        pytest.skip("this CPU Adam build cannot apply grad_scale")
+
+    op = optimizer.ds_opt_adam
+    barrier = Barrier(2)
+    steps = 4
+
+    def update(param, grad_scale):
+        grad = torch.ones_like(param)
+        exp_avg = torch.zeros_like(param)
+        exp_avg_sq = torch.zeros_like(param)
+        for step in range(1, steps + 1):
+            args = (optimizer.opt_id, step, 1e-3, beta1, beta2, 1e-8, 0.0, True, param, grad, exp_avg, exp_avg_sq)
+            barrier.wait(timeout=30)
+            if grad_scale == 1.0:
+                op.adam_update(*args)
+            else:
+                op.adam_update_scaled(*args, grad_scale)
+
+        torch.testing.assert_close(exp_avg, torch.full_like(param, grad_scale * (1 - beta1**steps)))
+        torch.testing.assert_close(exp_avg_sq, torch.full_like(param, grad_scale**2 * (1 - beta2**steps)))
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        list(executor.map(update, params, (1.0, 0.25)))
+
+
 @pytest.mark.parametrize('fused', [False, True])
 def test_cpu_adam_native_update_releases_gil(fused):
     if fused and get_accelerator().device_name() != 'cpu':
