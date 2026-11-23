@@ -612,9 +612,9 @@ class TestTensorFragmentUpdate(DistributedTest):
 class TestZero2AverageAfterCast(DistributedTest):
     world_size = 3
 
-    @pytest.mark.parametrize("multi_rank", [True, False])
+    @pytest.mark.parametrize("route", ["allreduce", "reduce_to_owner", "noncontiguous"])
     @pytest.mark.parametrize("communication_dtype", ["fp32", "bf16", "fp16"])
-    def test_master_gradient(self, multi_rank, communication_dtype):
+    def test_master_gradient(self, route, communication_dtype):
         if not get_accelerator().is_bf16_supported():
             pytest.skip("requires bf16")
         config = {
@@ -626,7 +626,8 @@ class TestZero2AverageAfterCast(DistributedTest):
             "zero_allow_untested_optimizer": True,
             "zero_optimization": {
                 "stage": 2,
-                "use_multi_rank_bucket_allreduce": multi_rank
+                "use_multi_rank_bucket_allreduce": route == "allreduce",
+                "contiguous_gradients": route != "noncontiguous"
             },
         }
         config["bf16"] = {"enabled": True}
