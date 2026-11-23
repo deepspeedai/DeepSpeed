@@ -314,7 +314,7 @@ def test_bucket_accesses_are_ordered_across_hook_streams(monkeypatch, overlap, c
     opt.overlap_comm = overlap
     opt.reduction_stream = FakeStream()
     opt.reduce_scatter = False
-    opt._record_gradient_stream = lambda tensor, stream: None
+    monkeypatch.setattr(torch.Tensor, "record_stream", lambda tensor, stream: None)
     opt.ipg_buckets[torch.float32].buffer.append(torch.empty(16, dtype=param.dtype, device=param.device))
     params = [param]
     for index, numel in enumerate([4, 4, 16], start=1):
