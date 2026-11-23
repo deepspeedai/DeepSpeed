@@ -12,7 +12,13 @@ captured width that covers the rows doing work.
 The bench drives the same multi-turn workload twice - once with
 ``graph_capture_batch_sizes=(max_batch_size,)`` and once with the default ladder - and
 prints the token streams, the work each configuration feeds through the decode graph,
-and the timing.
+and the timing. Both runs share one seeded RNG (``--seed``), so a launch is
+reproducible. The final comparison reports per-turn token equality and the
+generated-token agreement fraction rather than a single exact-match verdict: in
+low precision the decode forward at a different batch width can land a logit off by
+a last ulp, which flips a greedy argmax on near-ties, so cross-width exactness is
+not guaranteed; turns where both configurations replay the same width stay
+bit-exact, and the per-turn line still catches real regressions.
 
   row-steps   sum over decode steps of the width that step replayed. Attention and MLP
               cost scale with rows, so this is the decode work the graph does; the
@@ -44,6 +50,8 @@ Arguments:
                       runs without a GPU; the timing is then meaningless (default: off)
     --trials          measured repetitions per configuration, best is reported (default: 3)
     --warmup          unmeasured repetitions per configuration (default: 1)
+    --seed            RNG seed for the prompts (and the random model when --model is
+                      omitted), so a launch is reproducible (default: 0)
     --layers/--hidden-size/--heads/--vocab-size   shape of the random model
 
     python benchmarks/rollout/bench_graph_capture_ladder.py ...            (installed deepspeed)
@@ -83,6 +91,7 @@ def parse_args():
     parser.add_argument("--vocab-size", type=int, default=1024)
     parser.add_argument("--trials", type=int, default=3)
     parser.add_argument("--warmup", type=int, default=1)
+    parser.add_argument("--seed", type=int, default=0)
     return parser.parse_args()
 
 
@@ -171,7 +180,7 @@ def run_once(args, model, conversations, ladder, graph_capture, device):
     accelerator.synchronize()
     elapsed_ms = (time.perf_counter() - start) * 1000.0
     return {
-        "stream": torch.cat([turn.reshape(-1) for turn in stream]),
+        "stream": stream,
         "turns": turns,
         "elapsed_ms": elapsed_ms,
         "calls": calls,
@@ -182,6 +191,22 @@ def run_once(args, model, conversations, ladder, graph_capture, device):
         "captures": captures,
         "widths": widths,
     }
+
+
+def compare_token_streams(baseline, ladder, max_new_tokens):
+    """Per-turn token equality and the generated-token agreement count.
+
+    Each call's generated tail is the last ``max_new_tokens`` columns of every row;
+    the prompts are identical by construction, so only the tails count toward
+    agreement.
+    """
+    per_turn = [torch.equal(a, b) for a, b in zip(baseline, ladder)]
+    matches = total = 0
+    for a, b in zip(baseline, ladder):
+        same = a[:, -max_new_tokens:] == b[:, -max_new_tokens:]
+        matches += int(same.sum())
+        total += same.numel()
+    return per_turn, (matches, total)
 
 
 def measure(args, model, conversations, ladder, graph_capture, device):
@@ -263,11 +288,15 @@ def main():
               "continuous path and the ladder is not exercised. Use --mock-capture for the dispatch "
               "accounting, or run on a device with graph capture for the timing.\n")
 
+    # Seed before any RNG draw (model weights when --model is omitted, prompts always).
+    torch.manual_seed(args.seed)
+    torch.cuda.manual_seed_all(args.seed)
     model = build_model(args, device, dtype)
     conversations = build_conversations(args, device)
     print(f"device={device} dtype={dtype} graph_capture={graph_capture} mocked={args.mock_capture} "
-          f"conversations={args.conversations} slots={args.max_batch_size} prompt={args.prompt_len} "
-          f"new_tokens={args.max_new_tokens} turn_budgets={[c['turns'] for c in conversations]}\n")
+          f"seed={args.seed} conversations={args.conversations} slots={args.max_batch_size} "
+          f"prompt={args.prompt_len} new_tokens={args.max_new_tokens} "
+          f"turn_budgets={[c['turns'] for c in conversations]}\n")
 
     configs = [("one wide graph", (args.max_batch_size, )), ("ladder", None)]
     context = mock_graph_accelerator() if args.mock_capture else nullcontext()
@@ -289,7 +318,9 @@ def main():
     if args.mock_capture:
         print("token streams: not checked (the mocked replay returns the capture's logits)")
     else:
-        print(f"token streams match: {torch.equal(baseline['stream'], ladder['stream'])}")
+        per_turn, (matches, total) = compare_token_streams(baseline["stream"], ladder["stream"], args.max_new_tokens)
+        print(f"per-turn token equality: {per_turn}")
+        print(f"generated-token agreement: {matches}/{total} ({matches / total * 100.0:.1f}%)")
 
 
 if __name__ == "__main__":
