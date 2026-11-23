@@ -75,6 +75,35 @@ per-request ``replica_selector`` as a batch policy. Every rank must return the s
 cost inputs must come from data every rank shares, such as a link calibration gathered across
 ranks, never from a rank-local measurement.
 
+Several layouts as one source
+-----------------------------
+
+A parameter can be held in two layouts at once, such as a trainer's ZeRO-3
+partitions and an inference shard that is still current.
+``union_affine_maps`` from ``deepspeed.checkpoint.affine`` merges their maps into
+one source map, so the planner can read each block from any layout that holds
+it. Each layout uses its own locations, one per buffer, and
+``TransferEndpoints`` may bind several locations to one process::
+
+    from deepspeed.checkpoint.affine import union_affine_maps
+    from deepspeed.checkpoint.affine_transfer import PlanBudget, plan_transfer
+
+    source_map = union_affine_maps([zero3_storage_map, surviving_shard_map])
+    # A union is cut at every layout's edges, so it has more pieces than either layout.
+    plan = plan_transfer(target_map, source_map, PlanBudget(max_pieces_per_map=1 << 16))
+
+Pieces are cut where the layouts' blocks meet and keep their strides, so each
+buffer is read as it is stored. A ZeRO-3 block that a column edge cuts across
+several rows keeps its row-major strides and is read as a strided flat shard.
+
+The union's piece count grows with the number of partitions times the edges
+each one crosses, so it can exceed the default ``PlanBudget``, which allows
+4,096 pieces per map. For a (4096, 4096) parameter, ZeRO-3 partitions plus an
+8-way row split give 1,196 pieces at 200 partitions and 5,996 at 1,000; with
+an 8-way column split, 6,782 and 33,976. Raise ``max_pieces_per_map`` to fit.
+At 1,000 partitions with a column split, a plan into a column-split target also
+needs a larger ``max_merge_checks``. Maintenance contact: ``@Achyuthan-S``.
+
 Transport and staging
 ---------------------
 
@@ -108,6 +137,46 @@ place, the staging arena each peer direction allocates, the local copies, and th
 round count that ``TransferStats.rounds`` reports. ``execute_transfers`` builds
 its rounds and arenas from the same computation, so the two cannot drift apart.
 The schedule follows the current transport described above and changes with it.
+
+Analyzing a plan
+----------------
+
+``analyze_transfers`` reports what an ``execute_transfers`` batch will do,
+without running it or communicating. It takes the same plans, endpoints,
+element size and ``StagingBudget`` and reads the schedule from
+``schedule_transfers``, so it can be called on one process, for example to
+compare two candidate plans or budgets before choosing one::
+
+    from deepspeed.checkpoint.affine_transfer_analysis import (analyze_transfers, expected_stats,
+                                                                report_to_dict)
+    from deepspeed.checkpoint.affine_transfer_calibration import node_path_of
+    from deepspeed.checkpoint.affine_transfer_executor import StagingBudget
+
+    report = analyze_transfers(plans, endpoints, element_size=2, budget=StagingBudget(256 << 20),
+                               path_of=node_path_of(processes_per_node=8))
+    summary = report_to_dict(report)
+
+The report covers volume (logical, moved, local-copy and remote bytes), the
+number of chunks, the distribution of segment and message sizes, the number of rounds, every
+process's sent and received bytes, peers, messages, pack and unpack bytes and
+staging arena size, and bytes per process pair and per path label. Each message
+is labelled with ``path_of(from_process, to_process)``, and each process's local
+copies with ``path_of(process, process)``, the same hook ``calibrate_links``
+uses, so per-path totals can be priced with ``fit_links`` results. ``expected_stats(report, process)`` gives the ``TransferStats`` that
+process will return, which makes the prediction checkable after a run. Every
+field is exact except ``local_copy_bytes``, which is an upper bound: the report
+sees no buffers, so it also counts local copies that ``execute_transfers`` drops
+as in place (source and target the same memory at the same strides). A smaller
+``local_copy_bytes`` after a run is that known difference, not a prediction
+error.
+
+Processes are the transport-group ranks ``TransferEndpoints`` binds, and the
+summary records that as ``process_numbering``. Its pair and per-process figures
+join with ``fit_links`` results only when ``calibrate_links`` measured the same
+group, so pass the transfer's group to both.
+
+The report only describes a plan. It does not choose replicas, rank plans or
+estimate time; those decisions belong to the caller.
 
 Calibrating links
 -----------------
