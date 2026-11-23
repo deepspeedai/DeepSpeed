@@ -632,6 +632,15 @@ class InsertPostInitMethodToModuleSubClasses(object):
     def _add_tensor_creation_wrappers(self):
         if DeepSpeedTensorOverride.dtype in self.tensor_overrides:
             target_fp_dtype = self.dtype
+
+            def remember_replacement_dtype(module, name, param):
+                previous = module._parameters.get(name)
+                if (is_zero_param(previous) or hasattr(previous, "_ds_zero_init_dtype")) and not is_zero_param(param):
+                    if param.is_floating_point():
+                        param._ds_zero_init_dtype = target_fp_dtype
+
+            self._replacement_hook = torch.nn.modules.module.register_module_parameter_registration_hook(
+                remember_replacement_dtype)
         else:
             target_fp_dtype = None
         if DeepSpeedTensorOverride.device in self.tensor_overrides:
@@ -667,6 +676,8 @@ class InsertPostInitMethodToModuleSubClasses(object):
                                                              target_device=target_device)
 
     def _remove_tensor_creation_wrappers(self):
+        if DeepSpeedTensorOverride.dtype in self.tensor_overrides:
+            self._replacement_hook.remove()
         torch.Tensor.__new__ = torch.Tensor.__old_new__
         torch.tensor = _orig_torch_tensor
         torch.empty = _orig_torch_empty
@@ -1201,13 +1212,15 @@ class Init(InsertPostInitMethodToModuleSubClasses):
         else:
             dist.broadcast(view_as_uint8(param.data), dist.get_global_rank(partition_group, 0), partition_group)
         param.partition()
+        param.__dict__.pop("_ds_zero_init_dtype", None)
 
-    def _convert_to_zero_parameters(self, param_list):
+    def _convert_to_zero_parameters(self, param_list, apply_init_dtype=False):
         for param in param_list:
             if is_zero_param(param):
                 continue
 
-            param.data = param.data.to(self.local_device)
+            dtype = getattr(param, "_ds_zero_init_dtype", None) if apply_init_dtype else None
+            param.data = param.data.to(self.local_device, dtype=dtype)
             self._zero_init_param(param)
 
     def _validate_remote_device(self, remote_device, ds_config):
@@ -1675,7 +1688,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
             }
 
         def convert_to_zero_parameters(param_list):
-            self._convert_to_zero_parameters(param_list)
+            self._convert_to_zero_parameters(param_list, apply_init_dtype=True)
 
         def allgather_before(func: Callable) -> Callable:
 
