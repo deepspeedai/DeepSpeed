@@ -345,13 +345,16 @@ def test_continuous_graph_keeps_cache_position_alive_for_replay():
     rollout = HybridEngineRollout(SimpleNamespace(module=module), _make_tokenizer())
     state = rollout._get_continuous_graph_state(module, 1, 5, torch.device(accelerator.current_device_name()),
                                                 torch.float32, DeepSpeedStaticCache)
+    bucket = rollout._decode_bucket(highest_row=1)
+    rollout._capture_bucket_if_needed(module, state.cache, bucket, state.static_cache_position, bucket.write_positions)
     gc.collect()
 
-    # A captured kernel retains only the device pointer, not the Python tensor.
+    # A captured kernel retains only the device pointer, not the Python tensor; the state
+    # itself is what keeps the tensor alive between capture and replay.
     assert module.cache_position_ref() is not None
     state.static_input.fill_(7)
-    accelerator.replay_graph(state.graph)
-    assert torch.equal(state.static_logits, torch.full_like(state.static_logits, 11))
+    accelerator.replay_graph(bucket.graph)
+    assert torch.equal(bucket.logits, torch.full_like(bucket.logits, 11))
 
 
 def test_continuous_graph_state_survives_in_place_weight_updates():
@@ -383,23 +386,41 @@ def test_continuous_graph_state_survives_in_place_weight_updates():
 
     with patch.object(rollout, "_capture_continuous_graph", return_value=(graph, logits)) as capture:
         first = rollout._get_continuous_graph_state(module, 1, 5, device, torch.float32, GraphCache)
+        # Capture is lazy: fetching the state allocates buffers, the first step that needs a
+        # width captures it.
+        assert capture.call_count == 0
+
+        def bucket_for(state):
+            bucket = rollout._decode_bucket(highest_row=1)
+            return rollout._capture_bucket_if_needed(module, state.cache, bucket, state.static_cache_position,
+                                                     bucket.write_positions)
+
+        bucket_for(first)
+        assert capture.call_count == 1
         # An optimizer step writes in place, so replay already reads the new values.
         with torch.no_grad():
             module.weight.add_(1)
         updated = rollout._get_continuous_graph_state(module, 1, 5, device, torch.float32, GraphCache)
+        bucket_for(updated)
+        assert capture.call_count == 1
         # Captured kernels keep the old strides even when the address is unchanged.
         with torch.no_grad():
             module.weight.transpose_(0, 1)
         relaid = rollout._get_continuous_graph_state(module, 1, 5, device, torch.float32, GraphCache)
+        bucket_for(relaid)
         # A replaced parameter lives at an address the captured kernels never read.
         module.weight = torch.nn.Parameter(torch.zeros(2, 3))
         moved = rollout._get_continuous_graph_state(module, 1, 5, device, torch.float32, GraphCache)
+        bucket_for(moved)
         # Re-registering a buffer, e.g. a rotary inv_freq or quant scale, moves it too.
         module.register_buffer("inv_freq", torch.full((3, ), 2.0), persistent=False)
         rebuffered = rollout._get_continuous_graph_state(module, 1, 5, device, torch.float32, GraphCache)
+        bucket_for(rebuffered)
         resized = rollout._get_continuous_graph_state(module, 1, 6, device, torch.float32, GraphCache)
+        bucket_for(resized)
         rollout.shutdown()
         released = rollout._get_continuous_graph_state(module, 1, 6, device, torch.float32, GraphCache)
+        bucket_for(released)
 
     assert updated is first
     assert relaid is not first
@@ -408,6 +429,103 @@ def test_continuous_graph_state_survives_in_place_weight_updates():
     assert resized is not rebuffered
     assert released is not resized
     assert capture.call_count == 6
+
+
+def _mock_graph_accelerator(mock_get_accelerator):
+    stream = MagicMock()
+    accelerator = mock_get_accelerator.return_value
+    accelerator.Stream.return_value = stream
+    accelerator.current_stream.return_value = stream
+    accelerator.stream.side_effect = lambda _stream: nullcontext()
+    accelerator.capture_to_graph.side_effect = lambda _graph: nullcontext()
+    return accelerator
+
+
+def test_graph_capture_ladder_defaults_to_powers_of_two():
+    assert HybridEngineRollout._graph_capture_ladder(1) == (1, )
+    assert HybridEngineRollout._graph_capture_ladder(5) == (1, 2, 4, 5)
+    assert HybridEngineRollout._graph_capture_ladder(8) == (1, 2, 4, 8)
+    # A configured ladder still has to cover a full physical batch.
+    assert HybridEngineRollout._graph_capture_ladder(4, (1, 4)) == (1, 4)
+    assert HybridEngineRollout._graph_capture_ladder(4, (3, )) == (3, 4)
+
+
+def test_graph_capture_ladder_must_be_positive_and_fit_the_batch():
+    for configured, message in (((0, ), "positive integers"), ((5, ), "cannot exceed continuous_batch_size")):
+        rollout = HybridEngineRollout(
+            _make_engine(),
+            _make_tokenizer(),
+            cfg=HybridEngineRolloutConfig(use_graph_capture=True, graph_capture_batch_sizes=configured),
+        )
+        with pytest.raises(ValueError, match=message):
+            rollout._validate_continuous_graph_options(
+                2, SamplingConfig(max_new_tokens=2, temperature=0, continuous_batch_size=2))
+
+
+def test_graph_capture_bucket_width_rounds_up():
+    assert HybridEngineRollout._bucket_width((1, 2, 4, 8), 1) == 1
+    assert HybridEngineRollout._bucket_width((1, 2, 4, 8), 3) == 4
+    assert HybridEngineRollout._bucket_width((1, 2, 4, 8), 8) == 8
+
+
+@patch("deepspeed.runtime.rollout.hybrid_engine_rollout.get_accelerator")
+def test_graph_capture_dispatches_smaller_buckets_as_rows_retire(mock_get_accelerator):
+    """Decode steps pick the smallest captured width that holds the rows doing work."""
+
+    class RetiringModel(torch.nn.Module):
+        """Gives each row its own first token and retires the last row as soon as it decodes it."""
+
+        _supports_cache_class = True
+
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.zeros(1))
+            self.config = PretrainedConfig(
+                max_position_embeddings=32,
+                num_hidden_layers=1,
+                num_attention_heads=1,
+                num_key_value_heads=1,
+                hidden_size=1,
+                head_dim=1,
+            )
+
+        def forward(self,
+                    input_ids,
+                    attention_mask=None,
+                    past_key_values=None,
+                    use_cache=True,
+                    cache_position=None,
+                    position_ids=None,
+                    **kwargs):
+            states = input_ids[:, None, :, None].to(dtype=torch.float32)
+            past_key_values.update(states, states, layer_idx=0, cache_position=cache_position)
+            if input_ids.shape[1] > 1:
+                next_tokens = 3 + torch.arange(input_ids.shape[0]).long()
+            else:
+                next_tokens = torch.where(input_ids[:, 0] == 5, 2, 3).long()
+            logits = torch.zeros((input_ids.shape[0], input_ids.shape[1], 8))
+            logits.scatter_(2, next_tokens[:, None, None].expand(-1, input_ids.shape[1], 1), 1)
+            return SimpleNamespace(logits=logits, past_key_values=past_key_values)
+
+    model = RetiringModel()
+    _mock_graph_accelerator(mock_get_accelerator)
+    rollout = HybridEngineRollout(
+        SimpleNamespace(module=model),
+        SimpleNamespace(pad_token_id=0, eos_token_id=2),
+        cfg=HybridEngineRolloutConfig(use_graph_capture=True),
+    )
+    prompt = torch.tensor([[1, 2, 3, 4, 5, 6], [1, 2, 3, 4, 5, 7], [1, 2, 3, 4, 5, 8]])
+    request = RolloutRequest(prompt, torch.ones_like(prompt))
+
+    rollout.generate(request, SamplingConfig(max_new_tokens=4, temperature=0, continuous_batch_size=3))
+
+    stats = rollout.get_last_continuous_stats()
+    # Ladder is (1, 2, 3): the three row batch retires to two rows after its first decode, so
+    # only that step runs on the three wide graph, both widths are captured lazily, and no
+    # step ever replays a graph wider than the rows doing work.
+    assert stats["decode_bucket_widths"] == {3: 1, 2: 2}
+    assert stats["decode_padded_rows"] == 0
+    assert stats["graph_captures"] == 2
 
 
 def test_static_cache_constructor_supports_max_batch_keyword():
@@ -1637,8 +1755,9 @@ def test_sync_weights_continuous_graph_safe():
     refills derived tensors in place."""
     pytest.importorskip("transformers")
     from deepspeed.accelerator import get_accelerator
-    if get_accelerator().device_name() == "cpu":
-        pytest.skip("segKI injection needs an accelerator")
+    accelerator = get_accelerator()
+    if not accelerator.is_available() or not accelerator.is_graph_capture_supported():
+        pytest.skip("requires graph capture")
 
     model = _make_small_qwen()
     device = next(model.parameters()).device

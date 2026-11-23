@@ -12,17 +12,19 @@ Two generation paths:
      step.  Eliminates kernel launch overhead.
   3. **continuous batching (experimental)**: an opt-in bounded path
      selected through ``SamplingConfig.continuous_batch_size``; greedy or
-     sampled like the graph path, with or without graph capture.
+     sampled like the graph path, with or without graph capture. The captured
+     path dispatches each step to the smallest captured batch width from a
+     ladder, so a rollout never replays a wider graph than the rows it is running.
 """
 
 import itertools
 import math
 import time
 from copy import copy
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from functools import lru_cache
 from inspect import signature
-from typing import Optional
+from typing import Dict, Optional, Tuple
 
 import torch
 
@@ -128,6 +130,14 @@ class HybridEngineRolloutConfig:
     Cache trimming is opt-in because it copies the live cache columns after
     each reclaim. Without it, the rollout trims only when the cache would
     otherwise exhaust and a dead prefix can be reclaimed.
+
+    ``graph_capture_batch_sizes`` controls the captured-batch ladder of the
+    continuous graph path. The loop dispatches each step to the smallest
+    captured batch that fits the rows doing work, so a request arriving on its
+    own replays a one-row graph instead of the full batch. Defaults to the
+    powers of two up to ``max_batch_size`` plus ``max_batch_size`` itself.
+    Capture is lazy: a bucket is captured the first time the loop needs it, and
+    a bucket whose capture fails runs that forward eagerly instead.
     """
     use_graph_capture: bool = False
     enable_profiling: bool = False
@@ -148,11 +158,35 @@ class HybridEngineRolloutConfig:
     # PR-local switches; kept after every upstream field so the legacy
     # positional constructor contract (#8786's test) keeps holding
     use_segki: bool = False
+    graph_capture_batch_sizes: Optional[Tuple[int, ...]] = None
+
+
+@dataclass
+class _DecodeBucket:
+    """Captured decode forward for one batch width.
+
+    The buffers are views of the rollout's master buffers, so the per-row state the
+    scheduler writes (tokens, positions, validity, write positions) is visible to every
+    bucket that covers those rows. ``logits`` is the tensor the captured forward returns
+    and the graph overwrites in place on every replay.
+    """
+
+    width: int
+    input_ids: torch.Tensor
+    causal_attention: torch.Tensor
+    position_ids: torch.Tensor
+    write_positions: torch.Tensor
+    graph: object = None
+    logits: Optional[torch.Tensor] = None
+    disabled: bool = False
 
 
 @dataclass
 class _ContinuousGraphState:
+    """Captured graphs and static buffers shared by rollouts with the same shapes."""
+
     signature: tuple
+    ladder: Tuple[int, ...]
     cache: object
     static_input: torch.Tensor
     static_attention: torch.Tensor
@@ -160,8 +194,8 @@ class _ContinuousGraphState:
     static_position_ids: torch.Tensor
     static_write_positions: torch.Tensor
     static_cache_position: torch.Tensor
-    graph: object
-    static_logits: torch.Tensor
+    decode: Dict[int, _DecodeBucket] = field(default_factory=dict)
+    captures: int = 0
 
 
 class HybridEngineRollout(RolloutEngine):
@@ -199,6 +233,7 @@ class HybridEngineRollout(RolloutEngine):
         self._last_continuous_stats = None
         self._generation_defaults = None
 
+        self.graph_capture_batch_sizes = getattr(cfg, 'graph_capture_batch_sizes', None) if cfg else None
         self.use_segki = cfg is not None and getattr(cfg, 'use_segki', False)
         if self.use_segki:
             self._segki_report = self._apply_segki()
@@ -877,8 +912,7 @@ class HybridEngineRollout(RolloutEngine):
         static_causal_attention = state.static_causal_attention
         static_position_ids = state.static_position_ids
         static_write_positions = state.static_write_positions
-        graph = state.graph
-        static_logits = state.static_logits
+        captures_before = state.captures
         stats = {
             "cache_capacity": max_cache_len,
             "peak_cache_length": prompt_len,
@@ -888,6 +922,11 @@ class HybridEngineRollout(RolloutEngine):
             "trim_latency_ms": 0.0,
             "trim_bytes_moved": 0,
             "decode_steps": 0,
+            "graph_capture_ladder": list(state.ladder),
+            "graph_captures": 0,
+            "decode_bucket_steps": 0,
+            "decode_padded_rows": 0,
+            "decode_bucket_widths": {},
         }
 
         slot_by_request = {}
@@ -955,11 +994,15 @@ class HybridEngineRollout(RolloutEngine):
             decoded_tokens = {}
             if decode_ids:
                 self._update_static_causal_attention(static_attention, static_causal_attention)
+                bucket = self._decode_bucket(max(slot_by_request[request_id] for request_id in decode_ids) + 1)
+                self._capture_bucket_if_needed(module, cache, bucket, state.static_cache_position,
+                                               bucket.write_positions)
                 decode_start = self._profile_start(profile)
-                get_accelerator().replay_graph(graph)
+                decode_logits_all = self._run_bucket(module, cache, bucket, state.static_cache_position,
+                                                     bucket.write_positions)
                 self._profile_end(profile, "decode_forward_ms", decode_start, count="num_decode_forwards")
                 decode_logits = torch.cat(
-                    [static_logits[slot_by_request[request_id], -1, :].unsqueeze(0) for request_id in decode_ids],
+                    [decode_logits_all[slot_by_request[request_id], -1, :].unsqueeze(0) for request_id in decode_ids],
                     dim=0)
                 decoded = self._continuous_next_tokens(
                     decode_logits,
@@ -974,6 +1017,9 @@ class HybridEngineRollout(RolloutEngine):
                     decoded_tokens[request_id] = token
                     write_positions[request_id] += 1
                 stats["decode_steps"] += 1
+                stats["decode_bucket_steps"] += 1
+                stats["decode_padded_rows"] += bucket.width - len(decode_ids)
+                stats["decode_bucket_widths"][bucket.width] = stats["decode_bucket_widths"].get(bucket.width, 0) + 1
                 next_tokens.update(decoded_tokens)
 
             finished_ids = []
@@ -1002,6 +1048,7 @@ class HybridEngineRollout(RolloutEngine):
             stats["end_to_end_ms"] = None
             stats["tokens_per_second"] = None
         stats["trim_frequency"] = 0.0
+        stats["graph_captures"] = state.captures - captures_before
         self._last_continuous_stats = stats
         if profile is not None:
             self._finish_continuous_profile(profile, original_request, responses, max_batch_size, prompt_len,
@@ -1018,9 +1065,44 @@ class HybridEngineRollout(RolloutEngine):
         if (self.continuous_cache_capacity is not None
                 and self.continuous_cache_capacity < prompt_len + sampling.max_new_tokens):
             raise ValueError("continuous_cache_capacity must fit the prompt and all generated tokens")
+        self._graph_capture_ladder(sampling.continuous_batch_size, self.graph_capture_batch_sizes)
+
+    @staticmethod
+    def _graph_capture_ladder(max_batch_size, configured=None):
+        """Return the batch widths the graph path captures, smallest first.
+
+        The loop buckets every step up to the nearest width in the ladder, so a sparse
+        ladder means fewer captures and more padded rows, and a dense one means the
+        opposite. ``max_batch_size`` is always included: a full physical batch has to be
+        replayable for the step that drains every slot.
+        """
+        widths = {max_batch_size}
+        if configured:
+            for width in configured:
+                if not isinstance(width, int) or width <= 0:
+                    raise ValueError("graph_capture_batch_sizes must be positive integers")
+                if width > max_batch_size:
+                    raise ValueError("graph_capture_batch_sizes cannot exceed continuous_batch_size")
+                widths.add(width)
+        else:
+            width = 1
+            while width < max_batch_size:
+                widths.add(width)
+                width *= 2
+        return tuple(sorted(widths))
+
+    @staticmethod
+    def _bucket_width(ladder, required):
+        """Smallest captured width that covers ``required`` rows."""
+        for width in ladder:
+            if width >= required:
+                return width
+        raise ValueError(f"captured batch ladder {ladder} does not cover {required} rows")
 
     def _get_continuous_graph_state(self, module, max_batch_size, max_cache_len, device, model_dtype, cache_type):
-        signature = self._continuous_graph_signature(module, max_batch_size, max_cache_len, device, model_dtype)
+        ladder = self._graph_capture_ladder(max_batch_size, self.graph_capture_batch_sizes)
+        signature = self._continuous_graph_signature(module, max_batch_size, max_cache_len, device, model_dtype,
+                                                     ladder)
         state = self._continuous_graph_state
         if state is None or state.signature != signature:
             # Free the stale cache and graph pool before allocating replacements.
@@ -1040,17 +1122,9 @@ class HybridEngineRollout(RolloutEngine):
             # validity is represented by static_attention, so a fixed upper bound
             # lets one captured graph serve requests at different decode lengths.
             static_cache_position = torch.tensor([max_cache_len - 1], dtype=torch.long, device=device)
-            graph, static_logits = self._capture_continuous_graph(
-                module,
-                cache,
-                static_input,
-                static_causal_attention,
-                static_write_positions,
-                static_cache_position,
-                static_position_ids,
-            )
             state = _ContinuousGraphState(
                 signature,
+                ladder,
                 cache,
                 static_input,
                 static_attention,
@@ -1058,8 +1132,6 @@ class HybridEngineRollout(RolloutEngine):
                 static_position_ids,
                 static_write_positions,
                 static_cache_position,
-                graph,
-                static_logits,
             )
             self._continuous_graph_state = state
 
@@ -1071,8 +1143,69 @@ class HybridEngineRollout(RolloutEngine):
         state.static_write_positions.zero_()
         return state
 
+    def _decode_bucket(self, highest_row):
+        """Return the decode bucket covering the rows that are decoding, allocating it if new.
+
+        Buckets are captured by the caller once its buffers hold the step it is about to
+        run, so a capture is never asked to warm up on stale rows.
+        """
+        state = self._continuous_graph_state
+        width = self._bucket_width(state.ladder, highest_row)
+        bucket = state.decode.get(width)
+        if bucket is None:
+            bucket = _DecodeBucket(width, state.static_input[:width], state.static_causal_attention[:width],
+                                   state.static_position_ids[:width], state.static_write_positions[:width])
+            state.decode[width] = bucket
+        return bucket
+
+    def _capture_bucket_if_needed(self, module, cache, bucket, cache_position, write_position):
+        """Capture a bucket the first time the loop needs it."""
+        if bucket.graph is None and not bucket.disabled:
+            self._capture_bucket(module, cache, bucket, cache_position, write_position)
+        return bucket
+
+    def _capture_bucket(self, module, cache, bucket, cache_position, write_position):
+        """Capture one bucket's forward, falling back to eager forwards if capture fails.
+
+        The capture runs the model for real during its warmup, with the buffers the next
+        replay will use, so it must be called only once the caller has filled them.
+        """
+        try:
+            cache.set_write_position(write_position)
+            bucket.graph, bucket.logits = self._capture_continuous_graph(module, cache, bucket.input_ids,
+                                                                         bucket.causal_attention, write_position,
+                                                                         cache_position, bucket.position_ids,
+                                                                         self._last_logits_kwargs(module))
+            self._continuous_graph_state.captures += 1
+        except Exception as error:  # a graph is an optimization: a failed capture must not fail the rollout
+            bucket.graph = None
+            bucket.disabled = True
+            logger.warning(
+                "Rollout graph capture failed for batch width %s (%s); this bucket will run eagerly "
+                "for the rest of the rollout.", bucket.width, error)
+
+    def _run_bucket(self, module, cache, bucket, cache_position, write_position):
+        """Replay a bucket's captured forward, or run the same buffers eagerly without a graph."""
+        if bucket.graph is not None:
+            get_accelerator().replay_graph(bucket.graph)
+            return bucket.logits
+        # The eager fallback reads the same static buffers, so it stays token-identical
+        # to a replay; only the launch overhead differs.
+        cache.set_write_position(write_position)
+        output = self._call_model(
+            module,
+            bucket.input_ids,
+            attention_mask=bucket.causal_attention,
+            past_key_values=cache,
+            use_cache=True,
+            cache_position=cache_position,
+            position_ids=bucket.position_ids,
+            **self._last_logits_kwargs(module),
+        )
+        return output.logits
+
     @staticmethod
-    def _continuous_graph_signature(module, max_batch_size, max_cache_len, device, model_dtype):
+    def _continuous_graph_signature(module, max_batch_size, max_cache_len, device, model_dtype, ladder):
         # Replay reads parameters and buffers through the address and layout fixed
         # at capture, so in-place value updates need no recapture, but a moved or
         # re-laid-out tensor does. Prefill runs eagerly, so the prompt width only
@@ -1083,7 +1216,8 @@ class HybridEngineRollout(RolloutEngine):
         if device_index is None and device.type == get_accelerator().device_name():
             # torch.device("cuda") and torch.device("cuda", 0) name the same device.
             device_index = get_accelerator().current_device()
-        return (id(module), device.type, device_index, model_dtype, max_batch_size, max_cache_len, tensor_signature)
+        return (id(module), device.type, device_index, model_dtype, max_batch_size, max_cache_len, ladder,
+                tensor_signature)
 
     @staticmethod
     def _update_static_causal_attention(static_attention, static_causal_attention):
@@ -1091,9 +1225,16 @@ class HybridEngineRollout(RolloutEngine):
         static_causal_attention.neg_().add_(1).mul_(torch.finfo(static_causal_attention.dtype).min)
 
     @staticmethod
-    def _capture_continuous_graph(module, cache, static_input, static_attention, static_write_positions,
-                                  static_cache_position, static_position_ids):
-        """Capture one fixed-capacity decode forward and return its static logits."""
+    def _capture_continuous_graph(module,
+                                  cache,
+                                  static_input,
+                                  static_attention,
+                                  static_write_positions,
+                                  static_cache_position,
+                                  static_position_ids,
+                                  logits_kwargs=None):
+        """Capture one fixed-capacity decode forward and return its graph and static logits."""
+        logits_kwargs = logits_kwargs or {}
         accelerator = get_accelerator()
         saved_pre = dict(module._forward_pre_hooks)
         saved_post = dict(module._forward_hooks)
@@ -1121,6 +1262,7 @@ class HybridEngineRollout(RolloutEngine):
                         use_cache=True,
                         cache_position=static_cache_position,
                         position_ids=static_position_ids,
+                        **logits_kwargs,
                     )
             accelerator.current_stream().wait_stream(warmup_stream)
             graph = accelerator.create_graph()
@@ -1132,6 +1274,7 @@ class HybridEngineRollout(RolloutEngine):
                     use_cache=True,
                     cache_position=static_cache_position,
                     position_ids=static_position_ids,
+                    **logits_kwargs,
                 )
         finally:
             module._forward_pre_hooks.update(saved_pre)
