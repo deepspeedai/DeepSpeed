@@ -54,6 +54,7 @@ import gc
 import hashlib
 import math
 import sys
+import weakref
 import zlib
 from bisect import bisect_right
 from dataclasses import dataclass
@@ -121,6 +122,8 @@ class TransferWindow:
     ALIGNMENT = 512
     # The newest window identity this process has seen; see __init__.
     _created = 0
+    # Every window alive on this process, passed to a transfer or not; see _registered_locations.
+    _live: 'weakref.WeakSet[TransferWindow]' = weakref.WeakSet()
 
     def __init__(self, nbytes: int, group: Optional[object] = None, direction: str = 'pull'):
         import deepspeed.comm as dist
@@ -143,6 +146,7 @@ class TransferWindow:
         self.members = tuple(members)
         self.nbytes = -(-max(sizes) // self.ALIGNMENT) * self.ALIGNMENT
         self.pool, self._handle = dist.symm_mem_rendezvous(self.nbytes, torch.uint8, group)
+        TransferWindow._live.add(self)
         self._used = 0
         self._peers: Dict[Tuple[int, torch.dtype], torch.Tensor] = {}
 
@@ -453,11 +457,15 @@ def _is_packed(shape: Sequence[int], strides: Sequence[int]) -> bool:
     return True
 
 
-def _round_is_direct(entries, source: bool) -> bool:
-    # A view can replace staging only when the transport sees the same packed element order.
+def _round_is_direct(entries, source: bool, registered: Optional[AbstractSet] = None) -> bool:
+    # A view can replace staging only when the transport sees the same packed element order, and only
+    # when it is not window memory; see _registered_locations.
     if len(entries) != 1:
         return False
-    _, operation, _ = entries[0]
+    item, operation, _ = entries[0]
+    location = operation.segment.source_rank if source else operation.segment.target_rank
+    if registered is not None and (item, source, location) in registered:
+        return False
     return _is_packed(operation.chunk_shape,
                       operation.segment.source_strides if source else operation.segment.target_strides)
 
@@ -504,6 +512,30 @@ def _window_offsets(requests: Sequence[TransferRequest], window: TransferWindow)
                     if offset is not None:
                         offsets[(request.key, side, location)] = offset
     return offsets
+
+
+def _registered_locations(requests: Sequence[TransferRequest]) -> Optional[AbstractSet[Tuple[int, bool, int]]]:
+    """``(item, source?, location)`` of this process's buffers that lie in any window, or None if none do.
+
+    NCCL leaves a send or receive undefined when one side's buffer is registered with the communicator
+    and the other side's is not, and hangs on it between hosts. A peer cannot know whether this process's
+    buffer is registered, so a message never starts or ends in window memory: such a region is staged
+    through the arena on this side, which is plain memory, whatever the peer does with its own side.
+    """
+    spans = [(window.pool.device, window.pool.data_ptr(), window.nbytes) for window in list(TransferWindow._live)]
+    if not spans:
+        return None
+    found = set()
+    for item, request in enumerate(requests):
+        for source, buffers in ((True, request.source_buffers), (False, request.target_buffers)):
+            for location, buffer in buffers.items():
+                if not isinstance(buffer, torch.Tensor):
+                    continue
+                address = buffer.data_ptr()
+                if any(buffer.device == device and start <= address < start + nbytes
+                       for device, start, nbytes in spans):
+                    found.add((item, source, location))
+    return found or None
 
 
 def _window_locations(requests: Sequence[TransferRequest], offsets: Mapping[Tuple, int]) -> _WindowLocations:
@@ -566,8 +598,13 @@ class _Lane:
     send_arena: Dict[int, int]
 
 
-def _lanes(indexed: Sequence[Tuple[int, _Operation]], processes: Sequence[int], max_elements: int,
-           window_locations: Optional[_WindowLocations]) -> Dict[int, _Lane]:
+def _lanes(indexed: Sequence[Tuple[int, _Operation]],
+           processes: Sequence[int],
+           max_elements: int,
+           window_locations: Optional[_WindowLocations],
+           registered: Optional[AbstractSet] = None) -> Dict[int, _Lane]:
+    """Each process's local copies and staged rounds; ``registered`` are the regions of ``processes``'
+    buffers in window memory, which only their own process knows; see _registered_locations."""
     local = {process: [] for process in processes}
     incoming: Dict[int, Dict[int, List[Tuple[int, _Operation]]]] = {process: {} for process in processes}
     outgoing: Dict[int, Dict[int, List[Tuple[int, _Operation]]]] = {process: {} for process in processes}
@@ -597,11 +634,11 @@ def _lanes(indexed: Sequence[Tuple[int, _Operation]], processes: Sequence[int], 
         recv_rounds = {peer: _packed_rounds(ops, max_elements) for peer, ops in incoming[process].items()}
         send_rounds = {peer: _packed_rounds(ops, max_elements) for peer, ops in outgoing[process].items()}
         recv_direct = {
-            peer: [_round_is_direct(entries, False) for entries, _ in rounds]
+            peer: [_round_is_direct(entries, False, registered) for entries, _ in rounds]
             for peer, rounds in recv_rounds.items()
         }
         send_direct = {
-            peer: [_round_is_direct(entries, True) for entries, _ in rounds]
+            peer: [_round_is_direct(entries, True, registered) for entries, _ in rounds]
             for peer, rounds in send_rounds.items()
         }
         lanes[process] = _Lane(local[process], recv_rounds, send_rounds, recv_direct, send_direct,
@@ -876,7 +913,8 @@ def _agree(requests: Sequence[TransferRequest],
         # The same computation as schedule_transfers, so what it reports is what runs here.
         paused = _collector_paused() if keep else contextlib.nullcontext()
         with paused:
-            lane = _lanes(indexed, [rank], budget.bytes_per_peer // element_size, window_locations)[rank]
+            lane = _lanes(indexed, [rank], budget.bytes_per_peer // element_size, window_locations,
+                          _registered_locations(requests))[rank]
             # A local copy whose source and target are the same memory moves nothing. It is dropped here,
             # before the agreement, for a one-shot move and for every run of a prepared handle.
             if aliased:

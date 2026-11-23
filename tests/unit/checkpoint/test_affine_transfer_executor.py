@@ -591,6 +591,33 @@ class TestWindowTransfer(DistributedTest):
         for buffer in request.target_buffers.values():
             assert buffer.isnan().all(), 'a refused batch must not write'
 
+    def test_window_memory_is_never_a_message_buffer(self):
+        if get_accelerator().device_name() not in ('cuda', 'xpu'):
+            pytest.skip('symmetric memory needs a CUDA or XPU device')
+        _join_transfer_group()
+        dtype, rank, world_size = torch.float32, dist.get_rank(), dist.get_world_size()
+        rows, cols = 4 * world_size, 8
+        band = rows // world_size
+        split = contiguous_split_map((rows, cols), [band] * world_size, 0)
+        # Each band goes whole to the next process, so both sides could be sent and received in place. The
+        # source sits in a window that is not passed, so the band is a message, and the peer receives it
+        # into plain memory, which NCCL must not pair with registered memory: the source side is staged.
+        endpoints = TransferEndpoints(source={location: location
+                                              for location in range(world_size)},
+                                      target={location: (location + 1) % world_size
+                                              for location in range(world_size)})
+        window = TransferWindow(1 << 20)
+        shard = window.tensor((band, cols), dtype)
+        shard.copy_(_full(rows, cols, dtype)[rank * band:(rank + 1) * band])
+        target = torch.full((band, cols), UNWRITTEN, dtype=dtype, device=_device())
+        held = (rank - 1) % world_size
+        request = TransferRequest('weight', plan_transfer(split, split), {rank: shard}, {held: target})
+        prepared = prepare_transfers([request], endpoints, dtype)
+        assert prepared.run().mapped_bytes == 0
+        assert torch.equal(target, _full(rows, cols, dtype)[held * band:(held + 1) * band])
+        assert not any(any(direct) for direct in prepared._lane.send_direct.values()), 'window memory was sent'
+        assert all(all(direct) for direct in prepared._lane.recv_direct.values()), 'plain memory was staged'
+
     @pytest.mark.parametrize('direction', ['pull', 'push'])
     @pytest.mark.parametrize('prepared', [False, True])
     def test_a_window_region_written_here_while_a_peer_reads_it_is_refused(self, direction, prepared):
