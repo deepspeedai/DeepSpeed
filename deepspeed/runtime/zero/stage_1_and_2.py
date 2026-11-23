@@ -870,6 +870,14 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                                                     self.optimizer.state)
             self._hp_optimizer_states_linked = True
 
+    def _relink_hp_params_optimizer_state(self):
+        """Link the optimizer state into the params' fragments again: reload_states() moves the state to new tensors,
+        and _link_all_hp_params() rebuilds the fragments without it. Before the first step the state is empty (with
+        elastic checkpointing, state_dict() adds an empty one per group), and step() links it."""
+        self._hp_optimizer_states_linked = False
+        if any(self.optimizer.state.values()):
+            self._lazy_init_hp_params_optimizer_state()
+
     def is_moe_group(self, group):
         return 'moe' in group and group['moe']
 
@@ -1524,6 +1532,10 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             return
 
         grad_reduc = self.get_gradient_for_reduction(param)
+        if grad_reduc is None:
+            # The hook also fires when the backward delivered no gradient for a parameter in the graph, as when
+            # AutoEP stages an expert weight gradient for a later backward. There is nothing to reduce yet.
+            return
         comm_dtype = self.get_param_comm_dtype(param)
         bucket = self.ipg_buckets[comm_dtype]
         if bucket.elements + param.numel() > self.reduce_bucket_size:
@@ -2300,6 +2312,11 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                     extra_large_grad_reduc.data = extra_large_grad_reduc_for_average.data.view_as(extra_large_grad_reduc) if (not self.zenflow or self.extra_large_param_to_reduce[comm_dtype].dim() == 1) \
                         else extra_large_grad_reduc_for_average.data.view_as(extra_large_grad_reduc.transpose(0, 1))
 
+                    # Oversized gradients bypass the contiguous IPG buffer, so the
+                    # reduction reads the parameter's own storage, which non-owner
+                    # ranks release right after the reduction is enqueued.
+                    if self.overlap_comm and not get_accelerator().resolves_data_dependency():
+                        extra_large_grad_reduc_for_average.record_stream(self.reduction_stream)
                     self.average_tensor(extra_large_grad_reduc_for_average, comm_dtype)
                     del self.extra_large_param_to_reduce[comm_dtype]
                 else:
@@ -4039,6 +4056,12 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
         # Offload Optimizer States
         if needs_offload(OffloadStateTypeEnum.optim_states):
+            # The params' optimizer-state fragments are views of the device tensors and would keep them alive.
+            for group in self.bit16_groups:
+                for param in group:
+                    mapping = getattr(param, '_hp_mapping', None)
+                    if mapping is not None and mapping.optim_fragment is not None:
+                        mapping.optim_fragment.clear()
             offload_optimizer_states(self.optimizer, device, pin_memory=pin_memory, non_blocking=non_blocking)
             self.offloaded_states.add(OffloadStateTypeEnum.optim_states)
 
@@ -4064,6 +4087,11 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         # unlike the torch pinned allocator, so hold them until after the
         # synchronize at the end of this method.
         pending_host_buffers = []
+        # Reloading these states replaces or rebuilds what the params' optimizer-state fragments point to.
+        relink_states = {
+            OffloadStateTypeEnum.hp_params, OffloadStateTypeEnum.lp_params, OffloadStateTypeEnum.optim_states
+        }
+        relink_optimizer_state = bool(relink_states & self.offloaded_states)
 
         # Reload FP32 Master Parameters (HP Params)
         if OffloadStateTypeEnum.hp_params in self.offloaded_states:
@@ -4114,6 +4142,9 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         if OffloadStateTypeEnum.optim_states in self.offloaded_states:
             pending_host_buffers.append(reload_optimizer_states(self.optimizer, device, non_blocking=non_blocking))
             self.offloaded_states.remove(OffloadStateTypeEnum.optim_states)
+
+        if relink_optimizer_state:
+            self._relink_hp_params_optimizer_state()
 
         if non_blocking:
             get_accelerator().synchronize()

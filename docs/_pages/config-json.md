@@ -818,6 +818,12 @@ Explicit `true` requests fail instead of silently downgrading. See
 [Vocabulary-parallel LM Loss](/tutorials/autotp-training/#vocabulary-parallel-lm-loss)
 for supported embedding semantics and compiler limitations.
 
+***vocab_parallel_embedding***: [boolean]
+
+| Description | Default |
+| ----------- | ------- |
+| Shard an input embedding that is not tied to the output layer along the vocabulary: each rank keeps 1/tp of the rows and the partial lookups are summed over the tensor-parallel group. A tied embedding is sharded with its output head instead. Not supported with the DeepCompile `autotp` pass. See [Untied Input Embedding](/tutorials/autotp-training/#untied-input-embedding). | `false` |
+
 ***partition_config***: [dictionary]
 
 | Description                                                                                                                     | Default |
@@ -1009,7 +1015,7 @@ smoke coverage used for this AutoEP surface produced the following version gates
 
 | Description                                                                                                    | Default  |
 | -------------------------------------------------------------------------------------------------------------- | -------- |
-| How expert outputs are weighted by their router scores and reduced over top-k. `"auto"` resolves to `"weighted_sum"`. `"fused_weighted_sum"` is experimental and computes the same reduction in one Triton pass, without materializing the scattered assignment buffer or the `[tokens, top_k, hidden]` FP32 intermediate; it requires CUDA, Triton, bfloat16/float16 activations, `tensor_parallel.autotp_size=1`, `expert_tensor_parallel_size=1`, and a resolved `score_apply="post"`, and is rejected rather than silently ignored when any of those does not hold. `"legacy_bmm"` is a debug reduction retained for model-family verification. | `"auto"` |
+| How expert outputs are weighted by their router scores and reduced over top-k. `"auto"` resolves to `"weighted_sum"`. `"fused_weighted_sum"` is experimental and computes the same reduction in one Triton pass, without materializing the scattered assignment buffer or the `[tokens, top_k, hidden]` FP32 intermediate; it requires CUDA, Triton, bfloat16, float16 or float32 activations, `expert_tensor_parallel_size=1`, and a resolved `score_apply="post"`, and is rejected rather than silently ignored when any of those does not hold. `"legacy_bmm"` is a debug reduction retained for model-family verification. | `"auto"` |
 
 ***row_weighting_impl***: [string]
 
@@ -1028,6 +1034,18 @@ smoke coverage used for this AutoEP surface produced the following version gates
 | Description                                                                                                    | Default  |
 | -------------------------------------------------------------------------------------------------------------- | -------- |
 | Experimental. In the DeepEP backward, send the experts' input gradient back while computing their weight gradients. The expert backward returns its input gradient first and defers its weight-gradient GEMMs to the DeepEP dispatch backward, which launches its combine asynchronously, runs those GEMMs with `comm_num_sm` SMs withheld so the combine can run beside them, and waits before returning, including when weight-gradient computation raises. Parameter-gradient semantics are unchanged; exact cross-backend equality is not guaranteed. First-order gradients only (`create_graph=True` raises). Requires `comm_backend="deepep"` with `autoep_size > 1`, the `torch._grouped_mm` expert path (`use_grouped_mm=true`, and `disable_triton_grouped_mm=true` on devices that prefer the Triton grouped GEMM), ZeRO stage 1 or 2 (not 0 or 3), and PyTorch's SM carveout getter/setter APIs; unsupported configurations fail rather than falling back. | `false` |
+
+***deferred_dw_flush_period***: [integer]
+
+| Description                                                                                                    | Default  |
+| -------------------------------------------------------------------------------------------------------------- | -------- |
+| Experimental. Values above `1` stage the rows of the experts' weight-gradient GEMMs across backward passes instead of running the GEMMs in each one. A backward appends each expert's rows to a per-expert staging buffer and returns no expert weight gradient; one backward in every `deferred_dw_flush_period` runs the GEMMs once over everything staged. The backward that closes a gradient accumulation window always does the same, so every optimizer step sees the same accumulated gradient as before, up to floating-point summation order. This helps when each expert receives few rows per microbatch (many experts, small microbatches) and costs memory for the staged rows; with many rows per expert it is slower. First-order gradients only. Requires the `torch._grouped_mm` expert path (`use_grouped_mm=true`, and `disable_triton_grouped_mm=true` on devices that prefer the Triton grouped GEMM), and `managed_gradient_accumulation=true`; it cannot be combined with `overlap_weight_grad`, AutoEP+AutoTP folding, ZenFlow or DeepCompile. Unsupported configurations fail rather than falling back. | `1` |
+
+***deferred_dw_rows_per_expert***: [integer]
+
+| Description                                                                                                    | Default  |
+| -------------------------------------------------------------------------------------------------------------- | -------- |
+| Rows each local expert can stage when `deferred_dw_flush_period` is above `1`. Each MoE layer on each rank allocates `local experts * deferred_dw_rows_per_expert` rows of `2 * hidden + 3 * intermediate` values in the compute dtype. `0` sizes the buffer on the first backward, to `deferred_dw_flush_period` times the larger of that backward's busiest expert and twice its mean rows per expert. A buffer that is too small is still correct: the GEMMs run early to empty it, or at once for a backward that does not fit alone, and the result is held, at the size of the expert weight gradients, until the next backward that returns gradients. | `0` |
 
 ***skip_recompute_combine***: [boolean]
 
