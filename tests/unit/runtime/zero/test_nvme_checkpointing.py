@@ -152,7 +152,6 @@ class TestNVMeCheckpointing(DistributedTest):
     @pytest.mark.parametrize('precision', ['bf16', 'fp16'])
     @pytest.mark.parametrize('load_optimizer_states', [False, True])
     def test_load_module_only(self, tmpdir, param_offload_device, pipeline, precision, load_optimizer_states):
-        # Catch both empty swapped masters and checkpoint files overwriting refreshed masters (#8890).
         from deepspeed.utils import safe_get_full_fp32_param, safe_get_full_optimizer_state
 
         if not getattr(get_accelerator(), f'is_{precision}_supported')():
@@ -216,12 +215,15 @@ class TestNVMeCheckpointing(DistributedTest):
             random_dataloader(source, total_samples=3, hidden_dim=hidden_dim, device=source.device, dtype=dtype))
         for batch in batches[:2]:
             train_step(source, batch)
-        with deepspeed.zero.GatheredParameters(list(source.module.parameters())):
-            expected = [param.detach().clone() for param in source.module.parameters()]
+        source_params = list(source.module.parameters())
+        with deepspeed.zero.GatheredParameters(source_params):
+            expected = [param.detach().clone() for param in source_params]
+        expected_masters = [safe_get_full_fp32_param(param).clone() for param in source_params]
+        # Both the swapped weight and the resident bias lose precision in a model-dtype round trip.
+        assert all(not torch.equal(master, master.to(dtype).float()) for master in expected_masters)
         checkpoint_dir = os.path.join(tmpdir, 'checkpoint')
         source.save_checkpoint(checkpoint_dir, tag='module-only')
         source.destroy()
-        Init.param_id = 0
 
         target = initialize('target')
         try:
@@ -232,7 +234,10 @@ class TestNVMeCheckpointing(DistributedTest):
                 for i in range(len(target.optimizer.fp32_partitioned_groups_flat))
             ]
             assert any(swappable) and not all(swappable)
-            moments = [safe_get_full_optimizer_state(param, 'exp_avg').clone() for param in parameters]
+            moments = [{
+                key: safe_get_full_optimizer_state(param, key).clone()
+                for key in ('exp_avg', 'exp_avg_sq')
+            } for param in parameters]
             # Reading the states releases the buffers, including for the pipelined swapper.
             assert any(master.numel() == 0 for master in target.optimizer.fp32_partitioned_groups_flat)
             for _ in range(2):
@@ -243,10 +248,10 @@ class TestNVMeCheckpointing(DistributedTest):
                 with deepspeed.zero.GatheredParameters(parameters):
                     for param, saved in zip(parameters, expected):
                         torch.testing.assert_close(param, saved, rtol=0, atol=0)
-                for param, saved, moment in zip(parameters, expected, moments):
-                    torch.testing.assert_close(safe_get_full_fp32_param(param), saved.float(), rtol=0, atol=0)
-                    torch.testing.assert_close(safe_get_full_optimizer_state(param, 'exp_avg'), moment, rtol=0, atol=0)
-            before_step = [safe_get_full_fp32_param(param).clone() for param in parameters]
+                for param, master, state in zip(parameters, expected_masters, moments):
+                    torch.testing.assert_close(safe_get_full_fp32_param(param), master, rtol=0, atol=0)
+                    for key, moment in state.items():
+                        torch.testing.assert_close(safe_get_full_optimizer_state(param, key), moment, rtol=0, atol=0)
             if not load_optimizer_states and precision == 'bf16' and not pipeline:
                 with pytest.raises(ZeRORuntimeException, match='custom_load_fn'):
                     target.load_checkpoint(checkpoint_dir,
@@ -267,11 +272,11 @@ class TestNVMeCheckpointing(DistributedTest):
                 finally:
                     checkpoint['param_shapes'] = shapes
                     torch.save(checkpoint, model_path)
-                for param, before in zip(parameters, before_step):
+                for param, before in zip(parameters, expected_masters):
                     torch.testing.assert_close(safe_get_full_fp32_param(param), before, rtol=0, atol=0)
             train_step(target, batches[0])
             after_step = [safe_get_full_fp32_param(param) for param in parameters]
             assert all(torch.isfinite(value).all() for value in after_step)
-            assert any(not torch.equal(before, after) for before, after in zip(before_step, after_step))
+            assert any(not torch.equal(before, after) for before, after in zip(expected_masters, after_step))
         finally:
             target.destroy()

@@ -7,6 +7,7 @@ import sys
 import gc
 import collections
 import itertools
+import re
 from typing import Deque, Dict, Set, List, Container, Optional
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -3505,9 +3506,12 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         saved_groups = state_dict[FP32_FLAT_GROUPS]
         if len(saved_groups) != len(self.fp32_partitioned_groups_flat):
             raise RuntimeError("NVMe module-only checkpoint load requires matching optimizer subgroups")
-        source_paths = []
+        # The engine has matched the ordered parameter names and shapes. IDs address each engine's own swap files.
+        source_paths = {}
         for sub_group_id, (current, saved) in enumerate(zip(self.fp32_partitioned_groups_flat, saved_groups)):
-            if getattr(saved, 'ds_id', None) != current.ds_id or saved.dtype != current.dtype:
+            saved_id = getattr(saved, 'ds_id', None)
+            if (not isinstance(saved_id, str) or not re.fullmatch(r'[0-9]+_[0-9]+', saved_id)
+                    or saved_id in source_paths or saved.dtype != current.dtype):
                 raise RuntimeError("NVMe module-only checkpoint load requires matching optimizer subgroup layout")
             source_path = SwapTensorContext(saved, checkpoint_swap_folder).swap_path
             swappable = self._swappable_optimizer_subgroup(sub_group_id)
@@ -3520,18 +3524,17 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                     raise RuntimeError("NVMe module-only checkpoint load requires matching swap file sizes")
             elif saved.numel() != numel:
                 raise RuntimeError("NVMe module-only checkpoint load requires matching optimizer subgroup sizes")
-            source_paths.append(source_path)
+            source_paths[saved_id] = source_path
 
         for sub_group_id, (current, saved) in enumerate(zip(self.fp32_partitioned_groups_flat, saved_groups)):
             if self._swappable_optimizer_subgroup(sub_group_id):
                 swap_info = self.optimizer_swapper.swap_params_info[self.optimizer_swapper.parameter_id(current)]
-                copyfile(source_paths[sub_group_id], swap_info.get_swap_paths()[0])
+                copyfile(source_paths[saved.ds_id], swap_info.get_swap_paths()[0])
             else:
                 current.data.copy_(saved.data)
 
-        # Materialize the model weights before rounding the masters, keeping the live optimizer states.
+        # Materialize the model weights from the restored masters.
         self.reset_swap_buffers()
-        self.refresh_fp32_params()
 
     # Refresh the fp32 master params from the fp16 copies.
     def refresh_fp32_params(self):
