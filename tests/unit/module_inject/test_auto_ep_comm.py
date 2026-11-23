@@ -66,6 +66,18 @@ class TestAutoEPCommBackendSelection(unittest.TestCase):
 
         self.validate(config)
 
+    def test_deepep_accepts_folded_tensor_parallelism(self):
+        # AutoEP+AutoTP folding splits the routed assignments between the TP peers; the DeepEP route
+        # does that by masking, so the combination is no longer refused.
+        config = parse_autoep_config({
+            "enabled": True,
+            "autoep_size": 2,
+            "comm_backend": "deepep",
+            "comm_max_tokens_per_rank": 4096,
+        })
+
+        validate_autoep_config(config, world_size=4, pp_size=1, tp_size=2, sp_size=1)
+
     def test_sm_budget_and_qp_margin_are_configurable(self):
         config = parse_autoep_config({"enabled": True, "comm_num_sm": 24, "comm_qp_margin": 8})
 

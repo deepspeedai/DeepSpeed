@@ -388,10 +388,10 @@ class TestFusedGateUp:
 
     def test_overlap_weight_grad_settings_are_validated(self, monkeypatch):
 
-        def validate(zero_stage=1, **settings):
+        def validate(zero_stage=1, tp_size=1, **settings):
             base = {"enabled": True, "autoep_size": 2, "comm_backend": "deepep", "comm_max_tokens_per_rank": 64}
             config = parse_autoep_config({**base, **settings})
-            validate_autoep_config(config, 2, 1, 1, 1, zero_stage=zero_stage)
+            validate_autoep_config(config, 2 * tp_size, 1, tp_size, 1, zero_stage=zero_stage)
 
         assert parse_autoep_config({"enabled": True}).overlap_weight_grad is False
         validate(overlap_weight_grad=True, zero_stage=1)
@@ -406,6 +406,8 @@ class TestFusedGateUp:
         for stage in (0, 3):
             with pytest.raises(ValueError, match=f"ZeRO stage {stage}"):
                 validate(overlap_weight_grad=True, zero_stage=stage)
+        with pytest.raises(ValueError, match="AutoTP folding"):
+            validate(overlap_weight_grad=True, tp_size=2)
         for name in ("_get_sm_carveout_experimental", "_set_sm_carveout_experimental"):
             with monkeypatch.context() as missing_api:
                 missing_api.delattr(torch._C, name, raising=False)

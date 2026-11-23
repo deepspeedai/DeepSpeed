@@ -18,6 +18,7 @@ Requires GPUs and a DeepEP build, so it is opt-in.
 
 import contextlib
 import functools
+from types import SimpleNamespace
 from unittest import mock
 
 import pytest
@@ -37,6 +38,7 @@ from unit.v1.moe.autoep_test_utils import (
     MockMoETransformer,
     engine_input_dtype,
     make_autoep_config,
+    run_cpu_gloo_test,
     seed_everything,
     skip_unless_h100_tests_enabled,
 )
@@ -200,8 +202,9 @@ def _count_autoep_layer_forwards(engine):
 def _snapshot_fp32_parameters(engine):
     optimizer = engine.optimizer
     master_parameters = {}
-    # Stage-0 low-precision wrappers do not expose the safe_get parameter mapping.
-    if hasattr(optimizer, "fp16_groups"):
+    # Stage-0 low-precision wrappers do not expose the safe_get parameter mapping. (ZeRO-3's optimizer also has
+    # fp16_groups, but keeps its fp32 partitions elsewhere; safe_get_full_fp32_param gathers them below.)
+    if hasattr(optimizer, "fp16_groups") and engine.zero_optimization_stage() == 0:
         state = optimizer.state_dict()
         for index, parameters in enumerate(optimizer.fp16_groups):
             if "fp32_groups_flat" in state:
@@ -217,6 +220,9 @@ def _snapshot_fp32_parameters(engine):
         full_parameter = master_parameters.get(parameter)
         if full_parameter is None:
             full_parameter = safe_get_full_fp32_param(parameter)
+        if full_parameter is None and parameter.dtype == torch.float32:
+            # A parameter trained in fp32 is its own master copy.
+            full_parameter = parameter
         assert full_parameter is not None, f"Expected FP32 master parameter for {name}"
         assert full_parameter.dtype == torch.float32, f"Expected FP32 master parameter dtype for {name}"
         snapshot[name] = full_parameter.detach().cpu().clone()
@@ -231,16 +237,32 @@ def _build_test_engine(backend,
                        score_apply=None,
                        skip_recompute_combine=False,
                        zero_stage=1,
+                       tp_size=1,
+                       mixed_precision=True,
                        **expert_parallel):
     seed_everything(seed)
 
-    config = make_autoep_config(ep_size=ep_size)
-    # Pinned, because make_autoep_config prefers fp16 wherever it is available
-    # and DeepEP dispatches bfloat16 only. Both backends have to run the same
-    # dtype anyway for the comparison to mean anything.
-    config.pop("fp16", None)
-    config["bf16"] = {"enabled": True}
+    config = make_autoep_config(ep_size=ep_size, mixed_precision=mixed_precision)
+    if mixed_precision:
+        # Pinned, because make_autoep_config prefers fp16 wherever it is available
+        # and DeepEP dispatches bfloat16 only. Both backends have to run the same
+        # dtype anyway for the comparison to mean anything.
+        config.pop("fp16", None)
+        config["bf16"] = {"enabled": True}
     config["zero_optimization"]["stage"] = zero_stage
+    if tp_size > 1:
+        # AutoEP+AutoTP folding with the dense weights kept whole, so that only the MoE dispatch and
+        # restore are folded.
+        config["tensor_parallel"] = {
+            "autotp_size": tp_size,
+            "partition_config": {
+                "use_default_specs": False,
+                "layer_specs": [{
+                    "patterns": [".*\\.weight$"],
+                    "partition_type": "skip",
+                }],
+            },
+        }
     config["expert_parallel"]["comm_backend"] = backend
     if row_weighting_impl != "auto":
         # The original cleanup/legacy comparisons keep the fixture's lr=1e-4. Only the new eager/fused
@@ -288,6 +310,8 @@ def _run_one_step(backend,
                   steps=1,
                   seq_len=SEQ_LEN,
                   zero_stage=1,
+                  tp_size=1,
+                  mixed_precision=True,
                   **expert_parallel):
     """Build a model on ``backend``, run one step, return its output and grads."""
     engine = _build_test_engine(backend,
@@ -297,6 +321,8 @@ def _run_one_step(backend,
                                 score_apply=score_apply,
                                 skip_recompute_combine=skip_recompute_combine,
                                 zero_stage=zero_stage,
+                                tp_size=tp_size,
+                                mixed_precision=mixed_precision,
                                 **expert_parallel)
     if backend == "deepep" and not cleanup:
         _install_legacy_deepep_prep(engine)
@@ -891,3 +917,186 @@ class TestDeepEPColdStart(DistributedTest):
                                        rtol=5e-2,
                                        atol=5e-2,
                                        msg=f"cold-start gradient for {name}")
+
+
+def _assert_folded_results_close(actual, expected, *, rtol, atol):
+    """The folded DeepEP route against the folded collective route: same tokens, same split, same sums."""
+    torch.testing.assert_close(actual["output"], expected["output"], rtol=rtol, atol=atol)
+    torch.testing.assert_close(actual["input_gradient"], expected["input_gradient"], rtol=rtol, atol=atol)
+    assert set(actual["gradients"]) == set(
+        expected["gradients"]), "the two routes produced gradients for different parameters"
+    assert any(".router." in name for name in actual["gradients"]), "no router gradient was captured"
+    assert any(".experts." in name for name in actual["gradients"]), "no expert gradient was captured"
+    for name, reference in expected["gradients"].items():
+        torch.testing.assert_close(actual["gradients"][name],
+                                   reference,
+                                   rtol=rtol,
+                                   atol=atol,
+                                   msg=f"gradient for {name}")
+
+
+@pytest.mark.skipif(not _deepep_available(), reason="deep_ep is not installed")
+class TestDeepEPFoldedMatchesCollective(DistributedTest):
+    """Under AutoEP+AutoTP folding (TP 2 x EP 2) the DeepEP route must agree with the folded collective route.
+
+    Both split the assignments between the TP peers by the same rule, so a peer that sent an assignment
+    twice, dropped one, or restored the partial outputs with the wrong gradient factor would show up here.
+    """
+
+    world_size = 4
+    reuse_dist_env = False
+
+    @pytest.mark.parametrize("zero_stage", [1, 3])
+    def test_forward_and_backward_match_the_folded_collective_path(self, zero_stage):
+        skip_unless_h100_tests_enabled("DeepEP parity needs H100s and a DeepEP build")
+
+        collective = _run_one_step("comm", 2, seed=1234, tp_size=2, zero_stage=zero_stage)
+        deepep = _run_one_step("deepep", 2, seed=1234, tp_size=2, zero_stage=zero_stage, validate_folding_routing=True)
+
+        # bfloat16 with a different reduction order, as in TestDeepEPMatchesCollective.
+        _assert_folded_results_close(deepep, collective, rtol=5e-2, atol=5e-2)
+
+    def test_skip_recompute_combine_matches_the_folded_collective_path(self):
+        skip_unless_h100_tests_enabled("DeepEP parity needs H100s and a DeepEP build")
+
+        collective = _run_one_step("comm", 2, seed=4321, tp_size=2, decoder_layer_checkpointing=True)
+        deepep = _run_one_step("deepep",
+                               2,
+                               seed=4321,
+                               tp_size=2,
+                               decoder_layer_checkpointing=True,
+                               skip_recompute_combine=True)
+
+        _assert_folded_results_close(deepep, collective, rtol=5e-2, atol=5e-2)
+
+    def test_fused_row_weighting_matches_the_folded_collective_path(self):
+        _skip_unless_fused_row_weighting_enabled("DeepEP parity needs H100s and a DeepEP build")
+
+        collective = _run_one_step("comm", 2, seed=2468, tp_size=2)
+        deepep = _run_one_step("deepep", 2, seed=2468, tp_size=2, row_weighting_impl="fused")
+
+        _assert_folded_results_close(deepep, collective, rtol=5e-2, atol=5e-2)
+
+
+class _FakeDeepEPExchange:
+    """A stand-in for ``DeepEPExchange`` built from the collective primitives, so the DeepEP route runs on CPU.
+
+    It keeps to the documented DeepEP contract the layer relies on: dispatch sends each token's row to the
+    rank that owns each selected expert, treats an expert index of -1 as no selection, and returns the
+    arrivals grouped by local expert with their routing weights and a handle holding the per-expert prefix
+    counts; combine sends the rows back and sums them per token without applying the weights.
+    """
+
+    def __init__(self, ep_group, num_experts, top_k, hidden_size, **_unused):
+        self.ep_group = ep_group
+        self.ep_size = dist.get_world_size(group=ep_group)
+        self.ep_rank = dist.get_rank(group=ep_group)
+        self.num_experts = num_experts
+        self.num_local_experts = num_experts // self.ep_size
+        self.top_k = top_k
+        self.num_max_tokens_per_rank = 1 << 20
+        self.last_handle = None
+        self.last_pending = None
+        self.holders = 0
+
+    def release(self):
+        self.holders = max(self.holders - 1, 0)
+
+
+def _fake_deepep_dispatch(exchange,
+                          tokens,
+                          topk_idx,
+                          topk_weights,
+                          replay=None,
+                          *,
+                          weight_grad_slot=None,
+                          expert_weights=()):
+    from deepspeed.module_inject.auto_ep_layer import _AllToAllV, compute_split_plan_from_expert_indices
+    assert weight_grad_slot is None and not expert_weights, "the fake exchange has no weight-gradient overlap"
+    flat_experts = topk_idx.reshape(-1)
+    positions = torch.nonzero(flat_experts >= 0, as_tuple=False).flatten()
+    experts = flat_experts.index_select(0, positions)
+    # Experts are contiguous per rank, so expert order is destination-rank order, as the all-to-all needs.
+    order = torch.argsort(experts, stable=True)
+    positions = positions.index_select(0, order)
+    experts = experts.index_select(0, order)
+    rows = tokens.index_select(0, positions // exchange.top_k)
+    weights = topk_weights.reshape(-1).index_select(0, positions)
+    plan = compute_split_plan_from_expert_indices(expert_indices=experts,
+                                                  num_experts=exchange.num_experts,
+                                                  ep_size=exchange.ep_size,
+                                                  num_local_experts=exchange.num_local_experts,
+                                                  ep_group=exchange.ep_group)
+    received = _AllToAllV.apply(exchange.ep_group, rows, plan.input_splits, plan.output_splits)
+    recv_weights = _AllToAllV.apply(exchange.ep_group, weights.reshape(-1, 1), plan.input_splits,
+                                    plan.output_splits).reshape(-1)
+    arrived_experts = experts.new_empty(sum(plan.output_splits))
+    dist.all_to_all_single(arrived_experts,
+                           experts.contiguous(),
+                           output_split_sizes=plan.output_splits,
+                           input_split_sizes=plan.input_splits,
+                           group=exchange.ep_group)
+    # Arrivals are source-major; DeepEP hands them over grouped by expert.
+    by_expert = torch.argsort(arrived_experts, stable=True)
+    received = received.index_select(0, by_expert)
+    recv_weights = recv_weights.index_select(0, by_expert)
+    local_experts = arrived_experts - exchange.ep_rank * exchange.num_local_experts
+    counts = torch.bincount(local_experts, minlength=exchange.num_local_experts)
+    handle = SimpleNamespace(
+        psum_num_recv_tokens_per_expert=counts.cumsum(0),
+        num_expanded_tokens=received.shape[0],
+        topk_idx=topk_idx,
+        do_expand=True,
+        plan=plan,
+        by_expert=by_expert,
+        positions=positions,
+        num_tokens=tokens.shape[0],
+    )
+    exchange.last_handle = handle
+    return received, recv_weights, exchange
+
+
+def _fake_deepep_combine(exchange, rows, handle):
+    from deepspeed.module_inject.auto_ep_layer import _AllToAllV
+    source_major = torch.empty_like(handle.by_expert)
+    source_major[handle.by_expert] = torch.arange(handle.by_expert.numel())
+    rows = rows.index_select(0, source_major)
+    returned = _AllToAllV.apply(exchange.ep_group, rows, handle.plan.output_splits, handle.plan.input_splits)
+    tokens = handle.positions // exchange.top_k
+    return rows.new_zeros((handle.num_tokens, rows.shape[1])).index_add(0, tokens, returned)
+
+
+@contextlib.contextmanager
+def _fake_deepep_route():
+    """Run the DeepEP route on the fake exchange: no deep_ep, no CUDA, any dtype."""
+    real_barrier = auto_ep_layer.dist.barrier
+
+    def barrier_without_device_ids(group=None, **_kwargs):
+        return real_barrier(group=group)
+
+    with mock.patch.object(auto_ep_layer, "shared_exchange", lambda **kwargs: _FakeDeepEPExchange(**kwargs)), \
+            mock.patch.object(auto_ep_layer, "deepep_dispatch", _fake_deepep_dispatch), \
+            mock.patch.object(auto_ep_layer, "deepep_combine", _fake_deepep_combine), \
+            mock.patch.object(auto_ep_layer, "assert_dtype_supported", lambda dtype: None), \
+            mock.patch.object(auto_ep_layer.dist, "barrier", barrier_without_device_ids):
+        yield
+
+
+def _cpu_folded_fake_deepep_worker(rank, world_size, _shared_tmpdir):
+    # TP 2 x EP 2 in fp32 on gloo: the two routes split the assignments the same way and sum the same
+    # products, so they agree to rounding of the summation order.
+    collective = _run_one_step("comm", 2, seed=1234, tp_size=2, mixed_precision=False, zero_stage=0)
+    with _fake_deepep_route():
+        deepep = _run_one_step("deepep",
+                               2,
+                               seed=1234,
+                               tp_size=2,
+                               mixed_precision=False,
+                               zero_stage=0,
+                               validate_folding_routing=True)
+
+    _assert_folded_results_close(deepep, collective, rtol=1e-4, atol=1e-5)
+
+
+def test_cpu_gloo_folded_deepep_route_matches_the_folded_collective_path(tmpdir):
+    run_cpu_gloo_test(_cpu_folded_fake_deepep_worker, tmpdir, world_size=4)
