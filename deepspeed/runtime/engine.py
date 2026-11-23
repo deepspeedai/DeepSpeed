@@ -2458,6 +2458,18 @@ class DeepSpeedEngine(Module):
 
         optimizer_wrapper = self._do_optimizer_sanity_check(basic_optimizer)
 
+        if self.bf16_stochastic_round_params():
+            from deepspeed.runtime.sequence_parallel import parallel_state_sp
+            from deepspeed.utils.bwc import bwc_tensor_model_parallel_world_size
+
+            # Ulysses aliases its sequence group to the legacy model-parallel group.
+            if self.mpu is not parallel_state_sp and bwc_tensor_model_parallel_world_size(self.mpu) > 1:
+                raise ValueError("bf16.stochastic_round_params cannot preserve replicated tensor-parallel weights")
+            if optimizer_wrapper != BFLOAT16 and not (optimizer_wrapper == ZERO_OPTIMIZATION
+                                                      and self.zero_optimization_stage() <= ZeroStageEnum.gradients
+                                                      and not self.zenflow):
+                raise ValueError("bf16.stochastic_round_params supports BF16_Optimizer and ordinary ZeRO stages 1/2")
+
         if optimizer_wrapper == ZERO_OPTIMIZATION:
             self.optimizer = self._configure_zero_optimizer(basic_optimizer)
         elif optimizer_wrapper in [FP16, DDP_BFLOAT16]:
@@ -2467,12 +2479,6 @@ class DeepSpeedEngine(Module):
             self.optimizer = self._configure_bf16_optimizer(basic_optimizer)
         else:
             self.optimizer = basic_optimizer
-
-        # Subclasses such as ZenFlow's override the step that applies the rounding, so match exact types.
-        if self.bf16_stochastic_round_params() and type(
-                self.optimizer) not in (BF16_Optimizer, DeepSpeedZeroOptimizer):
-            raise ValueError("bf16.stochastic_round_params supports BF16_Optimizer and ZeRO stage 1/2 "
-                             f"(DeepSpeedZeroOptimizer); this engine uses {type(self.optimizer).__name__}")
 
         self._configure_autoep_folding_optimizer_gradient_reduction()
         log_dist("DeepSpeed Final Optimizer = {}".format(self.optimizer.__class__.__name__), ranks=[0])
@@ -4621,6 +4627,8 @@ class DeepSpeedEngine(Module):
 
         if load_zero_checkpoint and universal and not zero3:
             self.optimizer.update_lp_params()
+            if self.pipeline_parallelism and self.bf16_stochastic_round_params():
+                self.module._synchronize_tied_weights()
             if load_module_only:
                 self.optimizer.refresh_fp32_params()
 

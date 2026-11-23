@@ -15,9 +15,8 @@ from deepspeed import comm as dist
 from deepspeed.accelerator import get_accelerator
 from deepspeed.runtime.bf16_optimizer import BF16_Optimizer
 from deepspeed.runtime.config import DeepSpeedConfig
-from deepspeed.runtime.stochastic_rounding import stochastic_round_to_bf16_
 from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer
-from deepspeed.utils import safe_get_full_fp32_param, safe_get_full_grad
+from deepspeed.utils import safe_get_full_fp32_param, safe_get_full_grad, safe_set_full_fp32_param
 from unit.v1.zero.test_zero_user_backward import (initialize_distributed, create_ddp_model, collect_ddp_gradients,
                                                   collect_gradients_safe, compare_gradients)
 
@@ -704,36 +703,52 @@ def _bf16_neighbours(master):
     return low, high
 
 
-def test_stochastic_round_to_bf16_kernel():
-    tiny = 2.0**-133  # the smallest bf16 subnormal
-    values = torch.tensor([1 + 2.0**-9, -(1 + 3 * 2.0**-9), 0.3, 2 - 2.0**-9, 2.5 * tiny, -1.25 * tiny])
-    draws = 1 << 16
-    src = values.repeat_interleave(draws)
-    dst = torch.empty_like(src, dtype=torch.bfloat16)
-    stochastic_round_to_bf16_(dst, src, torch.Generator().manual_seed(0))
-    # Unbiased for either sign and for subnormals: each value rounds to its upper neighbour with probability equal
-    # to its position between the two.
-    low, high = _bf16_neighbours(values)
-    fraction = (values.double() - low) / (high - low)
-    rounded = dst.double().view(len(values), draws)
-    assert ((rounded == low[:, None]) | (rounded == high[:, None])).all()
-    rounded_up = (rounded == high[:, None]).double().mean(dim=1)
-    assert ((rounded_up - fraction).abs() < 5 * (fraction * (1 - fraction) / draws).sqrt()).all(), rounded_up
+def _rounding_config(stage):
+    return dict(train_micro_batch_size_per_gpu=1,
+                bf16=dict(enabled=True, stochastic_round_params=True),
+                zero_optimization=dict(stage=stage))
 
-    # The same seed repeats the draw; another seed does not.
-    again = torch.empty_like(dst)
-    stochastic_round_to_bf16_(again, src, torch.Generator().manual_seed(0))
-    assert torch.equal(again, dst)
-    stochastic_round_to_bf16_(again, src, torch.Generator().manual_seed(1))
-    assert not torch.equal(again, dst)
 
-    # bf16 values are kept exactly. Non-finite values round to nearest, including NaNs whose low bits would carry.
-    exact = torch.tensor([0.0, -0.0, 1.0, -0.5, tiny, -tiny, torch.finfo(torch.bfloat16).max])
-    non_finite = torch.tensor([0x7F800000, -0x00800000, 0x7FFFFFFF, -1], dtype=torch.int32).view(torch.float32)
-    src = torch.cat([exact, non_finite]).repeat(1000)
-    out = torch.empty_like(src, dtype=torch.bfloat16)
-    stochastic_round_to_bf16_(out, src, torch.Generator().manual_seed(2))
-    assert torch.equal(out.view(torch.int16), src.to(torch.bfloat16).view(torch.int16))
+class TestBF16StochasticRoundRefresh(DistributedTest):
+    world_size = 1
+
+    def test_master_neighbours(self):
+        if not bf16_required_version_check():
+            pytest.skip("bf16 is required")
+        tiny = 2.0**-133
+        values = torch.tensor([1 + 2.0**-9, -(1 + 3 * 2.0**-9), 0.3, 2 - 2.0**-9, 2.5 * tiny, -1.25 * tiny])
+        exact = torch.tensor([0.0, -0.0, 1.0, -0.5, tiny, -tiny, torch.finfo(torch.bfloat16).max])
+        specials = torch.tensor([0x7F800000, -0x00800000, 0x7FFFFFFF, -1], dtype=torch.int32).view(torch.float32)
+        draws = 1 << 16
+        fixed = torch.cat([exact, specials]).repeat(64)
+        master = torch.cat([values.repeat_interleave(draws), fixed])
+
+        def round_with_seed(seed):
+            torch.manual_seed(seed)
+            model = torch.nn.Linear(master.numel(), 1, bias=False)
+            config = _rounding_config(1)
+            config["data_types"] = dict(grad_accum_dtype="fp32")
+            engine, _, _, _ = deepspeed.initialize(model=model,
+                                                   optimizer=torch.optim.Adam(model.parameters()),
+                                                   config=config)
+            weight = engine.module.weight
+            safe_set_full_fp32_param(weight, master.to(weight.device).view_as(weight))
+            engine.optimizer.update_lp_params()
+            result = weight.detach().flatten().cpu().clone()
+            engine.destroy()
+            return result
+
+        rounded = round_with_seed(0)
+        assert torch.equal(rounded.view(torch.int16), round_with_seed(0).view(torch.int16))
+        assert not torch.equal(rounded[:draws], round_with_seed(1)[:draws])
+        low, high = _bf16_neighbours(values)
+        fraction = (values.double() - low) / (high - low)
+        samples = rounded[:values.numel() * draws].double().view(-1, draws)
+        assert ((samples == low[:, None]) | (samples == high[:, None])).all()
+        rounded_up = (samples == high[:, None]).double().mean(dim=1)
+        assert ((rounded_up - fraction).abs() < 5 * (fraction * (1 - fraction) / draws).sqrt()).all()
+        nearest = fixed.to(get_accelerator().current_device_name()).to(torch.bfloat16).cpu()
+        assert torch.equal(rounded[-fixed.numel():].view(torch.int16), nearest.view(torch.int16))
 
 
 @pytest.mark.parametrize("stochastic", [False, True])
@@ -747,25 +762,15 @@ class TestBF16StochasticRoundParams(DistributedTest):
 
     def test_bf16_params_track_fp32_masters(self, stochastic, zero_stage, offload, grad_accum_dtype, optimizer_type):
         if not bf16_required_version_check():
-            pytest.skip(
-                " DeepSpeed BFloat16 tests need torch >= 1.10, NCCL >= 2.10.3, CUDA > =11.0 and HW support for BFloat16 to run correctly"
-            )
-        zero_config = {"stage": zero_stage}
+            pytest.skip("bf16 is required")
+        torch.manual_seed(0)
+        config_dict = _rounding_config(zero_stage)
+        config_dict["data_types"] = dict(grad_accum_dtype=grad_accum_dtype)
         if offload:
-            zero_config["offload_optimizer"] = {"device": "cpu"}
-        config_dict = {
-            "train_micro_batch_size_per_gpu": 1,
-            "bf16": {
-                "enabled": True
-            },
-            "data_types": {
-                "grad_accum_dtype": grad_accum_dtype
-            },
-            "zero_optimization": zero_config,
-            "zero_force_ds_cpu_optimizer": False,
-        }
-        if stochastic:
-            config_dict["bf16"]["stochastic_round_params"] = True
+            config_dict["zero_optimization"]["offload_optimizer"] = dict(device="cpu")
+            config_dict["zero_force_ds_cpu_optimizer"] = False
+        if not stochastic:
+            del config_dict["bf16"]["stochastic_round_params"]
         model = _ConstantGradientModel()
         optimizer = torch.optim.Adam(model.parameters(), lr=_SR_LR)
         engine, _, _, _ = deepspeed.initialize(config=config_dict, model=model, optimizer=optimizer)
@@ -806,22 +811,12 @@ class TestBF16StochasticRoundParams(DistributedTest):
         engine.destroy()
 
 
-def test_bf16_stochastic_round_params_refuses_bf16_masters():
-    config = {
-        "train_micro_batch_size_per_gpu": 1,
-        "bf16": {
-            "enabled": True,
-            "stochastic_round_params": True,
-            "bf16_master_weights_and_grads": True
-        },
-        "zero_optimization": {
-            "stage": 2,
-            "offload_optimizer": {
-                "device": "cpu"
-            }
-        },
-    }
-    with pytest.raises(ValueError, match="stochastic_round_params"):
+@pytest.mark.parametrize("precision", ["fp16", "bf16"])
+def test_stochastic_round_requires_fp32_masters(precision):
+    config = _rounding_config(2)
+    config["zero_optimization"]["offload_optimizer"] = dict(device="cpu")
+    config.setdefault(precision, {})[f"{precision}_master_weights_and_grads"] = True
+    with pytest.raises(ValueError, match="requires fp32 master weights"):
         DeepSpeedConfig(config)
 
 
@@ -830,25 +825,91 @@ class TestBF16StochasticRoundParamsUnsupported(DistributedTest):
 
     def test_zero3_refused(self):
         if not bf16_required_version_check():
-            pytest.skip(
-                " DeepSpeed BFloat16 tests need torch >= 1.10, NCCL >= 2.10.3, CUDA > =11.0 and HW support for BFloat16 to run correctly"
-            )
-        config_dict = {
-            "zero_optimization": {
-                "stage": 3
-            },
-            "train_micro_batch_size_per_gpu": 1,
-            "bf16": {
-                "enabled": True,
-                "stochastic_round_params": True
-            },
-        }
+            pytest.skip("bf16 is required")
+        model = _ConstantGradientModel()
+        with pytest.raises(ValueError, match="supports BF16_Optimizer"):
+            engine, _, _, _ = deepspeed.initialize(config=_rounding_config(3),
+                                                   model=model,
+                                                   optimizer=torch.optim.Adam(model.parameters()))
+            engine.destroy()
+            raise AssertionError("ZeRO-3 accepted stochastic rounding")
+
+
+class TestStochasticRoundParallelism(DistributedTest):
+    world_size = 2
+
+    @pytest.mark.parametrize("tensor_parallel", [False, True])
+    def test_replicated_weights(self, tensor_parallel):
+        from deepspeed.runtime.pipe.topology import PipelineParallelGrid, PipeModelDataParallelTopology
+        from deepspeed.runtime.sequence_parallel import parallel_state_sp
+
+        if not bf16_required_version_check():
+            pytest.skip("bf16 is required")
+        initialize_distributed()
+        config = _rounding_config(2)
         model = _ConstantGradientModel()
         optimizer = torch.optim.Adam(model.parameters(), lr=_SR_LR)
-        try:
-            engine, _, _, _ = deepspeed.initialize(config=config_dict, model=model, optimizer=optimizer)
-        except ValueError as error:
-            assert "stochastic_round_params" in str(error)
-            return
+        if tensor_parallel:
+            mpu = PipelineParallelGrid(PipeModelDataParallelTopology(num_pp=1, num_mp=2, num_dp=1))
+            with pytest.raises(ValueError, match="replicated tensor-parallel weights"):
+                engine, _, _, _ = deepspeed.initialize(model=model, optimizer=optimizer, config=config, mpu=mpu)
+                engine.destroy()
+                raise AssertionError("TP accepted independent rounding of replicas")
+        else:
+            parallel_state_sp.initialize_sequence_parallel(2)
+            config["sequence_parallel_size"] = 2
+            engine, _, _, _ = deepspeed.initialize(model=model,
+                                                   optimizer=optimizer,
+                                                   config=config,
+                                                   mpu=parallel_state_sp)
+            before = model.weight.detach().clone()
+            engine.backward(engine())
+            engine.step()
+            assert (model.weight != before).any()
+            engine.destroy()
+
+
+class TestPipelineTiedStochasticRound(DistributedTest):
+    world_size = 2
+
+    def test_step_and_universal_warm_start_keep_copies_equal(self, tmpdir):
+        from deepspeed.checkpoint.constants import PIPELINE_REPLICATED_PARAMETER_PATTERNS, UNIVERSAL_CHECKPOINT_INFO
+        from unit.checkpoint.test_autotp_uc_checkpoint import _convert_to_universal
+        from deepspeed.pipe import PipelineModule, TiedLayerSpec
+
+        if not bf16_required_version_check():
+            pytest.skip("bf16 is required")
+        initialize_distributed()
+        torch.manual_seed(42)
+        tied = TiedLayerSpec("shared", torch.nn.Linear, 32, 32, bias=False)
+        layers = [tied, torch.nn.Identity(), torch.nn.Linear(32, 32, bias=False), tied]
+        model = PipelineModule(layers, num_stages=2, partition_method="uniform", loss_fn=lambda x, y: x.float().mean())
+        for param in model.parameters():
+            param.data.fill_(1.0)
+        # The second stage's extra matrix precedes the tied weight in its optimizer partition.
+        optimizer = torch.optim.Adam(reversed(list(model.parameters())), lr=0.001)
+        config = _rounding_config(1)
+        config["checkpoint"] = dict(load_universal=True)
+        config["data_types"] = dict(grad_accum_dtype="fp32")
+        engine, _, _, _ = deepspeed.initialize(model=model, optimizer=optimizer, config=config)
+        batch = (torch.ones(1, 32, dtype=torch.bfloat16), torch.zeros(1))
+        engine.train_batch(data_iter=iter([batch]))
+        weight = model.tied_modules["shared"].weight
+
+        def check_tied():
+            copies = [torch.empty_like(weight) for _ in range(2)]
+            dist.all_gather(copies, weight.detach())
+            assert weight.ne(1).any()
+            assert torch.equal(*copies)
+
+        check_tied()
+        info = {PIPELINE_REPLICATED_PARAMETER_PATTERNS: [r"^tied_modules\.shared\.weight$"]}
+        engine.save_checkpoint(str(tmpdir), tag="native", client_state={UNIVERSAL_CHECKPOINT_INFO: info})
+        if dist.get_rank() == 0:
+            _convert_to_universal(str(tmpdir / "native"), str(tmpdir / "universal"))
+        dist.barrier()
+        path, _ = engine.load_checkpoint(str(tmpdir), tag="universal", load_module_only=True)
+        assert path
+        check_tied()
+        assert torch.equal(safe_get_full_fp32_param(weight), weight.float())
         engine.destroy()
-        raise AssertionError("Unsupported stochastic rounding configuration was accepted")

@@ -74,15 +74,8 @@ class DeepSpeedBF16Config(DeepSpeedConfigModel):
     """
     Stochastically round fp32 master weights into the bf16 parameters after each optimizer step and universal-checkpoint
     load. The expected result equals the master within the finite bf16 range. Supported by ZeRO stages 1 and 2 and
-    BF16_Optimizer; requires fp32 master weights.
+    BF16_Optimizer with fp32 master weights and without tensor parallelism.
     """
-
-    @model_validator(mode="after")
-    def _validate_stochastic_round_params(self):
-        if self.stochastic_round_params and self.bf16_master_weights_and_grads:
-            raise ValueError("bf16.stochastic_round_params rounds from fp32 master weights and cannot be combined "
-                             "with bf16.bf16_master_weights_and_grads")
-        return self
 
 
 #########################################

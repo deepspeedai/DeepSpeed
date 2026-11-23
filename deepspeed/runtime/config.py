@@ -699,6 +699,10 @@ class DeepSpeedConfig(object):
         if self.gradient_allreduce_op == GRADIENT_ALLREDUCE_OP_SUM and self.compile_config.deepcompile:
             raise ValueError(f"{GRADIENT_ALLREDUCE_OP}='sum' is not supported with DeepCompile")
 
+        if self.bfloat16_config.enabled and self.bfloat16_config.stochastic_round_params and (
+                self.float16_config.fp16_master_weights_and_grads
+                or self.bfloat16_config.bf16_master_weights_and_grads):
+            raise ValueError("bf16.stochastic_round_params requires fp32 master weights")
         if self.float16_config.fp16_master_weights_and_grads:
             assert self.zero_enabled and self.zero_optimization_stage in (
                 ZeroStageEnum.optimizer_states, ZeroStageEnum.gradients,
