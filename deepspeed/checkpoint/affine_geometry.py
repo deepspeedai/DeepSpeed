@@ -11,7 +11,7 @@ from typing import List, Optional, Sequence, Tuple
 
 __all__ = [
     'LogicalBox', 'address_range', 'coordinate', 'dot', 'overlaps_itself', 'product', 'row_major_range_boxes',
-    'row_major_strides', 'strided_address'
+    'row_major_strides', 'strided_address', 'subtract'
 ]
 
 
@@ -181,3 +181,29 @@ def boxes_disjoint(boxes: Sequence[LogicalBox], max_checks: Optional[int] = None
             return False
         open_boxes.append(box)
     return True
+
+
+def subtract(region: LogicalBox, cut: LogicalBox) -> List[LogicalBox]:
+    """Return the disjoint parts of a box outside another box."""
+    overlap = region.intersection(cut)
+    if overlap.is_empty:
+        return [region]
+    origin = list(region.origin)
+    extent = list(region.extent)
+    pieces = []
+    for axis, (low, high) in enumerate(zip(overlap.origin, overlap.upper())):
+        if origin[axis] < low:
+            shape = extent.copy()
+            shape[axis] = low - origin[axis]
+            pieces.append(LogicalBox(tuple(origin), tuple(shape)))
+            extent[axis] -= shape[axis]
+            origin[axis] = low
+        end = origin[axis] + extent[axis]
+        if high < end:
+            start = origin.copy()
+            shape = extent.copy()
+            start[axis] = high
+            shape[axis] = end - high
+            pieces.append(LogicalBox(tuple(start), tuple(shape)))
+            extent[axis] = high - origin[axis]
+    return pieces
