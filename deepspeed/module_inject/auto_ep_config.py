@@ -65,6 +65,8 @@ def parse_autoep_config(param_dict: dict) -> AutoEPConfig:
     config.row_weighting_impl = param_dict.get("row_weighting_impl", "auto")
     config.gate_up_impl = param_dict.get("gate_up_impl", "separate")
     config.overlap_weight_grad = param_dict.get("overlap_weight_grad", False)
+    config.deferred_dw_flush_period = param_dict.get("deferred_dw_flush_period", 1)
+    config.deferred_dw_rows_per_expert = param_dict.get("deferred_dw_rows_per_expert", 0)
     config.comm_backend = param_dict.get("comm_backend", "comm")
     config.comm_num_sm = param_dict.get("comm_num_sm", 12)
     config.comm_qp_margin = param_dict.get("comm_qp_margin", 4)
@@ -236,6 +238,28 @@ def validate_autoep_config(
             raise ValueError("overlap_weight_grad withholds DeepEP's SMs from the weight-gradient GEMMs through "
                              "torch._C._set_sm_carveout_experimental, which this PyTorch build lacks. Upgrade "
                              "PyTorch, or leave overlap_weight_grad unset.")
+
+    flush_period = config.deferred_dw_flush_period
+    if isinstance(flush_period, bool) or not isinstance(flush_period, int) or flush_period < 1:
+        raise ValueError(f"deferred_dw_flush_period must be a positive integer, got {flush_period!r}")
+    rows_per_expert = config.deferred_dw_rows_per_expert
+    if isinstance(rows_per_expert, bool) or not isinstance(rows_per_expert, int) or rows_per_expert < 0:
+        raise ValueError(f"deferred_dw_rows_per_expert must be a non-negative integer, got {rows_per_expert!r}")
+    if flush_period > 1:
+        if not config.use_grouped_mm:
+            raise ValueError("deferred_dw_flush_period stages the experts' torch._grouped_mm weight gradients, but "
+                             "use_grouped_mm=false selects the sequential expert loop. Set use_grouped_mm=true, or "
+                             "leave deferred_dw_flush_period unset.")
+        if config.overlap_weight_grad:
+            raise ValueError("deferred_dw_flush_period stages the expert weight gradients across backward passes "
+                             "and overlap_weight_grad computes them in the DeepEP dispatch backward. Enable one "
+                             "of them.")
+        if tp_size > 1:
+            raise ValueError("deferred_dw_flush_period does not support AutoEP+AutoTP folding yet. Set "
+                             "tensor_parallel.autotp_size to 1, or leave deferred_dw_flush_period unset.")
+    elif rows_per_expert != 0:
+        raise ValueError("deferred_dw_rows_per_expert sizes the staging that deferred_dw_flush_period > 1 enables. "
+                         "Set deferred_dw_flush_period, or leave deferred_dw_rows_per_expert unset.")
 
     if config.row_weighting_impl == "fused":
         if config.comm_backend != "deepep":

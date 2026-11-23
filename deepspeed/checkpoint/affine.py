@@ -18,15 +18,18 @@ both directions.
 See ``deepspeed/checkpoint/affine_ir_spec.md`` for the full specification.
 """
 
+from bisect import bisect_left
+
 import torch
 
-from .affine_geometry import LogicalBox, address_range, boxes_disjoint, coordinate, overlaps_itself
+from .affine_geometry import LogicalBox, address_range, boxes_disjoint, coordinate, overlaps_itself, subtract
 from .affine_geometry import (dot as _dot, product as _product, row_major_range_boxes as _row_major_range_boxes,
                               row_major_strides as _row_major_strides, strided_address as _strided_address)
 
 __all__ = [
     'AffinePiece', 'ParamAffineMap', 'AFFINE_MAP_FORMAT_VERSION', 'SCALE_POWER_BY_STATE', 'replicated_map',
-    'contiguous_split_map', 'sub_param_map', 'segmented_map', 'block_gather_map', 'nest_affine_maps'
+    'contiguous_split_map', 'sub_param_map', 'segmented_map', 'block_gather_map', 'nest_affine_maps',
+    'union_affine_maps'
 ]
 
 # Encoding version of the stored map, independent of the universal checkpoint version so
@@ -932,3 +935,141 @@ def _first_index_at_or_after(piece, address):
                 index *= later_size
             return index
     return index
+
+
+def union_affine_maps(maps):
+    """One map of a parameter that several layouts hold at the same time.
+
+    Each map describes the same parameter in its own layout, held by its own locations: for example a
+    trainer's ZeRO-3 partitions and a surviving tensor-parallel shard of an inference copy. A location is
+    one buffer, so a process that holds the parameter in two layouts appears under two locations, and
+    the transfer's endpoints bind both of them to that process.
+
+    A planner may read a block from any of its holders, so it needs any two blocks to be equal or
+    disjoint, and each block to list every location that holds it. Each piece is therefore cut at the
+    edges of every block held over it, in any layout, and each cut piece lists the holders from every
+    layout. A cut keeps the piece's strides and moves its offsets, so every location still stores
+    exactly what it did. Pieces must be axis-aligned blocks of the parameter.
+
+    Layouts that contradict each other raise ``InvalidMapError``, and a piece that is not an axis-aligned
+    block raises ``UnsupportedLayoutError``, as the planner reports the same problems.
+    """
+    if not maps:
+        raise ValueError('A union needs at least one map.')
+    union = maps[0]
+    for other in maps[1:]:
+        union = _union_of_two(union, other)
+    return union
+
+
+def _union_of_two(first, second):
+    # affine_transfer imports this module, so its error types are imported where they are raised.
+    from .affine_transfer import InvalidMapError
+    if first.logical_shape != second.logical_shape:
+        raise InvalidMapError(f'The layouts describe parameters of shape {first.logical_shape} and '
+                              f'{second.logical_shape}, so they cannot describe the same parameter.')
+    shared = sorted(set(first.shard_shapes) & set(second.shard_shapes))
+    if shared:
+        raise InvalidMapError(f'Locations {shared} appear in both layouts; give each layout its own locations, '
+                              'one per buffer.')
+    blocks = _disjoint_blocks(first, second)
+    first_rows = [_rows(box)[0] for box, _ in blocks]
+    pieces_by_rank = {}
+    for affine_map in (first, second):
+        for rank, pieces in affine_map.pieces_by_rank.items():
+            pieces_by_rank[rank] = [
+                part for piece in pieces for part in _cut(piece, first.logical_shape, blocks, first_rows)
+            ]
+    affine_map = ParamAffineMap(logical_shape=first.logical_shape,
+                                shard_shapes={
+                                    **first.shard_shapes,
+                                    **second.shard_shapes
+                                },
+                                pieces_by_rank=pieces_by_rank)
+    try:
+        affine_map.validate()
+    except ValueError as error:
+        raise InvalidMapError(f'The layouts do not form one map: {error}') from error
+    return affine_map
+
+
+def _disjoint_blocks(*maps):
+    # Every block the maps hold, cut wherever two of them meet, so the parts are disjoint and each lists every
+    # location that holds it. Replicas within one map may cut the same region at different edges, so its own
+    # blocks are cut against each other too. Sorted, so the parts do not depend on the order the maps list them.
+    holders = {}
+    for affine_map in maps:
+        for pieces in affine_map.pieces_by_rank.values():
+            for piece in pieces:
+                if piece.numel:
+                    block = _block_of(piece, affine_map.logical_shape)
+                    holders[block] = holders.get(block, frozenset()) | piece.locations
+    # The blocks come in order of their first row, so a part that ends at or above a block's first row meets
+    # neither that block nor any later one, and is final. Comparing each block only with the parts still open,
+    # those reaching into its rows, keeps the work close to linear in the number of partitions.
+    final, open_parts = [], []
+    for block, block_holders in sorted(holders.items(), key=lambda item: (item[0].origin, item[0].extent)):
+        first_row = _rows(block)[0]
+        reached = []
+        for part, part_holders in open_parts:
+            (final if _rows(part)[1] <= first_row else reached).append((part, part_holders))
+        open_parts = []
+        rest = [block]
+        for part, part_holders in reached:
+            overlap = part.intersection(block)
+            if overlap.is_empty:
+                open_parts.append((part, part_holders))
+                continue
+            open_parts.append((overlap, part_holders | block_holders))
+            open_parts.extend((box, part_holders) for box in subtract(part, block))
+            rest = [box for remaining in rest for box in subtract(remaining, part)]
+        open_parts.extend((box, block_holders) for box in rest)
+    return sorted(final + open_parts, key=lambda item: (item[0].origin, item[0].extent))
+
+
+def _rows(box):
+    # The rows a block spans on the parameter's first axis; a scalar has one.
+    if not box.origin:
+        return 0, 1
+    return box.origin[0], box.origin[0] + box.extent[0]
+
+
+def _block_of(piece, logical_shape):
+    # Only an axis-aligned block of the parameter can be cut at another block's edges by coordinates.
+    strides = _row_major_strides(logical_shape)
+    origin = None
+    if len(piece.shape) == len(logical_shape) and all(
+            size <= 1 or stride == expected
+            for size, stride, expected in zip(piece.shape, piece.source_strides, strides)):
+        origin = coordinate(piece.source_offset, strides, logical_shape)
+    # A row-major run longer than what is left of its row wraps into the next row, so it is not a block.
+    if origin is not None and any(low + size > bound for low, size, bound in zip(origin, piece.shape, logical_shape)):
+        origin = None
+    if origin is None:
+        from .affine_transfer import UnsupportedLayoutError  # imported here, as in _union_of_two
+        raise UnsupportedLayoutError(f'Piece {piece} is not an axis-aligned block of a parameter of shape '
+                                     f'{logical_shape}, so it cannot be cut at another layout\'s block edges.')
+    return LogicalBox(origin, piece.shape)
+
+
+def _cut(piece, logical_shape, blocks, first_rows):
+    # ``piece`` cut into the disjoint ``blocks`` that cover it, each part with that block's holders. The blocks
+    # refine every block a layout holds, so one that meets this piece lies inside it and starts in its rows:
+    # ``first_rows`` (the blocks' first rows, in their sorted order) finds those without comparing the rest.
+    if not piece.numel:
+        return [piece]
+    block = _block_of(piece, logical_shape)
+    low, high = _rows(block)
+    parts = []
+    for other, holders in blocks[bisect_left(first_rows, low):bisect_left(first_rows, high)]:
+        overlap = block.intersection(other)
+        if not overlap.is_empty:
+            parts.append((overlap, holders))
+    return [_part_of(piece, block.origin, box, locations) for box, locations in parts]
+
+
+def _part_of(piece, origin, box, locations):
+    # The part of ``piece`` over ``box``: the same strides, with both offsets moved to the box's corner.
+    shift = tuple(low - start for low, start in zip(box.origin, origin))
+    return AffinePiece(box.extent, piece.source_offset + _dot(shift, piece.source_strides), piece.source_strides,
+                       piece.dest_offset + _dot(shift, piece.dest_strides), piece.dest_strides, locations, piece.scale)
