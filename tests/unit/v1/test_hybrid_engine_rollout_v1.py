@@ -48,7 +48,9 @@ class _LocalKVModel(torch.nn.Module):
             valid[:, :attention_mask.shape[1]] = attention_mask.bool()
         cache_sums = (values * valid[:, None, :, None]).sum(dim=(1, 2, 3)).long()
         next_tokens = cache_sums.remainder(29) + 3
-        logits = torch.zeros((input_ids.shape[0], input_ids.shape[1], 32), device=input_ids.device)
+        logits = torch.zeros((input_ids.shape[0], input_ids.shape[1], 32),
+                             dtype=self.weight.dtype,
+                             device=input_ids.device)
         logits.scatter_(2, next_tokens[:, None, None].expand(-1, input_ids.shape[1], 1), 1)
         return SimpleNamespace(logits=logits)
 
@@ -76,6 +78,17 @@ def _count_replays(monkeypatch, accelerator):
     return counter
 
 
+def test_static_graph_attention_mask_uses_additive_values():
+    attention = torch.tensor([[1, 1, 0], [0, 1, 1]], dtype=torch.bool)
+    causal = torch.empty(2, 1, 1, 3)
+
+    HybridEngineRollout._update_static_causal_attention(attention, causal)
+
+    minimum = torch.finfo(causal.dtype).min
+    assert torch.equal(causal[0, 0, 0], torch.tensor([0, 0, minimum], dtype=causal.dtype))
+    assert torch.equal(causal[1, 0, 0], torch.tensor([minimum, 0, 0], dtype=causal.dtype))
+
+
 @pytest.mark.parametrize("local_heads", [4, 2, 1])
 def test_static_graph_uses_prefill_kv_shape(local_heads, monkeypatch):
     accelerator = get_accelerator()
@@ -97,6 +110,39 @@ def test_static_graph_uses_prefill_kv_shape(local_heads, monkeypatch):
     assert output.input_ids.tolist() == _local_kv_tokens(prompts, new_tokens, local_heads)
     assert counter["replays"] == new_tokens - 1
     assert model.config.num_key_value_heads == 4
+
+
+@pytest.mark.parametrize("batch_size, repetition_penalty", [(1, 1.3), (2, 1.0)])
+def test_static_graph_full_step_kernel_preconditions(batch_size, repetition_penalty, monkeypatch):
+    accelerator = get_accelerator()
+    if not accelerator.is_available() or accelerator.create_graph() is None:
+        pytest.skip("requires graph capture")
+
+    from deepspeed.ops import module_inject
+
+    calls = []
+
+    class GraphOp:
+
+        def decode_step_graph(self, *args):
+            calls.append(args)
+
+    monkeypatch.setattr(module_inject, "get_fused_glu_op", GraphOp)
+    device = torch.device(accelerator.device_name())
+    model = _LocalKVModel(2).to(device).to(torch.bfloat16).eval()
+    model.generation_config = SimpleNamespace(repetition_penalty=repetition_penalty)
+    rollout = HybridEngineRollout(SimpleNamespace(module=model),
+                                  SimpleNamespace(pad_token_id=0, eos_token_id=-1),
+                                  cfg=HybridEngineRolloutConfig(use_graph_capture=True))
+    prompt_ids = torch.tensor([[1, 3, 4]] * batch_size, device=device)
+
+    output = rollout.generate(RolloutRequest(prompt_ids, torch.ones_like(prompt_ids)),
+                              SamplingConfig(max_new_tokens=3, temperature=0))
+
+    assert output.input_ids.shape == (batch_size, 6)
+    # The captured step kernel cannot apply penalties and is reserved for
+    # the single-row fast path, so neither case may mount it.
+    assert calls == []
 
 
 @pytest.mark.parametrize("use_graph", [False, True])

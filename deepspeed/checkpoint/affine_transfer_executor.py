@@ -44,6 +44,7 @@ mover should be perturbing.
 
 import sys
 import zlib
+from bisect import bisect_right
 from dataclasses import dataclass
 from itertools import product
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple
@@ -240,7 +241,11 @@ def _validate_buffers(plan: TransferPlan, source_buffers: Mapping[int, torch.Ten
                     f'{which} of {segment!r} reaches element {reach} of a {buffers[location].numel()}-element buffer')
 
 
-def _validate_aliases(requests: Sequence[TransferRequest]) -> None:
+def _buffers_alias(requests: Sequence[TransferRequest]) -> bool:
+    """Whether a target buffer shares storage with a source or with another target of the batch.
+
+    Usually none does, and then no region can alias. Otherwise ``_validate_aliases`` decides from the
+    regions this process actually reads and writes."""
     sources = [
         _data_range(buffer) for request in requests for buffer in request.source_buffers.values() if buffer.numel()
     ]
@@ -249,10 +254,61 @@ def _validate_aliases(requests: Sequence[TransferRequest]) -> None:
     ]
     for low, high in targets:
         if any(low < source_high and source_low < high for source_low, source_high in sources):
-            raise AffineTransferExecutionError('a source and a target overlap within the transfer batch')
+            return True
     for index, (low, high) in enumerate(targets):
         if any(low < other_high and other_low < high for other_low, other_high in targets[:index]):
+            return True
+    return False
+
+
+def _validate_aliases(requests: Sequence[TransferRequest], lane: '_Lane',
+                      element_size: int) -> List[Tuple[int, '_Operation']]:
+    """Refuse a region this process writes that it also reads, or writes twice; return the local copies to run.
+
+    A local copy whose source and target are the same memory at the same strides moves nothing. That is
+    how a relay rank holds its band: as a view of its own destination, which it sends to its peers and
+    keeps in place. Such a copy is dropped and its region counts as read, so any other write into it is
+    still refused. Regions are compared by the bytes they span, so strided regions that interleave
+    without sharing an element are refused as well.
+    """
+
+    def extent(buffers, location, offset, shape, strides) -> Tuple[int, int]:
+        start = buffers[location].data_ptr()
+        low, high = address_range(offset, shape, strides)
+        return start + low * element_size, start + (high + 1) * element_size
+
+    def source_extent(item, operation):
+        return extent(requests[item].source_buffers, operation.segment.source_rank, operation.source_offset,
+                      operation.chunk_shape, operation.segment.source_strides)
+
+    def target_extent(item, operation):
+        return extent(requests[item].target_buffers, operation.segment.target_rank, operation.target_offset,
+                      operation.chunk_shape, operation.segment.target_strides)
+
+    reads, writes, copies = [], [], []
+    for item, operation in lane.local_copies:
+        read, write = source_extent(item, operation), target_extent(item, operation)
+        reads.append(read)
+        in_place = read[0] == write[0] and all(size <= 1 or source == target for size, source, target in zip(
+            operation.chunk_shape, operation.segment.source_strides, operation.segment.target_strides))
+        if not in_place:
+            writes.append(write)
+            copies.append((item, operation))
+    for rounds, side, regions in ((lane.send_rounds, source_extent, reads), (lane.recv_rounds, target_extent, writes)):
+        for peer_rounds in rounds.values():
+            for entries, _ in peer_rounds:
+                regions.extend(side(item, operation) for item, operation, _ in entries)
+
+    writes.sort()
+    for (_, high), (low, _) in zip(writes, writes[1:]):
+        if low < high:
             raise AffineTransferExecutionError('two targets overlap within the transfer batch')
+    highs = [high for _, high in writes]
+    for low, high in reads:
+        index = bisect_right(highs, low)
+        if index < len(writes) and writes[index][0] < high:
+            raise AffineTransferExecutionError('a source and a target overlap within the transfer batch')
+    return copies
 
 
 def execute_transfer(plan: TransferPlan,
@@ -439,6 +495,9 @@ def schedule_transfers(plans: Sequence[TransferPlan],
     into rounds. Returns a ``ProcessSchedule`` for ``process``, or for every process the endpoints
     name. ``execute_transfers`` builds its own rounds and arenas from the same computation, so a
     cost model or policy reading this sees the messages and staging memory the executor will use.
+    It sees no buffers, so a local copy that ``execute_transfers`` drops as in place (source and
+    target the same memory at the same strides) still counts in ``local_copy_chunks`` and
+    ``local_copy_elements``; ``TransferStats.local_copy_bytes`` does not count it.
     """
     if not isinstance(element_size, int) or isinstance(element_size, bool) or element_size <= 0:
         raise AffineTransferExecutionError('element_size must be a positive integer')
@@ -519,7 +578,7 @@ def execute_transfers(requests: Sequence[TransferRequest],
                 raise AffineTransferExecutionError('a transfer request has no plan')
             _validate_buffers(request.plan, request.source_buffers, request.target_buffers, dtype, device, endpoints,
                               rank)
-        _validate_aliases(requests)
+        aliased = _buffers_alias(requests)
         # Many parameters share the same plan. Reuse only geometry within this call;
         # every request still validates its own buffers and participates in the digest.
         plans = [request.plan for request in requests]
@@ -535,6 +594,8 @@ def execute_transfers(requests: Sequence[TransferRequest],
         # The same computation as schedule_transfers, so what it reports is what runs here.
         lane = _lanes(indexed, [rank], budget.bytes_per_peer // element_size)[rank]
         local_copies, recv_rounds, send_rounds = lane.local_copies, lane.recv_rounds, lane.send_rounds
+        if aliased:
+            local_copies = _validate_aliases(requests, lane, element_size)
         recv_direct = {
             peer: [
                 _direct_payload(entries, requests, dtype, False) if direct else None
@@ -660,6 +721,11 @@ def _flat(location: int, buffers: Mapping[int, torch.Tensor], dtype: torch.dtype
         raise AffineTransferExecutionError(f'location {location} is bound to this process but holds no buffer')
     if buffer.layout != torch.strided or not buffer.is_contiguous():
         raise AffineTransferExecutionError(f'location {location}: shard is not contiguous in its own storage')
+    if buffer.is_conj() or buffer.is_neg():
+        # Point-to-point transport does not carry the lazy bit, and such a view of a destination is not
+        # the destination itself. Refusing it here refuses it wherever the copy would run.
+        raise AffineTransferExecutionError(f'location {location}: shard is a conjugate or negative view; '
+                                           'pass it resolved (resolve_conj, resolve_neg)')
     if buffer.dtype != dtype:
         raise AffineTransferExecutionError(f'location {location}: {buffer.dtype} is not {dtype}')
     return buffer.view(-1)

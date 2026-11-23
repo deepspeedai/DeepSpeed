@@ -8,6 +8,9 @@ from typing import Optional
 
 from deepspeed import comm as dist
 
+# Attribute names that carry the (query) attention head count, in probe order.
+_ATTN_HEAD_ATTRS = ('num_attention_heads', 'num_heads', 'n_heads', 'n_head', 'attention_heads')
+
 # Attribute names that carry the key/value head count, in probe order. Modern canonical names
 # first, then legacy aliases kept for older configs / checkpoints, then the query-head names as
 # an implicit "kv == q heads" default for plain (non-GQA) transformers. Shared by AutoTP and the
@@ -23,6 +26,16 @@ _KV_HEAD_ATTRS = (
     'attention_heads',
 )
 
+# The K/V-only subset of _KV_HEAD_ATTRS. The query-head aliases above are a config fallback for
+# plain MHA models; they must not be treated as K/V counts when a replicated-K/V module still
+# shards its query dimension.
+_KV_ONLY_HEAD_ATTRS = tuple(name for name in _KV_HEAD_ATTRS if name not in _ATTN_HEAD_ATTRS)
+
+# Runtime module attributes that can carry a K/V head count. `kv_heads` is GPTBigCode's module
+# attribute and `num_kv` is DeepSpeed's module alias, so neither appears in the config-only list
+# above. Query-head aliases are deliberately absent for the same reason as _KV_ONLY_HEAD_ATTRS.
+_MODULE_KV_HEAD_ATTRS = ('kv_heads', ) + _KV_ONLY_HEAD_ATTRS + ('num_kv', )
+
 
 def _kv_head_count_from(config) -> Optional[int]:
     """First non-None kv-head count found on ``config`` via :data:`_KV_HEAD_ATTRS`, else ``None``."""
@@ -33,8 +46,13 @@ def _kv_head_count_from(config) -> Optional[int]:
     return None
 
 
-# Attribute names that carry the (query) attention head count, in probe order.
-_ATTN_HEAD_ATTRS = ('num_attention_heads', 'num_heads', 'n_heads', 'n_head', 'attention_heads')
+def _kv_head_count_from_module(module) -> Optional[int]:
+    """First non-None K/V head count found on ``module`` via :data:`_MODULE_KV_HEAD_ATTRS`."""
+    for name in _MODULE_KV_HEAD_ATTRS:
+        value = getattr(module, name, None)
+        if value is not None:
+            return value
+    return None
 
 
 def _attention_head_count_from(config) -> Optional[int]:
