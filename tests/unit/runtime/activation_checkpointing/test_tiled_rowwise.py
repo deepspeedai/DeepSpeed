@@ -104,3 +104,31 @@ def test_rejects_mismatched_rows_and_bad_returns():
         tiled_rowwise_compute(lambda a, b: a + b[:, :2], torch.ones(1, 4, 2), torch.ones(1, 3, 2), token_budget=2)
     with pytest.raises(TypeError, match="tensor or a tuple"):
         tiled_rowwise_compute(lambda a: [a], torch.ones(1, 4, 2), token_budget=2)
+
+
+@pytest.mark.parametrize("budget", [1, 5, 36])
+def test_unchunked_forward_runs_once_and_matches_the_chunked_forward(budget):
+    x, r, w = _inputs(torch.bfloat16)
+    calls = []
+
+    def fn(a, b, weight):
+        calls.append((torch.is_grad_enabled(), a.shape[-2]))
+        return _fused_add_rms_norm(a, b, weight)
+
+    ref = _run(_fused_add_rms_norm, x, r, w)
+    got = _run(fn, x, r, w, budget=budget, shared_grad_dtype=torch.float32, chunk_forward=False)
+    assert calls[0] == (False, x.shape[-2])  # one whole-row forward under no_grad
+    assert all(grad_enabled for grad_enabled, _ in calls[1:])  # then the recompute, chunk by chunk, with grad
+    assert max(rows for _, rows in calls[1:]) <= budget
+    assert torch.equal(got[0], ref[0]) and torch.equal(got[1], ref[1])
+    assert torch.equal(got[2], ref[2]) and torch.equal(got[3], ref[3])
+    torch.testing.assert_close(got[4].float(), ref[4].float(), rtol=1e-2, atol=1e-2)
+
+
+def test_gradcheck_float64_with_an_unchunked_forward():
+    x, r, w = _inputs(torch.float64, rows=9, hidden=4)
+
+    def fn(a, b, weight):
+        return tiled_rowwise_compute(_fused_add_rms_norm, a, b, shared=(weight, ), token_budget=4, chunk_forward=False)
+
+    assert torch.autograd.gradcheck(fn, (x, r, w), eps=1e-6, atol=1e-5)

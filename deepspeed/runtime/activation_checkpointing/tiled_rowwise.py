@@ -8,6 +8,10 @@ of at most ``token_budget`` rows along ``token_dim``, in forward and in backward
 saves only the inputs; backward recomputes and differentiates one chunk at a time. Peak memory for ``fn``'s
 temporaries is therefore one chunk instead of the whole sequence.
 
+``chunk_forward=False`` runs the forward as one whole-row call and chunks only the backward. The forward then needs no
+per-chunk outputs copied into a preallocated buffer, but its temporaries are the ones ``fn`` would allocate untiled, so
+the forward peak is not reduced. ``fn`` must then return new tensors, not views of its inputs.
+
 Use it for row-wise ops whose autograd graph would otherwise hold several full-sequence temporaries, e.g. a norm
 evaluated in fp32: each fp32 ``[T, hidden]`` temporary of a pure-PyTorch norm backward is ``4 * T * hidden`` bytes.
 
@@ -48,7 +52,7 @@ def _as_tuple(result):
 class _TiledRowwise(torch.autograd.Function):
 
     @staticmethod
-    def forward(ctx, fn, token_budget, token_dim, n_chunked, shared_grad_dtype, *args):
+    def forward(ctx, fn, token_budget, token_dim, n_chunked, shared_grad_dtype, chunk_forward, *args):
         chunked, shared = args[:n_chunked], args[n_chunked:]
         num_rows = chunked[0].shape[token_dim]
         for t in chunked:
@@ -60,17 +64,21 @@ class _TiledRowwise(torch.autograd.Function):
         outputs = None
         single = True
         with _hold_gathered_params(params), torch.no_grad():
-            for start, end in bounds:
-                parts = [t.narrow(token_dim, start, end - start) for t in chunked]
-                result, single = _as_tuple(fn(*parts, *shared))
-                if outputs is None:
-                    outputs = []
-                    for r in result:
-                        shape = list(r.shape)
-                        shape[token_dim] = num_rows
-                        outputs.append(r.new_empty(shape))
-                for out, r in zip(outputs, result):
-                    out.narrow(token_dim, start, end - start).copy_(r)
+            if not chunk_forward:
+                result, single = _as_tuple(fn(*chunked, *shared))
+                outputs = list(result)
+            else:
+                for start, end in bounds:
+                    parts = [t.narrow(token_dim, start, end - start) for t in chunked]
+                    result, single = _as_tuple(fn(*parts, *shared))
+                    if outputs is None:
+                        outputs = []
+                        for r in result:
+                            shape = list(r.shape)
+                            shape[token_dim] = num_rows
+                            outputs.append(r.new_empty(shape))
+                    for out, r in zip(outputs, result):
+                        out.narrow(token_dim, start, end - start).copy_(r)
         ctx.fn = fn
         ctx.token_dim = token_dim
         ctx.bounds = bounds
@@ -84,7 +92,7 @@ class _TiledRowwise(torch.autograd.Function):
     def backward(ctx, *grad_outputs):
         saved = ctx.saved_tensors
         chunked, shared = saved[:ctx.n_chunked], saved[ctx.n_chunked:]
-        needs = ctx.needs_input_grad[5:]
+        needs = ctx.needs_input_grad[6:]
         needs_chunked, needs_shared = needs[:ctx.n_chunked], needs[ctx.n_chunked:]
         dim = ctx.token_dim
 
@@ -123,18 +131,26 @@ class _TiledRowwise(torch.autograd.Function):
                 shared_grads.append(leaf.grad.to(s.dtype))
             else:
                 shared_grads.append(None)
-        return (None, None, None, None, None, *input_grads, *shared_grads)
+        return (None, None, None, None, None, None, *input_grads, *shared_grads)
 
 
-def tiled_rowwise_compute(fn, *tensors, shared=(), token_budget, token_dim=-2, shared_grad_dtype=None):
+def tiled_rowwise_compute(fn,
+                          *tensors,
+                          shared=(),
+                          token_budget,
+                          token_dim=-2,
+                          shared_grad_dtype=None,
+                          chunk_forward=True):
     """Run row-wise ``fn(*tensors, *shared)`` in chunks of at most ``token_budget`` rows along ``token_dim``.
 
     Returns what ``fn`` returns (a tensor or a tuple of tensors) for the whole sequence. See the module docstring for
     the contract on ``fn``. With a single chunk (``token_budget`` at least the row count) ``fn`` is called directly.
+    ``chunk_forward=False`` runs the forward as one whole-row call and chunks only the backward.
     """
     if not tensors:
         raise ValueError("tiled_rowwise_compute: need at least one chunked tensor")
     if tensors[0].shape[token_dim] <= int(token_budget):
         return fn(*tensors, *shared)
     token_dim = token_dim % tensors[0].dim()
-    return _TiledRowwise.apply(fn, int(token_budget), token_dim, len(tensors), shared_grad_dtype, *tensors, *shared)
+    return _TiledRowwise.apply(fn, int(token_budget), token_dim, len(tensors), shared_grad_dtype, chunk_forward,
+                               *tensors, *shared)
