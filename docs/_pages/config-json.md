@@ -824,6 +824,12 @@ Explicit `true` requests fail instead of silently downgrading. See
 [Vocabulary-parallel LM Loss](/tutorials/autotp-training/#vocabulary-parallel-lm-loss)
 for supported embedding semantics and compiler limitations.
 
+***vocab_parallel_embedding***: [boolean]
+
+| Description | Default |
+| ----------- | ------- |
+| Shard an input embedding that is not tied to the output layer along the vocabulary: each rank keeps 1/tp of the rows and the partial lookups are summed over the tensor-parallel group. A tied embedding is sharded with its output head instead. Not supported with the DeepCompile `autotp` pass. See [Untied Input Embedding](/tutorials/autotp-training/#untied-input-embedding). | `false` |
+
 ***partition_config***: [dictionary]
 
 | Description                                                                                                                     | Default |
