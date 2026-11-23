@@ -4,15 +4,18 @@
 """Native-backend coverage for Phase 2 pin routing through offload helpers."""
 
 import gc
+import os
 
 import pytest
 import torch
 
+import deepspeed
 from deepspeed.accelerator import get_accelerator
 from deepspeed.runtime.zero.offload_config import OffloadStateTypeEnum
 from deepspeed.runtime.zero.offload_states import offload_optimizer_states, reload_optimizer_states
-from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer
 from deepspeed.utils.pin_memory import get_active_native_pinned_memory
+from unit.common import DistributedTest
+from unit.simple_model import SimpleModel
 
 
 def _require_native(monkeypatch):
@@ -90,48 +93,57 @@ def test_reload_optimizer_states_returns_host_sources(monkeypatch):
     assert accel.unpin_memory(pinned) is True
 
 
-def test_reload_states_holds_pin_buffers_until_sync(monkeypatch):
-    """ZeRO-1/2 reload must not free native pinned sources while copies are in flight."""
-    accel = _require_gpu_native(monkeypatch)
-    manager = get_active_native_pinned_memory()
-    device = accel.current_device_name()
+class TestReloadStatesHoldsPinBuffers(DistributedTest):
+    world_size = 1
 
-    hp_param = torch.randn(1024, device=device)
-    pinned = accel.pin_empty_like(hp_param, device="cpu")
-    pinned.copy_(hp_param)
-    # Mirrors offload_states(): the hp param now points at the pinned host buffer.
-    hp_param.data = pinned
-    begin = pinned.data_ptr()
+    def test_reload_states_holds_pin_buffers_until_sync(self):
+        """ZeRO-1/2 reload must not free native pinned sources while copies are in flight."""
+        previous_backend = os.environ.get("DS_PIN_MEMORY_BACKEND")
+        os.environ["DS_PIN_MEMORY_BACKEND"] = "native"
+        try:
+            self._check_reload_holds_pin_buffers()
+        finally:
+            if previous_backend is None:
+                os.environ.pop("DS_PIN_MEMORY_BACKEND", None)
+            else:
+                os.environ["DS_PIN_MEMORY_BACKEND"] = previous_backend
 
-    class _FakeZeroOptimizer:
-        # Run the real method against the minimal state its hp_params branch touches.
-        reload_states = DeepSpeedZeroOptimizer.reload_states
+    def _check_reload_holds_pin_buffers(self):
+        manager = get_active_native_pinned_memory()
+        accel = get_accelerator()
+        if manager is None or accel.device_name() == "cpu":
+            pytest.skip("requires the native pin backend on a non-CPU accelerator")
 
-        def _link_all_hp_params(self):
-            pass
+        hidden_dim = 16
+        model = SimpleModel(hidden_dim)
+        config = {"train_batch_size": 1, "zero_optimization": {"stage": 2}}
+        # A client torch optimizer keeps the test independent of FusedAdam's JIT build.
+        optimizer = torch.optim.Adam(model.parameters())
+        engine, _, _, _ = deepspeed.initialize(model=model, optimizer=optimizer, config=config)
+        engine.offload_states(include=[OffloadStateTypeEnum.hp_params], pin_memory=True)
+        hp_params = engine.optimizer.single_partition_of_fp32_groups
+        begins = [param.data_ptr() for param in hp_params]
+        assert all(param.device.type == "cpu" and begin in manager._ranges for param, begin in zip(hp_params, begins))
 
-    optimizer = _FakeZeroOptimizer()
-    optimizer.offloaded_states = {OffloadStateTypeEnum.hp_params}
-    optimizer.single_partition_of_fp32_groups = [hp_param]
-    optimizer.hp_params_pin_buffers = [pinned]
-    # reload_states now owns the only reference to the pinned buffer.
-    del pinned
+        registered_while_syncing = []
+        real_synchronize = accel.synchronize
 
-    registered_while_syncing = []
-    real_synchronize = accel.synchronize
+        def _recording_synchronize(*args, **kwargs):
+            registered_while_syncing.append(all(begin in manager._ranges for begin in begins))
+            return real_synchronize(*args, **kwargs)
 
-    def _recording_synchronize():
-        registered_while_syncing.append(begin in manager._ranges)
-        real_synchronize()
+        accel.synchronize = _recording_synchronize
+        try:
+            engine.reload_states(non_blocking=True)
+        finally:
+            del accel.synchronize
 
-    monkeypatch.setattr(accel, "synchronize", _recording_synchronize)
-    optimizer.reload_states(non_blocking=True)
-
-    assert registered_while_syncing == [True]
-    assert hp_param.device.type != "cpu"
-    gc.collect()
-    # Released once the copies are known to have completed.
-    assert begin not in manager._ranges
+        assert registered_while_syncing and all(registered_while_syncing)
+        assert all(param.device.type != "cpu" for param in hp_params)
+        gc.collect()
+        # Released once the copies are known to have completed.
+        assert not any(begin in manager._ranges for begin in begins)
+        engine.destroy()
 
 
 def test_superoffload_grad_buffer_unpinned_when_disabled():
