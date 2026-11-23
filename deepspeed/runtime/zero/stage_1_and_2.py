@@ -1532,6 +1532,10 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             return
 
         grad_reduc = self.get_gradient_for_reduction(param)
+        if grad_reduc is None:
+            # The hook also fires when the backward delivered no gradient for a parameter in the graph, as when
+            # AutoEP stages an expert weight gradient for a later backward. There is nothing to reduce yet.
+            return
         comm_dtype = self.get_param_comm_dtype(param)
         bucket = self.ipg_buckets[comm_dtype]
         if bucket.elements + param.numel() > self.reduce_bucket_size:
@@ -2308,6 +2312,11 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                     extra_large_grad_reduc.data = extra_large_grad_reduc_for_average.data.view_as(extra_large_grad_reduc) if (not self.zenflow or self.extra_large_param_to_reduce[comm_dtype].dim() == 1) \
                         else extra_large_grad_reduc_for_average.data.view_as(extra_large_grad_reduc.transpose(0, 1))
 
+                    # Oversized gradients bypass the contiguous IPG buffer, so the
+                    # reduction reads the parameter's own storage, which non-owner
+                    # ranks release right after the reduction is enqueued.
+                    if self.overlap_comm and not get_accelerator().resolves_data_dependency():
+                        extra_large_grad_reduc_for_average.record_stream(self.reduction_stream)
                     self.average_tensor(extra_large_grad_reduc_for_average, comm_dtype)
                     del self.extra_large_param_to_reduce[comm_dtype]
                 else:

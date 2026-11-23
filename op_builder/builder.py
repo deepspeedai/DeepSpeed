@@ -554,6 +554,9 @@ class CUDAOpBuilder(OpBuilder):
     # filter_ccs() drops older build targets, and is_compatible() requires torch and, when a GPU is visible, a CUDA
     # toolkit and a GPU that is not older.
     MIN_COMPUTE_CAPABILITY = None
+    # False for an op that only builds with CUDA, which is_compatible() then rejects when torch is built with ROCm.
+    # Builders that override is_compatible() call it first, so ROCm is reported rather than a missing dependency.
+    ROCM_SUPPORTED = True
 
     def __init__(self, name):
         super().__init__(name)
@@ -780,6 +783,12 @@ class CUDAOpBuilder(OpBuilder):
         return ccs_retained
 
     def is_compatible(self, verbose=False):
+        if not self.ROCM_SUPPORTED and self.is_rocm_pytorch():
+            # Recorded even when not verbose, so that jit_load() can report it as the reason.
+            self.error_log = f"{self.name} is not supported on ROCm"
+            if verbose:
+                self.warning(self.error_log)
+            return False
         if self.MIN_COMPUTE_CAPABILITY is None:
             return super().is_compatible(verbose)
         # setup.py checks every op, even when torch is not installed.
