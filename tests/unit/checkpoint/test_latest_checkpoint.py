@@ -3,19 +3,21 @@
 
 # DeepSpeed Team
 
-import deepspeed
+import os
 
 import pytest
+import torch
+
+import deepspeed
 from unit.common import DistributedTest
-from unit.simple_model import *
+from unit.simple_model import SimpleModel
 
 from unit.checkpoint.common import checkpoint_correctness_verification
 from deepspeed.ops.op_builder import FusedAdamBuilder
 
-if not deepspeed.ops.__compatible_ops__[FusedAdamBuilder.NAME]:
-    pytest.skip("This op had not been implemented on this system.", allow_module_level=True)
 
-
+@pytest.mark.skipif(not deepspeed.ops.__compatible_ops__[FusedAdamBuilder.NAME],
+                    reason="This op had not been implemented on this system.")
 class TestLatestCheckpoint(DistributedTest):
     world_size = 1
 
@@ -57,3 +59,34 @@ class TestLatestCheckpoint(DistributedTest):
         model, _, _, _ = deepspeed.initialize(config=config_dict, model=model, model_parameters=model.parameters())
         # should be no-op, since latest doesn't exist
         model.load_checkpoint(tmpdir)
+
+
+class TestDecoupledCheckpointDestroy(DistributedTest):
+    world_size = 2
+    non_daemonic_procs = True
+
+    @pytest.mark.parametrize("save_latest", [True, False])
+    def test_final_checkpoint(self, tmp_path, save_latest):
+        os.environ.update(CROSS_RANK="0", CROSS_SIZE="1")
+        config = {
+            "train_micro_batch_size_per_gpu": 1,
+            "checkpoint": {
+                "writer": {
+                    "type": "python",
+                    "decoupled": True,
+                    "data_parallel": "machine"
+                }
+            }
+        }
+        model = torch.nn.Linear(2, 1)
+        engine, _, _, _ = deepspeed.initialize(model=model,
+                                               optimizer=torch.optim.SGD(model.parameters(), lr=0.1),
+                                               config=config)
+        engine.save_checkpoint(str(tmp_path), tag="previous")
+        engine.backward(engine(torch.ones(1, 2, device=engine.device)).sum())
+        engine.step()
+        engine.save_checkpoint(str(tmp_path), tag="final", save_latest=save_latest)
+        engine.destroy()
+
+        assert (tmp_path / "final" / "mp_rank_00_model_states.pt").is_file()
+        assert (tmp_path / "latest").read_text() == ("final" if save_latest else "previous")
