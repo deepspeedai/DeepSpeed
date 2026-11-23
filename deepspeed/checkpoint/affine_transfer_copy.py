@@ -115,7 +115,7 @@ class _TileTable:
             if (target_rows is not None and source_rows is not None and source_rows[0] == 1
                     and target_rows[0] * target_rows[1] == source_rows[1]):
                 source_rows = (target_rows[0], target_rows[1], target_rows[1])
-            if (target_rows is None or source_rows is None or target_rows[:2] != source_rows[:2]
+            if (target_rows is None or source_rows is None or target_rows[:2] != source_rows[:2] or not target_rows[1]
                     or element not in _TILED_ELEMENT_SIZES or destination.device != device or source.device != device
                     or source.element_size() != element or destination.element_size() != element):
                 self.fallback.append((destination, source))

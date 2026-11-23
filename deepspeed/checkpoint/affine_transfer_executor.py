@@ -119,6 +119,8 @@ class TransferWindow:
     leaves the other processes waiting instead of refusing.
     """
     ALIGNMENT = 512
+    # The newest window identity this process has seen; see __init__.
+    _created = 0
 
     def __init__(self, nbytes: int, group: Optional[object] = None, direction: str = 'pull'):
         import deepspeed.comm as dist
@@ -126,10 +128,20 @@ class TransferWindow:
             raise AffineTransferExecutionError("window direction must be 'pull' or 'push'")
         self.group = group
         self.direction = direction
-        # Symmetric memory needs one size on every process, while shard sizes differ between processes.
-        largest = torch.tensor([nbytes], dtype=torch.int64, device=get_accelerator().current_device_name())
-        dist.all_reduce(largest, op=dist.ReduceOp.MAX, group=group)
-        self.nbytes = -(-int(largest.item()) // self.ALIGNMENT) * self.ALIGNMENT
+        # Symmetric memory needs one size on every process, while shard sizes differ between processes. The
+        # same gather names the window's processes and gives it an identity the whole group shares, newer than
+        # any window any of them made before, so that windows passed on different processes can be told apart.
+        world_size = dist.get_world_size(group=group)
+        local = torch.tensor([nbytes, TransferWindow._created, dist.get_rank()],
+                             dtype=torch.int64,
+                             device=get_accelerator().current_device_name())
+        seen = torch.empty((world_size, 3), dtype=torch.int64, device=local.device)
+        dist.all_gather(list(seen.unbind(0)), local, group=group)
+        sizes, created, members = zip(*seen.cpu().tolist())
+        self.identity = max(created) + 1
+        TransferWindow._created = self.identity
+        self.members = tuple(members)
+        self.nbytes = -(-max(sizes) // self.ALIGNMENT) * self.ALIGNMENT
         self.pool, self._handle = dist.symm_mem_rendezvous(self.nbytes, torch.uint8, group)
         self._used = 0
         self._peers: Dict[Tuple[int, torch.dtype], torch.Tensor] = {}
@@ -849,8 +861,13 @@ def _agree(requests: Sequence[TransferRequest],
         for plan in plans:
             if id(plan) not in digests:
                 digests[id(plan)] = plan_digest(plan, endpoints, budget, element_size)
-        # Which shards lie in a window and who copies decide what each process does, so ranks must agree on them.
-        mapping = None if window is None else (window.direction, tuple(sorted(offsets.items())))
+        if window is not None and initialized and (len(window.members) != world_size
+                                                   or window.members[rank] != dist.get_rank()):
+            raise AffineTransferExecutionError('the window was created over a different group than the transfer')
+        # Which window, which shards lie in it and who copies decide what each process does, so ranks must
+        # agree on them.
+        mapping = None if window is None else (window.identity, window.members, window.direction,
+                                               tuple(sorted(offsets.items())))
         fingerprint = (3, str(dtype), budget.bytes_per_peer, tuple(sorted(endpoints.source.items())),
                        tuple(sorted(endpoints.target.items())),
                        tuple((request.key, digests[id(request.plan)]) for request in requests), mapping)
@@ -1023,7 +1040,8 @@ def prepare_transfers(requests: Sequence[TransferRequest],
                             _group=group,
                             _world_size=agreed.world_size,
                             _device=agreed.device,
-                            _stream_ordered=agreed.stream_ordered)
+                            _stream_ordered=agreed.stream_ordered,
+                            _window=window)
 
 
 @dataclass(eq=False)
@@ -1068,6 +1086,8 @@ class PreparedTransfer:
     _stream_ordered: bool
     _runs: int = 0
     _released: bool = False
+    # Held so that the window, and the peer memory its copies address, live as long as the handle.
+    _window: Optional[TransferWindow] = None
 
     @torch.no_grad()
     def run(self, requests: Optional[Sequence[TransferRequest]] = None, *, check: bool = True) -> TransferStats:
@@ -1088,23 +1108,25 @@ class PreparedTransfer:
         ``check``, a process that cannot refuses on every process; without it, that process raises alone.
 
         A run with window copies anywhere in the group ends with a group barrier, and without ``check``
-        a repeated run also starts with one, so owners and copiers never overlap on a window shard.
+        every run also starts with one, so owners and copiers never overlap on a window shard.
         """
         failed = 0
-        if self._released:
+        # Views of a moved buffer may not even build, and the check refuses the run anyway: skip restaging.
+        moved = self._moved(requests) if check else 0
+        if self._released and not moved:
             try:
                 self._restage()
-            except (RuntimeError, MemoryError) as caught:
+            except (ValueError, TypeError, RuntimeError, MemoryError) as caught:
                 if not check:
-                    raise AffineTransferExecutionError(f'could not allocate the staging again: {caught}') from caught
+                    raise AffineTransferExecutionError(f'could not rebuild the staging: {caught}') from caught
                 failed = 1
-                print(f'[transfer] could not allocate the staging again: {caught}', file=sys.stderr, flush=True)
+                print(f'[transfer] could not rebuild the staging: {caught}', file=sys.stderr, flush=True)
         if check:
-            self._check(requests, failed)
-        elif self._mapped_total and self._runs:
+            self._check(moved, failed)
+        elif self._mapped_total:
             import deepspeed.comm as dist
-            # Owners may have rewritten their window shards since the last run, and nothing else orders
-            # those writes before a peer's copies; the check covers that case when it runs.
+            # Owners may have rewritten their window shards since prepare or the last run, and nothing else
+            # orders those writes before a peer's copies; the check covers that case when it runs.
             dist.barrier(group=self._group)
         return self._move()
 
@@ -1136,12 +1158,14 @@ class PreparedTransfer:
         self._rounds = rounds
         self._released = False
 
-    def _check(self, requests: Optional[Sequence[TransferRequest]], failed: int = 0) -> None:
-        import deepspeed.comm as dist
+    def _moved(self, requests: Optional[Sequence[TransferRequest]]) -> int:
         try:
-            moved = int(_buffer_layout(self._requests if requests is None else requests) != self._layout)
+            return int(_buffer_layout(self._requests if requests is None else requests) != self._layout)
         except (AttributeError, TypeError, RuntimeError):
-            moved = 1
+            return 1
+
+    def _check(self, moved: int, failed: int = 0) -> None:
+        import deepspeed.comm as dist
         if self._world_size > 1:
             # One process raising alone would leave its peers waiting in the transfer.
             local = torch.tensor([self._identity, self._runs, moved, failed], dtype=torch.int64, device=self._device)
@@ -1156,7 +1180,7 @@ class PreparedTransfer:
                 raise AffineTransferExecutionError('processes are not running the same prepared transfer for the '
                                                    'same time; no data moved')
         if failed:
-            raise AffineTransferExecutionError('a process could not allocate the released staging again; '
+            raise AffineTransferExecutionError('a process could not rebuild the released staging; '
                                                'no data moved')
         if moved:
             raise AffineTransferExecutionError('a buffer of the prepared transfer moved or changed since '

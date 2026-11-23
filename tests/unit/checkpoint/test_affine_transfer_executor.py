@@ -7,6 +7,7 @@
 import gc
 import math
 import os
+import time
 from dataclasses import replace
 
 import pytest
@@ -379,7 +380,7 @@ class TestB2Prepared(DistributedTest):
                 raise RuntimeError('out of memory for the staging')
 
             prepared._restage = out_of_memory
-        with pytest.raises(AffineTransferExecutionError, match='could not allocate the released staging'):
+        with pytest.raises(AffineTransferExecutionError, match='could not rebuild the released staging'):
             prepared.run()
         for targets, target_map, full in checks:
             _assert_matches(targets, target_map, full)
@@ -390,8 +391,9 @@ class TestB2Prepared(DistributedTest):
         for targets, target_map, full in checks:
             _assert_matches(targets, target_map, full + 1000.0)
 
+    @pytest.mark.parametrize('released', [False, True])
     @pytest.mark.parametrize('world_size', [2, 4])
-    def test_a_buffer_moved_on_one_process_stops_every_process(self, world_size):
+    def test_a_buffer_moved_on_one_process_stops_every_process(self, world_size, released):
         _join_transfer_group()
         rank = dist.get_rank()
         source, target = _row_to_column(world_size)
@@ -410,12 +412,15 @@ class TestB2Prepared(DistributedTest):
         prepared.run()
         _assert_matches(targets, target, full)
 
-        # The last process re-points one target in place, as a reload into new storage would.
+        # The last process re-points one target in place, as a reload into new storage would. After a release
+        # it also changes the dtype, so the views the run would stage again cannot even be built.
         moved = None
         if rank == world_size - 1:
+            if released:
+                prepared.release_staging()
             location = next(iter(targets))
             old = targets[location].data
-            targets[location].data = torch.full_like(old, -3.0)
+            targets[location].data = torch.full_like(old, -3.0, dtype=torch.float16 if released else old.dtype)
             moved = (location, old)
         before = {location: buffer.clone() for location, buffer in targets.items()}
         for buffer in sources.values():
@@ -533,11 +538,14 @@ class TestWindowTransfer(DistributedTest):
         schedule = schedule_transfers([request.plan], endpoints, budget, 2, rank, [windowed])[rank]
 
         full = _full(16, 16, dtype)
-        # Each run must see the sources as rewritten in place since the previous one, unchecked runs included.
+        # Each run must see the sources as rewritten in place since prepare or the previous run, unchecked runs
+        # included, the first one too; process 0 writes late, so a copier that does not wait reads stale shards.
         for run, values in enumerate((full, full.flip(0), full.flip(1))):
+            if rank == 0 and run != 1:
+                time.sleep(0.3)
             for location, buffer in request.source_buffers.items():
                 buffer.copy_(source.extract(values, location))
-            stats = prepared.run(check=run == 0)
+            stats = prepared.run(check=run == 1)
             _assert_matches(request.target_buffers, target, values)
         for buffer in request.target_buffers.values():
             buffer.fill_(UNWRITTEN)
@@ -563,6 +571,20 @@ class TestWindowTransfer(DistributedTest):
         dtype = torch.bfloat16
         # Each rank would make itself the copier, so both would write every target.
         window = TransferWindow(1 << 20, direction='pull' if dist.get_rank() == 0 else 'push')
+        endpoints, request, _, _, _ = _window_batch(window, 'both_pull', dtype)
+        with pytest.raises(AffineTransferExecutionError, match='disagree'):
+            prepare_transfers([request], endpoints, dtype, window=window)
+        for buffer in request.target_buffers.values():
+            assert buffer.isnan().all(), 'a refused batch must not write'
+
+    def test_different_windows_on_different_ranks_are_refused(self):
+        if get_accelerator().device_name() not in ('cuda', 'xpu'):
+            pytest.skip('symmetric memory needs a CUDA or XPU device')
+        _join_transfer_group()
+        dtype, rank = torch.bfloat16, dist.get_rank()
+        # Two windows of one size with shards at the same offsets: only their identity tells them apart.
+        first, second = TransferWindow(1 << 20), TransferWindow(1 << 20)
+        window = first if rank == 0 else second
         endpoints, request, _, _, _ = _window_batch(window, 'both_pull', dtype)
         with pytest.raises(AffineTransferExecutionError, match='disagree'):
             prepare_transfers([request], endpoints, dtype, window=window)
@@ -1199,6 +1221,8 @@ def test_fused_copies_match_copy_for_every_region_shape(dtype):
         (arena[300 * 64 + 3:300 * 64 + 80], source[11, 13:90]),  # unaligned run
         (target[100:400, 17:297], source[:300, 1:281]),  # unaligned strided rows on both sides
         (target[500:510, 0:10].t(), source[0:10, 0:10]),  # transposed: not tileable
+        (target[3:6, 0:0], source[3:6, 0:0]),  # empty
+        (arena[-1], source[299, 519]),  # a single element
     ]
     expected = [destination.clone().copy_(region) for destination, region in pairs]
     fused_copies(pairs)()

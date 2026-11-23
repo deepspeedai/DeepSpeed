@@ -677,6 +677,8 @@ class TorchBackend(Backend):
             raise RuntimeError(f"Torch version must be 2.5 or higher to use symmetric memory. "
                                f"Current version: {torch.__version__}")
         import torch.distributed._symmetric_memory as symm_mem
+        if not (hasattr(symm_mem, 'empty') and hasattr(symm_mem, 'rendezvous')):
+            raise RuntimeError(f"symmetric memory allocation is not available in torch {torch.__version__}")
         group = group if group is not None else torch.distributed.group.WORLD
         buffer = symm_mem.empty(numel, dtype=dtype, device=get_accelerator().current_device_name())
         return buffer, symm_mem.rendezvous(buffer, group.group_name)
