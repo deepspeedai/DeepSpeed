@@ -2,6 +2,7 @@
 # DeepSpeed Team
 """Accelerator-backed v1 HybridEngineRollout tests."""
 
+import copy
 import gc
 import os
 from types import SimpleNamespace
@@ -12,6 +13,7 @@ from transformers import PretrainedConfig
 from transformers.cache_utils import Cache
 
 import deepspeed
+import deepspeed.comm as dist
 from deepspeed.accelerator import get_accelerator
 from deepspeed.runtime.rollout.base import RolloutRequest, SamplingConfig
 from deepspeed.runtime.rollout.hybrid_engine_rollout import HybridEngineRollout, HybridEngineRolloutConfig
@@ -238,6 +240,96 @@ class TestAutoTPContinuousRollout(DistributedTest):
             del rollout
             gc.collect()
             accelerator.synchronize()
+
+
+def _tied_autotp_engine():
+    """A tied-embedding tiny Llama under AutoTP 2, whose output head AutoTP makes vocabulary-parallel, and an
+    unsharded copy of the same weights."""
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    config = LlamaConfig(vocab_size=128,
+                         hidden_size=64,
+                         intermediate_size=128,
+                         num_hidden_layers=2,
+                         num_attention_heads=4,
+                         num_key_value_heads=4,
+                         max_position_embeddings=64,
+                         tie_word_embeddings=True,
+                         eos_token_id=None)
+    torch.manual_seed(0)
+    model = LlamaForCausalLM(config)
+    device = torch.device(get_accelerator().current_device_name())
+    reference = copy.deepcopy(model).to(device).eval()
+    ds_config = {
+        "train_micro_batch_size_per_gpu": 1,
+        "tensor_parallel": {
+            "autotp_size": 2
+        },
+        "zero_optimization": {
+            "stage": 0
+        }
+    }
+    engine, _, _, _ = deepspeed.initialize(model=model, config=ds_config)
+    model.eval()
+    assert any(getattr(module, "is_vocab_parallel_lm_head", False) for module in model.modules())
+    prompt_ids = torch.tensor([[5, 17, 42, 9], [33, 8, 71, 2], [64, 11, 19, 90]], device=device)
+    return engine, reference, RolloutRequest(prompt_ids, torch.ones_like(prompt_ids))
+
+
+def _same_on_every_rank(tensor):
+    gathered = [None] * dist.get_world_size()
+    dist.all_gather_object(gathered, tensor.tolist())
+    return all(rank_tokens == gathered[0] for rank_tokens in gathered)
+
+
+class TestAutoTPVocabularyParallelHeadRollout(DistributedTest):
+    world_size = 2
+
+    @pytest.mark.parametrize("use_graph, continuous_batch_size", [(False, None), (True, None), (False, 2), (True, 2)])
+    def test_greedy_records_match_one_gpu_on_every_rank(self, use_graph, continuous_batch_size):
+        accelerator = get_accelerator()
+        if use_graph and accelerator.create_graph() is None:
+            pytest.skip("requires graph capture")
+        if continuous_batch_size and not use_graph and hasattr(
+                Cache, "get_query_offset") and not hasattr(DeepSpeedStaticCache, "get_query_offset"):
+            pytest.skip("DeepSpeedStaticCache lacks get_query_offset for this Transformers version")
+        engine, reference, request = _tied_autotp_engine()
+        new_tokens = 6
+        with torch.no_grad():
+            expected = reference.generate(request.prompt_ids,
+                                          attention_mask=request.prompt_attention_mask,
+                                          max_new_tokens=new_tokens,
+                                          do_sample=False,
+                                          pad_token_id=0)
+
+        # The rollout is the first forward after initialize, so with graph capture it also meets AutoTP's input
+        # check with a DeepSpeedStaticCache argument.
+        rollout = HybridEngineRollout(engine,
+                                      SimpleNamespace(pad_token_id=0, eos_token_id=-1),
+                                      cfg=HybridEngineRolloutConfig(use_graph_capture=use_graph))
+        try:
+            output = rollout.generate(
+                request,
+                SamplingConfig(max_new_tokens=new_tokens, temperature=0, continuous_batch_size=continuous_batch_size))
+            assert torch.equal(output.input_ids, expected)
+            assert _same_on_every_rank(output.input_ids)
+            # Training gets rank-local logits back.
+            assert not any(
+                getattr(module, "gather_output", False)
+                for module in engine.module.modules() if getattr(module, "is_vocab_parallel_lm_head", False))
+        finally:
+            del rollout
+            gc.collect()
+            accelerator.synchronize()
+
+    def test_ranks_sample_the_same_tokens_when_seeded_differently(self):
+        engine, _, request = _tied_autotp_engine()
+        get_accelerator().manual_seed(1234 + dist.get_rank())
+        rollout = HybridEngineRollout(engine, SimpleNamespace(pad_token_id=0, eos_token_id=-1))
+
+        output = rollout.generate(request, SamplingConfig(max_new_tokens=8, temperature=1.0))
+
+        assert _same_on_every_rank(output.input_ids)
 
 
 @pytest.mark.parametrize("attn_implementation", ["eager", "sdpa"])

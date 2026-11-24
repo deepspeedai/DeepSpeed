@@ -28,6 +28,7 @@ from deepspeed.runtime.rollout.hybrid_engine_rollout import (
     HybridEngineRollout,
     HybridEngineRolloutConfig,
     _GlobalEosStoppingCriteria,
+    _full_vocabulary_logits,
 )
 from deepspeed.utils.static_cache import DeepSpeedStaticCache
 from unit.common import DistributedTest
@@ -1134,6 +1135,74 @@ def test_zero3_rendezvous_uses_optimizer_dp_group(monkeypatch):
     rendezvous = HybridEngineRollout(engine, _make_tokenizer())._zero3_work_remaining()
 
     assert rendezvous.process_group is process_group
+
+
+def test_full_vocabulary_logits_gathers_only_vocabulary_parallel_heads_and_restores_them():
+    head = torch.nn.Linear(2, 2)
+    head.is_vocab_parallel_lm_head = True
+    head.gather_output = False
+    column_parallel = torch.nn.Linear(2, 2)
+    column_parallel.gather_output = False
+    module = torch.nn.Sequential(column_parallel, head)
+
+    with _full_vocabulary_logits(module):
+        assert head.gather_output is True
+        assert column_parallel.gather_output is False
+    assert head.gather_output is False
+
+    with pytest.raises(RuntimeError):
+        with _full_vocabulary_logits(module):
+            raise RuntimeError("generation failed")
+    # Training must get rank-local logits back even when generation fails.
+    assert head.gather_output is False
+
+
+def test_generate_decodes_with_full_vocabulary_logits():
+    engine = _make_engine()
+    engine.zero_optimization_partition_weights.return_value = False
+    head = SimpleNamespace(is_vocab_parallel_lm_head=True, gather_output=False)
+    engine.module.modules.return_value = [head]
+    gathered = []
+
+    def generate(*args, **kwargs):
+        gathered.append(head.gather_output)
+        return torch.tensor([[0, 1, 2, 5, 6], [0, 3, 4, 7, 8]])
+
+    engine.module.generate.side_effect = generate
+    HybridEngineRollout(engine, _make_tokenizer()).generate(_make_request(), _make_sampling())
+
+    assert gathered == [True]
+    assert head.gather_output is False
+
+
+@pytest.mark.parametrize("autotp_size, broadcasts", [(2, 1), (1, 0)])
+def test_generate_shares_the_random_state_across_the_autotp_group(autotp_size, broadcasts, monkeypatch):
+    engine = _make_engine()
+    engine.zero_optimization_partition_weights.return_value = False
+    engine.autotp_size.return_value = autotp_size
+    engine.module.generate.return_value = torch.tensor([[0, 1, 2, 5, 6], [0, 3, 4, 7, 8]])
+    group = object()
+    broadcast = MagicMock()
+    monkeypatch.setattr("deepspeed.runtime.rollout.hybrid_engine_rollout.dist.broadcast", broadcast)
+    monkeypatch.setattr("deepspeed.utils.groups.get_tensor_model_parallel_src_rank", lambda: 3)
+    monkeypatch.setattr("deepspeed.utils.groups.get_tensor_model_parallel_group", lambda: group)
+
+    HybridEngineRollout(engine, _make_tokenizer()).generate(_make_request(), _make_sampling())
+
+    assert broadcast.call_count == broadcasts
+    if broadcasts:
+        assert broadcast.call_args.args[1] == 3
+        assert broadcast.call_args.kwargs["group"] is group
+
+
+def test_tp_input_check_treats_deepspeed_static_cache_as_a_cache():
+    from deepspeed.runtime.utils import compare_tensors_in_structures
+
+    # Each rank builds its own cache, so the check must not compare the objects themselves.
+    first, second = (DeepSpeedStaticCache(_cache_config(), max_cache_len=4) for _ in range(2))
+
+    assert compare_tensors_in_structures([torch.ones(2), first], [torch.ones(2), second])
+    assert compare_tensors_in_structures({"past_key_values": first}, {"past_key_values": second})
 
 
 def test_non_zero3_generation_uses_native_eos():

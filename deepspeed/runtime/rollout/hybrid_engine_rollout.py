@@ -18,6 +18,7 @@ Two generation paths:
 import itertools
 import math
 import time
+from contextlib import contextmanager
 from copy import copy
 from dataclasses import dataclass, replace
 from functools import lru_cache
@@ -32,6 +33,21 @@ from deepspeed.runtime.rollout.base import RolloutBatch, RolloutEngine, RolloutR
 from deepspeed.runtime.rollout.continuous_batching import (ContinuousBatchRequest, ContinuousBatchScheduler,
                                                            plan_prefill_buckets)
 from deepspeed.utils import logger
+
+
+@contextmanager
+def _full_vocabulary_logits(module):
+    """Have AutoTP's vocabulary-parallel output heads gather their logits while the rollout decodes."""
+    modules = getattr(module, "modules", None)
+    heads = [m for m in modules() if getattr(m, "is_vocab_parallel_lm_head", False)] if callable(modules) else []
+    previous = [head.gather_output for head in heads]
+    for head in heads:
+        head.gather_output = True
+    try:
+        yield
+    finally:
+        for head, gather_output in zip(heads, previous):
+            head.gather_output = gather_output
 
 
 class _ForwardProfiler:
@@ -249,9 +265,27 @@ class HybridEngineRollout(RolloutEngine):
 
     @torch.no_grad()
     def generate(self, request: RolloutRequest, sampling: SamplingConfig) -> RolloutBatch:
-        if sampling.continuous_batch_size is not None:
-            return self._generate_continuous(request, sampling, sampling.continuous_batch_size)
-        return self._generate_batched(request, sampling)
+        # Once per call is enough: the ranks then run the same forwards and draw the same samples.
+        self._sync_rng_across_tp()
+        with _full_vocabulary_logits(self.engine.module):
+            if sampling.continuous_batch_size is not None:
+                return self._generate_continuous(request, sampling, sampling.continuous_batch_size)
+            return self._generate_batched(request, sampling)
+
+    def _sync_rng_across_tp(self):
+        """Share the random state across each AutoTP group, so that its ranks sample the same tokens."""
+        autotp_size = getattr(self.engine, "autotp_size", None)
+        autotp_size = autotp_size() if callable(autotp_size) else 1
+        if not isinstance(autotp_size, int) or autotp_size <= 1:
+            return
+        from deepspeed.utils import groups
+
+        accelerator = get_accelerator()
+        state = accelerator.get_rng_state().to(accelerator.current_device_name())
+        dist.broadcast(state,
+                       groups.get_tensor_model_parallel_src_rank(),
+                       group=groups.get_tensor_model_parallel_group())
+        accelerator.set_rng_state(state.cpu())
 
     def _generation_kwargs(self, sampling, attention_mask, pad_token_id, module=None):
         zero3_sync = self._zero3_work_remaining()
