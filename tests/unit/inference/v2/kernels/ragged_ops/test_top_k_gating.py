@@ -7,11 +7,16 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+import deepspeed
 from deepspeed.accelerator import get_accelerator
 from deepspeed.inference.v2.inference_utils import DtypeEnum
 from deepspeed.inference.v2.kernels.ragged_ops import RaggedTopKGating
+from deepspeed.ops.op_builder import RaggedOpsBuilder
 from .ragged_testing_utils import build_simple_batch
 from ...inference_test_utils import allclose
+
+if not deepspeed.ops.__compatible_ops__[RaggedOpsBuilder.NAME]:
+    pytest.skip("Ragged device ops are not available on this system", allow_module_level=True)
 
 
 def _top_k_gating_testing_helper(n_tokens: int, n_experts: int, n_top_k: int, seed: int = 0xC0FFEE) -> None:

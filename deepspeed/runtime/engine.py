@@ -39,6 +39,7 @@ from deepspeed.runtime.zero.parameter_offload import DeepSpeedZeRoOffload, ZeROO
 from deepspeed.runtime.zero.config import ZERO_OPTIMIZATION
 from deepspeed.runtime.zenflow.engine import (configure_zenflow, zenflow_step, is_zenflow_update_boundary,
                                               sync_zenflow_optimizer_lr)
+from deepspeed.runtime.reflow import engine as reflow_engine
 
 from deepspeed.runtime.fp16.fused_optimizer import FP16_Optimizer
 from deepspeed.runtime.fp16.loss_scaler import LossScaleConfig, LossScaleProfile
@@ -575,6 +576,7 @@ class DeepSpeedEngine(Module):
         self.mesh_device = mesh_device
         self._autoep_folding_spec = None
         self._autoep_folding_group_handles = None
+        self._autoep_dw_stagings = []
         self._python_gc_generation = None
 
         # Flag to indicate that scale() was called before manual backward pass
@@ -646,7 +648,8 @@ class DeepSpeedEngine(Module):
         self.tput_timer = ThroughputTimer(self._config.timers_config,
                                           batch_size=self.train_batch_size(),
                                           steps_per_output=self.steps_per_print(),
-                                          monitor_memory=False)
+                                          monitor_memory=False,
+                                          sync_current_stream=reflow_engine.reflow_enabled(self))
 
         log_dist(f"DeepSpeed Flops Profiler Enabled: {self.flops_profiler_enabled()}", ranks=[0])
 
@@ -854,6 +857,20 @@ class DeepSpeedEngine(Module):
                                tp_size,
                                sp_size,
                                zero_stage=self.zero_optimization_stage())
+        if autoep_config.deferred_dw_flush_period > 1:
+            # The engine flushes staged expert weight gradients in the backward that closes an accumulation
+            # window, so it must know that backward while it runs and nothing may read gradients before it.
+            if not self.managed_gradient_accumulation():
+                raise ValueError("deferred_dw_flush_period needs the engine to know which backward closes a "
+                                 "gradient accumulation window. Set managed_gradient_accumulation=true, or leave "
+                                 "deferred_dw_flush_period unset.")
+            if self.zenflow_config() is not None:
+                raise ValueError("deferred_dw_flush_period does not support ZenFlow, which reads gradients between "
+                                 "accumulation boundaries. Disable ZenFlow, or leave deferred_dw_flush_period unset.")
+            if self.is_deepcompile_enabled():
+                raise ValueError("deferred_dw_flush_period stages expert weight gradients in an eager autograd "
+                                 "function, which DeepCompile does not trace. Disable DeepCompile, or leave "
+                                 "deferred_dw_flush_period unset.")
         folding_spec = build_folding_spec(
             world_size=world_size,
             pp_size=pp_size,
@@ -920,6 +937,10 @@ class DeepSpeedEngine(Module):
                 on_moe_layer_replaced=on_moe_layer_replaced,
             )
             logger.info(f"AutoEP: replaced {len(specs)} MoE layer(s) with ep_size={ep_size}")
+            for module in model.modules():
+                dw_staging = getattr(module, "dw_staging", None)
+                if dw_staging is not None:
+                    self._autoep_dw_stagings.append(dw_staging)
 
             # Re-tag optimizer flags for newly created AutoEP parameters
             from deepspeed import set_optimizer_flags
@@ -1045,6 +1066,9 @@ class DeepSpeedEngine(Module):
         tp_config.tensor_parallel.tp_size = tp_size
         if tp_config.tensor_parallel.tp_group is None:
             tp_config.tensor_parallel.tp_group = groups.get_tensor_model_parallel_group()
+        if tp_config.vocab_parallel_embedding and self.is_deepcompile_enabled() and self.compile_autotp():
+            # The pass rewrites only linear layers, so engine.compile() would reject the sharded embedding.
+            raise ValueError("vocab_parallel_embedding does not support the DeepCompile 'autotp' pass")
 
         from deepspeed.module_inject.auto_tp import AutoTP
 
@@ -1059,16 +1083,19 @@ class DeepSpeedEngine(Module):
         # from_model_config descends into text_config itself, so multimodal outer configs
         # work here too.
         from deepspeed.module_inject.tp_shard import AutoTPMeta
+        from deepspeed.module_inject.fusedqkv_utils import replicates_kv_block, replicated_kv_shard_heads
 
-        num_kv_heads = AutoTPMeta.from_model_config(model_config).num_kv_heads
+        meta = AutoTPMeta.from_model_config(model_config)
+        # Replicated-K/V layouts are bounded by query heads, not K/V heads.
+        replicated_kv = replicates_kv_block(model)
+        shard_heads = replicated_kv_shard_heads(meta, replicated_kv)
 
-        # Ranks beyond the KV head count get no attention shard. This still computes the
-        # correct result because the row-parallel all-reduce sums their empty contribution,
-        # but attention work concentrates on the first num_kv_heads ranks.
-        if num_kv_heads is not None and tp_size > num_kv_heads:
+        # The replicated-K/V rejection lives in AutoTP.set_tensor_parallel_config and also
+        # covers inference; keep this warning only for non-replicated layouts.
+        if not replicated_kv and shard_heads is not None and tp_size > shard_heads:
             log_dist(
                 f"AutoTP: autotp_size ({tp_size}) exceeds the model's key-value head count "
-                f"({num_kv_heads}); ranks beyond the head count hold no attention shard and "
+                f"({shard_heads}); ranks beyond the head count hold no attention shard and "
                 "attention throughput will not scale past that point.",
                 ranks=[0],
                 level=logging.WARNING)
@@ -1077,6 +1104,10 @@ class DeepSpeedEngine(Module):
         hf_tp_plan = _get_hf_tp_plan(model)
 
         def finalize_autotp(autotp=None, attach_uc_metadata=False, require_vocab_parallel_lm_head=False):
+            if tp_config.vocab_parallel_embedding:
+                sharded = autotp._replace_untied_input_embedding()
+                if sharded is not None:
+                    log_dist(f"AutoTP: vocab_parallel_embedding shards '{sharded}' along the vocabulary", ranks=[0])
             if autotp is not None:
                 self._autotp_frozen_replicated_params = autotp.register_replicated_grad_hooks(model)
 
@@ -1254,8 +1285,25 @@ class DeepSpeedEngine(Module):
         if vocab_head_autotp is not None:
             vocab_head_autotp._replace_vocab_parallel_lm_head()
             replacement_sources.update(vocab_head_autotp.replacement_sources)
-        finalize_autotp(attach_uc_metadata=True,
+        # vocab_parallel_embedding needs this model's tensor-parallel metadata and the ZeRO-3 gather of an AutoTP.
+        embedding_autotp = None
+        if tp_config.vocab_parallel_embedding:
+            embedding_autotp = AutoTP(module=model,
+                                      all_reduce_linears=(),
+                                      prefix="",
+                                      state_dict=None,
+                                      linear_layer_setting=(torch.nn.Linear, torch.nn.Embedding),
+                                      orig_layer_impl=None,
+                                      keep_module_on_host=tp_config.keep_module_on_host,
+                                      model_config=model_config,
+                                      tp_grain_size=tp_config.tensor_parallel.tp_grain_size,
+                                      training_mode=True)
+            embedding_autotp.set_tensor_parallel_config(tp_size, tp_config.tensor_parallel.tp_group)
+        finalize_autotp(embedding_autotp,
+                        attach_uc_metadata=True,
                         require_vocab_parallel_lm_head=tp_config.vocab_parallel_lm_head is True)
+        if embedding_autotp is not None:
+            replacement_sources.update(embedding_autotp.replacement_sources)
         return replacement_sources
 
     def __del__(self):
@@ -2423,8 +2471,12 @@ class DeepSpeedEngine(Module):
                     msg = f'You are using ZeRO-Offload with a client provided optimizer ({type(basic_optimizer)}) which in most cases will yield poor performance. Please either use deepspeed.ops.adam.DeepSpeedCPUAdam or set an optimizer in your ds-config (https://www.deepspeed.ai/docs/config-json/#optimizer-parameters). If you really want to use a custom optimizer w. ZeRO-Offload and understand the performance impacts you can also set <"zero_force_ds_cpu_optimizer": false> in your configuration file.'
                     raise ZeRORuntimeException(msg)
 
+        reflow_engine.reject_optimizer_without_reflow(self, basic_optimizer)
         basic_optimizer.param_groups[:] = [pg for pg in basic_optimizer.param_groups if len(pg["params"]) != 0]
         log_dist("Removing param_group that has no 'params' in the basic Optimizer", ranks=[0])
+        # A client optimizer has to become the matching Reflow CPU optimizer; the config-built one already is one.
+        if reflow_engine.reflow_enabled(self):
+            basic_optimizer = reflow_engine.maybe_remap_client_optimizer(self, basic_optimizer)
 
         self._check_for_duplicates(basic_optimizer)
 
@@ -2461,7 +2513,11 @@ class DeepSpeedEngine(Module):
 
         if self.zero_use_cpu_optimizer():
             from deepspeed.ops.adam import DeepSpeedCPUAdam, ZenFlowCPUAdam
-            CPUAdam = ZenFlowCPUAdam if self.zenflow else DeepSpeedCPUAdam
+            use_reflow = reflow_engine.reflow_enabled(self)
+            if use_reflow:
+                CPUAdam = reflow_engine.cpu_adam_class()
+            else:
+                CPUAdam = ZenFlowCPUAdam if self.zenflow else DeepSpeedCPUAdam
 
             if self.bf16_optimizer_states():
                 if user_fp32_optimizer_states:
@@ -2475,6 +2531,8 @@ class DeepSpeedEngine(Module):
             optimizer_kwargs = {'adamw_mode': adam_w_mode, 'fp32_optimizer_states': fp32_optimizer_states}
             if self.zenflow:
                 optimizer_kwargs['overlap_step'] = self.overlap_step
+            if use_reflow:
+                optimizer_kwargs['num_threads'] = reflow_engine.reflow_num_threads(self)
             return CPUAdam, optimizer_kwargs
 
         try:
@@ -2582,7 +2640,10 @@ class DeepSpeedEngine(Module):
         elif self.optimizer_name() == LION_OPTIMIZER:
             if self.zero_use_cpu_optimizer():
                 from deepspeed.ops.lion import DeepSpeedCPULion
-                optimizer = DeepSpeedCPULion(model_parameters, **optimizer_parameters)
+                if reflow_engine.reflow_enabled(self):
+                    optimizer = reflow_engine.build_cpu_lion(self, model_parameters, optimizer_parameters)
+                else:
+                    optimizer = DeepSpeedCPULion(model_parameters, **optimizer_parameters)
             else:
                 from deepspeed.ops.lion import FusedLion
                 optimizer = FusedLion(model_parameters, **optimizer_parameters)
@@ -2824,8 +2885,12 @@ class DeepSpeedEngine(Module):
                 log_dist(f'Creating {model_dtype} ZeRO stage {zero_stage} optimizer', ranks=[0])
                 from deepspeed.runtime.zero.stage3 import DeepSpeedZeroOptimizer_Stage3
                 from deepspeed.runtime.superoffload.superoffload_stage3 import SuperOffloadOptimizer_Stage3
-                Stage3ZeroOptimizer = DeepSpeedZeroOptimizer_Stage3 if not self.super_offload(
-                ) else SuperOffloadOptimizer_Stage3
+                if self.super_offload():
+                    Stage3ZeroOptimizer = SuperOffloadOptimizer_Stage3
+                elif reflow_engine.reflow_enabled(self):
+                    Stage3ZeroOptimizer = reflow_engine.stage3_optimizer_class(self)
+                else:
+                    Stage3ZeroOptimizer = DeepSpeedZeroOptimizer_Stage3
                 optimizer = Stage3ZeroOptimizer(
                     self.module,
                     optimizer,
@@ -2927,6 +2992,9 @@ class DeepSpeedEngine(Module):
         if self.mpu is not None:
             data_parallel_world_size = self.mpu.get_data_parallel_world_size()
             data_parallel_rank = self.mpu.get_data_parallel_rank()
+        elif self.mesh_device is not None:
+            # The ranks of a sequence parallel group must load the same samples.
+            data_parallel_rank = dist.get_rank(group=self.mesh_device.get_group(mesh_dim="data_parallel"))
 
         if data_sampler is None and (route == ROUTE_PREDICT or route == ROUTE_EVAL):
             data_sampler = torch.utils.data.DistributedSampler(
@@ -3221,6 +3289,10 @@ class DeepSpeedEngine(Module):
                                "Please use engine.backward(loss) instead.")
 
         see_memory_usage("Engine before backward", force=self.memory_breakdown())
+
+        # The backward that closes an accumulation window must return every staged expert weight gradient.
+        for dw_staging in getattr(self, "_autoep_dw_stagings", ()):
+            dw_staging.flush_on_stage = self.is_gradient_accumulation_boundary()
 
         if self.is_deepcompile_active() and not self.uses_parallelization_pass_only():
             deepcompile_backward_prologue(self.is_gradient_accumulation_boundary())
@@ -3699,6 +3771,11 @@ class DeepSpeedEngine(Module):
         if self.is_gradient_accumulation_boundary():
             if self.checkpoint_engine.is_decoupled():
                 self._commit_decoupled_checkpoint()
+
+            if any(dw_staging.has_staged_rows for dw_staging in getattr(self, "_autoep_dw_stagings", ())):
+                raise RuntimeError("Expert weight gradients are still staged at an optimizer step, which would "
+                                   "apply them one step late. deferred_dw_flush_period needs the backward that "
+                                   "closes each gradient accumulation window to run through the engine.")
 
             self._take_model_step(lr_kwargs)
 
@@ -5068,9 +5145,10 @@ class DeepSpeedEngine(Module):
         if not self.checkpoint_engine.is_decoupled():
             commit_info = CheckpointCommitInfo(tag=tag, save_dir=save_dir, save_latest=save_latest)
             self.checkpoint_engine.commit(commit_info)
+            # Every rank must finish writing its files for `tag` before `latest` points at it.
+            dist.barrier()
             if save_latest and self.global_rank == 0:
-                with open(os.path.join(save_dir, 'latest'), 'w') as fd:
-                    fd.write(tag)
+                self._write_latest_tag(save_dir, tag)
 
         dist.barrier()
 
@@ -5086,11 +5164,24 @@ class DeepSpeedEngine(Module):
 
         self.checkpoint_engine.commit(commit_info)
 
+        # Every rank must finish writing its files for the tag before `latest` points at it.
+        dist.barrier()
         if self.global_rank == 0 and commit_info.save_latest:
-            with open(os.path.join(commit_info.save_dir, 'latest'), 'w') as fd:
-                fd.write(commit_info.tag)
+            self._write_latest_tag(commit_info.save_dir, commit_info.tag)
 
         dist.barrier()
+
+    @staticmethod
+    def _write_latest_tag(save_dir, tag):
+        # Write to a temporary file and rename it over `latest`, so a crash mid-write never
+        # leaves `latest` empty or truncated; readers see either the old tag or the new one.
+        latest_path = os.path.join(save_dir, 'latest')
+        tmp_path = f"{latest_path}.tmp.{os.getpid()}"
+        with open(tmp_path, 'w') as fd:
+            fd.write(tag)
+            fd.flush()
+            os.fsync(fd.fileno())
+        os.replace(tmp_path, latest_path)
 
     def _get_non_moe_state_dict(self, full_state_dict):
         """Remove expert-param keys from state dict, keeping all non-expert params.

@@ -48,7 +48,9 @@ class _LocalKVModel(torch.nn.Module):
             valid[:, :attention_mask.shape[1]] = attention_mask.bool()
         cache_sums = (values * valid[:, None, :, None]).sum(dim=(1, 2, 3)).long()
         next_tokens = cache_sums.remainder(29) + 3
-        logits = torch.zeros((input_ids.shape[0], input_ids.shape[1], 32), device=input_ids.device)
+        logits = torch.zeros((input_ids.shape[0], input_ids.shape[1], 32),
+                             dtype=self.weight.dtype,
+                             device=input_ids.device)
         logits.scatter_(2, next_tokens[:, None, None].expand(-1, input_ids.shape[1], 1), 1)
         return SimpleNamespace(logits=logits)
 
@@ -76,6 +78,17 @@ def _count_replays(monkeypatch, accelerator):
     return counter
 
 
+def test_static_graph_attention_mask_uses_additive_values():
+    attention = torch.tensor([[1, 1, 0], [0, 1, 1]], dtype=torch.bool)
+    causal = torch.empty(2, 1, 1, 3)
+
+    HybridEngineRollout._update_static_causal_attention(attention, causal)
+
+    minimum = torch.finfo(causal.dtype).min
+    assert torch.equal(causal[0, 0, 0], torch.tensor([0, 0, minimum], dtype=causal.dtype))
+    assert torch.equal(causal[1, 0, 0], torch.tensor([minimum, 0, 0], dtype=causal.dtype))
+
+
 @pytest.mark.parametrize("local_heads", [4, 2, 1])
 def test_static_graph_uses_prefill_kv_shape(local_heads, monkeypatch):
     accelerator = get_accelerator()
@@ -97,6 +110,39 @@ def test_static_graph_uses_prefill_kv_shape(local_heads, monkeypatch):
     assert output.input_ids.tolist() == _local_kv_tokens(prompts, new_tokens, local_heads)
     assert counter["replays"] == new_tokens - 1
     assert model.config.num_key_value_heads == 4
+
+
+@pytest.mark.parametrize("batch_size, repetition_penalty", [(1, 1.3), (2, 1.0)])
+def test_static_graph_full_step_kernel_preconditions(batch_size, repetition_penalty, monkeypatch):
+    accelerator = get_accelerator()
+    if not accelerator.is_available() or accelerator.create_graph() is None:
+        pytest.skip("requires graph capture")
+
+    from deepspeed.ops import module_inject
+
+    calls = []
+
+    class GraphOp:
+
+        def decode_step_graph(self, *args):
+            calls.append(args)
+
+    monkeypatch.setattr(module_inject, "get_fused_glu_op", GraphOp)
+    device = torch.device(accelerator.device_name())
+    model = _LocalKVModel(2).to(device).to(torch.bfloat16).eval()
+    model.generation_config = SimpleNamespace(repetition_penalty=repetition_penalty)
+    rollout = HybridEngineRollout(SimpleNamespace(module=model),
+                                  SimpleNamespace(pad_token_id=0, eos_token_id=-1),
+                                  cfg=HybridEngineRolloutConfig(use_graph_capture=True))
+    prompt_ids = torch.tensor([[1, 3, 4]] * batch_size, device=device)
+
+    output = rollout.generate(RolloutRequest(prompt_ids, torch.ones_like(prompt_ids)),
+                              SamplingConfig(max_new_tokens=3, temperature=0))
+
+    assert output.input_ids.shape == (batch_size, 6)
+    # The captured step kernel cannot apply penalties and is reserved for
+    # the single-row fast path, so neither case may mount it.
+    assert calls == []
 
 
 @pytest.mark.parametrize("use_graph", [False, True])
@@ -569,6 +615,39 @@ def _random_request(batch_size, prompt_len, device):
     generator = torch.Generator().manual_seed(1)
     prompt_ids = torch.randint(1, 64, (batch_size, prompt_len), generator=generator)
     return RolloutRequest(prompt_ids.to(device), torch.ones_like(prompt_ids).to(device))
+
+
+@pytest.mark.parametrize("use_graph_capture, continuous_batch_size", [(True, None), (True, 2), (False, 2)])
+@pytest.mark.parametrize("supports_cache_class", [None, True])
+def test_rollout_under_autocast_matches_hf_generate(use_graph_capture, continuous_batch_size, supports_cache_class):
+    # Under autocast an fp32 model emits fp32 keys (rotary embeddings promote them) but bf16 values,
+    # which the pre-allocated KV caches used to reject with a dtype mismatch (#9102).
+    # Continuous prefill goes through generate() unless the model sets _supports_cache_class.
+    accelerator = get_accelerator()
+    if not accelerator.is_bf16_supported():
+        pytest.skip("bf16 autocast is not supported")
+    if use_graph_capture and not accelerator.is_graph_capture_supported():
+        pytest.skip("graph capture is not supported")
+
+    device = torch.device(accelerator.device_name())
+    model = _tiny_llama(device)
+    if supports_cache_class is not None:
+        model._supports_cache_class = supports_cache_class
+    new_tokens = 8
+    request = _random_request(batch_size=4, prompt_len=8, device=device)
+    sampling = SamplingConfig(max_new_tokens=new_tokens, temperature=0, continuous_batch_size=continuous_batch_size)
+
+    with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
+        output = _rollout(model, use_graph_capture).generate(request, sampling)
+        with torch.no_grad():
+            expected = model.generate(request.prompt_ids,
+                                      attention_mask=request.prompt_attention_mask,
+                                      max_new_tokens=new_tokens,
+                                      do_sample=False,
+                                      eos_token_id=None,
+                                      pad_token_id=0)
+
+    assert output.input_ids.tolist() == expected.tolist()
 
 
 @pytest.mark.parametrize("use_graph_capture, continuous_batch_size", [(True, None), (True, 8), (False, 8)])

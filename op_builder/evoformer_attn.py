@@ -14,6 +14,7 @@ class EvoformerAttnBuilder(CUDAOpBuilder):
     BUILD_VAR = "DS_BUILD_EVOFORMER_ATTN"
     NAME = "evoformer_attn"
     MIN_COMPUTE_CAPABILITY = 7  # The kernels use Tensor Cores.
+    ROCM_SUPPORTED = False  # The kernels are built on CUTLASS.
     CUTLASS_IGNORE = "DS_IGNORE_CUTLASS_DETECTION"
     CUTLASS_PYTHON_BINDINGS = "DS_USE_CUTLASS_PYTHON_BINDINGS"
 
@@ -27,10 +28,7 @@ class EvoformerAttnBuilder(CUDAOpBuilder):
         return f"deepspeed.ops.{self.NAME}_op"
 
     def extra_ldflags(self):
-        if not self.is_rocm_pytorch():
-            return ["-lcurand"]
-        else:
-            return []
+        return ["-lcurand"]
 
     def sources(self):
         src_dir = "csrc/deepspeed4science/evoformer_attn"
@@ -43,6 +41,8 @@ class EvoformerAttnBuilder(CUDAOpBuilder):
         return super().nvcc_args()
 
     def is_compatible(self, verbose=False):
+        if not super().is_compatible(verbose):
+            return False
         if self.cutlass_path != self.CUTLASS_IGNORE:
             try:
                 self.include_paths()
@@ -62,7 +62,7 @@ class EvoformerAttnBuilder(CUDAOpBuilder):
                             self.warning("Please use CUTLASS version >= 3.1.0")
                         return False
 
-        return super().is_compatible(verbose)
+        return True
 
     @staticmethod
     def _repo_root():

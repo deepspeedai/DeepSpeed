@@ -8,11 +8,16 @@ from typing import List, Tuple
 import pytest
 import torch
 
+import deepspeed
 from deepspeed.accelerator import get_accelerator
 from deepspeed.inference.v2.kernels.ragged_ops import BlockedRotaryEmbeddings, BlockedTrainedRotaryEmbeddings
 from deepspeed.inference.v2.ragged import RaggedBatchWrapper, DSSequenceDescriptor
+from deepspeed.ops.op_builder import RaggedOpsBuilder
 from .ragged_testing_utils import build_batch_and_manager, validate_kv_cache
 from ....v2.inference_test_utils import allclose
+
+if not deepspeed.ops.__compatible_ops__[RaggedOpsBuilder.NAME]:
+    pytest.skip("Ragged device ops are not available on this system", allow_module_level=True)
 """
 NOTE(cmikeh2): It is very possible to see unit test failures (even on FP16) depending on when
 certain values are casted up to or down from float32. If we are seeing accuracy issues, we should
