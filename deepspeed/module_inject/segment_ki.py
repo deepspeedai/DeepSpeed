@@ -1052,6 +1052,9 @@ def install_decode_attention(model: torch.nn.Module,
         # weights carry the per-rank output dimension in weight.shape[0])
         q_out = projections[0].weight.shape[0]
         kv_out = projections[1].weight.shape[0]
+        o_in = projections[3].weight.shape[1]
+        if q_out != 2 * o_in:
+            continue  # not the 2x-wide query|gate layout (o_proj consumes only the attention half)
         num_q_heads = q_out // (2 * head_dim)
         num_kv_heads = kv_out // head_dim
         if num_q_heads * head_dim * 2 != q_out:
