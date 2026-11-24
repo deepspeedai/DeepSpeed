@@ -741,17 +741,28 @@ class TestAutoEPExpertStorageMaps(DistributedTest):
                                                        {ep_rank: [ep_rank]
                                                         for ep_rank in range(4)})
                 plan = plan_transfer(target_map, affine_map)
-                targets = {
-                    ep_rank: torch.full(shape, float("nan"))
-                    for ep_rank, shape in target_map.shard_shapes.items()
+                # CPU shards can already be views; also exercise source offsets when device-to-CPU copies are made.
+                offset_storage = {
+                    global_rank: torch.cat((shard.new_full((1, ), float("nan")), shard))[1:]
+                    for global_rank, shard in storage.items()
                 }
-                for segment in plan.segments:
-                    torch.as_strided(targets[segment.target_rank], segment.shape, segment.target_strides,
-                                     segment.target_offset).copy_(
-                                         torch.as_strided(storage[segment.source_rank], segment.shape,
-                                                          segment.source_strides, segment.source_offset))
-                for ep_rank, experts in enumerate(target_experts):
-                    torch.testing.assert_close(targets[ep_rank], full[experts].reshape(-1), rtol=0, atol=0)
+                for sources in (storage, offset_storage):
+                    target_buffers = {
+                        ep_rank: torch.full((shape[0] + 2, ), float("nan"))
+                        for ep_rank, shape in target_map.shard_shapes.items()
+                    }
+                    targets = {ep_rank: buffer[1:-1] for ep_rank, buffer in target_buffers.items()}
+                    for segment in plan.segments:
+                        source = sources[segment.source_rank]
+                        target = targets[segment.target_rank]
+                        # Segment offsets are shard-relative, while as_strided offsets are storage-relative.
+                        torch.as_strided(target, segment.shape, segment.target_strides,
+                                         target.storage_offset() + segment.target_offset).copy_(
+                                             torch.as_strided(source, segment.shape, segment.source_strides,
+                                                              source.storage_offset() + segment.source_offset))
+                    for ep_rank, experts in enumerate(target_experts):
+                        torch.testing.assert_close(targets[ep_rank], full[experts].reshape(-1), rtol=0, atol=0)
+                        assert torch.isnan(target_buffers[ep_rank][0]) and torch.isnan(target_buffers[ep_rank][-1])
         engine.destroy()
 
     @pytest.mark.parametrize("encoding", ["quantized", "nvme"])

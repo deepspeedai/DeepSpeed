@@ -8,8 +8,6 @@ from typing import Iterable, Tuple
 
 import torch
 
-#from .huggingface_engine import HuggingFaceCheckpointEngine
-
 MEGATRON = 'megatron'
 HUGGINGFACE = 'huggingface'
 
