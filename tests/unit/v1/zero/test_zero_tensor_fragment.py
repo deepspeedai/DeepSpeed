@@ -7,13 +7,14 @@ import pytest
 import deepspeed.comm as dist
 import torch
 import math
+import importlib
 
 from unit.common import DistributedTest
 from unit.simple_model import random_dataloader, SimpleModel
 from unit.util import bf16_required_version_check
 
 import deepspeed
-from deepspeed.utils import safe_get_full_fp32_param, safe_get_full_grad, safe_get_full_optimizer_state
+from deepspeed.utils import safe_get_full_fp32_param, safe_get_full_grad, safe_get_full_model_grads, safe_get_full_optimizer_state
 from deepspeed.utils import safe_set_full_fp32_param, safe_set_full_grad, safe_set_full_optimizer_state
 from deepspeed.utils import safe_get_local_fp32_param, safe_get_local_grad, safe_get_local_optimizer_state
 from deepspeed.utils import safe_set_local_fp32_param, safe_set_local_grad, safe_set_local_optimizer_state
@@ -24,6 +25,8 @@ from deepspeed.ops.aio import AsyncIOBuilder
 from deepspeed.accelerator import get_accelerator
 from deepspeed.runtime.swap_tensor import MIN_SWAPPABLE_BYTES
 
+tensor_fragment_module = importlib.import_module("deepspeed.utils.tensor_fragment")
+
 WEIGHT_KEY = 'weight'
 FIRST_ORDER_KEY = 'exp_avg'
 SECOND_ORDER_KEY = 'exp_avg_sq'
@@ -31,7 +34,8 @@ GRADIENT_KEY = 'gradient'
 
 
 @pytest.mark.parametrize("full_accumulation_buffer", [True, False])
-def test_full_gradient_reconstruction_uses_only_the_owned_fragment(monkeypatch, full_accumulation_buffer):
+@pytest.mark.parametrize("model_wide", [True, False])
+def test_full_gradient_reconstruction_uses_only_the_owned_fragment(monkeypatch, full_accumulation_buffer, model_wide):
     reference = torch.tensor([5.5, 11.0, 16.5, 22.0])
     for rank in range(2):
         param = torch.nn.Parameter(torch.zeros(4, dtype=torch.bfloat16))
@@ -52,10 +56,43 @@ def test_full_gradient_reconstruction_uses_only_the_owned_fragment(monkeypatch, 
         def sum_peer_fragment(tensor, *, group, _peer=peer_contribution):
             tensor.add_(_peer)
 
+        def sum_peer_fragments(tensors, *, group):
+            for tensor in tensors:
+                sum_peer_fragment(tensor, group=group)
+
         monkeypatch.setattr(dist, "all_reduce", sum_peer_fragment)
+        monkeypatch.setattr(dist, "has_all_reduce_coalesced", lambda: True)
+        monkeypatch.setattr(dist, "all_reduce_coalesced", sum_peer_fragments)
         # A full BF16 buffer must not be contributed twice when the parameter spans partitions.
-        actual = safe_get_full_grad(param)
+        if model_wide:
+            model = torch.nn.Module()
+            model.register_parameter('weight', param)
+            actual = safe_get_full_model_grads(model)['weight']
+        else:
+            actual = safe_get_full_grad(param)
         torch.testing.assert_close(actual, reference, rtol=0, atol=0)
+
+
+def test_safe_get_full_model_grads_prefers_fp32_accumulation(monkeypatch):
+    model = torch.nn.Linear(4, 1, bias=False, dtype=torch.bfloat16)
+    gradient = torch.full_like(model.weight, 1.00390625, dtype=torch.float32)
+    model.weight.grad = torch.ones_like(model.weight)
+    model.weight._hp_grad = gradient
+    link_hp_params(lp_param_list=[model.weight],
+                   flat_hp_partition=torch.zeros(4),
+                   gradient_dict={0: [gradient]},
+                   offload_gradient_dict={},
+                   use_offload=False,
+                   param_group_index=0,
+                   partition_start=0,
+                   partition_size=4,
+                   dp_group=object())
+    monkeypatch.setattr(dist, "has_all_reduce_coalesced", lambda: True)
+    monkeypatch.setattr(dist, "all_reduce_coalesced", lambda tensors, group: None)
+
+    actual = safe_get_full_model_grads(model)['weight']
+    assert actual.dtype == torch.float32
+    torch.testing.assert_close(actual, gradient, rtol=0, atol=0)
 
 
 def validate_tensor(model, api_type, opt_states):
@@ -97,6 +134,157 @@ class MyModel(torch.nn.Module):
             x = l(x)
             x = self.act(x)
         return self.cel(x, y)
+
+
+class _GradientMapping:
+
+    def __init__(self, gradient, start=0):
+        self.gradient = gradient
+        self.lp_fragment_address = type("Address", (), {"start": start, "numel": gradient.numel()})()
+
+    def get_lp_grad_fragment(self, _):
+        return self.gradient
+
+
+class _NamedParameterModel:
+
+    def __init__(self, parameters):
+        self.parameters = parameters
+
+    def named_parameters(self):
+        return self.parameters
+
+
+def test_safe_get_full_model_grads_coalesces_zero_gradients(monkeypatch):
+    first = torch.nn.Parameter(torch.zeros(2))
+    first._hp_mapping = _GradientMapping(torch.tensor([1.0, 2.0]))
+    first._index_in_param_group = 0
+    first._dp_group = object()
+
+    second = torch.nn.Parameter(torch.zeros(3))
+    second._hp_mapping = _GradientMapping(torch.tensor([3.0]), start=1)
+    second._index_in_param_group = 0
+    second._dp_group = first._dp_group
+
+    calls = []
+
+    def all_reduce_coalesced(buffers, group=None):
+        calls.append((buffers, group))
+
+    monkeypatch.setattr(tensor_fragment_module.dist, "has_all_reduce_coalesced", lambda: True)
+    monkeypatch.setattr(tensor_fragment_module.dist, "all_reduce_coalesced", all_reduce_coalesced)
+
+    grads = tensor_fragment_module.safe_get_full_model_grads(
+        _NamedParameterModel([("first", first), ("second", second)]))
+
+    assert len(calls) == 1
+    assert len(calls[0][0]) == 2
+    assert torch.equal(grads["first"], torch.tensor([1.0, 2.0]))
+    assert torch.equal(grads["second"], torch.tensor([0.0, 3.0, 0.0]))
+
+
+@pytest.mark.parametrize('coalesced', [True, False])
+def test_safe_get_full_model_grads_includes_unowned_zero_buffers(monkeypatch, coalesced):
+    first = torch.nn.Parameter(torch.zeros(2))
+    first._hp_mapping = _GradientMapping(torch.tensor([1.0, 2.0]))
+    first._index_in_param_group = 0
+    first._dp_group = object()
+
+    unowned = torch.nn.Parameter(torch.zeros(3))
+    unowned._hp_mapping = None
+    unowned._dp_group = first._dp_group
+
+    calls = []
+
+    def all_reduce_coalesced(buffers, group=None):
+        calls.append((buffers, group))
+        buffers[1].add_(torch.tensor([4.0, 5.0, 6.0]))
+
+    def all_reduce(buffer, group=None):
+        calls.append(([buffer], group))
+        if buffer.numel() == 3:
+            buffer.add_(torch.tensor([4.0, 5.0, 6.0]))
+
+    monkeypatch.setattr(tensor_fragment_module.dist, "has_all_reduce_coalesced", lambda: coalesced)
+    monkeypatch.setattr(tensor_fragment_module.dist, "all_reduce_coalesced", all_reduce_coalesced)
+    monkeypatch.setattr(tensor_fragment_module.dist, "all_reduce", all_reduce)
+
+    grads = tensor_fragment_module.safe_get_full_model_grads(
+        _NamedParameterModel([("first", first), ("unowned", unowned)]))
+
+    assert len(calls) == (1 if coalesced else 2)
+    assert all(group is first._dp_group for _, group in calls)
+    assert torch.equal(grads["first"], torch.tensor([1.0, 2.0]))
+    assert torch.equal(grads["unowned"], torch.tensor([4.0, 5.0, 6.0]))
+
+
+def test_safe_get_full_model_grads_separates_groups(monkeypatch):
+    first = torch.nn.Parameter(torch.zeros(2))
+    second = torch.nn.Parameter(torch.zeros(2))
+    for param in (first, second):
+        param._hp_mapping = None
+        param._dp_group = object()
+
+    contributions = {first._dp_group: 2.0, second._dp_group: 3.0}
+
+    def all_reduce_coalesced(buffers, group=None):
+        for buffer in buffers:
+            buffer.add_(contributions[group])
+
+    monkeypatch.setattr(tensor_fragment_module.dist, "has_all_reduce_coalesced", lambda: True)
+    monkeypatch.setattr(tensor_fragment_module.dist, "all_reduce_coalesced", all_reduce_coalesced)
+
+    grads = safe_get_full_model_grads(_NamedParameterModel([("first", first), ("second", second)]))
+    assert torch.equal(grads["first"], torch.full((2, ), 2.0))
+    assert torch.equal(grads["second"], torch.full((2, ), 3.0))
+
+
+def test_safe_get_full_model_grads_local_gradients():
+    model = torch.nn.Linear(2, 1)
+    model.weight.grad = torch.ones_like(model.weight)
+
+    grads = safe_get_full_model_grads(model)
+    assert grads["weight"] is model.weight.grad
+    assert grads["bias"] is None
+
+
+class TestFullModelGrads(DistributedTest):
+    world_size = 2
+
+    @pytest.mark.parametrize('zero_stage', [1, 2])
+    def test_matches_unpartitioned_gradients(self, zero_stage):
+        import copy
+
+        torch.manual_seed(123)
+        model = torch.nn.Sequential(torch.nn.Linear(4, 4), torch.nn.Linear(4, 1))
+        model.register_parameter('frozen', torch.nn.Parameter(torch.ones(1), requires_grad=False))
+        reference = copy.deepcopy(model).to(get_accelerator().current_device_name())
+        optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+        engine, _, _, _ = deepspeed.initialize(model=model,
+                                               optimizer=optimizer,
+                                               config={
+                                                   "train_micro_batch_size_per_gpu": 2,
+                                                   "zero_optimization": {
+                                                       "stage": zero_stage
+                                                   }
+                                               })
+        inputs = torch.arange(8, device=engine.device, dtype=torch.float32).reshape(2, 4) / 8
+        all_inputs = torch.cat([inputs + rank for rank in range(dist.get_world_size())])
+        reference(all_inputs).square().mean().backward()
+        engine.backward(engine(inputs + dist.get_rank()).square().mean())
+
+        try:
+            grads = safe_get_full_model_grads(engine.module)
+            for name, param in reference.named_parameters():
+                if param.grad is None:
+                    assert grads[name] is None
+                else:
+                    torch.testing.assert_close(grads[name], param.grad)
+                    torch.testing.assert_close(grads[name],
+                                               safe_get_full_grad(dict(engine.module.named_parameters())[name]))
+            engine.step()
+        finally:
+            engine.destroy()
 
 
 class ScaleModel(torch.nn.Module):
@@ -295,9 +483,12 @@ class TestZeroBf16Fp32GradAccum(DistributedTest):
                 engine.step()
 
         grad = safe_get_full_grad(engine.module.weight)
+        model_grad = safe_get_full_model_grads(engine.module)['weight']
         expected = torch.full((4, ), 1.00390625, dtype=torch.float32, device=engine.device)
         assert grad.dtype == torch.float32
+        assert model_grad.dtype == torch.float32
         torch.testing.assert_close(grad, expected, rtol=0, atol=0)
+        torch.testing.assert_close(model_grad, expected, rtol=0, atol=0)
 
         engine.destroy()
 
