@@ -15,6 +15,7 @@ from deepspeed.utils.logging import logger
 from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum
 from deepspeed.runtime.zero.partition_parameters import *
 from deepspeed.runtime.zero.partitioned_param_profiler import PartitionedParameterProfiler
+from deepspeed.runtime.zero.utils import agreement_ids
 from deepspeed.runtime.swap_tensor.partitioned_param_swapper import PartitionedParamStatus
 from deepspeed.utils.debug import debug_param2name_id_shape
 from deepspeed.accelerator import get_accelerator
@@ -99,7 +100,13 @@ class PartitionedParameterCoordinator:
         zero_quantized_nontrainable_weights=False,
         fast_sharding_for_leaf_module=False,
         log_trace_cache_warnings=False,
+        module_positions: Dict[int, int] = None,
+        param_positions: Dict[int, int] = None,
     ) -> None:
+        # The engine's own numbering of its modules and parameters, which the trace checks compare across ranks
+        # instead of ds_ids (see agreement_ids).
+        self.__module_positions = module_positions
+        self.__param_positions = param_positions
         # mapping of param -> handle for each param that is currently in flight
         self.__inflight_param_registry = inflight_param_registry
         # keeps track of the number of submodules invoked so far.
@@ -260,13 +267,14 @@ class PartitionedParameterCoordinator:
 
         if not self.is_complete_trace():  # not self.trace_complete:
             # Make sure that recorded submodule orders are identical across ranks
-            assert_ints_same_as_other_ranks([m.ds_id for m in self.__submodule_order])
+            assert_ints_same_as_other_ranks(agreement_ids(self.__submodule_order, self.__module_positions))
 
             if self.is_record_trace():
                 # Successfully recorded a trace
                 self.construct_parameter_trace_from_module_trace()
                 # Make sure that recorded parameter orders are identical across ranks
-                assert_ints_same_as_other_ranks([p.param.ds_id for p in self.__param_order])
+                assert_ints_same_as_other_ranks(
+                    agreement_ids([p.param for p in self.__param_order], self.__param_positions))
                 assert_ints_same_as_other_ranks([p.step_id_last_used_at for p in self.__param_order])
 
                 self.__submodule_order = tuple(self.__submodule_order)  # freeze

@@ -425,6 +425,87 @@ class TestZero3RepeatForwardLoop(DistributedTest):
         model.destroy()
 
 
+class _OwnGroupMPU:
+    """Puts the calling rank alone in its data-parallel group."""
+
+    def __init__(self, group):
+        self.group = group
+
+    def get_data_parallel_group(self):
+        return self.group
+
+    def get_data_parallel_world_size(self):
+        return 1
+
+    def get_data_parallel_rank(self):
+        return 0
+
+    def get_model_parallel_group(self):
+        return self.group
+
+    def get_model_parallel_world_size(self):
+        return 1
+
+    def get_model_parallel_rank(self):
+        return 0
+
+
+class TestZero3RankChecksAfterOtherModels(DistributedTest):
+    """Ranks that built different ZeRO-3 models before still train one model together (#9098).
+
+    ZeRO-3 numbers parameters and modules with counters that live for the whole process, so here the same model
+    gets different ids on the two ranks, and the checks that ranks agree must compare positions instead.
+    """
+    world_size = 2
+
+    @pytest.mark.parametrize("earlier", ["zero_init", "engine"])
+    def test(self, earlier):
+        rank = dist.get_rank()
+        own_group = [dist.new_group([r]) for r in range(self.world_size)][rank]
+        hidden_dim = 8
+        config = {
+            "train_micro_batch_size_per_gpu": 2,
+            "zero_allow_untested_optimizer": True,
+            "zero_optimization": {
+                "stage": 3,
+                "stage3_param_persistence_threshold": 0,
+                "enable_sanity_checks": True,
+            },
+        }
+        # Rank 1 builds more parameters (zero_init), or more parameters and modules (engine), than rank 0.
+        if earlier == "zero_init":
+            if rank == 1:
+                with deepspeed.zero.Init(data_parallel_group=own_group):
+                    Linear(hidden_dim, hidden_dim)
+        else:
+            other = torch.nn.Sequential(*[Linear(hidden_dim, hidden_dim) for _ in range(1 + 2 * rank)])
+            other_engine, _, _, _ = deepspeed.initialize(config=config, model=other, mpu=_OwnGroupMPU(own_group))
+            other_engine.destroy()
+
+        model = SimpleModel(hidden_dim)
+        model, _, _, _ = deepspeed.initialize(config=config,
+                                              model=model,
+                                              model_parameters=model.parameters(),
+                                              optimizer=torch.optim.SGD(model.parameters(), lr=0.1))
+        # The ids differ across ranks, or this would not test anything.
+        first_id = torch.tensor([next(model.module.parameters()).ds_id], device=model.device)
+        ids = [torch.zeros_like(first_id) for _ in range(self.world_size)]
+        dist.all_gather(ids, first_id)
+        assert ids[0] != ids[1]
+
+        # The trace checks run when the second step starts, the bucket check in every backward.
+        data_loader = random_dataloader(model=model,
+                                        total_samples=6,
+                                        hidden_dim=hidden_dim,
+                                        device=model.device,
+                                        dtype=torch.float32)
+        for batch in data_loader:
+            loss = model(batch[0], batch[1])
+            model.backward(loss)
+            model.step()
+        model.destroy()
+
+
 # testing the fix https://github.com/deepspeedai/DeepSpeed/pull/1227
 # also reproduces the https://github.com/deepspeedai/DeepSpeed/pull/1372
 @pytest.mark.parametrize("zero_stage", [2, 3])

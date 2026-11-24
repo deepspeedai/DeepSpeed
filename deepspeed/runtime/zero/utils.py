@@ -5,7 +5,7 @@
 
 import os
 import gc
-from typing import List, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 import torch
 from deepspeed import comm as dist
@@ -75,6 +75,20 @@ def is_zero_supported_optimizer(optimizer):
     except ImportError:
         pass
     return type(optimizer) in ZERO_SUPPORTED_OPTIMIZERS
+
+
+def agreement_ids(objects: Iterable, positions: Optional[Dict[int, int]]) -> List[int]:
+    """What ranks compare to check that they hold the same modules or parameters, in the same order.
+
+    ``ds_id`` comes from counters that live for the whole process, so a rank that built more ZeRO-3 modules or
+    parameters earlier numbers the same model differently. An engine numbers its own modules and parameters by
+    position once, in ``positions`` (from ``ds_id`` to position), and ranks compare those. An object the engine did
+    not number, such as an external parameter from outside its module, is compared by its ``ds_id``, made negative
+    so that it cannot equal a position.
+    """
+    if positions is None:
+        return [obj.ds_id for obj in objects]
+    return [positions.get(obj.ds_id, -1 - obj.ds_id) for obj in objects]
 
 
 @instrument_w_nvtx
