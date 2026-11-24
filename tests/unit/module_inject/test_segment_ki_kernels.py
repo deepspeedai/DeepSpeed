@@ -767,6 +767,7 @@ class TestArenaWeightViews:
     def test_install_decode_attention_rejects_dense_attention_and_accepts_gated(self):
         """Dense attention (q_out == o_in, e.g. Qwen3) must not be patched;
         gated attention (q_out == 2 * o_in, e.g. Qwen3.5) must be patched."""
+        pytest.importorskip("transformers.models.qwen3_5.modeling_qwen3_5")
         from deepspeed.module_inject.segment_ki import install_decode_attention
 
         class DummyKernelOp:
