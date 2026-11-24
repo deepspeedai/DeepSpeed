@@ -2312,7 +2312,14 @@ class HybridEngineRollout(RolloutEngine):
 
             graph = get_accelerator().create_graph()
             with get_accelerator().capture_to_graph(graph):
-                if not self.use_paged_cache:
+                if self.use_paged_cache:
+                    # The paged atom length fields derive from write_pos. Capture the
+                    # refresh (a pure device op) so every replay re-derives them from the
+                    # possibly in-graph-advanced write_pos; the b=1 step-kernel loop does
+                    # no host-side atom update, and a frozen total_extent makes attention
+                    # stop seeing the newly written decode tokens.
+                    ds_cache.update_graph_atoms()
+                else:
                     self._update_static_causal_attention(static_attn, static_causal_attn)
                 out = module(
                     static_token,

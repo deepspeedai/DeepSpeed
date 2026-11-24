@@ -135,6 +135,7 @@ class PagedAttentionCache:
         self._scale = self.head_dim**-0.5
         self._graph_safe = False
         self._graph_mode = False
+        self._graph_rows: Optional[torch.Tensor] = None
         self._graph_atoms: Optional[torch.Tensor] = None
         self._graph_outputs: Optional[torch.Tensor] = None
         # Block sharing for prompt-prefix reuse. A block can be referenced by several
@@ -205,6 +206,9 @@ class PagedAttentionCache:
         if self._graph_safe:
             return
         self._graph_safe = True
+        # Persistent row-index buffer for graph replay: captured kernels hold its
+        # address, so it is allocated once and must never be reallocated.
+        self._graph_rows = torch.arange(self.max_batch_size, dtype=torch.long, device=self.device)
         self._allocate_all_blocks()
         self._zero_storage()
         self._init_graph_atom_structure()
@@ -233,12 +237,16 @@ class PagedAttentionCache:
         if not self._graph_safe:
             raise RuntimeError("paged cache must be graph safe before graph replay")
         self._graph_mode = True
-        rows = torch.arange(self.max_batch_size, dtype=torch.long, device=self.device)
         # Eager prefill may have overwritten the shared atom buffer with multi-token
         # atoms. Restore the decode atom structure before every capture/replay.
         self._init_graph_atom_structure()
-        self._graph_atoms = self._atoms_device
-        self._active_rows = rows
+        # Decode uses one atom per row; the wider atom table also holds eager prefill
+        # atoms, and the kernel would otherwise launch degenerate CTAs for them.
+        self._graph_atoms = self._atoms_device[:self.max_batch_size]
+        # Captured selects read the row-index tensor by address, so it must stay the
+        # cache's persistent buffer; a fresh arange here would be freed before the
+        # first replay and the replay would index with allocator garbage.
+        self._active_rows = self._graph_rows
         self._step_prepared = True
         self._step_atoms = None
         self._step_q_len = 1
