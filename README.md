@@ -28,7 +28,7 @@ The meeting is hosted on Zoom and can be joined [here](https://zoom-lfx.platform
 
 * [2026/05] [Using Muon Optimizer with DeepSpeed](https://github.com/deepspeedai/DeepSpeed/blob/master/blogs/muon-optimizer/README.md)
 
-* [2026/05] [System DMA (SDMA) for ZeRO-3: offload collectives off compute units on AMD GPUs for better overlap](https://github.com/deepspeedai/DeepSpeed/blob/master/examples/sdma_allgather/README.md)
+* [2026/05] [System DMA (SDMA) for ZeRO-3: offload collectives off compute units on AMD GPUs for better overlap](https://github.com/deepspeedai/DeepSpeedExamples/blob/master/training/sdma_allgather/README.md)
 
 * [2026/03] DeepSpeed Team gave a tutorial at ASPLOS 2026 titled ["Building Efficient Large-Scale Model Systems with DeepSpeed: From Open-Source Foundations to Emerging Research" ](https://supercomputing-system-ai-lab.github.io/events/asplos2026-llm-tutorial/index.html)
 
@@ -191,6 +191,26 @@ All DeepSpeed documentation, tutorials, and blogs can be found on our website: [
 | [Blogs](https://www.deepspeed.ai/posts/)                                                       |  Blogs                                   |
 
 
+# DeepSpeed Examples
+
+If you are looking for examples using DeepSpeed please see the following resources:
+
+1. [DeepSpeedExamples](https://github.com/deepspeedai/DeepSpeedExamples)
+2. [Megatron-DeepSpeed](https://github.com/deepspeedai/Megatron-DeepSpeed)
+3. [DeepSpeed + AzureML](https://github.com/Azure/azureml-examples/tree/main/cli/jobs/deepspeed)
+4. [Getting Started with DeepSpeed on Azure](https://www.deepspeed.ai/tutorials/azure/)
+5. [DeepSpeed + Hugging Face Transformers Integration](https://huggingface.co/docs/transformers/deepspeed)
+6. [DeepSpeed + PyTorch Lightning](https://lightning.ai/docs/pytorch/stable/api/lightning.pytorch.utilities.deepspeed.html)
+
+
+# DeepSpeed Benchmarks
+
+If you are looking for DeepSpeed benchmarks, please see the following resources:
+
+1. [Communication Benchmarking Suite](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/benchmarks/communication)
+2. [Inference Benchmarks](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/benchmarks/inference)
+
+
 # CI funding
 
 This being an open source project we rely on others to provide us resources for CI hardware. At this moment Modal is kindly supporting our GPU CI runs by funding the hardware for us. Modal is an AI infrastructure platform for inference, fine-tuning, batch jobs and more. Get started with $30/mo in free credits today at https://modal.com. We have been getting an amazing support from Modal's team and will surely recommend them to your business.
@@ -204,22 +224,6 @@ Thanks so much to all of our amazing contributors!
 <a href="https://github.com/deepspeedai/DeepSpeed/graphs/contributors">
   <img src="https://contrib.rocks/image?repo=microsoft/DeepSpeed&r="  width="800px"/>
 </a>
-
-## Developer Certificate of Origin
-This project welcomes contributions and suggestions. Most contributions require you to
-agree to a Developer Certificate of Origin [DCO](https://wiki.linuxfoundation.org/dco)
-stating that they agree to the terms published at https://developercertificate.org for
-that *particular* contribution.
-
-DCOs are per-commit, so each commit needs to be signed off.  These can be signed in
-the commit by adding the `-s` flag.  DCO enforcement can also be signed off in the PR
-itself by clicking on the DCO enforcement check.
-
-## Code of Conduct
-This project has adopted the [Microsoft Open Source Code of
-Conduct](https://opensource.microsoft.com/codeofconduct/). For more information see the
-[Code of Conduct FAQ](https://opensource.microsoft.com/codeofconduct/faq/) or contact
-[opencode@microsoft.com](mailto:opencode@microsoft.com) with any additional questions or comments.
 
 # Publications
 1. Samyam Rajbhandari, Jeff Rasley, Olatunji Ruwase, Yuxiong He. (2019) ZeRO: memory optimizations toward training trillion parameter models. [arXiv:1910.02054](https://arxiv.org/abs/1910.02054) and [In Proceedings of the International Conference for High Performance Computing, Networking, Storage and Analysis (SC '20)](https://dl.acm.org/doi/10.5555/3433701.3433727).
