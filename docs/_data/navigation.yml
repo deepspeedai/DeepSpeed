@@ -101,6 +101,8 @@ lnav:
         url: /tutorials/one-cycle/
       - title: 'Pipeline Parallelism'
         url: /tutorials/pipeline/
+      - title: 'Reflow'
+        url: /tutorials/reflow/
       - title: 'Transformer Kernel'
         url: /tutorials/transformer_kernel/
       - title: 'Arctic Long Sequence Training (ALST) for HF Transformers integration'

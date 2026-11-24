@@ -799,7 +799,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                 if param.ds_secondary_tensor is not None:
                     param.ds_secondary_tensor = None
 
-    def _setup_for_real_optimizer(self):
+    def _setup_for_real_optimizer(self, *, allocate_grad_partitions=True):
         see_memory_usage("Before creating fp32 partitions", force=False)
         self._create_fp32_partitions()
         see_memory_usage("After creating fp32 partitions", force=False)
@@ -837,8 +837,9 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         # One flat gradient buffer per accumulation dtype: parameters kept in fp32 accumulate in fp32.
         params_by_grad_dtype = collections.defaultdict(list)
-        for param in all_params:
-            params_by_grad_dtype[self._grad_accumulation_dtype(param)].append(param)
+        if allocate_grad_partitions:
+            for param in all_params:
+                params_by_grad_dtype[self._grad_accumulation_dtype(param)].append(param)
         self.grad_partitions_flat_buffers: Dict[torch.dtype, Tensor] = {}
         for dtype, params in params_by_grad_dtype.items():
             flat_buffer = torch.zeros(sum(p.partition_numel() for p in params), dtype=dtype, device=self.device)
@@ -1138,7 +1139,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             self.optimizer.state[
                 self.fp32_partitioned_groups_flat[i]]["momentum_buffer"] = unpinned_fp32_buffer_momentum
 
-    def _create_fp32_partitions(self):
+    def _create_fp32_partitions(self, *, create_offloaded_master=None):
         cpu_memory_usage = 0
         cpu_memory_sub_groups = 0
         nvme_memory_usage = 0
@@ -1217,13 +1218,16 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                     self.fp32_partitioned_groups_flat.append(unpinned_fp32_buffer)
                     self._create_momentum_buffer(num_elements, i, ds_id)
                 elif self.offload_optimizer:
-                    converted = self.fp16_partitioned_groups_flat[i].to(self.subgroup_to_device[i],
-                                                                        dtype=self.master_weights_and_grads_dtype)
-                    master = converted.clone().detach()
-                    if self.offload_optimizer_pin_memory and master.device.type == "cpu":
-                        # As ZeRO-1/2 does: the master is copied to the device after every step, which is fast only
-                        # from pinned memory (_copy_pinned_master_to_device).
-                        master = get_accelerator().pin_memory(master)
+                    if create_offloaded_master is None:
+                        converted = self.fp16_partitioned_groups_flat[i].to(self.subgroup_to_device[i],
+                                                                            dtype=self.master_weights_and_grads_dtype)
+                        master = converted.clone().detach()
+                        if self.offload_optimizer_pin_memory and master.device.type == "cpu":
+                            # As ZeRO-1/2 does: the master is copied to the device after every step, which is fast only
+                            # from pinned memory (_copy_pinned_master_to_device).
+                            master = get_accelerator().pin_memory(master)
+                    else:
+                        master = create_offloaded_master(tensor, self.subgroup_to_device[i])
                     self.fp32_partitioned_groups_flat.append(master)
                     self._create_momentum_buffer(num_elements, i, ds_id)
                 elif self.fp16_partitioned_groups_flat[i].dtype == self.master_weights_and_grads_dtype and \
@@ -1373,26 +1377,26 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         return self.optimizer_swapper.is_swappable_tensor(None,
                                                           numel=self.fp16_partitioned_groups_flat_numel[sub_group_id])
 
-    def _partitioned_params_swap_out(self, i):
-        offset = 0
-        fp32_param = self.fp32_partitioned_groups_flat[i]
-        assert fp32_param is not None, \
-        f'fp32 parameters of sub_group {i} is None'
+    def _partitioned_params_swap_out(self, i, source=None):
+        if source is None:
+            source = self.fp32_partitioned_groups_flat[i]
+            assert source is not None, f'fp32 parameters of sub_group {i} is None'
 
+        offset = 0
         swap_fp16_params = []
-        swap_fp32_params = []
+        swap_sources = []
         for param, partitioned_param in zip(self.fp16_groups[i], self.fp16_partitioned_groups[i]):
-            src = fp32_param.narrow(0, offset, partitioned_param.ds_numel)
+            src = source.narrow(0, offset, partitioned_param.ds_numel)
             if partitioned_param.status == PartitionedParamStatus.AVAILABLE:
                 partitioned_param.data.copy_(src.data)
             else:
-                swap_fp32_params.append(src)
+                swap_sources.append(src)
                 swap_fp16_params.append(param)
             offset += partitioned_param.ds_numel
 
         if len(swap_fp16_params):
             swap_fp16_params[0].nvme_swapper.swap_out_partitioned_params(dst_fp16_params=swap_fp16_params,
-                                                                         src_fp32_params=swap_fp32_params)
+                                                                         src_fp32_params=swap_sources)
 
     def _set_fp16_partitioned_groups_flat(self):
         # setup flat buffers per subgroup, these are each just sections of the
@@ -1801,7 +1805,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         # deal with a use-case of transient grads that will be generated in a loop for the same computation involving some model params - e.g. when performing a tiled memory calculation that shards the normal single sub-module call into a loop over a shards.
         if getattr(param, "ds_grad_is_ready", True):
             self._apply_autoep_folding_tp_correction(param)
-            self.__add_grad_to_ipg_bucket(param)
+            self._add_grad_to_ipg_bucket(param)
 
     def configure_autoep_folding_tp_gradient_reduction(self, folding_spec):
         if folding_spec is None or folding_spec.tp_size <= 1:
@@ -1860,6 +1864,9 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         bucket.params.append(param)
         bucket.process_group = self._get_param_partition_group(param)
         bucket.elements += param.grad.numel()
+
+    # Subclasses can guard writes here. The standard writer keeps its original NVTX range.
+    _add_grad_to_ipg_bucket = __add_grad_to_ipg_bucket
 
     @instrument_w_nvtx
     @torch.no_grad()
@@ -2195,18 +2202,21 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         #Using a more memory efficient version
         self.norm_for_param_grads[param_id] = self._constant_buffered_norm2(param.grad)
 
+    def _local_grad_norm_squared(self, params, counts_every_rank):
+        total = 0.0
+        for param in params:
+            if counts_every_rank or is_model_parallel_parameter(param) or self.model_parallel_rank == 0:
+                param_id = self.get_param_id(param)
+                if param_id in self.norm_for_param_grads:
+                    total += self.norm_for_param_grads[param_id]**2
+        return total
+
     def complete_grad_norm_calculation_for_cpu_offload(self, params):
         self._assert_same_partition_group(params)
         process_group = self._get_param_partition_group(params[0])
         counts_every_rank = self._grad_norm_counts_every_rank(params, process_group)
-        total_norm = 0.0
+        total_norm = self._local_grad_norm_squared(params, counts_every_rank)
         norm_type = 2.0
-        for p in params:
-            if counts_every_rank or is_model_parallel_parameter(p) or (self.model_parallel_rank == 0):
-                param_id = self.get_param_id(p)
-                if param_id in self.norm_for_param_grads.keys():
-                    param_norm = self.norm_for_param_grads[param_id]
-                    total_norm += param_norm**2
 
         # Sum across all model parallel GPUs.
         total_norm_cuda = get_accelerator().FloatTensor([float(total_norm)])

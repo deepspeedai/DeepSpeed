@@ -13,9 +13,10 @@ import torch
 from deepspeed.accelerator import get_accelerator
 from deepspeed.module_inject.auto_ep_layer import AutoEPMoELayer
 from deepspeed.ops.triton_ops import autoep_fused_token_ops as fused_ops
-from deepspeed.utils import safe_get_full_grad
+from deepspeed.utils import safe_get_full_fp32_param, safe_get_full_grad
 from unit.common import DistributedTest
 from unit.v1.moe.autoep_test_utils import (
+    MockMoEOnlyTransformer,
     MockMoETransformer,
     engine_input_dtype,
     mixed_precision_config,
@@ -100,6 +101,41 @@ def _fp32_reference_step(ep_size, reference_state, seed, *, checkpoint_activatio
         torch.set_float32_matmul_precision(matmul_precision)
 
 
+def _build_folded_engine(combine_impl, zero_stage, reference_state, seed):
+    # FP32: the default folded restore rounds each product and each top-k addition to the
+    # activation dtype, so in fp16 it differs from the FP32 fused sum by about one unit in the
+    # last place of the MoE output, more than PARITY_TOLERANCE allows after the LM head.
+    config = _config(combine_impl, 2, mixed_precision=False)
+    # The per-expert loop does not depend on which dtypes this torch's grouped GEMM accepts.
+    config["expert_parallel"]["use_grouped_mm"] = False
+    config["zero_optimization"] = {"stage": zero_stage}
+    # Keep the dense weights whole so that only the MoE dispatch and restore are folded.
+    config["tensor_parallel"] = {
+        "autotp_size": 2,
+        "partition_config": {
+            "use_default_specs": False,
+            "layer_specs": [{
+                "patterns": [".*\\.weight$"],
+                "partition_type": "skip",
+            }],
+        },
+    }
+    seed_everything(seed)
+    model = _folded_model()
+    model.load_state_dict(reference_state)
+    engine, _, _, _ = deepspeed.initialize(model=model, config=config)
+    return engine
+
+
+def _folded_model():
+    # No attention: the key bias has a zero true gradient, and Adam's first step turns its
+    # rounding noise into +/- lr, which no parameter-update tolerance can compare.
+    return MockMoEOnlyTransformer(num_layers=2,
+                                  num_experts=NUM_EXPERTS,
+                                  hidden_size=HIDDEN_SIZE,
+                                  intermediate_size=2 * HIDDEN_SIZE)
+
+
 def _checkpoint_moe_layers(engine):
     """Recompute each MoE block in backward, as the benchmarked runs do."""
     for module in engine.module.modules():
@@ -119,10 +155,14 @@ def _named_gradients(engine):
 
 
 def _parameters(engine):
-    return {
-        name: param.detach().float().cpu().clone()
-        for name, param in engine.module.named_parameters() if param.requires_grad
-    }
+    values = {}
+    for name, param in engine.module.named_parameters():
+        if not param.requires_grad:
+            continue
+        # A ZeRO-3 parameter holds only its partition; its full fp32 value is the parameter of an fp32 run.
+        value = safe_get_full_fp32_param(param) if hasattr(param, "ds_id") else param
+        values[name] = value.detach().float().cpu().clone()
+    return values
 
 
 def _take_one_step(engine, seed, *, checkpoint_activations):
@@ -223,6 +263,35 @@ def _assert_step_matches(fused, eager, reference):
     assert any(value.abs().sum() > 0 for value in eager["delta"].values()), "the optimizer step changed nothing"
 
 
+def _assert_fp32_step_matches(fused, eager):
+    # Both paths run in fp32, so reassociation noise stays near fp32 resolution and every
+    # quantity can be compared directly. An fp32 reference would equal the eager path here.
+    torch.testing.assert_close(fused["loss"], eager["loss"], **PARITY_TOLERANCE)
+    torch.testing.assert_close(fused["output"], eager["output"], **PARITY_TOLERANCE)
+    torch.testing.assert_close(fused["input_grad"], eager["input_grad"], **PARITY_TOLERANCE)
+
+    assert fused["gradients"], "no gradients were captured, so the comparison would be vacuous"
+    assert set(fused["gradients"]) == set(eager["gradients"])
+    # Ensure both sides of the fused restore reached the comparison.
+    assert any(".router." in name for name in fused["gradients"]), "no router gradient was captured"
+    assert any(".experts.w" in name for name in fused["gradients"]), "no expert gradient was captured"
+
+    for name in sorted(eager["gradients"]):
+        torch.testing.assert_close(fused["gradients"][name],
+                                   eager["gradients"][name],
+                                   msg=lambda formatted, name=name: f"gradient mismatch for {name}\n{formatted}",
+                                   **PARITY_TOLERANCE)
+
+    for name in sorted(eager["delta"]):
+        torch.testing.assert_close(fused["delta"][name],
+                                   eager["delta"][name],
+                                   msg=lambda formatted, name=name: f"parameter update mismatch for {name}\n"
+                                   f"{formatted}",
+                                   **PARITY_TOLERANCE)
+
+    assert any(value.abs().sum() > 0 for value in eager["delta"].values()), "the optimizer step changed nothing"
+
+
 class TestAutoEPFusedParityExpertParallel(DistributedTest):
     world_size = 2
 
@@ -268,3 +337,28 @@ class TestAutoEPFusedParityLocalExperts(DistributedTest):
 
         reference = _fp32_reference_step(1, reference_state, seed, checkpoint_activations=False)
         _assert_step_matches(fused, eager, reference)
+
+
+class TestAutoEPFusedParityFoldedTensorParallel(DistributedTest):
+    world_size = 4
+
+    @pytest.mark.parametrize("zero_stage", [0, 2, 3])
+    @pytest.mark.parametrize("checkpoint_activations", [True, False])
+    def test_fused_matches_eager_with_autotp_folding(self, zero_stage, checkpoint_activations):
+        seed = 2468
+        seed_everything(seed)
+        reference_state = _folded_model().state_dict()
+
+        eager_engine = _build_folded_engine("weighted_sum", zero_stage, reference_state, seed)
+        eager = _take_one_step(eager_engine, seed, checkpoint_activations=checkpoint_activations)
+
+        fused_engine = _build_folded_engine("fused_weighted_sum", zero_stage, reference_state, seed)
+        moe_layers = [module for module in fused_engine.module.modules() if isinstance(module, AutoEPMoELayer)]
+        assert moe_layers
+        assert all(layer.combine_impl == "fused_weighted_sum"
+                   for layer in moe_layers), "the fused reduction was not actually selected"
+        assert all(layer.folding_group_handles is not None and layer.folding_group_handles.spec.tp_size == 2
+                   for layer in moe_layers), "the MoE layers were not folded with tensor parallelism"
+        fused = _take_one_step(fused_engine, seed, checkpoint_activations=checkpoint_activations)
+
+        _assert_fp32_step_matches(fused, eager)

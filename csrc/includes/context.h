@@ -160,11 +160,13 @@ public:
             _gemm_algos.push_back(test_attn_context->TestAlgo(100));
         } else {
             // Use default algo.
-            _gemm_algos.push_back(std::array<int, 3>({99, 99, 99}));
-            _gemm_algos.push_back(std::array<int, 3>({99, 99, 99}));
-            _gemm_algos.push_back(std::array<int, 3>({99, 99, 99}));
-            _gemm_algos.push_back(std::array<int, 3>({99, 99, 99}));
-            _gemm_algos.push_back(std::array<int, 3>({99, 99, 99}));
+            // hipify maps this name for ROCm, but would not map its CUDA value 99.
+            const int default_algo = CUBLAS_GEMM_DEFAULT_TENSOR_OP;
+            _gemm_algos.push_back(std::array<int, 3>({default_algo, default_algo, default_algo}));
+            _gemm_algos.push_back(std::array<int, 3>({default_algo, default_algo, default_algo}));
+            _gemm_algos.push_back(std::array<int, 3>({default_algo, default_algo, default_algo}));
+            _gemm_algos.push_back(std::array<int, 3>({default_algo, default_algo, default_algo}));
+            _gemm_algos.push_back(std::array<int, 3>({default_algo, default_algo, default_algo}));
         }
     }
 
