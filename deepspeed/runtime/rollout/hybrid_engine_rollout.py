@@ -13,8 +13,9 @@ Two generation paths:
   3. **continuous batching (experimental)**: an opt-in bounded path
      selected through ``SamplingConfig.continuous_batch_size``; greedy or
      sampled like the graph path, with or without graph capture. The captured
-     path dispatches each step to the smallest captured batch width from a
-     ladder, so a rollout never replays a wider graph than the rows it is running.
+     path dispatches each step to the smallest captured width covering its
+     highest occupied row. Bucket views start at row 0, so a row retired below
+     a live one still rides the wider replay.
 """
 
 import itertools
@@ -133,11 +134,16 @@ class HybridEngineRolloutConfig:
 
     ``graph_capture_batch_sizes`` controls the captured-batch ladder of the
     continuous graph path. The loop dispatches each step to the smallest
-    captured batch that fits the rows doing work, so a request arriving on its
-    own replays a one-row graph instead of the full batch. Defaults to the
-    powers of two up to ``max_batch_size`` plus ``max_batch_size`` itself.
-    Capture is lazy: a bucket is captured the first time the loop needs it, and
-    a bucket whose capture fails runs that forward eagerly instead.
+    captured width covering the highest occupied row, so a request arriving on
+    its own replays a one-row graph instead of the full batch. That width also
+    covers the vacant rows below the highest one, so a retired middle slot keeps
+    the step on the wider graph. Defaults to the powers of two up to
+    ``max_batch_size`` plus ``max_batch_size`` itself. Capture is lazy: a bucket
+    is captured the first time the loop needs it, and the decision is agreed
+    over the model-parallel groups because the capture runs forwards that hold
+    their collectives. A bucket whose capture fails runs that forward eagerly
+    instead only when no such group shares it; under tensor parallelism the
+    rollout fails rather than desynchronizing the groups.
     """
     use_graph_capture: bool = False
     enable_profiling: bool = False
@@ -167,8 +173,10 @@ class _DecodeBucket:
 
     The buffers are views of the rollout's master buffers, so the per-row state the
     scheduler writes (tokens, positions, validity, write positions) is visible to every
-    bucket that covers those rows. ``logits`` is the tensor the captured forward returns
-    and the graph overwrites in place on every replay.
+    bucket that covers those rows. The views always start at row 0: a bucket covers every
+    row below ``width``, including vacant slots, because a replayed forward cannot skip
+    the rows in between. ``logits`` is the tensor the captured forward returns and the
+    graph overwrites in place on every replay.
     """
 
     width: int
@@ -248,8 +256,10 @@ class HybridEngineRollout(RolloutEngine):
         A retained continuous-batching graph captures those tensors'
         addresses, so it is released here too (re-captured on the next
         rollout) -- replays would otherwise read freed memory. Interim
-        cost: one re-capture per sync; remove when refresh refills the
-        derived tensors in place and graphs survive by construction.
+        cost: that rollout re-captures each ladder bucket it uses, so up
+        to one capture per width in ``graph_capture_batch_sizes``; remove
+        when refresh refills the derived tensors in place and graphs
+        survive by construction.
 
         PROVISIONAL contract — see segki_refresh; the final weight-sync
         handshake is still under design.
@@ -925,6 +935,7 @@ class HybridEngineRollout(RolloutEngine):
             "graph_captures": 0,
             "decode_bucket_steps": 0,
             "decode_padded_rows": 0,
+            "decode_hole_rows": 0,
             "decode_bucket_widths": {},
         }
 
@@ -993,9 +1004,14 @@ class HybridEngineRollout(RolloutEngine):
             decoded_tokens = {}
             if decode_ids:
                 self._update_static_causal_attention(static_attention, static_causal_attention)
-                bucket = self._decode_bucket(max(slot_by_request[request_id] for request_id in decode_ids) + 1)
-                self._capture_bucket_if_needed(module, cache, bucket, state.static_cache_position,
-                                               bucket.write_positions)
+                highest_row = max(slot_by_request[request_id] for request_id in decode_ids) + 1
+                bucket = self._decode_bucket(highest_row)
+                self._capture_bucket_if_needed(module,
+                                               cache,
+                                               bucket,
+                                               state.static_cache_position,
+                                               bucket.write_positions,
+                                               profile=profile)
                 decode_start = self._profile_start(profile)
                 decode_logits_all = self._run_bucket(module, cache, bucket, state.static_cache_position,
                                                      bucket.write_positions)
@@ -1015,9 +1031,13 @@ class HybridEngineRollout(RolloutEngine):
                 for request_id, token in zip(decode_ids, decoded.split(1, dim=0)):
                     decoded_tokens[request_id] = token
                     write_positions[request_id] += 1
+                live_rows = len(decode_ids)
                 stats["decode_steps"] += 1
                 stats["decode_bucket_steps"] += 1
-                stats["decode_padded_rows"] += bucket.width - len(decode_ids)
+                stats["decode_padded_rows"] += bucket.width - live_rows
+                # Slots retired below the highest occupied row pad the replay like ladder rounding
+                # does; this reports them separately because only they could be compacted away.
+                stats["decode_hole_rows"] += highest_row - live_rows
                 stats["decode_bucket_widths"][bucket.width] = stats["decode_bucket_widths"].get(bucket.width, 0) + 1
                 next_tokens.update(decoded_tokens)
 
@@ -1082,7 +1102,7 @@ class HybridEngineRollout(RolloutEngine):
         widths = {max_batch_size}
         if configured:
             for width in configured:
-                if not isinstance(width, int) or width <= 0:
+                if isinstance(width, bool) or not isinstance(width, int) or width <= 0:
                     raise ValueError("graph_capture_batch_sizes must be positive integers")
                 if width > max_batch_size:
                     raise ValueError("graph_capture_batch_sizes cannot exceed continuous_batch_size")
@@ -1095,20 +1115,27 @@ class HybridEngineRollout(RolloutEngine):
         return tuple(sorted(widths))
 
     @staticmethod
-    def _bucket_width(ladder, required):
-        """Smallest captured width that covers ``required`` rows."""
+    def _bucket_width(ladder, highest_row):
+        """Smallest captured width that covers every row up to ``highest_row``.
+
+        Vacant slots below ``highest_row`` are covered too, because bucket views start at
+        row 0 and a replayed forward runs the rows in between.
+        """
         for width in ladder:
-            if width >= required:
+            if width >= highest_row:
                 return width
-        raise ValueError(f"captured batch ladder {ladder} does not cover {required} rows")
+        raise ValueError(f"captured batch ladder {ladder} does not cover {highest_row} rows")
 
     def _get_continuous_graph_state(self, module, max_batch_size, max_cache_len, device, model_dtype, cache_type):
         ladder = self._graph_capture_ladder(max_batch_size, self.graph_capture_batch_sizes)
         signature = self._continuous_graph_signature(module, max_batch_size, max_cache_len, device, model_dtype,
                                                      ladder)
         state = self._continuous_graph_state
-        if state is None or state.signature != signature:
-            # Free the stale cache and graph pool before allocating replacements.
+        if self._group_needs_capture(state is None or state.signature != signature, device):
+            # Free the stale cache and graph pool before allocating replacements. Every
+            # capture group rebuilds when any of its ranks does, so the buckets the loop
+            # captures below stay in step: a rank that kept its graphs while a peer
+            # re-captured would replay a different number of collective forwards.
             self._continuous_graph_state = None
             state = None
             # Capture sizes the layers from the model's local KV tensors.
@@ -1149,8 +1176,10 @@ class HybridEngineRollout(RolloutEngine):
     def _decode_bucket(self, highest_row):
         """Return the decode bucket covering the rows that are decoding, allocating it if new.
 
-        Buckets are captured by the caller once its buffers hold the step it is about to
-        run, so a capture is never asked to warm up on stale rows.
+        ``highest_row`` counts the rows up to the highest occupied slot, so the bucket's
+        row-0 view also covers any vacant slot below it. Buckets are captured by the caller
+        once its buffers hold the step it is about to run, so a capture is never asked to
+        warm up on stale rows.
         """
         state = self._continuous_graph_state
         width = self._bucket_width(state.ladder, highest_row)
@@ -1161,10 +1190,19 @@ class HybridEngineRollout(RolloutEngine):
             state.decode[width] = bucket
         return bucket
 
-    def _capture_bucket_if_needed(self, module, cache, bucket, cache_position, write_position):
-        """Capture a bucket the first time the loop needs it."""
-        if bucket.graph is None and not bucket.disabled:
-            self._capture_bucket(module, cache, bucket, cache_position, write_position)
+    def _capture_bucket_if_needed(self, module, cache, bucket, cache_position, write_position, profile=None):
+        """Capture a bucket the first time any rank of the capture groups needs it.
+
+        The group agreement can send a rank that already holds this bucket's graph back
+        through the capture, which is what keeps its count of collective forwards equal to
+        its peers'.
+        """
+        needs_capture = bucket.graph is None and not bucket.disabled
+        if not self._group_needs_capture(needs_capture, bucket.input_ids.device):
+            return bucket
+        capture_start = self._profile_start(profile)
+        self._capture_bucket(module, cache, bucket, cache_position, write_position)
+        self._profile_end(profile, "graph_capture_ms", capture_start, count="num_graph_captures")
         return bucket
 
     def _capture_bucket(self, module, cache, bucket, cache_position, write_position):
@@ -1180,7 +1218,17 @@ class HybridEngineRollout(RolloutEngine):
                                                                          cache_position, bucket.position_ids,
                                                                          self._last_logits_kwargs(module))
             self._continuous_graph_state.captures += 1
-        except Exception as error:  # a graph is an optimization: a failed capture must not fail the rollout
+        except Exception as error:
+            if self._capture_groups():
+                # The capture already ran some of its collective forwards here, so its peers
+                # are mid-capture too and an eager fallback would leave the groups'
+                # collectives unpaired. Failing the rollout is the only safe exit.
+                raise RuntimeError(
+                    f"graph capture failed for batch width {bucket.width} on a rank inside a tensor-parallel "
+                    f"group ({error}); running this forward eagerly would desynchronize the group. Disable graph "
+                    f"capture (use_graph_capture=False) to run without it.") from error
+            # A graph is an optimization: where no capture group shares the forward, a
+            # failed capture must not fail the rollout.
             bucket.graph = None
             bucket.disabled = True
             logger.warning(
@@ -1221,6 +1269,43 @@ class HybridEngineRollout(RolloutEngine):
             device_index = get_accelerator().current_device()
         return (id(module), device.type, device_index, model_dtype, max_batch_size, max_cache_len, ladder,
                 tensor_signature)
+
+    def _capture_groups(self):
+        """The tensor-parallel groups whose collectives a decode forward runs."""
+        capture_groups = []
+        autotp_size = getattr(self.engine, "autotp_size", None)
+        if callable(autotp_size):
+            autotp_size = autotp_size()
+        if isinstance(autotp_size, int) and autotp_size > 1:
+            from deepspeed.utils import groups
+            capture_groups.append(groups.get_tensor_model_parallel_group())
+        # DeepSpeedHybridEngine with inference_tp_size > 1 shards the inference containers
+        # over its own mp_group, separate from the AutoTP group.
+        from deepspeed.runtime.hybrid_engine import DeepSpeedHybridEngine
+        mp_group = getattr(self.engine, "mp_group", None) if isinstance(self.engine, DeepSpeedHybridEngine) else None
+        if mp_group is not None and mp_group not in capture_groups and dist.get_world_size(group=mp_group) > 1:
+            capture_groups.append(mp_group)
+        return capture_groups
+
+    def _group_needs_capture(self, local_needs_capture, device=None):
+        """Return whether any rank of the capture groups must capture the next forward.
+
+        Capture runs a fixed count of forwards that hold these groups' collectives, so a
+        rank must not capture, replay, or fall back on its own: the counts would diverge
+        and later collectives would pair across ranks. The groups take the maximum of the
+        local decisions, putting every rank on the same path. ``device`` is the device the
+        rendezvous flag is reduced on and must match the groups' backend, so callers pass
+        the model device rather than the default accelerator device.
+        """
+        capture_groups = self._capture_groups()
+        if not capture_groups:
+            return local_needs_capture
+        if device is None:
+            device = get_accelerator().current_device_name()
+        flag = torch.tensor(int(local_needs_capture), dtype=torch.int32, device=device)
+        for group in capture_groups:
+            dist.all_reduce(flag, op=dist.ReduceOp.MAX, group=group)
+        return bool(flag.item())
 
     @staticmethod
     def _update_static_causal_attention(static_attention, static_causal_attention):
@@ -1517,10 +1602,12 @@ class HybridEngineRollout(RolloutEngine):
             "start": time.perf_counter(),
             "prefill_forward_ms": 0.0,
             "decode_forward_ms": 0.0,
+            "graph_capture_ms": 0.0,
             "scheduler_overhead_ms": 0.0,
             "cache_management_overhead_ms": 0.0,
             "num_prefill_forwards": 0,
             "num_decode_forwards": 0,
+            "num_graph_captures": 0,
             "active_batch_sizes": [],
         }
 
@@ -1559,6 +1646,8 @@ class HybridEngineRollout(RolloutEngine):
             "generation_overhead_ms": max(0.0, generation_ms - prefill_ms - decode_ms),
             "num_prefill_forwards": profile["num_prefill_forwards"],
             "num_decode_forwards": profile["num_decode_forwards"],
+            "graph_capture_ms": profile["graph_capture_ms"],
+            "num_graph_captures": profile["num_graph_captures"],
             "scheduler_overhead_ms": profile["scheduler_overhead_ms"],
             "cache_management_overhead_ms": profile["cache_management_overhead_ms"],
             "post_processing_ms": (post_processing_end - generation_end) * 1000.0,

@@ -17,13 +17,13 @@ On replay the counter does *not* advance, so subsequent KV writes go to the
 wrong positions and the model silently produces incorrect logits.
 
 Our ``DeepSpeedStaticCache`` instead reads the write position from a shared
-tensor (``write_position``) that the caller updates in-place before each graph
-replay.  Because ``write_position`` is a real tensor at a fixed address, CUDA
-graph replays read the current value each time.
-
-The caller (HybridEngineRollout) must call ``cache.set_write_position(pos)``
-before each replay. ``pos`` may be a scalar (the existing fixed-batch behavior)
-or one position per cache row for continuous batching.
+tensor (``write_position``) that the caller updates in place between steps.
+Because ``write_position`` is a real tensor at a fixed address, CUDA graph
+replays read the current value each time. A graph binds the address it saw at
+capture, so the caller (HybridEngineRollout) only needs another
+``cache.set_write_position(pos)`` call when it swaps in a new position tensor;
+``pos`` may be a scalar (the existing fixed-batch behavior) or one position per
+cache row for continuous batching.
 """
 
 import torch
@@ -323,10 +323,12 @@ class DeepSpeedStaticCache:
     def set_write_position(self, pos: torch.Tensor):
         """Set the write position shared by all layers.
 
-        Must be called before each graph replay. A scalar tensor preserves the
-        fixed-batch path; a vector supplies one decode position per cache row.
-        The tensor is stored by reference so subsequent in-place updates are
-        immediately visible to all layers.
+        Call this whenever the position tensor itself changes. A captured graph
+        binds the tensor by reference, so in-place updates to a position tensor
+        set before capture reach every replay without another call, while a new
+        tensor needs one. A scalar tensor preserves the fixed-batch path; a
+        vector supplies one decode position per cache row. The tensor is stored
+        by reference, so in-place updates are immediately visible to all layers.
         """
         self._write_position = pos
         for layer in self._layers:
