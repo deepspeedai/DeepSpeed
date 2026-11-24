@@ -75,6 +75,9 @@ model's ``generation_config``, as ``generate()`` does. Other
 ``generation_config`` settings are not applied on the graph path. Continuous
 batching, with or without graph capture, picks tokens the same way.
 
+Every path ends a response at the tokenizer's ``eos_token_id`` or at any id in
+the model's ``generation_config.eos_token_id``.
+
 Shared Prompt Prefill
 ---------------------
 
