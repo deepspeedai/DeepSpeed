@@ -752,6 +752,15 @@ def segki_backend_generation() -> int:
     return _BACKEND_GENERATION
 
 
+# Set by apply_segment_ki and the decode installs on the modules whose forwards they replace.
+_INJECTION_MARKERS = ("_ki_dual_op", "_ki_gdn_op", "_ki_attn_op", "_ki_qkv_op", "_ki_norm_op", "_ki_gemm_op")
+
+
+def segki_injected(model: torch.nn.Module) -> bool:
+    """Whether segment kernels run in ``model``'s forwards, whichever rollout installed them."""
+    return any(hasattr(module, marker) for module in model.modules() for marker in _INJECTION_MARKERS)
+
+
 def segki_refresh(model: torch.nn.Module) -> None:
     """Drop every derived-weight cache after an in-place weight write.
 

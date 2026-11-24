@@ -264,23 +264,26 @@ class HybridEngineRollout(RolloutEngine):
         rollout) -- replays would otherwise read freed memory. Interim
         cost: one re-capture per sync; remove when refresh refills the
         derived tensors in place and graphs survive by construction.
-        Without segKI the graphs read only the parameters, which an in-place
-        update keeps at their captured addresses, so they are kept.
+        When no segment kernels run in the model (this rollout and every
+        other rollout sharing it run without segKI), the graphs read only the
+        parameters, which an in-place update keeps at their captured
+        addresses, so they are kept.
 
         PROVISIONAL contract — see segki_refresh; the final weight-sync
         handshake is still under design.
         """
-        if not self.use_segki:
+        from deepspeed.module_inject.segment_ki import segki_injected, segki_refresh
+        # Resolve through the engine like every other module access; unit
+        # tests hand us SimpleNamespace(module=...) engines.
+        module = getattr(self.engine, "module", None) or getattr(self, "module", None)
+        # Another rollout over the same model may have installed the kernels.
+        if not self.use_segki and (module is None or not segki_injected(module)):
             return
 
-        from deepspeed.module_inject.segment_ki import segki_refresh
         if self._continuous_graph_state is not None or self._static_graph_state is not None:
             get_accelerator().synchronize()
             self._continuous_graph_state = None
             self._static_graph_state = None
-        # Resolve through the engine like every other module access; unit
-        # tests hand us SimpleNamespace(module=...) engines.
-        module = getattr(self.engine, "module", None) or getattr(self, "module", None)
         if module is None:
             return
         segki_refresh(module)
@@ -978,7 +981,6 @@ class HybridEngineRollout(RolloutEngine):
         stats = {
             "cache_capacity": max_cache_len,
             "peak_cache_length": prompt_len,
-            "cache_memory_bytes": self._continuous_cache_memory_bytes(cache, static_attention, static_write_positions),
             "trim_count": 0,
             "trimmed_columns": 0,
             "trim_latency_ms": 0.0,
@@ -1109,6 +1111,9 @@ class HybridEngineRollout(RolloutEngine):
             if write_positions:
                 stats["peak_cache_length"] = max(stats["peak_cache_length"], max(write_positions.values()))
 
+        # Measured after decoding, like the eager path: the KV layers are sized lazily by the first prefill.
+        stats["cache_memory_bytes"] = self._continuous_cache_memory_bytes(cache, static_attention,
+                                                                          static_write_positions)
         generation_end = self._profile_start(profile)
         output = self._build_continuous_batch(original_request, responses)
         post_processing_end = self._profile_end(profile, None, generation_end)
@@ -1218,10 +1223,11 @@ class HybridEngineRollout(RolloutEngine):
         autocast_dtype = _get_autocast_dtype(device.type) if autocast_enabled else None
         # segki_refresh frees the injected kernels' derived-weight tensors, which
         # a graph captured before it would still read, and also empties the
-        # backend's process-wide GLU cache that other models' graphs read.
+        # backend's process-wide GLU cache that other models' graphs read. The
+        # kernels may have been installed by another rollout sharing the model.
+        from deepspeed.module_inject.segment_ki import segki_backend_generation, segki_injected
         segki_generation = 0
-        if self.use_segki:
-            from deepspeed.module_inject.segment_ki import segki_backend_generation
+        if self.use_segki or segki_injected(module):
             segki_generation = (getattr(module, "_ki_refresh_generation", 0), segki_backend_generation())
         # Persistent buffers made under inference mode cannot be updated in place outside it, and
         # decode replays the attention implementation (and its mask format) chosen at capture.

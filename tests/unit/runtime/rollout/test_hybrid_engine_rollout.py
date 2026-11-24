@@ -77,7 +77,10 @@ def test_disable_autocast_weight_cache_restores_previous_setting(monkeypatch):
     assert state[0] is True
 
 
-def test_graph_signature_tracks_inference_mode_attention_and_segki_backend():
+def test_graph_signature_tracks_inference_mode_attention_and_segki_backend(monkeypatch):
+    from deepspeed.module_inject import segment_ki
+    # segki_refresh below advances the process-wide generation; keep it from leaking into other tests.
+    monkeypatch.setattr(segment_ki, "_BACKEND_GENERATION", segment_ki._BACKEND_GENERATION)
     module = torch.nn.Linear(2, 2)
     module.config = PretrainedConfig()
     module.config._attn_implementation = "sdpa"
@@ -102,6 +105,36 @@ def test_graph_signature_tracks_inference_mode_attention_and_segki_backend():
     from deepspeed.module_inject.segment_ki import segki_refresh
     segki_refresh(other)
     assert signature() != base
+
+
+def test_rollout_without_segki_refreshes_kernels_another_rollout_installed(monkeypatch):
+    from deepspeed.module_inject import segment_ki
+    monkeypatch.setattr(segment_ki, "_BACKEND_GENERATION", segment_ki._BACKEND_GENERATION)
+    model = torch.nn.Sequential(torch.nn.Linear(2, 2))
+    model.config = PretrainedConfig()
+    rollout = HybridEngineRollout(SimpleNamespace(module=model), _make_tokenizer())
+    assert not rollout.use_segki
+    device = torch.device("cpu")
+
+    def signature():
+        return rollout._graph_signature(model, 1, 8, device, torch.float32)
+
+    # Without injected kernels the graphs read only the parameters, so an in-place sync keeps them.
+    rollout._static_graph_state = kept = object()
+    rollout.refresh_weights()
+    assert rollout._static_graph_state is kept
+    assert not hasattr(model, "_ki_refresh_generation")
+
+    # Another rollout over the same model installs segment kernels, which cache tensors derived from the weights.
+    linear = model[0]
+    linear._ki_attn_op = object()
+    linear._ki_attn_cat_w = (linear.weight, linear.weight.detach().clone())
+    before = signature()
+    rollout.refresh_weights()
+    assert rollout._static_graph_state is None
+    assert not hasattr(linear, "_ki_attn_cat_w")
+    # A refresh through either rollout invalidates graphs that replay the injected kernels.
+    assert signature() != before
 
 
 def test_recapture_is_agreed_over_the_hybrid_engine_inference_tp_group(monkeypatch):

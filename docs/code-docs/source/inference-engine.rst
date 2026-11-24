@@ -84,9 +84,11 @@ dtype, parameter layout, training mode and autocast setting. The prompt is still
 prefilled eagerly on every call, so one graph serves all prompt widths with the
 same total length. In-place weight updates, such as an optimizer step, are
 replayed without recapturing. The graph and cache stay allocated between
-rollouts until the shape changes or ``rollout.shutdown()`` releases them. With
-``use_segki=True``, ``sync_weights()`` and ``refresh_weights()`` also release
-them, because the injected kernels cache tensors derived from the weights.
+rollouts until the shape changes or ``rollout.shutdown()`` releases them. When
+segment kernels are installed on the model, by this rollout's ``use_segki=True``
+or by another rollout over the same model, ``sync_weights()`` and
+``refresh_weights()`` also release them, because the injected kernels cache
+tensors derived from the weights.
 
 Shared Prompt Prefill
 ---------------------
@@ -128,7 +130,7 @@ Scope and semantics
   graph. ``sync_weights()`` / ``refresh_weights()`` drop the derived weight
   caches and release the graph, so the next call recaptures with the trained
   weights. Updating weights without calling either of them is not supported
-  while segment kernels are enabled.
+  while segment kernels are installed on the model.
 - **Packed (varlen) sequences**: the GDN conv/scan wrappers forward the
   packed-sequence boundary markers (``seq_idx`` / ``cu_seqlens``) exactly as
   the native forward does; packed *training* (gradients through the packed
