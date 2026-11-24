@@ -613,6 +613,7 @@ class DeepSpeedEngine(Module):
             # Head counts were recorded against the whole model; the parameters are shards now.
             from deepspeed import resolve_per_head_muon_after_sharding
             resolve_per_head_muon_after_sharding(model)
+        self._configure_quantization(model)
         see_memory_usage("DeepSpeed Engine: After args sanity test", force=self.memory_breakdown())
         self._set_distributed_vars(args)
 
@@ -946,6 +947,19 @@ class DeepSpeedEngine(Module):
             from deepspeed import set_optimizer_flags
             set_optimizer_flags(self._config, model)
         return replacement_sources
+
+    def _configure_quantization(self, model):
+        recipe = self._config.quantization_config.subchannel
+        if not recipe.enabled:
+            return
+        # Runs after AutoEP has created the grouped experts and before ZeRO wraps the parameters.
+        if self.pipeline_parallelism:
+            raise ValueError("quantization.subchannel does not support PipelineModule yet.")
+        if self.autotp_size() > 1:
+            raise ValueError("quantization.subchannel does not support AutoTP yet: the tensor-parallel layers "
+                             "replace nn.Linear and would run unquantized.")
+        from deepspeed.runtime.quantization.subchannel import convert_to_subchannel_quantization
+        convert_to_subchannel_quantization(model, recipe)
 
     def _autoep_zero3_param_converter(self, model):
         if not self.zero_optimization_partition_weights():
