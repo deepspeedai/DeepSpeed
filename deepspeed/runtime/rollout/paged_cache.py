@@ -87,6 +87,10 @@ class PagedAttentionCache:
             or (getattr(text_config, "hidden_size") // getattr(text_config, "num_attention_heads")))
         self.device = torch.device(device)
         self.dtype = dtype
+        if DtypeEnum(dtype) not in BlockedFlashAttn.supported_dtypes:
+            supported = "/".join(str(dtype_enum.value) for dtype_enum in BlockedFlashAttn.supported_dtypes)
+            raise ValueError(f"paged cache requires {supported} K/V, got {dtype}: the blocked-attention kernel "
+                             "has no fp32 path. Load the model in bf16/fp16, or use the dense cache.")
         self.max_cache_len = int(max_cache_len)
         self.max_batch_size = int(batch_size)
         expected_block_size = get_kv_block_size(self.head_dim)
@@ -518,6 +522,17 @@ class PagedAttentionCache:
         blocks = self.block_ids[rows].gather(1, block_indices)
         return blocks * self.block_size + positions % self.block_size
 
+    def prepare_row(self, target_row: int, num_tokens: int) -> None:
+        """Size a row's block chain for ``num_tokens`` before its K/V is written.
+
+        Call this once per row, not once per layer: releasing and re-reserving the
+        chain between layers returns the same blocks in a different order, so the
+        layers would disagree about which physical block holds which position.
+        """
+        if not self._graph_safe:
+            self._free_row(target_row)
+        self._ensure_blocks(target_row, num_tokens)
+
     def copy_from_dense(
         self,
         layer_idx: int,
@@ -525,20 +540,26 @@ class PagedAttentionCache:
         values: torch.Tensor,
         target_row: int,
         valid_mask: Optional[torch.Tensor] = None,
+        prepared: bool = False,
     ) -> None:
-        """Copy one dense prefill row into a clean block-table row.
+        """Copy one dense prefill row into a block-table row.
 
         ``keys``/``values`` are ``[heads, prompt_len, head_dim]``. A left-padded
         prompt passes ``valid_mask``; only its real tokens are copied, so the
         paged row starts at column zero and decode positions stay compact.
+
+        A caller that copies several layers into the same row must size it once with
+        ``prepare_row`` and pass ``prepared=True`` for every layer: releasing and
+        re-reserving the chain between layers hands the same blocks back in a
+        different order, which would leave the earlier layers' K/V in blocks the
+        final table no longer names.
         """
         if valid_mask is not None:
             keys = keys[:, valid_mask]
             values = values[:, valid_mask]
         prompt_len = keys.shape[1]
-        if not self._graph_safe:
-            self._free_row(target_row)
-        self._ensure_blocks(target_row, prompt_len)
+        if not prepared:
+            self.prepare_row(target_row, prompt_len)
         positions = torch.arange(prompt_len, device=self.device)
         slots = self._slots(torch.tensor([target_row], device=self.device), positions[:1], prompt_len)[0]
         key_view = self._key_views[layer_idx].view(-1, self.num_kv_heads, self.head_dim)
@@ -841,6 +862,21 @@ def _paged_qwen3_forward(
     return attn_output, None
 
 
+def _reject_tensor_parallel_shards(attention) -> None:
+    """Fail closed on AutoTP shards, whose head counts are rank-local.
+
+    AutoTP shards the Q/K/V projections, so the model config's head counts are
+    model-global while each rank emits rank-local heads. The dense cache sizes its
+    layers from the first prefill's tensors for this reason; the paged cache sizes
+    its pool at construction, so it rejects the shards instead of allocating the
+    wrong geometry.
+    """
+    for name in ("q_proj", "k_proj", "v_proj"):
+        if getattr(getattr(attention, name, None), "is_tp_parallel", False):
+            raise ValueError("paged cache does not support tensor-parallel attention shards yet; "
+                             "run the rollout without AutoTP or use the dense cache")
+
+
 def install_paged_attention(module) -> list:
     """Patch Qwen3 attention modules to use paged attention when handed a paged cache.
 
@@ -853,6 +889,7 @@ def install_paged_attention(module) -> list:
         if type(submodule).__name__ != "Qwen3Attention":
             continue
         found += 1
+        _reject_tensor_parallel_shards(submodule)
         if getattr(submodule, "_paged_original_forward", None) is not None:
             continue
         submodule._paged_original_forward = submodule.forward

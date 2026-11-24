@@ -247,6 +247,11 @@ def main():
     model = build_model(args, device, dtype)
     workload = build_workload(args, model, device)
     variants = build_variants(args)
+    if args.dtype == "fp32":
+        # The blocked-attention kernel has no fp32 path, so the paged cells would only
+        # report that rejection; the dense baseline is what fp32 can measure here.
+        print("NOTE: the paged cache needs fp16/bf16 K/V; skipping the paged variants for --dtype fp32.\n")
+        variants = [variant for variant in variants if not variant[1].get("use_paged_cache")]
     print(f"device={device} dtype={dtype} model={args.model or 'random-qwen3'} "
           f"batch={args.batch_size} prompt_len={args.prompt_len} new_tokens={args.max_new_tokens} "
           f"paged_prefill={args.paged_prefill} prefix_reuse={args.prefix_reuse}\n")

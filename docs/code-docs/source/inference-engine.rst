@@ -357,12 +357,13 @@ allocation and the blocked-attention kernel reads each row through its table, so
 no dense attention mask is built and capacity is not sized worst-case. The cache
 needs an engine-owned decode loop -- continuous batching
 (``SamplingConfig.continuous_batch_size``), the continuous-graph path, or the
-single-batch graph path (``use_graph_capture=True``) -- plus a Qwen3 model and a
-CUDA device with compute capability 8.0 or newer. Generating without one of those
-loops is refused instead of silently running dense, because HuggingFace's
-``generate()`` owns its decode loop and never advances the paged write positions.
-The cache is rejected together with ``align_decode_fronts``, ``adaptive_prefill``
-and ``enable_cache_trimming``.
+single-batch graph path (``use_graph_capture=True``) -- plus a Qwen3 model, a
+CUDA device with compute capability 8.0 or newer, and fp16/bf16 K/V (the
+blocked-attention kernel has no fp32 path, so an fp32 model is rejected at cache
+construction). Generating without one of those loops is refused instead of
+silently running dense, because HuggingFace's ``generate()`` owns its decode loop
+and never advances the paged write positions. The cache is rejected together with
+``align_decode_fronts``, ``adaptive_prefill`` and ``enable_cache_trimming``.
 
 ``enable_paged_prefill=True`` writes prompts straight into pages on the
 continuous-batching paths, one request at a time, with the left padding dropped

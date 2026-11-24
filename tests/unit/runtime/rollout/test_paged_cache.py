@@ -6,7 +6,7 @@ import torch
 
 from types import SimpleNamespace
 
-from deepspeed.inference.v2.kernels.ragged_ops.blocked_flash.blocked_flash import get_kv_block_size
+from deepspeed.inference.v2.kernels.ragged_ops.blocked_flash.blocked_flash import BlockedFlashAttn, get_kv_block_size
 from deepspeed.runtime.rollout.paged_cache import PagedAttentionCache
 
 
@@ -302,3 +302,138 @@ def test_prefix_reuse_shares_blocks_and_releases_after_last_row():
     torch.testing.assert_close(row_keys, keys[0])
     cache.clear_row(1)
     assert cache.blocks_in_use == 0
+
+
+# ---------------------------------------------------------------------------
+# Kernel-free coverage.
+#
+# The block table, the per-row write positions and the atom table are plain tensor
+# logic; the blocked-attention op only needs them to describe valid work. Stubbing
+# the CUDA-only pieces (block sizes, block pool, attention kernel) runs all of that
+# real code on any device, which is where the contracts below are pinned. The
+# kernels themselves are covered by the tests above.
+# ---------------------------------------------------------------------------
+
+BLOCK_SIZE = 8
+
+
+class _FakePool:
+    """BlockedKVCache stand-in with the same reserve/free/get_cache contract."""
+
+    def __init__(self, configs, memory_config, *args, **kwargs):
+        config = configs[0]
+        layers, heads, head_dim = config.cache_shape
+        self.cache = torch.zeros((layers, memory_config.size, config.block_size, 2, heads, head_dim))
+        self.free_blocks = list(range(memory_config.size - 1, -1, -1))
+
+    def get_cache(self, cache_id):
+        return self.cache[cache_id]
+
+    def reserve(self, num_blocks):
+        if len(self.free_blocks) < num_blocks:
+            raise RuntimeError("block pool exhausted")
+        return torch.tensor([self.free_blocks.pop() for _ in range(num_blocks)], dtype=torch.int32)
+
+    def free(self, blocks):
+        self.free_blocks.extend(int(block) for block in blocks)
+
+
+class _RecordingKernel:
+    """BlockedFlashAttn stand-in: records the atoms it is handed and writes zeros."""
+
+    # The cache validates the K/V dtype against the real kernel's supported set.
+    supported_dtypes = BlockedFlashAttn.supported_dtypes
+    calls = []
+
+    def __init__(self, head_size, dtype):
+        self.head_size = head_size
+
+    def __call__(self, out, q, k, v, atoms, scale):
+        _RecordingKernel.calls.append({"atoms": atoms.clone(), "query_rows": q.shape[0]})
+        out.zero_()
+        return out
+
+
+@pytest.fixture
+def stubbed_ops(monkeypatch):
+    """Real cache logic on this device, with the CUDA-only ops stubbed out."""
+    from deepspeed.runtime.rollout import paged_cache
+
+    monkeypatch.setattr(paged_cache, "get_kv_block_size", lambda head_dim: BLOCK_SIZE)
+    monkeypatch.setattr(paged_cache, "get_q_block_size", lambda head_dim: BLOCK_SIZE // 2)
+    monkeypatch.setattr(paged_cache, "BlockedKVCache", _FakePool)
+    monkeypatch.setattr(paged_cache, "BlockedFlashAttn", _RecordingKernel)
+    _RecordingKernel.calls = []
+    return _RecordingKernel.calls
+
+
+def _make_cache(batch_size, max_cache_len, num_kv_heads=2, num_heads=4, head_dim=64, dtype=torch.bfloat16):
+    return PagedAttentionCache(_config(num_kv_heads, num_heads, head_dim),
+                               batch_size=batch_size,
+                               max_cache_len=max_cache_len,
+                               device=torch.device("cpu"),
+                               dtype=dtype,
+                               block_size=BLOCK_SIZE)
+
+
+def test_layered_prefill_keeps_one_block_table_per_row(stubbed_ops):
+    """Every layer of one prompt must be copied through the same block table.
+
+    Sizing the row once per layer releases and re-reserves its chain, and the allocator
+    hands the same blocks back in a different order: the earlier layers' K/V then sits
+    in blocks the final table no longer names, so reading a row back permutes it.
+    """
+    cache = _make_cache(batch_size=1, max_cache_len=6 * BLOCK_SIZE)
+    cache.set_write_position(torch.zeros(1, dtype=torch.long))
+    prompt_len = 3 * BLOCK_SIZE
+    keys_by_layer = [torch.randn(cache.num_kv_heads, prompt_len, cache.head_dim) for _ in range(cache.num_layers)]
+
+    cache.prepare_row(0, prompt_len)
+    for layer_idx, keys in enumerate(keys_by_layer):
+        cache.copy_from_dense(layer_idx, keys, keys.clone(), 0, prepared=True)
+
+    for layer_idx, keys in enumerate(keys_by_layer):
+        stored_keys, stored_values = cache.materialize(layer_idx, 0, prompt_len)
+        torch.testing.assert_close(stored_keys, keys)
+        torch.testing.assert_close(stored_values, keys)
+
+
+def test_prepare_row_reuses_the_table_across_layers(stubbed_ops):
+    """The row's block table must not change between layers of the same prompt."""
+    cache = _make_cache(batch_size=1, max_cache_len=6 * BLOCK_SIZE)
+    cache.set_write_position(torch.zeros(1, dtype=torch.long))
+    prompt_len = 3 * BLOCK_SIZE
+    keys = torch.randn(cache.num_kv_heads, prompt_len, cache.head_dim)
+
+    cache.prepare_row(0, prompt_len)
+    table_after_prepare = cache.block_ids[0].clone()
+    for layer_idx in range(cache.num_layers):
+        cache.copy_from_dense(layer_idx, keys, keys.clone(), 0, prepared=True)
+        assert torch.equal(cache.block_ids[0], table_after_prepare)
+
+
+def test_paged_cache_rejects_unsupported_kv_dtype(stubbed_ops):
+    """The blocked-attention kernel has no fp32 path, so fp32 must fail at construction."""
+    with pytest.raises(ValueError, match="no fp32 path"):
+        _make_cache(batch_size=1, max_cache_len=4 * BLOCK_SIZE, dtype=torch.float32)
+
+
+def test_paged_cache_rejects_tensor_parallel_shards(stubbed_ops):
+    """AutoTP shards the projections, so the config's head counts are not the local ones."""
+    from deepspeed.runtime.rollout.paged_cache import install_paged_attention
+
+    transformers = pytest.importorskip("transformers")
+    config = transformers.Qwen3Config(vocab_size=32,
+                                      hidden_size=32,
+                                      intermediate_size=64,
+                                      num_hidden_layers=1,
+                                      num_attention_heads=4,
+                                      num_key_value_heads=2,
+                                      head_dim=8,
+                                      pad_token_id=0)
+    model = transformers.Qwen3ForCausalLM(config)
+    install_paged_attention(model)
+
+    model.model.layers[0].self_attn.q_proj.is_tp_parallel = True
+    with pytest.raises(ValueError, match="tensor-parallel"):
+        install_paged_attention(model)

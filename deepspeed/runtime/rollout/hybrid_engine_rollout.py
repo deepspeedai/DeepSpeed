@@ -1380,14 +1380,19 @@ class HybridEngineRollout(RolloutEngine):
             if self.use_paged_cache:
                 # The paged row starts at column zero: padding is dropped and the K/V is
                 # written straight into the row's blocks, so no dense columns are reserved.
-                for layer_idx in range(self._cache_layer_count(prefill_cache)):
-                    prefill_keys, prefill_values = self._cache_layer_tensors(prefill_cache, layer_idx)
-                    for source_row, target_row in enumerate(target_slots):
-                        valid = prompt_attention[source_row].bool()
-                        cache.copy_from_dense(layer_idx, prefill_keys[source_row], prefill_values[source_row],
-                                              target_row, valid)
+                # Size each row once, then copy every layer through that same table.
                 for source_row, target_row in enumerate(target_slots):
-                    valid_len = int(prompt_attention[source_row].sum())
+                    valid = prompt_attention[source_row].bool()
+                    valid_len = int(valid.sum())
+                    cache.prepare_row(target_row, valid_len)
+                    for layer_idx in range(self._cache_layer_count(prefill_cache)):
+                        prefill_keys, prefill_values = self._cache_layer_tensors(prefill_cache, layer_idx)
+                        cache.copy_from_dense(layer_idx,
+                                              prefill_keys[source_row],
+                                              prefill_values[source_row],
+                                              target_row,
+                                              valid,
+                                              prepared=True)
                     attention_mask[target_row].zero_()
                     attention_mask[target_row, :valid_len] = 1
                     write_positions[target_row] = valid_len
@@ -2136,6 +2141,14 @@ class HybridEngineRollout(RolloutEngine):
         is_hybrid = "linear_attention" in (getattr(getattr(module.config, "text_config", module.config), "layer_types",
                                                    None) or [])
         prefill_mask = {"full_attention": None, "linear_attention": None} if is_hybrid else prompt_attn
+        # Paged rows are stored compactly, with the left padding dropped, so their prefill
+        # must use mask-derived positions as well: the model's default arange(prompt_len)
+        # rotates the real tokens as if the padding were still in front of them, and the
+        # compact decode front would then sit one padding-length short of the last prompt
+        # position. The dense layout keeps the padding in its columns, so it keeps the
+        # padded positions.
+        prefill_positions = self._prefill_position_ids(prompt_attn) if self.use_paged_cache else None
+        prefill_kwargs = {} if prefill_positions is None else {"position_ids": prefill_positions}
         prefill_out = module(
             prompt_ids,
             attention_mask=prefill_mask,
@@ -2145,6 +2158,7 @@ class HybridEngineRollout(RolloutEngine):
             # otherwise, which D2H-syncs and aborts stream capture on some
             # model/cache combinations (reproduced with LLaMA + StaticCache)
             cache_position=torch.arange(prompt_len, device=device),
+            **prefill_kwargs,
             **self._last_logits_kwargs(module),
         )
         next_token = next_tokens(prefill_out.logits[:, -1, :])
@@ -2160,13 +2174,19 @@ class HybridEngineRollout(RolloutEngine):
             ds_cache = self._create_paged_cache(module, batch_size, max_len, device, model_dtype)
             ds_cache.enable_graph_safe()
             ds_cache.set_write_position(write_pos)
-            for layer_idx in range(self._cache_layer_count(prefill_cache)):
-                hf_keys, hf_values = self._cache_layer_tensors(prefill_cache, layer_idx)
-                for row in range(batch_size):
+            for row in range(batch_size):
+                valid = prompt_attn[row].bool()
+                ds_cache.prepare_row(row, int(valid.sum()))
+                for layer_idx in range(self._cache_layer_count(prefill_cache)):
+                    hf_keys, hf_values = self._cache_layer_tensors(prefill_cache, layer_idx)
                     # The prefill cache is sized to the whole decode span; only the
                     # prompt columns hold real KV.
-                    ds_cache.copy_from_dense(layer_idx, hf_keys[row][:, :prompt_len], hf_values[row][:, :prompt_len],
-                                             row, prompt_attn[row].bool())
+                    ds_cache.copy_from_dense(layer_idx,
+                                             hf_keys[row][:, :prompt_len],
+                                             hf_values[row][:, :prompt_len],
+                                             row,
+                                             valid,
+                                             prepared=True)
             row_fronts = write_pos.clone()
         else:
             ds_cache = DeepSpeedStaticCache(module.config, max_cache_len=max_len)
@@ -2351,9 +2371,15 @@ class HybridEngineRollout(RolloutEngine):
                 # argmax + buffer updates outside the graph. The kernel also
                 # only accepts CUDA bf16 logits — fp16 models must keep the
                 # PyTorch argmax path instead of failing during capture.
+                # It also indexes full_token_buf with write_pos, whose response region
+                # starts at the padded prompt width, and it never refreshes host-side
+                # decode metadata: a paged row's front is compact rather than padded, and
+                # FlashInfer's page plan is only refreshed from the host, so the paged
+                # cache keeps the Python loop that re-plans both before every replay.
                 is_greedy = sampling is None or sampling.temperature <= 0.0
                 if (batch_size == 1 and graph_op is not None and is_greedy and repetition_penalty == 1.0
-                        and static_logits.dtype is torch.bfloat16 and get_accelerator().on_accelerator(static_logits)):
+                        and static_logits.dtype is torch.bfloat16 and get_accelerator().on_accelerator(static_logits)
+                        and not self.use_paged_cache):
                     graph_op.decode_step_graph(static_logits[:, -1, :].contiguous(), static_token.view(batch_size, 1),
                                                write_pos, static_attn, full_token_buf)
                     step_kernel_mounted = True
