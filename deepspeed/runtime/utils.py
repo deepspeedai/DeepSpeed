@@ -10,6 +10,7 @@ Helper functions and classes from multiple sources.
 
 from collections.abc import Iterable
 import os
+import sys
 import psutil
 import gc
 from math import isfinite, sqrt
@@ -1265,10 +1266,12 @@ def reload_adam_states(optimizer, device, non_blocking: bool = False):
 def is_transformers_cache(obj):
     """Skip checks for the `transformers` cache class when performing AutoTP tensor comparisons.
 
-    DeepSpeedStaticCache follows that interface without subclassing it, and is a per-rank object too.
+    DeepSpeedStaticCache follows that interface without subclassing it, and is a per-rank object too. Its module is
+    looked up rather than imported: an instance implies it is loaded, and importing it would make every AutoTP
+    input check depend on a rollout module whose annotations need Python 3.10.
     """
-    from deepspeed.utils.static_cache import DeepSpeedStaticCache
-    if isinstance(obj, DeepSpeedStaticCache):
+    static_cache = sys.modules.get("deepspeed.utils.static_cache")
+    if static_cache is not None and isinstance(obj, static_cache.DeepSpeedStaticCache):
         return True
     try:
         from transformers.cache_utils import Cache

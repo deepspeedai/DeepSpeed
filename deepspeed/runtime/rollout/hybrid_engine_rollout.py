@@ -40,7 +40,7 @@ def _full_vocabulary_logits(module):
     """Have AutoTP's vocabulary-parallel output heads gather their logits while the rollout decodes."""
     modules = getattr(module, "modules", None)
     heads = [m for m in modules() if getattr(m, "is_vocab_parallel_lm_head", False)] if callable(modules) else []
-    previous = [head.gather_output for head in heads]
+    previous = [getattr(head, "gather_output", False) for head in heads]
     for head in heads:
         head.gather_output = True
     try:
@@ -272,11 +272,27 @@ class HybridEngineRollout(RolloutEngine):
                 return self._generate_continuous(request, sampling, sampling.continuous_batch_size)
             return self._generate_batched(request, sampling)
 
+    def _tensor_parallel_size(self):
+        """Return the AutoTP size from the engine, or from DeepSpeed's tensor-parallel group for wrapped engines."""
+        autotp_size = getattr(self.engine, "autotp_size", None)
+        if callable(autotp_size):
+            size = autotp_size()
+            if isinstance(size, int):
+                return size
+        if not dist.is_initialized():
+            return 1
+        from deepspeed.utils import groups
+        try:
+            size = groups.get_tensor_model_parallel_world_size()
+        except AssertionError:
+            return 1
+        logger.warning_once("HybridEngineRollout: the engine does not report autotp_size(); using the size of "
+                            f"DeepSpeed's tensor-parallel group ({size}) to share the random state.")
+        return size
+
     def _sync_rng_across_tp(self):
         """Share the random state across each AutoTP group, so that its ranks sample the same tokens."""
-        autotp_size = getattr(self.engine, "autotp_size", None)
-        autotp_size = autotp_size() if callable(autotp_size) else 1
-        if not isinstance(autotp_size, int) or autotp_size <= 1:
+        if self._tensor_parallel_size() <= 1:
             return
         from deepspeed.utils import groups
 
@@ -1601,8 +1617,11 @@ class HybridEngineRollout(RolloutEngine):
         """Ask models that support it for last-position logits only, since prefill samples just one token."""
         # Without this the prefill materializes [batch, prompt_len, vocab] logits, the largest activation of the
         # rollout. Models that do not declare the argument may forward unknown kwargs to submodules, so skip them.
-        if "logits_to_keep" in signature(module.forward).parameters:
-            return {"logits_to_keep": 1}
+        # Transformers 4.45-4.48 name the argument num_logits_to_keep.
+        parameters = signature(module.forward).parameters
+        for name in ("logits_to_keep", "num_logits_to_keep"):
+            if name in parameters:
+                return {name: 1}
         return {}
 
     @staticmethod
