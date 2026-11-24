@@ -168,6 +168,71 @@ def test_linear_matches_fp64(device, block_size):
         assert _rel_error(grad, ref.grad) < ERROR_BOUND["e4m3"]
 
 
+@pytest.mark.parametrize("dw", [{"format": "none"}, {"block_size": 0}, {"block_size": 128}])
+def test_single_expert_ignores_alignment_padding(dw):
+    """One local expert whose group ends before the rows AutoEP pads the buffer with.
+
+    No expert owns those rows, so nothing they hold may reach an output or a gradient; NaN stands in for
+    whatever they hold. The expert MLP must give the same result as on the buffer cut off at the group's end.
+    """
+    _require_fp8_kernels()
+    device = get_accelerator().current_device_name()
+    torch.manual_seed(6)
+    experts = GroupedExperts(64, 128, 1, use_grouped_mm=False)
+    for weight in experts.parameters():
+        nn.init.normal_(weight, std=0.1)
+    layer = nn.Module()
+    layer.experts = experts.to(device)
+    forward = {"stochastic_rounding": False}
+    dw = dict(dw, stochastic_rounding=False)
+    recipe = SubchannelQuantizedMatmulConfig(enabled=True, modules=["*"], forward=forward, dx=forward, dw=dw)
+    convert_to_subchannel_quantization(layer, recipe)
+
+    group_end, padding_rows = 16, 8
+    counts = torch.tensor([group_end], device=device)
+    rows = torch.randn(group_end, 64, device=device)
+    grad_out = torch.randn(group_end, 64, device=device)
+    padding = torch.full((padding_rows, 64), float("nan"), device=device)
+
+    def output_and_grads(x, grad):
+        experts.zero_grad()
+        x = x.clone().requires_grad_()
+        y = experts(x, counts)
+        y.backward(grad)
+        return [y.detach()[:group_end], x.grad[:group_end]] + [weight.grad.clone() for weight in experts.parameters()]
+
+    expected = output_and_grads(rows, grad_out)
+    padded = output_and_grads(torch.cat([rows, padding]), torch.cat([grad_out, padding]))
+    for actual, reference in zip(padded, expected):
+        torch.testing.assert_close(actual, reference, rtol=1e-4, atol=1e-6)
+
+
+@pytest.mark.parametrize("fmt,block_size", [("e4m3", 128), ("e4m3", 0), ("int8", 128)])
+def test_nan_reaches_outputs_and_gradients(device, fmt, block_size):
+    """A NaN operand must come out as NaN: stored as a finite value it would hide a diverged run."""
+    x = torch.ones(4, 128, device=device)
+    x[1, 5] = float("nan")
+    x.requires_grad_()
+    w = torch.ones(8, 128, device=device, requires_grad=True)
+    grad_out = torch.ones(4, 8, device=device)
+    grad_out[2, 3] = float("nan")
+
+    y = subchannel_linear(x, w, None, _recipe(fmt, block_size=block_size))
+    y.backward(grad_out)
+
+    clean_rows = [0, 2, 3]
+    assert torch.isnan(y[1]).all()
+    assert not torch.isnan(y[clean_rows]).any()
+    # dx = dy W: only token 2 has a NaN output gradient.
+    assert torch.isnan(x.grad[2]).all()
+    assert not torch.isnan(x.grad[[0, 1, 3]]).any()
+    # dw = dy^T x: the NaN of dy sits in output feature 3, the NaN of x in input feature 5.
+    assert torch.isnan(w.grad[3]).all()
+    assert torch.isnan(w.grad[:, 5]).all()
+    clean_inputs = [k for k in range(128) if k != 5]
+    assert not torch.isnan(w.grad[[0, 1, 2, 4, 5, 6, 7]][:, clean_inputs]).any()
+
+
 def test_hadamard_reduces_int8_outlier_error(device):
     """Activation outlier channels inflate an INT8 block scale; rotating the block spreads them out."""
     generator = torch.Generator().manual_seed(2)

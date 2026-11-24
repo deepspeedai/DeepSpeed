@@ -96,6 +96,11 @@ def reference_quantize(x: torch.Tensor, cfg: GemmQuantizationConfig) -> torch.Te
     return blocks.reshape(y.shape)
 
 
+def _one_group(rows: torch.Tensor) -> torch.Tensor:
+    """The group ends of a single group that owns every row of ``rows``."""
+    return torch.full((1, ), rows.shape[0], dtype=torch.int32, device=rows.device)
+
+
 def _group_bounds(group_ends: torch.Tensor):
     ends = group_ends.tolist()
     return list(zip([0] + ends[:-1], ends))
@@ -161,9 +166,8 @@ def _high_precision_rows_mm(a: torch.Tensor, b: torch.Tensor, group_ends: torch.
     return out
 
 
-def _high_precision_wgrad(dy: torch.Tensor, x: torch.Tensor, group_ends: torch.Tensor) -> torch.Tensor:
-    if group_ends.shape[0] == 1:
-        # Rows past the single group's end are padding; the dense caller has none.
+def _high_precision_wgrad(dy: torch.Tensor, x: torch.Tensor, group_ends: torch.Tensor | None) -> torch.Tensor:
+    if group_ends is None:
         return (dy.transpose(0, 1) @ x).unsqueeze(0)
     # Not torch._grouped_mm: on torch 2.8 its 2D x 2D form never returns when an expert has no tokens.
     out = dy.new_zeros(group_ends.shape[0], dy.shape[1], x.shape[1])
@@ -201,35 +205,46 @@ def _quantized_rows_mm(a: torch.Tensor, b: torch.Tensor, group_ends: torch.Tenso
     return block_scaled_grouped_mm(a_q[0], a_scale[0], b_q, b_scale, group_ends, cfg.block_size, a.dtype)
 
 
-def _rows_mm(a: torch.Tensor, b: torch.Tensor, group_ends: torch.Tensor, cfg: GemmQuantizationConfig) -> torch.Tensor:
+def _rows_mm(a: torch.Tensor, b: torch.Tensor, group_ends: torch.Tensor | None,
+             cfg: GemmQuantizationConfig) -> torch.Tensor:
     """``out[m] = a[m] b[e]^T`` for the rows ``m`` of group ``e``; ``a`` is ``[M, K]``, ``b`` ``[E, N, K]``.
 
-    Rows past the last group's end are zero.
+    Rows past the last group's end are zero. ``group_ends`` None is one group that owns every row.
     """
+    has_tail = group_ends is not None
+    if group_ends is None:
+        group_ends = _one_group(a)
     if cfg.quantized:
         out = _quantized_rows_mm(a, b, group_ends, cfg)
     else:
         out = _high_precision_rows_mm(a, b, group_ends).to(a.dtype)
-    if b.shape[0] > 1:
-        # No GEMM writes the rows past the last group (AutoEP alignment padding); keep them finite.
+    if has_tail:
+        # No GEMM owns the rows past the last group (AutoEP alignment padding); keep them finite.
         tail = torch.arange(a.shape[0], device=a.device) >= group_ends[-1]
         out = out.masked_fill(tail.unsqueeze(1), 0)
     return out
 
 
-def _wgrad(dy: torch.Tensor, x: torch.Tensor, group_ends: torch.Tensor, cfg: GemmQuantizationConfig,
+def _wgrad(dy: torch.Tensor, x: torch.Tensor, group_ends: torch.Tensor | None, cfg: GemmQuantizationConfig,
            out_dtype: torch.dtype) -> torch.Tensor:
-    """``out[e] = dy[rows(e)]^T x[rows(e)]``: ``[E, N, K]`` from ``dy`` ``[M, N]`` and ``x`` ``[M, K]``."""
+    """``out[e] = dy[rows(e)]^T x[rows(e)]``: ``[E, N, K]`` from ``dy`` ``[M, N]`` and ``x`` ``[M, K]``.
+
+    Rows past the last group's end belong to no expert and are left out. ``group_ends`` None is one group that
+    owns every row.
+    """
     if not cfg.quantized:
         return _high_precision_wgrad(dy, x, group_ends).to(out_dtype)
+    # Only a dense layer's group is known to span every row, which keeps the row-scaled kernels on their fastest
+    # loop. One expert's group can end before alignment padding, so it takes the grouped loop like any other.
+    spans = group_ends
+    if group_ends is None:
+        group_ends = _one_group(dy)
     if not _use_kernels(dy, cfg.format):
         _warn_reference_fallback(cfg.format, dy.device)
         return _reference_wgrad(dy, x, group_ends, cfg).to(out_dtype)
 
     if cfg.block_size == 0:
         from deepspeed.ops.triton_ops.subchannel_quant import quantize_rows, row_scaled_grouped_wgrad
-        # A dense layer's single group spans every row; telling the kernels so keeps them on their fastest loop.
-        spans = None if group_ends.shape[0] == 1 else group_ends
         options = dict(fmt=cfg.format, stochastic=cfg.stochastic_rounding, group_ends=spans)
         dy_q, dy_amax = quantize_rows(dy.transpose(0, 1).unsqueeze(0), seed=_random_seed(cfg), **options)
         x_q, x_amax = quantize_rows(x.transpose(0, 1).unsqueeze(0), seed=_random_seed(cfg), **options)
@@ -274,14 +289,15 @@ _run_eagerly = getattr(getattr(torch, "compiler", None), "disable", lambda fn: f
 
 
 @_run_eagerly
-def subchannel_grouped_matmul(x: torch.Tensor, weight: torch.Tensor, group_ends: torch.Tensor,
+def subchannel_grouped_matmul(x: torch.Tensor, weight: torch.Tensor, group_ends: torch.Tensor | None,
                               recipe: SubchannelQuantizedMatmulConfig) -> torch.Tensor:
     """``y[m] = x[m] weight[e]^T`` for the rows ``m`` of group ``e``, with quantized forward and backward GEMMs.
 
     Args:
         x: ``[M, K]`` activations, grouped contiguously by expert.
         weight: ``[E, N, K]`` expert weights, in the dtype of ``x``.
-        group_ends: ``[E]`` int32 cumulative row counts; rows past ``group_ends[-1]`` produce zeros.
+        group_ends: ``[E]`` int32 cumulative row counts; rows past ``group_ends[-1]`` produce zeros and take no
+            part in the gradients. None for a single group that owns every row.
         recipe: The three GEMMs' quantization settings.
     """
     return _SubchannelGroupedMatmul.apply(x, weight, group_ends, recipe)
@@ -291,8 +307,7 @@ def subchannel_linear(x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor 
                       recipe: SubchannelQuantizedMatmulConfig) -> torch.Tensor:
     """``F.linear`` with quantized forward and backward GEMMs."""
     rows = x.reshape(-1, x.shape[-1])
-    group_ends = torch.full((1, ), rows.shape[0], dtype=torch.int32, device=x.device)
-    out = subchannel_grouped_matmul(rows, weight.to(x.dtype).unsqueeze(0), group_ends, recipe)
+    out = subchannel_grouped_matmul(rows, weight.to(x.dtype).unsqueeze(0), None, recipe)
     out = out.reshape(*x.shape[:-1], weight.shape[0])
     if bias is not None:
         out = out + bias.to(out.dtype)

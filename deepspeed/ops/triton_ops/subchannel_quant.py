@@ -147,8 +147,11 @@ if _TRITON_AVAILABLE:
             x = _hadamard_butterfly(x, BLOCK_R, BLOCK_K, LOG_H)
             x = x * (1.0 / tl.sqrt(float(1 << LOG_H)))
 
-        amax = tl.max(tl.abs(x), axis=1)
-        scale = tl.where(amax > 0, amax / QMAX, 1.0)
+        # Reduce the bit patterns: non-negative floats order like them and a NaN sorts above every number, so a NaN
+        # in the block reaches the block's scale and through it every product of the block. A float maximum would
+        # drop it, and the clamp below would then store it as a finite value.
+        amax = tl.max(tl.abs(x).to(tl.int32, bitcast=True), axis=1).to(tl.float32, bitcast=True)
+        scale = tl.where(amax == 0, 1.0, amax / QMAX)
         y = x / scale[:, None]
 
         if STOCHASTIC:
@@ -354,9 +357,11 @@ if _TRITON_AVAILABLE:
         x_ptrs = (x_ptr + (rows // R)[:, None] * stride_xb + (rows % R)[:, None] * stride_xr +
                   offs_k[None, :].to(tl.int64) * stride_xk)
         x = tl.load(x_ptrs, mask=mask, other=0.0).to(tl.float32)
-        amax = tl.max(tl.abs(x), axis=1)
-        # Non-negative floats order like their bit patterns, so an integer atomic max merges the tiles of a row.
-        tl.atomic_max(amax_ptr + rows * NUM_GROUPS + group, amax.to(tl.int32, bitcast=True), mask=mask_r & (amax > 0))
+        # Non-negative floats order like their bit patterns, so an integer max reduces a tile and an integer atomic
+        # max merges the tiles of a row. A NaN sorts above every number: it becomes the row's maximum, and so
+        # reaches every product of the row through its scale, where a float maximum would drop it.
+        amax_bits = tl.max(tl.abs(x).to(tl.int32, bitcast=True), axis=1)
+        tl.atomic_max(amax_ptr + rows * NUM_GROUPS + group, amax_bits, mask=mask_r & (amax_bits > 0))
 
     @triton.jit
     def _quantize_rows_kernel(
