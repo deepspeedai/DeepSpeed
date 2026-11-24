@@ -101,6 +101,8 @@ lnav:
         url: /tutorials/one-cycle/
       - title: 'Pipeline Parallelism'
         url: /tutorials/pipeline/
+      - title: 'Reflow'
+        url: /tutorials/reflow/
       - title: 'Subchannel FP8/INT8 Quantized Training'
         url: /tutorials/subchannel-quantized-training/
       - title: 'Transformer Kernel'
