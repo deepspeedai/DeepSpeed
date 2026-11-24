@@ -261,6 +261,7 @@ Conduct](https://opensource.microsoft.com/codeofconduct/). For more information 
 35. Tingfeng Lan, Yusen Wu, Bin Ma, Zhaoyuan Su, Rui Yang, Tekin Bicer, Masahiro Tanaka, Olatunji Ruwase, Dong Li, Yue Cheng. (2025) ZenFlow: Enabling Stall-Free Offloading Training via Asynchronous Updates [arXiv:2505.12242](https://arxiv.org/abs/2505.12242)
 36. Kayhan Behdin, Ata Fatahibaarzi, Qingquan Song, Yun Dai, Aman Gupta, Zhipeng Wang, Hejian Sang, Shao Tang, Gregory Dexter, Sirou Zhu, Siyu Zhu, Tejas Dharamsi, Vignesh Kothapalli, Zhoutong Fu, Yihan Cao, Pin-Lun Hsu, Fedor Borisyuk, Natesh S. Pillai, Luke Simon, Rahul Mazumder.(2025) Scaling Down, Serving Fast: Compressing and Deploying Efficient LLMs for Recommendation Systems [EMNLP 2025](https://aclanthology.org/2025.emnlp-industry.119/)
 37. Xinyu Lian, Masahiro Tanaka, Olatunji Ruwase, Minjia Zhang. (2026) SuperOffload: Unleashing the Power of Large-Scale LLM Training on Superchips [arxiv](https://arxiv.org/abs/2509.21271), [ASPLOS 2026](https://www.asplos-conference.org/asplos2026)
+38. Seongtae Bang, Gyeongseo Park, Ki-Dong Kang, Hyunkyun Shin, Sungju Kim, Daehoon Kim. (2027) ReFlow: Exposing Parallelism in CPU-Offloaded LLM Training via Register-Resident SIMD Fusion and Decoupled Update Scheduling [ACM](https://dl.acm.org/doi/10.1145/3845814.3850051), [ASPLOS 2027](https://www.asplos-conference.org/asplos2027/)
 
 # Videos
 1. DeepSpeed KDD 2020 Tutorial

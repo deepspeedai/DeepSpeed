@@ -389,7 +389,14 @@ class CUDA_Accelerator(DeepSpeedAccelerator):
             # Host-side ops (the CPU optimizers, and async I/O, which stages device tensors through
             # host memory) need no CUDA to build, so they share their builders with the CPU accelerator.
             cpu_op_builder_module = importlib.import_module("{}.cpu".format(op_builder_dir))
-            for member_name in ["CPUAdamBuilder", "CPUAdagradBuilder", "CPULionBuilder", "AsyncIOBuilder"]:
+            for member_name in [
+                    "CPUAdamBuilder",
+                    "CPUAdagradBuilder",
+                    "CPULionBuilder",
+                    "ReflowCPUAdamBuilder",
+                    "ReflowCPULionBuilder",
+                    "AsyncIOBuilder",
+            ]:
                 self.class_dict[member_name] = getattr(cpu_op_builder_module, member_name)
             # end initialize for create_op_builder()
 
