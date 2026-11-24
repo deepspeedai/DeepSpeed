@@ -495,6 +495,43 @@ class TestRoutingWeightsAreApplied(unittest.TestCase):
         self.assertEqual(seen["combine_rows"].shape[0], self.ARRIVED_ROWS)
         self.assertTrue(torch.equal(seen["counts"], torch.tensor([3, 3, 3, 3], dtype=torch.int32)))
 
+    def test_activation_row_weighting_hands_the_weights_to_the_experts(self):
+        # The experts apply them inside the activation; nothing scales the expert output afterwards.
+        seen = {}
+
+        def experts(rows, counts, weight_grad_slot=None, *, row_weights=None):
+            seen["row_weights"] = row_weights
+            return rows * 2
+
+        prefix = torch.tensor([3, 6, 9, self.ARRIVED_ROWS], dtype=torch.int64)
+        handle = mock.Mock(psum_num_recv_tokens_per_expert=prefix, num_expanded_tokens=self.ARRIVED_ROWS)
+        exchange = mock.Mock(last_handle=handle, num_max_tokens_per_rank=1024)
+        received = torch.ones((self.BUFFER_ROWS, self.HIDDEN))
+        recv_weights = torch.full((self.BUFFER_ROWS, ), self.WEIGHT)
+        layer = mock.Mock(_deepep_exchange=exchange,
+                          num_local_experts=self.LOCAL_EXPERTS,
+                          score_apply="post",
+                          row_weighting_impl="activation",
+                          overlap_weight_grad=False,
+                          comm_num_sm=12,
+                          comm_qp_margin=4,
+                          experts=experts)
+        with mock.patch.object(auto_ep_layer, "deepep_dispatch",
+                               lambda *_args, **_kwargs: (received, recv_weights, exchange)), \
+                mock.patch.object(auto_ep_layer, "deepep_combine", lambda _exchange, rows, _handle: rows), \
+                mock.patch.object(auto_ep_layer, "apply_deepep_row_weights", side_effect=AssertionError("applied")):
+            router_output = auto_ep_layer.RouterOutput(
+                top_scores=torch.ones((4, 2)),
+                selected_experts=torch.zeros((4, 2), dtype=torch.long),
+                num_tokens_per_expert=torch.zeros(self.LOCAL_EXPERTS, dtype=torch.long),
+            )
+            tokens = torch.ones((4, self.HIDDEN), dtype=torch.bfloat16)
+            result = auto_ep_layer.AutoEPMoELayer._deepep_route(layer, tokens, router_output)
+
+        self.assertEqual(seen["row_weights"].shape, (self.ARRIVED_ROWS, ))
+        self.assertTrue(torch.equal(seen["row_weights"], torch.full((self.ARRIVED_ROWS, ), self.WEIGHT)))
+        self.assertTrue(torch.equal(result, torch.full((self.ARRIVED_ROWS, self.HIDDEN), 2.0)))
+
     def test_a_buffer_of_exactly_the_arrived_rows_is_used_without_slicing(self):
         # A slice would change nothing forward, but its backward zero-fills a
         # buffer-sized gradient and copies the real one into it. Pin that
@@ -881,7 +918,7 @@ class TestWeightGradOverlap(unittest.TestCase):
         ]
         self.target = torch.randn(self.TOKENS, self.HIDDEN)
 
-    def run_route(self, overlap, gate_up_impl="separate", checkpoint=None):
+    def run_route(self, overlap, gate_up_impl="separate", checkpoint=None, activation_weighting=False):
         from deepspeed.moe.ep_experts import ExpertWeightGradSlot, GroupedExperts
 
         log = []
@@ -918,7 +955,10 @@ class TestWeightGradOverlap(unittest.TestCase):
             handle = exchange.last_handle
             prefix = handle.psum_num_recv_tokens_per_expert
             counts = torch.diff(prefix, prepend=prefix.new_zeros(1)).to(torch.int32)
-            rows = experts(received, counts, slot) * recv_weights.reshape(-1, 1)
+            if activation_weighting:
+                rows = experts(received, counts, slot, row_weights=recv_weights)
+            else:
+                rows = experts(received, counts, slot) * recv_weights.reshape(-1, 1)
             return auto_ep_comm.deepep_combine(exchange, rows, handle)
 
         carveouts = []
@@ -950,6 +990,16 @@ class TestWeightGradOverlap(unittest.TestCase):
                     # The backward combine is launched before the weight gradients and read only after them.
                     self.assertEqual(log[-3:], ["combine_async", "weight_grads_with_12_sms_withheld", "wait"])
             self.assertEqual(serial_log, ["combine", "combine"])
+
+    def test_activation_row_gradients_compose_with_async_weight_gradients(self):
+        for gate_up_impl in ("separate", "fused"):
+            serial, _ = self.run_route(False, gate_up_impl, activation_weighting=True)
+            for checkpoint_mode in (None, "reentrant", "non_reentrant"):
+                with self.subTest(gate_up_impl=gate_up_impl, checkpoint=checkpoint_mode):
+                    overlap, log = self.run_route(True, gate_up_impl, checkpoint_mode, activation_weighting=True)
+                    for name, expected in serial.items():
+                        torch.testing.assert_close(overlap[name], expected, rtol=0, atol=0, msg=name)
+                    self.assertEqual(log[-3:], ["combine_async", "weight_grads_with_12_sms_withheld", "wait"])
 
     def test_the_sm_carveout_is_restored(self):
         torch._C._set_sm_carveout_experimental(None)
@@ -1449,9 +1499,11 @@ class TestSkipRecomputeCombine(unittest.TestCase):
                   routing=None,
                   steps=1,
                   training=True,
-                  outer_reentrant=False):
+                  outer_reentrant=False,
+                  row_weighting_impl="eager"):
         log = []
         layer = self.make_layer(log, skip, score_apply)
+        layer.row_weighting_impl = row_weighting_impl
         decoder = self.DecoderLayer(layer, self.gate, self.routing if routing is None else routing, checkpoint_func,
                                     reads_output)
         decoder.train(training)
@@ -1532,6 +1584,15 @@ class TestSkipRecomputeCombine(unittest.TestCase):
             self.assertEqual(normal_log,
                              ["dispatch", "combine", "dispatch", "combine", "cached_dispatch", "combine"] * 3)
             self.assertEqual(skipped_log, ["dispatch", "combine", "dispatch", "cached_dispatch", "combine"] * 3)
+
+    def test_activation_weighting_is_not_applied_twice_when_the_combine_is_skipped(self):
+        for routing in (self.routing, self.routing % (self.EXPERTS - 1)):
+            kwargs = dict(row_weighting_impl="activation", routing=routing, steps=2)
+            normal, normal_log = self.run_block(False, self.reentrant(), **kwargs)
+            skipped, skipped_log = self.run_block(True, self.reentrant(), **kwargs)
+            for name, expected in normal.items():
+                torch.testing.assert_close(skipped[name], expected, rtol=0, atol=0, msg=name)
+            self.assertEqual(skipped_log.count("combine"), normal_log.count("combine") - 2)
 
     def test_the_skipped_combine_returns_nan_so_a_reader_fails_loudly(self):
         normal, _ = self.run_block(False, self.reentrant(), reads_output=True)

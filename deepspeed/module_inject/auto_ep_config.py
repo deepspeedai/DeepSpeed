@@ -191,7 +191,7 @@ def validate_autoep_config(
                          f"got '{config.combine_impl}'")
 
     # Validate row_weighting_impl
-    valid_row_weighting_impl = ("auto", "eager", "fused")
+    valid_row_weighting_impl = ("auto", "eager", "fused", "activation")
     if config.row_weighting_impl not in valid_row_weighting_impl:
         raise ValueError(f"row_weighting_impl must be one of {valid_row_weighting_impl}, "
                          f"got '{config.row_weighting_impl}'")
@@ -241,6 +241,9 @@ def validate_autoep_config(
     if isinstance(rows_per_expert, bool) or not isinstance(rows_per_expert, int) or rows_per_expert < 0:
         raise ValueError(f"deferred_dw_rows_per_expert must be a non-negative integer, got {rows_per_expert!r}")
     if flush_period > 1:
+        if config.row_weighting_impl == "activation":
+            raise ValueError("row_weighting_impl=\"activation\" has not been validated with deferred_dw_flush_period "
+                             "> 1. Leave deferred_dw_flush_period at 1 or use the existing row-weighting path.")
         if not config.use_grouped_mm:
             raise ValueError("deferred_dw_flush_period stages the experts' torch._grouped_mm weight gradients, but "
                              "use_grouped_mm=false selects the sequential expert loop. Set use_grouped_mm=true, or "
@@ -256,13 +259,14 @@ def validate_autoep_config(
         raise ValueError("deferred_dw_rows_per_expert sizes the staging that deferred_dw_flush_period > 1 enables. "
                          "Set deferred_dw_flush_period, or leave deferred_dw_rows_per_expert unset.")
 
-    if config.row_weighting_impl == "fused":
+    if config.row_weighting_impl in ("fused", "activation"):
+        impl = config.row_weighting_impl
         if config.comm_backend != "deepep":
-            raise ValueError('row_weighting_impl="fused" only runs inside the DeepEP route, but '
+            raise ValueError(f'row_weighting_impl="{impl}" only runs inside the DeepEP route, but '
                              f'comm_backend="{config.comm_backend}" was selected. Set comm_backend to '
                              '"deepep", or leave row_weighting_impl unset.')
         if config.autoep_size == 1:
-            raise ValueError('row_weighting_impl="fused" only runs when DeepEP dispatch is active '
+            raise ValueError(f'row_weighting_impl="{impl}" only runs when DeepEP dispatch is active '
                              '(autoep_size > 1), but autoep_size=1. Increase autoep_size, or leave '
                              "row_weighting_impl unset.")
 
