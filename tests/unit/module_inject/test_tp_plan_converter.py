@@ -177,3 +177,121 @@ class TestTPPlanConverter:
 
         assert colwise_count == 4  # qkv + Wq/Wk/Wv
         assert rowwise_count == 1  # out_proj
+
+    def test_supplement_replicated_qk_norm_without_model(self):
+        """When column-wise q_proj and k_proj are specified without a model,
+        q_norm and k_norm are supplemented as replicated_with_grad_allreduce."""
+        hf_plan = {
+            "layers.*.self_attn.q_proj": "colwise",
+            "layers.*.self_attn.k_proj": "colwise",
+            "layers.*.self_attn.v_proj": "colwise",
+            "layers.*.self_attn.o_proj": "rowwise",
+        }
+        supplemented = TPPlanConverter.supplement_replicated_qk_norm(dict(hf_plan))
+        assert supplemented["layers.*.self_attn.q_norm"] == "replicated_with_grad_allreduce"
+        assert supplemented["layers.*.self_attn.k_norm"] == "replicated_with_grad_allreduce"
+        assert len(supplemented) == 6
+
+    def test_supplement_replicated_qk_norm_preserves_existing(self):
+        """Existing q_norm/k_norm entries in the plan are preserved without duplication."""
+        hf_plan = {
+            "layers.*.self_attn.q_proj": "colwise",
+            "layers.*.self_attn.k_proj": "colwise",
+            "layers.*.self_attn.q_norm": "replicated_with_grad_allreduce",
+        }
+        supplemented = TPPlanConverter.supplement_replicated_qk_norm(dict(hf_plan))
+        assert supplemented["layers.*.self_attn.q_norm"] == "replicated_with_grad_allreduce"
+        assert supplemented["layers.*.self_attn.k_norm"] == "replicated_with_grad_allreduce"
+        assert len(supplemented) == 4
+
+    def test_supplement_replicated_qk_norm_with_model_without_norm(self):
+        """When a model is supplied that has no q_norm or k_norm parameters (like LLaMA),
+        no unnecessary norm specs are added."""
+        import torch.nn as nn
+
+        class DummyModel(nn.Module):
+
+            def __init__(self):
+                super().__init__()
+                self.layers = nn.ModuleList([
+                    nn.ModuleDict({
+                        "self_attn":
+                        nn.ModuleDict({
+                            "q_proj": nn.Linear(32, 32),
+                            "k_proj": nn.Linear(32, 32),
+                            "o_proj": nn.Linear(32, 32),
+                        })
+                    })
+                ])
+
+        model = DummyModel()
+        hf_plan = {
+            "layers.*.self_attn.q_proj": "colwise",
+            "layers.*.self_attn.k_proj": "colwise",
+            "layers.*.self_attn.o_proj": "rowwise",
+        }
+        supplemented = TPPlanConverter.supplement_replicated_qk_norm(dict(hf_plan), model=model)
+        assert "layers.*.self_attn.q_norm" not in supplemented
+        assert "layers.*.self_attn.k_norm" not in supplemented
+        assert len(supplemented) == 3
+
+    def test_get_hf_tp_plan_supplements_older_transformers_qwen3(self):
+        """Simulate transformers < 5.3 where base_model_tp_plan lacks q_norm/k_norm.
+        _get_hf_tp_plan should supplement them, and TPPlanConverter should mark them
+        as PartitionType.SKIP with grad_allreduce=True."""
+        import torch.nn as nn
+        from deepspeed.runtime.tensor_parallel.config import _get_hf_tp_plan
+
+        class MockQwen3Config:
+            base_model_tp_plan = {
+                "layers.*.self_attn.q_proj": "colwise",
+                "layers.*.self_attn.k_proj": "colwise",
+                "layers.*.self_attn.v_proj": "colwise",
+                "layers.*.self_attn.o_proj": "rowwise",
+                "layers.*.mlp.gate_proj": "colwise",
+                "layers.*.mlp.up_proj": "colwise",
+                "layers.*.mlp.down_proj": "rowwise",
+            }
+
+        class MockQwen3Attention(nn.Module):
+
+            def __init__(self):
+                super().__init__()
+                self.q_proj = nn.Linear(32, 32)
+                self.k_proj = nn.Linear(32, 32)
+                self.v_proj = nn.Linear(32, 32)
+                self.o_proj = nn.Linear(32, 32)
+                self.q_norm = nn.LayerNorm(32)
+                self.k_norm = nn.LayerNorm(32)
+
+        class MockQwen3Model(nn.Module):
+
+            def __init__(self):
+                super().__init__()
+                self.config = MockQwen3Config()
+                self.layers = nn.ModuleList([
+                    nn.ModuleDict({
+                        "self_attn": MockQwen3Attention(),
+                        "mlp": nn.ModuleDict({
+                            "gate_proj": nn.Linear(32, 64),
+                            "up_proj": nn.Linear(32, 64),
+                            "down_proj": nn.Linear(64, 32),
+                        }),
+                    })
+                ])
+
+        model = MockQwen3Model()
+        plan = _get_hf_tp_plan(model)
+        assert plan is not None
+        assert plan["layers.*.self_attn.q_norm"] == "replicated_with_grad_allreduce"
+        assert plan["layers.*.self_attn.k_norm"] == "replicated_with_grad_allreduce"
+
+        specs = TPPlanConverter.convert(plan)
+        q_norm_spec = [s for s in specs if "q_norm" in s.patterns[0]][0]
+        k_norm_spec = [s for s in specs if "k_norm" in s.patterns[0]][0]
+
+        assert q_norm_spec.partition_type == PartitionType.SKIP
+        assert q_norm_spec.grad_allreduce is True
+        assert k_norm_spec.partition_type == PartitionType.SKIP
+        assert k_norm_spec.grad_allreduce is True
+

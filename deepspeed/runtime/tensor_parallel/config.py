@@ -186,4 +186,8 @@ def _get_hf_tp_plan(model):
             merged_plan[pattern] = style
             canonical_patterns.add(canonical_pattern)
 
+    if merged_plan:
+        from deepspeed.module_inject.tp_plan_converter import TPPlanConverter
+        TPPlanConverter.supplement_replicated_qk_norm(merged_plan, model)
+
     return merged_plan or None
