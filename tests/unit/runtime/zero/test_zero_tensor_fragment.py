@@ -58,6 +58,48 @@ def test_full_gradient_reconstruction_uses_only_the_owned_fragment(monkeypatch, 
         torch.testing.assert_close(actual, reference, rtol=0, atol=0)
 
 
+def _link_first_half(param):
+    link_hp_params(lp_param_list=[param],
+                   flat_hp_partition=torch.zeros(2, device=param.device),
+                   gradient_dict={},
+                   offload_gradient_dict={},
+                   use_offload=False,
+                   param_group_index=0,
+                   partition_start=0,
+                   partition_size=2,
+                   dp_group=object())
+
+
+def test_fragment_mapping_does_not_keep_the_gradient_accumulator_alive():
+    # Autograd runs a parameter's gradient hooks on the stream that was current when its AccumulateGrad node
+    # was created. A mapping that kept the node alive would pin every later backward to the stream of link time.
+    param = torch.nn.Parameter(torch.zeros(4))
+    _link_first_half(param)
+    reused = []
+    for _ in range(2):
+        loss = (param * 2).sum()
+        node = torch.autograd.graph.get_gradient_edge(param).node
+        reused.append("from_earlier_iteration" in node.metadata)
+        node.metadata["from_earlier_iteration"] = True
+        loss.backward()
+        del loss, node
+    assert reused == [False, False]
+
+
+@pytest.mark.skipif(get_accelerator().resolves_data_dependency() or not get_accelerator().is_available(),
+                    reason="Requires an accelerator with streams")
+def test_gradient_hook_runs_on_the_backward_stream_after_linking():
+    accelerator = get_accelerator()
+    param = torch.nn.Parameter(torch.zeros(4, device=accelerator.device_name()))
+    _link_first_half(param)
+    hook_streams = []
+    param.register_post_accumulate_grad_hook(lambda _: hook_streams.append(accelerator.current_stream()))
+    stream = accelerator.Stream()
+    with accelerator.stream(stream):
+        (param * 2).sum().backward()
+    assert hook_streams == [stream]
+
+
 def validate_tensor(model, api_type, opt_states):
     assert api_type in ["full", "local"]
     for _, lp in model.named_parameters():
