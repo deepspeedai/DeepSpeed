@@ -59,7 +59,7 @@ The dictionary provided under the ``zero_optimization`` entry of the main
 DeepSpeed configuration dict will be parsed and validated with this class.
 Sub-configurations for parameter offload and optimizer offload settings are
 parsed by `DeepSpeedZeroOffloadParamConfig`_ and
-`DeepSpeedZeroOffloadOptimizerConfig`_.
+`DeepSpeedZeroOffloadOptimizerConfig`_, and the Reflow settings by `ReflowConfig`_.
 
 .. _DeepSpeedZeroConfig:
 .. autopydantic_model:: deepspeed.runtime.zero.config.DeepSpeedZeroConfig
@@ -69,6 +69,9 @@ parsed by `DeepSpeedZeroOffloadParamConfig`_ and
 
 .. _DeepSpeedZeroOffloadOptimizerConfig:
 .. autopydantic_model:: deepspeed.runtime.zero.config.DeepSpeedZeroOffloadOptimizerConfig
+
+.. _ReflowConfig:
+.. autopydantic_model:: deepspeed.runtime.reflow.reflow_config.ReflowConfig
 
 
 Example ZeRO-3 Configurations

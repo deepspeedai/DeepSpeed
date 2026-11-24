@@ -57,7 +57,7 @@ static __m512 load_16_bf16_as_f32(const void* data)
     return readAs<__m512>(&c);             // use memcpy to avoid aliasing
 }
 
-static void store_16_f32_as_bf16_nearest(__m512 v, void* data)
+static inline __m256i pack_f32_as_bf16_nearest(__m512 v)
 {
     __m512i u32 = readAs<__m512i>(&v);
 
@@ -84,9 +84,12 @@ static void store_16_f32_as_bf16_nearest(__m512 v, void* data)
 
     // mix in results with nans as needed
     __m256i nans = _mm256_set1_epi16(0x7fc0);
-    __m256i res = _mm256_mask_mov_epi16(non_nan_res, nan_mask, nans);
+    return _mm256_mask_mov_epi16(non_nan_res, nan_mask, nans);
+}
 
-    writeAs(data, res);
+static void store_16_f32_as_bf16_nearest(__m512 v, void* data)
+{
+    writeAs(data, pack_f32_as_bf16_nearest(v));
 }
 #define SIMD_LOAD_BF16(x) load_16_bf16_as_f32(x)
 #define SIMD_STORE_BF16(x, d) store_16_f32_as_bf16_nearest(d, x)
