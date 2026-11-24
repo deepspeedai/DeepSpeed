@@ -305,7 +305,6 @@ class DeepSpeedCheckpoint(object):
         layers_per_pp = 1
         if self.pp_degree > 0:
             layers_per_pp = len(transformer_layer_keys) // self.pp_degree
-        #print(f"{transformer_layer_keys} {layers_per_pp}")
         for key_index, layer_key in enumerate(transformer_layer_keys):
             pp_index = key_index // layers_per_pp
             layer_files = get_files_with_prefix(self.layer_files, layer_key + '-')

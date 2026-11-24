@@ -11,6 +11,7 @@ from deepspeed.runtime.config_utils import get_scalar_param, pp_int, DeepSpeedCo
 from deepspeed.utils import logger
 from .offload_config import DeepSpeedZeroOffloadParamConfig, DeepSpeedZeroOffloadOptimizerConfig, OffloadDeviceEnum
 from deepspeed.runtime.zenflow.zenflow_config import ZenFlowConfig
+from deepspeed.runtime.reflow.reflow_config import ReflowConfig
 from .leaf_module_config import DeepSpeedZeroLeafModuleConfig
 
 # ZeRO optimization. By default, this optimization is not enabled.
@@ -147,12 +148,22 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
     and callers do not use ``get_global_grad_norm()``.
     """
 
-    load_from_fp32_weights: bool = True
+    retain_gpu_grad_partition_until_step: bool = False
     """
-    Boolean indicating whether to initialize fp32 master weights from fp32
-    copies in checkpoint (no precision loss) or from model's fp16 copies (with
-    precision loss). This can be used to initialize optimizer state even when
-    checkpoint is missing optimizer state.
+    With ZeRO-2 CPU optimizer offload and fp32 gradient accumulation on a 16-bit model, the fp32
+    gradient partition is freed from GPU memory after each request boundary and restored from the host
+    gradient for the next backward. This is the default and keeps GPU memory use between requests low.
+    Set to ``true`` to keep the partition in GPU memory until ``step()``: GPU memory use between
+    requests rises by one fp32 partition per rank, and the per-request host copy and restore are avoided.
+    Has no effect on configurations that do not use the compact gradient partition.
+    """
+
+    load_from_fp32_weights: bool = Field(True, json_schema_extra={"deprecated": True})
+    """
+    Deprecated and ignored by ``DeepSpeedEngine.load_checkpoint``. Full ZeRO
+    checkpoint loads always restore saved fp32 master weights. Module-only loads
+    rebuild ZeRO-1/2 fp32 master weights from the loaded model weights, while
+    ZeRO-3 still reads fp32 weights.
     """
 
     elastic_checkpoint: bool = False
@@ -178,6 +189,14 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
 
     zenflow: Optional[ZenFlowConfig] = None
     """Enable ZenFlow"""
+
+    reflow: Optional[ReflowConfig] = None
+    """
+    Enable Reflow, the asynchronous CPU-offload optimizer for ZeRO stage 3: the CPU optimizer runs
+    per gradient bucket during backward and commits its state in the background, overlapping GPU
+    compute instead of running as a phase after backward. Requires optimizer offload to CPU.
+    Expects a dictionary containing values for :any:`ReflowConfig`.
+    """
 
     sub_group_size: int = Field(pp_int(1e9), ge=0)
     """
@@ -405,4 +424,25 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
             logger.warning(
                 "ZeRO-3 elastic checkpointing is deprecated and no longer supported. Use Universal Checkpointing instead."
             )
+        return self
+
+    @model_validator(mode="after")
+    def reflow_compat_check(self):
+        # Reflow is its own ZeRO-3 optimizer path; reject what it cannot wrap here, so the user gets a
+        # clear config error instead of a downstream failure at optimizer build time.
+        if self.reflow is None:
+            return self
+        if self.stage != ZeroStageEnum.weights:
+            raise ValueError(f"Reflow requires ZeRO stage 3, got stage {int(self.stage)}.")
+        offload_config = self.offload_optimizer
+        if offload_config is None or offload_config.device not in (OffloadDeviceEnum.cpu, OffloadDeviceEnum.nvme):
+            # Reflow runs the optimizer on CPU. device='cpu' keeps its state in CPU memory; device='nvme'
+            # additionally swaps that state per subgroup around the CPU step.
+            raise ValueError("Reflow requires optimizer offload with device 'cpu' or 'nvme'.")
+        if offload_config.ratio != 1.0:
+            raise ValueError("Reflow does not support partial optimizer offload; offload_optimizer.ratio must be 1.0.")
+        if self.zenflow is not None:
+            raise ValueError("Reflow is not compatible with ZenFlow; enable only one of them.")
+        if offload_config.super_offload:
+            raise ValueError("Reflow is not compatible with super_offload; enable only one of them.")
         return self

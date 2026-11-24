@@ -14,15 +14,19 @@ Contains AutoEPMoELayer, compute_split_plan, _AllToAllV, and helper functions.
 
 from __future__ import annotations
 
-from functools import lru_cache
+import math
+import weakref
+from functools import lru_cache, partial
 from typing import Literal, NamedTuple
 
 import torch
 import torch.nn as nn
+from torch.utils.checkpoint import checkpoint as torch_checkpoint
 import deepspeed.comm as dist
 from deepspeed.accelerator import get_accelerator
 from deepspeed.checkpoint.autoep_affine import (autoep_experts_for_rank, autoep_placement_to_affine_map,
-                                                autoep_placements_equal, legacy_uniform_autoep_placement_descriptor,
+                                                autoep_placements_equal, autoep_storage_affine_map,
+                                                legacy_uniform_autoep_placement_descriptor,
                                                 plan_autoep_placement_transfer)
 from deepspeed.checkpoint.affine import ParamAffineMap
 from deepspeed.checkpoint.affine_transfer import PlanBudget, TransferPlan
@@ -32,12 +36,12 @@ from deepspeed.module_inject.auto_ep_config import AutoEPConfig, MoELayerSpec, r
 from deepspeed.module_inject.auto_ep_folding import mark_autoep_folding_router_parameter
 from deepspeed.ops.triton_ops import autoep_fused_token_ops as fused_token_ops
 from deepspeed.utils import logger
-from deepspeed.module_inject.auto_ep_comm import (COMM_BACKEND, DEEPEP_BACKEND, DeepEPCheckpointReplay,
+from deepspeed.module_inject.auto_ep_comm import (COMM_BACKEND, DEEPEP_BACKEND, DeepEPCheckpointReplay, _in_backward,
                                                   assert_dtype_supported, deepep_combine, deepep_dispatch,
-                                                  new_exchange_scope, shared_exchange)
+                                                  deepep_record_combine, new_exchange_scope, shared_exchange)
 from deepspeed.moe.ep_router import TokenChoiceTopKRouter
 from deepspeed.moe.ep_count import count_tokens_per_expert
-from deepspeed.moe.ep_experts import GroupedExperts
+from deepspeed.moe.ep_experts import ExpertWeightGradSlot, GroupedExperts, MoeDeferredDwStaging
 from deepspeed.moe.ep_repack import (_gather_source_zero_params, repack_expert_requires_grad_flags,
                                      repack_expert_source_params, repack_expert_weights)
 
@@ -178,6 +182,42 @@ def apply_deepep_row_weights(
     if row_weighting_impl == "fused":
         return fused_token_ops.fused_row_weighting(rows, weights)
     return (rows.float() * weights).to(rows.dtype)
+
+
+class _RecordedEagerRowWeighting(torch.autograd.Function):
+    """The backward of the eager row weighting, recorded without computing its product."""
+
+    @staticmethod
+    def forward(ctx, rows, weights):
+        ctx.save_for_backward(rows, weights)
+        return torch.empty_like(rows)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        rows, weights = ctx.saved_tensors
+        # The steps autograd takes through (rows.float() * weights).to(rows.dtype), so the gradients match it.
+        grad = grad_output.float()
+        grad_rows = (grad * weights).to(rows.dtype)
+        grad_weights = (grad * rows.float()).sum_to_size(weights.shape)
+        return grad_rows, grad_weights
+
+
+def record_deepep_row_weights(
+    rows: torch.Tensor,
+    weights: torch.Tensor,
+    row_weighting_impl: Literal["eager", "fused"],
+) -> torch.Tensor:
+    """apply_deepep_row_weights for a result nobody reads: the same backward, an uninitialized result."""
+    if row_weighting_impl == "fused":
+        return fused_token_ops.recorded_fused_row_weighting(rows, weights)
+    return _RecordedEagerRowWeighting.apply(rows, weights)
+
+
+# skip_recompute_combine is limited to presets whose Hugging Face decoder layer adds the MoE output to the residual
+# and returns the sum, checked against their modeling code. Inside that decoder layer's checkpoint, nothing reads
+# the recomputed MoE output.
+SKIP_RECOMPUTE_COMBINE_PRESETS = frozenset(
+    ("deepseek_v2", "deepseek_v3", "minimax_m3", "mixtral", "qwen3_5_moe", "qwen3_moe"))
 
 
 def _split_plan_from_expert_counts(
@@ -538,6 +578,14 @@ class AutoEPMoELayer(nn.Module):
         self.score_apply = resolve_score_apply_mode(spec, config.score_apply)
         self.combine_impl = resolve_combine_impl(config.combine_impl)
         self.row_weighting_impl = resolve_row_weighting_impl(config.row_weighting_impl)
+        self.skip_recompute_combine = config.skip_recompute_combine
+        if self.skip_recompute_combine and spec.model_family not in SKIP_RECOMPUTE_COMBINE_PRESETS:
+            raise ValueError(f"skip_recompute_combine is not supported for preset '{spec.model_family}'. It relies "
+                             "on the decoder layer only adding the MoE output to the residual, which has been "
+                             f"checked for {sorted(SKIP_RECOMPUTE_COMBINE_PRESETS)}. Leave it unset for this model.")
+        # The decoder layer holding this layer, set by attach_decoder_layer; held weakly, as the decoder layer
+        # owns this module.
+        self._decoder_layer = None
         self._fused_combine_checked = False
         self._fused_row_weighting_checked = False
         route_norm = spec.route_norm if config.route_norm is None else config.route_norm
@@ -721,6 +769,25 @@ class AutoEPMoELayer(nn.Module):
         # Per layer, unlike the shared exchange: a checkpoint recompute must find this layer's forward handle.
         self._deepep_replay = DeepEPCheckpointReplay()
         self.comm_max_tokens_per_rank = config.comm_max_tokens_per_rank
+        self.overlap_weight_grad = config.overlap_weight_grad
+        if self.overlap_weight_grad and (self.experts.use_triton_grouped_mm or not self.experts.use_grouped_mm):
+            raise ValueError("overlap_weight_grad defers the experts' torch._grouped_mm weight gradients, but this "
+                             "device selects the Triton grouped GEMM. Set disable_triton_grouped_mm=true, or leave "
+                             "overlap_weight_grad unset.")
+        self.dw_staging = None
+        if config.deferred_dw_flush_period > 1:
+            if self.experts.use_triton_grouped_mm or not self.experts.use_grouped_mm:
+                raise ValueError("deferred_dw_flush_period stages the experts' torch._grouped_mm weight gradients, "
+                                 "but this device selects the Triton grouped GEMM. Set "
+                                 "disable_triton_grouped_mm=true, or leave deferred_dw_flush_period unset.")
+            self.dw_staging = MoeDeferredDwStaging(self.num_local_experts, config.deferred_dw_flush_period,
+                                                   config.deferred_dw_rows_per_expert)
+
+    def _run_experts(self, rows: torch.Tensor, counts: torch.Tensor, valid_counts: torch.Tensor | None = None):
+        """Run the expert MLP; ``valid_counts`` are the rows per expert before alignment padding, when it differs."""
+        if self.dw_staging is None:
+            return self.experts(rows, counts)
+        return self.experts(rows, counts, dw_staging=self.dw_staging, num_valid_tokens_per_expert=valid_counts)
 
     def _start_async_split_plan(self, num_tokens_per_expert: torch.Tensor) -> _PendingSplitPlan:
         if self._async_split_plan_pending is not None:
@@ -792,10 +859,84 @@ class AutoEPMoELayer(nn.Module):
         """Return the affine map of each live expert parameter (``w1``, ``w2``, ``w3``).
 
         Map ranks are EP-local ranks; translate them with ``dist.get_global_rank(self.ep_group, rank)``.
-        Each rank's shard is the unpartitioned packed ``[local_experts, ...]`` tensor.
+        Each rank's shard is the unpartitioned packed ``[local_experts, ...]`` tensor; use
+        :meth:`expert_storage_affine_maps` for the expert-data-parallel and ZeRO-3 storage.
         """
         placement = self._live_expert_placement()
         return {name: self._live_expert_affine_map(name, placement) for name in ("w1", "w2", "w3")}
+
+    def _expert_storage_group(self, params: dict[str, nn.Parameter]):
+        partitioned = [hasattr(param, "ds_id") for param in params.values()]
+        if all(partitioned):
+            storage_groups = {id(param.ds_process_group): param.ds_process_group for param in params.values()}
+            if len(storage_groups) != 1:
+                raise ValueError("AutoEP expert parameters are ZeRO-3 partitioned over different process groups.")
+            return next(iter(storage_groups.values()))
+        if any(partitioned):
+            raise ValueError("Only some AutoEP expert parameters are ZeRO-3 partitioned.")
+        if self.folding_group_handles is not None:
+            return self.folding_group_handles.edp_group
+        from deepspeed.utils import groups
+        return groups._get_expert_data_parallel_group(self.ep_group_name)
+
+    def expert_storage_affine_maps(self) -> dict[str, ParamAffineMap]:
+        """Return the affine map of the storage each global rank holds for ``w1``, ``w2`` and ``w3``.
+
+        This is computed locally from the expert data parallel group table and the placement, so it
+        involves no communication and any rank may call it on its own.
+
+        Map ranks are global ranks and the logical shape is the parameter's own shape. Each shard is
+        a rank's flat storage: the packed ``[local_experts, ...]`` tensor under ZeRO-0/1/2, where all
+        expert-data-parallel replicas are listed as holders, or the rank's ZeRO-3 partition
+        ``ds_tensor`` without its trailing padding. Optimizer state is not described. Quantized and
+        NVMe-offloaded ZeRO-3 storage is not supported.
+        """
+        if self.folding_group_handles is not None and self.folding_group_handles.spec.etp_size > 1:
+            raise NotImplementedError("Expert storage maps do not describe expert tensor-parallel shards yet.")
+        placement = self._live_expert_placement()
+        params = {name: getattr(self.experts, name) for name in ("w1", "w2", "w3")}
+        for name in params:
+            self._live_expert_affine_map(name, placement)
+        storage_group = self._expert_storage_group(params)
+        partitioned = hasattr(params["w1"], "ds_id")
+        if partitioned:
+            from deepspeed.checkpoint.zero_affine import _check_zero3_param_storage
+            for param in params.values():
+                _check_zero3_param_storage(param)
+
+        # The EDP group of each EP rank's global rank holds that EP rank's packed tensor. Every rank
+        # built all EDP groups, so the table answers this without assuming a rank layout.
+        from deepspeed.utils import groups
+        group_of_rank = {}
+        for group_ranks in groups._get_expert_data_parallel_group_table(self.ep_group_name):
+            for global_rank in group_ranks:
+                group_of_rank[global_rank] = list(group_ranks)
+        own_storage_ranks = dist.get_all_ranks_from_group(storage_group)
+        if group_of_rank.get(dist.get_rank()) != own_storage_ranks:
+            raise RuntimeError(f"Expert storage group ranks {own_storage_ranks} do not match the expert data "
+                               f"parallel group table for {self.ep_group_name}.")
+        holders_by_ep_rank = {}
+        for ep_rank, global_rank in enumerate(dist.get_all_ranks_from_group(self.ep_group)):
+            holders_by_ep_rank[ep_rank] = group_of_rank[global_rank]
+
+        storage_maps = {}
+        for name, param in params.items():
+            logical_shape = self._expert_logical_shape(param)
+            partition_numel_by_ep_rank = None
+            if partitioned:
+                # ZeRO-3 pads each packed tensor to a multiple of the group size and splits it evenly.
+                expert_numel = math.prod(logical_shape[1:])
+                partition_numel_by_ep_rank = {}
+                for ep_rank, holders in holders_by_ep_rank.items():
+                    packed_numel = len(autoep_experts_for_rank(placement, ep_rank)) * expert_numel
+                    partition_numel_by_ep_rank[ep_rank] = -(-packed_numel // len(holders))
+                expected = partition_numel_by_ep_rank[self.ep_rank]
+                if param.ds_tensor.ds_numel != expected:
+                    raise RuntimeError(f"Expert parameter {name} has a ZeRO-3 partition of {param.ds_tensor.ds_numel} "
+                                       f"elements, but even partitioning gives {expected}.")
+            storage_maps[name] = autoep_storage_affine_map(placement, logical_shape, holders_by_ep_rank,
+                                                           partition_numel_by_ep_rank)
+        return storage_maps
 
     def plan_expert_transfer(self,
                              target_placement: dict,
@@ -830,11 +971,6 @@ class AutoEPMoELayer(nn.Module):
 
         if folding_group_handles is not None:
             self.folding_group_handles = folding_group_handles
-            if self.combine_impl == "fused_weighted_sum" and folding_group_handles.spec.tp_size > 1:
-                # Folded TP restores tokens through a different path.
-                raise ValueError('combine_impl="fused_weighted_sum" does not support folded tensor parallelism '
-                                 f"(tensor_parallel.autotp_size={folding_group_handles.spec.tp_size}). Set "
-                                 'tensor_parallel.autotp_size to 1, or leave combine_impl unset.')
             if self.comm_backend == DEEPEP_BACKEND and folding_group_handles.spec.tp_size > 1:
                 # DeepEP's combine returns token-major rows, which folded TP's
                 # assignment-metadata restore can't consume. Refuse rather than
@@ -863,6 +999,30 @@ class AutoEPMoELayer(nn.Module):
                 use_data_before_expert_parallel_=use_data_before_expert_parallel_,
             )
         self.ep_group = groups._get_expert_parallel_group(self.ep_group_name)
+
+    def attach_decoder_layer(self, decoder_layer: nn.Module) -> None:
+        """Record the decoder layer whose checkpoint skip_recompute_combine requires."""
+        self._decoder_layer = weakref.ref(decoder_layer)
+
+    def _assert_recompute_skip_contract(self) -> None:
+        """Fail unless this recompute is the reentrant checkpoint of this layer's own decoder layer.
+
+        Only then is the recomputed output unread: the checkpoint only backpropagates through it, and the decoder
+        layer only adds it to the residual. A checkpoint spanning several layers would feed it to the next one.
+        """
+        decoder_layer = None if self._decoder_layer is None else self._decoder_layer()
+        checkpoint_func = getattr(decoder_layer, "_gradient_checkpointing_func", None)
+        reentrant = (isinstance(checkpoint_func, partial) and checkpoint_func.func is torch_checkpoint
+                     and checkpoint_func.keywords.get("use_reentrant") is True)
+        checkpointing = (getattr(decoder_layer, "gradient_checkpointing", False)
+                         and getattr(decoder_layer, "training", False))
+        if not checkpointing or not reentrant:
+            raise RuntimeError(
+                "skip_recompute_combine found a recompute that is not the reentrant checkpoint of this MoE "
+                "layer's own decoder layer. It requires training mode and Hugging Face per-layer gradient checkpointing with "
+                "use_reentrant=True, e.g. model.gradient_checkpointing_enable("
+                "gradient_checkpointing_kwargs={'use_reentrant': True}), so that nothing reads the skipped output. "
+                "Leave skip_recompute_combine unset for other checkpointing.")
 
     def _deepep_route(self, tokens: torch.Tensor, ro: "RouterOutput") -> torch.Tensor:
         """Dispatch, run the experts, and combine through DeepEP.
@@ -902,11 +1062,25 @@ class AutoEPMoELayer(nn.Module):
                 "job will produce, normally train_micro_batch_size_per_gpu * maximum padded sequence length, or "
                 'set comm_backend="comm".')
 
+        # With overlap, the experts' backward leaves their weight gradients in the slot, and the dispatch backward
+        # computes them while it sends the experts' input gradient back.
+        weight_grad_slot = ExpertWeightGradSlot() if self.overlap_weight_grad else None
+        expert_weights = (self.experts.w1, self.experts.w2, self.experts.w3) if self.overlap_weight_grad else ()
+
+        # In the decoder layer's reentrant recompute nothing reads this layer's output; the checkpoint only
+        # backpropagates through it. The post-expert row weighting and the combine then record their backward
+        # without running.
+        record_only = self.skip_recompute_combine and torch.is_grad_enabled() and _in_backward()
+        if record_only:
+            self._assert_recompute_skip_contract()
+
         received, recv_weights, exchange = deepep_dispatch(self._deepep_exchange,
                                                            tokens,
                                                            ro.selected_experts,
                                                            ro.top_scores,
-                                                           replay=self._deepep_replay)
+                                                           replay=self._deepep_replay,
+                                                           weight_grad_slot=weight_grad_slot,
+                                                           expert_weights=expert_weights)
         handle = exchange.last_handle
 
         # combine reads exactly the rows the handle says arrived, taken from
@@ -940,11 +1114,18 @@ class AutoEPMoELayer(nn.Module):
             raise RuntimeError(f"DeepEP returned {counts.numel()} expert counts, but this rank owns "
                                f"{self.num_local_experts} experts")
 
-        expert_output = self.experts(received, counts)
+        if weight_grad_slot is None:
+            expert_output = self._run_experts(received, counts)
+        else:
+            expert_output = self.experts(received, counts, weight_grad_slot=weight_grad_slot)
 
-        if weights is not None:
+        if weights is not None and record_only:
+            expert_output = record_deepep_row_weights(expert_output, weights, self.row_weighting_impl)
+        elif weights is not None:
             expert_output = apply_deepep_row_weights(expert_output, weights, self.row_weighting_impl)
 
+        if record_only:
+            return deepep_record_combine(exchange, expert_output, handle)
         return deepep_combine(exchange, expert_output, handle)
 
     def _finalize_output(self, output: torch.Tensor, x: torch.Tensor, hidden_states: torch.Tensor,
@@ -1061,6 +1242,7 @@ class AutoEPMoELayer(nn.Module):
                 dispatch_counters,
                 partition_assignments,
                 restore_combined,
+                restore_combined_fused,
             )
             payload = RoutedAssignmentPayload(
                 token_indices=(token_indices_sorted // self.top_k).to(torch.long),
@@ -1107,7 +1289,7 @@ class AutoEPMoELayer(nn.Module):
 
             routed_input_permuted, perm_indices, aligned_counts, n_tokens = permute_by_local_expert(
                 routed_input, local_counts)
-            expert_output = self.experts(routed_input_permuted, aligned_counts)
+            expert_output = self._run_experts(routed_input_permuted, aligned_counts, local_counts)
             expert_output = unpermute_by_local_expert(expert_output, perm_indices, n_tokens)
         else:
             # EP dispatch/compute/combine
@@ -1135,16 +1317,24 @@ class AutoEPMoELayer(nn.Module):
 
             routed_input, perm_indices, aligned_counts, n_tokens = permute_by_local_expert(
                 routed_input, plan.local_counts_by_source)
-            expert_output = self.experts(routed_input, aligned_counts)
+            expert_output = self._run_experts(routed_input, aligned_counts, plan.local_counts_by_source.sum(dim=0))
             expert_output = unpermute_by_local_expert(expert_output, perm_indices, n_tokens)
 
             expert_output = _AllToAllV.apply(self.ep_group, expert_output, plan.output_splits, plan.input_splits)
 
         if folded_tp:
-            output = restore_combined(expert_output,
-                                      restore_ctx,
-                                      tp_group=self.tp_group,
-                                      validate_coverage=self.validate_folding_routing).reshape(bsz, seqlen, hdim)
+            if self.combine_impl == "fused_weighted_sum":
+                output = restore_combined_fused(expert_output,
+                                                restore_ctx,
+                                                tp_group=self.tp_group,
+                                                top_k=self.top_k,
+                                                validate_coverage=self.validate_folding_routing)
+            else:
+                output = restore_combined(expert_output,
+                                          restore_ctx,
+                                          tp_group=self.tp_group,
+                                          validate_coverage=self.validate_folding_routing)
+            output = output.reshape(bsz, seqlen, hdim)
             self._last_folding_dispatch_counters = dispatch_counters(restore_ctx)
         elif self.combine_impl == "fused_weighted_sum":
             output = fused_token_ops.fused_weighted_restore(

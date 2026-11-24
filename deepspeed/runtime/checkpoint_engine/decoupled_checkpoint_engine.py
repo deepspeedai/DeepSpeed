@@ -48,19 +48,15 @@ def init_decoupled_checkpoint(config_params, dp_writer_config, save_event, save_
             (save_info, event_type) = save_queue.get()
             if event_type == DecoupledEvent.SAVE_EVENT and save_info is not None:
                 state_dict, save_path = save_info
-                # print(f'Received decoupled checkpoint request for {save_path=}')
                 save_path_list.append(save_path)
                 checkpoint_engine.save(state_dict, save_path)
                 del state_dict
-                # print(f'Completed decoupled checkpoint request for {save_path=}')
 
             if event_type == DecoupledEvent.COMMIT_EVENT:
-                # print(f'Recieved commit request for {save_path_list=}')
                 save_path_list = []
                 save_event.set()
 
             if event_type == DecoupledEvent.EXIT_EVENT:
-                # print(f'Received decoupled exit request')
                 break
     except Exception as e:
         print(f'[{ENGINE_NAME}] Checkpoint subprocess crashed with error: {e}')
@@ -198,7 +194,6 @@ class DecoupledCheckpointEngine(CheckpointEngine):
         return True
 
     def get_commit_info(self):
-        # print(f'getting commit info {self.commit_info=}')
         return self.commit_info
 
     def is_decoupled(self):

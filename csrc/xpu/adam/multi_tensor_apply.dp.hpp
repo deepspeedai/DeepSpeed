@@ -34,7 +34,6 @@ sycl::queue* getStreamFromPool(bool)
 }
 }  // namespace cuda
 }  // namespace at
-// #include <iostream>
 
 // This header is the one-stop shop for all your multi-tensor apply needs.
 
@@ -148,7 +147,6 @@ void multi_tensor_apply(int block_size,
 
     TensorListMetadata<depth> tl;
 
-    /* const at::cuda::OptionalCUDAGuard device_guard(device_of(tensor_lists[0][0])); */
     auto stream = at::cuda::getCurrentCUDAStream();
 
     tl.start_tensor_this_launch = 0;
@@ -163,7 +161,6 @@ void multi_tensor_apply(int block_size,
         int chunks_this_tensor = (tensor_lists[0][t].numel() + chunk_size - 1) / chunk_size;
 
         for (int chunk = 0; chunk < chunks_this_tensor; chunk++) {
-            // std::cout << chunks_this_tensor << std::endl;
             tl.block_to_tensor[loc_block_info] = loc_tensor_info - 1;
             tl.block_to_chunk[loc_block_info] = chunk;
             loc_block_info++;
@@ -173,9 +170,6 @@ void multi_tensor_apply(int block_size,
             bool blocks_full = (loc_block_info == depth_to_max_blocks[depth - 1]);
             bool last_chunk = (t == ntensors - 1 && chunk == chunks_this_tensor - 1);
             if (tensors_full || blocks_full || last_chunk) {
-                // using accscalar_t = acc_type<scalar_t, true>;
-                /* multi_tensor_apply_kernel<TensorListMetadata<depth>, T, ArgTypes...>
-                 * fn(chunk_size, noop_flag.DATA_PTR<int>(), tl, callable, args...); */
                 if constexpr (sizeof(multi_tensor_apply_kernel(
                                   chunk_size, noop_flag.DATA_PTR<int>(), tl, callable, args...)) <
                               2048) {
@@ -206,13 +200,9 @@ void multi_tensor_apply(int block_size,
                 // Reset.  The control flow possibilities here make my brain hurt.
                 loc_block_info = 0;
                 if (chunk == chunks_this_tensor - 1) {
-                    // std::cout << "Hit case 1 " << cond1 << " " << cond2 << " " << cond3 <<
-                    // std::endl;
                     loc_tensor_info = 0;
                     tl.start_tensor_this_launch = t + 1;
                 } else {
-                    // std::cout << "Hit case 2 " << cond1 << " " << cond2 << " " << cond3 <<
-                    // std::endl;
                     tl.sizes[0] = tl.sizes[loc_tensor_info - 1];
                     for (int d = 0; d < depth; d++)
                         tl.addresses[d][0] = tl.addresses[d][loc_tensor_info - 1];

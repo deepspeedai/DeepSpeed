@@ -18,7 +18,7 @@ from deepspeed.runtime.zero.utils import is_zero_param
 from abc import ABC, abstractmethod
 from typing import Iterable, Any, Optional, List, Tuple, Dict
 from .fusedqkv_utils import (shard_value_with_share_qk, prepare_tp_fused_qkvw, fused_qkv_subparam_sizes,
-                             set_fused_qkv_shard_state)
+                             set_fused_qkv_shard_state, replicated_kv_query_widths, replicated_kv_row_start)
 from deepspeed.runtime.tensor_parallel import AUTOTP_MODE
 from deepspeed.checkpoint.constants import (DS_AUTOTP_UC_META, UNIVERSAL_CHECKPOINT_VERSION_KEY,
                                             UNIVERSAL_CHECKPOINT_VERSION_VALUE)
@@ -189,10 +189,12 @@ def set_autotp_mode(training=False):
         DEEPSPEED_AUTOTP_MODE = AUTOTP_MODE.INFERENCE
 
 
-def add_bias(input, bias):
+def add_bias(input, bias, training=None):
     if bias is None:
         return input
-    if is_autotp_training_mode():
+    if training is None:
+        training = is_autotp_training_mode()
+    if training:
         # Training mode - avoid inplace to ensure correct autograd
         input = input + bias
         return input
@@ -219,10 +221,14 @@ class RowParallel(torch.autograd.Function):
         ctx.group = group
         if not pg_utils.is_parallel(group):
             return input
-        if is_inference_mode:
-            dist.inference_all_reduce(input, group=group)
+        # contiguous() may hand back a copy — the reduction must land in
+        # the caller's tensor, not a discarded temporary
+        red = input.contiguous()
+        if is_inference_mode or not ctx.needs_input_grad[1]:
+            dist.inference_all_reduce(red, group=group)
         else:
-            dist.all_reduce(input.contiguous(), group=group)
+            dist.all_reduce(red, group=group)
+        if red is not input: input.copy_(red)
         return input
 
     @staticmethod
@@ -258,7 +264,7 @@ class ScatterToTensorParallelRegion(torch.autograd.Function):
 class AsyncColumnParallel(torch.autograd.Function):
 
     @staticmethod
-    def forward(ctx: Any, group: dist.ProcessGroup, input: torch.Tensor, weight, bias) -> torch.Tensor:
+    def forward(ctx: Any, group: dist.ProcessGroup, input: torch.Tensor, weight, bias, training: bool) -> torch.Tensor:
         """
         Forward pass.
         """
@@ -266,7 +272,7 @@ class AsyncColumnParallel(torch.autograd.Function):
         ctx.group = group
         output = torch.matmul(input, weight.transpose(-1, -2))
         if bias is not None:
-            output = add_bias(output, bias)
+            output = add_bias(output, bias, training)
 
         ctx.save_for_backward(input, weight)
 
@@ -281,7 +287,7 @@ class AsyncColumnParallel(torch.autograd.Function):
         grad_weight = grad_output.view(-1, grad_output.shape[-1]).t().matmul(input.view(-1, input.shape[-1]))
         grad_bias = grad_output.sum(0) if ctx.use_bias else None
         handle.wait()
-        return None, grad_input, grad_weight, grad_bias
+        return None, grad_input, grad_weight, grad_bias, None
 
 
 class ColumnParallel(torch.autograd.Function):
@@ -568,8 +574,12 @@ class TensorParallel_Layer(nn.Module, ABC):
         return self.mp_group is not None
 
     def is_training_mode(self):
-        global DEEPSPEED_AUTOTP_MODE
-        return DEEPSPEED_AUTOTP_MODE == AUTOTP_MODE.TRAINING
+        # A model keeps the mode it was sharded in, so a frozen inference teacher and a training
+        # student can live in one process without sharing the process-wide AutoTP mode. Layers
+        # built without an explicit mode keep following set_autotp_mode.
+        if self.tp_meta.training is None:
+            return is_autotp_training_mode()
+        return self.tp_meta.training
 
     def _freeze_partition_sizes(self, total_size):
         """Resolve the tensor parallel split of this layer once, while the layer is built.
@@ -899,7 +909,7 @@ class LinearAllreduce(TensorParallel_Layer):
         if not self.defer_collectives_to_compiler:
             output = RowParallel.apply(self.mp_group, output, not self.is_training_mode())
         if self.bias is not None:
-            output = add_bias(output, self.bias)
+            output = add_bias(output, self.bias, self.is_training_mode())
         return output
 
     @torch.no_grad()
@@ -995,9 +1005,9 @@ class LinearLayer(TensorParallel_Layer):
                 input = ColumnParallel.apply(self.mp_group, input)
             output = torch.matmul(input, self.weight.transpose(-1, -2))
             if self.bias is not None:
-                output = add_bias(output, self.bias)
+                output = add_bias(output, self.bias, self.is_training_mode())
         else:
-            output = AsyncColumnParallel.apply(self.mp_group, input, self.weight, self.bias)
+            output = AsyncColumnParallel.apply(self.mp_group, input, self.weight, self.bias, self.is_training_mode())
 
         if self.gather_output:
             if self.defer_collectives_to_compiler:
@@ -1094,6 +1104,16 @@ class VocabParallelLinear(LinearLayer):
         self.vocab_size = self._orig_weight_shape[0]
         self.vocab_start_index = sum(self._partition_sizes[:self.tp_index])
         self.vocab_end_index = self.vocab_start_index + self._partition_sizes[self.tp_index]
+        # Set by the fused linear cross-entropy loss, which defers this projection into the loss.
+        self.fused_loss_capture = None
+
+    def forward(self, input):
+        capture = self.fused_loss_capture
+        if capture is not None and capture.armed:
+            # The fused loss projects ``input`` itself and reduces its gradient over TP, so the
+            # column-parallel input collective must not run here as well.
+            return capture.take(input)
+        return super().forward(input)
 
 
 class VocabParallelEmbedding(TensorParallel_Layer):
@@ -1451,6 +1471,82 @@ class SubParamColumnParallel(LinearLayer):
                                     is_bias=True)
 
 
+def _all_reduce_replicated_kv_rows(kv_grad, group):
+    """All-reduce the replicated K/V rows in place.
+
+    Some backends return this gradient non-contiguously, which collectives reject; reduce a
+    contiguous copy in that case and preserve the original layout for autograd.
+    """
+    if kv_grad.numel() == 0:
+        # The key/value block is replicated whole, so it is empty on every rank at once.
+        return kv_grad
+    if kv_grad.is_contiguous():
+        # Contiguous: reduce the view in place.
+        dist.all_reduce(kv_grad, group=group)
+    else:
+        # Non-contiguous: reduce a copy, then write it back.
+        reduced = kv_grad.contiguous()
+        dist.all_reduce(reduced, group=group)
+        kv_grad.copy_(reduced)
+    return kv_grad
+
+
+def _sum_replicated_kv_gradient(grad, kv_start, group):
+    """Sum the K/V gradient rows that every rank holds a copy of."""
+    grad = grad.clone()
+    _all_reduce_replicated_kv_rows(grad.narrow(0, kv_start, grad.shape[0] - kv_start), group)
+    return grad
+
+
+class _ReplicatedKvGradReducer:
+    """Sum each micro-batch's replicated K/V gradient exactly once.
+
+    A plain tensor hook reduces the incoming gradient before PyTorch accumulates it, which is
+    correct with gradient accumulation. Some backends skip that hook under ZeRO 1/2, so a
+    post-accumulate hook is registered as well. The fallback reduces only the K/V rows added
+    since its previous call: reducing the whole accumulated gradient again would scale earlier
+    micro-batches once per later backward.
+    """
+
+    def __init__(self, param, kv_start, group):
+        self.param = param
+        self.kv_start = kv_start
+        self.group = group
+        self._tensor_hook_ran = False
+        self._grad = None
+        self._kv = None
+
+    def tensor_hook(self, grad):
+        self._tensor_hook_ran = True
+        return _sum_replicated_kv_gradient(grad, self.kv_start, self.group)
+
+    def post_accumulate_hook(self, *_unused):
+        # Both hook forms leave the gradient on the parameter; the pre-2.1
+        # AccumulateGrad hook also passes (grad_inputs, grad_outputs).
+        grad = self.param.grad
+        if grad is None:
+            self._tensor_hook_ran = False
+            self._grad = None
+            self._kv = None
+            return
+        kv_grad = grad.narrow(0, self.kv_start, grad.shape[0] - self.kv_start)
+        if self._tensor_hook_ran:
+            # The tensor hook already summed this micro-batch before it was accumulated.
+            self._tensor_hook_ran = False
+        else:
+            if self._grad is grad and self._kv is not None:
+                delta = kv_grad - self._kv
+            else:
+                delta = kv_grad.clone()
+            _all_reduce_replicated_kv_rows(delta, self.group)
+            if self._grad is grad and self._kv is not None:
+                kv_grad.copy_(self._kv + delta)
+            else:
+                kv_grad.copy_(delta)
+        self._grad = grad
+        self._kv = kv_grad.clone()
+
+
 class FusedModuleWrapper:
 
     def __init__(self, fused_module: nn.Module):
@@ -1474,6 +1570,36 @@ class fused_LinearLayer(SubParamColumnParallel):
         self._subparam_layout_spec = (fused_qkv_subparam_sizes(kwargs.get('fused_module'), tuple(module.weight.shape),
                                                                kwargs['tp_meta']), None)
         super().__init__(module, mp_group, skip_partition, **kwargs)
+        self._sum_replicated_kv_gradients()
+
+    def _sum_replicated_kv_gradients(self):
+        """Sum the gradient of the key/value block that GPTBigCode gives every rank whole.
+
+        Each rank attends with only its own query heads, so the gradient it computes for the
+        shared key/value rows covers those heads alone. Unless the ranks add those partial
+        gradients, each applies a different update to rows that must stay identical, and
+        training departs from the unsharded model. The input gradient needs no change: the
+        column-parallel backward already sums every rank's contribution to it.
+        """
+        from deepspeed.module_inject.fusedqkv_utils import get_fused_qkv_type
+
+        if get_fused_qkv_type(self.fused_module.module) != 'bigcodetype' or not pg_utils.is_parallel(self.mp_group):
+            return
+        # This rank's shard is its query rows followed by the whole key/value block.
+        kv_start = replicated_kv_row_start(self.tp_meta, self.tp_world_size, self.tp_index)
+        if kv_start is None:
+            return
+        group = self.mp_group
+
+        from deepspeed.utils.torch import register_grad_hook
+
+        # The tensor hook handles the common path before accumulation; the post-accumulate
+        # fallback covers torch_npu, which skipped it under ZeRO 1/2 in our tests.
+        for param in (self.weight, self.bias):
+            if param is not None and param.requires_grad:
+                reducer = _ReplicatedKvGradReducer(param, kv_start, group)
+                param.register_hook(reducer.tensor_hook)
+                register_grad_hook(param, reducer.post_accumulate_hook)
 
     def _freeze_partition_sizes(self, total_size):
         super()._freeze_partition_sizes(total_size)
@@ -1528,7 +1654,9 @@ class fused_LinearLayer(SubParamColumnParallel):
         # The query rows are not split evenly: the widths follow the head count and the grain
         # size, so they have to come from the same helper the partition calls rather than
         # from a division here.
-        query_widths = list(get_shard_size_list(n_embd, self.tp_world_size, self.tp_meta))
+        query_widths = replicated_kv_query_widths(self.tp_meta, self.tp_world_size)
+        if query_widths is None:
+            return None
         return segmented_map(shape, [(n_embd, False), (shape[0] - n_embd, True)],
                              0,
                              self.tp_world_size,
@@ -1741,7 +1869,7 @@ class LmHeadLinearAllreduce(LinearAllreduce):
         if pg_utils.is_parallel(self.mp_group):
             dist.inference_all_reduce(output, group=self.mp_group)
         if self.bias is not None:
-            output = add_bias(output, self.bias)
+            output = add_bias(output, self.bias, self.is_training_mode())
         return output
 
 
@@ -2169,7 +2297,7 @@ class SubParamLinearLayer(TensorParallel_Layer):
             input = ColumnParallel.apply(self.mp_group, input)
         output = torch.matmul(input, self.weight.transpose(-1, -2))
         if self.bias is not None:
-            output = add_bias(output, self.bias)
+            output = add_bias(output, self.bias, self.is_training_mode())
         return output
 
     @torch.no_grad()
@@ -2298,7 +2426,7 @@ class SubParamLinearAllreduce(TensorParallel_Layer):
         if not self.defer_collectives_to_compiler:
             output = RowParallel.apply(self.mp_group, output, not self.is_training_mode())
         if self.bias is not None:
-            output = add_bias(output, self.bias)
+            output = add_bias(output, self.bias, self.is_training_mode())
         return output
 
     @torch.no_grad()

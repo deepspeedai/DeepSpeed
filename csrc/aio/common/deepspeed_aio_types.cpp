@@ -8,6 +8,7 @@ Functionality for swapping optimizer tensors to/from (NVMe) storage devices.
 */
 
 #include <cmath>
+#include <stdexcept>
 
 #include "deepspeed_aio_utils.h"
 
@@ -65,7 +66,15 @@ aio_context::aio_context(const int block_size, const int queue_depth)
         _iocbs.push_back((struct iocb*)calloc(1, sizeof(struct iocb)));
     }
     _io_events.resize(queue_depth);
-    io_queue_init(queue_depth, &_io_ctxt);
+    _io_ctxt = 0;
+    const auto ret = io_queue_init(queue_depth, &_io_ctxt);
+    if (ret != 0) {
+        // The destructor does not run when the constructor throws.
+        for (auto& iocb : _iocbs) { free(iocb); }
+        throw std::runtime_error("deepspeed_aio: io_queue_init(" + std::to_string(queue_depth) +
+                                 ") failed: " + std::string(strerror(-ret)) +
+                                 " (see /proc/sys/fs/aio-nr and aio-max-nr)");
+    }
 }
 
 aio_context::~aio_context()

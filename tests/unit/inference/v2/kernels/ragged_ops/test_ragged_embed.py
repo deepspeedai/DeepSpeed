@@ -8,10 +8,15 @@ from typing import List, Optional, Tuple
 import pytest
 import torch
 
+import deepspeed
 from deepspeed.accelerator import get_accelerator
 from deepspeed.inference.v2.kernels.ragged_ops import RaggedEmbeddingKernel
+from deepspeed.ops.op_builder import RaggedOpsBuilder
 from ....v2.inference_test_utils import allclose, get_dtypes
 from .ragged_testing_utils import build_batch_and_manager
+
+if not deepspeed.ops.__compatible_ops__[RaggedOpsBuilder.NAME]:
+    pytest.skip("Ragged device ops are not available on this system", allow_module_level=True)
 
 
 def baseline_implementation(token_ids: torch.Tensor,

@@ -4,6 +4,7 @@
 # DeepSpeed Team
 
 import os
+import glob
 import math
 
 import deepspeed
@@ -12,6 +13,7 @@ from torch.utils._pytree import tree_map
 
 from deepspeed.utils.torch import required_torch_version
 from deepspeed.checkpoint import UNIVERSAL_CHECKPOINT_INFO
+from deepspeed.checkpoint.constants import OPTIMIZER_STATE_DICT
 from deepspeed.checkpoint.ds_to_universal import main as convert_to_universal
 
 from unit.common import DistributedTest, DistributedFixture
@@ -275,3 +277,81 @@ class TestZeROUniversalCheckpointDP(DistributedTest):
     @pytest.mark.world_size(4)
     def test_dp_world_size_2to4(self, baseline_ws2, tmpdir, dtype, ds_config, load_optim, use_torch_adam):
         self._run_test(tmpdir, dtype, ds_config, load_optim, use_torch_adam, 4)
+
+
+def _fused_torch_adamw(params):
+    try:
+        return torch.optim.AdamW(params, lr=0.1, fused=True)
+    except RuntimeError as e:
+        pytest.skip(f"fused torch AdamW is not available on this accelerator: {e}")
+
+
+def _train(engine, hidden_dim, steps):
+    data_loader = random_dataloader(model=engine,
+                                    total_samples=steps,
+                                    hidden_dim=hidden_dim,
+                                    device=engine.device,
+                                    dtype=torch.float32)
+    for batch in data_loader:
+        loss = engine(batch[0], batch[1])
+        engine.backward(loss)
+        engine.step()
+
+
+@pytest.mark.parametrize("zero_stage", [1, 2, 3])
+@pytest.mark.parametrize("int_step", [False, True])
+class TestUniversalCheckpointFusedTorchAdamW(DistributedTest):
+    world_size = 1
+
+    def test_resume(self, tmpdir, zero_stage, int_step):
+        hidden_dim = 10
+        steps_before_save = 2
+        ds_config = {"train_batch_size": 1, "zero_optimization": {"stage": zero_stage}}
+
+        model = SimpleModel(hidden_dim, nlayers=2)
+        engine, _, _, _ = deepspeed.initialize(config=ds_config,
+                                               model=model,
+                                               optimizer=_fused_torch_adamw(model.parameters()))
+        _train(engine, hidden_dim, steps_before_save)
+        engine.save_checkpoint(tmpdir, tag=CP_TAG, client_state={UNIVERSAL_CHECKPOINT_INFO: {}})
+        engine.destroy()
+
+        cp_dir = os.path.join(tmpdir, CP_TAG)
+        univ_cp_dir = f"{cp_dir}_universal"
+        convert_to_universal(
+            SimpleNamespace(input_folder=cp_dir,
+                            output_folder=univ_cp_dir,
+                            num_extract_workers=1,
+                            num_merge_workers=1,
+                            keep_temp_folder=False,
+                            strict=True,
+                            inject_missing_state=False))
+        if int_step:
+            # DeepSpeed's FusedAdam and CPUAdam keep a Python int step, so universal checkpoints
+            # converted from them carry one, while fused torch AdamW needs a tensor.
+            for step_file in glob.glob(os.path.join(univ_cp_dir, "zero", "*", "step.pt")):
+                torch.save(steps_before_save, step_file)
+            # ZeRO-3 restores step from the common optimizer state instead of the per-parameter files.
+            if zero_stage == 3:
+                optim_state_file = os.path.join(univ_cp_dir, "zero", "optimizer_state.pt")
+                optim_sd = torch.load(optim_state_file, weights_only=False)
+                for state in optim_sd[OPTIMIZER_STATE_DICT]["state"].values():
+                    state["step"] = steps_before_save
+                torch.save(optim_sd, optim_state_file)
+
+        ds_config["checkpoint"] = {"load_universal": True}
+        model = SimpleModel(hidden_dim, nlayers=2)
+        engine, _, _, _ = deepspeed.initialize(config=ds_config,
+                                               model=model,
+                                               optimizer=_fused_torch_adamw(model.parameters()))
+        engine.load_checkpoint(tmpdir, tag=f"{CP_TAG}_universal")
+
+        # A step left as loaded (CPU tensor on an accelerator, or an int) fails the first fused step.
+        steps_after_load = 3
+        _train(engine, hidden_dim, steps_after_load)
+
+        optimizer_states = list(engine.optimizer.optimizer.state.values())
+        assert optimizer_states
+        for state in optimizer_states:
+            assert state["step"].item() == steps_before_save + steps_after_load
+        engine.destroy()
