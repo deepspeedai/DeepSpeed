@@ -293,8 +293,8 @@ if sys.platform == "win32":
     scripts = ['bin/deepspeed.bat', 'bin/ds', 'bin/ds_report.bat', 'bin/ds_report']
 else:
     scripts = [
-        'bin/deepspeed', 'bin/deepspeed.pt', 'bin/ds', 'bin/ds_ssh', 'bin/ds_report', 'bin/ds_bench', 'bin/dsr',
-        'bin/ds_nvme_tune', 'bin/ds_io'
+        'bin/deepspeed', 'bin/deepspeed.pt', 'bin/ds', 'bin/ds_ssh', 'bin/ds_report', 'bin/dsr', 'bin/ds_nvme_tune',
+        'bin/ds_io'
     ]
 
 start_time = time.time()
@@ -316,6 +316,7 @@ setup(name='deepspeed',
       packages=find_packages(include=['deepspeed', 'deepspeed.*']),
       include_package_data=True,
       scripts=scripts,
+      entry_points={'pytest_randomly.random_seeder': ['deepspeed = deepspeed.runtime.utils:set_random_seed']},
       classifiers=[
           'Programming Language :: Python :: 3.8', 'Programming Language :: Python :: 3.9',
           'Programming Language :: Python :: 3.10', 'Programming Language :: Python :: 3.11',

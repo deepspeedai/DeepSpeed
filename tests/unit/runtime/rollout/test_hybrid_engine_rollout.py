@@ -1278,15 +1278,43 @@ def test_tp_input_check_treats_deepspeed_static_cache_as_a_cache():
     assert compare_tensors_in_structures({"past_key_values": first}, {"past_key_values": second})
 
 
-def test_non_zero3_generation_uses_native_eos():
+@pytest.mark.parametrize("tokenizer_eos, config_eos, expected", [
+    (2, None, [2]),
+    (2, 7, [2, 7]),
+    (2, [7, 2, 9], [2, 7, 9]),
+    (None, [7, 9], [7, 9]),
+    (None, None, []),
+    (-1, [7], [7]),
+])
+def test_eos_token_ids_merge_tokenizer_and_generation_config(tokenizer_eos, config_eos, expected):
+    module = SimpleNamespace(generation_config=SimpleNamespace(eos_token_id=config_eos))
+    rollout = HybridEngineRollout(SimpleNamespace(module=module),
+                                  SimpleNamespace(pad_token_id=0, eos_token_id=tokenizer_eos))
+
+    assert rollout._eos_token_ids() == expected
+
+
+def test_continuous_rows_end_on_a_generation_config_eos_id():
+    module = SimpleNamespace(generation_config=SimpleNamespace(eos_token_id=[2, 7]))
+    rollout = HybridEngineRollout(SimpleNamespace(module=module), SimpleNamespace(pad_token_id=0, eos_token_id=2))
+
+    assert rollout._is_eos(torch.tensor([[7]]))
+    assert not rollout._is_eos(torch.tensor([[5]]))
+
+
+def test_non_zero3_generation_stops_on_every_eos_id():
     engine = _make_engine()
     engine.zero_optimization_partition_weights.return_value = False
-    engine.module.generate.return_value = torch.tensor([[0, 1, 2, 5, 6], [0, 3, 4, 7, 8]])
+    engine.module.generation_config = SimpleNamespace(eos_token_id=[2, 7])
+    engine.module.generate.return_value = torch.tensor([[0, 1, 2, 7, 6], [0, 3, 4, 5, 8]])
     rollout = HybridEngineRollout(engine, _make_tokenizer())
 
-    rollout.generate(_make_request(), _make_sampling())
+    output = rollout.generate(_make_request(), _make_sampling())
 
-    assert engine.module.generate.call_args.kwargs["eos_token_id"] == 2
+    # generate() takes the list in place of generation_config.eos_token_id, so the tokenizer's id alone would drop 7.
+    assert engine.module.generate.call_args.kwargs["eos_token_id"] == [2, 7]
+    # A row ends at its first id of either kind, and everything after it is padding.
+    assert output.attention_mask[:, 3:].tolist() == [[1, 0], [1, 1]]
     assert engine.module.generate.call_args.kwargs["stopping_criteria"] is None
     # Non-ZeRO-3 generation must keep the Transformers default.
     assert engine.module.generate.call_args.kwargs["synced_gpus"] is None

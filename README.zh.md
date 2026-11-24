@@ -33,7 +33,7 @@ DeepSpeed 于每月最后一个星期二美东时间 12:00（北京时间次日�
 
 * [2026/05] [在 DeepSpeed 中使用 Muon 优化器](https://github.com/deepspeedai/DeepSpeed/blob/master/blogs/muon-optimizer/README.md)
 
-* [2026/05] [针对 ZeRO-3 的系统 DMA (SDMA)：将集合通信算子从 AMD GPU 计算单元卸载，实现更优的通信与计算重叠](https://github.com/deepspeedai/DeepSpeed/blob/master/examples/sdma_allgather/README.md)
+* [2026/05] [针对 ZeRO-3 的系统 DMA (SDMA)：将集合通信算子从 AMD GPU 计算单元卸载，实现更优的通信与计算重叠](https://github.com/deepspeedai/DeepSpeedExamples/blob/master/training/sdma_allgather/README.md)
 
 * [2026/03] DeepSpeed 团队在 ASPLOS 2026 上开展了题为 [“Building Efficient Large-Scale Model Systems with DeepSpeed: From Open-Source Foundations to Emerging Research”](https://supercomputing-system-ai-lab.github.io/events/asplos2026-llm-tutorial/index.html) 的技术专题研讨
 
@@ -183,6 +183,26 @@ DeepSpeed 在 Windows 平台上对训练和推理均已支持大量核心功能�
 | [技术博客 (Blogs)](https://www.deepspeed.ai/posts/)                                                       |  官方前沿技术深度博文                                   |
 
 
+# DeepSpeed 示例
+
+如果您正在寻找使用 DeepSpeed 的示例，请参阅以下资源：
+
+1. [DeepSpeedExamples](https://github.com/deepspeedai/DeepSpeedExamples)
+2. [Megatron-DeepSpeed](https://github.com/deepspeedai/Megatron-DeepSpeed)
+3. [DeepSpeed + AzureML](https://github.com/Azure/azureml-examples/tree/main/cli/jobs/deepspeed)
+4. [在 Azure 上快速上手 DeepSpeed (Getting Started with DeepSpeed on Azure)](https://www.deepspeed.ai/tutorials/azure/)
+5. [DeepSpeed + Hugging Face Transformers 集成](https://huggingface.co/docs/transformers/deepspeed)
+6. [DeepSpeed + PyTorch Lightning](https://lightning.ai/docs/pytorch/stable/api/lightning.pytorch.utilities.deepspeed.html)
+
+
+# DeepSpeed 基准测试
+
+如果您正在寻找 DeepSpeed 的基准测试，请参阅以下资源：
+
+1. [通信基准测试套件 (Communication Benchmarking Suite)](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/benchmarks/communication)
+2. [推理基准测试 (Inference Benchmarks)](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/benchmarks/inference)
+
+
 # 持续集成 (CI) 硬件赞助
 
 作为一个开源项目，我们依赖合作伙伴为持续集成（CI）流水线提供硬件计算资源。目前，Modal 慷慨地为我们资助了 GPU CI 运行所需的全部硬件。Modal 是一个专注于模型推理、微调与批处理任务的一站式 AI 基础设施平台。现在访问 https://modal.com 即可获取每月 30 美元的免费额度开启体验。DeepSpeed 团队得到了来自 Modal 团队全方位的鼎力支持，在此向您的业务强烈推荐 Modal 服务。
@@ -194,14 +214,6 @@ DeepSpeed 非常欢迎开源社区的贡献！关于代码格式化规范、单�
 <a href="https://github.com/deepspeedai/DeepSpeed/graphs/contributors">
   <img src="https://contrib.rocks/image?repo=microsoft/DeepSpeed&r="  width="800px"/>
 </a>
-
-## 开发者原创性声明 (DCO)
-本项目欢迎任何建议与代码贡献。对于绝大多数贡献，您需要同意[开发者原创性声明 (DCO)](https://wiki.linuxfoundation.org/dco)，声明您认可发布于 https://developercertificate.org 的对应条款适用于该次特定贡献，并拥有授予相关贡献权限的合法权利。
-
-DCO 针对每次 Git Commit 生效，因此每个提交都需要附加签署声明（Sign-off）。您只需在提交代码时添加 `-s` 参数即可完成签署（例如 `git commit -s -m "Commit message"`）。在 Pull Request 界面中，也可以直接点击 DCO 检查项完成授权。
-
-## 行为准则
-本项目遵循 [Microsoft 开源行为准则](https://opensource.microsoft.com/codeofconduct/)。欲了解更多信息，请查阅[行为准则常见问题](https://opensource.microsoft.com/codeofconduct/faq/)，如有其他疑问或意见，亦可直接联系 [opencode@microsoft.com](mailto:opencode@microsoft.com)。
 
 # 代表性学术论文
 1. Samyam Rajbhandari, Jeff Rasley, Olatunji Ruwase, Yuxiong He. (2019) ZeRO: memory optimizations toward training trillion parameter models. [arXiv:1910.02054](https://arxiv.org/abs/1910.02054) and [In Proceedings of the International Conference for High Performance Computing, Networking, Storage and Analysis (SC '20)](https://dl.acm.org/doi/10.5555/3433701.3433727).

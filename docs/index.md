@@ -10,7 +10,7 @@ title: "Latest News"
 
 * [2026/05] [Using Muon Optimizer with DeepSpeed](https://github.com/deepspeedai/DeepSpeed/blob/master/blogs/muon-optimizer/README.md)
 
-* [2026/05] [System DMA (SDMA) for ZeRO-3: offload collectives off compute units on AMD GPUs for better overlap](https://github.com/deepspeedai/DeepSpeed/blob/master/examples/sdma_allgather/README.md)
+* [2026/05] [System DMA (SDMA) for ZeRO-3: offload collectives off compute units on AMD GPUs for better overlap](https://github.com/deepspeedai/DeepSpeedExamples/blob/master/training/sdma_allgather/README.md)
 
 * [2025/12] [DeepSpeed Core API updates: PyTorch-style backward and low-precision master states](https://github.com/deepspeedai/DeepSpeed/blob/master/blogs/core_api_update/README.md)
 

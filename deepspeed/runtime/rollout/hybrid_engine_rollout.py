@@ -305,15 +305,17 @@ class HybridEngineRollout(RolloutEngine):
 
     def _generation_kwargs(self, sampling, attention_mask, pad_token_id, module=None):
         zero3_sync = self._zero3_work_remaining()
+        eos_token_ids = self._eos_token_ids()
+        # A single id stays a scalar, as generate() and generation-config preparers received it before.
+        eos_token_ids = eos_token_ids[0] if len(eos_token_ids) == 1 else (eos_token_ids or None)
         stopping_criteria = None
-        if zero3_sync is not None and self.tokenizer.eos_token_id is not None:
-            stopping_criteria = [
-                _GlobalEosStoppingCriteria(attention_mask.shape[1], self.tokenizer.eos_token_id, zero3_sync)
-            ]
+        if zero3_sync is not None and eos_token_ids is not None:
+            stopping_criteria = [_GlobalEosStoppingCriteria(attention_mask.shape[1], eos_token_ids, zero3_sync)]
         kwargs = {
             "attention_mask": attention_mask,
             "max_new_tokens": sampling.max_new_tokens,
-            "eos_token_id": None if zero3_sync is not None else self.tokenizer.eos_token_id,
+            # generate() takes this in place of generation_config.eos_token_id, so pass every EOS id.
+            "eos_token_id": None if zero3_sync is not None else eos_token_ids,
             "stopping_criteria": stopping_criteria,
             # The group-aware criterion already synchronizes ZeRO-3 parameter gathers.
             "synced_gpus": False if zero3_sync is not None else None,
@@ -427,7 +429,7 @@ class HybridEngineRollout(RolloutEngine):
         output_ids, response_attn = self._pad_after_eos(
             output_ids,
             response_start=prompt_len,
-            eos_token_id=self.tokenizer.eos_token_id,
+            eos_token_id=self._eos_token_ids() or None,
             pad_token_id=pad_token_id,
             mask_padding=mask_padding,
         )
@@ -1605,12 +1607,25 @@ class HybridEngineRollout(RolloutEngine):
         position_ids = attention_mask.long().cumsum(dim=-1) - 1
         return position_ids.masked_fill(attention_mask == 0, 1)
 
+    def _eos_token_ids(self):
+        """Every id that ends a response: the tokenizer's EOS id, then those in the model's generation config.
+
+        A negative id is no token, and generate() would stop on none of the ids if the list held one.
+        """
+        generation_config = getattr(self.engine.module, "generation_config", None)
+        eos_token_ids = []
+        for eos in (self.tokenizer.eos_token_id, getattr(generation_config, "eos_token_id", None)):
+            for token in eos if isinstance(eos, (list, tuple)) else [eos]:
+                if isinstance(token, int) and token >= 0 and token not in eos_token_ids:
+                    eos_token_ids.append(token)
+        return eos_token_ids
+
     def _is_eos(self, token):
-        eos_token_id = self.tokenizer.eos_token_id
-        if eos_token_id is None:
+        eos_token_ids = self._eos_token_ids()
+        if not eos_token_ids:
             return False
-        eos_ids = torch.as_tensor(eos_token_id, dtype=token.dtype, device=token.device).flatten()
-        return bool((token == eos_ids).any().item())
+        eos_ids = torch.tensor(eos_token_ids, dtype=token.dtype, device=token.device)
+        return bool(torch.isin(token, eos_ids).any().item())
 
     @staticmethod
     def _last_logits_kwargs(module):
@@ -1872,7 +1887,8 @@ class HybridEngineRollout(RolloutEngine):
         batch_size = prompt_ids.shape[0]
         prompt_len = prompt_ids.shape[1]
         max_len = prompt_len + max_new_tokens
-        eos_token_id = self.tokenizer.eos_token_id
+        eos_token_ids = self._eos_token_ids()
+        eos_ids = torch.tensor(eos_token_ids, dtype=torch.long, device=device) if eos_token_ids else None
         model_dtype = next(module.parameters()).dtype
         select_next_tokens = self._token_selector(sampling)
         repetition_penalty = self._repetition_penalty(module)
@@ -2127,9 +2143,9 @@ class HybridEngineRollout(RolloutEngine):
                 # Tokens generated after a row's EOS (at most
                 # eos_check_every - 1 of them) are padded away by
                 # _pad_after_eos, so the output is identical.
-                if eos_token_id is None:
+                if eos_ids is None:
                     continue
-                eos_mask |= (next_token.view(batch_size) == eos_token_id)
+                eos_mask |= torch.isin(next_token.view(batch_size), eos_ids)
                 if step % eos_check_every == eos_check_every - 1 and bool(eos_mask.all()):
                     remaining = max_new_tokens - 2 - step
                     if remaining > 0:
@@ -2149,14 +2165,14 @@ class HybridEngineRollout(RolloutEngine):
             eos_check_every = 16
             for step in range(max_new_tokens - 1):
                 get_accelerator().replay_graph(graph)
-                if eos_token_id is not None and step % eos_check_every == eos_check_every - 1:
-                    if bool((static_token.view(-1) == eos_token_id).all().item()):
+                if eos_ids is not None and step % eos_check_every == eos_check_every - 1:
+                    if bool(torch.isin(static_token.view(-1), eos_ids).all().item()):
                         break
             # pad each row's tail after its own first EOS (response region only;
             # a prompt may legitimately contain the EOS id as content)
-            if eos_token_id is not None:
+            if eos_ids is not None:
                 resp = full_token_buf[:, prompt_len:]
-                is_eos = resp == eos_token_id
+                is_eos = torch.isin(resp, eos_ids)
                 first_eos = torch.where(is_eos.any(dim=1),
                                         is_eos.float().argmax(dim=1), torch.full_like(write_pos[0], resp.shape[1]))
                 for r in (first_eos < resp.shape[1]).nonzero(as_tuple=True)[0].tolist():
@@ -2177,7 +2193,8 @@ class HybridEngineRollout(RolloutEngine):
             get_accelerator().replay_graph(graph)
             next_token = next_tokens(static_logits[:, -1, :])
             output_ids.append(next_token)
-            eos_mask |= (next_token.view(1) == eos_token_id)
+            if eos_ids is not None:
+                eos_mask |= torch.isin(next_token.view(1), eos_ids)
         return torch.cat(output_ids, dim=1)
 
     def sync_weights(self, step: int) -> None:  # noqa: ARG002

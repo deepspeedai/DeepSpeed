@@ -196,7 +196,8 @@ class TestAutoTPContinuousRollout(DistributedTest):
                              num_hidden_layers=2,
                              num_attention_heads=4,
                              num_key_value_heads=4,
-                             max_position_embeddings=64)
+                             max_position_embeddings=64,
+                             eos_token_id=None)
         torch.manual_seed(0)
         model = AutoModelForCausalLM.from_config(config)
         ds_config = {
@@ -347,7 +348,8 @@ def test_static_graph_matches_native_llama_generation(attn_implementation):
                          num_hidden_layers=2,
                          num_attention_heads=4,
                          num_key_value_heads=2,
-                         max_position_embeddings=128)
+                         max_position_embeddings=128,
+                         eos_token_id=None)
     config._attn_implementation = attn_implementation
     device = torch.device(accelerator.device_name())
     model = LlamaForCausalLM(config).to(device).eval()
@@ -686,7 +688,8 @@ def _tiny_llama(device):
                          num_hidden_layers=2,
                          num_attention_heads=4,
                          num_key_value_heads=2,
-                         max_position_embeddings=128)
+                         max_position_embeddings=128,
+                         eos_token_id=None)
     model = LlamaForCausalLM(config)
     # A random initialization gives almost uniform next-token distributions, under which a wrong temperature or
     # cutoff rarely changes the drawn token. Scaling the output head makes them peaked.
@@ -828,6 +831,46 @@ def test_decode_repetition_penalty_matches_hf_generate(temperature, use_graph_ca
     assert output.input_ids.tolist() == expected
 
 
+@pytest.mark.parametrize("use_graph_capture, continuous_batch_size", [(False, None), (True, None), (True, 8),
+                                                                      (False, 8)])
+def test_every_path_stops_on_a_generation_config_eos_id(use_graph_capture, continuous_batch_size):
+    accelerator = get_accelerator()
+    if not accelerator.is_available() or accelerator.device_name() != "cuda":
+        pytest.skip("CUDA is required for CUDA graph decode coverage")
+
+    device = torch.device(accelerator.device_name())
+    model = _tiny_llama(device)
+    new_tokens = 16
+    request = _random_request(batch_size=8, prompt_len=8, device=device)
+    prompt_len = request.prompt_ids.shape[1]
+
+    def hf_generate():
+        with torch.no_grad():
+            return model.generate(request.prompt_ids,
+                                  attention_mask=request.prompt_attention_mask,
+                                  max_new_tokens=new_tokens,
+                                  do_sample=False,
+                                  pad_token_id=0)[:, prompt_len:].tolist()
+
+    # The model's generation config lists an EOS id the tokenizer does not have: a token the model generates midway.
+    full_length = hf_generate()
+    eos = full_length[0][new_tokens // 2]
+    model.generation_config.eos_token_id = [eos]
+    expected = [row[:row.index(eos) + 1] if eos in row else row for row in hf_generate()]
+    assert any(len(row) < new_tokens for row in expected)
+
+    output = _rollout(model, use_graph_capture).generate(
+        request, SamplingConfig(max_new_tokens=new_tokens,
+                                temperature=0.0,
+                                continuous_batch_size=continuous_batch_size))
+
+    # Each row matches generate() up to its EOS, and nothing after it is attended.
+    for row, mask, want in zip(output.input_ids[:, prompt_len:].tolist(),
+                               output.attention_mask[:, prompt_len:].tolist(), expected):
+        assert row[:len(want)] == want
+        assert not any(mask[len(want):])
+
+
 def test_continuous_graph_recaptures_only_when_tensor_layout_changes():
     accelerator = get_accelerator()
     if not accelerator.is_available() or accelerator.create_graph() is None:
@@ -843,7 +886,8 @@ def test_continuous_graph_recaptures_only_when_tensor_layout_changes():
                          num_hidden_layers=2,
                          num_attention_heads=4,
                          num_key_value_heads=2,
-                         max_position_embeddings=64)
+                         max_position_embeddings=64,
+                         eos_token_id=None)
     config._attn_implementation = "sdpa"
     eager_model = LlamaForCausalLM(config).to(device).eval()
     graph_model = LlamaForCausalLM(config).to(device).eval()
