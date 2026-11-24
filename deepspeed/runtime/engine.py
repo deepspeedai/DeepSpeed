@@ -39,6 +39,7 @@ from deepspeed.runtime.zero.parameter_offload import DeepSpeedZeRoOffload, ZeROO
 from deepspeed.runtime.zero.config import ZERO_OPTIMIZATION
 from deepspeed.runtime.zenflow.engine import (configure_zenflow, zenflow_step, is_zenflow_update_boundary,
                                               sync_zenflow_optimizer_lr)
+from deepspeed.runtime.reflow import engine as reflow_engine
 
 from deepspeed.runtime.fp16.fused_optimizer import FP16_Optimizer
 from deepspeed.runtime.fp16.loss_scaler import LossScaleConfig, LossScaleProfile
@@ -647,7 +648,8 @@ class DeepSpeedEngine(Module):
         self.tput_timer = ThroughputTimer(self._config.timers_config,
                                           batch_size=self.train_batch_size(),
                                           steps_per_output=self.steps_per_print(),
-                                          monitor_memory=False)
+                                          monitor_memory=False,
+                                          sync_current_stream=reflow_engine.reflow_enabled(self))
 
         log_dist(f"DeepSpeed Flops Profiler Enabled: {self.flops_profiler_enabled()}", ranks=[0])
 
@@ -2469,8 +2471,12 @@ class DeepSpeedEngine(Module):
                     msg = f'You are using ZeRO-Offload with a client provided optimizer ({type(basic_optimizer)}) which in most cases will yield poor performance. Please either use deepspeed.ops.adam.DeepSpeedCPUAdam or set an optimizer in your ds-config (https://www.deepspeed.ai/docs/config-json/#optimizer-parameters). If you really want to use a custom optimizer w. ZeRO-Offload and understand the performance impacts you can also set <"zero_force_ds_cpu_optimizer": false> in your configuration file.'
                     raise ZeRORuntimeException(msg)
 
+        reflow_engine.reject_optimizer_without_reflow(self, basic_optimizer)
         basic_optimizer.param_groups[:] = [pg for pg in basic_optimizer.param_groups if len(pg["params"]) != 0]
         log_dist("Removing param_group that has no 'params' in the basic Optimizer", ranks=[0])
+        # A client optimizer has to become the matching Reflow CPU optimizer; the config-built one already is one.
+        if reflow_engine.reflow_enabled(self):
+            basic_optimizer = reflow_engine.maybe_remap_client_optimizer(self, basic_optimizer)
 
         self._check_for_duplicates(basic_optimizer)
 
@@ -2507,7 +2513,11 @@ class DeepSpeedEngine(Module):
 
         if self.zero_use_cpu_optimizer():
             from deepspeed.ops.adam import DeepSpeedCPUAdam, ZenFlowCPUAdam
-            CPUAdam = ZenFlowCPUAdam if self.zenflow else DeepSpeedCPUAdam
+            use_reflow = reflow_engine.reflow_enabled(self)
+            if use_reflow:
+                CPUAdam = reflow_engine.cpu_adam_class()
+            else:
+                CPUAdam = ZenFlowCPUAdam if self.zenflow else DeepSpeedCPUAdam
 
             if self.bf16_optimizer_states():
                 if user_fp32_optimizer_states:
@@ -2521,6 +2531,8 @@ class DeepSpeedEngine(Module):
             optimizer_kwargs = {'adamw_mode': adam_w_mode, 'fp32_optimizer_states': fp32_optimizer_states}
             if self.zenflow:
                 optimizer_kwargs['overlap_step'] = self.overlap_step
+            if use_reflow:
+                optimizer_kwargs['num_threads'] = reflow_engine.reflow_num_threads(self)
             return CPUAdam, optimizer_kwargs
 
         try:
@@ -2628,7 +2640,10 @@ class DeepSpeedEngine(Module):
         elif self.optimizer_name() == LION_OPTIMIZER:
             if self.zero_use_cpu_optimizer():
                 from deepspeed.ops.lion import DeepSpeedCPULion
-                optimizer = DeepSpeedCPULion(model_parameters, **optimizer_parameters)
+                if reflow_engine.reflow_enabled(self):
+                    optimizer = reflow_engine.build_cpu_lion(self, model_parameters, optimizer_parameters)
+                else:
+                    optimizer = DeepSpeedCPULion(model_parameters, **optimizer_parameters)
             else:
                 from deepspeed.ops.lion import FusedLion
                 optimizer = FusedLion(model_parameters, **optimizer_parameters)
@@ -2870,8 +2885,12 @@ class DeepSpeedEngine(Module):
                 log_dist(f'Creating {model_dtype} ZeRO stage {zero_stage} optimizer', ranks=[0])
                 from deepspeed.runtime.zero.stage3 import DeepSpeedZeroOptimizer_Stage3
                 from deepspeed.runtime.superoffload.superoffload_stage3 import SuperOffloadOptimizer_Stage3
-                Stage3ZeroOptimizer = DeepSpeedZeroOptimizer_Stage3 if not self.super_offload(
-                ) else SuperOffloadOptimizer_Stage3
+                if self.super_offload():
+                    Stage3ZeroOptimizer = SuperOffloadOptimizer_Stage3
+                elif reflow_engine.reflow_enabled(self):
+                    Stage3ZeroOptimizer = reflow_engine.stage3_optimizer_class(self)
+                else:
+                    Stage3ZeroOptimizer = DeepSpeedZeroOptimizer_Stage3
                 optimizer = Stage3ZeroOptimizer(
                     self.module,
                     optimizer,
@@ -5126,9 +5145,10 @@ class DeepSpeedEngine(Module):
         if not self.checkpoint_engine.is_decoupled():
             commit_info = CheckpointCommitInfo(tag=tag, save_dir=save_dir, save_latest=save_latest)
             self.checkpoint_engine.commit(commit_info)
+            # Every rank must finish writing its files for `tag` before `latest` points at it.
+            dist.barrier()
             if save_latest and self.global_rank == 0:
-                with open(os.path.join(save_dir, 'latest'), 'w') as fd:
-                    fd.write(tag)
+                self._write_latest_tag(save_dir, tag)
 
         dist.barrier()
 
@@ -5144,11 +5164,24 @@ class DeepSpeedEngine(Module):
 
         self.checkpoint_engine.commit(commit_info)
 
+        # Every rank must finish writing its files for the tag before `latest` points at it.
+        dist.barrier()
         if self.global_rank == 0 and commit_info.save_latest:
-            with open(os.path.join(commit_info.save_dir, 'latest'), 'w') as fd:
-                fd.write(commit_info.tag)
+            self._write_latest_tag(commit_info.save_dir, commit_info.tag)
 
         dist.barrier()
+
+    @staticmethod
+    def _write_latest_tag(save_dir, tag):
+        # Write to a temporary file and rename it over `latest`, so a crash mid-write never
+        # leaves `latest` empty or truncated; readers see either the old tag or the new one.
+        latest_path = os.path.join(save_dir, 'latest')
+        tmp_path = f"{latest_path}.tmp.{os.getpid()}"
+        with open(tmp_path, 'w') as fd:
+            fd.write(tag)
+            fd.flush()
+            os.fsync(fd.fileno())
+        os.replace(tmp_path, latest_path)
 
     def _get_non_moe_state_dict(self, full_state_dict):
         """Remove expert-param keys from state dict, keeping all non-expert params.
