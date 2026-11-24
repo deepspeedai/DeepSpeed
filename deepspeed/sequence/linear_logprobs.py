@@ -209,7 +209,8 @@ def vocab_parallel_linear_logprobs(hidden,
     valid = target != ignore_index
     if position_mask is not None:
         valid = valid & position_mask.reshape(-1)
-    if pg_utils.is_parallel(tp_group):
+    tp_parallel = pg_utils.is_parallel(tp_group)
+    if tp_parallel:
         # Check lengths before comparing per-position IDs, so a mismatched mask fails on every
         # peer rather than leaving one rank waiting in a projection-chunk collective.
         n = torch.tensor(
@@ -233,8 +234,9 @@ def vocab_parallel_linear_logprobs(hidden,
         dist.all_reduce(upper, op=dist.ReduceOp.MAX, group=tp_group)
         if not torch.equal(lower, upper):
             raise ValueError("TP peers must provide identical targets and position masks")
-    if (valid & ((target < 0) | (target >= vocab_size))).any().item():
-        raise ValueError(f"target is out of range for vocabulary size {vocab_size}")
+    else:
+        if (valid & ((target < 0) | (target >= vocab_size))).any().item():
+            raise ValueError(f"target is out of range for vocabulary size {vocab_size}")
 
     indices = valid.nonzero().squeeze(-1)
     hidden = hidden.reshape(target.numel(), hidden.shape[-1]).index_select(0, indices)
