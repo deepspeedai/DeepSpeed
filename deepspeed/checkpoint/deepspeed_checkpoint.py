@@ -8,7 +8,7 @@ import re
 from typing import Dict
 import torch
 
-from .reshape_3d_utils import model_3d_desc, get_model_3d_descriptor_from_metadata
+from .reshape_3d_utils import model_3d_desc, checkpoint_parallel_dimensions, get_model_3d_descriptor_from_metadata
 from .reshape_utils import (basic_folder_validation, merge_state, partition_data, get_files, get_files_with_prefix,
                             get_zero_files)
 
@@ -122,7 +122,7 @@ class DeepSpeedCheckpoint(object):
 
     @staticmethod
     def _lightweight_parallel_dimensions(model_state):
-        dimensions = model_state.get(CHECKPOINT_PARALLEL_DIMS)
+        dimensions = checkpoint_parallel_dimensions(model_state)
         if dimensions is None or not isinstance(dimensions, dict):
             return dimensions if dimensions is None else type(dimensions).__name__
         return {key: dimensions.get(key) for key in (CHECKPOINT_PP_DEGREE, CHECKPOINT_TP_DEGREE)}

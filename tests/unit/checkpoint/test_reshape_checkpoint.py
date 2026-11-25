@@ -11,17 +11,29 @@ import torch
 
 from deepspeed.checkpoint import DeepSpeedCheckpoint, ZeROCheckpoint, get_model_3d_descriptor, model_3d_desc
 from deepspeed.checkpoint.constants import (AUTOEP_LAYERS_KEY, CHECKPOINT_PARALLEL_DIMS, CHECKPOINT_PP_DEGREE,
-                                            CHECKPOINT_TP_DEGREE, PARAM_SHAPES, UNIVERSAL_CHECKPOINT_INFO)
+                                            CHECKPOINT_TP_DEGREE, PARAM_SHAPES, UNIVERSAL_CHECKPOINT_INFO,
+                                            UNIVERSAL_CHECKPOINT_VERSION_KEY, UNIVERSAL_CHECKPOINT_VERSION_VALUE)
 from deepspeed.checkpoint.ds_to_universal import _aggregate_autoep_zero12_metadata
-from deepspeed.runtime.engine import _checkpoint_parallel_metadata
+from deepspeed.runtime.base_optimizer import _universal_checkpoint_tp_info
+from deepspeed.runtime.engine import _checkpoint_parallel_metadata, _default_universal_checkpoint_info
 
 PP2_TP1 = {CHECKPOINT_PP_DEGREE: 2, CHECKPOINT_TP_DEGREE: 1}
 PP1_TP2 = {CHECKPOINT_PP_DEGREE: 1, CHECKPOINT_TP_DEGREE: 2}
+PP1_TP1 = {CHECKPOINT_PP_DEGREE: 1, CHECKPOINT_TP_DEGREE: 1}
+
+# Mirrors deepspeed.runtime.sequence_parallel.parallel_state_sp, whose model-parallel accessors report
+# the Ulysses sequence-parallel group.
+ULYSSES_SP2_MPU = SimpleNamespace(initialize_sequence_parallel=lambda size: None,
+                                  get_model_parallel_world_size=lambda: 2,
+                                  get_model_parallel_rank=lambda: 1)
+TP2_MPU = SimpleNamespace(get_tensor_model_parallel_world_size=lambda: 2, get_tensor_model_parallel_rank=lambda: 1)
 
 
-def _write_checkpoint_layout(tmpdir, parallel_dimensions, autoep_metadata=None):
+def _write_checkpoint_layout(tmpdir, parallel_dimensions, autoep_metadata=None, mp_world_size=None):
     for mp_rank, dimensions in enumerate(parallel_dimensions):
         state = {PARAM_SHAPES: [{}], UNIVERSAL_CHECKPOINT_INFO: {"source": "writer"}, "ds_config": {}}
+        if mp_world_size is not None:
+            state["mp_world_size"] = mp_world_size
         if autoep_metadata is not None:
             state[AUTOEP_LAYERS_KEY] = autoep_metadata
         if dimensions is not None:
@@ -100,6 +112,37 @@ def test_checkpoint_descriptor_legacy_and_invalid_metadata(tmpdir, dimensions, e
         descriptor = get_model_3d_descriptor(str(tmpdir))
         assert (descriptor.pp_degree, descriptor.tp_degree, descriptor.dp_degree) == (1, 2, 2)
         assert ZeROCheckpoint(str(tmpdir)).get_src_tp_degree() == 2
+
+
+def test_sequence_parallel_mpu_records_no_model_parallelism():
+    dimensions = _checkpoint_parallel_metadata(ULYSSES_SP2_MPU)[CHECKPOINT_PARALLEL_DIMS]
+    assert dimensions == PP1_TP1
+    assert _default_universal_checkpoint_info(dimensions) == {
+        UNIVERSAL_CHECKPOINT_VERSION_KEY: UNIVERSAL_CHECKPOINT_VERSION_VALUE
+    }
+    assert _universal_checkpoint_tp_info(ULYSSES_SP2_MPU) == (0, 1)
+
+
+def test_model_parallel_checkpoints_get_no_default_universal_info():
+    assert _checkpoint_parallel_metadata(TP2_MPU)[CHECKPOINT_PARALLEL_DIMS] == PP1_TP2
+    assert _default_universal_checkpoint_info(PP1_TP2) is None
+    assert _default_universal_checkpoint_info(PP2_TP1) is None
+    assert _universal_checkpoint_tp_info(TP2_MPU) == (1, 2)
+
+
+def test_legacy_sequence_parallel_checkpoint_converts_as_tp1(tmpdir):
+    _write_checkpoint_layout(tmpdir, [PP1_TP2], mp_world_size=1)
+    descriptor = get_model_3d_descriptor(str(tmpdir))
+    assert (descriptor.pp_degree, descriptor.tp_degree, descriptor.dp_degree) == (1, 1, 2)
+    checkpoint = DeepSpeedCheckpoint(str(tmpdir))
+    assert (checkpoint.pp_degree, checkpoint.tp_degree, checkpoint.dp_degree) == (1, 1, 2)
+
+
+@pytest.mark.parametrize("mp_world_size", [None, 2])
+def test_missing_tensor_parallel_file_is_not_relabeled(tmpdir, mp_world_size):
+    _write_checkpoint_layout(tmpdir, [PP1_TP2], mp_world_size=mp_world_size)
+    with pytest.raises(RuntimeError, match="does not match"):
+        get_model_3d_descriptor(str(tmpdir))
 
 
 def test_checkpoint_writer_discovery_and_consumers_load_model_files_once(tmpdir, monkeypatch):
