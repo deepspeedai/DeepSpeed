@@ -235,6 +235,42 @@ class TestTPPlanConverter:
         assert "layers.*.self_attn.k_norm" not in supplemented
         assert len(supplemented) == 3
 
+    def test_supplement_replicated_qk_norm_ignores_gathered_projections(self):
+        """Projections using colwise_rep or colwise_gather_output already compute full gradients
+        and must not supplement grad_allreduce hooks."""
+        hf_plan = {
+            "layers.*.self_attn.q_proj": "colwise_gather_output",
+            "layers.*.self_attn.k_proj": "colwise_rep",
+        }
+        supplemented = TPPlanConverter.supplement_replicated_qk_norm(dict(hf_plan))
+        assert "layers.*.self_attn.q_norm" not in supplemented
+        assert "layers.*.self_attn.k_norm" not in supplemented
+        assert len(supplemented) == 2
+
+    def test_supplement_replicated_qk_norm_independent_projections(self):
+        """Only projections that are column-sharded supplement their matching norm."""
+        hf_plan = {
+            "layers.*.self_attn.q_proj": "colwise",
+            "layers.*.self_attn.k_proj": "rowwise",
+        }
+        supplemented = TPPlanConverter.supplement_replicated_qk_norm(dict(hf_plan))
+        assert supplemented.get("layers.*.self_attn.q_norm") == "replicated_with_grad_allreduce"
+        assert "layers.*.self_attn.k_norm" not in supplemented
+
+    def test_supplement_replicated_qk_norm_skips_model_without_named_parameters(self):
+        """A supplied model fixture without named_parameters is not assumed to have norms."""
+        class MockModelWithoutParams:
+            pass
+
+        hf_plan = {
+            "layers.*.self_attn.q_proj": "colwise",
+            "layers.*.self_attn.k_proj": "colwise",
+        }
+        supplemented = TPPlanConverter.supplement_replicated_qk_norm(dict(hf_plan), model=MockModelWithoutParams())
+        assert "layers.*.self_attn.q_norm" not in supplemented
+        assert "layers.*.self_attn.k_norm" not in supplemented
+        assert len(supplemented) == 2
+
     def test_get_hf_tp_plan_supplements_older_transformers_qwen3(self):
         """Simulate transformers < 5.3 where base_model_tp_plan lacks q_norm/k_norm.
         _get_hf_tp_plan should supplement them, and TPPlanConverter should mark them

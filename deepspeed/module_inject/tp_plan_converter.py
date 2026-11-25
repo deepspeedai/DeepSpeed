@@ -29,38 +29,37 @@ class TPPlanConverter:
         if not hf_tp_plan:
             return hf_tp_plan
 
-        model_params = None
-        if model is not None and hasattr(model, "named_parameters"):
+        if model is not None:
+            if not hasattr(model, "named_parameters"):
+                return hf_tp_plan
             model_params = [name for name, _ in model.named_parameters()]
+        else:
+            model_params = None
 
         has_q_norm = model_params is None or any("q_norm" in name for name in model_params)
         has_k_norm = model_params is None or any("k_norm" in name for name in model_params)
         has_v_norm = any("v_norm" in name for name in model_params) if model_params is not None else False
 
-        norm_candidates = []
-        if has_q_norm:
-            norm_candidates.append("q_norm")
-        if has_k_norm:
-            norm_candidates.append("k_norm")
-        if has_v_norm:
-            norm_candidates.append("v_norm")
-
-        if not norm_candidates:
-            return hf_tp_plan
+        proj_to_norm = {
+            "q_proj": ("q_norm", has_q_norm),
+            "k_proj": ("k_norm", has_k_norm),
+            "v_proj": ("v_norm", has_v_norm),
+        }
 
         additions = {}
         for pattern, partition in list(hf_tp_plan.items()):
-            if partition.lower() not in ("colwise", "colwise_rep", "colwise_gather_output"):
+            if partition.lower() != "colwise":
                 continue
 
-            for proj in ("q_proj", "k_proj"):
+            for proj, (norm, has_norm) in proj_to_norm.items():
+                if not has_norm:
+                    continue
                 for suffix in (f".{proj}", f".{proj}.weight"):
                     if pattern.endswith(suffix):
                         prefix = pattern[:-len(suffix)]
-                        for norm in norm_candidates:
-                            norm_key = f"{prefix}.{norm}"
-                            if norm_key not in hf_tp_plan and norm_key not in additions:
-                                additions[norm_key] = "replicated_with_grad_allreduce"
+                        norm_key = f"{prefix}.{norm}"
+                        if norm_key not in hf_tp_plan and norm_key not in additions:
+                            additions[norm_key] = "replicated_with_grad_allreduce"
 
         hf_tp_plan.update(additions)
         return hf_tp_plan
