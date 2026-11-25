@@ -3935,6 +3935,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
         if load_optimizer_states:
             self._link_all_hp_params()
+            self._relink_hp_params_optimizer_state()
 
     def _clear_hp_buffer_references(self):
         """
