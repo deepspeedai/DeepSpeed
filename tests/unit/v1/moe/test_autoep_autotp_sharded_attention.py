@@ -731,6 +731,21 @@ def _logical_state(engine, key, tp_size):
     return {name: value.detach().float().cpu() for name, value in values.items()}
 
 
+def _router_bias_buffers(engine):
+    """The routers' e_score_correction_bias buffers by name. They steer expert selection, and as buffers they are not
+    in the universal checkpoint's zero/ files."""
+    return {name: buffer for name, buffer in engine.module.named_buffers() if name.endswith("e_score_correction_bias")}
+
+
+def _zero_router_biases(engine):
+    for buffer in _router_bias_buffers(engine).values():
+        buffer.zero_()
+
+
+def _router_biases(engine):
+    return {name: buffer.detach().float().cpu() for name, buffer in _router_bias_buffers(engine).items()}
+
+
 def _universal_mismatches(got, want, rtol, atol):
     assert got.keys() == want.keys(), sorted(set(got) ^ set(want))
     mismatches = []
@@ -753,7 +768,11 @@ def _rotary_part_of_key_bias(state):
     the rotary dimensions by position, so their bias entries have a real gradient and are compared.
     """
     config = _tiny_glm4_moe_config()
-    rotary_dim = int(config.head_dim * config.partial_rotary_factor)
+    # Newer transformers keep the factor in rope_parameters instead of a config attribute.
+    rope_parameters = getattr(config, "rope_parameters", None) or {}
+    attribute_factor = getattr(config, "partial_rotary_factor", None)
+    partial_rotary_factor = rope_parameters.get("partial_rotary_factor", attribute_factor)
+    rotary_dim = int(config.head_dim * partial_rotary_factor)
     cut = dict(state)
     for name, value in state.items():
         if name.endswith("k_proj.bias"):
@@ -772,6 +791,11 @@ class _FoldedUniversalSource(DistributedFixture):
     def run(self, universal_precision, tmpdir):
         tp_size, ep_size = UNIVERSAL_SOURCE
         engine = _build_universal_engine(tp_size, ep_size, universal_precision, seed=1234)
+        # Nonzero routing biases, which a load must restore. Multiples of 1/64 are exact in bf16.
+        biases = _router_bias_buffers(engine)
+        assert biases, "the GLM-4-MoE routers have no e_score_correction_bias buffer"
+        for buffer in biases.values():
+            buffer.copy_((torch.arange(buffer.numel(), dtype=torch.float32) - buffer.numel() / 2) / 64)
         logical_rank, logical_world_size = dist.get_rank() // tp_size, dist.get_world_size() // tp_size
         _run_to_boundary(engine, logical_rank, logical_world_size)
         engine.step()
@@ -803,11 +827,13 @@ class _FoldedUniversalSource(DistributedFixture):
         all_losses = [None] * dist.get_world_size()
         dist.all_gather_object(all_losses, losses)
         if dist.get_rank() == 0:
-            torch.save({
-                "states": states,
-                "next_losses": all_losses,
-                "next_params": params_after
-            }, os.path.join(save_dir, "source_record.pt"))
+            torch.save(
+                {
+                    "states": states,
+                    "buffers": _router_biases(engine),
+                    "next_losses": all_losses,
+                    "next_params": params_after
+                }, os.path.join(save_dir, "source_record.pt"))
         dist.barrier()
 
 
@@ -852,10 +878,11 @@ class TestZero3FoldedUniversalCheckpoint(DistributedTest):
                                          seed=999,
                                          load_universal=True,
                                          offload=offload)
+        _zero_router_biases(engine)
         engine.load_checkpoint(save_dir, tag="step1_universal")
 
         # Every rank finishes its collectives before any assertion, so a failure cannot leave others waiting.
-        problems = []
+        problems = [f"buffer {m}" for m in _universal_mismatches(_router_biases(engine), record["buffers"], 0, 0)]
         for key in UNIVERSAL_STATES:
             loaded = _logical_state(engine, key, tp_size)
             problems += [f"{key}: {m}" for m in _universal_mismatches(loaded, record["states"][key], 1e-6, 1e-8)]
@@ -899,11 +926,13 @@ class TestZero3FoldedUniversalModuleOnlyLoad(DistributedTest):
         save_dir = str(tmpdir)
         record = torch.load(os.path.join(save_dir, "source_record.pt"), weights_only=False)
         engine = _build_universal_engine(tp_size, ep_size, universal_precision, seed=999, load_universal=True)
+        _zero_router_biases(engine)
         engine.load_checkpoint(save_dir, tag="step1_universal", load_module_only=True)
 
         # Every rank finishes its collectives before any assertion, so a failure cannot leave others waiting.
+        problems = [f"buffer {m}" for m in _universal_mismatches(_router_biases(engine), record["buffers"], 0, 0)]
         loaded = _logical_state(engine, "fp32", tp_size)
-        problems = _universal_mismatches(loaded, record["states"]["fp32"], 1e-6, 1e-8)
+        problems += _universal_mismatches(loaded, record["states"]["fp32"], 1e-6, 1e-8)
         source_tp, _ = UNIVERSAL_SOURCE
         logical_world_size = world_size // tp_size
         # In bf16 another layout rounds the forward differently, so only fp32 repeats the losses.

@@ -1517,6 +1517,20 @@ class TestRoutingAndLayerSemantics:
         assert torch.equal(scaled_counts, base_counts)
         assert base_counts.shape == (8, )
 
+    def test_router_computes_an_fp32_gate_in_fp32(self):
+        """A model may keep the gate weight in fp32 while the rest trains in bf16 (transformers lists GLM-4-MoE's
+        gate.weight in _keep_in_fp32_modules_strict). The router takes the bf16 hidden states and computes the logits
+        in fp32, as Hugging Face's router does."""
+        router = TokenChoiceTopKRouter(64, 8, None, None, 2, "sigmoid", False, 1.0, False)
+        hidden_states = torch.randn(50, 64).bfloat16()
+
+        scores, experts, counts = router(hidden_states)
+        reference_scores, reference_experts, reference_counts = router(hidden_states.float())
+
+        assert torch.equal(experts, reference_experts)
+        assert torch.equal(scores, reference_scores)
+        assert torch.equal(counts, reference_counts)
+
     def test_grouped_experts(self):
         experts = GroupedExperts(dim=64, hidden_dim=128, num_experts=4, use_grouped_mm=False)
         nn.init.normal_(experts.w1, std=0.02)

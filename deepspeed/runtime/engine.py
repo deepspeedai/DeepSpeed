@@ -4582,6 +4582,30 @@ class DeepSpeedEngine(Module):
 
         return load_path, client_states
 
+    def _load_universal_checkpoint_buffers(self, checkpoint):
+        """Restore the module's persistent buffers in a universal checkpoint load.
+
+        A universal load takes the parameters from zero/, cut for this run's layout, and does not apply the saved
+        module state. Persistent buffers (an MoE router's e_score_correction_bias, an AutoEP expert_bias) are only in
+        that module state. Buffers are not partitioned, so the source rank's copy is the whole buffer.
+        """
+        saved = checkpoint.get('module') or {}
+        live_buffers = dict(self.module.named_buffers())
+        missing = []
+        for name in self._get_buffer_names():
+            if name not in saved:
+                missing.append(name)
+                continue
+            live = live_buffers[name]
+            if saved[name].shape != live.shape:
+                raise RuntimeError(f"Universal checkpoint buffer {name!r} has shape {tuple(saved[name].shape)}, but "
+                                   f"the model's buffer has shape {tuple(live.shape)}")
+            with torch.no_grad():
+                live.copy_(saved[name].to(device=live.device, dtype=live.dtype))
+        if missing:
+            logger.warning(f"Universal checkpoint has no saved value for the persistent buffers {missing}; "
+                           "they keep their initial values")
+
     @staticmethod
     def _uses_autoep_zero3_partitioned_experts(autoep_layers):
         if not isinstance(autoep_layers, list):
@@ -4756,6 +4780,8 @@ class DeepSpeedEngine(Module):
                                         fetch_z3_params=fetch_z3_params,
                                         z3_params_to_fetch=z3_params_to_fetch,
                                         allowed_missing_keys=allowed_missing_keys)
+        else:
+            self._load_universal_checkpoint_buffers(checkpoint)
 
         self.loaded_checkpoint_dp_world_size = checkpoint['dp_world_size']
 
