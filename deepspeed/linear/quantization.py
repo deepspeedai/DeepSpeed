@@ -121,8 +121,11 @@ class QuantizedParameter(nn.Parameter):
         quantize it.
         """
         tensor = super().to(*args, **kwargs)
+        if not isinstance(tensor, type(self)):
+            tensor = torch.Tensor._make_subclass(type(self), tensor, self.requires_grad)
+        tensor.__dict__.update(self.__dict__)
         self.quantizer.to(*args, **kwargs)
-        self._ensure_quantized(tensor)
+        tensor._ensure_quantized(tensor)
         return tensor
 
 

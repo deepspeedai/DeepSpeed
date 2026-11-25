@@ -69,7 +69,6 @@ residual = torch.rand(256, 256, dtype=torch.float).to(get_accelerator().current_
 start_stats = get_dynamo_stats()
 
 if comm.get_rank() == 0:
-    #print(dynamo_stats['graph_breaks'])
     for item in start_stats.items():
         print(item)
 

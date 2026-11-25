@@ -427,15 +427,11 @@ class FP16_UnfusedOptimizer(DeepSpeedOptimizer):
     def initialize_optimizer_states(self):
         for i, group in enumerate(self.fp16_groups):
             for param in group:
-                param.grad = torch.zeros(param.size(),
-                                         dtype=param.dtype,
-                                         device=get_accelerator().current_device_name())
+                param.grad = torch.zeros(param.size(), dtype=param.dtype, device=param.device)
 
         for i, group in enumerate(self.fp32_groups):
             for param in group:
-                param.grad = torch.zeros(param.size(),
-                                         dtype=param.dtype,
-                                         device=get_accelerator().current_device_name())
+                param.grad = torch.zeros(param.size(), dtype=param.dtype, device=param.device)
 
         self.optimizer.step()
 

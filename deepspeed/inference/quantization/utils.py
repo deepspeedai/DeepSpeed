@@ -123,7 +123,6 @@ class DeQuantizer:
                 shape = list(tensor.shape)
                 shape[-1] = shape[-1] * 2
             elif self.config['num_bits'] == 8:
-                # last_dimension_size = last_dimension_size // 2
                 quantized_tensor = get_quantizer_module().dequantize_int8_to_half_experimental(
                     tensor.reshape(-1, last_dimension_size), quant_scale, quant_min,
                     tensor.numel() // last_dimension_size, self.config['group_size'])

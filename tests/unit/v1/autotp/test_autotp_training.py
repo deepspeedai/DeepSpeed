@@ -7,6 +7,7 @@ import pytest
 import deepspeed.comm as dist
 import torch
 import math
+import inspect
 import logging
 from copy import deepcopy
 from io import StringIO
@@ -27,7 +28,8 @@ from deepspeed.module_inject.fusedqkv_utils import shared_qk_value_head_ids
 from deepspeed.module_inject.layers import (LinearAllreduce, LinearLayer, VocabParallelLinear, VocabParallelEmbedding,
                                             set_autotp_mode, is_autotp_training_mode, GatherFromTensorParallelRegion,
                                             ScatterToTensorParallelRegion, HiddenParallelEmbedding,
-                                            Yuan_LinearAllreduce)
+                                            Yuan_LinearAllreduce, _sum_replicated_kv_gradient,
+                                            _ReplicatedKvGradReducer)
 from deepspeed.module_inject.tp_shard import AutoTPMeta, get_shard_size_list
 from unit.checkpoint.common import compare_lr_scheduler_states, compare_optimizer_states
 import os
@@ -521,7 +523,7 @@ class TestTiedVocabParallelLMHead(DistributedTest):
     world_size = 2
     reuse_dist_env = False
 
-    def _build_tied_model(self, seed, vocab_size, model_type="llama", padding_idx=None):
+    def _build_tied_model(self, seed, vocab_size, model_type="llama", padding_idx=None, tie_word_embeddings=True):
         transformers = pytest.importorskip("transformers")
         torch.manual_seed(seed)
         config_class = transformers.LlamaConfig
@@ -539,12 +541,13 @@ class TestTiedVocabParallelLMHead(DistributedTest):
                                     head_dim=8,
                                     pad_token_id=padding_idx,
                                     use_cache=False,
-                                    tie_word_embeddings=True)
+                                    tie_word_embeddings=tie_word_embeddings)
         model_config.base_model_tp_plan = None
         return model_class(model_config)
 
+    @pytest.mark.parametrize("backend", ["torch", "fused_linear"])
     @pytest.mark.parametrize("model_type,padding_idx", [("llama", 0), ("llama", 19), ("gemma3", 0), ("gemma3", 36)])
-    def test_tied_embedding_training_matches_unsharded_reference(self, model_type, padding_idx):
+    def test_tied_embedding_training_matches_unsharded_reference(self, model_type, padding_idx, backend):
         vocab_size = 37
         ds_config = {
             "train_micro_batch_size_per_gpu": 1,
@@ -552,6 +555,7 @@ class TestTiedVocabParallelLMHead(DistributedTest):
             "tensor_parallel": {
                 "autotp_size": self.world_size,
                 "vocab_parallel_lm_head": True,
+                "vocab_parallel_ce_backend": backend,
             },
             "zero_optimization": {
                 "stage": 0,
@@ -594,6 +598,107 @@ class TestTiedVocabParallelLMHead(DistributedTest):
             full_weight = head.weight.detach().clone()
             head.gather_params([full_weight])
             torch.testing.assert_close(full_weight, reference.lm_head.weight)
+
+    def _fused_linear_engine(self, model, zero_stage=0):
+        ds_config = {
+            "train_micro_batch_size_per_gpu": 1,
+            "gradient_clipping": 0.0,
+            "tensor_parallel": {
+                "autotp_size": self.world_size,
+                "vocab_parallel_lm_head": True,
+                "vocab_parallel_ce_backend": "fused_linear",
+            },
+            "zero_optimization": {
+                "stage": zero_stage,
+            },
+        }
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
+        engine, _, _, _ = deepspeed.initialize(model=model, optimizer=optimizer, config=ds_config)
+        return engine
+
+    @pytest.mark.parametrize("tie_word_embeddings", [True, False])
+    def test_fused_linear_loss_skips_logits_only_when_hf_computes_loss(self, tie_word_embeddings):
+        vocab_size = 37
+        device = torch.device(get_accelerator().current_device_name())
+        model = self._build_tied_model(42, vocab_size, tie_word_embeddings=tie_word_embeddings).to(device)
+        reference = deepcopy(model)
+        engine = self._fused_linear_engine(model)
+        head = engine.module.lm_head
+        local_vocab_size = head.weight.shape[0]
+
+        input_ids = torch.tensor([[3, 1, 19, 0, 36, 5, 2, 3]], device=device)
+        labels = input_ids.clone()
+        labels[0, :3] = -100
+        num_items_in_batch = torch.tensor(7, device=device)
+
+        expected = reference(input_ids=input_ids, labels=labels, num_items_in_batch=num_items_in_batch)
+        output = engine(input_ids=input_ids, labels=labels, num_items_in_batch=num_items_in_batch)
+        # A training forward with labels never materializes the logits.
+        assert output.logits.shape == (1, input_ids.shape[1], 0)
+        torch.testing.assert_close(output.loss, expected.loss)
+        expected.loss.backward()
+        engine.backward(output.loss)
+        full_grad = head.weight.grad.detach().clone()
+        head.gather_params([full_grad])
+        torch.testing.assert_close(full_grad, reference.lm_head.weight.grad)
+
+        # Without labels the caller wants the logits themselves.
+        expected_logits = torch.tensor_split(reference(input_ids=input_ids).logits, self.world_size,
+                                             dim=-1)[dist.get_rank()]
+        torch.testing.assert_close(engine(input_ids=input_ids).logits, expected_logits)
+
+        # Evaluation keeps the rank-local logits for metrics, and still reports the loss.
+        engine.eval()
+        reference.eval()
+        with torch.no_grad():
+            expected = reference(input_ids=input_ids, labels=labels)
+            output = engine(input_ids=input_ids, labels=labels)
+        assert output.logits.shape == (1, input_ids.shape[1], local_vocab_size)
+        torch.testing.assert_close(output.loss, expected.loss)
+
+        # Labels passed positionally arm the fused loss as well.
+        engine.train()
+        parameters = list(inspect.signature(engine.module.forward).parameters)
+        positional = [None] * (parameters.index("labels") + 1)
+        positional[parameters.index("input_ids")] = input_ids
+        positional[-1] = labels
+        output = engine(*positional)
+        assert output.logits.shape == (1, input_ids.shape[1], 0)
+        torch.testing.assert_close(output.loss, reference(input_ids=input_ids, labels=labels).loss)
+
+        # A loss that ignores the capture reads empty logits; the forward names the cause.
+        engine.module.loss_function = lambda logits, labels, **kwargs: logits.sum()
+        log_output = StringIO()
+        handler = logging.StreamHandler(log_output)
+        handler.setLevel(logging.WARNING)
+        ds_logger.addHandler(handler)
+        try:
+            engine(input_ids=input_ids, labels=labels)
+        finally:
+            ds_logger.removeHandler(handler)
+        assert "never consumed the LM-head capture" in log_output.getvalue()
+
+    def test_fused_linear_loss_rejects_unsupported_configurations(self):
+        transformers = pytest.importorskip("transformers")
+        device = torch.device(get_accelerator().current_device_name())
+        model_config = transformers.Gemma2Config(vocab_size=37,
+                                                 hidden_size=32,
+                                                 intermediate_size=64,
+                                                 num_hidden_layers=1,
+                                                 num_attention_heads=4,
+                                                 num_key_value_heads=4,
+                                                 head_dim=8,
+                                                 use_cache=False,
+                                                 tie_word_embeddings=False,
+                                                 final_logit_softcapping=1.0)
+        model_config.base_model_tp_plan = None
+        model = transformers.Gemma2ForCausalLM(model_config).to(device)
+        with pytest.raises(ValueError, match="final_logit_softcapping"):
+            self._fused_linear_engine(model)
+
+        model = self._build_tied_model(42, 37).to(device)
+        with pytest.raises(ValueError, match="ZeRO stage 3"):
+            self._fused_linear_engine(model, zero_stage=3)
 
     @pytest.mark.parametrize("vocab_size", [36, 37])
     def test_universal_checkpoint_reconstructs_tied_weight(self, vocab_size):
@@ -961,7 +1066,6 @@ class TestTpDataloaderCorrectness(DistributedTest):
                 "Data inconsistency within the TP group. Please check the Dataloader implementation to ensure consistency."
         ):
             for batch in data_loader:
-                # batch[0].requires_grad = requires_grad
                 batch[0] += dist.get_rank()
                 model(batch[0], batch[1])
 
@@ -1178,18 +1282,112 @@ class TestYuanOutputProjectionBias(DistributedTest):
             set_autotp_mode(training=False)
 
 
-class TestGPTBigCodeMultiQueryTraining(DistributedTest):
-    """Multi-query GPTBigCode must train the same model under AutoTP as on one device.
+def test_replicated_kv_gradient_hook_and_staging(monkeypatch):
+    import deepspeed.module_inject.layers as layers_module
 
-    Every rank holds the whole shared key/value block of the fused c_attn but attends with only
-    its own query heads, so the gradient each rank computes for those rows is partial. Unless the
-    ranks sum it, each applies a different update to rows that must stay identical (#8927).
+    kv_start = 3
+    # Some backends return the weight gradient in a transposed layout.
+    grad = torch.arange(40.0).reshape(5, 8).t()
+    assert grad.shape == (8, 5) and not grad.is_contiguous()
+
+    collectives = []
+
+    def fake_all_reduce(tensor, group=None):
+        collectives.append((tuple(tensor.shape), tensor.is_contiguous()))
+        tensor.fill_(-1.0)
+
+    # Collective backends reject non-contiguous inputs, so the test stands in for that
+    # documented contract and records what actually reaches the backend.
+    monkeypatch.setattr(layers_module.dist, "all_reduce", fake_all_reduce)
+    reduced = _sum_replicated_kv_gradient(grad, kv_start, group=None)
+
+    assert collectives == [((5, 5), True)]
+    torch.testing.assert_close(reduced[:kv_start], grad[:kv_start])
+    torch.testing.assert_close(reduced[kv_start:], torch.full((5, 5), -1.0))
+    assert not reduced.is_contiguous()
+
+    # PyTorch < 2.1 AccumulateGrad hooks receive (grad_inputs, grad_outputs).
+    param = nn.Parameter(torch.zeros(4, 2))
+    param.grad = torch.ones(4, 2)
+    monkeypatch.setattr(layers_module.dist, "all_reduce", lambda tensor, group=None: tensor.fill_(7.0))
+    reducer = _ReplicatedKvGradReducer(param, kv_start=2, group=None)
+    reducer.post_accumulate_hook((torch.empty_like(param.grad), ), (torch.empty_like(param.grad), ))
+    torch.testing.assert_close(param.grad[:2], torch.ones(2, 2))
+    torch.testing.assert_close(param.grad[2:], torch.full((2, 2), 7.0))
+
+
+def _run_two_accumulated_backwards(monkeypatch, register_tensor_hook):
+    import deepspeed.module_inject.layers as layers_module
+    from deepspeed.utils.torch import register_grad_hook
+
+    param = nn.Parameter(torch.zeros(4, 1))
+    # Simulate a two-rank TP sum on the replicated K/V rows.
+    monkeypatch.setattr(layers_module.dist, "all_reduce", lambda tensor, group=None: tensor.mul_(2))
+    reducer = _ReplicatedKvGradReducer(param, kv_start=2, group=None)
+    if register_tensor_hook:
+        param.register_hook(reducer.tensor_hook)
+    register_grad_hook(param, reducer.post_accumulate_hook)
+    for _ in range(2):
+        (param * 1.0).sum().backward()
+    return param
+
+
+@pytest.mark.parametrize("register_tensor_hook", [True, False])
+def test_replicated_kv_gradient_reduces_each_micro_batch_once(monkeypatch, register_tensor_hook):
+    # The second case simulates the torch_npu path where the plain tensor hook is skipped under
+    # ZeRO 1/2. The post-accumulate fallback must reduce only the new K/V rows, not the whole
+    # accumulated gradient.
+    param = _run_two_accumulated_backwards(monkeypatch, register_tensor_hook)
+    torch.testing.assert_close(param.grad, torch.tensor([[2.0], [2.0], [4.0], [4.0]]))
+
+
+@contextmanager
+def _count_kv_gradient_all_reduces(kv_rows, hidden):
+    """Count the K/V-row all-reduces issued by the fused c_attn gradient hook.
+
+    The hook runs in the autograd thread, so the test observes it by wrapping the collective it
+    calls. Only the replicated K/V slices have these shapes; the other all-reduces in the step
+    operate on full activations or gradients.
     """
-    world_size = [2, 4]
+    import deepspeed.module_inject.layers as layers_module
+
+    counts = {"weight": 0, "bias": 0}
+    original_all_reduce = layers_module.dist.all_reduce
+
+    def counting_all_reduce(tensor, *args, **kwargs):
+        shape = tuple(tensor.shape)
+        if shape == (kv_rows, hidden):
+            counts["weight"] += 1
+        elif shape == (kv_rows, ):
+            counts["bias"] += 1
+        return original_all_reduce(tensor, *args, **kwargs)
+
+    layers_module.dist.all_reduce = counting_all_reduce
+    try:
+        yield counts
+    finally:
+        layers_module.dist.all_reduce = original_all_reduce
+
+
+class TestGPTBigCodeMultiQueryTraining(DistributedTest):
+    """GPTBigCode MQA must train like one device under AutoTP.
+
+    TP=2 covers ZeRO 0/1/2/3 with DP=2; TP=4 covers the four-way query split. Each rank's
+    partial K/V gradient must be summed, and the hook is asserted in every case.
+    """
+    world_size = 4
     reuse_dist_env = False
 
-    def test_matches_single_device_training(self):
+    @pytest.mark.parametrize("zero_stage", [0, 1, 2, 3])
+    def test_matches_single_device_training_tp2(self, zero_stage):
+        self._train_and_compare(2, zero_stage)
+
+    def test_matches_single_device_training_tp4(self):
+        self._train_and_compare(4, 0)
+
+    def _train_and_compare(self, expected_tp, zero_stage):
         skip_on_device()
+        assert dist.get_world_size() == 4, (f"this case expects four ranks, got {dist.get_world_size()}")
         transformers = pytest.importorskip("transformers")
         hidden, heads, steps, lr = 32, 4, 4, 0.5
         kv_rows = 2 * (hidden // heads)
@@ -1222,7 +1420,7 @@ class TestGPTBigCodeMultiQueryTraining(DistributedTest):
         for input_ids in batches:
             loss = reference(input_ids=input_ids, labels=input_ids).loss
             loss.backward()
-            if reference_kv_grads is None:
+            if zero_stage == 0 and reference_kv_grads is None:
                 c_attn = reference.transformer.h[0].attn.c_attn
                 reference_kv_grads = (c_attn.weight.grad[hidden:].clone(), c_attn.bias.grad[hidden:].clone())
             reference_optimizer.step()
@@ -1239,32 +1437,53 @@ class TestGPTBigCodeMultiQueryTraining(DistributedTest):
             },
             # The reference does not clip, and DeepSpeed clips to norm 1.0 by default.
             "gradient_clipping": 0.0,
+            "zero_allow_untested_optimizer": True,
             "tensor_parallel": {
-                "autotp_size": dist.get_world_size(),
+                "autotp_size": expected_tp,
             },
             "zero_optimization": {
-                "stage": 0,
+                "stage": zero_stage,
             },
         }
         try:
             engine, _, _, _ = deepspeed.initialize(model=build_model(), config=ds_config)
             c_attn = engine.module.transformer.h[0].attn.c_attn
+
+            if zero_stage == 0:
+                # Every rank must hold its query rows plus the whole K/V block.
+                expected_query_width = hidden // expected_tp
+                assert c_attn.weight.shape[0] == expected_query_width + kv_rows
+
+                # Checkpoint metadata must describe the same shard the partition built.
+                checkpoint_map = c_attn._bigcode_affine_map((hidden + kv_rows, hidden))
+                assert checkpoint_map is not None
+                assert checkpoint_map.shard_shapes[c_attn.tp_index] == tuple(c_attn.weight.shape)
+
             losses = []
             for step, input_ids in enumerate(batches):
-                loss = engine(input_ids=input_ids, labels=input_ids).loss
-                engine.backward(loss)
                 if step == 0:
-                    # The shared rows' gradient on every rank must be the whole gradient, not
-                    # the part from this rank's heads.
-                    torch.testing.assert_close(c_attn.weight.grad[-kv_rows:], reference_kv_grads[0])
-                    torch.testing.assert_close(c_attn.bias.grad[-kv_rows:], reference_kv_grads[1])
+                    with _count_kv_gradient_all_reduces(kv_rows, hidden) as hook_calls:
+                        loss = engine(input_ids=input_ids, labels=input_ids).loss
+                        engine.backward(loss)
+                    assert hook_calls["weight"] > 0, "the K/V weight gradient hook did not run"
+                    if c_attn.bias is not None:
+                        assert hook_calls["bias"] > 0, "the K/V bias gradient hook did not run"
+                    if zero_stage == 0:
+                        # The shared rows' gradient on every rank must be the whole gradient,
+                        # not the part from this rank's heads.
+                        torch.testing.assert_close(c_attn.weight.grad[-kv_rows:], reference_kv_grads[0])
+                        torch.testing.assert_close(c_attn.bias.grad[-kv_rows:], reference_kv_grads[1])
+                else:
+                    loss = engine(input_ids=input_ids, labels=input_ids).loss
+                    engine.backward(loss)
                 engine.step()
                 losses.append(loss.item())
 
             torch.testing.assert_close(torch.tensor(losses), torch.tensor(reference_losses), atol=1e-5, rtol=0)
-            kv_on_ranks = [None] * dist.get_world_size()
-            dist.all_gather_object(kv_on_ranks, c_attn.weight.detach()[-kv_rows:].cpu())
-            assert all(torch.equal(kv, kv_on_ranks[0]) for kv in kv_on_ranks)
+            if zero_stage == 0:
+                kv_on_ranks = [None] * dist.get_world_size()
+                dist.all_gather_object(kv_on_ranks, c_attn.weight.detach()[-kv_rows:].cpu())
+                assert all(torch.equal(kv, kv_on_ranks[0]) for kv in kv_on_ranks)
         finally:
             reset_tp_model_init_state()
 
@@ -1545,7 +1764,6 @@ class TiedRowParallelOutputTrainingModel(nn.Module):
         return self.lm_head(torch.tanh(self.projection(self.embed_tokens(input_ids))))
 
 
-# @pytest.mark.sequential
 class TestParamsGather(DistributedTest):
     world_size = 4
     reuse_dist_env = False
@@ -2013,3 +2231,231 @@ class TestScatterGatherDuality(DistributedTest):
         local_gradient = torch.full_like(local, rank + 1)
         restored.backward(local_gradient)
         torch.testing.assert_close(local.grad, local_gradient)
+
+
+class TestVocabParallelEmbedding(DistributedTest):
+    """tensor_parallel.vocab_parallel_embedding: an untied input embedding is sharded along the vocabulary."""
+    world_size = 2
+    reuse_dist_env = False
+
+    def _model(self, tie_word_embeddings, hf_tp_plan=True, seed=0):
+        transformers = pytest.importorskip("transformers")
+
+        class HeuristicLlamaForCausalLM(transformers.LlamaForCausalLM):
+            _tp_plan = None
+
+        # 3 key-value heads do not divide over 2 ranks, so a vocabulary split by head count (44 and 22 rows)
+        # differs from the even split (33 and 33 rows).
+        config = transformers.LlamaConfig(vocab_size=66,
+                                          hidden_size=48,
+                                          intermediate_size=64,
+                                          num_hidden_layers=2,
+                                          num_attention_heads=6,
+                                          num_key_value_heads=3,
+                                          max_position_embeddings=32,
+                                          tie_word_embeddings=tie_word_embeddings)
+        model_class = transformers.LlamaForCausalLM
+        if not hf_tp_plan:
+            # Without a HuggingFace tp_plan, AutoTP falls back to its heuristic path.
+            config.base_model_tp_plan = None
+            model_class = HeuristicLlamaForCausalLM
+        torch.manual_seed(seed)
+        return model_class(config)
+
+    def _config(self, zero_stage, **tp_options):
+        return {
+            "train_micro_batch_size_per_gpu": 1,
+            "optimizer": {
+                "type": "SGD",
+                "params": {
+                    "lr": 0.1
+                }
+            },
+            "zero_allow_untested_optimizer": True,
+            # The reference does not clip; DeepSpeed clips the global gradient norm to 1.0 by default.
+            "gradient_clipping": 0.0,
+            "zero_optimization": {
+                "stage": zero_stage
+            },
+            "tensor_parallel": {
+                "autotp_size": self.world_size,
+                "vocab_parallel_embedding": True,
+                **tp_options
+            },
+        }
+
+    def _train_and_compare(self, engine, reference, zero_stage):
+        reference_optimizer = torch.optim.SGD(reference.parameters(), lr=0.1)
+        # Tokens from both halves of the vocabulary, so that both ranks' rows are looked up and trained.
+        input_ids = torch.tensor([[0, 5, 33, 65, 17, 40, 2, 31]], device=get_accelerator().current_device_name())
+        for _ in range(2):
+            expected = reference(input_ids=input_ids, labels=input_ids)
+            output = engine(input_ids=input_ids, labels=input_ids)
+            torch.testing.assert_close(output.loss, expected.loss)
+            expected.loss.backward()
+            reference_optimizer.step()
+            reference_optimizer.zero_grad()
+            engine.backward(output.loss)
+            engine.step()
+
+        embedding = engine.module.get_input_embeddings()
+        with deepspeed.zero.GatheredParameters([embedding.weight], enabled=zero_stage == 3):
+            weight = embedding.weight.detach().clone()
+        embedding.gather_params([weight])
+        torch.testing.assert_close(weight, reference.get_input_embeddings().weight)
+
+    @pytest.mark.parametrize("path,zero_stage,zero_init,vocab_parallel_lm_head", [
+        ("hf_tp_plan", 0, False, None),
+        ("hf_tp_plan", 1, False, None),
+        ("hf_tp_plan", 2, False, None),
+        ("hf_tp_plan", 3, False, None),
+        ("hf_tp_plan", 3, True, None),
+        ("hf_tp_plan", 0, False, True),
+        ("preset_model", 1, False, None),
+        ("skip_grad_allreduce_spec", 1, False, None),
+        ("heuristic", 1, False, True),
+    ])
+    def test_matches_single_device_training(self, path, zero_stage, zero_init, vocab_parallel_lm_head):
+        skip_on_device()
+        device = get_accelerator().current_device_name()
+        tp_options = {}
+        if vocab_parallel_lm_head is not None:
+            tp_options["vocab_parallel_lm_head"] = vocab_parallel_lm_head
+        if path in ("preset_model", "skip_grad_allreduce_spec"):
+            tp_options["preset_model"] = "llama"
+        if path == "skip_grad_allreduce_spec":
+            # The option shards the embedding anyway, so the spec's gradient sum over the tensor-parallel group
+            # would add the gradients of different vocabulary rows.
+            tp_options["partition_config"] = {
+                "layer_specs": [{
+                    "patterns": [r".*embed_tokens\.weight$"],
+                    "partition_type": "skip",
+                    "grad_allreduce": True
+                }],
+            }
+        config = self._config(zero_stage, **tp_options)
+        reference = self._model(tie_word_embeddings=False, hf_tp_plan=path != "heuristic").to(device)
+        if zero_init:
+            # How a large model is built: each parameter is partitioned over all ranks before AutoTP sees it.
+            with deepspeed.zero.Init(config_dict_or_path=config):
+                model = self._model(tie_word_embeddings=False)
+            with deepspeed.zero.GatheredParameters(list(model.parameters()), modifier_rank=0):
+                if dist.get_rank() == 0:
+                    model.load_state_dict(reference.state_dict())
+        else:
+            model = deepcopy(reference)
+        engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config)
+
+        embedding = engine.module.get_input_embeddings()
+        assert isinstance(embedding, VocabParallelEmbedding)
+        rows = getattr(embedding.weight, "ds_shape", embedding.weight.shape)[0]
+        assert rows == reference.config.vocab_size // self.world_size
+        if vocab_parallel_lm_head:
+            assert isinstance(engine.module.lm_head, VocabParallelLinear)
+        self._train_and_compare(engine, reference, zero_stage)
+
+    @pytest.mark.parametrize("output_head", ["vocab_parallel", "row_parallel"])
+    def test_tied_embedding_keeps_the_shard_of_its_output_head(self, output_head):
+        skip_on_device()
+        model = self._model(tie_word_embeddings=True).to(get_accelerator().current_device_name())
+        reference = deepcopy(model)
+        if output_head == "vocab_parallel":
+            tp_options = {"vocab_parallel_lm_head": True}
+        else:
+            tp_options = {
+                "partition_config": {
+                    "use_default_specs": False,
+                    "layer_specs": [{
+                        "patterns": [r".*lm_head\.weight$"],
+                        "partition_type": "row"
+                    }],
+                }
+            }
+        engine, _, _, _ = deepspeed.initialize(model=model,
+                                               model_parameters=model.parameters(),
+                                               config=self._config(zero_stage=0, **tp_options))
+        assert engine.module.get_input_embeddings().weight is engine.module.lm_head.weight
+        self._train_and_compare(engine, reference, zero_stage=0)
+
+    def test_replaces_every_registration_of_the_embedding(self):
+        """A name left on the old module would look up one shard as if it were the whole table."""
+        skip_on_device()
+        model = self._model(tie_word_embeddings=False).to(get_accelerator().current_device_name())
+        # T5's set_input_embeddings() registers one embedding module under several names.
+        model.embedding_alias = model.get_input_embeddings()
+        engine, _, _, _ = deepspeed.initialize(model=model,
+                                               model_parameters=model.parameters(),
+                                               config=self._config(zero_stage=0))
+        assert engine.module.embedding_alias is engine.module.get_input_embeddings()
+
+    def test_universal_checkpoint_rebuilds_the_embedding(self):
+        """Universal checkpoint conversion rebuilds the full embedding from the shards with this metadata."""
+        skip_on_device()
+        model = self._model(tie_word_embeddings=False)
+        original_weight = model.get_input_embeddings().weight.detach().clone()
+        engine, _, _, _ = deepspeed.initialize(model=model,
+                                               model_parameters=model.parameters(),
+                                               config=self._config(zero_stage=0))
+        uc_info = getattr(engine.module, UNIVERSAL_CHECKPOINT_INFO)
+        affine_map = ParamAffineMap.from_dict(uc_info[AFFINE_MAP][AFFINE_MAP_PARAMS][r"^model\.embed_tokens\.weight$"])
+        shards = [None] * self.world_size
+        dist.all_gather_object(shards,
+                               engine.module.get_input_embeddings().weight.detach().cpu(),
+                               group=groups.get_tensor_model_parallel_group())
+        torch.testing.assert_close(affine_map.rebuild(dict(enumerate(shards))), original_weight)
+
+    def test_save_load_round_trip_preserves_loss(self, tmpdir):
+        skip_on_device()
+        config = self._config(zero_stage=1)
+        input_ids = torch.tensor([[0, 5, 33, 65, 17, 40, 2, 31]], device=get_accelerator().current_device_name())
+        model = self._model(tie_word_embeddings=False, seed=42)
+        saved_engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config)
+        saved_loss = saved_engine(input_ids=input_ids, labels=input_ids).loss.detach().clone()
+        ckpt_path = os.path.join(tmpdir, "vocab_parallel_embedding")
+        saved_engine.save_checkpoint(ckpt_path)
+
+        model = self._model(tie_word_embeddings=False, seed=7)
+        loaded_engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config)
+        # A different initialization keeps the comparison meaningful: a checkpoint that never reaches the
+        # sharded embedding would leave this diverged loss in place.
+        diverged_loss = loaded_engine(input_ids=input_ids, labels=input_ids).loss.detach().clone()
+        assert not torch.allclose(diverged_loss, saved_loss)
+        loaded_engine.load_checkpoint(ckpt_path)
+        restored_loss = loaded_engine(input_ids=input_ids, labels=input_ids).loss
+        torch.testing.assert_close(restored_loss, saved_loss)
+
+    @pytest.mark.parametrize("conflict",
+                             ["tied_replicated_head", "embedding_spec", "deepcompile_autotp", "empty_shard"])
+    def test_rejects_conflicting_request(self, conflict):
+        skip_on_device()
+        model = self._model(tie_word_embeddings=conflict == "tied_replicated_head")
+        model = model.to(get_accelerator().current_device_name())
+        expected_error = ValueError
+        tp_options = {}
+        if conflict == "tied_replicated_head":
+            # Sharding a tied embedding on its own would untie it from the output layer.
+            tp_options["vocab_parallel_lm_head"] = False
+            expected_error = NotImplementedError
+        elif conflict == "embedding_spec":
+            # The spec has already split the embedding along the hidden dimension.
+            tp_options["partition_config"] = {
+                "use_default_specs": False,
+                "layer_specs": [{
+                    "patterns": [r".*embed_tokens\.weight$"],
+                    "partition_type": "row"
+                }],
+            }
+        elif conflict == "empty_shard":
+            # One grain of all 66 rows leaves the second rank no rows to look up.
+            tp_options["tp"] = {"tp_grain_size": 66}
+        config = self._config(zero_stage=0, **tp_options)
+        if conflict == "deepcompile_autotp":
+            # The pass rewrites only linear layers, so engine.compile() would reject the sharded embedding.
+            config["compile"] = {"deepcompile": True, "passes": ["autotp"]}
+        # pytest.raises inside a DistributedTest worker hangs the run when nothing is raised.
+        try:
+            deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config)
+            raised = False
+        except expected_error as error:
+            raised = "vocab_parallel_embedding" in str(error)
+        assert raised
