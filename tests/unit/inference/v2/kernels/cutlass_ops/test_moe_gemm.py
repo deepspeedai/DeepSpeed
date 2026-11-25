@@ -6,10 +6,15 @@
 import pytest
 import torch
 
+import deepspeed
 from deepspeed.accelerator import get_accelerator
 from deepspeed.inference.v2.inference_utils import ActivationType, DtypeEnum
 from deepspeed.inference.v2.kernels.cutlass_ops import MoEGEMM
+from deepspeed.ops.op_builder import InferenceCutlassBuilder
 from ....v2.inference_test_utils import allclose
+
+if not deepspeed.ops.__compatible_ops__[InferenceCutlassBuilder.NAME]:
+    pytest.skip("Cutlass ops are not available on this system", allow_module_level=True)
 
 SINGLE_EXPERT_CASES = [(13, 2048, 2048), (256, 1024, 4096), (278, 5120, 2048), (893, 5120, 2560)]
 

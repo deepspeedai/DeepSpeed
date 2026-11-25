@@ -717,6 +717,91 @@ Note that if the value of "device" is not specified or not supported, an asserti
 | ------------------------------------------------------------- | ------- |
 | Enable fast optimizer initialization when offloading to NVMe. | `false` |
 
+### Reflow
+[Reflow](/tutorials/reflow/) is an asynchronous CPU-offload optimizer for ZeRO stage 3. The CPU optimizer runs per gradient bucket during backward, gradients move to CPU in BF16, and the FP32 master weights and optimizer state are committed in the background while the next forward runs.
+
+The `reflow` block enables it, so an empty block is enough to run with the defaults. Reflow requires `"stage": 3`, `"fp16": {"enabled": true}` or `"bf16": {"enabled": true}`, `offload_optimizer` on `cpu` (or `nvme`) with `"ratio": 1.0`, and CPU Adam/Lion kernels built with AVX2 or AVX-512. Model parameters and offloaded gradients must be FP16/BF16; master weights and optimizer states must be FP32. If `data_types.grad_accum_dtype` is set, it must match the model dtype. FP32 model parameters, `torch_autocast`, low-precision master weights/states, and `fp32_optimizer_states: false` are rejected. It uses `ReflowCPUAdam`/`ReflowCPULion`; a client `DeepSpeedCPUAdam`/`DeepSpeedCPULion` is remapped automatically. These Reflow optimizers require the `reflow` block even when passed directly. Adam/AdamW support `maximize`, including per-group settings preserved when remapping a PyTorch optimizer; the default is `false`. Call `engine.step()`; direct `ReflowCPUAdam.step()` and `ReflowCPULion.step()` calls are rejected. It is not compatible with partial optimizer offload, `super_offload`, ZenFlow, DeepCompile, the Muon optimizer (support to be implemented), or `managed_gradient_accumulation: false`.
+```json
+  "reflow": {
+    "num_threads": null,
+    "enable_cpu_affinity": false,
+    "main_thread_cores": 3,
+    "main_thread_core_type": "logical",
+    "pin_main_thread": true,
+    "worker_core_type": "logical",
+    "bucketwise_worker_affinity": "thread",
+    "bucketwise_cores_per_worker": null,
+    "h2d_chunk_size_mib": 16,
+    "state_update_cores": null,
+    "state_update_backward_cores": null
+  }
+```
+***num_threads***: [integer or null]
+
+| Description | Default |
+| ----------- | ------- |
+| CPU optimizer kernel thread limit. When unset, each kernel uses the CPUs available under its worker's affinity. | `null` |
+
+***enable_cpu_affinity***: [boolean]
+
+| Description | Default |
+| ----------- | ------- |
+| Restrict the main process to the rank's NUMA-local CPU slice. Optimizer workers are pinned regardless of this setting. Use `pin_main_thread` to restrict the initializing thread to the reserved main CPUs. | `false` |
+
+***main_thread_cores***: [integer]
+
+| Description | Default |
+| ----------- | ------- |
+| CPUs or physical cores reserved for the initializing thread, according to `main_thread_core_type`. Ranks sharing a CPU set divide it before reserving their main CPUs. The reservation shrinks to leave a worker CPU when possible; a single CPU is shared by main and worker. Ranks also share CPUs if there are fewer CPUs than ranks. Partially overlapping rank affinities are rejected when pinning is enabled. | `3` |
+
+***main_thread_core_type***: [string]
+
+| Description | Default |
+| ----------- | ------- |
+| Count the main reservation as logical CPUs (`logical`) or physical cores with all available SMT siblings (`physical`). | `"logical"` |
+
+***pin_main_thread***: [boolean]
+
+| Description | Default |
+| ----------- | ------- |
+| Pin the initializing thread to the reserved main CPUs. Its original affinity is restored on engine destruction. Requires OS thread-affinity support. | `true` |
+
+***worker_core_type***: [string]
+
+| Description | Default |
+| ----------- | ------- |
+| Use all available worker CPU IDs (`logical`) or one logical CPU per worker physical core (`physical`). | `"logical"` |
+
+***bucketwise_worker_affinity***: [string]
+
+| Description | Default |
+| ----------- | ------- |
+| Assign a CPU mask per bucketwise task (`task`) or reuse a fixed bucketwise mask on each pool thread (`thread`). A thread running a state commit temporarily uses the commit mask. | `"thread"` |
+
+***bucketwise_cores_per_worker***: [integer or null]
+
+| Description | Default |
+| ----------- | ------- |
+| By default one optimizer worker uses the CPUs assigned to the rank after the main-thread reservation. A positive integer splits each NUMA-local group into workers with at most that many CPU IDs. | `null` |
+
+***h2d_chunk_size_mib*** (positive integer)
+
+| Description | Default |
+| ----------- | ------- |
+| Maximum size in MiB (1,048,576 bytes) of a Ready parameter copy from CPU to the accelerator. Each completed chunk can transfer while the CPU computes the next one. Checkpointed ranges wait until they are safe to publish. | `16` |
+
+***state_update_cores***: [integer or null]
+
+| Description | Default |
+| ----------- | ------- |
+| Limit worker CPU IDs available to the background optimizer-state commit during forward. When unset, all worker CPUs are available. | `null` |
+
+***state_update_backward_cores***: [integer or null]
+
+| Description | Default |
+| ----------- | ------- |
+| Limit the background state commit's worker CPU IDs during backward. When unset, all worker CPUs are available. Affinity changes take effect between commit slices. | `null` |
+
 
 ### Asynchronous I/O
 Configuring the asynchronous I/O module for offloading parameter and optimizer states to persistent (NVMe) storage. This module uses Linux native asynchronous I/O (libaio).
@@ -817,6 +902,12 @@ DeepCompile `autotp` pass, keeps the tied embedding/head replicated and logs a w
 Explicit `true` requests fail instead of silently downgrading. See
 [Vocabulary-parallel LM Loss](/tutorials/autotp-training/#vocabulary-parallel-lm-loss)
 for supported embedding semantics and compiler limitations.
+
+***vocab_parallel_embedding***: [boolean]
+
+| Description | Default |
+| ----------- | ------- |
+| Shard an input embedding that is not tied to the output layer along the vocabulary: each rank keeps 1/tp of the rows and the partial lookups are summed over the tensor-parallel group. A tied embedding is sharded with its output head instead. Not supported with the DeepCompile `autotp` pass. See [Untied Input Embedding](/tutorials/autotp-training/#untied-input-embedding). | `false` |
 
 ***partition_config***: [dictionary]
 
@@ -1009,7 +1100,7 @@ smoke coverage used for this AutoEP surface produced the following version gates
 
 | Description                                                                                                    | Default  |
 | -------------------------------------------------------------------------------------------------------------- | -------- |
-| How expert outputs are weighted by their router scores and reduced over top-k. `"auto"` resolves to `"weighted_sum"`. `"fused_weighted_sum"` is experimental and computes the same reduction in one Triton pass, without materializing the scattered assignment buffer or the `[tokens, top_k, hidden]` FP32 intermediate; it requires CUDA, Triton, bfloat16/float16 activations, `tensor_parallel.autotp_size=1`, `expert_tensor_parallel_size=1`, and a resolved `score_apply="post"`, and is rejected rather than silently ignored when any of those does not hold. `"legacy_bmm"` is a debug reduction retained for model-family verification. | `"auto"` |
+| How expert outputs are weighted by their router scores and reduced over top-k. `"auto"` resolves to `"weighted_sum"`. `"fused_weighted_sum"` is experimental and computes the same reduction in one Triton pass, without materializing the scattered assignment buffer or the `[tokens, top_k, hidden]` FP32 intermediate; it requires CUDA, Triton, bfloat16, float16 or float32 activations, `expert_tensor_parallel_size=1`, and a resolved `score_apply="post"`, and is rejected rather than silently ignored when any of those does not hold. `"legacy_bmm"` is a debug reduction retained for model-family verification. | `"auto"` |
 
 ***row_weighting_impl***: [string]
 
@@ -1028,6 +1119,18 @@ smoke coverage used for this AutoEP surface produced the following version gates
 | Description                                                                                                    | Default  |
 | -------------------------------------------------------------------------------------------------------------- | -------- |
 | Experimental. In the DeepEP backward, send the experts' input gradient back while computing their weight gradients. The expert backward returns its input gradient first and defers its weight-gradient GEMMs to the DeepEP dispatch backward, which launches its combine asynchronously, runs those GEMMs with `comm_num_sm` SMs withheld so the combine can run beside them, and waits before returning, including when weight-gradient computation raises. Parameter-gradient semantics are unchanged; exact cross-backend equality is not guaranteed. First-order gradients only (`create_graph=True` raises). Requires `comm_backend="deepep"` with `autoep_size > 1`, the `torch._grouped_mm` expert path (`use_grouped_mm=true`, and `disable_triton_grouped_mm=true` on devices that prefer the Triton grouped GEMM), ZeRO stage 1 or 2 (not 0 or 3), and PyTorch's SM carveout getter/setter APIs; unsupported configurations fail rather than falling back. | `false` |
+
+***deferred_dw_flush_period***: [integer]
+
+| Description                                                                                                    | Default  |
+| -------------------------------------------------------------------------------------------------------------- | -------- |
+| Experimental. Values above `1` stage the rows of the experts' weight-gradient GEMMs across backward passes instead of running the GEMMs in each one. A backward appends each expert's rows to a per-expert staging buffer and returns no expert weight gradient; one backward in every `deferred_dw_flush_period` runs the GEMMs once over everything staged. The backward that closes a gradient accumulation window always does the same, so every optimizer step sees the same accumulated gradient as before, up to floating-point summation order. This helps when each expert receives few rows per microbatch (many experts, small microbatches) and costs memory for the staged rows; with many rows per expert it is slower. First-order gradients only. Requires the `torch._grouped_mm` expert path (`use_grouped_mm=true`, and `disable_triton_grouped_mm=true` on devices that prefer the Triton grouped GEMM), and `managed_gradient_accumulation=true`; it cannot be combined with `overlap_weight_grad`, AutoEP+AutoTP folding, ZenFlow or DeepCompile. Unsupported configurations fail rather than falling back. | `1` |
+
+***deferred_dw_rows_per_expert***: [integer]
+
+| Description                                                                                                    | Default  |
+| -------------------------------------------------------------------------------------------------------------- | -------- |
+| Rows each local expert can stage when `deferred_dw_flush_period` is above `1`. Each MoE layer on each rank allocates `local experts * deferred_dw_rows_per_expert` rows of `2 * hidden + 3 * intermediate` values in the compute dtype. `0` sizes the buffer on the first backward, to `deferred_dw_flush_period` times the larger of that backward's busiest expert and twice its mean rows per expert. A buffer that is too small is still correct: the GEMMs run early to empty it, or at once for a backward that does not fit alone, and the result is held, at the size of the expert weight gradients, until the next backward that returns gradients. | `0` |
 
 ***skip_recompute_combine***: [boolean]
 
@@ -1171,6 +1274,48 @@ Use a built-in preset but override specific naming/weight fields for a fine-tune
 - AutoEP combines with AutoTP (`tensor_parallel.autotp_size > 1`) by folding them onto the same ranks, at ZeRO stages 0 to 3, with `expert_tensor_parallel_size` 1 and without ZeRO offload or DeepCompile
 - AutoEP with ZeRO Stage 3 is supported only without sequence parallelism, hpZeRO secondary tensor groups, non-1 `expert_tensor_parallel_size`, or quantized gradients
 - ZeRO Stage 3 saves AutoEP checkpoints partition-natively and supports same-topology save/load, module-only loads, optimizer-state-skipping loads, and universal checkpoint conversion (not yet with AutoTP folding). Universal loads can resume at a different data-parallel world size, a different `autoep_size`, or both (when the target `autoep_size` divides the expert count), including weights-only/module-only loads from the converted `fp32.pt` parameter files
+
+### Subchannel quantized training
+
+<i>**quantization**</i>: [dictionary]
+
+| Description | Default |
+| ----------- | ------- |
+| Low-precision training recipes, one subsection per recipe. `subchannel` quantizes the GEMMs of `nn.Linear` modules and AutoEP grouped experts to FP8 or INT8 with one scale per block of the reduction dimension. Parameters, gradients, optimizer state and module outputs keep their usual precision; only the GEMM operands are quantized, on the fly. | None |
+
+```json
+"quantization": {
+  "subchannel": {
+    "enabled": true,
+    "modules": ["*"],
+    "exclude_modules": ["*lm_head*", "*router*", "*.gate"],
+    "forward": {"format": "e4m3", "block_size": 128, "hadamard_size": 0, "stochastic_rounding": false},
+    "dx": {"format": "e4m3", "block_size": 128, "hadamard_size": 0, "stochastic_rounding": true},
+    "dw": {"format": "e4m3", "block_size": 128, "hadamard_size": 0, "stochastic_rounding": true}
+  }
+}
+```
+
+| Parameter | Type | Default | Description |
+| --------- | ---- | ------- | ----------- |
+| **enabled** | boolean | `false` | Convert the selected modules. |
+| **modules** | list | `["*"]` | `fnmatch` patterns over qualified module names. Matching `nn.Linear` modules (exact type) and AutoEP grouped experts are converted. Initialization fails if nothing matches. |
+| **exclude_modules** | list | `["*lm_head*", "*router*", "*.gate"]` | Patterns of modules left in full precision. The defaults keep the output head and MoE routers unquantized, since quantized router logits change which experts tokens reach. |
+| **forward** / **dx** / **dw** | dictionary | see below | Settings of the forward GEMM (`y = x W^T`), the input-gradient GEMM (`dx = dy W`) and the weight-gradient GEMM (`dW = dy^T x`). Each is configured independently. |
+
+Per-GEMM settings:
+
+| Parameter | Type | Default | Description |
+| --------- | ---- | ------- | ----------- |
+| **format** | string | `"e4m3"` | `"e4m3"` or `"e5m2"` (FP8), `"int8"`, or `"none"` to run this GEMM unquantized. |
+| **block_size** | integer | `128` | Elements of the reduction dimension sharing one FP32 scale: 32, 64, 128 or 256. For the weight gradient the reduction runs over tokens, and blocks restart at every expert. `0` gives each operand row a single scale over the whole reduction dimension (one per expert in the weight gradient); it requires an FP8 format and `hadamard_size` 0. See the performance note below. |
+| **hadamard_size** | integer | `0` | Rotate every `hadamard_size` chunk of a block by an orthonormal Hadamard matrix before quantizing, as a fused butterfly transform; the rotations of the two operands cancel in the product. A power of two up to `block_size`; `0` disables it. It spreads outlier channels across the block, which mainly helps `int8`: FP8 already gives every element of a block the same relative precision. |
+| **stochastic_rounding** | boolean | `false` forward, `true` for `dx` and `dw` | Round up or down at random with probabilities that make the rounding unbiased, so rounding errors average out over steps instead of accumulating. |
+
+**Constraints:**
+- The fused Triton kernels need Triton and a CUDA device of compute capability 8.9 or newer for FP8, 8.0 or newer for INT8. Elsewhere the GEMMs run on a PyTorch reference implementation that simulates the same quantization and multiplies in FP32, with a warning.
+- Performance: block scales have to be applied between tensor-core dot products, which keeps a block-scaled GEMM below BF16 speed; use it for its numerics. With `block_size` 0 the scales are applied once per output element and the FP8 GEMM itself runs about 1.6x faster than BF16, but both operands are still quantized in separate passes at every call. On an H200 a full layer step (forward, `dx` and `dw`) measured 1.16x to 1.39x faster than BF16 for layers 8192 wide with 16k or more tokens, and slower than BF16 for layers 4096 wide or narrower, including typical MoE experts.
+- Validated with ZeRO stages 1-3 for `nn.Linear`, and AutoEP with ZeRO-2. AutoEP's `gate_up_impl="fused"`, `overlap_weight_grad` and `deferred_dw_flush_period` above 1 are rejected for quantized experts. PipelineModule and AutoTP are not supported yet.
 
 ### Python cyclic garbage collection
 

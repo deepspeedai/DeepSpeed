@@ -6,8 +6,13 @@
 import pytest
 import torch
 
+import deepspeed
 from deepspeed.inference.v2.kernels.ragged_ops import AtomBuilder
+from deepspeed.ops.op_builder import RaggedOpsBuilder
 from .ragged_testing_utils import build_complex_batch
+
+if not deepspeed.ops.__compatible_ops__[RaggedOpsBuilder.NAME]:
+    pytest.skip("Ragged device ops are not available on this system", allow_module_level=True)
 
 Q_BLOCK_SIZE = 128
 KV_BLOCK_SIZE = 128

@@ -20,6 +20,8 @@ The fix filters parameters to only include those with requires_grad=True,
 ensuring empty parameter groups are properly handled.
 """
 
+from types import SimpleNamespace
+
 import torch
 import torch.nn as nn
 import deepspeed
@@ -388,6 +390,7 @@ class _AdamSelectionEngine:
         self.bf16_states = bf16_states
         self.zenflow = zenflow
         self.overlap_step = True
+        self._config = SimpleNamespace(zero_config=SimpleNamespace(reflow=None))
 
     def zero_use_cpu_optimizer(self):
         return self.cpu_offload

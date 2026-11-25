@@ -386,16 +386,42 @@ def test_jit_load_rejects_only_gpus_below_the_minimum_and_says_why(builder_name)
     builder = getattr(importlib.import_module(f"deepspeed.ops.op_builder.{module_name}"), class_name)()
     with patch.dict(os.environ, {}, clear=False):
         os.environ.pop("DS_IGNORE_CUDA_DETECTION", None)
-        # The real builders use deepspeed.ops.op_builder.builder, not this file's copy of that module.
+        # The real builders use deepspeed.ops.op_builder.builder, not this file's copy of that module. The
+        # deepspeed-kernels package is stubbed as installed, so only the GPU can make the op incompatible.
         with patch("deepspeed.ops.op_builder.builder.installed_cuda_version", return_value=(12, 8)), \
                 patch.object(CUDA_API, "is_available", return_value=True), \
-                patch.object(builder, "is_rocm_pytorch", return_value=False):
+                patch.object(builder, "is_rocm_pytorch", return_value=False), \
+                patch.dict(sys.modules, {"dskernels": MagicMock()}):
             with patch.object(builder, "cuda_capability_major", return_value=8):
                 assert builder.is_compatible() is True
             with patch.object(builder, "cuda_capability_major", return_value=7):
                 assert builder.is_compatible() is False
                 with pytest.raises(RuntimeError, match=r"compute capability 8\.0"):
                     builder.jit_load(verbose=False)
+
+
+@pytest.mark.parametrize(
+    "builder_name, rocm_supported",
+    [
+        ("evoformer_attn.EvoformerAttnBuilder", False),
+        ("gds.GDSBuilder", False),
+        ("inference_core_ops.InferenceCoreBuilder", False),
+        ("inference_cutlass_builder.InferenceCutlassBuilder", False),
+        ("ragged_ops.RaggedOpsBuilder", False),
+        # An op that builds with ROCm must stay compatible there.
+        ("fused_adam.FusedAdamBuilder", True),
+    ])
+def test_cuda_only_ops_are_incompatible_on_rocm_and_say_why(builder_name, rocm_supported):
+    # These ops only build with CUDA (CUTLASS, cuFile, CUDA libraries from deepspeed-kernels, or sources that do not
+    # hipify), so with a ROCm torch is_compatible() must reject them, keeping DS_BUILD_OPS=1 from trying to build
+    # them. The JIT-load error must name ROCm as the reason, not a dependency whose install would not help.
+    module_name, class_name = builder_name.split(".")
+    builder = getattr(importlib.import_module(f"deepspeed.ops.op_builder.{module_name}"), class_name)()
+    with patch.object(builder, "is_rocm_pytorch", return_value=True):
+        assert builder.is_compatible() is rocm_supported
+        if not rocm_supported:
+            with pytest.raises(RuntimeError, match="not supported on ROCm"):
+                builder.jit_load(verbose=False)
 
 
 def test_forked_child_can_use_cuda_after_importing_deepspeed():

@@ -410,6 +410,27 @@ def test_continuous_graph_state_survives_in_place_weight_updates():
     assert capture.call_count == 6
 
 
+@pytest.mark.parametrize("layer_types, sliding_window, expect_deepspeed_cache", [
+    (None, None, True),
+    (["full_attention", "full_attention"], None, True),
+    (None, 4, False),
+    (["full_attention", "sliding_attention"], 4, False),
+    (["full_attention", "linear_attention"], None, False),
+])
+def test_prefill_cache_keeps_hf_static_cache_unless_full_attention_only(layer_types, sliding_window,
+                                                                        expect_deepspeed_cache):
+    # DeepSpeedStaticCache models every layer as full attention. Prefilling a sliding-window model into it
+    # would silently attend outside the window, and hybrid models bind their GDN slots to the HF cache.
+    from transformers import LlamaConfig, StaticCache
+
+    config = LlamaConfig(hidden_size=8, num_hidden_layers=2, num_attention_heads=2, num_key_value_heads=1)
+    config.layer_types = layer_types
+    config.sliding_window = sliding_window
+    cache = HybridEngineRollout._create_prefill_cache(StaticCache, config, 1, 4, torch.device("cpu"), torch.float32)
+
+    assert isinstance(cache, DeepSpeedStaticCache) == expect_deepspeed_cache
+
+
 def test_static_cache_constructor_supports_max_batch_keyword():
 
     class MaxBatchStaticCache:
@@ -1115,15 +1136,43 @@ def test_zero3_rendezvous_uses_optimizer_dp_group(monkeypatch):
     assert rendezvous.process_group is process_group
 
 
-def test_non_zero3_generation_uses_native_eos():
+@pytest.mark.parametrize("tokenizer_eos, config_eos, expected", [
+    (2, None, [2]),
+    (2, 7, [2, 7]),
+    (2, [7, 2, 9], [2, 7, 9]),
+    (None, [7, 9], [7, 9]),
+    (None, None, []),
+    (-1, [7], [7]),
+])
+def test_eos_token_ids_merge_tokenizer_and_generation_config(tokenizer_eos, config_eos, expected):
+    module = SimpleNamespace(generation_config=SimpleNamespace(eos_token_id=config_eos))
+    rollout = HybridEngineRollout(SimpleNamespace(module=module),
+                                  SimpleNamespace(pad_token_id=0, eos_token_id=tokenizer_eos))
+
+    assert rollout._eos_token_ids() == expected
+
+
+def test_continuous_rows_end_on_a_generation_config_eos_id():
+    module = SimpleNamespace(generation_config=SimpleNamespace(eos_token_id=[2, 7]))
+    rollout = HybridEngineRollout(SimpleNamespace(module=module), SimpleNamespace(pad_token_id=0, eos_token_id=2))
+
+    assert rollout._is_eos(torch.tensor([[7]]))
+    assert not rollout._is_eos(torch.tensor([[5]]))
+
+
+def test_non_zero3_generation_stops_on_every_eos_id():
     engine = _make_engine()
     engine.zero_optimization_partition_weights.return_value = False
-    engine.module.generate.return_value = torch.tensor([[0, 1, 2, 5, 6], [0, 3, 4, 7, 8]])
+    engine.module.generation_config = SimpleNamespace(eos_token_id=[2, 7])
+    engine.module.generate.return_value = torch.tensor([[0, 1, 2, 7, 6], [0, 3, 4, 5, 8]])
     rollout = HybridEngineRollout(engine, _make_tokenizer())
 
-    rollout.generate(_make_request(), _make_sampling())
+    output = rollout.generate(_make_request(), _make_sampling())
 
-    assert engine.module.generate.call_args.kwargs["eos_token_id"] == 2
+    # generate() takes the list in place of generation_config.eos_token_id, so the tokenizer's id alone would drop 7.
+    assert engine.module.generate.call_args.kwargs["eos_token_id"] == [2, 7]
+    # A row ends at its first id of either kind, and everything after it is padding.
+    assert output.attention_mask[:, 3:].tolist() == [[1, 0], [1, 1]]
     assert engine.module.generate.call_args.kwargs["stopping_criteria"] is None
     # Non-ZeRO-3 generation must keep the Transformers default.
     assert engine.module.generate.call_args.kwargs["synced_gpus"] is None
@@ -1610,12 +1659,106 @@ def test_engine_pairs_shared_prefill_cache_tensors():
     workspace.repeat_kv_cache.assert_called_once_with(2, 2)
 
 
-# -- sync_weights is no-op ---------------------------------------------
+# -- sync_weights invalidates derived caches ---------------------------
 
 
-def test_sync_weights_is_noop():
-    rollout = HybridEngineRollout(_make_engine(), _make_tokenizer())
-    assert rollout.sync_weights(step=0) is None
+def test_sync_weights_drops_derived_caches():
+    # refresh_weights resolves the module through engine.module; the mock
+    # engine only has to expose it. A fake derived cache on the module
+    # must vanish after the training-step hook fires.
+    engine = _make_engine()
+    # a real module, not the mock's auto-attribute: segki_refresh walks
+    # .modules() and delattr must actually remove
+    engine.module = torch.nn.Identity()
+    engine.module._ki_tp_cat_w = object()  # a derived-weight cache stand-in
+    rollout = HybridEngineRollout(engine, _make_tokenizer())
+    rollout.sync_weights(step=0)
+    assert not hasattr(engine.module, "_ki_tp_cat_w")
+
+
+def test_sync_weights_continuous_graph_safe():
+    """Continuous graph + weight sync must not replay freed derived tensors.
+
+    The retained continuous graph captures the derived tensors' addresses
+    (GLU concat cache, attention cat weights); a refresh that drops them
+    while the graph survives leaves replays reading freed memory. The
+    graph must be released across a sync (interim contract) until refresh
+    refills derived tensors in place."""
+    pytest.importorskip("transformers")
+    from deepspeed.accelerator import get_accelerator
+    if get_accelerator().device_name() == "cpu":
+        pytest.skip("segKI injection needs an accelerator")
+
+    model = _make_small_qwen()
+    device = next(model.parameters()).device
+
+    def make_rollout():
+        return HybridEngineRollout(SimpleNamespace(module=model), SimpleNamespace(pad_token_id=0, eos_token_id=None),
+                                   HybridEngineRolloutConfig(use_segki=True, use_graph_capture=True))
+
+    prompt = torch.randint(3, 28, (2, 8), device=device)
+    sampling = SamplingConfig(max_new_tokens=8, temperature=0, continuous_batch_size=2)
+
+    rollout = make_rollout()
+    rollout.generate(RolloutRequest(prompt, torch.ones_like(prompt)), sampling)  # capture
+    rollout.generate(RolloutRequest(prompt, torch.ones_like(prompt)), sampling)  # reuse -> retained
+    # the hazard only exists when the graph actually survives across calls
+    assert rollout._continuous_graph_state is not None, "expected the continuous graph to be retained"
+
+    with torch.no_grad():
+        for p in model.parameters():
+            p.mul_(3.0)
+    rollout.sync_weights(step=0)
+    # interim contract: the sync must release the retained graph. It captures
+    # the derived tensors' addresses wherever they exist (TP>1 cat weights,
+    # Ampere/Hopper GLU concat cache, GDN gates); refresh drops those tensors,
+    # so a surviving graph would replay freed memory. On configs without any
+    # derived tensor the replay would stay correct by luck -- pin the release
+    # so every config is safe by construction.
+    assert rollout._continuous_graph_state is None, "sync must release the retained continuous graph"
+    synced = rollout.generate(RolloutRequest(prompt, torch.ones_like(prompt)), sampling)
+
+    fresh = make_rollout().generate(RolloutRequest(prompt, torch.ones_like(prompt)), sampling)
+    assert torch.equal(synced.input_ids, fresh.input_ids), \
+        "post-sync continuous generate must match a fresh injection"
+
+
+def test_sync_weights_generate_matches_fresh_injection():
+    """Rollout-path weight sync: inject -> generate -> in-place write ->
+    sync_weights -> generate must equal a fresh injection of the same
+    weights (derived caches rebuilt, live reads see the new values)."""
+    pytest.importorskip("transformers")
+    from deepspeed.accelerator import get_accelerator
+    from transformers import AutoModelForCausalLM
+    if get_accelerator().device_name() == "cpu":
+        pytest.skip("segKI injection needs an accelerator")
+
+    torch.manual_seed(0)
+    device = torch.device(get_accelerator().device_name())
+    try:
+        model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen3.5-0.8B-Base", dtype=torch.bfloat16).to(device).eval()
+    except Exception as e:
+        pytest.skip(f"model unavailable: {e}")
+
+    def make_rollout():
+        return HybridEngineRollout(SimpleNamespace(module=model), SimpleNamespace(pad_token_id=0, eos_token_id=None),
+                                   HybridEngineRolloutConfig(use_segki=True, use_graph_capture=False))
+
+    prompt = torch.randint(3, 1500, (2, 16), device=device)
+    sampling = SamplingConfig(max_new_tokens=8, temperature=0)
+
+    rollout = make_rollout()
+    rollout.generate(RolloutRequest(prompt, torch.ones_like(prompt)), sampling)  # build caches
+
+    # in-place weight write, the arena/reshard contract
+    with torch.no_grad():
+        for p in model.parameters():
+            p.add_(0.01)
+    rollout.sync_weights(step=0)
+    synced = rollout.generate(RolloutRequest(prompt, torch.ones_like(prompt)), sampling)
+
+    fresh = make_rollout().generate(RolloutRequest(prompt, torch.ones_like(prompt)), sampling)
+    assert torch.equal(synced.input_ids, fresh.input_ids), "post-sync generate must match a fresh injection"
 
 
 # -- generate dispatches correctly -------------------------------------
