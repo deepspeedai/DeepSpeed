@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <utility>
 #include "conversion_utils.h"
 #include "ds_kernel_utils.h"
 #include "memory_access_utils.h"
@@ -402,7 +403,8 @@ template <>
 DS_D_INLINE __half2 init<ROpType::Min>()
 {
 #ifdef __HIP_PLATFORM_AMD__
-    return __half2{_Float16_2{0x7C00, 0x7C00}};
+    // Bit-cast: _Float16_2{0x7C00, ...} would value-convert the integer to 31744.0 instead of +inf.
+    return __half2(__ushort_as_half(0x7C00), __ushort_as_half(0x7C00));
 #else
     constexpr __half2_raw inf = {0x7C00, 0x7C00};
     return __half2(inf);
@@ -413,7 +415,8 @@ template <>
 DS_D_INLINE __half2 init<ROpType::Max>()
 {
 #ifdef __HIP_PLATFORM_AMD__
-    return __half2{_Float16_2{0xFC00, 0xFC00}};
+    // Bit-cast: _Float16_2{0xFC00, ...} would value-convert the integer to 64512.0 instead of -inf.
+    return __half2(__ushort_as_half(0xFC00), __ushort_as_half(0xFC00));
 #else
     constexpr __half2_raw neg_inf = {0xFC00, 0xFC00};
     return __half2(neg_inf);
@@ -597,6 +600,57 @@ DS_D_INLINE void _warp_with_type_conversion(cg::thread_block_tile<hw_warp_size>&
         _warp<T, Ops...>(warp_arg, data);
     }
 }
+
+template <ROpType Op, typename T>
+DS_D_INLINE void _active_lanes_step(cg::thread_block_tile<hw_warp_size>& warp,
+                                    T& val,
+                                    int lane_mask,
+                                    bool partner_active)
+{
+    // Every lane executes the shuffle; only values read from existing lanes are combined.
+    const T other = warp.shfl_xor(val, lane_mask);
+    if (partner_active) { val = element<Op>(val, other); }
+}
+
+template <typename T, ROpType... Ops, int... Is>
+DS_D_INLINE void _warp_active_lanes_impl(cg::thread_block_tile<hw_warp_size>& warp,
+                                         T* data,
+                                         int active_lanes,
+                                         std::integer_sequence<int, Is...>)
+{
+    const int lane = warp.thread_rank();
+#pragma unroll
+    for (int i = 1; i < hw_warp_size; i *= 2) {
+        const bool partner_active = (lane ^ i) < active_lanes;
+        (_active_lanes_step<Ops>(warp, data[Is], i, partner_active), ...);
+    }
+    // Lane 0 holds the reduction over all active lanes; broadcast it so every lane agrees.
+    ((data[Is] = warp.shfl(data[Is], 0)), ...);
+}
+
+/*
+Warp reduction for a wavefront that is only partially populated (e.g. a 16- or 32-thread block on a
+64-wide wavefront). Shuffles that read lanes beyond `active_lanes` return values that are not part
+of the reduction (observed as 0 on gfx942), so they are discarded instead of combined.
+*/
+template <typename T, ROpType... Ops>
+DS_D_INLINE void _warp_active_lanes(cg::thread_block_tile<hw_warp_size>& warp_arg,
+                                    T* data,
+                                    int active_lanes)
+{
+    constexpr int elems = sizeof...(Ops);
+    using Seq = std::make_integer_sequence<int, elems>;
+    if constexpr (!(std::is_integral<T>::value || std::is_floating_point<T>::value)) {
+        float temp_data[elems];
+#pragma unroll
+        for (int i = 0; i < elems; i++) { temp_data[i] = conversion::to<float>(data[i]); }
+        _warp_active_lanes_impl<float, Ops...>(warp_arg, temp_data, active_lanes, Seq{});
+#pragma unroll
+        for (int i = 0; i < elems; i++) { data[i] = conversion::to<T>(temp_data[i]); }
+    } else {
+        _warp_active_lanes_impl<T, Ops...>(warp_arg, data, active_lanes, Seq{});
+    }
+}
 #endif  // defined(__HIP_PLATFORM_AMD__)
 
 /*
@@ -620,14 +674,24 @@ DS_D_INLINE void _block(cg::thread_block& tb,
 
 #ifdef __HIP_PLATFORM_AMD__
     const int total_threads = blockDim.x * blockDim.y * blockDim.z;
-    const int running_warps = total_threads / hw_warp_size;
+    // Round up so a block smaller than one wavefront (e.g. 16 threads) still counts as one running
+    // warp, matching meta_group_size() on CUDA. Truncation gave 0 and discarded every partial
+    // result.
+    const int running_warps = (total_threads + hw_warp_size - 1) / hw_warp_size;
 #else
     const int running_warps = warp_arg.meta_group_size();
 #endif
 
     // Always perform warp-scope reduction
 #ifdef __HIP_PLATFORM_AMD__
-    _warp_with_type_conversion<hw_warp_size, T, Ops...>(warp_arg, data);
+    // Lanes of this wavefront that map to real threads; the last wavefront of a block may be
+    // partial.
+    const int active_lanes = total_threads - _warp_rank() * hw_warp_size;
+    if (active_lanes < hw_warp_size) {
+        _warp_active_lanes<T, Ops...>(warp_arg, data, active_lanes);
+    } else {
+        _warp_with_type_conversion<hw_warp_size, T, Ops...>(warp_arg, data);
+    }
 #else
     _warp<T, Ops...>(warp_arg, data);
 #endif
@@ -655,7 +719,10 @@ DS_D_INLINE void _block(cg::thread_block& tb,
                 init<Ops...>(data);
             }
 #ifdef __HIP_PLATFORM_AMD__
-            _warp_with_type_conversion<total_warps, T, Ops...>(warp_arg, data);
+            // Only the first `running_warps` lanes hold partial results. Reduce over just those
+            // lanes: a full-width butterfly would also read lanes that do not exist when the block
+            // is smaller than one wavefront (16/32 threads), and those reads came back as 0.
+            _warp_active_lanes<T, Ops...>(warp_arg, data, running_warps);
 #else
             _warp<T, Ops..., total_warps>(warp_arg, data);
 #endif
