@@ -65,6 +65,10 @@ def _disable_autocast_weight_cache():
             cache_setter(previous)
 
 
+class _GraphCaptureFailed(Exception):
+    """Wraps an error raised while a decode forward is recorded into a graph."""
+
+
 class _ForwardProfiler:
     """Measure top-level model forwards without synchronizing each call."""
 
@@ -1038,7 +1042,7 @@ class HybridEngineRollout(RolloutEngine):
                 post_prefill_signature = self._graph_signature(module, max_batch_size, max_cache_len, device,
                                                                model_dtype)
                 needs_capture = graph is None or state.signature != post_prefill_signature
-                if self._group_needs_capture(needs_capture):
+                if self._group_needs_capture(needs_capture, module):
                     if graph is not None:
                         get_accelerator().synchronize()
                     state.signature = post_prefill_signature
@@ -1047,15 +1051,16 @@ class HybridEngineRollout(RolloutEngine):
                     # Capture at an unused cache position so prompt KV copied by
                     # this prefill is not overwritten by warmup or capture.
                     static_write_positions.fill_(max_cache_len - 1)
-                    graph, static_logits = self._capture_continuous_graph(
-                        module,
-                        cache,
-                        static_input,
-                        static_causal_attention,
-                        static_write_positions,
-                        state.static_cache_position,
-                        static_position_ids,
-                    )
+                    graph, static_logits = self._capture_on_all_ranks(
+                        module, lambda: self._capture_continuous_graph(
+                            module,
+                            cache,
+                            static_input,
+                            static_causal_attention,
+                            static_write_positions,
+                            state.static_cache_position,
+                            static_position_ids,
+                        ))
                     static_write_positions.zero_()
                     state.graph = graph
                     state.static_logits = static_logits
@@ -1154,7 +1159,7 @@ class HybridEngineRollout(RolloutEngine):
                                     capture=True):
         signature = self._graph_signature(module, max_batch_size, max_cache_len, device, model_dtype)
         state = self._continuous_graph_state
-        if self._group_needs_capture(state is None or state.signature != signature):
+        if self._group_needs_capture(state is None or state.signature != signature, module):
             # Free the stale cache and graph pool before allocating replacements.
             self._continuous_graph_state = None
             state = None
@@ -1174,15 +1179,16 @@ class HybridEngineRollout(RolloutEngine):
             static_cache_position = torch.tensor([max_cache_len - 1], dtype=torch.long, device=device)
             graph = static_logits = None
             if capture:
-                graph, static_logits = self._capture_continuous_graph(
-                    module,
-                    cache,
-                    static_input,
-                    static_causal_attention,
-                    static_write_positions,
-                    static_cache_position,
-                    static_position_ids,
-                )
+                graph, static_logits = self._capture_on_all_ranks(
+                    module, lambda: self._capture_continuous_graph(
+                        module,
+                        cache,
+                        static_input,
+                        static_causal_attention,
+                        static_write_positions,
+                        static_cache_position,
+                        static_position_ids,
+                    ))
             state = _ContinuousGraphState(
                 signature,
                 cache,
@@ -1237,7 +1243,7 @@ class HybridEngineRollout(RolloutEngine):
                 max_batch_size, max_cache_len, segki_generation, inference_mode, attn_implementation, module_modes,
                 tensor_signature) + tuple(extra)
 
-    def _capture_groups(self):
+    def _capture_groups(self, module=None):
         """The tensor-parallel groups whose collectives a decode forward runs."""
         capture_groups = []
         autotp_size = getattr(self.engine, "autotp_size", None)
@@ -1252,15 +1258,20 @@ class HybridEngineRollout(RolloutEngine):
         mp_group = getattr(self.engine, "mp_group", None) if isinstance(self.engine, DeepSpeedHybridEngine) else None
         if mp_group is not None and mp_group not in capture_groups and dist.get_world_size(group=mp_group) > 1:
             capture_groups.append(mp_group)
+        # segKI's lm_head all-gathers its vocabulary slices over the model's own
+        # tensor-parallel group, which AutoTP need not have created.
+        lm_head_group = getattr(getattr(module, "lm_head", None), "_ki_tp_group", None)
+        if lm_head_group is not None and lm_head_group not in capture_groups:
+            capture_groups.append(lm_head_group)
         return capture_groups
 
-    def _group_needs_capture(self, local_needs_capture):
-        """Return whether any rank of the tensor-parallel groups must capture again.
+    def _group_needs_capture(self, local_needs_capture, module):
+        """Return whether any rank of the decode forward's process groups must capture again.
 
-        Capture runs forwards that hold TP collectives, so a rank whose own
+        Capture runs forwards that hold collectives, so a rank whose own
         signature changed must not capture while its peers replay.
         """
-        capture_groups = self._capture_groups()
+        capture_groups = self._capture_groups(module)
         if not capture_groups:
             return local_needs_capture
         flag = torch.tensor(int(local_needs_capture),
@@ -1269,6 +1280,26 @@ class HybridEngineRollout(RolloutEngine):
         for group in capture_groups:
             dist.all_reduce(flag, op=dist.ReduceOp.MAX, group=group)
         return bool(flag.item())
+
+    def _capture_on_all_ranks(self, module, capture):
+        """Run ``capture``, failing it on every rank of the capture groups if it failed on any.
+
+        Capture records collectives instead of running them, so a rank whose
+        capture raised still meets its peers here; otherwise the peers would keep
+        a graph whose replay waits on a rank that has none. A failure in the eager
+        warmup is not caught, because its peers are then blocked in its collectives.
+        """
+        error = result = None
+        try:
+            result = capture()
+        except _GraphCaptureFailed as e:
+            error = e.__cause__
+        failed_anywhere = self._group_needs_capture(error is not None, module)
+        if error is not None:
+            raise error
+        if failed_anywhere:
+            raise RuntimeError("decode graph capture failed on a peer rank; see that rank's error")
+        return result
 
     @staticmethod
     def _update_static_causal_attention(static_attention, static_causal_attention):
@@ -1309,16 +1340,19 @@ class HybridEngineRollout(RolloutEngine):
                             position_ids=static_position_ids,
                         )
                 accelerator.current_stream().wait_stream(warmup_stream)
-                graph = accelerator.create_graph()
-                with accelerator.capture_to_graph(graph):
-                    output = module(
-                        static_input,
-                        attention_mask=static_attention,
-                        past_key_values=cache,
-                        use_cache=True,
-                        cache_position=static_cache_position,
-                        position_ids=static_position_ids,
-                    )
+                try:
+                    graph = accelerator.create_graph()
+                    with accelerator.capture_to_graph(graph):
+                        output = module(
+                            static_input,
+                            attention_mask=static_attention,
+                            past_key_values=cache,
+                            use_cache=True,
+                            cache_position=static_cache_position,
+                            position_ids=static_position_ids,
+                        )
+                except Exception as e:
+                    raise _GraphCaptureFailed() from e
         finally:
             module._forward_pre_hooks.update(saved_pre)
             module._forward_hooks.update(saved_post)
@@ -2072,7 +2106,7 @@ class HybridEngineRollout(RolloutEngine):
                                                        device,
                                                        model_dtype,
                                                        extra=(use_step_kernel, ))
-        if self._group_needs_capture(state.signature != post_prefill_signature):
+        if self._group_needs_capture(state.signature != post_prefill_signature, module):
             # Drop every reference to the stale state, including the prefill
             # output and cache, before _get_static_graph_state allocates the
             # replacement; otherwise both caches and graph pools stay resident.
@@ -2124,7 +2158,15 @@ class HybridEngineRollout(RolloutEngine):
 
         load_decode_inputs()
         if state.graph is None:
-            self._capture_static_graph(module, state, max_len, device, model_dtype, is_hybrid, use_step_kernel)
+            try:
+                self._capture_on_all_ranks(
+                    module, lambda: self._capture_static_graph(module, state, max_len, device, model_dtype, is_hybrid,
+                                                               use_step_kernel))
+            except Exception:
+                # A rank whose own capture succeeded already holds a graph its
+                # peers lack; drop the state everywhere so all ranks recapture.
+                self._static_graph_state = None
+                raise
             # Warmup and capture may have advanced the decode inputs.
             load_decode_inputs()
         graph = state.graph
@@ -2224,7 +2266,7 @@ class HybridEngineRollout(RolloutEngine):
 
         signature = self._graph_signature(module, batch_size, max_len, device, model_dtype, extra=(use_step_kernel, ))
         state = self._static_graph_state
-        if self._group_needs_capture(state is None or state.signature != signature):
+        if self._group_needs_capture(state is None or state.signature != signature, module):
             # Free the stale cache and graph pool before allocating replacements.
             self._static_graph_state = None
             state = None
@@ -2394,20 +2436,23 @@ class HybridEngineRollout(RolloutEngine):
                         graph_op = None
 
                 step_kernel_mounted = False
-                graph = get_accelerator().create_graph()
-                with get_accelerator().capture_to_graph(graph):
-                    static_logits = decode_forward().logits
-                    # decode_step_graph kernel is b=1 only (single-sequence argmax);
-                    # for b>1 the graph captures forward only and Python handles
-                    # argmax + buffer updates outside the graph. The kernel also
-                    # only accepts CUDA bf16 logits — fp16 models must keep the
-                    # PyTorch argmax path instead of failing during capture.
-                    if (graph_op is not None and static_logits.dtype is torch.bfloat16
-                            and get_accelerator().on_accelerator(static_logits)):
-                        graph_op.decode_step_graph(static_logits[:, -1, :].contiguous(),
-                                                   static_token.view(batch_size, 1), write_pos, static_attn,
-                                                   state.token_buffer)
-                        step_kernel_mounted = True
+                try:
+                    graph = get_accelerator().create_graph()
+                    with get_accelerator().capture_to_graph(graph):
+                        static_logits = decode_forward().logits
+                        # decode_step_graph kernel is b=1 only (single-sequence argmax);
+                        # for b>1 the graph captures forward only and Python handles
+                        # argmax + buffer updates outside the graph. The kernel also
+                        # only accepts CUDA bf16 logits — fp16 models must keep the
+                        # PyTorch argmax path instead of failing during capture.
+                        if (graph_op is not None and static_logits.dtype is torch.bfloat16
+                                and get_accelerator().on_accelerator(static_logits)):
+                            graph_op.decode_step_graph(static_logits[:, -1, :].contiguous(),
+                                                       static_token.view(batch_size, 1), write_pos, static_attn,
+                                                       state.token_buffer)
+                            step_kernel_mounted = True
+                except Exception as e:
+                    raise _GraphCaptureFailed() from e
 
                 # Restore the GDN states unconditionally, whether or not
                 # decode_step_graph was mounted, so the first replay does not start

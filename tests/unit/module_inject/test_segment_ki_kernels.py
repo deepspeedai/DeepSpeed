@@ -22,6 +22,7 @@ import os
 import pytest
 import torch
 
+import deepspeed.comm as dist
 from deepspeed.accelerator import get_accelerator
 
 from deepspeed.module_inject.kernel_reference import decode_attn as ref_decode_attn
@@ -29,6 +30,7 @@ from deepspeed.module_inject.kernel_reference import fused_add_norm as ref_add_n
 from deepspeed.module_inject.kernel_reference import gdn_gates as ref_gdn_gates
 from deepspeed.module_inject.kernel_reference import gated_norm as ref_gated_norm
 from deepspeed.module_inject.kernel_reference import grouped_linear as ref_grouped_linear
+from unit.common import DistributedTest
 
 DEV = get_accelerator().device_name()
 
@@ -381,6 +383,55 @@ class TestInjectionInvariants:
         GDNInputProj.apply(h, *ws, None).pow(2).sum().backward()
         for i, w in enumerate(ws):
             assert w.grad is not None, f"weight {i} got no gradient"
+
+
+class TestLmHeadSplitsOverTheTensorParallelGroup(DistributedTest):
+    """The vocab-parallel lm_head splits over the ranks that share hidden states."""
+    world_size = 2
+
+    def _head(self):
+        torch.manual_seed(0)
+        model = torch.nn.Module()
+        model.lm_head = torch.nn.Linear(32, 16, bias=False, dtype=torch.bfloat16)
+        return model
+
+    def _install(self, model):
+        from types import SimpleNamespace
+        from deepspeed.module_inject.segment_ki import install_lm_head
+        assert install_lm_head(model, SimpleNamespace(grouped_linear=None)) == 1
+
+    def test_data_parallel_head_is_not_split(self):
+        model = self._head()
+        self._install(model)
+        # Data-parallel ranks decode different sequences.
+        hidden = torch.randn(2, 1, 32, dtype=torch.bfloat16, generator=torch.Generator().manual_seed(dist.get_rank()))
+
+        with torch.no_grad():
+            logits = model.lm_head(hidden)
+
+        assert torch.equal(logits, torch.nn.functional.linear(hidden, model.lm_head.weight))
+        assert model.lm_head._ki_tp_group is None
+
+    def test_tensor_parallel_head_gathers_over_the_model_group(self):
+        from deepspeed.module_inject.layers import LinearAllreduce
+
+        class RowParallel(LinearAllreduce):
+
+            def __init__(self, mp_group):
+                torch.nn.Module.__init__(self)
+                self.mp_group = mp_group
+
+        group = dist.new_group(ranks=[0, 1])
+        model = self._head()
+        model.o_proj = RowParallel(group)
+        self._install(model)
+        hidden = torch.randn(2, 1, 32, dtype=torch.bfloat16, generator=torch.Generator().manual_seed(1))
+
+        with torch.no_grad():
+            logits = model.lm_head(hidden)
+
+        assert torch.equal(logits, torch.nn.functional.linear(hidden, model.lm_head.weight))
+        assert model.lm_head._ki_tp_group is group
 
 
 # ---------------------------------------------------------------------------

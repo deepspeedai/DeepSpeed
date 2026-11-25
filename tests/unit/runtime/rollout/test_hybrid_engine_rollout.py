@@ -166,8 +166,77 @@ def test_recapture_is_agreed_over_the_hybrid_engine_inference_tp_group(monkeypat
     monkeypatch.setattr(dist, "get_world_size", lambda group=None: 2)
     monkeypatch.setattr(dist, "all_reduce", all_reduce)
     # A peer's signature changed, so this rank captures with it even though its own did not.
-    assert rollout._group_needs_capture(False)
+    assert rollout._group_needs_capture(False, None)
     assert reduced == [engine.mp_group]
+
+
+def test_recapture_is_agreed_over_the_segki_lm_head_tp_group(monkeypatch):
+    model = torch.nn.Module()
+    model.lm_head = torch.nn.Linear(2, 4, bias=False)
+    # segKI's lm_head all-gathers over the model's tensor-parallel group, which AutoTP did not create here.
+    model.lm_head._ki_tp_group = object()
+    rollout = HybridEngineRollout.__new__(HybridEngineRollout)
+    rollout.engine = SimpleNamespace(autotp_size=1)
+    reduced = []
+
+    def all_reduce(tensor, op=None, group=None):
+        reduced.append(group)
+        tensor.fill_(1)
+
+    monkeypatch.setattr(dist, "all_reduce", all_reduce)
+    assert rollout._group_needs_capture(False, model)
+    assert reduced == [model.lm_head._ki_tp_group]
+
+
+@pytest.mark.parametrize("fails_here", [True, False])
+def test_capture_failure_on_any_rank_fails_capture_on_every_rank(fails_here, monkeypatch):
+    from deepspeed.runtime.rollout import hybrid_engine_rollout
+    from deepspeed.utils import groups
+    capturing = False
+
+    @contextmanager
+    def capture_to_graph(_graph):
+        nonlocal capturing
+        capturing = True
+        yield
+        capturing = False
+
+    class DecodeModule(torch.nn.Module):
+
+        def forward(self, input_ids, **_kwargs):
+            if capturing and fails_here:
+                raise ValueError("capture failed on this rank")
+            return SimpleNamespace(logits=torch.zeros((input_ids.shape[0], 1, 8)))
+
+    accelerator = MagicMock()
+    accelerator.current_device_name.return_value = "cpu"
+    accelerator.stream.side_effect = lambda _stream: nullcontext()
+    accelerator.capture_to_graph.side_effect = capture_to_graph
+    monkeypatch.setattr(hybrid_engine_rollout, "get_accelerator", lambda: accelerator)
+    tp_group = object()
+    monkeypatch.setattr(groups, "get_tensor_model_parallel_group", lambda: tp_group)
+    reduced = []
+
+    def all_reduce(tensor, op=None, group=None):
+        reduced.append(group)
+        # The peer's capture failed when this rank's did not.
+        tensor.fill_(1)
+
+    monkeypatch.setattr(dist, "all_reduce", all_reduce)
+    rollout = HybridEngineRollout.__new__(HybridEngineRollout)
+    rollout.engine = SimpleNamespace(autotp_size=2)
+    module = DecodeModule()
+
+    def capture():
+        return rollout._capture_continuous_graph(module, MagicMock(), torch.zeros((2, 1), dtype=torch.long),
+                                                 torch.zeros((2, 6)), torch.zeros(2, dtype=torch.long),
+                                                 torch.tensor([5]), torch.zeros((2, 1), dtype=torch.long))
+
+    # Every rank meets its peers before raising, so none keeps a graph whose replay waits on the failed rank.
+    expected = (ValueError, "capture failed on this rank") if fails_here else (RuntimeError, "peer rank")
+    with pytest.raises(expected[0], match=expected[1]):
+        rollout._capture_on_all_ranks(module, capture)
+    assert reduced == [tp_group]
 
 
 def _make_request():
