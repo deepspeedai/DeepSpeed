@@ -157,7 +157,8 @@ reset, and admitted-row copies, and separate ``prefill_forward_ms`` and
 ``decode_forward_ms`` totals. ``num_prefill_forwards`` counts each admitted
 prompt batch, while ``num_decode_forwards`` counts decode steps that had
 surviving rows. Graph captures are timed outside ``decode_forward_ms`` as
-``graph_capture_ms`` and counted by ``num_graph_captures``. ``num_generated_tokens``
+``graph_capture_ms``, and the captures that produced a graph are counted by
+``num_graph_captures``. ``num_generated_tokens``
 counts tokens actually produced by all requests (padding is excluded), and
 ``active_batch_size`` is the maximum number of simultaneously active rows;
 ``continuous_batch_size`` is the configured capacity.
@@ -340,11 +341,11 @@ the ladder: widths must be positive integers no larger than
 ladder captures and stores fewer graphs but pads more rows into a wider replay,
 and a denser ladder trades captures for less padding.
 Under tensor parallelism the capture forwards hold the model-parallel groups'
-collectives, so the decision to capture is agreed over those groups and a
-failed capture fails the rollout rather than falling back on one rank alone,
-which would leave the groups' collectives unpaired and hang them. Without such
-a group, a width whose capture fails runs its forwards eagerly for the rest of
-the rollout.
+collectives, so the decision to capture a width is agreed over those groups once
+per width, before its first capture, and a failed capture fails the rollout
+rather than falling back on one rank alone, which would leave the groups'
+collectives unpaired and hang them. Without such a group, a width whose capture
+fails runs its forwards eagerly for the rest of the rollout.
 ``get_last_continuous_stats()`` reports the ladder as ``graph_capture_ladder``,
 the steps per width as ``decode_bucket_widths``, the rows padded into a wider
 replay as ``decode_padded_rows``, and the captures performed by the call as

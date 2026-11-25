@@ -602,6 +602,54 @@ def test_graph_capture_time_is_reported_outside_decode_forwards(mock_get_acceler
     assert profile["graph_capture_ms"] > 0.0
 
 
+@patch("deepspeed.runtime.rollout.hybrid_engine_rollout.get_accelerator")
+def test_capture_agreement_is_taken_once_per_width(mock_get_accelerator, monkeypatch):
+    """A retained state must not rendezvous on every replay: one agreement per width."""
+    _mock_graph_accelerator(mock_get_accelerator)
+    engine = MagicMock()
+    engine.module = _RetiringModel()
+    engine.autotp_size = lambda: 2
+    monkeypatch.setattr("deepspeed.utils.groups.get_tensor_model_parallel_group", lambda: object())
+    # The capture agreement is under test; the per-call RNG broadcast needs a live group.
+    monkeypatch.setattr(HybridEngineRollout, "_sync_rng_across_tp", lambda self: None)
+    agreements = []
+    monkeypatch.setattr(dist, "all_reduce", lambda flag, **kwargs: agreements.append(None))
+    rollout = HybridEngineRollout(engine,
+                                  SimpleNamespace(pad_token_id=0, eos_token_id=2),
+                                  cfg=HybridEngineRolloutConfig(use_graph_capture=True))
+    request = _retiring_request(rows=3)
+    sampling = SamplingConfig(max_new_tokens=4, temperature=0, continuous_batch_size=3)
+
+    rollout.generate(request, sampling)
+    first_call = len(agreements)
+    captures = rollout.get_last_continuous_stats()["graph_captures"]
+    rollout.generate(request, sampling)
+
+    # The first call agrees the state and then each width it uses (3, then 2). The second
+    # call reuses the state and both widths are already decided, so only the state check
+    # rendezvouses; a per-replay agreement would be one per decode step instead.
+    assert first_call == 3
+    assert captures == 2
+    assert len(agreements) - first_call == 1
+    assert rollout.get_last_continuous_stats()["graph_captures"] == 0
+
+
+@patch("deepspeed.runtime.rollout.hybrid_engine_rollout.get_accelerator")
+def test_profile_counts_only_successful_captures(mock_get_accelerator):
+    """A capture that fell back to eager forwards is timed but not counted as a capture."""
+    _mock_graph_accelerator(mock_get_accelerator)
+    rollout = HybridEngineRollout(SimpleNamespace(module=_RetiringModel()),
+                                  SimpleNamespace(pad_token_id=0, eos_token_id=2),
+                                  cfg=HybridEngineRolloutConfig(use_graph_capture=True, enable_profiling=True))
+
+    with patch.object(rollout, "_capture_continuous_graph", side_effect=RuntimeError("simulated capture OOM")):
+        rollout.generate(_retiring_request(rows=3),
+                         SamplingConfig(max_new_tokens=3, temperature=0, continuous_batch_size=3))
+
+    assert rollout.get_last_continuous_stats()["graph_captures"] == 0
+    assert rollout.get_last_profile()["num_graph_captures"] == 0
+
+
 def test_group_needs_capture_reduces_over_the_autotp_group(monkeypatch):
     """A rank must capture when any peer of the tensor-parallel groups needs to."""
     autotp_group = object()

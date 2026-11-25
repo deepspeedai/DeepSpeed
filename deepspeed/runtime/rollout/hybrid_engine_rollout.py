@@ -26,7 +26,7 @@ from copy import copy
 from dataclasses import dataclass, field, replace
 from functools import lru_cache
 from inspect import signature
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Set, Tuple
 
 import torch
 
@@ -156,10 +156,11 @@ class HybridEngineRolloutConfig:
     the step on the wider graph. Defaults to the powers of two up to
     ``max_batch_size`` plus ``max_batch_size`` itself. Capture is lazy: a bucket
     is captured the first time the loop needs it, and the decision is agreed
-    over the model-parallel groups because the capture runs forwards that hold
-    their collectives. A bucket whose capture fails runs that forward eagerly
-    instead only when no such group shares it; under tensor parallelism the
-    rollout fails rather than desynchronizing the groups.
+    over the model-parallel groups once per width, not per replay, because the
+    capture runs forwards that hold their collectives. A bucket whose capture
+    fails runs that forward eagerly instead only when no such group shares it;
+    under tensor parallelism the rollout fails rather than desynchronizing the
+    groups.
     """
     use_graph_capture: bool = False
     enable_profiling: bool = False
@@ -220,6 +221,10 @@ class _ContinuousGraphState:
     static_cache_position: torch.Tensor
     decode: Dict[int, _DecodeBucket] = field(default_factory=dict)
     captures: int = 0
+    # Widths whose capture decision the model-parallel groups already took. Every rank
+    # updates it after the same consensus, and the width the loop is using comes from the
+    # shared schedule, so the rendezvous condition below is shared rather than rank-local.
+    capture_agreed: Set[int] = field(default_factory=set)
 
 
 class HybridEngineRollout(RolloutEngine):
@@ -1243,25 +1248,34 @@ class HybridEngineRollout(RolloutEngine):
         return bucket
 
     def _capture_bucket_if_needed(self, module, cache, bucket, cache_position, write_position, profile=None):
-        """Capture a bucket the first time any rank of the capture groups needs it.
+        """Capture a bucket the first time the group needs its width, at most once per state.
 
-        The group agreement can send a rank that already holds this bucket's graph back
-        through the capture, which is what keeps its count of collective forwards equal to
-        its peers'.
+        The decision is agreed over the capture groups because the capture's forwards hold
+        their collectives. Both the set of widths already decided and the width the loop is
+        using are the same on every rank, so no rank enters the rendezvous alone, and every
+        rank applies the same answer -- including a rank that already holds the bucket's
+        graph, whose redundant capture keeps the collective counts equal. Replays of an
+        agreed width never rendezvous.
         """
+        capture_agreed = self._continuous_graph_state.capture_agreed
+        if bucket.width in capture_agreed:
+            return bucket
+        capture_agreed.add(bucket.width)
         needs_capture = bucket.graph is None and not bucket.disabled
         if not self._group_needs_capture(needs_capture, bucket.input_ids.device):
             return bucket
         capture_start = self._profile_start(profile)
-        self._capture_bucket(module, cache, bucket, cache_position, write_position)
-        self._profile_end(profile, "graph_capture_ms", capture_start, count="num_graph_captures")
+        captured = self._capture_bucket(module, cache, bucket, cache_position, write_position)
+        self._profile_end(profile, "graph_capture_ms", capture_start, count="num_graph_captures" if captured else None)
         return bucket
 
     def _capture_bucket(self, module, cache, bucket, cache_position, write_position):
         """Capture one bucket's forward, falling back to eager forwards if capture fails.
 
         The capture runs the model for real during its warmup, with the buffers the next
-        replay will use, so it must be called only once the caller has filled them.
+        replay will use, so it must be called only once the caller has filled them. Returns
+        whether a graph was produced; an attempt that fails inside a capture group raises
+        instead, and without one it marks the bucket for eager forwards.
         """
         try:
             cache.set_write_position(write_position)
@@ -1270,6 +1284,7 @@ class HybridEngineRollout(RolloutEngine):
                                                                          cache_position, bucket.position_ids,
                                                                          self._last_logits_kwargs(module))
             self._continuous_graph_state.captures += 1
+            return True
         except Exception as error:
             if self._capture_groups():
                 # The capture already ran some of its collective forwards here, so its peers
@@ -1286,6 +1301,7 @@ class HybridEngineRollout(RolloutEngine):
             logger.warning(
                 "Rollout graph capture failed for batch width %s (%s); this bucket will run eagerly "
                 "for the rest of the rollout.", bucket.width, error)
+            return False
 
     def _run_bucket(self, module, cache, bucket, cache_position, write_position):
         """Replay a bucket's captured forward, or run the same buffers eagerly without a graph."""
