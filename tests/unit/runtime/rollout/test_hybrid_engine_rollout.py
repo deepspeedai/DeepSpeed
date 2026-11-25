@@ -1666,6 +1666,93 @@ class TestContinuousGraphCaptureFailure(DistributedTest):
                                      SamplingConfig(max_new_tokens=2, temperature=0, continuous_batch_size=2))
 
 
+class TestContinuousGraphCaptureAgreementDevice(DistributedTest):
+    """Capture agreement on real accelerator devices, sharded over an AutoTP tensor-parallel group.
+
+    The Gloo tests above pin the decision logic; here two ranks capture and replay real
+    device graphs whose forwards hold the TP group's collectives, so a rank that captured
+    or fell back on its own would hang on unpaired collectives instead of merely
+    diverging. The model keeps its native HuggingFace forwards (the rollout drives its
+    own static KV cache), so AutoTP shards the layers rather than the hybrid engine's
+    inference containers, whose own KV store the continuous path does not use. ZeRO
+    stays at stage 0 because partitioned-parameter fetches wait on a side stream, which
+    stream capture does not allow.
+    """
+    world_size = 2
+
+    def test(self):
+        from transformers import LlamaConfig, LlamaForCausalLM
+
+        rank = dist.get_rank()
+        device = torch.device(get_accelerator().current_device_name())
+        model = LlamaForCausalLM(
+            LlamaConfig(
+                vocab_size=32,
+                max_position_embeddings=32,
+                hidden_size=32,
+                intermediate_size=64,
+                num_hidden_layers=1,
+                num_attention_heads=4,
+                num_key_value_heads=4,
+                tie_word_embeddings=False,
+            ))
+        ds_config = {
+            "train_micro_batch_size_per_gpu": 1,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 1e-6,
+                    "torch_adam": True
+                },
+            },
+            "tensor_parallel": {
+                "autotp_size": 2,
+                "vocab_parallel_lm_head": True,
+            },
+            "zero_optimization": {
+                "stage": 0
+            },
+        }
+        engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=ds_config)
+        rollout = HybridEngineRollout(engine,
+                                      SimpleNamespace(pad_token_id=0, eos_token_id=2),
+                                      cfg=HybridEngineRolloutConfig(use_graph_capture=True, enable_profiling=True))
+        request = RolloutRequest(
+            prompt_ids=torch.tensor([[5, 6], [7, 8]], device=device),
+            prompt_attention_mask=torch.ones(2, 2, dtype=torch.long, device=device),
+        )
+        sampling = SamplingConfig(max_new_tokens=4, temperature=0, continuous_batch_size=2)
+
+        def gather(value):
+            values = [torch.zeros(1, dtype=torch.int32, device=device) for _ in range(2)]
+            dist.all_gather(values, torch.tensor([value], dtype=torch.int32, device=device))
+            return [tensor.item() for tensor in values]
+
+        # One decode width is in play, so the first rollout captures exactly once, and the
+        # capture's warmup and record forwards keep both ranks' collective counts in step.
+        first = rollout.generate(request, sampling)
+        assert gather(rollout.get_last_continuous_stats()["graph_captures"]) == [1, 1]
+
+        # A rank-local state drop must not let that rank re-capture alone: without the
+        # agreement its peer would replay its kept graph while this rank ran the capture's
+        # extra forwards, leaving the group's collectives unpaired. Every rank rebuilds
+        # instead, and the replayed tokens stay identical to the agreed first pass.
+        if rank == 1:
+            rollout._continuous_graph_state = None
+        second = rollout.generate(request, sampling)
+        assert gather(rollout.get_last_continuous_stats()["graph_captures"]) == [1, 1]
+        assert gather(rollout.get_last_profile()["num_graph_captures"]) == [1, 1]
+        assert torch.equal(second.input_ids, first.input_ids)
+
+        # A capture failure inside the TP group must fail the rollout on every rank instead
+        # of falling back eagerly here. The patch is deterministic on both ranks, so both
+        # raise locally at the same point and no collective is left unpaired.
+        rollout._continuous_graph_state = None
+        with patch.object(rollout, "_capture_continuous_graph", side_effect=RuntimeError("simulated capture OOM")):
+            with pytest.raises(RuntimeError, match="tensor-parallel group"):
+                rollout.generate(request, sampling)
+
+
 def test_continuous_repetition_penalty_matches_hf_in_bfloat16():
     from transformers import RepetitionPenaltyLogitsProcessor
 
