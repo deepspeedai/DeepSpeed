@@ -121,8 +121,10 @@ def test_rollout_without_segki_refreshes_kernels_another_rollout_installed(monke
 
     # Without injected kernels the graphs read only the parameters, so an in-place sync keeps them.
     rollout._static_graph_state = kept = object()
+    rollout._continuous_graph_state = kept_continuous = object()
     rollout.refresh_weights()
     assert rollout._static_graph_state is kept
+    assert rollout._continuous_graph_state is kept_continuous
     assert not hasattr(model, "_ki_refresh_generation")
 
     # Another rollout over the same model installs segment kernels, which cache tensors derived from the weights.
@@ -132,9 +134,20 @@ def test_rollout_without_segki_refreshes_kernels_another_rollout_installed(monke
     before = signature()
     rollout.refresh_weights()
     assert rollout._static_graph_state is None
+    assert rollout._continuous_graph_state is None
     assert not hasattr(linear, "_ki_attn_cat_w")
     # A refresh through either rollout invalidates graphs that replay the injected kernels.
     assert signature() != before
+
+
+@pytest.mark.parametrize("autotp_size", [2, lambda: 2])
+def test_capture_groups_accept_autotp_size_attribute_or_method(autotp_size, monkeypatch):
+    from deepspeed.utils import groups
+    tp_group = object()
+    monkeypatch.setattr(groups, "get_tensor_model_parallel_group", lambda: tp_group)
+    rollout = HybridEngineRollout.__new__(HybridEngineRollout)
+    rollout.engine = SimpleNamespace(autotp_size=autotp_size)
+    assert rollout._capture_groups() == [tp_group]
 
 
 def test_recapture_is_agreed_over_the_hybrid_engine_inference_tp_group(monkeypatch):

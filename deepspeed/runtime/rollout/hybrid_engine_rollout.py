@@ -1205,7 +1205,7 @@ class HybridEngineRollout(RolloutEngine):
         state.static_write_positions.zero_()
         return state
 
-    def _graph_signature(self, module, max_batch_size, max_cache_len, device, model_dtype):
+    def _graph_signature(self, module, max_batch_size, max_cache_len, device, model_dtype, extra=()):
         # Replay reads parameters and buffers through the address and layout fixed
         # at capture, so in-place value updates need no recapture, but a moved or
         # re-laid-out tensor does. Prefill runs eagerly, so the prompt width only
@@ -1235,13 +1235,15 @@ class HybridEngineRollout(RolloutEngine):
         attn_implementation = getattr(getattr(module, "config", None), "_attn_implementation", None)
         return (id(module), module.training, autocast_enabled, autocast_dtype, device.type, device_index, model_dtype,
                 max_batch_size, max_cache_len, segki_generation, inference_mode, attn_implementation, module_modes,
-                tensor_signature)
+                tensor_signature) + tuple(extra)
 
     def _capture_groups(self):
         """The tensor-parallel groups whose collectives a decode forward runs."""
         capture_groups = []
         autotp_size = getattr(self.engine, "autotp_size", None)
-        if callable(autotp_size) and autotp_size() > 1:
+        if callable(autotp_size):
+            autotp_size = autotp_size()
+        if isinstance(autotp_size, int) and autotp_size > 1:
             from deepspeed.utils import groups
             capture_groups.append(groups.get_tensor_model_parallel_group())
         # DeepSpeedHybridEngine with inference_tp_size > 1 shards the inference
@@ -2026,6 +2028,8 @@ class HybridEngineRollout(RolloutEngine):
         repetition_penalty = self._repetition_penalty(module)
         output_ids = [prompt_ids]
 
+        # The repetition penalty reads the tokens emitted so far from output_ids,
+        # so append each token only after next_tokens() has selected it.
         def next_tokens(logits):
             if repetition_penalty != 1.0:
                 logits = self._apply_repetition_penalty(logits, torch.cat(output_ids, dim=1), repetition_penalty,
@@ -2062,9 +2066,16 @@ class HybridEngineRollout(RolloutEngine):
             prefill_cache = self._create_prefill_cache(StaticCache, module.config, batch_size, max_len, device,
                                                        model_dtype)
         prefill_out = run_prefill(prefill_cache)
-        post_prefill_signature = self._graph_signature(module, batch_size, max_len, device,
-                                                       model_dtype) + (use_step_kernel, )
+        post_prefill_signature = self._graph_signature(module,
+                                                       batch_size,
+                                                       max_len,
+                                                       device,
+                                                       model_dtype,
+                                                       extra=(use_step_kernel, ))
         if self._group_needs_capture(state.signature != post_prefill_signature):
+            # Drop every reference to the stale state, including the prefill
+            # output and cache, before _get_static_graph_state allocates the
+            # replacement; otherwise both caches and graph pools stay resident.
             self._static_graph_state = None
             prefill_out = None
             prefill_cache = None
@@ -2204,12 +2215,14 @@ class HybridEngineRollout(RolloutEngine):
         """Return the fixed-batch decode state for this shape, reset for a new prompt.
 
         A new state, allocated when the signature changes, has no graph yet: the
-        caller prefills, loads the prompt and then captures.
+        caller prefills, loads the prompt and then captures. A caller replacing a
+        state it still holds must drop its own references to it (and to anything
+        holding its cache) first, or the old cache and graph pool are not freed.
         """
         from transformers import StaticCache
         from deepspeed.utils.static_cache import DeepSpeedStaticCache, DSStaticGDNSlot
 
-        signature = self._graph_signature(module, batch_size, max_len, device, model_dtype) + (use_step_kernel, )
+        signature = self._graph_signature(module, batch_size, max_len, device, model_dtype, extra=(use_step_kernel, ))
         state = self._static_graph_state
         if self._group_needs_capture(state is None or state.signature != signature):
             # Free the stale cache and graph pool before allocating replacements.
@@ -2321,15 +2334,19 @@ class HybridEngineRollout(RolloutEngine):
                 install_lm_head(module, attn_op)
             except Exception as e:
                 # The install chain shares one try: a failure in any part (rope
-                # tables, decode attention, fused norm, lm head) silently drops
-                # the whole segKI decode path back to the HF forward, which is
-                # numerically correct but loses all kernel gains. Make that
-                # visible instead of looking like normal slow decoding.
-                logger.warning_once(f"segKI decode install failed; rollout falls back to the HF forward "
-                                    f"({type(e).__name__}: {e}). Decode will run without the injected kernels.")
+                # tables, decode attention, fused norm, lm head) skips the
+                # installs after it, while those before it stay active. Both
+                # forwards are numerically correct, but the skipped kernel gains
+                # are lost; make that visible instead of looking like slow decoding.
+                logger.warning_once(f"segKI decode install failed ({type(e).__name__}: {e}); kernels installed "
+                                    f"before the failure stay active, the rest of decode runs the HF forward.")
                 module._ki_fused_norm_patched = 0
-            state.signature = self._graph_signature(module, batch_size, max_len, device,
-                                                    model_dtype) + (use_step_kernel, )
+            state.signature = self._graph_signature(module,
+                                                    batch_size,
+                                                    max_len,
+                                                    device,
+                                                    model_dtype,
+                                                    extra=(use_step_kernel, ))
 
         # Snapshot the GDN states right after prefill: the warmup forwards
         # advance conv/recurrent states by extra steps, so they must be

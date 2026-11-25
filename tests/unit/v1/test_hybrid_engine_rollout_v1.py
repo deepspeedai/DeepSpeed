@@ -1034,6 +1034,49 @@ def test_rollout_under_autocast_matches_hf_generate(use_graph_capture, continuou
     assert output.input_ids.tolist() == expected.tolist()
 
 
+def test_static_graph_is_recaptured_when_autocast_changes(monkeypatch):
+    # A retained fp32 graph replays fp32 kernels, so entering bf16 autocast must recapture rather than reuse it.
+    accelerator = get_accelerator()
+    if not accelerator.is_available() or accelerator.device_name() != "cuda":
+        pytest.skip("CUDA is required for CUDA graph decode coverage")
+    if not accelerator.is_bf16_supported():
+        pytest.skip("bf16 autocast is not supported")
+
+    device = torch.device(accelerator.device_name())
+    model = _tiny_llama(device)
+    rollout = _rollout(model, use_graph_capture=True)
+    captures = []
+    original_capture = rollout._capture_static_graph
+
+    def capture(*args, **kwargs):
+        captures.append(torch.is_autocast_enabled(device.type))
+        return original_capture(*args, **kwargs)
+
+    monkeypatch.setattr(rollout, "_capture_static_graph", capture)
+    new_tokens = 8
+    request = _random_request(batch_size=4, prompt_len=8, device=device)
+    sampling = SamplingConfig(max_new_tokens=new_tokens, temperature=0)
+
+    def generate_and_compare():
+        output = rollout.generate(request, sampling)
+        with torch.no_grad():
+            expected = model.generate(request.prompt_ids,
+                                      attention_mask=request.prompt_attention_mask,
+                                      max_new_tokens=new_tokens,
+                                      do_sample=False,
+                                      eos_token_id=None,
+                                      pad_token_id=0)
+        assert output.input_ids.tolist() == expected.tolist()
+
+    for _ in range(2):
+        generate_and_compare()
+    with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
+        for _ in range(2):
+            generate_and_compare()
+
+    assert captures == [False, True]
+
+
 @pytest.mark.parametrize("use_graph_capture, continuous_batch_size", [(True, None), (True, 8), (False, 8)])
 @pytest.mark.parametrize("temperature, top_k, top_p", [(1.0, 0, 1.0), (0.7, 5, 1.0), (1.0, 0, 0.8)])
 def test_decode_sampling_matches_hf_generate(temperature, top_k, top_p, use_graph_capture, continuous_batch_size):
