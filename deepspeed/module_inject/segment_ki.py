@@ -536,7 +536,8 @@ def _fla_recurrent_inplace(query, key, value, **kw):
     # the outer (bypassed) wrapper computes this default; the Triton
     # kernel cannot branch on a None host value
     scale = kw.get("scale")
-    if scale is None: scale = K**-0.5
+    if scale is None:
+        scale = K**-0.5
     BV = min(8, triton.next_power_of_2(V))
     NV = triton.cdiv(V, BV)
     fused_recurrent_gated_delta_rule_fwd_kernel[(NV * B * HV, )](
@@ -1019,6 +1020,57 @@ def install_lm_head(model: torch.nn.Module, kernel_op) -> int:
     return 1
 
 
+def _validate_qwen3_5_decode_attention(module) -> bool:
+    """Validate that a Qwen3.5 attention module matches the semantic and structural
+    contract required by the segKI decode_attn kernel:
+    - Exposes q_proj, k_proj, v_proj, o_proj with weights
+    - Exposes per-head q_norm, k_norm modules
+    - Uses supported head_dim in (64, 128, 256)
+    - Has 2x-wide gated query layout: q_out == 2 * o_in
+    - Integer head counts matching projection shapes
+    - GQA ratio divides the kernel's 16 warps-per-block split
+    - Config layer_types is 'full_attention' if specified
+    """
+    projections = [getattr(module, name, None) for name in ("q_proj", "k_proj", "v_proj", "o_proj")]
+    # duck-typed projection check: AutoTP replaces nn.Linear with a
+    # LinearLayer wrapper that still exposes .weight
+    if not all(hasattr(p, "weight") and p.weight is not None for p in projections):
+        return False
+    if not all(isinstance(getattr(module, name, None), torch.nn.Module) for name in ("q_norm", "k_norm")):
+        return False
+    head_dim = getattr(module, "head_dim", None)
+    if head_dim not in (64, 128, 256):
+        return False
+
+    q_out = projections[0].weight.shape[0]
+    kv_out = projections[1].weight.shape[0]
+    o_in = projections[3].weight.shape[1]
+    if q_out != 2 * o_in:
+        return False
+
+    num_q_heads = q_out // (2 * head_dim)
+    num_kv_heads = kv_out // head_dim
+    if num_q_heads * head_dim * 2 != q_out or num_kv_heads * head_dim != kv_out:
+        return False
+    if num_kv_heads == 0 or 16 % (num_q_heads // num_kv_heads) != 0:
+        return False
+
+    layer_types = getattr(getattr(module, "config", None), "layer_types", None)
+    layer_idx = getattr(module, "layer_idx", None)
+    if layer_types is not None and layer_idx is not None and layer_types[layer_idx] != "full_attention":
+        return False
+
+    return True
+
+
+SUPPORTED_ATTENTION = {}
+try:
+    from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5Attention
+    SUPPORTED_ATTENTION[Qwen3_5Attention] = _validate_qwen3_5_decode_attention
+except ImportError:
+    pass
+
+
 def install_decode_attention(model: torch.nn.Module,
                              write_pos: torch.Tensor,
                              kernel_op,
@@ -1026,14 +1078,12 @@ def install_decode_attention(model: torch.nn.Module,
                              sin_table: torch.Tensor = None) -> int:
     """Patch full-attention layers to use the custom decode_attn kernel.
 
-    Detection mirrors find_glu_segments: structural (q/k/v/o projections
-    plus per-head q_norm/k_norm present, q_proj carrying the 2x-wide
-    query|gate layout), cross-checked against the config's layer_types so
-    linear-attention blocks are never touched. Only gated query attention
-    layers (where q_proj.weight.shape[0] == 2 * o_proj.weight.shape[1])
-    are patched; dense non-gated attention layers (such as standard Qwen3
-    where q_out == o_in) are left unpatched. Returns the patched count;
-    layers whose GQA ratio the kernel cannot serve are left native."""
+    Only injects into attention implementations explicitly registered in
+    SUPPORTED_ATTENTION (such as Qwen3.5 gated attention). Unknown classes
+    (including dense Qwen3 or custom subclasses) remain untouched. For registered
+    classes, validates projection shapes, head dimensions, and kernel requirements
+    before patching. Returns the patched count; layers whose configuration
+    or GQA ratio the kernel cannot serve are left native."""
     if kernel_op is None or not hasattr(kernel_op, "decode_attn"):
         return 0
     try:
@@ -1043,32 +1093,19 @@ def install_decode_attention(model: torch.nn.Module,
 
     patched = 0
     for module in model.modules():
-        projections = [getattr(module, name, None) for name in ("q_proj", "k_proj", "v_proj", "o_proj")]
-        # duck-typed projection check: AutoTP replaces nn.Linear with a
-        # LinearLayer wrapper that still exposes .weight
-        if not all(hasattr(p, "weight") and p.weight is not None for p in projections):
+        validator = SUPPORTED_ATTENTION.get(type(module))
+        if validator is None:
             continue
-        if not all(isinstance(getattr(module, name, None), torch.nn.Module) for name in ("q_norm", "k_norm")):
+        if not validator(module):
             continue
+
         head_dim = module.head_dim
-        # per-rank head counts from the actual weight shapes (AutoTP-sharded
-        # weights carry the per-rank output dimension in weight.shape[0])
+        projections = [getattr(module, name, None) for name in ("q_proj", "k_proj", "v_proj", "o_proj")]
         q_out = projections[0].weight.shape[0]
         kv_out = projections[1].weight.shape[0]
-        o_in = projections[3].weight.shape[1]
-        if q_out != 2 * o_in:
-            continue  # not the 2x-wide query|gate layout (o_proj consumes only the attention half)
         num_q_heads = q_out // (2 * head_dim)
         num_kv_heads = kv_out // head_dim
-        if num_q_heads * head_dim * 2 != q_out:
-            continue  # not the 2x-wide query|gate layout this forward replays
-        layer_types = getattr(getattr(module, "config", None), "layer_types", None)
-        if layer_types is not None and layer_types[module.layer_idx] != "full_attention":
-            continue
-        # Kernel contract: supported head dims and a GQA ratio that divides
-        # its 16 warps-per-block KV split.
-        if head_dim not in (64, 128, 256) or 16 % (num_q_heads // num_kv_heads) != 0:
-            continue
+
         if getattr(module, "_ki_orig_attn_forward", None) is None:
             module._ki_orig_attn_forward = module.forward
         # Fused q-side preprocessing inputs: the (1+w) norm scale and the
