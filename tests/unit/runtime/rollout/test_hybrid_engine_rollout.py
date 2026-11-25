@@ -28,6 +28,7 @@ from deepspeed.runtime.rollout.hybrid_engine_rollout import (
     HybridEngineRollout,
     HybridEngineRolloutConfig,
     _GlobalEosStoppingCriteria,
+    _full_vocabulary_logits,
 )
 from deepspeed.utils.static_cache import DeepSpeedStaticCache
 from unit.common import DistributedTest
@@ -661,6 +662,29 @@ def test_continuous_prefill_requests_last_logits_only():
     assert model.prefill_logits_to_keep == [1]
 
 
+def _forward_with_logits_to_keep(input_ids, logits_to_keep=0):
+    pass
+
+
+def _forward_with_num_logits_to_keep(input_ids, num_logits_to_keep=0):
+    pass
+
+
+def _forward_without_logits_to_keep(input_ids):
+    pass
+
+
+@pytest.mark.parametrize("forward, argument", [
+    (_forward_with_logits_to_keep, "logits_to_keep"),
+    (_forward_with_num_logits_to_keep, "num_logits_to_keep"),
+    (_forward_without_logits_to_keep, None),
+])
+def test_last_logits_kwargs_follow_the_transformers_argument_name(forward, argument):
+    # Transformers 4.45-4.48 call the argument num_logits_to_keep.
+    expected = {} if argument is None else {argument: 1}
+    assert HybridEngineRollout._last_logits_kwargs(SimpleNamespace(forward=forward)) == expected
+
+
 def test_aligned_continuous_generation_supports_mixed_effective_prompt_lengths():
 
     class CacheConfig(SimpleNamespace):
@@ -1134,6 +1158,125 @@ def test_zero3_rendezvous_uses_optimizer_dp_group(monkeypatch):
     rendezvous = HybridEngineRollout(engine, _make_tokenizer())._zero3_work_remaining()
 
     assert rendezvous.process_group is process_group
+
+
+def test_full_vocabulary_logits_gathers_only_vocabulary_parallel_heads_and_restores_them():
+    head = torch.nn.Linear(2, 2)
+    head.is_vocab_parallel_lm_head = True
+    head.gather_output = False
+    column_parallel = torch.nn.Linear(2, 2)
+    column_parallel.gather_output = False
+    module = torch.nn.Sequential(column_parallel, head)
+
+    with _full_vocabulary_logits(module):
+        assert head.gather_output is True
+        assert column_parallel.gather_output is False
+    assert head.gather_output is False
+
+    with pytest.raises(RuntimeError):
+        with _full_vocabulary_logits(module):
+            raise RuntimeError("generation failed")
+    # Training must get rank-local logits back even when generation fails.
+    assert head.gather_output is False
+
+
+def test_generate_decodes_with_full_vocabulary_logits():
+    engine = _make_engine()
+    engine.zero_optimization_partition_weights.return_value = False
+    head = SimpleNamespace(is_vocab_parallel_lm_head=True, gather_output=False)
+    engine.module.modules.return_value = [head]
+    gathered = []
+
+    def generate(*args, **kwargs):
+        gathered.append(head.gather_output)
+        return torch.tensor([[0, 1, 2, 5, 6], [0, 3, 4, 7, 8]])
+
+    engine.module.generate.side_effect = generate
+    HybridEngineRollout(engine, _make_tokenizer()).generate(_make_request(), _make_sampling())
+
+    assert gathered == [True]
+    assert head.gather_output is False
+
+
+def test_full_vocabulary_logits_accepts_a_head_without_gather_output():
+    from deepspeed.runtime.rollout.hybrid_engine_rollout import _full_vocabulary_logits
+
+    head = SimpleNamespace(is_vocab_parallel_lm_head=True)
+    with _full_vocabulary_logits(SimpleNamespace(modules=lambda: [head])):
+        assert head.gather_output is True
+    assert head.gather_output is False
+
+
+def _patch_random_state_sync(monkeypatch, events, src_rank=3):
+    """Have the broadcast copy a source-rank state into the tensor, and record the state the rank then sets."""
+    group = object()
+    source_state = torch.arange(8, dtype=torch.uint8)
+    accelerator = get_accelerator()
+
+    def broadcast(tensor, src, group=None):
+        events.append(("broadcast", src, group))
+        tensor.copy_(source_state.to(tensor.device))
+
+    def set_rng_state(state, *args, **kwargs):
+        events.append(("set_rng_state", state.clone()))
+
+    monkeypatch.setattr("deepspeed.runtime.rollout.hybrid_engine_rollout.dist.broadcast", broadcast)
+    monkeypatch.setattr(accelerator, "get_rng_state", lambda *args, **kwargs: torch.zeros(8, dtype=torch.uint8))
+    monkeypatch.setattr(accelerator, "set_rng_state", set_rng_state)
+    monkeypatch.setattr("deepspeed.utils.groups.get_tensor_model_parallel_src_rank", lambda: src_rank)
+    monkeypatch.setattr("deepspeed.utils.groups.get_tensor_model_parallel_group", lambda: group)
+    return group, source_state
+
+
+@pytest.mark.parametrize("autotp_size", [2, 1])
+def test_generate_shares_the_random_state_across_the_autotp_group(autotp_size, monkeypatch):
+    engine = _make_engine()
+    engine.zero_optimization_partition_weights.return_value = False
+    engine.autotp_size.return_value = autotp_size
+    events = []
+
+    def generate(*args, **kwargs):
+        events.append(("generate", ))
+        return torch.tensor([[0, 1, 2, 5, 6], [0, 3, 4, 7, 8]])
+
+    engine.module.generate.side_effect = generate
+    group, source_state = _patch_random_state_sync(monkeypatch, events)
+
+    HybridEngineRollout(engine, _make_tokenizer()).generate(_make_request(), _make_sampling())
+
+    if autotp_size == 1:
+        assert events == [("generate", )]
+        return
+    # The rank adopts the source rank's state before it samples anything.
+    assert [event[0] for event in events] == ["broadcast", "set_rng_state", "generate"]
+    assert events[0][1:] == (3, group)
+    assert torch.equal(events[1][1].cpu(), source_state)
+
+
+def test_generate_shares_the_random_state_when_the_engine_is_wrapped(monkeypatch):
+    engine = _make_engine()
+    engine.zero_optimization_partition_weights.return_value = False
+    engine.module.generate.return_value = torch.tensor([[0, 1, 2, 5, 6], [0, 3, 4, 7, 8]])
+    # A wrapper that exposes the module but not autotp_size(), as tests/integration/zero3_arena_e2e.py does.
+    wrapper = SimpleNamespace(module=engine.module)
+    events = []
+    _patch_random_state_sync(monkeypatch, events)
+    monkeypatch.setattr("deepspeed.runtime.rollout.hybrid_engine_rollout.dist.is_initialized", lambda: True)
+    monkeypatch.setattr("deepspeed.utils.groups.get_tensor_model_parallel_world_size", lambda: 2)
+
+    HybridEngineRollout(wrapper, _make_tokenizer()).generate(_make_request(), _make_sampling())
+
+    assert [event[0] for event in events] == ["broadcast", "set_rng_state"]
+
+
+def test_tp_input_check_treats_deepspeed_static_cache_as_a_cache():
+    from deepspeed.runtime.utils import compare_tensors_in_structures
+
+    # Each rank builds its own cache, so the check must not compare the objects themselves.
+    first, second = (DeepSpeedStaticCache(_cache_config(), max_cache_len=4) for _ in range(2))
+
+    assert compare_tensors_in_structures([torch.ones(2), first], [torch.ones(2), second])
+    assert compare_tensors_in_structures({"past_key_values": first}, {"past_key_values": second})
 
 
 @pytest.mark.parametrize("tokenizer_eos, config_eos, expected", [
