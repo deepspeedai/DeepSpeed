@@ -674,13 +674,14 @@ def _forward_without_logits_to_keep(input_ids):
     pass
 
 
-@pytest.mark.parametrize("forward, expected", [
-    (_forward_with_logits_to_keep, {"logits_to_keep": 1}),
-    (_forward_with_num_logits_to_keep, {"num_logits_to_keep": 1}),
-    (_forward_without_logits_to_keep, {}),
+@pytest.mark.parametrize("forward, argument", [
+    (_forward_with_logits_to_keep, "logits_to_keep"),
+    (_forward_with_num_logits_to_keep, "num_logits_to_keep"),
+    (_forward_without_logits_to_keep, None),
 ])
-def test_last_logits_kwargs_follow_the_transformers_argument_name(forward, expected):
+def test_last_logits_kwargs_follow_the_transformers_argument_name(forward, argument):
     # Transformers 4.45-4.48 call the argument num_logits_to_keep.
+    expected = {} if argument is None else {argument: 1}
     assert HybridEngineRollout._last_logits_kwargs(SimpleNamespace(forward=forward)) == expected
 
 
