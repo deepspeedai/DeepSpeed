@@ -477,6 +477,13 @@ class TestSegKIDataParallelRollout(DistributedTest):
         accelerator = get_accelerator()
         if accelerator.create_graph() is None:
             pytest.skip("requires graph capture")
+        # Without the native op install_lm_head is skipped entirely, so only
+        # here is the is_vocab_parallel_lm_head guard under test in the first place.
+        try:
+            from deepspeed.ops.module_inject import get_fused_glu_op
+            get_fused_glu_op()
+        except Exception as e:
+            pytest.skip(f"requires the segKI native op: {e}")
 
         from transformers import LlamaConfig, LlamaForCausalLM
 
