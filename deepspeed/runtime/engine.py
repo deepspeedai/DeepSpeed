@@ -550,6 +550,20 @@ class DeepSpeedEngine(Module):
         self.warn_unscaled_loss = True
         self.config = config
         self._config = config_class
+        # Reject incompatible layouts before changing process-wide mesh or expert state.
+        # An explicit mpu replaces groups.mpu; a data/sequence parallel mesh does not.
+        requested_tp_size = self.autotp_size()
+        if requested_tp_size > 1 and (mesh_device is not None or groups.mesh_device is not None):
+            # The data parallel getters read groups.mesh_device before any mpu. A data/sequence parallel mesh
+            # spans every rank, so its data parallel group would mix ranks that hold different TP shards.
+            if mesh_device is not None:
+                raise RuntimeError("An AutoTP engine cannot run on a data/sequence parallel mesh yet "
+                                   "(see https://github.com/deepspeedai/DeepSpeed/issues/9081).")
+            raise RuntimeError(
+                "An AutoTP engine cannot be built after an engine with a data/sequence parallel mesh in the same "
+                "process yet (see https://github.com/deepspeedai/DeepSpeed/issues/9081).")
+        if requested_tp_size > 1 or (self.mpu is None and groups.mpu is groups):
+            groups._check_existing_tp_groups(tensor_model_parallel_size=max(requested_tp_size, 1))
         if self._config.deterministic_mode:
             from .determinism import apply_determinism
             apply_determinism(self._config)
