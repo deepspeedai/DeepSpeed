@@ -411,6 +411,61 @@ class TestAutoTPGraphRecapture(DistributedTest):
             accelerator.synchronize()
 
 
+class TestSegKIDataParallelRollout(DistributedTest):
+    world_size = 2
+
+    def test_each_rank_matches_its_own_generation(self):
+        accelerator = get_accelerator()
+        if accelerator.create_graph() is None:
+            pytest.skip("requires graph capture")
+        try:
+            from deepspeed.ops.module_inject import get_fused_glu_op
+            get_fused_glu_op()
+        except Exception as e:
+            pytest.skip(f"requires the segKI native op: {e}")
+
+        from transformers import LlamaConfig, LlamaForCausalLM
+
+        config = LlamaConfig(vocab_size=128,
+                             hidden_size=128,
+                             intermediate_size=256,
+                             num_hidden_layers=2,
+                             num_attention_heads=4,
+                             num_key_value_heads=2,
+                             max_position_embeddings=64)
+        config._attn_implementation = "sdpa"
+        torch.manual_seed(0)
+        device = torch.device(accelerator.current_device_name())
+        model = LlamaForCausalLM(config).to(device=device, dtype=torch.bfloat16).eval()
+        reference = copy.deepcopy(model)
+        # Pure data parallel: every rank holds the whole model and decodes its own prompt.
+        generator = torch.Generator().manual_seed(100 + dist.get_rank())
+        prompt_ids = torch.randint(1, config.vocab_size, (1, 8), generator=generator).to(device)
+        attention_mask = torch.ones_like(prompt_ids)
+        new_tokens = 8
+        with torch.no_grad():
+            expected = reference.generate(prompt_ids,
+                                          attention_mask=attention_mask,
+                                          max_new_tokens=new_tokens,
+                                          do_sample=False,
+                                          eos_token_id=None,
+                                          pad_token_id=0)
+
+        rollout = HybridEngineRollout(SimpleNamespace(module=model),
+                                      SimpleNamespace(pad_token_id=0, eos_token_id=-1),
+                                      cfg=HybridEngineRolloutConfig(use_graph_capture=True, use_segki=True))
+        try:
+            output = rollout.generate(RolloutRequest(prompt_ids, attention_mask),
+                                      SamplingConfig(max_new_tokens=new_tokens, temperature=0))
+            assert hasattr(model.lm_head, "_ki_gemm_op"), "segKI did not install its lm_head"
+            # A head split over the world would decode each rank's prompt with half of its peer's logits.
+            assert output.input_ids.tolist() == expected.tolist()
+        finally:
+            del rollout
+            gc.collect()
+            accelerator.synchronize()
+
+
 @pytest.mark.parametrize("attn_implementation", ["eager", "sdpa"])
 def test_static_graph_matches_native_llama_generation(attn_implementation):
     accelerator = get_accelerator()
