@@ -430,6 +430,13 @@ def resolve_per_head_muon_after_sharding(model: torch.nn.Module) -> None:
     logger.info("per_head_muon: after sharding, tagged %s", dict(sorted(tagged.items())))
 
 
+def _autosp_sequence_parallel_size(config):
+    passes = config.get("compile", {}).get("passes", None) or []
+    if "autosp" not in passes:
+        return 1
+    return config.get("sequence_parallel_size", 1)
+
+
 def initialize(
     args: Any = None,
     model: torch.nn.Module = None,
@@ -534,6 +541,20 @@ def initialize(
     if not isinstance(config, dict):
         config = load_ds_config(config)
 
+    if _autosp_sequence_parallel_size(config) > 1:
+        # Without the AutoSP backend each rank trains on its full sequence, while the engine still sums
+        # gradients over the sequence parallel ranks. Only DeepCompile runs that backend, and not with ZeRO 2/3.
+        if not config.get("compile", {}).get("deepcompile", False):
+            raise ValueError("AutoSP requires DeepCompile; set compile.deepcompile to true")
+        zero_config = config.get("zero_optimization", {})
+        if isinstance(zero_config, bool):
+            # The deprecated boolean form selects stage 1 or 0.
+            zero_stage = int(zero_config)
+        else:
+            zero_stage = zero_config.get("stage", 0)
+        if zero_stage >= 2:
+            raise ValueError(f"AutoSP does not support ZeRO stage {zero_stage}; use ZeRO stage 0 or 1")
+
     mesh_device = None
     if mesh_param:
         logger.info(f"mesh_param to Initialize mesh device: {mesh_param}")
@@ -544,6 +565,15 @@ def initialize(
             logger.info(f"config to Initialize mesh device: {config}")
             mesh_device = dist.initialize_mesh_device((config["data_parallel_size"], config["sequence_parallel_size"]), \
             ("data_parallel", "sequence_parallel"))
+        elif mpu is None and _autosp_sequence_parallel_size(config) > 1:
+            # AutoSP shards the sequence inside the compiled graph, but the engine still needs the sequence
+            # parallel dimension to sum gradients over SP ranks while averaging them over DP ranks.
+            sp_size = _autosp_sequence_parallel_size(config)
+            if dist.get_world_size() % sp_size != 0:
+                raise ValueError(f"world size {dist.get_world_size()} is not divisible by "
+                                 f"sequence_parallel_size {sp_size}")
+            mesh_device = dist.initialize_mesh_device((dist.get_world_size() // sp_size, sp_size),
+                                                      ("data_parallel", "sequence_parallel"))
 
     merge_tp_model_init_into_config(config, mpu, mesh_param, dist)
 

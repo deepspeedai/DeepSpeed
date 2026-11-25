@@ -22,6 +22,33 @@ DS_COMM_ALL_REDUCE_OFF = False
 DS_COMM_REDUCE_OFF = False
 
 
+def _ensure_gloo_subgroup_split():
+    """Let a Gloo world create a subgroup that excludes some ranks.
+
+    PyTorch 2.7 through 2.10 calls ``perform_nocolor_split`` on ranks that are
+    not members of the new group whenever the default group can be split.
+    ``ProcessGroupGloo`` does not implement that NCCL-only method, so those
+    ranks raise ``AttributeError`` before group creation finishes. Gloo has no
+    color split to perform, and non-members return ``NON_GROUP_MEMBER``.
+    """
+    import torch.distributed.distributed_c10d as c10d
+
+    if getattr(c10d, "_deepspeed_gloo_subgroup_split", False):
+        return
+    original = c10d._new_process_group_helper
+
+    def _new_process_group_helper(*args, **kwargs):
+        try:
+            return original(*args, **kwargs)
+        except AttributeError as exc:
+            if "perform_nocolor_split" not in str(exc):
+                raise
+            return c10d.GroupMember.NON_GROUP_MEMBER, None
+
+    c10d._new_process_group_helper = _new_process_group_helper
+    c10d._deepspeed_gloo_subgroup_split = True
+
+
 def disable_compiler_collective(func):
     if required_torch_version(min_version=2.3):
         return func
@@ -129,16 +156,30 @@ class StagedWork:
         return result
 
 
-def _needs_cpu_staging(tensor):
-    # gloo (the only torch backend on macOS) cannot operate on MPS tensors.
-    return isinstance(tensor, torch.Tensor) and tensor.device.type == 'mps'
+def _needs_cpu_staging(tensor, group=None):
+    """Whether this tensor must be copied to CPU before a gloo collective.
+
+    Gloo cannot operate on MPS tensors. It also faults (``writev`` EFAULT) when a
+    CUDA pointer is handed to the host transport, which is what a CUDA pipeline
+    stage hits when the process group itself is gloo.
+    """
+    if not isinstance(tensor, torch.Tensor):
+        return False
+    if tensor.device.type == 'mps':
+        return True
+    if tensor.device.type != 'cuda' or not torch.distributed.is_initialized():
+        return False
+    try:
+        return torch.distributed.get_backend(group) == 'gloo'
+    except Exception:
+        return False
 
 
 def stage_on_cpu(func=None, *, always_async=False, copy_to_cpu=True, copy_from_cpu=True):
-    """Runs a collective on CPU copies of any MPS tensor arguments, then copies the results back.
+    """Runs a collective on CPU copies of device tensors gloo cannot take, then copies results back.
 
-    This is what lets DeepSpeed use the gloo backend on Apple Silicon, where device tensors are
-    not supported by any torch.distributed backend. Unified memory keeps the copies cheap.
+    This lets DeepSpeed use gloo with MPS tensors on Apple Silicon, and with CUDA tensors when
+    the process group itself is gloo. Unified memory keeps the MPS copies cheap.
 
     always_async is for ops like isend/irecv that are asynchronous by contract but have no
     async_op parameter: the copy back must wait until the returned work handle completes.
@@ -154,21 +195,23 @@ def stage_on_cpu(func=None, *, always_async=False, copy_to_cpu=True, copy_from_c
             copy_from_cpu=copy_from_cpu,
         )
 
-    def _stage(arg, pairs):
-        if _needs_cpu_staging(arg):
+    def _stage(arg, pairs, group):
+        if _needs_cpu_staging(arg, group):
             cpu_tensor = arg.to('cpu') if copy_to_cpu else torch.empty_like(arg, device='cpu')
             pairs.append((arg, cpu_tensor))
             return cpu_tensor
-        if isinstance(arg, list) and any(_needs_cpu_staging(t) for t in arg):
-            return [_stage(t, pairs) for t in arg]
+        if isinstance(arg, list) and any(_needs_cpu_staging(t, group) for t in arg):
+            return [_stage(t, pairs, group) for t in arg]
         return arg
 
     signature = inspect.signature(func)
 
     def wrapper(self, *args, **kwargs):
+        bound_args = signature.bind(self, *args, **kwargs)
+        group = bound_args.arguments.get('group')
         pairs = []
-        args = [_stage(arg, pairs) for arg in args]
-        kwargs = {key: _stage(arg, pairs) for key, arg in kwargs.items()}
+        args = [_stage(arg, pairs, group) for arg in args]
+        kwargs = {key: _stage(arg, pairs, group) for key, arg in kwargs.items()}
         if not pairs:
             return func(self, *args, **kwargs)
 
@@ -180,7 +223,6 @@ def stage_on_cpu(func=None, *, always_async=False, copy_to_cpu=True, copy_from_c
                     device_tensor.copy_(cpu_tensor)
 
         # async_op is usually forwarded positionally, so resolve it against the real signature.
-        bound_args = signature.bind(self, *args, **kwargs)
         if always_async or bound_args.arguments.get('async_op', False):
             # torch.distributed returns None for ranks outside the requested group. Without a
             # completion handle, an output-only staging buffer must never be published.
@@ -290,6 +332,32 @@ class TorchBackend(Backend):
         return torch.distributed.all_reduce(tensor=tensor, op=op, group=group, async_op=async_op)
 
     def inference_all_reduce(self, tensor, op, group=None):
+        # Latency-optimized accelerator path: the one-shot P2P kernel fills the same
+        # hook the CPU backend fills with shm+AVX (see deepspeed/comm/custom_collective.py).
+        # Initialized lazily here (not in __init__): at this point the local device
+        # is bound and the real TP group is in hand, so buffers are allocated on the
+        # device the kernels will use, and topologies that can never use the fast
+        # path never pay the JIT build.
+        # The custom collective targets device accelerators for now; the CPU
+        # accelerator's fast path stays with the shm op handled further below
+        # (whose init would otherwise be preceded by this route's extra
+        # build-verdict all_reduce). Temporary exclusion: once the CPU shm
+        # backend implements the custom-collective contract, it joins this
+        # same route and the special case below is removed.
+        if get_accelerator().on_accelerator(tensor) and get_accelerator()._name != 'cpu':
+            from deepspeed.comm import custom_collective
+            world_sz = torch.distributed.get_world_size(group=group)
+            try:
+                custom_collective.initialize(group)
+            except Exception:
+                pass  # the comm library remains the answer; initialize() logs build failures
+            # the kernel only implements sum over fp16/bf16/fp32; anything else
+            # must take the standard backend, not raise from the fast path
+            if (self._reduce_op(op) == torch.distributed.ReduceOp.SUM
+                    and tensor.dtype in (torch.float16, torch.bfloat16, torch.float32)
+                    and custom_collective.custom_collective_ready(world_sz, group=group) and tensor.is_contiguous()
+                    and tensor.numel() * tensor.element_size() <= custom_collective.custom_collective_max_bytes()):
+                return custom_collective.all_reduce(tensor)
         use_ds_op = hasattr(torch.ops, 'deepspeed') and hasattr(torch.ops.deepspeed, 'inference_all_reduce_')
         world_size = torch.distributed.get_world_size(group=group)
         if world_size <= 1:
@@ -299,6 +367,13 @@ class TorchBackend(Backend):
         if use_ds_op:
             required_level = 1 if tensor.dtype == torch.float32 else 2
             use_ds_op = getattr(self, 'shm_vector_kernel_level', 0) >= required_level
+            # The shm kernel is bound to the WORLD topology and takes no group
+            # argument, so it may only serve world-wide reduces; a proper TP
+            # subgroup must fall through to the group-aware all_reduce below,
+            # or sibling subgroups' partial sums get combined (a subgroup with
+            # full world size is necessarily the world itself, hence the check).
+            if use_ds_op:
+                use_ds_op = torch.distributed.get_world_size(group=group) == torch.distributed.get_world_size()
         if not use_ds_op:
             op = self._reduce_op(op)
             return torch.distributed.all_reduce(tensor=tensor, op=op, group=group, async_op=False)
@@ -537,6 +612,7 @@ class TorchBackend(Backend):
         return torch.distributed.get_backend(group=group)
 
     def new_group(self, ranks):
+        _ensure_gloo_subgroup_split()
         return torch.distributed.new_group(ranks)
 
     def get_global_rank(self, group, group_rank):
