@@ -192,7 +192,9 @@ read a block input in one autograd node, saves only this rank's part of the inpu
 for backward, and overlaps the backward reduce-scatter with the weight-gradient
 GEMMs. ZeRO-3 partitioned weights use the plain path, and so do weights with
 tensor hooks (such as the sum of GPTBigCode's shared key/value rows), whose hooks
-PyTorch would skip under non-reentrant activation checkpointing.
+PyTorch would skip under non-reentrant activation checkpointing. The TP ranks agree
+on the path at the start of each forward pass that follows a backward, so a hook
+registered on one rank only moves every rank to the plain path.
 
 Requirements, checked at `deepspeed.initialize()`:
 
@@ -204,6 +206,8 @@ Requirements, checked at `deepspeed.initialize()`:
   decoder layer (as OPT's `fc2` does), because the decoder layer adds the residual to
   the block output.
 - The sequence length is divisible by `autotp_size` (checked in the forward pass).
+- `output_hidden_states` is not requested (checked in the forward pass): the
+  decoder layers' outputs hold only this rank's part of the sequence.
 - No column-parallel layer gathers its output, and the DeepCompile `autotp` pass is
   not used.
 - No AutoEP MoE layer is inside the decoder layers: AutoEP + AutoTP folding expects

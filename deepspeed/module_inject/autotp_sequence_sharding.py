@@ -24,6 +24,7 @@ Requirements, checked when it is applied:
   - every decoder layer of the layer list has at least one block;
   - a block is neither a whole decoder layer nor inside another block;
   - no AutoEP or other routed MoE layer is inside the decoder layers;
+  - output_hidden_states is not requested (checked in the forward pass);
   - the sequence length is divisible by the tensor-parallel size.
 Every replicated parameter inside the decoder layers (norm weights, row-parallel biases) then sees only this rank's
 part of the sequence or of the heads, so its gradient is summed over the tensor-parallel group. The modules of a
@@ -35,6 +36,7 @@ import torch
 from torch import nn
 
 from deepspeed import comm as dist
+from deepspeed.accelerator import get_accelerator
 from deepspeed.comm import pg_utils
 from deepspeed.runtime.zero.linear import autocast_custom_bwd, autocast_custom_fwd
 from deepspeed.runtime.zero.utils import is_zero_param
@@ -178,34 +180,43 @@ class ColumnGroupFromSequenceShards(torch.autograd.Function):
         hidden = x_shard.shape[-1]
         x_local = x_shard.contiguous().view(-1, hidden)
         full_shape = _shape_with(x_shard, ctx.dim, x_shard.shape[ctx.dim] * ctx.world_size)
-        x_2d = x_local.new_empty((ctx.world_size * x_local.shape[0], hidden))
-        gather = dist.all_gather_into_tensor(x_2d, x_local, group=ctx.group, async_op=True)
+        # The token count, not -1, shapes the output gradients: a rank can hold no output features of a linear (a
+        # tp_grain_size larger than its share), and reshape(-1, 0) is ambiguous.
+        tokens = ctx.world_size * x_local.shape[0]
+        # The weights follow x_shard, group and dim in the inputs. Only the weight-gradient GEMMs read the gathered
+        # input, so with every weight frozen it is not gathered at all.
+        weights_need_grad = [
+            grad_out is not None and needs_grad for grad_out, needs_grad in zip(grad_outs, ctx.needs_input_grad[3:])
+        ]
+        gather = None
+        if any(weights_need_grad):
+            x_2d = x_local.new_empty((tokens, hidden))
+            gather = dist.all_gather_into_tensor(x_2d, x_local, group=ctx.group, async_op=True)
         # Sum of the input gradients of all the linears; addmm_ accumulates inside each GEMM.
         grad_in_2d = None
         for grad_out, weight in zip(grad_outs, weights):
             if grad_out is None:
                 continue
-            grad_out_2d = grad_out.reshape(-1, grad_out.shape[-1])
+            grad_out_2d = grad_out.reshape(tokens, grad_out.shape[-1])
             if grad_in_2d is None:
                 grad_in_2d = torch.matmul(grad_out_2d, weight)
             else:
                 # In-place ops are not autocast: match dtypes by hand (fp32 weights under torch_autocast).
                 grad_in_2d.addmm_(grad_out_2d.to(grad_in_2d.dtype), weight.to(grad_in_2d.dtype))
         if grad_in_2d is None:
-            grad_in_2d = x_2d.new_zeros(x_2d.shape)
+            grad_in_2d = x_local.new_zeros((tokens, hidden))
         grad_in = grad_in_2d.view(full_shape)
         if grad_x_full is not None:
             grad_in = grad_in + grad_x_full
         grad_shard, handle = _reduce_scatter(grad_in, ctx.dim, ctx.group, ctx.world_size, async_op=True)
-        gather.wait()
-        # The weights follow x_shard, group and dim in the inputs. A frozen weight needs no weight-gradient GEMM.
-        weights_need_grad = ctx.needs_input_grad[3:]
+        if gather is not None:
+            gather.wait()
         grad_weights = []
         for grad_out, needs_grad in zip(grad_outs, weights_need_grad):
-            if grad_out is None or not needs_grad:
+            if not needs_grad:
                 grad_weights.append(None)
             else:
-                grad_weights.append(torch.matmul(grad_out.reshape(-1, grad_out.shape[-1]).t(), x_2d))
+                grad_weights.append(torch.matmul(grad_out.reshape(tokens, grad_out.shape[-1]).t(), x_2d))
         handle.wait()
         return (grad_shard, None, None, *grad_weights)
 
@@ -358,9 +369,9 @@ def apply_autotp_sequence_sharding(model, group, seq_dim=1, overlap=True, zero_s
     def make_gather_hook(state):
 
         def gather(x):
-            # Fused only once the forward pre-hook has allowed it (see count_pass): activation checkpointing
-            # recomputes the block in backward, and the recomputation must save what the forward saved.
-            if overlap and state.fusable and state.can_fuse():
+            # Fused only once the forward pre-hook has allowed it on every TP rank (see count_pass): activation
+            # checkpointing recomputes the block in backward, and the recomputation must save what the forward saved.
+            if overlap and state.fusable:
                 readers = state.readers
                 weights = [layer.weight for layer in readers]
                 x_full, *outs = ColumnGroupFromSequenceShards.apply(x, group, seq_dim, *weights)
@@ -393,20 +404,34 @@ def apply_autotp_sequence_sharding(model, group, seq_dim=1, overlap=True, zero_s
     backward_seen = [False]
     states = []
 
-    def count_pass(module, args):
+    def count_pass(module, args, kwargs):
+        # Hugging Face records each decoder layer's output for output_hidden_states, and those outputs hold only this
+        # rank's part of the sequence.
+        output_hidden_states = kwargs.get("output_hidden_states")
+        if output_hidden_states is None:
+            output_hidden_states = getattr(getattr(module, "config", None), "output_hidden_states", False)
+        if output_hidden_states:
+            raise NotImplementedError("AutoTP sequence sharding does not support output_hidden_states: the decoder "
+                                      "layers' outputs hold only this rank's part of the sequence")
         passes[0] += 1
         # A block is fused only in forward passes that start after a backward that followed the pass that recorded
         # its readers. Checkpointing recomputes a forward pass's blocks during backward, and each recomputation must
         # take the path its forward took; switching only here keeps that true also when several forward passes come
         # before one backward (a contrastive or DPO loss). It does not cover a forward pass that starts between two
         # backward passes while an earlier forward pass still awaits its backward; checkpointing then raises.
-        if backward_seen[0]:
+        if overlap and backward_seen[0]:
             backward_seen[0] = False
-            for state in states:
-                if state.learned_in is not None:
-                    state.fusable = True
+            # The fused and the plain backward run different collectives, so every TP rank must take the same path.
+            # A rank can disagree (a tensor hook registered on one rank only), so the ranks agree on the smallest
+            # answer. This runs once per forward pass that follows a backward, not once per block.
+            eligible = torch.tensor([int(state.learned_in is not None and state.can_fuse()) for state in states],
+                                    dtype=torch.int32,
+                                    device=get_accelerator().current_device_name())
+            dist.all_reduce(eligible, op=dist.ReduceOp.MIN, group=group)
+            for state, agreed in zip(states, eligible.tolist()):
+                state.fusable = bool(agreed)
 
-    model.register_forward_pre_hook(count_pass)
+    model.register_forward_pre_hook(count_pass, with_kwargs=True)
 
     for block_name, block in blocks.items():
         columns = [

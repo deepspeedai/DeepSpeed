@@ -21,7 +21,7 @@ def skip_on_device():
         pytest.skip("XPU requires a higher version for test")
 
 
-def build_qwen3_model():
+def build_qwen3_model(**overrides):
     from transformers import AutoModelForCausalLM, Qwen3Config
 
     # Construct locally so the test does not download model configuration or weights. q_norm/k_norm act on the
@@ -37,6 +37,8 @@ def build_qwen3_model():
         max_position_embeddings=128,
         tie_word_embeddings=False,
     )
+    for name, value in overrides.items():
+        setattr(config, name, value)
     torch.manual_seed(0)
     return config, AutoModelForCausalLM.from_config(config)
 
@@ -169,6 +171,86 @@ class TestAutoTPSequenceShardingTwoForwards(DistributedTest):
             reference_optimizer.zero_grad()
 
             torch.testing.assert_close(loss.detach(), reference_loss.detach(), rtol=1e-5, atol=1e-5)
+
+
+def train_and_compare(engine, reference, config, steps=3):
+    """Train both models with the same batches and plain SGD; the losses must match after every step."""
+    reference_optimizer = torch.optim.SGD(reference.parameters(), lr=0.1)
+    for step in range(steps):
+        input_ids = tp_shared_input_ids(config.vocab_size, 16, step)
+        loss = engine(input_ids=input_ids, labels=input_ids).loss
+        engine.backward(loss)
+        engine.step()
+
+        reference_loss = reference(input_ids=input_ids, labels=input_ids).loss
+        reference_loss.backward()
+        reference_optimizer.step()
+        reference_optimizer.zero_grad()
+
+        torch.testing.assert_close(loss.detach(), reference_loss.detach(), rtol=1e-5, atol=1e-5)
+
+
+class TestAutoTPSequenceShardingEmptyShard(DistributedTest):
+    """A tp_grain_size as large as the MLP width leaves the second rank no rows of gate_proj and up_proj. The
+    one-autograd-node backward must handle a linear that has no output features on a rank."""
+    world_size = 2
+
+    def test_matches_single_device_training(self):
+        skip_on_device()
+        pytest.importorskip("transformers")
+
+        config, model = build_qwen3_model(intermediate_size=64)
+        reference = copy.deepcopy(model).to(get_accelerator().current_device_name())
+        ds_config = build_config(zero_stage=1, mode="overlap")
+        ds_config["tensor_parallel"]["tp"] = {"tp_grain_size": 64}
+        engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=ds_config)
+        rows = [None] * self.world_size
+        dist.all_gather_object(rows, engine.module.model.layers[0].mlp.gate_proj.weight.shape[0])
+        assert sorted(rows) == [0, 64], rows
+
+        train_and_compare(engine, reference, config)
+
+
+class TestAutoTPSequenceShardingFrozenColumns(DistributedTest):
+    """With every column-parallel weight of the attention blocks frozen, the one-autograd-node backward has no
+    weight-gradient GEMM to run and skips the gather of the block input; the input gradient must stay right."""
+    world_size = 2
+
+    def test_matches_single_device_training(self):
+        skip_on_device()
+        pytest.importorskip("transformers")
+
+        config, model = build_qwen3_model()
+        for layer in model.model.layers:
+            for proj in (layer.self_attn.q_proj, layer.self_attn.k_proj, layer.self_attn.v_proj):
+                proj.weight.requires_grad_(False)
+        reference = copy.deepcopy(model).to(get_accelerator().current_device_name())
+        model.gradient_checkpointing_enable()
+        engine, _, _, _ = deepspeed.initialize(model=model,
+                                               model_parameters=model.parameters(),
+                                               config=build_config(zero_stage=1, mode="overlap"))
+        train_and_compare(engine, reference, config)
+
+
+class TestAutoTPSequenceShardingRankLocalHook(DistributedTest):
+    """A tensor hook on a column-parallel weight of one rank only (gradient monitoring on rank 0, for example) keeps
+    that rank's block on the plain path. The other rank must take it too: the two paths run different collectives
+    in backward, so a mixed choice hangs."""
+    world_size = 2
+
+    def test_matches_single_device_training(self):
+        skip_on_device()
+        pytest.importorskip("transformers")
+
+        config, model = build_qwen3_model()
+        reference = copy.deepcopy(model).to(get_accelerator().current_device_name())
+        model.gradient_checkpointing_enable()
+        engine, _, _, _ = deepspeed.initialize(model=model,
+                                               model_parameters=model.parameters(),
+                                               config=build_config(zero_stage=1, mode="overlap"))
+        if dist.get_rank() == 0:
+            engine.module.model.layers[0].self_attn.q_proj.weight.register_hook(lambda grad: None)
+        train_and_compare(engine, reference, config)
 
 
 ATTENTION_ONLY_PARTITION = {
@@ -460,6 +542,40 @@ class TestAutoTPSequenceShardingRejects(DistributedTest):
             raised = False
         except NotImplementedError as error:
             raised = "model.layers.1.mlp" in str(error)
+        assert raised
+
+    def test_deepcompile_autotp_pass(self):
+        """The DeepCompile 'autotp' pass hands the linears' collectives to the compiler only in engine.compile(), after
+        sequence sharding has been applied; initialization must refuse the combination."""
+        skip_on_device()
+        pytest.importorskip("transformers")
+
+        config, model = build_qwen3_model()
+        ds_config = build_config(zero_stage=0, mode="overlap")
+        ds_config["compile"] = {"deepcompile": True, "passes": ["autotp"]}
+        try:
+            deepspeed.initialize(model=model, model_parameters=model.parameters(), config=ds_config)
+            raised = False
+        except NotImplementedError as error:
+            raised = "DeepCompile" in str(error)
+        assert raised
+
+    def test_output_hidden_states(self):
+        """Hugging Face records each decoder layer's output for output_hidden_states, and with sequence sharding those
+        outputs hold only this rank's tokens; the forward pass must refuse the request."""
+        skip_on_device()
+        pytest.importorskip("transformers")
+
+        config, model = build_qwen3_model()
+        engine, _, _, _ = deepspeed.initialize(model=model,
+                                               model_parameters=model.parameters(),
+                                               config=build_config(zero_stage=1, mode="overlap"))
+        input_ids = tp_shared_input_ids(config.vocab_size, 16, 0)
+        try:
+            engine(input_ids=input_ids, output_hidden_states=True)
+            raised = False
+        except NotImplementedError as error:
+            raised = "output_hidden_states" in str(error)
         assert raised
 
     def test_skipped_gradient_sum(self):
