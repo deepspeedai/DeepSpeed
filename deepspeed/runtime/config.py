@@ -4,7 +4,6 @@
 # DeepSpeed Team
 
 import os
-import re
 from typing import Union
 from enum import Enum
 
@@ -175,6 +174,11 @@ def get_expert_parallel_config(param_dict):
         return parse_autoep_config(param_dict[EXPERT_PARALLEL])
     from deepspeed.module_inject.auto_ep_config import AutoEPConfig
     return AutoEPConfig()
+
+
+def get_quantization_config(param_dict):
+    from deepspeed.runtime.quantization.config import get_quantization_config as _get_quantization_config
+    return _get_quantization_config(param_dict)
 
 
 def get_torch_autocast_enabled(param_dict):
@@ -375,93 +379,6 @@ def get_hybrid_engine_config(param_dict):
     return hybrid_engine_config
 
 
-HIFLOAT8 = "hifloat8"
-HIFLOAT8_DEFAULT = {
-    "enabled": False,
-    "backend": "torchao",
-    "module_name_patterns": (),
-    "min_numel": 0,
-    "expected_module_count": None,
-    "config": None,
-    "module_configs": None,
-}
-
-
-def get_hifloat8_config(param_dict):
-    if "low_precision" in param_dict:
-        raise DeepSpeedConfigError("Use the existing hifloat8 section, not low_precision")
-    return _parse_hifloat8_config(param_dict.get(HIFLOAT8, {}))
-
-
-def _parse_hifloat8_config(config):
-    if not isinstance(config, dict):
-        raise DeepSpeedConfigError(f"'{HIFLOAT8}' must be an object, got {type(config).__name__}")
-
-    unknown = sorted(set(config) - set(HIFLOAT8_DEFAULT))
-    if unknown:
-        raise DeepSpeedConfigError(f"Unknown '{HIFLOAT8}' fields: {unknown}")
-
-    result = dict(HIFLOAT8_DEFAULT)
-    result.update(config)
-    if not isinstance(result["enabled"], bool):
-        raise DeepSpeedConfigError("'hifloat8.enabled' must be a boolean")
-    if result["backend"] == "torchao_npu":
-        result["backend"] = "torchao"
-    if result["backend"] != "torchao":
-        raise DeepSpeedConfigError("'hifloat8.backend' must be 'torchao'; the legacy torch_npu helper was removed")
-    policy = result["config"]
-    if policy is not None:
-        if not isinstance(policy, dict):
-            raise DeepSpeedConfigError("'hifloat8.config' must be an object or null")
-    module_configs = result["module_configs"]
-    if module_configs is not None:
-        if not isinstance(module_configs, dict):
-            raise DeepSpeedConfigError("'hifloat8.module_configs' must be an object or null")
-        for selector, recipe in module_configs.items():
-            if not isinstance(selector, str):
-                raise DeepSpeedConfigError("'hifloat8.module_configs' keys must be module names or re: patterns")
-            if recipe is not None and not isinstance(recipe, dict):
-                raise DeepSpeedConfigError(f"HiFloat8 recipe for {selector!r} must be an object or null")
-            if selector.startswith("re:"):
-                try:
-                    re.compile(selector[3:])
-                except re.error as error:
-                    raise DeepSpeedConfigError(
-                        f"Invalid HiFloat8 module_configs regex {selector!r}: {error}") from error
-    patterns = result["module_name_patterns"]
-    if not isinstance(patterns,
-                      (list, tuple)) or not all(isinstance(pattern, str) and pattern for pattern in patterns):
-        raise DeepSpeedConfigError("'hifloat8.module_name_patterns' must be a list of non-empty strings")
-    if result["enabled"] and not patterns and not module_configs:
-        raise DeepSpeedConfigError("HiFloat8 requires module_name_patterns or module_configs when enabled")
-    min_numel = result["min_numel"]
-    if isinstance(min_numel, bool) or not isinstance(min_numel, int) or min_numel < 0:
-        raise DeepSpeedConfigError("'hifloat8.min_numel' must be a non-negative integer")
-    expected_count = result["expected_module_count"]
-    if expected_count is not None and (isinstance(expected_count, bool) or not isinstance(expected_count, int)
-                                       or expected_count <= 0):
-        raise DeepSpeedConfigError("'hifloat8.expected_module_count' must be a positive integer or null")
-    result["module_name_patterns"] = tuple(patterns)
-    return result
-
-
-def get_quantization_config(param_dict):
-    """Normalize training quantization options, including the legacy HiFloat8 section."""
-    if "low_precision" in param_dict:
-        raise DeepSpeedConfigError("Use quantization.hifloat8 instead of low_precision")
-    if "quantization" not in param_dict:
-        return {HIFLOAT8: get_hifloat8_config(param_dict)} if HIFLOAT8 in param_dict else {}
-    if HIFLOAT8 in param_dict:
-        raise DeepSpeedConfigError("Set HiFloat8 options only under quantization.hifloat8")
-    options = param_dict["quantization"]
-    if not isinstance(options, dict):
-        raise DeepSpeedConfigError("'quantization' must be an object")
-    unknown = sorted(set(options) - {HIFLOAT8})
-    if unknown:
-        raise DeepSpeedConfigError(f"Unknown training quantization formats: {unknown}")
-    return {HIFLOAT8: _parse_hifloat8_config(options[HIFLOAT8])} if HIFLOAT8 in options else {}
-
-
 def get_expert_data_topo_config(param_dict):
     return get_scalar_param(param_dict, USE_DATA_BEFORE_EXPERT_PARALLEL, USE_DATA_BEFORE_EXPERT_PARALLEL_DEFAULT)
 
@@ -628,10 +545,10 @@ class DeepSpeedConfig(object):
 
         self.use_data_before_expert_parallel_ = get_expert_data_topo_config(param_dict)
         self.hybrid_engine = get_hybrid_engine_config(param_dict)
-        self.quantization_config = get_quantization_config(param_dict)
-        self.hifloat8_config = self.quantization_config.get(HIFLOAT8, HIFLOAT8_DEFAULT.copy())
 
         self.pipeline = get_pipeline_config(param_dict)
+        self.quantization_config = get_quantization_config(param_dict)
+        self.hifloat8_config = self.quantization_config.hifloat8
 
         self.data_efficiency_enabled = get_data_efficiency_enabled(param_dict)
         self.data_efficiency_config = get_data_efficiency_config(param_dict)
@@ -704,8 +621,6 @@ class DeepSpeedConfig(object):
         micro_batch = self.train_micro_batch_size_per_gpu
         grad_acc = self.gradient_accumulation_steps
 
-        #print(f"in: train_batch = {train_batch}, micro_batch={micro_batch}")
-
         # all values are provided nothing needs to be set
         if train_batch is not None and micro_batch is not None and grad_acc is not None:
             return
@@ -742,8 +657,6 @@ class DeepSpeedConfig(object):
         else:
             assert False, \
                 'Either train_batch_size or train_micro_batch_size_per_gpu needs to be provided'
-
-        #print(f"final: {self.train_batch_size=} {self.train_micro_batch_size_per_gpu=} {self.gradient_accumulation_steps=}")
 
     def _configure_train_batch_size(self):
         self._set_batch_related_parameters()
@@ -792,6 +705,27 @@ class DeepSpeedConfig(object):
             raise ValueError(f"{GRADIENT_ALLREDUCE_OP}='sum' is not supported with ZenFlow")
         if self.gradient_allreduce_op == GRADIENT_ALLREDUCE_OP_SUM and self.compile_config.deepcompile:
             raise ValueError(f"{GRADIENT_ALLREDUCE_OP}='sum' is not supported with DeepCompile")
+        reflow_enabled = self.zero_config.reflow is not None
+        if reflow_enabled and self.compile_config.deepcompile:
+            # DeepCompile's ZeRO-3 backward reduces grads without partition_grads, which is where Reflow
+            # launches its bucketwise CPU optimizer, so the optimizer would never see those grads.
+            raise ValueError("Reflow optimizer offload is not supported with DeepCompile")
+        if reflow_enabled and self.optimizer_name == MUON_OPTIMIZER:
+            # Reflow's CPU step runs its Adam/Lion kernels on every subgroup, so Muon's orthogonalized update would
+            # be silently replaced by Adam. Supporting Muon in Reflow is future work.
+            raise ValueError("Reflow does not support the Muon optimizer yet; remove the 'reflow' block from "
+                             "zero_optimization to use Muon with ZeRO-Offload")
+        if reflow_enabled:
+            if not (self.bfloat16_config.enabled or self.float16_config.enabled) or self.torch_autocast_enabled:
+                raise ValueError("Reflow requires FP16 or BF16 model parameters; enable 'fp16.enabled' "
+                                 "or 'bf16.enabled'. FP32 model parameters and torch_autocast are not supported.")
+            model_dtype = torch.bfloat16 if self.bfloat16_config.enabled else torch.float16
+            if self.grad_accum_dtype is not None and DtypeEnum(self.grad_accum_dtype).value != model_dtype:
+                raise ValueError("Reflow requires data_types.grad_accum_dtype to match the FP16 or BF16 model dtype.")
+            if (self.float16_config.fp16_master_weights_and_grads or self.bfloat16_config.bf16_master_weights_and_grads
+                    or self.bfloat16_config.bf16_optimizer_states):
+                raise ValueError("Reflow requires FP32 master weights and optimizer states; "
+                                 "low-precision master weights and optimizer states are not supported.")
 
         if self.float16_config.fp16_master_weights_and_grads:
             assert self.zero_enabled and self.zero_optimization_stage in (

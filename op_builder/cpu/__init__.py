@@ -9,6 +9,8 @@ from .fused_adam import FusedAdamBuilder
 from .cpu_adam import CPUAdamBuilder
 from .cpu_adagrad import CPUAdagradBuilder
 from .cpu_lion import CPULionBuilder
+from .reflow_cpu_adam import ReflowCPUAdamBuilder
+from .reflow_cpu_lion import ReflowCPULionBuilder
 from .no_impl import NotImplementedBuilder
 from .async_io import AsyncIOBuilder
 from .pin_memory import PinMemoryBuilder

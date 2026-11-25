@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import torch
+
 from deepspeed.module_inject.auto_ep_presets.base import (
     _UNSET,
     _raise_unsupported_load_balance_coeff,
@@ -62,10 +64,14 @@ def parse_autoep_config(param_dict: dict) -> AutoEPConfig:
     config.combine_impl = param_dict.get("combine_impl", "auto")
     config.row_weighting_impl = param_dict.get("row_weighting_impl", "auto")
     config.gate_up_impl = param_dict.get("gate_up_impl", "separate")
+    config.overlap_weight_grad = param_dict.get("overlap_weight_grad", False)
+    config.deferred_dw_flush_period = param_dict.get("deferred_dw_flush_period", 1)
+    config.deferred_dw_rows_per_expert = param_dict.get("deferred_dw_rows_per_expert", 0)
     config.comm_backend = param_dict.get("comm_backend", "comm")
     config.comm_num_sm = param_dict.get("comm_num_sm", 12)
     config.comm_qp_margin = param_dict.get("comm_qp_margin", 4)
     config.comm_max_tokens_per_rank = param_dict.get("comm_max_tokens_per_rank", 0)
+    config.skip_recompute_combine = param_dict.get("skip_recompute_combine", False)
     config.num_expert_groups = param_dict.get("num_expert_groups", None)
     config.num_limited_groups = param_dict.get("num_limited_groups", None)
     config.score_func = param_dict.get("score_func", "auto")
@@ -136,11 +142,6 @@ def validate_autoep_config(
 
     # Reject configurations that would bypass the requested fused reduction.
     if config.combine_impl == "fused_weighted_sum":
-        if tp_size > 1:
-            raise ValueError('combine_impl="fused_weighted_sum" does not support folded tensor parallelism '
-                             f"(tensor_parallel.autotp_size={tp_size}), which restores combined tokens from "
-                             "assignment metadata instead of the weighted reduction it implements. Set "
-                             'tensor_parallel.autotp_size to 1, or leave combine_impl unset.')
         if config.expert_tensor_parallel_size > 1:
             raise ValueError('combine_impl="fused_weighted_sum" requires expert_tensor_parallel_size=1, but got '
                              f"{config.expert_tensor_parallel_size}. Set expert_tensor_parallel_size to 1, or leave "
@@ -209,6 +210,52 @@ def validate_autoep_config(
         raise ValueError(f"comm_backend must be one of {valid_comm_backend}, "
                          f"got '{config.comm_backend}'")
 
+    if not isinstance(config.overlap_weight_grad, bool):
+        raise ValueError(f"overlap_weight_grad must be true or false, got {config.overlap_weight_grad!r}")
+    if config.overlap_weight_grad:
+        if config.comm_backend != "deepep" or config.autoep_size == 1:
+            raise ValueError(
+                "overlap_weight_grad overlaps the experts' weight-gradient GEMMs with DeepEP's backward "
+                f'combine, but comm_backend="{config.comm_backend}" with autoep_size={config.autoep_size} '
+                'has none. Set comm_backend="deepep" with autoep_size > 1, or leave overlap_weight_grad '
+                "unset.")
+        if not config.use_grouped_mm:
+            raise ValueError("overlap_weight_grad defers the experts' torch._grouped_mm weight gradients, but "
+                             "use_grouped_mm=false selects the sequential expert loop. Set use_grouped_mm=true, or "
+                             "leave overlap_weight_grad unset.")
+        if zero_stage not in (1, 2):
+            raise ValueError("overlap_weight_grad returns expert weight gradients from the DeepEP dispatch, which "
+                             f"has not been validated with ZeRO stage {zero_stage}. Use ZeRO stage 1 or 2, or "
+                             "leave overlap_weight_grad unset.")
+        if not all(
+                hasattr(torch._C, name)
+                for name in ("_get_sm_carveout_experimental", "_set_sm_carveout_experimental")):
+            raise ValueError("overlap_weight_grad withholds DeepEP's SMs from the weight-gradient GEMMs through "
+                             "torch._C._set_sm_carveout_experimental, which this PyTorch build lacks. Upgrade "
+                             "PyTorch, or leave overlap_weight_grad unset.")
+
+    flush_period = config.deferred_dw_flush_period
+    if isinstance(flush_period, bool) or not isinstance(flush_period, int) or flush_period < 1:
+        raise ValueError(f"deferred_dw_flush_period must be a positive integer, got {flush_period!r}")
+    rows_per_expert = config.deferred_dw_rows_per_expert
+    if isinstance(rows_per_expert, bool) or not isinstance(rows_per_expert, int) or rows_per_expert < 0:
+        raise ValueError(f"deferred_dw_rows_per_expert must be a non-negative integer, got {rows_per_expert!r}")
+    if flush_period > 1:
+        if not config.use_grouped_mm:
+            raise ValueError("deferred_dw_flush_period stages the experts' torch._grouped_mm weight gradients, but "
+                             "use_grouped_mm=false selects the sequential expert loop. Set use_grouped_mm=true, or "
+                             "leave deferred_dw_flush_period unset.")
+        if config.overlap_weight_grad:
+            raise ValueError("deferred_dw_flush_period stages the expert weight gradients across backward passes "
+                             "and overlap_weight_grad computes them in the DeepEP dispatch backward. Enable one "
+                             "of them.")
+        if tp_size > 1:
+            raise ValueError("deferred_dw_flush_period does not support AutoEP+AutoTP folding yet. Set "
+                             "tensor_parallel.autotp_size to 1, or leave deferred_dw_flush_period unset.")
+    elif rows_per_expert != 0:
+        raise ValueError("deferred_dw_rows_per_expert sizes the staging that deferred_dw_flush_period > 1 enables. "
+                         "Set deferred_dw_flush_period, or leave deferred_dw_rows_per_expert unset.")
+
     if config.row_weighting_impl == "fused":
         if config.comm_backend != "deepep":
             raise ValueError('row_weighting_impl="fused" only runs inside the DeepEP route, but '
@@ -233,6 +280,22 @@ def validate_autoep_config(
         raise ValueError("comm_max_tokens_per_rank must be a positive integer when comm_backend='deepep'. "
                          "Set it to the largest number of tokens one rank can route, normally "
                          "train_micro_batch_size_per_gpu * maximum padded sequence length.")
+
+    if not isinstance(config.skip_recompute_combine, bool):
+        raise ValueError(f"skip_recompute_combine must be a boolean, got {config.skip_recompute_combine!r}")
+    if config.skip_recompute_combine:
+        if config.comm_backend != "deepep" or config.autoep_size == 1:
+            raise ValueError('skip_recompute_combine skips the DeepEP combine, so it requires comm_backend="deepep" '
+                             f'and autoep_size > 1, but comm_backend="{config.comm_backend}" and '
+                             f"autoep_size={config.autoep_size} were set.")
+        if config.moe_layer_pattern is not None:
+            raise ValueError("skip_recompute_combine does not support a custom moe_layer_pattern, because the "
+                             "optimization requires a checked preset decoder-layer contract. Leave the pattern "
+                             "unset or disable skip_recompute_combine.")
+        # The recompute is recognized as a grad-enabled forward that runs inside a backward pass.
+        if not hasattr(torch._C, "_current_graph_task_id"):
+            raise ValueError("skip_recompute_combine needs torch._C._current_graph_task_id, which this PyTorch "
+                             "build lacks. Upgrade PyTorch or leave skip_recompute_combine unset.")
 
     # Validate score_func
     valid_score_func = ("auto", "softmax", "sigmoid")

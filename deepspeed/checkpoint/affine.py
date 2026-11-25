@@ -18,11 +18,18 @@ both directions.
 See ``deepspeed/checkpoint/affine_ir_spec.md`` for the full specification.
 """
 
+from bisect import bisect_left
+
 import torch
+
+from .affine_geometry import LogicalBox, address_range, boxes_disjoint, coordinate, overlaps_itself, subtract
+from .affine_geometry import (dot as _dot, product as _product, row_major_range_boxes as _row_major_range_boxes,
+                              row_major_strides as _row_major_strides, strided_address as _strided_address)
 
 __all__ = [
     'AffinePiece', 'ParamAffineMap', 'AFFINE_MAP_FORMAT_VERSION', 'SCALE_POWER_BY_STATE', 'replicated_map',
-    'contiguous_split_map', 'sub_param_map', 'segmented_map', 'block_gather_map', 'nest_affine_maps'
+    'contiguous_split_map', 'sub_param_map', 'segmented_map', 'block_gather_map', 'nest_affine_maps',
+    'union_affine_maps'
 ]
 
 # Encoding version of the stored map, independent of the universal checkpoint version so
@@ -162,49 +169,26 @@ def _dest_interval(piece):
 
 
 def _dest_box(piece, shard_shape):
-    """Return a piece's destination as per-axis ``(starts, stops)`` in the shard, or None.
+    """Return a piece's destination as a box of the shard's grid, or None.
 
     A column split writes each piece into a few columns of every shard row, so its
     destination is not one interval. It is still a box in the shard's own grid, because its
     strides are the shard's row-major strides, and a box can be checked for bounds and
-    overlap from its corners without walking any elements.
+    overlap from its corners without walking any elements. A view that wraps past the end of
+    a shard row is not a box of that grid; the walk in validate_coverage() checks it instead.
     """
     if piece.numel == 0 or len(piece.shape) != len(shard_shape) or len(piece.dest_strides) != len(shard_shape):
         return None
     shard_strides = _row_major_strides(shard_shape)
     if any(size > 1 and got != want for size, got, want in zip(piece.shape, piece.dest_strides, shard_strides)):
         return None
-
-    starts = []
-    remainder = piece.dest_offset
-    for stride in shard_strides:
-        start, remainder = divmod(remainder, stride)
-        starts.append(start)
-    stops = [start + size for start, size in zip(starts, piece.shape)]
-    return starts, stops
-
-
-def _dest_address_range(piece):
-    """Return the lowest and highest shard address a piece writes."""
-    low = piece.dest_offset
-    high = piece.dest_offset
-    for size, stride in zip(piece.shape, piece.dest_strides):
-        reach = (size - 1) * stride
-        if reach < 0:
-            low += reach
-        else:
-            high += reach
-    return low, high
-
-
-def _first_shared_address(box, other_box, shard_shape):
-    """Return the first shard address two boxes both write, or None when they are disjoint."""
-    corner = []
-    for start, stop, other_start, other_stop in zip(box[0], box[1], other_box[0], other_box[1]):
-        if max(start, other_start) >= min(stop, other_stop):
-            return None
-        corner.append(max(start, other_start))
-    return sum(position * stride for position, stride in zip(corner, _row_major_strides(shard_shape)))
+    origin = coordinate(piece.dest_offset, shard_strides, shard_shape)
+    if origin is None:
+        return None
+    box = LogicalBox(origin, piece.shape)
+    if any(high > dim for high, dim in zip(box.upper(), shard_shape)):
+        return None
+    return box
 
 
 class ParamAffineMap:
@@ -258,7 +242,7 @@ class ParamAffineMap:
                              f'account for {held}.')
         for piece in pieces:
             for side, strides in (('source', piece.source_strides), ('destination', piece.dest_strides)):
-                if _overlaps_itself(piece.shape, strides):
+                if overlaps_itself(piece.shape, strides):
                     raise ValueError(f'Rank {rank} piece {piece} reaches one {side} address twice within itself, '
                                      'so one of its elements would silently overwrite another.')
         self._validate_destinations(rank, pieces, self.shard_shapes[rank])
@@ -289,33 +273,31 @@ class ParamAffineMap:
             cursor = stop
 
         # A column split's pieces have no interval, so the check above skips them. Check them as
-        # boxes against every other box-shaped piece of the rank instead. Ranks whose pieces are
-        # all dense are fully covered above and skip this pairwise pass.
+        # boxes of the shard grid instead. Ranks whose pieces are all dense are fully covered above
+        # and skip this pass.
         if not has_strided_piece:
             return
         boxes = []
         for piece in pieces:
             if piece.numel and _dest_interval(piece) is None:
-                low, high = _dest_address_range(piece)
+                low, high = address_range(piece.dest_offset, piece.shape, piece.dest_strides)
                 if low < 0 or high >= shard_numel:
                     raise ValueError(f'Rank {rank} piece {piece} writes shard addresses [{low}, {high}], '
                                      f'outside the shard of {shard_numel} elements.')
             box = _dest_box(piece, shard_shape)
-            if box is None:
-                continue
-            starts, stops = box
-            fits = all(start >= 0 and stop <= dim for start, stop, dim in zip(starts, stops, shard_shape))
-            if not fits:
-                # A view may wrap past the end of a shard row while staying inside the shard. It is
-                # not a box of the shard's grid, so the walk in validate_coverage() checks it instead.
-                continue
-            boxes.append(box)
+            if box is not None:
+                boxes.append(box)
+        # A sweep proves most layouts disjoint without comparing every pair; the pairwise walk
+        # only runs to name the address that two boxes share.
+        if boxes_disjoint(boxes):
+            return
+        shard_strides = _row_major_strides(shard_shape)
         for index, box in enumerate(boxes):
             for other_box in boxes[index + 1:]:
-                shared = _first_shared_address(box, other_box, shard_shape)
-                if shared is not None:
-                    raise ValueError(f'Rank {rank} writes shard address {shared} twice, so one piece would '
-                                     'silently overwrite another.')
+                shared = box.intersection(other_box)
+                if not shared.is_empty:
+                    raise ValueError(f'Rank {rank} writes shard address {_dot(shared.origin, shard_strides)} '
+                                     'twice, so one piece would silently overwrite another.')
 
     def validate_coverage(self):
         """Full check: each shard address is written once, the shards cover the parameter,
@@ -509,22 +491,6 @@ def _scaled(tensor, scale, scale_power):
 _UNWRITTEN, _SINGLE_HOLDER, _REPLICA = 0, 1, 2
 
 
-def _overlaps_itself(shape, strides):
-    """Whether two positions of a view with this shape and these strides share an address.
-
-    Taking the axes that move in order of stride, the view is free of overlap when each stride
-    clears every address the axes before it reach. That holds for every layout the builders here
-    produce. A view that interleaves its axes some other way is refused even where it would not
-    collide, which keeps this to a few comparisons per piece instead of a walk over its elements.
-    """
-    reach = 0
-    for stride, size in sorted((stride, size) for size, stride in zip(shape, strides) if size > 1):
-        if stride <= reach:
-            return True
-        reach += stride * (size - 1)
-    return False
-
-
 def _place(placed, piece, rank):
     """Mark the shard addresses ``piece`` occupies in ``placed``, refusing one already taken.
 
@@ -560,21 +526,6 @@ def _flat_buffer(tensor):
     if flat.storage_offset() != 0:
         flat = flat.clone()
     return flat
-
-
-def _product(shape):
-    count = 1
-    for dim in shape:
-        count *= dim
-    return count
-
-
-def _row_major_strides(shape):
-    """Element stride per axis for a densely packed tensor of this shape."""
-    strides = [1] * len(shape)
-    for axis in range(len(shape) - 2, -1, -1):
-        strides[axis] = strides[axis + 1] * shape[axis + 1]
-    return tuple(strides)
 
 
 def replicated_map(shape, tp_degree, scale=1.0):
@@ -932,10 +883,6 @@ def _nest_replicated_block(copies, intervals_by_outer_rank, pieces_by_rank):
                                 scale=piece.scale * storage_scale))
 
 
-def _dot(index, strides):
-    return sum(position * stride for position, stride in zip(index, strides))
-
-
 def _dense_rows(piece):
     # The number of leading axes after which the piece is contiguous in its shard: a box of the piece
     # that spans every later axis in full, and only those, is one run of shard addresses.
@@ -946,43 +893,6 @@ def _dense_rows(piece):
             return axis + 1
         run *= size
     return 0
-
-
-def _row_major_range_boxes(shape, low, high, dense_rows=0):
-    """Split the row-major index range ``[low, high)`` of ``shape`` into ``(origin, extent)`` boxes.
-
-    At most two boxes per axis: a partial run at either end and whole runs between. The first
-    ``dense_rows`` axes are never merged, so a box spans more than one position of such an axis only
-    where the storage is contiguous across it.
-    """
-    if low >= high:
-        return []
-    if not shape:
-        return [((), ())]
-    if len(shape) == 1:
-        return [((low, ), (high - low, ))]
-    inner = _product(shape[1:])
-    first, low_rest = divmod(low, inner)
-    last, high_rest = divmod(high, inner)
-
-    def within(row, start, stop):
-        return [((row, ) + origin, (1, ) + extent)
-                for origin, extent in _row_major_range_boxes(shape[1:], start, stop, dense_rows - 1)]
-
-    if first == last:
-        return within(first, low_rest, high_rest)
-    boxes = []
-    if low_rest:
-        boxes.extend(within(first, low_rest, inner))
-        first += 1
-    if dense_rows > 0:
-        for row in range(first, last):
-            boxes.extend(within(row, 0, inner))
-    elif last > first:
-        boxes.append(((first, ) + (0, ) * (len(shape) - 1), (last - first, ) + tuple(shape[1:])))
-    if high_rest:
-        boxes.extend(within(last, 0, high_rest))
-    return boxes
 
 
 def _check_monotone_dest(piece):
@@ -996,14 +906,6 @@ def _check_monotone_dest(piece):
                 raise NotImplementedError(f'Layout piece {piece} does not store its elements in row-major order, so '
                                           'its storage cannot be described.')
             later_span += stride * (size - 1)
-
-
-def _strided_address(shape, offset, strides, index):
-    address = offset
-    for size, stride in reversed(list(zip(shape, strides))):
-        index, position = divmod(index, size)
-        address += position * stride
-    return address
 
 
 def _first_index_at_or_after(piece, address):
@@ -1033,3 +935,141 @@ def _first_index_at_or_after(piece, address):
                 index *= later_size
             return index
     return index
+
+
+def union_affine_maps(maps):
+    """One map of a parameter that several layouts hold at the same time.
+
+    Each map describes the same parameter in its own layout, held by its own locations: for example a
+    trainer's ZeRO-3 partitions and a surviving tensor-parallel shard of an inference copy. A location is
+    one buffer, so a process that holds the parameter in two layouts appears under two locations, and
+    the transfer's endpoints bind both of them to that process.
+
+    A planner may read a block from any of its holders, so it needs any two blocks to be equal or
+    disjoint, and each block to list every location that holds it. Each piece is therefore cut at the
+    edges of every block held over it, in any layout, and each cut piece lists the holders from every
+    layout. A cut keeps the piece's strides and moves its offsets, so every location still stores
+    exactly what it did. Pieces must be axis-aligned blocks of the parameter.
+
+    Layouts that contradict each other raise ``InvalidMapError``, and a piece that is not an axis-aligned
+    block raises ``UnsupportedLayoutError``, as the planner reports the same problems.
+    """
+    if not maps:
+        raise ValueError('A union needs at least one map.')
+    union = maps[0]
+    for other in maps[1:]:
+        union = _union_of_two(union, other)
+    return union
+
+
+def _union_of_two(first, second):
+    # affine_transfer imports this module, so its error types are imported where they are raised.
+    from .affine_transfer import InvalidMapError
+    if first.logical_shape != second.logical_shape:
+        raise InvalidMapError(f'The layouts describe parameters of shape {first.logical_shape} and '
+                              f'{second.logical_shape}, so they cannot describe the same parameter.')
+    shared = sorted(set(first.shard_shapes) & set(second.shard_shapes))
+    if shared:
+        raise InvalidMapError(f'Locations {shared} appear in both layouts; give each layout its own locations, '
+                              'one per buffer.')
+    blocks = _disjoint_blocks(first, second)
+    first_rows = [_rows(box)[0] for box, _ in blocks]
+    pieces_by_rank = {}
+    for affine_map in (first, second):
+        for rank, pieces in affine_map.pieces_by_rank.items():
+            pieces_by_rank[rank] = [
+                part for piece in pieces for part in _cut(piece, first.logical_shape, blocks, first_rows)
+            ]
+    affine_map = ParamAffineMap(logical_shape=first.logical_shape,
+                                shard_shapes={
+                                    **first.shard_shapes,
+                                    **second.shard_shapes
+                                },
+                                pieces_by_rank=pieces_by_rank)
+    try:
+        affine_map.validate()
+    except ValueError as error:
+        raise InvalidMapError(f'The layouts do not form one map: {error}') from error
+    return affine_map
+
+
+def _disjoint_blocks(*maps):
+    # Every block the maps hold, cut wherever two of them meet, so the parts are disjoint and each lists every
+    # location that holds it. Replicas within one map may cut the same region at different edges, so its own
+    # blocks are cut against each other too. Sorted, so the parts do not depend on the order the maps list them.
+    holders = {}
+    for affine_map in maps:
+        for pieces in affine_map.pieces_by_rank.values():
+            for piece in pieces:
+                if piece.numel:
+                    block = _block_of(piece, affine_map.logical_shape)
+                    holders[block] = holders.get(block, frozenset()) | piece.locations
+    # The blocks come in order of their first row, so a part that ends at or above a block's first row meets
+    # neither that block nor any later one, and is final. Comparing each block only with the parts still open,
+    # those reaching into its rows, keeps the work close to linear in the number of partitions.
+    final, open_parts = [], []
+    for block, block_holders in sorted(holders.items(), key=lambda item: (item[0].origin, item[0].extent)):
+        first_row = _rows(block)[0]
+        reached = []
+        for part, part_holders in open_parts:
+            (final if _rows(part)[1] <= first_row else reached).append((part, part_holders))
+        open_parts = []
+        rest = [block]
+        for part, part_holders in reached:
+            overlap = part.intersection(block)
+            if overlap.is_empty:
+                open_parts.append((part, part_holders))
+                continue
+            open_parts.append((overlap, part_holders | block_holders))
+            open_parts.extend((box, part_holders) for box in subtract(part, block))
+            rest = [box for remaining in rest for box in subtract(remaining, part)]
+        open_parts.extend((box, block_holders) for box in rest)
+    return sorted(final + open_parts, key=lambda item: (item[0].origin, item[0].extent))
+
+
+def _rows(box):
+    # The rows a block spans on the parameter's first axis; a scalar has one.
+    if not box.origin:
+        return 0, 1
+    return box.origin[0], box.origin[0] + box.extent[0]
+
+
+def _block_of(piece, logical_shape):
+    # Only an axis-aligned block of the parameter can be cut at another block's edges by coordinates.
+    strides = _row_major_strides(logical_shape)
+    origin = None
+    if len(piece.shape) == len(logical_shape) and all(
+            size <= 1 or stride == expected
+            for size, stride, expected in zip(piece.shape, piece.source_strides, strides)):
+        origin = coordinate(piece.source_offset, strides, logical_shape)
+    # A row-major run longer than what is left of its row wraps into the next row, so it is not a block.
+    if origin is not None and any(low + size > bound for low, size, bound in zip(origin, piece.shape, logical_shape)):
+        origin = None
+    if origin is None:
+        from .affine_transfer import UnsupportedLayoutError  # imported here, as in _union_of_two
+        raise UnsupportedLayoutError(f'Piece {piece} is not an axis-aligned block of a parameter of shape '
+                                     f'{logical_shape}, so it cannot be cut at another layout\'s block edges.')
+    return LogicalBox(origin, piece.shape)
+
+
+def _cut(piece, logical_shape, blocks, first_rows):
+    # ``piece`` cut into the disjoint ``blocks`` that cover it, each part with that block's holders. The blocks
+    # refine every block a layout holds, so one that meets this piece lies inside it and starts in its rows:
+    # ``first_rows`` (the blocks' first rows, in their sorted order) finds those without comparing the rest.
+    if not piece.numel:
+        return [piece]
+    block = _block_of(piece, logical_shape)
+    low, high = _rows(block)
+    parts = []
+    for other, holders in blocks[bisect_left(first_rows, low):bisect_left(first_rows, high)]:
+        overlap = block.intersection(other)
+        if not overlap.is_empty:
+            parts.append((overlap, holders))
+    return [_part_of(piece, block.origin, box, locations) for box, locations in parts]
+
+
+def _part_of(piece, origin, box, locations):
+    # The part of ``piece`` over ``box``: the same strides, with both offsets moved to the box's corner.
+    shift = tuple(low - start for low, start in zip(box.origin, origin))
+    return AffinePiece(box.extent, piece.source_offset + _dot(shift, piece.source_strides), piece.source_strides,
+                       piece.dest_offset + _dot(shift, piece.dest_strides), piece.dest_strides, locations, piece.scale)

@@ -223,6 +223,12 @@ class DeepSpeedAccelerator(ABC):
         """Return a native differentiable grouped GEMM override, if available."""
         return None
 
+    # Quantization formats (``"e4m3"``, ``"e5m2"``, ``"int8"``) whose fused subchannel-quantized GEMM kernels
+    # run on this accelerator. Formats not listed run on a PyTorch reference implementation. Defaults to none
+    # so backends opt in explicitly.
+    def supported_subchannel_quantization_formats(self):
+        return ()
+
     # Graph operations
     # Whether HybridEngine's graph-captured generation paths are supported.
     # Backends opt in explicitly, and only after implementing

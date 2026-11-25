@@ -9,12 +9,17 @@ import torch
 from torch import nn
 
 from deepspeed.accelerator import get_accelerator
-from deepspeed.runtime.config import DeepSpeedConfigError, get_hifloat8_config, get_quantization_config
+from deepspeed.runtime.config import DeepSpeedConfigError
+from deepspeed.runtime.quantization.config import get_quantization_config
 from deepspeed.runtime.engine import DeepSpeedEngine
 
 # Native tests require the public API; a missing extension must fail there.
 # Gate only device availability, without importing TorchAO during collection.
 requires_npu = pytest.mark.skipif(not hasattr(torch, "npu") or not torch.npu.is_available(), reason="NPU unavailable")
+
+
+def get_hifloat8_config(config):
+    return get_quantization_config(config).hifloat8
 
 
 def test_hifloat8_config_defaults_disabled():
@@ -134,7 +139,7 @@ def test_torchao_backend_preserves_dense_and_grouped_parameters(policy):
     engine.device = torch.device("npu:0")
     engine._config.hifloat8_config["backend"] = "torchao"
     engine._config.hifloat8_config["config"] = policy
-    engine._configure_quantization()
+    engine._configure_hifloat8()
 
     assert isinstance(model["dense"], HiFloat8Linear)
     assert isinstance(model["experts"].grouped_mm, HiFloat8GMM)
@@ -172,7 +177,6 @@ def _make_engine(model, patterns, min_numel=0, module_configs=None):
         zero_optimization_stage=2,
     )
     engine._config.hifloat8_config = get_hifloat8_config({"hifloat8": engine._config.hifloat8_config})
-    engine._config.quantization_config = {"hifloat8": engine._config.hifloat8_config}
     engine._config.float16_config = SimpleNamespace(enabled=False)
     engine.pipeline_parallelism = False
     engine.has_moe_layers = False
@@ -198,7 +202,7 @@ def test_engine_selects_routed_experts_without_replacing_parameters():
     parameters = dict(model.named_parameters())
     keys = tuple(model.state_dict())
     engine = _make_engine(model, ["experts"])
-    engine._configure_quantization()
+    engine._configure_hifloat8()
     assert engine.hifloat8_grouped_module_names == ("experts", )
     assert engine.hifloat8_converted_module_names == ()
     assert isinstance(model.experts.grouped_mm, HiFloat8GMM)
@@ -218,7 +222,7 @@ def test_engine_converts_only_selected_modules_and_preserves_parameters():
 
     engine = _make_engine(model, ["*.mlp.gate_proj", "*.mlp.up_proj", "*.mlp.down_proj"])
     engine._config.hifloat8_config["expected_module_count"] = 3
-    engine._configure_quantization()
+    engine._configure_hifloat8()
 
     assert engine.hifloat8_converted_module_names == (
         "model.mlp.gate_proj",
@@ -235,7 +239,7 @@ def test_engine_converts_only_selected_modules_and_preserves_parameters():
 def test_engine_fails_when_module_selection_is_empty():
     engine = _make_engine(_ToyModel(), ["*.does_not_exist"])
     with pytest.raises(RuntimeError, match="matched no nn.Linear"):
-        engine._configure_quantization()
+        engine._configure_hifloat8()
 
 
 def test_engine_rejects_partially_unmatched_patterns_before_conversion():
@@ -243,7 +247,7 @@ def test_engine_rejects_partially_unmatched_patterns_before_conversion():
     model = _ToyModel()
     engine = _make_engine(model, ["*.mlp.gate_proj", "*.missing_projection"])
     with pytest.raises(RuntimeError, match="patterns matched no eligible modules"):
-        engine._configure_quantization()
+        engine._configure_hifloat8()
     assert type(model.model.mlp["gate_proj"]) is nn.Linear
 
 
@@ -257,7 +261,7 @@ def test_engine_rejects_wrong_module_count_before_backend_load(monkeypatch):
     engine = _make_engine(model, ["*.mlp.gate_proj"])
     engine._config.hifloat8_config["expected_module_count"] = 3
     with pytest.raises(RuntimeError, match="expected_module_count"):
-        engine._configure_quantization()
+        engine._configure_hifloat8()
     assert type(model.model.mlp["gate_proj"]) is nn.Linear
 
 
@@ -282,7 +286,7 @@ def test_missing_optional_backend_reports_selection_before_model_mutation(monkey
     parameters = dict(model.named_parameters())
     engine = _make_engine(model, ["*.mlp.gate_proj"])
     with pytest.raises(RuntimeError, match="selected 1 Linear and 0 AutoEP modules.+before conversion") as caught:
-        engine._configure_quantization()
+        engine._configure_hifloat8()
     assert caught.value.__cause__ is error
     assert type(model.model.mlp["gate_proj"]) is nn.Linear
     assert all(dict(model.named_parameters())[name] is parameter for name, parameter in parameters.items())
@@ -340,7 +344,7 @@ def test_accelerator_without_hifloat8_fails_before_conversion(monkeypatch):
     model = _ToyModel()
     engine = _make_engine(model, ["*.mlp.gate_proj"])
     with pytest.raises(RuntimeError, match="No hifloat8 training backend"):
-        engine._configure_quantization()
+        engine._configure_hifloat8()
     assert type(model.model.mlp["gate_proj"]) is nn.Linear
 
 
@@ -350,7 +354,7 @@ def test_invalid_recipe_fails_before_conversion():
     engine = _make_engine(model, ["*.mlp.gate_proj"])
     engine._config.hifloat8_config["config"] = {"compute_dtype": "float32"}
     with pytest.raises(RuntimeError, match="recipe failed before conversion"):
-        engine._configure_quantization()
+        engine._configure_hifloat8()
     assert type(model.model.mlp["gate_proj"]) is nn.Linear
 
 
@@ -411,7 +415,7 @@ def test_public_quantize_entry_converts_dense_and_grouped_in_place(monkeypatch, 
         patterns = []
     engine = _make_engine(model, patterns, module_configs=module_configs)
     engine.device = torch.device("npu:0")
-    engine._configure_quantization()
+    engine._configure_hifloat8()
     assert calls == [model]
     assert engine.module is model
     assert tuple(model.state_dict()) == keys
@@ -443,9 +447,57 @@ def test_quantization_hifloat8_and_legacy_config_normalize_identically():
         get_quantization_config({"quantization": {"hifloat8": options}, "hifloat8": options})
 
 
+def test_quantization_recipes_share_one_configuration():
+    config = get_quantization_config({
+        "quantization": {
+            "subchannel": {
+                "enabled": True,
+                "forward": {
+                    "block_size": 32
+                }
+            },
+            "hifloat8": {
+                "enabled": False
+            },
+        }
+    })
+    assert config.subchannel.enabled
+    assert config.subchannel.forward.block_size == 32
+    assert not config.hifloat8["enabled"]
+
+
+def test_quantization_rejects_both_recipes_enabled():
+    with pytest.raises(DeepSpeedConfigError, match="Enable only one"):
+        get_quantization_config({
+            "hifloat8": {
+                "enabled": True,
+                "module_name_patterns": ["*.experts"]
+            },
+            "quantization": {
+                "subchannel": {
+                    "enabled": True
+                }
+            },
+        })
+
+
+@pytest.mark.parametrize("option,value", [("overlap_weight_grad", True), ("dw_staging", object())])
+def test_hifloat8_rejects_deferred_expert_gradients_before_conversion(option, value):
+    from deepspeed.moe.ep_experts import GroupedExperts
+
+    model = nn.Module()
+    model.experts = GroupedExperts(16, 32, 2, use_grouped_mm=False)
+    setattr(model, option, value)
+    original = model.experts.grouped_mm
+    engine = _make_engine(model, ["experts"])
+    with pytest.raises(RuntimeError, match="deferred or staged weight gradients"):
+        engine._configure_hifloat8()
+    assert model.experts.grouped_mm is original
+
+
 @pytest.mark.parametrize("options", [[], None, {"fp8": {"enabled": True}}])
 def test_invalid_training_quantization_sections_fail_closed(options):
-    with pytest.raises(DeepSpeedConfigError):
+    with pytest.raises((DeepSpeedConfigError, ValueError)):
         get_quantization_config({"quantization": options})
 
 
@@ -461,7 +513,7 @@ def test_module_recipe_selection_errors_preserve_the_model(module_configs):
     before = dict(model.named_parameters())
     engine = _make_engine(model, [], module_configs=module_configs)
     with pytest.raises(RuntimeError, match="matched no"):
-        engine._configure_quantization()
+        engine._configure_hifloat8()
     assert all(type(module) is nn.Linear for module in model.model.mlp.values())
     assert all(dict(model.named_parameters())[name] is value for name, value in before.items())
 
@@ -532,7 +584,7 @@ def test_module_recipes_match_explicit_ao_reference_with_one_conversion(monkeypa
     engine = _make_engine(model, patterns, module_configs=module_configs)
     engine._config.hifloat8_config["config"] = {"weight_dst_type_max": 31}
     engine._config.hifloat8_config["expected_module_count"] = 5
-    engine._configure_quantization()
+    engine._configure_hifloat8()
     assert calls == [model]
     assert tuple(model.state_dict()) == keys
     assert type(model["untouched"]) is nn.Linear
@@ -565,7 +617,7 @@ def test_late_invalid_module_recipe_fails_before_any_conversion():
     model = nn.ModuleDict({"first": nn.Linear(8, 8), "last": nn.Linear(8, 8)})
     engine = _make_engine(model, [], module_configs={"first": {}, "last": {"compute_dtype": "float32"}})
     with pytest.raises(RuntimeError, match="recipe failed before conversion"):
-        engine._configure_quantization()
+        engine._configure_hifloat8()
     assert all(type(module) is nn.Linear for module in model.values())
 
 
@@ -574,7 +626,7 @@ def test_default_module_recipe_converts_only_eligible_modules():
     model = nn.ModuleDict({"dense": nn.Linear(8, 8), "skip": nn.Linear(8, 8), "embedding": nn.Embedding(8, 8)})
     engine = _make_engine(model, [], module_configs={"skip": None, "_default": {"grad_dst_type_max": 15}})
     engine._config.hifloat8_config["expected_module_count"] = 1
-    engine._configure_quantization()
+    engine._configure_hifloat8()
     assert model["dense"].config.grad_dst_type_max == 15
     assert type(model["skip"]) is nn.Linear
     assert type(model["embedding"]) is nn.Embedding

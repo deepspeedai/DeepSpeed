@@ -123,7 +123,7 @@ class IPGBucket:
     has_moe_params: bool = False
     ready_events: dict = field(default_factory=dict)
     reuse_events: dict = field(default_factory=dict)
-    # Streams that issued copies into buffer[index] for the current bucket fill.
+    # Streams that produced the gradients of the current bucket fill, oversized ones included.
     # average_tensor must wait on all of them before reducing the bucket, since the
     # copies can be produced on multiple streams (e.g. under torch.compile gradient
     # hooks run on different autograd streams), not just the current one (#8061).
@@ -205,10 +205,12 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                  bf16_optimizer_states=False,
                  elastic_checkpoint=False,
                  check_grad_overflow=True,
-                 compute_grad_norm=True):
+                 compute_grad_norm=True,
+                 retain_gpu_grad_partition_until_step=False):
 
         super().__init__()
 
+        self.retain_gpu_grad_partition_until_step = retain_gpu_grad_partition_until_step
         if not compute_grad_norm and clip_grad > 0.0:
             raise ValueError("zero_optimization.compute_grad_norm=false requires gradient_clipping=0")
         if not compute_grad_norm and zenflow_config is not None:
@@ -653,6 +655,10 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             self._offload_accumulated_param_ids = set()
             # FP32-master gradients first seen at a boundary stay in the partition until another backward.
             self._offload_partition_only_param_ids = set()
+            # Host sums updated by a non-boundary backward since they were last published to the FP32 partition.
+            self._offload_unpublished_param_ids = set()
+            # Compact partitions freed at a boundary; the host gradient holds their running sum.
+            self._host_owned_compact_partitions = set()
             self.temp_grad_buffer_for_cpu_offload = torch.zeros(largest_param_numel,
                                                                 device=self.device,
                                                                 dtype=self.dtype)
@@ -759,6 +765,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             for p in self.bit16_groups[i]:
                 if getattr(p, '_hp_mapping', None):
                     p._hp_mapping = None
+                if getattr(p, '_zero_optimizer', None) is self:
+                    del p._zero_optimizer
         for hook in self._grad_acc_hooks:
             hook.remove()
         self.print_rank_0("Removed grad acc hooks")
@@ -861,6 +869,14 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 lazy_init_hp_params_optimizer_state(self.bit16_groups[i], self.single_partition_of_fp32_groups[i],
                                                     self.optimizer.state)
             self._hp_optimizer_states_linked = True
+
+    def _relink_hp_params_optimizer_state(self):
+        """Link the optimizer state into the params' fragments again: reload_states() moves the state to new tensors,
+        and _link_all_hp_params() rebuilds the fragments without it. Before the first step the state is empty (with
+        elastic checkpointing, state_dict() adds an empty one per group), and step() links it."""
+        self._hp_optimizer_states_linked = False
+        if any(self.optimizer.state.values()):
+            self._lazy_init_hp_params_optimizer_state()
 
     def is_moe_group(self, group):
         return 'moe' in group and group['moe']
@@ -1024,8 +1040,6 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         self.reduce_ipg_grads()
         self.report_ipg_memory_usage("In ipg_epilogue after reduce_ipg_grads", 0)
 
-        # if dist.get_rank() == 0:
-        #    logger.info("Params already reduced %s", self.params_already_reduced)
         for i in range(len(self.params_already_reduced)):
             self.params_already_reduced[i] = False
 
@@ -1063,6 +1077,9 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                     # sum until step(): more request boundaries may precede the update.
                     if self.use_grad_accum_attribute:
                         self.all_grad_tensors[i] = None
+        elif self.is_gradient_accumulation_boundary():
+            self._publish_unpublished_offload_grads()
+            self._offload_compact_grad_partitions()
 
         self._release_ipg_buffers()
 
@@ -1110,10 +1127,34 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 if self._use_compact_grad_partition_buffer(group_idx):
                     self.copy_grads_in_partition(param, group_idx)
                     continue
-                self._restore_cpu_offload_grad_to_gpu(param)
-                self.set_norm_for_param_grad_in_gpu(param)
-                self.update_offload_overflow_tracker_for_param_grad(param)
-                self.async_inplace_copy_grad_to_fp32_buffer_from_gpu(param)
+                self._publish_host_accumulated_grad(param)
+        self._offload_unpublished_param_ids.clear()
+        self._offload_compact_grad_partitions()
+
+    def _publish_host_accumulated_grad(self, param):
+        """Read this parameter's host sum back to the device, then into the FP32 partition.
+
+        The device pass lets the shared norm and overflow helpers see the full accumulated gradient.
+        """
+        self._restore_cpu_offload_grad_to_gpu(param)
+        self.set_norm_for_param_grad_in_gpu(param)
+        self.update_offload_overflow_tracker_for_param_grad(param)
+        self.async_inplace_copy_grad_to_fp32_buffer_from_gpu(param)
+
+    def _publish_unpublished_offload_grads(self):
+        """Bring every host sum a non-boundary backward left behind into the FP32 partition.
+
+        A boundary backward publishes only the parameters it reduced. A parameter whose last
+        contribution this window came from a non-boundary backward would otherwise reach step(),
+        safe_get_full_grad() and the grad norm as zero.
+        """
+        for group_idx, group in enumerate(self.params_in_partition):
+            if self._use_compact_grad_partition_buffer(group_idx):
+                continue
+            for param in group:
+                if self.get_param_id(param) in self._offload_unpublished_param_ids:
+                    self._publish_host_accumulated_grad(param)
+        self._offload_unpublished_param_ids.clear()
 
     def _restore_cpu_offload_grad_to_gpu(self, param):
         # Last non-boundary epilogue cleared param.grad; reload accumulated CPU grads for boundary helpers.
@@ -1264,13 +1305,21 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         return param.grad_accum if self.use_grad_accum_attribute else param.grad
 
     def _use_compact_grad_partition_buffer(self, group_idx):
-        gradient_accumulation_dtype = getattr(self, "gradient_accumulation_dtype", None)
-        if gradient_accumulation_dtype != torch.float32 or gradient_accumulation_dtype == self.dtype:
-            return False
         params_in_partition = self.params_in_partition[group_idx]
         if len(params_in_partition) > 0 and self._is_muon_group(params_in_partition):
             return False
+        gradient_accumulation_dtype = getattr(self, "gradient_accumulation_dtype", None)
+        if gradient_accumulation_dtype != torch.float32 or gradient_accumulation_dtype == self.dtype:
+            return False
         return True
+
+    @staticmethod
+    def _host_grad_holds_accum_exactly(host_dtype, accum_dtype):
+        # The host gradient may be restored into the device buffer only if no bits are lost:
+        # same dtype, or an fp32 host holding bf16/fp16 values that were widened from it.
+        if host_dtype == accum_dtype:
+            return True
+        return host_dtype == torch.float32 and accum_dtype in (torch.bfloat16, torch.float16)
 
     def _build_compact_grad_partition_buffer(self, group_idx):
         partition_size = int(self.partition_size[group_idx])
@@ -1313,8 +1362,67 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             return grad_group
 
         grad_group = self._build_compact_grad_partition_buffer(group_idx)
+        if self.cpu_offload and group_idx in self._host_owned_compact_partitions:
+            self._restore_compact_grad_partition(group_idx, grad_group)
         self.averaged_gradients[group_idx] = grad_group
         return grad_group
+
+    def _offload_compact_grad_partitions(self):
+        """Copy each compact partition's running sum to the host gradient at a boundary.
+
+        Every parameter accumulated in this window is copied, including one that missed the
+        boundary backward. Once the host holds the exact sum, the GPU partition is freed so it
+        does not occupy GPU memory between requests; a later backward in the window restores it.
+        """
+        stream = get_accelerator().current_stream()
+        if self.overlap_comm and self.reduction_stream is not None:
+            stream.wait_stream(self.reduction_stream)
+        for group_idx in range(len(self.bit16_groups)):
+            grad_group = self.averaged_gradients.get(group_idx)
+            if grad_group is None or not self._use_compact_grad_partition_buffer(group_idx):
+                continue
+            partition_id = dist.get_rank(group=self.real_dp_process_group[group_idx])
+            host_grad = self.single_partition_of_fp32_groups[group_idx].grad.view(-1)
+            for param in self.params_in_partition[group_idx]:
+                param_id = self.get_param_id(param)
+                if param_id not in self._offload_accumulated_param_ids:
+                    continue
+                [_, _, dest_offset, num_elements] = self.grad_position[param_id]
+                source = self._get_compact_grad_partition_slice(group_idx, partition_id, param_id, num_elements)
+                self.norm_for_param_grads[param_id] = source.data.to(get_norm_dtype()).norm(2)
+                # Check the value the optimizer will read: an fp32 sum can pass here and become inf in an
+                # fp16 host gradient.
+                host_value = source.to(host_grad.dtype)
+                self.update_offload_overflow_tracker(host_value)
+                host_grad.narrow(0, dest_offset, num_elements).copy_(host_value, non_blocking=True)
+            self._record_offload_copy()
+
+            # Free only when the host copy can restore the device sum bit for bit. Otherwise the
+            # device buffer stays resident until step(), and ZenFlow orders its own copies.
+            if not self._host_grad_holds_accum_exactly(host_grad.dtype, grad_group.flat_partition.dtype):
+                continue
+            if not self._offload_gradient_safety_enabled:
+                continue
+            if self.retain_gpu_grad_partition_until_step:
+                continue
+            self._record_gradient_stream(grad_group.flat_partition, stream)
+            self.averaged_gradients[group_idx] = None
+            self._host_owned_compact_partitions.add(group_idx)
+
+    def _restore_compact_grad_partition(self, group_idx, grad_group):
+        self._host_owned_compact_partitions.discard(group_idx)
+        # The restore may run on another stream than the boundary copy that filled the host gradient.
+        self._wait_for_offload_copies()
+        partition_id = dist.get_rank(group=self.real_dp_process_group[group_idx])
+        host_grad = self.single_partition_of_fp32_groups[group_idx].grad.view(-1)
+        for param in self.params_in_partition[group_idx]:
+            param_id = self.get_param_id(param)
+            if param_id not in self._offload_accumulated_param_ids:
+                continue
+            [_, _, dest_offset, num_elements] = self.grad_position[param_id]
+            insertion_offset = int(self.grad_partition_insertion_offset[group_idx][partition_id][param_id])
+            destination = grad_group.flat_partition.narrow(0, insertion_offset, num_elements)
+            destination.copy_(host_grad.narrow(0, dest_offset, num_elements), non_blocking=True)
 
     def _get_compact_grad_partition_slice(self, group_idx, partition_id, param_id, num_elements):
         if not self._use_compact_grad_partition_buffer(group_idx):
@@ -1408,11 +1516,16 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
     ############### Independent Partition Gradient ########################
     def _record_gradient_stream(self, tensor, stream):
         accelerator = get_accelerator()
-        if self._offload_gradient_safety_enabled and not accelerator.resolves_data_dependency():
+        if self._gradient_stream_safety_enabled() and not accelerator.resolves_data_dependency():
             tensor.record_stream(stream)
 
+    def _gradient_stream_safety_enabled(self):
+        # Hooks may produce gradients and fill the bucket on several streams. overlap_comm without offload
+        # orders the bucket reads with copy_streams instead, and ZenFlow orders its own reduction.
+        return self._offload_gradient_safety_enabled or not (self.overlap_comm or self.zenflow)
+
     def _record_bucket_producer(self, bucket):
-        if self._offload_gradient_safety_enabled and not get_accelerator().resolves_data_dependency():
+        if self._gradient_stream_safety_enabled() and not get_accelerator().resolves_data_dependency():
             stream = get_accelerator().current_stream()
             event = get_accelerator().Event()
             event.record(stream)
@@ -1424,6 +1537,10 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             return
 
         grad_reduc = self.get_gradient_for_reduction(param)
+        if grad_reduc is None:
+            # The hook also fires when the backward delivered no gradient for a parameter in the graph, as when
+            # AutoEP stages an expert weight gradient for a later backward. There is nothing to reduce yet.
+            return
         comm_dtype = self.get_param_comm_dtype(param)
         bucket = self.ipg_buckets[comm_dtype]
         if bucket.elements + param.numel() > self.reduce_bucket_size:
@@ -1451,12 +1568,12 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 if self._offload_gradient_safety_enabled:
                     # Unlike contiguous(), clone guarantees independent storage.
                     grad_reduc.data = grad_reduc.detach().clone(memory_format=torch.contiguous_format)
-                # Oversized gradients bypass the contiguous buffer. Event tracking
-                # below covers them too; legacy copy_streams only covers buckets.
+                # Oversized gradients bypass the contiguous buffer. Producer tracking
+                # below covers them too.
                 self.extra_large_param_to_reduce[comm_dtype] = param
             else:
                 # keeping the gradients contiguous to prevent memory fragmentation, and avoid flattening
-                if self._offload_gradient_safety_enabled and bucket.index in bucket.reuse_events:
+                if self._gradient_stream_safety_enabled() and bucket.index in bucket.reuse_events:
                     # Every producer must wait, not only the first writer to this buffer.
                     get_accelerator().current_stream().wait_event(bucket.reuse_events[bucket.index])
                 new_grad_tensor = bucket.buffer[bucket.index].narrow(0, bucket.elements, param.numel())
@@ -1466,10 +1583,10 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 grad_reduc.data = new_grad_tensor.data.view_as(grad_reduc) if (
                     not self.zenflow or grad_reduc.dim() == 1) else new_grad_tensor.data.view_as(
                         grad_reduc.transpose(0, 1))
-                # Record the stream this copy ran on so average_tensor can wait on
-                # every producer of the bucket, not just the current stream (#8061).
-                if self.overlap_comm and not get_accelerator().resolves_data_dependency():
-                    bucket.copy_streams.add(get_accelerator().current_stream())
+            # Record the stream that produced this gradient so average_tensor can wait on
+            # every producer of the bucket, not just the current stream (#8061).
+            if self.overlap_comm and not get_accelerator().resolves_data_dependency():
+                bucket.copy_streams.add(get_accelerator().current_stream())
 
         self._record_bucket_producer(bucket)
         bucket.elements += param.numel()
@@ -1597,7 +1714,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
     def average_tensor(self, tensor: torch.Tensor, communication_data_type: torch.dtype):
         # Imported here because importing Muon compiles its kernels, which slows down import deepspeed.
         from deepspeed.runtime.zero.muon.muon_optimizer import MuonWithAuxAdam
-        if self._offload_gradient_safety_enabled:
+        if self._gradient_stream_safety_enabled():
             stream = self.reduction_stream if self.overlap_comm else get_accelerator().current_stream()
             for event in self.ipg_buckets[communication_data_type].ready_events.values():
                 stream.wait_event(event)
@@ -1637,7 +1754,6 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             prev_id, prev_process_group, prev_copy_ranks = -1, None, None
 
             process_group = self.dp_process_group
-            # count = 0
             bucket = self.ipg_buckets[communication_data_type]
             for i, param_idx_in_group, param_id in bucket.params:
                 param = self.bit16_groups[i][param_idx_in_group]
@@ -1664,10 +1780,6 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 # Calculate rank and offsets for grad slices
                 for idx in range(len(partition_ids_w_offsets)):
                     partition_id, offset = partition_ids_w_offsets[idx]
-
-                    # if dist.get_rank() == 0 and count < 100:
-                    #     print(f"Rank {dist.get_rank()} rank offset id {idx} calculated dp size {dist.get_world_size(group=process_group)} real dp size {dist.get_world_size(self.real_dp_process_group[i])} and dst: {partition_id}")
-                    # count += 1
 
                     # Calculate numel for grad slice depending on partition location
                     if idx == len(partition_ids_w_offsets) - 1:
@@ -2131,19 +2243,9 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         if group_idx is None:
             group_idx = self._get_param_group_idx(param)
         if self.cpu_offload and self._use_compact_grad_partition_buffer(group_idx):
-            param_id = self.get_param_id(param)
-            self._offload_accumulated_param_ids.add(param_id)
+            # The boundary copy to the host runs per group, in _offload_compact_grad_partitions().
+            self._offload_accumulated_param_ids.add(self.get_param_id(param))
             if self.is_gradient_accumulation_boundary():
-                [_, _, dest_offset, num_elements] = self.grad_position[param_id]
-                partition_id = dist.get_rank(group=self.real_dp_process_group[group_idx])
-                source = self._get_compact_grad_partition_slice(group_idx, partition_id, param_id, num_elements)
-                self.norm_for_param_grads[param_id] = source.data.to(get_norm_dtype()).norm(2)
-                self.update_offload_overflow_tracker(source)
-                destination = self.single_partition_of_fp32_groups[group_idx].grad.view(-1).narrow(
-                    0, dest_offset, num_elements)
-                destination.copy_(source.to(destination.dtype), non_blocking=True)
-                self._record_gradient_stream(source, get_accelerator().current_stream())
-                self._record_offload_copy()
                 self.clear_grad_attribute(param)
             return
         if self.cpu_offload:
@@ -2163,6 +2265,9 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 self.update_offload_overflow_tracker_for_param_grad(param)
 
                 self.async_inplace_copy_grad_to_fp32_buffer_from_gpu(param)
+                self._offload_unpublished_param_ids.discard(param_id)
+            else:
+                self._offload_unpublished_param_ids.add(param_id)
 
             # Include the shared-buffer fast path in subsequent accumulation and finalization.
             self._offload_accumulated_param_ids.add(param_id)
@@ -2171,7 +2276,6 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             if self.use_grad_accum_attribute:
                 self.clear_grad_attribute(param)
             return
-        #print(f"ID {self.get_param_id(param)} grad norm {param.grad.norm()}")
         if self.grads_in_partition is None:
             self.grads_in_partition_offset = 0
             total_size = 0
@@ -2190,10 +2294,10 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         new_grad_tensor = self.grads_in_partition.view(-1).narrow(0, self.grads_in_partition_offset, param.numel())
         new_grad_tensor.copy_(grad_reduc.view(-1))
         grad_reduc.data = new_grad_tensor.data.view_as(grad_reduc)
-        #print(f"Grad norm after copy to contiguous_buffer {param.grad.data.norm()}")
         self.grads_in_partition_offset += param.numel()
 
     def reduce_ipg_grads(self, comm_dtype=None):
+        stream = self.reduction_stream if self.overlap_comm else get_accelerator().current_stream()
         dtypes = sort_dtypes(self.ipg_buckets.keys())
         if comm_dtype is not None:
             dtypes = [comm_dtype]
@@ -2214,11 +2318,21 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                     extra_large_grad_reduc.data = extra_large_grad_reduc_for_average.data.view_as(extra_large_grad_reduc) if (not self.zenflow or self.extra_large_param_to_reduce[comm_dtype].dim() == 1) \
                         else extra_large_grad_reduc_for_average.data.view_as(extra_large_grad_reduc.transpose(0, 1))
 
+                    # Oversized gradients bypass the contiguous IPG buffer, so the
+                    # reduction reads the parameter's own storage, which non-owner
+                    # ranks release right after the reduction is enqueued.
+                    if self.overlap_comm and not get_accelerator().resolves_data_dependency():
+                        extra_large_grad_reduc_for_average.record_stream(self.reduction_stream)
                     self.average_tensor(extra_large_grad_reduc_for_average, comm_dtype)
                     del self.extra_large_param_to_reduce[comm_dtype]
                 else:
                     self.average_tensor(bucket.buffer[bucket.index].narrow(0, 0, bucket.elements), comm_dtype)
             else:
+                # The fallback reads the gradients themselves, which a non-owner frees right after this flush.
+                for event in bucket.ready_events.values():
+                    stream.wait_event(event)
+                for grad in bucket.grads:
+                    self._record_gradient_stream(grad, stream)
                 if any(self._use_compact_grad_partition_buffer(group_idx) for group_idx, _, _ in bucket.params):
                     self._buffered_reduce_fallback_preserving_fp32(bucket.grads,
                                                                    bucket.params,
@@ -2226,16 +2340,6 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                                                                    elements_per_buffer=bucket.elements)
                 else:
                     self.buffered_reduce_fallback(None, bucket.grads, comm_dtype, elements_per_buffer=bucket.elements)
-
-        if self.overlap_comm:
-            stream = self.reduction_stream
-        elif self.cpu_offload:
-            # TODO: copy_grad_stream is disabled because of race with reduce. This hurts perf and should be fixed.
-            #            get_accelerator().synchronize()
-            #            stream = self.copy_grad_stream
-            stream = get_accelerator().current_stream()
-        else:
-            stream = get_accelerator().current_stream()
 
         with get_accelerator().stream(stream):
             for comm_dtype in dtypes:
@@ -2264,7 +2368,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                         if self.contiguous_gradients and self.is_param_in_current_partition[param_id]:
                             self.copy_grads_in_partition(param, group_idx)
                 # Empty and oversized reductions do not consume the contiguous buffer.
-                if (self._offload_gradient_safety_enabled and 0 < bucket.elements <= self.reduce_bucket_size
+                if (self._gradient_stream_safety_enabled() and 0 < bucket.elements <= self.reduce_bucket_size
                         and not get_accelerator().resolves_data_dependency()):
                     event = get_accelerator().Event()
                     event.record(stream)
@@ -2551,7 +2655,6 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         partitions = []
 
         dp = dist.get_world_size(group=self.real_dp_process_group[group_id])
-        # dp_id = dist.get_rank(group=self.real_dp_process_group[group_id])
 
         total_num_elements = tensor.numel()
 
@@ -2668,8 +2771,6 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             else:
                 dist.all_reduce(total_norm, op=dist.ReduceOp.MAX, group=expert_parallel_group)
         else:
-            # if dist.get_rank() == 0:
-            #    logger.info(f"Total Norm beginning {total_norm}")
             param_gradients = (g for g in gradients if not getattr(g, "_zero_padding", False))
             for g, p in zip(param_gradients, params):
                 # Pipeline parallelism may replicate parameters. Avoid multi-counting.
@@ -2759,7 +2860,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                                          buffer,
                                          self.optimizer.param_groups[param_group_idx]['momentum'],
                                          ns_method=ns_method,
-                                         is_expert_group=getattr(tensor, 'is_expert_group', False))
+                                         is_expert_group=getattr(tensor, 'is_expert_group', False),
+                                         num_heads=getattr(tensor, 'muon_num_heads', None))
             tensor = grad_accum
             buffer_idx += tensor.numel()
             param_id = self.get_param_id(tensor_list[i])
@@ -2926,6 +3028,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         self._wait_for_offload_copies()
         self.norm_for_param_grads = {}
         self.local_overflow = False
+        self._host_owned_compact_partitions.clear()
         # Adam consumes the partition gradient; a parameter idle in the next window must not reuse it.
         for fp32_partition in self.single_partition_of_fp32_groups:
             if fp32_partition.grad is not None:
@@ -3038,6 +3141,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         if self.cpu_offload:
             self._offload_accumulated_param_ids = set()
             self._offload_partition_only_param_ids = set()
+            self._offload_unpublished_param_ids = set()
 
         if not self.compute_grad_norm:
             self._global_grad_norm = None
@@ -3075,6 +3179,9 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             self._release_preflattened_grad_buffers()
             if self.cpu_offload:
                 self.reset_cpu_buffers()
+                # A resident compact partition still holds the skipped window's inf/NaN sum.
+                for k in self.averaged_gradients.keys():
+                    self.averaged_gradients[k] = None
             else:
                 for k in self.averaged_gradients.keys():
                     self.averaged_gradients[k] = None
@@ -3296,6 +3403,13 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                                             dtype=self._gradient_reduction_buffer_dtype(),
                                             device=get_accelerator().current_device_name())
                         bucket.buffer.append(buf_1)
+
+                if self._gradient_stream_safety_enabled() and not get_accelerator().resolves_data_dependency():
+                    # The allocator may reuse a block that still has work queued on this stream: order first writes.
+                    allocated = get_accelerator().Event()
+                    allocated.record(get_accelerator().current_stream())
+                    for bucket in self.ipg_buckets.values():
+                        bucket.reuse_events = dict.fromkeys(range(len(bucket.buffer)), allocated)
 
             self.ready_for_gradients = True
 
@@ -3950,6 +4064,12 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
         # Offload Optimizer States
         if needs_offload(OffloadStateTypeEnum.optim_states):
+            # The params' optimizer-state fragments are views of the device tensors and would keep them alive.
+            for group in self.bit16_groups:
+                for param in group:
+                    mapping = getattr(param, '_hp_mapping', None)
+                    if mapping is not None and mapping.optim_fragment is not None:
+                        mapping.optim_fragment.clear()
             offload_optimizer_states(self.optimizer, device, pin_memory=pin_memory, non_blocking=non_blocking)
             self.offloaded_states.add(OffloadStateTypeEnum.optim_states)
 
@@ -3975,6 +4095,11 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         # unlike the torch pinned allocator, so hold them until after the
         # synchronize at the end of this method.
         pending_host_buffers = []
+        # Reloading these states replaces or rebuilds what the params' optimizer-state fragments point to.
+        relink_states = {
+            OffloadStateTypeEnum.hp_params, OffloadStateTypeEnum.lp_params, OffloadStateTypeEnum.optim_states
+        }
+        relink_optimizer_state = bool(relink_states & self.offloaded_states)
 
         # Reload FP32 Master Parameters (HP Params)
         if OffloadStateTypeEnum.hp_params in self.offloaded_states:
@@ -4025,6 +4150,9 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         if OffloadStateTypeEnum.optim_states in self.offloaded_states:
             pending_host_buffers.append(reload_optimizer_states(self.optimizer, device, non_blocking=non_blocking))
             self.offloaded_states.remove(OffloadStateTypeEnum.optim_states)
+
+        if relink_optimizer_state:
+            self._relink_hp_params_optimizer_state()
 
         if non_blocking:
             get_accelerator().synchronize()

@@ -287,6 +287,20 @@ class CUDA_Accelerator(DeepSpeedAccelerator):
             return False
         return major < 9
 
+    def supported_subchannel_quantization_formats(self):
+        # The Triton kernels need FP8 tensor cores (sm89+) for FP8 and integer tensor cores (sm80+) for INT8.
+        from deepspeed.ops.triton_ops import is_triton_available
+        # not verified on AMD GPU, whose FP8 formats differ
+        if torch.version.hip is not None or not is_triton_available():
+            return ()
+        capability = torch.cuda.get_device_capability()
+        formats = ()
+        if capability >= (8, 0):
+            formats += ("int8", )
+        if capability >= (8, 9):
+            formats += ("e4m3", "e5m2")
+        return formats
+
     # Graph operations
     def is_graph_capture_supported(self) -> bool:
         return True
@@ -360,7 +374,7 @@ class CUDA_Accelerator(DeepSpeedAccelerator):
             return "deepspeed.ops.op_builder"
 
     # dict that holds class name <--> class type mapping i.e.
-    # 'AsyncIOBuilder': <class 'op_builder.async_io.AsyncIOBuilder'>
+    # 'FusedAdamBuilder': <class 'op_builder.fused_adam.FusedAdamBuilder'>
     # this dict will be filled at init stage
     class_dict = None
 
@@ -386,10 +400,17 @@ class CUDA_Accelerator(DeepSpeedAccelerator):
                         ) and member_name != "OpBuilder" and member_name != "CUDAOpBuilder":  # avoid abstract classes
                             if not member_name in self.class_dict:
                                 self.class_dict[member_name] = getattr(module, member_name)
-            # Host-side optimizers run on the CPU wherever the model lives,
-            # so they share their builders with the CPU accelerator.
+            # Host-side ops (the CPU optimizers, and async I/O, which stages device tensors through
+            # host memory) need no CUDA to build, so they share their builders with the CPU accelerator.
             cpu_op_builder_module = importlib.import_module("{}.cpu".format(op_builder_dir))
-            for member_name in ["CPUAdamBuilder", "CPUAdagradBuilder", "CPULionBuilder"]:
+            for member_name in [
+                    "CPUAdamBuilder",
+                    "CPUAdagradBuilder",
+                    "CPULionBuilder",
+                    "ReflowCPUAdamBuilder",
+                    "ReflowCPULionBuilder",
+                    "AsyncIOBuilder",
+            ]:
                 self.class_dict[member_name] = getattr(cpu_op_builder_module, member_name)
             # end initialize for create_op_builder()
 

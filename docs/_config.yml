@@ -20,6 +20,7 @@ plugins:
   - jekyll-feed
   - jekyll-include-cache
   - jekyll-paginate
+  - jekyll-redirect-from
 
 #paginate: 10
 #paginate_path: /blog/page:num

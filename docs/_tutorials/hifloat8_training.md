@@ -128,6 +128,11 @@ their working/output dtype contract. Scaling currently supports per-tensor only.
 The current NPU HiFloat8 path requires BF16 model parameters and accepts ZeRO
 stages 0–2. ZeRO-3, PipelineModule, AutoTP, custom MPU and explicit DeepSpeed MoE
 layers are rejected, as is an explicit fused gate/up override on selected experts.
+
+Enable either HiFloat8 or subchannel quantized training in an engine. A selected
+HiFloat8 AutoEP expert group cannot use `overlap_weight_grad` or
+`deferred_dw_flush_period` greater than one because AO computes the expert weight
+gradients through its own autograd implementation.
 Quantized checkpoint ingestion into ZeRO-3 is unsupported;
 checkpoints retain high-precision weights and their original state names.
 Reconstruct the same policy for resume. The opt-in DP2/GAS2 lifecycle entry point
