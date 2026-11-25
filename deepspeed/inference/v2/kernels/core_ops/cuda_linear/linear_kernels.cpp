@@ -198,7 +198,8 @@ std::vector<torch::Tensor> preprocess_weight(torch::Tensor& weight)
     TORCH_CHECK(weight.device().type() == torch::kCPU, "weight must be on CPU");
     auto M = weight.size(0);
     auto K = weight.size(1);
-    TORCH_CHECK(K % 4 == 0, "K must be multiple of 4");
+    TORCH_CHECK(M % 64 == 0, "Weight output dimension M must be a multiple of 64 for FP6 prepacking, but got ", M);
+    TORCH_CHECK(K % 64 == 0, "Weight input dimension K must be a multiple of 64 for FP6 prepacking, but got ", K);
 
     // Pack weight from FP16 to FP6.
     uint16_t* weight_16bit_ptr = reinterpret_cast<uint16_t*>(weight.data_ptr<at::Half>());
