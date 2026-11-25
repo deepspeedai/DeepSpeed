@@ -501,7 +501,9 @@ class TestSegKIDataParallelRollout(DistributedTest):
         ds_config = {
             "train_micro_batch_size_per_gpu": 1,
             # segKI's lm_head install requires bf16 weights, so cast on initialize instead of after.
-            "bf16": {"enabled": True},
+            "bf16": {
+                "enabled": True
+            },
             "tensor_parallel": {
                 "autotp_size": 2,
                 "vocab_parallel_lm_head": True
