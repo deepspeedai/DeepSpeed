@@ -445,8 +445,6 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
         if self.zenflow is not None or self.reflow is not None or self.zero_quantized_weights or \
                 self.zero_quantized_nontrainable_weights or self.zero_quantized_gradients:
             raise ValueError(f"{feature} does not support ZenFlow, Reflow, or ZeRO quantization.")
-        if self.elastic_checkpoint or self.pipeline_loading_checkpoint:
-            raise ValueError(f"{feature} does not support ZeRO optimizer checkpointing.")
         return self
 
     @model_validator(mode="after")

@@ -298,10 +298,9 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             if type(init_optimizer) not in (torch.optim.Adam, torch.optim.AdamW, FusedAdam):
                 raise ValueError(
                     "zero_hpz_optimizer_sharding requires torch Adam, torch AdamW, or DeepSpeed FusedAdam.")
-            if init_optimizer.state or any(
-                    group.get("amsgrad") or group.get("differentiable") for group in init_optimizer.param_groups):
-                raise ValueError("zero_hpz_optimizer_sharding requires a fresh Adam optimizer without AMSGrad or "
-                                 "differentiable steps.")
+            if init_optimizer.state:
+                raise ValueError("zero_hpz_optimizer_sharding requires a fresh Adam optimizer.")
+            self._validate_hpz_adam_groups(init_optimizer.param_groups)
             if self.dtype not in (torch.float16, torch.bfloat16, torch.float32) or fp16_master_weights_and_gradients \
                     or bf16_master_weights_and_gradients or bf16_optimizer_states:
                 raise ValueError("zero_hpz_optimizer_sharding requires FP32 master weights and Adam moments.")
@@ -828,6 +827,11 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
     def _set_zero_group_parallelism(self):
         groups._create_zero_param_parallel_group(self.zero_hpz_partition_size)
 
+    @staticmethod
+    def _validate_hpz_adam_groups(param_groups):
+        if any(group.get("amsgrad") or group.get("differentiable") for group in param_groups):
+            raise ValueError("zero_hpz_optimizer_sharding does not support AMSGrad or differentiable steps.")
+
     def _initialize_hpz_optimizer_group(self, module, hpz_group):
         rank = dist.get_rank()
         group_size = self.zero_hpz_partition_size
@@ -873,6 +877,9 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                 self._hpz_optimizer_group = group
                 self._hpz_replica_ranks = ranks
                 self._hpz_lane = ranks.index(rank)
+
+    def _hpz_primary_lane(self, tensor):
+        return tensor.detach().view(len(self._hpz_replica_ranks), -1)[self._hpz_lane]
 
     def _gather_hpz_optimizer_lanes(self, primary):
         flat = primary.new_empty(len(self._hpz_replica_ranks) * primary.numel())
@@ -3288,7 +3295,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             dst = self.fp16_partitioned_groups_flat[sub_group_id].data
             src = self.fp32_partitioned_groups_flat[sub_group_id].data
             if self.zero_hpz_optimizer_sharding:
-                src = src.narrow(0, self._hpz_lane * dst.numel(), dst.numel())
+                src = self._hpz_primary_lane(src)
             if self._master_pinned_at_construction(sub_group_id) and dst.device.type != "cpu":
                 self._copy_pinned_master_to_device(dst, src)
             else:
@@ -3981,6 +3988,20 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         state_dict[FP32_FLAT_GROUPS] = self.fp32_partitioned_groups_flat
         self._clear_fp32_optimizer_param_groups()
 
+        if self.zero_hpz_optimizer_sharding:
+            # torch.save serializes a view's entire backing storage. Give each rank its own compact tensors.
+            def checkpoint_partition(tensor):
+                return self._hpz_primary_lane(tensor).to(device="cpu", copy=True)
+
+            state_dict[FP32_FLAT_GROUPS] = [checkpoint_partition(p) for p in self.fp32_partitioned_groups_flat]
+            optimizer_state = state_dict[OPTIMIZER_STATE_DICT]
+            optimizer_state['state'] = {
+                index: {
+                    key: checkpoint_partition(value) if key != 'step' else value
+                    for key, value in state.items()
+                }
+                for index, state in optimizer_state['state'].items()
+            }
         return state_dict
 
     def _add_backup_optimizer_state(self):
@@ -4028,8 +4049,6 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             checkpoint['optimizer'] = optimizer.state_dict()
             torch.save(checkpoint, "saved.pth")
         """
-        if self.zero_hpz_optimizer_sharding:
-            raise NotImplementedError("zero_hpz_optimizer_sharding does not support ZeRO optimizer checkpointing.")
         if self.elastic_checkpoint:
             raise NotImplementedError(
                 "ZeRO-3 elastic checkpointing is deprecated and unsupported. Use Universal Checkpointing instead.")
@@ -4118,6 +4137,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
     def _rigid_load_state_dict(self, state_dict, load_optimizer_states=True, load_from_fp32_weights=True):
         # I think it should actually be ok to reload the optimizer before the model.
         if load_optimizer_states:
+            if self.zero_hpz_optimizer_sharding:
+                self._validate_hpz_adam_groups(state_dict[OPTIMIZER_STATE_DICT]['param_groups'])
             self.loss_scaler = state_dict[LOSS_SCALER]
             self.dynamic_loss_scale = state_dict['dynamic_loss_scale']
             self.overflow = state_dict['overflow']
@@ -4147,12 +4168,14 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             self._post_step(timer_names)
 
         # restore fp32 partitions
-        for curr_param, saved_param in zip(self.fp32_partitioned_groups_flat, state_dict[FP32_FLAT_GROUPS]):
+        local_masters = self.fp32_partitioned_groups_flat
+        if self.zero_hpz_optimizer_sharding:
+            local_masters = [self._hpz_primary_lane(p) for p in local_masters]
+        for curr_param, saved_param in zip(local_masters, state_dict[FP32_FLAT_GROUPS]):
             curr_param.data.copy_(saved_param.data)
 
         # restore fp16 partitions from fp32
-        for sub_group_id in range(len(self.fp32_partitioned_groups_flat)):
-            fp32_param = self.fp32_partitioned_groups_flat[sub_group_id]
+        for sub_group_id, fp32_param in enumerate(local_masters):
             if sum(fp32_param.size()) > 0:
                 fp16_param = self.fp16_partitioned_groups_flat[sub_group_id]
                 fp16_param.data.copy_(fp32_param.data)
@@ -4166,13 +4189,28 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                 partitioned_param.data = q.data
 
         if not load_from_fp32_weights:
-            self.refresh_fp32_params()
+            for master, weights in zip(local_masters, self.fp16_partitioned_groups_flat):
+                master.data.copy_(weights.data)
+
+    def _restore_hpz_optimizer_lanes(self, load_optimizer_states):
+        completed = load_optimizer_states
+        for master in self.fp32_partitioned_groups_flat:
+            master.data.copy_(self._gather_hpz_optimizer_lanes(self._hpz_primary_lane(master)))
+            if load_optimizer_states:
+                state = self.optimizer.state.get(master, {})
+                for key, value in state.items():
+                    if key != 'step':
+                        state[key] = self._gather_hpz_optimizer_lanes(value)
+                completed = completed and 'step' in state
+        if completed and self._hpz_adam_step_event is not None:
+            self._hpz_adam_step_event.record()
+        self._hpz_adam_step_complete = completed
 
     # TODO: Support different/changing load/save DP degree.
     def load_state_dict(self,
                         state_dict_list,
                         load_optimizer_states=True,
-                        load_from_fp32_weights=False,
+                        load_from_fp32_weights=None,
                         checkpoint_folder=None,
                         load_serial=None,
                         param_shapes=None):
@@ -4201,15 +4239,17 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             optimizer.load_state_dict(checkpoint['optimizer'])
         """
 
-        if self.zero_hpz_optimizer_sharding:
-            raise NotImplementedError("zero_hpz_optimizer_sharding does not support ZeRO optimizer checkpointing.")
         if self.elastic_checkpoint:
             raise NotImplementedError(
                 "ZeRO-3 elastic checkpointing is deprecated and unsupported. Use Universal Checkpointing instead.")
 
+        if load_from_fp32_weights is None:
+            load_from_fp32_weights = self.zero_hpz_optimizer_sharding
         if checkpoint_folder:
             self._load_universal_checkpoint(checkpoint_folder, load_optimizer_states, load_from_fp32_weights)
         else:
+            if self.zero_hpz_optimizer_sharding:
+                self._hpz_adam_step_complete = False
             self._rigid_load_state_dict(state_dict_list[dist.get_rank(group=self.dp_process_group)],
                                         load_optimizer_states=load_optimizer_states,
                                         load_from_fp32_weights=load_from_fp32_weights)
@@ -4222,10 +4262,15 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                 rank = dist.get_rank(group=self.dp_process_group)
                 local_rank = dist.get_local_rank()
                 del state_dict_list[rank]
-                rank_end = dist.get_world_size() - 1
-                if local_rank != rank_end:
+                local_size = int(
+                    os.environ.get("LOCAL_SIZE") or os.environ.get("LOCAL_WORLD_SIZE")
+                    or os.environ.get("OMPI_COMM_WORLD_LOCAL_SIZE") or dist.get_world_size())
+                if local_rank + 1 < local_size and rank + 1 < dist.get_world_size():
                     dist.send(tensor=load_serial, dst=rank + 1)
 
+            if self.zero_hpz_optimizer_sharding:
+                # Release the next serial reader before waiting for its partition.
+                self._restore_hpz_optimizer_lanes(load_optimizer_states)
             if len(self.persistent_parameters) > 0:
                 self.persistent_parameters[0].partition(self.persistent_parameters)
                 # self.persistent_parameters[0].all_gather(self.persistent_parameters) # this will be done in checkpoint_event_epilogue() so remove it to prevent double all_gather

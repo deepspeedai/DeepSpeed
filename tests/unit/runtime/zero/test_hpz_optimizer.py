@@ -18,6 +18,7 @@ from deepspeed import comm as dist
 from deepspeed.accelerator import get_accelerator
 from deepspeed.ops.adam import FusedAdam
 from deepspeed.utils import safe_get_full_fp32_param, safe_get_local_fp32_param
+from deepspeed.utils.zero_to_fp32 import get_fp32_state_dict_from_zero_checkpoint
 from unit.common import get_master_port
 
 
@@ -48,17 +49,18 @@ def _input(step, microbatch, rank, size):
 
 class _HpZModel(torch.nn.Module):
 
-    def __init__(self, rank):
+    def __init__(self, rank, frozen_value=1.0):
         super().__init__()
         self.first = torch.nn.Parameter(torch.arange(1, 18).float() / 16 + rank)
         self.second = torch.nn.Parameter(torch.arange(1, 4).float() / 16 + rank)
+        self.frozen = torch.nn.Parameter(torch.full((5, ), frozen_value), requires_grad=False)
 
     @property
     def weights(self):
         return (self.first, self.second)
 
     def forward(self, inputs):
-        return sum((weight * batch).sum() for weight, batch in zip(self.weights, inputs))
+        return self.frozen.sum() + sum((weight * batch).sum() for weight, batch in zip(self.weights, inputs))
 
 
 def _adam_param_groups(model):
@@ -110,7 +112,105 @@ def _assert_model_writeback(params):
             assert _bits(param.float()) == _bits(expected)
 
 
-def _hpz_rank(rank, port, conn, enabled, zero_init, fused):
+def _new_engine(rank, enabled, zero_init, fused, frozen_value=1.0):
+    config = _hpz_config(enabled)
+    if fused:
+        del config["bf16"]
+        config["fp16"] = {"enabled": True, "initial_scale_power": 7, "hysteresis": 1}
+    if zero_init:
+        config["zero_optimization"]["reduce_scatter"] = False
+        config["zero_optimization"]["pipeline_loading_checkpoint"] = True
+    with deepspeed.zero.Init(config_dict_or_path=config) if zero_init else nullcontext():
+        model = _HpZModel(rank, frozen_value)
+    if fused:
+        optimizer = FusedAdam(_adam_param_groups(model), lr=0.01, weight_decay=0.01)
+    else:
+        optimizer = torch.optim.AdamW(_adam_param_groups(model),
+                                      lr=0.01,
+                                      weight_decay=0.01,
+                                      foreach=False,
+                                      fused=False)
+    engine, _, _, _ = deepspeed.initialize(model=model, optimizer=optimizer, config=config)
+    return engine
+
+
+def _train_step(engine, rank, step, gather=None):
+    losses = []
+    for microbatch in range(2):
+        inputs = [
+            _input(step, microbatch, rank, size).to(engine.device, engine.module.first.dtype) for size in (17, 3)
+        ]
+        with patch.object(dist, "allgather_fn", new=gather) if gather is not None else nullcontext():
+            loss = engine(inputs)
+            losses.append(loss.item())
+            engine.backward(loss)
+        engine.step()
+    assert engine.was_step_applied()
+    return losses
+
+
+def _overflow_step(engine, rank):
+    for _ in range(2):
+        value = float("inf") if rank == 1 else 1.0
+        inputs = [torch.full((size, ), value, device=engine.device, dtype=torch.float16) for size in (17, 3)]
+        engine.backward(engine(inputs))
+        engine.step()
+    assert not engine.was_step_applied()
+
+
+def _checkpoint_metadata(engine):
+    groups = [{k: v for k, v in group.items() if k != "params"} for group in engine.optimizer.optimizer.param_groups]
+    return (engine.global_steps, engine.global_samples, engine.skipped_steps, groups,
+            vars(engine.optimizer.loss_scaler).copy(), engine.optimizer.dynamic_loss_scale, engine.optimizer.overflow)
+
+
+def _check_load_options(rank, checkpoint_dir, saved):
+    for kwargs in ({"load_module_only": True}, {"load_optimizer_states": False}):
+        fresh = _new_engine(rank, enabled=True, zero_init=False, fused=False)
+        fresh.load_checkpoint(checkpoint_dir, **kwargs)
+        assert fresh.global_steps == (0 if kwargs.get("load_module_only") else 1)
+        assert not fresh.optimizer.optimizer.state
+        for master, (_, master_bits, *_) in zip(fresh.optimizer.fp32_partitioned_groups_flat, saved):
+            assert _bits(master) == master_bits
+        with pytest.raises(RuntimeError):
+            fresh.optimizer.get_local_hpz_adam_state(fresh.module.first)
+        _assert_model_writeback(fresh.module.weights)
+        fresh.destroy()
+
+
+def _resave_without_optimizer_sharding(rank, checkpoint_dir, saved):
+    ordinary = _new_engine(rank, enabled=False, zero_init=False, fused=False)
+    _, client_state = ordinary.load_checkpoint(checkpoint_dir)
+    for master, (replicas, *bits, step) in zip(ordinary.optimizer.fp32_partitioned_groups_flat, saved):
+        state = ordinary.optimizer.optimizer.state[master]
+        lane = replicas.index(rank)
+        for actual, expected in zip((master, state["exp_avg"], state["exp_avg_sq"]), bits):
+            width = actual.numel()
+            assert len(expected) == 2 * width
+            assert _bits(actual) == expected[lane * width:(lane + 1) * width]
+        assert _step_bits(state["step"]) == step
+    full_masters = {
+        name: safe_get_full_fp32_param(p)
+        for name, p in ordinary.module.named_parameters() if p.requires_grad
+    }
+    if rank == 0:
+        consolidated = get_fp32_state_dict_from_zero_checkpoint(checkpoint_dir, tag="first")
+        for name, master in full_masters.items():
+            assert _bits(consolidated[name]) == _bits(master)
+
+    shard = torch.load(ordinary._get_zero_ckpt_name(checkpoint_dir, "first"), map_location="cpu", weights_only=False)
+    saved_optimizer = shard["optimizer_state_dict"]
+    tensors = list(saved_optimizer["fp32_flat_groups"])
+    for state in saved_optimizer["optimizer_state_dict"]["state"].values():
+        tensors.extend((state["exp_avg"], state["exp_avg_sq"]))
+    for tensor in tensors:
+        assert tensor.untyped_storage().nbytes() == tensor.numel() * tensor.element_size()
+
+    ordinary.save_checkpoint(checkpoint_dir, tag="ordinary", client_state={"epoch": client_state["epoch"]})
+    ordinary.destroy()
+
+
+def _hpz_rank(rank, port, conn, enabled, zero_init, fused, checkpoint_dir):
     os.environ.update(MASTER_ADDR="127.0.0.1",
                       MASTER_PORT=port,
                       WORLD_SIZE="4",
@@ -125,31 +225,15 @@ def _hpz_rank(rank, port, conn, enabled, zero_init, fused):
     deepspeed.init_distributed(dist_backend=accelerator.communication_backend_name(),
                                timeout=timedelta(seconds=45),
                                auto_mpi_discovery=False)
-    config = _hpz_config(enabled)
-    dtype = torch.float16 if fused else torch.bfloat16
-    if fused:
-        del config["bf16"]
-        config["fp16"] = {"enabled": True, "loss_scale": 128}
-    if zero_init:
-        config["zero_optimization"]["reduce_scatter"] = False
-    with deepspeed.zero.Init(config_dict_or_path=config) if zero_init else nullcontext():
-        model = _HpZModel(rank)
-    if fused:
-        optimizer = FusedAdam(_adam_param_groups(model), lr=0.01, weight_decay=0.01)
-    else:
-        optimizer = torch.optim.AdamW(_adam_param_groups(model),
-                                      lr=0.01,
-                                      weight_decay=0.01,
-                                      foreach=False,
-                                      fused=False)
-    engine, _, _, _ = deepspeed.initialize(model=model, optimizer=optimizer, config=config)
+    engine = _new_engine(rank, enabled, zero_init, fused)
+    if enabled and not zero_init and not fused:
+        engine.save_checkpoint(checkpoint_dir, tag="initial")
+        engine.destroy()
+        engine = _new_engine(rank, enabled, zero_init, fused)
+        engine.load_checkpoint(checkpoint_dir, tag="initial")
     if enabled:
         with pytest.raises(RuntimeError):
-            engine.optimizer.get_local_hpz_adam_state(model.first)
-        with pytest.raises(NotImplementedError):
-            engine.save_checkpoint("unused")
-        with pytest.raises(NotImplementedError):
-            engine.load_checkpoint("unused")
+            engine.optimizer.get_local_hpz_adam_state(engine.module.first)
 
     gather_groups = []
     gather = dist.allgather_fn
@@ -161,32 +245,49 @@ def _hpz_rank(rank, port, conn, enabled, zero_init, fused):
 
     states = []
     for step in range(2):
-        for microbatch in range(2):
-            inputs = [_input(step, microbatch, rank, size).to(engine.device, dtype) for size in (17, 3)]
-            with patch.object(dist, "allgather_fn", new=record_gather):
-                loss = engine(inputs)
-                engine.backward(loss)
-            engine.step()
-        assert engine.was_step_applied()
+        uninterrupted_losses = _train_step(engine, rank, step, gather=record_gather)
         if enabled:
-            resident = _resident_state(engine, optimizer, rank)
+            resident = _resident_state(engine, engine.optimizer.optimizer, rank)
             assert _local_state(engine) == resident
             states.append(resident)
-    if fused:
-        for _ in range(2):
-            value = float("inf") if rank == 1 else 1.0
-            inputs = [torch.full((size, ), value, device=engine.device, dtype=dtype) for size in (17, 3)]
-            engine.backward(engine(inputs))
-            engine.step()
-        assert not engine.was_step_applied()
-        assert _resident_state(engine, optimizer, rank) == states[-1]
-        assert _local_state(engine) == states[-1]
+            if step == 0:
+                if fused:
+                    _overflow_step(engine, rank)
+                    assert _local_state(engine) == resident
+                saved_metadata = _checkpoint_metadata(engine)
+                engine.save_checkpoint(checkpoint_dir, tag="first", client_state={"epoch": 7})
     if enabled:
-        _assert_model_writeback(model.weights)
+        _assert_model_writeback(engine.module.weights)
+        engine.destroy()
+        if not fused and not zero_init:
+            _check_load_options(rank, checkpoint_dir, states[0])
+            _resave_without_optimizer_sharding(rank, checkpoint_dir, states[0])
+        engine = _new_engine(rank, enabled, zero_init, fused, frozen_value=4.0)
+        for group in engine.optimizer.optimizer.param_groups:
+            group["lr"] = 0.5
+        load_path, client_state = engine.load_checkpoint(checkpoint_dir)
+        assert load_path and client_state["epoch"] == 7
+        assert _checkpoint_metadata(engine) == saved_metadata
+        assert _resident_state(engine, engine.optimizer.optimizer, rank) == states[0]
+        assert _local_state(engine) == states[0]
+        _assert_model_writeback(engine.module.weights)
+        resumed_losses = _train_step(engine, rank, 1)
+        assert resumed_losses == uninterrupted_losses, (resumed_losses, uninterrupted_losses)
+        assert _resident_state(engine, engine.optimizer.optimizer, rank) == states[1]
+        assert _local_state(engine) == states[1]
+        _assert_model_writeback(engine.module.weights)
+        if fused:
+            _overflow_step(engine, rank)
+            assert _resident_state(engine, engine.optimizer.optimizer, rank) == states[-1]
+            assert _local_state(engine) == states[-1]
+        if zero_init:
+            engine.destroy()
+            engine = _new_engine(rank, enabled, zero_init, fused)
+            engine.load_checkpoint(checkpoint_dir)
     else:
         with pytest.raises(RuntimeError):
-            engine.optimizer.get_local_hpz_adam_state(model.first)
-        states = [_bits(safe_get_local_fp32_param(param)) for param in model.weights]
+            engine.optimizer.get_local_hpz_adam_state(engine.module.first)
+        states = [_bits(safe_get_local_fp32_param(param)) for param in engine.module.weights]
     dist.barrier()
     conn.send((states, gather_groups))
     if conn.recv() == "read":
@@ -231,7 +332,7 @@ def _assert_adam_reference(states):
 @pytest.mark.parametrize("enabled,zero_init,fused", [(False, False, False), (True, False, False), (True, True, False),
                                                      (True, False, True)],
                          ids=["legacy-hpz", "hierarchical", "hierarchical-zero-init", "hierarchical-fused-adam"])
-def test_hpz_adam_recovery(enabled, zero_init, fused):
+def test_hpz_adam_recovery(enabled, zero_init, fused, tmp_path):
     if get_accelerator().device_name() not in ("cpu", "cuda"):
         pytest.skip("requires Gloo or NCCL")
     if fused and get_accelerator().device_name() == "cpu":
@@ -249,7 +350,7 @@ def test_hpz_adam_recovery(enabled, zero_init, fused):
     try:
         for rank in range(4):
             parent, child = context.Pipe()
-            process = context.Process(target=_hpz_rank, args=(rank, port, child, enabled, zero_init, fused))
+            process = context.Process(target=_hpz_rank, args=(rank, port, child, enabled, zero_init, fused, tmp_path))
             process.start()
             child.close()
             workers.append((process, parent))
@@ -274,7 +375,8 @@ def test_hpz_adam_recovery(enabled, zero_init, fused):
             assert owner.exitcode == -signal.SIGKILL
             _, peer = workers[2]
             peer.send("read")
-            assert _recv(peer, timeout=20) == states[0][-1]
+            expected = states[0][0] if zero_init else states[0][-1]
+            assert _recv(peer, timeout=20) == expected
     finally:
         for process, conn in workers:
             if process.is_alive():

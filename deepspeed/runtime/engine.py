@@ -2345,7 +2345,7 @@ class DeepSpeedEngine(Module):
         if optimizer is None and not self.optimizer_name():
             raise ValueError(f"{feature} requires an Adam optimizer.")
         if self.load_universal_checkpoint():
-            raise ValueError(f"{feature} does not support ZeRO optimizer checkpointing.")
+            raise ValueError(f"{feature} does not support Universal Checkpoint loading.")
         if self.torch_autocast_enabled() and self.torch_autocast_dtype() == torch.float16:
             raise ValueError(f"{feature} does not support torch autocast with an FP16 GradScaler.")
         groups._validate_hpz_optimizer_topology(self.zero_hpz_partition_size(), dist.get_world_group())
@@ -4526,6 +4526,7 @@ class DeepSpeedEngine(Module):
                 name = self.param_names[param]
                 if hasattr(param, 'ds_id'):
                     param.ds_tensor.data.copy_(saved_frozen_params[name].data)
+                    param.ds_secondary_tensor = None
                 else:
                     param.data.copy_(saved_frozen_params[name].data)
 
@@ -4640,9 +4641,6 @@ class DeepSpeedEngine(Module):
         before ``load_checkpoint()``.
 
         """
-
-        if self._config.zero_config.zero_hpz_optimizer_sharding:
-            raise NotImplementedError("zero_hpz_optimizer_sharding does not support DeepSpeed checkpoint loading.")
 
         if tag is None:
             latest_tag = "latest_universal" if self.load_universal_checkpoint() else "latest"
@@ -5122,9 +5120,6 @@ class DeepSpeedEngine(Module):
         process with rank 0.
 
         """
-        if self._config.zero_config.zero_hpz_optimizer_sharding:
-            raise NotImplementedError("zero_hpz_optimizer_sharding does not support DeepSpeed checkpoint saving.")
-
         if not save_dir:
             raise ValueError(f"save_dir must be a non-empty string, got {save_dir!r}")
 

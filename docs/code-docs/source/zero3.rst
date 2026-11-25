@@ -402,9 +402,22 @@ or checkpoint reads. A worker must remain alive to make the call.
 The first version supports dense data parallelism with torch Adam, torch AdamW,
 or DeepSpeed FusedAdam and resident FP32 master weights and moments. Use
 matching hardware and training settings across ranks. The opt-in layout requires unquantized
-parameter and gradient communication. Optimizer or parameter offload, training checkpoint save and load,
-and manual master or optimizer state edits are unsupported with the flag enabled.
+parameter and gradient communication. Optimizer or parameter offload and manual
+master or optimizer state edits are unsupported with the flag enabled.
 The memory guarantee applies between completed updates on surviving workers.
+
+Call ``engine.save_checkpoint()`` on all ranks. Each file stores its ordinary
+ZeRO-3 partition of the FP32 master and Adam state. On a fresh engine,
+``engine.load_checkpoint()`` restores those partitions and rebuilds the
+replicas. A checkpoint saved after an Adam update is ready for a local recovery
+read immediately after a full load. A weights-only load keeps the saved FP32
+masters and leaves Adam and the loss scaler at their current settings.
+
+Keep the data-parallel world size and optimizer parameter groups the same. You
+can change the hpZ subgroup size or switch optimizer sharding on or off.
+The standard ``zero_to_fp32.py`` tool can consolidate either layout. Changing
+the shape of the tensors passed to Adam can change floating-point rounding in
+subsequent updates.
 
 .. automethod:: deepspeed.runtime.zero.stage3.DeepSpeedZeroOptimizer_Stage3.get_local_hpz_adam_state
 
