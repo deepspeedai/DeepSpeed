@@ -11,7 +11,6 @@ import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 
 import deepspeed
-import deepspeed.runtime.zero.parameter_offload as po_mod
 from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
 from unit.common import DistributedTest, preferred_dtype
 
@@ -182,7 +181,6 @@ class TestZero3CoordinatorCacheLifecycle(DistributedTest):
             assert model.a_status_at_b[-1] == ZeroParamStatus.AVAILABLE
         finally:
             engine.destroy()
-            po_mod.FWD_MODULE_STACK.clear()
 
     def test_backward_recompute_release_does_not_mutate_cached_forward_release(self):
         hidden = 8
@@ -224,7 +222,6 @@ class TestZero3CoordinatorCacheLifecycle(DistributedTest):
             assert model.status_after_outer_bwd[-1] == ZeroParamStatus.AVAILABLE
         finally:
             engine.destroy()
-            po_mod.FWD_MODULE_STACK.clear()
 
     def test_engine_coordinator_released_after_complete_trace(self):
         hidden = 16
@@ -248,7 +245,6 @@ class TestZero3CoordinatorCacheLifecycle(DistributedTest):
         submodule_ref = weakref.ref(engine.module.fc1)
 
         engine.destroy()
-        po_mod.FWD_MODULE_STACK.clear()
         del coordinator, engine, optimizer, model, x
         gc.collect()
 
