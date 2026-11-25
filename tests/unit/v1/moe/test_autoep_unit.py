@@ -348,14 +348,62 @@ class TestAutoEPConfig:
         })
         validate_autoep_config(config, world_size=2, pp_size=1, tp_size=1, sp_size=1)
 
-    def test_fused_combine_rejects_folded_tensor_parallelism(self):
+    def test_skip_recompute_combine_defaults_off_and_requires_the_deepep_route(self):
+        assert parse_autoep_config({}).skip_recompute_combine is False
+        deepep = {"comm_backend": "deepep", "comm_max_tokens_per_rank": 4096}
+        rejected = (
+            ({
+                "autoep_size": 2,
+                "skip_recompute_combine": "true"
+            }, "skip_recompute_combine must be a boolean"),
+            ({
+                "autoep_size": 2,
+                "skip_recompute_combine": True
+            }, 'comm_backend="comm"'),
+            ({
+                "autoep_size": 1,
+                "skip_recompute_combine": True,
+                **deepep
+            }, "autoep_size=1"),
+        )
+        for overrides, match in rejected:
+            config = parse_autoep_config({"enabled": True, **overrides})
+            with pytest.raises(ValueError, match=match):
+                validate_autoep_config(config, world_size=2, pp_size=1, tp_size=1, sp_size=1)
+
+        config = parse_autoep_config({"enabled": True, "autoep_size": 2, "skip_recompute_combine": True, **deepep})
+        assert config.skip_recompute_combine is True
+        validate_autoep_config(config, world_size=2, pp_size=1, tp_size=1, sp_size=1)
+
+    @pytest.mark.parametrize("preset_model", [None, "mixtral"], ids=["automatic-preset", "explicit-preset"])
+    @pytest.mark.parametrize("pattern", [r"custom\.wrapper\.moe", r"model\.layers\.\d+\.block_sparse_moe", ""],
+                             ids=["custom-parent", "preset-pattern", "empty-pattern"])
+    def test_skip_recompute_combine_rejects_pattern_overrides_even_with_supported_presets(self, preset_model, pattern):
+        settings = {
+            "enabled": True,
+            "autoep_size": 2,
+            "comm_backend": "deepep",
+            "comm_max_tokens_per_rank": 4096,
+            "preset_model": preset_model,
+            "moe_layer_pattern": pattern,
+        }
+        config = parse_autoep_config({**settings, "skip_recompute_combine": True})
+        with pytest.raises(ValueError, match="skip_recompute_combine.*moe_layer_pattern"):
+            validate_autoep_config(config, world_size=2, pp_size=1, tp_size=1, sp_size=1)
+
+        config = parse_autoep_config({**settings, "skip_recompute_combine": False})
+        validate_autoep_config(config, world_size=2, pp_size=1, tp_size=1, sp_size=1)
+        config = parse_autoep_config({**settings, "skip_recompute_combine": True, "moe_layer_pattern": None})
+        validate_autoep_config(config, world_size=2, pp_size=1, tp_size=1, sp_size=1)
+
+    def test_fused_combine_accepts_folded_tensor_parallelism(self):
         config = parse_autoep_config({
             "enabled": True,
             "autoep_size": 2,
             "combine_impl": "fused_weighted_sum",
         })
-        with pytest.raises(ValueError, match=r"tensor_parallel\.autotp_size=2"):
-            validate_autoep_config(config, world_size=4, pp_size=1, tp_size=2, sp_size=1)
+        validate_autoep_config(config, world_size=4, pp_size=1, tp_size=2, sp_size=1)
+        assert config.combine_impl == "fused_weighted_sum"
 
     def test_fused_combine_rejects_expert_tensor_parallelism(self):
         config = parse_autoep_config({
@@ -455,12 +503,13 @@ class TestAutoEPConfig:
 
         observed = {}
 
-        def record_validate(config, world_size, pp_size, tp_size, sp_size):
+        def record_validate(config, world_size, pp_size, tp_size, sp_size, zero_stage=None):
             observed["validate"] = {
                 "world_size": world_size,
                 "pp_size": pp_size,
                 "tp_size": tp_size,
                 "sp_size": sp_size,
+                "zero_stage": zero_stage,
             }
 
         def record_create(**kwargs):
@@ -489,6 +538,7 @@ class TestAutoEPConfig:
 
         assert groups.mpu is None
         assert observed["validate"]["sp_size"] == 2
+        assert observed["validate"]["zero_stage"] == 0
         assert observed["create"]["mp_size"] == 2
         assert observed["create"]["mp_mode"] == "sp"
 
@@ -922,6 +972,7 @@ class TestAutoEPConfig:
         optimizer = object.__new__(DeepSpeedZeroOptimizer_Stage3)
         optimizer.dp_process_group = "global_data_parallel"
         optimizer.ipg_buckets = {torch.float32: SimpleNamespace(params=[], process_group="expert_data_parallel")}
+        optimizer.dtype = torch.float32
         optimizer.postscale_gradients = True
         optimizer.gradient_predivide_factor = 1.0
         optimizer.sequence_parallel_size = 1
@@ -1509,6 +1560,14 @@ class TestRoutingAndLayerSemantics:
                            ep_rank=0,
                            config=AutoEPConfig(enabled=True, autoep_size=1, load_balance_coeff=0.02))
 
+    def test_skip_recompute_combine_is_limited_to_checked_presets(self):
+        source = MockMoEBlock(num_experts=4, ffn_hidden=128, hidden_size=64)
+        config = _runtime_config(enabled=True, autoep_size=1, skip_recompute_combine=True)
+        with pytest.raises(ValueError, match="skip_recompute_combine is not supported for preset 'custom_family'"):
+            AutoEPMoELayer(_make_spec(model_family="custom_family"), source, ep_size=1, ep_rank=0, config=config)
+        layer = AutoEPMoELayer(_make_spec(), source, ep_size=1, ep_rank=0, config=config)
+        assert layer.skip_recompute_combine is True
+
     def test_router_cache_does_not_duplicate_model_level_gate_capture(self):
         source = MockMoEBlock(num_experts=4, ffn_hidden=128, hidden_size=64)
         layer = AutoEPMoELayer(_make_spec(router_logits_capture_target="router", router_logits_capture_mode="raw"),
@@ -2065,6 +2124,19 @@ class TestModelDetectionAndReplacement:
         assert isinstance(model.model.layers[0].mlp, AutoEPMoELayer)
         assert model(torch.randn(1, 4, 64)).shape == (1, 4, 100)
 
+    def test_skip_recompute_combine_attaches_each_layer_to_its_decoder_layer(self):
+        for skip in (False, True):
+            model = MockMoETransformer(num_layers=2, moe_every_n=1)
+            config = _runtime_config(enabled=True, autoep_size=1, preset_model="mixtral", skip_recompute_combine=skip)
+            auto_ep = AutoEP(model, config)
+            for spec in auto_ep.ep_parser():
+                auto_ep.replace_moe_layer(spec, ep_size=1, ep_rank=0)
+            for decoder_layer in model.model.layers:
+                attached = decoder_layer.mlp._decoder_layer
+                # Held weakly, so the decoder layer is not registered as a child of its own MoE layer.
+                assert (attached() if skip else attached) is (decoder_layer if skip else None)
+                assert all(module is not decoder_layer for module in decoder_layer.mlp.modules())
+
     def test_fused_replacement_preserves_frozen_experts_and_trainable_router(self):
         model = MockMoETransformer(num_layers=1, num_experts=4, moe_every_n=1).to(dtype=torch.bfloat16)
         source = model.model.layers[0].mlp
@@ -2406,6 +2478,44 @@ def _eager_pep604_lines(module):
                 if isinstance(sub_node, ast.BinOp) and isinstance(sub_node.op, ast.BitOr):
                     offending_lines.append(sub_node.lineno)
     return sorted(set(offending_lines))
+
+
+class _ModelKeyedRegistry(dict):
+    """Like transformers' newer _CAN_RECORD_REGISTRY: keyed by str(model class), with get() and __setitem__() that
+    take a model."""
+
+    def __setitem__(self, model, can_record_outputs):
+        super().__setitem__(str(model.__class__), can_record_outputs)
+
+    def get(self, model):
+        return super().get(str(model.__class__)) or {}
+
+
+class TestTransformersOutputRecorderRegistry:
+
+    @pytest.mark.parametrize("registry_type", [dict, _ModelKeyedRegistry], ids=["plain_dict", "model_keyed"])
+    def test_install_uses_and_restores_entries_by_class_key(self, registry_type):
+        import deepspeed.module_inject.auto_ep_presets.base as presets_base
+
+        model = nn.Sequential(nn.Linear(2, 2))
+        model_key, layer_key = str(model.__class__), str(model[0].__class__)
+        registry = registry_type()
+        dict.__setitem__(registry, model_key, {"router_logits": "original"})
+        seen_while_installing = {}
+
+        def maybe_install_capturing_hooks(installed_model):
+            seen_while_installing.update(dict(registry))
+
+        output_capturing = SimpleNamespace(_CAN_RECORD_REGISTRY=registry,
+                                           maybe_install_capturing_hooks=maybe_install_capturing_hooks)
+        entries = {model_key: {"router_logits": "retargeted"}, layer_key: {"router_logits": "added"}}
+        installed = presets_base._install_instance_transformers_output_recorders(model, entries, output_capturing,
+                                                                                 lambda module: 0)
+
+        assert installed
+        assert seen_while_installing == entries
+        # The original entry is back under its class key, and the added one is gone.
+        assert dict(registry) == {model_key: {"router_logits": "original"}}
 
 
 class TestPy39AnnotationSafety:

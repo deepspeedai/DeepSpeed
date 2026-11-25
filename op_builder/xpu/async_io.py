@@ -21,7 +21,6 @@ class AsyncIOBuilder(OpBuilder):
 
     def sources(self):
         return [
-            'csrc/aio/py_lib/deepspeed_py_copy.cpp',
             'csrc/aio/py_lib/py_ds_aio.cpp',
             'csrc/aio/py_lib/deepspeed_py_aio.cpp',
             'csrc/aio/py_lib/deepspeed_py_aio_handle.cpp',

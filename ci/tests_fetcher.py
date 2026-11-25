@@ -96,6 +96,14 @@ WORKFLOWS: dict[str, WorkflowConfig] = {
         test_scopes=("tests/unit/v1", ),
         extra_run_all_globs=(".github/workflows/modal*.yml", ),
     ),
+    # PR-level v1 multi-rank CPU suite: same scope as the Modal run, but the
+    # workflow also selects only world_size > 1 tests (DS_MULTIRANK_ONLY).
+    "cpu-torch-latest-v1-multirank":
+    WorkflowConfig(
+        name="cpu-torch-latest-v1-multirank",
+        test_scopes=("tests/unit/v1", ),
+        extra_run_all_globs=(".github/workflows/cpu-torch-latest-v1-multirank.yml", ),
+    ),
 }
 
 DEFAULT_WORKFLOW = "modal-torch-latest"
@@ -181,6 +189,12 @@ class TestSelector:
         # module_inject is applied at deepspeed.initialize() time (replace_module /
         # replace_transformer_layer); the tests it affects don't import it directly.
         "deepspeed/module_inject/**": ("tests/unit/v1/moe/**", ),
+        # Reflow's ZeRO-3 optimizer is chosen inside deepspeed.initialize(); its tests reach it
+        # through the engine rather than by importing it.
+        "deepspeed/runtime/reflow/**": (
+            "tests/unit/v1/zero/test_reflow.py",
+            "tests/unit/v1/ops/test_reflow_cpu_optimizers.py",
+        ),
     }
 
     def __init__(self, repo_root: Path | str, config: WorkflowConfig):

@@ -130,7 +130,7 @@ jobs:
       - name: Install Python
         uses: actions/setup-python@v7
         with:
-          python-version: "3.10"
+          python-version: "3.12"
           cache: 'pip' # caching pip dependencies
 
       - name: Install build dependencies

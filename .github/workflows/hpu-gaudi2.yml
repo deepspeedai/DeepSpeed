@@ -22,7 +22,6 @@ on:
       - "deepspeed/module_inject/auto_tp.py"
       - "deepspeed/module_inject/replace_module.py"
       - "deepspeed/module_inject/load_checkpoint.py"
-      - "deepspeed/module_inject/inject.py"
       - "deepspeed/ops/transformer/**"
       - "deepspeed/ops/adam/**"
 

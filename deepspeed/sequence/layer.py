@@ -54,6 +54,9 @@ def _generate_layout_params(scatter_idx, batch_dim_idx, seq_world_size, input):
     if batch_dim_idx == 0:
         if scatter_idx < 2:
             bs, global_seq_len, num_local_head, head_dim = input.shape
+            assert global_seq_len % seq_world_size == 0, (
+                f"Sequence length ({global_seq_len}) must be divisible by the sequence parallel size ({seq_world_size})!"
+            )
             pre_all2all_inp_shape = [bs, seq_world_size, global_seq_len // seq_world_size, num_local_head, head_dim]
             pre_all2all_permute_idx = (1, 0, 2, 3, 4)
 
@@ -70,6 +73,9 @@ def _generate_layout_params(scatter_idx, batch_dim_idx, seq_world_size, input):
     else:
         if scatter_idx < 2:
             global_seq_len, bs, num_local_head, head_dim = input.shape
+            assert global_seq_len % seq_world_size == 0, (
+                f"Sequence length ({global_seq_len}) must be divisible by the sequence parallel size ({seq_world_size})!"
+            )
             pre_all2all_inp_shape = [seq_world_size, global_seq_len // seq_world_size, bs, num_local_head, head_dim]
             pre_all2all_permute_idx = None
 
@@ -473,6 +479,14 @@ class DistributedAttention(torch.nn.Module):
         num_kv_heads (int): number of key-value heads before sharding, which is what the uneven
             partition follows. Only needed when it does not divide evenly by the sequence
             parallel world size; when omitted it is read from the key tensor of each forward.
+        validate_shards (bool): check that each of Q, K and V has the same sequence length
+            on every sequence-group rank before each forward's attention data collectives.
+            Adds one metadata all-gather and host synchronization per forward; disabled by default.
+            All group members must enable this flag consistently and participate in every forward.
+            Inconsistent flags cannot be detected without communication in the default path.
+            Only sequence lengths are checked, not other shapes, dtypes or devices. Query and
+            KV sequence lengths may differ. No padding is added: callers must provide equal
+            shards and own any padding, attention masks and loss masking.
     """
 
     def __init__(
@@ -483,6 +497,7 @@ class DistributedAttention(torch.nn.Module):
         gather_idx: int = 0,
         sp_stream=None,
         num_kv_heads: int = None,
+        validate_shards: bool = False,
     ) -> None:
 
         super(DistributedAttention, self).__init__()
@@ -491,6 +506,7 @@ class DistributedAttention(torch.nn.Module):
         # Kept per instance: a second model with a different head count must not decide how this
         # one is sharded.
         self.num_kv_heads = num_kv_heads
+        self.validate_shards = validate_shards
         self.scatter_idx = scatter_idx
         self.gather_idx = gather_idx
         self.sp_overlap_comm = False
@@ -500,6 +516,24 @@ class DistributedAttention(torch.nn.Module):
             self.overlap_handles = {}
             self.sp_overlap_comm = True
             self.default_stream = get_accelerator().default_stream()
+
+    def _validate_shard_lengths(self, query, key, value, batch_dim_idx):
+        seq_dim = 1 - batch_dim_idx
+        lengths = torch.tensor([tensor.shape[seq_dim] for tensor in (query, key, value)],
+                               dtype=torch.int64,
+                               device=query.device)
+        gathered = [torch.empty_like(lengths) for _ in range(dist.get_world_size(self.spg))]
+        dist.all_gather(gathered, lengths, group=self.spg)
+        rank_lengths = [metadata.tolist() for metadata in gathered]
+        mismatches = []
+        for index, name in enumerate(('query', 'key', 'value')):
+            sizes = [metadata[index] for metadata in rank_lengths]
+            if any(size != sizes[0] for size in sizes[1:]):
+                details = ', '.join(f'group rank {rank}: {size}' for rank, size in enumerate(sizes))
+                mismatches.append(f'{name} sequence lengths [{details}]')
+        if mismatches:
+            raise ValueError('DistributedAttention requires equal sequence shards across ranks: ' +
+                             '; '.join(mismatches))
 
     def layer_sync(self, layer):
         if self.sp_overlap_comm and hasattr(layer, 'done_event'):
@@ -525,6 +559,9 @@ class DistributedAttention(torch.nn.Module):
         Returns:
             * output (Tensor): context output
         """
+
+        if self.validate_shards:
+            self._validate_shard_lengths(query, key, value, batch_dim_idx)
 
         # TODO Merge three alltoall calls into one
         # TODO (Reza): change the api on the megatron-deepspeed side so that we only receive all data (q,k, and v) together!

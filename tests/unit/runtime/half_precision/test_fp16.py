@@ -236,7 +236,6 @@ class TestFP16OptimizerForMoE(DistributedTest):
         model = SimpleMoEModel(hidden_dim, ep_size=2)
         param_group = {'params': [p for p in model.parameters()], 'name': 'random-unique-name'}
         params = split_params_into_different_moe_groups_for_optimizer(param_group)
-        # optimizer = torch.optim.AdamW(params=model.parameters())
         optimizer = FusedAdam(params=params)
         engine, optimizer, _, _ = deepspeed.initialize(config=config_dict,
                                                        model=model,

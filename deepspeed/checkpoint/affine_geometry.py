@@ -1,0 +1,209 @@
+# SPDX-License-Identifier: Apache-2.0
+# DeepSpeed Team
+"""Index and box arithmetic shared by affine maps, transfer planning and storage maps.
+
+Pure functions on shapes, strides, offsets and axis-aligned boxes. They know nothing about pieces,
+ranks or tensors, so one implementation can serve every module that describes or plans shards.
+"""
+
+from dataclasses import dataclass
+from typing import List, Optional, Sequence, Tuple
+
+__all__ = [
+    'LogicalBox', 'address_range', 'coordinate', 'dot', 'overlaps_itself', 'product', 'row_major_range_boxes',
+    'row_major_strides', 'strided_address', 'subtract'
+]
+
+
+def product(shape: Sequence[int]) -> int:
+    count = 1
+    for size in shape:
+        count *= size
+    return count
+
+
+def row_major_strides(shape: Sequence[int]) -> Tuple[int, ...]:
+    """Element stride per axis for a densely packed tensor of this shape."""
+    strides = [1] * len(shape)
+    for axis in range(len(shape) - 2, -1, -1):
+        strides[axis] = strides[axis + 1] * shape[axis + 1]
+    return tuple(strides)
+
+
+def coordinate(offset: int, strides: Tuple[int, ...], shape: Tuple[int, ...]) -> Optional[Tuple[int, ...]]:
+    """The grid coordinate a storage offset names, or None when it names nothing."""
+    coordinates = []
+    rest = offset
+    for stride, size in zip(strides, shape):
+        position, remainder = divmod(rest, stride)
+        if position >= size:
+            return None
+        coordinates.append(position)
+        rest = remainder
+    return tuple(coordinates) if rest == 0 else None
+
+
+def dot(index, strides):
+    return sum(position * stride for position, stride in zip(index, strides))
+
+
+def address_range(offset: int, shape: Sequence[int], strides: Sequence[int]) -> Tuple[int, int]:
+    """The lowest and highest address a strided view reaches, both inclusive."""
+    low = offset
+    high = offset
+    for size, stride in zip(shape, strides):
+        reach = (size - 1) * stride
+        if reach < 0:
+            low += reach
+        else:
+            high += reach
+    return low, high
+
+
+def overlaps_itself(shape: Sequence[int], strides: Sequence[int]) -> bool:
+    """Whether two positions of a view with this shape and these strides share an address.
+
+    Taking the axes that move in order of stride, the view is free of overlap when each stride
+    clears every address the axes before it reach. That holds for every layout the builders
+    produce. A view that interleaves its axes some other way is refused even where it would not
+    collide, which keeps this to a few comparisons per view instead of a walk over its elements.
+    """
+    reach = 0
+    for stride, size in sorted((stride, size) for size, stride in zip(shape, strides) if size > 1):
+        if stride <= reach:
+            return True
+        reach += stride * (size - 1)
+    return False
+
+
+def strided_address(shape, offset, strides, index):
+    address = offset
+    for size, stride in reversed(list(zip(shape, strides))):
+        index, position = divmod(index, size)
+        address += position * stride
+    return address
+
+
+def row_major_range_boxes(shape, low, high, dense_rows=0) -> List[Tuple[Tuple[int, ...], Tuple[int, ...]]]:
+    """Split the row-major index range ``[low, high)`` of ``shape`` into ``(origin, extent)`` boxes.
+
+    At most two boxes per axis: a partial run at either end and whole runs between. The first
+    ``dense_rows`` axes are never merged, so a box spans more than one position of such an axis only
+    where the storage is contiguous across it.
+    """
+    if low >= high:
+        return []
+    if not shape:
+        return [((), ())]
+    if len(shape) == 1:
+        return [((low, ), (high - low, ))]
+    inner = product(shape[1:])
+    first, low_rest = divmod(low, inner)
+    last, high_rest = divmod(high, inner)
+
+    def within(row, start, stop):
+        return [((row, ) + origin, (1, ) + extent)
+                for origin, extent in row_major_range_boxes(shape[1:], start, stop, dense_rows - 1)]
+
+    if first == last:
+        return within(first, low_rest, high_rest)
+    boxes = []
+    if low_rest:
+        boxes.extend(within(first, low_rest, inner))
+        first += 1
+    if dense_rows > 0:
+        for row in range(first, last):
+            boxes.extend(within(row, 0, inner))
+    elif last > first:
+        boxes.append(((first, ) + (0, ) * (len(shape) - 1), (last - first, ) + tuple(shape[1:])))
+    if high_rest:
+        boxes.extend(within(last, 0, high_rest))
+    return boxes
+
+
+@dataclass(frozen=True)
+class LogicalBox:
+    """An axis-aligned block of the logical parameter: its first coordinate and its extents."""
+    origin: Tuple[int, ...]
+    extent: Tuple[int, ...]
+
+    @property
+    def volume(self) -> int:
+        return product(self.extent)
+
+    @property
+    def is_empty(self) -> bool:
+        return any(size == 0 for size in self.extent)
+
+    def upper(self) -> Tuple[int, ...]:
+        return tuple(low + size for low, size in zip(self.origin, self.extent))
+
+    def intersection(self, other: 'LogicalBox') -> 'LogicalBox':
+        low = tuple(max(a, b) for a, b in zip(self.origin, other.origin))
+        high = tuple(min(a, b) for a, b in zip(self.upper(), other.upper()))
+        return LogicalBox(low, tuple(max(0, h - l) for h, l in zip(high, low)))
+
+    def contains(self, other: 'LogicalBox') -> bool:
+        return all(other_low >= low and other_high <= high
+                   for low, high, other_low, other_high in zip(self.origin, self.upper(), other.origin, other.upper()))
+
+    def __repr__(self) -> str:
+        return f'Box({self.origin}+{self.extent})'
+
+
+def boxes_disjoint(boxes: Sequence[LogicalBox], max_checks: Optional[int] = None) -> bool:
+    """Whether no two boxes share an element.
+
+    Sweeps along the axis whose box origins are most varied, so a box is compared only with the boxes
+    still open where it starts. For the grid and run layouts the builders emit that is a handful of
+    boxes, not all of them, but a layout that keeps many boxes open still costs a comparison per pair.
+
+    With ``max_checks``, the sweep gives up and returns False once it has compared more pairs than
+    that, so False means "not shown disjoint". The sweep compares at most n*(n-1)/2 pairs, so giving
+    up implies n**2 exceeds ``max_checks``, and a caller's pairwise fallback under the same budget
+    refuses at once.
+    """
+    boxes = [box for box in boxes if not box.is_empty]
+    if len(boxes) < 2:
+        return True
+    if not boxes[0].origin:
+        return False
+    axis = max(range(len(boxes[0].origin)), key=lambda a: len({box.origin[a] for box in boxes}))
+    open_boxes: List[LogicalBox] = []
+    checks = 0
+    for box in sorted(boxes, key=lambda b: b.origin[axis]):
+        checks += len(open_boxes)
+        if max_checks is not None and checks > max_checks:
+            return False
+        start = box.origin[axis]
+        open_boxes = [other for other in open_boxes if other.origin[axis] + other.extent[axis] > start]
+        if any(not box.intersection(other).is_empty for other in open_boxes):
+            return False
+        open_boxes.append(box)
+    return True
+
+
+def subtract(region: LogicalBox, cut: LogicalBox) -> List[LogicalBox]:
+    """Return the disjoint parts of a box outside another box."""
+    overlap = region.intersection(cut)
+    if overlap.is_empty:
+        return [region]
+    origin = list(region.origin)
+    extent = list(region.extent)
+    pieces = []
+    for axis, (low, high) in enumerate(zip(overlap.origin, overlap.upper())):
+        if origin[axis] < low:
+            shape = extent.copy()
+            shape[axis] = low - origin[axis]
+            pieces.append(LogicalBox(tuple(origin), tuple(shape)))
+            extent[axis] -= shape[axis]
+            origin[axis] = low
+        end = origin[axis] + extent[axis]
+        if high < end:
+            start = origin.copy()
+            shape = extent.copy()
+            start[axis] = high
+            shape[axis] = end - high
+            pieces.append(LogicalBox(tuple(start), tuple(shape)))
+            extent[axis] = high - origin[axis]
+    return pieces
