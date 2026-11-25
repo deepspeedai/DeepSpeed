@@ -465,6 +465,77 @@ class TestSegKIDataParallelRollout(DistributedTest):
             gc.collect()
             accelerator.synchronize()
 
+    def test_vocab_parallel_head_is_not_split_over_the_tp_group(self):
+        """segKI must not patch a vocab-parallel lm_head.
+
+        AutoTP's VocabParallelLinear head holds a shard of the vocabulary; patching it would make
+        segKI halve that shard and all-gather, silently dropping most of the rows from the logits.
+        It is not caught by the collective guard because VocabParallelLinear subclasses the
+        collective-bearing LinearLayer, not LinearAllreduce, so install_lm_head needs its own
+        ``is_vocab_parallel_lm_head`` check (a pre-existing master bug fixed by this PR).
+        """
+        accelerator = get_accelerator()
+        if accelerator.create_graph() is None:
+            pytest.skip("requires graph capture")
+
+        from transformers import LlamaConfig, LlamaForCausalLM
+
+        config = LlamaConfig(vocab_size=129,
+                             hidden_size=128,
+                             intermediate_size=256,
+                             num_hidden_layers=2,
+                             num_attention_heads=4,
+                             num_key_value_heads=2,
+                             max_position_embeddings=64)
+        torch.manual_seed(0)
+        device = torch.device(accelerator.current_device_name())
+        model = LlamaForCausalLM(config).to(device=device, dtype=torch.bfloat16).eval()
+        reference = copy.deepcopy(model)
+        ds_config = {
+            "train_micro_batch_size_per_gpu": 1,
+            # segKI's lm_head install requires bf16 weights, so cast on initialize instead of after.
+            "bf16": {"enabled": True},
+            "tensor_parallel": {
+                "autotp_size": 2,
+                "vocab_parallel_lm_head": True
+            },
+            "zero_optimization": {
+                "stage": 0
+            },
+        }
+        engine, _, _, _ = deepspeed.initialize(model=model, config=ds_config)
+        model.eval()
+        # The config must actually shard the head, else this is not the case under test.
+        heads = [m for m in model.modules() if getattr(m, "is_vocab_parallel_lm_head", False)]
+        assert heads and heads[0].weight.shape[0] < config.vocab_size
+
+        prompt_ids = torch.tensor([[5, 17, 42, 9, 30, 61, 100, 3]], device=device)
+        attention_mask = torch.ones_like(prompt_ids)
+        new_tokens = 8
+        with torch.no_grad():
+            expected = reference.generate(prompt_ids,
+                                          attention_mask=attention_mask,
+                                          max_new_tokens=new_tokens,
+                                          do_sample=False,
+                                          eos_token_id=None,
+                                          pad_token_id=0)
+
+        rollout = HybridEngineRollout(engine,
+                                      SimpleNamespace(pad_token_id=0, eos_token_id=-1),
+                                      cfg=HybridEngineRolloutConfig(use_graph_capture=True, use_segki=True))
+        try:
+            output = rollout.generate(RolloutRequest(prompt_ids, attention_mask),
+                                      SamplingConfig(max_new_tokens=new_tokens, temperature=0))
+            assert not any(hasattr(m, "_ki_gemm_op") for m in heads), \
+                "segKI patched a vocab-parallel lm_head"
+            # A patched head halves its shard and gathers, leaving the greedy tokens to wander over
+            # the missing rows.
+            assert output.input_ids.tolist() == expected.tolist()
+        finally:
+            del rollout
+            gc.collect()
+            accelerator.synchronize()
+
 
 @pytest.mark.parametrize("attn_implementation", ["eager", "sdpa"])
 def test_static_graph_matches_native_llama_generation(attn_implementation):

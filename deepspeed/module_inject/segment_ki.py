@@ -1018,8 +1018,11 @@ def install_lm_head(model: torch.nn.Module, kernel_op) -> int:
     if lm.weight.dtype is not torch.bfloat16 or lm.bias is not None:
         return 0
     # vocab-parallel lm_head wrappers carry gather/allreduce semantics in
-    # their forward; a plain-GEMM patch would silently drop the collective
-    if carries_collective(lm):
+    # their forward; a plain-GEMM patch would silently drop the collective and
+    # decode a shard of the vocabulary (VocabParallelLinear subclasses the
+    # collective-bearing LinearLayer, not LinearAllreduce, so it needs its own
+    # guard)
+    if carries_collective(lm) or getattr(lm, "is_vocab_parallel_lm_head", False):
         return 0
     # Only the ranks of the model's tensor-parallel group hold the same hidden
     # states, so the vocabulary is split over that group; a model without
