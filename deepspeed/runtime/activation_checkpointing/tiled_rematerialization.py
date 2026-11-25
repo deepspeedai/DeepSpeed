@@ -45,6 +45,7 @@ refuses to split: GDN tiles run in order, carrying the recurrent state.
 chain inside an oversized packed sample.
 """
 
+import collections
 import contextvars
 import sys
 import weakref
@@ -700,6 +701,16 @@ def rebase_cu_seqlens(cu_seqlens, start_sample, end_sample):
     return cu_seqlens[start_sample:end_sample + 1] - cu_seqlens[start_sample]
 
 
+def host_cu_seqlens(cu_seqlens):
+    """``cu_seqlens`` as a list of Python ints: one device-to-host copy for a CUDA tensor, none for a list.
+
+    Tile planning reads every sample boundary; indexing a CUDA tensor one element at a time syncs once per sample.
+    """
+    if torch.is_tensor(cu_seqlens):
+        return [int(c) for c in cu_seqlens.tolist()]
+    return [int(c) for c in cu_seqlens]
+
+
 def plan_packed_tiles(cu_seqlens, shards=None, token_budget=None):
     """Group whole samples of one packed row into contiguous tiles.
 
@@ -719,31 +730,32 @@ def plan_packed_tiles(cu_seqlens, shards=None, token_budget=None):
     another tile would reach the cap, the walk stops closing and the
     remainder accumulates in the final tile, even past budget.
     """
-    num_samples = int(cu_seqlens.shape[0]) - 1
+    cu = host_cu_seqlens(cu_seqlens)
+    num_samples = len(cu) - 1
     if num_samples == 1:
-        return [(0, 1, 0, int(cu_seqlens[1]))]
+        return [(0, 1, 0, cu[1])]
     if token_budget is None:
         if shards is None:
             raise ValueError("plan_packed_tiles requires shards or token_budget")
-        total_tokens = int(cu_seqlens[-1])
+        total_tokens = cu[-1]
         token_budget = (total_tokens + int(shards) - 1) // int(shards)
     token_budget = int(token_budget)
     max_tiles = int(shards) if shards is not None else num_samples
 
     tiles = []
     start_sample = 0
-    start_tok = int(cu_seqlens[0])
+    start_tok = cu[0]
     for sample in range(num_samples):
         tile_has_sample = sample > start_sample
-        end_tok_with_sample = int(cu_seqlens[sample + 1])
+        end_tok_with_sample = cu[sample + 1]
         over_budget = tile_has_sample and (end_tok_with_sample - start_tok) > token_budget
         at_tile_cap = len(tiles) + 1 >= max_tiles
         if over_budget and not at_tile_cap:
-            close_tok = int(cu_seqlens[sample])
+            close_tok = cu[sample]
             tiles.append((start_sample, sample, start_tok, close_tok))
             start_sample = sample
             start_tok = close_tok
-    tiles.append((start_sample, num_samples, start_tok, int(cu_seqlens[num_samples])))
+    tiles.append((start_sample, num_samples, start_tok, cu[num_samples]))
     return tiles
 
 
@@ -860,8 +872,8 @@ def _resolve_forward_packed_tiles(tile_forward, fwd_tile_size, fwd_shards, cu_se
         return plan_packed_tiles(cu_seqlens, shards=fwd_shards)
     if tile_forward:
         return tiles
-    num_samples = int(cu_seqlens.shape[0]) - 1
-    return [(0, num_samples, 0, int(cu_seqlens[-1]))]
+    cu = host_cu_seqlens(cu_seqlens)
+    return [(0, len(cu) - 1, 0, cu[-1])]
 
 
 def _narrow_token_kwarg(value, start_tok, tile_len):
@@ -870,14 +882,118 @@ def _narrow_token_kwarg(value, start_tok, tile_len):
     return tuple(item.narrow(0, start_tok, tile_len) for item in value)
 
 
-def _packed_tile_kwargs(cu_seqlens, start_sample, end_sample, start_tok, end_tok, kwargs_to_token_shard,
-                        kwargs_to_pass, max_seqlen_keys):
-    local_cu_seqlens = rebase_cu_seqlens(cu_seqlens, start_sample, end_sample)
-    kw = {"cu_seqlens": local_cu_seqlens}
+class PackedTilePlan:
+    """Everything one packed row's tiling needs, computed once on the host.
+
+    ``tiles`` / ``fwd_tiles`` / ``chain_plans`` are the plan; for every tile ``(start_sample, end_sample)`` in either
+    list it holds the rebased boundaries on the device (``tile_cu``) and on the host (``tile_cu_cpu``), the longest
+    sample (``tile_max``), and any extra per-tile kwargs from the caller's ``tile_kwargs_fn`` (``tile_extras``). Every
+    mixer call that sees the same ``cu_seqlens`` tensor (all layers and passes of one step) reuses it, so tiling reads
+    the boundaries back from the device once per step and uploads each tile's metadata once.
+    """
+
+    __slots__ = ("cu_host", "tiles", "fwd_tiles", "chain_plans", "tile_cu", "tile_cu_cpu", "tile_max", "tile_extras")
+
+
+_PACKED_PLAN_CACHE_SIZE = 8
+# key -> (cu_seqlens, cu_seqlens._version, plan). Holding cu_seqlens keeps its id from being reused while cached; the
+# version check rejects a tensor updated in place, so a cached plan never describes different boundaries.
+_packed_plan_cache = collections.OrderedDict()
+
+
+def _upload(cpu_tensor, device):
+    if device.type == "cpu":
+        return cpu_tensor
+    return cpu_tensor.pin_memory().to(device, non_blocking=True)
+
+
+def _build_packed_tile_plan(cu_seqlens, device, shards, token_budget, tile_forward, fwd_tile_size, fwd_shards,
+                            chain_tile_fn, chain_token_budget, chain_align, tile_kwargs_fn):
+    plan = PackedTilePlan()
+    plan.cu_host = host_cu_seqlens(cu_seqlens)
+    tiles = plan_packed_tiles(plan.cu_host, shards=shards, token_budget=token_budget)
+    # Agree before the single-sample shortcut: a one-sample rank still has to
+    # enter the MIN all_reduce its multi-sample peers are waiting in. Its
+    # local count of 1 is also the right vote, since packed tiling cannot
+    # split a sample, so every rank then merges down to one tile.
+    plan.tiles = _agree_packed_tile_count(tiles, device)
+    plan.chain_plans = {}
+    if chain_tile_fn is not None:
+        plan.chain_plans = _plan_packed_chains(plan.tiles, chain_token_budget, chain_align)
+    plan.fwd_tiles = _resolve_forward_packed_tiles(tile_forward, fwd_tile_size, fwd_shards, plan.cu_host, plan.tiles)
+    if plan.chain_plans:
+        # A whole-row first forward would pay the full-sequence workspace the chain exists to drop.
+        plan.fwd_tiles = plan.tiles
+    plan.tile_cu, plan.tile_cu_cpu, plan.tile_max, plan.tile_extras = {}, {}, {}, {}
+    num_samples = len(plan.cu_host) - 1
+    keys = {(t[0], t[1]) for t in plan.tiles} | {(t[0], t[1]) for t in plan.fwd_tiles} | {(0, num_samples)}
+    for start_sample, end_sample in keys:
+        local = [c - plan.cu_host[start_sample] for c in plan.cu_host[start_sample:end_sample + 1]]
+        cpu = torch.tensor(local, dtype=cu_seqlens.dtype)
+        plan.tile_cu_cpu[(start_sample, end_sample)] = cpu
+        plan.tile_cu[(start_sample, end_sample)] = _upload(cpu, device)
+        plan.tile_max[(start_sample, end_sample)] = max(b - a for a, b in zip(local, local[1:]))
+        plan.tile_extras[(start_sample, end_sample)] = dict(tile_kwargs_fn(cpu, device)) if tile_kwargs_fn else {}
+    return plan
+
+
+def get_packed_tile_plan(cu_seqlens,
+                         device,
+                         shards=None,
+                         token_budget=None,
+                         tile_forward=False,
+                         fwd_tile_size=None,
+                         fwd_shards=None,
+                         chain_tile_fn=None,
+                         chain_token_budget=None,
+                         chain_align=64,
+                         tile_kwargs_fn=None):
+    """The ``PackedTilePlan`` for ``cu_seqlens`` under these tiling options, built on first use and then cached.
+
+    The cache is keyed by the identity and version of ``cu_seqlens`` and by the options, so every layer and pass of one
+    step shares one plan, and a new step's boundaries (a new tensor) get a new one. ``tile_kwargs_fn(tile_cu_cpu,
+    device) -> dict`` adds per-tile kwargs computed once per plan (for example kernel chunk indices).
+    """
+    key = (id(cu_seqlens), shards, token_budget, bool(tile_forward), fwd_tile_size, fwd_shards, chain_tile_fn,
+           chain_token_budget, chain_align, tile_kwargs_fn)
+    hit = _packed_plan_cache.get(key)
+    if hit is not None and hit[0] is cu_seqlens and hit[1] == cu_seqlens._version:
+        _packed_plan_cache.move_to_end(key)
+        return hit[2]
+    plan = _build_packed_tile_plan(cu_seqlens, device, shards, token_budget, tile_forward, fwd_tile_size, fwd_shards,
+                                   chain_tile_fn, chain_token_budget, chain_align, tile_kwargs_fn)
+    _packed_plan_cache[key] = (cu_seqlens, cu_seqlens._version, plan)
+    _packed_plan_cache.move_to_end(key)
+    while len(_packed_plan_cache) > _PACKED_PLAN_CACHE_SIZE:
+        _packed_plan_cache.popitem(last=False)
+    return plan
+
+
+def _packed_tile_kwargs(cu_seqlens,
+                        start_sample,
+                        end_sample,
+                        start_tok,
+                        end_tok,
+                        kwargs_to_token_shard,
+                        kwargs_to_pass,
+                        max_seqlen_keys,
+                        plan=None,
+                        pass_cu_seqlens_cpu=False):
+    if plan is not None:
+        tile = (start_sample, end_sample)
+        kw = {"cu_seqlens": plan.tile_cu[tile]}
+        if pass_cu_seqlens_cpu:
+            kw["cu_seqlens_cpu"] = plan.tile_cu_cpu[tile]
+        kw.update(plan.tile_extras[tile])
+    else:
+        kw = {"cu_seqlens": rebase_cu_seqlens(cu_seqlens, start_sample, end_sample)}
     if max_seqlen_keys:
         # The row's global max can be larger than any one tile's; recompute
         # exactly instead of passing a stale, oversized hint through.
-        local_max = int(local_cu_seqlens.diff().max())
+        if plan is not None:
+            local_max = plan.tile_max[(start_sample, end_sample)]
+        else:
+            local_max = int(kw["cu_seqlens"].diff().max())
         for key in max_seqlen_keys:
             kw[key] = local_max
     tile_len = end_tok - start_tok
@@ -902,7 +1018,9 @@ def packed_seq_tiled_rematerialize_compute(fn,
                                            fwd_shards=None,
                                            chain_tile_fn=None,
                                            chain_token_budget=None,
-                                           chain_align=64):
+                                           chain_align=64,
+                                           pass_cu_seqlens_cpu=False,
+                                           tile_kwargs_fn=None):
     """Tile ``fn(hidden_states, **kwargs)`` over contiguous whole-sample tiles of one packed row.
 
     ``hidden_states`` is ``[1, T, H]`` or ``[T, H]``; ``cu_seqlens`` locates
@@ -923,6 +1041,13 @@ def packed_seq_tiled_rematerialize_compute(fn,
     so token-major kwargs are refused and pass kwargs are not forwarded to it.
     This call keeps the parameter hold and ``ds_grad_is_ready`` for itself;
     the chain neither gathers nor marks readiness on its own.
+
+    The tiling is planned once per ``cu_seqlens`` tensor (``get_packed_tile_plan``) and shared by every call that passes
+    the same tensor, so the boundaries are read back from the device once per step and each tile's metadata is
+    uploaded once. ``pass_cu_seqlens_cpu=True`` also passes each tile's rebased boundaries to ``fn`` as a CPU tensor
+    ``cu_seqlens_cpu``, for callees that would otherwise read them back from the device (varlen max lengths, kernel
+    chunk indices). ``tile_kwargs_fn(tile_cu_seqlens_cpu, device) -> dict`` adds per-tile kwargs, computed once per
+    plan; it must be a stable object (it is part of the cache key).
     """
     kwargs_to_token_shard = {} if kwargs_to_token_shard is None else dict(kwargs_to_token_shard)
     kwargs_to_pass = {} if kwargs_to_pass is None else dict(kwargs_to_pass)
@@ -961,24 +1086,30 @@ def packed_seq_tiled_rematerialize_compute(fn,
     if not hidden_states.is_contiguous():
         hidden_states = hidden_states.contiguous()
 
-    tiles = plan_packed_tiles(cu_seqlens, shards=shards, token_budget=token_budget)
-    # Agree before the single-sample shortcut: a one-sample rank still has to
-    # enter the MIN all_reduce its multi-sample peers are waiting in. Its
-    # local count of 1 is also the right vote, since packed tiling cannot
-    # split a sample, so every rank then merges down to one tile.
-    tiles = _agree_packed_tile_count(tiles, hidden_states.device)
-    chain_plans = {}
-    if chain_tile_fn is not None:
-        chain_plans = _plan_packed_chains(tiles, chain_token_budget, chain_align)
+    plan = get_packed_tile_plan(cu_seqlens,
+                                hidden_states.device,
+                                shards=shards,
+                                token_budget=token_budget,
+                                tile_forward=tile_forward,
+                                fwd_tile_size=fwd_tile_size,
+                                fwd_shards=fwd_shards,
+                                chain_tile_fn=chain_tile_fn,
+                                chain_token_budget=chain_token_budget,
+                                chain_align=chain_align,
+                                tile_kwargs_fn=tile_kwargs_fn)
+    if plan.cu_host[-1] - plan.cu_host[0] != hidden_states.shape[-2]:
+        raise ValueError(f"packed_seq_tiled_rematerialize_compute: cu_seqlens spans {plan.cu_host[-1] - plan.cu_host[0]} "
+                         f"tokens but hidden_states has {hidden_states.shape[-2]}")
+    tiles, fwd_tiles, chain_plans = plan.tiles, plan.fwd_tiles, plan.chain_plans
     if num_samples == 1 and not chain_plans:
-        return fn(hidden_states, cu_seqlens=cu_seqlens, **kwargs_to_token_shard, **kwargs_to_pass)
+        whole = (0, 1)
+        extra = dict(plan.tile_extras[whole])
+        if pass_cu_seqlens_cpu:
+            extra["cu_seqlens_cpu"] = plan.tile_cu_cpu[whole]
+        return fn(hidden_states, cu_seqlens=cu_seqlens, **kwargs_to_token_shard, **kwargs_to_pass, **extra)
 
     if len(tiles) > 1 or chain_plans:
         _warn_if_not_z3_leaf(compute_params)
-    fwd_tiles = _resolve_forward_packed_tiles(tile_forward, fwd_tile_size, fwd_shards, cu_seqlens, tiles)
-    if chain_plans:
-        # A whole-row first forward would pay the full-sequence workspace the chain exists to drop.
-        fwd_tiles = tiles
 
     global _tiled_fwd_grad_enabled
     _tiled_fwd_grad_enabled = torch.is_grad_enabled()
@@ -996,6 +1127,7 @@ def packed_seq_tiled_rematerialize_compute(fn,
         tuple(max_seqlen_keys),
         chain_tile_fn,
         chain_plans,
+        (plan, bool(pass_cu_seqlens_cpu)),
         *kwargs_to_token_shard.values(),
         *kwargs_to_pass.values(),
     )
@@ -1022,9 +1154,11 @@ class PackedSeqTiledRematerializeCompute(torch.autograd.Function):
         max_seqlen_keys,
         chain_tile_fn,
         chain_plans,
+        host_meta,
         *args,
     ) -> torch.Tensor:
         ctx.ds_tiled_grad_enabled = _tiled_fwd_grad_enabled
+        ctx.packed_plan, ctx.pass_cu_seqlens_cpu = host_meta
         ctx.fn = fn
         ctx.compute_params = compute_params if compute_params is not None else []
         ctx.keys_to_token_shard = keys_to_token_shard
@@ -1060,8 +1194,16 @@ class PackedSeqTiledRematerializeCompute(torch.autograd.Function):
             with torch.no_grad():
                 output_shards = []
                 for start_sample, end_sample, start_tok, end_tok in fwd_tiles:
-                    kw = _packed_tile_kwargs(cu_seqlens, start_sample, end_sample, start_tok, end_tok,
-                                             kwargs_to_token_shard, kwargs_to_pass, max_seqlen_keys)
+                    kw = _packed_tile_kwargs(cu_seqlens,
+                                             start_sample,
+                                             end_sample,
+                                             start_tok,
+                                             end_tok,
+                                             kwargs_to_token_shard,
+                                             kwargs_to_pass,
+                                             max_seqlen_keys,
+                                             plan=ctx.packed_plan,
+                                             pass_cu_seqlens_cpu=ctx.pass_cu_seqlens_cpu)
                     x_tile = hidden_states.narrow(token_dim, start_tok, end_tok - start_tok)
                     if start_sample in chain_plans:
                         sample_x = x_tile.unsqueeze(0) if token_dim == 0 else x_tile
@@ -1124,14 +1266,22 @@ class PackedSeqTiledRematerializeCompute(torch.autograd.Function):
                     x_tile.requires_grad_(x_requires_grad)
                     if x_grad is not None:
                         x_tile.grad = x_grad.narrow(token_dim, start_tok, tile_len).view_as(x_tile)
-                    kw = _packed_tile_kwargs(cu_seqlens, start_sample, end_sample, start_tok, end_tok,
-                                             kwargs_to_token_shard, kwargs_to_pass, max_seqlen_keys)
+                    kw = _packed_tile_kwargs(cu_seqlens,
+                                             start_sample,
+                                             end_sample,
+                                             start_tok,
+                                             end_tok,
+                                             kwargs_to_token_shard,
+                                             kwargs_to_pass,
+                                             max_seqlen_keys,
+                                             plan=ctx.packed_plan,
+                                             pass_cu_seqlens_cpu=ctx.pass_cu_seqlens_cpu)
                     grad_tile = incoming_grad.narrow(token_dim, start_tok, tile_len)
                     with torch.enable_grad():
                         output = fn(x_tile, **kw)
                     torch.autograd.backward(output, grad_tile)
 
-        grad_outputs = [None, x_grad, None, None, None, None, None, None, None, None, None]
+        grad_outputs = [None, x_grad, None, None, None, None, None, None, None, None, None, None]
         arg_outputs = [None] * ctx.total_args
         return tuple(grad_outputs + arg_outputs)
 

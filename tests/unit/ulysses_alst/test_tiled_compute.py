@@ -10,7 +10,7 @@ from deepspeed.runtime.activation_checkpointing.tiled_rematerialization import (
     tiled_rematerialize, tiled_rematerialize_compute, classify_rematerialize_kwarg, _hold_gathered_params,
     plan_packed_tiles, rebase_cu_seqlens, classify_packed_kwarg, packed_seq_tiled_rematerialize_compute,
     PackedSeqTiledRematerializeCompute, plan_chain_tiles, _merge_smallest_chain_pair, _causal_conv_carry,
-    sequential_chain_rematerialize, qwen35_gdn_tile_forward, limit_grad_reduce)
+    sequential_chain_rematerialize, qwen35_gdn_tile_forward, limit_grad_reduce, get_packed_tile_plan, host_cu_seqlens)
 from deepspeed.runtime.sequence_parallel.ulysses_sp import TiledMLP, sequence_tiled_compute, TiledFusedLogitsLoss
 from deepspeed.accelerator import get_accelerator
 from deepspeed.utils import safe_get_full_grad
@@ -652,6 +652,48 @@ def test_rebase_cu_seqlens():
     rebased = rebase_cu_seqlens(cu_seqlens, 1, 3)
     torch_assert_equal(rebased, torch.tensor([0, 4, 8]))
     assert int(rebased[-1]) == int(cu_seqlens[3] - cu_seqlens[1])
+
+
+def test_plan_packed_tiles_accepts_host_boundaries():
+    cu_seqlens = torch.tensor([0, 3, 6, 9, 12])
+    assert host_cu_seqlens(cu_seqlens) == [0, 3, 6, 9, 12]
+    assert plan_packed_tiles([0, 3, 6, 9, 12], token_budget=7) == plan_packed_tiles(cu_seqlens, token_budget=7)
+
+
+def test_packed_tile_plan_holds_each_tiles_metadata():
+    cu_seqlens = torch.tensor([0, 3, 7, 9, 16], dtype=torch.int32)
+    calls = []
+
+    def extras(tile_cu_cpu, device):
+        calls.append(tile_cu_cpu.tolist())
+        return {"tile_len": int(tile_cu_cpu[-1])}
+
+    plan = get_packed_tile_plan(cu_seqlens, torch.device("cpu"), token_budget=8, tile_kwargs_fn=extras)
+    assert plan.tiles == plan_packed_tiles(cu_seqlens, token_budget=8) == [(0, 2, 0, 7), (2, 3, 7, 9), (3, 4, 9, 16)]
+    for start_sample, end_sample, start_tok, end_tok in plan.tiles:
+        tile = (start_sample, end_sample)
+        torch_assert_equal(plan.tile_cu[tile], rebase_cu_seqlens(cu_seqlens, start_sample, end_sample))
+        torch_assert_equal(plan.tile_cu_cpu[tile], rebase_cu_seqlens(cu_seqlens, start_sample, end_sample))
+        assert plan.tile_cu_cpu[tile].dtype == cu_seqlens.dtype
+        assert plan.tile_max[tile] == int(rebase_cu_seqlens(cu_seqlens, start_sample, end_sample).diff().max())
+        assert plan.tile_extras[tile] == {"tile_len": end_tok - start_tok}
+    assert len(calls) == len(plan.tile_cu)  # once per tile, including the whole-row entry
+
+
+def test_packed_tile_plan_is_shared_until_the_boundaries_change():
+    cu_seqlens = torch.tensor([0, 4, 8, 12])
+    plan = get_packed_tile_plan(cu_seqlens, torch.device("cpu"), token_budget=4)
+    # Same tensor and options: every layer and pass of a step reuses one plan.
+    assert get_packed_tile_plan(cu_seqlens, torch.device("cpu"), token_budget=4) is plan
+    # Other options get their own plan.
+    assert get_packed_tile_plan(cu_seqlens, torch.device("cpu"), token_budget=8) is not plan
+    # An in-place update is a different set of boundaries: the cached plan must not be returned.
+    cu_seqlens[1] = 2
+    replanned = get_packed_tile_plan(cu_seqlens, torch.device("cpu"), token_budget=4)
+    assert replanned is not plan
+    assert replanned.cu_host == [0, 2, 8, 12]
+    # Equal values in a new tensor (the next step) are planned again, not matched by value.
+    assert get_packed_tile_plan(torch.tensor([0, 2, 8, 12]), torch.device("cpu"), token_budget=4) is not replanned
 
 
 def test_classify_packed_kwarg():
