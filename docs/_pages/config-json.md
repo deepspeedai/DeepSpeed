@@ -369,9 +369,7 @@ Example of <i>**scheduler**</i>
 
 ### Training quantization
 
-`quantization` groups training recipes by low-precision format. Enable at most one
-training recipe per engine. See [subchannel quantized training](#subchannel-quantized-training)
-for FP8 and INT8. The Ascend
+`quantization` groups training recipes by low-precision format. The Ascend
 HiFloat8 path uses `quantization.hifloat8` with BF16 parameters and ZeRO stages 0–2.
 DeepSpeed selects modules and applies AO configs through one `quantize_` call.
 

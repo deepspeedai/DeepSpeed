@@ -9,17 +9,12 @@ import torch
 from torch import nn
 
 from deepspeed.accelerator import get_accelerator
-from deepspeed.runtime.config import DeepSpeedConfigError
-from deepspeed.runtime.quantization.config import get_quantization_config
+from deepspeed.runtime.config import DeepSpeedConfig, DeepSpeedConfigError, get_hifloat8_config, get_quantization_config
 from deepspeed.runtime.engine import DeepSpeedEngine
 
 # Native tests require the public API; a missing extension must fail there.
 # Gate only device availability, without importing TorchAO during collection.
 requires_npu = pytest.mark.skipif(not hasattr(torch, "npu") or not torch.npu.is_available(), reason="NPU unavailable")
-
-
-def get_hifloat8_config(config):
-    return get_quantization_config(config).hifloat8
 
 
 def test_hifloat8_config_defaults_disabled():
@@ -172,6 +167,7 @@ def _make_engine(model, patterns, min_numel=0, module_configs=None):
             "min_numel": min_numel,
             "module_configs": module_configs,
         },
+        quantization_config=get_quantization_config({}),
         bfloat16_config=SimpleNamespace(enabled=True),
         tensor_parallel_config=SimpleNamespace(autotp_size=1),
         zero_optimization_stage=2,
@@ -440,15 +436,14 @@ def test_public_quantize_entry_converts_dense_and_grouped_in_place(monkeypatch, 
 
 def test_quantization_hifloat8_and_legacy_config_normalize_identically():
     options = {"enabled": True, "module_name_patterns": ["*.experts"], "config": {"grad_dst_type_max": None}}
-    assert get_quantization_config({"quantization": {
-        "hifloat8": options
-    }}) == get_quantization_config({"hifloat8": options})
+    assert get_hifloat8_config({"quantization": {"hifloat8": options}}) == get_hifloat8_config({"hifloat8": options})
     with pytest.raises(DeepSpeedConfigError, match="quantization.hifloat8"):
-        get_quantization_config({"quantization": {"hifloat8": options}, "hifloat8": options})
+        get_hifloat8_config({"quantization": {"hifloat8": options}, "hifloat8": options})
 
 
-def test_quantization_recipes_share_one_configuration():
-    config = get_quantization_config({
+def test_hifloat8_is_parsed_separately_from_upstream_subchannel():
+    options = {
+        "train_micro_batch_size_per_gpu": 1,
         "quantization": {
             "subchannel": {
                 "enabled": True,
@@ -457,28 +452,25 @@ def test_quantization_recipes_share_one_configuration():
                 }
             },
             "hifloat8": {
-                "enabled": False
+                "expected_module_count": 7
             },
         }
-    })
-    assert config.subchannel.enabled
-    assert config.subchannel.forward.block_size == 32
-    assert not config.hifloat8["enabled"]
+    }
+    config = DeepSpeedConfig(options)
+    assert config.quantization_config.subchannel.enabled
+    assert config.quantization_config.subchannel.forward.block_size == 32
+    assert not hasattr(config.quantization_config, "hifloat8")
+    assert config.hifloat8_config["expected_module_count"] == 7
+    assert options["quantization"]["hifloat8"] == {"expected_module_count": 7}
 
 
-def test_quantization_rejects_both_recipes_enabled():
-    with pytest.raises(DeepSpeedConfigError, match="Enable only one"):
-        get_quantization_config({
-            "hifloat8": {
-                "enabled": True,
-                "module_name_patterns": ["*.experts"]
-            },
-            "quantization": {
-                "subchannel": {
-                    "enabled": True
-                }
-            },
-        })
+def test_quantization_rejects_both_recipes_enabled_before_conversion():
+    model = _ToyModel()
+    engine = _make_engine(model, ["model.self_attn.q_proj"])
+    engine._config.quantization_config = get_quantization_config({"quantization": {"subchannel": {"enabled": True}}})
+    with pytest.raises(RuntimeError, match="Enable only one"):
+        engine._validate_hifloat8_configuration(model)
+    assert type(model.model.self_attn["q_proj"]) is nn.Linear
 
 
 @pytest.mark.parametrize("option,value", [("overlap_weight_grad", True), ("dw_staging", object())])
@@ -504,7 +496,7 @@ def test_invalid_training_quantization_sections_fail_closed(options):
 @pytest.mark.parametrize("module_configs", [[], True, {1: {}}, {"dense": []}, {"re:(": {}}])
 def test_invalid_module_recipe_structure_fails_during_config_parsing(module_configs):
     with pytest.raises(DeepSpeedConfigError):
-        get_quantization_config({"quantization": {"hifloat8": {"module_configs": module_configs}}})
+        get_hifloat8_config({"quantization": {"hifloat8": {"module_configs": module_configs}}})
 
 
 @pytest.mark.parametrize("module_configs", [{"missing": {}}, {"re:.*missing": {}}, {"_default": None}])

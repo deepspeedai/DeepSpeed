@@ -10,7 +10,6 @@ import torch
 
 from deepspeed.accelerator import get_accelerator
 from deepspeed.moe.ep_experts import GroupedExperts
-from deepspeed.runtime.quantization.config import HIFLOAT8
 from deepspeed.utils import logger
 
 
@@ -94,7 +93,7 @@ def configure_hifloat8(model, config, device):
     selected_linears, selected_experts = [], []
     for options, linears, experts in _select_modules(model, config):
         try:
-            config_class = accelerator.get_training_quantization_config(HIFLOAT8)
+            config_class = accelerator.get_training_quantization_config("hifloat8")
             if config_class is None or torch.device(device).type != accelerator.device_name():
                 raise RuntimeError(f"No hifloat8 training backend for {device}")
             recipe = _hifloat8_recipe(config_class, options, bool(linears), bool(experts))

@@ -4,6 +4,7 @@
 # DeepSpeed Team
 
 import os
+import re
 from typing import Union
 from enum import Enum
 
@@ -176,8 +177,91 @@ def get_expert_parallel_config(param_dict):
     return AutoEPConfig()
 
 
+HIFLOAT8 = "hifloat8"
+HIFLOAT8_DEFAULT = {
+    "enabled": False,
+    "backend": "torchao",
+    "module_name_patterns": (),
+    "min_numel": 0,
+    "expected_module_count": None,
+    "config": None,
+    "module_configs": None,
+}
+
+
+def _parse_hifloat8_config(config):
+    if not isinstance(config, dict):
+        raise DeepSpeedConfigError(f"'{HIFLOAT8}' must be an object, got {type(config).__name__}")
+
+    unknown = sorted(set(config) - set(HIFLOAT8_DEFAULT))
+    if unknown:
+        raise DeepSpeedConfigError(f"Unknown '{HIFLOAT8}' fields: {unknown}")
+
+    result = dict(HIFLOAT8_DEFAULT)
+    result.update(config)
+    if not isinstance(result["enabled"], bool):
+        raise DeepSpeedConfigError("'hifloat8.enabled' must be a boolean")
+    if result["backend"] == "torchao_npu":
+        result["backend"] = "torchao"
+    if result["backend"] != "torchao":
+        raise DeepSpeedConfigError("'hifloat8.backend' must be 'torchao'; the legacy torch_npu helper was removed")
+    policy = result["config"]
+    if policy is not None:
+        if not isinstance(policy, dict):
+            raise DeepSpeedConfigError("'hifloat8.config' must be an object or null")
+    module_configs = result["module_configs"]
+    if module_configs is not None:
+        if not isinstance(module_configs, dict):
+            raise DeepSpeedConfigError("'hifloat8.module_configs' must be an object or null")
+        for selector, recipe in module_configs.items():
+            if not isinstance(selector, str):
+                raise DeepSpeedConfigError("'hifloat8.module_configs' keys must be module names or re: patterns")
+            if recipe is not None and not isinstance(recipe, dict):
+                raise DeepSpeedConfigError(f"HiFloat8 recipe for {selector!r} must be an object or null")
+            if selector.startswith("re:"):
+                try:
+                    re.compile(selector[3:])
+                except re.error as error:
+                    raise DeepSpeedConfigError(
+                        f"Invalid HiFloat8 module_configs regex {selector!r}: {error}") from error
+    patterns = result["module_name_patterns"]
+    if not isinstance(patterns,
+                      (list, tuple)) or not all(isinstance(pattern, str) and pattern for pattern in patterns):
+        raise DeepSpeedConfigError("'hifloat8.module_name_patterns' must be a list of non-empty strings")
+    if result["enabled"] and not patterns and not module_configs:
+        raise DeepSpeedConfigError("HiFloat8 requires module_name_patterns or module_configs when enabled")
+    min_numel = result["min_numel"]
+    if isinstance(min_numel, bool) or not isinstance(min_numel, int) or min_numel < 0:
+        raise DeepSpeedConfigError("'hifloat8.min_numel' must be a non-negative integer")
+    expected_count = result["expected_module_count"]
+    if expected_count is not None and (isinstance(expected_count, bool) or not isinstance(expected_count, int)
+                                       or expected_count <= 0):
+        raise DeepSpeedConfigError("'hifloat8.expected_module_count' must be a positive integer or null")
+    result["module_name_patterns"] = tuple(patterns)
+    return result
+
+
+def get_hifloat8_config(param_dict):
+    """Read HiFloat8's own options, including the legacy top-level alias."""
+    if "low_precision" in param_dict:
+        raise DeepSpeedConfigError("Use quantization.hifloat8 instead of low_precision")
+    options = param_dict.get("quantization", {})
+    if not isinstance(options, dict):
+        raise DeepSpeedConfigError("'quantization' must be an object")
+    if HIFLOAT8 in param_dict and HIFLOAT8 in options:
+        raise DeepSpeedConfigError("Set HiFloat8 options only under quantization.hifloat8")
+    return _parse_hifloat8_config(options.get(HIFLOAT8, param_dict.get(HIFLOAT8, {})))
+
+
 def get_quantization_config(param_dict):
     from deepspeed.runtime.quantization.config import get_quantization_config as _get_quantization_config
+    options = param_dict.get("quantization", {})
+    if not isinstance(options, dict):
+        raise DeepSpeedConfigError("'quantization' must be an object")
+    if HIFLOAT8 in options:
+        # HiFloat8 validates its own slice of the user config. Upstream sees its original schema.
+        upstream_options = {name: value for name, value in options.items() if name != HIFLOAT8}
+        param_dict = {**param_dict, "quantization": upstream_options}
     return _get_quantization_config(param_dict)
 
 
@@ -548,7 +632,7 @@ class DeepSpeedConfig(object):
 
         self.pipeline = get_pipeline_config(param_dict)
         self.quantization_config = get_quantization_config(param_dict)
-        self.hifloat8_config = self.quantization_config.hifloat8
+        self.hifloat8_config = get_hifloat8_config(param_dict)
 
         self.data_efficiency_enabled = get_data_efficiency_enabled(param_dict)
         self.data_efficiency_config = get_data_efficiency_config(param_dict)

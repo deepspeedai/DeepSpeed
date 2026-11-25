@@ -2218,6 +2218,8 @@ class DeepSpeedEngine(Module):
     def _validate_hifloat8_configuration(self, model):
         if not self.hifloat8_enabled():
             return
+        if self._config.quantization_config.subchannel.enabled:
+            raise RuntimeError("Enable only one of quantization.subchannel and quantization.hifloat8")
         if not self.bfloat16_enabled():
             raise RuntimeError("HiFloat8 training requires BF16 model parameters")
         if self.pipeline_parallelism:
@@ -2235,7 +2237,7 @@ class DeepSpeedEngine(Module):
         if not self.hifloat8_enabled():
             return
 
-        from .quantization.hifloat8 import configure_hifloat8
+        from .hifloat8 import configure_hifloat8
 
         self.hifloat8_converted_module_names, self.hifloat8_grouped_module_names = configure_hifloat8(
             self.module, self._config.hifloat8_config, self.device)
