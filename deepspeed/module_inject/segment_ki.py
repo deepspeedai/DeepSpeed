@@ -758,7 +758,10 @@ _INJECTION_MARKERS = ("_ki_dual_op", "_ki_gdn_op", "_ki_attn_op", "_ki_qkv_op", 
 
 def segki_injected(model: torch.nn.Module) -> bool:
     """Whether segment kernels run in ``model``'s forwards, whichever rollout installed them."""
-    return any(hasattr(module, marker) for module in model.modules() for marker in _INJECTION_MARKERS)
+    # The markers are plain attributes, so they live in __dict__. hasattr would
+    # route every miss through nn.Module.__getattr__, which is ~5x slower on
+    # the common uninjected scan.
+    return any(any(marker in module.__dict__ for marker in _INJECTION_MARKERS) for module in model.modules())
 
 
 def segki_refresh(model: torch.nn.Module) -> None:
