@@ -491,7 +491,11 @@ def merge_tp_slices(uc_info, dir, slice_dir, tp_degree, name_and_shapes):
                 # below, so there is no optimizer tensor to merge here.
                 continue
             cat_dim = 1 if get_matched_pattern(parameters_with_row_parallelism, name) else 0
-            param = torch.cat(slices, dim=cat_dim)
+            if len(slices) == 1:
+                # cat rejects a 0-D tensor, such as a scalar parameter.
+                param = slices[0]
+            else:
+                param = torch.cat(slices, dim=cat_dim)
             ckpt_dict[CAT_DIM] = cat_dim
 
         if get_matched_pattern(vocabulary_parameters, name):

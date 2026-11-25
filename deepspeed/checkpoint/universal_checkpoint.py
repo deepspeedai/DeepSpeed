@@ -399,6 +399,9 @@ def load_hp_checkpoint_state(self, folder, tp_rank, tp_world_size, ep_rank=0, ep
                 sub_params = full_hp_param.chunk(n_sub_params, dim=chunk_dim)
                 sub_params_tp_slice = [p.chunk(tp_world_size, dim=chunk_dim)[tp_rank] for p in sub_params]
                 tp_hp_slice = torch.cat(sub_params_tp_slice, dim=chunk_dim)
+            elif tp_world_size == 1:
+                # chunk rejects a 0-D tensor, such as a scalar parameter.
+                tp_hp_slice = full_hp_param
             else:
                 # this performs the opposite of cat when merging TP slices
                 tp_hp_slice = full_hp_param.chunk(tp_world_size, chunk_dim)[tp_rank]

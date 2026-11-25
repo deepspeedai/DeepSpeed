@@ -22,6 +22,7 @@ from deepspeed.pipe import PipelineModule
 from deepspeed.runtime.pipe.topology import PipeModelDataParallelTopology
 from deepspeed.checkpoint.ds_to_universal import main as convert_to_universal
 from deepspeed.utils import groups, safe_get_full_fp32_param, safe_get_full_optimizer_state
+from deepspeed.runtime.zero.utils import ZeRORuntimeException
 
 from unit.common import DistributedTest, DistributedFixture
 from unit.simple_model import *
@@ -615,6 +616,37 @@ def _full_optimizer_states(engine):
     return states
 
 
+class _ScaledModel(SimpleModel):
+    """SimpleModel behind a trainable 0-D scale, a parameter with no dimension to partition along."""
+
+    def __init__(self, hidden_dim, nlayers):
+        super().__init__(hidden_dim, nlayers=nlayers)
+        self.scale = torch.nn.Parameter(torch.tensor(0.9))
+
+    def forward(self, x, y):
+        return super().forward(x * self.scale, y)
+
+
+def _save_as_universal(engine, tmpdir):
+    """Save ``engine`` and convert the checkpoint, returning the universal checkpoint's tag."""
+    engine.save_checkpoint(tmpdir, tag=CP_TAG, client_state={UNIVERSAL_CHECKPOINT_INFO: {}})
+    engine.destroy()
+
+    cp_dir = os.path.join(tmpdir, CP_TAG)
+    dist.barrier()
+    if dist.get_rank() == 0:
+        convert_to_universal(
+            SimpleNamespace(input_folder=cp_dir,
+                            output_folder=f"{cp_dir}_universal",
+                            num_extract_workers=1,
+                            num_merge_workers=1,
+                            keep_temp_folder=False,
+                            strict=True,
+                            inject_missing_state=False))
+    dist.barrier()
+    return f"{CP_TAG}_universal"
+
+
 @pytest.mark.parametrize("source_stage,target_stage", [(1, 3), (2, 3), (3, 1), (3, 2)])
 class TestUniversalCheckpointAcrossZeROStages(DistributedTest):
     world_size = 2
@@ -630,14 +662,16 @@ class TestUniversalCheckpointAcrossZeROStages(DistributedTest):
             ds_config = {"train_batch_size": 2, "zero_optimization": {"stage": stage, "sub_group_size": 100}}
             if load_universal:
                 ds_config["checkpoint"] = {"load_universal": True}
-            model = SimpleModel(hidden_dim, nlayers=2)
+            model = _ScaledModel(hidden_dim, nlayers=2)
             # Two groups with their own settings. The target starts from other settings, so the check below
             # sees what the load restored.
+            group_params = [list(layer.parameters()) for layer in model.linears]
+            group_params[0].append(model.scale)
             param_groups = [{
-                "params": list(layer.parameters()),
+                "params": params,
                 "lr": 1.0 if load_universal else lr,
                 "weight_decay": 0.0 if load_universal else 0.01 * i
-            } for i, (layer, lr) in enumerate(zip(model.linears, group_lrs))]
+            } for i, (params, lr) in enumerate(zip(group_params, group_lrs))]
             engine, _, _, _ = deepspeed.initialize(config=ds_config,
                                                    model=model,
                                                    optimizer=torch.optim.Adam(param_groups))
@@ -651,24 +685,10 @@ class TestUniversalCheckpointAcrossZeROStages(DistributedTest):
             source.optimizer._hp_optimizer_states_linked = False
             source.optimizer._lazy_init_hp_params_optimizer_state()
         expected = _full_optimizer_states(source)
-        source.save_checkpoint(tmpdir, tag=CP_TAG, client_state={UNIVERSAL_CHECKPOINT_INFO: {}})
-        source.destroy()
-
-        cp_dir = os.path.join(tmpdir, CP_TAG)
-        dist.barrier()
-        if dist.get_rank() == 0:
-            convert_to_universal(
-                SimpleNamespace(input_folder=cp_dir,
-                                output_folder=f"{cp_dir}_universal",
-                                num_extract_workers=1,
-                                num_merge_workers=1,
-                                keep_temp_folder=False,
-                                strict=True,
-                                inject_missing_state=False))
-        dist.barrier()
+        universal_tag = _save_as_universal(source, tmpdir)
 
         target = build(target_stage, load_universal=True)
-        target.load_checkpoint(tmpdir, tag=f"{CP_TAG}_universal")
+        target.load_checkpoint(tmpdir, tag=universal_tag)
 
         loaded = _full_optimizer_states(target)
         assert loaded.keys() == expected.keys()
@@ -710,24 +730,10 @@ class TestUniversalCheckpointBeforeFirstStepToZeRO3(DistributedTest):
 
         source = build(source_stage, load_universal=False)
         expected = {name: safe_get_full_fp32_param(param).cpu() for name, param in source.module.named_parameters()}
-        source.save_checkpoint(tmpdir, tag=CP_TAG, client_state={UNIVERSAL_CHECKPOINT_INFO: {}})
-        source.destroy()
-
-        cp_dir = os.path.join(tmpdir, CP_TAG)
-        dist.barrier()
-        if dist.get_rank() == 0:
-            convert_to_universal(
-                SimpleNamespace(input_folder=cp_dir,
-                                output_folder=f"{cp_dir}_universal",
-                                num_extract_workers=1,
-                                num_merge_workers=1,
-                                keep_temp_folder=False,
-                                strict=True,
-                                inject_missing_state=False))
-        dist.barrier()
+        universal_tag = _save_as_universal(source, tmpdir)
 
         target = build(3, load_universal=True)
-        target.load_checkpoint(tmpdir, tag=f"{CP_TAG}_universal")
+        target.load_checkpoint(tmpdir, tag=universal_tag)
         for name, param in target.module.named_parameters():
             assert torch.equal(safe_get_full_fp32_param(param).cpu(), expected[name]), name
         assert not any(target.optimizer.optimizer.state.values())
@@ -738,3 +744,51 @@ class TestUniversalCheckpointBeforeFirstStepToZeRO3(DistributedTest):
         for state in optimizer_states:
             assert int(state["step"]) == 1
         target.destroy()
+
+
+@pytest.mark.parametrize("source_stage,target_stage", [(2, 3), (3, 2)])
+class TestUniversalCheckpointAcrossZeROStagesRejects(DistributedTest):
+    world_size = 2
+
+    def _build(self, stage, hidden_dim, one_group, load_universal=False):
+        ds_config = {"train_batch_size": 2, "zero_optimization": {"stage": stage, "sub_group_size": 100}}
+        if load_universal:
+            ds_config["checkpoint"] = {"load_universal": True}
+        model = SimpleModel(hidden_dim, nlayers=2)
+        if one_group:
+            params = model.parameters()
+        else:
+            params = [{"params": list(layer.parameters())} for layer in model.linears]
+        engine, _, _, _ = deepspeed.initialize(config=ds_config,
+                                               model=model,
+                                               optimizer=torch.optim.Adam(params, lr=0.1))
+        return engine
+
+    def test_param_group_count_mismatch(self, tmpdir, source_stage, target_stage):
+        """Pairing groups by position would leave the layers of the groups one side lacks unrestored."""
+        hidden_dim = 10
+        source = self._build(source_stage, hidden_dim, one_group=True)
+        _train(source, hidden_dim, 2)
+        universal_tag = _save_as_universal(source, tmpdir)
+
+        target = self._build(target_stage, hidden_dim, one_group=False, load_universal=True)
+        with pytest.raises(ValueError, match="optimizer parameter groups"):
+            target.load_checkpoint(tmpdir, tag=universal_tag)
+
+    def test_incomplete_adam_moment_pair(self, tmpdir, source_stage, target_stage):
+        """Without exp_avg_sq.pt, ZeRO-3 would restart the moments at step 1 and ZeRO-1/2 would fail its next step."""
+        hidden_dim = 10
+        source = self._build(source_stage, hidden_dim, one_group=True)
+        _train(source, hidden_dim, 2)
+        universal_tag = _save_as_universal(source, tmpdir)
+        if dist.get_rank() == 0:
+            zero_dir = os.path.join(tmpdir, universal_tag, "zero")
+            for name in os.listdir(zero_dir):
+                exp_avg_sq = os.path.join(zero_dir, name, "exp_avg_sq.pt")
+                if os.path.isfile(exp_avg_sq):
+                    os.remove(exp_avg_sq)
+        dist.barrier()
+
+        target = self._build(target_stage, hidden_dim, one_group=True, load_universal=True)
+        with pytest.raises(ZeRORuntimeException, match="only one of the Adam moments"):
+            target.load_checkpoint(tmpdir, tag=universal_tag)

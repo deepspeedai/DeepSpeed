@@ -373,12 +373,28 @@ class ZeROOptimizer(DeepSpeedOptimizer):
                                                     load_optimizer_states=False)
             return
 
+        # Check every parameter, not only the ones whose fragment this rank holds, so all ranks fail together.
+        for lp_group in lp_groups:
+            for lp in lp_group:
+                param_dir = os.path.join(checkpoint_dir, self.param_names[lp])
+                has_exp_avg = os.path.isfile(os.path.join(param_dir, "exp_avg.pt"))
+                has_exp_avg_sq = os.path.isfile(os.path.join(param_dir, "exp_avg_sq.pt"))
+                if has_exp_avg != has_exp_avg_sq:
+                    # Adam would fail on its next step, or start one moment from zero while keeping the other.
+                    from deepspeed.runtime.zero.utils import ZeRORuntimeException
+                    raise ZeRORuntimeException(
+                        f"{param_dir} has only one of the Adam moments exp_avg.pt and exp_avg_sq.pt")
+
         optim_state_path = os.path.join(checkpoint_dir, "optimizer_state.pt")
         assert os.path.isfile(
             optim_state_path), f'{optim_state_path} containing optimizer global state is missing! Cannot proceed.'
         optim_sd = torch.load(optim_state_path, weights_only=False)
         self._load_global_state(optim_sd)
         global_step = None
+        # zip below would silently skip the groups that one side lacks.
+        if len(optim_sd['param_groups']) != len(self.optimizer.param_groups):
+            raise ValueError(f"The universal checkpoint in {checkpoint_dir} has {len(optim_sd['param_groups'])} "
+                             f"optimizer parameter groups, but this optimizer has {len(self.optimizer.param_groups)}.")
 
         for i, (param_group,
                 loaded_param_group) in enumerate(zip(self.optimizer.param_groups, optim_sd['param_groups'])):

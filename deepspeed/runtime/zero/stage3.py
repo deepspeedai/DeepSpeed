@@ -4066,11 +4066,18 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         """
         missing = set()
         for sub_group_id, fp16_group in enumerate(self.fp16_groups):
-            saved = [
-                all(
-                    os.path.isfile(os.path.join(checkpoint_dir, self.param_names[param], f"{key}.pt"))
-                    for key in ("exp_avg", "exp_avg_sq")) for param in fp16_group if param in self.param_names
-            ]
+            saved = []
+            for param in fp16_group:
+                if param not in self.param_names:
+                    continue
+                param_dir = os.path.join(checkpoint_dir, self.param_names[param])
+                has_exp_avg = os.path.isfile(os.path.join(param_dir, "exp_avg.pt"))
+                has_exp_avg_sq = os.path.isfile(os.path.join(param_dir, "exp_avg_sq.pt"))
+                if has_exp_avg != has_exp_avg_sq:
+                    # Only a missing pair means "never stepped"; half a pair is a damaged checkpoint.
+                    raise ZeRORuntimeException(
+                        f"{param_dir} has only one of the Adam moments exp_avg.pt and exp_avg_sq.pt")
+                saved.append(has_exp_avg)
             if saved and not any(saved):
                 missing.add(sub_group_id)
             elif not all(saved):
