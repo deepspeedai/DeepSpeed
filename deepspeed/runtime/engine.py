@@ -2829,11 +2829,12 @@ class DeepSpeedEngine(Module):
             zero_communication_data_type = self.communication_data_type
             if (zero_stage == ZeroStageEnum.optimizer_states and self._config.communication_data_type is None
                     and gradient_accumulation_dtype == torch.float32 and model_dtype != torch.float32
-                    and not self.zenflow):
+                    and not self.zenflow and not self.has_moe_layers):
                 # ZeRO-1 keeps the whole optimizer window in the accumulation dtype. Reducing it in
                 # the 16-bit communication dtype would round that sum before the optimizer sees it,
                 # which defeats data_types.grad_accum_dtype=fp32. An explicit communication dtype
-                # still takes precedence.
+                # still takes precedence. MoE models are excluded because expert-group reductions
+                # share this optimizer-wide dtype and must keep their model dtype (#9047 scope).
                 zero_communication_data_type = torch.float32
 
             if isinstance(self.module, PipelineModule):

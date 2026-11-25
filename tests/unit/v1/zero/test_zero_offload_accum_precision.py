@@ -126,6 +126,47 @@ class TestZero1ExplicitCommunicationDtype(DistributedTest):
         assert fp32_error == 0.0, f"explicit fp32 communication lost precision: {fp32_error:.3e}"
 
 
+class TinyMoE(torch.nn.Module):
+
+    def __init__(self, hidden=8, num_experts=2):
+        super().__init__()
+        from deepspeed.moe.layer import MoE
+        self.moe = MoE(hidden_size=hidden,
+                       expert=torch.nn.Linear(hidden, hidden),
+                       num_experts=num_experts,
+                       ep_size=1,
+                       k=1)
+
+    def forward(self, x):
+        output, _, _ = self.moe(x)
+        return output
+
+
+def _effective_communication_dtype(model):
+    """The dtype ZeRO-1 hands to every gradient reduction, expert groups included."""
+    engine, _, _, _ = deepspeed.initialize(model=model,
+                                           model_parameters=model.parameters(),
+                                           config=_config(1, False, "fp32"))
+    try:
+        return engine.optimizer.communication_data_type
+    finally:
+        engine.destroy()
+
+
+class TestZero1MoeCommunicationDtype(DistributedTest):
+    world_size = 1
+
+    def test_expert_group_reduction_keeps_model_dtype(self):
+        # Pins the scope of the fp32-accumulation default (#9047): it must not reach MoE expert
+        # groups, which share the optimizer-wide dtype and stay in the model dtype.
+        if not deepspeed.ops.__compatible_ops__[deepspeed.ops.op_builder.CPUAdamBuilder.NAME]:
+            pytest.skip("CPUAdam is required for offloaded low-precision masters")
+        if not get_accelerator().is_bf16_supported():
+            pytest.skip("BF16 is not supported")
+        assert _effective_communication_dtype(TinyMoE()) == torch.bfloat16
+        assert _effective_communication_dtype(Weighted(NUMEL)) == torch.float32
+
+
 def _set_grad_error(scenario, stage=2):
     """Drive safe_set_full_grad between two backwards in one window and return the window sum read at its end.
 
