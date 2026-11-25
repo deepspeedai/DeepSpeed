@@ -87,7 +87,7 @@ class BlockedKVCache:
                 total_per_block_footprint += per_block_footprint * elem_size(config.cache_dtype)
 
             # Perform a dummy nccl call before calculating available memory, on some systems (H100) we've observed higher memory allocations from NCCL
-            if dist.get_world_size(group=mp_group) > 1:
+            if dist.is_initialized() and dist.get_world_size(group=mp_group) > 1:
                 dummy_tensor = torch.tensor(0, dtype=torch.int32, device=get_accelerator().current_device())
                 dist.all_reduce(dummy_tensor, op=ReduceOp.MIN, group=mp_group)
 
@@ -106,9 +106,12 @@ class BlockedKVCache:
 
             num_blocks = available_kv_memory // total_per_block_footprint
 
+            if self._memory_config.max_blocks is not None:
+                num_blocks = min(num_blocks, self._memory_config.max_blocks)
+
             # In a multi-process setting, we need to ensure that all processes have the same
             # KV cache capacity to ensure scheduling guarantees are equivalent on all ranks.
-            if dist.get_world_size(group=mp_group) > 1:
+            if dist.is_initialized() and dist.get_world_size(group=mp_group) > 1:
                 reduce_tensor = torch.tensor(num_blocks, dtype=torch.int32, device=get_accelerator().current_device())
                 dist.all_reduce(reduce_tensor, op=ReduceOp.MIN, group=mp_group)
                 num_blocks = reduce_tensor.item()
@@ -119,6 +122,8 @@ class BlockedKVCache:
                 get_accelerator().empty_cache()
         else:  # AllocationMode.ALLOCATE
             num_blocks = self._memory_config.size
+            if self._memory_config.max_blocks is not None:
+                num_blocks = min(num_blocks, self._memory_config.max_blocks)
 
         caches = []
         allocators = []
@@ -189,6 +194,15 @@ class BlockedKVCache:
             cache_group (int): The cache group to get from. Default is 0.
         """
         return self._caches[cache_group][cache_id]
+
+    @property
+    def num_blocks(self) -> int:
+        """
+        Return the number of blocks allocated in each cache group.
+        """
+        if not self._caches:
+            return 0
+        return self._caches[0].shape[1]
 
     @property
     def free_blocks(self) -> torch.Tensor:

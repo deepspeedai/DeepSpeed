@@ -4,7 +4,7 @@
 # DeepSpeed Team
 
 from enum import Enum
-from typing import Tuple
+from typing import Optional, Tuple
 
 from pydantic import PositiveInt, model_validator
 
@@ -131,6 +131,13 @@ class MemoryConfig(DeepSpeedConfigModel):
 
     If mode is ALLOCATE, this is the number of blocks to allocate for the KV-cache. This may
     require tuning for model/GPU setups.
+    """
+
+    max_blocks: Optional[PositiveInt] = None
+    """
+    Maximum number of blocks to allocate for the KV-cache. If specified, bounds the
+    number of allocated blocks even if more memory is available, preventing excessive
+    or greedy allocation that can lead to out-of-memory errors on activation spikes.
     """
 
 
