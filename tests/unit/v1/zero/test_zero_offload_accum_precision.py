@@ -4,9 +4,9 @@
 Accumulation precision of ZeRO-1/2 CPU offload across one optimizer window.
 
 Each micro-step's gradient is exactly representable in bf16 (values (128 + k) / 128), so the
-exact window sum is known. The only rounding comes from the accumulation dtype and the host
-copy, which makes the error of each (stage, master dtype, accumulation dtype) cell directly
-comparable.
+exact window sum is known. The only rounding comes from the accumulation dtype, the host copy,
+and an explicitly configured communication dtype, which makes the error of each (stage, master
+dtype, accumulation dtype) cell directly comparable.
 """
 
 import os
@@ -34,7 +34,7 @@ class Weighted(torch.nn.Module):
         return (self.w * c).sum()
 
 
-def _config(stage, low_precision_master, accumulation_dtype):
+def _config(stage, low_precision_master, accumulation_dtype, communication_dtype=None):
     config = {
         "train_batch_size": 1,
         "gradient_accumulation_steps": 1,
@@ -62,16 +62,19 @@ def _config(stage, low_precision_master, accumulation_dtype):
     }
     if accumulation_dtype is not None:
         config["data_types"] = {"grad_accum_dtype": accumulation_dtype}
+    if communication_dtype is not None:
+        config["communication_data_type"] = communication_dtype
     return config
 
 
-def _window_error(stage, low_precision_master, accumulation_dtype):
+def _window_error(stage, low_precision_master, accumulation_dtype, communication_dtype=None):
     """Relative max error of the window's gradient sum against the exact sum, read before step()."""
     torch.manual_seed(0)
     model = Weighted(NUMEL)
     engine, _, _, _ = deepspeed.initialize(model=model,
                                            model_parameters=model.parameters(),
-                                           config=_config(stage, low_precision_master, accumulation_dtype))
+                                           config=_config(stage, low_precision_master, accumulation_dtype,
+                                                          communication_dtype))
     try:
         generator = torch.Generator().manual_seed(1234)
         exact = torch.zeros(NUMEL, dtype=torch.float64)
@@ -104,10 +107,23 @@ class TestZeroOffloadAccumPrecision(DistributedTest):
             with open(out, "a") as f:
                 f.write(f"stage={stage} master={'bf16' if low_precision_master else 'fp32'} "
                         f"accum={accumulation_dtype or 'bf16'} rel_max_err={error:.3e}\n")
-        if stage == 2 and not low_precision_master and accumulation_dtype == "fp32":
-            # The supported case: the window sum is exact. Stage 1 rounds its window sum to the
-            # 16-bit reduction dtype once (same error on the base commit); it is characterized, not required.
+        if not low_precision_master and accumulation_dtype == "fp32":
+            # Both stages keep the fp32 window sum exact when the communication dtype is implicit.
             assert error == 0.0, f"fp32 accumulation with fp32 masters lost precision: {error:.3e}"
+
+
+class TestZero1ExplicitCommunicationDtype(DistributedTest):
+    world_size = 1
+
+    def test_explicit_communication_dtype_is_respected(self):
+        if not deepspeed.ops.__compatible_ops__[deepspeed.ops.op_builder.CPUAdamBuilder.NAME]:
+            pytest.skip("CPUAdam is required for offloaded low-precision masters")
+        if not get_accelerator().is_bf16_supported():
+            pytest.skip("BF16 is not supported")
+        bf16_error = _window_error(1, False, "fp32", communication_dtype="bf16")
+        assert bf16_error > 0.0, "an explicit bf16 communication dtype must keep its rounding"
+        fp32_error = _window_error(1, False, "fp32", communication_dtype="fp32")
+        assert fp32_error == 0.0, f"explicit fp32 communication lost precision: {fp32_error:.3e}"
 
 
 def _set_grad_error(scenario, stage=2):

@@ -2826,6 +2826,16 @@ class DeepSpeedEngine(Module):
 
             log_dist(f'Creating {model_dtype} ZeRO stage {zero_stage} optimizer', ranks=[0])
 
+            zero_communication_data_type = self.communication_data_type
+            if (zero_stage == ZeroStageEnum.optimizer_states and self._config.communication_data_type is None
+                    and gradient_accumulation_dtype == torch.float32 and model_dtype != torch.float32
+                    and not self.zenflow):
+                # ZeRO-1 keeps the whole optimizer window in the accumulation dtype. Reducing it in
+                # the 16-bit communication dtype would round that sum before the optimizer sees it,
+                # which defeats data_types.grad_accum_dtype=fp32. An explicit communication dtype
+                # still takes precedence.
+                zero_communication_data_type = torch.float32
+
             if isinstance(self.module, PipelineModule):
                 if overlap_comm:
                     logger.warning("Pipeline parallelism does not support overlapped communication, will be disabled.")
@@ -2867,7 +2877,7 @@ class DeepSpeedEngine(Module):
                 bf16_master_weights_and_gradients=self.bf16_master_weights_and_gradients(),
                 bf16_optimizer_states=self.bf16_optimizer_states(),
                 gradient_accumulation_dtype=gradient_accumulation_dtype,
-                communication_data_type=self.communication_data_type,
+                communication_data_type=zero_communication_data_type,
                 elastic_checkpoint=self.zero_elastic_checkpoint(),
                 check_grad_overflow=check_grad_overflow,
                 compute_grad_norm=self.zero_compute_grad_norm(),
