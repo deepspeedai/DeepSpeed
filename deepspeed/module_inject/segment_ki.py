@@ -1029,7 +1029,10 @@ def install_decode_attention(model: torch.nn.Module,
     Detection mirrors find_glu_segments: structural (q/k/v/o projections
     plus per-head q_norm/k_norm present, q_proj carrying the 2x-wide
     query|gate layout), cross-checked against the config's layer_types so
-    linear-attention blocks are never touched. Returns the patched count;
+    linear-attention blocks are never touched. Only gated query attention
+    layers (where q_proj.weight.shape[0] == 2 * o_proj.weight.shape[1])
+    are patched; dense non-gated attention layers (such as standard Qwen3
+    where q_out == o_in) are left unpatched. Returns the patched count;
     layers whose GQA ratio the kernel cannot serve are left native."""
     if kernel_op is None or not hasattr(kernel_op, "decode_attn"):
         return 0

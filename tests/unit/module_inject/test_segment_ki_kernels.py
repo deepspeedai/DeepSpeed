@@ -382,6 +382,42 @@ class TestInjectionInvariants:
         for i, w in enumerate(ws):
             assert w.grad is not None, f"weight {i} got no gradient"
 
+    def test_install_decode_attention_rejects_dense_attention_and_accepts_gated(self):
+        """Dense attention (q_out == o_in, e.g. Qwen3) must not be patched;
+        gated attention (q_out == 2 * o_in, e.g. Qwen3.5) must be patched."""
+        pytest.importorskip("transformers.models.qwen3_5.modeling_qwen3_5")
+        from deepspeed.module_inject.segment_ki import install_decode_attention
+
+        class DummyKernelOp:
+
+            def decode_attn(self, *args, **kwargs):
+                pass
+
+        class DummyAttentionLayer(torch.nn.Module):
+
+            def __init__(self, num_heads, head_dim, is_gated=False):
+                super().__init__()
+                self.head_dim = head_dim
+                self.layer_idx = 0
+                q_mult = 2 if is_gated else 1
+                self.q_proj = torch.nn.Linear(num_heads * head_dim, q_mult * num_heads * head_dim, bias=False)
+                self.k_proj = torch.nn.Linear(num_heads * head_dim, num_heads * head_dim, bias=False)
+                self.v_proj = torch.nn.Linear(num_heads * head_dim, num_heads * head_dim, bias=False)
+                self.o_proj = torch.nn.Linear(num_heads * head_dim, num_heads * head_dim, bias=False)
+                self.q_norm = torch.nn.LayerNorm(head_dim)
+                self.k_norm = torch.nn.LayerNorm(head_dim)
+
+        # 1. Dense model: 16 heads of dim 128 (q_out = 2048, o_in = 2048) -> should NOT be patched
+        dense_model = torch.nn.Sequential(DummyAttentionLayer(16, 128, is_gated=False))
+        write_pos = torch.zeros(1, dtype=torch.int32)
+        res_dense = install_decode_attention(dense_model, write_pos, DummyKernelOp())
+        assert res_dense == 0
+
+        # 2. Gated model: 16 heads of dim 128, 2x-wide q_proj (q_out = 4096, o_in = 2048) -> should be patched
+        gated_model = torch.nn.Sequential(DummyAttentionLayer(16, 128, is_gated=True))
+        res_gated = install_decode_attention(gated_model, write_pos, DummyKernelOp())
+        assert res_gated == 1
+
 
 # ---------------------------------------------------------------------------
 # 3. Rollout -> train -> rollout integration (GPU + real model)
@@ -763,42 +799,6 @@ class TestArenaWeightViews:
         out_fresh = self._gen(rollout2, ids)
 
         assert torch.equal(out_after, out_fresh), "arena in-place write + refresh diverged from fresh injection"
-
-    def test_install_decode_attention_rejects_dense_attention_and_accepts_gated(self):
-        """Dense attention (q_out == o_in, e.g. Qwen3) must not be patched;
-        gated attention (q_out == 2 * o_in, e.g. Qwen3.5) must be patched."""
-        pytest.importorskip("transformers.models.qwen3_5.modeling_qwen3_5")
-        from deepspeed.module_inject.segment_ki import install_decode_attention
-
-        class DummyKernelOp:
-
-            def decode_attn(self, *args, **kwargs):
-                pass
-
-        class DummyAttentionLayer(torch.nn.Module):
-
-            def __init__(self, num_heads, head_dim, is_gated=False):
-                super().__init__()
-                self.head_dim = head_dim
-                self.layer_idx = 0
-                q_mult = 2 if is_gated else 1
-                self.q_proj = torch.nn.Linear(num_heads * head_dim, q_mult * num_heads * head_dim, bias=False)
-                self.k_proj = torch.nn.Linear(num_heads * head_dim, num_heads * head_dim, bias=False)
-                self.v_proj = torch.nn.Linear(num_heads * head_dim, num_heads * head_dim, bias=False)
-                self.o_proj = torch.nn.Linear(num_heads * head_dim, num_heads * head_dim, bias=False)
-                self.q_norm = torch.nn.LayerNorm(head_dim)
-                self.k_norm = torch.nn.LayerNorm(head_dim)
-
-        # 1. Dense model: 16 heads of dim 128 (q_out = 2048, o_in = 2048) -> should NOT be patched
-        dense_model = torch.nn.Sequential(DummyAttentionLayer(16, 128, is_gated=False))
-        write_pos = torch.zeros(1, dtype=torch.int32)
-        res_dense = install_decode_attention(dense_model, write_pos, DummyKernelOp())
-        assert res_dense == 0
-
-        # 2. Gated model: 16 heads of dim 128, 2x-wide q_proj (q_out = 4096, o_in = 2048) -> should be patched
-        gated_model = torch.nn.Sequential(DummyAttentionLayer(16, 128, is_gated=True))
-        res_gated = install_decode_attention(gated_model, write_pos, DummyKernelOp())
-        assert res_gated == 1
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="native kernels are CUDA-only")  #ignore-cuda
