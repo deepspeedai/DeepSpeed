@@ -367,6 +367,48 @@ These routines can be used in a training loop as shown in the following snippet.
 
 
 
+Recover Adam state from an hpZ peer
+-----------------------------------
+
+Set ``zero_hpz_optimizer_sharding`` to ``true`` in ``zero_optimization``. Use the
+same configuration in ``deepspeed.zero.Init`` if you partition the model at
+construction. With four ranks and ``zero_hpz_partition_size=2``, each of the
+subgroups ``(0, 1)`` and ``(2, 3)`` holds a complete set of optimizer shards.
+Ranks 0 and 2 share one shard. Ranks 1 and 3 share the other.
+
+Once every rank has completed the optimizer step, pause the surviving workers
+between steps. For example, run this on rank 2 to read rank 0's shard directly
+from rank 2's optimizer memory.
+
+.. code-block:: python
+
+    param = engine.module.get_parameter("layer.weight")
+    shard = engine.optimizer.get_local_hpz_adam_state(param)
+    assert 0 in shard.replica_ranks
+    master = shard.fp32_master
+    first_moment = shard.exp_avg
+    second_moment = shard.exp_avg_sq
+    adam_step = shard.step
+
+The three FP32 tensors are detached copies on the local device. Each tensor's
+first dimension follows ``replica_ranks``. Each row has the width of an ordinary
+ZeRO-3 primary partition and includes its padding. For a parameter with
+``N`` elements and ``D`` data-parallel ranks, row ``i`` starts at element
+``replica_ranks[i] * ceil(N / D)`` in the flattened parameter. ``step`` is the
+Adam counter for the flat optimizer group that contains the parameter.
+This call uses the live peer's local tensors and performs no collectives
+or checkpoint reads. A worker must remain alive to make the call.
+
+The first version supports dense data parallelism with torch Adam, torch AdamW,
+or DeepSpeed FusedAdam and resident FP32 master weights and moments. Use
+matching hardware and training settings across ranks. The opt-in layout requires unquantized
+parameter and gradient communication. Optimizer or parameter offload, training checkpoint save and load,
+and manual master or optimizer state edits are unsupported with the flag enabled.
+The memory guarantee applies between completed updates on surviving workers.
+
+.. automethod:: deepspeed.runtime.zero.stage3.DeepSpeedZeroOptimizer_Stage3.get_local_hpz_adam_state
+
+
 Modifying Partitioned States
 ----------------------------
 

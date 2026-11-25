@@ -44,6 +44,7 @@ ZeRO optimization should be enabled as:
     "round_robin_gradients": [true|false],
     "parameter_alignment": [true|false],
     "zero_hpz_partition_size": 1,
+    "zero_hpz_optimizer_sharding": false,
     "zero_quantized_weights": [true|false],
     "zero_quantized_nontrainable_weights": [true|false],
     "zero_quantized_gradients": [true|false],
@@ -344,6 +345,10 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
     """
     Number of ranks in zero parameters partitioning secondary group
     """
+    zero_hpz_optimizer_sharding: bool = False
+    """
+    Replicate each ZeRO-3 Adam optimizer shard across matching ranks in the hpZ groups.
+    """
     zero_quantized_weights: bool = False
     """
     Boolean indicating whether to quantize zero parameters (weights)
@@ -424,6 +429,24 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
             logger.warning(
                 "ZeRO-3 elastic checkpointing is deprecated and no longer supported. Use Universal Checkpointing instead."
             )
+        return self
+
+    @model_validator(mode="after")
+    def hpz_optimizer_sharding_compat_check(self):
+        if not self.zero_hpz_optimizer_sharding:
+            return self
+        feature = "zero_hpz_optimizer_sharding"
+        if self.stage != ZeroStageEnum.weights or self.zero_hpz_partition_size < 2:
+            raise ValueError(f"{feature} requires ZeRO stage 3 and zero_hpz_partition_size >= 2.")
+        if any(config is not None and config.device != OffloadDeviceEnum.none
+               for config in (self.offload_optimizer, self.offload_param)) or getattr(
+                   self.offload_optimizer, "super_offload", False):
+            raise ValueError(f"{feature} does not support optimizer or parameter offload.")
+        if self.zenflow is not None or self.reflow is not None or self.zero_quantized_weights or \
+                self.zero_quantized_nontrainable_weights or self.zero_quantized_gradients:
+            raise ValueError(f"{feature} does not support ZenFlow, Reflow, or ZeRO quantization.")
+        if self.elastic_checkpoint or self.pipeline_loading_checkpoint:
+            raise ValueError(f"{feature} does not support ZeRO optimizer checkpointing.")
         return self
 
     @model_validator(mode="after")

@@ -1110,6 +1110,11 @@ class Init(InsertPostInitMethodToModuleSubClasses):
             raise RuntimeError(_pg_contradiction)
 
         self.zero_param_process_group = zero_param_parallel_group
+        if _ds_config is not None and _ds_config.zero_config.zero_hpz_optimizer_sharding:
+            groups._validate_hpz_optimizer_topology(_ds_config.zero_config.zero_hpz_partition_size,
+                                                    self.ds_process_group)
+            if self.zero_param_process_group is None:
+                self.zero_param_process_group = groups._get_zero_param_intra_parallel_group()
         if _ds_config is not None and _ds_config.zero_config.zero_hpz_partition_size > 1 and self.zero_param_process_group is None:
             groups._create_zero_param_parallel_group(_ds_config.zero_config.zero_hpz_partition_size)
             self.zero_param_process_group = groups._get_zero_param_intra_parallel_group()

@@ -82,3 +82,29 @@ ZeRO++
 </a>
 
 Congratulations! You have completed the ZeRO++ tutorial.
+
+## Replicate ZeRO-3 Adam shards across hpZ groups
+
+For a pure data-parallel job with four ranks, use the following ZeRO settings
+with Adam or AdamW to give each two-rank hpZ subgroup a complete set of optimizer
+shards.
+
+```json
+{
+    "zero_optimization": {
+        "stage": 3,
+        "zero_hpz_partition_size": 2,
+        "zero_hpz_optimizer_sharding": true
+    }
+}
+```
+
+Rank 0 shares its FP32 master and Adam shard with rank 2. Rank 1 shares its shard
+with rank 3. ZeRO-3 uses gradients from all four ranks for each update. The
+optimizer uses twice the per-rank master and Adam storage of ordinary ZeRO-3 in
+this example.
+
+Run the local recovery reader on a live peer after all ranks complete the
+optimizer step and before another update begins.
+[Recover Adam state from an hpZ peer](https://deepspeed.readthedocs.io/en/latest/zero3.html#recover-adam-state-from-an-hpz-peer)
+shows how to read the tensors and step counter.

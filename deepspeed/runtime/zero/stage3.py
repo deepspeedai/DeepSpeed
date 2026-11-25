@@ -7,7 +7,7 @@ import sys
 import gc
 import collections
 import itertools
-from typing import Deque, Dict, Set, List, Container, Optional
+from typing import Deque, Dict, Set, List, Container, Optional, NamedTuple, Union
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 
@@ -35,7 +35,7 @@ import deepspeed.runtime.zenflow.engine_stage3 as zf_engine_stage3
 from deepspeed.runtime.zero.utils import ZeRORuntimeException, get_mapping_to_flat_buffer, defragment, get_norm_dtype
 from deepspeed.runtime.zero.offload_states import (offload_adam_states, reload_adam_states,
                                                    unpin_offloaded_optimizer_states)
-from deepspeed.ops.adam import DeepSpeedCPUAdam
+from deepspeed.ops.adam import DeepSpeedCPUAdam, FusedAdam
 from deepspeed.runtime.swap_tensor.partitioned_param_swapper import PartitionedParamStatus
 from deepspeed.runtime.swap_tensor.optimizer_utils import OptimizerSwapper
 from deepspeed.runtime.swap_tensor.partitioned_optimizer_swapper import PartitionedOptimizerSwapper
@@ -64,6 +64,14 @@ OPTIMIZER_STEP_TIMER = 'optimizer_step'
 PARTIAL_OFFLOAD_NO_BIAS_CORRECTION = ("offload_optimizer.ratio < 1 steps the sub-groups kept on the device with torch "
                                       "Adam, which always applies bias correction; bias_correction=False is not "
                                       "supported.")
+
+
+class HpZAdamState(NamedTuple):
+    replica_ranks: tuple
+    fp32_master: Tensor
+    exp_avg: Tensor
+    exp_avg_sq: Tensor
+    step: Union[int, Tensor]
 
 
 def print_rank_0(message, debug=False, force=False):
@@ -208,6 +216,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         enable_sanity_checks=False,
         cpuadam_cores_perc=0.8,
         save_muon_momentum_buffer_in_memory=False,
+        zero_hpz_optimizer_sharding=False,
     ):
         see_memory_usage("Stage 3 initialize beginning", force=False)
 
@@ -280,6 +289,29 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         #num of ranks in a ZeRO param partitioning group
         self.zero_hpz_partition_size = zero_hpz_partition_size
 
+        self.zero_hpz_optimizer_sharding = zero_hpz_optimizer_sharding
+        self._hpz_adam_step_complete = False
+        if self.zero_hpz_optimizer_sharding:
+            groups._validate_hpz_optimizer_topology(zero_hpz_partition_size, dp_process_group)
+            if mpu is not None or all2all_process_group is not None:
+                raise ValueError("zero_hpz_optimizer_sharding supports only dense, full-world data parallelism.")
+            if type(init_optimizer) not in (torch.optim.Adam, torch.optim.AdamW, FusedAdam):
+                raise ValueError(
+                    "zero_hpz_optimizer_sharding requires torch Adam, torch AdamW, or DeepSpeed FusedAdam.")
+            if init_optimizer.state or any(
+                    group.get("amsgrad") or group.get("differentiable") for group in init_optimizer.param_groups):
+                raise ValueError("zero_hpz_optimizer_sharding requires a fresh Adam optimizer without AMSGrad or "
+                                 "differentiable steps.")
+            if self.dtype not in (torch.float16, torch.bfloat16, torch.float32) or fp16_master_weights_and_gradients \
+                    or bf16_master_weights_and_gradients or bf16_optimizer_states:
+                raise ValueError("zero_hpz_optimizer_sharding requires FP32 master weights and Adam moments.")
+            if is_autocast_initialized() and get_autocast_dtype() == torch.float16:
+                raise ValueError(
+                    "zero_hpz_optimizer_sharding does not support torch autocast with an FP16 GradScaler.")
+            if any(config is not None and config.device != OffloadDeviceEnum.none
+                   for config in (offload_optimizer_config, offload_param_config)):
+                raise ValueError("zero_hpz_optimizer_sharding does not support optimizer or parameter offload.")
+
         zero_param_parallel_group = groups._get_zero_param_intra_parallel_group()
         print_rank_0(
             f"ZeRO Stage 3 param partitioning group {self.zero_hpz_partition_size} {zero_param_parallel_group}",
@@ -287,6 +319,9 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         if self.zero_hpz_partition_size > 1 and zero_param_parallel_group is None:
             self._set_zero_group_parallelism()
             zero_param_parallel_group = groups._get_zero_param_intra_parallel_group()
+
+        if self.zero_hpz_optimizer_sharding:
+            self._initialize_hpz_optimizer_group(module, zero_param_parallel_group)
 
         self.parameter_offload = self.initialize_ds_offload(
             module=module,
@@ -793,6 +828,69 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
     def _set_zero_group_parallelism(self):
         groups._create_zero_param_parallel_group(self.zero_hpz_partition_size)
 
+    def _initialize_hpz_optimizer_group(self, module, hpz_group):
+        rank = dist.get_rank()
+        group_size = self.zero_hpz_partition_size
+        first_rank = rank - rank % group_size
+        expected_ranks = tuple(range(first_rank, first_rank + group_size))
+        device = torch.device(get_accelerator().current_device_name())
+        world_size = dist.get_world_size()
+        hpz_groups = {hpz_group}
+        valid_layout = True
+        for param in module.parameters():
+            if is_model_parallel_parameter(param) or param.layout != torch.strided:
+                valid_layout = False
+                break
+            if not is_zero_param(param):
+                continue
+            hpz_groups.add(param.ds_zero_param_process_group)
+            if (param.ds_zero_partition_world_size != world_size or param.ds_zero_partition_rank != rank
+                    or param.ds_secondary_tensor_group_size != group_size
+                    or param.ds_secondary_tensor_num_of_groups != world_size // group_size
+                    or param.ds_tensor.device != device):
+                valid_layout = False
+                break
+
+        valid_groups = all(group is not None and tuple(self._global_ranks(group)) == expected_ranks
+                           for group in hpz_groups)
+        sparse_grads = any(
+            isinstance(layer, (torch.nn.Embedding, torch.nn.EmbeddingBag)) and layer.sparse
+            for layer in module.modules())
+        invalid_layout = torch.tensor(int(not valid_layout or not valid_groups or sparse_grads), device=device)
+        dist.all_reduce(invalid_layout, op=dist.ReduceOp.MAX)
+        if invalid_layout.item():
+            raise ValueError("zero_hpz_optimizer_sharding requires resident, dense ZeRO-3 parameters with the "
+                             "configured hpZ layout and full-world data parallelism.")
+
+        accelerator = get_accelerator()
+        self._hpz_adam_step_event = None if accelerator.is_synchronized_device() else accelerator.Event()
+
+        # Create the process groups in the same order on all ranks.
+        for column in range(group_size):
+            ranks = tuple(range(column, world_size, group_size))
+            group = dist.new_group(ranks)
+            if column == rank % group_size:
+                self._hpz_optimizer_group = group
+                self._hpz_replica_ranks = ranks
+                self._hpz_lane = ranks.index(rank)
+
+    def _gather_hpz_optimizer_lanes(self, primary):
+        flat = primary.new_empty(len(self._hpz_replica_ranks) * primary.numel())
+        dist.allgather_fn(flat, primary, group=self._hpz_optimizer_group)
+        return flat
+
+    def _gather_hpz_master(self, sub_group_id):
+        primary = self.fp16_partitioned_groups_flat[sub_group_id]
+        rank = self._get_sub_group_partition_rank(sub_group_id)
+        offset = 0
+        for param in self.fp16_groups[sub_group_id]:
+            width = param.partition_numel()
+            valid = max(0, min(width, param.ds_numel - rank * width))
+            if valid < width:
+                primary.narrow(0, offset + valid, width - valid).zero_()
+            offset += width
+        return self._gather_hpz_optimizer_lanes(primary.float())
+
     def invalidate_secondary_tensor(self):
         for fpg in self.fp16_groups:
             for param in fpg:
@@ -1177,7 +1275,11 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             ds_id = ds_id_begin + '_' + ds_id_end
 
             # a partition of the fp32 master weights that will be updated by this process
-            if self._swappable_optimizer_subgroup(i):
+            if self.zero_hpz_optimizer_sharding:
+                master = self._gather_hpz_master(i)
+                master.ds_id = ds_id
+                self.fp32_partitioned_groups_flat.append(master)
+            elif self._swappable_optimizer_subgroup(i):
                 self.fp32_partitioned_groups_flat.append(torch.empty(0, dtype=self.master_weights_and_grads_dtype))
                 self.fp32_partitioned_groups_flat[i].ds_id = ds_id
                 nvme_memory_usage += (fp32_element_size * num_elements)
@@ -1414,6 +1516,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         num_subgroups = len(self.fp16_groups)
 
         largest_numel = max([sum([p.ds_numel for p in psg]) for psg in self.fp16_partitioned_groups])
+        if self.zero_hpz_optimizer_sharding:
+            largest_numel *= len(self._hpz_replica_ranks)
         gradient_dtype = self.fp32_partitioned_groups_flat[0].dtype
         gradient_buffer = torch.zeros(int(largest_numel), dtype=gradient_dtype, device=self.device)
 
@@ -1453,6 +1557,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
                 self.fp32_partitioned_groups_flat[i].grad = subgroup_gradient_buffer.to(self.subgroup_to_device[i])
             else:
+                if self.zero_hpz_optimizer_sharding:
+                    num_elements *= len(self._hpz_replica_ranks)
                 self.fp32_partitioned_groups_flat[i].grad = gradient_buffer.narrow(0, 0, num_elements)
 
             if swappable_param_subgroup:
@@ -2934,6 +3040,9 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         single_grad_partition = self.flatten(self.averaged_gradients[sub_group_id]).to(
             self.fp32_partitioned_groups_flat[sub_group_id].dtype)
 
+        if self.zero_hpz_optimizer_sharding:
+            single_grad_partition = self._gather_hpz_optimizer_lanes(single_grad_partition)
+
         assert single_grad_partition.numel() == self.fp32_partitioned_groups_flat[sub_group_id].numel(), \
             "averaged gradients have different number of elements that partition size {} {} {} {}".format(
                 single_grad_partition.numel(), self.fp32_partitioned_groups_flat[sub_group_id].numel(), sub_group_id, partition_id)
@@ -3178,6 +3287,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             # fp32_partitioned_groups are aliases. Calling tensor.data.copy_ will not trigger any copy in that case.
             dst = self.fp16_partitioned_groups_flat[sub_group_id].data
             src = self.fp32_partitioned_groups_flat[sub_group_id].data
+            if self.zero_hpz_optimizer_sharding:
+                src = src.narrow(0, self._hpz_lane * dst.numel(), dst.numel())
             if self._master_pinned_at_construction(sub_group_id) and dst.device.type != "cpu":
                 self._copy_pinned_master_to_device(dst, src)
             else:
@@ -3210,6 +3321,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             self._apply_muon_to_accumulated_grads()
             norm_groups = self._get_norm_groups()
             scaled_global_grad_norm = combine_grad_norm_groups(norm_groups)
+            if self.zero_hpz_optimizer_sharding:
+                dist.broadcast(scaled_global_grad_norm, src=0, group=self.dp_process_group)
             if is_invalid_grad_norm(scaled_global_grad_norm):
                 self.overflow = True
 
@@ -3230,6 +3343,9 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             # The epilogue has copied all gradients into the partition buffers. Clear the
             # model gradients once, rather than visiting every parameter for each sub-group.
             self.zero_grad(set_to_none=True)
+
+        if self.zero_hpz_optimizer_sharding:
+            self._hpz_adam_step_complete = False
 
         #update parameters one sub group at a time
         for sub_group_id, group in enumerate(self.fp16_groups):
@@ -3265,6 +3381,10 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         self.timers(OPTIMIZER_STEP_TIMER).stop()
 
         self._post_step(timer_names)
+        if self.zero_hpz_optimizer_sharding:
+            if self._hpz_adam_step_event is not None:
+                self._hpz_adam_step_event.record()
+            self._hpz_adam_step_complete = True
 
         # warn user about caching allocator flushes
         memory_stats = get_accelerator().memory_stats()
@@ -3531,6 +3651,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             self._optimizer_states_and_gradient_swap_in(group_idx)
 
         fp32_param = self.fp32_partitioned_groups_flat[group_idx]
+        if self.zero_hpz_optimizer_sharding:
+            dest_offset += self._hpz_lane * self.fp16_partitioned_groups_flat_numel[group_idx]
         if optim_state_key is None:
             fp32_opt_state = fp32_param.narrow(0, dest_offset, num_elements)
         else:
@@ -3555,6 +3677,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         return hp_param
 
     def set_full_hp_param(self, value, param, optim_state_key=None):
+        if self.zero_hpz_optimizer_sharding:
+            raise NotImplementedError("zero_hpz_optimizer_sharding does not support manual optimizer state mutation.")
         if not param.requires_grad:
             return
 
@@ -3607,6 +3731,36 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         if self._swappable_optimizer_subgroup(group_idx):
             self._writeback_swap_state(group_idx, write_opt_state=False, write_gradients=True)
 
+    def get_local_hpz_adam_state(self, param) -> HpZAdamState:
+        """Copy the parameter's local Adam lanes after a completed step without communicating.
+
+        Each tensor has shape (len(replica_ranks), primary_partition_width), including any
+        primary partition padding. Rows are ordered by the corresponding global rank.
+        """
+        if not self.zero_hpz_optimizer_sharding:
+            raise RuntimeError("get_local_hpz_adam_state requires zero_hpz_optimizer_sharding.")
+        if not self._hpz_adam_step_complete:
+            raise RuntimeError("get_local_hpz_adam_state requires a completed optimizer step.")
+        if getattr(param, "_z3_optimizer", None) is not self or self.get_param_id(param) not in self.grad_position:
+            raise ValueError("get_local_hpz_adam_state requires a parameter managed by this optimizer.")
+
+        if self._hpz_adam_step_event is not None:
+            get_accelerator().current_stream().wait_event(self._hpz_adam_step_event)
+
+        group_idx, offset, width = self.grad_position[self.get_param_id(param)]
+        master = self.fp32_partitioned_groups_flat[group_idx]
+        state = self.optimizer.state[master]
+        lane_width = self.fp16_partitioned_groups_flat_numel[group_idx]
+
+        def snapshot(tensor):
+            lanes = tensor.detach().view(len(self._hpz_replica_ranks), lane_width)
+            return lanes.narrow(1, offset, width).clone()
+
+        step = state["step"]
+        return HpZAdamState(self._hpz_replica_ranks, snapshot(master), snapshot(state["exp_avg"]),
+                            snapshot(state["exp_avg_sq"]),
+                            step.detach().clone() if torch.is_tensor(step) else step)
+
     def get_local_fp32_param(self, param, optim_state_key=None) -> Tensor:
         if not param.requires_grad:
             return None
@@ -3614,9 +3768,13 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                                                                        release_swap_buffers=True,
                                                                        optim_state_key=optim_state_key)
         fp32_opt_state = fp32_opt_state.to(get_accelerator().current_device_name())
+        if self.zero_hpz_optimizer_sharding:
+            return fp32_opt_state.detach().clone()
         return fp32_opt_state
 
     def set_local_hp_param(self, value, param, optim_state_key=None):
+        if self.zero_hpz_optimizer_sharding:
+            raise NotImplementedError("zero_hpz_optimizer_sharding does not support manual optimizer state mutation.")
         if not param.requires_grad:
             return
 
@@ -3870,6 +4028,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             checkpoint['optimizer'] = optimizer.state_dict()
             torch.save(checkpoint, "saved.pth")
         """
+        if self.zero_hpz_optimizer_sharding:
+            raise NotImplementedError("zero_hpz_optimizer_sharding does not support ZeRO optimizer checkpointing.")
         if self.elastic_checkpoint:
             raise NotImplementedError(
                 "ZeRO-3 elastic checkpointing is deprecated and unsupported. Use Universal Checkpointing instead.")
@@ -3901,7 +4061,12 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
     # Refresh the fp32 master params from the fp16 copies.
     def refresh_fp32_params(self):
-        self._restore_from_bit16_weights()
+        if self.zero_hpz_optimizer_sharding:
+            self._hpz_adam_step_complete = False
+            for i, master in enumerate(self.fp32_partitioned_groups_flat):
+                master.data.copy_(self._gather_hpz_master(i))
+        else:
+            self._restore_from_bit16_weights()
 
     # Extract flattened partition for current rank from all partitions
     def _get_flattened_partition(self, all_partition_states, group=None):
@@ -4036,6 +4201,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             optimizer.load_state_dict(checkpoint['optimizer'])
         """
 
+        if self.zero_hpz_optimizer_sharding:
+            raise NotImplementedError("zero_hpz_optimizer_sharding does not support ZeRO optimizer checkpointing.")
         if self.elastic_checkpoint:
             raise NotImplementedError(
                 "ZeRO-3 elastic checkpointing is deprecated and unsupported. Use Universal Checkpointing instead.")
@@ -4312,6 +4479,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                        device: OffloadDeviceEnum = OffloadDeviceEnum.cpu,
                        pin_memory: bool = True,
                        non_blocking: bool = False):
+        if self.zero_hpz_optimizer_sharding:
+            raise NotImplementedError("zero_hpz_optimizer_sharding does not support offloading optimizer states.")
         device = device.value
 
         self.empty_partition_cache()
