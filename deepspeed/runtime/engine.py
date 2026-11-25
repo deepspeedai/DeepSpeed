@@ -613,6 +613,7 @@ class DeepSpeedEngine(Module):
             # Head counts were recorded against the whole model; the parameters are shards now.
             from deepspeed import resolve_per_head_muon_after_sharding
             resolve_per_head_muon_after_sharding(model)
+        self._configure_quantization(model)
         see_memory_usage("DeepSpeed Engine: After args sanity test", force=self.memory_breakdown())
         self._set_distributed_vars(args)
 
@@ -946,6 +947,19 @@ class DeepSpeedEngine(Module):
             from deepspeed import set_optimizer_flags
             set_optimizer_flags(self._config, model)
         return replacement_sources
+
+    def _configure_quantization(self, model):
+        recipe = self._config.quantization_config.subchannel
+        if not recipe.enabled:
+            return
+        # Runs after AutoEP has created the grouped experts and before ZeRO wraps the parameters.
+        if self.pipeline_parallelism:
+            raise ValueError("quantization.subchannel does not support PipelineModule yet.")
+        if self.autotp_size() > 1:
+            raise ValueError("quantization.subchannel does not support AutoTP yet: the tensor-parallel layers "
+                             "replace nn.Linear and would run unquantized.")
+        from deepspeed.runtime.quantization.subchannel import convert_to_subchannel_quantization
+        convert_to_subchannel_quantization(model, recipe)
 
     def _autoep_zero3_param_converter(self, model):
         if not self.zero_optimization_partition_weights():
@@ -3570,6 +3584,13 @@ class DeepSpeedEngine(Module):
             # Set flag to prevent hooks from firing (we'll manually call prologue/epilogue)
             backward_kwargs = {"retain_graph": retain_graph}
 
+            # fp32 copy for the monitor, divided by gas only after the cast so low precision losses do not underflow
+            monitor_loss = None
+            if self.monitor.enabled:
+                monitor_loss = loss.detach().float().mean()
+                if scale_wrt_gas:
+                    monitor_loss = monitor_loss / self.gradient_accumulation_steps()
+
             loss = loss / self.gradient_accumulation_steps() if scale_wrt_gas else loss
             gas_scaled_loss = loss
 
@@ -3589,6 +3610,11 @@ class DeepSpeedEngine(Module):
 
                 # backward_epilogue is not called in a hook when self._support_torch_style_backward is False
                 self._backward_epilogue()
+
+            # Summed over the micro-batches of a step and reported as train_loss in step().
+            # Added only after a successful backward.
+            if monitor_loss is not None:
+                self.losses = monitor_loss if self.losses is None else self.losses + monitor_loss
 
             return gas_scaled_loss
         finally:
@@ -3776,6 +3802,10 @@ class DeepSpeedEngine(Module):
                 raise RuntimeError("Expert weight gradients are still staged at an optimizer step, which would "
                                    "apply them one step late. deferred_dw_flush_period needs the backward that "
                                    "closes each gradient accumulation window to run through the engine.")
+
+            # Written before _take_model_step() resets self.losses and advances global_samples
+            if self.monitor.enabled and self.global_rank == 0 and self.losses is not None:
+                self.monitor.write_events([("Train/Samples/train_loss", self.losses.item(), self.global_samples)])
 
             self._take_model_step(lr_kwargs)
 

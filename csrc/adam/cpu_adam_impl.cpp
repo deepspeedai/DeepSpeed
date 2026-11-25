@@ -14,6 +14,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <thread>
 #include <type_traits>
 #include <unordered_map>
@@ -251,6 +252,51 @@ void invoke(std::shared_ptr<Adam_Optimizer> opt,
                parallel);
 }
 
+static int ds_adam_step_impl(int optimizer_id,
+                             size_t step,
+                             float lr,
+                             float beta1,
+                             float beta2,
+                             float epsilon,
+                             float weight_decay,
+                             bool bias_correction,
+                             torch::Tensor& params,
+                             torch::Tensor& grads,
+                             torch::Tensor& exp_avg,
+                             torch::Tensor& exp_avg_sq,
+                             std::optional<float> grad_scale = std::nullopt,
+                             torch::Tensor* params_copy = nullptr)
+{
+    TORCH_CHECK(!grad_scale.has_value() || ds_adam_grad_scale_supported(),
+                "adam_update_scaled: the RVV kernel does not apply grad_scale");
+    auto params_c = params.contiguous();
+    auto grads_c = grads.contiguous();
+    auto exp_avg_c = exp_avg.contiguous();
+    auto exp_avg_sq_c = exp_avg_sq.contiguous();
+
+    std::shared_ptr<Adam_Optimizer> opt =
+        std::static_pointer_cast<Adam_Optimizer>(s_optimizers[optimizer_id]);
+    opt->IncrementStep(step, beta1, beta2);
+    opt->update_state(lr, epsilon, weight_decay, bias_correction);
+
+    // The CPU fused optimizer shares this state across parameter groups.
+    auto step_opt = std::make_shared<Adam_Optimizer>(*opt);
+    step_opt->set_grad_scale(grad_scale.value_or(1.0f));
+    if (params_copy != nullptr) {
+        step_opt->set_params_copy(params_c.data_ptr<float>(),
+                                  params_copy->data_ptr<c10::BFloat16>());
+    }
+    pybind11::gil_scoped_release release;
+    invoke(step_opt, params_c, grads_c, exp_avg_c, exp_avg_sq_c, params_c.numel());
+
+    // contiguous() copies a non-contiguous tensor, so write the result back.
+    if (!params.is_same(params_c)) params.copy_(params_c);
+    if (!exp_avg.is_same(exp_avg_c)) exp_avg.copy_(exp_avg_c);
+    if (!exp_avg_sq.is_same(exp_avg_sq_c)) exp_avg_sq.copy_(exp_avg_sq_c);
+
+    return 0;
+}
+
 int ds_adam_step(int optimizer_id,
                  size_t step,
                  float lr,
@@ -264,24 +310,18 @@ int ds_adam_step(int optimizer_id,
                  torch::Tensor& exp_avg,
                  torch::Tensor& exp_avg_sq)
 {
-    auto params_c = params.contiguous();
-    auto grads_c = grads.contiguous();
-    auto exp_avg_c = exp_avg.contiguous();
-    auto exp_avg_sq_c = exp_avg_sq.contiguous();
-
-    std::shared_ptr<Adam_Optimizer> opt =
-        std::static_pointer_cast<Adam_Optimizer>(s_optimizers[optimizer_id]);
-    opt->IncrementStep(step, beta1, beta2);
-    opt->update_state(lr, epsilon, weight_decay, bias_correction);
-
-    invoke(opt, params_c, grads_c, exp_avg_c, exp_avg_sq_c, params_c.numel());
-
-    // contiguous() copies a non-contiguous tensor, so write the result back.
-    if (!params.is_same(params_c)) params.copy_(params_c);
-    if (!exp_avg.is_same(exp_avg_c)) exp_avg.copy_(exp_avg_c);
-    if (!exp_avg_sq.is_same(exp_avg_sq_c)) exp_avg_sq.copy_(exp_avg_sq_c);
-
-    return 0;
+    return ds_adam_step_impl(optimizer_id,
+                             step,
+                             lr,
+                             beta1,
+                             beta2,
+                             epsilon,
+                             weight_decay,
+                             bias_correction,
+                             params,
+                             grads,
+                             exp_avg,
+                             exp_avg_sq);
 }
 
 bool ds_adam_copy_supported()
@@ -347,29 +387,20 @@ int ds_adam_step_scaled_copy(int optimizer_id,
         params_copy.scalar_type() == torch::kBFloat16 && params_copy.is_contiguous() &&
             params_copy.numel() == params.numel(),
         "adam_update_scaled_copy: params_copy must be contiguous bfloat16 with params' numel");
-    std::shared_ptr<Adam_Optimizer> opt =
-        std::static_pointer_cast<Adam_Optimizer>(s_optimizers[optimizer_id]);
-    opt->set_params_copy(params.data_ptr<float>(), params_copy.data_ptr<c10::BFloat16>());
-    try {
-        ds_adam_step_scaled(optimizer_id,
-                            step,
-                            lr,
-                            beta1,
-                            beta2,
-                            epsilon,
-                            weight_decay,
-                            bias_correction,
-                            params,
-                            grads,
-                            exp_avg,
-                            exp_avg_sq,
-                            grad_scale);
-    } catch (...) {
-        opt->set_params_copy(nullptr, nullptr);
-        throw;
-    }
-    opt->set_params_copy(nullptr, nullptr);
-    return 0;
+    return ds_adam_step_impl(optimizer_id,
+                             step,
+                             lr,
+                             beta1,
+                             beta2,
+                             epsilon,
+                             weight_decay,
+                             bias_correction,
+                             params,
+                             grads,
+                             exp_avg,
+                             exp_avg_sq,
+                             grad_scale,
+                             &params_copy);
 }
 
 int ds_adam_step_scaled(int optimizer_id,
@@ -386,30 +417,19 @@ int ds_adam_step_scaled(int optimizer_id,
                         torch::Tensor& exp_avg_sq,
                         float grad_scale)
 {
-    TORCH_CHECK(ds_adam_grad_scale_supported(),
-                "adam_update_scaled: the RVV kernel does not apply grad_scale");
-    std::shared_ptr<Adam_Optimizer> opt =
-        std::static_pointer_cast<Adam_Optimizer>(s_optimizers[optimizer_id]);
-    opt->set_grad_scale(grad_scale);
-    try {
-        ds_adam_step(optimizer_id,
-                     step,
-                     lr,
-                     beta1,
-                     beta2,
-                     epsilon,
-                     weight_decay,
-                     bias_correction,
-                     params,
-                     grads,
-                     exp_avg,
-                     exp_avg_sq);
-    } catch (...) {
-        opt->set_grad_scale(1.0f);
-        throw;
-    }
-    opt->set_grad_scale(1.0f);
-    return 0;
+    return ds_adam_step_impl(optimizer_id,
+                             step,
+                             lr,
+                             beta1,
+                             beta2,
+                             epsilon,
+                             weight_decay,
+                             bias_correction,
+                             params,
+                             grads,
+                             exp_avg,
+                             exp_avg_sq,
+                             grad_scale);
 }
 
 void adamw_rollback_inplace(float* params,
