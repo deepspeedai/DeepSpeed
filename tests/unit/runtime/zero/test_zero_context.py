@@ -291,6 +291,45 @@ class TestSerialContext(DistributedTest):
             expected = torch.full((4, 4), 0.875, dtype=torch.bfloat16, device=engine.device)
             torch.testing.assert_close(model.linear.weight, expected, rtol=0, atol=0)
 
+    def test_added_child_bias_trains(self):
+        if not get_accelerator().is_bf16_supported():
+            pytest.skip("bf16 is not supported")
+        setup_serial_env()
+
+        class Model(torch.nn.Module):
+
+            def __init__(self):
+                super().__init__()
+                self.linear = torch.nn.Linear(4, 4, bias=False)
+                self.linear.bias = torch.nn.Parameter(torch.ones(4, dtype=torch.float32))
+
+            def forward(self, x):
+                return self.linear(x).float().mean()
+
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 1,
+            "bf16": {
+                "enabled": True
+            },
+            "zero_optimization": {
+                "stage": 3
+            },
+            "zero_allow_untested_optimizer": True,
+            "gradient_clipping": 0,
+        }
+        with deepspeed.zero.Init(config_dict_or_path=config_dict):
+            model = Model()
+
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.5)
+        engine, _, _, _ = deepspeed.initialize(config=config_dict, model=model, optimizer=optimizer)
+        loss = engine(torch.ones(1, 4, device=engine.device, dtype=torch.bfloat16))
+        engine.backward(loss)
+        engine.step()
+        # d(mean)/d(bias) is 1/4 for each of the 4 outputs, so one SGD step at lr=0.5 moves 1.0 to 0.875.
+        with deepspeed.zero.GatheredParameters(model.linear.bias):
+            expected = torch.full((4, ), 0.875, dtype=torch.bfloat16, device=engine.device)
+            torch.testing.assert_close(model.linear.bias, expected, rtol=0, atol=0)
+
     def test_throughput_calculation(self):
         setup_serial_env()
 

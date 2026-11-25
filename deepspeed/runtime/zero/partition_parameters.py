@@ -633,14 +633,15 @@ class InsertPostInitMethodToModuleSubClasses(object):
         if DeepSpeedTensorOverride.dtype in self.tensor_overrides:
             target_fp_dtype = self.dtype
 
-            def remember_replacement_dtype(module, name, param):
-                previous = module._parameters.get(name)
-                if (is_zero_param(previous) or hasattr(previous, "_ds_zero_init_dtype")) and not is_zero_param(param):
-                    if param.is_floating_point():
-                        param._ds_zero_init_dtype = target_fp_dtype
+            # A parent's constructor may replace or add a child's parameter after the child was
+            # partitioned, so _post_init_method never sees it. Mark it to take the Init dtype when it is
+            # converted later, like every parameter _post_init_method converts.
+            def remember_init_dtype(module, name, param):
+                if param is not None and not is_zero_param(param) and param.is_floating_point():
+                    param._ds_zero_init_dtype = target_fp_dtype
 
             self._replacement_hook = torch.nn.modules.module.register_module_parameter_registration_hook(
-                remember_replacement_dtype)
+                remember_init_dtype)
         else:
             target_fp_dtype = None
         if DeepSpeedTensorOverride.device in self.tensor_overrides:
