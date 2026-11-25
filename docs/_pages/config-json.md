@@ -1953,3 +1953,41 @@ The offload pass is **not** in the default DeepCompile schedule; enable it only 
 | Description | Default |
 | ----------- | ------- |
 | Parameters and buffers kept in fp32 while the model trains in bf16 or fp16. `"auto"` uses the model's Hugging Face transformers lists: `_keep_in_fp32_modules_strict`, plus `_keep_in_fp32_modules` under fp16. An example is the MoE routing bias `e_score_correction_bias` of DeepSeek-V3, GLM-4.5 and GLM-5, whose values bf16 cannot tell apart. A list gives name patterns, matched the way transformers matches them: `*` stands for any characters and a pattern may match anywhere in the parameter or buffer name. `[]` keeps nothing in fp32. Under ZeRO-3, `deepspeed.zero.Init` converts them when it finishes building each module, before a checkpoint is loaded into them. Listed buffers stay fp32 even when `buffer_dtype` is set. Listed parameters stay fp32 only under ZeRO stage 3 without parameter offload, where their gradients are also reduced and accumulated in fp32; with other stages or with parameter offload they follow the training dtype, with a warning for `"auto"` and an error for an explicit list. Frozen parameters stored quantized (`zero_quantized_nontrainable_weights`) stay quantized, with a warning. | `"auto"` |
+
+### Ragged Inference Engine (v2) Memory options
+
+The Ragged Inference Engine (v2) manages the persistent key-value cache through `manager.memory_config`.
+
+```json
+{
+  "manager": {
+    "max_tracked_sequences": 2048,
+    "max_ragged_batch_size": 768,
+    "max_ragged_sequence_count": 512,
+    "max_context": 8192,
+    "memory_config": {
+      "mode": "reserve",
+      "size": 1000000000,
+      "max_blocks": null
+    }
+  }
+}
+```
+
+<i>**mode**</i>: ["reserve" | "allocate"]
+
+| Description | Default |
+| ----------- | ------- |
+| KV cache allocation mode. `reserve` calculates KV blocks dynamically from remaining GPU memory while reserving `size` bytes. `allocate` allocates an explicit `size` number of blocks. | `"reserve"` |
+
+<i>**size**</i>: [integer]
+
+| Description | Default |
+| ----------- | ------- |
+| Parameter for each allocation mode. In `reserve` mode, bytes to reserve after KV cache allocation (guaranteed across all TP devices). In `allocate` mode, the exact number of KV blocks to allocate. | `1000000000` (1 GB) |
+
+<i>**max_blocks**</i>: [integer or null]
+
+| Description | Default |
+| ----------- | ------- |
+| Maximum number of KV cache blocks to allocate. When specified in `reserve` or `allocate` mode, bounds the allocated blocks even if surplus GPU memory is available, preventing excessive allocation and reserving headroom for activation spikes during prefill or generation. | `null` |
