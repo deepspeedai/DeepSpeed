@@ -33,7 +33,6 @@ class CUDA_Accelerator(DeepSpeedAccelerator):
         self._name = 'cuda'
         self._communication_backend_name = 'nccl' if sys.platform != 'win32' else 'gloo'
         self._compile_backend = "inductor"
-        self._nvtx_domains = {}
         if pynvml is None:
             self._init_pynvml()
 
@@ -86,6 +85,10 @@ class CUDA_Accelerator(DeepSpeedAccelerator):
         return torch.cuda.device_count()
 
     def synchronize(self, device_index=None):
+        # Torch 2.14 Dynamo rejects torch.cuda.synchronize(None): it builds
+        # torch.device(None). None means the current device, so omit the argument.
+        if device_index is None:
+            return torch.cuda.synchronize()
         return torch.cuda.synchronize(device_index)
 
     # RNG APIs
@@ -233,16 +236,15 @@ class CUDA_Accelerator(DeepSpeedAccelerator):
         return torch.cuda.is_available()
 
     def _get_nvtx_domain(self, domain):
+        # Return the domain name rather than a Domain object for compatibility with older nvtx versions.
         if nvtx is None or domain is None:
             return None
-        if domain not in self._nvtx_domains:
-            self._nvtx_domains[domain] = nvtx.get_domain(domain)
-        return self._nvtx_domains[domain]
+        return domain
 
     def range_push(self, msg, domain=None, category=None):
         nvtx_domain = self._get_nvtx_domain(domain)
         if nvtx_domain is not None:
-            return nvtx_domain.push_range(message=msg, category=category)
+            return nvtx.push_range(message=msg, domain=nvtx_domain, category=category)
         torch_nvtx = getattr(torch.cuda, 'nvtx', None)
         if torch_nvtx is not None and hasattr(torch_nvtx, 'range_push'):
             return torch_nvtx.range_push(msg)
@@ -250,7 +252,7 @@ class CUDA_Accelerator(DeepSpeedAccelerator):
     def range_pop(self, domain=None):
         nvtx_domain = self._get_nvtx_domain(domain)
         if nvtx_domain is not None:
-            return nvtx_domain.pop_range()
+            return nvtx.pop_range(domain=nvtx_domain)
         torch_nvtx = getattr(torch.cuda, 'nvtx', None)
         if torch_nvtx is not None and hasattr(torch_nvtx, 'range_pop'):
             return torch_nvtx.range_pop()
@@ -285,7 +287,27 @@ class CUDA_Accelerator(DeepSpeedAccelerator):
             return False
         return major < 9
 
+    def supported_subchannel_quantization_formats(self):
+        # The Triton kernels need FP8 tensor cores (sm89+) for FP8 and integer tensor cores (sm80+) for INT8.
+        from deepspeed.ops.triton_ops import is_triton_available
+        # not verified on AMD GPU, whose FP8 formats differ
+        if torch.version.hip is not None or not is_triton_available():
+            return ()
+        capability = torch.cuda.get_device_capability()
+        formats = ()
+        if capability >= (8, 0):
+            formats += ("int8", )
+        if capability >= (8, 9):
+            formats += ("e4m3", "e5m2")
+        return formats
+
     # Graph operations
+    def is_graph_capture_supported(self) -> bool:
+        return True
+
+    def is_current_stream_capturing(self) -> bool:
+        return torch.cuda.is_current_stream_capturing()
+
     def create_graph(self):
         return torch.cuda.CUDAGraph()
 
@@ -352,7 +374,7 @@ class CUDA_Accelerator(DeepSpeedAccelerator):
             return "deepspeed.ops.op_builder"
 
     # dict that holds class name <--> class type mapping i.e.
-    # 'AsyncIOBuilder': <class 'op_builder.async_io.AsyncIOBuilder'>
+    # 'FusedAdamBuilder': <class 'op_builder.fused_adam.FusedAdamBuilder'>
     # this dict will be filled at init stage
     class_dict = None
 
@@ -378,10 +400,17 @@ class CUDA_Accelerator(DeepSpeedAccelerator):
                         ) and member_name != "OpBuilder" and member_name != "CUDAOpBuilder":  # avoid abstract classes
                             if not member_name in self.class_dict:
                                 self.class_dict[member_name] = getattr(module, member_name)
-            # Host-side optimizers run on the CPU wherever the model lives,
-            # so they share their builders with the CPU accelerator.
+            # Host-side ops (the CPU optimizers, and async I/O, which stages device tensors through
+            # host memory) need no CUDA to build, so they share their builders with the CPU accelerator.
             cpu_op_builder_module = importlib.import_module("{}.cpu".format(op_builder_dir))
-            for member_name in ["CPUAdamBuilder", "CPUAdagradBuilder", "CPULionBuilder"]:
+            for member_name in [
+                    "CPUAdamBuilder",
+                    "CPUAdagradBuilder",
+                    "CPULionBuilder",
+                    "ReflowCPUAdamBuilder",
+                    "ReflowCPULionBuilder",
+                    "AsyncIOBuilder",
+            ]:
                 self.class_dict[member_name] = getattr(cpu_op_builder_module, member_name)
             # end initialize for create_op_builder()
 

@@ -3,9 +3,14 @@
 
 # DeepSpeed Team
 
+import copy
 import math
 import os
 import sys
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier, Event, Thread
+from time import monotonic
+import warnings
 import torch
 import numpy as np
 import pytest
@@ -13,8 +18,10 @@ from cpuinfo import get_cpu_info
 
 import deepspeed
 from deepspeed.accelerator import get_accelerator
-from deepspeed.ops.adam import FusedAdam
-from deepspeed.ops.op_builder import CPUAdamBuilder, FusedAdamBuilder
+from deepspeed.ops.adagrad import DeepSpeedCPUAdagrad
+from deepspeed.ops.adam import DeepSpeedCPUAdam, FusedAdam
+from deepspeed.ops.lion import DeepSpeedCPULion
+from deepspeed.ops.op_builder import CPUAdagradBuilder, CPUAdamBuilder, CPULionBuilder, FusedAdamBuilder
 from unit.common import DistributedTest
 
 if not deepspeed.ops.__compatible_ops__[CPUAdamBuilder.NAME]:
@@ -111,6 +118,261 @@ def test_cpu_adam_strict_state_updates(model_size, adamw_mode, weight_decay, bia
         torch.testing.assert_close(state['exp_avg_sq'], ref_exp_avg_sq, rtol=3e-5, atol=2e-6)
 
 
+@pytest.mark.parametrize('fused', [False, True])
+def test_cpu_adam_concurrent_updates(fused):
+    from deepspeed.ops.adam import DeepSpeedCPUAdam
+
+    if fused and get_accelerator().device_name() != 'cpu':
+        pytest.skip("requires the CPU fused Adam implementation")
+
+    barrier = Barrier(2)
+    cases = []
+    for index in range(2):
+        generator = torch.Generator().manual_seed(71 + index)
+        parameter = torch.nn.Parameter(torch.randn(1048579, generator=generator))
+        reference = torch.nn.Parameter(parameter.detach().clone())
+        options = dict(lr=0.001 + index * 0.004,
+                       betas=(0.85 - index * 0.1, 0.97 - index * 0.03),
+                       eps=1e-7,
+                       weight_decay=0.07)
+        optimizer = (FusedAdam if fused else DeepSpeedCPUAdam)([parameter], **options)
+        expected = torch.optim.AdamW([reference], foreach=False, **options)
+        gradients = [torch.randn(parameter.shape, generator=generator) for _ in range(4)]
+        cases.append((parameter, reference, optimizer, expected, gradients))
+
+    def update(case):
+        parameter, reference, optimizer, expected, gradients = case
+        for gradient in gradients:
+            parameter.grad = gradient
+            reference.grad = gradient
+            barrier.wait(timeout=30)
+            optimizer.step()
+            expected.step()
+            torch.testing.assert_close(parameter, reference, rtol=3e-5, atol=2e-6)
+            for key in ('exp_avg', 'exp_avg_sq'):
+                torch.testing.assert_close(optimizer.state[parameter][key],
+                                           expected.state[reference][key],
+                                           rtol=3e-5,
+                                           atol=2e-6)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        list(executor.map(update, cases))
+
+
+def test_cpu_adam_concurrent_grad_scale_same_optimizer():
+    params = [torch.zeros(1 << 18, device='cpu', dtype=torch.float32) for _ in range(2)]
+    beta1, beta2 = 0.5, 0.75
+    optimizer = DeepSpeedCPUAdam(params, betas=(beta1, beta2))
+    if not optimizer.grad_scale_supported():
+        pytest.skip("this CPU Adam build cannot apply grad_scale")
+
+    op = optimizer.ds_opt_adam
+    barrier = Barrier(2)
+    steps = 4
+
+    def update(param, grad_scale):
+        grad = torch.ones_like(param)
+        exp_avg = torch.zeros_like(param)
+        exp_avg_sq = torch.zeros_like(param)
+        for step in range(1, steps + 1):
+            args = (optimizer.opt_id, step, 1e-3, beta1, beta2, 1e-8, 0.0, True, param, grad, exp_avg, exp_avg_sq)
+            barrier.wait(timeout=30)
+            if grad_scale == 1.0:
+                op.adam_update(*args)
+            else:
+                op.adam_update_scaled(*args, grad_scale)
+
+        torch.testing.assert_close(exp_avg, torch.full_like(param, grad_scale * (1 - beta1**steps)))
+        torch.testing.assert_close(exp_avg_sq, torch.full_like(param, grad_scale**2 * (1 - beta2**steps)))
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        list(executor.map(update, params, (1.0, 0.25)))
+
+
+@pytest.mark.parametrize('fused', [False, True])
+def test_cpu_adam_native_update_releases_gil(fused):
+    if fused and get_accelerator().device_name() != 'cpu':
+        pytest.skip("requires the CPU fused Adam implementation")
+
+    parameter = torch.nn.Parameter(torch.ones(16 * 1024 * 1024))
+    parameter.grad = torch.ones_like(parameter)
+    optimizer = (FusedAdam if fused else DeepSpeedCPUAdam)([parameter])
+    optimizer.step()
+    state = optimizer.state[parameter]
+    if fused:
+        native_update = optimizer.multi_tensor_adam
+        args = (65536, optimizer._dummy_overflow_buf, [[parameter.grad], [parameter], [state['exp_avg']],
+                                                       [state['exp_avg_sq']]], 0.001, 0.9, 0.999, 1e-8, 2, 1, 1, 0.0)
+    else:
+        native_update = optimizer.ds_opt_adam.adam_update
+        args = (optimizer.opt_id, 2, 0.001, 0.9, 0.999, 1e-8, 0.0, True, parameter, parameter.grad, state['exp_avg'],
+                state['exp_avg_sq'])
+
+    ready = Event()
+    stop = Event()
+    progressed = Event()
+    updating = False
+
+    def observe():
+        ready.set()
+        while not stop.wait(0.001):
+            if updating:
+                progressed.set()
+                return
+
+    observer = Thread(target=observe, daemon=True)
+    switch_interval = sys.getswitchinterval()
+    observer.start()
+    try:
+        assert ready.wait(timeout=5), "Python observer did not start"
+        # Exclude interpreter scheduling between the flag changes and the native call.
+        # All tensors and arguments are prepared before this interval.
+        sys.setswitchinterval(60)
+        deadline = monotonic() + 5
+        for _ in range(20):
+            updating = True
+            native_update(*args)
+            updating = False
+            if progressed.is_set() or monotonic() >= deadline:
+                break
+        assert progressed.is_set(), "Python thread made no progress during native Adam updates"
+    finally:
+        updating = False
+        sys.setswitchinterval(switch_interval)
+        stop.set()
+        observer.join(timeout=5)
+    assert not observer.is_alive()
+
+
+@pytest.mark.parametrize('model_size', [3, 17, 513, 524289])
+@pytest.mark.parametrize('adamw_mode,weight_decay', [(True, 0.0), (True, 0.07), (False, 0.07)])
+@pytest.mark.parametrize('grad_scale', [0.37, 1.0])
+def test_cpu_adam_grad_scale_matches_scaling_in_place(model_size, adamw_mode, weight_decay, grad_scale):
+    """step(grad_scale=s) multiplies each gradient by s as the kernel loads it: the parameters and moments must be
+    bitwise equal to grad.mul_(s) followed by step(), and the gradient itself must be left unchanged. Sizes cover the
+    vectorized blocks and the scalar remainder."""
+    from deepspeed.ops.adam import DeepSpeedCPUAdam
+
+    generator = torch.Generator().manual_seed(model_size)
+    initial = torch.rand(model_size, generator=generator).mul_(1.5).sub_(0.75)
+    fused_param = torch.nn.Parameter(initial.clone())
+    in_place_param = torch.nn.Parameter(initial.clone())
+    kwargs = dict(lr=7e-4, betas=(0.85, 0.97), eps=1e-7, weight_decay=weight_decay, adamw_mode=adamw_mode)
+    fused = DeepSpeedCPUAdam([fused_param], **kwargs)
+    in_place = DeepSpeedCPUAdam([in_place_param], **kwargs)
+    if grad_scale != 1.0 and not fused.grad_scale_supported():
+        pytest.skip("this CPU Adam build cannot apply grad_scale (RVV)")
+
+    for _ in range(4):
+        grad = torch.rand(model_size, generator=generator).mul_(3.0).sub_(1.5)
+        fused_param.grad = grad.clone()
+        fused.step(grad_scale=grad_scale)
+        assert torch.equal(fused_param.grad, grad)
+        in_place_param.grad = grad.clone().mul_(grad_scale)
+        in_place.step()
+
+        assert torch.equal(fused_param, in_place_param)
+        assert torch.equal(fused.state[fused_param]['exp_avg'], in_place.state[in_place_param]['exp_avg'])
+        assert torch.equal(fused.state[fused_param]['exp_avg_sq'], in_place.state[in_place_param]['exp_avg_sq'])
+
+
+@pytest.mark.parametrize('model_size', [3, 17, 513, 524289])
+@pytest.mark.parametrize('piece_numel', [1000, 1 << 20])
+@pytest.mark.parametrize('grad_scale', [0.37, 1.0])
+def test_cpu_adam_bf16_copy_matches_step(model_size, piece_numel, grad_scale):
+    """step(bf16_copy=...) updates in pieces and writes a bfloat16 copy of each updated piece in the same kernel pass:
+    the parameters and moments must be bitwise equal to step(grad_scale=...), and the copy bitwise equal to casting the
+    updated parameters with torch. A requested piece size of 1000 is rounded down to a multiple of the kernel's
+    widest vector block (aligned_piece_numel); the last piece of 524289 elements still ends in the scalar loop."""
+    from deepspeed.ops.adam import DeepSpeedCPUAdam
+
+    generator = torch.Generator().manual_seed(model_size)
+    initial = torch.rand(model_size, generator=generator).mul_(1.5).sub_(0.75)
+    pieces_param = torch.nn.Parameter(initial.clone())
+    step_param = torch.nn.Parameter(initial.clone())
+    kwargs = dict(lr=7e-4, betas=(0.85, 0.97), eps=1e-7, weight_decay=0.07, adamw_mode=True)
+    pieces = DeepSpeedCPUAdam([pieces_param], **kwargs)
+    reference = DeepSpeedCPUAdam([step_param], **kwargs)
+    if not pieces.copy_supported():
+        pytest.skip("this CPU Adam build cannot write the bfloat16 copy")
+
+    for _ in range(3):
+        grad = torch.rand(model_size, generator=generator).mul_(3.0).sub_(1.5)
+        pieces_param.grad = grad.clone()
+        step_param.grad = grad.clone()
+        copy = torch.full((model_size, ), float('nan'), dtype=torch.bfloat16)
+        seen = []
+
+        def before_piece(param, start, count):
+            return torch.empty(count, dtype=torch.bfloat16)
+
+        def after_piece(param, start, count, out):
+            assert param is pieces_param
+            seen.append((start, count))
+            copy[start:start + count] = out
+
+        pieces.step(grad_scale=grad_scale, bf16_copy=(piece_numel, before_piece, after_piece))
+        reference.step(grad_scale=grad_scale)
+
+        piece = pieces.aligned_piece_numel(piece_numel)
+        assert piece <= piece_numel or piece == pieces.aligned_piece_numel(1)
+        assert seen == [(s, min(piece, model_size - s)) for s in range(0, model_size, piece)]
+        assert torch.equal(pieces_param.grad, grad)
+        assert torch.equal(pieces_param, step_param)
+        assert torch.equal(pieces.state[pieces_param]['exp_avg'], reference.state[step_param]['exp_avg'])
+        assert torch.equal(pieces.state[pieces_param]['exp_avg_sq'], reference.state[step_param]['exp_avg_sq'])
+        assert torch.equal(copy, step_param.detach().to(torch.bfloat16))
+
+
+def test_cpu_adam_bf16_copy_runs_step_hooks():
+    """step(bf16_copy=...) is still torch's wrapped Optimizer.step: step hooks run, and a learning-rate scheduler on
+    the optimizer sees the step (no "lr_scheduler.step() before optimizer.step()" warning)."""
+    from deepspeed.ops.adam import DeepSpeedCPUAdam
+
+    param = torch.nn.Parameter(torch.ones(256))
+    optimizer = DeepSpeedCPUAdam([param], lr=1e-3)
+    if not optimizer.copy_supported():
+        pytest.skip("this CPU Adam build cannot write the bfloat16 copy")
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1)
+    calls = []
+    optimizer.register_step_pre_hook(lambda opt, args, kwargs: calls.append("pre"))
+    optimizer.register_step_post_hook(lambda opt, args, kwargs: calls.append("post"))
+    param.grad = torch.full((256, ), 0.5)
+    copy = torch.empty(256, dtype=torch.bfloat16)
+    optimizer.step(grad_scale=0.5, bf16_copy=(256, lambda p, start, count: copy[start:start + count], lambda *a: None))
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        scheduler.step()
+
+    assert calls == ["pre", "post"]
+    assert not [w for w in caught if "optimizer.step()" in str(w.message)]
+    assert torch.equal(copy, param.detach().to(torch.bfloat16))
+
+
+def test_cpu_adam_updates_non_contiguous_param():
+    from deepspeed.ops.adam import DeepSpeedCPUAdam
+
+    initial = torch.randn(6, 5).t()
+    cpu_param = torch.nn.Parameter(initial.clone(memory_format=torch.preserve_format))
+    assert not cpu_param.is_contiguous()
+    ref_param = initial.clone()
+    ref_exp_avg = torch.zeros_like(ref_param)
+    ref_exp_avg_sq = torch.zeros_like(ref_param)
+    optimizer = DeepSpeedCPUAdam([cpu_param], lr=1e-2, weight_decay=0.01)
+
+    for step in range(1, 4):
+        grad = torch.randn_like(ref_param)
+        cpu_param.grad = grad
+        optimizer.step()
+        _reference_adam_step(ref_param, grad, ref_exp_avg, ref_exp_avg_sq, step, 1e-2, (0.9, 0.999), 1e-8, 0.01, True,
+                             True)
+
+    state = optimizer.state[cpu_param]
+    torch.testing.assert_close(cpu_param, ref_param, rtol=3e-5, atol=2e-6)
+    torch.testing.assert_close(state['exp_avg'], ref_exp_avg, rtol=3e-5, atol=2e-6)
+    torch.testing.assert_close(state['exp_avg_sq'], ref_exp_avg_sq, rtol=3e-5, atol=2e-6)
+
+
 def test_cpu_adam_rejects_amsgrad():
     from deepspeed.ops.adam import DeepSpeedCPUAdam
 
@@ -123,12 +385,48 @@ def test_cpu_adam_rejects_amsgrad():
     assert len(optimizer.param_groups) == 1
 
 
+@pytest.mark.parametrize('fp32_optimizer_states', [True, False])
+@pytest.mark.parametrize('optimizer_class, builder', [(DeepSpeedCPUAdam, CPUAdamBuilder),
+                                                      (DeepSpeedCPULion, CPULionBuilder),
+                                                      (DeepSpeedCPUAdagrad, CPUAdagradBuilder)],
+                         ids=['adam', 'lion', 'adagrad'])
+def test_cpu_optimizer_load_state_dict_keeps_state_dtype(optimizer_class, builder, fp32_optimizer_states):
+    """Resuming from a state_dict must keep the states in the dtype step() uses for them, so that the resumed
+    optimizer takes the same step as the one that was saved."""
+    if not deepspeed.ops.__compatible_ops__[builder.NAME]:
+        pytest.skip(f"{builder.NAME} is not compatible")
+
+    generator = torch.Generator().manual_seed(0)
+    param = torch.nn.Parameter(torch.randn(1024, generator=generator).to(torch.bfloat16))
+    optimizer = optimizer_class([param], fp32_optimizer_states=fp32_optimizer_states)
+    for _ in range(3):
+        param.grad = torch.randn(1024, generator=generator).to(torch.bfloat16)
+        optimizer.step()
+
+    resumed_param = torch.nn.Parameter(param.detach().clone())
+    resumed = optimizer_class([resumed_param], fp32_optimizer_states=fp32_optimizer_states)
+    # A deep copy stands in for a checkpoint, so that the two optimizers do not share state tensors.
+    resumed.load_state_dict(copy.deepcopy(optimizer.state_dict()))
+
+    state_dtype = torch.float32 if fp32_optimizer_states else torch.bfloat16
+    for key, value in optimizer.state[param].items():
+        if torch.is_tensor(value):
+            assert resumed.state[resumed_param][key].dtype == state_dtype
+            assert torch.equal(resumed.state[resumed_param][key], value)
+
+    grad = torch.randn(1024, generator=generator).to(torch.bfloat16)
+    param.grad = grad
+    resumed_param.grad = grad.clone()
+    optimizer.step()
+    resumed.step()
+    assert torch.equal(resumed_param, param)
+
+
 @pytest.mark.parametrize('dtype', [torch.half, torch.bfloat16, torch.float], ids=["fp16", "bf16", "fp32"])
 @pytest.mark.parametrize('model_size',
                          [
                              (64),
                              (22),
-                             #(55),
                              (128),
                              (1024),
                              (1048576),
@@ -156,12 +454,6 @@ class TestCPUAdam(DistributedTest):
         cpu_data = torch.randn(model_size, device='cpu').to(dtype)
         cpu_param = torch.nn.Parameter(cpu_data)
         cuda_param = torch.nn.Parameter(cpu_data.to(get_accelerator().device_name()))
-
-        # tolerance = cpu_param.float().norm().detach().numpy() * 1e-2
-        # check_equal(cpu_param.float().norm(),
-        #             cuda_param.float().cpu().norm(),
-        #             atol=tolerance,
-        #             verbose=True)
 
         cpu_optimizer = DeepSpeedCPUAdam([cpu_param])
         cuda_optimizer = FusedAdam([cuda_param])
@@ -333,6 +625,9 @@ def test_zenflow_adam_cross_process():
 
 class TestCPUAdamGPUError(DistributedTest):
 
+    # The assertion under test can only fire for a param on a discrete accelerator;
+    # on the cpu accelerator step() returns normally and the rank pool deadlocks.
+    @pytest.mark.skipif(get_accelerator().device_name() == 'cpu', reason="requires a discrete accelerator device")
     def test_cpu_adam_gpu_error(self):
         model_size = 64
         from deepspeed.ops.adam import DeepSpeedCPUAdam

@@ -6,6 +6,7 @@
 import pytest
 import torch
 
+import deepspeed
 from deepspeed.accelerator import get_accelerator
 from deepspeed.inference.v2.inference_utils import DtypeEnum
 from deepspeed.inference.v2.kernels.ragged_ops import (
@@ -13,7 +14,11 @@ from deepspeed.inference.v2.kernels.ragged_ops import (
     MoEScatter,
     RaggedTopKGating,
 )
+from deepspeed.ops.op_builder import RaggedOpsBuilder
 from .ragged_testing_utils import build_simple_batch
+
+if not deepspeed.ops.__compatible_ops__[RaggedOpsBuilder.NAME]:
+    pytest.skip("Ragged device ops are not available on this system", allow_module_level=True)
 """
 For simplicity's sake, these tests do rely on ``RaggedTopKGating``  and
 ``MoEScatter`` to produce correct inputs. If either of these kernels is broken

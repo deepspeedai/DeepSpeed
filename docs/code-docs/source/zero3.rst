@@ -59,7 +59,7 @@ The dictionary provided under the ``zero_optimization`` entry of the main
 DeepSpeed configuration dict will be parsed and validated with this class.
 Sub-configurations for parameter offload and optimizer offload settings are
 parsed by `DeepSpeedZeroOffloadParamConfig`_ and
-`DeepSpeedZeroOffloadOptimizerConfig`_.
+`DeepSpeedZeroOffloadOptimizerConfig`_, and the Reflow settings by `ReflowConfig`_.
 
 .. _DeepSpeedZeroConfig:
 .. autopydantic_model:: deepspeed.runtime.zero.config.DeepSpeedZeroConfig
@@ -69,6 +69,9 @@ parsed by `DeepSpeedZeroOffloadParamConfig`_ and
 
 .. _DeepSpeedZeroOffloadOptimizerConfig:
 .. autopydantic_model:: deepspeed.runtime.zero.config.DeepSpeedZeroOffloadOptimizerConfig
+
+.. _ReflowConfig:
+.. autopydantic_model:: deepspeed.runtime.reflow.reflow_config.ReflowConfig
 
 
 Example ZeRO-3 Configurations
@@ -485,7 +488,7 @@ The DeepSpeed engine maintains a set of states in device memory (e.g., CUDA memo
 You can selectively offload specific states by specifying the ``OffloadStateTypeEnum`` in the include argument. ``OffloadStateTypeEnum`` is an enum that defines the states that can be offloaded. The following states are supported:
 
 * ``OffloadStateTypeEnum.optim_states``: Optimizer states. Currently, only states of DeepSpeed's FusedAdam optimizer are supported.
-* ``OffloadStateTypeEnum.hp_params``: FP32 parameters.
+* ``OffloadStateTypeEnum.hp_params``: FP32 parameters. When the model weights are already FP32 and the optimizer is not offloaded, ZeRO-3 uses each weight partition as its FP32 copy; those copies move only with ``lp_params``, so offloading ``hp_params`` alone frees no device memory for them.
 * ``OffloadStateTypeEnum.lp_params``: BF16/FP16 parameters.
 * ``OffloadStateTypeEnum.lp_grads``: BF16/FP16 gradients.
 * ``OffloadStateTypeEnum.contiguous_grad_buffer``: The contiguous gradient buffer for reduce operations.
