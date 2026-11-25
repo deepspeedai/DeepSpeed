@@ -487,7 +487,7 @@ class TestSegKIDataParallelRollout(DistributedTest):
 
         from transformers import LlamaConfig, LlamaForCausalLM
 
-        config = LlamaConfig(vocab_size=129,
+        config = LlamaConfig(vocab_size=128,
                              hidden_size=128,
                              intermediate_size=256,
                              num_hidden_layers=2,
