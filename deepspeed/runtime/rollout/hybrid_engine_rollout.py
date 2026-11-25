@@ -18,6 +18,7 @@ Two generation paths:
 import itertools
 import math
 import time
+from contextlib import contextmanager
 from copy import copy
 from dataclasses import dataclass, replace
 from functools import lru_cache
@@ -32,6 +33,21 @@ from deepspeed.runtime.rollout.base import RolloutBatch, RolloutEngine, RolloutR
 from deepspeed.runtime.rollout.continuous_batching import (ContinuousBatchRequest, ContinuousBatchScheduler,
                                                            plan_prefill_buckets)
 from deepspeed.utils import logger
+
+
+@contextmanager
+def _full_vocabulary_logits(module):
+    """Have AutoTP's vocabulary-parallel output heads gather their logits while the rollout decodes."""
+    modules = getattr(module, "modules", None)
+    heads = [m for m in modules() if getattr(m, "is_vocab_parallel_lm_head", False)] if callable(modules) else []
+    previous = [getattr(head, "gather_output", False) for head in heads]
+    for head in heads:
+        head.gather_output = True
+    try:
+        yield
+    finally:
+        for head, gather_output in zip(heads, previous):
+            head.gather_output = gather_output
 
 
 class _ForwardProfiler:
@@ -249,9 +265,43 @@ class HybridEngineRollout(RolloutEngine):
 
     @torch.no_grad()
     def generate(self, request: RolloutRequest, sampling: SamplingConfig) -> RolloutBatch:
-        if sampling.continuous_batch_size is not None:
-            return self._generate_continuous(request, sampling, sampling.continuous_batch_size)
-        return self._generate_batched(request, sampling)
+        # Once per call is enough: the ranks then run the same forwards and draw the same samples.
+        self._sync_rng_across_tp()
+        with _full_vocabulary_logits(self.engine.module):
+            if sampling.continuous_batch_size is not None:
+                return self._generate_continuous(request, sampling, sampling.continuous_batch_size)
+            return self._generate_batched(request, sampling)
+
+    def _tensor_parallel_size(self):
+        """Return the AutoTP size from the engine, or from DeepSpeed's tensor-parallel group for wrapped engines."""
+        autotp_size = getattr(self.engine, "autotp_size", None)
+        if callable(autotp_size):
+            size = autotp_size()
+            if isinstance(size, int):
+                return size
+        if not dist.is_initialized():
+            return 1
+        from deepspeed.utils import groups
+        try:
+            size = groups.get_tensor_model_parallel_world_size()
+        except AssertionError:
+            return 1
+        logger.warning_once("HybridEngineRollout: the engine does not report autotp_size(); using the size of "
+                            f"DeepSpeed's tensor-parallel group ({size}) to share the random state.")
+        return size
+
+    def _sync_rng_across_tp(self):
+        """Share the random state across each AutoTP group, so that its ranks sample the same tokens."""
+        if self._tensor_parallel_size() <= 1:
+            return
+        from deepspeed.utils import groups
+
+        accelerator = get_accelerator()
+        state = accelerator.get_rng_state().to(accelerator.current_device_name())
+        dist.broadcast(state,
+                       groups.get_tensor_model_parallel_src_rank(),
+                       group=groups.get_tensor_model_parallel_group())
+        accelerator.set_rng_state(state.cpu())
 
     def _generation_kwargs(self, sampling, attention_mask, pad_token_id, module=None):
         zero3_sync = self._zero3_work_remaining()
@@ -1582,8 +1632,11 @@ class HybridEngineRollout(RolloutEngine):
         """Ask models that support it for last-position logits only, since prefill samples just one token."""
         # Without this the prefill materializes [batch, prompt_len, vocab] logits, the largest activation of the
         # rollout. Models that do not declare the argument may forward unknown kwargs to submodules, so skip them.
-        if "logits_to_keep" in signature(module.forward).parameters:
-            return {"logits_to_keep": 1}
+        # Transformers 4.45-4.48 name the argument num_logits_to_keep.
+        parameters = signature(module.forward).parameters
+        for name in ("logits_to_keep", "num_logits_to_keep"):
+            if name in parameters:
+                return {name: 1}
         return {}
 
     @staticmethod
