@@ -2,6 +2,7 @@
 # DeepSpeed Team
 """Accelerator-backed v1 HybridEngineRollout tests."""
 
+import copy
 import gc
 import os
 from types import SimpleNamespace
@@ -12,6 +13,7 @@ from transformers import PretrainedConfig
 from transformers.cache_utils import Cache
 
 import deepspeed
+import deepspeed.comm as dist
 from deepspeed.accelerator import get_accelerator
 from deepspeed.runtime.rollout.base import RolloutRequest, SamplingConfig
 from deepspeed.runtime.rollout.hybrid_engine_rollout import HybridEngineRollout, HybridEngineRolloutConfig
@@ -194,7 +196,8 @@ class TestAutoTPContinuousRollout(DistributedTest):
                              num_hidden_layers=2,
                              num_attention_heads=4,
                              num_key_value_heads=4,
-                             max_position_embeddings=64)
+                             max_position_embeddings=64,
+                             eos_token_id=None)
         torch.manual_seed(0)
         model = AutoModelForCausalLM.from_config(config)
         ds_config = {
@@ -240,6 +243,96 @@ class TestAutoTPContinuousRollout(DistributedTest):
             accelerator.synchronize()
 
 
+def _tied_autotp_engine():
+    """A tied-embedding tiny Llama under AutoTP 2, whose output head AutoTP makes vocabulary-parallel, and an
+    unsharded copy of the same weights."""
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    config = LlamaConfig(vocab_size=128,
+                         hidden_size=64,
+                         intermediate_size=128,
+                         num_hidden_layers=2,
+                         num_attention_heads=4,
+                         num_key_value_heads=4,
+                         max_position_embeddings=64,
+                         tie_word_embeddings=True,
+                         eos_token_id=None)
+    torch.manual_seed(0)
+    model = LlamaForCausalLM(config)
+    device = torch.device(get_accelerator().current_device_name())
+    reference = copy.deepcopy(model).to(device).eval()
+    ds_config = {
+        "train_micro_batch_size_per_gpu": 1,
+        "tensor_parallel": {
+            "autotp_size": 2
+        },
+        "zero_optimization": {
+            "stage": 0
+        }
+    }
+    engine, _, _, _ = deepspeed.initialize(model=model, config=ds_config)
+    model.eval()
+    assert any(getattr(module, "is_vocab_parallel_lm_head", False) for module in model.modules())
+    prompt_ids = torch.tensor([[5, 17, 42, 9], [33, 8, 71, 2], [64, 11, 19, 90]], device=device)
+    return engine, reference, RolloutRequest(prompt_ids, torch.ones_like(prompt_ids))
+
+
+def _same_on_every_rank(tensor):
+    gathered = [None] * dist.get_world_size()
+    dist.all_gather_object(gathered, tensor.tolist())
+    return all(rank_tokens == gathered[0] for rank_tokens in gathered)
+
+
+class TestAutoTPVocabularyParallelHeadRollout(DistributedTest):
+    world_size = 2
+
+    @pytest.mark.parametrize("use_graph, continuous_batch_size", [(False, None), (True, None), (False, 2), (True, 2)])
+    def test_greedy_records_match_one_gpu_on_every_rank(self, use_graph, continuous_batch_size):
+        accelerator = get_accelerator()
+        if use_graph and accelerator.create_graph() is None:
+            pytest.skip("requires graph capture")
+        if continuous_batch_size and not use_graph and hasattr(
+                Cache, "get_query_offset") and not hasattr(DeepSpeedStaticCache, "get_query_offset"):
+            pytest.skip("DeepSpeedStaticCache lacks get_query_offset for this Transformers version")
+        engine, reference, request = _tied_autotp_engine()
+        new_tokens = 6
+        with torch.no_grad():
+            expected = reference.generate(request.prompt_ids,
+                                          attention_mask=request.prompt_attention_mask,
+                                          max_new_tokens=new_tokens,
+                                          do_sample=False,
+                                          pad_token_id=0)
+
+        # The rollout is the first forward after initialize, so with graph capture it also meets AutoTP's input
+        # check with a DeepSpeedStaticCache argument.
+        rollout = HybridEngineRollout(engine,
+                                      SimpleNamespace(pad_token_id=0, eos_token_id=-1),
+                                      cfg=HybridEngineRolloutConfig(use_graph_capture=use_graph))
+        try:
+            output = rollout.generate(
+                request,
+                SamplingConfig(max_new_tokens=new_tokens, temperature=0, continuous_batch_size=continuous_batch_size))
+            assert torch.equal(output.input_ids, expected)
+            assert _same_on_every_rank(output.input_ids)
+            # Training gets rank-local logits back.
+            assert not any(
+                getattr(module, "gather_output", False)
+                for module in engine.module.modules() if getattr(module, "is_vocab_parallel_lm_head", False))
+        finally:
+            del rollout
+            gc.collect()
+            accelerator.synchronize()
+
+    def test_ranks_sample_the_same_tokens_when_seeded_differently(self):
+        engine, _, request = _tied_autotp_engine()
+        get_accelerator().manual_seed(1234 + dist.get_rank())
+        rollout = HybridEngineRollout(engine, SimpleNamespace(pad_token_id=0, eos_token_id=-1))
+
+        output = rollout.generate(request, SamplingConfig(max_new_tokens=8, temperature=1.0))
+
+        assert _same_on_every_rank(output.input_ids)
+
+
 @pytest.mark.parametrize("attn_implementation", ["eager", "sdpa"])
 def test_static_graph_matches_native_llama_generation(attn_implementation):
     accelerator = get_accelerator()
@@ -255,7 +348,8 @@ def test_static_graph_matches_native_llama_generation(attn_implementation):
                          num_hidden_layers=2,
                          num_attention_heads=4,
                          num_key_value_heads=2,
-                         max_position_embeddings=128)
+                         max_position_embeddings=128,
+                         eos_token_id=None)
     config._attn_implementation = attn_implementation
     device = torch.device(accelerator.device_name())
     model = LlamaForCausalLM(config).to(device).eval()
@@ -601,7 +695,8 @@ def _tiny_llama(device):
                          num_hidden_layers=2,
                          num_attention_heads=4,
                          num_key_value_heads=2,
-                         max_position_embeddings=128)
+                         max_position_embeddings=128,
+                         eos_token_id=None)
     model = LlamaForCausalLM(config)
     # A random initialization gives almost uniform next-token distributions, under which a wrong temperature or
     # cutoff rarely changes the drawn token. Scaling the output head makes them peaked.
@@ -743,6 +838,46 @@ def test_decode_repetition_penalty_matches_hf_generate(temperature, use_graph_ca
     assert output.input_ids.tolist() == expected
 
 
+@pytest.mark.parametrize("use_graph_capture, continuous_batch_size", [(False, None), (True, None), (True, 8),
+                                                                      (False, 8)])
+def test_every_path_stops_on_a_generation_config_eos_id(use_graph_capture, continuous_batch_size):
+    accelerator = get_accelerator()
+    if not accelerator.is_available() or accelerator.device_name() != "cuda":
+        pytest.skip("CUDA is required for CUDA graph decode coverage")
+
+    device = torch.device(accelerator.device_name())
+    model = _tiny_llama(device)
+    new_tokens = 16
+    request = _random_request(batch_size=8, prompt_len=8, device=device)
+    prompt_len = request.prompt_ids.shape[1]
+
+    def hf_generate():
+        with torch.no_grad():
+            return model.generate(request.prompt_ids,
+                                  attention_mask=request.prompt_attention_mask,
+                                  max_new_tokens=new_tokens,
+                                  do_sample=False,
+                                  pad_token_id=0)[:, prompt_len:].tolist()
+
+    # The model's generation config lists an EOS id the tokenizer does not have: a token the model generates midway.
+    full_length = hf_generate()
+    eos = full_length[0][new_tokens // 2]
+    model.generation_config.eos_token_id = [eos]
+    expected = [row[:row.index(eos) + 1] if eos in row else row for row in hf_generate()]
+    assert any(len(row) < new_tokens for row in expected)
+
+    output = _rollout(model, use_graph_capture).generate(
+        request, SamplingConfig(max_new_tokens=new_tokens,
+                                temperature=0.0,
+                                continuous_batch_size=continuous_batch_size))
+
+    # Each row matches generate() up to its EOS, and nothing after it is attended.
+    for row, mask, want in zip(output.input_ids[:, prompt_len:].tolist(),
+                               output.attention_mask[:, prompt_len:].tolist(), expected):
+        assert row[:len(want)] == want
+        assert not any(mask[len(want):])
+
+
 def test_continuous_graph_recaptures_only_when_tensor_layout_changes():
     accelerator = get_accelerator()
     if not accelerator.is_available() or accelerator.create_graph() is None:
@@ -758,7 +893,8 @@ def test_continuous_graph_recaptures_only_when_tensor_layout_changes():
                          num_hidden_layers=2,
                          num_attention_heads=4,
                          num_key_value_heads=2,
-                         max_position_embeddings=64)
+                         max_position_embeddings=64,
+                         eos_token_id=None)
     config._attn_implementation = "sdpa"
     eager_model = LlamaForCausalLM(config).to(device).eval()
     graph_model = LlamaForCausalLM(config).to(device).eval()

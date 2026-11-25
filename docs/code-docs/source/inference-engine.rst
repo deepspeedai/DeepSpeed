@@ -78,6 +78,9 @@ continuous batching the captured decode uses a ladder of batch widths instead
 of one wide graph, and ``graph_capture_batch_sizes`` overrides the ladder
 described in the continuous batching section below.
 
+Every path ends a response at the tokenizer's ``eos_token_id`` or at any id in
+the model's ``generation_config.eos_token_id``.
+
 Shared Prompt Prefill
 ---------------------
 

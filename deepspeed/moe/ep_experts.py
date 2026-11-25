@@ -810,6 +810,30 @@ def _run_experts_triton_grouped_mm(
     return out
 
 
+def _run_experts_grouped_mm_fn(
+    grouped_mm_fn: Callable[[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor],
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    w3: torch.Tensor,
+    x: torch.Tensor,
+    num_tokens_per_expert: torch.Tensor,
+    activation: str = "swiglu",
+    alpha: float = 1.702,
+    limit: float = 7.0,
+) -> torch.Tensor:
+    """Compute the expert MLP with ``grouped_mm_fn(x, w, offsets)``, ``x @ w[e]^T`` per expert, for its GEMMs.
+
+    ``w`` keeps the native ``[E, N, K]`` layout. Args otherwise mirror :func:`_run_experts_grouped_mm`.
+    """
+    offsets = torch.cumsum(num_tokens_per_expert, dim=0, dtype=torch.int32)
+
+    dtype = x.dtype
+    gate = grouped_mm_fn(x, w1.to(dtype), offsets)
+    up = grouped_mm_fn(x, w3.to(dtype), offsets)
+    h = apply_expert_activation(gate, up, activation, alpha, limit)
+    return grouped_mm_fn(h, w2.to(dtype), offsets).type_as(x)
+
+
 # ---------------------------------------------------------------------------
 # GroupedExperts module
 # ---------------------------------------------------------------------------
@@ -875,6 +899,8 @@ class GroupedExperts(nn.Module):
         self.w3.is_expert_group = True
         self.use_triton_grouped_mm = False
         self.use_grouped_mm = use_grouped_mm
+        # Set after construction to replace the expert GEMMs, e.g. by quantized ones; see forward().
+        self.grouped_mm_fn = None
 
         # Resolve the Triton path. The device-specific decision is delegated to
         # the accelerator backend (e.g. the CUDA backend prefers Triton on
@@ -930,6 +956,11 @@ class GroupedExperts(nn.Module):
         """
 
         act = (self.activation, self.activation_alpha, self.activation_limit)
+        if self.grouped_mm_fn is not None:
+            if weight_grad_slot is not None or dw_staging is not None:
+                raise RuntimeError("deferring or staging expert weight gradients is not supported with grouped_mm_fn")
+            return _run_experts_grouped_mm_fn(self.grouped_mm_fn, self.w1, self.w2, self.w3, x, num_tokens_per_expert,
+                                              *act)
         if weight_grad_slot is not None or dw_staging is not None:
             if self.use_triton_grouped_mm or not self.use_grouped_mm:
                 raise RuntimeError("deferring expert weight gradients needs the torch._grouped_mm path")
