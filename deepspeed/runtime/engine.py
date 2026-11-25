@@ -553,9 +553,12 @@ class DeepSpeedEngine(Module):
         # Reject incompatible layouts before changing process-wide mesh or expert state.
         # An explicit mpu replaces groups.mpu; a data/sequence parallel mesh does not.
         requested_tp_size = self.autotp_size()
-        if requested_tp_size > 1 and mesh_device is None and groups.mesh_device is not None:
-            # The data parallel getters read groups.mesh_device before any mpu, so this engine would run on the
-            # earlier engine's data/sequence parallel mesh instead of its own TP layout.
+        if requested_tp_size > 1 and (mesh_device is not None or groups.mesh_device is not None):
+            # The data parallel getters read groups.mesh_device before any mpu. A data/sequence parallel mesh
+            # spans every rank, so its data parallel group would mix ranks that hold different TP shards.
+            if mesh_device is not None:
+                raise RuntimeError("An AutoTP engine cannot run on a data/sequence parallel mesh yet "
+                                   "(see https://github.com/deepspeedai/DeepSpeed/issues/9081).")
             raise RuntimeError(
                 "An AutoTP engine cannot be built after an engine with a data/sequence parallel mesh in the same "
                 "process yet (see https://github.com/deepspeedai/DeepSpeed/issues/9081).")
