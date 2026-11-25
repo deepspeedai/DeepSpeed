@@ -26,6 +26,10 @@ The meeting is hosted on Zoom and can be joined [here](https://zoom-lfx.platform
 
 ## Latest News
 
+* [2026/10] [PyTorch Conference Keynote Talk on DeepSpeed](https://docs.google.com/presentation/d/15VUQolpQKdXsNUbrOvITtwtrAZiqbRtCCB1qpEZr6ds/edit?slide=id.p1#slide=id.p1)
+
+* [2026/10] [PyTorch Conference Technical Talk on DeepSpeed](https://docs.google.com/presentation/d/1ppLgczlTeFBpn_E26ByF8O3sVOaG-yc-/edit?slide=id.p1#slide=id.p1)
+
 * [2026/05] [Using Muon Optimizer with DeepSpeed](https://github.com/deepspeedai/DeepSpeed/blob/master/blogs/muon-optimizer/README.md)
 
 * [2026/05] [System DMA (SDMA) for ZeRO-3: offload collectives off compute units on AMD GPUs for better overlap](https://github.com/deepspeedai/DeepSpeedExamples/blob/master/training/sdma_allgather/README.md)
