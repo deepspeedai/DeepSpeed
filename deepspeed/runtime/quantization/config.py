@@ -3,10 +3,12 @@
 
 # DeepSpeed Team
 
-from typing import List, Literal
+import re
+from typing import Any, List, Literal
 
 from pydantic import Field, field_validator, model_validator
 
+from deepspeed.runtime.config import DeepSpeedConfigError
 from deepspeed.runtime.config_utils import DeepSpeedConfigModel
 
 QUANTIZATION = "quantization"
@@ -102,11 +104,144 @@ class SubchannelQuantizedMatmulConfig(DeepSpeedConfigModel):
     dw: GemmQuantizationConfig = Field(default_factory=_gradient_gemm_default)
 
 
+HIFLOAT8 = "hifloat8"
+HIFLOAT8_DEFAULT = {
+    "enabled": False,
+    "backend": "torchao",
+    "module_name_patterns": (),
+    "min_numel": 0,
+    "expected_module_count": None,
+    "config": None,
+    "module_configs": None,
+}
+
+
+def _parse_hifloat8_config(config):
+    if not isinstance(config, dict):
+        raise DeepSpeedConfigError(f"'{HIFLOAT8}' must be an object, got {type(config).__name__}")
+
+    unknown = sorted(set(config) - set(HIFLOAT8_DEFAULT))
+    if unknown:
+        raise DeepSpeedConfigError(f"Unknown '{HIFLOAT8}' fields: {unknown}")
+
+    result = dict(HIFLOAT8_DEFAULT)
+    result.update(config)
+    if not isinstance(result["enabled"], bool):
+        raise DeepSpeedConfigError("'hifloat8.enabled' must be a boolean")
+    if result["backend"] == "torchao_npu":
+        result["backend"] = "torchao"
+    if result["backend"] != "torchao":
+        raise DeepSpeedConfigError("'hifloat8.backend' must be 'torchao'; the legacy torch_npu helper was removed")
+    policy = result["config"]
+    if policy is not None:
+        if not isinstance(policy, dict):
+            raise DeepSpeedConfigError("'hifloat8.config' must be an object or null")
+    module_configs = result["module_configs"]
+    if module_configs is not None:
+        if not isinstance(module_configs, dict):
+            raise DeepSpeedConfigError("'hifloat8.module_configs' must be an object or null")
+        for selector, recipe in module_configs.items():
+            if not isinstance(selector, str):
+                raise DeepSpeedConfigError("'hifloat8.module_configs' keys must be module names or re: patterns")
+            if recipe is not None and not isinstance(recipe, dict):
+                raise DeepSpeedConfigError(f"HiFloat8 recipe for {selector!r} must be an object or null")
+            if selector.startswith("re:"):
+                try:
+                    re.compile(selector[3:])
+                except re.error as error:
+                    raise DeepSpeedConfigError(
+                        f"Invalid HiFloat8 module_configs regex {selector!r}: {error}") from error
+    patterns = result["module_name_patterns"]
+    if not isinstance(patterns,
+                      (list, tuple)) or not all(isinstance(pattern, str) and pattern for pattern in patterns):
+        raise DeepSpeedConfigError("'hifloat8.module_name_patterns' must be a list of non-empty strings")
+    if result["enabled"] and not patterns and not module_configs:
+        raise DeepSpeedConfigError("HiFloat8 requires module_name_patterns or module_configs when enabled")
+    min_numel = result["min_numel"]
+    if isinstance(min_numel, bool) or not isinstance(min_numel, int) or min_numel < 0:
+        raise DeepSpeedConfigError("'hifloat8.min_numel' must be a non-negative integer")
+    expected_count = result["expected_module_count"]
+    if expected_count is not None and (isinstance(expected_count, bool) or not isinstance(expected_count, int)
+                                       or expected_count <= 0):
+        raise DeepSpeedConfigError("'hifloat8.expected_module_count' must be a positive integer or null")
+    result["module_name_patterns"] = tuple(patterns)
+    return result
+
+
+class TorchAOQuantizationConfig(DeepSpeedConfigModel):
+    hifloat8: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("hifloat8", mode="before")
+    @classmethod
+    def _validate_hifloat8(cls, value):
+        return _parse_hifloat8_config(value)
+
+    @property
+    def enabled(self):
+        return self.hifloat8["enabled"]
+
+
+# The nested spelling sets the GEMM format family. The old flat spelling
+# still accepts independent format choices for each pass.
+_SUBCHANNEL_FORMATS = {
+    "int8": ("int8", ),
+    "fp8": ("e4m3", "e5m2"),
+}
+
+
 class DeepSpeedQuantizationConfig(DeepSpeedConfigModel):
-    """The ``quantization`` section: low-precision training recipes, one subsection per recipe."""
+    """Backend-first configuration for opt-in training quantization."""
 
     subchannel: SubchannelQuantizedMatmulConfig = Field(default_factory=SubchannelQuantizedMatmulConfig)
+    torchao: TorchAOQuantizationConfig = Field(default_factory=TorchAOQuantizationConfig)
+
+    @field_validator("subchannel", mode="before")
+    @classmethod
+    def _normalize_named_subchannel_recipe(cls, value):
+        if not isinstance(value, dict):
+            return value
+        named_formats = _SUBCHANNEL_FORMATS.keys() & value.keys()
+        if not named_formats:
+            return value
+        if len(value) != 1:
+            raise DeepSpeedConfigError(
+                "Set one named subchannel recipe, without other subchannel options at that level")
+        name = next(iter(named_formats))
+        recipe = value[name]
+        if not isinstance(recipe, dict):
+            raise DeepSpeedConfigError(f"quantization.subchannel.{name} must be an object")
+        options = dict(recipe)
+        formats = _SUBCHANNEL_FORMATS[name]
+        for pass_name in ("forward", "dx", "dw"):
+            gemm = options.get(pass_name, {})
+            if not isinstance(gemm, dict):
+                raise DeepSpeedConfigError(f"quantization.subchannel.{name}.{pass_name} must be an object")
+            gemm_format = gemm.get("format", formats[0])
+            if gemm_format not in (*formats, "none"):
+                raise DeepSpeedConfigError(
+                    f"Format {gemm_format!r} does not belong to quantization.subchannel.{name}.{pass_name}")
+            # Supplying a gradient config bypasses its default factory.
+            options[pass_name] = {"stochastic_rounding": pass_name != "forward", **gemm, "format": gemm_format}
+        return options
+
+    @model_validator(mode="after")
+    def _validate_backend_selection(self):
+        if self.subchannel.enabled and self.torchao.enabled:
+            raise DeepSpeedConfigError("Enable only one of quantization.subchannel and quantization.torchao")
+        return self
 
 
 def get_quantization_config(param_dict):
-    return DeepSpeedQuantizationConfig(**param_dict.get(QUANTIZATION, {}))
+    if "low_precision" in param_dict:
+        raise DeepSpeedConfigError("Use quantization.torchao.hifloat8 instead of low_precision")
+    options = param_dict.get(QUANTIZATION, {})
+    if not isinstance(options, dict):
+        raise DeepSpeedConfigError("'quantization' must be an object")
+    options = dict(options)
+    if HIFLOAT8 in options or HIFLOAT8 in param_dict:
+        if HIFLOAT8 in options and HIFLOAT8 in param_dict:
+            raise DeepSpeedConfigError("Use only one of quantization.hifloat8 and the top-level hifloat8")
+        if "torchao" in options:
+            raise DeepSpeedConfigError("Use only one of quantization.torchao and the legacy HiFloat8 sections")
+        options["torchao"] = {HIFLOAT8: options.pop(HIFLOAT8, param_dict.get(HIFLOAT8))}
+    return DeepSpeedQuantizationConfig(**options)

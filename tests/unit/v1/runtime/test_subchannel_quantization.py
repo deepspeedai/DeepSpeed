@@ -107,6 +107,38 @@ def test_quantization_section_defaults_to_disabled():
     assert config.subchannel.dw.stochastic_rounding
 
 
+@pytest.mark.parametrize("name,gemm_format", [("int8", "int8"), ("fp8", "e4m3")])
+def test_named_subchannel_recipe_matches_flat_config(name, gemm_format):
+    named = {"enabled": True, "modules": ["*.experts"], "dx": {"block_size": 32}}
+    flat = {
+        "enabled": True,
+        "modules": ["*.experts"],
+        "forward": {
+            "format": gemm_format
+        },
+        "dx": {
+            "format": gemm_format,
+            "block_size": 32,
+            "stochastic_rounding": True
+        },
+        "dw": {
+            "format": gemm_format,
+            "stochastic_rounding": True
+        },
+    }
+    assert get_quantization_config({
+        "quantization": {
+            "subchannel": {
+                name: named
+            }
+        }
+    }).subchannel == get_quantization_config({
+        "quantization": {
+            "subchannel": flat
+        }
+    }).subchannel
+
+
 # ---------------------------------------------------------------------------
 # Numerics
 # ---------------------------------------------------------------------------

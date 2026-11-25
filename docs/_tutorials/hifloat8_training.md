@@ -17,13 +17,22 @@ AutoEP topology, batch size and optimizer settings remain in that configuration.
 
 ```json
 {
-  "bf16": {"enabled": true},
-  "zero_optimization": {"stage": 2},
+  "bf16": {
+    "enabled": true
+  },
+  "zero_optimization": {
+    "stage": 2
+  },
   "quantization": {
-    "hifloat8": {
-      "enabled": true,
-      "module_name_patterns": ["*.experts", "*.shared_experts.*_proj"],
-      "min_numel": 65536
+    "torchao": {
+      "hifloat8": {
+        "enabled": true,
+        "module_name_patterns": [
+          "*.experts",
+          "*.shared_experts.*_proj"
+        ],
+        "min_numel": 65536
+      }
     }
   }
 }
@@ -43,14 +52,14 @@ engine, optimizer, _, _ = deepspeed.initialize(
 ```
 
 For a Dense-only model, omit AutoEP and select the actual Linear module names.
-Set `quantization.hifloat8.enabled=false` to return to the high-precision path.
+Set `quantization.torchao.hifloat8.enabled=false` to return to the high-precision path.
 
 AutoEP topology and trainable-parameter selection are configured separately.
 Every pattern must match an eligible module. Optional `expected_module_count`
-checks the complete selection before backend loading. The `quantization`
-section gives each training format its own module selection. HiFloat8 is the
-first supported format. Existing top-level `hifloat8` files and the
-`backend="torchao_npu"` alias still work. Use one location for HiFloat8 options.
+checks the complete selection before backend loading. The `torchao` backend
+currently accepts the HiFloat8 recipe. Existing `quantization.hifloat8` and
+top-level `hifloat8` files, including the `backend="torchao_npu"` alias, still
+work. Use one location for HiFloat8 options.
 
 ## Per-module recipes
 
@@ -60,16 +69,28 @@ pass. Expert names refer to their AutoEP containers.
 
 ```json
 {
-  "bf16": {"enabled": true},
+  "bf16": {
+    "enabled": true
+  },
   "quantization": {
-    "hifloat8": {
-      "enabled": true,
-      "config": {"weight_dst_type_max": 15},
-      "module_configs": {
-        "model.layers.0.self_attn.q_proj": {"grad_dst_type_max": 15},
-        "re:model\\.layers\\.[0-9]+\\.self_attn\\.q_proj": {"grad_dst_type_max": 224},
-        "re:model\\.layers\\.[0-9]+\\.mlp\\.experts": {"grad_dst_type_max": 224},
-        "_default": null
+    "torchao": {
+      "hifloat8": {
+        "enabled": true,
+        "config": {
+          "weight_dst_type_max": 15
+        },
+        "module_configs": {
+          "model.layers.0.self_attn.q_proj": {
+            "grad_dst_type_max": 15
+          },
+          "re:model\\.layers\\.[0-9]+\\.self_attn\\.q_proj": {
+            "grad_dst_type_max": 224
+          },
+          "re:model\\.layers\\.[0-9]+\\.mlp\\.experts": {
+            "grad_dst_type_max": 224
+          },
+          "_default": null
+        }
       }
     }
   }

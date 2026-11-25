@@ -369,9 +369,11 @@ Example of <i>**scheduler**</i>
 
 ### Training quantization
 
-`quantization` groups training recipes by low-precision format. The Ascend
-HiFloat8 path uses `quantization.hifloat8` with BF16 parameters and ZeRO stages 0–2.
-DeepSpeed selects modules and applies AO configs through one `quantize_` call.
+`quantization` selects a training quantization backend, then its recipe.
+Use `quantization.torchao.hifloat8` for Ascend HiFloat8 with BF16 parameters
+and ZeRO stages 0–2. DeepSpeed selects modules and applies AO configs through
+one `quantize_` call. Use `quantization.subchannel.int8` or
+`quantization.subchannel.fp8` for the subchannel path. Enable one backend per engine.
 
 | HiFloat8 field | Meaning | Default |
 | --- | --- | --- |
@@ -386,12 +388,18 @@ DeepSpeed selects modules and applies AO configs through one `quantize_` call.
 ```json
 {
   "quantization": {
-    "hifloat8": {
-      "enabled": true,
-      "module_configs": {
-        "model.layers.0.self_attn.q_proj": {"grad_dst_type_max": 15},
-        "re:model\\.layers\\.[0-9]+\\.self_attn\\.q_proj": {"grad_dst_type_max": 224},
-        "_default": null
+    "torchao": {
+      "hifloat8": {
+        "enabled": true,
+        "module_configs": {
+          "model.layers.0.self_attn.q_proj": {
+            "grad_dst_type_max": 15
+          },
+          "re:model\\.layers\\.[0-9]+\\.self_attn\\.q_proj": {
+            "grad_dst_type_max": 224
+          },
+          "_default": null
+        }
       }
     }
   }
@@ -402,8 +410,9 @@ Exact names win over regexes, which are evaluated in JSON order, then `_default`
 A recipe dictionary overrides the shared `config`. A null recipe skips the module.
 With `module_name_patterns`, unmatched modules inside that scope inherit the shared
 recipe. With only `module_configs`, unmatched modules are skipped. Every explicit
-selector must match an eligible module inside the scope. Existing top-level
-`hifloat8` configurations are accepted as a compatibility entry point.
+selector must match an eligible module inside the scope. The old
+`quantization.hifloat8` and top-level `hifloat8` spellings remain accepted.
+Use a single spelling for the recipe.
 
 See [HiFloat8 training](../tutorials/hifloat8_training/) for numerical fields and
 the conversion lifecycle.
@@ -1323,6 +1332,27 @@ Use a built-in preset but override specific naming/weight fields for a fine-tune
 | Description | Default |
 | ----------- | ------- |
 | Low-precision training recipes, one subsection per recipe. `subchannel` quantizes the GEMMs of `nn.Linear` modules and AutoEP grouped experts to FP8 or INT8 with one scale per block of the reduction dimension. Parameters, gradients, optimizer state and module outputs keep their usual precision; only the GEMM operands are quantized, on the fly. | None |
+
+The named `subchannel.int8` and `subchannel.fp8` forms take the same options
+as the flat `subchannel` form below. Within a named recipe, a GEMM with no
+format override uses `int8` or `e4m3`, respectively. The FP8 recipe also
+accepts `e5m2`. Both named recipes accept `none` for individual GEMMs.
+Use the flat spelling to assign different format families to different GEMMs.
+
+```json
+{
+  "quantization": {
+    "subchannel": {
+      "int8": {
+        "enabled": true,
+        "modules": ["*.experts"],
+        "forward": {"block_size": 128},
+        "dx": {"format": "none"}
+      }
+    }
+  }
+}
+```
 
 ```json
 "quantization": {

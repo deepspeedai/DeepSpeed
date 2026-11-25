@@ -592,7 +592,11 @@ class DeepSpeedEngine(Module):
         self._configure_with_arguments(args, mpu)
         self.pipeline_parallelism = isinstance(model, PipelineModule)
         self._do_sanity_check()
-        self._validate_hifloat8_configuration(model)
+        from .quantization.quantizer import create_training_quantizer
+
+        training_quantizer = create_training_quantizer(self._config.quantization_config)
+        if training_quantizer is not None:
+            training_quantizer.validate_environment(self, model)
         if self.log_level() is not None:
             set_log_level_from_string(self.log_level())
         eager_model_parameters = _model_parameters_need_remap(model_parameters)
@@ -614,7 +618,8 @@ class DeepSpeedEngine(Module):
             # Head counts were recorded against the whole model; the parameters are shards now.
             from deepspeed import resolve_per_head_muon_after_sharding
             resolve_per_head_muon_after_sharding(model)
-        self._configure_quantization(model)
+        if training_quantizer is not None and not training_quantizer.convert_after_device_placement:
+            training_quantizer.convert(self, model)
         see_memory_usage("DeepSpeed Engine: After args sanity test", force=self.memory_breakdown())
         self._set_distributed_vars(args)
 
@@ -632,7 +637,8 @@ class DeepSpeedEngine(Module):
 
         # Configure distributed model
         self._configure_distributed_model(model)
-        self._configure_hifloat8()
+        if training_quantizer is not None and training_quantizer.convert_after_device_placement:
+            training_quantizer.convert(self, self.module)
 
         # These hooks should be disabled later if DeepCompile is not active.
         self.module_forward_pre_hook = self._create_module_forward_pre_hook()
@@ -949,19 +955,6 @@ class DeepSpeedEngine(Module):
             from deepspeed import set_optimizer_flags
             set_optimizer_flags(self._config, model)
         return replacement_sources
-
-    def _configure_quantization(self, model):
-        recipe = self._config.quantization_config.subchannel
-        if not recipe.enabled:
-            return
-        # Runs after AutoEP has created the grouped experts and before ZeRO wraps the parameters.
-        if self.pipeline_parallelism:
-            raise ValueError("quantization.subchannel does not support PipelineModule yet.")
-        if self.autotp_size() > 1:
-            raise ValueError("quantization.subchannel does not support AutoTP yet: the tensor-parallel layers "
-                             "replace nn.Linear and would run unquantized.")
-        from deepspeed.runtime.quantization.subchannel import convert_to_subchannel_quantization
-        convert_to_subchannel_quantization(model, recipe)
 
     def _autoep_zero3_param_converter(self, model):
         if not self.zero_optimization_partition_weights():
@@ -2214,33 +2207,6 @@ class DeepSpeedEngine(Module):
         modules['module'] = model
         # register module attribute in engine but avoid getattr
         self.__dict__['module'] = model
-
-    def _validate_hifloat8_configuration(self, model):
-        if not self.hifloat8_enabled():
-            return
-        if self._config.quantization_config.subchannel.enabled:
-            raise RuntimeError("Enable only one of quantization.subchannel and quantization.hifloat8")
-        if not self.bfloat16_enabled():
-            raise RuntimeError("HiFloat8 training requires BF16 model parameters")
-        if self.pipeline_parallelism:
-            raise RuntimeError("HiFloat8 training has not been validated with DeepSpeed PipelineModule")
-        if self.autotp_size() > 1:
-            raise RuntimeError("HiFloat8 training has not been validated with DeepSpeed AutoTP")
-        if self.mpu is not None:
-            raise RuntimeError("HiFloat8 training has not been validated with a custom model-parallel unit")
-        if any(isinstance(module, MoE) for module in model.modules()):
-            raise RuntimeError("HiFloat8 experts require AutoEP, not the explicit DeepSpeed MoE layer")
-        if self.zero_optimization_stage() >= ZeroStageEnum.weights:
-            raise RuntimeError("HiFloat8 phase-1 supports DeepSpeed ZeRO stages 0, 1, and 2 only")
-
-    def _configure_hifloat8(self):
-        if not self.hifloat8_enabled():
-            return
-
-        from .hifloat8 import configure_hifloat8
-
-        self.hifloat8_converted_module_names, self.hifloat8_grouped_module_names = configure_hifloat8(
-            self.module, self._config.hifloat8_config, self.device)
 
     def _configure_distributed_model(self, model):
         self._set_client_model(model)
