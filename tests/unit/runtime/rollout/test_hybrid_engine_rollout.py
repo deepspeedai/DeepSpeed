@@ -1900,10 +1900,16 @@ class TestContinuousGraphCaptureAgreementDevice(DistributedTest):
     world_size = 2
 
     def test(self):
+        accelerator = get_accelerator()
+        if accelerator.create_graph() is None:
+            # Without capture the continuous path falls back to eager batching, which has no
+            # graph stats to assert on; the CPU multi-rank job otherwise runs this test.
+            pytest.skip("requires graph capture")
+
         from transformers import LlamaConfig, LlamaForCausalLM
 
         rank = dist.get_rank()
-        device = torch.device(get_accelerator().current_device_name())
+        device = torch.device(accelerator.current_device_name())
         model = LlamaForCausalLM(
             LlamaConfig(
                 vocab_size=32,
