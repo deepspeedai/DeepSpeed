@@ -204,20 +204,14 @@ It also takes care of replacing `labels` with `shift_labels` in the batch, by pr
 
 ### Loss averaging
 
-Since each rank processes a segment we need to average loss. To get the gradients right we need to use a differentiable `all_gather`
+Shards can contain different numbers of valid targets, for example when prompt tokens are masked during fine-tuning. In the training loop above, each rank counts its pre-shifted labels that differ from `-100`. It multiplies its FP32 mean loss by that count to get `local_sum`. A shard with no valid targets contributes zero.
+
+The training loop uses one `all_reduce` to sum both the detached `local_sum` and the valid-target count across the sequence-parallel group. For logging, divide the group's loss sum by the group's count. For backward, divide each rank's differentiable `local_sum` by that same count. The training loop clamps the denominator to at least one so a fully ignored group has zero loss and gradients.
 
 ```python
-    # differentiable weighted per-shard-loss aggregation across ranks
-    losses_per_rank = torch.distributed.nn.functional.all_gather(loss, group=sp_group)
-    # special dealing with SFT that has prompt tokens that aren't used in loss computation
-    good_tokens = (shift_labels != -100).view(-1).sum()
-    good_tokens_per_rank = torch.distributed.nn.functional.all_gather(good_tokens, group=sp_group)
-    total_loss = sum(losses_per_rank[rank] * good_tokens_per_rank[rank] for rank in range(sp_world_size))
-    total_good_tokens = sum(good_tokens_per_rank)
-    loss = total_loss / max(total_good_tokens, 1)
+global_mean = totals[0] / total_good_tokens  # for logging
+model.backward(local_sum / total_good_tokens)
 ```
-
-In theory you could just average `losses_per_rank`, but the system supports variable sequence length so the last rank is likely to have a shorter sequence length and also use cases like SFT may have a variable number of tokens that contribute to the loss calculation, so it's best to compute a weighted loss.
 
 ## Nuances
 
@@ -261,47 +255,47 @@ shiftedl : [2 3 4 5]  [6 7 8 -100]
 
 If you use [Liger-kernel](https://github.com/linkedin/Liger-Kernel) it'll automatically do the very memory efficient loss computation without manifesting intermediate full logits tensor, which consume a huge among of GPU memory when long sequence lengths are used.
 
-If your model isn't supported by Liger-kernel you can use our implementation, which uses about the same amount of memory, but which is slightly slower since it's written in plain PyTorch. Here is a simplified version of it:
+For the Llama model above, call this loss method from the causal language model's forward pass, with the sequence-parallel group in `self.sp_group`. Run the decoder once, then apply `lm_head` to one tile of hidden states at a time. The data loader has already aligned each target with its hidden state.
 
 ```python
-    def loss(self, batch):
-        num_shards = 4
-        outputs = model(**batch, use_cache=False)
-        hidden_states = outputs.last_hidden_state
+import torch
+import torch.nn.functional as F
+import deepspeed.comm as dist
+from deepspeed.runtime.sequence_parallel.ulysses_sp import sequence_tiled_compute
 
-        kwargs_to_shard = dict(
-            hidden_states=hidden_states,
-            shift_labels=batch["shift_labels"],
-        )
-        kwargs_to_pass = dict(model=model, vocab_size=model.config.vocab_size)
-        grad_requiring_tensor_key = "hidden_states"
-        compute_params = [model.lm_head.weight]
-        seqlen = shift_labels.shape[1]
+def loss_fn(hidden_states, shift_labels, lm_head):
+    logits = lm_head(hidden_states).float()
+    return F.cross_entropy(logits.flatten(0, 1), shift_labels.reshape(-1), reduction="sum")
 
-        total_loss_sum = sequence_tiled_compute(
-            loss_fn,
-            seqlen,
-            num_shards,
-            kwargs_to_shard,
-            kwargs_to_pass,
-            grad_requiring_tensor_key,
-            compute_params,
-            output_unshard_dimension=0,  # loss is a scalar
-            output_reduction="sum",
-        )
-        total_good_items = (shift_labels != -100).squeeze().sum()
-        loss = total_loss_sum / max(total_good_items, 1)
+def loss(self, batch):
+    hidden_states = self.base_model(
+        input_ids=batch["input_ids"],
+        position_ids=batch["position_ids"],
+        use_cache=False,
+    ).last_hidden_state
+    shift_labels = batch["shift_labels"]
+    local_sum = sequence_tiled_compute(
+        loss_fn,
+        seqlen=shift_labels.shape[1],
+        shards=4,
+        kwargs_to_shard=dict(hidden_states=hidden_states, shift_labels=shift_labels),
+        kwargs_to_pass=dict(lm_head=self.lm_head),
+        grad_requiring_tensor_key="hidden_states",
+        compute_params=list(self.lm_head.parameters()),
+        output_unshard_dimension=0,
+        output_reduction="sum",
+    )
 
-        # differentiable weighted per-shard-loss aggregation across ranks
-        losses_per_rank = torch.distributed.nn.functional.all_gather(loss, group=self.sp_group)
-        good_tokens = (shift_labels != -100).view(-1).sum()
-        good_tokens_per_rank = torch.distributed.nn.functional.all_gather(good_tokens, group=self.sp_group)
-        total_loss = sum(losses_per_rank[rank] * good_tokens_per_rank[rank] for rank in range(self.sp_world_size))
-        total_good_tokens = sum(good_tokens_per_rank)
-        loss = total_loss / max(total_good_tokens, 1)
+    with torch.no_grad():
+        totals = torch.stack((local_sum, (shift_labels != -100).sum()))
+        dist.all_reduce(totals, group=self.sp_group)
+        total_good_tokens = totals[1].clamp_min(1)
+        global_mean = totals[0] / total_good_tokens
 
-        return loss
+    return global_mean + (local_sum - local_sum.detach()) / total_good_tokens
 ```
+
+Each tile returns a scalar FP32 sum of cross-entropies. Summing the tiles gives the loss sum for this rank, including zero for an entirely ignored shard. Every rank returns the same group mean. The difference `local_sum - local_sum.detach()` is zero in the forward pass and carries only this rank's gradient in backward.
 
 You can see the full version [here](https://github.com/snowflakedb/ArcticTraining/blob/main/arctic_training/trainer/sft_trainer.py#L45).
 
