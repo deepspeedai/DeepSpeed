@@ -28,8 +28,12 @@ def _load_loss_runtime_in_the_worker(request):
     global ChunkedCausalLMLoss, chunked_cross_entropy, install_chunked_causal_lm_loss, triton_backend_available
     global _TRITON_ON_CUDA
     # The shared Triton helper probes its driver on import, so load it after pytest has forked its worker.
-    from deepspeed.runtime.chunked_cross_entropy import (ChunkedCausalLMLoss, chunked_cross_entropy,
-                                                         install_chunked_causal_lm_loss, triton_backend_available)
+    from deepspeed.ops.triton_ops.chunked_cross_entropy import (
+        ChunkedCausalLMLoss,
+        chunked_cross_entropy,
+        install_chunked_causal_lm_loss,
+        triton_backend_available,
+    )
     _TRITON_ON_CUDA = _CUDA_AVAILABLE and triton_backend_available()
     if "backend" in request.fixturenames and request.getfixturevalue("backend") == "triton" and not _TRITON_ON_CUDA:
         pytest.skip("the Triton backend needs CUDA and Triton")
@@ -262,7 +266,7 @@ def test_an_out_of_range_target_fails_the_triton_backend_instead_of_reading_anot
     import textwrap
     program = textwrap.dedent("""
         import torch
-        from deepspeed.runtime.chunked_cross_entropy import chunked_cross_entropy
+        from deepspeed.ops.triton_ops.chunked_cross_entropy import chunked_cross_entropy
         logits = torch.randn(4, 8, device="cuda")
         loss = chunked_cross_entropy(logits, torch.tensor([1, 8, 2, 3], device="cuda"), backend="triton")
         print("LOSS", loss.item())

@@ -887,7 +887,7 @@ the stock ``ForCausalLMLoss``:
 
 .. code-block:: python
 
-    from deepspeed.runtime.chunked_cross_entropy import install_chunked_causal_lm_loss
+    from deepspeed.ops.triton_ops.chunked_cross_entropy import install_chunked_causal_lm_loss
 
     install_chunked_causal_lm_loss(model)
     engine, optimizer, _, _ = deepspeed.initialize(model=model, config=ds_config)
