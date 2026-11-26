@@ -941,6 +941,7 @@ class TestAutoEPConfig:
         optimizer.gradient_accumulation_dtype = torch.float32
         optimizer.postscale_gradients = True
         optimizer.gradient_predivide_factor = 1.0
+        optimizer.sequence_parallel_size = 1
         optimizer.all2all_process_group = None
         optimizer._assert_same_partition_group = lambda _: None
         optimizer._get_param_partition_group = lambda _: "expert_data_parallel"
