@@ -150,6 +150,8 @@ class SynchronizedWallClockTimer:
             if name in self.timers:
                 elapsed_time = (self.timers[name].elapsed_total(reset=reset) / normalizer)
                 string += " | {}: {:.2f}".format(name, elapsed_time)
+        if memory_breakdown:
+            string += self.memory_usage()
 
         # timers logging should be independent of the global log level it's already conditional on wall_clock_breakdown being True, so using use_logger=False will always print the stats
         print_dist(string, ranks=ranks or [0])
