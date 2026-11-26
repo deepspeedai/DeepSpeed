@@ -28,6 +28,7 @@ import deepspeed
 from deepspeed.runtime.engine import DeepSpeedEngine
 from deepspeed.runtime.bf16_optimizer import BF16_Optimizer
 from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
+from deepspeed.runtime.comm.coalesced_collectives import reduce_scatter_coalesced
 from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer, split_half_float_double
 from deepspeed.utils.zero_to_fp32 import load_state_dict_from_zero_checkpoint
 from deepspeed.runtime.zero.utils import ZeRORuntimeException
@@ -71,6 +72,47 @@ class TestZeroPredivideWithSequenceParallel(DistributedTest):
         grad = torch.full((4, ), float(dist.get_rank() + 1), device=get_accelerator().current_device_name())
         DeepSpeedZeroOptimizer.gradient_reduction_w_predivide(optimizer, grad, grad.dtype)
         torch.testing.assert_close(grad, torch.full_like(grad, 3.0))
+
+
+class TestReduceScatterCoalesced(DistributedTest):
+    world_size = 2
+
+    def test_non_contiguous_and_empty_inputs(self):
+        device = get_accelerator().current_device_name()
+        rank = dist.get_rank()
+        group = dist.get_world_group()
+
+        assert reduce_scatter_coalesced([], group) == []
+
+        # Single non-contiguous transposed 2-D view on the fast path
+        transposed = ((rank + 1) * torch.arange(6, dtype=torch.float32, device=device)).reshape(2, 3).t()
+        assert not transposed.is_contiguous()
+        (transposed_out, ) = reduce_scatter_coalesced([transposed], group)
+        expected_transposed = torch.arange(6, dtype=torch.float32, device=device).reshape(2, 3).t().reshape(-1) * 1.5
+        assert transposed_out.is_contiguous()
+        assert torch.allclose(transposed_out, expected_transposed[rank * 3:(rank + 1) * 3])
+
+        # Single non-contiguous 1-D strided slice on the fast path
+        base = (rank + 1) * torch.arange(12, dtype=torch.float32, device=device)
+        strided = base[::2]
+        assert not strided.is_contiguous()
+        (strided_out, ) = reduce_scatter_coalesced([strided], group)
+        expected_strided = torch.arange(0, 12, 2, dtype=torch.float32, device=device) * 1.5
+        assert strided_out.is_contiguous()
+        assert torch.allclose(strided_out, expected_strided[rank * 3:(rank + 1) * 3])
+
+        # Multi-tensor path combining non-contiguous views and uneven-partition zero padding
+        multi_t1 = ((rank + 1) * torch.arange(6, dtype=torch.float32, device=device)).reshape(2, 3).t()
+        multi_t2 = ((rank + 1) * torch.arange(10, dtype=torch.float32, device=device))[::2]
+        out1, out2 = reduce_scatter_coalesced([multi_t1, multi_t2], group)
+        expected_t2 = torch.arange(0, 10, 2, dtype=torch.float32, device=device) * 1.5
+        assert torch.allclose(out1, expected_transposed[rank * 3:(rank + 1) * 3])
+        if rank == 0:
+            assert out2.shape == (3, )
+            assert torch.allclose(out2, expected_t2[:3])
+        elif rank == 1:
+            assert out2.shape == (2, )
+            assert torch.allclose(out2, expected_t2[3:5])
 
 
 @pytest.mark.parametrize("zero_stage", [0, 1, 2])
