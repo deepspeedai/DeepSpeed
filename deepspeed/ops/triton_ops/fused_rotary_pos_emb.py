@@ -125,12 +125,9 @@ def assert_supported(q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: t
     """Reject inputs the kernels do not reproduce eager for, before the fused path runs."""
     if not _TRITON_AVAILABLE:
         raise RuntimeError("fused RoPE needs Triton, which is not installed in this environment.")
-    tensors = {"q": q, "k": k, "cos": cos, "sin": sin}
-    for name, tensor in tensors.items():
-        if not isinstance(tensor, torch.Tensor):
-            raise RuntimeError(f"fused RoPE needs tensors, but {name} is {type(tensor).__name__}.")
-        if tensor.device.type != "cuda":
-            raise RuntimeError(f'fused RoPE runs CUDA kernels but {name} is on device "{tensor.device.type}".')
+    if q.device.type != "cuda":
+        raise RuntimeError(f'fused RoPE runs CUDA kernels but q is on device "{q.device.type}".')
+    for tensor in (k, cos, sin):
         if tensor.dtype != q.dtype:
             # Eager type promotion would compute in the wider dtype.
             raise RuntimeError(f"fused RoPE needs q, k, cos and sin in one dtype, got {q.dtype} and {tensor.dtype}.")
@@ -144,7 +141,7 @@ def assert_supported(q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: t
         raise RuntimeError("fused RoPE needs 4-D q and k and 3-D cos and sin of one shape, got "
                            f"{tuple(q.shape)}, {tuple(k.shape)}, {tuple(cos.shape)} and {tuple(sin.shape)}.")
     head_dim = q.shape[-1]
-    if head_dim % 2 or not 0 < head_dim <= _MAX_HEAD_DIM:
+    if head_dim % 2 or head_dim > _MAX_HEAD_DIM:
         raise RuntimeError(f"fused RoPE needs an even head dimension up to {_MAX_HEAD_DIM}, got {head_dim}.")
     sequence_dim = 2 if unsqueeze_dim == 1 else 1
     for name, tensor in (("q", q), ("k", k)):
@@ -155,8 +152,6 @@ def assert_supported(q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: t
                                f"{tuple(tensor.shape)} for cos {tuple(cos.shape)}.")
         if tensor.stride(-1) != 1:
             raise RuntimeError(f"fused RoPE needs a unit-stride head dimension in {name}.")
-    if k.shape[0] != q.shape[0]:
-        raise RuntimeError(f"fused RoPE needs q and k with one batch size, got {q.shape[0]} and {k.shape[0]}.")
     if cos.requires_grad or sin.requires_grad:
         raise RuntimeError("fused RoPE treats cos and sin as constants, but one of them requires grad.")
 

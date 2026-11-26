@@ -207,39 +207,26 @@ def is_available() -> bool:
     return _TRITON_AVAILABLE
 
 
-def _assert_supported_device_and_dtype(tensor: torch.Tensor, *, name: str) -> None:
+def assert_supported(hidden: torch.Tensor, weight: torch.Tensor) -> None:
+    """Reject unsupported inputs before the fused path runs."""
     if not _TRITON_AVAILABLE:
         raise RuntimeError(f"fused RMSNorm needs Triton, which is not installed in this environment.")
-    if tensor.dtype not in SUPPORTED_DTYPES:
+    if hidden.dtype not in SUPPORTED_DTYPES:
         raise RuntimeError(
-            f"fused RMSNorm supports bfloat16 and float16 tensors, but {name} has dtype {tensor.dtype}.")
-    if tensor.device.type != "cuda":
-        raise RuntimeError(f'fused RMSNorm runs CUDA kernels but {name} is on device "{tensor.device.type}".')
-
-
-def assert_supported(hidden: torch.Tensor, weight: torch.Tensor, eps: float) -> None:
-    """Reject unsupported inputs before the fused path runs."""
-    _assert_supported_device_and_dtype(hidden, name="hidden")
-    _assert_supported_device_and_dtype(weight, name="weight")
+            f"fused RMSNorm supports bfloat16 and float16 tensors, but hidden has dtype {hidden.dtype}.")
+    if hidden.device.type != "cuda":
+        raise RuntimeError(f'fused RMSNorm runs CUDA kernels but hidden is on device "{hidden.device.type}".')
     if hidden.device != weight.device:
         raise RuntimeError(
             f"fused RMSNorm needs hidden and weight on the same device, got {hidden.device} and {weight.device}.")
     if hidden.dtype != weight.dtype:
         raise RuntimeError(
             f"fused RMSNorm needs hidden and weight to have the same dtype, got {hidden.dtype} and {weight.dtype}.")
-    if hidden.dim() == 0:
-        raise RuntimeError("fused RMSNorm needs at least one normalized dimension.")
-    if weight.dim() != 1:
-        raise RuntimeError(f"fused RMSNorm needs a 1-D weight Parameter, got shape {tuple(weight.shape)}.")
     if hidden.shape[-1] != weight.numel():
         raise RuntimeError(f"fused RMSNorm expected hidden last dimension {weight.numel()}, got {hidden.shape[-1]}.")
-    if hidden.shape[-1] < 1:
-        raise RuntimeError("fused RMSNorm needs a non-empty normalized dimension.")
     if hidden.shape[-1] > _MAX_FORWARD_BLOCK:
         raise RuntimeError(
             f"fused RMSNorm supports normalized dimensions up to {_MAX_FORWARD_BLOCK}, got {hidden.shape[-1]}.")
-    if not isinstance(eps, float):
-        raise RuntimeError(f"fused RMSNorm needs a float epsilon, got {type(eps).__name__}.")
 
 
 def _block_n(n_cols: int) -> int:
@@ -380,7 +367,7 @@ def fused_rms_norm(hidden: torch.Tensor, weight: torch.Tensor, eps: float) -> to
     Unsupported inputs raise. Modules installed by ``replace_rms_norm`` run
     their eager forward for such inputs instead.
     """
-    assert_supported(hidden, weight, eps)
+    assert_supported(hidden, weight)
     return _run_kernels(hidden, weight, eps)
 
 
@@ -423,7 +410,7 @@ def _runs_supported_rms_norm_forward(module: torch.nn.Module) -> bool:
 
 def _fused_module_forward(self, hidden_states, eager_forward):
     try:
-        assert_supported(hidden_states, self.weight, self.variance_epsilon)
+        assert_supported(hidden_states, self.weight)
     except RuntimeError as unsupported:
         # The class's own forward is the eager computation the kernels stand in for, so the result is exactly eager's.
         logger.warning_once(f"{unsupported} Running eager {type(self).__name__} instead.")

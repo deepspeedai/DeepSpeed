@@ -307,7 +307,7 @@ def test_fused_rms_norm_fail_fast_guards_on_cpu(monkeypatch):
     hidden = torch.randn((2, 128), dtype=torch.bfloat16)
     weight = torch.randn((128, ), dtype=torch.bfloat16)
     with pytest.raises(RuntimeError, match="CUDA kernels"):
-        fused_rms_norm.assert_supported(hidden, weight, 1e-6)
+        fused_rms_norm.assert_supported(hidden, weight)
 
 
 @pytest.mark.parametrize("qualified_name", RMS_NORM_CLASSES)

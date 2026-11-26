@@ -500,8 +500,7 @@ it:
   sites exist only inside the DeepEP route;
 - Triton is unavailable, the device is not CUDA, or the build is ROCm;
 - rows are not bfloat16 or float16;
-- weights are not FP32 ``[N, 1]`` tensors on the same CUDA device;
-- rows or weights are not contiguous, or rows are not shaped ``[N, H]``.
+- weights are not FP32 ``[N, 1]`` tensors on the same CUDA device.
 
 The operator also accepts FP16 rows, but the current DeepEP dispatch supports
 BF16 rows only. Correct backward replay through DeepEP additionally requires
@@ -873,12 +872,10 @@ which is where AutoEP training memory peaks.
 ``install_chunked_causal_lm_loss`` replaces that loss with one that computes
 the same FP32 cross entropy without them: forward keeps only the logits it was
 given plus one FP32 value per token, and backward recomputes the softmax and
-writes the gradient directly in the logits' dtype. On CUDA a Triton kernel does
-each pass in a single read of the logits (``backend="triton"``); the PyTorch
-backend (``backend="torch"``) does the same arithmetic in blocks of rows and
-runs anywhere. The default ``"auto"`` picks Triton when it can run; naming a
-backend that cannot run raises. The
-loss, the label shifting, ``ignore_index`` and ``num_items_in_batch``
+writes the gradient directly in the logits' dtype. For CUDA logits, when Triton
+is available, a Triton kernel does each pass in a single read of the logits;
+otherwise a PyTorch implementation does the same arithmetic in blocks of rows.
+The loss, the label shifting, ``ignore_index`` and ``num_items_in_batch``
 normalization follow ``ForCausalLMLoss``; gradients may differ from it by one
 BF16/FP16 rounding step where the FP32 evaluation order lands on a rounding
 boundary. It has no second derivative: backward with ``create_graph=True``

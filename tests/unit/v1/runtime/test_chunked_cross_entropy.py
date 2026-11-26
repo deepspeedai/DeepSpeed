@@ -25,16 +25,16 @@ BACKEND_DEVICES = [
 
 @pytest.fixture(autouse=True)
 def _load_loss_runtime_in_the_worker(request):
-    global ChunkedCausalLMLoss, chunked_cross_entropy, install_chunked_causal_lm_loss, triton_backend_available
+    global ChunkedCausalLMLoss, chunked_cross_entropy, install_chunked_causal_lm_loss, is_triton_available
     global _TRITON_ON_CUDA
     # The shared Triton helper probes its driver on import, so load it after pytest has forked its worker.
+    from deepspeed.ops.triton_ops import is_triton_available
     from deepspeed.ops.triton_ops.chunked_cross_entropy import (
         ChunkedCausalLMLoss,
         chunked_cross_entropy,
         install_chunked_causal_lm_loss,
-        triton_backend_available,
     )
-    _TRITON_ON_CUDA = _CUDA_AVAILABLE and triton_backend_available()
+    _TRITON_ON_CUDA = _CUDA_AVAILABLE and is_triton_available()
     if "backend" in request.fixturenames and request.getfixturevalue("backend") == "triton" and not _TRITON_ON_CUDA:
         pytest.skip("the Triton backend needs CUDA and Triton")
 
@@ -83,7 +83,7 @@ def test_matches_hugging_face_loss_and_gradient(backend, device, dtype, block_ro
     logits, labels = _inputs(2, 33, vocab, dtype, device=device)
 
     expected_loss, expected_grad = _loss_and_grad(loss_utils.ForCausalLMLoss, logits, labels, vocab)
-    loss, grad = _loss_and_grad(ChunkedCausalLMLoss(block_rows=block_rows, backend=backend), logits, labels, vocab)
+    loss, grad = _loss_and_grad(ChunkedCausalLMLoss(block_rows=block_rows), logits, labels, vocab)
 
     assert loss.dtype == expected_loss.dtype == torch.float32
     torch.testing.assert_close(loss, expected_loss, rtol=1e-6, atol=1e-6)
@@ -109,11 +109,7 @@ def test_normalizes_by_num_items_in_batch_like_hugging_face(backend, device):
                                                   labels,
                                                   vocab,
                                                   num_items_in_batch=num_items)
-    loss, grad = _loss_and_grad(ChunkedCausalLMLoss(backend=backend),
-                                logits,
-                                labels,
-                                vocab,
-                                num_items_in_batch=num_items)
+    loss, grad = _loss_and_grad(ChunkedCausalLMLoss(), logits, labels, vocab, num_items_in_batch=num_items)
 
     torch.testing.assert_close(loss, expected_loss, rtol=1e-6, atol=1e-6)
     distance = (_ordered_bits(grad) - _ordered_bits(expected_grad)).abs()
@@ -145,16 +141,16 @@ def test_uses_given_shift_labels_like_hugging_face(labels_kind):
 @pytest.mark.parametrize("block_rows", [0, -1])
 def test_nonpositive_block_rows_are_rejected_at_all_public_entry_points(backend, device, block_rows):
     with pytest.raises(ValueError, match="block_rows"):
-        ChunkedCausalLMLoss(block_rows=block_rows, backend=backend)
+        ChunkedCausalLMLoss(block_rows=block_rows)
     logits = torch.zeros((4, 8), device=device)
     target = torch.ones(4, dtype=torch.long, device=device)
     with pytest.raises(ValueError, match="block_rows"):
-        chunked_cross_entropy(logits, target, block_rows=block_rows, backend=backend)
+        chunked_cross_entropy(logits, target, block_rows=block_rows)
 
     model = _tiny_causal_lm(seed=17)
     original_loss = model.loss_function
     with pytest.raises(ValueError, match="block_rows"):
-        install_chunked_causal_lm_loss(model, block_rows=block_rows, backend=backend)
+        install_chunked_causal_lm_loss(model, block_rows=block_rows)
     assert model.loss_function is original_loss
 
 
@@ -171,7 +167,7 @@ def test_nonlong_class_indices_are_rejected_like_the_stock_loss(backend, device,
     logits, labels = _inputs(1, 7, 17, torch.float32, seed=19, device=device)
     value = 1.5 if dtype == torch.float32 else 1
     bad = torch.full(labels.shape, value, dtype=dtype, device=device)
-    loss_function = ChunkedCausalLMLoss(block_rows=3, backend=backend)
+    loss_function = ChunkedCausalLMLoss(block_rows=3)
     with pytest.raises(RuntimeError):
         loss_utils.ForCausalLMLoss(logits, bad, 17)
     with pytest.raises(RuntimeError):
@@ -183,7 +179,7 @@ def test_nonlong_class_indices_are_rejected_like_the_stock_loss(backend, device,
     with pytest.raises(RuntimeError):
         torch.nn.functional.cross_entropy(logits.reshape(-1, 17), bad.reshape(-1))
     with pytest.raises(RuntimeError):
-        chunked_cross_entropy(logits.reshape(-1, 17), bad.reshape(-1), backend=backend)
+        chunked_cross_entropy(logits.reshape(-1, 17), bad.reshape(-1))
 
 
 def test_torch_20_uses_the_one_argument_async_assert_contract(monkeypatch):
@@ -201,12 +197,12 @@ def test_torch_20_uses_the_one_argument_async_assert_contract(monkeypatch):
     # This collaborator exposes the documented Torch 2.0 signature while still executing the real assertion.
     monkeypatch.setattr(torch, "__version__", "2.0.0")
     monkeypatch.setattr(torch, "_assert_async", legacy_assert_async)
-    actual = chunked_cross_entropy(logits, target, backend="torch")
+    actual = chunked_cross_entropy(logits, target)
     actual.backward()
     torch.testing.assert_close(actual, expected, rtol=1e-6, atol=1e-6)
     torch.testing.assert_close(logits.grad, expected_logits.grad, rtol=1e-5, atol=1e-8)
     with pytest.raises(RuntimeError):
-        chunked_cross_entropy(logits.detach(), torch.tensor([1, 8, 3, 4]), backend="torch")
+        chunked_cross_entropy(logits.detach(), torch.tensor([1, 8, 3, 4]))
 
 
 @pytest.mark.parametrize("backend, device", BACKEND_DEVICES)
@@ -214,20 +210,20 @@ def test_ignored_rows_get_no_gradient_and_all_ignored_is_nan(backend, device):
     logits = torch.randn(6, 11, device=device, requires_grad=True)
     target = torch.tensor([3, -100, 5, -100, 0, 10], device=device)
 
-    chunked_cross_entropy(logits, target, block_rows=4, backend=backend).backward()
+    chunked_cross_entropy(logits, target, block_rows=4).backward()
     assert torch.all(logits.grad[1] == 0) and torch.all(logits.grad[3] == 0)
     assert torch.all(logits.grad[0] != 0)
 
     all_ignored = torch.full((6, ), -100, device=device)
     expected = torch.nn.functional.cross_entropy(logits.detach(), all_ignored)
-    assert torch.isnan(expected) and torch.isnan(chunked_cross_entropy(logits.detach(), all_ignored, backend=backend))
+    assert torch.isnan(expected) and torch.isnan(chunked_cross_entropy(logits.detach(), all_ignored))
 
 
 @pytest.mark.parametrize("backend, device", BACKEND_DEVICES)
 def test_double_backward_raises_instead_of_dropping_the_second_derivative(backend, device):
     logits = torch.randn(4, 16, device=device, requires_grad=True)
     target = torch.tensor([1, 2, 3, 4], device=device)
-    loss = chunked_cross_entropy(logits, target, backend=backend)
+    loss = chunked_cross_entropy(logits, target)
 
     # A gradient penalty needs the loss's second derivative, which neither backend computes. It must fail rather
     # than silently leave that term out while the rest of the objective still backpropagates.
@@ -245,15 +241,15 @@ def test_a_strided_target_is_read_by_row(backend, device):
     strided = torch.stack([target, torch.zeros_like(target)], dim=1)[:, 0]
     assert not strided.is_contiguous()
 
-    expected = chunked_cross_entropy(logits.detach(), target, backend=backend)
-    torch.testing.assert_close(chunked_cross_entropy(logits.detach(), strided, backend=backend), expected)
+    expected = chunked_cross_entropy(logits.detach(), target)
+    torch.testing.assert_close(chunked_cross_entropy(logits.detach(), strided), expected)
 
 
 def test_an_out_of_range_target_raises_on_cpu():
     logits = torch.randn(4, 8)
     for bad in (8, -3):
         with pytest.raises(RuntimeError, match="out of range"):
-            chunked_cross_entropy(logits, torch.tensor([1, bad, 2, 3]), backend="torch")
+            chunked_cross_entropy(logits, torch.tensor([1, bad, 2, 3]))
 
 
 @pytest.mark.skipif(not _TRITON_ON_CUDA, reason="the Triton backend needs CUDA and Triton")
@@ -268,19 +264,12 @@ def test_an_out_of_range_target_fails_the_triton_backend_instead_of_reading_anot
         import torch
         from deepspeed.ops.triton_ops.chunked_cross_entropy import chunked_cross_entropy
         logits = torch.randn(4, 8, device="cuda")
-        loss = chunked_cross_entropy(logits, torch.tensor([1, 8, 2, 3], device="cuda"), backend="triton")
+        loss = chunked_cross_entropy(logits, torch.tensor([1, 8, 2, 3], device="cuda"))
         print("LOSS", loss.item())
     """)
     completed = subprocess.run([sys.executable, "-c", program], capture_output=True, text=True, timeout=300)
     assert completed.returncode != 0, completed.stdout
     assert "LOSS" not in completed.stdout
-
-
-def test_a_named_backend_that_cannot_run_raises_instead_of_substituting():
-    with pytest.raises(RuntimeError, match="needs CUDA logits and Triton"):
-        chunked_cross_entropy(torch.randn(4, 8), torch.tensor([1, 2, 3, 4]), backend="triton")
-    with pytest.raises(ValueError, match="Unsupported chunked cross-entropy backend"):
-        ChunkedCausalLMLoss(backend="fast")
 
 
 def test_saves_no_full_vocabulary_float32_tensor():
@@ -337,7 +326,7 @@ def test_installed_loss_trains_a_hugging_face_model_like_the_stock_loss():
 def test_installed_loss_rejects_malformed_labels_like_a_stock_model(backend, device, dtype):
     stock = _tiny_causal_lm(seed=29).to(device)
     chunked = _tiny_causal_lm(seed=29).to(device)
-    install_chunked_causal_lm_loss(chunked, block_rows=3, backend=backend)
+    install_chunked_causal_lm_loss(chunked, block_rows=3)
     input_ids = torch.ones((1, 7), dtype=torch.long, device=device)
     value = 1.5 if dtype == torch.float32 else 1
     labels = torch.full(input_ids.shape, value, dtype=dtype, device=device)
@@ -413,25 +402,20 @@ def test_real_vocabulary_backward_peak_drops_by_the_float32_tensors():
         finally:
             leaf = loss = None
 
-    expected_loss = expected_grad = loss = grad = candidates = None
+    expected_loss = expected_grad = loss = grad = None
     try:
         expected_loss, expected_grad, stock_peak = backward_peak(loss_utils.ForCausalLMLoss)
         required_savings = 2 * float32_logits_bytes
 
-        candidates = [("torch", ChunkedCausalLMLoss(block_rows=torch_block_rows, backend="torch"))]
-        if triton_backend_available():
-            candidates.append(("triton", ChunkedCausalLMLoss(backend="triton")))
-
-        for backend, loss_function in candidates:
-            loss, grad, peak_allocated = backward_peak(loss_function)
-            torch.testing.assert_close(loss, expected_loss, rtol=1e-5, atol=1e-5)
-            max_distance, matching_fraction = _ulp_distance_statistics(grad, expected_grad, rows_per_chunk=8)
-            assert max_distance <= 1
-            assert matching_fraction >= 0.999
-            assert stock_peak - peak_allocated >= required_savings, (stock_peak, peak_allocated, required_savings)
-            loss = grad = None
+        # Triton where it can run; otherwise the PyTorch backend in blocks of torch_block_rows.
+        loss, grad, peak_allocated = backward_peak(ChunkedCausalLMLoss(block_rows=torch_block_rows))
+        torch.testing.assert_close(loss, expected_loss, rtol=1e-5, atol=1e-5)
+        max_distance, matching_fraction = _ulp_distance_statistics(grad, expected_grad, rows_per_chunk=8)
+        assert max_distance <= 1
+        assert matching_fraction >= 0.999
+        assert stock_peak - peak_allocated >= required_savings, (stock_peak, peak_allocated, required_savings)
     finally:
-        candidates = expected_loss = expected_grad = loss = grad = labels = logits = None
+        expected_loss = expected_grad = loss = grad = labels = logits = None
         gc.collect()
         cuda.synchronize()
         cuda.empty_cache()
