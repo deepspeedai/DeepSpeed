@@ -94,6 +94,10 @@ class DeepSpeedStaticLayer:
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if not self.is_initialized:
             self.lazy_initialization(key_states, value_states)
+        # Under autocast, keys and values can arrive in different dtypes: rotary embeddings
+        # promote bf16 key projections to fp32 while value projections stay bf16.
+        key_states = key_states.to(self.dtype)
+        value_states = value_states.to(self.dtype)
 
         kv_length = key_states.shape[-2]
 

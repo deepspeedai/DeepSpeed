@@ -728,6 +728,17 @@ def collect_autotp_universal_checkpoint_info(model: nn.Module) -> Dict[str, Any]
     # an alias would describe a parameter that has no slices to convert.
     canonical_names = {id(param): name for name, param in model.named_parameters()}
 
+    # AutoEP converts its own expert weights from their EP placement. Under AutoEP + AutoTP folding the TP peers
+    # hold different experts, so describing these weights here (as untouched, hence TP-replicated) would publish a
+    # wrong layout for anything that reads this schema. The router stays: it is the same on every TP peer.
+    autoep_expert_param_ids = set()
+    for module in model.modules():
+        if not getattr(module, "_is_autoep_layer", False):
+            continue
+        for param in module.parameters():
+            if getattr(param, "allreduce", True) is False:
+                autoep_expert_param_ids.add(id(param))
+
     for module_name, module in model.named_modules():
         marker = getattr(module, "_mark_uc_metadata", None)
         if marker is not None:
@@ -738,6 +749,8 @@ def collect_autotp_universal_checkpoint_info(model: nn.Module) -> Dict[str, Any]
         for param_name, param in module.named_parameters(recurse=False):
             full_name = f"{module_name}.{param_name}" if module_name else param_name
             if canonical_names.get(id(param), full_name) != full_name:
+                continue
+            if id(param) in autoep_expert_param_ids:
                 continue
             pattern = rf"^{re.escape(full_name)}$"
 

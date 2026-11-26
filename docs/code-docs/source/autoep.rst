@@ -64,13 +64,16 @@ including models built under ``deepspeed.zero.Init``. Stage 3 AutoEP checkpoints
 partition-natively in the ``zero_pp_rank_*`` shard files and support
 same-topology load, module-only loads (``load_module_only``),
 optimizer-state-free loads (``load_optimizer_states=False``), and Universal
-Checkpoint conversion, except with AutoTP folding. Optimizer-including
+Checkpoint conversion, also with AutoTP folding. Optimizer-including
 Universal Checkpoint loads can
 resume with a different data-parallel world size, a different ``autoep_size``,
-or both, when the target ``autoep_size`` divides the model's expert count.
+a different ``tensor_parallel.autotp_size`` (folded or not), or any
+combination, when the target ``autoep_size`` divides the model's expert count
+and, with ``tensor_parallel.autotp_size > 1``, is greater than 1 (folding
+requires expert parallelism).
 Weights-only/module-only Universal Checkpoint loads use the converted
-``fp32.pt`` parameter files and support the same data-parallel and
-``autoep_size`` topology changes.
+``fp32.pt`` parameter files and support the same data-parallel,
+``autoep_size`` and ``tensor_parallel.autotp_size`` changes.
 
 **Usage:**
 
@@ -722,11 +725,17 @@ existing numerical tolerances, not bitwise unchanged. Only the forward
 reduction changes: the backward, collectives, router, grouped GEMM and
 expert-major reorder are untouched.
 
+With AutoEP+AutoTP folding (``tensor_parallel.autotp_size`` greater than 1),
+each tensor-parallel peer sends only part of the routed assignments to the
+experts. The restore first all-gathers the rows, their token and top-k slot,
+and their routing weights over the tensor-parallel group, as the default
+restore does, and then reduces the gathered rows with the same kernel. The
+default folded restore multiplies and adds the rows in the activation dtype,
+one top-k slot at a time; the fused restore does both in FP32.
+
 ``"fused_weighted_sum"`` is rejected, rather than quietly ignored, when it would
 have nothing to replace or would change semantics:
 
-- ``tensor_parallel.autotp_size`` greater than 1, which uses folded tensor
-  parallelism and restores combined tokens from assignment metadata instead;
 - ``expert_tensor_parallel_size`` greater than 1;
 - ``comm_backend="deepep"`` with expert parallelism, because DeepEP already
   restores and reduces its routed rows;
@@ -820,10 +829,12 @@ Requirements and limits:
 - AutoEP with ZeRO Stage 3 is supported only without sequence parallelism,
   hpZeRO secondary tensor groups, non-1 expert tensor parallelism, or
   quantized gradients.
-- Regular checkpoint save/load requires matching ``autoep_size``. To change
-  ``autoep_size`` or data-parallel world size across runs for the same
-  AutoEP-detected model topology, convert the checkpoint to Universal
-  Checkpoint format and load it with ``checkpoint.load_universal``; see the
+- Regular checkpoint save/load requires matching ``autoep_size`` and, under
+  folding, matching ``tensor_parallel.autotp_size``. To change
+  ``autoep_size``, ``tensor_parallel.autotp_size`` or data-parallel world size
+  across runs for the same AutoEP-detected model topology, convert the
+  checkpoint to Universal Checkpoint format and load it with
+  ``checkpoint.load_universal``; see the
   `Universal Checkpointing tutorial </tutorials/universal-checkpointing/>`__
   for the detailed flow and constraints.
 - DeepSeek-V2 and DeepSeek-V3 AutoEP do not support load-balance expert bias

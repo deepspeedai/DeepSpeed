@@ -396,14 +396,14 @@ class TestAutoEPConfig:
         config = parse_autoep_config({**settings, "skip_recompute_combine": True, "moe_layer_pattern": None})
         validate_autoep_config(config, world_size=2, pp_size=1, tp_size=1, sp_size=1)
 
-    def test_fused_combine_rejects_folded_tensor_parallelism(self):
+    def test_fused_combine_accepts_folded_tensor_parallelism(self):
         config = parse_autoep_config({
             "enabled": True,
             "autoep_size": 2,
             "combine_impl": "fused_weighted_sum",
         })
-        with pytest.raises(ValueError, match=r"tensor_parallel\.autotp_size=2"):
-            validate_autoep_config(config, world_size=4, pp_size=1, tp_size=2, sp_size=1)
+        validate_autoep_config(config, world_size=4, pp_size=1, tp_size=2, sp_size=1)
+        assert config.combine_impl == "fused_weighted_sum"
 
     def test_fused_combine_rejects_expert_tensor_parallelism(self):
         config = parse_autoep_config({
@@ -1105,7 +1105,8 @@ class TestAutoEPConfig:
             "model.layers.0.mlp.experts.w2",
             "model.layers.0.mlp.experts.w3",
         }
-        assert _uses_zero3_partitioned_autoep_metadata(metadata_by_rank[0])
+        # Keyed by (tensor-parallel rank, data-parallel rank), read from zero_pp_rank_{dp}_mp_rank_{tp}.
+        assert _uses_zero3_partitioned_autoep_metadata(metadata_by_rank[(0, 0)])
 
     def test_universal_stage3_extract_accepts_tuple_param_shapes(self, tmp_path):
         from deepspeed.checkpoint.constants import OPTIMIZER_STATE_DICT
@@ -1515,6 +1516,20 @@ class TestRoutingAndLayerSemantics:
         assert torch.allclose(scaled_scores, base_scores * 2.5, atol=1e-5)
         assert torch.equal(scaled_counts, base_counts)
         assert base_counts.shape == (8, )
+
+    def test_router_computes_an_fp32_gate_in_fp32(self):
+        """A model may keep the gate weight in fp32 while the rest trains in bf16 (transformers lists GLM-4-MoE's
+        gate.weight in _keep_in_fp32_modules_strict). The router takes the bf16 hidden states and computes the logits
+        in fp32, as Hugging Face's router does."""
+        router = TokenChoiceTopKRouter(64, 8, None, None, 2, "sigmoid", False, 1.0, False)
+        hidden_states = torch.randn(50, 64).bfloat16()
+
+        scores, experts, counts = router(hidden_states)
+        reference_scores, reference_experts, reference_counts = router(hidden_states.float())
+
+        assert torch.equal(experts, reference_experts)
+        assert torch.equal(scores, reference_scores)
+        assert torch.equal(counts, reference_counts)
 
     def test_grouped_experts(self):
         experts = GroupedExperts(dim=64, hidden_dim=128, num_experts=4, use_grouped_mm=False)

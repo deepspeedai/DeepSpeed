@@ -341,3 +341,40 @@ process holds up to ``(2 + max(widths)) * max(sizes)`` bytes, 2.25 GiB with the
 default width at 8 processes per node and 256 MiB, so pass shorter
 ``sizes`` or smaller fan widths on large jobs. The numbers describe the
 transport used for the measurement (torch point-to-point) on that topology.
+
+Choosing between plans
+----------------------
+
+Plans that move the same data can differ in time by more than 5x, for example
+when a node's copy crosses the network once and is then exchanged over NVLink
+instead of being sent to every rank. ``affine_transfer_cost`` prices each way
+of running a move from its schedule and keeps the cheapest::
+
+    from deepspeed.checkpoint.affine_transfer_cost import (TransferCostModel, TransferStage,
+                                                           cheapest, node_route)
+
+    model = TransferCostModel(node_route(node_of_process, intra_node=('device_pair', )),
+                              {'network_send': 68.4e9, 'network_receive': 23.4e9,
+                               'device_pair': 52.1e9})
+    choice = cheapest({'direct': [TransferStage(plans, endpoints, element_size)],
+                       'relay': [TransferStage(fetch_plans, fetch_endpoints, element_size),
+                                 TransferStage(spread_plans, node_endpoints, element_size)]},
+                      model)
+
+Each candidate is a list of stages, one ``execute_transfers`` call each, run one
+after another. Within a call, each round costs its most loaded resource's bytes
+over that resource's capacity, plus ``seconds_per_round``. The host's copy
+launches, ``seconds_per_region`` for each staged or local region, overlap the
+bytes rather than adding to them, so the larger of the two counts, and each call
+adds ``seconds_per_call``. ``node_route`` sends a message between nodes through
+the sender's ``network_send`` and the receiver's ``network_receive``, and within
+a node through ``device_send`` and ``device_receive`` (each GPU's own link, as on
+NVSwitch) or ``device_pair`` (NVLink between two GPUs); any callable that names
+a message's resources can replace it. ``choice.name`` is the cheapest candidate
+and ``choice.seconds`` holds every estimate. A tie goes to the name that sorts
+first.
+
+The capacities and costs are calibrated for each machine, transport
+configuration and executor. Every rank must build the same model and the same
+candidates, so that every rank chooses the same plan. A plan's one-time
+preparation, and overlap between two stages, are not priced yet.
