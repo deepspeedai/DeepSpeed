@@ -127,8 +127,13 @@ def test_validation_rule_g6_preset_consistency():
     _assert_rejects("must match", world_size=4, tp_size=2, ep_size=2, ep_preset="mixtral", tp_preset_model="qwen3_moe")
 
 
-def test_validation_rule_g7_zero3_lane_pointer():
-    _assert_rejects("ZeRO stage 3.*separate ZeRO-3 composition lane", zero_stage=3)
+def test_validation_rule_g7_zero3_accepted():
+    validate_autoep_config(AutoEPConfig(enabled=True, autoep_size=2),
+                           world_size=4,
+                           pp_size=1,
+                           tp_size=2,
+                           sp_size=1,
+                           zero_stage=3)
 
 
 def test_validation_rule_g8_mpu_conflict():
@@ -145,9 +150,37 @@ def test_validation_rule_g10_data_before_expert_parallel_rejected():
     _assert_rejects("use_data_before_expert_parallel_", use_data_before_expert_parallel=True)
 
 
-@pytest.mark.parametrize("offload_key", ["zero_offload_optimizer", "zero_offload_param"])
-def test_validation_rule_g11_zero_offload_rejected(offload_key):
-    _assert_rejects("offload", **{offload_key: True})
+@pytest.mark.parametrize(
+    "tp_size, zero_stage, optimizer_device, param_device",
+    [
+        (2, 3, "cpu", None),  # folded ZeRO-3 with the optimizer on the CPU
+        (2, 3, "cpu", "none"),
+        (2, 2, "none", "none"),  # "none" means no offload
+        (1, 2, "nvme", "cpu"),  # without folding the offload policy does not apply
+    ])
+def test_validation_rule_g11_zero_offload_accepted(tp_size, zero_stage, optimizer_device, param_device):
+    validate_autoep_config(AutoEPConfig(enabled=True, autoep_size=2),
+                           world_size=4,
+                           pp_size=1,
+                           tp_size=tp_size,
+                           sp_size=1,
+                           zero_stage=zero_stage,
+                           offload_optimizer_device=optimizer_device,
+                           offload_param_device=param_device)
+
+
+@pytest.mark.parametrize("zero_stage, optimizer_device, param_device, match", [
+    (1, "cpu", None, "only with ZeRO stage 3"),
+    (2, "cpu", None, "only with ZeRO stage 3"),
+    (3, "nvme", None, 'device "nvme"'),
+    (3, None, "cpu", "parameter offload"),
+    (3, "cpu", "nvme", "parameter offload"),
+])
+def test_validation_rule_g11_zero_offload_rejected(zero_stage, optimizer_device, param_device, match):
+    _assert_rejects(match,
+                    zero_stage=zero_stage,
+                    offload_optimizer_device=optimizer_device,
+                    offload_param_device=param_device)
 
 
 def test_deepcompile_folded_rejected():

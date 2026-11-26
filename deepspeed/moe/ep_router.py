@@ -165,8 +165,10 @@ class TokenChoiceTopKRouter(nn.Module):
                 - selected_experts ``(T, top_k)``: expert indices per token.
                 - num_tokens_per_expert ``(num_experts,)``: int32 histogram of token counts.
         """
-        # Gate projection -> (T, num_experts)
-        scores = self.gate(x)
+        # Gate projection -> (T, num_experts). A model may keep the gate weight in fp32 while the rest trains in bf16
+        # (transformers lists GLM-4-MoE's gate.weight in _keep_in_fp32_modules_strict): the logits are then computed
+        # in fp32, as Hugging Face's router does, and the matmul needs the input in the weight's dtype.
+        scores = self.gate(x.to(self.gate.weight.dtype))
 
         # Scoring in float32 to avoid loss explosion
         if self.score_func == "sigmoid":

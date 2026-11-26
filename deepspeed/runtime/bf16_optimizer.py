@@ -14,7 +14,8 @@ from packaging import version as pkg_version
 from deepspeed.git_version_info import version
 from deepspeed.runtime.utils import (get_global_norm_of_tensors, clip_tensors_by_global_norm, DummyOptim,
                                      align_dense_tensors, all_gather_dp_groups, is_model_parallel_parameter,
-                                     see_memory_usage, get_norm_with_moe_layers, is_optimized_parameter)
+                                     see_memory_usage, get_norm_with_moe_layers, is_invalid_grad_norm,
+                                     is_optimized_parameter)
 from deepspeed.utils import link_hp_params, lazy_init_hp_params_optimizer_state, fragment_address, groups
 from deepspeed.moe.utils import is_moe_param, is_moe_param_group
 from deepspeed.utils.bwc import bwc_tensor_model_parallel_rank
@@ -24,7 +25,8 @@ from deepspeed.checkpoint.constants import UNIVERSAL_CHECKPOINT_INFO
 from deepspeed.checkpoint.constants import (DS_VERSION, PARTITION_COUNT, BASE_OPTIMIZER_STATE,
                                             SINGLE_PARTITION_OF_FP32_GROUPS, CLIP_GRAD, GROUP_PADDINGS,
                                             PARAM_SLICE_MAPPINGS)
-from deepspeed.module_inject.auto_ep_folding import apply_folding_correction_to_grad_buffer
+from deepspeed.module_inject.auto_ep_folding import (apply_folding_correction_to_grad_buffer,
+                                                     clear_autoep_folding_gradient_corrected)
 
 setattr(sys.modules[__name__], 'fragment_address', fragment_address)
 
@@ -74,6 +76,7 @@ class BF16_Optimizer(ZeROOptimizer):
         self.custom_loss_scaler = False
         self.external_loss_scale = None
         self.torch_autocast_gradscaler = None
+        self.overflow = False
 
         self.immediate_grad_update = bfloat16_config.immediate_grad_update
 
@@ -127,6 +130,10 @@ class BF16_Optimizer(ZeROOptimizer):
             for p in self.bf16_groups[i]:
                 if getattr(p, '_hp_mapping', None):
                     p._hp_mapping = None
+                # _update_hp_grad() leaves a view of the fp32 gradient buffer here; a model kept after
+                # destroy() would otherwise keep the whole buffer alive.
+                if getattr(p, '_hp_grad', None) is not None:
+                    p._hp_grad = None
         for hook in self._grad_acc_hooks:
             hook.remove()
         print_rank_0("Removed grad acc hooks")
@@ -347,6 +354,9 @@ class BF16_Optimizer(ZeROOptimizer):
                            partition_start=partition_id * partition_size,
                            partition_size=partition_size,
                            dp_group=self.real_dp_process_group[i])
+            # Unlike ZeRO's fragment lists, BF16's gradient dictionary includes every parameter.
+            for param_index, lp_param in enumerate(self.bf16_groups[i]):
+                lp_param._index_in_param_group = param_index
 
     def _lazy_init_hp_params_optimizer_state(self):
         if not self._hp_optimizer_states_linked:
@@ -379,6 +389,7 @@ class BF16_Optimizer(ZeROOptimizer):
         if closure is not None:
             raise NotImplementedError(f'{self.__class__} does not support closure.')
 
+        self.overflow = False
         non_expert_grads_for_norm, expert_grads_for_norm = self.get_grads_for_norm()
         non_expert_groups_norm = get_global_norm_of_tensors(input_tensors=non_expert_grads_for_norm,
                                                             mpu=self.mpu,
@@ -392,7 +403,12 @@ class BF16_Optimizer(ZeROOptimizer):
 
         self._global_grad_norm = all_groups_norm
 
-        assert all_groups_norm > 0.
+        if is_invalid_grad_norm(all_groups_norm):
+            self.overflow = True
+            self._global_grad_norm = float("inf")
+            self.clear_hp_grads()
+            self.clear_lp_grads()
+            return
         if self.clip_grad > 0.:
             clip_tensors_by_global_norm(input_tensors=self.get_grads_for_norm(for_clipping=True),
                                         max_norm=self.clip_grad,
@@ -474,7 +490,8 @@ class BF16_Optimizer(ZeROOptimizer):
                 update = muon_update(gradients[param_index].view(param.shape).clone(),
                                      momentum.view(param.shape),
                                      beta=group['momentum'],
-                                     ns_method=group.get('ns_method', 'gram'))
+                                     ns_method=group.get('ns_method', 'gram'),
+                                     num_heads=getattr(param, 'muon_num_heads', None))
                 partition.grad.narrow(0, local_offset,
                                       length).copy_(update.reshape(-1).narrow(0, matrix_offset, length))
                 committed.narrow(0, local_offset, length).copy_(momentum.narrow(0, matrix_offset, length))
@@ -661,10 +678,8 @@ class BF16_Optimizer(ZeROOptimizer):
         assert ckpt_version, "Empty ds_version in checkpoint, not clear how to proceed"
         ckpt_version = pkg_version.parse(ckpt_version)
 
-        self.clip_grad = current_rank_sd.get(CLIP_GRAD, self.clip_grad)
-
         if load_optimizer_states:
-            print("_load_legacy_checkpoint current_rank_sd[BASE_OPTIMIZER_STATE]")
+            self.clip_grad = current_rank_sd.get(CLIP_GRAD, self.clip_grad)
             self.optimizer.load_state_dict(current_rank_sd[BASE_OPTIMIZER_STATE])
 
         if load_from_fp32_weights:
@@ -672,12 +687,16 @@ class BF16_Optimizer(ZeROOptimizer):
                                       current_rank_sd[SINGLE_PARTITION_OF_FP32_GROUPS]):
                 src_tensor = _get_padded_tensor(saved, current.numel())
                 current.data.copy_(src_tensor.data)
+        else:
+            self._restore_from_bit16_weights()
 
         if load_optimizer_states:
             self._link_all_hp_params()
 
     def _load_universal_checkpoint(self, checkpoint_folder, load_optimizer_states, load_from_fp32_weights):
-        self.load_hp_checkpoint_state_from_checkpoint_dir("bf16_groups", checkpoint_folder)
+        self.load_hp_checkpoint_state_from_checkpoint_dir("bf16_groups",
+                                                          checkpoint_folder,
+                                                          load_optimizer_states=load_optimizer_states)
 
     def _load_global_state(self, sd):
         pass
@@ -695,6 +714,12 @@ class BF16_Optimizer(ZeROOptimizer):
     def accumulate_hp_grads_and_remove_lp(self, lp_param, group_idx, param_idx):
         assert self.immediate_grad_update
         self._update_hp_grad(lp_param, group_idx, param_idx, clear_lp_grads=False)
+        # The high-precision buffer now holds this gradient; reduction, clipping and the step all read it
+        # there. Keeping the low-precision copy until the step leaves every parameter's gradient alive twice
+        # through the end of backward, and zeroing it instead frees nothing.
+        # The correction marker belongs to the low-precision gradient being released.
+        clear_autoep_folding_gradient_corrected(lp_param)
+        lp_param.grad = None
 
     def create_grad_acc_hooks(self):
         for i, param_group in enumerate(self.bf16_groups):

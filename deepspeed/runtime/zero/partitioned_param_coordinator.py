@@ -7,7 +7,7 @@ from dataclasses import dataclass
 import collections
 from collections import UserDict
 import threading
-from typing import Deque, Dict, Set
+from typing import Deque, Dict, FrozenSet, Set, Tuple
 
 from deepspeed import comm as dist
 from deepspeed.utils import z3_leaf_module
@@ -33,7 +33,7 @@ def debug_rank0(message: str) -> None:
 
 @torch.no_grad()
 @instrument_w_nvtx
-@compiler.disable
+@compiler.lazy_disable
 def update_recompute_parameters(sub_module: Module, param: Parameter) -> None:
     sub_module.ds_recompute_parameters.add(param)
     param.ds_active_sub_modules.add(sub_module.ds_id)
@@ -119,6 +119,8 @@ class PartitionedParameterCoordinator:
         # queue for parameters to fetch. parameters will be popped off the left
         # side of the dequeue as they are fetched
         self.__param_queue: Deque[__class__.__ParamInTrace] = None
+        # (submodule ds_id, step_id) -> ds_ids of the params that can be released after that step
+        self.__params_to_release_cache: Dict[Tuple[int, int], FrozenSet[int]] = {}
         self.__prefetch_bucket_sz: int = prefetch_bucket_sz
         self.__prefetch_nvme: bool = prefetch_nvme
         self.hierarchy: int = 0
@@ -158,6 +160,23 @@ class PartitionedParameterCoordinator:
         # In-progress backward submodules keyed by ds_id. A dict (not LIFO deque) lets release
         # remove a specific module, since multi-tensor z3-leaf hooks fire out of reverse order.
         self.__active_backward_submodules: Dict[int, Module] = {}
+        # Cache per instance: a class-level lru_cache keys on self and would keep every coordinator,
+        # and the modules and parameters it references, alive for the life of the process.
+        self.__params_to_release = functools.lru_cache(maxsize=None)(self.__params_to_release)
+
+    def wait_for_external_allgather_dependencies(self, events) -> None:
+        """Make future param all-gathers wait for external GPU writes.
+
+        Reflow writes updated fp16/bf16 parameter partitions on its own H2D stream. With overlap_comm
+        the all-gather runs on its own stream, so a compute-stream wait alone would not order those
+        reads after the H2D writes.
+        """
+        if not events or get_accelerator().is_synchronized_device():
+            return
+        with get_accelerator().stream(self.__allgather_stream):
+            for event in events:
+                if event is not None:
+                    self.__allgather_stream.wait_event(event)
 
     """Tracing and Tracking
     TODO. consider performing trace before initializing PartitionedParameterCoordinator
@@ -176,6 +195,9 @@ class PartitionedParameterCoordinator:
         # pop an empty deque (IndexError) after trace invalidation.
         self.__step_id_module_fetched_for = collections.defaultdict(lambda: collections.deque())
         self.__param_queue = None
+        self.__params_to_release_cache.clear()
+        if hasattr(self.__params_to_release, "cache_clear"):
+            self.__params_to_release.cache_clear()
 
     def is_complete_trace(self) -> bool:
         return self.__trace_mode == ZeRoTraceMode.COMPLETE
@@ -247,7 +269,7 @@ class PartitionedParameterCoordinator:
         for sub_module in self.__submodule_order:
             self.record_parameters(sub_module)
 
-    @compiler.disable
+    @compiler.lazy_disable
     def reset_step(self) -> None:
         """indicate that we have completed one fwd+bwd for the model"""
         if is_compiling():
@@ -304,7 +326,7 @@ class PartitionedParameterCoordinator:
     Fetching, prefetching, and releasing parameters
     """
 
-    @compiler.disable
+    @compiler.lazy_disable
     @instrument_w_nvtx
     @torch.no_grad()
     def fetch_sub_module(self, current_submodule: Module, forward: bool) -> None:
@@ -370,11 +392,9 @@ class PartitionedParameterCoordinator:
             self._dump_param_ids(event_name, current_submodule.ds_id,
                                  [(p.ds_id, p.ds_shape)
                                   for p in params_to_fetch if p.ds_status == ZeroParamStatus.NOT_AVAILABLE])
-            # self._dump_params(event_name, current_submodule, [p for p in params_to_fetch if p.ds_status == ZeroParamStatus.NOT_AVAILABLE])
 
             self.__profiler.start_event(event_name)
             # kick off all gather for params in the immediately required submodule
-            #for param in params_to_fetch:
             if logger.isEnabledFor(logging.DEBUG):
                 for param in params_to_fetch:
                     debug_rank0(f"-fetch: {param.ds_summary()}")
@@ -494,7 +514,6 @@ class PartitionedParameterCoordinator:
     def release_sub_module(self, submodule: Module, forward=False) -> None:
         """release the parameters of a sub module, assuming they meet conditions to
         be released."""
-        # print_rank_0(f"release_sub_module {'fwd' if forward else 'bwd'}: {submodule.ds_id=} {debug_module2name_id(submodule)}", force=False)
         params_to_release = (self.__params_to_release(submodule, self.__step_id) if self.is_complete_trace() else set(
             p.ds_id for p in iter_params(submodule, recurse=z3_leaf_module(submodule))))
 
@@ -502,7 +521,7 @@ class PartitionedParameterCoordinator:
             assert self.__active_backward_submodules, "active_backward_submodules is empty during backward pass"
             # Persistent params must stay resident even when attributed to a recompute owner.
             recompute_params = set([p.ds_id for p in submodule.ds_recompute_parameters if not p.ds_persist])
-            params_to_release.update(recompute_params)
+            params_to_release = params_to_release | recompute_params
 
         current_bwd_id = next(reversed(
             self.__active_backward_submodules)) if self.__active_backward_submodules else None
@@ -619,7 +638,7 @@ class PartitionedParameterCoordinator:
             if swap_persisted_params:
                 swap_persisted_params[0].nvme_swapper.remove_partition_and_release_buffers(swap_persisted_params)
 
-    @compiler.disable
+    @compiler.lazy_disable
     @instrument_w_nvtx
     def __release_param(self, param: Parameter, free_data: bool = True) -> None:
         if param.ds_status == ZeroParamStatus.AVAILABLE and not param.ds_active_sub_modules:
@@ -630,10 +649,16 @@ class PartitionedParameterCoordinator:
             self.__n_available_params -= param.ds_numel
 
     @instrument_w_nvtx
-    @functools.lru_cache(maxsize=None)
     def __params_to_release(self, submodule_to_release: Module, step_id: int) -> Set[int]:
         if not self.is_complete_trace():
             raise RuntimeError("expected trace to be complete")
+
+        # Cached per coordinator (not via a class-level lru_cache, which pins the coordinator and its modules
+        # forever) and dropped together with the trace, since it is only valid for the trace it was built from.
+        key = (submodule_to_release.ds_id, step_id)
+        cached = self.__params_to_release_cache.get(key)
+        if cached is not None:
+            return cached
 
         params_to_release = set(
             p.ds_id for p in iter_params(submodule_to_release, recurse=z3_leaf_module(submodule_to_release))
@@ -661,7 +686,9 @@ class PartitionedParameterCoordinator:
                 params_to_release.discard(param.ds_id)
                 params_traversed += param.ds_numel
 
-        return params_to_release
+        result = frozenset(params_to_release)
+        self.__params_to_release_cache[key] = result
+        return result
 
     @instrument_w_nvtx
     def __prefetch_nvme_param_partitions(self) -> None:
@@ -675,6 +702,7 @@ class PartitionedParameterCoordinator:
 
         numel_considered = 0
         swap_in_params = []
+        swap_in_params_set = set()
         for param_in_trace in self.__param_queue:
             param = param_in_trace.param
             if param.nvme_swapper is None:
@@ -682,8 +710,11 @@ class PartitionedParameterCoordinator:
             if (numel_considered > 2 * numel_in_flight
                     or len(swap_in_params) >= param.nvme_swapper.available_swap_in_buffers()):
                 break
-            if param.ds_tensor.status == PartitionedParamStatus.NOT_AVAILABLE:
+            # The queue has a param once per use, e.g. the last layer's for the forward and again for the backward,
+            # but swap_in() takes each param once.
+            if param.ds_tensor.status == PartitionedParamStatus.NOT_AVAILABLE and param not in swap_in_params_set:
                 swap_in_params.append(param)
+                swap_in_params_set.add(param)
             numel_considered += param.ds_numel
 
         if swap_in_params:

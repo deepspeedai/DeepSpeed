@@ -37,15 +37,13 @@ void Adagrad_Optimizer::Step_1(ds_params_precision_t* _params,
             for (size_t k = t; k < offset; k++) {
                 float grad = (float)grads[k];
                 float param = (float)_params[k];
-                float momentum = grads[k];
                 float variance = _exp_avg_sq[k];
                 if (_weight_decay > 0) { grad = param * _weight_decay + grad; }
 
                 variance += grad * grad;
 
-                grad = sqrt(variance);
-                grad += _eps;
-                grad = momentum / grad;
+                float denominator = sqrt(variance) + _eps;
+                grad /= denominator;
                 param = grad * step_size + param;
                 _params[k] = param;
                 // STORE UPDATE TERM TO GRAD'S MEMORY
@@ -196,6 +194,10 @@ int ds_adagrad_step(int optimizer_id,
     opt->update_state(lr, epsilon, weight_decay);
 
     invoke(opt, params_c, grads_c, exp_avg_sq_c, params_c.numel());
+
+    // contiguous() copies a non-contiguous tensor, so write the result back.
+    if (!params.is_same(params_c)) params.copy_(params_c);
+    if (!exp_avg_sq.is_same(exp_avg_sq_c)) exp_avg_sq.copy_(exp_avg_sq_c);
 
     return 0;
 }

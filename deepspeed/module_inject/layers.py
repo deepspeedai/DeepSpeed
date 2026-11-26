@@ -7,6 +7,7 @@ import logging
 import torch
 import re
 from deepspeed import comm as dist
+from deepspeed.comm import pg_utils
 from torch import nn
 from torch.nn import functional as F
 from torch.nn.parameter import Parameter
@@ -17,7 +18,7 @@ from deepspeed.runtime.zero.utils import is_zero_param
 from abc import ABC, abstractmethod
 from typing import Iterable, Any, Optional, List, Tuple, Dict
 from .fusedqkv_utils import (shard_value_with_share_qk, prepare_tp_fused_qkvw, fused_qkv_subparam_sizes,
-                             set_fused_qkv_shard_state)
+                             set_fused_qkv_shard_state, replicated_kv_query_widths, replicated_kv_row_start)
 from deepspeed.runtime.tensor_parallel import AUTOTP_MODE
 from deepspeed.checkpoint.constants import (DS_AUTOTP_UC_META, UNIVERSAL_CHECKPOINT_VERSION_KEY,
                                             UNIVERSAL_CHECKPOINT_VERSION_VALUE)
@@ -28,7 +29,7 @@ __all__ = [
     "TensorParallel_Layer", "LinearAllreduce", "LinearAllreduceWithReplicatedInput", "LinearLayer",
     "LmHeadLinearAllreduce", "Yuan_LinearAllreduce", "Yuan_LinearLayer", "GateUpPack_LinearLayer",
     "Conv_LinearALlreduce", "fused_LinearLayer", "conv_LinearLayer", "SubParamLinearLayer", "SubParamLinearAllreduce",
-    "VocabParallelLinear", "VocabParallelEmbedding"
+    "VocabParallelLinear", "VocabParallelEmbedding", "HiddenParallelEmbedding"
 ]
 
 DEEPSPEED_AUTOTP_MODE = AUTOTP_MODE.INFERENCE
@@ -188,10 +189,12 @@ def set_autotp_mode(training=False):
         DEEPSPEED_AUTOTP_MODE = AUTOTP_MODE.INFERENCE
 
 
-def add_bias(input, bias):
+def add_bias(input, bias, training=None):
     if bias is None:
         return input
-    if is_autotp_training_mode():
+    if training is None:
+        training = is_autotp_training_mode()
+    if training:
         # Training mode - avoid inplace to ensure correct autograd
         input = input + bias
         return input
@@ -216,12 +219,16 @@ class RowParallel(torch.autograd.Function):
         Forward pass.
         """
         ctx.group = group
-        if group == None:
+        if not pg_utils.is_parallel(group):
             return input
-        if is_inference_mode:
-            dist.inference_all_reduce(input, group=group)
+        # contiguous() may hand back a copy — the reduction must land in
+        # the caller's tensor, not a discarded temporary
+        red = input.contiguous()
+        if is_inference_mode or not ctx.needs_input_grad[1]:
+            dist.inference_all_reduce(red, group=group)
         else:
-            dist.all_reduce(input.contiguous(), group=group)
+            dist.all_reduce(red, group=group)
+        if red is not input: input.copy_(red)
         return input
 
     @staticmethod
@@ -249,7 +256,7 @@ class ScatterToTensorParallelRegion(torch.autograd.Function):
         # layers need the sum of all slices, not this rank's padded gradient.
         grad_input = grad_output.new_zeros(ctx.input_shape)
         grad_input.narrow(-1, ctx.offset, ctx.size).copy_(grad_output)
-        if ctx.group is not None:
+        if pg_utils.is_parallel(ctx.group):
             dist.all_reduce(grad_input, group=ctx.group)
         return None, grad_input, None, None
 
@@ -257,7 +264,7 @@ class ScatterToTensorParallelRegion(torch.autograd.Function):
 class AsyncColumnParallel(torch.autograd.Function):
 
     @staticmethod
-    def forward(ctx: Any, group: dist.ProcessGroup, input: torch.Tensor, weight, bias) -> torch.Tensor:
+    def forward(ctx: Any, group: dist.ProcessGroup, input: torch.Tensor, weight, bias, training: bool) -> torch.Tensor:
         """
         Forward pass.
         """
@@ -265,7 +272,7 @@ class AsyncColumnParallel(torch.autograd.Function):
         ctx.group = group
         output = torch.matmul(input, weight.transpose(-1, -2))
         if bias is not None:
-            output = add_bias(output, bias)
+            output = add_bias(output, bias, training)
 
         ctx.save_for_backward(input, weight)
 
@@ -280,7 +287,7 @@ class AsyncColumnParallel(torch.autograd.Function):
         grad_weight = grad_output.view(-1, grad_output.shape[-1]).t().matmul(input.view(-1, input.shape[-1]))
         grad_bias = grad_output.sum(0) if ctx.use_bias else None
         handle.wait()
-        return None, grad_input, grad_weight, grad_bias
+        return None, grad_input, grad_weight, grad_bias, None
 
 
 class ColumnParallel(torch.autograd.Function):
@@ -306,7 +313,7 @@ class ColumnParallel(torch.autograd.Function):
         """
         Backward pass.
         """
-        if ctx.group == None:
+        if not pg_utils.is_parallel(ctx.group):
             return None, grad_output
 
         dist.all_reduce(grad_output.contiguous(), group=ctx.group)
@@ -405,6 +412,8 @@ class TensorParallel_Layer(nn.Module, ABC):
         else:
             self.tp_world_size: int = 1
             self.tp_index: int = 0
+        # Cached once so hot and compiled paths need no process-group query per call.
+        self.is_tp_parallel: bool = pg_utils.is_parallel(mp_group)
 
         # backward compatibility
         self.world_size = self.tp_world_size
@@ -565,8 +574,12 @@ class TensorParallel_Layer(nn.Module, ABC):
         return self.mp_group is not None
 
     def is_training_mode(self):
-        global DEEPSPEED_AUTOTP_MODE
-        return DEEPSPEED_AUTOTP_MODE == AUTOTP_MODE.TRAINING
+        # A model keeps the mode it was sharded in, so a frozen inference teacher and a training
+        # student can live in one process without sharing the process-wide AutoTP mode. Layers
+        # built without an explicit mode keep following set_autotp_mode.
+        if self.tp_meta.training is None:
+            return is_autotp_training_mode()
+        return self.tp_meta.training
 
     def _freeze_partition_sizes(self, total_size):
         """Resolve the tensor parallel split of this layer once, while the layer is built.
@@ -715,6 +728,17 @@ def collect_autotp_universal_checkpoint_info(model: nn.Module) -> Dict[str, Any]
     # an alias would describe a parameter that has no slices to convert.
     canonical_names = {id(param): name for name, param in model.named_parameters()}
 
+    # AutoEP converts its own expert weights from their EP placement. Under AutoEP + AutoTP folding the TP peers
+    # hold different experts, so describing these weights here (as untouched, hence TP-replicated) would publish a
+    # wrong layout for anything that reads this schema. The router stays: it is the same on every TP peer.
+    autoep_expert_param_ids = set()
+    for module in model.modules():
+        if not getattr(module, "_is_autoep_layer", False):
+            continue
+        for param in module.parameters():
+            if getattr(param, "allreduce", True) is False:
+                autoep_expert_param_ids.add(id(param))
+
     for module_name, module in model.named_modules():
         marker = getattr(module, "_mark_uc_metadata", None)
         if marker is not None:
@@ -725,6 +749,8 @@ def collect_autotp_universal_checkpoint_info(model: nn.Module) -> Dict[str, Any]
         for param_name, param in module.named_parameters(recurse=False):
             full_name = f"{module_name}.{param_name}" if module_name else param_name
             if canonical_names.get(id(param), full_name) != full_name:
+                continue
+            if id(param) in autoep_expert_param_ids:
                 continue
             pattern = rf"^{re.escape(full_name)}$"
 
@@ -896,7 +922,7 @@ class LinearAllreduce(TensorParallel_Layer):
         if not self.defer_collectives_to_compiler:
             output = RowParallel.apply(self.mp_group, output, not self.is_training_mode())
         if self.bias is not None:
-            output = add_bias(output, self.bias)
+            output = add_bias(output, self.bias, self.is_training_mode())
         return output
 
     @torch.no_grad()
@@ -906,7 +932,7 @@ class LinearAllreduce(TensorParallel_Layer):
         if weight is None:
             return
 
-        if self.mp_group is None or self.tp_world_size == 1:
+        if not self.is_tp_parallel:
             weight.data = weight.data.contiguous()
             return
 
@@ -992,9 +1018,9 @@ class LinearLayer(TensorParallel_Layer):
                 input = ColumnParallel.apply(self.mp_group, input)
             output = torch.matmul(input, self.weight.transpose(-1, -2))
             if self.bias is not None:
-                output = add_bias(output, self.bias)
+                output = add_bias(output, self.bias, self.is_training_mode())
         else:
-            output = AsyncColumnParallel.apply(self.mp_group, input, self.weight, self.bias)
+            output = AsyncColumnParallel.apply(self.mp_group, input, self.weight, self.bias, self.is_training_mode())
 
         if self.gather_output:
             if self.defer_collectives_to_compiler:
@@ -1015,7 +1041,7 @@ class LinearLayer(TensorParallel_Layer):
             if param is None:
                 continue
 
-            if self.mp_group is None or self.tp_world_size == 1:
+            if not self.is_tp_parallel:
                 params_list[idx].data = param.data.contiguous()
                 continue
 
@@ -1091,6 +1117,16 @@ class VocabParallelLinear(LinearLayer):
         self.vocab_size = self._orig_weight_shape[0]
         self.vocab_start_index = sum(self._partition_sizes[:self.tp_index])
         self.vocab_end_index = self.vocab_start_index + self._partition_sizes[self.tp_index]
+        # Set by the fused linear cross-entropy loss, which defers this projection into the loss.
+        self.fused_loss_capture = None
+
+    def forward(self, input):
+        capture = self.fused_loss_capture
+        if capture is not None and capture.armed:
+            # The fused loss projects ``input`` itself and reduces its gradient over TP, so the
+            # column-parallel input collective must not run here as well.
+            return capture.take(input)
+        return super().forward(input)
 
 
 class VocabParallelEmbedding(TensorParallel_Layer):
@@ -1163,7 +1199,7 @@ class VocabParallelEmbedding(TensorParallel_Layer):
 
     def forward(self, input):
         self._assert_compiled_if_deferred()
-        if self.mp_group is None or self.tp_world_size == 1:
+        if not self.is_tp_parallel:
             output = F.embedding(input, self.weight, padding_idx=self.padding_idx)
         else:
             # Tokens outside this rank's vocab shard are remapped to index 0 so the local lookup
@@ -1183,7 +1219,7 @@ class VocabParallelEmbedding(TensorParallel_Layer):
         for idx, param in enumerate(params_list):
             if param is None:
                 continue
-            if self.mp_group is None or self.tp_world_size == 1:
+            if not self.is_tp_parallel:
                 params_list[idx].data = param.data.contiguous()
                 continue
             params_list[idx].data = self._all_gather_shards(param, self._partition_sizes, dim=0).contiguous()
@@ -1207,6 +1243,104 @@ class VocabParallelEmbedding(TensorParallel_Layer):
                                 partition_dim=0,
                                 logical_shape=self._orig_weight_shape,
                                 output_shape=self._orig_weight_shape,
+                                partition_sizes=self._partition_sizes,
+                                target_partition_shape=tuple(self.weight.shape),
+                                original_shape=self._orig_weight_shape)
+
+
+class HiddenParallelEmbedding(TensorParallel_Layer):
+    """Embedding lookup sharded along the hidden dimension (dim 1) for training.
+
+    Each rank looks up its slice of every token's embedding, and the slices are all-gathered
+    into the replicated activation that the following layers expect. When tied to a row-parallel
+    output head, whose weight is sharded along the same dimension, this module reuses that
+    layer's already-sharded weight ``Parameter`` and shard boundaries, so both modules read from
+    and accumulate gradients into the same physical tensor.
+    """
+
+    @staticmethod
+    def validate_embedding(module):
+        # max_norm renormalizes whole rows, which no rank holds, and sparse gradients cannot
+        # accumulate into a weight whose tied output head produces dense gradients.
+        if module.max_norm is not None or module.sparse:
+            raise NotImplementedError("Hidden-parallel embedding options max_norm and sparse are not supported.")
+        embedding_type = type(module)
+        if embedding_type.forward is nn.Embedding.forward:
+            return
+        if (embedding_type.__module__ == "transformers.models.gemma3.modeling_gemma3"
+                and embedding_type.__name__ == "Gemma3TextScaledWordEmbedding"):
+            return
+        raise NotImplementedError(f"Hidden-parallel sharding does not support the custom embedding forward of "
+                                  f"{embedding_type.__name__}.")
+
+    def __init__(self, module, mp_group=None, tied_row_parallel_linear=None, **kwargs):
+        super().__init__(mp_group, **kwargs)
+        self.validate_embedding(module)
+        self.weight = module.weight
+        # nn.Embedding has no bias, but the base class's extra_repr() reads self.bias.
+        self.bias = None
+        self.support_training = True
+        # Hidden sharding keeps every vocabulary row on every rank, so these apply unchanged.
+        self.padding_idx = module.padding_idx
+        self.scale_grad_by_freq = module.scale_grad_by_freq
+
+        if tied_row_parallel_linear is not None:
+            # The output head already partitioned and materialized its shard along the same
+            # dimension; share that Parameter verbatim, keeping its equivalent gather/partition hooks.
+            self._orig_weight_shape = tied_row_parallel_linear._orig_weight_shape
+            self._partition_sizes = tied_row_parallel_linear._partition_sizes
+            self.weight = tied_row_parallel_linear.weight
+        else:
+            self._orig_weight_shape = self._shape_before_zero3_partition(module.weight)
+            self._freeze_partition_sizes(self._orig_weight_shape[1])
+            if self._should_materialize_tp_partition():
+                self._tp_partition([self.weight])
+            self.config_tp_params(self.weight)
+
+        embed_scale = None
+        if type(module).forward is not nn.Embedding.forward:
+            embed_scale = module.embed_scale.to(self.weight.device)
+        self.register_buffer("embed_scale", embed_scale, persistent=False)
+        self._mark_uc_metadata()
+
+    def forward(self, input):
+        self._assert_compiled_if_deferred()
+        output = F.embedding(input,
+                             self.weight,
+                             padding_idx=self.padding_idx,
+                             scale_grad_by_freq=self.scale_grad_by_freq)
+        if self.is_tp_parallel:
+            output = GatherFromTensorParallelRegion.apply(self.mp_group, output, self._partition_sizes)
+        if self.embed_scale is not None:
+            output = output * self.embed_scale.to(self.weight.dtype)
+        return output
+
+    @torch.no_grad()
+    def gather_params(self, params_list):
+        for idx, param in enumerate(params_list):
+            if param is None:
+                continue
+            if not self.is_tp_parallel:
+                params_list[idx].data = param.data.contiguous()
+                continue
+            params_list[idx].data = self._all_gather_shards(param, self._partition_sizes, dim=1).contiguous()
+
+    @torch.no_grad()
+    def _tp_partition(self, params_list):
+        for idx, param in enumerate(params_list):
+            if param is None:
+                return
+            _partition = params_list[idx].split(self._partition_sizes, dim=1)[self.tp_index]
+            params_list[idx].data = self.move(_partition).detach()
+
+    def _mark_uc_metadata(self):
+        # Matches LinearAllreduce's weight metadata, so the label stays the same whichever side
+        # of a tied pair runs last during universal-checkpoint metadata collection.
+        self._set_param_uc_meta(self.weight,
+                                partition_type='row',
+                                partition_dim=1,
+                                logical_shape=self._orig_weight_shape,
+                                output_shape=(self._orig_weight_shape[0], ),
                                 partition_sizes=self._partition_sizes,
                                 target_partition_shape=tuple(self.weight.shape),
                                 original_shape=self._orig_weight_shape)
@@ -1350,6 +1484,82 @@ class SubParamColumnParallel(LinearLayer):
                                     is_bias=True)
 
 
+def _all_reduce_replicated_kv_rows(kv_grad, group):
+    """All-reduce the replicated K/V rows in place.
+
+    Some backends return this gradient non-contiguously, which collectives reject; reduce a
+    contiguous copy in that case and preserve the original layout for autograd.
+    """
+    if kv_grad.numel() == 0:
+        # The key/value block is replicated whole, so it is empty on every rank at once.
+        return kv_grad
+    if kv_grad.is_contiguous():
+        # Contiguous: reduce the view in place.
+        dist.all_reduce(kv_grad, group=group)
+    else:
+        # Non-contiguous: reduce a copy, then write it back.
+        reduced = kv_grad.contiguous()
+        dist.all_reduce(reduced, group=group)
+        kv_grad.copy_(reduced)
+    return kv_grad
+
+
+def _sum_replicated_kv_gradient(grad, kv_start, group):
+    """Sum the K/V gradient rows that every rank holds a copy of."""
+    grad = grad.clone()
+    _all_reduce_replicated_kv_rows(grad.narrow(0, kv_start, grad.shape[0] - kv_start), group)
+    return grad
+
+
+class _ReplicatedKvGradReducer:
+    """Sum each micro-batch's replicated K/V gradient exactly once.
+
+    A plain tensor hook reduces the incoming gradient before PyTorch accumulates it, which is
+    correct with gradient accumulation. Some backends skip that hook under ZeRO 1/2, so a
+    post-accumulate hook is registered as well. The fallback reduces only the K/V rows added
+    since its previous call: reducing the whole accumulated gradient again would scale earlier
+    micro-batches once per later backward.
+    """
+
+    def __init__(self, param, kv_start, group):
+        self.param = param
+        self.kv_start = kv_start
+        self.group = group
+        self._tensor_hook_ran = False
+        self._grad = None
+        self._kv = None
+
+    def tensor_hook(self, grad):
+        self._tensor_hook_ran = True
+        return _sum_replicated_kv_gradient(grad, self.kv_start, self.group)
+
+    def post_accumulate_hook(self, *_unused):
+        # Both hook forms leave the gradient on the parameter; the pre-2.1
+        # AccumulateGrad hook also passes (grad_inputs, grad_outputs).
+        grad = self.param.grad
+        if grad is None:
+            self._tensor_hook_ran = False
+            self._grad = None
+            self._kv = None
+            return
+        kv_grad = grad.narrow(0, self.kv_start, grad.shape[0] - self.kv_start)
+        if self._tensor_hook_ran:
+            # The tensor hook already summed this micro-batch before it was accumulated.
+            self._tensor_hook_ran = False
+        else:
+            if self._grad is grad and self._kv is not None:
+                delta = kv_grad - self._kv
+            else:
+                delta = kv_grad.clone()
+            _all_reduce_replicated_kv_rows(delta, self.group)
+            if self._grad is grad and self._kv is not None:
+                kv_grad.copy_(self._kv + delta)
+            else:
+                kv_grad.copy_(delta)
+        self._grad = grad
+        self._kv = kv_grad.clone()
+
+
 class FusedModuleWrapper:
 
     def __init__(self, fused_module: nn.Module):
@@ -1373,6 +1583,36 @@ class fused_LinearLayer(SubParamColumnParallel):
         self._subparam_layout_spec = (fused_qkv_subparam_sizes(kwargs.get('fused_module'), tuple(module.weight.shape),
                                                                kwargs['tp_meta']), None)
         super().__init__(module, mp_group, skip_partition, **kwargs)
+        self._sum_replicated_kv_gradients()
+
+    def _sum_replicated_kv_gradients(self):
+        """Sum the gradient of the key/value block that GPTBigCode gives every rank whole.
+
+        Each rank attends with only its own query heads, so the gradient it computes for the
+        shared key/value rows covers those heads alone. Unless the ranks add those partial
+        gradients, each applies a different update to rows that must stay identical, and
+        training departs from the unsharded model. The input gradient needs no change: the
+        column-parallel backward already sums every rank's contribution to it.
+        """
+        from deepspeed.module_inject.fusedqkv_utils import get_fused_qkv_type
+
+        if get_fused_qkv_type(self.fused_module.module) != 'bigcodetype' or not pg_utils.is_parallel(self.mp_group):
+            return
+        # This rank's shard is its query rows followed by the whole key/value block.
+        kv_start = replicated_kv_row_start(self.tp_meta, self.tp_world_size, self.tp_index)
+        if kv_start is None:
+            return
+        group = self.mp_group
+
+        from deepspeed.utils.torch import register_grad_hook
+
+        # The tensor hook handles the common path before accumulation; the post-accumulate
+        # fallback covers torch_npu, which skipped it under ZeRO 1/2 in our tests.
+        for param in (self.weight, self.bias):
+            if param is not None and param.requires_grad:
+                reducer = _ReplicatedKvGradReducer(param, kv_start, group)
+                param.register_hook(reducer.tensor_hook)
+                register_grad_hook(param, reducer.post_accumulate_hook)
 
     def _freeze_partition_sizes(self, total_size):
         super()._freeze_partition_sizes(total_size)
@@ -1380,23 +1620,56 @@ class fused_LinearLayer(SubParamColumnParallel):
             set_fused_qkv_shard_state(self.fused_module.module, self._subparam_shard_widths, self.tp_index)
 
     def _segmented_affine_map(self, shape):
+        """Describe the fused layouts whose rows are not split per sub-parameter.
+
+        Both cases here need a per-piece description that one partition dimension cannot give:
+        GPTBigCode because its key/value block is held whole by every rank, CodeGen because its
+        rows are permuted before they are split.
+        """
+        from deepspeed.module_inject.fusedqkv_utils import get_fused_qkv_type
+
+        fused_type = get_fused_qkv_type(self.fused_module.module)
+        if fused_type == 'bigcodetype':
+            return self._bigcode_affine_map(shape)
+        if fused_type == 'codegentype':
+            return self._codegen_affine_map(shape)
+        return None
+
+    def _codegen_affine_map(self, shape):
+        """CodeGen reassembles q, k and v per sub-block, so a rank holds scattered equal blocks.
+
+        The partition builds that order out of reshapes rather than from a list of blocks, so
+        this derives the same order independently. What keeps the two from drifting is a test
+        requiring this map to equal one probed from the partition function itself.
+        """
+        from deepspeed.checkpoint.affine import block_gather_map
+        from deepspeed.module_inject.fusedqkv_utils import codegen_block_layout
+
+        if not shape:
+            return None
+        layout = codegen_block_layout(shape[0], self.tp_world_size, self.tp_meta.num_kv_heads)
+        if layout is None:
+            return None
+        block_size, block_ids_by_rank = layout
+        return block_gather_map(shape, block_ids_by_rank, block_size, 0)
+
+    def _bigcode_affine_map(self, shape):
         """GPTBigCode shards the query rows and gives every rank the whole key/value block.
 
         The two segments differ only in who holds them, which is what a per-piece location
         set expresses and a single partition dimension cannot.
         """
         from deepspeed.checkpoint.affine import segmented_map
-        from deepspeed.module_inject.fusedqkv_utils import get_fused_qkv_type
 
-        if get_fused_qkv_type(self.fused_module.module) != 'bigcodetype':
-            return None
         n_embd = self.tp_meta.n_embd
         if not shape or n_embd is None or n_embd >= shape[0]:
             return None
         # The query rows are not split evenly: the widths follow the head count and the grain
         # size, so they have to come from the same helper the partition calls rather than
         # from a division here.
-        query_widths = list(get_shard_size_list(n_embd, self.tp_world_size, self.tp_meta))
+        query_widths = replicated_kv_query_widths(self.tp_meta, self.tp_world_size)
+        if query_widths is None:
+            return None
         return segmented_map(shape, [(n_embd, False), (shape[0] - n_embd, True)],
                              0,
                              self.tp_world_size,
@@ -1499,16 +1772,17 @@ class Yuan_LinearAllreduce(LinearAllreduce):
                                 affine_map=weight_map,
                                 unsupported_reason=None if weight_map else self._unsupported_uc_reason)
         if self.bias is not None:
-            bias_shape = tuple(self.bias.shape)
-            # The weight is describable but this bias is not. Its partition pre-divides by the
-            # world size and replicates, which would need a scaled piece -- and that path does
-            # not currently produce a usable bias, so there is no layout to describe yet.
+            # Only the weight follows the shared-QK head selection. The bias is added once after
+            # the all-reduce, so every rank holds it whole, exactly as for any LinearAllreduce.
+            bias_shape = self._shape_before_zero3_partition(self.bias)
             self._set_param_uc_meta(self.bias,
                                     partition_type='row',
+                                    partition_dim=None,
                                     logical_shape=bias_shape,
+                                    output_shape=bias_shape,
                                     original_shape=bias_shape,
                                     is_bias=True,
-                                    unsupported_reason=self._unsupported_uc_reason)
+                                    replicated=True)
 
 
 class Yuan_LinearLayer(LinearLayer):
@@ -1605,10 +1879,10 @@ class LmHeadLinearAllreduce(LinearAllreduce):
         input_shard_offset = sum(input_shard_sizes[0:self.tp_index])
         output = torch.matmul(input[:, :, input_shard_offset:input_shard_offset + input_shard_size],
                               self.weight.transpose(-1, -2))
-        if self.mp_group is not None:
+        if pg_utils.is_parallel(self.mp_group):
             dist.inference_all_reduce(output, group=self.mp_group)
         if self.bias is not None:
-            output = add_bias(output, self.bias)
+            output = add_bias(output, self.bias, self.is_training_mode())
         return output
 
 
@@ -2036,7 +2310,7 @@ class SubParamLinearLayer(TensorParallel_Layer):
             input = ColumnParallel.apply(self.mp_group, input)
         output = torch.matmul(input, self.weight.transpose(-1, -2))
         if self.bias is not None:
-            output = add_bias(output, self.bias)
+            output = add_bias(output, self.bias, self.is_training_mode())
         return output
 
     @torch.no_grad()
@@ -2165,7 +2439,7 @@ class SubParamLinearAllreduce(TensorParallel_Layer):
         if not self.defer_collectives_to_compiler:
             output = RowParallel.apply(self.mp_group, output, not self.is_training_mode())
         if self.bias is not None:
-            output = add_bias(output, self.bias)
+            output = add_bias(output, self.bias, self.is_training_mode())
         return output
 
     @torch.no_grad()

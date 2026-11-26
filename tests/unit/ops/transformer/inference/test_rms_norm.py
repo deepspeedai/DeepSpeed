@@ -80,4 +80,3 @@ def test_pre_norm(batch, seq_len, channels, dtype):
     new_output = pre_ds_implementation(vals, residual, gamma, epsilon)
 
     assert allclose(new_output[0], ref_output[0])
-    #assert allclose(new_output[1], ref_output[1])

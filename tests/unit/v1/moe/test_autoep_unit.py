@@ -39,6 +39,7 @@ from deepspeed.module_inject.auto_ep_layer import (
     combine_from_routed,
     compute_split_plan,
     compute_split_plan_from_expert_indices,
+    resolve_row_weighting_impl,
     resolve_score_apply_mode,
 )
 from deepspeed.module_inject.auto_ep_preset_adapters import get_preset_adapter
@@ -68,6 +69,7 @@ from unit.v1.moe.autoep_test_utils import (
     replace_autoep_layers,
     skip_unless_transformers_has,
     state_matched_models,
+    tiny_minimax_m3_config,
     tiny_mixtral_config,
 )
 
@@ -254,6 +256,7 @@ class TestAutoEPConfig:
         assert disabled.autoep_size == 1
         assert disabled.validate_folding_routing is False
         assert disabled.async_split_plan is False
+        assert disabled.row_weighting_impl == "auto"
         assert disabled.load_balance_coeff is None
         assert disabled._load_balance_coeff_explicit is False
 
@@ -263,6 +266,7 @@ class TestAutoEPConfig:
             "preset_model": "mixtral",
             "load_balance_coeff": None,
             "score_apply": "pre",
+            "row_weighting_impl": "eager",
             "route_scale": 2.0,
             "validate_folding_routing": True,
             "async_split_plan": True,
@@ -276,6 +280,7 @@ class TestAutoEPConfig:
         assert config.load_balance_coeff is None
         assert config._load_balance_coeff_explicit is True
         assert config.score_apply == "pre"
+        assert config.row_weighting_impl == "eager"
         assert config.route_scale == 2.0
         validate_autoep_config(config, world_size=4, pp_size=1, tp_size=1, sp_size=1)
 
@@ -308,14 +313,97 @@ class TestAutoEPConfig:
         with pytest.raises(ValueError, match="combine_impl must be one of"):
             validate_autoep_config(config, world_size=1, pp_size=1, tp_size=1, sp_size=1)
 
-    def test_fused_combine_rejects_folded_tensor_parallelism(self):
+    def test_row_weighting_impl_rejects_unknown_value(self):
+        config = parse_autoep_config({"enabled": True, "row_weighting_impl": "triton"})
+        with pytest.raises(ValueError, match="row_weighting_impl must be one of"):
+            validate_autoep_config(config, world_size=1, pp_size=1, tp_size=1, sp_size=1)
+
+    def test_fused_row_weighting_rejects_non_deepep_backend(self):
+        config = parse_autoep_config({
+            "enabled": True,
+            "autoep_size": 2,
+            "row_weighting_impl": "fused",
+        })
+        with pytest.raises(ValueError, match='row_weighting_impl="fused".*comm_backend="comm"'):
+            validate_autoep_config(config, world_size=2, pp_size=1, tp_size=1, sp_size=1)
+
+    def test_fused_row_weighting_rejects_ep_size_one(self):
+        config = parse_autoep_config({
+            "enabled": True,
+            "autoep_size": 1,
+            "row_weighting_impl": "fused",
+            "comm_backend": "deepep",
+            "comm_max_tokens_per_rank": 4096,
+        })
+        with pytest.raises(ValueError, match="autoep_size=1"):
+            validate_autoep_config(config, world_size=1, pp_size=1, tp_size=1, sp_size=1)
+
+    def test_fused_row_weighting_accepts_the_deepep_path(self):
+        config = parse_autoep_config({
+            "enabled": True,
+            "autoep_size": 2,
+            "row_weighting_impl": "fused",
+            "comm_backend": "deepep",
+            "comm_max_tokens_per_rank": 4096,
+        })
+        validate_autoep_config(config, world_size=2, pp_size=1, tp_size=1, sp_size=1)
+
+    def test_skip_recompute_combine_defaults_off_and_requires_the_deepep_route(self):
+        assert parse_autoep_config({}).skip_recompute_combine is False
+        deepep = {"comm_backend": "deepep", "comm_max_tokens_per_rank": 4096}
+        rejected = (
+            ({
+                "autoep_size": 2,
+                "skip_recompute_combine": "true"
+            }, "skip_recompute_combine must be a boolean"),
+            ({
+                "autoep_size": 2,
+                "skip_recompute_combine": True
+            }, 'comm_backend="comm"'),
+            ({
+                "autoep_size": 1,
+                "skip_recompute_combine": True,
+                **deepep
+            }, "autoep_size=1"),
+        )
+        for overrides, match in rejected:
+            config = parse_autoep_config({"enabled": True, **overrides})
+            with pytest.raises(ValueError, match=match):
+                validate_autoep_config(config, world_size=2, pp_size=1, tp_size=1, sp_size=1)
+
+        config = parse_autoep_config({"enabled": True, "autoep_size": 2, "skip_recompute_combine": True, **deepep})
+        assert config.skip_recompute_combine is True
+        validate_autoep_config(config, world_size=2, pp_size=1, tp_size=1, sp_size=1)
+
+    @pytest.mark.parametrize("preset_model", [None, "mixtral"], ids=["automatic-preset", "explicit-preset"])
+    @pytest.mark.parametrize("pattern", [r"custom\.wrapper\.moe", r"model\.layers\.\d+\.block_sparse_moe", ""],
+                             ids=["custom-parent", "preset-pattern", "empty-pattern"])
+    def test_skip_recompute_combine_rejects_pattern_overrides_even_with_supported_presets(self, preset_model, pattern):
+        settings = {
+            "enabled": True,
+            "autoep_size": 2,
+            "comm_backend": "deepep",
+            "comm_max_tokens_per_rank": 4096,
+            "preset_model": preset_model,
+            "moe_layer_pattern": pattern,
+        }
+        config = parse_autoep_config({**settings, "skip_recompute_combine": True})
+        with pytest.raises(ValueError, match="skip_recompute_combine.*moe_layer_pattern"):
+            validate_autoep_config(config, world_size=2, pp_size=1, tp_size=1, sp_size=1)
+
+        config = parse_autoep_config({**settings, "skip_recompute_combine": False})
+        validate_autoep_config(config, world_size=2, pp_size=1, tp_size=1, sp_size=1)
+        config = parse_autoep_config({**settings, "skip_recompute_combine": True, "moe_layer_pattern": None})
+        validate_autoep_config(config, world_size=2, pp_size=1, tp_size=1, sp_size=1)
+
+    def test_fused_combine_accepts_folded_tensor_parallelism(self):
         config = parse_autoep_config({
             "enabled": True,
             "autoep_size": 2,
             "combine_impl": "fused_weighted_sum",
         })
-        with pytest.raises(ValueError, match=r"tensor_parallel\.autotp_size=2"):
-            validate_autoep_config(config, world_size=4, pp_size=1, tp_size=2, sp_size=1)
+        validate_autoep_config(config, world_size=4, pp_size=1, tp_size=2, sp_size=1)
+        assert config.combine_impl == "fused_weighted_sum"
 
     def test_fused_combine_rejects_expert_tensor_parallelism(self):
         config = parse_autoep_config({
@@ -420,12 +508,13 @@ class TestAutoEPConfig:
 
         observed = {}
 
-        def record_validate(config, world_size, pp_size, tp_size, sp_size):
+        def record_validate(config, world_size, pp_size, tp_size, sp_size, zero_stage=None):
             observed["validate"] = {
                 "world_size": world_size,
                 "pp_size": pp_size,
                 "tp_size": tp_size,
                 "sp_size": sp_size,
+                "zero_stage": zero_stage,
             }
 
         def record_create(**kwargs):
@@ -454,6 +543,7 @@ class TestAutoEPConfig:
 
         assert groups.mpu is None
         assert observed["validate"]["sp_size"] == 2
+        assert observed["validate"]["zero_stage"] == 0
         assert observed["create"]["mp_size"] == 2
         assert observed["create"]["mp_mode"] == "sp"
 
@@ -529,7 +619,7 @@ class TestAutoEPConfig:
         with pytest.raises(AssertionError, match="sequence parallelism"):
             engine._validate_zero3_moe_compatibility()
 
-    def test_zero3_compatibility_gate_rejects_active_autotp(self):
+    def test_zero3_compatibility_gate_allows_active_autotp(self):
         model = MockMoETransformer(num_layers=1)
         replace_autoep_layers(model, "mixtral")
         engine = object.__new__(DeepSpeedEngine)
@@ -542,8 +632,7 @@ class TestAutoEPConfig:
             expert_parallel_config=AutoEPConfig(enabled=True, autoep_size=1),
         )
 
-        with pytest.raises(AssertionError, match="AutoTP"):
-            engine._validate_zero3_moe_compatibility()
+        engine._validate_zero3_moe_compatibility()
 
     def test_zero3_compatibility_gate_rejects_quantized_gradients(self):
         model = MockMoETransformer(num_layers=1)
@@ -637,6 +726,121 @@ class TestAutoEPConfig:
         for param in layer.router.parameters():
             assert not hasattr(param, DS_AUTOEP_UC_META)
 
+    def test_live_expert_maps_address_the_packed_runtime_weights(self):
+        source = MockMoEBlock(num_experts=4, ffn_hidden=128, hidden_size=64)
+        spec = _make_spec()
+        # Packing everything onto one rank is the logical tensor, derived without any affine map.
+        full = dict(zip(("w1", "w2", "w3"), repack_expert_weights(source.experts, spec, ep_rank=0, ep_size=1)))
+        layers = [
+            AutoEPMoELayer(spec, source, ep_size=2, ep_rank=rank, config=_runtime_config(enabled=True, autoep_size=2))
+            for rank in range(2)
+        ]
+
+        for name in ("w1", "w2", "w3"):
+            affine_map = layers[0].expert_affine_maps()[name]
+            assert affine_map.logical_shape == tuple(full[name].shape)
+            for rank, layer in enumerate(layers):
+                local_weight = getattr(layer.experts, name).detach()
+                assert affine_map.shard_shapes[rank] == tuple(local_weight.shape)
+                torch.testing.assert_close(affine_map.extract(full[name], rank), local_weight, rtol=0, atol=0)
+
+    def test_plan_expert_transfer_moves_live_shards_into_target_packed_order(self, monkeypatch):
+        from deepspeed.checkpoint.affine import ParamAffineMap
+        from deepspeed.checkpoint.autoep_affine import make_autoep_placement_descriptor
+
+        source = MockMoEBlock(num_experts=4, ffn_hidden=128, hidden_size=64)
+        spec = _make_spec()
+        full = dict(zip(("w1", "w2", "w3"), repack_expert_weights(source.experts, spec, ep_rank=0, ep_size=1)))
+        layers = [
+            AutoEPMoELayer(spec, source, ep_size=2, ep_rank=rank, config=_runtime_config(enabled=True, autoep_size=2))
+            for rank in range(2)
+        ]
+        # A resize to three ranks with reordered, uneven, empty and replicated placements.
+        target_experts = [[3, 0], [], [2, 1, 0]]
+        target_placement = make_autoep_placement_descriptor(4, target_experts)
+
+        def materializes(*args, **kwargs):
+            raise AssertionError("planning must not materialize the logical parameter")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(ParamAffineMap, "rebuild", materializes)
+            patch.setattr(ParamAffineMap, "extract", materializes)
+            plans = layers[0].plan_expert_transfer(target_placement)
+
+        assert set(plans) == {"w1", "w2", "w3"}
+        for name, plan in plans.items():
+            expert_shape = tuple(full[name].shape[1:])
+            targets = {
+                rank: torch.full((len(experts), ) + expert_shape, float("nan"))
+                for rank, experts in enumerate(target_experts)
+            }
+            writes = {rank: torch.zeros(target.shape, dtype=torch.int64) for rank, target in targets.items()}
+            for segment in plan.segments:
+                assert segment.source_rank in (0, 1)
+                local_weight = getattr(layers[segment.source_rank].experts, name).detach()
+                source_view = torch.as_strided(local_weight.reshape(-1), segment.shape, segment.source_strides,
+                                               segment.source_offset)
+                target_view = torch.as_strided(targets[segment.target_rank].view(-1), segment.shape,
+                                               segment.target_strides, segment.target_offset)
+                target_view.copy_(source_view)
+                torch.as_strided(writes[segment.target_rank].view(-1), segment.shape, segment.target_strides,
+                                 segment.target_offset).add_(1)
+
+            for rank, experts in enumerate(target_experts):
+                torch.testing.assert_close(targets[rank], full[name][experts], rtol=0, atol=0)
+                assert torch.all(writes[rank] == 1)
+
+    def test_live_expert_maps_reject_a_placement_the_weights_do_not_have(self):
+        from deepspeed.checkpoint.autoep_affine import make_autoep_placement_descriptor
+
+        layer = AutoEPMoELayer(_make_spec(),
+                               MockMoEBlock(num_experts=4, ffn_hidden=128, hidden_size=64),
+                               ep_size=2,
+                               ep_rank=0,
+                               config=_runtime_config(enabled=True, autoep_size=2))
+        uniform_placement = layer.expert_placement_descriptor
+
+        with pytest.raises(ValueError, match="num_experts"):
+            layer.plan_expert_transfer(make_autoep_placement_descriptor(8, [list(range(8))]))
+
+        layer.expert_placement_descriptor = make_autoep_placement_descriptor(4, [[1, 0], [2, 3]])
+        with pytest.raises(NotImplementedError, match="placement"):
+            layer.expert_affine_maps()
+        with pytest.raises(NotImplementedError, match="placement"):
+            layer.plan_expert_transfer(uniform_placement)
+
+    def test_live_expert_maps_identify_placement_ranks_by_id(self):
+        from deepspeed.checkpoint.constants import AUTOEP_PLACEMENT_RANKS
+
+        layer = AutoEPMoELayer(_make_spec(),
+                               MockMoEBlock(num_experts=4, ffn_hidden=128, hidden_size=64),
+                               ep_size=2,
+                               ep_rank=0,
+                               config=_runtime_config(enabled=True, autoep_size=2))
+        expected = {name: affine_map.to_dict() for name, affine_map in layer.expert_affine_maps().items()}
+        reordered = dict(layer.expert_placement_descriptor)
+        reordered[AUTOEP_PLACEMENT_RANKS] = list(reversed(reordered[AUTOEP_PLACEMENT_RANKS]))
+        layer.expert_placement_descriptor = reordered
+
+        assert {name: affine_map.to_dict() for name, affine_map in layer.expert_affine_maps().items()} == expected
+
+    def test_live_expert_maps_reject_a_published_map_the_placement_does_not_produce(self):
+        from deepspeed.checkpoint.constants import AFFINE_MAP, DS_AUTOEP_UC_META
+
+        layer = AutoEPMoELayer(_make_spec(),
+                               MockMoEBlock(num_experts=4, ffn_hidden=128, hidden_size=64),
+                               ep_size=2,
+                               ep_rank=0,
+                               config=_runtime_config(enabled=True, autoep_size=2))
+        uniform_placement = layer.expert_placement_descriptor
+        published = getattr(layer.experts.w2, DS_AUTOEP_UC_META)
+        published[AFFINE_MAP] = layer.expert_affine_maps()["w1"].to_dict()
+
+        with pytest.raises(ValueError, match="w2"):
+            layer.expert_affine_maps()
+        with pytest.raises(ValueError, match="w2"):
+            layer.plan_expert_transfer(uniform_placement)
+
     def test_checkpoint_source_placement_does_not_need_to_match_target_topology(self):
         from deepspeed.checkpoint.autoep_affine import make_autoep_placement_descriptor
         from deepspeed.checkpoint.constants import (
@@ -709,6 +913,7 @@ class TestAutoEPConfig:
         param.ds_zero_placement_family = "autoep_expert"
         param.ds_zero_partition_group_name = "ep_size_2"
         optimizer.model_parallel_rank = 0
+        optimizer.model_parallel_group = None
         optimizer.norm_for_param_grads = {7: 3.0}
         optimizer.get_param_id = lambda _: 7
         optimizer._assert_same_partition_group = lambda _: None
@@ -727,6 +932,7 @@ class TestAutoEPConfig:
 
         monkeypatch.setattr(zero_stage3, "get_accelerator", lambda: FakeAccelerator())
         monkeypatch.setattr(zero_stage3.dist, "all_reduce", fake_all_reduce)
+        monkeypatch.setattr(zero_stage3.dist, "get_world_size", lambda group=None: 2)
 
         norm = optimizer.complete_grad_norm_calculation_for_cpu_offload([param])
 
@@ -771,6 +977,7 @@ class TestAutoEPConfig:
         optimizer = object.__new__(DeepSpeedZeroOptimizer_Stage3)
         optimizer.dp_process_group = "global_data_parallel"
         optimizer.ipg_buckets = {torch.float32: SimpleNamespace(params=[], process_group="expert_data_parallel")}
+        optimizer.dtype = torch.float32
         optimizer.postscale_gradients = True
         optimizer.gradient_predivide_factor = 1.0
         optimizer.sequence_parallel_size = 1
@@ -903,7 +1110,8 @@ class TestAutoEPConfig:
             "model.layers.0.mlp.experts.w2",
             "model.layers.0.mlp.experts.w3",
         }
-        assert _uses_zero3_partitioned_autoep_metadata(metadata_by_rank[0])
+        # Keyed by (tensor-parallel rank, data-parallel rank), read from zero_pp_rank_{dp}_mp_rank_{tp}.
+        assert _uses_zero3_partitioned_autoep_metadata(metadata_by_rank[(0, 0)])
 
     def test_universal_stage3_extract_accepts_tuple_param_shapes(self, tmp_path):
         from deepspeed.checkpoint.constants import OPTIMIZER_STATE_DICT
@@ -986,14 +1194,20 @@ class TestAutoEPConfig:
             parse_model_states([str(model_file)])
 
     def test_preset_registry_core_contracts(self):
-        assert set(PRESET_MODELS) == {"mixtral", "qwen3_moe", "qwen3_5_moe", "deepseek_v2", "deepseek_v3"}
+        assert set(PRESET_MODELS) == {
+            "mixtral", "qwen3_moe", "qwen3_5_moe", "deepseek_v2", "deepseek_v3", "minimax_m3"
+        }
         assert preset_name_for_hf_model_type("mixtral") == "mixtral"
         assert preset_name_for_hf_model_type("qwen2_moe") == "qwen3_moe"
+        assert preset_name_for_hf_model_type("minimax_m3_vl_text") == "minimax_m3"
         assert preset_name_for_hf_model_type("llama4_text") is None
 
         qwen35 = unsupported_preset_for_hf_model_type("qwen3_5_moe")
         assert qwen35 is not None
         assert "qwen3_5_moe_text" in qwen35[1].unsupported_hf_model_type_notes["qwen3_5_moe"]
+        minimax = unsupported_preset_for_hf_model_type("minimax_m3_vl")
+        assert minimax is not None
+        assert "minimax_m3_vl_text" in minimax[1].unsupported_hf_model_type_notes["minimax_m3_vl"]
         assert PRESET_MODELS["deepseek_v2"].supports_expert_bias is False
         assert PRESET_MODELS["deepseek_v3"].unsupported_router_bias_names == ()
 
@@ -1337,6 +1551,20 @@ class TestRoutingAndLayerSemantics:
         assert torch.equal(scaled_counts, base_counts)
         assert base_counts.shape == (8, )
 
+    def test_router_computes_an_fp32_gate_in_fp32(self):
+        """A model may keep the gate weight in fp32 while the rest trains in bf16 (transformers lists GLM-4-MoE's
+        gate.weight in _keep_in_fp32_modules_strict). The router takes the bf16 hidden states and computes the logits
+        in fp32, as Hugging Face's router does."""
+        router = TokenChoiceTopKRouter(64, 8, None, None, 2, "sigmoid", False, 1.0, False)
+        hidden_states = torch.randn(50, 64).bfloat16()
+
+        scores, experts, counts = router(hidden_states)
+        reference_scores, reference_experts, reference_counts = router(hidden_states.float())
+
+        assert torch.equal(experts, reference_experts)
+        assert torch.equal(scores, reference_scores)
+        assert torch.equal(counts, reference_counts)
+
     def test_grouped_experts(self):
         experts = GroupedExperts(dim=64, hidden_dim=128, num_experts=4, use_grouped_mm=False)
         nn.init.normal_(experts.w1, std=0.02)
@@ -1354,6 +1582,7 @@ class TestRoutingAndLayerSemantics:
 
         spec = _make_spec(score_apply="post")
         assert resolve_score_apply_mode(spec, "auto") == "post"
+        assert resolve_row_weighting_impl("auto") == "eager"
         expert_output = torch.ones(4, 8)
         top_scores = torch.tensor([[0.6, 0.4], [0.7, 0.3]])
         out = combine_from_routed(expert_output, top_scores, torch.arange(4), 2, "post", "weighted_sum", (1, 2, 8))
@@ -1379,6 +1608,14 @@ class TestRoutingAndLayerSemantics:
                            ep_size=1,
                            ep_rank=0,
                            config=AutoEPConfig(enabled=True, autoep_size=1, load_balance_coeff=0.02))
+
+    def test_skip_recompute_combine_is_limited_to_checked_presets(self):
+        source = MockMoEBlock(num_experts=4, ffn_hidden=128, hidden_size=64)
+        config = _runtime_config(enabled=True, autoep_size=1, skip_recompute_combine=True)
+        with pytest.raises(ValueError, match="skip_recompute_combine is not supported for preset 'custom_family'"):
+            AutoEPMoELayer(_make_spec(model_family="custom_family"), source, ep_size=1, ep_rank=0, config=config)
+        layer = AutoEPMoELayer(_make_spec(), source, ep_size=1, ep_rank=0, config=config)
+        assert layer.skip_recompute_combine is True
 
     def test_router_cache_does_not_duplicate_model_level_gate_capture(self):
         source = MockMoEBlock(num_experts=4, ffn_hidden=128, hidden_size=64)
@@ -1936,6 +2173,19 @@ class TestModelDetectionAndReplacement:
         assert isinstance(model.model.layers[0].mlp, AutoEPMoELayer)
         assert model(torch.randn(1, 4, 64)).shape == (1, 4, 100)
 
+    def test_skip_recompute_combine_attaches_each_layer_to_its_decoder_layer(self):
+        for skip in (False, True):
+            model = MockMoETransformer(num_layers=2, moe_every_n=1)
+            config = _runtime_config(enabled=True, autoep_size=1, preset_model="mixtral", skip_recompute_combine=skip)
+            auto_ep = AutoEP(model, config)
+            for spec in auto_ep.ep_parser():
+                auto_ep.replace_moe_layer(spec, ep_size=1, ep_rank=0)
+            for decoder_layer in model.model.layers:
+                attached = decoder_layer.mlp._decoder_layer
+                # Held weakly, so the decoder layer is not registered as a child of its own MoE layer.
+                assert (attached() if skip else attached) is (decoder_layer if skip else None)
+                assert all(module is not decoder_layer for module in decoder_layer.mlp.modules())
+
     def test_fused_replacement_preserves_frozen_experts_and_trainable_router(self):
         model = MockMoETransformer(num_layers=1, num_experts=4, moe_every_n=1).to(dtype=torch.bfloat16)
         source = model.model.layers[0].mlp
@@ -2108,6 +2358,46 @@ class TestModelDetectionAndReplacement:
                                        compare_aux_loss=True,
                                        compare_logits=False)
 
+    def test_hf_minimax_m3_causal_lm_matches_autoep_with_router_logits(self):
+        transformers = pytest.importorskip("transformers")
+        skip_unless_transformers_has(transformers,
+                                     "MiniMaxM3VLTextConfig",
+                                     "MiniMaxM3VLForCausalLM",
+                                     min_version="5.15.0",
+                                     reason="MiniMax-M3 AutoEP router-logit capture")
+
+        torch.manual_seed(1234)
+        config = tiny_minimax_m3_config(transformers)
+        native_model, autoep_model = state_matched_models(transformers.MiniMaxM3VLForCausalLM, config)
+        replace_autoep_layers(autoep_model, "minimax_m3")
+        assert_causal_lm_outputs_close(native_model,
+                                       autoep_model,
+                                       output_router_logits=True,
+                                       compare_router_logits=True,
+                                       compare_aux_loss=True,
+                                       compare_logits=False)
+
+    def test_minimax_m3_adapter_guards(self, monkeypatch):
+        adapter = get_preset_adapter("minimax_m3")
+        model = MockMoETransformer(num_layers=1, num_experts=4, moe_every_n=1)
+        model.config.model_type = "minimax_m3_vl_text"
+
+        monkeypatch.setattr(adapter, "_installed_transformers_version", lambda: "5.15.0")
+        specs = AutoEP(model, _runtime_config(enabled=True, autoep_size=1)).ep_parser()
+        assert len(specs) == 1
+        assert specs[0].model_family == "minimax_m3"
+        assert specs[0].expert_activation == "swiglu_oai"
+
+        # The version gate runs for this preset: the MiniMax-M3 classes appear in 5.15.0.
+        monkeypatch.setattr(adapter, "_installed_transformers_version", lambda: "5.14.0")
+        with pytest.raises(ValueError, match="requires Transformers >= 5.15.0"):
+            AutoEP(model, _runtime_config(enabled=True, autoep_size=1))._resolve_presets()
+
+        monkeypatch.setattr(adapter, "_installed_transformers_version", lambda: "5.15.0")
+        model.config.model_type = "minimax_m3_vl"
+        with pytest.raises(ValueError, match="minimax_m3_vl_text"):
+            AutoEP(model, _runtime_config(enabled=True, autoep_size=1))._resolve_presets()
+
     def test_qwen_adapter_guards(self, monkeypatch):
         monkeypatch.setattr(get_preset_adapter("qwen3_moe"), "_installed_transformers_version", lambda: "5.0.0")
         model = MockMoETransformer(num_layers=1, num_experts=4, moe_every_n=1)
@@ -2237,6 +2527,44 @@ def _eager_pep604_lines(module):
                 if isinstance(sub_node, ast.BinOp) and isinstance(sub_node.op, ast.BitOr):
                     offending_lines.append(sub_node.lineno)
     return sorted(set(offending_lines))
+
+
+class _ModelKeyedRegistry(dict):
+    """Like transformers' newer _CAN_RECORD_REGISTRY: keyed by str(model class), with get() and __setitem__() that
+    take a model."""
+
+    def __setitem__(self, model, can_record_outputs):
+        super().__setitem__(str(model.__class__), can_record_outputs)
+
+    def get(self, model):
+        return super().get(str(model.__class__)) or {}
+
+
+class TestTransformersOutputRecorderRegistry:
+
+    @pytest.mark.parametrize("registry_type", [dict, _ModelKeyedRegistry], ids=["plain_dict", "model_keyed"])
+    def test_install_uses_and_restores_entries_by_class_key(self, registry_type):
+        import deepspeed.module_inject.auto_ep_presets.base as presets_base
+
+        model = nn.Sequential(nn.Linear(2, 2))
+        model_key, layer_key = str(model.__class__), str(model[0].__class__)
+        registry = registry_type()
+        dict.__setitem__(registry, model_key, {"router_logits": "original"})
+        seen_while_installing = {}
+
+        def maybe_install_capturing_hooks(installed_model):
+            seen_while_installing.update(dict(registry))
+
+        output_capturing = SimpleNamespace(_CAN_RECORD_REGISTRY=registry,
+                                           maybe_install_capturing_hooks=maybe_install_capturing_hooks)
+        entries = {model_key: {"router_logits": "retargeted"}, layer_key: {"router_logits": "added"}}
+        installed = presets_base._install_instance_transformers_output_recorders(model, entries, output_capturing,
+                                                                                 lambda module: 0)
+
+        assert installed
+        assert seen_while_installing == entries
+        # The original entry is back under its class key, and the added one is gone.
+        assert dict(registry) == {model_key: {"router_logits": "original"}}
 
 
 class TestPy39AnnotationSafety:

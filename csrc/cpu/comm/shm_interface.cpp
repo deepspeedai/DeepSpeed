@@ -105,7 +105,31 @@ void inference_all_reduce_(torch::Tensor& data, int op)
     return;
 }
 
-PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) { m.def("initialize", &initialize, "shm initialize"); }
+int vector_kernel_level()
+{
+#if defined(__x86_64__)
+    // The bf16/fp16 reduce kernels are compiled with target("avx512bw") and use
+    // _mm512_* conversions; the fp32 kernels only use 256-bit AVX. Executing an
+    // unsupported ISA level faults, and the fault surfaces downstream as a hang
+    // once the peers block on the shm synchronization flags.
+    if (__builtin_cpu_supports("avx512bw")) return 2;
+    if (__builtin_cpu_supports("avx2")) return 1;
+    return 0;
+#else
+    // The arm64/riscv ports have no runtime ISA probe, so keep the pre-guard
+    // behavior of always enabling them; stricter gating for their optional
+    // extensions (e.g. riscv +v/+zvfh) is left to those ports' maintainers.
+    return 2;
+#endif
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
+{
+    m.def("initialize", &initialize, "shm initialize");
+    m.def("vector_kernel_level",
+          &vector_kernel_level,
+          "host ISA level usable by the shm reduce kernels");
+}
 
 TORCH_LIBRARY(deepspeed, m)
 {

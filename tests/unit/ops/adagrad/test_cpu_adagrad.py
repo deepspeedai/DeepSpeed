@@ -27,6 +27,24 @@ def check_equal(first, second, atol=1e-2, verbose=False):
     np.testing.assert_allclose(x, y, err_msg="param-update mismatch!", atol=atol)
 
 
+@pytest.mark.parametrize('model_size', [129, 1024, 8000])
+@pytest.mark.parametrize('weight_decay', [0.0, 0.1])
+def test_cpu_adagrad_weight_decay(model_size, weight_decay):
+    param = torch.nn.Parameter(torch.ones(model_size, device='cpu', dtype=torch.float32))
+    ref_param = torch.nn.Parameter(param.detach().clone())
+    optimizer_kwargs = dict(lr=0.01, eps=1e-8, weight_decay=weight_decay)
+    optimizer = DeepSpeedCPUAdagrad([param], **optimizer_kwargs)
+    ref_optimizer = torch.optim.Adagrad([ref_param], **optimizer_kwargs)
+
+    for grad_value in (0.25, 0.0, -0.5):
+        param.grad = torch.full_like(param, grad_value)
+        ref_param.grad = param.grad.clone()
+        optimizer.step()
+        ref_optimizer.step()
+
+        torch.testing.assert_close(param, ref_param, rtol=1e-6, atol=1e-7)
+
+
 class TestCPUAdagrad(DistributedTest):
     world_size = 1
     requires_cuda_env = False
@@ -54,6 +72,25 @@ class TestCPUAdagrad(DistributedTest):
             optimizer1.step()
 
         check_equal(param, param1, atol=1e-2, verbose=True)
+
+    def test_cpu_adagrad_non_contiguous_param(self):
+        initial = torch.randn(6, 5).t()
+        param = torch.nn.Parameter(initial.clone(memory_format=torch.preserve_format))
+        param1 = torch.nn.Parameter(initial.clone())
+        assert not param.is_contiguous()
+
+        optimizer = DeepSpeedCPUAdagrad([param])
+        optimizer1 = torch.optim.Adagrad([param1])
+
+        for i in range(3):
+            grad = torch.randn_like(param1)
+            param.grad = grad.clone()
+            param1.grad = grad.clone()
+            optimizer.step()
+            optimizer1.step()
+
+        torch.testing.assert_close(param, param1)
+        torch.testing.assert_close(optimizer.state[param]['exp_avg_sq'], optimizer1.state[param1]['sum'])
 
     def test_cpu_adagrad_opt_sparse_embedding(self, model_size=32, vocabulary_size=64, dim=16):
         device = 'cpu'
@@ -97,6 +134,9 @@ class TestCPUAdagrad(DistributedTest):
 
 class TestCPUAdagradGPUError(DistributedTest):
 
+    # The assertion under test can only fire for a param on a discrete accelerator;
+    # on the cpu accelerator step() returns normally and the rank pool deadlocks.
+    @pytest.mark.skipif(get_accelerator().device_name() == 'cpu', reason="requires a discrete accelerator device")
     def test_cpu_adagrad_gpu_error(self):
         model_size = 64
         device = get_accelerator().device_name(0)  # 'cuda:0' or 'xpu:0'

@@ -215,7 +215,25 @@ class DeepSpeedAccelerator(ABC):
     def prefer_triton_grouped_mm(self):
         return False
 
+    # Quantization formats (``"e4m3"``, ``"e5m2"``, ``"int8"``) whose fused subchannel-quantized GEMM kernels
+    # run on this accelerator. Formats not listed run on a PyTorch reference implementation. Defaults to none
+    # so backends opt in explicitly.
+    def supported_subchannel_quantization_formats(self):
+        return ()
+
     # Graph operations
+    # Whether HybridEngine's graph-captured generation paths are supported.
+    # Backends opt in explicitly, and only after implementing
+    # is_current_stream_capturing: the static KV cache relies on it to skip
+    # host-side checks that are illegal while a graph is being captured.
+    # Defaults to False so backends that merely expose a graph API stay on the
+    # eager path until they are validated.
+    def is_graph_capture_supported(self) -> bool:
+        return False
+
+    def is_current_stream_capturing(self) -> bool:
+        return False
+
     @abc.abstractmethod
     def create_graph(self):
         ...
