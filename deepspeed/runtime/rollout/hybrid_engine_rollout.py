@@ -431,6 +431,13 @@ class HybridEngineRollout(RolloutEngine):
             logger.warning_once("HybridEngineRollout: graph capture is not supported on the current accelerator; "
                                 "falling back to eager generation.")
             use_graph_capture = False
+        if use_graph_capture and self._zero3_partitioned():
+            # ZeRO-3 gathers fresh parameter buffers per forward, so a replayed graph
+            # would read the weights gathered at capture time. The eager path below
+            # handles ZeRO-3 synchronization instead.
+            logger.warning_once("HybridEngineRollout: graph capture is not supported with ZeRO-3 partitioned "
+                                "weights; falling back to eager generation.")
+            use_graph_capture = False
 
         forward_profiler = None
         forward_profile_handles = []
@@ -559,6 +566,13 @@ class HybridEngineRollout(RolloutEngine):
             # of aborting when the backend has not opted into graph capture.
             logger.warning_once("HybridEngineRollout: graph capture is not supported on the current accelerator; "
                                 "falling back to eager continuous batching.")
+            use_graph_capture = False
+        if use_graph_capture and self._zero3_partitioned():
+            # ZeRO-3 gathers fresh parameter buffers per forward, so a replayed graph
+            # would read the weights gathered at capture time. The eager path below
+            # handles ZeRO-3 synchronization instead.
+            logger.warning_once("HybridEngineRollout: graph capture is not supported with ZeRO-3 partitioned "
+                                "weights; falling back to eager continuous batching.")
             use_graph_capture = False
         module = self.engine.module
         prepared_generation_config = None
@@ -1916,6 +1930,17 @@ class HybridEngineRollout(RolloutEngine):
                                           dtype=torch.long,
                                           device=input_ids.device),
         )
+
+    def _zero3_partitioned(self):
+        """Whether this engine partitions weights across ranks (ZeRO-3).
+
+        A captured graph keeps the parameter buffers that were gathered at
+        capture time, while ZeRO-3 gathers fresh buffers per forward, so replaying
+        it reads stale weights. The eager path already synchronizes ZeRO-3 via
+        ``_zero3_work_remaining()``, so callers fall back to it.
+        """
+        is_zero3 = getattr(self.engine, "zero_optimization_partition_weights", None)
+        return bool(callable(is_zero3) and is_zero3())
 
     def _zero3_work_remaining(self):
         """Return a rendezvous over the group used for ZeRO-3 parameter gathers."""

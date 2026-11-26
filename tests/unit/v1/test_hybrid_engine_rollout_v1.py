@@ -1495,3 +1495,44 @@ def test_continuous_graph_recaptures_only_when_tensor_layout_changes():
     allocated = accelerator.memory_allocated()
     graph_rollout.shutdown()
     assert accelerator.memory_allocated() <= allocated - cache_bytes
+
+
+def test_graph_capture_falls_back_for_zero3_partitioned_weights(monkeypatch):
+    """ZeRO-3 gathers fresh parameter buffers each forward; a replayed graph would read
+    the stale buffers captured earlier. With use_graph_capture on, a partitioned-weights
+    engine must therefore take the eager path (which syncs ZeRO-3) and capture nothing."""
+    accelerator = get_accelerator()
+    if not accelerator.is_available() or accelerator.create_graph() is None:
+        pytest.skip("requires graph capture")
+    device = torch.device(accelerator.device_name())
+
+    prompt_ids = torch.tensor([[1, 3, 4, 2], [3, 4, 5, 1]], device=device)
+    prompt_attn = torch.ones_like(prompt_ids)
+    new_tokens = 4
+
+    # Eager reference: prompt plus one deterministic token per step.
+    expected = torch.cat([prompt_ids, (prompt_ids.sum(dim=1, keepdim=True).remainder(29) + 3).repeat(1, new_tokens)],
+                         dim=1)
+
+    # If the graph path is (wrongly) taken, capture must fail so the test does.
+    def no_capture(*args, **kwargs):
+        raise RuntimeError("graph capture must not run on a ZeRO-3-partitioned engine")
+
+    monkeypatch.setattr(accelerator, "create_graph", no_capture)
+
+    # A ZeRO-3 engine reports partitioned weights; the eager path reads module.generate.
+    eager_calls = []
+
+    def fake_generate(prompt_ids, **kwargs):
+        eager_calls.append(kwargs)
+        return expected
+
+    engine = SimpleNamespace(module=SimpleNamespace(generate=fake_generate, config=object()),
+                             zero_optimization_partition_weights=lambda: True)
+    rollout = HybridEngineRollout(engine,
+                                  SimpleNamespace(pad_token_id=0, eos_token_id=-1),
+                                  cfg=HybridEngineRolloutConfig(use_graph_capture=True))
+    output = rollout.generate(RolloutRequest(prompt_ids, prompt_attn),
+                              SamplingConfig(max_new_tokens=new_tokens, temperature=0))
+    assert eager_calls, "ZeRO-3 engine must fall back to the eager generation path"
+    assert torch.equal(output.input_ids, expected)
