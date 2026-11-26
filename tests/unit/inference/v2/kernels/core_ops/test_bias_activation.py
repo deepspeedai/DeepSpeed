@@ -8,10 +8,15 @@ from typing import Optional
 import pytest
 import torch
 
+import deepspeed
 from deepspeed.accelerator import get_accelerator
 from deepspeed.inference.v2.inference_utils import ActivationType, DtypeEnum
 from deepspeed.inference.v2.kernels.core_ops import CUDABiasActivation
+from deepspeed.ops.op_builder import InferenceCoreBuilder
 from ....v2.inference_test_utils import get_dtypes, allclose
+
+if not deepspeed.ops.__compatible_ops__[InferenceCoreBuilder.NAME]:
+    pytest.skip("Inference core ops are not available on this system", allow_module_level=True)
 
 
 def reference_bias_act_implementation(input: torch.Tensor, bias: Optional[torch.Tensor],

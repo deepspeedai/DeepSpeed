@@ -7,6 +7,7 @@ Arctic Long Sequence Training (ALST) Tiled compute component tests
 """
 
 from deepspeed.runtime.sequence_parallel.ulysses_sp import TiledMLP, sequence_tiled_compute, TiledFusedLogitsLoss
+from deepspeed.accelerator import get_accelerator
 from deepspeed.utils import safe_get_full_grad
 from torch.nn import Linear, Module
 from unit.common import DistributedTest, preferred_dtype
@@ -122,9 +123,6 @@ class TestTiledCompute(DistributedTest):
         elif dtype == torch.float16:
             config_dict["fp16"] = {"enabled": True, "loss_scale": 1.0}
 
-        # for debug
-        # torch.set_printoptions(precision=8, sci_mode=True)
-
         vocab_size = 10
         seed = 42
         hidden_dim = 128
@@ -180,12 +178,6 @@ class TestTiledCompute(DistributedTest):
         assert param_grad_b2 is not None
         assert x_grad_b is not None
 
-        # print(f"{loss_a=}")
-        # print(f"{loss_b=}")
-        # print(f"{param_grad_a1=}")
-        # print(f"{param_grad_b1=}")
-        # print(f"{param_grad_a2=}")
-        # print(f"{param_grad_b2=}")
         torch_assert_equal(loss_a, loss_b)
 
         # Gradient will not be exactly the same, especially under half-precision. And bf16 is
@@ -220,15 +212,71 @@ class TestTiledCompute(DistributedTest):
         assert param_grad_c2 is not None
         assert x_grad_c is not None
 
-        # print(f"{loss_a=}")
-        # print(f"{loss_c=}")
-        # print(f"{param_grad_a1=}")
-        # print(f"{param_grad_c1=}")
         # see notes for B
         torch_assert_equal(loss_a, loss_c)
         torch_assert_close(param_grad_a1, param_grad_c1)  #, rtol=1e-03, atol=1e-04)
         torch_assert_close(param_grad_a2, param_grad_c2)  #, rtol=1e-03, atol=1e-04)
         torch_assert_close(x_grad_a, x_grad_c)
+
+
+@pytest.mark.parametrize("batch_size", [1, 2])
+@pytest.mark.parametrize("seqlen,shards", [(5, 4), (2, 4), (7, 4), (8, 4)])
+@pytest.mark.parametrize("output_reduction", [None, "sum", "mean"])
+def test_sequence_tiled_compute_shard_boundaries(batch_size, seqlen, shards, output_reduction):
+    # Empty trailing tiles must preserve both gradients and updates relative to untiled computation.
+    device = get_accelerator().device_name()
+    dtype = torch.float32
+    hidden_dim = 8
+    torch.manual_seed(42)
+    tiled_model = SimpleMLP(hidden_dim).to(device=device, dtype=dtype)
+    reference_model = SimpleMLP(hidden_dim).to(device=device, dtype=dtype)
+    reference_model.load_state_dict(tiled_model.state_dict())
+    tiled_optimizer = torch.optim.SGD(tiled_model.parameters(), lr=0.01)
+    reference_optimizer = torch.optim.SGD(reference_model.parameters(), lr=0.01)
+
+    def compute(x, scale, model):
+        output = mlp_forward_orig(model, x) * scale
+        return output if output_reduction is None else output.sum()
+
+    for _ in range(2):
+        tiled_optimizer.zero_grad()
+        reference_optimizer.zero_grad()
+        x = torch.rand((batch_size, seqlen, hidden_dim), device=device, dtype=dtype, requires_grad=True)
+        x_reference = x.detach().clone().requires_grad_(True)
+        scale = torch.rand_like(x)
+
+        output = sequence_tiled_compute(
+            compute,
+            seqlen,
+            shards,
+            kwargs_to_shard={
+                "x": x,
+                "scale": scale
+            },
+            kwargs_to_pass={"model": tiled_model},
+            grad_requiring_tensor_key="x",
+            compute_params=list(tiled_model.parameters()),
+            output_unshard_dimension=1 if output_reduction is None else 0,
+            output_reduction=output_reduction,
+        )
+        expected = mlp_forward_orig(reference_model, x_reference) * scale
+        if output_reduction is not None:
+            expected = expected.sum()
+            if output_reduction == "mean":
+                # Averaging per-tile sums divides the full sum by the requested tile count.
+                expected = expected / shards
+
+        torch.testing.assert_close(output, expected)
+        output.sum().backward()
+        expected.sum().backward()
+        torch.testing.assert_close(x.grad, x_reference.grad)
+        for param, reference_param in zip(tiled_model.parameters(), reference_model.parameters()):
+            torch.testing.assert_close(param.grad, reference_param.grad)
+
+        tiled_optimizer.step()
+        reference_optimizer.step()
+        for param, reference_param in zip(tiled_model.parameters(), reference_model.parameters()):
+            torch.testing.assert_close(param, reference_param)
 
 
 @pytest.mark.parametrize("shards", [2, 4])
@@ -321,14 +369,10 @@ class TestTiledFusedLogitsLoss(DistributedTest):
             },
         }
         dtype = preferred_dtype()
-        #dtype = torch.float
         if dtype == torch.bfloat16:
             config_dict["bf16"] = {"enabled": True}
         elif dtype == torch.float16:
             config_dict["fp16"] = {"enabled": True, "loss_scale": 1.0}
-
-        # for debug
-        # torch.set_printoptions(precision=8, sci_mode=True)
 
         vocab_size = 100
         seed = 42
@@ -382,12 +426,6 @@ class TestTiledFusedLogitsLoss(DistributedTest):
         assert param_grad_b is not None
         assert x_grad_b is not None
 
-        # print(f"{loss_a=}")
-        # print(f"{loss_b=}")
-        # print(f"{x_grad_a=}")
-        # print(f"{x_grad_b=}")
-        # print(f"{param_grad_a=}")
-        # print(f"{param_grad_b=}")
         # usually this is an exact match, but on cpu CI this fails.
         torch_assert_close(loss_a, loss_b)
 

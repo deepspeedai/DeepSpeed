@@ -60,6 +60,36 @@ For benchmark matrices, cases execute from the largest effective batch to the
 smallest because HybridEngine sizes its inference workspace on the first
 forward. Results remain in the user-requested matrix order.
 
+HybridEngine Rollout CUDA Graph Decode
+--------------------------------------
+
+``HybridEngineRolloutConfig(use_graph_capture=True)`` captures the decode
+forward pass in a CUDA graph and replays it for every generated token. Only the
+model forward is captured; the next token is chosen from the graph's output
+logits after each replay. Greedy decoding (``temperature <= 0``) takes the
+argmax. Sampling applies the ``temperature``, ``top_k`` and ``top_p`` settings
+of ``SamplingConfig`` with Hugging Face's logits warpers, in the order
+``generate()`` applies them, so both paths sample from the same distribution.
+Both greedy decoding and sampling first apply the repetition penalty from the
+model's ``generation_config``, as ``generate()`` does. Other
+``generation_config`` settings are not applied on the graph path. Continuous
+batching, with or without graph capture, picks tokens the same way.
+
+Every path ends a response at the tokenizer's ``eos_token_id`` or at any id in
+the model's ``generation_config.eos_token_id``.
+
+The captured graph and its static cache are reused by later ``generate()``
+calls with the same batch size, prompt width plus ``max_new_tokens``, device,
+dtype, parameter layout, training mode and autocast setting. The prompt is still
+prefilled eagerly on every call, so one graph serves all prompt widths with the
+same total length. In-place weight updates, such as an optimizer step, are
+replayed without recapturing. The graph and cache stay allocated between
+rollouts until the shape changes or ``rollout.shutdown()`` releases them. When
+segment kernels are installed on the model, by this rollout's ``use_segki=True``
+or by another rollout over the same model, ``sync_weights()`` and
+``refresh_weights()`` also release them, because the injected kernels cache
+tensors derived from the weights.
+
 Shared Prompt Prefill
 ---------------------
 
@@ -70,9 +100,51 @@ branches. The option is disabled by default.
 
 Shared prefill currently requires HybridEngine kernel injection, ZeRO stage 0,
 inference tensor-parallel size 1, an internal KV cache, and a prompt longer than
-one token. It cannot be combined with CUDA graph capture or
-``release_inference_cache``. Sampling still happens independently for every
-response branch after the shared prompt forward.
+one token. It cannot be combined with CUDA graph capture,
+``release_inference_cache``, or continuous batching
+(``SamplingConfig.continuous_batch_size``). Sampling still happens independently
+for every response branch after the shared prompt forward.
+
+Segment-Based Kernel Injection (experimental)
+---------------------------------------------
+
+``HybridEngineRolloutConfig(use_segki=True)`` accelerates greedy decode by
+injecting native CUDA kernels into comm-free segments of the model at rollout
+construction. Segments are detected structurally, by attribute names, so any
+HF family whose gated MLP uses ``gate_proj``/``up_proj``/``down_proj`` with a
+SiLU activation (LLaMA, Qwen, Mistral, DeepSeek, ...) or whose GatedDeltaNet
+block uses the ``in_proj_{qkv,z,b,a}`` set is picked up without per-model code.
+GELU-gated variants (e.g. Gemma) and other unsupported architectures pass
+through silently. The option is disabled by default and
+combines with ``use_graph_capture=True`` for the fastest path.
+
+Scope and semantics
+~~~~~~~~~~~~~~~~~~
+
+- **Throughput numbers** count executed decode steps (all rows step together);
+  tokens produced after a row's EOS are padded, so valid-token rates can be
+  lower at early EOS. Graph warm-up + capture (~1–1.5 s on a 4B model) runs
+  on the first ``generate()`` call for a decode shape and is excluded from
+  decode-rate measurements.
+- **Graph reuse**: later calls with the same decode shape replay the captured
+  graph. ``sync_weights()`` / ``refresh_weights()`` drop the derived weight
+  caches and release the graph, so the next call recaptures with the trained
+  weights. Updating weights without calling either of them is not supported
+  while segment kernels are installed on the model.
+- **Packed (varlen) sequences**: the GDN conv/scan wrappers forward the
+  packed-sequence boundary markers (``seq_idx`` / ``cu_seqlens``) exactly as
+  the native forward does; packed *training* (gradients through the packed
+  path) is not exercised by the test suite and not guaranteed.
+
+Injected replacements read the original weight ``Parameter`` objects directly
+with exact backward, so training and generation share one forward path: no
+weight copies and no inject/eject switching between rollout and training
+steps.
+
+Segment injection requires a CUDA accelerator and currently targets
+single-GPU (batch-size 1 gets a fully fused decode step inside the captured
+graph; larger batches keep batched argmax in Python). Fused projections are
+never applied to layers carrying tensor-parallel collectives.
 
 Continuous batching (experimental)
 -----------------------------------
@@ -83,8 +155,9 @@ When unset, generation keeps its existing behavior. When set to a positive
 value, at most that many prompt rows are active at once; completed rows retire
 and pending rows are prefetched into the released slots. The returned
 ``RolloutBatch`` remains in the original ``RolloutRequest`` row order.
-The experimental path periodically trims unused cache columns from the left
-to keep long-running staggered-EOS workloads within the allocated cache span.
+When ``HybridEngineRolloutConfig(enable_cache_trimming=True)`` is enabled, the
+experimental path periodically trims unused cache columns from the left to
+keep long-running staggered-EOS workloads within the allocated cache span.
 
 When ``HybridEngineRolloutConfig(enable_profiling=True)`` is enabled, this path
 also records a snapshot in ``get_last_profile()``. In addition to the common
@@ -99,14 +172,220 @@ number of simultaneously active rows; ``continuous_batch_size`` is the
 configured capacity.
 
 The experimental path intentionally does not implement paged attention or change the
-default generation semantics. It currently requires one prompt width for all
-rows, a model with cache-class support, greedy decoding, and one sample per
-prompt. CUDA Graph capture and multiple prompt widths are rejected until the
-scheduling semantics are validated on real workloads. Models without
-cache-class support should use the default ``generate()`` path or upgrade
-Transformers.
+default generation semantics. It currently requires one padded prompt width for
+all rows, a model with cache-class support, and one sample per prompt. Shared
+prompt prefill is rejected until the scheduling semantics are validated on real
+workloads. Models that explicitly declare no cache-class
+support are rejected; models with unknown support should be validated against
+the default ``generate()`` path before use.
+``align_decode_fronts=False`` is the default equal-width padded-prompt baseline:
+all requests use the same padded prompt width. Different effective lengths
+encoded by the attention masks retain the legacy staggered logical decode
+positions; physical decode-front alignment is enabled only when
+``align_decode_fronts=True``. Cache trimming is independently controlled by
+``enable_cache_trimming`` and is disabled by default. When disabled, the
+rollout does not trim periodically, but it reclaims a dead prefix when that is
+necessary to avoid exhausting the configured cache capacity.
+
+Set ``HybridEngineRolloutConfig(align_decode_fronts=True)`` to enable the
+follow-up alignment path. It derives each request's effective prompt width from
+its attention mask, orders requests from longest to shortest internally, and
+restores the original row order in the returned batch. Retired rows are refilled
+from that pre-sorted pending queue. Cache trimming remains disabled unless
+``enable_cache_trimming=True`` is also set. You can override the derived cache
+span with ``continuous_cache_capacity``; if the span is exhausted, the rollout
+raises an error that names both remedies.
+
+For eager decode, set ``HybridEngineRolloutConfig(adaptive_prefill=True)`` to choose ordinary
+batched generation or aligned CB with cost-based prefill buckets. Auto is
+opt-in and takes precedence over ``align_decode_fronts`` without modifying the
+caller's configuration. A length-sorted O(n²) dynamic program minimizes the
+additive estimated cost of contiguous buckets, including one large bucket and
+one request per bucket as candidates. Each bucket uses ordinary left padding
+and a two-dimensional attention mask; no packed/varlen kernel is required.
+The CB cache layout remains right-aligned for the entire call. Newly admitted
+requests are replanned together on every refill, without reordering survivors.
+
+The estimated bucket cost is a fixed Forward term plus linear padded-token
+work, quadratic Attention work, and KV traffic. Attention work uses the model's
+layer count, query heads and ``head_dim``; KV traffic uses KV heads, ``head_dim``
+and parameter element size. Projection/MLP work is represented by the calibrated
+linear coefficient rather than inferred from head dimension alone.
+
+The following coefficients are starting estimates, not portable guarantees:
+
+* ``prefill_fixed_cost_ms=25.0``: fixed cost per prefill Forward.
+* ``prefill_token_cost_ms=0.1``: milliseconds per padded token position.
+* ``prefill_attention_cost_ms=0.01``: milliseconds per estimated GFLOP of
+  Attention work (``4 * B * L² * layers * query_heads * head_dim``).
+* ``prefill_kv_cost_ms=0.04``: milliseconds per MiB of estimated KV traffic.
+* ``continuous_decode_cost_ms=10.0``: extra CB milliseconds per Decode step
+  (generation budget minus the first token returned by Prefill), used when
+  comparing with ordinary generation.
+
+The decode term uses the configured maximum generation budget. Natural EOS can
+shorten a rollout, so this estimate can overstate the extra CB decode cost.
+Calibration uses fixed, EOS-disabled output lengths; deployment evaluation should
+also measure the actual response-length distribution and end-to-end latency.
+
+All costs must be finite and non-negative. Calibrate them for the model,
+device, precision and attention backend. DP is optimal for these estimates;
+it cannot guarantee globally minimal measured GPU latency. Ordinary generation
+is eligible only when all requests fit the active-row and prefill limits, the
+physical input width fits the model position limit, and neither explicit static
+capacity nor trimming is requested. Otherwise Auto remains on the CB path.
+
+Auto validates masks and reads effective lengths in one batch transfer. When
+ordinary generation beats a lower bound on every CB partition, it skips DP;
+uniform prompt lengths also admit an exact single-bucket estimate. The fallback
+reuses the resolved generation configuration and normalizes the result once.
+This keeps planning overhead small for short generations and large request counts.
+
+The `DeepSpeedExamples adaptive prefill benchmark
+<https://github.com/deepspeedai/DeepSpeedExamples/tree/master/benchmarks/opsd#adaptive-prefill-calibration>`_
+provides separate calibration and evaluation. From the DeepSpeedExamples checkout:
+
+.. code-block:: bash
+
+   python benchmarks/opsd/rollout_prefill.py --model Qwen/Qwen3-32B --dtype bfloat16 \
+       --repeats 3 --calibrate costs.json
+   python benchmarks/opsd/rollout_prefill.py --model Qwen/Qwen3-32B --dtype bfloat16 \
+       --cost-config costs.json --repeats 3 --output sweep.json
+
+Use ``--model tiny-qwen2 --dtype float32`` for a seeded small-model smoke test.
+Calibration uses six uniform shapes distinct from the evaluation workloads,
+fits non-negative fixed/token/Attention terms, measures KV management rates,
+and estimates extra CB Decode cost from one-token and eight-token calls.
+The saved JSON records model, GPU, precision, backend and library versions;
+the sweep rejects a calibration from a different configuration. Applications
+can pass its ``costs`` dictionary to ``HybridEngineRolloutConfig``.
+Calibration runs during deployment preparation; applications load the saved
+coefficients once at rollout initialization, without profiling or refitting
+inside generation requests. The built-in grid reaches 768 input tokens; extend
+it to cover the deployment's lengths and feasible batch sizes before relying
+on these estimates for longer contexts.
+
+The four evaluation workloads cover 128 short requests, a 128/4 tail, a
+16..512 spread and a 512/16 tail. Timing includes routing and cache work, with
+one warmup and interleaved repetitions of all four paths. The report includes
+``auto_vs_best`` and the worst-case regression, plus selected routes and output
+ID agreement. Generation is deliberately limited to two tokens with EOS
+disabled to expose short-generation overhead; this is a controlled performance
+test rather than a natural-EOS rollout trace. Use ``--new-tokens`` to evaluate
+other budgets and recalibrate when the deployment configuration changes.
+
+``prefill_max_tokens=65536`` limits padded token positions in each Forward;
+set it to ``None`` to remove this planning limit. A single prompt above the
+configured limit raises an error; this does not implement chunked prefill.
+Long prompts also need a model position limit covering the prompt and generation
+budget, sufficient static KV capacity, and enough temporary Forward memory.
+The token limit does not bound allocated Decode KV memory; reduce the configured
+active-row capacity or cache capacity when needed.
+
+Automatic selection currently requires single-process greedy rollout with one
+sample per prompt and a supported cache-class model.
+With both ``adaptive_prefill=True`` and ``use_graph_capture=True``, supported
+accelerators use eager bucketed prefill for newly admitted prompts and replay
+decode in fixed physical slots. Each surviving request keeps its KV row across
+refills. The graph capacity and position limits use the physical input width.
+Graph capture is explicitly selected by the caller; the cost model chooses the
+prefill buckets. Profiling reports ``generation_strategy="bucketed_graph"``.
+Auto takes precedence over ``align_decode_fronts``; either value of that flag
+uses the same fixed-slot graph path. Graph capture still rejects cache trimming.
+Accelerators without graph support use the eager adaptive policy.
+
+Other non-default generation settings beyond repetition penalty, token IDs and the supported length/sampling
+settings are rejected; for example, beam search, no-repeat n-grams, forced tokens
+and dictionary outputs cannot be reproduced by the continuous path. Auto resolves
+HF's effective generation configuration before validation, including legacy model
+settings, while retaining explicit generation-configuration overrides. Repetition
+penalty follows the installed Transformers version's treatment of leading padding,
+using the original prompt history and attention mask even when bucket input is trimmed.
+
+With profiling, ``get_last_profile()["generation_strategy"]`` reports
+``"batched"``, ``"bucketed"``, or ``"bucketed_graph"`` for Auto; ``num_prefill_forwards`` counts actual
+bucket Forwards on the CB path. End-to-end time includes initial route planning
+and result normalization. Ordinary generation has no static-cache snapshot,
+so ``get_last_continuous_stats()`` returns ``None`` for that call. Across Auto
+paths, productive-token counts and throughput exclude structural padding and
+retain EOS plus PAD-valued tokens generated before termination; active/configured
+row-capacity fields retain their continuous-call meaning. Manual alignment and
+equal-width modes retain their existing profile strategy labels.
+
+The most recent cache statistics are available from
+``rollout.get_last_continuous_stats()``. They include ``cache_capacity``,
+``peak_cache_length``, ``cache_memory_bytes``, ``trim_count``,
+``trimmed_columns``, ``trim_frequency``, and ``trim_bytes_moved``.
+``cache_memory_bytes`` covers
+the allocated KV tensors plus the per-row attention mask and write positions,
+with the same definition for eager and graph-captured decoding. With profiling enabled,
+``trim_latency_ms``, ``end_to_end_ms``, and ``tokens_per_second`` are also
+measured with accelerator synchronization; otherwise those timing fields are
+``None`` or zero.
+``trim_frequency`` is the number of trims divided by decode steps. Trimming
+statistics remain zero when ``enable_cache_trimming`` is false unless a
+capacity-exhaustion fallback reclaims a dead prefix.
+
+CUDA Graph capture is supported for CUDA inputs with the default
+``align_decode_fronts=False`` and ``enable_cache_trimming=False`` settings. It
+uses a fixed ``continuous_batch_size`` layout, keeps every KV-cache row and
+decode tensor at a stable address, and masks inactive rows while the scheduler
+refills them. Graph state is reused across rollout calls with the same decode
+batch size, cache length, device and dtype, and is rebuilt when one of these
+changes or when a model parameter or buffer changes address, shape, strides,
+dtype or device. Replays read these tensors in place, so in-place optimizer updates between
+rollouts are picked up without recapturing. By default, the cache length is the
+prompt width plus ``max_new_tokens``. Set ``continuous_cache_capacity`` to reuse
+one graph across prompt widths that fit within that capacity.
+Call ``rollout.shutdown()`` to release the graph and its
+static cache. The rollout stays usable and captures again on its next graph
+call. Under tensor parallelism the graph holds captured collectives, so call
+``shutdown()`` before ``torch.distributed.destroy_process_group()``. With Auto
+disabled, manual aligned decode fronts are rejected because they move cache
+rows. Cache trimming is rejected in both graph modes. ``flash_attention_2`` is
+also rejected because the captured decode uses a four-dimensional additive
+attention mask.
 
 ``DeepSpeedStaticCache`` accepts one write position per row and can compact
 active rows while preserving its static tensor addresses. This mirrors the
 scheduler/cache separation used by systems such as vLLM and SGLang without
 copying their backend-specific kernels.
+
+``DeepSpeedStaticCache.get_query_offset(layer_idx)`` supports the causal-mask
+query-offset interface used by Transformers 5.20. It returns zero before a
+write position is supplied, the scalar write position for fixed-batch decoding,
+or the largest per-row write position for continuous batching. Per-row attention
+masks determine which cache entries are valid below that shared frontier.
+The offset excludes the current write, unlike ``get_seq_length()``; querying it
+does not advance the cache or synchronize a device tensor to the host.
+This is a targeted query-offset compatibility fix, not a guarantee of support
+for every Transformers 5.20 cache API.
+
+OPSD response-token utilities
+-----------------------------
+
+``ResponseTokenBatch.from_rollout`` derives causal training targets and a
+response-only loss mask from a ``RolloutBatch``. The mask excludes prompt and
+padding tokens while retaining an attended EOS token. Use
+``generalized_jsd_loss`` to compare aligned student and teacher logits on that
+mask:
+
+.. code-block:: python
+
+    from deepspeed.runtime.rollout import ResponseTokenBatch, generalized_jsd_loss
+
+    response_batch = ResponseTokenBatch.from_rollout(rollout_batch)
+    student_logits = response_batch.select_causal_logits(student_model(**model_inputs).logits)
+    teacher_logits = aligned_teacher_logits
+    loss_output = generalized_jsd_loss(
+        student_logits,
+        teacher_logits,
+        response_batch.response_mask,
+    )
+    loss = loss_output.loss
+
+The rollout supplies only the student on-policy trajectory. Construct the
+teacher inputs, including any privileged context, separately and align the
+teacher logits with the student causal-logit shape before calling the loss.
+``loss_sum`` and ``valid_token_count`` are available for callers that need
+explicit distributed loss normalization.

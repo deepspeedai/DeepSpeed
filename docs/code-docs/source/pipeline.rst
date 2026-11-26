@@ -6,6 +6,9 @@ Model Specification
 .. autoclass:: deepspeed.pipe.PipelineModule
     :members:
 
+.. autoclass:: deepspeed.pipe.DualPipeVModule
+    :members:
+
 .. autoclass:: deepspeed.pipe.LayerSpec
     :members:
 
@@ -18,6 +21,9 @@ Model Specification
 Training
 --------
 .. automodule:: deepspeed.runtime.pipe.engine
+    :members:
+
+.. autoclass:: deepspeed.runtime.pipe.dualpipev.DualPipeVEngine
     :members:
 
 Extending Pipeline Parallelism

@@ -7,7 +7,7 @@ import os
 import torch
 import pytest
 import deepspeed
-from deepspeed.ops.op_builder import OpBuilder
+from deepspeed.ops.op_builder.builder import CUDAOpBuilder
 from unit.common import DistributedTest
 from deepspeed.accelerator import get_accelerator
 
@@ -17,7 +17,7 @@ from deepspeed.ops.op_builder import InferenceBuilder
 if not deepspeed.ops.__compatible_ops__[InferenceBuilder.NAME]:
     pytest.skip("This op had not been implemented on this system.", allow_module_level=True)
 
-rocm_version = OpBuilder.installed_rocm_version()
+rocm_version = CUDAOpBuilder.installed_rocm_version()
 if rocm_version != (0, 0):
     pytest.skip("skip inference tests on rocm for now", allow_module_level=True)
 
@@ -34,7 +34,6 @@ class TestHybridEngineLlama(DistributedTest):
         for t in tokens:
             if torch.is_tensor(tokens[t]):
                 tokens[t] = tokens[t].to(f'{get_accelerator().device_name()}:{local_rank}')
-        #output = model.generate(**tokens, do_sample=False, max_length=100)
         output = model.generate(tokens.input_ids, do_sample=False, max_length=100)
         outputs = tokenizer.batch_decode(output, skip_special_tokens=True)
         return outputs

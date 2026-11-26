@@ -138,6 +138,7 @@ def _build_average_tensor_optimizer(monkeypatch, *, copy_streams):
     optimizer = DeepSpeedZeroOptimizer.__new__(DeepSpeedZeroOptimizer)
     optimizer.overlap_comm = True
     optimizer.reduce_scatter = False  # take the early-return reduce path, isolating the wait logic
+    optimizer._offload_gradient_safety_enabled = False  # exercise the non-offload stream-wait path
     optimizer.reduction_stream = _FakeWaitStream()
     comm_dtype = torch.float16
     bucket = zero_stage12.IPGBucket()
@@ -168,9 +169,8 @@ def test_average_tensor_waits_on_all_ipg_bucket_producer_streams(monkeypatch):
 
 
 def test_average_tensor_falls_back_to_current_stream_without_producers(monkeypatch):
-    # The extra-large-param path reduces without copying into the bucket, so
-    # copy_streams is empty: preserve the original behavior of waiting on the
-    # current stream.
+    # An empty bucket has no recorded producers: preserve the original behavior
+    # of waiting on the current stream.
     optimizer, comm_dtype, current, _ = _build_average_tensor_optimizer(monkeypatch, copy_streams=[])
 
     optimizer.average_tensor(torch.zeros(4), comm_dtype)

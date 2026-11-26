@@ -317,3 +317,36 @@ Tied layers are replicated on every pipeline stage that owns an instance of
 reuse. Training then proceeds as normal, but an additional all-reduce of the
 tied gradients is added after all backward passes complete. The all-reduce
 ensures that the weights of the tied layer remain in sync across pipeline stages.
+
+### DualPipeV Schedule
+DualPipeV is a pipeline schedule from
+[DualPipe](https://github.com/deepseek-ai/DualPipe) in which each GPU holds two
+pipeline stages. With `P` GPUs in the pipeline the model is partitioned into
+`2P` stages, and GPU `r` holds stage `r` and stage `2P - 1 - r`. A micro-batch
+runs forward from GPU `0` to GPU `P - 1`, turns around there, and runs back to
+GPU `0`. GPU `0` therefore loads the data and also computes the loss. While one
+of a GPU's stages waits for its neighbor, the other stage can process a
+different micro-batch.
+
+To use DualPipeV, build the model with `DualPipeVModule` in place of
+`PipelineModule`. It accepts the same arguments, and `num_stages` is still the
+number of GPUs in the pipeline.
+```python
+from deepspeed.pipe import DualPipeVModule
+net = DualPipeVModule(layers=net, loss_fn=torch.nn.CrossEntropyLoss(), num_stages=2)
+engine, _, _, _ = deepspeed.initialize(config=config, model=net, model_parameters=net.parameters())
+loss = engine.train_batch(data_iter=train_iter)
+```
+
+`deepspeed.initialize()` selects the DualPipeV engine when it is given a
+`DualPipeVModule`. `train_batch()`, `eval_batch()`, activation checkpointing,
+and saving and loading checkpoints are used as with `PipelineModule`.
+
+DualPipeV has the following requirements:
+
+* `gradient_accumulation_steps` must be at least `2P`. The same minimum applies
+  to `num_micro_batches` in `eval_batch()`.
+* `dynamic_shape=True` is not supported.
+* Boolean tensors cannot be passed between stages.
+* The `pipe_partitioned` and `grad_partitioned` options for model parallelism
+  are not supported.

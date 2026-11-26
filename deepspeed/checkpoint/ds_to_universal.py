@@ -17,7 +17,6 @@ import re
 import shutil
 import torch
 import tqdm
-#from pprint import pprint
 
 from deepspeed.checkpoint import DeepSpeedCheckpoint
 from deepspeed.checkpoint import (
@@ -50,7 +49,11 @@ from deepspeed.checkpoint import (
     AUTOTP_UNSUPPORTED_PARAMETER_PATTERNS,
     AUTOEP_LAYERS_KEY,
     AUTOEP_LAYERS_KEY_LEGACY,
+    AUTOEP_EXPERT_PLACEMENT,
     AUTOEP_EXPERT_KEY_PREFIX,
+    AUTOEP_PLACEMENT_EXPERTS,
+    AUTOEP_PLACEMENT_RANK,
+    AUTOEP_PLACEMENT_RANKS,
     EP_IS_EXPERT_PARAM,
     EP_NUM_EXPERTS,
     EXPERT_PARAMETER_PATTERNS,
@@ -60,7 +63,8 @@ from deepspeed.checkpoint.autoep_zero3_metadata import (
     is_autoep_zero3_partitioned_entry,
     validate_autoep_zero3_partitioned_metadata,
 )
-from deepspeed.checkpoint.affine import ParamAffineMap, AFFINE_MAP_FORMAT_VERSION
+from deepspeed.checkpoint.affine import ParamAffineMap, AFFINE_MAP_FORMAT_VERSION, SCALE_POWER_BY_STATE
+from deepspeed.checkpoint.autoep_affine import autoep_metadata_to_affine_map, validate_autoep_placement_descriptor
 
 
 def parse_arguments():
@@ -129,13 +133,10 @@ def extract_zero_shards(dir, ds_checkpoint, indices_3D):
     pp_index, tp_index, dp_index = indices_3D
     sd = ds_checkpoint.get_zero_checkpoint_state(pp_index=pp_index, tp_index=tp_index, dp_index=dp_index)
 
-    # pprint(f"Processing {dp_index=} {pp_index=}, {tp_index=}")
-
     optim_sd = sd[OPTIMIZER_STATE_DICT]
     param_slice_mappings = optim_sd[PARAM_SLICE_MAPPINGS]
     universal_checkpoint_info = ds_checkpoint.get_checkpoint_info(UNIVERSAL_CHECKPOINT_INFO)
     pipeline_replicated_params = universal_checkpoint_info.get(PIPELINE_REPLICATED_PARAMETER_PATTERNS, [])
-    # print(f'{pipeline_replicated_params=}')
 
     # dict
     state_groups = optim_sd[BASE_OPTIMIZER_STATE]["state"]
@@ -159,7 +160,6 @@ def extract_zero_shards(dir, ds_checkpoint, indices_3D):
                 # Skip tied weights that are replicated in first and last pp stages
                 continue
 
-            # pprint(f"dpt{dp_index}{pp_index}{tp_index} {param_group_id} {name} => {fragment_mapping.start}:{fragment_mapping.numel}")
             for state_key in flat_state.keys():
                 dump_param_fragment(dir, tp_index, dp_index, state_key, flat_state[state_key], name,
                                     fragment_mapping.start, fragment_mapping.numel)
@@ -225,8 +225,6 @@ def dump_param_fragment(dir, tp_index, dp_index, state_name, state_flat_tensor, 
     cnt += 1
 
     path = os.path.join(param_base_path, f"{state_name}.{dp_index_to_str(dp_index)}")
-
-    #print(f"{param_name}: {offset}: {numel} => {path}")
 
     # State might be a python int or a tensor
     if state_name != "step" and torch.is_tensor(state_flat_tensor):
@@ -372,14 +370,11 @@ def merge_tp_slices(uc_info, dir, slice_dir, tp_degree, name_and_shapes):
     # gradient by `1 / s`, so Adam's first moment carries the inverse and its second moment
     # the inverse square. Using the parameter's factor for all three would corrupt the
     # optimizer state and change the trajectory after a resume.
-    scale_powers = {"fp32": 1, "exp_avg": -1, "exp_avg_sq": -2}
 
     for state in ("fp32", "exp_avg", "exp_avg_sq"):
         slices = _merge_zero_shards(slice_base_path, state, tp_degree, per_tp_shapes)
         final_path = os.path.join(param_base_path, f"{state}.pt")
 
-        #print(f"Expected shape: {shape}")
-        #print(f"Fragment sizes:", list(frag.shape for frag in slices))
         ckpt_dict = {}
         if matched_affine_map is not None:
             # The pieces say where every element of the parameter lives, so none of the
@@ -387,15 +382,13 @@ def merge_tp_slices(uc_info, dir, slice_dir, tp_degree, name_and_shapes):
             # writes none of the per-category keys those branches add to `ckpt_dict`,
             # because the geometry is what a restoring job needs and it is not tied to a
             # category.
-            param = matched_affine_map.rebuild(dict(enumerate(slices)), scale_powers[state])
+            param = matched_affine_map.rebuild(dict(enumerate(slices)), SCALE_POWER_BY_STATE[state])
         elif get_matched_pattern(replicated_parameters, name):
             if len(slices) > 1:
                 assert all([slices[0].equal(other_slice) for other_slice in slices[1:]])
             param = slices[0]
-            # print(f'replicate {name} using first slice')
         elif get_matched_pattern(parameters_to_average, name):
             param = sum(slices) / len(slices)
-            # print(f'merge {name} using average')
         elif get_matched_pattern(parameters_with_2_sub_params_cat_dim_0, name):
             cat_dim = 0
             chunked_slices = [torch.chunk(s, 2, dim=cat_dim) for s in slices]
@@ -491,20 +484,24 @@ def merge_tp_slices(uc_info, dir, slice_dir, tp_degree, name_and_shapes):
             param = torch.cat(merged_chunks, dim=partition_dim)
             ckpt_dict[SUB_PARAM_SHAPE] = normalized_subparam_shape
         else:
+            if not slices:
+                # ZeRO does not materialize optimizer state for parameters that have
+                # never received a gradient. Their model state is copied separately
+                # below, so there is no optimizer tensor to merge here.
+                continue
             cat_dim = 1 if get_matched_pattern(parameters_with_row_parallelism, name) else 0
-            # print(f"merge {name} with CAT DIM: {cat_dim}")
             param = torch.cat(slices, dim=cat_dim)
             ckpt_dict[CAT_DIM] = cat_dim
 
         if get_matched_pattern(vocabulary_parameters, name):
-            #print(f"Before {param.shape=}")
-            # strip padding
-            original_vocab_size = universal_checkpoint_info['original_vocab_size']
-            param = param[:original_vocab_size, :]
+            # A map already rebuilds the tensor at its own size, while original_vocab_size is the first
+            # vocabulary tensor's: an untied input embedding and output head may have different vocabularies.
+            if matched_affine_map is None:
+                # strip padding
+                original_vocab_size = universal_checkpoint_info['original_vocab_size']
+                param = param[:original_vocab_size, :]
             ckpt_dict[VOCAB_TENSOR] = True
-            #print(f"After {param.shape=}")
 
-        #print(f"Final shape: {param.shape}")
         ckpt_dict[PARAM] = param
         _save_checkpoint(final_path, ckpt_dict)
 
@@ -560,7 +557,6 @@ def _extract_zero_shard_files(args, ds_checkpoint, temp_dir):
     _3d_range_list = list(
         itertools.product(range(ds_checkpoint.pp_degree), range(ds_checkpoint.tp_degree),
                           range(ds_checkpoint.dp_degree)))
-    #pprint(f'{_3d_range_list=}')
 
     do_work = partial(extract_zero_shards, temp_dir, ds_checkpoint)
     _do_parallel_work(do_work, _3d_range_list, args.num_extract_workers)
@@ -596,6 +592,10 @@ def _merge_tp_slice_files(args, uc_info, tp_degree, slice_shapes, temp_dir, excl
     # if a pattern was not used by any of the workers, then it was not used at all -> assert/alert
     sets = [set(lst) for lst in unmatched_patterns_lists]
     unmatched_patterns = list(set.intersection(*sets))
+    # A pattern for a parameter merged elsewhere (AutoEP experts) has nothing to match here.
+    unmatched_patterns = [
+        pattern for pattern in unmatched_patterns if not any(re.match(pattern, name) for name in exclude_param_names)
+    ]
     if args.strict:
         assert not unmatched_patterns, f'Unused patterns={unmatched_patterns} while merging tp slices'
     elif unmatched_patterns:
@@ -619,13 +619,6 @@ def _shape_numel(shape):
     if hasattr(shape, "numel"):
         return shape.numel()
     return math.prod(shape)
-
-
-def _zero3_rank_from_file(path):
-    match = re.search(r'(?:bf16_)?zero_pp_rank_([0-9]+)_mp_rank_', os.path.basename(path))
-    if match is None:
-        raise ValueError(f"Cannot parse ZeRO rank from checkpoint file name: {path}")
-    return int(match.group(1))
 
 
 def _zero3_tp_dp_ranks_from_file(path):
@@ -697,10 +690,16 @@ def _autoep_expert_param_info(autoep_metadata):
 
 
 def _autoep_expert_param_names_by_rank(model_files):
+    """Return the AutoEP expert parameter names and each model-state file's AutoEP metadata.
+
+    The metadata is keyed by ``(tp_rank, dp_rank)``, read from the file name
+    ``zero_pp_rank_{dp_rank}_mp_rank_{tp_rank}``: under AutoEP + AutoTP folding the files of
+    different tensor-parallel ranks share a data-parallel rank.
+    """
     expert_param_names = set()
     metadata_by_rank = {}
     for model_file in model_files:
-        rank = _zero3_rank_from_file(model_file)
+        rank = _zero3_tp_dp_ranks_from_file(model_file)
         model_state = torch.load(model_file, map_location=torch.device('cpu'), weights_only=False)
         autoep_metadata = _get_autoep_metadata(model_state)
         if autoep_metadata is not None:
@@ -711,9 +710,11 @@ def _autoep_expert_param_names_by_rank(model_files):
 
 
 def _rank_map_from_files(files, description):
+    # Keyed by (tp_rank, dp_rank): under AutoEP + AutoTP folding the files of different
+    # tensor-parallel ranks share a data-parallel rank.
     rank_map = {}
     for path in files:
-        rank = _zero3_rank_from_file(path)
+        rank = _zero3_tp_dp_ranks_from_file(path)
         if rank in rank_map:
             raise RuntimeError(f"Duplicate ZeRO rank {rank} in {description} files: "
                                f"{rank_map[rank]} and {path}")
@@ -743,9 +744,20 @@ def _validate_autoep_expert_shapes(model_states_by_rank, metadata_by_rank):
         param_shapes = model_states_by_rank[rank][PARAM_SHAPES]
         zero_shape_names = {name for sub_group_shape in param_shapes for name in sub_group_shape}
         missing = set(expert_info) - zero_shape_names
-        if missing:
+        missing_nonempty = []
+        for param_name in missing:
+            layer_info = expert_info[param_name]
+            placement = layer_info.get(AUTOEP_EXPERT_PLACEMENT)
+            if placement is None:
+                missing_nonempty.append(param_name)
+                continue
+            entries_by_rank = {entry[AUTOEP_PLACEMENT_RANK]: entry for entry in placement[AUTOEP_PLACEMENT_RANKS]}
+            rank_entry = entries_by_rank[layer_info['ep_rank']]
+            if rank_entry[AUTOEP_PLACEMENT_EXPERTS]:
+                missing_nonempty.append(param_name)
+        if missing_nonempty:
             raise RuntimeError(f"AutoEP expert parameters are missing from rank {rank} ZeRO param_shapes: "
-                               f"{sorted(missing)}")
+                               f"{sorted(missing_nonempty)}")
         frozen_shapes = model_states_by_rank[rank].get('frozen_param_shapes') or {}
         frozen_experts = set(expert_info).intersection(frozen_shapes)
         if frozen_experts:
@@ -767,35 +779,74 @@ def _save_zero3_autoep_universal_tensor(output_dir, param_name, state_key, tenso
     )
 
 
+def _rebuild_zero3_autoep_rank_tensors(ep_tensors, affine_map_or_placement, logical_shape, context):
+    if affine_map_or_placement is None:
+        return torch.cat([ep_tensors[rank] for rank in sorted(ep_tensors)], dim=0)
+
+    if hasattr(affine_map_or_placement, 'shard_shapes'):
+        affine_map = affine_map_or_placement
+    else:
+        affine_map = autoep_metadata_to_affine_map(
+            {AUTOEP_EXPERT_PLACEMENT: affine_map_or_placement},
+            logical_shape,
+        )
+    expected_ranks = set(affine_map.shard_shapes)
+    actual_ranks = set(ep_tensors)
+    unexpected_ranks = actual_ranks - expected_ranks
+    missing_nonempty_ranks = {
+        rank
+        for rank in expected_ranks - actual_ranks if torch.Size(affine_map.shard_shapes[rank]).numel() != 0
+    }
+    if unexpected_ranks or missing_nonempty_ranks:
+        raise RuntimeError(
+            f"Incomplete AutoEP EP-rank tensors for {context}: got {sorted(actual_ranks)}, "
+            f"expected nonempty ranks "
+            f"{sorted(rank for rank in expected_ranks if torch.Size(affine_map.shard_shapes[rank]).numel())}.")
+    for rank, tensor in ep_tensors.items():
+        expected_shape = affine_map.shard_shapes[rank]
+        if tuple(tensor.shape) != expected_shape:
+            raise RuntimeError(f"AutoEP EP-rank tensor shape mismatch for {context}, rank {rank}: "
+                               f"got {tuple(tensor.shape)}, expected {expected_shape}.")
+    try:
+        return affine_map.rebuild(ep_tensors)
+    except ValueError as exc:
+        raise RuntimeError(f"Failed to rebuild AutoEP universal tensor for {context}: {exc}") from exc
+
+
 def _consolidate_zero3_autoep_expert_states(output_dir, model_files, optim_files):
     model_rank_map, optim_rank_map = _validate_zero3_model_optim_rank_sets(model_files, optim_files)
     model_states_by_rank = {
         rank: torch.load(model_file, map_location=torch.device('cpu'), weights_only=False)
         for rank, model_file in model_rank_map.items()
     }
-    optim_states_by_rank = {
-        rank: torch.load(optim_file, map_location=torch.device('cpu'), weights_only=False)
-        for rank, optim_file in optim_rank_map.items()
-    }
     metadata_by_rank = {
         rank: _get_autoep_metadata(model_state)
         for rank, model_state in model_states_by_rank.items() if _get_autoep_metadata(model_state) is not None
     }
     _validate_autoep_expert_shapes(model_states_by_rank, metadata_by_rank)
+    # Together the optimizer files hold every optimizer state of the model, more than one host holds for a large
+    # model, so they are read one at a time and the expert fragments wait in files until every rank is read.
+    fragment_dir = os.path.join(output_dir, "tmp", "autoep_expert_fragments")
+    os.makedirs(fragment_dir, exist_ok=True)
 
     expert_fragments = {}
     num_experts_by_param = {}
     expected_dp_world_by_param_rank = {}
     expected_ep_ranks_by_param = {}
+    placement_by_param = {}
+    logical_shape_by_param = {}
+    affine_map_by_param = {}
 
     for rank, model_state in model_states_by_rank.items():
-        optim_state = optim_states_by_rank.get(rank)
-        if optim_state is None:
+        optim_file = optim_rank_map.get(rank)
+        if optim_file is None:
             raise FileNotFoundError(f"Missing ZeRO optimizer checkpoint for rank {rank}")
 
         autoep_metadata = _get_autoep_metadata(model_state)
         if not _uses_zero3_partitioned_autoep_metadata(autoep_metadata):
             continue
+
+        optim_state = torch.load(optim_file, map_location=torch.device('cpu'), weights_only=False)
 
         expert_info = _autoep_expert_param_info(autoep_metadata)
         param_shapes = model_state[PARAM_SHAPES]
@@ -809,9 +860,15 @@ def _consolidate_zero3_autoep_expert_states(output_dir, model_files, optim_files
                 'exp_avg': optimizer_sub_state.get('exp_avg'),
                 'exp_avg_sq': optimizer_sub_state.get('exp_avg_sq'),
             }
+            # Expert sub-groups are partitioned over the expert-data-parallel group, not the dense one, so no
+            # default can stand in for the recorded partition. Every partition-native AutoEP ZeRO-3 checkpoint
+            # records it.
             partition_metadata = partition_groups[sub_group_id] if sub_group_id < len(partition_groups) else {}
-            partition_count = partition_metadata.get('partition_count', len(model_states_by_rank))
-            partition_rank = partition_metadata.get('partition_rank', rank)
+            if 'partition_count' not in partition_metadata or 'partition_rank' not in partition_metadata:
+                raise RuntimeError(f"ZeRO rank {rank} optimizer state has no ds_zero_partition_groups entry for "
+                                   f"sub-group {sub_group_id}; cannot locate its AutoEP expert partitions.")
+            partition_count = partition_metadata['partition_count']
+            partition_rank = partition_metadata['partition_rank']
 
             offset = 0
             for param_name, shape in sub_group_shape.items():
@@ -824,18 +881,51 @@ def _consolidate_zero3_autoep_expert_states(output_dir, model_files, optim_files
                 if layer_info is not None:
                     ep_rank = layer_info['ep_rank']
                     num_experts_by_param[param_name] = layer_info['num_experts']
+                    placement = layer_info.get(AUTOEP_EXPERT_PLACEMENT)
+                    if placement is not None:
+                        try:
+                            validate_autoep_placement_descriptor(placement)
+                        except (TypeError, ValueError) as exc:
+                            raise RuntimeError(f"Invalid AutoEP expert placement for {param_name}: {exc}") from exc
+                        existing_placement = placement_by_param.setdefault(param_name, placement)
+                        if existing_placement != placement:
+                            raise RuntimeError(f"AutoEP expert placement disagrees across ranks for {param_name}.")
+                        logical_shape = (layer_info['num_experts'], ) + tuple(shape)[1:]
+                        existing_logical_shape = logical_shape_by_param.setdefault(param_name, logical_shape)
+                        if existing_logical_shape != logical_shape:
+                            raise RuntimeError(f"AutoEP expert logical shape disagrees across ranks for {param_name}: "
+                                               f"{existing_logical_shape} != {logical_shape}.")
+                        affine_map = autoep_metadata_to_affine_map(layer_info, logical_shape)
+                        existing_map = affine_map_by_param.setdefault(param_name, affine_map)
+                        if existing_map.to_dict() != affine_map.to_dict():
+                            raise RuntimeError(f"AutoEP affine map disagrees across ranks for {param_name}.")
+                        expected_shape = affine_map.shard_shapes.get(ep_rank)
+                        if expected_shape is None or tuple(shape) != expected_shape:
+                            raise RuntimeError(f"AutoEP expert shard shape mismatch for {param_name}, EP rank "
+                                               f"{ep_rank}: got {tuple(shape)}, expected {expected_shape}.")
                     expected_dp_world_by_param_rank[(param_name,
                                                      ep_rank)] = layer_info['expert_data_parallel_world_size']
-                    expected_ep_ranks_by_param[param_name] = set(range(layer_info['ep_size']))
+                    expected_ep_ranks_by_param[param_name] = (set(affine_map.shard_shapes) if placement is not None
+                                                              else set(range(layer_info['ep_size'])))
                     for state_key, flat_tensor in flat_state.items():
                         if flat_tensor is None:
                             raise RuntimeError(f"Missing optimizer state '{state_key}' for AutoEP expert "
                                                f"parameter {param_name} on ZeRO rank {rank}")
+                        # clone(): saving the narrowed view would write the whole flat tensor behind it.
                         fragment = flat_tensor.narrow(0, offset, padding_free_numel).clone()
+                        # One directory per parameter and EP rank, created first, as for the dense fragments: a
+                        # parameter name may contain "/" (a registered module name may).
+                        fragment_param_dir = os.path.join(fragment_dir, param_name, f"ep{ep_rank}")
+                        os.makedirs(fragment_param_dir, exist_ok=True)
+                        fragment_path = os.path.join(fragment_param_dir, f"{state_key}.part{partition_rank}.pt")
+                        torch.save(fragment, fragment_path)
                         key = (param_name, state_key, ep_rank)
-                        expert_fragments.setdefault(key, []).append((partition_rank, fragment, shape))
+                        expert_fragments.setdefault(key, []).append((partition_rank, fragment_path, shape))
 
                 offset += partitioned_numel
+        # Drop every reference into this rank's optimizer state, including the loop variables, before the
+        # next file is read.
+        optim_state = zero_optim_state = optimizer_sub_state = flat_state = flat_tensor = None
 
     grouped_by_param = {}
     for (param_name, state_key, ep_rank), fragments in expert_fragments.items():
@@ -843,10 +933,16 @@ def _consolidate_zero3_autoep_expert_states(output_dir, model_files, optim_files
 
     for (param_name, state_key), ep_rank_fragments in grouped_by_param.items():
         missing_ep_ranks = expected_ep_ranks_by_param[param_name] - set(ep_rank_fragments)
+        affine_map = affine_map_by_param.get(param_name)
+        if affine_map is not None:
+            missing_ep_ranks = {
+                rank
+                for rank in missing_ep_ranks if torch.Size(affine_map.shard_shapes[rank]).numel() != 0
+            }
         if missing_ep_ranks:
             raise RuntimeError(f"Missing AutoEP universal fragments for {param_name}/{state_key} EP ranks: "
                                f"{sorted(missing_ep_ranks)}")
-        ep_tensors = []
+        ep_tensors = {}
         for ep_rank in sorted(ep_rank_fragments):
             fragments = sorted(ep_rank_fragments[ep_rank], key=lambda item: item[0])
             expected_dp_world = expected_dp_world_by_param_rank[(param_name, ep_rank)]
@@ -862,12 +958,20 @@ def _consolidate_zero3_autoep_expert_states(output_dir, model_files, optim_files
             if any(tuple(fragment_shape) != tuple(shape) for _, _, fragment_shape in fragments):
                 raise RuntimeError(f"Inconsistent AutoEP expert fragment shapes for {param_name}/{state_key} "
                                    f"EP rank {ep_rank}")
-            full_flat = torch.cat([fragment for _, fragment, _ in fragments], dim=0)[:_shape_numel(shape)]
-            ep_tensors.append(full_flat.view(shape))
+            fragment_paths = [path for _, path, _ in fragments]
+            full_flat = torch.cat([torch.load(path, weights_only=True) for path in fragment_paths],
+                                  dim=0)[:_shape_numel(shape)]
+            ep_tensors[ep_rank] = full_flat.view(shape)
+            # Each fragment is read only once. Removing it now means the disk never holds every fragment and
+            # every universal file at the same time.
+            for path in fragment_paths:
+                os.remove(path)
 
         if not ep_tensors:
             continue
-        full_expert_tensor = torch.cat(ep_tensors, dim=0)
+        full_expert_tensor = _rebuild_zero3_autoep_rank_tensors(ep_tensors, affine_map,
+                                                                logical_shape_by_param.get(param_name),
+                                                                f"{param_name}/{state_key}")
         if full_expert_tensor.shape[0] != num_experts_by_param[param_name]:
             raise RuntimeError(f"AutoEP universal tensor for {param_name}/{state_key} has wrong expert dimension: "
                                f"got {full_expert_tensor.shape[0]}, expected {num_experts_by_param[param_name]}")
@@ -1083,7 +1187,6 @@ def main(args):
         _check_for_required_state(ds_checkpoint)
 
         iteration = ds_checkpoint.get_iteration()
-        #_create_latest_file(args.output_folder, iteration)
         checkpoint_paths = _create_checkpoint_paths(args.output_folder, iteration, ds_checkpoint.tp_degree,
                                                     ds_checkpoint.pp_degree)
 
@@ -1100,10 +1203,9 @@ def main(args):
         slice_shapes = _group_per_tp_shapes(slice_shapes_by_tp, ds_checkpoint.pp_degree, ds_checkpoint.tp_degree)
         temp_dir = os.path.join(args.output_folder, 'tmp')
 
-        from deepspeed.checkpoint.autoep_universal import (
-            consolidate_autoep_zero12_expert_states,
-            get_autoep_zero12_expert_param_info,
-        )
+        from deepspeed.checkpoint.autoep_universal import (consolidate_autoep_zero12_expert_states,
+                                                           get_autoep_zero12_fp32_fallback_param_names,
+                                                           get_autoep_zero12_expert_param_info)
 
         expert_files = glob.glob(os.path.join(args.input_folder, 'layer_*_expert_*_model_states.pt'))
         autoep_expert_file_type = _classify_autoep_expert_file_consolidation(autoep_metadata, expert_files)
@@ -1121,13 +1223,45 @@ def main(args):
                               temp_dir,
                               exclude_param_names=set(autoep_expert_param_info))
 
+        # ZeRO may not create optimizer fragments for parameters that have not
+        # received a gradient. Universal restore still needs their model values.
+        zero_output_folder = os.path.join(args.output_folder, "zero")
+        for model_file in ds_checkpoint.mp_rank_files:
+            model_state = torch.load(model_file, map_location="cpu", weights_only=False)
+            module_state = model_state.get("module")
+            if module_state is None:
+                # Pipeline checkpoints store model weights in separate layer files.
+                continue
+            for name, tensor in module_state.items():
+                param_dir = os.path.join(zero_output_folder, name)
+                fp32_path = os.path.join(param_dir, "fp32.pt")
+                if os.path.isfile(fp32_path):
+                    continue
+                os.makedirs(param_dir, exist_ok=True)
+                torch.save({PARAM: tensor.float()}, fp32_path)
+
         if autoep_expert_file_type == 'autoep':
-            print('*** 2.5. Consolidating AutoEP ZeRO-1/2 expert states')
+            print('*** 2.5. Consolidating AutoEP expert model states')
+            from deepspeed.checkpoint.autoep_universal import consolidate_autoep_expert_files
             autoep_slice_shapes = {name: per_tp_shapes[0] for name, per_tp_shapes in slice_shapes.items()}
-            consolidate_autoep_zero12_expert_states(temp_dir, args.output_folder, autoep_expert_param_info,
-                                                    autoep_slice_shapes, ds_checkpoint.dp_degree,
-                                                    ds_checkpoint.tp_degree, use_data_before_expert_parallel)
+            fp32_fallback_param_names = get_autoep_zero12_fp32_fallback_param_names(
+                temp_dir, autoep_expert_param_info, autoep_slice_shapes, ds_checkpoint.dp_degree,
+                use_data_before_expert_parallel)
+            consolidate_autoep_expert_files(args.input_folder,
+                                            args.output_folder,
+                                            autoep_metadata,
+                                            fp32_fallback_param_names=fp32_fallback_param_names,
+                                            fp32_fallback_dir=temp_dir)
             print(f'    Consolidated {len(autoep_metadata)} AutoEP layer(s)')
+            print('*** 2.6. Consolidating AutoEP ZeRO-1/2 expert states')
+            consolidate_autoep_zero12_expert_states(temp_dir,
+                                                    args.output_folder,
+                                                    autoep_expert_param_info,
+                                                    autoep_slice_shapes,
+                                                    ds_checkpoint.dp_degree,
+                                                    ds_checkpoint.tp_degree,
+                                                    use_data_before_expert_parallel,
+                                                    fp32_fallback_dir=temp_dir)
         elif autoep_expert_file_type == 'native_moe':
             print(f'    Found {len(expert_files)} expert checkpoint file(s) but no AutoEP metadata; '
                   'assuming native DeepSpeed MoE and skipping AutoEP consolidation')
@@ -1212,7 +1346,12 @@ def main(args):
                 dict((k, v) for sub in grid_tp for k, v in sub.items()) for grid_tp in param_shapes_grid
             ]
             slice_shapes = {name: [param_shapes_by_tp[tp][name] for tp in range(tp_degree)] for name in param_keys}
-            _merge_tp_slice_files(args, uc_info, tp_degree, slice_shapes, temp_dir)
+            _merge_tp_slice_files(args,
+                                  uc_info,
+                                  tp_degree,
+                                  slice_shapes,
+                                  temp_dir,
+                                  exclude_param_names=autoep_expert_param_names)
         else:
             # Plain ZeRO-3 (no tensor parallelism): DP-only merge, unchanged behavior.
             _merge_zero3_slice_files(args, param_keys, dp_degree, temp_dir)
