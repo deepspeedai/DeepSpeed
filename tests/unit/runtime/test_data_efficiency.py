@@ -367,16 +367,26 @@ def test_data_sampler_resumes_where_it_left_off(tmp_path, monkeypatch):
     assert batches == expected
 
 
-def test_data_sampler_loads_checkpoints_from_before_the_rng_fix(tmp_path, monkeypatch):
-    # Older checkpoints hold numpy's global RNG state, a tuple. Loading one still works and
-    # restores the global RNG as before.
+@pytest.mark.parametrize("bit_generator", [np.random.MT19937, np.random.Philox])
+def test_data_sampler_loads_checkpoints_from_before_the_rng_fix(tmp_path, monkeypatch, bit_generator):
+    # Older checkpoints only hold numpy's global RNG state. With the default MT19937 that is a
+    # tuple, but an application that swapped in another bit generator saved a dict. Either way,
+    # loading must restore the global RNG and leave the sampler's own RNG alone.
     monkeypatch.setattr(data_sampler.dist, "barrier", lambda *args, **kwargs: None)
     monkeypatch.setattr(data_sampler.dist, "broadcast", lambda *args, **kwargs: None)
-    sampler = _curriculum_sampler(str(tmp_path))
-    state = sampler.state_dict()
-    np.random.seed(7)
-    state["np_rng_state"] = np.random.get_state()
-    expected = np.random.random()
+    original_bit_generator = np.random.get_bit_generator()
+    np.random.set_bit_generator(bit_generator(7))
+    try:
+        state = _curriculum_sampler(str(tmp_path)).state_dict()
+        del state["sampler_rng_state"]
+        expected_global_draw = np.random.random()
+        np.random.random()
 
-    _curriculum_sampler(str(tmp_path)).load_state_dict(state)
-    assert np.random.random() == expected
+        resumed = _curriculum_sampler(str(tmp_path))
+        expected_sampler_draw = _curriculum_sampler(str(tmp_path)).np_rng.random()
+        resumed.load_state_dict(state)
+
+        assert np.random.random() == expected_global_draw
+        assert resumed.np_rng.random() == expected_sampler_draw
+    finally:
+        np.random.set_bit_generator(original_bit_generator)
