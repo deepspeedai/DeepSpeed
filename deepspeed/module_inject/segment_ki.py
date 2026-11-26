@@ -48,6 +48,19 @@ def carries_collective(module: torch.nn.Module) -> bool:
     return isinstance(module, _ALLREDUCE_LAYERS)
 
 
+def _tp_rank_and_size(module: torch.nn.Module):
+    """This rank's index and the size of the tensor-parallel group of ``module``'s collective.
+
+    Only the ranks that all-reduce a layer's output hold the same activations,
+    so the world, which also spans data-parallel replicas, cannot stand in for it.
+    A module without a collective is not sharded.
+    """
+    if not carries_collective(module) or module.mp_group is None:
+        return 0, 1
+    import deepspeed.comm as dist
+    return dist.get_rank(group=module.mp_group), dist.get_world_size(group=module.mp_group)
+
+
 @dataclass
 class GLUSegment:
     """A gated-MLP segment: gate/up are comm-free projections, down is the
@@ -315,9 +328,7 @@ def _fused_gdn_forward(self, hidden_states, *args, **kwargs):
     # config values are the global ones). The colwise/rowwise GDN partition
     # keeps the whole block rank-local (per-head math); out_proj's AllReduce
     # is the layer's only collective.
-    import deepspeed.comm as dist
-    tp_size = dist.get_world_size() if dist.is_initialized() else 1
-    r = dist.get_rank() if dist.is_initialized() else 0
+    r, tp_size = _tp_rank_and_size(self.out_proj)
     key_dim = self.key_dim // tp_size
     value_dim = self.value_dim // tp_size
     num_v_heads = self.num_v_heads // tp_size
@@ -591,11 +602,9 @@ def _install_gdn_segment(seg: GDNSegment) -> bool:
         # The conv weight channels follow the fused [q|k|v] block order; a
         # rank's local channels are one range per block, so the local weight
         # is the cat of the three rank-indexed block rows (cached — tiny).
-        import deepspeed.comm as dist
-        tp_sz = dist.get_world_size() if dist.is_initialized() else 1
+        rk, tp_sz = _tp_rank_and_size(parent.out_proj)
         if tp_sz == 1:
             return parent.conv1d.weight.squeeze(1), parent.conv1d.bias
-        rk = dist.get_rank()
         nq = parent.key_dim // tp_sz
         nv = parent.value_dim // tp_sz
         w = parent.conv1d.weight.squeeze(1)
@@ -710,8 +719,7 @@ def _install_gdn_segment(seg: GDNSegment) -> bool:
     # replicated. AutoTP's generic column split lands mid-block (no rank
     # holds a valid local layout); refuse loudly instead of computing on a
     # garbage layout.
-    import deepspeed.comm as dist
-    tp_size = dist.get_world_size() if dist.is_initialized() else 1
+    _, tp_size = _tp_rank_and_size(parent.out_proj)
     if tp_size > 1:
         expected = {
             "in_proj_qkv": 2 * parent.key_dim + parent.value_dim,
@@ -742,6 +750,27 @@ def _install_gdn_segment(seg: GDNSegment) -> bool:
 
 _NATIVE_OP_LOAD_WHY = None
 
+# Bumped whenever the backend's process-wide caches are emptied, which every
+# model's injected forwards may read, not only the refreshed model's.
+_BACKEND_GENERATION = 0
+
+
+def segki_backend_generation() -> int:
+    """How many times segKI's process-wide derived-weight caches were emptied."""
+    return _BACKEND_GENERATION
+
+
+# Set by apply_segment_ki and the decode installs on the modules whose forwards they replace.
+_INJECTION_MARKERS = ("_ki_dual_op", "_ki_gdn_op", "_ki_attn_op", "_ki_qkv_op", "_ki_norm_op", "_ki_gemm_op")
+
+
+def segki_injected(model: torch.nn.Module) -> bool:
+    """Whether segment kernels run in ``model``'s forwards, whichever rollout installed them."""
+    # The markers are plain attributes, so they live in __dict__. hasattr would
+    # route every miss through nn.Module.__getattr__, which is ~5x slower on
+    # the common uninjected scan.
+    return any(any(marker in module.__dict__ for marker in _INJECTION_MARKERS) for module in model.modules())
+
 
 def segki_refresh(model: torch.nn.Module) -> None:
     """Drop every derived-weight cache after an in-place weight write.
@@ -759,6 +788,8 @@ def segki_refresh(model: torch.nn.Module) -> None:
     redesigned cache scheme) is still under design; expect this entry
     point to change.
     """
+    # Decode graphs that captured the dropped tensors key on this to recapture.
+    model._ki_refresh_generation = getattr(model, "_ki_refresh_generation", 0) + 1
     op = None
     for module in model.modules():
         for attr in ("_ki_tp_cat_w", "_ki_attn_cat_w", "_ki_conv_w_local", "_ki_gates_cache"):
@@ -771,6 +802,8 @@ def segki_refresh(model: torch.nn.Module) -> None:
     gdn_op = op or next((getattr(m, attr, None) for m in model.modules()
                          for attr in ("_ki_gdn_op", "_ki_dual_op") if getattr(m, attr, None) is not None), None)
     if gdn_op is not None and hasattr(gdn_op, "clear_glu_cat_cache"):
+        global _BACKEND_GENERATION
+        _BACKEND_GENERATION += 1
         gdn_op.clear_glu_cat_cache()
 
 
@@ -985,9 +1018,18 @@ def install_lm_head(model: torch.nn.Module, kernel_op) -> int:
     if lm.weight.dtype is not torch.bfloat16 or lm.bias is not None:
         return 0
     # vocab-parallel lm_head wrappers carry gather/allreduce semantics in
-    # their forward; a plain-GEMM patch would silently drop the collective
-    if carries_collective(lm):
+    # their forward; a plain-GEMM patch would silently drop the collective and
+    # decode a shard of the vocabulary (VocabParallelLinear subclasses the
+    # collective-bearing LinearLayer, not LinearAllreduce, so it needs its own
+    # guard)
+    if carries_collective(lm) or getattr(lm, "is_vocab_parallel_lm_head", False):
         return 0
+    # Only the ranks of the model's tensor-parallel group hold the same hidden
+    # states, so the vocabulary is split over that group; a model without
+    # collectives is unsharded and keeps the whole head on every rank.
+    collective = next((m for m in model.modules() if carries_collective(m)), None)
+    tp_rank, tp = _tp_rank_and_size(collective) if collective is not None else (0, 1)
+    tp_group = collective.mp_group if tp > 1 else None
 
     def _lm_forward(self, hidden_states):
         b = hidden_states.shape[0]
@@ -997,17 +1039,16 @@ def install_lm_head(model: torch.nn.Module, kernel_op) -> int:
             # rank-ordered all-gather reassembles full logits for argmax
             # and sampling alike; downstream sees identical semantics.
             import deepspeed.comm as dist
-            tp = dist.get_world_size() if dist.is_initialized() else 1
             x2 = hidden_states.reshape(b, -1)
             if tp > 1 and self.weight.shape[0] % tp == 0:
                 half = self.weight.shape[0] // tp
-                w_loc = self.weight[dist.get_rank() * half:(dist.get_rank() + 1) * half]
+                w_loc = self.weight[tp_rank * half:(tp_rank + 1) * half]
                 if not torch.is_grad_enabled() and 16 <= b <= 32 and x2.is_contiguous():
                     loc = self._ki_gemm_op.grouped_linear(x2, [w_loc], False)[0]
                 else:
                     loc = torch.nn.functional.linear(x2, w_loc)
                 parts = [torch.empty_like(loc) for _ in range(tp)]
-                dist.all_gather(parts, loc.contiguous())
+                dist.all_gather(parts, loc.contiguous(), group=tp_group)
                 return torch.cat(parts, dim=-1).view(b, 1, -1)
             if (not torch.is_grad_enabled() and 16 <= b <= 32 and hidden_states.is_contiguous()):
                 out = self._ki_gemm_op.grouped_linear(x2, [self.weight], False)[0]
@@ -1015,6 +1056,7 @@ def install_lm_head(model: torch.nn.Module, kernel_op) -> int:
         return torch.nn.functional.linear(hidden_states, self.weight, self.bias)
 
     lm._ki_gemm_op = kernel_op
+    lm._ki_tp_group = tp_group
     lm.forward = _lm_forward.__get__(lm, type(lm))
     return 1
 
