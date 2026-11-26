@@ -596,7 +596,9 @@ class PipelineModule(nn.Module):
         layer_ckpt_path = os.path.join(ckpt_dir, f'layer_{idx:02d}-')
         layer_ckpt_path += "*model_states.pt"
         ckpt_files = glob.glob(layer_ckpt_path)
-        ckpt_files.sort()
+        # The shard order decides which model-parallel rank loads which file. A plain string sort
+        # puts model_100 before model_11 once a rank needs more than the two zero-padded digits.
+        ckpt_files.sort(key=lambda path: [int(t) if t.isdigit() else t for t in regex.split(r'(\d+)', path)])
         return ckpt_files
 
     def save_state_dict(self, save_dir, checkpoint_engine, exclude_frozen_params=False):
