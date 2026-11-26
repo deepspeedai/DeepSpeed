@@ -4,6 +4,7 @@
 # DeepSpeed Team
 
 import os
+import zipfile
 import torch
 from .constants import (MODEL_FILE_PREFIX, MODEL_FILE_SUFFIX, OPTIM_FILE_SUFFIX, ZERO_FILE_PREFIX)
 
@@ -24,6 +25,20 @@ def get_zero_ckpt_name_for_rank(base_folder, dp_rank, mp_rank):
         zero_prefix + mp_rank_string + OPTIM_FILE_SUFFIX,
     )
     return zero_ckpt_name
+
+
+def load_mmap(path, **kwargs):
+    """``torch.load`` that memory-maps ``path`` when torch and the file format allow it.
+
+    Checkpoint conversion and universal loading often need only a slice of each tensor, or only the
+    non-tensor entries of a file. A mapped file reads just the pages they touch, instead of reading
+    and copying the whole file into memory first.
+    """
+    from deepspeed.utils.torch import required_torch_version
+    # torch.load gained mmap in 2.1, and only the zipfile format (torch.save's default since 1.6) can be mapped.
+    if required_torch_version(min_version=2.1) and isinstance(path, (str, os.PathLike)) and zipfile.is_zipfile(path):
+        kwargs["mmap"] = True
+    return torch.load(path, **kwargs)
 
 
 def get_layer_ckpt_name_for_rank(base_folder, layer_id, tp_rank):

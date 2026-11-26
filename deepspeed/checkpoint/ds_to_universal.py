@@ -19,6 +19,7 @@ import torch
 import tqdm
 
 from deepspeed.checkpoint import DeepSpeedCheckpoint
+from deepspeed.checkpoint.utils import load_mmap
 from deepspeed.checkpoint import (
     OPTIMIZER_STATE_DICT,
     ZERO_STAGE,
@@ -178,7 +179,7 @@ def extract_zero_shards_stage3(optim_files_grid,
     tp_index, dp_index = indices
     exclude_param_names = exclude_param_names or set()
     optim_file = optim_files_grid[tp_index][dp_index]
-    state_dict = torch.load(optim_file, map_location='cpu', weights_only=False)
+    state_dict = load_mmap(optim_file, map_location='cpu', weights_only=False)
     optim_sd = state_dict[OPTIMIZER_STATE_DICT]
     partition_groups = optim_sd.get('ds_zero_partition_groups') or []
 
@@ -260,7 +261,7 @@ def _merge_zero_shards(param_base_path, state, tp_degree, slice_shapes=None):
                 raise ValueError(f"Cannot parse dp_rank from {p}")
 
         paths = [f"{prefix_path}.{dp_index_to_str(dp_index)}" for dp_index in sorted(list(dp_indices))]
-        shards = [torch.load(p, weights_only=False) for p in paths]
+        shards = [load_mmap(p, weights_only=False) for p in paths]
 
         if state == "step":
             assert all(v == shards[0] for v in shards), "All shards must have the same step value"
@@ -700,7 +701,7 @@ def _autoep_expert_param_names_by_rank(model_files):
     metadata_by_rank = {}
     for model_file in model_files:
         rank = _zero3_tp_dp_ranks_from_file(model_file)
-        model_state = torch.load(model_file, map_location=torch.device('cpu'), weights_only=False)
+        model_state = load_mmap(model_file, map_location=torch.device('cpu'), weights_only=False)
         autoep_metadata = _get_autoep_metadata(model_state)
         if autoep_metadata is not None:
             metadata_by_rank[rank] = autoep_metadata
@@ -816,7 +817,7 @@ def _rebuild_zero3_autoep_rank_tensors(ep_tensors, affine_map_or_placement, logi
 def _consolidate_zero3_autoep_expert_states(output_dir, model_files, optim_files):
     model_rank_map, optim_rank_map = _validate_zero3_model_optim_rank_sets(model_files, optim_files)
     model_states_by_rank = {
-        rank: torch.load(model_file, map_location=torch.device('cpu'), weights_only=False)
+        rank: load_mmap(model_file, map_location=torch.device('cpu'), weights_only=False)
         for rank, model_file in model_rank_map.items()
     }
     metadata_by_rank = {
@@ -846,7 +847,7 @@ def _consolidate_zero3_autoep_expert_states(output_dir, model_files, optim_files
         if not _uses_zero3_partitioned_autoep_metadata(autoep_metadata):
             continue
 
-        optim_state = torch.load(optim_file, map_location=torch.device('cpu'), weights_only=False)
+        optim_state = load_mmap(optim_file, map_location=torch.device('cpu'), weights_only=False)
 
         expert_info = _autoep_expert_param_info(autoep_metadata)
         param_shapes = model_state[PARAM_SHAPES]
@@ -959,7 +960,7 @@ def _consolidate_zero3_autoep_expert_states(output_dir, model_files, optim_files
                 raise RuntimeError(f"Inconsistent AutoEP expert fragment shapes for {param_name}/{state_key} "
                                    f"EP rank {ep_rank}")
             fragment_paths = [path for _, path, _ in fragments]
-            full_flat = torch.cat([torch.load(path, weights_only=True) for path in fragment_paths],
+            full_flat = torch.cat([load_mmap(path, weights_only=True) for path in fragment_paths],
                                   dim=0)[:_shape_numel(shape)]
             ep_tensors[ep_rank] = full_flat.view(shape)
             # Each fragment is read only once. Removing it now means the disk never holds every fragment and
@@ -980,14 +981,14 @@ def _consolidate_zero3_autoep_expert_states(output_dir, model_files, optim_files
 
 
 def _parse_model_states_stage3(files):
-    return torch.load(files[0], map_location=torch.device('cpu'), weights_only=False)[PARAM_SHAPES]
+    return load_mmap(files[0], map_location=torch.device('cpu'), weights_only=False)[PARAM_SHAPES]
 
 
 def _load_universal_checkpoint_info_stage3(model_files):
     # The UNIVERSAL_CHECKPOINT_INFO schema (TP merge patterns, etc.) is identical on
     # every rank, so loading it from any model_states file is sufficient. It is only
     # populated under AutoTP, which is exactly the case that needs the TP-aware merge.
-    model_state = torch.load(model_files[0], map_location=torch.device('cpu'), weights_only=False)
+    model_state = load_mmap(model_files[0], map_location=torch.device('cpu'), weights_only=False)
     return model_state.get(UNIVERSAL_CHECKPOINT_INFO) or {}
 
 
@@ -1030,7 +1031,7 @@ def _save_optimizer_state(args, ds_checkpoint):
 
 
 def _save_optimizer_state_stage3(args, optim_files):
-    sd = torch.load(optim_files[0], map_location=torch.device('cpu'), weights_only=False)
+    sd = load_mmap(optim_files[0], map_location=torch.device('cpu'), weights_only=False)
     output_sd = sd[OPTIMIZER_STATE_DICT]
     output_sd[PARAM_GROUPS] = output_sd[OPTIMIZER_STATE_DICT][PARAM_GROUPS]
     zero_output_folder = os.path.join(args.output_folder, "zero")
@@ -1066,7 +1067,7 @@ def _get_zero3_model_state_files(checkpoint_dir):
 
 def _raise_if_stage3_autoep_universal_conversion(model_files):
     for model_file in model_files:
-        model_state = torch.load(model_file, map_location=torch.device('cpu'), weights_only=False)
+        model_state = load_mmap(model_file, map_location=torch.device('cpu'), weights_only=False)
         autoep_metadata = model_state.get(AUTOEP_LAYERS_KEY)
         if autoep_metadata is None:
             autoep_metadata = model_state.get(AUTOEP_LAYERS_KEY_LEGACY)
@@ -1086,7 +1087,7 @@ def _get_checkpoint_files(checkpoint_dir, glob_pattern):
 
 
 def _get_zero_stage(optim_files):
-    state_dict = torch.load(optim_files[0], map_location=torch.device('cpu'), weights_only=False)
+    state_dict = load_mmap(optim_files[0], map_location=torch.device('cpu'), weights_only=False)
     optimizer_state = state_dict[OPTIMIZER_STATE_DICT]
     zero_stage = optimizer_state.get(ZERO_STAGE, 1)
     return zero_stage
@@ -1227,7 +1228,7 @@ def main(args):
         # received a gradient. Universal restore still needs their model values.
         zero_output_folder = os.path.join(args.output_folder, "zero")
         for model_file in ds_checkpoint.mp_rank_files:
-            model_state = torch.load(model_file, map_location="cpu", weights_only=False)
+            model_state = load_mmap(model_file, map_location="cpu", weights_only=False)
             module_state = model_state.get("module")
             if module_state is None:
                 # Pipeline checkpoints store model weights in separate layer files.
@@ -1278,7 +1279,7 @@ def main(args):
         for f in ds_checkpoint.mp_rank_files:
             if autoep_metadata is not None:
                 # Load -> update with AutoEP metadata -> save
-                mp_sd = torch.load(f, map_location=torch.device('cpu'), weights_only=False)
+                mp_sd = load_mmap(f, map_location=torch.device('cpu'), weights_only=False)
                 if UNIVERSAL_CHECKPOINT_INFO not in mp_sd:
                     mp_sd[UNIVERSAL_CHECKPOINT_INFO] = {}
                 mp_sd[UNIVERSAL_CHECKPOINT_INFO][EXPERT_PARAMETER_PATTERNS] = [r'\.experts\.w[123]$']
@@ -1371,7 +1372,7 @@ def main(args):
             if _is_expert_model_state_file(f):
                 continue
             if has_zero3_partitioned_autoep:
-                model_state = torch.load(f, map_location=torch.device('cpu'), weights_only=False)
+                model_state = load_mmap(f, map_location=torch.device('cpu'), weights_only=False)
                 autoep_metadata = _get_autoep_metadata(model_state)
                 if UNIVERSAL_CHECKPOINT_INFO not in model_state:
                     model_state[UNIVERSAL_CHECKPOINT_INFO] = {}

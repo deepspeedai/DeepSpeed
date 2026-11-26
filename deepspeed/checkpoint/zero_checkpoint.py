@@ -10,6 +10,7 @@ from .constants import (BASE_OPTIMIZER_STATE, GROUP_PADDINGS, OPTIMIZER_STATE_DI
 from .reshape_utils import (basic_folder_validation, get_zero_files, merge_state)
 
 from .reshape_3d_utils import (model_3d_desc, get_model_3d_descriptor)
+from .utils import load_mmap
 
 GROUP_STATE_KEY = 'state'
 
@@ -54,7 +55,7 @@ class ZeROCheckpoint(object):
         state_file_list = self.get_files_for_rank(pp_index, tp_index, dp_index)
         merged_sd = None
         for state_file in state_file_list:
-            sd = torch.load(state_file, map_location=torch.device('cpu'), weights_only=False)
+            sd = load_mmap(state_file, map_location=torch.device('cpu'), weights_only=False)
             for key in keys_to_ignore:
                 sd.pop(key, None)
 
