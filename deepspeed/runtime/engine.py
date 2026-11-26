@@ -5244,6 +5244,10 @@ class DeepSpeedEngine(Module):
             dist.barrier()
             if save_latest and self.global_rank == 0:
                 self._write_latest_tag(save_dir, tag)
+        elif self.super_offload():
+            # The decoupled writer reads the fp32 weights and Adam state from shared memory, which SuperOffload
+            # updates in the next backward, before step() would commit this save.
+            self._commit_decoupled_checkpoint()
 
         dist.barrier()
 
