@@ -367,6 +367,12 @@ Example of <i>**scheduler**</i>
 | 0 | Not supported | Not supported |
 | 1/2/3 | Requires ZeRO-Offload + `DeepSpeedCPUAdam` (optimizer states stay fp32 on CPU) | On GPU without offload, or on CPU with `offload_optimizer` + `DeepSpeedCPUAdam`; optimizer states kept in bf16 either way |
 
+<i>**bf16:store_param_remainders**</i>: [boolean]
+
+| Description | Default |
+| ----------- | ------- |
+| Store the fp32 master weights of ZeRO stage 1 and 2 as the bf16 parameters (their upper 16 bits, rounded to nearest with ties away from zero) plus an int16 remainder (their lower 16 bits), instead of a separate fp32 copy: 2 bytes per parameter instead of 4. The optimizer still updates the exact fp32 values, and checkpoints keep the fp32 format. The bf16 weights differ from today's round-to-nearest-even copy only where the lower 16 bits are exactly 0x8000. Same scheme as `store_param_remainders` in Megatron-LM and Transformer Engine. Requires DeepSpeed's `FusedAdam` on CUDA, no `offload_optimizer`, not `bf16_master_weights_and_grads`, and with ZeRO stage 1 `data_types.grad_accum_dtype="bf16"`. | `false` |
+
 ### PyTorch Automatic Mixed Precision (torch.autocast) training options
 
 <i>**torch_autocast**</i>: [dictionary]

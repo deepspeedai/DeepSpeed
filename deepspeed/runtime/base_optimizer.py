@@ -400,7 +400,9 @@ class ZeROOptimizer(DeepSpeedOptimizer):
             if steps[0] is not None:
                 self.optimizer.state[hp_param]['step'] = steps[0]
 
-            map_to_flat_opt_states(hp_param, lp_groups[i], self.optimizer.state, opt_keys)
+            # With remainders hp_param is the bf16 half of the master weights; Adam's moments stay fp32.
+            state_dtype = torch.float32 if getattr(self, "store_param_remainders", False) else None
+            map_to_flat_opt_states(hp_param, lp_groups[i], self.optimizer.state, opt_keys, state_dtype=state_dtype)
 
             for key, value in loaded_param_group.items():
                 if key == 'params':

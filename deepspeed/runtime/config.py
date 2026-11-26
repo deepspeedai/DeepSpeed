@@ -739,6 +739,25 @@ class DeepSpeedConfig(object):
                 ZeroStageEnum.optimizer_states, ZeroStageEnum.gradients,
                 ZeroStageEnum.weights), "bf16_optimizer_states is only supported with ZeRO Stage 1, 2, or 3."
             assert self.bfloat16_config.bf16_master_weights_and_grads, "bf16_optimizer_states requires bf16_master_weights_and_grads to be enabled."
+        if self.bfloat16_config.store_param_remainders:
+            self._check_store_param_remainders()
+
+    def _check_store_param_remainders(self):
+        unsupported = []
+        if not self.bfloat16_config.enabled:
+            unsupported.append("bf16 disabled")
+        if not self.zero_enabled or self.zero_optimization_stage not in (ZeroStageEnum.optimizer_states,
+                                                                         ZeroStageEnum.gradients):
+            unsupported.append(f"ZeRO stage {self.zero_optimization_stage} (needs stage 1 or 2)")
+        if self.bfloat16_config.bf16_master_weights_and_grads:
+            unsupported.append("bf16_master_weights_and_grads")
+        offload_optimizer = self.zero_config.offload_optimizer
+        if offload_optimizer is not None and offload_optimizer.device != "none":
+            unsupported.append("optimizer offload")
+        if self.zero_config.zenflow is not None:
+            unsupported.append("ZenFlow")
+        if unsupported:
+            raise ValueError("bf16.store_param_remainders does not support " + ", ".join(unsupported))
 
     def _do_warning_check(self):
         vocabulary_size = self._param_dict.get(VOCABULARY_SIZE, VOCABULARY_SIZE_DEFAULT)

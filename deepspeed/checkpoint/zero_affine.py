@@ -238,6 +238,9 @@ def zero_optimizer_storage_shard(param, optim_state_key=None):
         return torch.empty(0, dtype=torch.float32, device=get_accelerator().current_device_name())
     if mapping.use_offload:
         raise NotImplementedError('Offloaded ZeRO optimizer states have no affine storage map.')
+    if optim_state_key is None and mapping.hp_remainder_fragment is not None:
+        raise NotImplementedError('With bf16.store_param_remainders the fp32 master weights are stored as bf16 '
+                                  'weights plus remainders; they have no fp32 storage to view.')
     if optim_state_key is not None and mapping.optim_fragment is None:
         raise RuntimeError('ZeRO links optimizer states to parameters at the first optimizer step; '
                            f'call this after it to read {optim_state_key!r}.')
