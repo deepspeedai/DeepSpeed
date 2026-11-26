@@ -2861,7 +2861,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                                          self.optimizer.param_groups[param_group_idx]['momentum'],
                                          ns_method=ns_method,
                                          is_expert_group=getattr(tensor, 'is_expert_group', False),
-                                         num_heads=getattr(tensor, 'muon_num_heads', None))
+                                         num_heads=getattr(tensor, 'muon_num_heads', None),
+                                         momentum_scale_ratio=self._muon_momentum_scale_ratio())
             tensor = grad_accum
             buffer_idx += tensor.numel()
             param_id = self.get_param_id(tensor_list[i])
@@ -2971,7 +2972,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                                          self.optimizer.param_groups[param_group_idx]['momentum'],
                                          ns_method=ns_method,
                                          is_expert_group=getattr(tensor, 'is_expert_group', False),
-                                         num_heads=getattr(tensor, 'muon_num_heads', None))
+                                         num_heads=getattr(tensor, 'muon_num_heads', None),
+                                         momentum_scale_ratio=self._muon_momentum_scale_ratio())
             tensor = grad_accum
             num_elements = tensor.numel()
             buffer_idx += num_elements
@@ -3124,8 +3126,10 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         staged.copy_(committed)
         return staged
 
-    def _commit_muon_momentum(self):
+    def _commit_muon_momentum(self, backward_scale):
         """Move this step's momentum into the optimizer state, now that the step survived."""
+        if self._muon_pending_momentum:
+            self.loss_scaler.muon_momentum_scale = backward_scale
         for staged, flatten_copy in self._muon_pending_momentum.values():
             self.optimizer.state[flatten_copy]["momentum_buffer"].copy_(staged)
         # The buffers are kept rather than dropped: staging re-copies from the committed
@@ -3170,7 +3174,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         prev_scale = self.loss_scale
         self._update_scale(self.overflow)
         if not self.overflow:
-            self._commit_muon_momentum()
+            self._commit_muon_momentum(prev_scale)
         if self.overflow:
             if self.compute_grad_norm:
                 self._global_grad_norm = float("inf")
