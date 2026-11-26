@@ -164,15 +164,15 @@ class TestUlyssesSPHF(DistributedTest):
         )
         # print(f"{sp_rank=} {loss_b=}")
 
-        # differentiable weighted per-shard-loss aggregation across ranks
-        losses_per_rank = torch.distributed.nn.functional.all_gather(loss_b, group=sp_group)
-        good_tokens = sum((shift_labels != -100).view(-1))
-        good_tokens_per_rank = torch.distributed.nn.functional.all_gather(good_tokens, group=sp_group)
-        total_loss = sum(losses_per_rank[rank] * good_tokens_per_rank[rank] for rank in range(sp_world_size))
-        total_good_tokens = sum(good_tokens_per_rank)
-        loss_b = total_loss / total_good_tokens
-        # print(f"{sp_rank=} gathered {loss_b=}")
-        model_b.backward(loss_b)
+        good_tokens = (shift_labels != -100).sum()
+        local_mean = torch.where(good_tokens > 0, loss_b.float(), 0.0)
+        local_sum = local_mean * good_tokens
+
+        totals = torch.stack((local_sum.detach(), good_tokens))
+        dist.all_reduce(totals, group=sp_group)
+        total_good_tokens = totals[1].clamp_min(1)
+        loss_b = totals[0] / total_good_tokens
+        model_b.backward(local_sum / total_good_tokens)
 
         grad_b = get_grad(model_b.module.model.layers[0].self_attn.q_proj.weight, zero_stage)
         assert grad_b is not None
@@ -544,15 +544,15 @@ class TestUlyssesSPHFFlexAttention(DistributedTest):
         )
         # print(f"{sp_rank=} {loss_b=}")
 
-        # differentiable weighted per-shard-loss aggregation across ranks
-        losses_per_rank = torch.distributed.nn.functional.all_gather(loss_b, group=sp_group)
-        good_tokens = sum((shift_labels != -100).view(-1))
-        good_tokens_per_rank = torch.distributed.nn.functional.all_gather(good_tokens, group=sp_group)
-        total_loss = sum(losses_per_rank[rank] * good_tokens_per_rank[rank] for rank in range(sp_world_size))
-        total_good_tokens = sum(good_tokens_per_rank)
-        loss_b = total_loss / total_good_tokens
-        # print(f"{sp_rank=} gathered {loss_b=}")
-        model_b.backward(loss_b)
+        good_tokens = (shift_labels != -100).sum()
+        local_mean = torch.where(good_tokens > 0, loss_b.float(), 0.0)
+        local_sum = local_mean * good_tokens
+
+        totals = torch.stack((local_sum.detach(), good_tokens))
+        dist.all_reduce(totals, group=sp_group)
+        total_good_tokens = totals[1].clamp_min(1)
+        loss_b = totals[0] / total_good_tokens
+        model_b.backward(local_sum / total_good_tokens)
 
         grad_b = get_grad(model_b.module.model.layers[0].self_attn.q_proj.weight, zero_stage)
         assert grad_b is not None
