@@ -46,8 +46,6 @@ class UNetPolicy(DSPolicy):
                    qw.shape[-1], \
                    client_module.heads
         else:
-            #return None
-            #kvw = Parameter(torch.cat((kw, vw), dim=0), requires_grad=False)
             return qw, \
                    kw, vw, \
                    client_module.to_out[0].weight, \

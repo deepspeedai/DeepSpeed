@@ -72,7 +72,10 @@ class NPUFusedLamb:
 
         p.data.copy_((p.float() - step_size * lamb_coeff * update).to(p.dtype))
         if p_copy.numel() > 0:
-            p_copy.copy_(p.data)
+            # p_copy is a leaf fp16 parameter and the copy only mirrors the
+            # fp32 update into it, so it must not be recorded by autograd.
+            with torch.no_grad():
+                p_copy.copy_(p.data)
 
         return lamb_coeff
 

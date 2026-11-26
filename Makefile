@@ -8,7 +8,7 @@ help: ## this help
 	echo $(MAKEFILE_LIST)
 
 test: ## run tests
-	pytest --forked tests/unit/
+	pytest tests/unit/
 
 format: ## fix formatting
 	@if [ ! -d "venv" ]; then \

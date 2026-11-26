@@ -67,7 +67,6 @@ union AVX_Data {
 #elif defined(__AVX256__)
     __m256 data;
 #endif
-    // float data_f[16];
 };
 
 template <int span>

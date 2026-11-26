@@ -42,6 +42,10 @@ _EXPERT_PARALLEL_GROUP_RANKS = {}
 _EXPERT_DATA_PARALLEL_GROUP = {}
 # Mapping of expert data parallel group to ranks
 _EXPERT_DATA_PARALLEL_GROUP_RANKS = {}
+# Mapping of expert data parallel group name to the ranks of every group with that name, not only the
+# caller's. Every rank builds all groups anyway, so keeping them lets ranks locate other ranks' replicas
+# without a collective.
+_EXPERT_DATA_PARALLEL_GROUP_TABLE = {}
 # dist world group needs to be cloned for some cases
 _WORLD_GROUP = None
 # ZeRO parameter  partitioning group that the current rank belongs to.
@@ -111,6 +115,7 @@ def _release_process_group_references(group=None):
         _EXPERT_PARALLEL_GROUP_RANKS.clear()
         _EXPERT_DATA_PARALLEL_GROUP.clear()
         _EXPERT_DATA_PARALLEL_GROUP_RANKS.clear()
+        _EXPERT_DATA_PARALLEL_GROUP_TABLE.clear()
         _ALL_TO_ALL_GROUP.clear()
         _WORLD_GROUP = None
         _ZERO_PARAM_INTRA_PARALLEL_GROUP = None
@@ -199,6 +204,26 @@ def _init_tp_groups_with_new_group(tensor_model_parallel_size=1, data_parallel_s
     return _DATA_PARALLEL_GROUP, _MODEL_PARALLEL_GROUP
 
 
+def _check_existing_tp_groups(tensor_model_parallel_size):
+    """Raise if the process-wide TP groups do not have the requested size.
+
+    These groups are shared by every engine in the process, and the first engine to create them wins.
+    A later engine that asks for another layout would otherwise run on the earlier engine's groups
+    without any error.
+    """
+    if _TENSOR_MODEL_PARALLEL_GROUP is None:
+        return
+    existing_tp_size = dist.get_world_size(group=_TENSOR_MODEL_PARALLEL_GROUP)
+    if existing_tp_size == tensor_model_parallel_size:
+        return
+    raise RuntimeError(
+        f"A tensor parallel size {tensor_model_parallel_size} was requested, but this process already has "
+        f"tensor parallel groups of size {existing_tp_size}, "
+        "created by an earlier engine or model. "
+        "DeepSpeed keeps these groups process-wide, so engines with different tensor parallel sizes "
+        "cannot be built in the same process yet (see https://github.com/deepspeedai/DeepSpeed/issues/9081).")
+
+
 def _init_tp_mesh_device(tensor_model_parallel_size=1, data_parallel_size=None):
     """Initialize model data parallel groups."""
 
@@ -207,6 +232,7 @@ def _init_tp_mesh_device(tensor_model_parallel_size=1, data_parallel_size=None):
     global _TENSOR_MODEL_PARALLEL_GROUP
 
     if _TENSOR_MODEL_PARALLEL_GROUP is not None:
+        _check_existing_tp_groups(tensor_model_parallel_size)
         return
 
     if data_parallel_size is None:
@@ -430,6 +456,7 @@ def _create_expert_and_data_parallel(expert_parallel_size_,
         # Build the expert data parallel groups.
         # Only create group if it does not already exist
         if group_name not in _EXPERT_DATA_PARALLEL_GROUP:
+            edp_table = []
             for pp_stage_start in range(0, world_size, pp_stride):
                 for i in range(expert_parallel_size_):
                     if use_data_before_expert_parallel_:
@@ -437,12 +464,14 @@ def _create_expert_and_data_parallel(expert_parallel_size_,
                     else:
                         ranks = range(pp_stage_start + i, pp_stage_start + pp_stride, expert_parallel_size_)
                     group = dist.new_group(ranks)
+                    edp_table.append(tuple(ranks))
                     log_dist(
                         f'Creating expert data parallel process group named {group_name} with ranks: {list(ranks)}',
                         [0])
                     if rank in ranks:
                         _EXPERT_DATA_PARALLEL_GROUP[group_name] = group
                         _EXPERT_DATA_PARALLEL_GROUP_RANKS[group_name] = ranks
+            _EXPERT_DATA_PARALLEL_GROUP_TABLE[group_name] = tuple(edp_table)
 
         # Build the expert parallel groups.
         # Only create group if it does not already exist
@@ -491,6 +520,7 @@ def _create_expert_and_data_parallel(expert_parallel_size_,
         from deepspeed.module_inject.auto_ep_folding import expected_folding_group_tables
         folding_tables = expected_folding_group_tables(folding_spec)
 
+    edp_table = []
     for pp_stage_start in range(0, world_size, pp_stride):
         stage_ranks = list(range(pp_stage_start, pp_stage_start + pp_stride))
         stage_rank_set = set(stage_ranks)
@@ -529,10 +559,12 @@ def _create_expert_and_data_parallel(expert_parallel_size_,
 
         for edp_ranks in edp_groups_list:
             group = dist.new_group(edp_ranks)
+            edp_table.append(tuple(edp_ranks))
             log_dist(f'Creating expert data parallel process group named {group_name} with ranks: {edp_ranks}', [0])
             if rank in edp_ranks:
                 _EXPERT_DATA_PARALLEL_GROUP[group_name] = group
                 _EXPERT_DATA_PARALLEL_GROUP_RANKS[group_name] = edp_ranks
+    _EXPERT_DATA_PARALLEL_GROUP_TABLE[group_name] = tuple(edp_table)
 
 
 def _get_expert_parallel_ranks(world_size,
@@ -659,6 +691,7 @@ def _create_expert_data_and_model_parallel(expert_parallel_size_, mpu, use_data_
             if rank in list(ranks):
                 _EXPERT_DATA_PARALLEL_GROUP[group_name] = group
                 _EXPERT_DATA_PARALLEL_GROUP_RANKS[group_name] = ranks
+        _EXPERT_DATA_PARALLEL_GROUP_TABLE[group_name] = tuple(tuple(ranks) for ranks in expert_data_parallel_groups)
 
 
 def _get_max_expert_size():
@@ -713,6 +746,13 @@ def _get_expert_data_parallel_group_ranks(group_name):
     assert group_name in _EXPERT_DATA_PARALLEL_GROUP_RANKS, \
         'expert data parallel group is not initialized'
     return _EXPERT_DATA_PARALLEL_GROUP_RANKS[group_name]
+
+
+def _get_expert_data_parallel_group_table(group_name):
+    """Get the ranks of every expert data parallel group named ``group_name``, in creation order."""
+    assert group_name in _EXPERT_DATA_PARALLEL_GROUP_TABLE, \
+        'expert data parallel group is not initialized'
+    return _EXPERT_DATA_PARALLEL_GROUP_TABLE[group_name]
 
 
 def _get_expert_data_parallel_group_dict():
@@ -897,6 +937,8 @@ def _get_sequence_data_parallel_world_size():
     global mpu
     if mpu is not None and hasattr(mpu, 'get_sequence_data_parallel_world_size'):
         return mpu.get_sequence_data_parallel_world_size()
+    if mesh_device is not None and mpu is None:
+        return dist.get_world_size(group=_get_sequence_data_parallel_group())
     return _get_data_parallel_world_size()
 
 
@@ -905,6 +947,8 @@ def _get_sequence_data_parallel_rank():
     global mpu
     if mpu is not None and hasattr(mpu, 'get_sequence_data_parallel_rank'):
         return mpu.get_sequence_data_parallel_rank()
+    if mesh_device is not None and mpu is None:
+        return dist.get_rank(group=_get_sequence_data_parallel_group())
     return _get_data_parallel_rank()
 
 
@@ -914,6 +958,9 @@ def _get_sequence_data_parallel_group():
     # gradient allreduce must be across both dimensions of data and sequence parallelism.
     if mpu is not None and hasattr(mpu, 'get_sequence_data_parallel_group'):
         return mpu.get_sequence_data_parallel_group()
+    if mesh_device is not None and mpu is None:
+        # The (data_parallel, sequence_parallel) mesh covers every rank, so the combined group is the world.
+        return _clone_world_group()
     return _get_data_parallel_group()
 
 
