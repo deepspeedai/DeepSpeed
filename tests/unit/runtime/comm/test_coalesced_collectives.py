@@ -48,6 +48,43 @@ class TestReduceScatterCoalesced(DistributedTest):
             assert output2.shape == (1, )
             assert torch.allclose(output2, torch.arange(8, 9, **tensor_kwargs) / 2)
 
+    def test_non_contiguous_and_empty_inputs(self):
+        device = get_accelerator().current_device_name()
+        rank = dist.get_rank()
+        group = dist.get_world_group()
+
+        assert reduce_scatter_coalesced([], group) == []
+
+        # Single non-contiguous transposed 2-D view on the fast path
+        transposed = ((rank + 1) * torch.arange(6, dtype=torch.float32, device=device)).reshape(2, 3).t()
+        assert not transposed.is_contiguous()
+        (transposed_out, ) = reduce_scatter_coalesced([transposed], group)
+        expected_transposed = torch.arange(6, dtype=torch.float32, device=device).reshape(2, 3).t().reshape(-1) * 1.5
+        assert transposed_out.is_contiguous()
+        assert torch.allclose(transposed_out, expected_transposed[rank * 3:(rank + 1) * 3])
+
+        # Single non-contiguous 1-D strided slice on the fast path
+        base = (rank + 1) * torch.arange(12, dtype=torch.float32, device=device)
+        strided = base[::2]
+        assert not strided.is_contiguous()
+        (strided_out, ) = reduce_scatter_coalesced([strided], group)
+        expected_strided = torch.arange(0, 12, 2, dtype=torch.float32, device=device) * 1.5
+        assert strided_out.is_contiguous()
+        assert torch.allclose(strided_out, expected_strided[rank * 3:(rank + 1) * 3])
+
+        # Multi-tensor path combining non-contiguous views and uneven-partition zero padding
+        multi_t1 = ((rank + 1) * torch.arange(6, dtype=torch.float32, device=device)).reshape(2, 3).t()
+        multi_t2 = ((rank + 1) * torch.arange(10, dtype=torch.float32, device=device))[::2]
+        out1, out2 = reduce_scatter_coalesced([multi_t1, multi_t2], group)
+        expected_t2 = torch.arange(0, 10, 2, dtype=torch.float32, device=device) * 1.5
+        assert torch.allclose(out1, expected_transposed[rank * 3:(rank + 1) * 3])
+        if rank == 0:
+            assert out2.shape == (3, )
+            assert torch.allclose(out2, expected_t2[:3])
+        elif rank == 1:
+            assert out2.shape == (2, )
+            assert torch.allclose(out2, expected_t2[3:5])
+
 
 class TestReduceScatterCoalescedTensorSmallerThanWorldSize(DistributedTest):
     world_size = 2
@@ -97,41 +134,6 @@ class TestAllToAllQuantReduceFallback(DistributedTest):
         elif dist.get_rank() == 1:
             assert output.shape == (24, )
             assert torch.allclose(output, torch.zeros_like(output))
-
-
-def test_reduce_scatter_coalesced_empty_input():
-    assert reduce_scatter_coalesced([]) == []
-
-
-def test_reduce_scatter_coalesced_non_contiguous_and_zero_padding(monkeypatch):
-    import deepspeed.runtime.comm.coalesced_collectives as cc
-
-    captured_buffers = []
-
-    def fake_reduce_scatter(input_tensor, output_tensor, group=None, async_op=False, prof=False):
-        captured_buffers.append(input_tensor.clone())
-        chunks = torch.chunk(input_tensor, 2)
-        output_tensor.copy_(chunks[0] + chunks[1])
-
-    monkeypatch.setattr(cc.dist, "get_rank", lambda group=None: 0)
-    monkeypatch.setattr(cc.dist, "get_world_size", lambda group=None: 2)
-    monkeypatch.setattr(cc, "_torch_reduce_scatter_fn", fake_reduce_scatter)
-
-    # Single non-contiguous tensor (fast path)
-    non_contig = torch.arange(6, dtype=torch.float32).reshape(2, 3).t()
-    assert not non_contig.is_contiguous()
-    (single_out, ) = reduce_scatter_coalesced([non_contig])
-    expected_flat = non_contig.reshape(-1) / 2.0
-    assert torch.allclose(single_out, expected_flat[:3] + expected_flat[3:])
-
-    # Padded multi-tensor path with non-contiguous tensor: padding slots must be zero-initialized
-    t1 = torch.arange(6, dtype=torch.float32).reshape(2, 3).t()
-    t2 = torch.tensor([10.0, 20.0, 30.0], dtype=torch.float32)
-    out1, out2 = reduce_scatter_coalesced([t1, t2])
-    assert out1.shape == (3, )
-    assert out2.shape == (2, )
-    # Rank 1's second tensor partition has 1 element and 1 padded slot (last element of captured buffer)
-    assert captured_buffers[-1][-1].item() == 0.0
 
 
 class TestAllToAllQuantReduceAverage:

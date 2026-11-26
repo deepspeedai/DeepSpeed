@@ -96,7 +96,7 @@ def reduce_scatter_coalesced(
 
     partition_lst_for_each_tensor = [None] * len(tensors)
     for tensor_idx, tensor in enumerate(tensors):
-        flattened_tensor = tensor.reshape(-1)
+        flattened_tensor = tensor.contiguous().view(-1)
         chunk_sz = math.ceil(tensor.numel() / world_sz)
         partition_lst_for_each_tensor[tensor_idx] = [
             flattened_tensor[rank * chunk_sz:rank * chunk_sz + chunk_sz] for rank in range(0, world_sz)
@@ -107,7 +107,7 @@ def reduce_scatter_coalesced(
     if len(tensors) == 1 and tensors[0].numel() % world_sz == 0:
         # if there's only one tensor being reduced and we don't need to pad
         # we have an opportunity to avoid a memory allocation
-        tensor_partition_flat_buffer = tensors[0].reshape(-1)
+        tensor_partition_flat_buffer = flattened_tensor
     else:
         # interleave tensor partitions such that the correct reduced partitions of each tensor
         # end up at each rank
