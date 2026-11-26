@@ -350,7 +350,6 @@ def _check_fused_rms_norm_rejects_double_backward():
 def test_fused_rms_norm_fail_fast_guards_on_cpu(monkeypatch):
     fused_rms_norm = _rms_norm()
     monkeypatch.setattr(fused_rms_norm, "_TRITON_AVAILABLE", True)
-    monkeypatch.setattr(fused_rms_norm, "_IS_ROCM_PYTORCH", False)
     hidden = torch.randn((2, 128), dtype=torch.bfloat16)
     weight = torch.randn((128, ), dtype=torch.bfloat16)
     with pytest.raises(RuntimeError, match="CUDA kernels"):
@@ -360,7 +359,6 @@ def test_fused_rms_norm_fail_fast_guards_on_cpu(monkeypatch):
 def test_fused_rms_norm_fail_fast_dtype_guard(monkeypatch):
     fused_rms_norm = _rms_norm()
     monkeypatch.setattr(fused_rms_norm, "_TRITON_AVAILABLE", True)
-    monkeypatch.setattr(fused_rms_norm, "_IS_ROCM_PYTORCH", False)
     hidden = torch.randn((2, 128), dtype=torch.float32)
     weight = torch.randn((128, ), dtype=torch.float32)
     with pytest.raises(RuntimeError, match="bfloat16 and float16"):

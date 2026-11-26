@@ -12,8 +12,6 @@ import torch
 
 from deepspeed.ops.triton_ops._triton import _TRITON_AVAILABLE, triton, tl
 
-_IS_ROCM_PYTORCH = getattr(torch.version, "hip", None) is not None
-
 SUPPORTED_ROW_DTYPES = (torch.bfloat16, torch.float16, torch.float32)
 SUPPORTED_ROW_WEIGHTING_DTYPES = (torch.bfloat16, torch.float16)
 
@@ -224,7 +222,7 @@ if _TRITON_AVAILABLE:
 
 def is_available() -> bool:
     """Whether this build can run the fused weighted restore at all."""
-    return _TRITON_AVAILABLE and not _IS_ROCM_PYTORCH
+    return _TRITON_AVAILABLE
 
 
 def assert_supported(rows: torch.Tensor, *, score_apply: str) -> None:
@@ -232,9 +230,6 @@ def assert_supported(rows: torch.Tensor, *, score_apply: str) -> None:
     if not _TRITON_AVAILABLE:
         raise RuntimeError('combine_impl="fused_weighted_sum" needs Triton, which is not installed in this '
                            "environment. Install Triton, or leave combine_impl unset.")
-    if _IS_ROCM_PYTORCH:
-        raise RuntimeError('combine_impl="fused_weighted_sum" is not yet supported on ROCm. Leave combine_impl '
-                           "unset to run here.")
     if rows.device.type != "cuda":
         raise RuntimeError('combine_impl="fused_weighted_sum" runs CUDA kernels but this layer is on device '
                            f'"{rows.device.type}". Leave combine_impl unset to run here.')
@@ -350,9 +345,6 @@ def assert_row_weighting_supported(rows: torch.Tensor, weights: torch.Tensor) ->
     if not _TRITON_AVAILABLE:
         raise RuntimeError('row_weighting_impl="fused" needs Triton, which is not installed in this environment. '
                            'Install Triton, or set row_weighting_impl="eager".')
-    if _IS_ROCM_PYTORCH:
-        raise RuntimeError('row_weighting_impl="fused" is not yet supported on ROCm. Set '
-                           'row_weighting_impl="eager" to run here.')
     if rows.device.type != "cuda":
         raise RuntimeError('row_weighting_impl="fused" runs CUDA kernels but rows are on device '
                            f'"{rows.device.type}". Set row_weighting_impl="eager" to run here.')

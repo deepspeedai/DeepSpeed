@@ -15,8 +15,6 @@ from torch.autograd.function import once_differentiable
 from deepspeed.ops.triton_ops._triton import _TRITON_AVAILABLE, triton, tl
 from deepspeed.utils import logger
 
-_IS_ROCM_PYTORCH = getattr(torch.version, "hip", None) is not None
-
 SUPPORTED_DTYPES = (torch.bfloat16, torch.float16)
 # Modeling modules whose ``apply_rotary_pos_emb`` computes ``q * cos + rotate_half(q) * sin`` with the split-half
 # ``rotate_half``. Several architectures define a function of the same name that rotates only part of the head
@@ -119,7 +117,7 @@ if _TRITON_AVAILABLE:
 
 def is_available() -> bool:
     """Whether this build can run the fused rotary kernels."""
-    return _TRITON_AVAILABLE and not _IS_ROCM_PYTORCH
+    return _TRITON_AVAILABLE
 
 
 def assert_supported(q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor,
@@ -127,8 +125,6 @@ def assert_supported(q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: t
     """Reject inputs the kernels do not reproduce eager for, before the fused path runs."""
     if not _TRITON_AVAILABLE:
         raise RuntimeError("fused RoPE needs Triton, which is not installed in this environment.")
-    if _IS_ROCM_PYTORCH:
-        raise RuntimeError("fused RoPE is not yet supported on ROCm.")
     tensors = {"q": q, "k": k, "cos": cos, "sin": sin}
     for name, tensor in tensors.items():
         if not isinstance(tensor, torch.Tensor):
@@ -338,8 +334,8 @@ def replace_rotary_pos_emb(model: torch.nn.Module) -> int:
         modeling.apply_rotary_pos_emb = _make_fused(original)
         count += 1
     if count and not is_available():
-        logger.warning(f"fused RoPE patched {count} modeling modules, but its kernel needs Triton on CUDA, not ROCm, "
-                       f"so they will run the eager function.")
+        logger.warning(f"fused RoPE patched {count} modeling modules, but its kernel needs Triton, which is not "
+                       f"available, so they will run the eager function.")
     return count
 
 

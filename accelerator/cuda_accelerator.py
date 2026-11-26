@@ -277,7 +277,8 @@ class CUDA_Accelerator(DeepSpeedAccelerator):
         # and newer; on sm8x it falls back to a slow per-group loop, so a Triton
         # grouped-GEMM kernel is preferred there when Triton is available.
         from deepspeed.ops.triton_ops import is_triton_available as triton_grouped_mm_is_available
-        # not verified on AMD GPU
+        # On AMD GPUs the Triton grouped GEMM is correct but not uniformly faster than torch._grouped_mm (on MI300X
+        # it wins for many small experts and loses for few large ones), so the native kernel stays the default.
         if torch.version.hip is not None or not triton_grouped_mm_is_available():
             return False
         if not hasattr(torch, "_grouped_mm"):
@@ -290,9 +291,16 @@ class CUDA_Accelerator(DeepSpeedAccelerator):
     def supported_subchannel_quantization_formats(self):
         # The Triton kernels need FP8 tensor cores (sm89+) for FP8 and integer tensor cores (sm80+) for INT8.
         from deepspeed.ops.triton_ops import is_triton_available
-        # not verified on AMD GPU, whose FP8 formats differ
-        if torch.version.hip is not None or not is_triton_available():
+        if not is_triton_available():
             return ()
+        if torch.version.hip is not None:
+            # Gate by AMD arch name; unlisted archs fall back to PyTorch.
+            rocm_subchannel_formats = {
+                "gfx942": ("int8", ),  # MI300X: native INT8 only (OCP FP8 is emulated)
+                "gfx950": ("int8", "e4m3", "e5m2"),  # MI350X: native INT8 and OCP FP8
+            }
+            arch = torch.cuda.get_device_properties(torch.cuda.current_device()).gcnArchName.split(":")[0]
+            return rocm_subchannel_formats.get(arch, ())
         capability = torch.cuda.get_device_capability()
         formats = ()
         if capability >= (8, 0):

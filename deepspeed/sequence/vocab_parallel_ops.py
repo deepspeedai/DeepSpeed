@@ -21,7 +21,7 @@ it, but its logits get zero gradient so that callers can mask such rows (e.g. pa
 For log-probability, entropy and KL, when Triton supports the logits' device, the per-row work
 runs in fused Triton kernels
 (``deepspeed.ops.triton_ops.vocab_parallel_softmax``); otherwise, or with
-``deepspeed.HAS_TRITON = False``, the same math runs eagerly in bounded row chunks.
+``deepspeed.HAS_TRITON = False`` (on CUDA), the same math runs eagerly in bounded row chunks.
 JSD also has fused Triton forward/backward kernels, with bounded eager row chunks as fallback.
 """
 
@@ -41,11 +41,21 @@ from deepspeed.sequence.cross_entropy import _resolve_vocab_metadata
 _CHUNK_NUMEL = 1 << 24
 
 
+def _triton_enabled():
+    # deepspeed.HAS_TRITON is False on ROCm only to keep DeepSpeed's Triton inference kernels off there (see
+    # deepspeed/__init__.py). These training kernels pass their unit tests on ROCm (MI300X), so on ROCm they
+    # follow Triton availability instead.
+    if getattr(torch.version, "hip", None) is not None:
+        from deepspeed.ops.triton_ops import is_triton_available
+        return is_triton_available()
+    return deepspeed.HAS_TRITON
+
+
 def _use_triton(*logits):
     # Eager row chunks run about a dozen separate memory-bound kernels per chunk; the Triton
     # kernels read each logit once per pass.
     accelerator = get_accelerator()
-    return deepspeed.HAS_TRITON and accelerator.is_triton_supported() and accelerator.on_accelerator(logits[0])
+    return _triton_enabled() and accelerator.is_triton_supported() and accelerator.on_accelerator(logits[0])
 
 
 def _triton_rows(logits):

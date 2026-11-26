@@ -23,7 +23,6 @@ import torch
 from deepspeed.ops.triton_ops._triton import _TRITON_AVAILABLE, triton, tl
 from deepspeed.utils.torch import required_torch_version
 
-_IS_ROCM_PYTORCH = getattr(torch.version, "hip", None) is not None
 BACKENDS = ("auto", "triton", "torch")
 _TRITON_BLOCK = 4096
 
@@ -68,7 +67,7 @@ if _TRITON_AVAILABLE:
 
 
 def triton_backend_available() -> bool:
-    return _TRITON_AVAILABLE and not _IS_ROCM_PYTORCH
+    return _TRITON_AVAILABLE
 
 
 def _resolve_backend(backend: str, logits: torch.Tensor) -> str:

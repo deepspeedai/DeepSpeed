@@ -10,8 +10,6 @@ from torch.autograd.function import once_differentiable
 from deepspeed.ops.triton_ops._triton import _TRITON_AVAILABLE, triton, tl
 from deepspeed.utils import logger
 
-_IS_ROCM_PYTORCH = getattr(torch.version, "hip", None) is not None
-
 SUPPORTED_DTYPES = (torch.bfloat16, torch.float16)
 # Classes whose forward is confirmed to compute ``weight * normalized.to(input_dtype)`` with FP32 statistics, the
 # expression the kernels reproduce. Hugging Face classes with the same name suffix and attributes, such as
@@ -206,14 +204,12 @@ if _TRITON_AVAILABLE:
 
 def is_available() -> bool:
     """Whether this build can run the fused RMSNorm kernels."""
-    return _TRITON_AVAILABLE and not _IS_ROCM_PYTORCH
+    return _TRITON_AVAILABLE
 
 
 def _assert_supported_device_and_dtype(tensor: torch.Tensor, *, name: str) -> None:
     if not _TRITON_AVAILABLE:
         raise RuntimeError(f"fused RMSNorm needs Triton, which is not installed in this environment.")
-    if _IS_ROCM_PYTORCH:
-        raise RuntimeError("fused RMSNorm is not yet supported on ROCm.")
     if tensor.dtype not in SUPPORTED_DTYPES:
         raise RuntimeError(
             f"fused RMSNorm supports bfloat16 and float16 tensors, but {name} has dtype {tensor.dtype}.")
@@ -474,6 +470,6 @@ def replace_rms_norm(module: torch.nn.Module) -> int:
         setattr(child, _FUSED_INSTANCE_ATTRIBUTE, _FUSED_INSTANCE_OPT_IN)
         count += 1
     if count and not is_available():
-        logger.warning(f"fused RMSNorm replaced {count} modules, but its kernels need Triton on CUDA, not ROCm, "
-                       f"so those modules will run their eager forward.")
+        logger.warning(f"fused RMSNorm replaced {count} modules, but its kernels need Triton, which is not "
+                       f"available, so those modules will run their eager forward.")
     return count
