@@ -6,8 +6,22 @@ import torch
 
 from types import SimpleNamespace
 
+import deepspeed
 from deepspeed.inference.v2.kernels.ragged_ops.blocked_flash.blocked_flash import BlockedFlashAttn, get_kv_block_size
+from deepspeed.ops.op_builder import RaggedOpsBuilder
 from deepspeed.runtime.rollout.paged_cache import PagedAttentionCache
+
+
+def _skip_without_blocked_flash():
+    """Skip unless the blocked-attention backend this cache needs can be built.
+
+    The builder needs the optional dskernels package and compute capability >= 8.0, so a
+    CUDA installation without them must skip rather than fail: paged caching is opt-in.
+    """
+    if not torch.cuda.is_available():  #ignore-cuda
+        pytest.skip("paged cache needs a CUDA device")
+    if not deepspeed.ops.__compatible_ops__[RaggedOpsBuilder.NAME]:
+        pytest.skip("ragged device ops are not available on this system")
 
 
 def _config(num_kv_heads, num_heads, head_dim):
@@ -29,8 +43,7 @@ def _dense_oracle(query, row_keys, row_values, num_heads, num_kv_heads, is_causa
 
 
 def test_paged_decode_matches_dense_oracle():
-    if not torch.cuda.is_available():  #ignore-cuda
-        pytest.skip("paged cache needs a CUDA device")
+    _skip_without_blocked_flash()
     torch.manual_seed(0)
     device = torch.device("cuda")
     dtype = torch.bfloat16
@@ -69,8 +82,7 @@ def test_paged_decode_matches_dense_oracle():
 
 
 def test_paged_compact_releases_and_reorders_rows():
-    if not torch.cuda.is_available():  #ignore-cuda
-        pytest.skip("paged cache needs a CUDA device")
+    _skip_without_blocked_flash()
     torch.manual_seed(1)
     device = torch.device("cuda")
     dtype = torch.bfloat16
@@ -97,8 +109,7 @@ def test_paged_compact_releases_and_reorders_rows():
 
 
 def test_graph_safe_paged_decode_matches_dense_oracle():
-    if not torch.cuda.is_available():  #ignore-cuda
-        pytest.skip("paged cache needs a CUDA device")
+    _skip_without_blocked_flash()
     torch.manual_seed(2)
     device = torch.device("cuda")
     dtype = torch.bfloat16
@@ -139,8 +150,7 @@ def test_set_graph_mode_keeps_persistent_row_and_atom_views():
     # view, and (b) allocate a fresh arange row-index every call that the captured
     # selects read by address; that buffer was freed before the first replay, so the
     # replay indexed with allocator garbage ("index out of bounds" in IndexKernel).
-    if not torch.cuda.is_available():  #ignore-cuda
-        pytest.skip("paged cache needs a CUDA device")
+    _skip_without_blocked_flash()
     device = torch.device("cuda")
     block_size = get_kv_block_size(64)
     cache = PagedAttentionCache(_config(2, 4, 64),
@@ -166,8 +176,7 @@ def test_graph_safe_multi_block_decode_matches_dense_oracle():
     # both head_dim 64 (kv block 128) and 128 (kv block 64, the Qwen3-4B/8B
     # geometry): the configuration the rollout benches run, which the earlier
     # single-block suite did not cover.
-    if not torch.cuda.is_available():  #ignore-cuda
-        pytest.skip("paged cache needs a CUDA device")
+    _skip_without_blocked_flash()
     torch.manual_seed(7)
     device = torch.device("cuda")
     dtype = torch.bfloat16
@@ -203,8 +212,7 @@ def test_graph_safe_multi_block_decode_matches_dense_oracle():
 
 
 def test_paged_prefill_attention_matches_dense_oracle():
-    if not torch.cuda.is_available():  #ignore-cuda
-        pytest.skip("paged cache needs a CUDA device")
+    _skip_without_blocked_flash()
     torch.manual_seed(3)
     device = torch.device("cuda")
     dtype = torch.bfloat16
@@ -231,8 +239,7 @@ def test_paged_prefill_attention_matches_dense_oracle():
 
 def test_flashinfer_decode_matches_dense_oracle():
     pytest.importorskip("flashinfer")
-    if not torch.cuda.is_available():  #ignore-cuda
-        pytest.skip("paged cache needs a CUDA device")
+    _skip_without_blocked_flash()
     torch.manual_seed(5)
     device = torch.device("cuda")
     dtype = torch.bfloat16
@@ -271,8 +278,7 @@ def test_flashinfer_decode_matches_dense_oracle():
 
 
 def test_prefix_reuse_shares_blocks_and_releases_after_last_row():
-    if not torch.cuda.is_available():  #ignore-cuda
-        pytest.skip("paged cache needs a CUDA device")
+    _skip_without_blocked_flash()
     torch.manual_seed(4)
     device = torch.device("cuda")
     dtype = torch.bfloat16
@@ -324,18 +330,23 @@ class _FakePool:
         config = configs[0]
         layers, heads, head_dim = config.cache_shape
         self.cache = torch.zeros((layers, memory_config.size, config.block_size, 2, heads, head_dim))
-        self.free_blocks = list(range(memory_config.size - 1, -1, -1))
+        self._free = list(range(memory_config.size - 1, -1, -1))
+
+    @property
+    def free_blocks(self):
+        """Free-block counts per allocator, as BlockedKVCache reports them."""
+        return [len(self._free)]
 
     def get_cache(self, cache_id):
         return self.cache[cache_id]
 
     def reserve(self, num_blocks):
-        if len(self.free_blocks) < num_blocks:
+        if len(self._free) < num_blocks:
             raise RuntimeError("block pool exhausted")
-        return torch.tensor([self.free_blocks.pop() for _ in range(num_blocks)], dtype=torch.int32)
+        return torch.tensor([self._free.pop() for _ in range(num_blocks)], dtype=torch.int32)
 
     def free(self, blocks):
-        self.free_blocks.extend(int(block) for block in blocks)
+        self._free.extend(int(block) for block in blocks)
 
 
 class _RecordingKernel:
@@ -437,3 +448,22 @@ def test_paged_cache_rejects_tensor_parallel_shards(stubbed_ops):
     model.model.layers[0].self_attn.q_proj.is_tp_parallel = True
     with pytest.raises(ValueError, match="tensor-parallel"):
         install_paged_attention(model)
+
+
+def test_blocks_in_use_counts_physical_blocks(stubbed_ops):
+    """A shared prefix block is one physical block, however many rows reference it."""
+    cache = _make_cache(batch_size=2, max_cache_len=4 * BLOCK_SIZE)
+    cache.set_write_position(torch.zeros(2, dtype=torch.long))
+    keys = torch.randn(1, cache.num_kv_heads, BLOCK_SIZE, cache.head_dim)
+    cache.set_active_rows([0])
+    cache.write(0, keys, keys.clone())
+    cache.register_prefix([b"prefix"], 0, 1)
+    assert cache.blocks_in_use == 1
+
+    assert cache.prepare_prefix([b"prefix"], 1) == 1
+    assert cache.blocks_in_use == 1
+
+    cache.clear_row(0)
+    assert cache.blocks_in_use == 1
+    cache.clear_row(1)
+    assert cache.blocks_in_use == 0

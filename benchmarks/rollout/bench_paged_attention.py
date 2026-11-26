@@ -188,7 +188,9 @@ def run_cell(args, model, workload, path, variant, device):
     except Exception as error:  # a cell that cannot run is reported, not silent
         return {"error": f"{type(error).__name__}: {error}"}
 
-    generated = args.batch_size * args.max_new_tokens
+    # max_new_tokens is a cap: a pretrained model's generation config can stop a row at
+    # EOS, so count the valid response positions instead of the requested budget.
+    generated = int(output.attention_mask[:, args.prompt_len:].sum().item())
     return {
         "ids": output.input_ids.cpu(),
         "ms": best_ms,

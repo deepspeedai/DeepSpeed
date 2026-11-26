@@ -104,6 +104,7 @@ class PagedAttentionCache:
                     f"got {self.block_size}")
         self.max_blocks_per_row = (self.max_cache_len + self.block_size - 1) // self.block_size
         num_blocks = self.max_batch_size * self.max_blocks_per_row
+        self._num_blocks = num_blocks
 
         cache_config = KVCacheConfig(
             block_size=self.block_size,
@@ -178,7 +179,12 @@ class PagedAttentionCache:
 
     @property
     def blocks_in_use(self) -> int:
-        return sum(self._block_counts)
+        """Physical blocks the pool has handed out; a shared prefix block counts once.
+
+        The per-row block counts include a shared block once per referencing row, so
+        they overstate what the pool is holding and hide the savings prefix reuse buys.
+        """
+        return self._num_blocks - sum(self.kv_cache.free_blocks)
 
     def set_write_position(self, pos: torch.Tensor) -> None:
         if not isinstance(pos, torch.Tensor) or pos.dim() != 1:

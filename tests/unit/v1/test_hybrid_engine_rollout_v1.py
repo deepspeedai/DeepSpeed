@@ -13,6 +13,8 @@ from transformers.cache_utils import Cache
 
 import deepspeed
 from deepspeed.accelerator import get_accelerator
+from deepspeed.inference.v2.kernels.ragged_ops.blocked_flash.blocked_flash import get_kv_block_size
+from deepspeed.ops.op_builder import RaggedOpsBuilder
 from deepspeed.runtime.rollout.base import RolloutRequest, SamplingConfig
 from deepspeed.runtime.rollout.hybrid_engine_rollout import HybridEngineRollout, HybridEngineRolloutConfig
 from deepspeed.utils.static_cache import DeepSpeedStaticCache
@@ -860,3 +862,112 @@ def test_continuous_graph_recaptures_only_when_tensor_layout_changes():
     allocated = accelerator.memory_allocated()
     graph_rollout.shutdown()
     assert accelerator.memory_allocated() <= allocated - cache_bytes
+
+
+# ---------------------------------------------------------------------------
+# Paged KV cache: end-to-end coverage on the three engine-owned decode loops.
+# ---------------------------------------------------------------------------
+
+
+def _tiny_qwen3(device):
+    """A Qwen3 model small enough for a unit test, with peaked logits so greedy tokens are unambiguous."""
+    from transformers import Qwen3Config, Qwen3ForCausalLM
+
+    torch.manual_seed(0)
+    config = Qwen3Config(vocab_size=64,
+                         hidden_size=256,
+                         intermediate_size=512,
+                         num_hidden_layers=2,
+                         num_attention_heads=4,
+                         num_key_value_heads=2,
+                         head_dim=64,
+                         max_position_embeddings=512,
+                         pad_token_id=0,
+                         eos_token_id=None)
+    model = Qwen3ForCausalLM(config)
+    # A random initialization gives almost uniform next-token distributions, under which a
+    # wrong KV read rarely changes the drawn token. Scaling the output head makes them peaked.
+    with torch.no_grad():
+        model.lm_head.weight.mul_(30)
+    model.generation_config.eos_token_id = None
+    return model.to(device=device, dtype=torch.bfloat16).eval()
+
+
+def _paged_request(batch_size, prompt_len, device, padding):
+    """A request whose prompt spans several blocks, optionally left-padded."""
+    request = _random_request(batch_size, prompt_len, device)
+    if not padding:
+        return request
+    prompt_ids = request.prompt_ids.clone()
+    prompt_ids[:, :padding] = 0
+    mask = request.prompt_attention_mask.clone()
+    mask[:, :padding] = 0
+    return RolloutRequest(prompt_ids, mask)
+
+
+@pytest.mark.parametrize("use_graph_capture, continuous_batch_size", [(False, 2), (True, 2), (True, None)])
+@pytest.mark.parametrize("enable_paged_prefill, padding", [(True, 0), (True, 16), (False, 0), (False, 16)])
+def test_paged_rollout_matches_dense_on_every_engine_loop(use_graph_capture, continuous_batch_size,
+                                                          enable_paged_prefill, padding):
+    """Paged decode must reproduce the dense token stream on every engine-owned loop.
+
+    The prompt spans several blocks and the decode steps advance each row's front, so a
+    stale atom table, a stale FlashInfer plan, a mis-sized block chain or a padding-offset
+    position error all change the tokens. The paged cache is also checked directly: every
+    row advances past its prompt and keeps a block chain the kernel can walk.
+    """
+    accelerator = get_accelerator()
+    if not accelerator.is_available() or accelerator.device_name() != "cuda":
+        pytest.skip("CUDA is required for paged rollout coverage")
+    if not deepspeed.ops.__compatible_ops__[RaggedOpsBuilder.NAME]:
+        pytest.skip("ragged device ops are not available on this system")
+    if not accelerator.is_bf16_supported():
+        pytest.skip("the blocked-attention kernel needs bf16 or fp16 K/V")
+    if use_graph_capture and not accelerator.is_graph_capture_supported():
+        pytest.skip("graph capture is not supported")
+    if continuous_batch_size is None and not enable_paged_prefill:
+        pytest.skip("the single-batch graph path always stages its prefill densely")
+
+    device = torch.device(accelerator.device_name())
+    block_size = get_kv_block_size(64)
+    prompt_len = block_size + 32
+    new_tokens = 6
+    cache_len = prompt_len + new_tokens
+    request = _paged_request(batch_size=2, prompt_len=prompt_len, device=device, padding=padding)
+    sampling = SamplingConfig(max_new_tokens=new_tokens, temperature=0.0, continuous_batch_size=continuous_batch_size)
+    model = _tiny_qwen3(device)
+    # eos -1 never matches, so every row generates the full length.
+    tokenizer = SimpleNamespace(pad_token_id=0, eos_token_id=-1)
+    capacity = {"continuous_cache_capacity": cache_len} if continuous_batch_size else {}
+
+    dense = HybridEngineRollout(SimpleNamespace(module=model),
+                                tokenizer,
+                                cfg=HybridEngineRolloutConfig(use_graph_capture=use_graph_capture,
+                                                              **capacity)).generate(request, sampling)
+
+    rollout = HybridEngineRollout(SimpleNamespace(module=model),
+                                  tokenizer,
+                                  cfg=HybridEngineRolloutConfig(use_paged_cache=True,
+                                                                paged_block_size=block_size,
+                                                                enable_paged_prefill=enable_paged_prefill,
+                                                                use_graph_capture=use_graph_capture,
+                                                                **capacity))
+    created = []
+    create_cache = rollout._create_paged_cache
+
+    def record_cache(*args, **kwargs):
+        cache = create_cache(*args, **kwargs)
+        created.append(cache)
+        return cache
+
+    rollout._create_paged_cache = record_cache
+    paged = rollout.generate(request, sampling)
+
+    assert torch.equal(paged.input_ids, dense.input_ids)
+    cache = created[-1]
+    for row in range(request.prompt_ids.shape[0]):
+        length = int(cache.row_len[row])
+        assert length > prompt_len, "the row must advance past its prompt"
+        used = cache.block_ids[row, :-(-length // block_size)]
+        assert used.numel() and bool((used >= 0).all()), "the row's block chain must be fully allocated"
+    assert cache.blocks_in_use > 0
