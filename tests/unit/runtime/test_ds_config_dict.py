@@ -9,6 +9,8 @@ import pytest
 import json
 import hjson
 import argparse
+import subprocess
+import sys
 import torch
 
 from deepspeed.runtime.zero.config import DeepSpeedZeroConfig
@@ -573,3 +575,220 @@ class TestNoModel(DistributedTest):
 
         with pytest.raises(AssertionError):
             model, _, _, _ = deepspeed.initialize(model, config=base_config)
+
+
+class TestConfigValidation:
+
+    @pytest.mark.parametrize("key,message", [
+        ("train_batch_size", "Train batch size"),
+        ("train_micro_batch_size_per_gpu", "Micro batch size per gpu"),
+        ("gradient_accumulation_steps", "Gradient accumulation steps"),
+    ])
+    @pytest.mark.parametrize("value", [0, -1, float("nan")])
+    def test_invalid_batch_sizes(self, key, message, value):
+        config_dict = {
+            "train_batch_size": 1,
+            "train_micro_batch_size_per_gpu": 1,
+            "gradient_accumulation_steps": 1,
+        }
+        config_dict[key] = value
+        with pytest.raises(AssertionError, match=message + ".*has to be greater than 0"):
+            DeepSpeedConfig(config_dict)
+
+    def test_invalid_batch_size_mismatch(self):
+        config_dict = {
+            "train_batch_size": 15,
+            "train_micro_batch_size_per_gpu": 2,
+            "gradient_accumulation_steps": 2,
+        }
+        # 15 can never equal 2 * 2 * world_size for any integer world_size
+        with pytest.raises(AssertionError, match="train_batch_size is not equal to micro_batch_per_gpu"):
+            DeepSpeedConfig(config_dict)
+
+    def test_fp16_bf16_conflict(self):
+        config_dict = {
+            "train_batch_size": 8,
+            "fp16": {
+                "enabled": True
+            },
+            "bf16": {
+                "enabled": True
+            },
+        }
+        with pytest.raises(AssertionError, match="bfloat16 and fp16 modes cannot be simultaneously enabled"):
+            DeepSpeedConfig(config_dict)
+
+    def test_missing_batch_sizes(self):
+        config_dict = {
+            # Neither train_batch_size nor train_micro_batch_size_per_gpu provided
+        }
+        with pytest.raises(AssertionError,
+                           match="Either train_batch_size or train_micro_batch_size_per_gpu needs to be provided"):
+            DeepSpeedConfig(config_dict)
+
+    @pytest.mark.parametrize("precision,option", [
+        ("fp16", "fp16_master_weights_and_grads"),
+        ("bf16", "bf16_master_weights_and_grads"),
+        ("bf16", "bf16_optimizer_states"),
+    ])
+    def test_master_weights_require_zero(self, precision, option):
+        with pytest.raises(AssertionError, match="only supported with ZeRO Stage 1, 2, or 3"):
+            DeepSpeedConfig({"train_batch_size": 1, precision: {"enabled": True, option: True}})
+
+    def test_bf16_optimizer_states_require_master_weights(self):
+        with pytest.raises(AssertionError, match="requires bf16_master_weights_and_grads to be enabled"):
+            DeepSpeedConfig({
+                "train_batch_size": 1,
+                "zero_optimization": {
+                    "stage": 1
+                },
+                "bf16": {
+                    "enabled": True,
+                    "bf16_optimizer_states": True
+                },
+            })
+
+
+    def test_curriculum_learning_missing_metrics(self):
+        with pytest.raises(AssertionError, match="curriculum_metrics must be specified"):
+            DeepSpeedConfig({
+                "train_batch_size": 1,
+                "data_efficiency": {"data_sampling": {"curriculum_learning": {
+                    "enabled": True
+                }}}
+            })
+
+    def test_dynamic_batching_missing_max_tokens(self):
+        with pytest.raises(AssertionError, match="max_tokens must be specified"):
+            DeepSpeedConfig({
+                "train_batch_size": 1,
+                "data_efficiency": {"data_sampling": {"dynamic_batching": {
+                    "enabled": True
+                }}}
+            })
+
+    def test_zero_partial_offload_outside_stage_3(self):
+        with pytest.raises(AssertionError, match="Partial offloading only supported for ZeRO Stage 3"):
+            try:
+                from pydantic import ValidationError
+                DeepSpeedConfig({
+                    "train_batch_size": 1,
+                    "zero_optimization": {
+                        "stage": 2,
+                        "offload_optimizer": {
+                            "device": "cpu",
+                            "ratio": 0.5
+                        }
+                    }
+                })
+            except Exception as e:
+                if "Partial offloading only supported for ZeRO Stage 3" not in str(e):
+                    raise
+                raise AssertionError("Partial offloading only supported for ZeRO Stage 3")
+
+    def test_autotuning_missing_results_dir(self):
+        with pytest.raises(AssertionError, match="results_dir cannot be empty"):
+            DeepSpeedConfig({
+                "train_batch_size": 1,
+                "autotuning": {
+                    "enabled": True,
+                    "results_dir": ""
+                }
+            })
+
+    def test_autotuning_missing_exps_dir(self):
+        with pytest.raises(AssertionError, match="exps_dir cannot be empty"):
+            DeepSpeedConfig({
+                "train_batch_size": 1,
+                "autotuning": {
+                    "enabled": True,
+                    "exps_dir": ""
+                }
+            })
+
+    def test_checkpointing_invalid_value(self):
+        from deepspeed.runtime.config import DeepSpeedConfigError
+        with pytest.raises(DeepSpeedConfigError, match=".*Checkpoint config contains invalid tag_validation value.*"):
+            DeepSpeedConfig({
+                "train_batch_size": 1,
+                "checkpoint": {
+                    "tag_validation": "invalid_mode"
+                }
+            })
+
+
+
+def test_config_validation_optimized_python():
+    # A normal pytest run must catch validation accidentally reverting to assert.
+    code = """
+from deepspeed.runtime.config import DeepSpeedConfig
+
+try:
+    DeepSpeedConfig({
+        "train_batch_size": 0,
+        "train_micro_batch_size_per_gpu": 1,
+        "gradient_accumulation_steps": 1,
+    })
+except AssertionError as error:
+    if "Train batch size" not in str(error):
+        raise
+else:
+    raise RuntimeError("Optimized Python accepted invalid batch sizes")
+"""
+    result = subprocess.run([sys.executable, "-O", "-c", code], capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+def test_config_validation_optimized_python_all_cases():
+    code = """
+import sys
+from deepspeed.runtime.config import DeepSpeedConfig
+from pydantic import ValidationError
+
+def test_case(config, expected_error):
+    try:
+        DeepSpeedConfig(config)
+    except Exception as e:
+        if expected_error not in str(e):
+            print(f"Error {e} does not contain {expected_error}")
+            sys.exit(1)
+    else:
+        print(f"Optimized Python accepted invalid config: {config}")
+        sys.exit(1)
+
+test_case({
+    "train_batch_size": 1,
+    "data_efficiency": {"data_sampling": {"curriculum_learning": {"enabled": True}}}
+}, "curriculum_metrics must be specified")
+
+test_case({
+    "train_batch_size": 1,
+    "data_efficiency": {"data_sampling": {"dynamic_batching": {"enabled": True}}}
+}, "max_tokens must be specified")
+
+test_case({
+    "train_batch_size": 1,
+    "zero_optimization": {
+        "stage": 2,
+        "offload_optimizer": {"device": "cpu", "ratio": 0.5}
+    }
+}, "Partial offloading only supported for ZeRO Stage 3")
+
+test_case({
+    "train_batch_size": 1,
+    "autotuning": {"enabled": True, "results_dir": ""}
+}, "results_dir cannot be empty")
+
+test_case({
+    "train_batch_size": 1,
+    "autotuning": {"enabled": True, "exps_dir": ""}
+}, "exps_dir cannot be empty")
+
+test_case({
+    "train_batch_size": 1,
+    "checkpoint": {"tag_validation": "invalid_mode"}
+}, "Checkpoint config contains invalid tag_validation value")
+"""
+    import subprocess
+    import sys
+    result = subprocess.run([sys.executable, "-O", "-c", code], capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stdout + result.stderr
