@@ -44,7 +44,9 @@ class _LocalKVModel(torch.nn.Module):
                                            layer_idx=0,
                                            cache_kwargs={"cache_position": cache_position})
         if attention_mask.dim() == 4:
-            valid = attention_mask[:, 0, 0, :] == 0
+            mask = attention_mask[:, 0, 0, :]
+            # Boolean masks mark valid columns True, additive ones with 0.
+            valid = mask if mask.dtype == torch.bool else mask == 0
         else:
             valid = torch.zeros((values.shape[0], values.shape[2]), dtype=torch.bool, device=input_ids.device)
             valid[:, :attention_mask.shape[1]] = attention_mask.bool()
@@ -333,6 +335,217 @@ class TestAutoTPVocabularyParallelHeadRollout(DistributedTest):
         assert _same_on_every_rank(output.input_ids)
 
 
+class TestAutoTPGraphRecapture(DistributedTest):
+    world_size = 2
+
+    @pytest.mark.parametrize("continuous_batch_size", [None, 2])
+    def test_ranks_recapture_together(self, continuous_batch_size, monkeypatch):
+        accelerator = get_accelerator()
+        if accelerator.create_graph() is None:
+            pytest.skip("requires graph capture")
+
+        from transformers import AutoModelForCausalLM, LlamaConfig
+
+        config = LlamaConfig(vocab_size=128,
+                             hidden_size=64,
+                             intermediate_size=128,
+                             num_hidden_layers=2,
+                             num_attention_heads=4,
+                             num_key_value_heads=4,
+                             max_position_embeddings=64)
+        torch.manual_seed(0)
+        model = AutoModelForCausalLM.from_config(config)
+        ds_config = {
+            "train_micro_batch_size_per_gpu": 1,
+            "tensor_parallel": {
+                "autotp_size": 2
+            },
+            "zero_optimization": {
+                "stage": 0
+            },
+        }
+        engine, _, _, _ = deepspeed.initialize(model=model, config=ds_config)
+        model.eval()
+
+        device = torch.device(accelerator.current_device_name())
+        prompt_ids = torch.tensor([[5, 17, 42, 9], [33, 8, 71, 2]], device=device)
+        prompt_attn = torch.ones_like(prompt_ids)
+        new_tokens = 6
+        with torch.no_grad():
+            expected = model.generate(prompt_ids,
+                                      attention_mask=prompt_attn,
+                                      max_new_tokens=new_tokens,
+                                      do_sample=False,
+                                      eos_token_id=None,
+                                      pad_token_id=0)
+
+        original_capture_to_graph = accelerator.capture_to_graph
+        capture_count = 0
+
+        def counted_capture_to_graph(*args, **kwargs):
+            nonlocal capture_count
+            capture_count += 1
+            return original_capture_to_graph(*args, **kwargs)
+
+        monkeypatch.setattr(accelerator, "capture_to_graph", counted_capture_to_graph)
+        rollout = HybridEngineRollout(engine,
+                                      SimpleNamespace(pad_token_id=0, eos_token_id=-1),
+                                      cfg=HybridEngineRolloutConfig(use_graph_capture=True))
+        sampling = SamplingConfig(max_new_tokens=new_tokens,
+                                  temperature=0,
+                                  continuous_batch_size=continuous_batch_size)
+        try:
+            for step in range(2):
+                if step == 1 and dist.get_rank() == 1:
+                    # Only this rank's signature changes; its peer must capture with it,
+                    # since capture runs forwards that hold TP collectives.
+                    weight = model.model.layers[0].mlp.down_proj.weight
+                    weight.data = weight.data.clone()
+                output = rollout.generate(RolloutRequest(prompt_ids, prompt_attn), sampling)
+                assert torch.equal(output.input_ids, expected)
+            assert capture_count == 2
+        finally:
+            # A live graph holding NCCL work hangs process-group teardown.
+            del rollout
+            gc.collect()
+            accelerator.synchronize()
+
+
+class TestSegKIDataParallelRollout(DistributedTest):
+    world_size = 2
+
+    def test_each_rank_matches_its_own_generation(self):
+        accelerator = get_accelerator()
+        if accelerator.create_graph() is None:
+            pytest.skip("requires graph capture")
+        try:
+            from deepspeed.ops.module_inject import get_fused_glu_op
+            get_fused_glu_op()
+        except Exception as e:
+            pytest.skip(f"requires the segKI native op: {e}")
+
+        from transformers import LlamaConfig, LlamaForCausalLM
+
+        config = LlamaConfig(vocab_size=128,
+                             hidden_size=128,
+                             intermediate_size=256,
+                             num_hidden_layers=2,
+                             num_attention_heads=4,
+                             num_key_value_heads=2,
+                             max_position_embeddings=64)
+        config._attn_implementation = "sdpa"
+        torch.manual_seed(0)
+        device = torch.device(accelerator.current_device_name())
+        model = LlamaForCausalLM(config).to(device=device, dtype=torch.bfloat16).eval()
+        reference = copy.deepcopy(model)
+        # Pure data parallel: every rank holds the whole model and decodes its own prompt.
+        generator = torch.Generator().manual_seed(100 + dist.get_rank())
+        prompt_ids = torch.randint(1, config.vocab_size, (1, 8), generator=generator).to(device)
+        attention_mask = torch.ones_like(prompt_ids)
+        new_tokens = 8
+        with torch.no_grad():
+            expected = reference.generate(prompt_ids,
+                                          attention_mask=attention_mask,
+                                          max_new_tokens=new_tokens,
+                                          do_sample=False,
+                                          eos_token_id=None,
+                                          pad_token_id=0)
+
+        rollout = HybridEngineRollout(SimpleNamespace(module=model),
+                                      SimpleNamespace(pad_token_id=0, eos_token_id=-1),
+                                      cfg=HybridEngineRolloutConfig(use_graph_capture=True, use_segki=True))
+        try:
+            output = rollout.generate(RolloutRequest(prompt_ids, attention_mask),
+                                      SamplingConfig(max_new_tokens=new_tokens, temperature=0))
+            assert hasattr(model.lm_head, "_ki_gemm_op"), "segKI did not install its lm_head"
+            # A head split over the world would decode each rank's prompt with half of its peer's logits.
+            assert output.input_ids.tolist() == expected.tolist()
+        finally:
+            del rollout
+            gc.collect()
+            accelerator.synchronize()
+
+    def test_vocab_parallel_head_is_not_split_over_the_tp_group(self):
+        """segKI must not patch a vocab-parallel lm_head.
+
+        AutoTP's VocabParallelLinear head holds a shard of the vocabulary; patching it would make
+        segKI halve that shard and all-gather, silently dropping most of the rows from the logits.
+        It is not caught by the collective guard because VocabParallelLinear subclasses the
+        collective-bearing LinearLayer, not LinearAllreduce, so install_lm_head needs its own
+        ``is_vocab_parallel_lm_head`` check (a pre-existing master bug fixed by this PR).
+        """
+        accelerator = get_accelerator()
+        if accelerator.create_graph() is None:
+            pytest.skip("requires graph capture")
+        # Without the native op install_lm_head is skipped entirely, so only
+        # here is the is_vocab_parallel_lm_head guard under test in the first place.
+        try:
+            from deepspeed.ops.module_inject import get_fused_glu_op
+            get_fused_glu_op()
+        except Exception as e:
+            pytest.skip(f"requires the segKI native op: {e}")
+
+        from transformers import LlamaConfig, LlamaForCausalLM
+
+        config = LlamaConfig(vocab_size=128,
+                             hidden_size=128,
+                             intermediate_size=256,
+                             num_hidden_layers=2,
+                             num_attention_heads=4,
+                             num_key_value_heads=2,
+                             max_position_embeddings=64)
+        torch.manual_seed(0)
+        device = torch.device(accelerator.current_device_name())
+        model = LlamaForCausalLM(config).to(device=device, dtype=torch.bfloat16).eval()
+        reference = copy.deepcopy(model)
+        ds_config = {
+            "train_micro_batch_size_per_gpu": 1,
+            # segKI's lm_head install requires bf16 weights, so cast on initialize instead of after.
+            "bf16": {
+                "enabled": True
+            },
+            "tensor_parallel": {
+                "autotp_size": 2,
+                "vocab_parallel_lm_head": True
+            },
+            "zero_optimization": {
+                "stage": 0
+            },
+        }
+        engine, _, _, _ = deepspeed.initialize(model=model, config=ds_config)
+        model.eval()
+        # The config must actually shard the head, else this is not the case under test.
+        heads = [m for m in model.modules() if getattr(m, "is_vocab_parallel_lm_head", False)]
+        assert heads and heads[0].weight.shape[0] < config.vocab_size
+
+        prompt_ids = torch.tensor([[5, 17, 42, 9, 30, 61, 100, 3]], device=device)
+        attention_mask = torch.ones_like(prompt_ids)
+        new_tokens = 8
+        with torch.no_grad():
+            expected = reference.generate(prompt_ids,
+                                          attention_mask=attention_mask,
+                                          max_new_tokens=new_tokens,
+                                          do_sample=False,
+                                          eos_token_id=None,
+                                          pad_token_id=0)
+
+        rollout = HybridEngineRollout(engine,
+                                      SimpleNamespace(pad_token_id=0, eos_token_id=-1),
+                                      cfg=HybridEngineRolloutConfig(use_graph_capture=True, use_segki=True))
+        try:
+            output = rollout.generate(RolloutRequest(prompt_ids, attention_mask),
+                                      SamplingConfig(max_new_tokens=new_tokens, temperature=0))
+            assert not any(hasattr(m, "_ki_gemm_op") for m in heads), \
+                "segKI patched a vocab-parallel lm_head"
+            # A patched head halves its shard and gathers, leaving the greedy tokens to wander over
+            # the missing rows.
+            assert output.input_ids.tolist() == expected.tolist()
+        finally:
+            del rollout
+            gc.collect()
+            accelerator.synchronize()
+
+
 @pytest.mark.parametrize("attn_implementation", ["eager", "sdpa"])
 def test_static_graph_matches_native_llama_generation(attn_implementation):
     accelerator = get_accelerator()
@@ -373,6 +586,215 @@ def test_static_graph_matches_native_llama_generation(attn_implementation):
                               SamplingConfig(max_new_tokens=new_tokens, temperature=0))
 
     assert output.input_ids.tolist() == expected.tolist()
+
+
+def test_segki_graphs_recapture_after_refresh_or_a_shared_model_reinstall(monkeypatch):
+    accelerator = get_accelerator()
+    if not accelerator.is_available() or accelerator.create_graph() is None:
+        pytest.skip("requires graph capture")
+
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    torch.manual_seed(4321)
+    config = LlamaConfig(vocab_size=64,
+                         hidden_size=64,
+                         intermediate_size=128,
+                         num_hidden_layers=2,
+                         num_attention_heads=4,
+                         num_key_value_heads=2,
+                         max_position_embeddings=64)
+    config._attn_implementation = "sdpa"
+    device = torch.device(accelerator.device_name())
+    model = LlamaForCausalLM(config).to(device).eval()
+    prompt_ids = torch.randint(1, 64, (2, 8), generator=torch.Generator().manual_seed(2)).to(device)
+    attention_mask = torch.ones_like(prompt_ids)
+    sampling = SamplingConfig(max_new_tokens=8, temperature=0)
+    with torch.no_grad():
+        expected = model.generate(prompt_ids,
+                                  attention_mask=attention_mask,
+                                  max_new_tokens=8,
+                                  do_sample=False,
+                                  eos_token_id=None,
+                                  pad_token_id=0)
+
+    original_capture_to_graph = accelerator.capture_to_graph
+    capture_count = 0
+
+    def counted_capture_to_graph(*args, **kwargs):
+        nonlocal capture_count
+        capture_count += 1
+        return original_capture_to_graph(*args, **kwargs)
+
+    monkeypatch.setattr(accelerator, "capture_to_graph", counted_capture_to_graph)
+
+    def make_rollout():
+        return HybridEngineRollout(SimpleNamespace(module=model),
+                                   SimpleNamespace(pad_token_id=0, eos_token_id=-1),
+                                   cfg=HybridEngineRolloutConfig(use_graph_capture=True, use_segki=True))
+
+    first, second = make_rollout(), make_rollout()
+    # first, first (replay), second (reinstalls the model's decode kernels), first (must recapture),
+    # then a refresh, after which first must recapture once more and replay again.
+    for rollout, captures in ((first, 1), (first, 1), (second, 2), (first, 3), (first, 3), ("refresh", 4), (first, 4)):
+        if rollout == "refresh":
+            first.refresh_weights()
+            rollout = first
+        output = rollout.generate(RolloutRequest(prompt_ids, attention_mask), sampling)
+        assert output.input_ids.tolist() == expected.tolist()
+        assert capture_count == captures
+
+
+def test_static_graph_is_reused_across_rollouts_with_the_same_decode_shape(monkeypatch):
+    accelerator = get_accelerator()
+    if not accelerator.is_available() or accelerator.create_graph() is None:
+        pytest.skip("requires graph capture")
+
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    torch.manual_seed(1234)
+    config = LlamaConfig(vocab_size=64,
+                         hidden_size=64,
+                         intermediate_size=128,
+                         num_hidden_layers=2,
+                         num_attention_heads=4,
+                         num_key_value_heads=2,
+                         max_position_embeddings=128)
+    config._attn_implementation = "sdpa"
+    device = torch.device(accelerator.device_name())
+    model = LlamaForCausalLM(config).to(device).eval()
+    generator = torch.Generator().manual_seed(1)
+    short_prompts = torch.randint(1, 64, (4, 8), generator=generator).to(device)
+    long_prompts = torch.randint(1, 64, (4, 12), generator=generator).to(device)
+    # eos -1 never matches, so every row generates the full length.
+    rollout = HybridEngineRollout(SimpleNamespace(module=model),
+                                  SimpleNamespace(pad_token_id=0, eos_token_id=-1),
+                                  cfg=HybridEngineRolloutConfig(use_graph_capture=True))
+
+    original_capture_to_graph = accelerator.capture_to_graph
+    capture_count = 0
+
+    def counted_capture_to_graph(*args, **kwargs):
+        nonlocal capture_count
+        capture_count += 1
+        return original_capture_to_graph(*args, **kwargs)
+
+    monkeypatch.setattr(accelerator, "capture_to_graph", counted_capture_to_graph)
+    # The decode graph depends on the batch size and prompt width plus max_new_tokens, not on the
+    # prompt width alone: 8 + 16 and 12 + 12 share one graph, while 8 + 8 needs another.
+    outputs = []
+    for step, (prompt_ids, new_tokens) in enumerate(
+        ((short_prompts, 16), (short_prompts, 16), (long_prompts, 12), (short_prompts, 8))):
+        if step == 1:
+            # Apply the same in-place update an optimizer step would make.
+            with torch.no_grad():
+                for parameter in model.parameters():
+                    parameter.add_(torch.randn_like(parameter) * 0.05)
+            rollout.sync_weights(step=1)
+        attention_mask = torch.ones_like(prompt_ids)
+        with torch.no_grad():
+            expected = model.generate(prompt_ids,
+                                      attention_mask=attention_mask,
+                                      max_new_tokens=new_tokens,
+                                      do_sample=False,
+                                      eos_token_id=None,
+                                      pad_token_id=0)
+        output = rollout.generate(RolloutRequest(prompt_ids, attention_mask),
+                                  SamplingConfig(max_new_tokens=new_tokens, temperature=0))
+        assert output.input_ids.tolist() == expected.tolist()
+        outputs.append(output.input_ids)
+
+    # The update must change the tokens, otherwise a graph replaying stale weights would also pass.
+    assert not torch.equal(outputs[0], outputs[1])
+    assert capture_count == 2
+
+    # A graph captured in eval mode must not be replayed in training mode.
+    model.train()
+    rollout.generate(RolloutRequest(short_prompts, torch.ones_like(short_prompts)),
+                     SamplingConfig(max_new_tokens=8, temperature=0))
+    model.eval()
+    assert capture_count == 3
+
+    # Child module mode changes must also invalidate a retained graph.
+    child = model.model.layers[0]
+    child.train()
+    rollout.generate(RolloutRequest(short_prompts, torch.ones_like(short_prompts)),
+                     SamplingConfig(max_new_tokens=8, temperature=0))
+    child.eval()
+    assert capture_count == 4
+
+    # Nor may a graph captured without autocast be replayed under it. Autocast
+    # still changes kernels at the model's own dtype, e.g. softmax runs in fp32.
+    bf16_rollout = HybridEngineRollout(SimpleNamespace(module=copy.deepcopy(model).to(torch.bfloat16)),
+                                       SimpleNamespace(pad_token_id=0, eos_token_id=-1),
+                                       cfg=HybridEngineRolloutConfig(use_graph_capture=True))
+    bf16_request = RolloutRequest(short_prompts, torch.ones_like(short_prompts))
+    bf16_rollout.generate(bf16_request, SamplingConfig(max_new_tokens=8, temperature=0))
+    with torch.autocast(device_type=accelerator.device_name(), dtype=torch.bfloat16):
+        bf16_rollout.generate(bf16_request, SamplingConfig(max_new_tokens=8, temperature=0))
+    bf16_rollout.shutdown()
+    assert capture_count == 6
+
+    head_dim = config.hidden_size // config.num_attention_heads
+    # Keys and values for every layer at batch 4 and cache length 8 + 8.
+    cache_bytes = 2 * config.num_hidden_layers * 4 * config.num_key_value_heads * 16 * head_dim * 4
+    allocated = accelerator.memory_allocated()
+    rollout.shutdown()
+    assert accelerator.memory_allocated() <= allocated - cache_bytes
+
+
+@pytest.mark.parametrize("continuous_batch_size", [None, 2])
+def test_graph_revalidates_tensors_replaced_during_prefill(monkeypatch, continuous_batch_size):
+    accelerator = get_accelerator()
+    if not accelerator.is_available() or accelerator.create_graph() is None:
+        pytest.skip("requires graph capture")
+
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    torch.manual_seed(1234)
+    config = LlamaConfig(vocab_size=64,
+                         hidden_size=64,
+                         intermediate_size=128,
+                         num_hidden_layers=2,
+                         num_attention_heads=4,
+                         num_key_value_heads=2,
+                         max_position_embeddings=128)
+    config._attn_implementation = "eager"
+    device = torch.device(accelerator.device_name())
+    model = LlamaForCausalLM(config).to(device).eval()
+    prompt_ids = torch.randint(1, 64, (2, 8), generator=torch.Generator().manual_seed(1)).to(device)
+    attention_mask = torch.ones_like(prompt_ids)
+    sampling = SamplingConfig(max_new_tokens=6, temperature=0, continuous_batch_size=continuous_batch_size)
+    tokenizer = SimpleNamespace(pad_token_id=0, eos_token_id=-1)
+    rollout = HybridEngineRollout(SimpleNamespace(module=model),
+                                  tokenizer,
+                                  cfg=HybridEngineRolloutConfig(use_graph_capture=True))
+    capture_count = 0
+    original_capture_to_graph = accelerator.capture_to_graph
+
+    def counted_capture_to_graph(*args, **kwargs):
+        nonlocal capture_count
+        capture_count += 1
+        return original_capture_to_graph(*args, **kwargs)
+
+    monkeypatch.setattr(accelerator, "capture_to_graph", counted_capture_to_graph)
+    first = rollout.generate(RolloutRequest(prompt_ids, attention_mask), sampling)
+    assert capture_count == 1
+
+    replaced = [False]
+    handle = None
+
+    def replace_buffer_once(*_args, **_kwargs):
+        if not replaced[0]:
+            rotary = model.model.rotary_emb
+            rotary.inv_freq = rotary.inv_freq.clone()
+            replaced[0] = True
+            handle.remove()
+
+    handle = model.register_forward_pre_hook(replace_buffer_once)
+    second = rollout.generate(RolloutRequest(prompt_ids, attention_mask), sampling)
+    assert replaced[0]
+    assert torch.equal(second.input_ids, first.input_ids)
+    assert capture_count == 2
 
 
 def test_continuous_generation_profile_on_accelerator():
@@ -558,7 +980,9 @@ def test_continuous_rollout_matches_native_llama_generation_on_accelerator(attn_
     monkeypatch.setattr(accelerator, "capture_to_graph", counted_capture_to_graph)
     # Three requests and two slots force refill; the second call also exercises graph reuse.
     captures_per_call = []
-    for rollout in (eager_rollout, graph_rollout, graph_rollout):
+    for rollout_index, rollout in enumerate((eager_rollout, graph_rollout, graph_rollout)):
+        if rollout_index == 2:
+            rollout.sync_weights(step=1)
         output = rollout.generate(request, sampling)
         assert torch.equal(output.input_ids, reference)
         assert torch.equal(output.attention_mask, expected_attention)
@@ -749,6 +1173,89 @@ def test_rollout_under_autocast_matches_hf_generate(use_graph_capture, continuou
                                       eos_token_id=None,
                                       pad_token_id=0)
 
+    assert output.input_ids.tolist() == expected.tolist()
+
+
+def test_static_graph_is_recaptured_when_autocast_changes(monkeypatch):
+    # A retained fp32 graph replays fp32 kernels, so entering bf16 autocast must recapture rather than reuse it.
+    accelerator = get_accelerator()
+    if not accelerator.is_available() or accelerator.device_name() != "cuda":
+        pytest.skip("CUDA is required for CUDA graph decode coverage")
+    if not accelerator.is_bf16_supported():
+        pytest.skip("bf16 autocast is not supported")
+
+    device = torch.device(accelerator.device_name())
+    model = _tiny_llama(device)
+    rollout = _rollout(model, use_graph_capture=True)
+    captures = []
+    original_capture = rollout._capture_static_graph
+
+    def capture(*args, **kwargs):
+        captures.append(torch.is_autocast_enabled(device.type))
+        return original_capture(*args, **kwargs)
+
+    monkeypatch.setattr(rollout, "_capture_static_graph", capture)
+    new_tokens = 8
+    request = _random_request(batch_size=4, prompt_len=8, device=device)
+    sampling = SamplingConfig(max_new_tokens=new_tokens, temperature=0)
+
+    def generate_and_compare():
+        output = rollout.generate(request, sampling)
+        with torch.no_grad():
+            expected = model.generate(request.prompt_ids,
+                                      attention_mask=request.prompt_attention_mask,
+                                      max_new_tokens=new_tokens,
+                                      do_sample=False,
+                                      eos_token_id=None,
+                                      pad_token_id=0)
+        assert output.input_ids.tolist() == expected.tolist()
+
+    for _ in range(2):
+        generate_and_compare()
+    with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
+        for _ in range(2):
+            generate_and_compare()
+
+    assert captures == [False, True]
+
+
+def test_static_graph_is_recaptured_after_a_peer_capture_failure(monkeypatch):
+    # This rank's capture succeeded but a peer's failed: replaying the kept graph
+    # would wait on a peer that has none, so the next call must capture again.
+    accelerator = get_accelerator()
+    if not accelerator.is_available() or accelerator.device_name() != "cuda":
+        pytest.skip("CUDA is required for CUDA graph decode coverage")
+
+    device = torch.device(accelerator.device_name())
+    model = _tiny_llama(device)
+    rollout = _rollout(model, use_graph_capture=True)
+    captures = 0
+
+    def capture_on_all_ranks(_module, capture):
+        nonlocal captures
+        captures += 1
+        result = capture()
+        if captures == 1:
+            raise RuntimeError("decode graph capture failed on a peer rank")
+        return result
+
+    monkeypatch.setattr(rollout, "_capture_on_all_ranks", capture_on_all_ranks)
+    new_tokens = 8
+    request = _random_request(batch_size=4, prompt_len=8, device=device)
+    sampling = SamplingConfig(max_new_tokens=new_tokens, temperature=0)
+
+    with pytest.raises(RuntimeError, match="peer rank"):
+        rollout.generate(request, sampling)
+    output = rollout.generate(request, sampling)
+    with torch.no_grad():
+        expected = model.generate(request.prompt_ids,
+                                  attention_mask=request.prompt_attention_mask,
+                                  max_new_tokens=new_tokens,
+                                  do_sample=False,
+                                  eos_token_id=None,
+                                  pad_token_id=0)
+
+    assert captures == 2
     assert output.input_ids.tolist() == expected.tolist()
 
 
