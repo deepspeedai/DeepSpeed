@@ -118,7 +118,7 @@ __device__ void reduce_block_in_shared_memory(T* s_a, T* s_b, T* g_a, T* g_b)
         }
 
         // Reduce final warp using shuffle
-        for (int offset = warpSize / 2; offset > 0; offset /= 2) {
+        for (int offset = active.size() / 2; offset > 0; offset /= 2) {
             a_sum += active.shfl_down(a_sum, offset);
             b_sum += active.shfl_down(b_sum, offset);
         }
