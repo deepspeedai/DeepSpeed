@@ -695,18 +695,25 @@ class TestUniversalCheckpointAcrossZeROStages(DistributedTest):
         for name, states in expected.items():
             for expected_state, loaded_state in zip(states, loaded[name]):
                 assert torch.equal(expected_state, loaded_state), name
-        optimizer_states = list(target.optimizer.optimizer.state.values())
-        assert optimizer_states
-        for state in optimizer_states:
-            assert int(state["step"]) == steps_before_save
+        optimizer = target.optimizer.optimizer
+        owned = {buf for buf, st in optimizer.state.items() if "exp_avg" in st}
+        assert owned
+        # The restored step lands only on the groups this rank owns moments for. A rank that holds no
+        # fragment for a group (e.g. a scalar's own group, whose moments live on a wider group's buffer)
+        # must not get a bare step: it would be an incomplete state entry the optimizer cannot use next step.
+        for buf, st in optimizer.state.items():
+            if buf in owned:
+                assert int(st["step"]) == steps_before_save, buf
+            else:
+                assert "step" not in st, buf
 
         for i, (param_group, lr) in enumerate(zip(target.optimizer.param_groups, group_lrs)):
             assert param_group["lr"] == lr and param_group["weight_decay"] == 0.01 * i, param_group
 
-        # The restored optimizer must also be able to keep training, advancing every state's step once.
+        # The restored optimizer must also be able to keep training, advancing every owned step once.
         _train(target, hidden_dim, 1)
-        for state in target.optimizer.optimizer.state.values():
-            assert int(state["step"]) == steps_before_save + 1
+        for buf in owned:
+            assert int(optimizer.state[buf]["step"]) == steps_before_save + 1, buf
         target.destroy()
 
 
@@ -826,14 +833,19 @@ class TestUniversalCheckpointCrossStageScalarOwnGroup(DistributedTest):
         target = build(target_stage, load_universal=True)
         target.load_checkpoint(tmpdir, tag=universal_tag)
 
-        # Every restored parameter must carry the source's global step so the very next step continues
-        # from it; the scalar's rank holds no fragment for its own group, so its step is restored from
-        # the global state in the universal checkpoint.
-        states = target.optimizer.optimizer.state.values()
-        for state in states:
-            assert int(state["step"]) == steps_before_save
+        # Every restored parameter must carry the source's global step on the ranks that own its group's moments, so the very
+        # next step continues from it. A rank that holds no fragment for the scalar's group has no local state there at all,
+        # so its (empty) state must not carry a restored step: a bare step with no moments is broken state.
+        optimizer = target.optimizer.optimizer
+        owned = {buf for buf, state in optimizer.state.items() if "exp_avg" in state}
+        assert owned
+        for buf, state in optimizer.state.items():
+            if buf in owned:
+                assert int(state["step"]) == steps_before_save, buf
+            else:
+                assert "step" not in state, buf
 
         _train(target, hidden_dim, 1)
-        for state in target.optimizer.optimizer.state.values():
-            assert int(state["step"]) == steps_before_save + 1
+        for buf in owned:
+            assert int(optimizer.state[buf]["step"]) == steps_before_save + 1, buf
         target.destroy()

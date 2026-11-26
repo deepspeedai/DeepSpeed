@@ -418,14 +418,17 @@ class ZeROOptimizer(DeepSpeedOptimizer):
 
             if steps and steps[0] is not None:
                 step_to_restore = steps[0]
-            else:
-                # No usable per-parameter step: either this rank holds no fragment for the group (a
-                # scalar param in its own group when a ZeRO-3 source loads under ZeRO-1/2), or a ZeRO-3
-                # source that keeps its step in the global state. Fall back to the source's global step.
+            elif opt_keys:
+                # A rank that owns this group's moments but whose source is ZeRO-3 (no per-parameter
+                # step.pt) gets the source's global step. A rank with no fragment for the group has
+                # no local optimizer state at all, so it must not be seeded here: writing only a step
+                # would leave an incomplete state entry the optimizer cannot consume at the next step.
                 if global_step is None:
                     from deepspeed.checkpoint.universal_checkpoint import load_universal_optimizer_step
                     global_step = load_universal_optimizer_step(optim_sd, checkpoint_dir, [])
                 step_to_restore = global_step
+            else:
+                step_to_restore = None
 
             if step_to_restore is not None:
                 # The optimizer advances step in place, and a ZeRO-3 source's step is shared by every group.
@@ -440,7 +443,8 @@ class ZeROOptimizer(DeepSpeedOptimizer):
                 param_group[key] = value
 
             # The restored group settings decide where step belongs, so place it after them.
-            place_restored_optimizer_step(self.optimizer.state[hp_param], hp_param, param_group)
+            if step_to_restore is not None:
+                place_restored_optimizer_step(self.optimizer.state[hp_param], hp_param, param_group)
 
     def report_ipg_memory_usage(self, tag, param_elems, dtype=None):
         dtypes = self.ipg_buckets.keys() if dtype is None else [dtype]
