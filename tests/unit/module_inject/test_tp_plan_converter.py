@@ -331,3 +331,79 @@ class TestTPPlanConverter:
         assert k_norm_spec.partition_type == PartitionType.SKIP
         assert k_norm_spec.grad_allreduce is True
 
+    def test_replicated_style_converts_to_skip_without_grad_allreduce(self):
+        """'replicated' style converts to PartitionType.SKIP with grad_allreduce=False."""
+        plan = {"layers.*.self_attn.q_norm": "replicated"}
+        specs = TPPlanConverter.convert(plan)
+        assert len(specs) == 1
+        assert specs[0].partition_type == PartitionType.SKIP
+        assert specs[0].grad_allreduce is False
+        assert specs[0].gather_output is False
+
+    def test_layer_specific_gathered_override_supplements_replicated_norm(self):
+        """When a layer-specific colwise_gather_output rule overrides a wildcard colwise rule,
+        the overridden layer's norm is supplemented as 'replicated' (grad_allreduce=False),
+        while other layers matching the wildcard receive grad_allreduce=True."""
+        import torch.nn as nn
+        from deepspeed.module_inject.autotp_config import AutoTPConfig
+
+        class MockAttention(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.q_proj = nn.Linear(32, 32)
+                self.k_proj = nn.Linear(32, 32)
+                self.q_norm = nn.LayerNorm(32)
+                self.k_norm = nn.LayerNorm(32)
+
+        class MockModel(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.layers = nn.ModuleList([
+                    nn.ModuleDict({"self_attn": MockAttention()}),
+                    nn.ModuleDict({"self_attn": MockAttention()}),
+                ])
+
+        model = MockModel()
+
+        # Plan with wildcard colwise and layer 0 colwise_gather_output override
+        hf_plan = {
+            "layers.*.self_attn.q_proj": "colwise",
+            "layers.*.self_attn.k_proj": "colwise",
+            "layers.0.self_attn.q_proj": "colwise_gather_output",
+            "layers.0.self_attn.k_proj": "colwise_gather_output",
+        }
+
+        # Test without model
+        supp_no_model = TPPlanConverter.supplement_replicated_qk_norm(dict(hf_plan))
+        assert supp_no_model["layers.0.self_attn.q_norm"] == "replicated"
+        assert supp_no_model["layers.0.self_attn.k_norm"] == "replicated"
+        assert supp_no_model["layers.*.self_attn.q_norm"] == "replicated_with_grad_allreduce"
+        assert supp_no_model["layers.*.self_attn.k_norm"] == "replicated_with_grad_allreduce"
+
+        specs_no_model = TPPlanConverter.convert(supp_no_model)
+        config_no_model = AutoTPConfig(layer_specs=specs_no_model)
+        # Layer 0 norm must match the specific 'replicated' rule (grad_allreduce=False)
+        spec_q0 = config_no_model.find_matching_spec("layers.0.self_attn.q_norm.weight")
+        assert spec_q0 is not None
+        assert spec_q0.grad_allreduce is False
+        # Layer 1 norm must match the wildcard 'replicated_with_grad_allreduce' rule (grad_allreduce=True)
+        spec_q1 = config_no_model.find_matching_spec("layers.1.self_attn.q_norm.weight")
+        assert spec_q1 is not None
+        assert spec_q1.grad_allreduce is True
+
+        # Test with model
+        supp_model = TPPlanConverter.supplement_replicated_qk_norm(dict(hf_plan), model=model)
+        assert supp_model["layers.0.self_attn.q_norm"] == "replicated"
+        assert supp_model["layers.0.self_attn.k_norm"] == "replicated"
+        assert supp_model["layers.*.self_attn.q_norm"] == "replicated_with_grad_allreduce"
+        assert supp_model["layers.*.self_attn.k_norm"] == "replicated_with_grad_allreduce"
+
+        specs_model = TPPlanConverter.convert(supp_model, model=model)
+        config_model = AutoTPConfig(layer_specs=specs_model)
+        spec_m_q0 = config_model.find_matching_spec("layers.0.self_attn.q_norm.weight")
+        assert spec_m_q0 is not None
+        assert spec_m_q0.grad_allreduce is False
+        spec_m_q1 = config_model.find_matching_spec("layers.1.self_attn.q_norm.weight")
+        assert spec_m_q1 is not None
+        assert spec_m_q1.grad_allreduce is True
+
