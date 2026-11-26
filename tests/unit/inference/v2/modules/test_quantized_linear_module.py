@@ -170,7 +170,7 @@ def test_fp6_quantized_linear_act_fn(tokens: int, in_channels: int, out_channels
 # Other shapes, not supported by FP6 kernels. Will raise ValueError.
 @pytest.mark.inference_v2_ops
 @pytest.mark.parametrize("tokens", all_tokens)
-@pytest.mark.parametrize("in_channels, out_channels", [(4608, 1728), (3420, 5120), (5120, 3420)])
+@pytest.mark.parametrize("in_channels, out_channels", [(4608, 1728), (3420, 5120), (5120, 3424)])
 @pytest.mark.parametrize("act_fn", all_acts)
 @pytest.mark.parametrize("use_bias", [True, False])
 def test_fp6_quantized_linear_act_fn_fail(tokens: int, in_channels: int, out_channels: int, act_fn: ActivationType,
