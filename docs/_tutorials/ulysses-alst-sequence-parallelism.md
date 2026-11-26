@@ -113,19 +113,18 @@ for iter, batch in enumerate(dl):
         vocab_size=model.module.config.vocab_size,
     )
 
-    # differentiable weighted per-shard-loss aggregation across ranks
-    losses_per_rank = torch.distributed.nn.functional.all_gather(loss, group=sp_group)
-    # special dealing with SFT that has prompt tokens that aren't used in loss computation
-    good_tokens = (shift_labels != -100).view(-1).sum()
-    good_tokens_per_rank = torch.distributed.nn.functional.all_gather(good_tokens, group=sp_group)
-    total_loss = sum(losses_per_rank[rank] * good_tokens_per_rank[rank] for rank in range(sp_world_size))
-    total_good_tokens = sum(good_tokens_per_rank)
-    loss = total_loss / max(total_good_tokens, 1)
+    good_tokens = (shift_labels != -100).sum()
+    local_mean = torch.where(good_tokens > 0, loss.float(), 0.0)
+    local_sum = local_mean * good_tokens
+
+    totals = torch.stack((local_sum.detach(), good_tokens))
+    dist.all_reduce(totals, group=sp_group)
+    total_good_tokens = totals[1].clamp_min(1)
 
     if dist.get_rank() == 0:
-        print(f"{iter}: {loss=}")
+        print(f"{iter}: loss={(totals[0] / total_good_tokens).item()}")
 
-    model.backward(loss)
+    model.backward(local_sum / total_good_tokens)
 ```
 
 Now to train:
