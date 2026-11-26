@@ -635,7 +635,7 @@ order between Transformers releases. The installer therefore replaces only
 instances of the classes in ``SUPPORTED_RMS_NORM_CLASSES``: the RMSNorm
 classes of Llama, Mistral, Mixtral, Phi-3, Qwen2, Qwen2-MoE, Qwen3, Qwen3-MoE,
 DeepSeek-V2 and DeepSeek-V3. A module is replaced only if it still runs its
-class's own ``forward`` and is at most 2048 wide, so subclasses, modules whose
+class's own ``forward`` and is at most 32768 wide, so subclasses, modules whose
 ``forward`` was already patched or wrapped (by another kernel installer or by
 an earlier call) and wider norms are left alone. Replaced modules keep their
 own weight Parameter and ``variance_epsilon``. The return value is the number
@@ -681,10 +681,9 @@ Requirements and limits:
   modules run eager.
 - bfloat16 or float16, with the input and the weight in the same dtype. Other
   inputs run eager, including float32 weights under autocast.
-- Norms wider than 2048 are not replaced. That covers the hidden size and head
-  dimension of Qwen3-30B-A3B; in models with a wider hidden size, such as
-  Qwen3-235B-A22B (4096), only the narrower norms, such as the 128-wide query
-  and key norms, are replaced.
+- Norms wider than 32768 are not replaced. That covers the hidden size and
+  head dimension of models such as Qwen3-235B-A22B (4096) and DeepSeek-V3
+  (7168).
 - Any leading shape. Non-contiguous inputs and weights are copied before the
   kernels run. The output and the input gradient the kernels produce are
   contiguous, whereas eager RMSNorm follows the strides of its input and of

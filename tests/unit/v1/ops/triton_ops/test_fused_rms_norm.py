@@ -190,7 +190,17 @@ def _check_fused_rms_norm_matches_hf_forward_and_backward(dtype, shape):
                       min_frac_within_1=0.95,
                       label="dx",
                       atol=dx_atol)
-    _assert_ulp_close(fused_weight.grad, eager_weight.grad, max_ulp=8, min_frac_within_1=0.95, label="dgamma")
+    # Eager rounds each row's product before summing the weight gradient, so a column whose products nearly cancel
+    # can be many ULPs off; wide rows have many such columns, so allow one rounding step of a typical value there.
+    dgamma_atol = 0.0
+    if shape[-1] > 2048:
+        dgamma_atol = torch.finfo(dtype).eps * eager_weight.grad.float().abs().mean().item()
+    _assert_ulp_close(fused_weight.grad,
+                      eager_weight.grad,
+                      max_ulp=8,
+                      min_frac_within_1=0.95,
+                      label="dgamma",
+                      atol=dgamma_atol)
 
 
 def _check_fused_rms_norm_width_one_has_nonzero_input_gradient(dtype, n_rows=257):
@@ -493,8 +503,8 @@ def test_replace_rms_norm_runs_the_eager_forward_for_cpu_inputs(qualified_name):
 
 def test_replace_rms_norm_leaves_norms_wider_than_the_kernels_alone():
     rms_norm_class = _hf_class(QWEN3_MOE_RMS_NORM)
-    assert _rms_norm().replace_rms_norm(rms_norm_class(2048)) == 1
-    assert _rms_norm().replace_rms_norm(rms_norm_class(2049)) == 0
+    assert _rms_norm().replace_rms_norm(rms_norm_class(32768)) == 1
+    assert _rms_norm().replace_rms_norm(rms_norm_class(32769)) == 0
 
 
 def _check_replace_rms_norm_copy_uses_its_own_epsilon(device, copy_module):
@@ -764,6 +774,9 @@ class TestFusedRMSNormCUDA(DistributedTest):
             (0, 2048),
             (7, 128),
             (5, 2048),
+            # Wider rows run with more warps: 8 above 2048 and 16 above 16384, up to the widest supported row.
+            (5, 2049),
+            (3, 32768),
             (3, 130),
             # First width beyond the narrow cutoff: it must retain the wide-path accuracy contract.
             (3, 129),
@@ -830,11 +843,11 @@ class TestFusedRMSNormCUDA(DistributedTest):
         _check_fused_rms_norm_handles_strided_weight(dtype)
 
     @pytest.mark.parametrize("hidden_dtype, weight_dtype, width", [
-        (torch.bfloat16, torch.bfloat16, 2049),
+        (torch.bfloat16, torch.bfloat16, 32769),
         (torch.float32, torch.float32, 128),
         (torch.bfloat16, torch.float16, 128),
     ],
-                             ids=["wider-than-2048", "float32", "mixed-dtypes"])
+                             ids=["wider-than-32768", "float32", "mixed-dtypes"])
     def test_fused_rms_norm_rejects_unsupported_inputs(self, hidden_dtype, weight_dtype, width):
         _require_fused_engine()
         _check_fused_rms_norm_rejects_unsupported_inputs(hidden_dtype, weight_dtype, width)

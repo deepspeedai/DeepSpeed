@@ -26,7 +26,7 @@ SUPPORTED_RMS_NORM_CLASSES = (
     "transformers.models.qwen3.modeling_qwen3.Qwen3RMSNorm",
     "transformers.models.qwen3_moe.modeling_qwen3_moe.Qwen3MoeRMSNorm",
 )
-_MAX_FORWARD_BLOCK = 2048
+_MAX_FORWARD_BLOCK = 32768
 _DWEIGHT_BLOCK_M = 16
 _DWEIGHT_BLOCK_N = 256
 # Norms at most this wide, such as the 128-wide query and key norms, give each program several rows: one row per
@@ -246,6 +246,15 @@ def _block_n(n_cols: int) -> int:
     return max(16, triton.next_power_of_2(n_cols))
 
 
+def _num_warps(n_cols: int) -> int:
+    # The row kernels hold a whole row in one program, so wider rows are spread over more threads.
+    if n_cols <= 2048:
+        return 4
+    if n_cols <= 16384:
+        return 8
+    return 16
+
+
 def _narrow_block_m(n_rows: int, n_cols: int):
     """Rows per narrow program, capped to the input, or None when unused."""
     if n_rows == 0 or n_cols > _NARROW_MAX_COLS:
@@ -288,6 +297,7 @@ class _FusedRMSNorm(torch.autograd.Function):
                 n_cols,
                 eps,
                 BLOCK_N=_block_n(n_cols),
+                num_warps=_num_warps(n_cols),
             )
         return out
 
@@ -330,6 +340,7 @@ class _FusedRMSNorm(torch.autograd.Function):
             grad_hidden,
             n_cols,
             BLOCK_N=_block_n(n_cols),
+            num_warps=_num_warps(n_cols),
         )
 
         dweight_block_n = min(_DWEIGHT_BLOCK_N, _block_n(n_cols))
@@ -357,7 +368,7 @@ def fused_rms_norm(hidden: torch.Tensor, weight: torch.Tensor, eps: float) -> to
     rounded once to the input dtype, and the module weight is multiplied after
     that rounding. ``hidden`` and ``weight`` must be bfloat16 or float16 CUDA
     tensors of the same dtype, and the normalized (last) dimension must be at
-    most 2048.
+    most 32768.
 
     The kernels read hidden rows and the weight as dense arrays, so
     non-contiguous tensors of either kind are copied explicitly before they
@@ -437,7 +448,7 @@ def replace_rms_norm(module: torch.nn.Module) -> int:
 
     A module is replaced if its exact class is listed in
     ``SUPPORTED_RMS_NORM_CLASSES``, it still runs that class's own forward, and
-    it is at most 2048 wide. Subclasses, modules whose forward was patched or
+    it is at most 32768 wide. Subclasses, modules whose forward was patched or
     wrapped, by another installer or by an earlier call, and wider modules are
     left untouched. Replaced modules keep their own weight Parameter and
     ``variance_epsilon``.
