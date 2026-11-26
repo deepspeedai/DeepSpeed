@@ -550,6 +550,20 @@ class DeepSpeedEngine(Module):
         self.warn_unscaled_loss = True
         self.config = config
         self._config = config_class
+        # Reject incompatible layouts before changing process-wide mesh or expert state.
+        # An explicit mpu replaces groups.mpu; a data/sequence parallel mesh does not.
+        requested_tp_size = self.autotp_size()
+        if requested_tp_size > 1 and (mesh_device is not None or groups.mesh_device is not None):
+            # The data parallel getters read groups.mesh_device before any mpu. A data/sequence parallel mesh
+            # spans every rank, so its data parallel group would mix ranks that hold different TP shards.
+            if mesh_device is not None:
+                raise RuntimeError("An AutoTP engine cannot run on a data/sequence parallel mesh yet "
+                                   "(see https://github.com/deepspeedai/DeepSpeed/issues/9081).")
+            raise RuntimeError(
+                "An AutoTP engine cannot be built after an engine with a data/sequence parallel mesh in the same "
+                "process yet (see https://github.com/deepspeedai/DeepSpeed/issues/9081).")
+        if requested_tp_size > 1 or (self.mpu is None and groups.mpu is groups):
+            groups._check_existing_tp_groups(tensor_model_parallel_size=max(requested_tp_size, 1))
         if self._config.deterministic_mode:
             from .determinism import apply_determinism
             apply_determinism(self._config)
@@ -4608,6 +4622,8 @@ class DeepSpeedEngine(Module):
                 ZeRO stages 1 and 2 rebuild fp32 master weights from the loaded model weights; universal checkpoints
                 first load those model weights from their fp32 copies. ZeRO stage 3 restores fp32 weights because its
                 model checkpoint does not contain the partitioned model weights.
+                NVMe optimizer offload requires the same DP world size, parameter/subgroup layout, and swap storage
+                configuration, and does not support custom_load_fn. Existing optimizer states are preserved.
             custom_load_fn: Optional. Custom model load function.
 
         Returns:
@@ -4637,6 +4653,9 @@ class DeepSpeedEngine(Module):
                         "checkpoint please ensure this file exists or pass an explicit checkpoint tag when loading a checkpoint."
                     )
                     return None, None
+
+        if load_module_only and self.zero_nvme_offload_optimizer() and custom_load_fn is not None:
+            raise ZeRORuntimeException("NVMe module-only checkpoint load does not support custom_load_fn")
 
         if self._optimizer_has_ckpt_event_prologue():
             # Prepare for checkpoint load by ensuring all parameters are partitioned
@@ -4669,15 +4688,22 @@ class DeepSpeedEngine(Module):
             _, _, free = disk_usage(offload_dir)
             logger.info(f"Loading NVMe offload checkpoint from {offload_ckpt_dir} to {offload_dir}, "
                         f"{free / 1e9:,.2f} GB free on target filesystem...")
-            if load_zero_optimizer_states:
-                copytree(offload_ckpt_dir, offload_dir, dirs_exist_ok=True)
+            if load_module_only:
+                zero_sd_list = self._get_all_zero_checkpoints(load_dir, tag)
+                if zero_sd_list is None:
+                    raise ZeRORuntimeException("NVMe module-only checkpoint load requires the ZeRO checkpoint shards")
+                partition_id = dist.get_rank(group=self.optimizer.dp_process_group)
+                self.optimizer.load_module_only_nvme_checkpoint(zero_sd_list[partition_id], offload_ckpt_dir)
             else:
-                for swap_info in self.optimizer.optimizer_swapper.swap_params_info.values():
-                    fp32_path = swap_info.get_swap_paths()[0]
-                    copyfile(os.path.join(offload_ckpt_dir, os.path.basename(fp32_path)), fp32_path)
+                if load_zero_optimizer_states:
+                    copytree(offload_ckpt_dir, offload_dir, dirs_exist_ok=True)
+                else:
+                    for swap_info in self.optimizer.optimizer_swapper.swap_params_info.values():
+                        fp32_path = swap_info.get_swap_paths()[0]
+                        copyfile(os.path.join(offload_ckpt_dir, os.path.basename(fp32_path)), fp32_path)
+                self.optimizer.reset_swap_buffers()
             _, _, free = disk_usage(offload_dir)
             logger.info(f"NVMe checkpoint load complete! {free / 1e9:,.2f} GB free on target filesystem")
-            self.optimizer.reset_swap_buffers()
 
         if self._optimizer_has_ckpt_event_epilogue():
             self.optimizer.checkpoint_event_epilogue()
@@ -4688,6 +4714,30 @@ class DeepSpeedEngine(Module):
                 self.optimizer.refresh_fp32_params()
 
         return load_path, client_states
+
+    def _load_universal_checkpoint_buffers(self, checkpoint):
+        """Restore the module's persistent buffers in a universal checkpoint load.
+
+        A universal load takes the parameters from zero/, cut for this run's layout, and does not apply the saved
+        module state. Persistent buffers (an MoE router's e_score_correction_bias, an AutoEP expert_bias) are only in
+        that module state. Buffers are not partitioned, so the source rank's copy is the whole buffer.
+        """
+        saved = checkpoint.get('module') or {}
+        live_buffers = dict(self.module.named_buffers())
+        missing = []
+        for name in self._get_buffer_names():
+            if name not in saved:
+                missing.append(name)
+                continue
+            live = live_buffers[name]
+            if saved[name].shape != live.shape:
+                raise RuntimeError(f"Universal checkpoint buffer {name!r} has shape {tuple(saved[name].shape)}, but "
+                                   f"the model's buffer has shape {tuple(live.shape)}")
+            with torch.no_grad():
+                live.copy_(saved[name].to(device=live.device, dtype=live.dtype))
+        if missing:
+            logger.warning(f"Universal checkpoint has no saved value for the persistent buffers {missing}; "
+                           "they keep their initial values")
 
     @staticmethod
     def _uses_autoep_zero3_partitioned_experts(autoep_layers):
@@ -4798,13 +4848,25 @@ class DeepSpeedEngine(Module):
         folding_spec = getattr(self, "_autoep_folding_spec", None)
         folded_autoep_tp = folding_spec is not None and folding_spec.tp_size > 1
         ep_group_name = f"ep_size_{folding_spec.ep_size}" if folded_autoep_tp else None
-        DeepSpeedEngine._validate_autoep_folding_checkpoint_metadata(
-            checkpoint,
-            folding_spec=folding_spec,
-            family="dense",
-            zero_partition_group="dense_dp",
-            zero_partition_count=folding_spec.dp_size if folded_autoep_tp else None,
-            tp_rank=groups.get_tensor_model_parallel_rank() if folded_autoep_tp else None)
+        # A universal checkpoint is re-sliced from zero/ for this runtime's layout, so the layout the
+        # source run recorded in its model states need not match.
+        if not self.load_universal_checkpoint():
+            DeepSpeedEngine._validate_autoep_folding_checkpoint_metadata(
+                checkpoint,
+                folding_spec=folding_spec,
+                family="dense",
+                zero_partition_group="dense_dp",
+                zero_partition_count=folding_spec.dp_size if folded_autoep_tp else None,
+                tp_rank=groups.get_tensor_model_parallel_rank() if folded_autoep_tp else None)
+
+        if load_module_only and self.zero_nvme_offload_optimizer():
+            if self.seq_dp_world_size != checkpoint['dp_world_size']:
+                raise ZeRORuntimeException("NVMe module-only checkpoint load requires the same DP world size")
+            saved_shapes = [list(group.items()) for group in checkpoint['param_shapes']]
+            current_shapes = [list(group.items()) for group in self._get_zero_param_shapes()]
+            if saved_shapes != current_shapes:
+                raise ZeRORuntimeException("NVMe module-only checkpoint load requires matching parameter names, "
+                                           "shapes, and optimizer subgroup order")
 
         fetch_z3_params = False
         z3_params_to_fetch = None
@@ -4860,13 +4922,16 @@ class DeepSpeedEngine(Module):
                                         fetch_z3_params=fetch_z3_params,
                                         z3_params_to_fetch=z3_params_to_fetch,
                                         allowed_missing_keys=allowed_missing_keys)
+        else:
+            self._load_universal_checkpoint_buffers(checkpoint)
 
         self.loaded_checkpoint_dp_world_size = checkpoint['dp_world_size']
 
         optim_checkpoint = None
         if load_module_only:
             deepspeed_states = ['module']
-            if self.optimizer is not None and hasattr(self.optimizer, 'refresh_fp32_params'):
+            if (self.optimizer is not None and hasattr(self.optimizer, 'refresh_fp32_params')
+                    and not self.zero_nvme_offload_optimizer()):
                 self.optimizer.refresh_fp32_params()
         else:
             has_zero_optimizer_state = self.zero_optimization()
