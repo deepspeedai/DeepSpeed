@@ -379,7 +379,10 @@ def parse_inclusion_exclusion(resource_pool, inclusion, exclusion):
     for hostname, slots in resource_pool.items():
         active_resources[hostname] = list(range(slots))
 
-    return parse_resource_filter(active_resources, include_str=inclusion, exclude_str=exclusion)
+    active_resources = parse_resource_filter(active_resources, include_str=inclusion, exclude_str=exclusion)
+    if not active_resources:
+        raise ValueError(f"--exclude={exclusion} leaves no slots to launch on")
+    return active_resources
 
 
 def apply_num_nodes_and_gpus(active_resources, num_nodes, num_gpus):
