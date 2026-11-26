@@ -321,7 +321,8 @@ class DeepSpeedDataSampler(object):
             CURRICULUM_LEARNING_CURRENT_DIFFICULTIES: self.current_difficulties,
             CURRICULUM_LEARNING_DATA_CLUSTER_PATHS: self.data_cluster_paths,
             CURRICULUM_LEARNING_DATA_CLUSTER_CURRENT_POSITION: self.data_cluster_current_position,
-            CURRICULUM_LEARNING_NP_RNG_STATE: np.random.get_state()
+            CURRICULUM_LEARNING_NP_RNG_STATE: np.random.get_state(),
+            CURRICULUM_LEARNING_SAMPLER_RNG_STATE: self.np_rng.bit_generator.state
         }
 
     def load_state_dict(self, state_dict):
@@ -332,6 +333,14 @@ class DeepSpeedDataSampler(object):
         self.data_cluster_paths = state_dict[CURRICULUM_LEARNING_DATA_CLUSTER_PATHS]
         self.data_cluster_current_position = state_dict[CURRICULUM_LEARNING_DATA_CLUSTER_CURRENT_POSITION]
         np.random.set_state(state_dict[CURRICULUM_LEARNING_NP_RNG_STATE])
+        sampler_rng_state = state_dict.get(CURRICULUM_LEARNING_SAMPLER_RNG_STATE)
+        if sampler_rng_state is not None:
+            self.np_rng.bit_generator.state = sampler_rng_state
+        else:
+            # Older checkpoints only saved numpy's global RNG, so there is nothing to restore
+            # self.np_rng from, and it starts over from the seed.
+            logger.warning("This checkpoint has no state for the data sampler's RNG, so sampling after "
+                           "resume will not match an uninterrupted run.")
         cluster_root_path = self.data_efficiency_config[DATA_SAMPLING][CURRICULUM_LEARNING][
             CURRICULUM_LEARNING_CLUSTER_PATH]
         # Backward compatibility: previously data_cluster_paths were stored as
