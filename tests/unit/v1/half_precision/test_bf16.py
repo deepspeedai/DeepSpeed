@@ -669,3 +669,131 @@ class TestBF16FullGradientReconstruction(DistributedTest):
                                            msg=f"{name} at step {step}")
                 before[name] = after.clone()
         engine.destroy()
+
+
+def _fp32_master_bf16_states_config(zero_stage, bf16_optimizer_states, **zero_extra):
+    return {
+        "train_micro_batch_size_per_gpu": 2,
+        "gradient_accumulation_steps": 1,
+        "steps_per_print": 1,
+        "optimizer": {
+            "type": "Adam",
+            "params": {
+                "lr": 1e-3
+            }
+        },
+        "bf16": {
+            "enabled": True,
+            "bf16_optimizer_states": bf16_optimizer_states
+        },
+        "zero_optimization": {
+            "stage": zero_stage,
+            **zero_extra
+        },
+    }
+
+
+@pytest.mark.parametrize("zero_stage", [1, 2, 3])
+class TestFP32MasterWeightsWithBF16OptimizerStates(DistributedTest):
+    """bf16_optimizer_states without bf16_master_weights_and_grads: fp32 master weights, FusedAdam moments in bf16."""
+    world_size = 2
+    hidden_dim = 16
+
+    def _engine(self, zero_stage, bf16_optimizer_states):
+        if not bf16_required_version_check():
+            pytest.skip("DeepSpeed BFloat16 tests need torch >= 1.10, NCCL >= 2.10.3, CUDA >= 11.0 and bf16 hardware")
+        if get_accelerator().device_name() != "cuda":
+            pytest.skip("bf16 moments with fp32 master weights need the CUDA/ROCm FusedAdam kernel")
+        torch.manual_seed(123)
+        model = SimpleModel(self.hidden_dim, nlayers=2)
+        config = _fp32_master_bf16_states_config(zero_stage, bf16_optimizer_states)
+        engine, _, _, _ = deepspeed.initialize(config=config, model=model, model_parameters=model.parameters())
+        return engine
+
+    def _train(self, engine, steps):
+        torch.manual_seed(7)  # the same batches for every engine
+        loader = random_dataloader(model=engine,
+                                   total_samples=2 * steps,
+                                   hidden_dim=self.hidden_dim,
+                                   device=engine.device,
+                                   dtype=torch.bfloat16)
+        losses = []
+        for x, y in loader:
+            loss = engine(x, y)
+            engine.backward(loss)
+            engine.step()
+            losses.append(loss.item())
+        return losses
+
+    @staticmethod
+    def _masters_and_moments(engine):
+        # The basic optimizer's state is keyed by the master partitions it updates. ZeRO-3 empties its param_groups
+        # outside the optimizer step, so the masters are read from the state's keys.
+        basic = engine.optimizer.optimizer
+        masters = list(basic.state.keys())
+        moments = [basic.state[p][key] for p in masters for key in ("exp_avg", "exp_avg_sq")]
+        return basic, masters, moments
+
+    def test_trains_like_fp32_states_with_bf16_moments(self, zero_stage):
+        # Catches moments silently kept in fp32 (no memory saved), master weights dropped to bf16, and an update that
+        # reads the bf16 moments wrongly (the losses would part from the fp32-moment run within a few steps).
+        bf16_engine = self._engine(zero_stage, True)
+        bf16_losses = self._train(bf16_engine, steps=5)
+        fp32_engine = self._engine(zero_stage, False)
+        fp32_losses = self._train(fp32_engine, steps=5)
+
+        basic, masters, moments = self._masters_and_moments(bf16_engine)
+        assert isinstance(basic, FusedAdam)
+        assert masters and all(p.dtype == torch.float32 for p in masters)
+        assert moments and all(m.dtype == torch.bfloat16 for m in moments)
+        _, _, fp32_moments = self._masters_and_moments(fp32_engine)
+        assert fp32_moments and all(m.dtype == torch.float32 for m in fp32_moments)
+        for bf16_loss, fp32_loss in zip(bf16_losses, fp32_losses):
+            assert abs(bf16_loss - fp32_loss) <= 1e-2 * abs(fp32_loss), (bf16_losses, fp32_losses)
+
+    def test_checkpoint_reload_keeps_bf16_moments(self, zero_stage, tmpdir):
+        # torch.optim.Optimizer.load_state_dict casts state tensors to their parameter's dtype; a reload must not turn
+        # the bf16 moments of fp32 master weights back into fp32 or change their values.
+        engine = self._engine(zero_stage, True)
+        self._train(engine, steps=2)
+        engine.save_checkpoint(str(tmpdir))
+        _, _, saved_moments = self._masters_and_moments(engine)
+        saved = [moment.clone() for moment in saved_moments]
+
+        reloaded = self._engine(zero_stage, True)
+        reloaded.load_checkpoint(str(tmpdir))
+        _, _, moments = self._masters_and_moments(reloaded)
+        assert len(moments) == len(saved) > 0
+        for moment, expected in zip(moments, saved):
+            assert moment.dtype == torch.bfloat16
+            assert torch.equal(moment, expected)
+
+
+class TestFP32MasterWeightsWithBF16OptimizerStatesRejected(DistributedTest):
+    world_size = 1
+
+    def test_optimizer_offload_is_rejected(self):
+        # The CPU optimizer keeps its moments in the parameters' dtype; with fp32 master weights the setting would
+        # silently save nothing on the host.
+        from deepspeed.runtime.config import DeepSpeedConfig
+        config = _fp32_master_bf16_states_config(2, True, offload_optimizer={"device": "cpu"})
+        try:
+            DeepSpeedConfig(config)
+            rejected = None
+        except AssertionError as error:
+            rejected = str(error)
+        assert rejected is not None and "without optimizer offload" in rejected, rejected
+
+    def test_optimizers_other_than_fused_adam_are_rejected(self):
+        # torch.optim.Adam keeps its moments in the fp32 master weights' dtype, so the setting would save nothing.
+        if get_accelerator().device_name() != "cuda":
+            pytest.skip("bf16 moments with fp32 master weights need the CUDA/ROCm FusedAdam kernel")
+        config = _fp32_master_bf16_states_config(2, True)
+        config["optimizer"]["params"]["torch_adam"] = True
+        model = SimpleModel(16)
+        try:
+            deepspeed.initialize(config=config, model=model, model_parameters=model.parameters())
+            rejected = None
+        except ValueError as error:
+            rejected = str(error)
+        assert rejected is not None and "needs DeepSpeed's FusedAdam" in rejected, rejected

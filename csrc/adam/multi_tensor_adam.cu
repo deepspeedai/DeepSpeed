@@ -30,7 +30,10 @@ typedef enum : int {
 
 using MATH_T = float;
 
-template <typename T, typename index_t>
+// T: gradient and parameter type. MT: type of both Adam moments (exp_avg, exp_avg_sq); it may
+// differ from T, e.g. fp32 parameters with bf16 moments. All arithmetic is in MATH_T (fp32) either
+// way.
+template <typename T, typename MT, typename index_t>
 struct AdamFunctor {
     __device__ __forceinline__ void operator()(int chunk_size,
                                                volatile int* noop_gmem,
@@ -62,10 +65,10 @@ struct AdamFunctor {
         T* p = (T*)tl.addresses[1][tensor_loc];
         p += chunk_idx * chunk_size;
 
-        T* m = (T*)tl.addresses[2][tensor_loc];
+        MT* m = (MT*)tl.addresses[2][tensor_loc];
         m += chunk_idx * chunk_size;
 
-        T* v = (T*)tl.addresses[3][tensor_loc];
+        MT* v = (MT*)tl.addresses[3][tensor_loc];
         v += chunk_idx * chunk_size;
 
         n -= chunk_idx * chunk_size;
@@ -162,41 +165,59 @@ void multi_tensor_adam_cuda(int chunk_size,
         if (requires_64bit_indexing) { break; }
     }
 
-    // Assume single type across p,g,m1,m2 now
+    // g and p share one type (list 0); m and v share one type (lists 2 and 3), which may differ
+    // from it.
+    const auto moment_type = tensor_lists[2][0].scalar_type();
+    for (size_t l = 2; l < 4; l++) {
+        for (const auto& t : tensor_lists[l]) {
+            TORCH_CHECK(t.scalar_type() == moment_type,
+                        "multi_tensor_adam: exp_avg and exp_avg_sq must all have the same dtype");
+        }
+    }
     if (requires_64bit_indexing) {
-        DISPATCH_DOUBLE_FLOAT_AND_HALF(tensor_lists[0][0].scalar_type(),
-                                       0,
-                                       "adam",
-                                       multi_tensor_apply<4>((int64_t)BLOCK_SIZE,
-                                                             (int64_t)chunk_size,
-                                                             noop_flag,
-                                                             tensor_lists,
-                                                             AdamFunctor<scalar_t_0, int64_t>(),
-                                                             beta1,
-                                                             beta2,
-                                                             bias_correction1,
-                                                             bias_correction2,
-                                                             epsilon,
-                                                             lr,
-                                                             (adamMode_t)mode,
-                                                             weight_decay);)
+        DISPATCH_DOUBLE_FLOAT_AND_HALF(
+            tensor_lists[0][0].scalar_type(),
+            0,
+            "adam",
+            DISPATCH_DOUBLE_FLOAT_AND_HALF(
+                moment_type,
+                1,
+                "adam_moments",
+                multi_tensor_apply<4>((int64_t)BLOCK_SIZE,
+                                      (int64_t)chunk_size,
+                                      noop_flag,
+                                      tensor_lists,
+                                      AdamFunctor<scalar_t_0, scalar_t_1, int64_t>(),
+                                      beta1,
+                                      beta2,
+                                      bias_correction1,
+                                      bias_correction2,
+                                      epsilon,
+                                      lr,
+                                      (adamMode_t)mode,
+                                      weight_decay);))
     } else {
-        DISPATCH_DOUBLE_FLOAT_AND_HALF(tensor_lists[0][0].scalar_type(),
-                                       0,
-                                       "adam",
-                                       multi_tensor_apply<4>(BLOCK_SIZE,
-                                                             chunk_size,
-                                                             noop_flag,
-                                                             tensor_lists,
-                                                             AdamFunctor<scalar_t_0, int32_t>(),
-                                                             beta1,
-                                                             beta2,
-                                                             bias_correction1,
-                                                             bias_correction2,
-                                                             epsilon,
-                                                             lr,
-                                                             (adamMode_t)mode,
-                                                             weight_decay);)
+        DISPATCH_DOUBLE_FLOAT_AND_HALF(
+            tensor_lists[0][0].scalar_type(),
+            0,
+            "adam",
+            DISPATCH_DOUBLE_FLOAT_AND_HALF(
+                moment_type,
+                1,
+                "adam_moments",
+                multi_tensor_apply<4>(BLOCK_SIZE,
+                                      chunk_size,
+                                      noop_flag,
+                                      tensor_lists,
+                                      AdamFunctor<scalar_t_0, scalar_t_1, int32_t>(),
+                                      beta1,
+                                      beta2,
+                                      bias_correction1,
+                                      bias_correction2,
+                                      epsilon,
+                                      lr,
+                                      (adamMode_t)mode,
+                                      weight_decay);))
     }
 
     AT_CUDA_CHECK(cudaGetLastError());

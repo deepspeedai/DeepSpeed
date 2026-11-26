@@ -67,7 +67,8 @@ class DeepSpeedBF16Config(DeepSpeedConfigModel):
 
     bf16_optimizer_states: bool = False
     """
-    Keep optimizer states in bf16 (only valid when bf16_master_weights_and_grads is enabled).
+    Keep optimizer states in bf16. With bf16_master_weights_and_grads, all optimizer states are bf16. Without it, the
+    master weights stay fp32 and DeepSpeed's FusedAdam stores its two moments in bf16 (GPU only, no optimizer offload).
     """
 
 

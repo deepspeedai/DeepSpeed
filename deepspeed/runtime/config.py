@@ -738,7 +738,13 @@ class DeepSpeedConfig(object):
             assert self.zero_enabled and self.zero_optimization_stage in (
                 ZeroStageEnum.optimizer_states, ZeroStageEnum.gradients,
                 ZeroStageEnum.weights), "bf16_optimizer_states is only supported with ZeRO Stage 1, 2, or 3."
-            assert self.bfloat16_config.bf16_master_weights_and_grads, "bf16_optimizer_states requires bf16_master_weights_and_grads to be enabled."
+            # With fp32 master weights on the GPU, FusedAdam keeps the moments in bf16 (exp_avg_dtype). The CPU
+            # optimizer stores moments in the parameter dtype, so offload still needs bf16 master weights.
+            if not self.bfloat16_config.bf16_master_weights_and_grads:
+                offload = self.zero_config.offload_optimizer
+                assert offload is None or offload.device == "none", (
+                    "bf16_optimizer_states with fp32 master weights is only supported without optimizer offload; "
+                    "enable bf16_master_weights_and_grads to offload bf16 optimizer states.")
 
     def _do_warning_check(self):
         vocabulary_size = self._param_dict.get(VOCABULARY_SIZE, VOCABULARY_SIZE_DEFAULT)

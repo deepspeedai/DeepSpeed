@@ -531,9 +531,10 @@ class ZeROOptimizer(DeepSpeedOptimizer):
             "fp16_master_weights_and_gradients and bf16_master_weights_and_gradients are mutually exclusive."
 
         self.bf16_optimizer_states = bf16_optimizer_states
-        if self.bf16_optimizer_states:
-            assert self.bf16_master_weights_and_gradients, \
-                "bf16_optimizer_states requires bf16_master_weights_and_gradients."
+        if self.bf16_optimizer_states and not self.bf16_master_weights_and_gradients:
+            # fp32 master weights with bf16 moments: FusedAdam(exp_avg_dtype=torch.bfloat16) on the GPU only.
+            assert not offload_enabled, \
+                "bf16_optimizer_states with fp32 master weights is only supported without optimizer offload."
 
         # bf16 master weights require ZeRO-Offload + DeepSpeedCPUAdam whenever the optimizer states
         # cannot stay on the GPU: either because they remain fp32 (bf16_optimizer_states disabled),

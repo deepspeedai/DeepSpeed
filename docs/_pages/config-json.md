@@ -358,7 +358,7 @@ Example of <i>**scheduler**</i>
 
 | Description | Default |
 | ----------- | ------- |
-| Keep optimizer states in bf16 as well. Requires `bf16_master_weights_and_grads=true`. Offload is optional: without `offload_optimizer` the bf16 states stay on the GPU; with `offload_optimizer` (`DeepSpeedCPUAdam`) they are offloaded to CPU memory in bf16. The offloaded state (bf16 master weights plus the two bf16 Adam moments) is then ~6 bytes/param, versus ~10 bytes/param when the moments are kept in fp32. | `false` |
+| Keep optimizer states in bf16. With `bf16_master_weights_and_grads=true`, offload is optional: without `offload_optimizer` the bf16 states stay on the GPU; with `offload_optimizer` (`DeepSpeedCPUAdam`) they are offloaded to CPU memory in bf16. The offloaded state (bf16 master weights plus the two bf16 Adam moments) is then ~6 bytes/param, versus ~10 bytes/param when the moments are kept in fp32. Without `bf16_master_weights_and_grads`, the master weights stay fp32 and DeepSpeed's `FusedAdam` (optimizer type `Adam` or `AdamW`) stores its two moments in bf16: 8 bytes/param of optimizer state instead of 12, with the update still computed in fp32. This form needs a CUDA or ROCm GPU and no `offload_optimizer`. | `false` |
 
 **Support matrix (bf16 master weights/gradients)**
 
@@ -366,6 +366,12 @@ Example of <i>**scheduler**</i>
 | ---------- | --------------------------- | -------------------------- |
 | 0 | Not supported | Not supported |
 | 1/2/3 | Requires ZeRO-Offload + `DeepSpeedCPUAdam` (optimizer states stay fp32 on CPU) | On GPU without offload, or on CPU with `offload_optimizer` + `DeepSpeedCPUAdam`; optimizer states kept in bf16 either way |
+
+**Support matrix (fp32 master weights, `bf16_master_weights_and_grads=false`)**
+
+| ZeRO stage | bf16_optimizer_states=False | bf16_optimizer_states=True |
+| ---------- | --------------------------- | -------------------------- |
+| 1/2/3 | fp32 master weights and fp32 optimizer states (default) | fp32 master weights, `FusedAdam` moments in bf16, on GPU without `offload_optimizer` |
 
 ### PyTorch Automatic Mixed Precision (torch.autocast) training options
 
