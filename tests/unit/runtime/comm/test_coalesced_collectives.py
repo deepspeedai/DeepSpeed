@@ -99,6 +99,41 @@ class TestAllToAllQuantReduceFallback(DistributedTest):
             assert torch.allclose(output, torch.zeros_like(output))
 
 
+def test_reduce_scatter_coalesced_empty_input():
+    assert reduce_scatter_coalesced([]) == []
+
+
+def test_reduce_scatter_coalesced_non_contiguous_and_zero_padding(monkeypatch):
+    import deepspeed.runtime.comm.coalesced_collectives as cc
+
+    captured_buffers = []
+
+    def fake_reduce_scatter(input_tensor, output_tensor, group=None, async_op=False, prof=False):
+        captured_buffers.append(input_tensor.clone())
+        chunks = torch.chunk(input_tensor, 2)
+        output_tensor.copy_(chunks[0] + chunks[1])
+
+    monkeypatch.setattr(cc.dist, "get_rank", lambda group=None: 0)
+    monkeypatch.setattr(cc.dist, "get_world_size", lambda group=None: 2)
+    monkeypatch.setattr(cc, "_torch_reduce_scatter_fn", fake_reduce_scatter)
+
+    # Single non-contiguous tensor (fast path)
+    non_contig = torch.arange(6, dtype=torch.float32).reshape(2, 3).t()
+    assert not non_contig.is_contiguous()
+    (single_out, ) = reduce_scatter_coalesced([non_contig])
+    expected_flat = non_contig.reshape(-1) / 2.0
+    assert torch.allclose(single_out, expected_flat[:3] + expected_flat[3:])
+
+    # Padded multi-tensor path with non-contiguous tensor: padding slots must be zero-initialized
+    t1 = torch.arange(6, dtype=torch.float32).reshape(2, 3).t()
+    t2 = torch.tensor([10.0, 20.0, 30.0], dtype=torch.float32)
+    out1, out2 = reduce_scatter_coalesced([t1, t2])
+    assert out1.shape == (3, )
+    assert out2.shape == (2, )
+    # Rank 1's second tensor partition has 1 element and 1 padded slot (last element of captured buffer)
+    assert captured_buffers[-1][-1].item() == 0.0
+
+
 class TestAllToAllQuantReduceAverage:
 
     def test_matches_reduce_scatter_average(self, tmpdir):
