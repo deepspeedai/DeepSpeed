@@ -2407,7 +2407,9 @@ class _SubgroupMPU:
 class TestZero3OverSubgroup(DistributedTest):
     world_size = 3
 
-    def test(self):
+    # With sanity checks, every reduced gradient bucket is also checked across the ranks that reduce it.
+    @pytest.mark.parametrize("sanity_checks", [False, True])
+    def test(self, sanity_checks):
         # ZeRO-3 over ranks 1-2 of a world of three; rank 0 holds no engine. A barrier or a rank-agreement check over
         # the world would wait for rank 0, and one that broadcasts from global rank 0 would never get its data.
         trainer_ranks = [1, 2]
@@ -2416,11 +2418,11 @@ class TestZero3OverSubgroup(DistributedTest):
         everyone = dist.new_group(list(range(dist.get_world_size())))
         try:
             if dist.get_rank() in trainer_ranks:
-                self._train_like_plain_torch(mpu)
+                self._train_like_plain_torch(mpu, sanity_checks)
         finally:
             dist.barrier(group=everyone)
 
-    def _train_like_plain_torch(self, mpu):
+    def _train_like_plain_torch(self, mpu, sanity_checks):
         # Oracle: the same model under plain torch SGD. Both trainer ranks see the same batch, so the gradient ZeRO
         # averages over the subgroup is the reference's. SGD, because its update is linear in the gradient: Adam
         # turns a rounding difference in a near-zero gradient into a difference of the size of the learning rate.
@@ -2436,7 +2438,8 @@ class TestZero3OverSubgroup(DistributedTest):
             "zero_allow_untested_optimizer": True,
             "zero_optimization": {
                 "stage": 3,
-                "stage3_param_persistence_threshold": 0
+                "stage3_param_persistence_threshold": 0,
+                "enable_sanity_checks": sanity_checks
             }
         }
         engine, _, _, _ = deepspeed.initialize(config=config_dict,
