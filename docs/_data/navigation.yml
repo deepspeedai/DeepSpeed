@@ -103,6 +103,8 @@ lnav:
         url: /tutorials/pipeline/
       - title: 'Reflow'
         url: /tutorials/reflow/
+      - title: 'Subchannel FP8/INT8 Quantized Training'
+        url: /tutorials/subchannel-quantized-training/
       - title: 'Transformer Kernel'
         url: /tutorials/transformer_kernel/
       - title: 'Arctic Long Sequence Training (ALST) for HF Transformers integration'
