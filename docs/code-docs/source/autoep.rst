@@ -64,13 +64,16 @@ including models built under ``deepspeed.zero.Init``. Stage 3 AutoEP checkpoints
 partition-natively in the ``zero_pp_rank_*`` shard files and support
 same-topology load, module-only loads (``load_module_only``),
 optimizer-state-free loads (``load_optimizer_states=False``), and Universal
-Checkpoint conversion, except with AutoTP folding. Optimizer-including
+Checkpoint conversion, also with AutoTP folding. Optimizer-including
 Universal Checkpoint loads can
 resume with a different data-parallel world size, a different ``autoep_size``,
-or both, when the target ``autoep_size`` divides the model's expert count.
+a different ``tensor_parallel.autotp_size`` (folded or not), or any
+combination, when the target ``autoep_size`` divides the model's expert count
+and, with ``tensor_parallel.autotp_size > 1``, is greater than 1 (folding
+requires expert parallelism).
 Weights-only/module-only Universal Checkpoint loads use the converted
-``fp32.pt`` parameter files and support the same data-parallel and
-``autoep_size`` topology changes.
+``fp32.pt`` parameter files and support the same data-parallel,
+``autoep_size`` and ``tensor_parallel.autotp_size`` changes.
 
 **Usage:**
 
@@ -321,6 +324,142 @@ not run ``torch._grouped_mm``: with ``use_grouped_mm=false``, or on devices that
 select the Triton grouped GEMM (compute capability below 9.0) unless
 ``disable_triton_grouped_mm=true``.
 
+**Overlapping expert weight gradients with the DeepEP backward (experimental):**
+
+In the backward pass, the experts compute their input gradient (dX), which
+DeepEP then combines back to the ranks the tokens came from, and their weight
+gradients (dW). The two are independent, but normally run one after the other:
+a grouped GEMM's backward computes dX and dW together, before the combine
+starts. ``overlap_weight_grad`` runs them side by side:
+
+.. code-block:: json
+
+    {
+      "expert_parallel": {
+        "enabled": true,
+        "autoep_size": 8,
+        "comm_backend": "deepep",
+        "comm_max_tokens_per_rank": 16384,
+        "gate_up_impl": "fused",
+        "overlap_weight_grad": true
+      }
+    }
+
+The expert backward returns dX at once and leaves its dW GEMMs in a slot. The
+DeepEP dispatch, which takes the expert weights as extra inputs, launches its
+backward combine of dX on DeepEP's stream, runs the dW GEMMs on the compute
+stream, waits for the combine, and returns dW through autograd, so ZeRO's
+gradient handling is unchanged. ``torch._grouped_mm`` launches persistent
+kernels sized to every SM, which would leave the combine nowhere to run, so the
+dW GEMMs are launched with ``comm_num_sm`` SMs withheld through PyTorch's
+experimental SM carveout, restored immediately afterwards.
+The asynchronous combine is waited on even if a weight-gradient GEMM raises.
+Frozen expert weights omit their dW GEMMs and return no gradient. With fused
+gate+up, the shared dW GEMM is omitted only when both projections are frozen.
+
+The same gradient products autograd forms for ``torch._grouped_mm`` run in a
+different schedule; exact numerical equality across algorithms or hardware
+is not guaranteed. This path supports first-order gradients only and rejects
+``create_graph=True`` rather than constructing an incomplete derivative.
+
+On Qwen3-30B-A3B with 8 H100s (expert parallel size 8, micro-batch 4, 16
+accumulation steps, sequence length 4096, reentrant activation checkpointing,
+``gate_up_impl="fused"``), a full optimizer step went from 21.57 s to 21.10 s
+(-2.2%) in two pairs measured in the same job; overlapping without the SM
+carveout recovered only -0.7%. A kernel profile showed DeepEP running alongside
+the grouped GEMMs for 1.3 s of the step, against none before. Peak allocated
+memory was unchanged and reserved memory about 0.7 GB higher.
+
+``overlap_weight_grad`` is rejected, rather than silently ignored, unless
+``comm_backend="deepep"`` with ``autoep_size > 1``, the experts run
+``torch._grouped_mm`` (``use_grouped_mm=true``, and
+``disable_triton_grouped_mm=true`` on devices that select the Triton grouped
+GEMM), ZeRO stage is 1 or 2 (not 0 or 3), and PyTorch provides both
+``torch._C._get_sm_carveout_experimental`` and
+``torch._C._set_sm_carveout_experimental``.
+
+**Staging expert weight gradients across microbatches (experimental):**
+
+With hundreds of experts, or with small microbatches, each expert receives few
+rows per backward. The weight-gradient GEMMs (dW) then write three full-size
+gradients for a handful of rows each, and autograd adds each of them to the
+accumulated gradient: the backward is bound by memory bandwidth over the expert
+weights' footprint, not by arithmetic. ``deferred_dw_flush_period`` runs those
+GEMMs once for several backward passes instead:
+
+.. code-block:: json
+
+    {
+      "gradient_accumulation_steps": 16,
+      "expert_parallel": {
+        "enabled": true,
+        "autoep_size": 8,
+        "deferred_dw_flush_period": 8,
+        "deferred_dw_rows_per_expert": 256
+      }
+    }
+
+A backward that stages computes the experts' input gradient as usual, copies
+the rows the dW GEMMs read (the expert input, the activation output and their
+gradients, without alignment padding) behind each expert's cursor in a
+per-layer staging buffer, and returns no expert weight gradient. A flush
+gathers the staged rows of all experts, runs the dW GEMMs once over them and
+returns the result through autograd. It runs:
+
+* in one backward of every ``deferred_dw_flush_period``;
+* in the backward that closes a gradient accumulation window, which the engine
+  marks, so no staged row outlives the optimizer step it belongs to.
+  ``engine.step()`` raises if rows are still staged at a boundary.
+
+When the rows of a backward do not fit behind an expert's cursor, the dW GEMMs
+run early over the staged rows to empty the buffer, without moving the period,
+and a backward that does not fit even an empty buffer computes its own dW at
+once. Either result is held, at the size of the expert weight gradients, and
+returned by the next flush. Which backward returns expert weight gradients
+therefore depends only on the count of backward passes, not on the routing:
+ranks that hold replicas of the same experts receive different rows, and ZeRO
+stages 2 and 3 reduce a gradient across them in the backward that returns it.
+
+Gradient reduction, clipping and the optimizer see what they saw before: the
+sum over the window. Between flushes the expert weights have no new
+gradient. The sum is formed in one GEMM rather than by adding per-backward
+results, so values differ by floating-point summation order; in bf16 the
+staged sum was the closer of the two to an fp64 reference in every measured
+case.
+
+Each MoE layer on each rank holds ``local experts * deferred_dw_rows_per_expert``
+rows of ``2 * hidden + 3 * intermediate`` values in the compute dtype for as
+long as it trains. ``deferred_dw_rows_per_expert`` defaults to ``0``, which
+sizes the buffer on the first backward to ``deferred_dw_flush_period`` times
+the larger of that backward's busiest expert and twice its mean rows per
+expert.
+
+Whether this helps depends on the rows each expert receives per backward. On one
+H200 (PyTorch 2.8.0, bf16), timing only the grouped expert MLP's forward and
+backward for 128 local experts with hidden size 2048 and intermediate size 768
+(``gate_up_impl="fused"``), evenly routed, over windows of 8 backward passes:
+
+==================  ===========  ===========  ===========  ====================
+Rows per expert     period 2     period 4     period 8     Staging at period 8
+==================  ===========  ===========  ===========  ====================
+8                   1.22x        1.49x        1.68x        0.20 GiB
+32                  1.21x        1.46x        1.63x        0.78 GiB
+128                 1.06x        1.23x        1.34x        3.13 GiB
+512                 0.80x        0.86x        0.88x        12.50 GiB
+==================  ===========  ===========  ===========  ====================
+
+Speedups are against the same module without staging; values below 1 are
+slowdowns. These are module-level timings, not end-to-end training steps, and
+no convergence run has been done with this option yet.
+
+``deferred_dw_flush_period`` above ``1`` is rejected, rather than silently
+ignored, unless the experts run ``torch._grouped_mm`` (``use_grouped_mm=true``,
+and ``disable_triton_grouped_mm=true`` on devices that select the Triton
+grouped GEMM) and ``managed_gradient_accumulation`` is on. It cannot be
+combined with ``overlap_weight_grad``, AutoEP+AutoTP folding, ZenFlow or
+DeepCompile. It supports first-order gradients only. It runs with ZeRO stages
+0 to 3; optimizer and parameter offload have not been validated with it.
+
 **DeepEP row weighting implementation (experimental):**
 
 DeepEP dispatch returns one received row per routed assignment and one FP32
@@ -373,6 +512,72 @@ weighting. The separate MoE gradient-norm correction affects the
 The model-level gradient comparison samples gradients before the wrapper
 computes the norm and clips them in ``engine.step()``. GPU validation applies
 both independent corrections; neither is part of this opt-in change.
+
+**Skipping the recomputed combine (experimental):**
+
+With reentrant activation checkpointing, backward recomputes each decoder layer
+only to rebuild its autograd graph, and never reads the recomputed outputs. In a
+decoder layer that adds the MoE output to the residual, nothing reads the
+recomputed MoE output either. ``skip_recompute_combine`` lets the DeepEP route
+record the post-expert row weighting and the combine in that recompute without
+running them. Their backward is unchanged: a cached dispatch on the same handle,
+and the row-weighting gradients. The dispatch and the experts still run, because
+backward needs their activations.
+
+.. code-block:: json
+
+    {
+      "expert_parallel": {
+        "enabled": true,
+        "autoep_size": 8,
+        "comm_backend": "deepep",
+        "comm_max_tokens_per_rank": 16384,
+        "skip_recompute_combine": true
+      }
+    }
+
+On Qwen3-30B-A3B with 8 H100s (expert parallel size 8, micro-batch 4, 16
+accumulation steps, sequence length 4096, DeepEP with 28 SMs), an equivalent
+benchmark prototype cut the step from 20.57 s to 19.94 s (-3.1%). Gradients
+matched the normal recompute within the measured numerical bounds. Peak
+allocated memory was unchanged; peak reserved memory was 0.25 GB lower.
+These are same-allocation prototype measurements, not a retiming of every
+supported model or of this branch after upstream integration.
+
+Recorded and normal combines share the backward context, including ownership
+of the dispatch replay entry. That entry is released with its autograd graph,
+so a later reentrant step cannot reuse a previous step's routing.
+
+The skip relies on nothing reading the skipped output, so it is guarded:
+
+- The recompute is recognized as a grad-enabled forward that runs inside a
+  backward pass. Each time, AutoEP checks that the MoE layer's decoder layer is
+  in training mode and has
+  Hugging Face gradient checkpointing enabled with ``use_reentrant=True``, for
+  example via ``model.gradient_checkpointing_enable(
+  gradient_checkpointing_kwargs={"use_reentrant": True})``, and raises
+  otherwise. Hugging Face does not checkpoint an eval-mode decoder, even if
+  checkpointing remains configured. Such an outer recompute is rejected;
+  an ordinary eval forward is unchanged.
+  Transformers 5 defaults to non-reentrant checkpointing, so the
+  argument is required there. A checkpoint that spans several layers would
+  feed the skipped output to the next layer. Non-reentrant checkpointing and
+  DeepSpeed's own checkpointing API are also rejected.
+- Only presets whose decoder layer adds the MoE output straight to the residual
+  are accepted: ``deepseek_v2``, ``deepseek_v3``, ``minimax_m3``, ``mixtral``,
+  ``qwen3_5_moe`` and ``qwen3_moe``. Other presets are rejected at conversion.
+  Any non-null ``moe_layer_pattern`` is rejected during configuration validation,
+  even with an explicit or auto-detected supported preset: overriding the pattern
+  changes the decoder parent, so the preset name no longer establishes its
+  output-consumer contract. Leave the pattern unset or disable the skip;
+  custom patterns remain supported when this option is off.
+- The skipped combine returns NaN rather than uninitialized memory. If
+  something outside the contract reads it in a value-dependent operation,
+  it can produce non-finite outputs or gradients. The sentinel is not a
+  general runtime proof that no consumer reads the value.
+- It requires ``comm_backend="deepep"`` and ``autoep_size > 1``. Both
+  ``row_weighting_impl`` values are supported; the recorded eager weighting
+  takes autograd's own steps through the eager expression.
 
 Requirements and limits:
 
@@ -448,6 +653,28 @@ Where the kernels run, results are not bitwise identical to eager RMSNorm: the
 kernels' FP32 reductions sum in a different order, so a small fraction of
 outputs and gradients differ in their last bits.
 
+For norms at most 128 wide, the fused kernels schedule several rows per
+program and combine the input- and weight-gradient reads in backward. Small
+inputs cap the row tile at the next power of two of their row count, so a
+single row does not instantiate a full 4096-element tile. Larger inputs keep
+the existing tile size. Wider norms retain the one-row kernels. The numerical
+tests do not require bitwise equality with eager. For narrow input gradients
+they allow at most 8 ULPs or an absolute error of 1e-7 per element, since
+near-zero gradients can have large ULP distances after cancellation. At least
+95% must still be within one ULP; forward, weight-gradient and wide-path
+thresholds are unchanged.
+At width one, the pre-gamma input derivative in exact arithmetic is
+``eps / (x**2 + eps)**(3/2)``, which is nonzero when ``eps > 0``. With a
+very small epsilon and large ``abs(x)``, low-precision rounding can hide this
+gradient; width-one tests use a measurable positive epsilon and an FP64
+reference rather than assuming the derivative is zero.
+
+Performance depends on the GPU and workload. The measured H100 attention
+training cases benefited from this scheduling, but review measurements on an
+RTX PRO 4500 found narrow forward 11-16% slower than the parent row kernels.
+That is a forward-only observation, not an E2E result; this opt-in path does
+not promise a speedup on every supported device or shape.
+
 Requirements and limits:
 
 - The kernels need CUDA with Triton. On ROCm or without Triton, replaced
@@ -498,11 +725,17 @@ existing numerical tolerances, not bitwise unchanged. Only the forward
 reduction changes: the backward, collectives, router, grouped GEMM and
 expert-major reorder are untouched.
 
+With AutoEP+AutoTP folding (``tensor_parallel.autotp_size`` greater than 1),
+each tensor-parallel peer sends only part of the routed assignments to the
+experts. The restore first all-gathers the rows, their token and top-k slot,
+and their routing weights over the tensor-parallel group, as the default
+restore does, and then reduces the gathered rows with the same kernel. The
+default folded restore multiplies and adds the rows in the activation dtype,
+one top-k slot at a time; the fused restore does both in FP32.
+
 ``"fused_weighted_sum"`` is rejected, rather than quietly ignored, when it would
 have nothing to replace or would change semantics:
 
-- ``tensor_parallel.autotp_size`` greater than 1, which uses folded tensor
-  parallelism and restores combined tokens from assignment metadata instead;
 - ``expert_tensor_parallel_size`` greater than 1;
 - ``comm_backend="deepep"`` with expert parallelism, because DeepEP already
   restores and reduces its routed rows;
@@ -587,21 +820,44 @@ Requirements and limits:
 - AutoEP combines with AutoTP (``tensor_parallel.autotp_size > 1``) by
   folding: on the same ranks, AutoTP shards the layers its partition
   specification names and AutoEP distributes the routed experts. Folding
-  supports ZeRO stages 0 to 3 with ``expert_tensor_parallel_size=1``, and
-  rejects ZeRO optimizer or parameter offload and DeepCompile. Tensor model
-  parallelism from ``mpu`` is not supported.
+  supports ZeRO stages 0 to 3 with ``expert_tensor_parallel_size=1``. With
+  ZeRO stage 3 the optimizer can be offloaded to the CPU
+  (``offload_optimizer.device: "cpu"``); folding rejects optimizer offload
+  with ZeRO stages 1 and 2 or to NVMe, Muon with optimizer offload, parameter
+  offload, and DeepCompile. Tensor model parallelism from ``mpu`` is not
+  supported.
 - AutoEP with ZeRO Stage 3 is supported only without sequence parallelism,
   hpZeRO secondary tensor groups, non-1 expert tensor parallelism, or
   quantized gradients.
-- Regular checkpoint save/load requires matching ``autoep_size``. To change
-  ``autoep_size`` or data-parallel world size across runs for the same
-  AutoEP-detected model topology, convert the checkpoint to Universal
-  Checkpoint format and load it with ``checkpoint.load_universal``; see the
+- Regular checkpoint save/load requires matching ``autoep_size`` and, under
+  folding, matching ``tensor_parallel.autotp_size``. To change
+  ``autoep_size``, ``tensor_parallel.autotp_size`` or data-parallel world size
+  across runs for the same AutoEP-detected model topology, convert the
+  checkpoint to Universal Checkpoint format and load it with
+  ``checkpoint.load_universal``; see the
   `Universal Checkpointing tutorial </tutorials/universal-checkpointing/>`__
   for the detailed flow and constraints.
 - DeepSeek-V2 and DeepSeek-V3 AutoEP do not support load-balance expert bias
   yet. The built-in DeepSeek presets disable it by default; explicit non-null
   values fail.
+
+Gradient clipping under folding
+-------------------------------
+
+For AutoEP with AutoTP at ZeRO stages 1 and 2, the routed-expert gradient norm
+sums squared partition contributions over expert data parallelism and then
+expert parallelism. Every expert owner contributes, including owners whose
+tensor-parallel rank is nonzero. This expert total does not receive another
+tensor-parallel sum. Replicated and tensor-parallel dense parameters retain
+their existing norm reductions. Native MoE groups in the same optimizer
+retain their model-parallel reduction and expert-norm averaging.
+
+The clipping coefficient in ``engine.step()`` therefore uses each logical
+expert once. The sharded-attention regression checks complete gradients,
+the global norm, and actual FP32 SGD updates against the unsharded reference.
+Thresholds at half and twice the reference norm cover active clipping and
+an unclipped control, including models built under ``deepspeed.zero.Init``
+at ZeRO stage 3.
 
 Chunked causal-LM loss
 ----------------------
@@ -644,3 +900,102 @@ or ``None`` for automatic sizing, even when the selected backend does not use
 row blocking. Invalid settings are rejected before a backend runs. A model
 with a non-writable stock ``loss_function`` raises an actionable error rather
 than being silently left unmodified.
+
+Planning expert placement transfers
+-----------------------------------
+
+An ``AutoEPMoELayer`` can describe where its live expert weights are, and plan
+the copies that would move them to another expert placement, for example one
+with a different EP size. Planning moves no data, does not
+plan optimizer states, and does not change the placement the layer runs with.
+
+.. code-block:: python
+
+    from deepspeed.checkpoint.autoep_affine import make_autoep_placement_descriptor
+
+    # layer: an AutoEPMoELayer after deepspeed.initialize()
+    affine_maps = layer.expert_affine_maps()  # {"w1": ParamAffineMap, "w2": ..., "w3": ...}
+
+    # Move 8 experts onto 2 EP ranks: rank 0 holds experts 0-2, rank 1 holds experts 3-7.
+    target = make_autoep_placement_descriptor(8, [[0, 1, 2], [3, 4, 5, 6, 7]])
+    plans = layer.plan_expert_transfer(target)  # {"w1": TransferPlan, "w2": ..., "w3": ...}
+    for segment in plans["w1"].segments:
+        ...  # copy segment.shape elements from the source shard into the target shard
+
+- ``make_autoep_placement_descriptor(num_experts, experts_by_rank)`` builds the
+  target placement. ``experts_by_rank[r]`` lists the global expert IDs that
+  target rank ``r`` holds, in the order they are packed in its local tensor.
+  Ranks may hold different numbers of experts, non-contiguous experts, no
+  experts, or experts that other ranks also hold, but every expert must be
+  held by at least one rank.
+- Ranks in a plan are EP-local. ``segment.source_rank`` is a rank of the
+  layer's EP group; translate it with
+  ``dist.get_global_rank(layer.ep_group, segment.source_rank)``.
+  ``segment.target_rank`` indexes ``experts_by_rank`` of the target placement;
+  mapping it to a process is up to the caller, since the target EP group may
+  differ from the current one.
+- ``source_offset``/``target_offset`` and the stride vectors count elements of
+  a rank's packed local expert tensor ``[local_experts, ...]`` in row-major
+  order. That tensor is the unpartitioned parameter: under ZeRO-3, gather the
+  parameter (for example with ``deepspeed.zero.GatheredParameters``) before
+  applying the offsets. Ranks are EP-local, so expert-data-parallel replicas
+  are not candidates here; plan from ``expert_storage_affine_maps()`` to read
+  from them.
+- When several source ranks hold an element, the plan reads it from the
+  lowest-ranked holder. Pass ``replica_selector``, a callable that receives a
+  ``ReplicaSelectionRequest`` and returns the ``source_rank`` of one of its
+  ``candidates``, to choose a different holder.
+- ``limits`` takes a ``deepspeed.checkpoint.affine_transfer.PlanBudget``. A plan
+  that exceeds it raises ``AffineTransferError`` instead of being truncated.
+- The runtime packs experts with the contiguous, uniform placement. If the
+  layer's placement descriptor describes anything else, both methods raise
+  ``NotImplementedError``.
+
+``expert_affine_maps()`` describes one packed tensor per EP rank, so ZeRO and
+expert-data-parallel (EDP) storage has to be normalized before its offsets apply.
+``expert_storage_affine_maps()`` instead describes what every process actually
+stores, so a plan built from it reads directly from runtime storage:
+
+.. code-block:: python
+
+    from deepspeed.checkpoint.affine_transfer import plan_transfer
+
+    # Built locally from the expert data parallel group table; no communication.
+    storage_maps = layer.expert_storage_affine_maps()  # {"w1": ParamAffineMap, ...}
+    plan = plan_transfer(target_map, storage_maps["w1"])
+
+- Map ranks are global ranks. The logical shape is the parameter's own shape,
+  and each shard is a rank's flat storage, which
+  ``zero_param_storage_shard(param)`` in ``deepspeed.checkpoint.zero_affine``
+  returns: ``param.data.view(-1)``, or under ZeRO-3 the partition
+  ``param.ds_tensor`` without its padding.
+  ``target_map`` must use the same logical shape;
+  ``autoep_storage_affine_map`` in ``deepspeed.checkpoint.autoep_affine`` builds
+  one from a placement descriptor and its holders.
+- Under ZeRO-0/1/2, every EDP replica of an EP rank stores the whole packed
+  tensor and is listed as a holder. The plan reads from the lowest global rank
+  unless ``replica_selector`` chooses another candidate.
+- Under ZeRO-3, each EDP rank stores its partition of the packed tensor. The
+  trailing padding is not part of a shard, so a rank whose partition is all
+  padding, or whose EP rank holds no experts, has an empty shard and is never
+  a source or target of a copy.
+- The maps list only authoritative copies: the storage the optimizer step
+  updates and the next forward reads, so a write through the maps lasts.
+  Copies the runtime derives from them are not listed. One is the gathered
+  copy ZeRO-3 keeps of a persistent parameter between forwards: it holds the
+  same values after a step, but a write to it is lost once it is released, and
+  a write to the shard alone is not seen while it serves the forward. For this
+  reason ``zero_param_storage_shard`` refuses a gathered parameter; call
+  ``engine.empty_partition_cache()`` before writing.
+- The maps describe the low-precision parameters the forward reads, which is
+  what a rollout engine consumes. When a training engine is the target, these
+  parameters are themselves derived from its fp32 master weights, and its next
+  optimizer step overwrites them. The fp32 master weights and optimizer states
+  are not described. Expert tensor parallelism
+  (``expert_tensor_parallel_size > 1``) raises ``NotImplementedError``.
+- ``autotp_storage_affine_maps(model)`` in ``deepspeed.checkpoint.zero_affine``
+  describes the experts of an AutoEP layer with this method, so a model-wide
+  description under AutoTP and AutoEP is consistent.
+
+The maps and plans use the affine representation that Universal Checkpoint
+uses for expert parameters; see ``deepspeed/checkpoint/affine_ir_spec.md``.

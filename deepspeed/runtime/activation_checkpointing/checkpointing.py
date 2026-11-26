@@ -622,7 +622,6 @@ class CheckpointFunction(torch.autograd.Function):
         ctx.fwd_cuda_rng_state_tracker = get_cuda_rng_tracker().get_states()
 
         see_memory_usage("Before running forward on the layer", force=False)
-        # ctx.save_for_backward(*args)
         with torch.no_grad():
             outputs = run_function(*inputs_cuda)
 

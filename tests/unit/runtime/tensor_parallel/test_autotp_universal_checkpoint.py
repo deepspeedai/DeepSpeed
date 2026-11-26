@@ -353,8 +353,8 @@ def test_collect_records_fused_layouts_without_a_sub_param_split():
     assert "interleaves" in unsupported[r"^qkv_proj\.weight$"]
 
 
-@pytest.mark.parametrize("layer_cls", [Yuan_LinearLayer, Yuan_LinearAllreduce])
-def test_collect_records_yuan_layout_as_unsupported(layer_cls):
+@pytest.mark.parametrize("layer_cls, bias_refused", [(Yuan_LinearLayer, True), (Yuan_LinearAllreduce, False)])
+def test_collect_records_yuan_layout_as_unsupported(layer_cls, bias_refused):
     model = torch.nn.Module()
     model.proj = layer_cls(torch.nn.Linear(8, 8, bias=True), mp_group=None, name="proj")
 
@@ -362,7 +362,10 @@ def test_collect_records_yuan_layout_as_unsupported(layer_cls):
 
     unsupported = uc_info[AUTOTP_UNSUPPORTED_PARAMETER_PATTERNS]
     assert "noncontiguous head groups" in unsupported[r"^proj\.weight$"]
-    assert "noncontiguous head groups" in unsupported[r"^proj\.bias$"]
+    # The value projection's bias follows its weight's head selection, so without head counts it
+    # is refused with it. The output projection's bias is replicated whole, which needs no head
+    # counts to describe.
+    assert (r"^proj\.bias$" in unsupported) == bias_refused
     with pytest.raises(RuntimeError, match="noncontiguous head groups"):
         model.proj.gather_params([model.proj.weight, model.proj.bias])
 

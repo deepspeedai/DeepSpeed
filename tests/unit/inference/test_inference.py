@@ -21,11 +21,11 @@ from deepspeed.accelerator import get_accelerator
 from deepspeed.git_version_info import torch_info
 from deepspeed.model_implementations import DeepSpeedTransformerInference
 from deepspeed.ops.op_builder import InferenceBuilder
-from deepspeed.ops.op_builder import OpBuilder
+from deepspeed.ops.op_builder.builder import CUDAOpBuilder
 
 from unit.common import DistributedTest
 
-rocm_version = OpBuilder.installed_rocm_version()
+rocm_version = CUDAOpBuilder.installed_rocm_version()
 if rocm_version != (0, 0):
     pytest.skip("skip inference tests on rocm for now", allow_module_level=True)
 
@@ -739,5 +739,4 @@ class TestLMCorrectness(DistributedTest):
         ds_time = time.time() - start
 
         ppl_diff = abs(bs_output["results"][task]["ppl"] - ds_output["results"][task]["ppl"])
-        #assert ds_time <= bs_time
         assert ppl_diff < 0.01

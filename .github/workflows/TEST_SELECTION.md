@@ -29,8 +29,8 @@ workflows from one config — see [Adding a workflow](#add-a-new-workflow).
   the exact candidate SHA inside a no-secret Modal Sandbox. If the fixed
   `L40S:2` Sandbox cannot start within its acquisition window, the controller
   tries a fixed, ordered pool of AWS `g7.12xlarge` Spot locations. The backend
-  runs only for merge queue entries, the nightly scheduled full run, and manual
-  runs — a plain PR event never spends GPU quota.
+  runs only for opted-in merge queue entries, the nightly scheduled full run,
+  and manual runs — a plain PR event never spends GPU quota.
 - A manual `infrastructure_smoke` dispatch skips selection and pytest entirely.
   It starts one short OCI `L40S:2` Sandbox check and three independent regional
   AWS jobs in parallel. Each AWS job directly selects one region, launches a
@@ -45,7 +45,8 @@ workflows from one config — see [Adding a workflow](#add-a-new-workflow).
   python ci/tests_fetcher.py --base origin/master            # what would CI run?
   python ci/tests_fetcher.py --base origin/master --explain  # ...and why?
   ```
-- Force a full run: put `[test all]` (or `[no filter]`) in a commit message.
+- Force full test selection with `[test all]` (or `[no filter]`). Queue GPU
+  execution also requires the exact `needs-gpu-test` label.
 
 
 ## Why
@@ -71,6 +72,11 @@ and documentation checks are not disabled.
 The active `python`, `cpu-torch-latest`, and `nv-pre-compile-ops` workflows use
 the reusable `check-paths.yml` gate. Disabled legacy workflows are left unchanged.
 
+The shared gate also skips root `version.txt` changes on both PRs and merge queue
+entries, including diffs mixing version and documentation changes. Any other
+changed path still requires CI unless explicitly excluded for that workflow.
+The Modal selector already selects no tests for a version-only diff.
+
 The optional `mps-torch-latest` and `no-torch` workflows rely on their PR trigger
 paths instead, which exclude Markdown. A README under a watched source directory
 cannot start these workflows merely because the PR also changes unrelated code.
@@ -95,8 +101,9 @@ diff runs tests, and detection failures, including a base branch without the
 script, emit a warning and fall back to running tests. If the gate job itself
 fails or exceeds its 10-minute limit, the required jobs fail instead of skipping.
 Callers may pass `pr-ignore` (files, or directories ending in `/`, such as
-`version.txt`) to skip more paths on pull requests only; merge queue entries skip
-only documentation-only diffs. Preview the decision with
+`deepspeed/inference/v2/`) to skip more paths on pull requests only; merge queue
+entries use only the shared documentation and root `version.txt` exclusions.
+Preview the decision with
 `python ci/check_paths.py --base "$(git merge-base origin/master HEAD)"`.
 
 Scheduled, manual, and push runs retain their existing behavior. Required
@@ -173,24 +180,23 @@ pytest. It is an explicit infrastructure diagnostic and is not available to
 scheduled, pull-request, or merge-queue executions, so it cannot weaken the
 Required check.
 
-`mode` controls `deploy`:
+`mode` controls the selected test scope:
 
 - **`none`** → `deploy` is skipped. The Required status is still satisfied (a
   skipped dependent job counts as success here).
-- **`subset`** → `deploy` runs pytest on exactly the impacted files.
-- **`all`** → `deploy` runs the whole scope (`tests/unit/v1`).
+- **`subset`** → an eligible `deploy` runs pytest on exactly the impacted files.
+- **`all`** → an eligible `deploy` runs the whole scope (`tests/unit/v1`).
 
-Independent of `mode`, `deploy` is also skipped on `pull_request_target` runs,
-so pushing to a PR never spends GPU quota — the `collect-tests` summary still
-previews what the queue will run. The selected backend actually executes on
-`merge_group` (the merged tree, gating the merge), `schedule`, and
-`workflow_dispatch`. On `merge_group` the candidate is the merge-group commit
-in the base repository, diffed against the queue's base SHA, so the selection
-covers exactly what the entry would introduce. There is deliberately no `push`
-trigger: master receives no direct pushes (the merge queue lands every entry,
-and each merge_group run already tested the merged tree), so a post-push run
-would duplicate the queue's work. Cross-entry interaction regressions are what
-the nightly full suite exists to catch.
+Independent of `mode`, `deploy` is skipped on `pull_request_target` runs and on
+merge-group runs whose entry PR lacks the exact `needs-gpu-test` label. The
+`collect-tests` summary still previews the selected scope. The backend executes
+for opted-in `merge_group` entries (the merged tree, gating the merge),
+`schedule`, and `workflow_dispatch`. On `merge_group` the candidate is the
+merge-group commit in the base repository, diffed against the queue's base SHA,
+so the selection covers exactly what the entry would introduce. There is
+deliberately no `push` trigger: master receives no direct pushes and the merge
+queue evaluates every entry before landing. Cross-entry interaction regressions
+are what the nightly full suite exists to catch.
 
 For a manual infrastructure-only check, select `infrastructure_smoke` when
 dispatching the workflow. That skips both `collect-tests` and `deploy`; the
@@ -217,12 +223,11 @@ suite. Its outcome feeds `nightly-triage.yml`:
   kill before the controller could classify itself — so triage reports it as
   unclassified rather than guessing a class.
 - **Real test failures** → an issue is opened listing the failing test files
-  and the run. Triage deliberately stops there: the merge queue already gated
-  each entry on its own impacted tests, so a nightly failure is either a
-  cross-entry interaction (worth human judgment; the issue provides the
-  exposure) or an operational flake. If nightly regressions turn out to be
-  frequent enough to justify automated bisection, the `nightly-last-green` tag
-  is the good endpoint it would start from.
+  and the run. Triage deliberately stops there: an opted-out queue entry may
+  have introduced a regression that nightly is the first GPU run to expose, or
+  the failure may be a cross-entry interaction or operational flake. If nightly
+  regressions turn out to be frequent enough to justify automated bisection,
+  the `nightly-last-green` tag is the good endpoint it would start from.
 
 The controller (`ci/torch_latest.py`) classifies its own failures for this
 routing. It waits up to 10 minutes for Modal Sandbox startup; only that
@@ -340,8 +345,9 @@ deepspeed/shared.py impacts:
 
 ### Escape hatches
 
-- **Force the full suite for a push:** include `[test all]` (or `[no filter]`)
-  anywhere in a commit message on the branch.
+- **Force full test selection:** include `[test all]` (or `[no filter]`)
+  anywhere in a commit message on the branch. Queue GPU execution still needs
+  the exact `needs-gpu-test` label.
 - **Touch an infra file:** changing a non-documentation file that matches a run-all
   glob runs everything.
 - **Found a missed test?** It's likely a runtime/dynamic dependency the static
@@ -532,7 +538,8 @@ aren't committed (the fetcher diffs *committed* history, `merge-base..HEAD`).
 
 **A relevant test wasn't selected.**
 Likely a runtime/dynamic dependency. Confirm with `--explain`, then add a
-`DYNAMIC_EDGES` entry. As a stop-gap, push with `[test all]`.
+`DYNAMIC_EDGES` entry. As a stop-gap, use `[test all]`; the entry still needs
+the exact `needs-gpu-test` label to execute that selection on the merge queue.
 
 **Everything runs even for a tiny change.**
 You touched a run-all glob (CI/build/shared fixture/core runtime), or a hub module
