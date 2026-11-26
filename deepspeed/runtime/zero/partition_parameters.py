@@ -1183,10 +1183,13 @@ class Init(InsertPostInitMethodToModuleSubClasses):
         else:
             self.param_swapper = None
 
-        # If we are provided an already-allocated module to prepare.
+        # If we are provided an already-allocated module to prepare. Honoring the recorded dtype here
+        # keeps a parameter the context marked (for example, a bias a parent constructor added to an
+        # already-partitioned child) consistent with the Init dtype even when this call runs before
+        # deepspeed.initialize converts the same model again.
         if module is not None:
             assert isinstance(module, torch.nn.Module)
-            self._convert_to_zero_parameters(module.parameters(recurse=True))
+            self._convert_to_zero_parameters(module.parameters(recurse=True), apply_init_dtype=True)
             self._keep_in_fp32(module)
 
         self.use_all_gather_into_tensor = dist.has_all_gather_into_tensor()

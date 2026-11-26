@@ -291,7 +291,8 @@ class TestSerialContext(DistributedTest):
             expected = torch.full((4, 4), 0.875, dtype=torch.bfloat16, device=engine.device)
             torch.testing.assert_close(model.linear.weight, expected, rtol=0, atol=0)
 
-    def test_added_child_bias_trains(self):
+    @pytest.mark.parametrize("init_module", [True, False])
+    def test_added_child_bias_trains(self, init_module):
         if not get_accelerator().is_bf16_supported():
             pytest.skip("bf16 is not supported")
         setup_serial_env()
@@ -319,6 +320,11 @@ class TestSerialContext(DistributedTest):
         }
         with deepspeed.zero.Init(config_dict_or_path=config_dict):
             model = Model()
+
+        if init_module:
+            # Convert the already-partitioned model again before initialize. The bias added by the
+            # constructor keeps the Init dtype only if this conversion honors the recorded dtype.
+            deepspeed.zero.Init(module=model, config_dict_or_path=config_dict)
 
         optimizer = torch.optim.SGD(model.parameters(), lr=0.5)
         engine, _, _, _ = deepspeed.initialize(config=config_dict, model=model, optimizer=optimizer)
