@@ -826,11 +826,12 @@ class TestUniversalCheckpointCrossStageScalarOwnGroup(DistributedTest):
         target = build(target_stage, load_universal=True)
         target.load_checkpoint(tmpdir, tag=universal_tag)
 
-        # Every restored group must carry the source's global step so the very next step continues from it.
-        for i, param_group in enumerate(target.optimizer.param_groups):
-            hp_param = param_group['params'][0]
-            for state in target.optimizer.optimizer.state.values():
-                assert int(state["step"]) == steps_before_save
+        # Every restored parameter must carry the source's global step so the very next step continues
+        # from it; the scalar's rank holds no fragment for its own group, so its step is restored from
+        # the global state in the universal checkpoint.
+        states = target.optimizer.optimizer.state.values()
+        for state in states:
+            assert int(state["step"]) == steps_before_save
 
         _train(target, hidden_dim, 1)
         for state in target.optimizer.optimizer.state.values():

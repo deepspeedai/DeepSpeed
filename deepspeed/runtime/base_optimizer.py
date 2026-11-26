@@ -413,26 +413,24 @@ class ZeROOptimizer(DeepSpeedOptimizer):
                     steps.append(step)
 
             hp_param = param_group['params'][0]
-            assert all(step == steps[0] for step in steps), f"Steps {steps} are not equal"
-            if not steps:
-                # This rank holds no fragment for the group (e.g. a scalar param in its own group when a
-                # ZeRO-3 source loads under ZeRO-1/2), so no per-parameter step is loaded here; sync the
-                # group with the source's global step, or leave it unset if the source wrote none.
-                if global_step is None:
-                    from deepspeed.checkpoint.universal_checkpoint import load_universal_optimizer_step
-                    global_step = load_universal_optimizer_step(optim_sd, checkpoint_dir, [])
-                if global_step is not None:
-                    self.optimizer.state[hp_param]['step'] = global_step
-            elif steps[0] is None:
-                # A ZeRO-3 source writes no per-parameter step.pt; its step is in the global state.
-                if global_step is None:
-                    from deepspeed.checkpoint.universal_checkpoint import load_universal_optimizer_step
-                    global_step = load_universal_optimizer_step(optim_sd, checkpoint_dir, [])
-                steps[0] = global_step
-                self.optimizer.state[hp_param]['step'] = steps[0]
+            if steps:
+                assert all(step == steps[0] for step in steps), f"Steps {steps} are not equal"
+
+            if steps and steps[0] is not None:
+                step_to_restore = steps[0]
             else:
+                # No usable per-parameter step: either this rank holds no fragment for the group (a
+                # scalar param in its own group when a ZeRO-3 source loads under ZeRO-1/2), or a ZeRO-3
+                # source that keeps its step in the global state. Fall back to the source's global step.
+                if global_step is None:
+                    from deepspeed.checkpoint.universal_checkpoint import load_universal_optimizer_step
+                    global_step = load_universal_optimizer_step(optim_sd, checkpoint_dir, [])
+                step_to_restore = global_step
+
+            if step_to_restore is not None:
                 # The optimizer advances step in place, and a ZeRO-3 source's step is shared by every group.
-                self.optimizer.state[hp_param]['step'] = steps[0].clone() if torch.is_tensor(steps[0]) else steps[0]
+                self.optimizer.state[hp_param]['step'] = step_to_restore.clone() if torch.is_tensor(
+                    step_to_restore) else step_to_restore
 
             map_to_flat_opt_states(hp_param, lp_groups[i], self.optimizer.state, opt_keys)
 
