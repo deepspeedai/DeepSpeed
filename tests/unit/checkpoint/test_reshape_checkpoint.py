@@ -13,6 +13,7 @@ from deepspeed.checkpoint import DeepSpeedCheckpoint, ZeROCheckpoint, get_model_
 from deepspeed.checkpoint.constants import (AUTOEP_LAYERS_KEY, CHECKPOINT_PARALLEL_DIMS, CHECKPOINT_PP_DEGREE,
                                             CHECKPOINT_TP_DEGREE, PARAM_SHAPES, UNIVERSAL_CHECKPOINT_INFO,
                                             UNIVERSAL_CHECKPOINT_VERSION_KEY, UNIVERSAL_CHECKPOINT_VERSION_VALUE)
+from deepspeed.checkpoint import ds_to_universal
 from deepspeed.checkpoint.ds_to_universal import _aggregate_autoep_zero12_metadata
 from deepspeed.runtime.base_optimizer import _universal_checkpoint_tp_info
 from deepspeed.runtime.engine import _checkpoint_parallel_metadata, _default_universal_checkpoint_info
@@ -165,3 +166,41 @@ def test_checkpoint_writer_discovery_and_consumers_load_model_files_once(tmpdir,
     assert checkpoint.get_checkpoint_info(UNIVERSAL_CHECKPOINT_INFO) == {"source": "writer"}
     assert (checkpoint.pp_degree, checkpoint.tp_degree, checkpoint.dp_degree) == (2, 1, 2)
     assert model_loads == checkpoint.mp_rank_files
+
+
+def _random_file(path, size):
+    data = os.urandom(size)
+    with open(path, "wb") as f:
+        f.write(data)
+    return data
+
+
+@pytest.mark.parametrize("size", [0, 1, 4096, 10 * 4096 + 7])
+def test_direct_file_copy_is_byte_identical(tmpdir, monkeypatch, size):
+    # Interleaved chunks and the unaligned tail must neither drop nor repeat bytes, whatever the file size.
+    monkeypatch.setattr(ds_to_universal, "COPY_CHUNK_BYTES", 4096)
+    src, dst = os.path.join(tmpdir, "src.pt"), os.path.join(tmpdir, "dst.pt")
+    data = _random_file(src, size)
+    try:
+        ds_to_universal._direct_copy(src, dst, size, num_workers=3)
+    except OSError as e:
+        pytest.skip(f"no direct I/O in {tmpdir}: {e}")
+    with open(dst, "rb") as f:
+        assert f.read() == data
+
+
+@pytest.mark.parametrize("clone", [True, False])
+def test_copy_file_is_byte_identical(tmpdir, monkeypatch, clone):
+    monkeypatch.setattr(ds_to_universal, "PARALLEL_COPY_MIN_BYTES", 1)
+    monkeypatch.setattr(ds_to_universal, "COPY_CHUNK_BYTES", 4096)
+    if not clone:
+        monkeypatch.setattr(ds_to_universal, "_clone_file", lambda src, dst: False)
+    src = os.path.join(tmpdir, "mp_rank_00_model_states.pt")
+    data = _random_file(src, 10 * 4096 + 7)
+    out = os.path.join(tmpdir, "out")
+    os.makedirs(out)
+    ds_to_universal._copy_file(src, out, num_workers=3)
+    dst = os.path.join(out, os.path.basename(src))
+    with open(dst, "rb") as f:
+        assert f.read() == data
+    assert os.stat(dst).st_mtime == os.stat(src).st_mtime

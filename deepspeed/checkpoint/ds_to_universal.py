@@ -11,7 +11,8 @@ import argparse
 import glob
 import itertools
 import math
-from concurrent.futures import ProcessPoolExecutor
+import mmap
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 import os
 import re
 import shutil
@@ -66,6 +67,14 @@ from deepspeed.checkpoint.autoep_zero3_metadata import (
 )
 from deepspeed.checkpoint.affine import ParamAffineMap, AFFINE_MAP_FORMAT_VERSION, SCALE_POWER_BY_STATE
 from deepspeed.checkpoint.autoep_affine import autoep_metadata_to_affine_map, validate_autoep_placement_descriptor
+
+# Copying a file with parallel direct I/O only pays off for large files, e.g. the model-states file.
+COPY_WORKERS = 8
+PARALLEL_COPY_MIN_BYTES = 1 << 30
+COPY_CHUNK_BYTES = 8 << 20
+DIRECT_IO_ALIGN = 4096
+# Linux ioctl that makes a file share the blocks of another, copy-on-write (XFS, Btrfs).
+FICLONE = 0x40049409
 
 
 def parse_arguments():
@@ -128,6 +137,76 @@ def _save_checkpoint(file_path, chkpt_sd):
     dir, _ = os.path.split(file_path)
     os.makedirs(dir, exist_ok=True)
     torch.save(chkpt_sd, file_path)
+
+
+def _clone_file(src, dst):
+    """Make ``dst`` share the blocks of ``src``; False where the file system cannot."""
+    try:
+        import fcntl
+        with open(src, 'rb') as fin, open(dst, 'wb') as fout:
+            fcntl.ioctl(fout.fileno(), FICLONE, fin.fileno())
+        return True
+    except (ImportError, OSError):
+        return False
+
+
+def _direct_copy(src, dst, size, num_workers):
+    """Copy ``src`` to ``dst`` with O_DIRECT, ``num_workers`` threads each taking every ``num_workers``-th chunk.
+
+    Buffered writes into one file serialize on its inode lock in XFS, so a single file takes buffered writes at a
+    fraction of the bandwidth of striped NVMe storage; direct writes within the file size do not serialize.
+    """
+    aligned = size // DIRECT_IO_ALIGN * DIRECT_IO_ALIGN
+    num_chunks = math.ceil(aligned / COPY_CHUNK_BYTES)
+    with open(dst, 'wb') as fout:
+        os.ftruncate(fout.fileno(), size)
+
+    def copy_chunks(first):
+        # An anonymous mapping is page aligned, as O_DIRECT requires of its buffers.
+        buf = memoryview(mmap.mmap(-1, COPY_CHUNK_BYTES))
+        fin = os.open(src, os.O_RDONLY | os.O_DIRECT)
+        try:
+            fout = os.open(dst, os.O_WRONLY | os.O_DIRECT)
+            try:
+                for chunk in range(first, num_chunks, num_workers):
+                    offset = chunk * COPY_CHUNK_BYTES
+                    view = buf[:min(COPY_CHUNK_BYTES, aligned - offset)]
+                    if os.preadv(fin, [view], offset) != len(view) or os.pwritev(fout, [view], offset) != len(view):
+                        raise OSError(f'short direct I/O copying {src} at byte {offset}')
+            finally:
+                os.close(fout)
+        finally:
+            os.close(fin)
+
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        copies = [executor.submit(copy_chunks, first) for first in range(num_workers)]
+        for copy in copies:
+            copy.result()
+    if size > aligned:
+        with open(src, 'rb') as fin, open(dst, 'r+b') as fout:
+            fin.seek(aligned)
+            fout.seek(aligned)
+            fout.write(fin.read())
+
+
+def _copy_file(src, dst_dir, num_workers=COPY_WORKERS):
+    """Copy ``src`` into ``dst_dir``: a large file as a reflink where the file system supports it, else with
+    ``num_workers`` threads of direct I/O."""
+    dst = os.path.join(dst_dir, os.path.basename(src))
+    size = os.path.getsize(src)
+    if size >= PARALLEL_COPY_MIN_BYTES:
+        if _clone_file(src, dst):
+            shutil.copystat(src, dst)
+            return
+        if num_workers > 1 and hasattr(os, 'O_DIRECT') and hasattr(os, 'preadv'):
+            try:
+                _direct_copy(src, dst, size, num_workers)
+                shutil.copystat(src, dst)
+                return
+            except OSError:
+                # Some file systems do not support direct I/O.
+                pass
+    shutil.copy2(src, dst_dir)
 
 
 def extract_zero_shards(dir, ds_checkpoint, indices_3D):
@@ -1287,7 +1366,7 @@ def main(args):
                 out_path = os.path.join(args.output_folder, os.path.basename(f))
                 torch.save(mp_sd, out_path)
             else:
-                shutil.copy2(f, args.output_folder)
+                _copy_file(f, args.output_folder)
 
     else:
         # Stage 3 path
@@ -1380,7 +1459,7 @@ def main(args):
                 model_state[UNIVERSAL_CHECKPOINT_INFO][AUTOEP_LAYERS_KEY] = autoep_metadata
                 torch.save(model_state, os.path.join(args.output_folder, os.path.basename(f)))
             else:
-                shutil.copy2(f, args.output_folder)
+                _copy_file(f, args.output_folder)
 
     # Update latest to output folder
     checkpoint_root_folder, step_folder = os.path.split(args.output_folder)
