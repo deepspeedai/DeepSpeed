@@ -77,6 +77,9 @@ def get_tensor_position(func):
     # all_to_all and torch multiGPU colls
     elif 'input_tensor_list' in sig_params:
         arg = 'input_tensor_list'
+    # batch_isend_irecv
+    elif 'p2p_op_list' in sig_params:
+        arg = 'p2p_op_list'
     if arg is None:
         return -1
     else:
@@ -96,6 +99,8 @@ def get_tensor_kwarg(func, kwargs):
         arg = func_args['input_list']
     elif 'input_tensor_list' in func_args:
         arg = func_args['input_tensor_list']
+    elif 'p2p_op_list' in func_args:
+        arg = func_args['p2p_op_list']
     return arg
 
 
@@ -121,7 +126,9 @@ def get_msg_size_from_args(func, *args, **kwargs):
         # Sum of tensor sizes for list colls such as torch's all_to_all
         # NOTE: msg_size for list colls will not be the actual size transmitted by a given MPI/NCCL call within the coll op. Instead, it's the total amount of data transmitted.
         if type(tensor_arg) is list:
-            return sum(x.element_size() * x.nelement() for x in tensor_arg)
+            # batch_isend_irecv passes P2POp objects, which wrap the tensor they transmit
+            tensors = [getattr(x, 'tensor', x) for x in tensor_arg]
+            return sum(x.element_size() * x.nelement() for x in tensors)
         else:
             return tensor_arg.element_size() * tensor_arg.nelement()
 

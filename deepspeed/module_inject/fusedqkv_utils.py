@@ -2,9 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # DeepSpeed Team
+from dataclasses import replace
+from typing import Optional
+
 import torch
 from deepspeed.utils.logging import warning_once
-from deepspeed.module_inject.tp_shard import AutoTPMeta, get_shard_size, get_shard_size_list
+from deepspeed.module_inject.tp_shard import (AutoTPMeta, get_shard_size, get_shard_size_list, _MODULE_KV_HEAD_ATTRS,
+                                              _kv_head_count_from_module)
 
 
 def split_by_qkvlist_and_refuse(qkv_list, split_size, split_dim=0, cat_dim=0):
@@ -49,6 +53,68 @@ def get_fused_qkv_type(module):
     # There can be overlap with matches (e.g., "DecoderLayer" and "FalconDecoderLayer").
     # We take the longest matching module_name
     return FUSED_QKV_TYPE_DICT[max(module_name_matches, key=len)]
+
+
+_REPLICATED_KV_BLOCK_CLASS_NAMES = tuple(name for name, fused_type in FUSED_QKV_TYPE_DICT.items()
+                                         if fused_type == 'bigcodetype')
+
+
+def replicates_kv_block(module):
+    """Whether this model's fused qkv layout keeps the whole K/V block on every rank.
+
+    Uses class names instead of ``get_fused_qkv_type`` to avoid stringifying every module.
+    """
+    return any(
+        any(name in type(child).__name__ for name in _REPLICATED_KV_BLOCK_CLASS_NAMES) for child in module.modules())
+
+
+def is_replicated_kv_attention(module, replicated_kv):
+    """Whether ``module`` is an attention module using the replicated-K/V layout."""
+    return bool(replicated_kv and getattr(module, "multi_query", False))
+
+
+def replicated_kv_shard_meta(meta: AutoTPMeta, replicated_kv: bool) -> AutoTPMeta:
+    """Metadata whose shard unit is query heads for replicated K/V, otherwise K/V heads.
+
+    ``get_shard_size`` always reads ``num_kv_heads`` as the shard unit. Replacing that field
+    keeps the fused-qkv partition, the query-row widths, and the attribute sharding on the same
+    head count instead of each caller deriving it independently.
+    """
+    if not replicated_kv or meta.num_attention_heads is None:
+        return meta
+    return replace(meta, num_kv_heads=meta.num_attention_heads)
+
+
+def replicated_kv_shard_heads(meta: AutoTPMeta, replicated_kv: bool) -> Optional[int]:
+    """Number of attention heads that bound one rank's shard, or None when unspecified."""
+    if replicated_kv and meta.num_attention_heads is None:
+        return None
+    return replicated_kv_shard_meta(meta, replicated_kv).num_kv_heads
+
+
+def replicated_kv_query_widths(meta: AutoTPMeta, mp_size: int):
+    """Per-rank query-row widths for a replicated-K/V fused qkv layout, or None without n_embd."""
+    shard_meta = replicated_kv_shard_meta(meta, True)
+    if shard_meta.n_embd is None:
+        return None
+    return get_shard_size_list(shard_meta.n_embd, mp_size, shard_meta)
+
+
+def replicated_kv_row_start(meta: AutoTPMeta, mp_size: int, rank: int) -> Optional[int]:
+    """First K/V row in ``rank``'s local replicated-K/V shard."""
+    query_widths = replicated_kv_query_widths(meta, mp_size)
+    if query_widths is None:
+        return None
+    return query_widths[rank]
+
+
+def replicated_kv_group_count(module, local_num_heads: int) -> int:
+    """Query-to-K/V group count after the query heads have been sharded."""
+    kv_heads = _kv_head_count_from_module(module)
+    if not kv_heads:
+        raise RuntimeError(f"AutoTP cannot recompute num_key_value_groups for {type(module).__name__}: "
+                           f"none of the module K/V head attributes {_MODULE_KV_HEAD_ATTRS} is set.")
+    return local_num_heads // kv_heads
 
 
 def fused_qkv_subparam_sizes(module, weight_shape, meta: AutoTPMeta):
@@ -163,8 +229,7 @@ def prepare_tp_fused_qkvw(module, src, mp_size, gpu_index, meta: AutoTPMeta):
         assert n_embd is not None
         q = input[:n_embd]
         kv = input[n_embd:]
-        shape = q.shape
-        split_q = q.split(get_shard_size_list(shape[0], mp_size, meta), dim=0)
+        split_q = q.split(replicated_kv_query_widths(meta, mp_size), dim=0)
         return torch.cat((split_q[gpu_index], kv), dim=0)
 
     def _phi3_type_transpose(input, mp_size, meta=meta):
@@ -236,6 +301,45 @@ def shared_qk_value_head_ids(num_heads, world_size, rank):
     return v_head_ids
 
 
+def codegen_block_layout(total_rows, world_size, num_kv_heads, codegen_mp_num=4):
+    """Which equal-sized blocks of a codegen fused-QKV weight each rank holds, in shard order.
+
+    ``_codegen_type_transpose`` views the weight as ``codegen_mp_num`` blocks, cuts every block
+    into q/k/v, subdivides each third across the ranks, then reassembles the pieces q, k, v at a
+    time. That produces one fixed permutation of the whole weight from which a rank takes a
+    contiguous slice, so a rank's rows are a selection of equal blocks rather than a span -- which
+    is why one partition dimension cannot describe this layout.
+
+    Returns ``(block_size, {rank: block_ids})``, or ``None`` where this permutation is not the
+    layout the weight actually has: the partition refuses a head count it cannot divide, it is
+    never reached below two ranks, and without equal blocks there is nothing to enumerate.
+    """
+    if world_size < 2 or num_kv_heads is None or num_kv_heads % (world_size * codegen_mp_num):
+        # The same condition `_codegen_type_transpose` asserts, plus the single-rank case it is
+        # never called for. Describing a permutation the partition does not apply would be worse
+        # than leaving the layout undescribed.
+        return None
+
+    divisor = 3 * codegen_mp_num * world_size
+    if not total_rows or total_rows % divisor:
+        return None
+
+    block_size = total_rows // divisor
+    mp_block_rows = total_rows // codegen_mp_num
+    third_rows = total_rows // (3 * codegen_mp_num)
+
+    block_ids_by_rank = {}
+    for rank in range(world_size):
+        block_ids = []
+        for entry in range(codegen_mp_num):
+            mp_block, within = divmod(rank * codegen_mp_num + entry, world_size)
+            for third in range(3):
+                row = mp_block * mp_block_rows + third * third_rows + within * block_size
+                block_ids.append(row // block_size)
+        block_ids_by_rank[rank] = block_ids
+    return block_size, block_ids_by_rank
+
+
 def shard_value_with_share_qk(
         weight,
         bias,
@@ -269,7 +373,11 @@ def shard_value_with_share_qk(
         if shard_value:
             sharded_bias = torch.cat(sharded_bias, dim=0)
         else:
-            bias = bias / float(world_size)
+            # The output projection is row parallel: LinearAllreduce sums the partial products
+            # across ranks first and adds the bias once afterwards, so every rank keeps the whole
+            # bias unchanged. Dividing it by the world size here would scale the output's bias by
+            # the same factor.
+            sharded_bias = bias.data
         return torch.nn.Parameter(sharded_weight), torch.nn.Parameter(sharded_bias)
     else:
         return torch.nn.Parameter(sharded_weight), None

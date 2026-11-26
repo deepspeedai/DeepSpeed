@@ -209,10 +209,10 @@ class DataAnalyzer(object):
             p = []
             for thread in threads_to_run:
                 p.append(Process(target=self.run_map_helper, args=(thread, )))
-                p[thread].start()
+                p[-1].start()
 
-            for thread in threads_to_run:
-                p[thread].join()
+            for proc in p:
+                proc.join()
         else:
             assert self.num_threads == 1
             self.run_map_helper(0)
@@ -490,7 +490,6 @@ class DistributedDataAnalyzer(object):
         # comm_group and worker_id+num_workers are mutually exclusive
         self.comm_group = comm_group
         if self.comm_group is None:
-            # self.comm_group = deepspeed.utils.groups._clone_world_group()
             self.num_workers = num_workers
             self.worker_id = worker_id
         else:

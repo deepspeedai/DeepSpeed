@@ -10,7 +10,7 @@ If you're interested in a newer version that works with HF Transformers, please 
 
 ## 1. Installation
 
-You will need to install DeepSpeed v0.10.2 or higher to use the DeepSpeed Sequence feature. Installing DeepSpeed is as simple as `pip install deepspeed`, [see more details](/tutorials/getting-started/).
+You will need to install DeepSpeed v0.10.2 or higher to use the DeepSpeed Sequence feature. Installing DeepSpeed is as simple as `pip install deepspeed`, [see more details](/getting-started/).
 
 
 ## 2. How to use DeepSpeed-Ulysses in your application?
@@ -52,6 +52,13 @@ def forward():
 
 ```
 
+`DistributedAttention(..., validate_shards=True)` enables an opt-in shard-length diagnostic.
+All ranks in the sequence parallel group must enable it consistently and enter each forward call.
+It compares query, key, and value sequence lengths separately across group ranks; query and KV lengths may differ.
+With consistent participation, unequal shards raise diagnostic errors before attention data collectives.
+Validation adds a metadata all-gather and host synchronization per forward; when disabled (the default), it adds no metadata communication.
+The caller remains responsible for equal shards or padding and for correct attention and loss masks; this flag adds no padding.
+
 * **Add sequence parallel communication group**:  Note that DistributedAttention takes `local_attn` and `sequence_parallel_group` as the parameters, where local_attn can be your original attention block. You also need to build the sequence parallel communication group and pass that the DistributedAttention. One way to do this is to build the sequence parallel group at the model initialization stage.
 
 
@@ -79,7 +86,7 @@ def get_sequence_parallel_group():
 
 ```
 
-In the Megatron-DeepSpeed exampele, to enable sequence parallelism, set the degree of parallelism using the --ds-sequence-parallel-size argument. You also need to ensure that the number of attention heads is divisible by this value.
+In the Megatron-DeepSpeed example, to enable sequence parallelism, set the degree of parallelism using the --ds-sequence-parallel-size argument. You also need to ensure that the number of attention heads is divisible by this value.
 We have prepared scripts for you to quickly get some examples for training GPT-3 like models with very long sequences:
 
 ```shell

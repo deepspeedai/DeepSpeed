@@ -4,6 +4,7 @@
 # DeepSpeed Team
 
 # Automatic Tensor Parallelism
+import dataclasses
 import logging
 import re
 
@@ -14,14 +15,30 @@ import torch
 from deepspeed import comm as dist
 from .layers import *
 from deepspeed.accelerator import get_accelerator
-from .fusedqkv_utils import require_tp_fused_qkvw
-from deepspeed.module_inject.tp_shard import AutoTPMeta, get_shard_size, get_shard_size_list
+from .fusedqkv_utils import (require_tp_fused_qkvw, replicates_kv_block, is_replicated_kv_attention,
+                             replicated_kv_group_count, replicated_kv_shard_heads, replicated_kv_shard_meta)
+from deepspeed.module_inject.tp_shard import (AutoTPMeta, get_shard_size, get_shard_size_list, _MODULE_KV_HEAD_ATTRS)
 from deepspeed.utils import groups
 from deepspeed.utils.logging import log_dist, print_dist
-from deepspeed.module_inject.layers import is_autotp_training_mode
+from deepspeed.module_inject.layers import DS_TENSOR_MODEL_PARALLEL, is_autotp_training_mode
 from deepspeed.module_inject.layers import _build_param_uc_restore_meta
 from deepspeed.checkpoint.constants import DS_AUTOTP_UC_META
 from .autotp_config import TPLayerSpec, AutoTPConfig, PartitionType
+from deepspeed.runtime.zero import GatheredParameters
+from deepspeed.runtime.zero.utils import is_zero_param
+
+# Module attributes update_mp_params may shard. _SHARDED_KV_HEAD_ATTRS is the subset that must
+# stay whole for replicated-K/V attention; keep it a subset of both this list and the broader
+# module attribute probe list so a later edit cannot silently drop one side.
+_MP_PARAM_ATTRS = ("n_heads", "inner_dim", "num_heads", "num_kv", "num_attention_heads", "num_attn_heads",
+                   "all_head_size", "embed_dim", "hidden_size", "num_key_value_heads", "num_kv_heads", "kv_n_heads",
+                   "d_model", "num_attention_heads_per_partition", "num_multi_query_groups_per_partition",
+                   "hidden_size_per_partition")
+_SHARDED_KV_HEAD_ATTRS = ("num_key_value_heads", "num_kv_heads", "kv_n_heads", "num_kv")
+assert set(_SHARDED_KV_HEAD_ATTRS) <= set(_MP_PARAM_ATTRS), \
+    "_SHARDED_KV_HEAD_ATTRS must be a subset of _MP_PARAM_ATTRS"
+assert set(_SHARDED_KV_HEAD_ATTRS) <= set(_MODULE_KV_HEAD_ATTRS), \
+    "_SHARDED_KV_HEAD_ATTRS must be a subset of _MODULE_KV_HEAD_ATTRS"
 
 
 def move(tensor, device, copy=True):
@@ -196,6 +213,15 @@ class Loading():
                     module.norm.bias = mp_replace.copy(module.norm.bias, state_dict[prefix + 'bias'])
 
 
+def _weight_ndim(weight):
+    """Number of dimensions of a layer's weight. A weight partitioned by ``deepspeed.zero.Init``
+    holds an empty 1-D placeholder, so its original shape, ``ds_shape``, is used instead."""
+    ds_shape = getattr(weight, "ds_shape", None)
+    if ds_shape is not None:
+        return len(ds_shape)
+    return getattr(weight, "dim", lambda: 0)()
+
+
 class AutoTP():
 
     def __init__(self,
@@ -210,7 +236,7 @@ class AutoTP():
                  vocab_parallel_lm_head=False,
                  model_config=None,
                  tp_grain_size: int = 1,
-                 training_mode: bool = False):
+                 training_mode: Optional[bool] = None):
         self.module = module
         self.all_reduce_linears = all_reduce_linears
         self.prefix = prefix
@@ -218,31 +244,59 @@ class AutoTP():
 
         self.mp_size = None
         self.mp_group = None
+        self.partition_config = partition_config
         # Per-model TP metadata threaded through every layer / helper so each AutoTP instance
-        # shards by its own model's kv-head / grain values.
-        self.tp_meta = AutoTPMeta.from_model_config(model_config, tp_grain_size)
+        # shards by its own model's kv-head / grain values and keeps its own training mode.
+        # None is kept in the layers so they keep following set_autotp_mode, as before.
+        self.tp_meta = AutoTPMeta.from_model_config(model_config, tp_grain_size, training=training_mode)
+        self._replicates_kv_block = replicates_kv_block(self.module)
+        if self.partition_config is not None and any(
+                is_replicated_kv_attention(child, self._replicates_kv_block) for child in self.module.modules()):
+            # update_mp_params still uses model-wide head counts here, which would leave
+            # ranks without query rows with empty attention attributes.
+            raise NotImplementedError("AutoTP does not support an explicit partition_config for replicated-K/V "
+                                      "attention yet; remove partition_config to use the query-head heuristic.")
+        if self.partition_config is None:
+            # Replicated-K/V layouts keep the whole K/V block on every rank, so shard by
+            # query heads; K/V head attributes stay whole. This assumes one replicated-K/V
+            # layout per model.
+            self.tp_meta = replicated_kv_shard_meta(self.tp_meta, self._replicates_kv_block)
         self.linear_layer_setting = linear_layer_setting
         self.orig_layer_impl = orig_layer_impl
         self.linear_policies = None
         self.conv_linear_layer = False
-        self.partition_config = partition_config
         self.vocab_parallel_lm_head = vocab_parallel_lm_head
-        self.training_mode = training_mode
-        self._originally_tied_vocab_head_ids = set()
+        self._training_mode = training_mode
         self._vocab_parallel_lm_head_candidate = None
+        # A tied vocab-parallel lm_head shares its embed_tokens/wte weight with a
+        # VocabParallelEmbedding built from the same shard, so the generic embedding-slicing
+        # path (_slice_embedding, which shards a different, hidden dimension) must leave those
+        # specific embedding modules alone; _create_vocab_parallel_layer replaces them instead.
+        self._tied_vocab_parallel_embedding_ids = set()
         if self.vocab_parallel_lm_head:
-            embedding_weights = {
-                id(module.weight)
-                for module in self.module.modules() if isinstance(module, nn.Embedding) and hasattr(module, "weight")
-            }
-            self._originally_tied_vocab_head_ids = {
-                id(module)
-                for name, module in self.module.named_modules()
-                if self._is_vocab_parallel_lm_head(module, name) and id(module.weight) in embedding_weights
-            }
+            embedding_modules_by_weight_id = {}
+            for module in self.module.modules():
+                if isinstance(module, nn.Embedding) and hasattr(module, "weight"):
+                    embedding_modules_by_weight_id.setdefault(id(module.weight), []).append(module)
+            for name, module in self.module.named_modules():
+                if not self._is_vocab_parallel_lm_head(module, name):
+                    continue
+                for tied_embedding in embedding_modules_by_weight_id.get(id(module.weight), []):
+                    self._tied_vocab_parallel_embedding_ids.add(id(tied_embedding))
+        # Snapshot weight ties from the original model: once an earlier sibling such as a tied
+        # embedding is sliced, its new Parameter no longer aliases the head's weight, so a check
+        # made during the replacement walk would miss the tie and silently break it.
+        self._tied_weight_partners = self._find_tied_weight_partners()
+        # Embeddings tied to a row-parallel training output head are replaced by
+        # _create_row_parallel_layer with a HiddenParallelEmbedding sharing the head's shard, so
+        # _slice_embedding must leave them alone for the same reason as the vocab-parallel case.
+        self._tied_row_parallel_embedding_ids = self._find_tied_row_parallel_embedding_ids()
         self._gathered_column_tie_fallbacks_configured = False
         self._tied_gathered_column_module_names = set()
         TensorParallel_Layer.set_keep_module_on_host(keep_module_on_host)
+        # The parameters _gather_zero3_params replaced, for the engine to re-point a caller's optimizer.
+        from deepspeed.module_inject.auto_ep_layer import ReplacementSourceMap
+        self.replacement_sources = ReplacementSourceMap()
 
     def in_module_list(module, module_list):
         for item in module_list:
@@ -366,15 +420,39 @@ class AutoTP():
         if AutoTP.kernel_supported(module_list) else "Not able to determine model policy automatically. Please provide policy."
         return policy_list
 
+    @property
+    def training_mode(self):
+        # None follows the process-wide AutoTP mode at the time of use, so a set_autotp_mode call
+        # between construction and set_tensor_parallel_config still routes to the training group.
+        if self._training_mode is None:
+            return is_autotp_training_mode()
+        return self._training_mode
+
     def set_tensor_parallel_config(self, mp_size, mp_group):
 
-        if is_autotp_training_mode():
+        if self.training_mode:
             self.mp_group = groups.get_tensor_model_parallel_group()
             self.mp_size = groups.get_tensor_model_parallel_world_size()
-            return
+        else:
+            self.mp_size = mp_size
+            self.mp_group = mp_group
 
-        self.mp_size = mp_size
-        self.mp_group = mp_group
+        self._validate_replicated_kv_tp_width()
+
+    def _validate_replicated_kv_tp_width(self):
+        """Reject a replicated-K/V layout sharded across more ranks than query heads.
+
+        Runs after custom config, HF tp_plan, or heuristic AutoTP has been chosen.
+        """
+        if self.partition_config is not None or not self._replicates_kv_block:
+            return
+        shard_heads = replicated_kv_shard_heads(self.tp_meta, self._replicates_kv_block)
+        if shard_heads is not None and self.mp_size > shard_heads:
+            # A rank beyond the query heads has no query rows and an empty output projection.
+            raise RuntimeError(f"AutoTP cannot shard this replicated key/value attention across {self.mp_size} ranks: "
+                               f"the model has {shard_heads} query heads, so at least one rank would hold "
+                               f"no query rows and an empty attention output projection. Reduce "
+                               f"tensor_parallel.autotp_size to at most the query head count.")
 
     def _replace(self, child, name, conv_linear_layer):
         # This function should clearly define the routing rules for specific layers
@@ -400,6 +478,7 @@ class AutoTP():
         if "mlp.gate" == name or "q_a_proj" in name or "kv_a_proj_with_mqa" in name or name == "block_sparse_moe.gate" or (
             ('mlp.shared_expert_gate' == name or 'mlp.gate' == name) and 'qwen2_moe' in str(type(self.module))):
             return child
+        self._gather_zero3_params(child)
         # For Yuan model
         if 'Yuan' in str(self.module):
             if 'v_proj' in name:
@@ -476,10 +555,46 @@ class AutoTP():
         if spec.partition_type == PartitionType.SKIP:
             return child
 
+        self._gather_zero3_params(child)
         if spec.partition_type == PartitionType.ROW:
             return self._create_row_parallel_layer(child, spec, name)
         else:
             return self._create_column_parallel_layer(child, spec, name)
+
+    def _gather_zero3_params(self, module):
+        """Give ``module`` full, ordinary parameters in place of ZeRO-3 partitioned ones.
+
+        Under ``deepspeed.zero.Init`` every rank holds one partition of each weight and an empty
+        placeholder as its data, so the tensor-parallel layer would slice the placeholder. Each
+        weight is gathered once and replaced by an ordinary parameter holding the full value, which
+        the layer then slices to this rank's shard. ZeRO-3 partitions that shard over the
+        data-parallel group when it builds its optimizer. The replaced parameters are recorded in
+        ``self.replacement_sources`` so the engine can re-point an optimizer built before.
+        """
+        zero_params = [(name, param) for name, param in module.named_parameters(recurse=False) if is_zero_param(param)]
+        if not zero_params:
+            return
+        with GatheredParameters([param for _, param in zero_params], modifier_rank=None):
+            full_values = [(name, param, param.data.clone()) for name, param in zero_params]
+        for name, source, value in full_values:
+            replacement = nn.Parameter(value, requires_grad=source.requires_grad)
+            # Optimizer tags set by deepspeed.set_optimizer_flags before the engine runs AutoTP.
+            for attr in ("use_muon", "muon_num_heads"):
+                if hasattr(source, attr):
+                    setattr(replacement, attr, getattr(source, attr))
+            setattr(module, name, replacement)
+            # A module tied to this weight (an embedding sharing the output head's weight) must hold the same
+            # replacement. Otherwise the tie is broken here, and the tie checks that run after the gather
+            # find nothing to protect.
+            tied_owners = []
+            for other in self.module.modules():
+                for other_name, other_param in other.named_parameters(recurse=False, remove_duplicate=False):
+                    if other_param is source:
+                        tied_owners.append((other, other_name))
+            for other, other_name in tied_owners:
+                setattr(other, other_name, replacement)
+            self.replacement_sources.sources[id(replacement)] = [source]
+            self.replacement_sources.discarded.add(id(source))
 
     def _create_row_parallel_layer(self, module, spec: TPLayerSpec, name: str):
         """Create row-parallel layer (AllReduce after forward)."""
@@ -491,14 +606,15 @@ class AutoTP():
             if spec.shape is not None or spec.get_partition_dim() != 1:
                 raise NotImplementedError(
                     "Row-parallel output-head training requires an unreshaped input-dimension shard.")
-            tied = any(weight is module.weight for other in self.module.modules() if other is not module
-                       for name, weight in other.named_parameters(recurse=False) if name == 'weight')
-            if self.mp_size > 1 and tied:
-                raise NotImplementedError(
-                    "Row-parallel output-head training cannot shard a tied weight. "
-                    "Keep the tied embedding and output head replicated until coupled embedding sharding is supported."
-                )
-            return LinearAllreduceWithReplicatedInput(module, self.mp_group, name=name, tp_meta=self.tp_meta)
+            tied_embeddings = []
+            if self.mp_size > 1:
+                tied_embeddings = self._validate_row_parallel_head_ties(module)
+            row_parallel_head = LinearAllreduceWithReplicatedInput(module,
+                                                                   self.mp_group,
+                                                                   name=name,
+                                                                   tp_meta=self.tp_meta)
+            self._replace_tied_row_parallel_embeddings(row_parallel_head, tied_embeddings)
+            return row_parallel_head
 
         if spec.shape is not None:
             return SubParamLinearAllreduce(
@@ -536,6 +652,75 @@ class AutoTP():
             )
         return LinearLayer(module, self.mp_group, name=name, gather_output=spec.gather_output, tp_meta=self.tp_meta)
 
+    def _find_tied_weight_partners(self):
+        modules_by_weight_id = {}
+        for module in self.module.modules():
+            weight = module._parameters.get("weight")
+            if weight is not None:
+                modules_by_weight_id.setdefault(id(weight), []).append(module)
+        tied_weight_partners = {}
+        for modules in modules_by_weight_id.values():
+            if len(modules) < 2:
+                continue
+            for module in modules:
+                tied_weight_partners[id(module)] = [other for other in modules if other is not module]
+        return tied_weight_partners
+
+    def _find_tied_row_parallel_embedding_ids(self):
+        if not self.training_mode or self.partition_config is None:
+            return set()
+        model_type = self._get_model_type()
+        embedding_ids = set()
+        for name, module in self.module.named_modules():
+            if not isinstance(module, nn.Linear) or not self._is_lm_head_name(name):
+                continue
+            if self._is_vocab_parallel_lm_head(module, name):
+                continue
+            spec = self.partition_config.find_matching_spec(name + ".weight", model_type)
+            if spec is None or spec.partition_type != PartitionType.ROW:
+                continue
+            for partner in self._tied_weight_partners.get(id(module), []):
+                if isinstance(partner, nn.Embedding):
+                    embedding_ids.add(id(partner))
+        return embedding_ids
+
+    def _validate_row_parallel_head_ties(self, head):
+        partners = self._tied_weight_partners.get(id(head), [])
+        if any(not isinstance(partner, nn.Embedding) for partner in partners):
+            raise NotImplementedError("Row-parallel output-head training can only share its weight with nn.Embedding "
+                                      "modules, which are then sharded along the same hidden dimension.")
+        for partner in partners:
+            HiddenParallelEmbedding.validate_embedding(partner)
+        # Validated partners were skipped by _slice_embedding, so they still alias the head's weight here.
+        return self._find_tied_embedding_modules(head)
+
+    def _replace_tied_row_parallel_embeddings(self, row_parallel_head, tied_embeddings):
+        model_type = self._get_model_type()
+        replacements = {}
+        for embed_parent, embed_child_name, embed_module, embed_full_name in tied_embeddings:
+            spec = self.partition_config.find_matching_spec(embed_full_name + ".weight", model_type)
+            if spec is not None and spec.partition_type != PartitionType.ROW:
+                log_dist(
+                    f"AutoTP: the row-parallel output head '{row_parallel_head.name}' supersedes the configured "
+                    f"'{spec.partition_type.value}' partitioning for tied embedding '{embed_full_name}'; it shares "
+                    "the head's hidden-dimension shard instead.",
+                    ranks=[0],
+                    level=logging.WARNING)
+            if embed_module not in replacements:
+                hidden_parallel_embedding = HiddenParallelEmbedding(embed_module,
+                                                                    self.mp_group,
+                                                                    tied_row_parallel_linear=row_parallel_head,
+                                                                    name=embed_full_name,
+                                                                    tp_meta=self.tp_meta)
+                # Guards re-entry when the replacement walk later reaches this module.
+                setattr(hidden_parallel_embedding, "replaced", True)
+                replacements[embed_module] = hidden_parallel_embedding
+            setattr(embed_parent, embed_child_name, replacements[embed_module])
+            log_dist(
+                f"AutoTP: tied embedding '{embed_full_name}' shares the hidden-dimension shard of the "
+                f"row-parallel output head '{row_parallel_head.name}'",
+                ranks=[0])
+
     @staticmethod
     def _default_lm_head_patterns():
         return ("lm_head", "embed_out")
@@ -558,13 +743,61 @@ class AutoTP():
         return self.vocab_parallel_lm_head and isinstance(child, nn.Linear) and self._is_lm_head_name(name)
 
     def _create_vocab_parallel_layer(self, child, name):
-        self._validate_untied_vocab_head(child)
+        # A tied embedding gets the same gathered parameter, so it is still found as tied below.
+        self._gather_zero3_params(child)
+        tied_embeddings = self._validate_vocab_parallel_layer(child, name)
         setattr(child, "replaced", True)
-        log_dist(
-            f"AutoTP: vocab_parallel_lm_head keeps '{name}' vocabulary-sharded and installs the "
-            f"distributed causal-LM loss",
-            ranks=[0])
-        return VocabParallelLinear(child, self.mp_group, name=name, tp_meta=self.tp_meta)
+        vocab_parallel_linear = VocabParallelLinear(child, self.mp_group, name=name, tp_meta=self.tp_meta)
+        # Guards re-entry if this instance is later revisited by the same replacement walk,
+        # e.g. when it is a sibling of the tied embedding and gets read again through
+        # named_children() after that embedding's own swap already mutated the parent module.
+        setattr(vocab_parallel_linear, "replaced", True)
+
+        message = f"AutoTP: vocab_parallel_lm_head keeps '{name}'"
+        replacements = {}
+        for embed_parent, embed_child_name, embed_module, embed_full_name in tied_embeddings:
+            self._warn_overridden_embedding_spec(embed_full_name)
+            if embed_module not in replacements:
+                setattr(embed_module, "replaced", True)
+                vocab_parallel_embedding = VocabParallelEmbedding(embed_module,
+                                                                  self.mp_group,
+                                                                  tied_vocab_parallel_linear=vocab_parallel_linear,
+                                                                  name=embed_full_name,
+                                                                  tp_meta=self.tp_meta)
+                setattr(vocab_parallel_embedding, "replaced", True)
+                replacements[embed_module] = vocab_parallel_embedding
+            setattr(embed_parent, embed_child_name, replacements[embed_module])
+            message += f" and its tied embedding '{embed_full_name}'"
+        log_dist(f"{message} vocabulary-sharded and installs the distributed causal-LM loss", ranks=[0])
+        return vocab_parallel_linear
+
+    def _find_tied_embedding_modules(self, lm_head):
+        """Locate every registered embedding reference sharing lm_head's weight Parameter.
+
+        Safe to call at any point during replacement: _slice_embedding refuses to touch a
+        module recorded in _tied_vocab_parallel_embedding_ids (computed from the original,
+        pre-replacement model in __init__), so a tied embedding's weight identity here is
+        exactly what it was when that set was built, regardless of traversal order.
+        """
+        tied_embeddings = []
+        for parent_name, parent in self.module.named_modules():
+            # named_children() removes duplicate modules, hiding aliases on the same parent.
+            for child_name, child in parent._modules.items():
+                if isinstance(child, nn.Embedding) and getattr(child, "weight", None) is lm_head.weight:
+                    full_name = f"{parent_name}.{child_name}" if parent_name else child_name
+                    tied_embeddings.append((parent, child_name, child, full_name))
+        return tied_embeddings
+
+    def _validate_vocab_parallel_layer(self, child, name):
+        tied_embeddings = self._find_tied_embedding_modules(child)
+        for _, _, embedding, _ in tied_embeddings:
+            VocabParallelEmbedding.validate_embedding(embedding)
+        vocab_size = TensorParallel_Layer._shape_before_zero3_partition(child.weight)[0]
+        partition_sizes = get_shard_size_list(vocab_size, self.mp_size, self.tp_meta, name)
+        if min(partition_sizes) == 0:
+            raise ValueError(f"vocab_parallel_lm_head requires nonempty vocabulary shards for tp_size={self.mp_size}, "
+                             f"but '{name}' has {vocab_size} rows with tp_grain_size={self.tp_meta.tp_grain_size}")
+        return tied_embeddings
 
     def _warn_overridden_lm_head_spec(self, name):
         # A no-gather vocab-parallel head ignores whatever the plan asked for, so say so rather
@@ -579,12 +812,22 @@ class AutoTP():
             ranks=[0],
             level=logging.WARNING)
 
-    def _validate_untied_vocab_head(self, lm_head):
-        if id(lm_head) in self._originally_tied_vocab_head_ids:
-            raise ValueError("A no-gather vocab-parallel LM head requires untied embedding and output weights")
-        for _, module in self.module.named_modules():
-            if isinstance(module, nn.Embedding) and getattr(module, "weight", None) is lm_head.weight:
-                raise ValueError("A no-gather vocab-parallel LM head requires untied embedding and output weights")
+    def _warn_overridden_embedding_spec(self, name):
+        # A tied vocab-parallel head forces its embedding to share the same vocab-dimension
+        # shard, so any explicit spec configured for the embedding itself is ignored; say so
+        # for the same reason _warn_overridden_lm_head_spec does for the head's own spec.
+        if self.partition_config is None:
+            return
+        param_name = name if name.endswith(".weight") else name + ".weight"
+        spec = self.partition_config.find_matching_spec(param_name, self._get_model_type())
+        if spec is None:
+            return
+        log_dist(
+            f"AutoTP: vocab_parallel_lm_head supersedes the configured '{spec.partition_type.value}' "
+            f"partitioning for tied embedding '{name}'; it shares the vocabulary-parallel shard of its "
+            "tied lm_head instead.",
+            ranks=[0],
+            level=logging.WARNING)
 
     def _resolve_vocab_parallel_lm_head(self):
         if self._vocab_parallel_lm_head_candidate is not None:
@@ -603,7 +846,8 @@ class AutoTP():
             names = [full_name for _, _, _, full_name in candidates]
             raise ValueError(f"Unable to choose among multiple vocab-parallel LM heads: {names}")
 
-        self._validate_untied_vocab_head(candidates[0][2])
+        _, _, child, full_name = candidates[0]
+        self._validate_vocab_parallel_layer(child, full_name)
         self._vocab_parallel_lm_head_candidate = candidates[0]
         return self._vocab_parallel_lm_head_candidate
 
@@ -613,6 +857,57 @@ class AutoTP():
             raise RuntimeError(f"Vocab-parallel LM head '{full_name}' changed during AutoTP partitioning")
         setattr(parent, child_name, self._create_vocab_parallel_layer(child, full_name))
 
+    def _replace_untied_input_embedding(self):
+        """Shard the input embedding along the vocabulary (``tensor_parallel.vocab_parallel_embedding``).
+
+        Returns the replaced module's name, or None when the embedding is tied to an output head that
+        AutoTP already sharded, which leaves the embedding sharded with that head.
+        """
+        get_input_embeddings = getattr(self.module, "get_input_embeddings", None)
+        embedding = get_input_embeddings() if callable(get_input_embeddings) else None
+        if isinstance(embedding, TensorParallel_Layer):
+            # A VocabParallelEmbedding or HiddenParallelEmbedding sharing its tied head's shard;
+            # sharding it again would break the tie.
+            return None
+        if not isinstance(embedding, nn.Embedding):
+            raise ValueError(
+                "vocab_parallel_embedding needs a model whose get_input_embeddings() returns nn.Embedding, "
+                f"got {type(embedding).__name__}")
+        name = next(name for name, module in self.module.named_modules() if module is embedding)
+        if hasattr(embedding.weight, DS_AUTOTP_UC_META):
+            # _slice_embedding has already split it along the hidden dimension for a matching spec.
+            raise ValueError(
+                f"vocab_parallel_embedding: '{name}' is already partitioned by a matching tensor-parallel "
+                "spec; remove that spec or make it 'skip' to shard the embedding along the vocabulary")
+        for other_name, module in self.module.named_modules():
+            if module is not embedding and getattr(module, "weight", None) is embedding.weight:
+                raise NotImplementedError(f"vocab_parallel_embedding: the embedding weight is shared with "
+                                          f"{other_name!r}; a tied embedding is sharded with its output head "
+                                          "instead (vocab_parallel_lm_head or a row-parallel head)")
+        self._gather_zero3_params(embedding)
+        # The vocabulary is not made of attention heads, so it is split evenly like the vocabulary-parallel
+        # output head. A split by key-value head count leaves ranks beyond that count with no rows.
+        vocab_meta = dataclasses.replace(self.tp_meta, num_kv_heads=None)
+        # A rank with no rows would fail its lookup while the other ranks wait in the all-reduce.
+        vocab_size = TensorParallel_Layer._shape_before_zero3_partition(embedding.weight)[0]
+        if min(get_shard_size_list(vocab_size, self.mp_size, vocab_meta, name)) == 0:
+            raise ValueError(
+                f"vocab_parallel_embedding requires nonempty vocabulary shards for tp_size={self.mp_size}, "
+                f"but '{name}' has {vocab_size} rows with tp_grain_size={vocab_meta.tp_grain_size}")
+        sharded = VocabParallelEmbedding(embedding, self.mp_group, name=name, tp_meta=vocab_meta)
+        setattr(sharded, "replaced", True)
+        # named_modules() lists a module once, but a model may register it under several names (T5's
+        # set_input_embeddings() gives the encoder and decoder the same module). A name left on the old
+        # module would look up its one shard as if it were the whole table.
+        owners = []
+        for parent in self.module.modules():
+            for child_name, child in parent._modules.items():
+                if child is embedding:
+                    owners.append((parent, child_name))
+        for parent, child_name in owners:
+            setattr(parent, child_name, sharded)
+        return name
+
     def _configure_gathered_column_tie_fallbacks(self):
         """Configure a replicated fallback for gathered output layers tied to embeddings."""
         if self._gathered_column_tie_fallbacks_configured:
@@ -621,7 +916,7 @@ class AutoTP():
             self._gathered_column_tie_fallbacks_configured = True
             return
 
-        named_modules = list(self.module.named_modules())
+        named_modules = list(self.module.named_modules(remove_duplicate=False))
         embeddings = [(name, module) for name, module in named_modules
                       if isinstance(module, nn.Embedding) and hasattr(module, "weight")]
         get_input_embeddings = getattr(self.module, "get_input_embeddings", None)
@@ -646,11 +941,10 @@ class AutoTP():
             if self._is_vocab_parallel_lm_head(module, module_name):
                 continue
 
-            tied_embedding_name = next(
-                (embedding_name for embedding_name, embedding in embeddings if module.weight is embedding.weight),
-                None,
-            )
-            if tied_embedding_name is None:
+            tied_embedding_names = [
+                embedding_name for embedding_name, embedding in embeddings if module.weight is embedding.weight
+            ]
+            if not tied_embedding_names:
                 continue
 
             if self.partition_config is None:
@@ -662,10 +956,10 @@ class AutoTP():
             if not uses_gathered_column:
                 continue
 
-            self._tied_gathered_column_module_names.update((module_name, tied_embedding_name))
+            self._tied_gathered_column_module_names.update((module_name, *tied_embedding_names))
             log_dist(
-                f"AutoTP: '{module_name}.weight' is tied to '{tied_embedding_name}.weight'; leaving both modules "
-                "replicated because coupled vocabulary-parallel embedding is not supported yet.",
+                f"AutoTP: '{module_name}.weight' is tied to embeddings {tied_embedding_names}; leaving these modules "
+                "replicated to preserve tied weights with gathered output.",
                 ranks=[0],
                 level=logging.WARNING,
             )
@@ -695,7 +989,19 @@ class AutoTP():
     def _slice_embedding(self, child, name, conv_linear_layer):
         if getattr(child, "replaced", False) == True:
             return
+        if id(child) in self._tied_row_parallel_embedding_ids:
+            # Replaced by _create_row_parallel_layer's HiddenParallelEmbedding, which shares the
+            # tied head's shard; slicing a separate copy here would break the tie.
+            return
+        if self.vocab_parallel_lm_head and id(child) in self._tied_vocab_parallel_embedding_ids:
+            # This embedding is tied to a vocab_parallel_lm_head and gets replaced by
+            # _create_vocab_parallel_layer's VocabParallelEmbedding instead, sharing that
+            # layer's vocab-dimension shard. Splitting it here on the hidden dimension as well
+            # would leave the module double-partitioned and break the tied weight identity.
+            return
 
+        source = child.weight
+        self._gather_zero3_params(child)
         mp_replace = ReplaceWithTensorSlicing(mp_group=self.mp_group)
 
         original_shape = tuple(child.weight.shape)
@@ -718,6 +1024,10 @@ class AutoTP():
                                          partition_sizes=partition_sizes,
                                          target_partition_shape=tuple(new_embedding.weight.shape),
                                          original_shape=original_shape))
+        # The sliced embedding owns a new parameter, so a caller's optimizer must be re-pointed to it.
+        self.replacement_sources.sources.pop(id(child.weight), None)
+        self.replacement_sources.sources[id(new_embedding.weight)] = [source]
+        self.replacement_sources.discarded.add(id(source))
         setattr(child, "replaced", True)
         return new_embedding
 
@@ -730,9 +1040,12 @@ class AutoTP():
         first optimizer step. The hook runs when the gradient is computed, before accumulation,
         so it holds under gradient accumulation and under the DeepCompile pass, whose compiled
         backward still accumulates leaf gradients through the autograd engine.
+
+        Returns the ``(name, param)`` pairs skipped because they were frozen, so the engine can
+        reject them if they are unfrozen later and would train without the reduction.
         """
         if self.partition_config is None or self.mp_group is None or self.mp_size <= 1:
-            return
+            return []
 
         def make_grad_allreduce_hook(group):
 
@@ -745,9 +1058,19 @@ class AutoTP():
 
         model_type = self._get_model_type()
         registered = []
+        frozen = []
         for param_name, param in model.named_parameters():
             spec = self.partition_config.find_matching_spec(param_name, model_type)
             if spec is None or not spec.grad_allreduce:
+                continue
+            # vocab_parallel_embedding and vocab_parallel_lm_head shard their weight even when a skip spec names it.
+            # The ranks then hold different rows, so summing their gradients would mix those rows.
+            if getattr(param, DS_TENSOR_MODEL_PARALLEL, False):
+                continue
+            # A frozen parameter, such as one of a distillation teacher, has no gradient to reduce,
+            # and PyTorch refuses hooks on tensors that do not require gradients.
+            if not param.requires_grad:
+                frozen.append((param_name, param))
                 continue
             if getattr(param, "_ds_grad_allreduce_registered", False):
                 continue
@@ -759,6 +1082,7 @@ class AutoTP():
                 f"AutoTP: registered tensor-parallel grad all-reduce for {len(registered)} replicated "
                 f"parameters, e.g. {registered[0]!r}",
                 ranks=[0])
+        return frozen
 
     def update_mp_params(self, child, name=None):
         if getattr(child, "replaced", False) == True:
@@ -776,19 +1100,25 @@ class AutoTP():
         if has_unsharded_high_dimensional_param:
             setattr(child, "replaced", True)
             return
-        param_list = [
-            "n_heads", "inner_dim", "num_heads", "num_kv", "num_attention_heads", "num_attn_heads", "all_head_size",
-            "embed_dim", "hidden_size", "num_key_value_heads", "num_kv_heads", "kv_n_heads", "d_model",
-            "num_attention_heads_per_partition", "num_multi_query_groups_per_partition", "hidden_size_per_partition"
-        ]
+        # Replicated-K/V attention follows query heads; K/V aliases stay whole and the
+        # group count follows the local query shard.
+        replicated_kv_attention = is_replicated_kv_attention(child, getattr(self, "_replicates_kv_block", False))
+        param_list = list(_MP_PARAM_ATTRS)
         for param in param_list:
             if "Yuan" in str(child) and 'embed_dim' in param_list:
                 param_list.remove('embed_dim')
             if hasattr(child, param):
+                if replicated_kv_attention and param in _SHARDED_KV_HEAD_ATTRS:
+                    continue
                 param_val = getattr(child, param)
                 # get_shard_size selects its partitioning strategy from the module name, so the
                 # attributes must be sharded under the same name as the weights they describe.
                 setattr(child, param, get_shard_size(param_val, self.mp_size, self.tp_meta, name, rank=tp_index))
+        # Recompute groups from the local query shard. The module may expose the K/V head count
+        # under any of the runtime aliases in _MODULE_KV_HEAD_ATTRS.
+        num_heads = getattr(child, "num_heads", None)
+        if replicated_kv_attention and hasattr(child, "num_key_value_groups") and num_heads is not None:
+            child.num_key_value_groups = replicated_kv_group_count(child, num_heads)
         setattr(child, "replaced", True)
 
     def update_linear_policies(self):
@@ -814,8 +1144,7 @@ class AutoTP():
             if child is None:
                 continue
             full_name = f"{autoep_name}.{child_name}" if autoep_name else child_name
-            if self.partition_config is not None and hasattr(child, "weight") and getattr(
-                    child.weight, "dim", lambda: 0)() == 2:
+            if self.partition_config is not None and hasattr(child, "weight") and _weight_ndim(child.weight) == 2:
                 new_child = self._replace_with_config(child, full_name)
                 if new_child is not None:
                     setattr(autoep_layer, child_name, new_child)
@@ -870,7 +1199,7 @@ class AutoTP():
                         if new_child is not None:
                             setattr(r_module, name, new_child)
                     # If no pattern matched or skip, leave embedding unchanged
-                elif hasattr(child, "weight") and getattr(child.weight, "dim", lambda: 0)() == 2:
+                elif hasattr(child, "weight") and _weight_ndim(child.weight) == 2:
                     new_child = self._replace_with_config(child, full_name)
                     if new_child is not None:
                         setattr(r_module, name, new_child)

@@ -113,9 +113,10 @@ def get_full_hp_grad(self):
         reduce_fragment = torch.narrow(reduce_buffer, 0, lp_frag_address.start, lp_frag_address.numel)
 
         if self.view(-1).shape == hp_grad_fragment.shape:
-            reduce_buffer.data.copy_(hp_grad_fragment.data)
-        else:
-            reduce_fragment.data.copy_(hp_grad_fragment.data)
+            # BF16 retains a full accumulation buffer on each rank, but reconstruction must contribute
+            # only the fragment owned by this optimizer partition.
+            hp_grad_fragment = hp_grad_fragment.narrow(0, lp_frag_address.start, lp_frag_address.numel)
+        reduce_fragment.data.copy_(hp_grad_fragment.data)
 
     dist.all_reduce(reduce_buffer, group=self._dp_group)
     return reduce_buffer.reshape_as(self)
@@ -216,6 +217,10 @@ def safe_get_full_grad(param):
         Returns:
             Union[torch.Tensor, None]: A tensor on accelerator device
     """
+    # BF16_Optimizer keeps its accumulation buffer separately while retaining the low-precision staging gradient.
+    if getattr(param, '_hp_grad', None) is not None:
+        return param.get_full_hp_grad()
+
     if param.grad is not None:
         return param.grad
 
@@ -386,7 +391,8 @@ def get_hp_fragment_mapping(lp_param, lp_start, flat_hp_partition, gradient_dict
     hp_fragment_tensor = flat_hp_partition.narrow(0, hp_frag_address.start, hp_frag_address.numel)
 
     lp_frag_address = fragment_address(start=fragment_start - lp_start, numel=fragment_numel)
-    lp_fragment_tensor = lp_param.flatten().narrow(0, lp_frag_address.start, lp_frag_address.numel)
+    # Detached: autograd history here would keep the parameter's AccumulateGrad node, and its stream, alive.
+    lp_fragment_tensor = lp_param.detach().flatten().narrow(0, lp_frag_address.start, lp_frag_address.numel)
 
     return tensor_fragment(lp_fragment=lp_fragment_tensor,
                            lp_fragment_address=lp_frag_address,

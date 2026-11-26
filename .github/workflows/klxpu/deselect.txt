@@ -1,0 +1,105 @@
+# KLXPU (KUNLUNXIN XPU) v1-suite deselect list.
+#
+# Individual tests that fail on the klxpu accelerator but live in files whose
+# other tests pass; deselecting per node id keeps the rest (and new tests)
+# running. Grouped by the failure actually observed (verified from a run log).
+# One node id per line, relative to the repo root; blank/# lines are ignored.
+
+
+# --- Vendor Triton unsupported: Triton Error [CUDA]: CUDA_ERROR_NOT_SUPPORTED
+#     (MoE grouped-GEMM / router paths, chunked-cross-entropy triton variants) ---
+tests/unit/v1/moe/test_autoep_checkpoint.py::TestAutoEPZero3UniversalCheckpoint4GPU::test_zero3_partition_native_universal_round_trip_replica_groups_4gpu
+tests/unit/v1/moe/test_autoep_checkpoint.py::TestAutoEPZero3UniversalCheckpoint::test_zero3_partition_native_universal_round_trip_same_topology
+tests/unit/v1/moe/test_autoep_checkpoint.py::TestAutoEPZero3UniversalCheckpoint::test_zero3_universal_load_optimizer_states_false_same_topology
+tests/unit/v1/moe/test_autoep_checkpoint.py::TestAutoEPZero3UniversalCheckpoint::test_zero3_universal_module_only_same_topology
+tests/unit/v1/moe/test_autoep_checkpoint.py::TestAutoEPZero3UniversalCheckpoint::test_zero3_universal_weights_only_preserves_fp32_master_weights[load_kwargs0]
+tests/unit/v1/moe/test_autoep_checkpoint.py::TestAutoEPZero3UniversalCheckpoint::test_zero3_universal_weights_only_preserves_fp32_master_weights[load_kwargs1]
+tests/unit/v1/moe/test_autoep_checkpoint.py::TestAutoEPZero3UniversalTopologyChange::test_autoep_size_2to1_fixed_world_size
+tests/unit/v1/moe/test_autoep_checkpoint.py::TestAutoEPZero3UniversalTopologyChange::test_autoep_size_2to4_fixed_world_size
+tests/unit/v1/moe/test_autoep_checkpoint.py::TestAutoEPZero3UniversalTopologyChange::test_dp_world_size_4to2_fixed_ep_size
+tests/unit/v1/moe/test_autoep_checkpoint.py::TestAutoEPZero3UniversalTopologyChange::test_dp_world_size_4to8_and_autoep_size_2to4
+tests/unit/v1/moe/test_autoep_checkpoint.py::TestAutoEPZero3UniversalTopologyChange::test_dp_world_size_4to8_fixed_ep_size
+tests/unit/v1/moe/test_autoep_checkpoint.py::TestAutoEPZero3UniversalTopologyChange::test_load_optimizer_states_false_autoep_size_2to4
+tests/unit/v1/moe/test_autoep_checkpoint.py::TestAutoEPZero3UniversalTopologyChange::test_module_only_dp_world_size_4to2_fixed_ep_size
+tests/unit/v1/moe/test_autoep_checkpoint.py::TestAutoEPZero3UniversalTopologyChange::test_universal_load_rejects_mismatched_target_expert_shape
+tests/unit/v1/moe/test_autoep_expert_activation.py::TestFusedGateUp::test_accumulated_updates_and_checkpoint_keep_the_separate_parameters[False-swiglu]
+tests/unit/v1/moe/test_autoep_expert_activation.py::TestFusedGateUp::test_accumulated_updates_and_checkpoint_keep_the_separate_parameters[True-swiglu]
+tests/unit/v1/moe/test_autoep_expert_activation.py::TestFusedGateUp::test_matches_separate_with_skewed_and_empty_experts[swiglu]
+tests/unit/v1/moe/test_autoep_expert_activation.py::TestGroupedExpertsActivation::test_grouped_gemm_paths_match_the_for_loop[geglu_tanh-triton_grouped_mm]
+tests/unit/v1/moe/test_autoep_expert_activation.py::TestGroupedExpertsActivation::test_grouped_gemm_paths_match_the_for_loop[swiglu-fused_gate_up]
+tests/unit/v1/moe/test_autoep_expert_activation.py::TestGroupedExpertsActivation::test_grouped_gemm_paths_match_the_for_loop[swiglu-grouped_mm]
+tests/unit/v1/moe/test_autoep_expert_activation.py::TestGroupedExpertsActivation::test_grouped_gemm_paths_match_the_for_loop[swiglu-triton_grouped_mm]
+tests/unit/v1/moe/test_autoep_expert_activation.py::TestGroupedExpertsActivation::test_grouped_gemm_paths_match_the_for_loop[swiglu_clamped-triton_grouped_mm]
+tests/unit/v1/moe/test_autoep_expert_activation.py::TestGroupedExpertsActivation::test_grouped_gemm_paths_match_the_for_loop[swiglu_oai-triton_grouped_mm]
+tests/unit/v1/moe/test_autoep_grad_parity.py::TestAutoEPAsyncSplitPlanParity::test_async_split_plan_matches_synchronous_step[False-False]
+tests/unit/v1/moe/test_autoep_grad_parity.py::TestAutoEPAsyncSplitPlanParity::test_async_split_plan_matches_synchronous_step[False-True]
+tests/unit/v1/moe/test_autoep_grad_parity.py::TestAutoEPAsyncSplitPlanParity::test_async_split_plan_matches_synchronous_step[True-False]
+tests/unit/v1/moe/test_autoep_grad_parity.py::TestAutoEPAsyncSplitPlanParity::test_async_split_plan_matches_synchronous_step[True-True]
+tests/unit/v1/moe/test_autoep_grad_parity.py::TestAutoEPGradParity::test_zero2_autoep_matches_zero2_after_one_update
+tests/unit/v1/moe/test_autoep_grad_parity.py::TestAutoEPGradParity::test_zero3_autoep_expert_grads_match_zero2_autoep
+tests/unit/v1/moe/test_autoep_integration.py::TestAutoEPClientOptimizer::test_client_optimizer_updates_expert_weights
+tests/unit/v1/moe/test_autoep_integration.py::TestAutoEPOnly::test_zero2_ep_2gpu
+tests/unit/v1/moe/test_autoep_integration.py::TestAutoEPOnly::test_zero3_ep_save_load_same_topology_2gpu
+tests/unit/v1/moe/test_autoep_integration.py::TestAutoEPOnly::test_zero3_ep_train_step_and_placement_2gpu
+tests/unit/v1/moe/test_autoep_integration.py::TestAutoEPZero3ReplicaGroups::test_zero3_ep_expert_replica_group_train_save_load_4gpu
+tests/unit/v1/moe/test_autoep_integration.py::TestAutoEPZero3ReplicaGroups::test_zero3_ep_source_zero_init_expert_replica_placement_4gpu
+tests/unit/v1/moe/test_autoep_unit.py::TestRoutingAndLayerSemantics::test_router_cache_checkpoint_training[cuda-False-False]
+tests/unit/v1/moe/test_autoep_unit.py::TestRoutingAndLayerSemantics::test_router_cache_checkpoint_training[cuda-False-True]
+tests/unit/v1/moe/test_autoep_unit.py::TestRoutingAndLayerSemantics::test_router_cache_checkpoint_training[cuda-None-False]
+tests/unit/v1/moe/test_autoep_unit.py::TestRoutingAndLayerSemantics::test_router_cache_checkpoint_training[cuda-None-True]
+tests/unit/v1/moe/test_autoep_unit.py::TestRoutingAndLayerSemantics::test_router_cache_checkpoint_training[cuda-True-False]
+tests/unit/v1/moe/test_autoep_unit.py::TestRoutingAndLayerSemantics::test_router_cache_checkpoint_training[cuda-True-True]
+tests/unit/v1/runtime/test_chunked_cross_entropy.py::test_a_strided_target_is_read_by_row[triton]
+tests/unit/v1/runtime/test_chunked_cross_entropy.py::test_double_backward_raises_instead_of_dropping_the_second_derivative[triton]
+tests/unit/v1/runtime/test_chunked_cross_entropy.py::test_ignored_rows_get_no_gradient_and_all_ignored_is_nan[triton]
+tests/unit/v1/runtime/test_chunked_cross_entropy.py::test_matches_hugging_face_loss_and_gradient[7-dtype0-triton]
+tests/unit/v1/runtime/test_chunked_cross_entropy.py::test_matches_hugging_face_loss_and_gradient[7-dtype1-triton]
+tests/unit/v1/runtime/test_chunked_cross_entropy.py::test_matches_hugging_face_loss_and_gradient[7-dtype2-triton]
+tests/unit/v1/runtime/test_chunked_cross_entropy.py::test_matches_hugging_face_loss_and_gradient[None-dtype0-triton]
+tests/unit/v1/runtime/test_chunked_cross_entropy.py::test_matches_hugging_face_loss_and_gradient[None-dtype1-triton]
+tests/unit/v1/runtime/test_chunked_cross_entropy.py::test_matches_hugging_face_loss_and_gradient[None-dtype2-triton]
+tests/unit/v1/runtime/test_chunked_cross_entropy.py::test_normalizes_by_num_items_in_batch_like_hugging_face[triton]
+tests/unit/v1/runtime/test_chunked_cross_entropy.py::test_real_vocabulary_backward_peak_drops_by_the_float32_tensors
+
+# --- torch.compile / DeepCompile intercepted by torch_xmlir (runs eagerly):
+#     regional-compile sees 0 compiled regions (assert 0 > 0), DeepCompile op
+#     build fails (ninja/jit_load), TestDeepCompile cases fail the same way ---
+tests/unit/v1/compile/test_compile_zero.py::TestDeepCompile::test[True-1-dtype0]
+tests/unit/v1/compile/test_compile_zero.py::TestDeepCompile::test[True-1-dtype1]
+tests/unit/v1/compile/test_compile_zero.py::TestDeepCompile::test[True-1-dtype2]
+tests/unit/v1/compile/test_compile_zero.py::TestDeepCompile::test[True-3-dtype0]
+tests/unit/v1/compile/test_compile_zero.py::TestDeepCompile::test[True-3-dtype1]
+tests/unit/v1/compile/test_compile_zero.py::TestDeepCompile::test[True-3-dtype2]
+tests/unit/v1/compile/test_compile_zero.py::TestDeepCompile::test_free_activation_mode[1-dtype0]
+tests/unit/v1/compile/test_compile_zero.py::TestDeepCompile::test_free_activation_mode[3-dtype0]
+tests/unit/v1/compile/test_compile_zero.py::TestDeepCompile::test_frozen_params[3-dtype0]
+tests/unit/v1/compile/test_compile_zero.py::TestDeepCompile::test_fusing_allgather_and_autocast[3-bfloat16]
+tests/unit/v1/compile/test_compile_zero.py::TestDeepCompile::test_fusing_allgather_and_autocast[3-float16]
+tests/unit/v1/compile/test_compile_zero.py::TestDeepCompile::test_padded_shard_handling[3-dtype0]
+tests/unit/v1/compile/test_compile_zero.py::TestDeepCompile::test_zero1_releases_grad_buffers_after_optimizer_step
+tests/unit/v1/compile/test_offload_activation.py::TestOffloadActivation::test_offload_activation_correctness[1-dtype0]
+tests/unit/v1/compile/test_offload_activation.py::TestOffloadActivation::test_offload_activation_correctness[2-dtype0]
+tests/unit/v1/compile/test_offload_opt_states.py::TestOffloadOptStates::test_offload_opt_states_correctness[dtype0]
+tests/unit/v1/moe/test_autoep_unit.py::TestAutoEPRegionalCompile::test_compiles_model_root_with_direct_autoep_child[False]
+tests/unit/v1/moe/test_autoep_unit.py::TestAutoEPRegionalCompile::test_compiles_model_root_with_direct_autoep_child[True]
+tests/unit/v1/moe/test_autoep_unit.py::TestAutoEPRegionalCompile::test_default_compiles_full_model[None]
+tests/unit/v1/moe/test_autoep_unit.py::TestAutoEPRegionalCompile::test_default_compiles_full_model[compile_options1]
+
+# --- XDNN mixed-dtype strictness: [XDNN_PYTORCH] ... inconsistent effective
+#     datatype (bf16 activations vs fp32 master-weight / DDP references) ---
+tests/unit/v1/half_precision/test_bf16.py::TestBF16MasterWeightsGradients::test_gradients_match_ddp[zero_stage_1_bf16_opt_states_True]
+tests/unit/v1/half_precision/test_bf16.py::TestBF16MasterWeightsGradients::test_gradients_match_ddp[zero_stage_2_bf16_opt_states_True]
+tests/unit/v1/half_precision/test_bf16.py::TestBF16MasterWeightsGradients::test_gradients_match_ddp[zero_stage_3_bf16_opt_states_True]
+tests/unit/v1/half_precision/test_with_autocast.py::TestTorchAutocastWithPrecisionModes::test_gradients_match_ddp_with_autocast[z1_bf16_full_autocast]
+tests/unit/v1/half_precision/test_with_autocast.py::TestTorchAutocastWithPrecisionModes::test_gradients_match_ddp_with_autocast[z2_bf16_full_autocast]
+tests/unit/v1/half_precision/test_with_autocast.py::TestTorchAutocastWithPrecisionModes::test_gradients_match_ddp_with_autocast[z3_bf16_full_autocast]
+
+# --- float8 narrow dtypes unimplemented on XDNN: [NOT IMPLEMENTED] code= 4 ---
+tests/unit/v1/half_precision/test_mixed_precision_dtype.py::TestMixedPrecisionDtypeEndToEnd::test_narrow_dtypes_preserved[float8_e4m3fn-3]
+tests/unit/v1/half_precision/test_mixed_precision_dtype.py::TestMixedPrecisionDtypeEndToEnd::test_narrow_dtypes_preserved[float8_e4m3fnuz-3]
+tests/unit/v1/half_precision/test_mixed_precision_dtype.py::TestMixedPrecisionDtypeEndToEnd::test_narrow_dtypes_preserved[float8_e5m2-3]
+tests/unit/v1/half_precision/test_mixed_precision_dtype.py::TestMixedPrecisionDtypeEndToEnd::test_narrow_dtypes_preserved[float8_e5m2fnuz-3]
+
+# --- torch_xmlir loads libbkcl/XCCL (CUDA) at import, so this fork-safety
+#     assertion that collection leaves CUDA uninitialized fails ---
+tests/unit/v1/runtime/test_chunked_cross_entropy.py::test_collection_leaves_cuda_initialization_fork_safe

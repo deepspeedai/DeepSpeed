@@ -120,16 +120,6 @@ fail. Therefore, if you need to you can override the default location with the h
  TORCH_EXTENSIONS_DIR=./torch-extensions deepspeed ...
 ```
 
-### Conda environment for building from source
-
-If you encounter difficulties during compilation using the default system environment, you can try the conda environment provided, which includes the necessary compilation toolchain and PyTorch.
-
-```bash
-conda env create -n deepspeed -f environment.yml --force
-```
-
-and try above install commands after activating it.
-
 ## Building for the correct architectures
 
 If you're getting the following error:
@@ -147,6 +137,8 @@ You can build specifically for a desired range of architectures by setting a `TO
 ```bash
 TORCH_CUDA_ARCH_LIST="6.1;7.5;8.6" pip install ...
 ```
+
+Entries can be separated by `;` or spaces, and can use `+PTX` or the `a` suffix (for example `9.0a`). Architecture names such as `Ampere` are not supported. If no entry has `+PTX`, DeepSpeed adds PTX for the highest entry without a suffix, so the ops can also run on newer GPUs.
 
 It will also make the build faster when you only build for a few architectures.
 

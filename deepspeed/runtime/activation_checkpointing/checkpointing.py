@@ -622,7 +622,6 @@ class CheckpointFunction(torch.autograd.Function):
         ctx.fwd_cuda_rng_state_tracker = get_cuda_rng_tracker().get_states()
 
         see_memory_usage("Before running forward on the layer", force=False)
-        # ctx.save_for_backward(*args)
         with torch.no_grad():
             outputs = run_function(*inputs_cuda)
 
@@ -1044,7 +1043,7 @@ def non_reentrant_checkpoint(function, *args):
         return tuple(all_outputs)
 
 
-@compiler.disable  # WA from Pytorch repo for compile + zero 3 accuracy issue
+@compiler.lazy_disable  # WA from Pytorch repo for compile + zero 3 accuracy issue
 def checkpoint(function, *args, **kwargs):
     """Checkpoint a model or part of the model.
     This has been directly copied from torch.utils.checkpoint.

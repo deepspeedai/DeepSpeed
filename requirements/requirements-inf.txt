@@ -4,4 +4,4 @@ protobuf
 qtorch
 safetensors
 sentencepiece
-transformers>=4.32.1
+transformers>=4.45.0

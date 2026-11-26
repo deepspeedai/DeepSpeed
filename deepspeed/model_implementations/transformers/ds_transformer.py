@@ -14,13 +14,6 @@ from deepspeed.ops.transformer.inference.ds_attention import DeepSpeedSelfAttent
 from deepspeed.ops.transformer.inference.op_binding.workspace import WorkspaceOp
 from deepspeed.accelerator import get_accelerator
 import deepspeed
-# Import the triton kernels whenever triton is installed. Previously this was also
-# gated on is_triton_supported(), which reads the GPU compute capability at import
-# time and thereby creates a CUDA context, breaking fork()-based multiprocessing
-# (issue #7918). Triton use is gated at runtime via self.config.use_triton below.
-if deepspeed.HAS_TRITON:
-    from deepspeed.ops.transformer.inference.triton.mlp import TritonMLP
-    from deepspeed.ops.transformer.inference.triton.attention import TritonSelfAttention
 
 
 class DeepSpeedTransformerInference(nn.Module):
@@ -65,12 +58,15 @@ class DeepSpeedTransformerInference(nn.Module):
             assert not self.config.use_triton
         else:
             if deepspeed.HAS_TRITON and self.config.use_triton:
+                # Imported here because the triton kernels import triton, which slows down import deepspeed.
+                from deepspeed.ops.transformer.inference.triton.attention import TritonSelfAttention
                 self.attention = TritonSelfAttention(self.config)
             else:
                 self.attention = DeepSpeedSelfAttention(self.config, mp_group, quantize_scales, quantize_groups,
                                                         merge_count)
 
         if deepspeed.HAS_TRITON and self.config.use_triton:
+            from deepspeed.ops.transformer.inference.triton.mlp import TritonMLP
             self.mlp = TritonMLP(self.config)
         else:
             self.mlp = DeepSpeedMLP(self.config, mp_group, quantize_scales, quantize_groups, merge_count,

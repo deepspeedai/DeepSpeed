@@ -1,13 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # DeepSpeed Team
 
+import importlib.util
 from unittest.mock import patch
 
+import pytest
+import torch
 import torch.nn as nn
 
 import deepspeed.runtime.hybrid_engine as hybrid_engine
 from deepspeed.runtime.hybrid_engine import DeepSpeedHybridEngine
-from deepspeed.module_inject.layers import LinearLayer
+from deepspeed.module_inject.layers import LinearLayer, OPTEmbedding
 
 
 class SupportedLayer(nn.Module):
@@ -31,6 +34,22 @@ def _make_engine(module):
     return engine
 
 
+def test_hybrid_engine_import_does_not_resolve_transformers_opt(monkeypatch):
+    from transformers.models import opt
+
+    class TransformersOPTImportGuard:
+
+        def __getattr__(self, name):
+            raise AssertionError(f'Hybrid Engine resolved transformers.models.opt.modeling_opt.{name} during import')
+
+    monkeypatch.setattr(opt, 'modeling_opt', TransformersOPTImportGuard(), raising=False)
+    spec = importlib.util.spec_from_file_location('deepspeed.runtime._hybrid_engine_import_test',
+                                                  hybrid_engine.__file__)
+    module = importlib.util.module_from_spec(spec)
+
+    spec.loader.exec_module(module)
+
+
 def test_unsupported_model_uses_native_fallback(monkeypatch):
     monkeypatch.setattr(hybrid_engine, 'replace_policies', [SupportedPolicy])
     engine = _make_engine(nn.Sequential(UnsupportedLayer(), nn.Linear(2, 2), nn.LayerNorm(2)))
@@ -45,18 +64,63 @@ def test_unsupported_model_uses_native_fallback(monkeypatch):
 
 
 def test_supported_model_registers_auxiliary_policies(monkeypatch):
-    monkeypatch.setattr(hybrid_engine, 'replace_policies', [SupportedPolicy])
+    from transformers.models.opt.modeling_opt import OPTLearnedPositionalEmbedding
+
+    monkeypatch.setattr(hybrid_engine, 'replace_policies', [SupportedPolicy, hybrid_engine.HFOPTLayerPolicy])
     engine = _make_engine(nn.Sequential(SupportedLayer(), nn.Linear(2, 2)))
 
     engine.populate_all_inference_policies()
 
     assert SupportedLayer in engine.inference_policies
     assert engine.inference_policies[nn.Linear][0] is LinearLayer
+    assert engine.inference_policies[OPTLearnedPositionalEmbedding] == (OPTEmbedding, )
+
+
+def test_supported_model_without_transformers_registers_auxiliary_policies(monkeypatch):
+    if importlib.util.find_spec('transformers') is not None:
+        pytest.skip('Requires an environment without Transformers')
+
+    monkeypatch.setattr(hybrid_engine, 'replace_policies', [SupportedPolicy, hybrid_engine.HFOPTLayerPolicy])
+    engine = _make_engine(nn.Sequential(SupportedLayer(), nn.Linear(2, 2)))
+
+    engine.populate_all_inference_policies()
+
+    assert SupportedLayer in engine.inference_policies
+    assert engine.inference_policies[nn.Linear][0] is LinearLayer
+    assert all(policy.__name__ != 'OPTLearnedPositionalEmbedding' for policy in engine.inference_policies)
+
+
+def test_transformers_checkpoint_roundtrip(tmp_path):
+    from transformers import BertConfig, BertForSequenceClassification
+
+    torch.manual_seed(1234)
+    model = BertForSequenceClassification(
+        BertConfig(
+            vocab_size=32,
+            hidden_size=16,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=32,
+            hidden_dropout_prob=0.0,
+            attention_probs_dropout_prob=0.0,
+        ))
+    model.eval()
+    input_ids = torch.tensor([[1, 2, 3, 4]])
+    with torch.inference_mode():
+        expected = model(input_ids).logits
+
+    checkpoint = tmp_path / 'ordinary_transformers_model.pt'
+    torch.save({'model': model, 'input_ids': input_ids, 'expected': expected}, checkpoint)
+
+    restored = torch.load(checkpoint, map_location='cpu', weights_only=False)
+    restored['model'].eval()
+    with torch.inference_mode():
+        actual = restored['model'](restored['input_ids']).logits
+    torch.testing.assert_close(actual, restored['expected'])
 
 
 def test_modern_opt_uses_native_fallback():
     import inspect
-    import pytest
     from transformers import OPTConfig, OPTForCausalLM
     from transformers.models.opt.modeling_opt import OPTDecoderLayer
 
