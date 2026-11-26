@@ -4838,7 +4838,12 @@ class DeepSpeedEngine(Module):
         from deepspeed.runtime.state_dict_factory import SDLoaderFactory
 
         ckpt_list = self._get_all_ckpt_names(load_dir, tag)
-        sd_loader = SDLoaderFactory.get_sd_loader(ckpt_list, checkpoint_engine=self.checkpoint_engine)
+        checkpoint_engine = self.checkpoint_engine
+        if self.load_universal_checkpoint() and type(checkpoint_engine) is TorchCheckpointEngine:
+            # Universal restore takes the weights from zero/ and reads only metadata from the model-states file,
+            # which every rank would otherwise unpickle in full, twice.
+            checkpoint_engine = TorchCheckpointEngine(mmap=True)
+        sd_loader = SDLoaderFactory.get_sd_loader(ckpt_list, checkpoint_engine=checkpoint_engine)
 
         is_pipe_parallel = isinstance(self.module, PipelineModule)
 
