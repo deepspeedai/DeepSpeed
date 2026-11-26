@@ -207,6 +207,24 @@ class TestGroupedExpertsActivation:
         (live_grad, ) = torch.autograd.grad(live_out, live, live_upstream)
         assert live_grad.data_ptr() == live_upstream.data_ptr()
 
+    @pytest.mark.skipif(get_accelerator().device_name() != "cuda",
+                        reason="host synchronization checks use CUDA's sync debug mode")
+    def test_empty_expert_grad_guard_does_not_wait_for_the_device(self):
+        # The guard runs for every expert weight in every backward pass. A host-side check of the expert counts would
+        # block the host until the GPU caught up each time, leaving the GPU idle while the next kernels are queued.
+        device = get_accelerator().current_device_name()
+        weight = torch.ones(4, 2, 3, device=device, requires_grad=True)
+        guarded = _zero_empty_expert_grad(weight, torch.tensor([2, 0, 1, 3], device=device))
+        upstream = torch.ones_like(guarded)
+        previous_mode = torch.cuda.get_sync_debug_mode()  #ignore-cuda
+        torch.cuda.set_sync_debug_mode("error")  #ignore-cuda
+        try:
+            (grad, ) = torch.autograd.grad(guarded, weight, upstream)
+        finally:
+            torch.cuda.set_sync_debug_mode(previous_mode)  #ignore-cuda
+        assert grad[1].eq(0).all()
+        assert grad[0].eq(1).all() and grad[2].eq(1).all() and grad[3].eq(1).all()
+
     @pytest.mark.parametrize("activation", tuple(EXPERT_ACTIVATIONS))
     def test_for_loop_matches_dense_reference(self, activation):
         torch.manual_seed(0)
