@@ -91,7 +91,6 @@ class TPPlanConverter:
                             matching_patterns.append((pattern, partition))
                     if not matching_patterns:
                         continue
-                    matching_patterns.sort(key=lambda item: (item[0].count('*'), -len(item[0])))
                     best_pattern, best_partition = matching_patterns[0]
                     best_style = best_partition.lower()
 
@@ -177,16 +176,6 @@ class TPPlanConverter:
                     gather_output=gather_output,
                     grad_allreduce=grad_allreduce,
                 ))
-
-        # Sort layer_specs so that more specific patterns precede wildcards.
-        # This ensures that layer-specific overrides (e.g. colwise_gather_output on layer 0)
-        # take precedence over wildcard rules (e.g. *.self_attn.q_norm).
-        layer_specs.sort(
-            key=lambda spec: (
-                min(p.count(".*") for p in spec.patterns),
-                -max(len(p) for p in spec.patterns),
-            )
-        )
 
         return layer_specs
 

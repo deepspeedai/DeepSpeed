@@ -365,12 +365,12 @@ class TestTPPlanConverter:
 
         model = MockModel()
 
-        # Plan with wildcard colwise and layer 0 colwise_gather_output override
+        # Plan with layer 0 colwise_gather_output override and wildcard colwise fallback
         hf_plan = {
-            "layers.*.self_attn.q_proj": "colwise",
-            "layers.*.self_attn.k_proj": "colwise",
             "layers.0.self_attn.q_proj": "colwise_gather_output",
             "layers.0.self_attn.k_proj": "colwise_gather_output",
+            "layers.*.self_attn.q_proj": "colwise",
+            "layers.*.self_attn.k_proj": "colwise",
         }
 
         # Test without model
@@ -406,4 +406,67 @@ class TestTPPlanConverter:
         spec_m_q1 = config_model.find_matching_spec("layers.1.self_attn.q_norm.weight")
         assert spec_m_q1 is not None
         assert spec_m_q1.grad_allreduce is True
+
+    def test_qwen3_projection_order_preserved_when_adding_norms(self):
+        """Preserve existing projection rule order when adding norm rules (Qwen3 regression test).
+
+        When a plan has `layers.*.self_attn.q_proj: colwise` followed by
+        `self_attn.q_proj: colwise_gather_output`, the first rule must take precedence
+        so that projection outputs are not gathered and norm rules match with
+        replicated_with_grad_allreduce (grad_allreduce=True).
+        """
+        import torch.nn as nn
+        from deepspeed.module_inject.autotp_config import AutoTPConfig
+
+        class MockAttention(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.q_proj = nn.Linear(32, 32)
+                self.k_proj = nn.Linear(32, 32)
+                self.q_norm = nn.LayerNorm(32)
+                self.k_norm = nn.LayerNorm(32)
+
+        class MockModel(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.layers = nn.ModuleList([
+                    nn.ModuleDict({"self_attn": MockAttention()}),
+                    nn.ModuleDict({"self_attn": MockAttention()}),
+                ])
+
+        model = MockModel()
+
+        hf_plan = {
+            "layers.*.self_attn.q_proj": "colwise",
+            "layers.*.self_attn.k_proj": "colwise",
+            "self_attn.q_proj": "colwise_gather_output",
+            "self_attn.k_proj": "colwise_gather_output",
+        }
+
+        # Test without model
+        supp_no_model = TPPlanConverter.supplement_replicated_qk_norm(dict(hf_plan))
+        specs_no_model = TPPlanConverter.convert(supp_no_model)
+        config_no_model = AutoTPConfig(layer_specs=specs_no_model)
+        # Projection must use the first rule ('colwise', gather_output=False), keeping 4 heads
+        proj_spec = config_no_model.find_matching_spec("layers.0.self_attn.q_proj.weight")
+        assert proj_spec is not None
+        assert proj_spec.gather_output is False
+        assert proj_spec.partition_type == PartitionType.COLUMN
+        # Norm must use the matching first norm rule (grad_allreduce=True)
+        norm_spec = config_no_model.find_matching_spec("layers.0.self_attn.q_norm.weight")
+        assert norm_spec is not None
+        assert norm_spec.grad_allreduce is True
+        assert norm_spec.partition_type == PartitionType.SKIP
+
+        # Test with model
+        specs_model = TPPlanConverter.convert(dict(hf_plan), model=model)
+        config_model = AutoTPConfig(layer_specs=specs_model)
+        proj_spec_m = config_model.find_matching_spec("layers.0.self_attn.q_proj.weight")
+        assert proj_spec_m is not None
+        assert proj_spec_m.gather_output is False
+        assert proj_spec_m.partition_type == PartitionType.COLUMN
+        norm_spec_m = config_model.find_matching_spec("layers.0.self_attn.q_norm.weight")
+        assert norm_spec_m is not None
+        assert norm_spec_m.grad_allreduce is True
+        assert norm_spec_m.partition_type == PartitionType.SKIP
 
