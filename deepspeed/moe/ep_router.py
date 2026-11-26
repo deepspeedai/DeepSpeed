@@ -194,18 +194,21 @@ class TokenChoiceTopKRouter(nn.Module):
             # group selection) while still gathering scores from the current gate.
             selected_experts_indices = self._replay_routes(scores.shape[0], scores.device)
         else:
-            scores_for_choice = (scores if expert_bias is None else scores + expert_bias)
+            # Expert IDs are discrete. Keep selection out of autograd so that
+            # checkpoint recording and replay save the same tensors.
+            with torch.no_grad():
+                scores_for_choice = (scores if expert_bias is None else scores + expert_bias)
 
-            # Apply pre-trained score correction bias (e.g. DeepSeek-V3 noaux_tc routing)
-            if self.e_score_correction_bias is not None:
-                scores_for_choice = scores_for_choice + self.e_score_correction_bias.unsqueeze(0)
+                # Apply pre-trained score correction bias (e.g. DeepSeek-V3 noaux_tc routing)
+                if self.e_score_correction_bias is not None:
+                    scores_for_choice = scores_for_choice + self.e_score_correction_bias.unsqueeze(0)
 
-            # Apply node-limited routing if configured
-            if self.num_expert_groups is not None:
-                scores_for_choice = self._get_node_limited_routing_scores(scores_for_choice)
+                # Apply node-limited routing if configured
+                if self.num_expert_groups is not None:
+                    scores_for_choice = self._get_node_limited_routing_scores(scores_for_choice)
 
-            # Select top-k experts per token
-            _, selected_experts_indices = torch.topk(scores_for_choice, k=self.top_k, dim=-1, sorted=False)
+                # Select top-k experts per token
+                _, selected_experts_indices = torch.topk(scores_for_choice, k=self.top_k, dim=-1, sorted=False)
             selected_experts_indices = self._apply_routing_replay(selected_experts_indices)
 
         # Gather original (unbiased) scores for selected experts

@@ -1301,22 +1301,20 @@ class TestRoutingAndLayerSemantics:
         candidate.router.set_routing_replay(replay, "layer.0")
         inputs = torch.randn(4, 8, 64, device=device)
 
-        with torch.no_grad(), replay.recording():
-            candidate(inputs)
-            candidate(inputs)
-
         reference_inputs = inputs.detach().clone().requires_grad_(True)
         reference_output = reference(reference_inputs)
         reference_output.square().mean().backward()
+        assert reference.router.gate.weight.grad is not None
 
         candidate_inputs = inputs.detach().clone().requires_grad_(True)
+        with replay.recording():
+            candidate_output = checkpoint(candidate, candidate_inputs, use_reentrant=checkpoint_mode)
 
         def unexpected_topk(*args, **kwargs):
             raise AssertionError("checkpoint replay must not recompute top-k")
 
         monkeypatch.setattr(torch, "topk", unexpected_topk)
         with replay.replaying():
-            candidate_output = checkpoint(candidate, candidate_inputs, use_reentrant=checkpoint_mode)
             candidate_output.square().mean().backward()
 
         torch.testing.assert_close(candidate_output, reference_output, rtol=1e-5, atol=1e-6)
