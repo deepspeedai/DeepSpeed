@@ -414,13 +414,23 @@ class ZeROOptimizer(DeepSpeedOptimizer):
 
             hp_param = param_group['params'][0]
             assert all(step == steps[0] for step in steps), f"Steps {steps} are not equal"
-            if steps[0] is None:
+            if not steps:
+                # This rank holds no fragment for the group (e.g. a scalar param in its own group when a
+                # ZeRO-3 source loads under ZeRO-1/2), so no per-parameter step is loaded here; sync the
+                # group with the source's global step, or leave it unset if the source wrote none.
+                if global_step is None:
+                    from deepspeed.checkpoint.universal_checkpoint import load_universal_optimizer_step
+                    global_step = load_universal_optimizer_step(optim_sd, checkpoint_dir, [])
+                if global_step is not None:
+                    self.optimizer.state[hp_param]['step'] = global_step
+            elif steps[0] is None:
                 # A ZeRO-3 source writes no per-parameter step.pt; its step is in the global state.
                 if global_step is None:
                     from deepspeed.checkpoint.universal_checkpoint import load_universal_optimizer_step
                     global_step = load_universal_optimizer_step(optim_sd, checkpoint_dir, [])
                 steps[0] = global_step
-            if steps[0] is not None:
+                self.optimizer.state[hp_param]['step'] = steps[0]
+            else:
                 # The optimizer advances step in place, and a ZeRO-3 source's step is shared by every group.
                 self.optimizer.state[hp_param]['step'] = steps[0].clone() if torch.is_tensor(steps[0]) else steps[0]
 

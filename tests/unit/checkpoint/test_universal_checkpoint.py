@@ -792,3 +792,47 @@ class TestUniversalCheckpointAcrossZeROStagesRejects(DistributedTest):
         target = self._build(target_stage, hidden_dim, one_group=True, load_universal=True)
         with pytest.raises(ZeRORuntimeException, match="only one of the Adam moments"):
             target.load_checkpoint(tmpdir, tag=universal_tag)
+
+
+@pytest.mark.parametrize("source_stage,target_stage", [(3, 1), (3, 2), (1, 3), (2, 3)])
+class TestUniversalCheckpointCrossStageScalarOwnGroup(DistributedTest):
+    """A scalar parameter in its own optimizer group: under ZeRO-1/2 it leaves some rank without a
+    fragment for that group, so the loader must not require a per-parameter step there."""
+
+    world_size = 2
+
+    def test_load(self, tmpdir, source_stage, target_stage):
+        hidden_dim = 10
+        steps_before_save = 2
+
+        def build(stage, load_universal):
+            ds_config = {"train_batch_size": 2, "zero_optimization": {"stage": stage, "sub_group_size": 100}}
+            if load_universal:
+                ds_config["checkpoint"] = {"load_universal": True}
+            model = _ScaledModel(hidden_dim, nlayers=2)
+            # The scalar keeps its own group: no other parameter in the group can carry its step on a rank
+            # that holds only the scale's fragment.
+            param_groups = [{"params": list(layer.parameters())} for layer in model.linears]
+            param_groups.append({"params": [model.scale]})
+            engine, _, _, _ = deepspeed.initialize(config=ds_config,
+                                                   model=model,
+                                                   optimizer=torch.optim.Adam(param_groups))
+            return engine
+
+        source = build(source_stage, load_universal=False)
+        _train(source, hidden_dim, steps_before_save)
+        universal_tag = _save_as_universal(source, tmpdir)
+
+        target = build(target_stage, load_universal=True)
+        target.load_checkpoint(tmpdir, tag=universal_tag)
+
+        # Every restored group must carry the source's global step so the very next step continues from it.
+        for i, param_group in enumerate(target.optimizer.param_groups):
+            hp_param = param_group['params'][0]
+            for state in target.optimizer.optimizer.state.values():
+                assert int(state["step"]) == steps_before_save
+
+        _train(target, hidden_dim, 1)
+        for state in target.optimizer.optimizer.state.values():
+            assert int(state["step"]) == steps_before_save + 1
+        target.destroy()
