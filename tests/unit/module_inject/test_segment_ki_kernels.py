@@ -22,6 +22,7 @@ import os
 import pytest
 import torch
 
+import deepspeed.comm as dist
 from deepspeed.accelerator import get_accelerator
 
 from deepspeed.module_inject.kernel_reference import decode_attn as ref_decode_attn
@@ -29,6 +30,7 @@ from deepspeed.module_inject.kernel_reference import fused_add_norm as ref_add_n
 from deepspeed.module_inject.kernel_reference import gdn_gates as ref_gdn_gates
 from deepspeed.module_inject.kernel_reference import gated_norm as ref_gated_norm
 from deepspeed.module_inject.kernel_reference import grouped_linear as ref_grouped_linear
+from unit.common import DistributedTest
 
 DEV = get_accelerator().device_name()
 
@@ -432,6 +434,55 @@ class TestSegkiRefreshDispatcher:
         assert not hasattr(model[0], "_ki_tp_cat_w")
 
 
+class TestLmHeadSplitsOverTheTensorParallelGroup(DistributedTest):
+    """The vocab-parallel lm_head splits over the ranks that share hidden states."""
+    world_size = 2
+
+    def _head(self):
+        torch.manual_seed(0)
+        model = torch.nn.Module()
+        model.lm_head = torch.nn.Linear(32, 16, bias=False, dtype=torch.bfloat16)
+        return model
+
+    def _install(self, model):
+        from types import SimpleNamespace
+        from deepspeed.module_inject.segment_ki import install_lm_head
+        assert install_lm_head(model, SimpleNamespace(grouped_linear=None)) == 1
+
+    def test_data_parallel_head_is_not_split(self):
+        model = self._head()
+        self._install(model)
+        # Data-parallel ranks decode different sequences.
+        hidden = torch.randn(2, 1, 32, dtype=torch.bfloat16, generator=torch.Generator().manual_seed(dist.get_rank()))
+
+        with torch.no_grad():
+            logits = model.lm_head(hidden)
+
+        assert torch.equal(logits, torch.nn.functional.linear(hidden, model.lm_head.weight))
+        assert model.lm_head._ki_tp_group is None
+
+    def test_tensor_parallel_head_gathers_over_the_model_group(self):
+        from deepspeed.module_inject.layers import LinearAllreduce
+
+        class RowParallel(LinearAllreduce):
+
+            def __init__(self, mp_group):
+                torch.nn.Module.__init__(self)
+                self.mp_group = mp_group
+
+        group = dist.new_group(ranks=[0, 1])
+        model = self._head()
+        model.o_proj = RowParallel(group)
+        self._install(model)
+        hidden = torch.randn(2, 1, 32, dtype=torch.bfloat16, generator=torch.Generator().manual_seed(1))
+
+        with torch.no_grad():
+            logits = model.lm_head(hidden)
+
+        assert torch.equal(logits, torch.nn.functional.linear(hidden, model.lm_head.weight))
+        assert model.lm_head._ki_tp_group is group
+
+
 # ---------------------------------------------------------------------------
 # 3. Rollout -> train -> rollout integration (GPU + real model)
 # ---------------------------------------------------------------------------
@@ -707,6 +758,48 @@ class TestArenaWeightViews:
             out_refreshed,
             out_fresh), (f"refresh path diverged from fresh injection: "
                          f"{(out_refreshed != out_fresh).sum().item()} of {out_fresh.numel()} tokens differ")
+
+    @pytest.mark.parametrize("batch_size", [1, 2])
+    def test_graph_reused_until_refresh(self, batch_size, monkeypatch):
+        """The decode graph is captured once per shape and replayed by later
+        rollouts; segki_refresh frees the derived tensors it captured, so the
+        next rollout must capture again."""
+        pytest.importorskip("transformers")
+        accelerator = get_accelerator()
+        if accelerator.device_name() == "cpu" or accelerator.create_graph() is None:
+            pytest.skip("requires graph capture")
+        try:
+            from transformers import AutoTokenizer
+            tok = AutoTokenizer.from_pretrained(_TEST_MODEL)
+        except Exception as e:
+            pytest.skip(f"model {_TEST_MODEL} unavailable: {e}")
+        object.__setattr__(tok, "eos_token_id", -1)
+        torch.manual_seed(17)
+        ids = torch.randint(1000, 50000, (batch_size, 64), device=accelerator.device_name())
+
+        original_capture_to_graph = accelerator.capture_to_graph
+        capture_count = 0
+
+        def counted_capture_to_graph(*args, **kwargs):
+            nonlocal capture_count
+            capture_count += 1
+            return original_capture_to_graph(*args, **kwargs)
+
+        monkeypatch.setattr(accelerator, "capture_to_graph", counted_capture_to_graph)
+        rollout, m = self._make_rollout(tok)
+        first = self._gen(rollout, ids)
+        assert torch.equal(self._gen(rollout, ids), first)
+        assert capture_count == 1
+
+        from deepspeed.module_inject.segment_ki import segki_refresh
+        segki_refresh(m)
+        assert torch.equal(self._gen(rollout, ids), first)
+        assert capture_count == 2
+
+        rollout.refresh_weights()
+        assert torch.equal(self._gen(rollout, ids), first)
+        assert capture_count == 3
+        rollout.shutdown()
 
     def test_glu_only_model_refresh_clears_backend_cat_cache(self):
         """GLU-only (dense) models carry the backend handle on _ki_dual_op;

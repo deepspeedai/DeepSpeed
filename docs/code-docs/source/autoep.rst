@@ -64,13 +64,16 @@ including models built under ``deepspeed.zero.Init``. Stage 3 AutoEP checkpoints
 partition-natively in the ``zero_pp_rank_*`` shard files and support
 same-topology load, module-only loads (``load_module_only``),
 optimizer-state-free loads (``load_optimizer_states=False``), and Universal
-Checkpoint conversion, except with AutoTP folding. Optimizer-including
+Checkpoint conversion, also with AutoTP folding. Optimizer-including
 Universal Checkpoint loads can
 resume with a different data-parallel world size, a different ``autoep_size``,
-or both, when the target ``autoep_size`` divides the model's expert count.
+a different ``tensor_parallel.autotp_size`` (folded or not), or any
+combination, when the target ``autoep_size`` divides the model's expert count
+and, with ``tensor_parallel.autotp_size > 1``, is greater than 1 (folding
+requires expert parallelism).
 Weights-only/module-only Universal Checkpoint loads use the converted
-``fp32.pt`` parameter files and support the same data-parallel and
-``autoep_size`` topology changes.
+``fp32.pt`` parameter files and support the same data-parallel,
+``autoep_size`` and ``tensor_parallel.autotp_size`` changes.
 
 **Usage:**
 
@@ -375,6 +378,88 @@ GEMM), ZeRO stage is 1 or 2 (not 0 or 3), and PyTorch provides both
 ``torch._C._get_sm_carveout_experimental`` and
 ``torch._C._set_sm_carveout_experimental``.
 
+**Staging expert weight gradients across microbatches (experimental):**
+
+With hundreds of experts, or with small microbatches, each expert receives few
+rows per backward. The weight-gradient GEMMs (dW) then write three full-size
+gradients for a handful of rows each, and autograd adds each of them to the
+accumulated gradient: the backward is bound by memory bandwidth over the expert
+weights' footprint, not by arithmetic. ``deferred_dw_flush_period`` runs those
+GEMMs once for several backward passes instead:
+
+.. code-block:: json
+
+    {
+      "gradient_accumulation_steps": 16,
+      "expert_parallel": {
+        "enabled": true,
+        "autoep_size": 8,
+        "deferred_dw_flush_period": 8,
+        "deferred_dw_rows_per_expert": 256
+      }
+    }
+
+A backward that stages computes the experts' input gradient as usual, copies
+the rows the dW GEMMs read (the expert input, the activation output and their
+gradients, without alignment padding) behind each expert's cursor in a
+per-layer staging buffer, and returns no expert weight gradient. A flush
+gathers the staged rows of all experts, runs the dW GEMMs once over them and
+returns the result through autograd. It runs:
+
+* in one backward of every ``deferred_dw_flush_period``;
+* in the backward that closes a gradient accumulation window, which the engine
+  marks, so no staged row outlives the optimizer step it belongs to.
+  ``engine.step()`` raises if rows are still staged at a boundary.
+
+When the rows of a backward do not fit behind an expert's cursor, the dW GEMMs
+run early over the staged rows to empty the buffer, without moving the period,
+and a backward that does not fit even an empty buffer computes its own dW at
+once. Either result is held, at the size of the expert weight gradients, and
+returned by the next flush. Which backward returns expert weight gradients
+therefore depends only on the count of backward passes, not on the routing:
+ranks that hold replicas of the same experts receive different rows, and ZeRO
+stages 2 and 3 reduce a gradient across them in the backward that returns it.
+
+Gradient reduction, clipping and the optimizer see what they saw before: the
+sum over the window. Between flushes the expert weights have no new
+gradient. The sum is formed in one GEMM rather than by adding per-backward
+results, so values differ by floating-point summation order; in bf16 the
+staged sum was the closer of the two to an fp64 reference in every measured
+case.
+
+Each MoE layer on each rank holds ``local experts * deferred_dw_rows_per_expert``
+rows of ``2 * hidden + 3 * intermediate`` values in the compute dtype for as
+long as it trains. ``deferred_dw_rows_per_expert`` defaults to ``0``, which
+sizes the buffer on the first backward to ``deferred_dw_flush_period`` times
+the larger of that backward's busiest expert and twice its mean rows per
+expert.
+
+Whether this helps depends on the rows each expert receives per backward. On one
+H200 (PyTorch 2.8.0, bf16), timing only the grouped expert MLP's forward and
+backward for 128 local experts with hidden size 2048 and intermediate size 768
+(``gate_up_impl="fused"``), evenly routed, over windows of 8 backward passes:
+
+==================  ===========  ===========  ===========  ====================
+Rows per expert     period 2     period 4     period 8     Staging at period 8
+==================  ===========  ===========  ===========  ====================
+8                   1.22x        1.49x        1.68x        0.20 GiB
+32                  1.21x        1.46x        1.63x        0.78 GiB
+128                 1.06x        1.23x        1.34x        3.13 GiB
+512                 0.80x        0.86x        0.88x        12.50 GiB
+==================  ===========  ===========  ===========  ====================
+
+Speedups are against the same module without staging; values below 1 are
+slowdowns. These are module-level timings, not end-to-end training steps, and
+no convergence run has been done with this option yet.
+
+``deferred_dw_flush_period`` above ``1`` is rejected, rather than silently
+ignored, unless the experts run ``torch._grouped_mm`` (``use_grouped_mm=true``,
+and ``disable_triton_grouped_mm=true`` on devices that select the Triton
+grouped GEMM) and ``managed_gradient_accumulation`` is on. It cannot be
+combined with ``overlap_weight_grad``, AutoEP+AutoTP folding, ZenFlow or
+DeepCompile. It supports first-order gradients only. It runs with ZeRO stages
+0 to 3; optimizer and parameter offload have not been validated with it.
+
 **DeepEP row weighting implementation (experimental):**
 
 DeepEP dispatch returns one received row per routed assignment and one FP32
@@ -640,11 +725,17 @@ existing numerical tolerances, not bitwise unchanged. Only the forward
 reduction changes: the backward, collectives, router, grouped GEMM and
 expert-major reorder are untouched.
 
+With AutoEP+AutoTP folding (``tensor_parallel.autotp_size`` greater than 1),
+each tensor-parallel peer sends only part of the routed assignments to the
+experts. The restore first all-gathers the rows, their token and top-k slot,
+and their routing weights over the tensor-parallel group, as the default
+restore does, and then reduces the gathered rows with the same kernel. The
+default folded restore multiplies and adds the rows in the activation dtype,
+one top-k slot at a time; the fused restore does both in FP32.
+
 ``"fused_weighted_sum"`` is rejected, rather than quietly ignored, when it would
 have nothing to replace or would change semantics:
 
-- ``tensor_parallel.autotp_size`` greater than 1, which uses folded tensor
-  parallelism and restores combined tokens from assignment metadata instead;
 - ``expert_tensor_parallel_size`` greater than 1;
 - ``comm_backend="deepep"`` with expert parallelism, because DeepEP already
   restores and reduces its routed rows;
@@ -738,10 +829,12 @@ Requirements and limits:
 - AutoEP with ZeRO Stage 3 is supported only without sequence parallelism,
   hpZeRO secondary tensor groups, non-1 expert tensor parallelism, or
   quantized gradients.
-- Regular checkpoint save/load requires matching ``autoep_size``. To change
-  ``autoep_size`` or data-parallel world size across runs for the same
-  AutoEP-detected model topology, convert the checkpoint to Universal
-  Checkpoint format and load it with ``checkpoint.load_universal``; see the
+- Regular checkpoint save/load requires matching ``autoep_size`` and, under
+  folding, matching ``tensor_parallel.autotp_size``. To change
+  ``autoep_size``, ``tensor_parallel.autotp_size`` or data-parallel world size
+  across runs for the same AutoEP-detected model topology, convert the
+  checkpoint to Universal Checkpoint format and load it with
+  ``checkpoint.load_universal``; see the
   `Universal Checkpointing tutorial </tutorials/universal-checkpointing/>`__
   for the detailed flow and constraints.
 - DeepSeek-V2 and DeepSeek-V3 AutoEP do not support load-balance expert bias

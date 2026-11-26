@@ -275,6 +275,38 @@ each shard's mean itself, weighted by the shard's valid-token count, so an
 additional SP reduction would double-count tokens. Pass an `sp_group` only when
 this loss is the sole aggregation over a manually constructed TP x SP mesh.
 
+### Untied Input Embedding
+
+`vocab_parallel_lm_head` shards an input embedding only when it is tied to the
+output head. An untied input embedding stays replicated on every TP rank (for
+example Qwen2.5-72B's 152,064 x 8,192 embedding weight is 12% of each GPU's
+parameters at TP 8). Set `vocab_parallel_embedding` to shard it along the
+vocabulary as well:
+
+```json
+"tensor_parallel": {
+    "autotp_size": 8,
+    "vocab_parallel_embedding": true
+}
+```
+
+Each rank keeps 1/tp of the rows, looks up the tokens that fall in its rows, and
+the partial results are summed over the tensor-parallel group. The model must
+return an `nn.Embedding` from `get_input_embeddings()`. The option applies on all
+three partitioning paths (HuggingFace `tp_plan`, `partition_config` or
+`preset_model`, and the heuristic path) and to models built under
+`deepspeed.zero.Init`.
+
+A tied embedding is sharded with its output head instead. When the head is
+vocabulary-parallel (`vocab_parallel_lm_head`) or row-parallel, the embedding
+already shares the head's shard and the option changes nothing. When the head
+stays replicated, the option raises an error rather than untie the embedding from
+its output head.
+
+The option also raises an error in two cases: when a `partition_config` spec
+already partitions the embedding, and when the DeepCompile `autotp` pass is
+enabled, because that pass does not support vocabulary-parallel embeddings.
+
 ### Fused Projection and Loss
 
 The vocabulary-parallel loss above still materializes `[tokens, vocab / tp]`
@@ -531,6 +563,8 @@ For Grouped Query Attention with different Q/K/V sizes:
 3. **Combined TP and SP orchestration**: The vocab-parallel loss supports explicit orthogonal TP and SP groups, but AutoTP does not currently construct a combined TP x SP process mesh automatically.
 
 4. **Cross-topology universal restore**: Loading a universal checkpoint back into a topology with a *different* tensor-parallel degree goes through DeepSpeed's Megatron-style model-state loader, which is not AutoTP-aware; prefer same-topology restore when changing world size.
+
+5. **One tensor-parallel layout per process**: The TP and DP groups are process-wide, and the first engine creates them. A later engine in the same process must use the same `autotp_size`; `deepspeed.initialize` raises an error if it asks for a different one, including an engine without AutoTP that does not pass its own `mpu` and would therefore inherit an earlier AutoTP engine's groups. If an engine in between passed its own `mpu`, a later engine without one inherits that `mpu` instead. Per-engine groups are tracked in [#9081](https://github.com/deepspeedai/DeepSpeed/issues/9081).
 
 
 ## See Also

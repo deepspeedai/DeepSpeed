@@ -264,7 +264,7 @@ because most accelerator and large-scale workflows do not run on PR events (see 
 Report, in the PR:
 
 - Hardware and software: device model and count, accelerator/driver version, torch version
-- The exact command run (`pytest --forked tests/unit/...`, or the training/inference script)
+- The exact command run (`pytest tests/unit/...`, or the training/inference script)
 - The result: pass/fail, and for a bug fix, the failure observed *before* the change on the same
   setup
 - Any configuration on the affected matrix axes (1.5) that you could **not** run, and why
@@ -323,7 +323,8 @@ Frequent sources in this repo:
 - **Shared state across tests.** `reuse_dist_env` reuses the process group between tests in a
   class; a test that leaves global state behind (an initialized engine, a monkeypatched module, a
   changed accelerator, a cached op build) will break its neighbors or itself under `pytest-xdist`.
-  Note that `--forked` is required for distributed CUDA tests.
+  Do not use `--forked` to isolate tests: it breaks CUDA tests on GPU hosts, and distributed tests
+  do not need it because their ranks start from a forkserver.
 - **Timing, ports, and filesystem.** Do not assume a fixed port or a shared `/tmp` path; use the
   provided helpers and `tmpdir`. Avoid sleeps and wall-clock assertions.
 - **Unavailable hardware.** Skip explicitly on unmet requirements (device availability, device
@@ -447,7 +448,7 @@ New features must include documentation updates — this is a hard requirement, 
 - New or changed config keys → `docs/_pages/config-json.md`
 - User-facing features → a tutorial under `docs/_tutorials/`
 - Public API additions → the API reference under `docs/code-docs/source/`
-- Usage examples → `examples/`, and for a full feature, a companion PR to
+- Usage examples → a companion PR to
   [DeepSpeedExamples](https://github.com/deepspeedai/DeepSpeedExamples) or
   [Megatron-DeepSpeed](https://github.com/deepspeedai/Megatron-DeepSpeed)
 

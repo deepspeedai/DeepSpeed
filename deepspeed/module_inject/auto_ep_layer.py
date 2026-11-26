@@ -41,7 +41,7 @@ from deepspeed.module_inject.auto_ep_comm import (COMM_BACKEND, DEEPEP_BACKEND, 
                                                   deepep_record_combine, new_exchange_scope, shared_exchange)
 from deepspeed.moe.ep_router import TokenChoiceTopKRouter
 from deepspeed.moe.ep_count import count_tokens_per_expert
-from deepspeed.moe.ep_experts import ExpertWeightGradSlot, GroupedExperts
+from deepspeed.moe.ep_experts import ExpertWeightGradSlot, GroupedExperts, MoeDeferredDwStaging
 from deepspeed.moe.ep_repack import (_gather_source_zero_params, repack_expert_requires_grad_flags,
                                      repack_expert_source_params, repack_expert_weights)
 
@@ -774,6 +774,20 @@ class AutoEPMoELayer(nn.Module):
             raise ValueError("overlap_weight_grad defers the experts' torch._grouped_mm weight gradients, but this "
                              "device selects the Triton grouped GEMM. Set disable_triton_grouped_mm=true, or leave "
                              "overlap_weight_grad unset.")
+        self.dw_staging = None
+        if config.deferred_dw_flush_period > 1:
+            if self.experts.use_triton_grouped_mm or not self.experts.use_grouped_mm:
+                raise ValueError("deferred_dw_flush_period stages the experts' torch._grouped_mm weight gradients, "
+                                 "but this device selects the Triton grouped GEMM. Set "
+                                 "disable_triton_grouped_mm=true, or leave deferred_dw_flush_period unset.")
+            self.dw_staging = MoeDeferredDwStaging(self.num_local_experts, config.deferred_dw_flush_period,
+                                                   config.deferred_dw_rows_per_expert)
+
+    def _run_experts(self, rows: torch.Tensor, counts: torch.Tensor, valid_counts: torch.Tensor | None = None):
+        """Run the expert MLP; ``valid_counts`` are the rows per expert before alignment padding, when it differs."""
+        if self.dw_staging is None:
+            return self.experts(rows, counts)
+        return self.experts(rows, counts, dw_staging=self.dw_staging, num_valid_tokens_per_expert=valid_counts)
 
     def _start_async_split_plan(self, num_tokens_per_expert: torch.Tensor) -> _PendingSplitPlan:
         if self._async_split_plan_pending is not None:
@@ -957,11 +971,6 @@ class AutoEPMoELayer(nn.Module):
 
         if folding_group_handles is not None:
             self.folding_group_handles = folding_group_handles
-            if self.combine_impl == "fused_weighted_sum" and folding_group_handles.spec.tp_size > 1:
-                # Folded TP restores tokens through a different path.
-                raise ValueError('combine_impl="fused_weighted_sum" does not support folded tensor parallelism '
-                                 f"(tensor_parallel.autotp_size={folding_group_handles.spec.tp_size}). Set "
-                                 'tensor_parallel.autotp_size to 1, or leave combine_impl unset.')
             if self.comm_backend == DEEPEP_BACKEND and folding_group_handles.spec.tp_size > 1:
                 # DeepEP's combine returns token-major rows, which folded TP's
                 # assignment-metadata restore can't consume. Refuse rather than
@@ -1106,7 +1115,7 @@ class AutoEPMoELayer(nn.Module):
                                f"{self.num_local_experts} experts")
 
         if weight_grad_slot is None:
-            expert_output = self.experts(received, counts)
+            expert_output = self._run_experts(received, counts)
         else:
             expert_output = self.experts(received, counts, weight_grad_slot=weight_grad_slot)
 
@@ -1233,6 +1242,7 @@ class AutoEPMoELayer(nn.Module):
                 dispatch_counters,
                 partition_assignments,
                 restore_combined,
+                restore_combined_fused,
             )
             payload = RoutedAssignmentPayload(
                 token_indices=(token_indices_sorted // self.top_k).to(torch.long),
@@ -1279,7 +1289,7 @@ class AutoEPMoELayer(nn.Module):
 
             routed_input_permuted, perm_indices, aligned_counts, n_tokens = permute_by_local_expert(
                 routed_input, local_counts)
-            expert_output = self.experts(routed_input_permuted, aligned_counts)
+            expert_output = self._run_experts(routed_input_permuted, aligned_counts, local_counts)
             expert_output = unpermute_by_local_expert(expert_output, perm_indices, n_tokens)
         else:
             # EP dispatch/compute/combine
@@ -1307,16 +1317,24 @@ class AutoEPMoELayer(nn.Module):
 
             routed_input, perm_indices, aligned_counts, n_tokens = permute_by_local_expert(
                 routed_input, plan.local_counts_by_source)
-            expert_output = self.experts(routed_input, aligned_counts)
+            expert_output = self._run_experts(routed_input, aligned_counts, plan.local_counts_by_source.sum(dim=0))
             expert_output = unpermute_by_local_expert(expert_output, perm_indices, n_tokens)
 
             expert_output = _AllToAllV.apply(self.ep_group, expert_output, plan.output_splits, plan.input_splits)
 
         if folded_tp:
-            output = restore_combined(expert_output,
-                                      restore_ctx,
-                                      tp_group=self.tp_group,
-                                      validate_coverage=self.validate_folding_routing).reshape(bsz, seqlen, hdim)
+            if self.combine_impl == "fused_weighted_sum":
+                output = restore_combined_fused(expert_output,
+                                                restore_ctx,
+                                                tp_group=self.tp_group,
+                                                top_k=self.top_k,
+                                                validate_coverage=self.validate_folding_routing)
+            else:
+                output = restore_combined(expert_output,
+                                          restore_ctx,
+                                          tp_group=self.tp_group,
+                                          validate_coverage=self.validate_folding_routing)
+            output = output.reshape(bsz, seqlen, hdim)
             self._last_folding_dispatch_counters = dispatch_counters(restore_ctx)
         elif self.combine_impl == "fused_weighted_sum":
             output = fused_token_ops.fused_weighted_restore(

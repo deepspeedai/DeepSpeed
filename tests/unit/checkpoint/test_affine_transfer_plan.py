@@ -30,10 +30,12 @@ import pytest
 import torch
 
 from deepspeed.checkpoint.affine import (AffinePiece, ParamAffineMap, block_gather_map, contiguous_split_map,
-                                         replicated_map, segmented_map, sub_param_map)
+                                         nest_affine_maps, replicated_map, segmented_map, sub_param_map,
+                                         union_affine_maps)
 from deepspeed.checkpoint.affine_geometry import LogicalBox, boxes_disjoint
 from deepspeed.checkpoint.affine_transfer import (AffineTransferError, InvalidMapError, PlanBudget, TransferSegment,
                                                   UnsupportedLayoutError, plan_transfer)
+from deepspeed.checkpoint.zero_affine import zero_storage_affine_map
 
 SENTINEL = -12345.0
 
@@ -480,6 +482,114 @@ def test_flat_storage_is_written_as_well_as_read(make_target):
                          segment.target_offset).copy_(read)
     for rank, shard in written.items():
         assert torch.equal(shard, expected[rank](full))
+
+
+def _zero_partitions_cut_at_columns(rows, cols, sizes, column_edges, per_row=False):
+    """ZeRO flat partitions of a (rows, cols) parameter, each piece cut at the given column edges.
+
+    A partition holds the flat range [a, b) of the parameter. Cut at a column edge, the rows it holds
+    become boxes narrower than the parameter, which the partition still stores at the parameter's own
+    strides (cols, 1), shifted by -a. With ``per_row`` every piece is one row, so each is also a dense
+    run: the same storage, described the way the planner accepted before.
+    """
+    pieces_by_rank, shard_shapes, start = {}, {}, 0
+    for rank, size in enumerate(sizes):
+        end = start + size
+        shard_shapes[rank] = (size, )
+        # The flat range as a partial head row, a block of whole rows and a partial tail row.
+        (head, head_col), (tail, tail_col) = divmod(start, cols), divmod(end, cols)
+        runs = [(head, 1, head_col, tail_col)] if head == tail else [(head, 1, head_col, cols),
+                                                                     (head + 1, tail - head - 1, 0, cols),
+                                                                     (tail, 1, 0, tail_col)]
+        boxes = [(row, height, max(left, edge), min(right, next_edge)) for row, height, left, right in runs
+                 for edge, next_edge in zip(column_edges, column_edges[1:])]
+        if per_row:
+            boxes = [(row + step, 1, left, right) for row, height, left, right in boxes for step in range(height)]
+        pieces_by_rank[rank] = [
+            AffinePiece((height, right - left), row * cols + left, (cols, 1), row * cols + left - start, (cols, 1),
+                        [rank]) for row, height, left, right in boxes if height > 0 and left < right
+        ]
+        start = end
+    return ParamAffineMap((rows, cols), shard_shapes, pieces_by_rank)
+
+
+def _zero_partitions_of(full, sizes):
+    flat, start, shards = full.reshape(-1), 0, {}
+    for rank, size in enumerate(sizes):
+        shards[rank] = flat[start:start + size].clone()
+        start += size
+    return shards
+
+
+@pytest.mark.parametrize('sizes', [[24, 24], [20, 28], [13, 19, 16], [5, 30, 13]],
+                         ids=['whole_rows', 'cut_mid_row', 'three_uneven', 'short_head'])
+def test_a_flat_shard_holds_boxes_at_the_parameters_own_strides(sizes):
+    """A ZeRO partition cut at a tensor-parallel column edge keeps the parameter's row-major order.
+
+    Two column halves of the same rows interleave in the partition, so their address intervals
+    overlap although no address is shared. With one shift for the whole partition the map from a
+    logical index to an address is injective, which is what lets the planner accept them.
+    """
+    rows, cols = 6, 8
+    full = torch.arange(rows * cols, dtype=torch.float64).reshape(rows, cols)
+    zero = _zero_partitions_cut_at_columns(rows, cols, sizes, [0, 4, 8])
+    assert any(piece.dest_strides == (cols, 1) and piece.shape[0] > 1 and piece.shape[1] < cols
+               for pieces in zero.pieces_by_rank.values() for piece in pieces)
+    tp = contiguous_split_map((rows, cols), [4, 4], 1)
+
+    read = _apply_plan(plan_transfer(tp, zero), tp, _zero_partitions_of(full, sizes))
+    for rank in tp.shard_shapes:
+        assert torch.equal(read[rank], tp.extract(full, rank))
+
+    written = _apply_plan(plan_transfer(zero, tp), zero, _shards(tp, lambda m, r: m.extract(full, r)))
+    for rank, shard in _zero_partitions_of(full, sizes).items():
+        assert torch.equal(written[rank], shard)
+
+
+def test_column_cut_plans_like_its_per_row_split():
+    """Describing the same storage with one box per column block instead of one piece per row
+    changes the size of the map, not what the plan moves."""
+    rows, cols, sizes = 64, 16, [300, 400, 324]
+    full = torch.randn(rows, cols, dtype=torch.float64)
+    boxes = _zero_partitions_cut_at_columns(rows, cols, sizes, [0, 8, 16])
+    per_row = _zero_partitions_cut_at_columns(rows, cols, sizes, [0, 8, 16], per_row=True)
+    count = lambda map_: sum(len(pieces) for pieces in map_.pieces_by_rank.values())
+    assert count(boxes) <= 3 * 2 * len(sizes) < count(per_row)
+    target = contiguous_split_map((rows, cols), [8, 8], 1)
+
+    shards = _zero_partitions_of(full, sizes)
+    by_box = _apply_plan(plan_transfer(target, boxes), target, shards)
+    by_row = _apply_plan(plan_transfer(target, per_row), target, shards)
+    for rank in target.shard_shapes:
+        assert torch.equal(by_box[rank], by_row[rank])
+        assert torch.equal(by_box[rank], target.extract(full, rank))
+
+
+def _in_order(shape, origin, dest_offset, dest_strides=(6, 1)):
+    return AffinePiece(shape, origin[0] * 6 + origin[1], (6, 1), dest_offset, dest_strides, [0])
+
+
+@pytest.mark.parametrize('numel, pieces, error, reason', [
+    (24, [_in_order(
+        (4, 3), (0, 0), 0), _in_order(
+            (4, 3),
+            (0, 3), 0), _in_order((1, 1), (0, 0), 23)], UnsupportedLayoutError, 'different shifts'),
+    (24, [_in_order((4, 4), (0, 0), 0), _in_order((4, 3), (0, 3), 3)], InvalidMapError, 'overlap'),
+    (23, [_in_order((4, 3), (0, 0), 0), _in_order((4, 3), (0, 3), 3)], InvalidMapError, 'outside the'),
+    (24, [_in_order((4, 3), (0, 0), 0), _in_order((4, 3), (0, 3), 12,
+                                                  (3, 1))], UnsupportedLayoutError, 'stored otherwise'),
+    (24, [_in_order((4, 3), (0, 0), 0, (5, 1)), _in_order((4, 3), (0, 3), 3)], UnsupportedLayoutError, 'dest axis 0'),
+],
+                         ids=[
+                             'two_shifts', 'overlap_at_one_shift', 'past_the_shard', 'mixed_with_a_dense_run',
+                             'neither_dense_nor_the_parameters'
+                         ])
+def test_pieces_at_the_parameters_strides_must_tile_by_one_shift(numel, pieces, error, reason):
+    """The single-shift argument is the whole proof, so anything outside it is refused."""
+    source = ParamAffineMap((4, 6), {0: (numel, )}, {0: pieces})
+
+    with pytest.raises(error, match=reason):
+        plan_transfer(replicated_map((4, 6), 1), source)
 
 
 @pytest.mark.parametrize('shard_shape, dest_strides', [((32, ), (8, 1)), ((2, 2, 4), (4, 1))],
@@ -929,3 +1039,165 @@ def test_a_single_corrupt_piece_is_reported_rather_than_planned_around():
         )
         with pytest.raises(AffineTransferError):
             plan_transfer(contiguous_split_map((16, 8), [4, 4, 4, 4], 0), broken)
+
+
+# ---------------------------------------------------------------- one parameter in several layouts
+
+
+def _zero3_storage(shape, partitions, first_location):
+    """ZeRO-3 partitions of the flattened parameter, described in the parameter's own shape."""
+    numel = _product(shape)
+    locations = list(range(first_location, first_location + partitions))
+    return nest_affine_maps(replicated_map(shape, 1),
+                            {0: zero_storage_affine_map(numel, locations, -(-numel // partitions))})
+
+
+def _surviving(layout, ranks, first_location):
+    """The shards that ``ranks`` hold in ``layout``, at locations counted from ``first_location``."""
+    moved = {rank: first_location + rank for rank in ranks}
+
+    def move(piece):
+        holders = {moved[holder] for holder in piece.locations}
+        return AffinePiece(piece.shape, piece.source_offset, piece.source_strides, piece.dest_offset,
+                           piece.dest_strides, holders)
+
+    shard_shapes = {moved[rank]: layout.shard_shapes[rank] for rank in ranks}
+    pieces = {moved[rank]: [move(piece) for piece in layout.pieces_by_rank[rank]] for rank in ranks}
+    return ParamAffineMap(layout.logical_shape, shard_shapes, pieces)
+
+
+def _assert_union_holds_what_each_layout_holds(union, layouts, full):
+    """Each element lists every location of every layout that holds it, and each location keeps its shard."""
+    holders = [layout.holders() for layout in layouts]
+    merged = union.holders()
+    for offset in range(full.numel()):
+        assert merged[offset] == set().union(*(by_layout.get(offset, set()) for by_layout in holders)), offset
+    for layout in layouts:
+        for location in layout.shard_shapes:
+            assert torch.equal(union.extract(full, location), layout.extract(full, location)), location
+
+
+@pytest.mark.parametrize('rows,cols,sizes,survivors,partitions', [
+    (6, 5, [3, 3], [0], 4),
+    (7, 4, [3, 2, 2], [0, 2], 3),
+    (5, 6, [2, 3], [1], 1),
+    (6, 5, [3, 3], [0, 1], 5),
+])
+def test_a_surviving_row_shard_and_zero3_partitions_plan_as_one_source(rows, cols, sizes, survivors, partitions):
+    """A tensor-parallel row shard that is still current, and the trainer's ZeRO-3 partitions, as one source.
+
+    A partition may start or end inside a row, so its blocks overlap the shard's without being equal
+    until both are cut.
+    """
+    zero = _zero3_storage((rows, cols), partitions, first_location=100)
+    shard = _surviving(contiguous_split_map((rows, cols), sizes, 0), survivors, first_location=0)
+    source = union_affine_maps([zero, shard])
+    full = _full(rows, cols, seed=rows * cols)
+    _assert_union_holds_what_each_layout_holds(source, [zero, shard], full)
+
+    shards = _shards(source, lambda map_, rank: map_.extract(full, rank))
+    for target in (contiguous_split_map((rows, cols), _split(rows, 2),
+                                        0), contiguous_split_map((rows, cols), _split(cols, 3), 1)):
+        plan = plan_transfer(target, source)
+        produced = _apply_plan(plan, target, shards)
+        for rank in target.shard_shapes:
+            assert torch.equal(produced[rank], target.extract(full, rank)), rank
+        # The lowest holder is read by default, so the surviving shard serves every block it holds.
+        assert {segment.source_rank for segment in plan.segments} & set(survivors)
+
+
+def test_a_union_of_three_layouts_does_not_depend_on_their_order():
+    """Merging folds pairwise, so every order must give the same holders and an exact plan."""
+    rows, cols = 12, 5
+    layouts = [
+        _zero3_storage((rows, cols), 5, first_location=100),
+        _surviving(contiguous_split_map((rows, cols), [6, 6], 0), [1], first_location=0),
+        _surviving(contiguous_split_map((rows, cols), [4, 4, 4], 0), [0, 2], first_location=10),
+    ]
+    full = _full(rows, cols, seed=7)
+    target = contiguous_split_map((rows, cols), _split(cols, 2), 1)
+    for order in itertools.permutations(layouts):
+        source = union_affine_maps(list(order))
+        _assert_union_holds_what_each_layout_holds(source, layouts, full)
+        produced = _apply_plan(plan_transfer(target, source), target,
+                               _shards(source, lambda map_, rank: map_.extract(full, rank)))
+        for rank in target.shard_shapes:
+            assert torch.equal(produced[rank], target.extract(full, rank)), rank
+
+
+@pytest.mark.parametrize('rows,cols,sizes,survivors,partitions', [
+    (6, 5, [3, 2], [0], 2),
+    (7, 4, [2, 1, 1], [0, 2], 3),
+    (9, 4, [2, 2], [1], 7),
+])
+def test_a_column_cut_plans_from_the_surviving_column_shard(rows, cols, sizes, survivors, partitions):
+    """Cut at a column edge, a ZeRO-3 block of several rows keeps its strides and its partition's offset.
+
+    Such a block is not dense in its flat shard, so this also needs the planner to read strided flat shards.
+    """
+    zero = _zero3_storage((rows, cols), partitions, first_location=100)
+    shard = _surviving(contiguous_split_map((rows, cols), sizes, 1), survivors, first_location=0)
+    source = union_affine_maps([zero, shard])
+    full = _full(rows, cols, seed=rows * cols)
+    _assert_union_holds_what_each_layout_holds(source, [zero, shard], full)
+    shards = _shards(source, lambda map_, rank: map_.extract(full, rank))
+    assert torch.equal(source.rebuild(shards).view(rows, cols), full)
+
+    for target in (contiguous_split_map((rows, cols), _split(rows, 2),
+                                        0), contiguous_split_map((rows, cols), _split(cols, 3), 1)):
+        plan = plan_transfer(target, source)
+        produced = _apply_plan(plan, target, shards)
+        for rank in target.shard_shapes:
+            assert torch.equal(produced[rank], target.extract(full, rank)), rank
+        assert {segment.source_rank for segment in plan.segments} & set(survivors)
+
+
+def test_a_union_refuses_layouts_it_cannot_merge():
+    # The planner's error types, so a caller that falls back on an AffineTransferError catches these too.
+    shard = contiguous_split_map((4, 6), [2, 2], 0)
+    with pytest.raises(ValueError, match='at least one map'):
+        union_affine_maps([])
+    # Both layouts name locations 0 and 1, so one location would stand for two buffers.
+    with pytest.raises(InvalidMapError, match='appear in both layouts'):
+        union_affine_maps([shard, contiguous_split_map((4, 6), [3, 3], 1)])
+    with pytest.raises(InvalidMapError, match='shape'):
+        union_affine_maps([shard, _surviving(contiguous_split_map((6, 4), [3, 3], 0), [0], first_location=10)])
+    # A transposed block has no corner and extent in the parameter's coordinates to cut at.
+    transposed = ParamAffineMap((4, 6), {20: (6, 4)}, {20: [AffinePiece((6, 4), 0, (1, 6), 0, (4, 1), {20})]})
+    with pytest.raises(UnsupportedLayoutError, match='axis-aligned block'):
+        union_affine_maps([shard, transposed])
+    # Row-major strides, but eight elements from the start of a six-wide row run into the next row.
+    wrapping = ParamAffineMap(
+        (4, 6), {30: (24, )},
+        {30: [AffinePiece((1, 8), 0, (6, 1), 0, (8, 1), {30}),
+              AffinePiece((1, 16), 8, (6, 1), 8, (16, 1), {30})]})
+    with pytest.raises(UnsupportedLayoutError, match='axis-aligned block'):
+        union_affine_maps([shard, wrapping])
+
+
+def test_a_union_cuts_replicas_that_split_a_block_differently():
+    """Replicas within one layout may store a block whole or in parts, so its own edges are cut at too."""
+    rows, cols = 6, 5
+    whole_and_halves = ParamAffineMap(
+        (rows, cols),
+        {
+            0: (rows, cols),
+            1: (rows, cols)
+        },
+        {
+            0: [AffinePiece((rows, cols), 0, (cols, 1), 0, (cols, 1), {0, 1})],
+            # The same block in two halves, stored in the other order.
+            1: [
+                AffinePiece((3, cols), 0, (cols, 1), 3 * cols, (cols, 1), {0, 1}),
+                AffinePiece((3, cols), 3 * cols, (cols, 1), 0, (cols, 1), {0, 1})
+            ],
+        })
+    zero = _zero3_storage((rows, cols), 4, first_location=100)
+    source = union_affine_maps([whole_and_halves, zero])
+    full = _full(rows, cols, seed=13)
+    _assert_union_holds_what_each_layout_holds(source, [whole_and_halves, zero], full)
+    target = contiguous_split_map((rows, cols), _split(cols, 2), 1)
+    produced = _apply_plan(plan_transfer(target, source), target,
+                           _shards(source, lambda map_, rank: map_.extract(full, rank)))
+    for rank in target.shard_shapes:
+        assert torch.equal(produced[rank], target.extract(full, rank)), rank

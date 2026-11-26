@@ -243,3 +243,26 @@ def test_static_cache_memory_skips_layers_without_kv():
 
     # Only layer 0 holds KV: 4 rows x 3 heads x 4 positions x (5 key + 7 value dims) x 2 bytes.
     assert cache.memory_bytes() == 4 * 3 * 4 * (5 + 7) * 2
+
+
+@pytest.mark.parametrize("per_row_decode", [False, True])
+def test_static_layer_accepts_values_in_a_different_dtype_than_keys(per_row_decode):
+    # Under autocast, rotary embeddings promote bf16 key projections to fp32 while the value
+    # projections stay bf16, so one update carries keys and values of different dtypes (#9102).
+    layer = DeepSpeedStaticLayer(max_cache_len=4)
+    seq_len = 1 if per_row_decode else 3
+    keys = torch.randn((2, 1, seq_len, 2), dtype=torch.float32)
+    values = torch.randn((2, 1, seq_len, 2), dtype=torch.bfloat16)
+    if per_row_decode:
+        layer.lazy_initialization(keys, values)
+        layer.set_write_position(torch.tensor([0, 2]))
+
+    cached_keys, cached_values = layer.update(keys, values)
+
+    assert cached_values.dtype == torch.float32
+    if per_row_decode:
+        written = cached_values[torch.arange(2), :, torch.tensor([0, 2]), :]
+        assert torch.equal(written, values[:, :, 0, :].float())
+    else:
+        assert torch.equal(cached_values[:, :, :seq_len, :], values.float())
+        assert torch.equal(cached_keys[:, :, :seq_len, :], keys)
