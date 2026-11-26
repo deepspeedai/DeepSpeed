@@ -405,12 +405,12 @@ TRL 1.15). Use the vocabulary-parallel ops below, or keep
 ### Log-probabilities, Entropy, KL, and JSD on Sharded Logits
 
 RL and on-policy distillation losses can consume the local logits shard
-directly through `deepspeed.sequence.vocab_parallel_ops`, so they never
+directly through `deepspeed.ops.triton_ops.vocab_parallel_ops`, so they never
 all-gather the full vocabulary:
 
 ```python
-from deepspeed.sequence.vocab_parallel_ops import (vocab_parallel_entropy, vocab_parallel_jsd, vocab_parallel_kl_div,
-                                                   vocab_parallel_logprobs)
+from deepspeed.ops.triton_ops.vocab_parallel_ops import (vocab_parallel_entropy, vocab_parallel_jsd,
+                                                         vocab_parallel_kl_div, vocab_parallel_logprobs)
 
 head = model.lm_head  # VocabParallelLinear installed by vocab_parallel_lm_head
 shard = dict(tp_group=head.mp_group)
