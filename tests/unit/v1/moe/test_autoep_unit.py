@@ -1027,6 +1027,34 @@ class TestAutoEPConfig:
         with pytest.raises(RuntimeError, match="outside AutoEP expert"):
             engine.load_module_state_dict(checkpoint, strict=True, allowed_missing_keys=["weight"])
 
+    @pytest.mark.parametrize("ep_rank", [1, 2, 3])
+    def test_autoep_resume_keeps_rank_local_frozen_experts(self, ep_rank):
+        # The shared model checkpoint contains rank-0 frozen fragments. Those
+        # must not overwrite expert tensors restored from this rank's files.
+        layer = object.__new__(AutoEPMoELayer)
+        nn.Module.__init__(layer)
+        layer.experts = GroupedExperts(4, 8, 2, use_grouped_mm=False)
+        model = nn.ModuleDict({"moe": layer, "dense": nn.Linear(4, 4, bias=False)})
+        model.requires_grad_(False)
+        engine = object.__new__(DeepSpeedEngine)
+        object.__setattr__(engine, "module", model)
+        object.__setattr__(engine, "param_names", {p: name for name, p in model.named_parameters()})
+        checkpoint = {
+            "module": {
+                name: torch.full_like(p, ep_rank + 1)
+                for name, p in model.named_parameters()
+            },
+            ds_engine.FROZEN_PARAM_FRAGMENTS: {
+                name: torch.ones_like(p)
+                for name, p in model.named_parameters()
+            },
+        }
+        engine.load_module_state_dict(checkpoint)
+        for parameter in layer.experts.parameters():
+            torch.testing.assert_close(parameter, torch.full_like(parameter, ep_rank + 1))
+        # Non-expert frozen-fragment restoration retains its existing behavior.
+        torch.testing.assert_close(model["dense"].weight, torch.ones_like(model["dense"].weight))
+
     def test_resolve_zero3_param_placement_rejects_pre_partitioned_expert_on_wrong_group(self, monkeypatch):
         engine = object.__new__(DeepSpeedEngine)
         model = nn.Linear(2, 2, bias=False)
@@ -1202,9 +1230,8 @@ class TestAutoEPConfig:
         assert preset_name_for_hf_model_type("minimax_m3_vl_text") == "minimax_m3"
         assert preset_name_for_hf_model_type("llama4_text") is None
 
-        qwen35 = unsupported_preset_for_hf_model_type("qwen3_5_moe")
-        assert qwen35 is not None
-        assert "qwen3_5_moe_text" in qwen35[1].unsupported_hf_model_type_notes["qwen3_5_moe"]
+        assert preset_name_for_hf_model_type("qwen3_5_moe") == "qwen3_5_moe"
+        assert unsupported_preset_for_hf_model_type("qwen3_5_moe") is None
         minimax = unsupported_preset_for_hf_model_type("minimax_m3_vl")
         assert minimax is not None
         assert "minimax_m3_vl_text" in minimax[1].unsupported_hf_model_type_notes["minimax_m3_vl"]
@@ -2410,8 +2437,9 @@ class TestModelDetectionAndReplacement:
         assert specs[0].model_family == "qwen3_moe"
 
         model.config.model_type = "qwen3_5_moe"
-        with pytest.raises(ValueError, match="qwen3_5_moe_text"):
-            AutoEP(model, _runtime_config(enabled=True, autoep_size=1))._resolve_presets()
+        monkeypatch.setattr(get_preset_adapter("qwen3_5_moe"), "_installed_transformers_version", lambda: "5.16.1")
+        specs = AutoEP(model, _runtime_config(enabled=True, autoep_size=1)).ep_parser()
+        assert specs[0].model_family == "qwen3_5_moe"
 
     def test_deepseek_v3_detection_and_score_correction_bias_copy(self, monkeypatch):
         FakeGatheredParameters.calls = []
@@ -3086,3 +3114,79 @@ class TestReplacementSourceMap:
         assert [id(p) for p in w1] == [id(experts_source.gate_up_proj)]
         assert [id(p) for p in w3] == [id(experts_source.gate_up_proj)]
         assert [id(p) for p in w2] == [id(experts_source.down_proj)]
+
+
+@pytest.mark.parametrize("wrapper", [False, True])
+@pytest.mark.parametrize("autocast", [False, True])
+def test_qwen35_autoep_preserves_native_router_and_text_outputs(wrapper, autocast):
+    # Catches wrong wrapper paths, top-k/dtype drift, and post-softmax logit capture.
+    transformers = pytest.importorskip("transformers")
+    required = ("Qwen3_5MoeTextConfig", "Qwen3_5MoeConfig", "Qwen3_5MoeForCausalLM",
+                "Qwen3_5MoeForConditionalGeneration")
+    if not all(hasattr(transformers, name) for name in required):
+        pytest.skip("Transformers does not provide the Qwen3.5 MoE model classes")
+    Qwen3_5MoeTextConfig = transformers.Qwen3_5MoeTextConfig
+    Qwen3_5MoeConfig = transformers.Qwen3_5MoeConfig
+    Qwen3_5MoeForCausalLM = transformers.Qwen3_5MoeForCausalLM
+    Qwen3_5MoeForConditionalGeneration = transformers.Qwen3_5MoeForConditionalGeneration
+
+    torch.manual_seed(42)
+    config = Qwen3_5MoeTextConfig(vocab_size=128,
+                                  hidden_size=128,
+                                  num_hidden_layers=1,
+                                  num_attention_heads=2,
+                                  num_key_value_heads=1,
+                                  head_dim=64,
+                                  moe_intermediate_size=128,
+                                  shared_expert_intermediate_size=128,
+                                  num_experts=4,
+                                  num_experts_per_tok=2,
+                                  layer_types=["full_attention"],
+                                  use_cache=False)
+    cls = Qwen3_5MoeForCausalLM
+    if wrapper:
+        config = Qwen3_5MoeConfig(text_config=config.to_dict(),
+                                  vision_config={
+                                      "depth": 1,
+                                      "hidden_size": 32,
+                                      "intermediate_size": 64,
+                                      "num_heads": 4,
+                                      "out_hidden_size": 128,
+                                      "num_position_embeddings": 16
+                                  })
+        cls = Qwen3_5MoeForConditionalGeneration
+    config._attn_implementation = "eager"
+    reference = cls(config).to(dtype=torch.bfloat16).eval()
+    candidate = copy.deepcopy(reference)
+    autoep = AutoEP(
+        candidate,
+        parse_autoep_config({
+            "enabled": True,
+            "autoep_size": 1,
+            "preset_model": "qwen3_5_moe",
+            "use_grouped_mm": False
+        }))
+    specs = autoep.ep_parser()
+    assert len(specs) == 1
+    path = "model.language_model.layers.0.mlp" if wrapper else "model.layers.0.mlp"
+    assert specs[0].moe_module_name == path
+    original = reference.get_submodule(path)
+    autoep.replace_moe_layer(specs[0], ep_size=1, ep_rank=0)
+    replaced = candidate.get_submodule(path)
+    x = torch.randn(13, 128, dtype=torch.float32 if autocast else torch.bfloat16)
+    with torch.autocast("cpu", dtype=torch.bfloat16, enabled=autocast):
+        logits, scores, indices = original.gate(x)
+        actual_scores, actual_indices, counts = replaced.router(x)
+    assert actual_scores.dtype == scores.dtype == torch.bfloat16
+    torch.testing.assert_close(actual_indices, indices, rtol=0, atol=0)
+    torch.testing.assert_close(actual_scores, scores, rtol=0, atol=0)
+    with torch.no_grad(), torch.autocast("cpu", dtype=torch.bfloat16, enabled=autocast):
+        _, returned_logits = replaced(x.unsqueeze(0))
+    torch.testing.assert_close(returned_logits, logits, rtol=0, atol=0)
+    assert counts.sum() == 26
+    ids = torch.tensor([[1, 5, 7, 9, 11]])
+    with torch.no_grad():
+        expected = reference(input_ids=ids, labels=ids)
+        actual = candidate(input_ids=ids, labels=ids)
+    torch.testing.assert_close(actual.loss, expected.loss, rtol=0, atol=0.005)
+    torch.testing.assert_close(actual.logits, expected.logits, rtol=0.02, atol=0.01)

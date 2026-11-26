@@ -606,6 +606,11 @@ class DeepSpeedEngine(Module):
         self._configure_with_arguments(args, mpu)
         self.pipeline_parallelism = isinstance(model, PipelineModule)
         self._do_sanity_check()
+        from .quantization.quantizer import create_training_quantizer
+
+        training_quantizer = create_training_quantizer(self._config.quantization_config)
+        if training_quantizer is not None:
+            training_quantizer.validate_environment(self, model)
         if self.log_level() is not None:
             set_log_level_from_string(self.log_level())
         eager_model_parameters = _model_parameters_need_remap(model_parameters)
@@ -627,7 +632,8 @@ class DeepSpeedEngine(Module):
             # Head counts were recorded against the whole model; the parameters are shards now.
             from deepspeed import resolve_per_head_muon_after_sharding
             resolve_per_head_muon_after_sharding(model)
-        self._configure_quantization(model)
+        if training_quantizer is not None and not training_quantizer.convert_after_device_placement:
+            training_quantizer.convert(self, model)
         see_memory_usage("DeepSpeed Engine: After args sanity test", force=self.memory_breakdown())
         self._set_distributed_vars(args)
 
@@ -645,6 +651,8 @@ class DeepSpeedEngine(Module):
 
         # Configure distributed model
         self._configure_distributed_model(model)
+        if training_quantizer is not None and training_quantizer.convert_after_device_placement:
+            training_quantizer.convert(self, self.module)
 
         # These hooks should be disabled later if DeepCompile is not active.
         self.module_forward_pre_hook = self._create_module_forward_pre_hook()
@@ -961,19 +969,6 @@ class DeepSpeedEngine(Module):
             from deepspeed import set_optimizer_flags
             set_optimizer_flags(self._config, model)
         return replacement_sources
-
-    def _configure_quantization(self, model):
-        recipe = self._config.quantization_config.subchannel
-        if not recipe.enabled:
-            return
-        # Runs after AutoEP has created the grouped experts and before ZeRO wraps the parameters.
-        if self.pipeline_parallelism:
-            raise ValueError("quantization.subchannel does not support PipelineModule yet.")
-        if self.autotp_size() > 1:
-            raise ValueError("quantization.subchannel does not support AutoTP yet: the tensor-parallel layers "
-                             "replace nn.Linear and would run unquantized.")
-        from deepspeed.runtime.quantization.subchannel import convert_to_subchannel_quantization
-        convert_to_subchannel_quantization(model, recipe)
 
     def _autoep_zero3_param_converter(self, model):
         if not self.zero_optimization_partition_weights():
@@ -1789,6 +1784,9 @@ class DeepSpeedEngine(Module):
 
     def bfloat16_enabled(self):
         return self._config.bfloat16_config.enabled
+
+    def hifloat8_enabled(self):
+        return self._config.hifloat8_config["enabled"]
 
     def fp16_master_weights_and_gradients(self):
         return self._config.float16_config.fp16_master_weights_and_grads
@@ -4513,6 +4511,7 @@ class DeepSpeedEngine(Module):
 
         if checkpoint.get(FROZEN_PARAM_FRAGMENTS, None) is not None:
             saved_frozen_params = checkpoint[FROZEN_PARAM_FRAGMENTS]
+            restored_experts = DeepSpeedEngine._autoep_expert_parameter_names(None, self.module)
             for param in self.module.parameters():
                 if is_optimized_parameter(param):
                     continue
@@ -4521,6 +4520,10 @@ class DeepSpeedEngine(Module):
                 name = self.param_names[param]
                 if hasattr(param, 'ds_id'):
                     param.ds_tensor.data.copy_(saved_frozen_params[name].data)
+                elif name in restored_experts and name in module_state_dict:
+                    # AutoEP already loaded this rank's expert files above. The
+                    # shared checkpoint's frozen fragments belong to EP rank 0.
+                    continue
                 else:
                     param.data.copy_(saved_frozen_params[name].data)
 

@@ -1,3 +1,7 @@
+.. Copyright (c) DeepSpeed Team.
+.. SPDX-License-Identifier: Apache-2.0
+.. DeepSpeed Team
+
 AutoEP (Automatic Expert Parallelism)
 =====================================
 
@@ -33,7 +37,7 @@ Transformers build that exposes the matching config/model classes,
        but the tested ``4.x`` builds do not match the validated AutoEP layout.
    * - ``qwen3_5_moe``
      - ``5.2.0``
-     - Requires the Qwen3.5 text-backbone ``qwen3_5_moe_text`` model type;
+     - Supports text input through the text backbone or the MoE wrapper; vision input is untested;
        for performance on Qwen3.5's Gated DeltaNet layers, install optimized
        kernels. See the `Hugging Face Transformers kernel loading docs
        <https://huggingface.co/docs/transformers/kernel_doc/loading_kernels>`__
@@ -150,10 +154,31 @@ value other than ``False`` instead of silently changing the requested behavior.
 1. During ``deepspeed.initialize()``, AutoEP scans the model for MoE layers
    using preset-defined patterns (router name, expert name, weight shapes).
 2. Detected MoE blocks are replaced with ``AutoEPMoELayer``, which uses
-   TorchTitan's grouped GEMM kernels and AllToAll token dispatch.
+   grouped GEMM and AllToAll token dispatch. The accelerator may supply a
+   native grouped operation; otherwise the existing PyTorch/Triton paths apply.
 3. EP/EDP process groups are created automatically based on ``autoep_size``.
 4. Expert parameters are marked for expert-data-parallel gradient reduction;
    router and shared-expert parameters use standard data-parallel reduction.
+
+**Optional HiFloat8 training:**
+
+The ``quantization.hifloat8`` section selects Linear and GroupedExperts
+modules. On NPU the accelerator resolves the public TorchAO HiFloat8 config.
+DeepSpeed maps the selected Linear and stateless grouped GEMM leaves to
+that config and calls ``torchao.quantization.quantize_`` once. AO owns the
+config parsing and GEMM handlers. DeepSpeed keeps the expert parameters,
+routing, padding and activation on the expert container.
+
+The separate ``get_grouped_mm()`` hook supplies high-precision grouped GEMM.
+On NPU it uses TorchNPU autograd without a TorchAO dependency. HiFloat8 requires
+BF16 parameters and currently supports ZeRO stages 0–2; quantized checkpoint
+ingestion into ZeRO-3 remains unsupported.
+
+On Ascend NPU, AutoEP generates permutation indices on device when there are
+at least 64 source/expert groups. Smaller groups use the CPU reference path
+because device launch overhead can dominate. The ordering and padding contract
+is identical; this internal choice does not change the AutoEP configuration.
+Other dispatch steps may still synchronize with the host.
 
 **Router outputs and activation checkpointing:**
 

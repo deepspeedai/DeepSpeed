@@ -215,6 +215,14 @@ class DeepSpeedAccelerator(ABC):
     def prefer_triton_grouped_mm(self):
         return False
 
+    def get_training_quantization_config(self, format_name):
+        """Return the optional AO config class for this training format."""
+        return None
+
+    def get_grouped_mm(self):
+        """Return a native differentiable grouped GEMM override, if available."""
+        return None
+
     # Quantization formats (``"e4m3"``, ``"e5m2"``, ``"int8"``) whose fused subchannel-quantized GEMM kernels
     # run on this accelerator. Formats not listed run on a PyTorch reference implementation. Defaults to none
     # so backends opt in explicitly.

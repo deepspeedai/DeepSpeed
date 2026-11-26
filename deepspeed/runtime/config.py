@@ -177,8 +177,8 @@ def get_expert_parallel_config(param_dict):
 
 
 def get_quantization_config(param_dict):
-    from deepspeed.runtime.quantization.config import get_quantization_config as _get_quantization_config
-    return _get_quantization_config(param_dict)
+    from deepspeed.runtime.quantization.config import get_quantization_config as parse_quantization
+    return parse_quantization(param_dict)
 
 
 def get_torch_autocast_enabled(param_dict):
@@ -548,6 +548,7 @@ class DeepSpeedConfig(object):
 
         self.pipeline = get_pipeline_config(param_dict)
         self.quantization_config = get_quantization_config(param_dict)
+        self.hifloat8_config = self.quantization_config.torchao.hifloat8
 
         self.data_efficiency_enabled = get_data_efficiency_enabled(param_dict)
         self.data_efficiency_config = get_data_efficiency_config(param_dict)
