@@ -1070,6 +1070,12 @@ try:
 except ImportError:
     pass
 
+try:
+    from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeAttention
+    SUPPORTED_ATTENTION[Qwen3_5MoeAttention] = _validate_qwen3_5_decode_attention
+except ImportError:
+    pass
+
 
 def install_decode_attention(model: torch.nn.Module,
                              write_pos: torch.Tensor,
@@ -1079,9 +1085,10 @@ def install_decode_attention(model: torch.nn.Module,
     """Patch full-attention layers to use the custom decode_attn kernel.
 
     Only injects into attention implementations explicitly registered in
-    SUPPORTED_ATTENTION (such as Qwen3.5 gated attention). Unknown classes
-    (including dense Qwen3 or custom subclasses) remain untouched. For registered
-    classes, validates projection shapes, head dimensions, and kernel requirements
+    SUPPORTED_ATTENTION (such as Qwen3.5 dense and MoE gated attention:
+    Qwen3_5Attention, Qwen3_5MoeAttention). Unknown classes (including dense
+    Qwen3 or custom subclasses) remain untouched. For registered classes,
+    validates projection shapes, head dimensions, and kernel requirements
     before patching. Returns the patched count; layers whose configuration
     or GQA ratio the kernel cannot serve are left native."""
     if kernel_op is None or not hasattr(kernel_op, "decode_attn"):
@@ -1089,7 +1096,10 @@ def install_decode_attention(model: torch.nn.Module,
     try:
         from transformers.models.qwen3_5.modeling_qwen3_5 import apply_rotary_pos_emb
     except ImportError:
-        return 0
+        try:
+            from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import apply_rotary_pos_emb
+        except ImportError:
+            return 0
 
     patched = 0
     for module in model.modules():
