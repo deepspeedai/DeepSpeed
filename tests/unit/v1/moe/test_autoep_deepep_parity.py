@@ -685,7 +685,9 @@ class TestDeepEPMatchesCollective(DistributedTest):
     @pytest.mark.parametrize("gate_up_impl", ["separate", "fused"])
     @pytest.mark.parametrize("skewed_routing", [False, True])
     @pytest.mark.parametrize("zero_stage", [1, 2])
-    def test_overlapped_weight_gradients_match_the_serial_backward(self, gate_up_impl, skewed_routing, zero_stage):
+    @pytest.mark.parametrize("reentrant", [True, False], ids=["reentrant", "non-reentrant"])
+    def test_overlapped_weight_gradients_match_the_serial_backward(self, gate_up_impl, skewed_routing, zero_stage,
+                                                                   reentrant):
         """overlap_weight_grad changes when the experts' weight gradients are computed, not their values.
 
         The two runs dispatch separately, so DeepEP's arrival order can differ between them and change summation
@@ -696,7 +698,7 @@ class TestDeepEPMatchesCollective(DistributedTest):
         common = dict(skewed_routing=skewed_routing,
                       zero_stage=zero_stage,
                       activation_checkpointing=True,
-                      reentrant_checkpointing=True,
+                      reentrant_checkpointing=reentrant,
                       gate_up_impl=gate_up_impl,
                       use_grouped_mm=True,
                       disable_triton_grouped_mm=True)
