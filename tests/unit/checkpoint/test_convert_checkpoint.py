@@ -78,9 +78,9 @@ def test_sizing_pass_does_not_clone_a_tied_placeholder(monkeypatch):
 
     clones = []
     original_clone = torch.Tensor.clone
-    monkeypatch.setattr(torch.Tensor, "clone",
-                        lambda self, *args, **kwargs: (clones.append(self.shape)
-                                                       or original_clone(self, *args, **kwargs)))
+    monkeypatch.setattr(
+        torch.Tensor, "clone", lambda self, *args, **kwargs:
+        (clones.append(self.shape) or original_clone(self, *args, **kwargs)))
 
     empty = to_torch_tensor(state_dict, return_empty_tensor=True, share_tensors=False)
     assert clones == [], f"the sizing pass cloned {clones}"
