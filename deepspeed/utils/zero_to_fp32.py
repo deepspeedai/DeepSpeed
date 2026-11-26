@@ -187,12 +187,11 @@ def parse_model_states(files):
             # ZeRO-1 does not record frozen parameters separately, but it does not partition
             # parameters either, so they are stored whole in the module state: any tensor
             # there that is neither a buffer, an optimizer-owned parameter nor a tied alias.
-            # ZeRO-3 module states only hold empty placeholders, so those are skipped.
+            # ZeRO-3 module states only hold empty placeholders; those are dropped once the stage is known.
             known_names = set(buffer_names) | set(param_names) | {name for name, _ in shared_params}
             module_frozen = {
                 k: v
-                for k, v in state_dict["module"].items()
-                if k not in known_names and isinstance(v, torch.Tensor) and v.numel() > 0
+                for k, v in state_dict["module"].items() if k not in known_names and isinstance(v, torch.Tensor)
             }
             if module_frozen:
                 frozen_param_shapes = {k: v.shape for k, v in module_frozen.items()}

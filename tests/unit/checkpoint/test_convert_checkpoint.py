@@ -352,3 +352,42 @@ def test_zero3_extra_module_tensor_is_not_treated_as_frozen_param(tmp_path):
 
     assert set(state_dict) == {"weight"}
     torch.testing.assert_close(state_dict["weight"], weight, rtol=0, atol=0)
+
+
+def test_zero1_zero_element_frozen_param_is_recovered(tmp_path):
+    # A frozen parameter with no elements is stored whole in the module state like any other frozen
+    # parameter, and strict load_state_dict() needs its key back.
+    shape = torch.Size([2, 3])
+    weight = torch.arange(6.0).view(shape)
+    empty = torch.empty(0, 4)
+    checkpoint_dir = tmp_path / "step1"
+    checkpoint_dir.mkdir()
+    torch.save(
+        {
+            "module": {
+                "weight": weight,
+                "empty": empty
+            },
+            "buffer_names": [],
+            "param_shapes": [{
+                "weight": shape
+            }],
+            "shared_params": {},
+            "frozen_param_shapes": None,
+            "frozen_param_fragments": None,
+            "ds_version": "0.0.0",
+        }, checkpoint_dir / "mp_rank_00_model_states.pt")
+    torch.save(
+        {
+            "optimizer_state_dict": {
+                "zero_stage": 1,
+                "partition_count": 1,
+                "single_partition_of_fp32_groups": [weight.flatten()],
+            }
+        }, checkpoint_dir / "zero_pp_rank_0_mp_rank_00_optim_states.pt")
+
+    state_dict = zero_to_fp32.get_fp32_state_dict_from_zero_checkpoint(tmp_path, tag="step1")
+
+    assert set(state_dict) == {"weight", "empty"}
+    assert state_dict["empty"].shape == empty.shape
+    torch.testing.assert_close(state_dict["weight"], weight, rtol=0, atol=0)
