@@ -659,9 +659,10 @@ inputs cap the row tile at the next power of two of their row count, so a
 single row does not instantiate a full 4096-element tile. Larger inputs keep
 the existing tile size. Wider norms retain the one-row kernels. The numerical
 tests do not require bitwise equality with eager. For narrow input gradients
-they allow at most 8 ULPs or an absolute error of 1e-7 per element, since
-near-zero gradients can have large ULP distances after cancellation. At least
-95% must still be within one ULP; forward, weight-gradient and wide-path
+they allow at most 8 ULPs or an absolute error of 1e-7 per element, and for
+weight gradients of rows wider than 2048 at most 8 ULPs or one rounding step of
+a typical weight gradient, since near-zero results can have large ULP distances
+after cancellation. At least 95% must still be within one ULP; the other
 thresholds are unchanged.
 At width one, the pre-gamma input derivative in exact arithmetic is
 ``eps / (x**2 + eps)**(3/2)``, which is nonzero when ``eps > 0``. With a
