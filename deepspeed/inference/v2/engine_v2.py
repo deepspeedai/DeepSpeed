@@ -197,7 +197,7 @@ class InferenceEngineV2:
         """
 
         cur_seqs = self._state_manager.n_tracked_sequences
-        free_blocks = self._state_manager.free_blocks
+        free_blocks = self._state_manager.free_blocks[0]
         req_blocks = 0
         batch_len = 0
 
