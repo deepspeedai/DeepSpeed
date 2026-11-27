@@ -73,7 +73,10 @@ of ``SamplingConfig`` with Hugging Face's logits warpers, in the order
 Both greedy decoding and sampling first apply the repetition penalty from the
 model's ``generation_config``, as ``generate()`` does. Other
 ``generation_config`` settings are not applied on the graph path. Continuous
-batching, with or without graph capture, picks tokens the same way.
+batching, with or without graph capture, picks tokens the same way; with
+continuous batching the captured decode uses a ladder of batch widths instead
+of one wide graph, and ``graph_capture_batch_sizes`` overrides the ladder
+described in the continuous batching section below.
 
 Every path ends a response at the tokenizer's ``eos_token_id`` or at any id in
 the model's ``generation_config.eos_token_id``.
@@ -166,10 +169,12 @@ transitions, ``cache_management_overhead_ms`` for cache compaction, trimming,
 reset, and admitted-row copies, and separate ``prefill_forward_ms`` and
 ``decode_forward_ms`` totals. ``num_prefill_forwards`` counts each admitted
 prompt batch, while ``num_decode_forwards`` counts decode steps that had
-surviving rows. ``num_generated_tokens`` counts tokens actually produced by
-all requests (padding is excluded), and ``active_batch_size`` is the maximum
-number of simultaneously active rows; ``continuous_batch_size`` is the
-configured capacity.
+surviving rows. Graph captures are timed outside ``decode_forward_ms`` as
+``graph_capture_ms``, and the captures that produced a graph are counted by
+``num_graph_captures``. ``num_generated_tokens``
+counts tokens actually produced by all requests (padding is excluded), and
+``active_batch_size`` is the maximum number of simultaneously active rows;
+``continuous_batch_size`` is the configured capacity.
 
 The experimental path intentionally does not implement paged attention or change the
 default generation semantics. It currently requires one padded prompt width for
@@ -337,6 +342,27 @@ dtype or device. Replays read these tensors in place, so in-place optimizer upda
 rollouts are picked up without recapturing. By default, the cache length is the
 prompt width plus ``max_new_tokens``. Set ``continuous_cache_capacity`` to reuse
 one graph across prompt widths that fit within that capacity.
+Each decode step replays the smallest captured batch width that covers its
+highest occupied row. Bucket views start at row 0, so a row retired below a
+live one still rides the wider replay; the vacant slots below the highest row
+are reported as ``decode_hole_rows``. By default the captured widths are the
+powers of two up to ``continuous_batch_size`` plus that full batch size itself,
+and each width is captured lazily on first use. Set
+``HybridEngineRolloutConfig(graph_capture_batch_sizes=(1, 4, 8))`` to override
+the ladder: widths must be positive integers no larger than
+``continuous_batch_size``, and the full batch size is always captured. A sparser
+ladder captures and stores fewer graphs but pads more rows into a wider replay,
+and a denser ladder trades captures for less padding.
+Under tensor parallelism the capture forwards hold the model-parallel groups'
+collectives, so the decision to capture a width is agreed over those groups once
+per width, before its first capture, and a failed capture fails the rollout
+rather than falling back on one rank alone, which would leave the groups'
+collectives unpaired and hang them. Without such a group, a width whose capture
+fails runs its forwards eagerly for the rest of the rollout.
+``get_last_continuous_stats()`` reports the ladder as ``graph_capture_ladder``,
+the steps per width as ``decode_bucket_widths``, the rows padded into a wider
+replay as ``decode_padded_rows``, and the captures performed by the call as
+``graph_captures``.
 Call ``rollout.shutdown()`` to release the graph and its
 static cache. The rollout stays usable and captures again on its next graph
 call. Under tensor parallelism the graph holds captured collectives, so call

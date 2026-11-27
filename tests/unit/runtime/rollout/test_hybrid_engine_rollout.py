@@ -537,13 +537,16 @@ def test_continuous_graph_keeps_cache_position_alive_for_replay():
     rollout = HybridEngineRollout(SimpleNamespace(module=module), _make_tokenizer())
     state = rollout._get_continuous_graph_state(module, 1, 5, torch.device(accelerator.current_device_name()),
                                                 torch.float32, DeepSpeedStaticCache)
+    bucket = rollout._decode_bucket(highest_row=1)
+    rollout._capture_bucket_if_needed(module, state.cache, bucket, state.static_cache_position, bucket.write_positions)
     gc.collect()
 
-    # A captured kernel retains only the device pointer, not the Python tensor.
+    # A captured kernel retains only the device pointer, not the Python tensor; the state
+    # itself is what keeps the tensor alive between capture and replay.
     assert module.cache_position_ref() is not None
     state.static_input.fill_(7)
-    accelerator.replay_graph(state.graph)
-    assert torch.equal(state.static_logits, torch.full_like(state.static_logits, 11))
+    accelerator.replay_graph(bucket.graph)
+    assert torch.equal(bucket.logits, torch.full_like(bucket.logits, 11))
 
 
 def test_continuous_graph_state_survives_in_place_weight_updates():
@@ -575,23 +578,41 @@ def test_continuous_graph_state_survives_in_place_weight_updates():
 
     with patch.object(rollout, "_capture_continuous_graph", return_value=(graph, logits)) as capture:
         first = rollout._get_continuous_graph_state(module, 1, 5, device, torch.float32, GraphCache)
+        # Capture is lazy: fetching the state allocates buffers, the first step that needs a
+        # width captures it.
+        assert capture.call_count == 0
+
+        def bucket_for(state):
+            bucket = rollout._decode_bucket(highest_row=1)
+            return rollout._capture_bucket_if_needed(module, state.cache, bucket, state.static_cache_position,
+                                                     bucket.write_positions)
+
+        bucket_for(first)
+        assert capture.call_count == 1
         # An optimizer step writes in place, so replay already reads the new values.
         with torch.no_grad():
             module.weight.add_(1)
         updated = rollout._get_continuous_graph_state(module, 1, 5, device, torch.float32, GraphCache)
+        bucket_for(updated)
+        assert capture.call_count == 1
         # Captured kernels keep the old strides even when the address is unchanged.
         with torch.no_grad():
             module.weight.transpose_(0, 1)
         relaid = rollout._get_continuous_graph_state(module, 1, 5, device, torch.float32, GraphCache)
+        bucket_for(relaid)
         # A replaced parameter lives at an address the captured kernels never read.
         module.weight = torch.nn.Parameter(torch.zeros(2, 3))
         moved = rollout._get_continuous_graph_state(module, 1, 5, device, torch.float32, GraphCache)
+        bucket_for(moved)
         # Re-registering a buffer, e.g. a rotary inv_freq or quant scale, moves it too.
         module.register_buffer("inv_freq", torch.full((3, ), 2.0), persistent=False)
         rebuffered = rollout._get_continuous_graph_state(module, 1, 5, device, torch.float32, GraphCache)
+        bucket_for(rebuffered)
         resized = rollout._get_continuous_graph_state(module, 1, 6, device, torch.float32, GraphCache)
+        bucket_for(resized)
         rollout.shutdown()
         released = rollout._get_continuous_graph_state(module, 1, 6, device, torch.float32, GraphCache)
+        bucket_for(released)
 
     assert updated is first
     assert relaid is not first
@@ -600,6 +621,278 @@ def test_continuous_graph_state_survives_in_place_weight_updates():
     assert resized is not rebuffered
     assert released is not resized
     assert capture.call_count == 6
+
+
+def _mock_graph_accelerator(mock_get_accelerator):
+    stream = MagicMock()
+    accelerator = mock_get_accelerator.return_value
+    accelerator.Stream.return_value = stream
+    accelerator.current_stream.return_value = stream
+    accelerator.stream.side_effect = lambda _stream: nullcontext()
+    accelerator.capture_to_graph.side_effect = lambda _graph: nullcontext()
+    return accelerator
+
+
+class _RetiringModel(torch.nn.Module):
+    """Gives each row its own first token and retires the last row as soon as it decodes it."""
+
+    _supports_cache_class = True
+
+    def __init__(self):
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.zeros(1))
+        self.config = PretrainedConfig(
+            max_position_embeddings=32,
+            num_hidden_layers=1,
+            num_attention_heads=1,
+            num_key_value_heads=1,
+            hidden_size=1,
+            head_dim=1,
+        )
+
+    def forward(self,
+                input_ids,
+                attention_mask=None,
+                past_key_values=None,
+                use_cache=True,
+                cache_position=None,
+                position_ids=None,
+                **kwargs):
+        states = input_ids[:, None, :, None].to(dtype=torch.float32)
+        past_key_values.update(states, states, layer_idx=0, cache_position=cache_position)
+        if input_ids.shape[1] > 1:
+            next_tokens = 3 + torch.arange(input_ids.shape[0]).long()
+        else:
+            next_tokens = torch.where(input_ids[:, 0] == 5, 2, 3).long()
+        logits = torch.zeros((input_ids.shape[0], input_ids.shape[1], 8))
+        logits.scatter_(2, next_tokens[:, None, None].expand(-1, input_ids.shape[1], 1), 1)
+        return SimpleNamespace(logits=logits, past_key_values=past_key_values)
+
+
+def _retiring_request(rows):
+    """One request per row for `_RetiringModel`; the third admitted row retires after its first decode."""
+    prompt = torch.cat([torch.arange(1, 6).repeat(rows, 1), (6 + torch.arange(rows)).unsqueeze(1)], dim=1)
+    return RolloutRequest(prompt, torch.ones_like(prompt))
+
+
+def _ladder_stats(mock_get_accelerator, rows, continuous_batch_size, max_new_tokens, configured=None):
+    """Run one continuous-graph rollout on `_RetiringModel` and return its public stats."""
+    _mock_graph_accelerator(mock_get_accelerator)
+    rollout = HybridEngineRollout(
+        SimpleNamespace(module=_RetiringModel()),
+        SimpleNamespace(pad_token_id=0, eos_token_id=2),
+        cfg=HybridEngineRolloutConfig(use_graph_capture=True, graph_capture_batch_sizes=configured),
+    )
+    rollout.generate(
+        _retiring_request(rows),
+        SamplingConfig(max_new_tokens=max_new_tokens, temperature=0, continuous_batch_size=continuous_batch_size))
+    return rollout.get_last_continuous_stats()
+
+
+@patch("deepspeed.runtime.rollout.hybrid_engine_rollout.get_accelerator")
+def test_graph_capture_ladder_defaults_and_overrides(mock_get_accelerator):
+    """The reported ladder is the powers-of-two default, or the configured widths plus the full batch."""
+    stats = _ladder_stats(mock_get_accelerator, rows=3, continuous_batch_size=5, max_new_tokens=2)
+    assert stats["graph_capture_ladder"] == [1, 2, 4, 5]
+
+    stats = _ladder_stats(mock_get_accelerator, rows=3, continuous_batch_size=4, max_new_tokens=2, configured=(3, ))
+    assert stats["graph_capture_ladder"] == [3, 4]
+
+
+def test_graph_capture_ladder_must_be_positive_and_fit_the_batch(graph_capture_accelerator):
+    request = _make_request()
+    for configured, message in (((0, ), "positive integers"), ((True, ), "positive integers"),
+                                ((5, ), "cannot exceed continuous_batch_size")):
+        rollout = HybridEngineRollout(
+            _make_engine(),
+            _make_tokenizer(),
+            cfg=HybridEngineRolloutConfig(use_graph_capture=True, graph_capture_batch_sizes=configured),
+        )
+        with pytest.raises(ValueError, match=message):
+            rollout.generate(request, SamplingConfig(max_new_tokens=2, temperature=0, continuous_batch_size=2))
+
+
+@patch("deepspeed.runtime.rollout.hybrid_engine_rollout.get_accelerator")
+def test_graph_capture_bucket_width_rounds_up_and_pads(mock_get_accelerator):
+    """A decode step replays the smallest captured width that holds its rows; the rest is padding."""
+    stats = _ladder_stats(mock_get_accelerator,
+                          rows=3,
+                          continuous_batch_size=8,
+                          max_new_tokens=4,
+                          configured=(1, 2, 4, 8))
+    # The three-row wave rounds up to the width-4 bucket (one padded row), then the two
+    # surviving rows fit the width-2 bucket exactly. That padding is ladder rounding rather
+    # than a vacant slot inside the replay, so no hole rows are reported.
+    assert stats["decode_bucket_widths"] == {4: 1, 2: 2}
+    assert stats["decode_padded_rows"] == 1
+    assert stats["decode_hole_rows"] == 0
+    assert stats["graph_captures"] == 2
+
+
+@patch("deepspeed.runtime.rollout.hybrid_engine_rollout.get_accelerator")
+def test_graph_capture_dispatches_smaller_buckets_as_rows_retire(mock_get_accelerator):
+    """Decode steps pick the smallest captured width that covers the highest occupied row."""
+    stats = _ladder_stats(mock_get_accelerator, rows=3, continuous_batch_size=3, max_new_tokens=4)
+
+    # Ladder is (1, 2, 3): the three row batch retires to two rows after its first decode, so
+    # only that step runs on the three wide graph, both widths are captured lazily, and no
+    # step replays a graph wider than its highest occupied row.
+    assert stats["decode_bucket_widths"] == {3: 1, 2: 2}
+    assert stats["decode_padded_rows"] == 0
+    assert stats["graph_captures"] == 2
+
+
+@patch("deepspeed.runtime.rollout.hybrid_engine_rollout.get_accelerator")
+def test_graph_capture_keeps_the_wider_bucket_over_a_retired_middle_slot(mock_get_accelerator):
+    """A vacant slot below the highest occupied row still rides the wider replay."""
+    stats = _ladder_stats(mock_get_accelerator, rows=4, continuous_batch_size=4, max_new_tokens=4)
+
+    # The third row retires after its first decode, leaving slots 0, 1 and 3 live. Bucket
+    # views start at row 0, so the two remaining steps stay on the width-4 graph and count
+    # the vacant slot as a hole alongside the ladder rounding.
+    assert stats["decode_bucket_widths"] == {4: 3}
+    assert stats["decode_padded_rows"] == 2
+    assert stats["decode_hole_rows"] == 2
+    assert stats["graph_captures"] == 1
+
+
+@patch("deepspeed.runtime.rollout.hybrid_engine_rollout.get_accelerator")
+def test_graph_capture_failure_without_capture_groups_falls_back_to_eager(mock_get_accelerator):
+    """Without a model-parallel group a failed capture runs that bucket eagerly, token for token."""
+    _mock_graph_accelerator(mock_get_accelerator)
+    graph_rollout = HybridEngineRollout(SimpleNamespace(module=_RetiringModel()),
+                                        SimpleNamespace(pad_token_id=0, eos_token_id=2),
+                                        cfg=HybridEngineRolloutConfig(use_graph_capture=True))
+    eager_rollout = HybridEngineRollout(SimpleNamespace(module=_RetiringModel()),
+                                        SimpleNamespace(pad_token_id=0, eos_token_id=2),
+                                        cfg=HybridEngineRolloutConfig(use_graph_capture=False))
+    request = _retiring_request(rows=3)
+    sampling = SamplingConfig(max_new_tokens=3, temperature=0, continuous_batch_size=3)
+
+    with patch.object(graph_rollout, "_capture_continuous_graph", side_effect=RuntimeError("simulated capture OOM")):
+        output = graph_rollout.generate(request, sampling)
+
+    assert graph_rollout.get_last_continuous_stats()["graph_captures"] == 0
+    assert torch.equal(output.input_ids, eager_rollout.generate(request, sampling).input_ids)
+
+
+@patch("deepspeed.runtime.rollout.hybrid_engine_rollout.get_accelerator")
+def test_graph_capture_time_is_reported_outside_decode_forwards(mock_get_accelerator):
+    """The profile times captures separately from decode forwards and counts them."""
+    _mock_graph_accelerator(mock_get_accelerator)
+    rollout = HybridEngineRollout(SimpleNamespace(module=_RetiringModel()),
+                                  SimpleNamespace(pad_token_id=0, eos_token_id=2),
+                                  cfg=HybridEngineRolloutConfig(use_graph_capture=True, enable_profiling=True))
+
+    rollout.generate(_retiring_request(rows=4), SamplingConfig(max_new_tokens=3,
+                                                               temperature=0,
+                                                               continuous_batch_size=4))
+
+    profile = rollout.get_last_profile()
+    assert profile["num_graph_captures"] == rollout.get_last_continuous_stats()["graph_captures"] == 1
+    assert profile["graph_capture_ms"] > 0.0
+
+
+@patch("deepspeed.runtime.rollout.hybrid_engine_rollout.get_accelerator")
+def test_capture_agreement_is_taken_once_per_width(mock_get_accelerator, monkeypatch):
+    """A retained state must not rendezvous on every replay: one agreement per width."""
+    _mock_graph_accelerator(mock_get_accelerator)
+    engine = MagicMock()
+    engine.module = _RetiringModel()
+    engine.autotp_size = lambda: 2
+    monkeypatch.setattr("deepspeed.utils.groups.get_tensor_model_parallel_group", lambda: object())
+    # The capture agreement is under test; the per-call RNG broadcast needs a live group.
+    monkeypatch.setattr(HybridEngineRollout, "_sync_rng_across_tp", lambda self: None)
+    agreements = []
+    monkeypatch.setattr(dist, "all_reduce", lambda flag, **kwargs: agreements.append(None))
+    rollout = HybridEngineRollout(engine,
+                                  SimpleNamespace(pad_token_id=0, eos_token_id=2),
+                                  cfg=HybridEngineRolloutConfig(use_graph_capture=True))
+    request = _retiring_request(rows=3)
+    sampling = SamplingConfig(max_new_tokens=4, temperature=0, continuous_batch_size=3)
+
+    rollout.generate(request, sampling)
+    first_call = len(agreements)
+    captures = rollout.get_last_continuous_stats()["graph_captures"]
+    rollout.generate(request, sampling)
+
+    # The first call agrees the state (1) and then, for each width it uses (3, then 2), the
+    # per-width decision plus the capture's own all-ranks failure check (2 x 2). The second
+    # call reuses the state and both widths, so only the state check rendezvouses; a
+    # per-replay agreement would be one per decode step instead.
+    assert first_call == 5
+    assert captures == 2
+    assert len(agreements) - first_call == 1
+    assert rollout.get_last_continuous_stats()["graph_captures"] == 0
+
+
+@patch("deepspeed.runtime.rollout.hybrid_engine_rollout.get_accelerator")
+def test_profile_counts_only_successful_captures(mock_get_accelerator):
+    """A capture that fell back to eager forwards is timed but not counted as a capture."""
+    _mock_graph_accelerator(mock_get_accelerator)
+    rollout = HybridEngineRollout(SimpleNamespace(module=_RetiringModel()),
+                                  SimpleNamespace(pad_token_id=0, eos_token_id=2),
+                                  cfg=HybridEngineRolloutConfig(use_graph_capture=True, enable_profiling=True))
+
+    with patch.object(rollout, "_capture_continuous_graph", side_effect=RuntimeError("simulated capture OOM")):
+        rollout.generate(_retiring_request(rows=3),
+                         SamplingConfig(max_new_tokens=3, temperature=0, continuous_batch_size=3))
+
+    assert rollout.get_last_continuous_stats()["graph_captures"] == 0
+    assert rollout.get_last_profile()["num_graph_captures"] == 0
+
+
+def test_group_needs_capture_reduces_over_the_autotp_group(monkeypatch):
+    """A rank must capture when any peer of the tensor-parallel groups needs to."""
+    autotp_group = object()
+    reduced = []
+
+    def all_reduce(flag, op=None, group=None):
+        assert op is dist.ReduceOp.MAX
+        reduced.append(group)
+        flag.fill_(1)
+
+    engine = MagicMock()
+    engine.autotp_size = lambda: 2
+    monkeypatch.setattr(dist, "all_reduce", all_reduce)
+    monkeypatch.setattr("deepspeed.utils.groups.get_tensor_model_parallel_group", lambda: autotp_group)
+    rollout = HybridEngineRollout(engine, _make_tokenizer())
+
+    # This rank's own state is current, but a peer's is not, so the capture runs here too.
+    assert rollout._group_needs_capture(False, device=torch.device("cpu")) is True
+    assert rollout._capture_groups() == [autotp_group]
+    assert reduced == [autotp_group]
+
+
+def test_group_needs_capture_covers_hybrid_engine_inference_group(monkeypatch):
+    """inference_tp_size > 1 shards the decode forward over the hybrid engine's own mp_group."""
+    engine = DeepSpeedHybridEngine.__new__(DeepSpeedHybridEngine)
+    engine.mp_group = object()
+    engine.autotp_size = lambda: 1
+    rollout = HybridEngineRollout.__new__(HybridEngineRollout)
+    rollout.engine = engine
+    reduced = []
+
+    def all_reduce(flag, op=None, group=None):
+        reduced.append(group)
+        flag.fill_(1)
+
+    monkeypatch.setattr(dist, "get_world_size", lambda group=None: 2)
+    monkeypatch.setattr(dist, "all_reduce", all_reduce)
+
+    assert rollout._group_needs_capture(False, device=torch.device("cpu")) is True
+    assert reduced == [engine.mp_group]
+
+
+def test_group_needs_capture_is_local_without_model_parallel_groups(monkeypatch):
+    """A rollout with no capture group decides locally and issues no agreement collective."""
+    rollout = HybridEngineRollout(SimpleNamespace(module=_RetiringModel()), _make_tokenizer())
+    all_reduce = MagicMock()
+    monkeypatch.setattr(dist, "all_reduce", all_reduce)
+
+    assert rollout._group_needs_capture(True, device=torch.device("cpu")) is True
+    assert rollout._group_needs_capture(False, device=torch.device("cpu")) is False
+    all_reduce.assert_not_called()
 
 
 @pytest.mark.parametrize("layer_types, sliding_window, expect_deepspeed_cache", [
@@ -1697,6 +1990,186 @@ class TestZero3SynchronizedEarlyStop(DistributedTest):
         assert result.input_ids[0, 1 + target_eos_step].item() == 2
 
 
+def _init_gloo_topology(ranks):
+    """Initialize a CPU/Gloo topology and return the requested subgroup.
+
+    This is a topology test, so the device lookup that would bind Gloo to a visible
+    accelerator is patched exactly as in the other rollout topology tests.
+    """
+    with patch("deepspeed.comm.torch.get_accelerator") as mock_accelerator:
+        mock_accelerator.return_value.device_name.return_value = "cpu"
+        deepspeed.init_distributed(dist_backend="gloo")
+    return dist.new_group(ranks=ranks)
+
+
+def _hybrid_tp_engine(model, mp_group):
+    """An engine whose decode forward is sharded over a two-rank inference TP group."""
+    engine = DeepSpeedHybridEngine.__new__(DeepSpeedHybridEngine)
+    # nn.Module.__setattr__ needs an initialized module; rollout only reads these.
+    object.__setattr__(engine, "module", model)
+    object.__setattr__(engine, "mp_group", mp_group)
+    object.__setattr__(engine, "autotp_size", lambda: 1)
+    return engine
+
+
+class TestContinuousGraphCaptureAgreement(DistributedTest):
+    """Capture must take the same path on every rank of the model-parallel group.
+
+    A capture runs a fixed count of forwards that hold the group's collectives, so a rank
+    that captured or fell back alone would leave later collectives unpaired and hang it.
+    """
+    world_size = 2
+    backend = "gloo"
+    requires_cuda_env = False
+    init_distributed = False
+
+    def test(self):
+        group = _init_gloo_topology([0, 1])
+        rank = dist.get_rank()
+        with patch("deepspeed.runtime.rollout.hybrid_engine_rollout.get_accelerator") as mock_accelerator:
+            _mock_graph_accelerator(mock_accelerator)
+            rollout = HybridEngineRollout(_hybrid_tp_engine(_RetiringModel(), group),
+                                          SimpleNamespace(pad_token_id=0, eos_token_id=2),
+                                          cfg=HybridEngineRolloutConfig(use_graph_capture=True))
+            request = _retiring_request(rows=2)
+            sampling = SamplingConfig(max_new_tokens=2, temperature=0, continuous_batch_size=2)
+            first = rollout.generate(request, sampling)
+            assert rollout.get_last_continuous_stats()["graph_captures"] == 1
+            rollout.generate(request, sampling)
+            assert rollout.get_last_continuous_stats()["graph_captures"] == 0
+
+            # A rank-local signature change (state dropped on this rank only) must not let
+            # that rank capture alone: the group agrees, so every rank rebuilds its state
+            # and re-captures the width the loop needs. Gathering the counts fails on every
+            # rank when the decisions diverge, so the test cannot pass by rank majority.
+            if rank == 1:
+                rollout._continuous_graph_state = None
+            output = rollout.generate(request, sampling)
+            captures = [torch.zeros(1, dtype=torch.int32) for _ in range(2)]
+            dist.all_gather(captures,
+                            torch.tensor([rollout.get_last_continuous_stats()["graph_captures"]], dtype=torch.int32))
+
+        assert [capture.item() for capture in captures] == [1, 1]
+        assert torch.equal(output.input_ids, first.input_ids)
+
+
+class TestContinuousGraphCaptureFailure(DistributedTest):
+    """A capture failure in a model-parallel group must fail the rollout, not fall back here.
+
+    The failed rank has already run some of the capture's collective forwards, so running
+    the step eagerly would leave the group's collectives to pair across ranks.
+    """
+    world_size = 2
+    backend = "gloo"
+    requires_cuda_env = False
+    init_distributed = False
+
+    def test(self):
+        group = _init_gloo_topology([0, 1])
+        with patch("deepspeed.runtime.rollout.hybrid_engine_rollout.get_accelerator") as mock_accelerator:
+            _mock_graph_accelerator(mock_accelerator)
+            rollout = HybridEngineRollout(_hybrid_tp_engine(_RetiringModel(), group),
+                                          SimpleNamespace(pad_token_id=0, eos_token_id=2),
+                                          cfg=HybridEngineRolloutConfig(use_graph_capture=True))
+            with patch.object(rollout, "_capture_continuous_graph", side_effect=RuntimeError("simulated capture OOM")):
+                with pytest.raises(RuntimeError, match="tensor-parallel group"):
+                    rollout.generate(_retiring_request(rows=2),
+                                     SamplingConfig(max_new_tokens=2, temperature=0, continuous_batch_size=2))
+
+
+class TestContinuousGraphCaptureAgreementDevice(DistributedTest):
+    """Capture agreement on real accelerator devices, sharded over an AutoTP tensor-parallel group.
+
+    The Gloo tests above pin the decision logic; here two ranks capture and replay real
+    device graphs whose forwards hold the TP group's collectives, so a rank that captured
+    or fell back on its own would hang on unpaired collectives instead of merely
+    diverging. The model keeps its native HuggingFace forwards (the rollout drives its
+    own static KV cache), so AutoTP shards the layers rather than the hybrid engine's
+    inference containers, whose own KV store the continuous path does not use. ZeRO
+    stays at stage 0 because partitioned-parameter fetches wait on a side stream, which
+    stream capture does not allow.
+    """
+    world_size = 2
+
+    def test(self):
+        accelerator = get_accelerator()
+        if accelerator.create_graph() is None:
+            # Without capture the continuous path falls back to eager batching, which has no
+            # graph stats to assert on; the CPU multi-rank job otherwise runs this test.
+            pytest.skip("requires graph capture")
+
+        from transformers import LlamaConfig, LlamaForCausalLM
+
+        rank = dist.get_rank()
+        device = torch.device(accelerator.current_device_name())
+        model = LlamaForCausalLM(
+            LlamaConfig(
+                vocab_size=32,
+                max_position_embeddings=32,
+                hidden_size=32,
+                intermediate_size=64,
+                num_hidden_layers=1,
+                num_attention_heads=4,
+                num_key_value_heads=4,
+                tie_word_embeddings=False,
+            ))
+        ds_config = {
+            "train_micro_batch_size_per_gpu": 1,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 1e-6,
+                    "torch_adam": True
+                },
+            },
+            "tensor_parallel": {
+                "autotp_size": 2,
+                "vocab_parallel_lm_head": True,
+            },
+            "zero_optimization": {
+                "stage": 0
+            },
+        }
+        engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=ds_config)
+        rollout = HybridEngineRollout(engine,
+                                      SimpleNamespace(pad_token_id=0, eos_token_id=2),
+                                      cfg=HybridEngineRolloutConfig(use_graph_capture=True, enable_profiling=True))
+        request = RolloutRequest(
+            prompt_ids=torch.tensor([[5, 6], [7, 8]], device=device),
+            prompt_attention_mask=torch.ones(2, 2, dtype=torch.long, device=device),
+        )
+        sampling = SamplingConfig(max_new_tokens=4, temperature=0, continuous_batch_size=2)
+
+        def gather(value):
+            values = [torch.zeros(1, dtype=torch.int32, device=device) for _ in range(2)]
+            dist.all_gather(values, torch.tensor([value], dtype=torch.int32, device=device))
+            return [tensor.item() for tensor in values]
+
+        # One decode width is in play, so the first rollout captures exactly once, and the
+        # capture's warmup and record forwards keep both ranks' collective counts in step.
+        first = rollout.generate(request, sampling)
+        assert gather(rollout.get_last_continuous_stats()["graph_captures"]) == [1, 1]
+
+        # A rank-local state drop must not let that rank re-capture alone: without the
+        # agreement its peer would replay its kept graph while this rank ran the capture's
+        # extra forwards, leaving the group's collectives unpaired. Every rank rebuilds
+        # instead, and the replayed tokens stay identical to the agreed first pass.
+        if rank == 1:
+            rollout._continuous_graph_state = None
+        second = rollout.generate(request, sampling)
+        assert gather(rollout.get_last_continuous_stats()["graph_captures"]) == [1, 1]
+        assert gather(rollout.get_last_profile()["num_graph_captures"]) == [1, 1]
+        assert torch.equal(second.input_ids, first.input_ids)
+
+        # A capture failure inside the TP group must fail the rollout on every rank instead
+        # of falling back eagerly here. The patch is deterministic on both ranks, so both
+        # raise locally at the same point and no collective is left unpaired.
+        rollout._continuous_graph_state = None
+        with patch.object(rollout, "_capture_continuous_graph", side_effect=RuntimeError("simulated capture OOM")):
+            with pytest.raises(RuntimeError, match="tensor-parallel group"):
+                rollout.generate(request, sampling)
+
+
 def test_continuous_repetition_penalty_matches_hf_in_bfloat16():
     from transformers import RepetitionPenaltyLogitsProcessor
 
@@ -2021,8 +2494,9 @@ def test_sync_weights_continuous_graph_safe():
     refills derived tensors in place."""
     pytest.importorskip("transformers")
     from deepspeed.accelerator import get_accelerator
-    if get_accelerator().device_name() == "cpu":
-        pytest.skip("segKI injection needs an accelerator")
+    accelerator = get_accelerator()
+    if not accelerator.is_available() or not accelerator.is_graph_capture_supported():
+        pytest.skip("requires graph capture")
 
     model = _make_small_qwen()
     device = next(model.parameters()).device

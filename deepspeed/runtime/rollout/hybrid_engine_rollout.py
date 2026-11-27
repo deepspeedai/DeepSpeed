@@ -12,7 +12,10 @@ Two generation paths:
      step.  Eliminates kernel launch overhead.
   3. **continuous batching (experimental)**: an opt-in bounded path
      selected through ``SamplingConfig.continuous_batch_size``; greedy or
-     sampled like the graph path, with or without graph capture.
+     sampled like the graph path, with or without graph capture. The captured
+     path dispatches each step to the smallest captured width covering its
+     highest occupied row. Bucket views start at row 0, so a row retired below
+     a live one still rides the wider replay.
 """
 
 import itertools
@@ -20,10 +23,10 @@ import math
 import time
 from contextlib import contextmanager
 from copy import copy
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from functools import lru_cache
 from inspect import signature
-from typing import Optional
+from typing import Dict, Optional, Set, Tuple
 
 import torch
 
@@ -163,6 +166,20 @@ class HybridEngineRolloutConfig:
     Cache trimming is opt-in because it copies the live cache columns after
     each reclaim. Without it, the rollout trims only when the cache would
     otherwise exhaust and a dead prefix can be reclaimed.
+
+    ``graph_capture_batch_sizes`` controls the captured-batch ladder of the
+    continuous graph path. The loop dispatches each step to the smallest
+    captured width covering the highest occupied row, so a request arriving on
+    its own replays a one-row graph instead of the full batch. That width also
+    covers the vacant rows below the highest one, so a retired middle slot keeps
+    the step on the wider graph. Defaults to the powers of two up to
+    ``max_batch_size`` plus ``max_batch_size`` itself. Capture is lazy: a bucket
+    is captured the first time the loop needs it, and the decision is agreed
+    over the model-parallel groups once per width, not per replay, because the
+    capture runs forwards that hold their collectives. A bucket whose capture
+    fails runs that forward eagerly instead only when no such group shares it;
+    under tensor parallelism the rollout fails rather than desynchronizing the
+    groups.
     """
     use_graph_capture: bool = False
     enable_profiling: bool = False
@@ -183,11 +200,37 @@ class HybridEngineRolloutConfig:
     # PR-local switches; kept after every upstream field so the legacy
     # positional constructor contract (#8786's test) keeps holding
     use_segki: bool = False
+    graph_capture_batch_sizes: Optional[Tuple[int, ...]] = None
+
+
+@dataclass
+class _DecodeBucket:
+    """Captured decode forward for one batch width.
+
+    The buffers are views of the rollout's master buffers, so the per-row state the
+    scheduler writes (tokens, positions, validity, write positions) is visible to every
+    bucket that covers those rows. The views always start at row 0: a bucket covers every
+    row below ``width``, including vacant slots, because a replayed forward cannot skip
+    the rows in between. ``logits`` is the tensor the captured forward returns and the
+    graph overwrites in place on every replay.
+    """
+
+    width: int
+    input_ids: torch.Tensor
+    causal_attention: torch.Tensor
+    position_ids: torch.Tensor
+    write_positions: torch.Tensor
+    graph: object = None
+    logits: Optional[torch.Tensor] = None
+    disabled: bool = False
 
 
 @dataclass
 class _ContinuousGraphState:
+    """Captured graphs and static buffers shared by rollouts with the same shapes."""
+
     signature: tuple
+    ladder: Tuple[int, ...]
     cache: object
     static_input: torch.Tensor
     static_attention: torch.Tensor
@@ -195,8 +238,12 @@ class _ContinuousGraphState:
     static_position_ids: torch.Tensor
     static_write_positions: torch.Tensor
     static_cache_position: torch.Tensor
-    graph: object
-    static_logits: torch.Tensor
+    decode: Dict[int, _DecodeBucket] = field(default_factory=dict)
+    captures: int = 0
+    # Widths whose capture decision the model-parallel groups already took. Every rank
+    # updates it after the same consensus, and the width the loop is using comes from the
+    # shared schedule, so the rendezvous condition below is shared rather than rank-local.
+    capture_agreed: Set[int] = field(default_factory=set)
 
 
 @dataclass
@@ -252,6 +299,7 @@ class HybridEngineRollout(RolloutEngine):
         self._last_continuous_stats = None
         self._generation_defaults = None
 
+        self.graph_capture_batch_sizes = getattr(cfg, 'graph_capture_batch_sizes', None) if cfg else None
         self.use_segki = cfg is not None and getattr(cfg, 'use_segki', False)
         if self.use_segki:
             self._segki_report = self._apply_segki()
@@ -266,12 +314,13 @@ class HybridEngineRollout(RolloutEngine):
         With segKI, the retained decode graphs capture those tensors'
         addresses, so they are released here too (re-captured on the next
         rollout) -- replays would otherwise read freed memory. Interim
-        cost: one re-capture per sync; remove when refresh refills the
-        derived tensors in place and graphs survive by construction.
-        When no segment kernels run in the model (this rollout and every
-        other rollout sharing it run without segKI), the graphs read only the
-        parameters, which an in-place update keeps at their captured
-        addresses, so they are kept.
+        cost: that rollout re-captures each ladder bucket it uses, so up
+        to one capture per width in ``graph_capture_batch_sizes``; remove
+        when refresh refills the derived tensors in place and graphs
+        survive by construction. When no segment kernels run in the model
+        (this rollout and every other rollout sharing it run without
+        segKI), the graphs read only the parameters, which an in-place
+        update keeps at their captured addresses, so they are kept.
 
         PROVISIONAL contract — see segki_refresh; the final weight-sync
         handshake is still under design.
@@ -967,21 +1016,15 @@ class HybridEngineRollout(RolloutEngine):
             request_by_id[request_id] = request
             responses[request_id] = []
 
-        state = self._get_continuous_graph_state(module,
-                                                 max_batch_size,
-                                                 max_cache_len,
-                                                 device,
-                                                 model_dtype,
-                                                 DeepSpeedStaticCache,
-                                                 capture=False)
+        state = self._get_continuous_graph_state(module, max_batch_size, max_cache_len, device, model_dtype,
+                                                 DeepSpeedStaticCache)
         cache = state.cache
         static_input = state.static_input
         static_attention = state.static_attention
         static_causal_attention = state.static_causal_attention
         static_position_ids = state.static_position_ids
         static_write_positions = state.static_write_positions
-        graph = state.graph
-        static_logits = state.static_logits
+        captures_before = state.captures
         stats = {
             "cache_capacity": max_cache_len,
             "peak_cache_length": prompt_len,
@@ -990,6 +1033,12 @@ class HybridEngineRollout(RolloutEngine):
             "trim_latency_ms": 0.0,
             "trim_bytes_moved": 0,
             "decode_steps": 0,
+            "graph_capture_ladder": list(state.ladder),
+            "graph_captures": 0,
+            "decode_bucket_steps": 0,
+            "decode_padded_rows": 0,
+            "decode_hole_rows": 0,
+            "decode_bucket_widths": {},
         }
 
         slot_by_request = {}
@@ -1039,31 +1088,6 @@ class HybridEngineRollout(RolloutEngine):
                     generation_config=generation_config,
                 )
                 next_tokens.update(admitted_tokens)
-                post_prefill_signature = self._graph_signature(module, max_batch_size, max_cache_len, device,
-                                                               model_dtype)
-                needs_capture = graph is None or state.signature != post_prefill_signature
-                if self._group_needs_capture(needs_capture, module):
-                    if graph is not None:
-                        get_accelerator().synchronize()
-                    state.signature = post_prefill_signature
-                    # Drop every reference to the old graph pool and logits before capturing their replacement.
-                    state.graph = state.static_logits = graph = static_logits = None
-                    # Capture at an unused cache position so prompt KV copied by
-                    # this prefill is not overwritten by warmup or capture.
-                    static_write_positions.fill_(max_cache_len - 1)
-                    graph, static_logits = self._capture_on_all_ranks(
-                        module, lambda: self._capture_continuous_graph(
-                            module,
-                            cache,
-                            static_input,
-                            static_causal_attention,
-                            static_write_positions,
-                            state.static_cache_position,
-                            static_position_ids,
-                        ))
-                    static_write_positions.zero_()
-                    state.graph = graph
-                    state.static_logits = static_logits
 
             decode_ids = tuple(request_id for request_id in update.active_ids if request_id not in admitted_ids)
             static_input.zero_()
@@ -1082,11 +1106,20 @@ class HybridEngineRollout(RolloutEngine):
             decoded_tokens = {}
             if decode_ids:
                 self._update_static_causal_attention(static_attention, static_causal_attention)
+                highest_row = max(slot_by_request[request_id] for request_id in decode_ids) + 1
+                bucket = self._decode_bucket(highest_row)
+                self._capture_bucket_if_needed(module,
+                                               cache,
+                                               bucket,
+                                               state.static_cache_position,
+                                               bucket.write_positions,
+                                               profile=profile)
                 decode_start = self._profile_start(profile)
-                get_accelerator().replay_graph(graph)
+                decode_logits_all = self._run_bucket(module, cache, bucket, state.static_cache_position,
+                                                     bucket.write_positions)
                 self._profile_end(profile, "decode_forward_ms", decode_start, count="num_decode_forwards")
                 decode_logits = torch.cat(
-                    [static_logits[slot_by_request[request_id], -1, :].unsqueeze(0) for request_id in decode_ids],
+                    [decode_logits_all[slot_by_request[request_id], -1, :].unsqueeze(0) for request_id in decode_ids],
                     dim=0)
                 decoded = self._continuous_next_tokens(
                     decode_logits,
@@ -1100,7 +1133,14 @@ class HybridEngineRollout(RolloutEngine):
                 for request_id, token in zip(decode_ids, decoded.split(1, dim=0)):
                     decoded_tokens[request_id] = token
                     write_positions[request_id] += 1
+                live_rows = len(decode_ids)
                 stats["decode_steps"] += 1
+                stats["decode_bucket_steps"] += 1
+                stats["decode_padded_rows"] += bucket.width - live_rows
+                # Slots retired below the highest occupied row pad the replay like ladder rounding
+                # does; this reports them separately because only they could be compacted away.
+                stats["decode_hole_rows"] += highest_row - live_rows
+                stats["decode_bucket_widths"][bucket.width] = stats["decode_bucket_widths"].get(bucket.width, 0) + 1
                 next_tokens.update(decoded_tokens)
 
             finished_ids = []
@@ -1132,6 +1172,11 @@ class HybridEngineRollout(RolloutEngine):
             stats["end_to_end_ms"] = None
             stats["tokens_per_second"] = None
         stats["trim_frequency"] = 0.0
+        stats["graph_captures"] = state.captures - captures_before
+        # The cache layers are allocated lazily from the first forward, so the footprint is
+        # measured after the loop, as on the eager path.
+        stats["cache_memory_bytes"] = self._continuous_cache_memory_bytes(cache, static_attention,
+                                                                          static_write_positions)
         self._last_continuous_stats = stats
         if profile is not None:
             self._finish_continuous_profile(profile, original_request, responses, max_batch_size, prompt_len,
@@ -1148,19 +1193,53 @@ class HybridEngineRollout(RolloutEngine):
         if (self.continuous_cache_capacity is not None
                 and self.continuous_cache_capacity < prompt_len + sampling.max_new_tokens):
             raise ValueError("continuous_cache_capacity must fit the prompt and all generated tokens")
+        self._graph_capture_ladder(sampling.continuous_batch_size, self.graph_capture_batch_sizes)
 
-    def _get_continuous_graph_state(self,
-                                    module,
-                                    max_batch_size,
-                                    max_cache_len,
-                                    device,
-                                    model_dtype,
-                                    cache_type,
-                                    capture=True):
-        signature = self._graph_signature(module, max_batch_size, max_cache_len, device, model_dtype)
+    @staticmethod
+    def _graph_capture_ladder(max_batch_size, configured=None):
+        """Return the batch widths the graph path captures, smallest first.
+
+        The loop buckets every step up to the nearest width in the ladder, so a sparse
+        ladder means fewer captures and more padded rows, and a dense one means the
+        opposite. ``max_batch_size`` is always included: a full physical batch has to be
+        replayable for the step that drains every slot.
+        """
+        widths = {max_batch_size}
+        if configured:
+            for width in configured:
+                if isinstance(width, bool) or not isinstance(width, int) or width <= 0:
+                    raise ValueError("graph_capture_batch_sizes must be positive integers")
+                if width > max_batch_size:
+                    raise ValueError("graph_capture_batch_sizes cannot exceed continuous_batch_size")
+                widths.add(width)
+        else:
+            width = 1
+            while width < max_batch_size:
+                widths.add(width)
+                width *= 2
+        return tuple(sorted(widths))
+
+    @staticmethod
+    def _bucket_width(ladder, highest_row):
+        """Smallest captured width that covers every row up to ``highest_row``.
+
+        Vacant slots below ``highest_row`` are covered too, because bucket views start at
+        row 0 and a replayed forward runs the rows in between.
+        """
+        for width in ladder:
+            if width >= highest_row:
+                return width
+        raise ValueError(f"captured batch ladder {ladder} does not cover {highest_row} rows")
+
+    def _get_continuous_graph_state(self, module, max_batch_size, max_cache_len, device, model_dtype, cache_type):
+        ladder = self._graph_capture_ladder(max_batch_size, self.graph_capture_batch_sizes)
+        signature = self._graph_signature(module, max_batch_size, max_cache_len, device, model_dtype, extra=(ladder, ))
         state = self._continuous_graph_state
-        if self._group_needs_capture(state is None or state.signature != signature, module):
-            # Free the stale cache and graph pool before allocating replacements.
+        if self._group_needs_capture(state is None or state.signature != signature, module, device):
+            # Free the stale cache and graph pool before allocating replacements. Every
+            # capture group rebuilds when any of its ranks does, so the buckets the loop
+            # captures below stay in step: a rank that kept its graphs while a peer
+            # re-captured would replay a different number of collective forwards.
             self._continuous_graph_state = None
             state = None
             # Capture sizes the layers from the model's local KV tensors.
@@ -1177,20 +1256,10 @@ class HybridEngineRollout(RolloutEngine):
             # validity is represented by static_attention, so a fixed upper bound
             # lets one captured graph serve requests at different decode lengths.
             static_cache_position = torch.tensor([max_cache_len - 1], dtype=torch.long, device=device)
-            graph = static_logits = None
-            if capture:
-                graph, static_logits = self._capture_on_all_ranks(
-                    module, lambda: self._capture_continuous_graph(
-                        module,
-                        cache,
-                        static_input,
-                        static_causal_attention,
-                        static_write_positions,
-                        static_cache_position,
-                        static_position_ids,
-                    ))
+
             state = _ContinuousGraphState(
                 signature,
+                ladder,
                 cache,
                 static_input,
                 static_attention,
@@ -1198,8 +1267,6 @@ class HybridEngineRollout(RolloutEngine):
                 static_position_ids,
                 static_write_positions,
                 static_cache_position,
-                graph,
-                static_logits,
             )
             self._continuous_graph_state = state
 
@@ -1210,6 +1277,102 @@ class HybridEngineRollout(RolloutEngine):
         state.static_position_ids.zero_()
         state.static_write_positions.zero_()
         return state
+
+    def _decode_bucket(self, highest_row):
+        """Return the decode bucket covering the rows that are decoding, allocating it if new.
+
+        ``highest_row`` counts the rows up to the highest occupied slot, so the bucket's
+        row-0 view also covers any vacant slot below it. Buckets are captured by the caller
+        once its buffers hold the step it is about to run, so a capture is never asked to
+        warm up on stale rows.
+        """
+        state = self._continuous_graph_state
+        width = self._bucket_width(state.ladder, highest_row)
+        bucket = state.decode.get(width)
+        if bucket is None:
+            bucket = _DecodeBucket(width, state.static_input[:width], state.static_causal_attention[:width],
+                                   state.static_position_ids[:width], state.static_write_positions[:width])
+            state.decode[width] = bucket
+        return bucket
+
+    def _capture_bucket_if_needed(self, module, cache, bucket, cache_position, write_position, profile=None):
+        """Capture a bucket the first time the group needs its width, at most once per state.
+
+        The decision is agreed over the capture groups because the capture's forwards hold
+        their collectives. Both the set of widths already decided and the width the loop is
+        using are the same on every rank, so no rank enters the rendezvous alone, and every
+        rank applies the same answer -- including a rank that already holds the bucket's
+        graph, whose redundant capture keeps the collective counts equal. Replays of an
+        agreed width never rendezvous.
+        """
+        capture_agreed = self._continuous_graph_state.capture_agreed
+        if bucket.width in capture_agreed:
+            return bucket
+        capture_agreed.add(bucket.width)
+        needs_capture = bucket.graph is None and not bucket.disabled
+        if not self._group_needs_capture(needs_capture, module, bucket.input_ids.device):
+            return bucket
+        capture_start = self._profile_start(profile)
+        captured = self._capture_bucket(module, cache, bucket, cache_position, write_position)
+        self._profile_end(profile, "graph_capture_ms", capture_start, count="num_graph_captures" if captured else None)
+        return bucket
+
+    def _capture_bucket(self, module, cache, bucket, cache_position, write_position):
+        """Capture one bucket's forward, falling back to eager forwards if capture fails.
+
+        The capture runs the model for real during its warmup, with the buffers the next
+        replay will use, so it must be called only once the caller has filled them. Returns
+        whether a graph was produced; an attempt that fails inside a capture group raises
+        instead, and without one it marks the bucket for eager forwards.
+        """
+        try:
+            cache.set_write_position(write_position)
+            bucket.graph, bucket.logits = self._capture_on_all_ranks(
+                module,
+                lambda: self._capture_continuous_graph(module, cache, bucket.input_ids, bucket.causal_attention,
+                                                       write_position, cache_position, bucket.position_ids,
+                                                       self._last_logits_kwargs(module)),
+                bucket.input_ids.device,
+            )
+            self._continuous_graph_state.captures += 1
+            return True
+        except Exception as error:
+            if self._capture_groups(module):
+                # The capture already ran some of its collective forwards here, so its peers
+                # are mid-capture too and an eager fallback would leave the groups'
+                # collectives unpaired. Failing the rollout is the only safe exit.
+                raise RuntimeError(
+                    f"graph capture failed for batch width {bucket.width} on a rank inside a tensor-parallel "
+                    f"group ({error}); running this forward eagerly would desynchronize the group. Disable graph "
+                    f"capture (use_graph_capture=False) to run without it.") from error
+            # A graph is an optimization: where no capture group shares the forward, a
+            # failed capture must not fail the rollout.
+            bucket.graph = None
+            bucket.disabled = True
+            logger.warning(
+                "Rollout graph capture failed for batch width %s (%s); this bucket will run eagerly "
+                "for the rest of the rollout.", bucket.width, error)
+            return False
+
+    def _run_bucket(self, module, cache, bucket, cache_position, write_position):
+        """Replay a bucket's captured forward, or run the same buffers eagerly without a graph."""
+        if bucket.graph is not None:
+            get_accelerator().replay_graph(bucket.graph)
+            return bucket.logits
+        # The eager fallback reads the same static buffers, so it stays token-identical
+        # to a replay; only the launch overhead differs.
+        cache.set_write_position(write_position)
+        output = self._call_model(
+            module,
+            bucket.input_ids,
+            attention_mask=bucket.causal_attention,
+            past_key_values=cache,
+            use_cache=True,
+            cache_position=cache_position,
+            position_ids=bucket.position_ids,
+            **self._last_logits_kwargs(module),
+        )
+        return output.logits
 
     def _graph_signature(self, module, max_batch_size, max_cache_len, device, model_dtype, extra=()):
         # Replay reads parameters and buffers through the address and layout fixed
@@ -1265,23 +1428,25 @@ class HybridEngineRollout(RolloutEngine):
             capture_groups.append(lm_head_group)
         return capture_groups
 
-    def _group_needs_capture(self, local_needs_capture, module):
+    def _group_needs_capture(self, local_needs_capture, module=None, device=None):
         """Return whether any rank of the decode forward's process groups must capture again.
 
-        Capture runs forwards that hold collectives, so a rank whose own
-        signature changed must not capture while its peers replay.
+        Capture runs forwards that hold collectives, so a rank whose own state changed must
+        not capture while its peers replay, and the group's maximum puts every rank on the
+        same path. ``device`` is the device the rendezvous flag is reduced on; it must match
+        the groups' backend, so the capture path passes the model device.
         """
         capture_groups = self._capture_groups(module)
         if not capture_groups:
             return local_needs_capture
-        flag = torch.tensor(int(local_needs_capture),
-                            dtype=torch.int32,
-                            device=get_accelerator().current_device_name())
+        if device is None:
+            device = get_accelerator().current_device_name()
+        flag = torch.tensor(int(local_needs_capture), dtype=torch.int32, device=device)
         for group in capture_groups:
             dist.all_reduce(flag, op=dist.ReduceOp.MAX, group=group)
         return bool(flag.item())
 
-    def _capture_on_all_ranks(self, module, capture):
+    def _capture_on_all_ranks(self, module, capture, device=None):
         """Run ``capture``, failing it on every rank of the capture groups if it failed on any.
 
         Capture records collectives instead of running them, so a rank whose
@@ -1294,7 +1459,7 @@ class HybridEngineRollout(RolloutEngine):
             result = capture()
         except _GraphCaptureFailed as e:
             error = e.__cause__
-        failed_anywhere = self._group_needs_capture(error is not None, module)
+        failed_anywhere = self._group_needs_capture(error is not None, module, device)
         if error is not None:
             raise error
         if failed_anywhere:
@@ -1307,9 +1472,16 @@ class HybridEngineRollout(RolloutEngine):
         static_causal_attention.neg_().add_(1).mul_(torch.finfo(static_causal_attention.dtype).min)
 
     @staticmethod
-    def _capture_continuous_graph(module, cache, static_input, static_attention, static_write_positions,
-                                  static_cache_position, static_position_ids):
-        """Capture one fixed-capacity decode forward and return its static logits."""
+    def _capture_continuous_graph(module,
+                                  cache,
+                                  static_input,
+                                  static_attention,
+                                  static_write_positions,
+                                  static_cache_position,
+                                  static_position_ids,
+                                  logits_kwargs=None):
+        """Capture one fixed-capacity decode forward and return its graph and static logits."""
+        logits_kwargs = logits_kwargs or {}
         accelerator = get_accelerator()
         saved_pre = dict(module._forward_pre_hooks)
         saved_post = dict(module._forward_hooks)
@@ -1338,6 +1510,7 @@ class HybridEngineRollout(RolloutEngine):
                             use_cache=True,
                             cache_position=static_cache_position,
                             position_ids=static_position_ids,
+                            **logits_kwargs,
                         )
                 accelerator.current_stream().wait_stream(warmup_stream)
                 try:
@@ -1350,6 +1523,7 @@ class HybridEngineRollout(RolloutEngine):
                             use_cache=True,
                             cache_position=static_cache_position,
                             position_ids=static_position_ids,
+                            **logits_kwargs,
                         )
                 except Exception as e:
                     raise _GraphCaptureFailed() from e
@@ -1591,10 +1765,12 @@ class HybridEngineRollout(RolloutEngine):
             "start": time.perf_counter(),
             "prefill_forward_ms": 0.0,
             "decode_forward_ms": 0.0,
+            "graph_capture_ms": 0.0,
             "scheduler_overhead_ms": 0.0,
             "cache_management_overhead_ms": 0.0,
             "num_prefill_forwards": 0,
             "num_decode_forwards": 0,
+            "num_graph_captures": 0,
             "active_batch_sizes": [],
         }
 
@@ -1633,6 +1809,8 @@ class HybridEngineRollout(RolloutEngine):
             "generation_overhead_ms": max(0.0, generation_ms - prefill_ms - decode_ms),
             "num_prefill_forwards": profile["num_prefill_forwards"],
             "num_decode_forwards": profile["num_decode_forwards"],
+            "graph_capture_ms": profile["graph_capture_ms"],
+            "num_graph_captures": profile["num_graph_captures"],
             "scheduler_overhead_ms": profile["scheduler_overhead_ms"],
             "cache_management_overhead_ms": profile["cache_management_overhead_ms"],
             "post_processing_ms": (post_processing_end - generation_end) * 1000.0,
