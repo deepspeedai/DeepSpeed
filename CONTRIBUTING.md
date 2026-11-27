@@ -51,6 +51,13 @@ need it either, because their ranks start from a forkserver. GPU CI runs plain `
 only the CPU-only CI jobs pass `--forked`, which is safe there because they never
 initialize CUDA.
 
+To test an installed DeepSpeed package and its precompiled ops instead of the source
+checkout, run PyTest from the `tests` directory:
+```bash
+cd tests
+DS_TEST_USE_INSTALLED_DEEPSPEED=1 pytest --forked unit/
+```
+
 You can also run:
 ```
 make test
