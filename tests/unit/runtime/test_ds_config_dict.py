@@ -149,6 +149,38 @@ def test_gradient_allreduce_op_default():
     assert config.gradient_allreduce_op == "mean"
 
 
+@pytest.mark.parametrize("rank,world_size,sequence_parallel_size,expected_rank,expected_world_size",
+                         [(None, None, None, 0, 1), (1, 2, None, 1, 2), (3, 4, 2, 3, 2)])
+def test_config_uses_launcher_environment_before_distributed_initialization(monkeypatch, rank, world_size,
+                                                                            sequence_parallel_size, expected_rank,
+                                                                            expected_world_size):
+    if rank is not None:
+        monkeypatch.setenv("RANK", str(rank))
+    else:
+        monkeypatch.delenv("RANK", raising=False)
+    if world_size is not None:
+        monkeypatch.setenv("WORLD_SIZE", str(world_size))
+    else:
+        monkeypatch.delenv("WORLD_SIZE", raising=False)
+
+    def get_rank_before_distributed_initialization():
+        raise RuntimeError
+
+    monkeypatch.setattr(dist, "get_rank", get_rank_before_distributed_initialization)
+    config_dict = {
+        "train_batch_size": expected_world_size,
+        "train_micro_batch_size_per_gpu": 1,
+        "gradient_accumulation_steps": 1,
+    }
+    if sequence_parallel_size is not None:
+        config_dict["sequence_parallel_size"] = sequence_parallel_size
+
+    config = DeepSpeedConfig(config_dict)
+
+    assert config.global_rank == expected_rank
+    assert config.world_size == expected_world_size
+
+
 def test_disable_python_gc_config_default():
     config = DeepSpeedConfig({"train_batch_size": 1})
     assert config.disable_python_gc is False
