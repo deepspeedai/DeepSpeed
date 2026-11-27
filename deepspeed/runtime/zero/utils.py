@@ -17,9 +17,49 @@ from deepspeed.ops.lion import DeepSpeedCPULion, FusedLion
 from deepspeed.utils.nvtx import instrument_w_nvtx
 from deepspeed.accelerator import get_accelerator
 from deepspeed.runtime.utils import get_only_unique_item
+from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum
 
 # ensure we only warn once, otherwise every iteration will trigger a warning
 warned = False
+
+QUANT_SCALE_ATTR = "ds_quant_scale"
+
+
+def is_quantized_partition(tensor):
+    """Whether a ZeRO partition's storage holds quantized codes."""
+    return tensor is not None and hasattr(tensor, QUANT_SCALE_ATTR)
+
+
+def active_partition(param, use_secondary_tensor=None):
+    """The partition tensor a fetch reads; defaults to the secondary tensor when present."""
+    if use_secondary_tensor is None:
+        use_secondary_tensor = getattr(param, "ds_secondary_tensor", None) is not None
+    return param.ds_secondary_tensor if use_secondary_tensor else param.ds_tensor
+
+
+def is_quantized_param(param, use_secondary_tensor=None):
+    return is_quantized_partition(active_partition(param, use_secondary_tensor))
+
+
+def should_quantize_nontrainable_partition(param, tensor, enabled):
+    """Whether frozen storage can be quantized in place.
+
+    CPU- and NVMe-offloaded partitions stay unquantized: the quantizer runs on
+    the accelerator, so rebinding their storage would move it back to the
+    accelerator and defeat the offload. An NVMe partition also points into the
+    swapper buffer, where the bytes on disk would remain unquantized. The
+    partition length must also fit the quantizer's int8 grouping.
+    """
+    if not enabled or param.requires_grad or tensor is None:
+        return False
+    if getattr(tensor, "final_location", None) == OffloadDeviceEnum.nvme:
+        return False
+    if tensor.device.type != get_accelerator().device_name():
+        logger.warning_once("zero_quantized_nontrainable_weights: frozen partitions stored on "
+                            f"{tensor.device.type} stay unquantized")
+        return False
+    numel = tensor.numel()
+    return numel >= 8 and numel % 8 == 0
 
 
 def _initialize_parameter_parallel_groups(parameter_parallel_size=None):

@@ -33,6 +33,8 @@ An example snippet of deepspeed configurations with all MixZ++ optimization enab
 ```
 Note that for multi-node training, the `"zero_hpz_partition_size"` should be set to the number of GPUs per node. For example, if you have 8 GPUs per node, then `"zero_hpz_partition_size"` should be set to 8. For single-node training, the `"zero_hpz_partition_size"` should not be set.
 
+`zero_quantized_nontrainable_weights` requires an fp16 base model. bf16 and fp32 models are not supported. Only accelerator-resident frozen partitions are quantized; CPU-offloaded frozen partitions stay unquantized.
+
 ### Training Script Changes
 DeepSpeed engine will identify the LoRA frozen parameters if the LoRA model is passed when DeepSpeed initializes. However, the popular implementation is to initialize a base model and then convert to LoRA model later. In such cases, users need to explicitly call DeepSpeed engine after LoRA model is converted. This is only a 1-line effort. An example snippet of training script is shown below:
 

@@ -34,7 +34,9 @@ from deepspeed.runtime.base_optimizer import ZeROOptimizer
 from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer
 from deepspeed.runtime.zenflow.zenflow_stage_1_and_2 import ZenFlowZeroOptimizer
 from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
-from deepspeed.runtime.zero.utils import is_zero_supported_optimizer, ZeRORuntimeException
+from deepspeed.runtime.zero.weight_quantizer import get_weight_quantizer
+from deepspeed.runtime.zero.utils import (is_zero_supported_optimizer, ZeRORuntimeException, is_quantized_partition,
+                                          QUANT_SCALE_ATTR)
 from deepspeed.runtime.zero.parameter_offload import DeepSpeedZeRoOffload, ZeROOrderedDict, ensure_zero_ordered_dict
 from deepspeed.runtime.zero.config import ZERO_OPTIMIZATION
 from deepspeed.runtime.zenflow.engine import (configure_zenflow, zenflow_step, is_zenflow_update_boundary,
@@ -4519,10 +4521,7 @@ class DeepSpeedEngine(Module):
                 if param not in self.param_names:
                     raise ValueError(f"failed to find frozen {param} in named params")
                 name = self.param_names[param]
-                if hasattr(param, 'ds_id'):
-                    param.ds_tensor.data.copy_(saved_frozen_params[name].data)
-                else:
-                    param.data.copy_(saved_frozen_params[name].data)
+                self._restore_frozen_param_fragment(param, saved_frozen_params[name].data)
 
     def _get_zero_ckpt_prefix(self, dp_rank, bf16_mode):
         return f'{"bf16_" if bf16_mode else ""}zero_pp_rank_{dp_rank}'
@@ -5726,7 +5725,34 @@ class DeepSpeedEngine(Module):
         return param.ds_shape if hasattr(param, 'ds_id') else param.shape
 
     def _get_param_fragment_func(self, param):
-        return param.ds_tensor.detach().cpu() if hasattr(param, 'ds_id') else param.detach().cpu()
+        tensor = param.ds_tensor if hasattr(param, 'ds_id') else param
+        if is_quantized_partition(tensor):
+            # Checkpoints store full-precision fragments; raw int8 codes have no scales.
+            tensor = get_weight_quantizer().dequantize(tensor.data,
+                                                       getattr(tensor, QUANT_SCALE_ATTR),
+                                                       dtype=param.dtype)
+        return tensor.detach().cpu()
+
+    def _restore_frozen_param_fragment(self, param, saved):
+        if saved.dtype == torch.int8:
+            raise RuntimeError("This checkpoint stores frozen parameter fragments as int8 codes without their "
+                               "scales, so the frozen weights cannot be restored. Reload the base model "
+                               "weights and save a new checkpoint with this version.")
+
+        if not hasattr(param, 'ds_id'):
+            param.data.copy_(saved.to(param.device))
+            return
+
+        tensor = param.ds_tensor
+        if not is_quantized_partition(tensor):
+            tensor.data.copy_(saved.to(tensor.device))
+            return
+
+        restored = get_weight_quantizer().dequantize(tensor.data, getattr(tensor, QUANT_SCALE_ATTR), dtype=param.dtype)
+        restored.copy_(saved.to(restored.device))
+        quantized, scale = get_weight_quantizer().quantize(restored)
+        tensor.data = quantized
+        setattr(tensor, QUANT_SCALE_ATTR, scale)
 
     def _get_zero_frozen_param_attributes(self, attr_func):
         frozen_param_fragments = OrderedDict()

@@ -66,7 +66,7 @@ def test_cuda_quantizer_round_trips_parameter_dtype(monkeypatch, dtype):
     The quantizer op is fp16-only, so under a bf16 config the weights used to come back as fp16 and
     break the forward pass with a dtype mismatch. See #7775.
     """
-    monkeypatch.setattr(CUDAQuantizer, "quantizer_cuda_module", Fp16OnlyQuantizerModule())
+    monkeypatch.setattr(CUDAQuantizer, "backend_module", Fp16OnlyQuantizerModule())
     quantizer = CUDAQuantizer()
 
     param = torch.randn(4096, dtype=dtype)

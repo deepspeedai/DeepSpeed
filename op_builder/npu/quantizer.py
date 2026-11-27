@@ -11,45 +11,17 @@ from .builder import NPUOpBuilder
 
 class NPUQuantizer:
     """
-    Grouped symmetric quantization for the Zero++ quantized-communication
-    paths (quantized weight all-gather in partition_parameters.py and the
-    quantized gradient all-to-all in coalesced_collectives.py).
+    Grouped quantization for the ZeRO++ quantized-communication paths.
 
-    Wire format, per group:
-        scale   = 2**num_bits / (2 * max(|x|))   (1.0 when max == 0)
-        params  = 1 / scale                      (fp32, the value that is sent)
-        q       = trunc(x * scale), clamped to [-2**(b-1), 2**(b-1)-1]
+    Wire format per group: scale = 2**num_bits / (2 * max(|x|)),
+    params = 1 / scale, q = round(x * scale), with round-half-to-even.
+    Production uses symmetric int4/int8; the asymmetric branch serves the
+    shared quantizer contract test.
 
-    Truncation is toward zero: the reference implementation casts to an
-    integer type, so a round-to-nearest "simplification" would silently
-    change every quantized value. tests/unit/ops/quantizer/test_npu_quantizer.py
-    pins this against an independent per-group reference.
-
-    Known deviation: fp32/fp64 division on this accelerator is approximate
-    (1 ulp off on ~5% of values), so params can differ from a correctly
-    rounded computation by 1 ulp. This is bounded and safe: every rank in a
-    run computes the same value, the 1-ulp scale error (~1e-7 relative) is
-    five orders below the quantization error (~1e-2), and the wire format is
-    transient (checkpoints store unquantized weights).
-
-    Native operators: torch_npu's npu_quantize family rounds half-to-even
-    and exposes no truncation mode, so no native op can honor the wire
-    format today. If CANN later adds one, _quantize_groups is the single
-    swap point.
-
-    The dequantize_*_experimental methods are unrelated to that wire format:
-    they serve the inference weight-quantization path, which is asymmetric
-    with a per-group scale and minimum.
-
-    The inference int4 path as a whole requires CANN >= 9.0.0: the shared
-    Quantizer._compress_uint8_to_uint4 packs with a uint8 left shift
-    (aclnnLeftShifts), which older CANN releases do not provide. The
-    dequantizers below do not use that operator and are version-independent;
-    on older CANN the failure happens during quantization, before they run.
-    torch_npu exposes the CANN version through
-    torch_npu.utils.get_cann_version() and
-    torch_npu.npu.utils._is_gte_cann_version(), but this module does not gate
-    on it because the failing step is in shared code.
+    The dequantize_*_experimental methods implement the inference format
+    (asymmetric, with a per-group scale and minimum). That int4 path requires
+    CANN >= 9.0.0 for its uint4 packing; the dequantizers here are version-
+    independent.
     """
 
     Symmetric = 0
@@ -57,7 +29,6 @@ class NPUQuantizer:
 
     @staticmethod
     def _as_groups(tensor, groups):
-        # The quantized tensor is processed as one flat run of per-group chunks.
         flat = tensor.contiguous().view(-1)
         assert flat.numel() % groups == 0, "numel must be divisible by groups"
         return flat.view(groups, flat.numel() // groups)
@@ -66,26 +37,33 @@ class NPUQuantizer:
     def _quantize_groups(xg, num_bits):
         """Per-group symmetric quantization of an fp32 [groups, elems] tensor.
 
-        Returns the quantized values (int32, in the representable range) and
-        the stored per-group scale reciprocals. This is the shared math behind
-        quantize, swizzle_quant, and quantized_reduction.
+        Returns the quantized values and the stored per-group scale reciprocals.
         """
         maxv = xg.abs().max(dim=1).values
-        # scale = 2**num_bits / (2 * max), computed in fp32 like the reference.
-        # Dividing by zero yields inf for empty groups; the mask below
-        # restores the reference 1.0, so this form agrees bitwise with the
-        # explicit where() (verified on 910B4).
+        # max == 0 groups divide by zero; mask their scale to 1.0.
         scale = (float(1 << num_bits)) / (2.0 * maxv)
         scale.masked_fill_(maxv == 0, 1.0)
-        # The stored/sent value is the reciprocal of the scale; dequantize
-        # multiplies it back, so the round trip is q * (1/scale) == q * scale.
+        # Store the reciprocal; dequantize multiplies it back.
         stored = scale.reciprocal().view(-1)
-        # Truncate toward zero, then clamp into the representable range.
-        # Chained in-place form: xg is always a fresh float() copy here.
+        # xg is a fresh float() copy, so the in-place chain is safe.
         q_min = -(1 << (num_bits - 1))
         q_max = (1 << (num_bits - 1)) - 1
-        xg.mul_(scale.view(-1, 1)).trunc_().clamp_(q_min, q_max)
+        xg.mul_(scale.view(-1, 1)).round_().clamp_(q_min, q_max)
         return xg, stored
+
+    @staticmethod
+    def _quantize_groups_asymmetric(xg, num_bits):
+        """Per-group asymmetric quantization."""
+        maxv = xg.amax(dim=1, keepdim=True)
+        minv = xg.amin(dim=1, keepdim=True)
+        scale = (float(1 << num_bits)) / (maxv - minv)
+        scale.masked_fill_(maxv == minv, 1.0)
+        stored = scale.reciprocal().view(-1)
+        q_min = -(1 << (num_bits - 1))
+        q_max = (1 << (num_bits - 1)) - 1
+        offset = q_min - minv * scale
+        xg.mul_(scale).add_(offset).round_().clamp_(q_min, q_max)
+        return xg, stored, offset.view(-1)
 
     @staticmethod
     def _pack_int4(q_flat):
@@ -109,74 +87,81 @@ class NPUQuantizer:
 
     @staticmethod
     def quantize(input_vals, groups, num_bits, quant_type):
-        """Grouped symmetric int8 quantization.
+        """Quantize fp16 input to int4 or int8.
 
-        Args:
-            input_vals: fp16 tensor (the hpZ path converts bf16 weights to fp16
-                before calling in, so fp16 is the only dtype that appears here).
-            groups: number of quantization groups; numel must divide evenly.
-            num_bits: must be 8 (int4 uses a packed byte layout, not implemented).
-            quant_type: must be Symmetric (the only mode the hpZ/qgZ paths use).
-
-        Returns:
-            (int8 tensor with input_vals' shape, fp32 params of shape [groups, 1])
+        Returns packed codes and per-group params ([scale reciprocal, zero
+        point] for asymmetric). int4 requires an even last dimension.
         """
-        assert quant_type == NPUQuantizer.Symmetric, "only Symmetric quantization is implemented"
-        assert num_bits == 8, "only int8 is implemented (int4 uses a packed byte layout)"
+        assert quant_type in (NPUQuantizer.Symmetric, NPUQuantizer.Asymmetric)
+        assert num_bits in (4, 8), "num_bits must be 4 or 8"
 
         xg = NPUQuantizer._as_groups(input_vals, groups).float()  # fp16 -> fp32 is exact
-        q, stored = NPUQuantizer._quantize_groups(xg, num_bits)
-        return q.to(torch.int8).view(input_vals.shape), stored.view(groups, 1)
+        if quant_type == NPUQuantizer.Symmetric:
+            q, stored = NPUQuantizer._quantize_groups(xg, num_bits)
+            params = stored.view(groups, 1)
+        else:
+            q, stored, offset = NPUQuantizer._quantize_groups_asymmetric(xg, num_bits)
+            params = torch.stack((stored, offset), dim=1)
+        if num_bits == 4:
+            assert input_vals.shape[-1] % 2 == 0, "int4 requires an even last dimension"
+            packed = NPUQuantizer._pack_int4(q.reshape(-1))
+            out_shape = tuple(input_vals.shape[:-1]) + (input_vals.shape[-1] // 2, )
+            return packed.view(out_shape), params
+        return q.to(torch.int8).view(input_vals.shape), params
 
     @staticmethod
-    def _dequantize_fp32(quantized_data, params, groups):
+    def _dequantize_fp32(quantized_data, params, groups, quant_type=None):
+        if quant_type is None:
+            quant_type = NPUQuantizer.Symmetric
         q = NPUQuantizer._as_groups(quantized_data, groups).float()
-        p = params.contiguous().view(-1).float()
-        return q.mul_(p.view(groups, 1)).view(quantized_data.shape)
+        p = params.contiguous().float()
+        if quant_type == NPUQuantizer.Symmetric:
+            return q.mul_(p.view(-1).view(groups, 1)).view(quantized_data.shape)
+        assert quant_type == NPUQuantizer.Asymmetric
+        step = p[:, 0].view(groups, 1)
+        offset = p[:, 1].view(groups, 1)
+        return q.sub_(offset).mul_(step).view(quantized_data.shape)
 
     @staticmethod
     def dequantize(quantized_data, params, groups, num_bits, quant_type):
-        """Inverse of quantize; returns fp16, matching the hpZ/qgZ call sites.
-
-        For int4 the input is the flat packed byte tensor and the output is
-        the flat unpacked element tensor (2 elements per byte), which is what
-        the qgZ path receives and expects.
-        """
-        assert quant_type == NPUQuantizer.Symmetric
+        """Inverse of quantize; int4 packed input has its last dimension doubled."""
+        assert quant_type in (NPUQuantizer.Symmetric, NPUQuantizer.Asymmetric)
         if num_bits == 4:
-            assert quantized_data.dim() == 1, "the int4 wire format is a flat packed byte tensor"
-            vals = NPUQuantizer._unpack_int4(quantized_data)
+            out_shape = None
+            if quantized_data.dim() == 1:
+                packed = quantized_data
+            else:
+                out_shape = list(quantized_data.shape)
+                out_shape[-1] *= 2
+                packed = quantized_data.reshape(-1)
+            vals = NPUQuantizer._unpack_int4(packed)
             out_elems = vals.numel()
             assert out_elems % groups == 0, "unpacked numel must be divisible by groups"
             q = vals.float().view(groups, out_elems // groups)
-            p = params.contiguous().view(-1).float()
-            return (q * p.view(groups, 1)).view(-1).half()
+            p = params.contiguous().float()
+            if quant_type == NPUQuantizer.Symmetric:
+                out = q.mul_(p.view(-1).view(groups, 1)).half()
+            else:
+                out = q.sub_(p[:, 1].view(groups, 1)).mul_(p[:, 0].view(groups, 1)).half()
+            return out.view(-1) if out_shape is None else out.view(*out_shape)
         assert num_bits == 8
-        return NPUQuantizer._dequantize_fp32(quantized_data, params, groups).half()
+        return NPUQuantizer._dequantize_fp32(quantized_data, params, groups, quant_type).half()
 
     @staticmethod
     def dequantize_fp32(quantized_data, params, groups, num_bits, quant_type):
         """Same, but keeps fp32 (no fp16 rounding in the middle)."""
-        assert quant_type == NPUQuantizer.Symmetric
+        assert quant_type in (NPUQuantizer.Symmetric, NPUQuantizer.Asymmetric)
         assert num_bits == 8
-        return NPUQuantizer._dequantize_fp32(quantized_data, params, groups)
+        return NPUQuantizer._dequantize_fp32(quantized_data, params, groups, quant_type)
 
     @staticmethod
     def swizzle_quant(input_vals, groups, num_bits, quant_type, pipeline_size, nodes, devices_per_node):
         """Grouped quantization with the output groups permuted into the qgZ
         two-stage all-to-all layout.
 
-        Input group g = (z * pipeline_size + y) * contiguous_groups + x, where
-        z is the partition id, y the pipeline slice, and x the group within
-        both, lands in output slot
-        y * partitions + (z % devices_per_node) * nodes + z // devices_per_node.
-        The permutation makes each destination's data one contiguous run, so
-        the all-to-all can move it as whole chunks. Scales are stored in the
-        same permuted order.
-
-        Returns:
-            (flat packed tensor (2 elements per byte for int4),
-             fp32 scales of shape [groups, 1])
+        The permutation makes each destination's data one contiguous run;
+        scales are stored in the same permuted order. Returns the flat packed
+        tensor and fp32 scales of shape [groups, 1].
         """
         assert quant_type == NPUQuantizer.Symmetric, "only Symmetric quantization is implemented"
         assert num_bits in (4, 8), "swizzle_quant supports int4 and int8"
@@ -192,8 +177,7 @@ class NPUQuantizer:
         xg = NPUQuantizer._as_groups(input_vals, groups).float()
         q, stored = NPUQuantizer._quantize_groups(xg, num_bits)
 
-        # output group index for each input group (the reference index math:
-        # block_rank -> output_partition -> out_block_rank)
+        # Map each input group to its output slot.
         group_idx = torch.arange(groups, device=input_vals.device)
         z = group_idx // contiguous_groups // pipeline_size  # partition id
         y = group_idx // contiguous_groups % pipeline_size  # pipeline slice
@@ -234,10 +218,10 @@ class NPUQuantizer:
         assert bytes_per_tensor % groups_per_tensor == 0, "group size must be whole bytes"
         elems_per_in_group = bytes_per_tensor // groups_per_tensor  # in packed bytes
 
-        # per-element scale index within one rank's chunk (in unpacked elements)
+        # Scale index for each unpacked element.
         scale_idx = torch.arange(bytes_per_tensor * pack, device=input_vals.device) // (elems_per_in_group * pack)
 
-        # accumulate the dequantized halves, like the reference accumulation dtype
+        # Accumulate in fp16, matching the reference.
         acc = None
         for j in range(devices_per_node):
             chunk = input_vals[j * bytes_per_tensor:(j + 1) * bytes_per_tensor]
@@ -246,7 +230,6 @@ class NPUQuantizer:
             deq = (vals.float() * scales_j[scale_idx]).half()
             acc = deq if acc is None else acc + deq
 
-        # re-quantize the summed values with out_groups
         assert bytes_per_tensor % out_groups == 0, "sum must split into out_groups"
         elems_per_out_group = bytes_per_tensor // out_groups * pack  # in unpacked elements
         q, stored = NPUQuantizer._quantize_groups(acc.reshape(out_groups, elems_per_out_group).float(), num_bits)
