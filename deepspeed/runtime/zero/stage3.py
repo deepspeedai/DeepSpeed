@@ -7,6 +7,7 @@ import sys
 import gc
 import collections
 import itertools
+import re
 from typing import Deque, Dict, Set, List, Container, Optional, NamedTuple, Union
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -37,7 +38,7 @@ from deepspeed.runtime.zero.offload_states import (offload_adam_states, reload_a
                                                    unpin_offloaded_optimizer_states)
 from deepspeed.ops.adam import DeepSpeedCPUAdam, FusedAdam
 from deepspeed.runtime.swap_tensor.partitioned_param_swapper import PartitionedParamStatus
-from deepspeed.runtime.swap_tensor.optimizer_utils import OptimizerSwapper
+from deepspeed.runtime.swap_tensor.optimizer_utils import OptimizerSwapper, SwapTensorContext
 from deepspeed.runtime.swap_tensor.partitioned_optimizer_swapper import PartitionedOptimizerSwapper
 from deepspeed.runtime.swap_tensor.pipelined_optimizer_swapper import PipelinedOptimizerSwapper
 from deepspeed.checkpoint.constants import (
@@ -2220,7 +2221,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         dist.all_reduce(buffer_to_reduce, group=process_group)
 
-        if self.postscale_gradients and self.gradient_predivide_factor != averaging_world_sz:
+        if self.postscale_gradients and self.gradient_predivide_factor != 1.0:
             buffer_to_reduce = buffer_to_reduce.mul(self.gradient_predivide_factor)
 
         # Parameters kept in fp32 accumulate in fp32; they share a bucket with the others only when the
@@ -2273,12 +2274,12 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         else:
             grad_partitions_for_rank = reduce_scatter_coalesced(full_grads_for_rank, process_group)
 
-        if self.postscale_gradients and self.gradient_predivide_factor != 1.0 and self.gradient_predivide_factor != dist.get_world_size(
-                process_group):
+        if self.postscale_gradients and self.gradient_predivide_factor != 1.0:
             grad_partitions_for_rank = [g.mul(self.gradient_predivide_factor) for g in grad_partitions_for_rank]
 
         partition_world_size = dist.get_world_size(group=process_group)
-        averaging_world_size = self._gradient_averaging_world_size(params_to_reduce, partition_world_size)
+        averaging_world_size = self._gradient_averaging_world_size(params_to_reduce, partition_world_size) / float(
+            self.sequence_parallel_size)
         if averaging_world_size != partition_world_size:
             scale = partition_world_size / float(averaging_world_size)
             grad_partitions_for_rank = [g.mul(scale) for g in grad_partitions_for_rank]
@@ -4074,9 +4075,58 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
     # Restore base optimizer fp32 weights from ZeRO fp16 weights
     def _restore_from_bit16_weights(self):
-        for fp16_partitions, fp32_partition in zip(self.fp16_partitioned_groups_flat,
-                                                   self.fp32_partitioned_groups_flat):
-            fp32_partition.data.copy_(fp16_partitions.data)
+        for sub_group_id, fp32_partition in enumerate(self.fp32_partitioned_groups_flat):
+            swappable = self._swappable_optimizer_subgroup(sub_group_id)
+            if swappable:
+                self._optimizer_states_and_gradient_swap_in(sub_group_id)
+            try:
+                fp16_partitions = self.fp16_partitioned_groups_flat[sub_group_id]
+                if fp16_partitions is None:
+                    self._swap_in_sub_group_to_flat_buffer(fp32_partition, sub_group_id)
+                else:
+                    fp32_partition.data.copy_(fp16_partitions.data)
+                if swappable:
+                    self.optimizer_swapper.swap_out_optimizer_state(parameter=fp32_partition, async_swap=False)
+            finally:
+                if swappable:
+                    self.optimizer_swapper.release_swap_buffers(parameter=fp32_partition)
+                    fp32_partition.grad = None
+
+    def load_module_only_nvme_checkpoint(self, state_dict, checkpoint_swap_folder):
+        from shutil import copyfile
+
+        saved_groups = state_dict[FP32_FLAT_GROUPS]
+        if len(saved_groups) != len(self.fp32_partitioned_groups_flat):
+            raise RuntimeError("NVMe module-only checkpoint load requires matching optimizer subgroups")
+        # The engine has matched the ordered parameter names and shapes. IDs address each engine's own swap files.
+        source_paths = {}
+        for sub_group_id, (current, saved) in enumerate(zip(self.fp32_partitioned_groups_flat, saved_groups)):
+            saved_id = getattr(saved, 'ds_id', None)
+            if (not isinstance(saved_id, str) or not re.fullmatch(r'[0-9]+_[0-9]+', saved_id)
+                    or saved_id in source_paths or saved.dtype != current.dtype):
+                raise RuntimeError("NVMe module-only checkpoint load requires matching optimizer subgroup layout")
+            source_path = SwapTensorContext(saved, checkpoint_swap_folder).swap_path
+            swappable = self._swappable_optimizer_subgroup(sub_group_id)
+            if swappable != os.path.isfile(source_path):
+                raise RuntimeError("NVMe module-only checkpoint load requires matching optimizer subgroup storage")
+            numel = self.fp16_partitioned_groups_flat_numel[sub_group_id]
+            if swappable:
+                swap_numel = self.optimizer_swapper._io_aligned_numel(numel)
+                if os.path.getsize(source_path) != swap_numel * current.element_size():
+                    raise RuntimeError("NVMe module-only checkpoint load requires matching swap file sizes")
+            elif saved.numel() != numel:
+                raise RuntimeError("NVMe module-only checkpoint load requires matching optimizer subgroup sizes")
+            source_paths[saved_id] = source_path
+
+        for sub_group_id, (current, saved) in enumerate(zip(self.fp32_partitioned_groups_flat, saved_groups)):
+            if self._swappable_optimizer_subgroup(sub_group_id):
+                swap_info = self.optimizer_swapper.swap_params_info[self.optimizer_swapper.parameter_id(current)]
+                copyfile(source_paths[saved.ds_id], swap_info.get_swap_paths()[0])
+            else:
+                current.data.copy_(saved.data)
+
+        # Materialize the model weights from the restored masters.
+        self.reset_swap_buffers()
 
     # Refresh the fp32 master params from the fp16 copies.
     def refresh_fp32_params(self):

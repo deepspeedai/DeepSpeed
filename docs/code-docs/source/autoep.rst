@@ -64,13 +64,16 @@ including models built under ``deepspeed.zero.Init``. Stage 3 AutoEP checkpoints
 partition-natively in the ``zero_pp_rank_*`` shard files and support
 same-topology load, module-only loads (``load_module_only``),
 optimizer-state-free loads (``load_optimizer_states=False``), and Universal
-Checkpoint conversion, except with AutoTP folding. Optimizer-including
+Checkpoint conversion, also with AutoTP folding. Optimizer-including
 Universal Checkpoint loads can
 resume with a different data-parallel world size, a different ``autoep_size``,
-or both, when the target ``autoep_size`` divides the model's expert count.
+a different ``tensor_parallel.autotp_size`` (folded or not), or any
+combination, when the target ``autoep_size`` divides the model's expert count
+and, with ``tensor_parallel.autotp_size > 1``, is greater than 1 (folding
+requires expert parallelism).
 Weights-only/module-only Universal Checkpoint loads use the converted
-``fp32.pt`` parameter files and support the same data-parallel and
-``autoep_size`` topology changes.
+``fp32.pt`` parameter files and support the same data-parallel,
+``autoep_size`` and ``tensor_parallel.autotp_size`` changes.
 
 **Usage:**
 
@@ -161,6 +164,38 @@ directly compute them locally when constructing the return value, preserving
 that return contract and its gradients. No router-logit tensor is stored on
 the layer, so checkpoint replay early-stop and exceptions cannot leave a
 router-logit cache keeping the autograd graph alive between training steps.
+
+**Routing replay (opt-in):**
+
+AutoEP normally selects experts on every forward. A ``RoutingReplay`` object
+can instead record those IDs for activation-checkpoint recomputation or accept
+IDs captured by a rollout worker. During replay, the router skips expert and
+group top-k selection, then evaluates the current gate for the stored IDs, so
+router gradients are preserved.
+
+.. code-block:: python
+
+    from deepspeed.moe.routing_replay import RoutingReplay, attach_routing_replay
+
+    routing = RoutingReplay()
+    attach_routing_replay(engine.module, routing)
+    with routing.recording():
+        loss = checkpointed_step(batch)
+    with routing.replaying():
+        loss.backward()
+
+For rollout routes, call ``set_replay_data(layer_name, selected_experts)`` with
+an integer ``[tokens, top_k]`` tensor before the training forward. This external
+route path covers that forward; it does not retain rollout routes for a later
+activation-checkpoint recomputation. The layer names are the names returned by
+``model.named_modules()`` after AutoEP replacement. The replay object belongs to
+one model; create a separate object for actor and reference models. The tensor
+must follow the flattened token order used by the training forward; this API
+does not remap packed or sequence-parallel routes. Recorded checkpoint queues
+are consumed in the same layer and micro-batch order in which they were
+recorded, so callers using interleaved checkpoint segments should provide
+per-forward route tensors instead. Attach replay only to routers whose forwards
+will be replayed; unused recorded queues are not automatically discarded.
 
 **Communication backend (optional):**
 
@@ -826,10 +861,12 @@ Requirements and limits:
 - AutoEP with ZeRO Stage 3 is supported only without sequence parallelism,
   hpZeRO secondary tensor groups, non-1 expert tensor parallelism, or
   quantized gradients.
-- Regular checkpoint save/load requires matching ``autoep_size``. To change
-  ``autoep_size`` or data-parallel world size across runs for the same
-  AutoEP-detected model topology, convert the checkpoint to Universal
-  Checkpoint format and load it with ``checkpoint.load_universal``; see the
+- Regular checkpoint save/load requires matching ``autoep_size`` and, under
+  folding, matching ``tensor_parallel.autotp_size``. To change
+  ``autoep_size``, ``tensor_parallel.autotp_size`` or data-parallel world size
+  across runs for the same AutoEP-detected model topology, convert the
+  checkpoint to Universal Checkpoint format and load it with
+  ``checkpoint.load_universal``; see the
   `Universal Checkpointing tutorial </tutorials/universal-checkpointing/>`__
   for the detailed flow and constraints.
 - DeepSeek-V2 and DeepSeek-V3 AutoEP do not support load-balance expert bias

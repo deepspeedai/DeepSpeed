@@ -63,6 +63,7 @@ CURRICULUM_LEARNING_CURRENT_DIFFICULTIES = "current_difficulties"
 CURRICULUM_LEARNING_DATA_CLUSTER_PATHS = "data_cluster_paths"
 CURRICULUM_LEARNING_DATA_CLUSTER_CURRENT_POSITION = "data_cluster_current_position"
 CURRICULUM_LEARNING_NP_RNG_STATE = "np_rng_state"
+CURRICULUM_LEARNING_SAMPLER_RNG_STATE = "sampler_rng_state"
 
 #########################################
 # Data efficiency - Dynamic batching and LR scaling
