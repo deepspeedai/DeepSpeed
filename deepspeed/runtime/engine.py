@@ -18,6 +18,7 @@ from torch.nn.parameter import Parameter
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import _LRScheduler
 from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
+from torch.utils._pytree import tree_map_only
 from contextlib import contextmanager
 from contextvars import ContextVar
 from threading import Lock
@@ -1022,12 +1023,14 @@ class DeepSpeedEngine(Module):
 
         self.first_dataloader_check = None
 
+        # Send CPU copies: a pickled device tensor is restored on the sender's device.
         def check_dataloader_inputs_same_across_ranks(module, args, kwargs):
 
             def broadcast_and_check(args, bcast_rank, bcast_group):
                 if isinstance(args, tuple):
                     args = list(args)
                 if len(args) > 0:
+                    args = tree_map_only(torch.Tensor, lambda t: t.detach().cpu(), args)
                     if self.mpu.get_tensor_model_parallel_rank() == 0:
                         _src_args = [args]
                         dist.broadcast_object_list(object_list=_src_args,
