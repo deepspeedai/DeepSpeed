@@ -7,6 +7,9 @@ import copy
 import math
 import os
 import sys
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier, Event, Thread
+from time import monotonic
 import warnings
 import torch
 import numpy as np
@@ -115,6 +118,132 @@ def test_cpu_adam_strict_state_updates(model_size, adamw_mode, weight_decay, bia
         torch.testing.assert_close(state['exp_avg_sq'], ref_exp_avg_sq, rtol=3e-5, atol=2e-6)
 
 
+@pytest.mark.parametrize('fused', [False, True])
+def test_cpu_adam_concurrent_updates(fused):
+    from deepspeed.ops.adam import DeepSpeedCPUAdam
+
+    if fused and get_accelerator().device_name() != 'cpu':
+        pytest.skip("requires the CPU fused Adam implementation")
+
+    barrier = Barrier(2)
+    cases = []
+    for index in range(2):
+        generator = torch.Generator().manual_seed(71 + index)
+        parameter = torch.nn.Parameter(torch.randn(1048579, generator=generator))
+        reference = torch.nn.Parameter(parameter.detach().clone())
+        options = dict(lr=0.001 + index * 0.004,
+                       betas=(0.85 - index * 0.1, 0.97 - index * 0.03),
+                       eps=1e-7,
+                       weight_decay=0.07)
+        optimizer = (FusedAdam if fused else DeepSpeedCPUAdam)([parameter], **options)
+        expected = torch.optim.AdamW([reference], foreach=False, **options)
+        gradients = [torch.randn(parameter.shape, generator=generator) for _ in range(4)]
+        cases.append((parameter, reference, optimizer, expected, gradients))
+
+    def update(case):
+        parameter, reference, optimizer, expected, gradients = case
+        for gradient in gradients:
+            parameter.grad = gradient
+            reference.grad = gradient
+            barrier.wait(timeout=30)
+            optimizer.step()
+            expected.step()
+            torch.testing.assert_close(parameter, reference, rtol=3e-5, atol=2e-6)
+            for key in ('exp_avg', 'exp_avg_sq'):
+                torch.testing.assert_close(optimizer.state[parameter][key],
+                                           expected.state[reference][key],
+                                           rtol=3e-5,
+                                           atol=2e-6)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        list(executor.map(update, cases))
+
+
+def test_cpu_adam_concurrent_grad_scale_same_optimizer():
+    params = [torch.zeros(1 << 18, device='cpu', dtype=torch.float32) for _ in range(2)]
+    beta1, beta2 = 0.5, 0.75
+    optimizer = DeepSpeedCPUAdam(params, betas=(beta1, beta2))
+    if not optimizer.grad_scale_supported():
+        pytest.skip("this CPU Adam build cannot apply grad_scale")
+
+    op = optimizer.ds_opt_adam
+    barrier = Barrier(2)
+    steps = 4
+
+    def update(param, grad_scale):
+        grad = torch.ones_like(param)
+        exp_avg = torch.zeros_like(param)
+        exp_avg_sq = torch.zeros_like(param)
+        for step in range(1, steps + 1):
+            args = (optimizer.opt_id, step, 1e-3, beta1, beta2, 1e-8, 0.0, True, param, grad, exp_avg, exp_avg_sq)
+            barrier.wait(timeout=30)
+            if grad_scale == 1.0:
+                op.adam_update(*args)
+            else:
+                op.adam_update_scaled(*args, grad_scale)
+
+        torch.testing.assert_close(exp_avg, torch.full_like(param, grad_scale * (1 - beta1**steps)))
+        torch.testing.assert_close(exp_avg_sq, torch.full_like(param, grad_scale**2 * (1 - beta2**steps)))
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        list(executor.map(update, params, (1.0, 0.25)))
+
+
+@pytest.mark.parametrize('fused', [False, True])
+def test_cpu_adam_native_update_releases_gil(fused):
+    if fused and get_accelerator().device_name() != 'cpu':
+        pytest.skip("requires the CPU fused Adam implementation")
+
+    parameter = torch.nn.Parameter(torch.ones(16 * 1024 * 1024))
+    parameter.grad = torch.ones_like(parameter)
+    optimizer = (FusedAdam if fused else DeepSpeedCPUAdam)([parameter])
+    optimizer.step()
+    state = optimizer.state[parameter]
+    if fused:
+        native_update = optimizer.multi_tensor_adam
+        args = (65536, optimizer._dummy_overflow_buf, [[parameter.grad], [parameter], [state['exp_avg']],
+                                                       [state['exp_avg_sq']]], 0.001, 0.9, 0.999, 1e-8, 2, 1, 1, 0.0)
+    else:
+        native_update = optimizer.ds_opt_adam.adam_update
+        args = (optimizer.opt_id, 2, 0.001, 0.9, 0.999, 1e-8, 0.0, True, parameter, parameter.grad, state['exp_avg'],
+                state['exp_avg_sq'])
+
+    ready = Event()
+    stop = Event()
+    progressed = Event()
+    updating = False
+
+    def observe():
+        ready.set()
+        while not stop.wait(0.001):
+            if updating:
+                progressed.set()
+                return
+
+    observer = Thread(target=observe, daemon=True)
+    switch_interval = sys.getswitchinterval()
+    observer.start()
+    try:
+        assert ready.wait(timeout=5), "Python observer did not start"
+        # Exclude interpreter scheduling between the flag changes and the native call.
+        # All tensors and arguments are prepared before this interval.
+        sys.setswitchinterval(60)
+        deadline = monotonic() + 5
+        for _ in range(20):
+            updating = True
+            native_update(*args)
+            updating = False
+            if progressed.is_set() or monotonic() >= deadline:
+                break
+        assert progressed.is_set(), "Python thread made no progress during native Adam updates"
+    finally:
+        updating = False
+        sys.setswitchinterval(switch_interval)
+        stop.set()
+        observer.join(timeout=5)
+    assert not observer.is_alive()
+
+
 @pytest.mark.parametrize('model_size', [3, 17, 513, 524289])
 @pytest.mark.parametrize('adamw_mode,weight_decay', [(True, 0.0), (True, 0.07), (False, 0.07)])
 @pytest.mark.parametrize('grad_scale', [0.37, 1.0])
@@ -218,6 +347,30 @@ def test_cpu_adam_bf16_copy_runs_step_hooks():
     assert calls == ["pre", "post"]
     assert not [w for w in caught if "optimizer.step()" in str(w.message)]
     assert torch.equal(copy, param.detach().to(torch.bfloat16))
+
+
+def test_cpu_adam_updates_non_contiguous_param():
+    from deepspeed.ops.adam import DeepSpeedCPUAdam
+
+    initial = torch.randn(6, 5).t()
+    cpu_param = torch.nn.Parameter(initial.clone(memory_format=torch.preserve_format))
+    assert not cpu_param.is_contiguous()
+    ref_param = initial.clone()
+    ref_exp_avg = torch.zeros_like(ref_param)
+    ref_exp_avg_sq = torch.zeros_like(ref_param)
+    optimizer = DeepSpeedCPUAdam([cpu_param], lr=1e-2, weight_decay=0.01)
+
+    for step in range(1, 4):
+        grad = torch.randn_like(ref_param)
+        cpu_param.grad = grad
+        optimizer.step()
+        _reference_adam_step(ref_param, grad, ref_exp_avg, ref_exp_avg_sq, step, 1e-2, (0.9, 0.999), 1e-8, 0.01, True,
+                             True)
+
+    state = optimizer.state[cpu_param]
+    torch.testing.assert_close(cpu_param, ref_param, rtol=3e-5, atol=2e-6)
+    torch.testing.assert_close(state['exp_avg'], ref_exp_avg, rtol=3e-5, atol=2e-6)
+    torch.testing.assert_close(state['exp_avg_sq'], ref_exp_avg_sq, rtol=3e-5, atol=2e-6)
 
 
 def test_cpu_adam_rejects_amsgrad():
@@ -581,6 +734,23 @@ class TestCPUAdamSubgroup(DistributedTest):
 
         # Verify step count decremented
         assert optimizer.state[subgroup_id]['step'] == 0, "Step count should be decremented after rollback"
+
+    def test_rollback_of_first_step_keeps_exp_avg_sq_non_negative(self):
+        """exp_avg_sq is 0 before the first step. Rolling that step back must not leave it negative, because sqrt()
+        of a negative value in the next step turns the parameter into NaN."""
+        from deepspeed.ops.adam import DeepSpeedCPUAdam
+
+        model_size = 4096
+        param = torch.nn.Parameter(torch.randn(model_size, device='cpu'))
+        optimizer = DeepSpeedCPUAdam([param])
+        param.grad = torch.randn(model_size, device='cpu')
+
+        optimizer.step_subgroup(0)
+        optimizer.rollback_subgroup(0)
+        assert (optimizer.state[0]['exp_avg_sq'] >= 0).all()
+
+        optimizer.step_subgroup(0)
+        assert torch.isfinite(param.data).all()
 
     def test_rollback_subgroup_uninitialized_error(self):
         """Test that rollback_subgroup raises error for uninitialized subgroup."""

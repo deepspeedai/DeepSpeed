@@ -142,11 +142,6 @@ def validate_autoep_config(
 
     # Reject configurations that would bypass the requested fused reduction.
     if config.combine_impl == "fused_weighted_sum":
-        if tp_size > 1:
-            raise ValueError('combine_impl="fused_weighted_sum" does not support folded tensor parallelism '
-                             f"(tensor_parallel.autotp_size={tp_size}), which restores combined tokens from "
-                             "assignment metadata instead of the weighted reduction it implements. Set "
-                             'tensor_parallel.autotp_size to 1, or leave combine_impl unset.')
         if config.expert_tensor_parallel_size > 1:
             raise ValueError('combine_impl="fused_weighted_sum" requires expert_tensor_parallel_size=1, but got '
                              f"{config.expert_tensor_parallel_size}. Set expert_tensor_parallel_size to 1, or leave "
@@ -476,6 +471,10 @@ def validate_autoep_post_detection(
                 raise ValueError(f"num_limited_groups ({num_limited_groups}) must be <= "
                                  f"num_expert_groups ({num_expert_groups}) in layer "
                                  f"'{spec.moe_module_name}'")
+            candidates = (spec.num_experts // num_expert_groups) * num_limited_groups
+            if spec.top_k > candidates:
+                raise ValueError(f"top_k={spec.top_k} exceeds the {candidates} experts available in the selected "
+                                 f"{num_limited_groups} group(s) in layer '{spec.moe_module_name}'")
 
 
 def _divisors(n: int) -> list[int]:

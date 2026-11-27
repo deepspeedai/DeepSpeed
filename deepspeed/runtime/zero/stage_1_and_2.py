@@ -123,7 +123,7 @@ class IPGBucket:
     has_moe_params: bool = False
     ready_events: dict = field(default_factory=dict)
     reuse_events: dict = field(default_factory=dict)
-    # Streams that issued copies into buffer[index] for the current bucket fill.
+    # Streams that produced the gradients of the current bucket fill, oversized ones included.
     # average_tensor must wait on all of them before reducing the bucket, since the
     # copies can be produced on multiple streams (e.g. under torch.compile gradient
     # hooks run on different autograd streams), not just the current one (#8061).
@@ -1516,11 +1516,16 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
     ############### Independent Partition Gradient ########################
     def _record_gradient_stream(self, tensor, stream):
         accelerator = get_accelerator()
-        if self._offload_gradient_safety_enabled and not accelerator.resolves_data_dependency():
+        if self._gradient_stream_safety_enabled() and not accelerator.resolves_data_dependency():
             tensor.record_stream(stream)
 
+    def _gradient_stream_safety_enabled(self):
+        # Hooks may produce gradients and fill the bucket on several streams. overlap_comm without offload
+        # orders the bucket reads with copy_streams instead, and ZenFlow orders its own reduction.
+        return self._offload_gradient_safety_enabled or not (self.overlap_comm or self.zenflow)
+
     def _record_bucket_producer(self, bucket):
-        if self._offload_gradient_safety_enabled and not get_accelerator().resolves_data_dependency():
+        if self._gradient_stream_safety_enabled() and not get_accelerator().resolves_data_dependency():
             stream = get_accelerator().current_stream()
             event = get_accelerator().Event()
             event.record(stream)
@@ -1563,12 +1568,12 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 if self._offload_gradient_safety_enabled:
                     # Unlike contiguous(), clone guarantees independent storage.
                     grad_reduc.data = grad_reduc.detach().clone(memory_format=torch.contiguous_format)
-                # Oversized gradients bypass the contiguous buffer. Event tracking
-                # below covers them too; legacy copy_streams only covers buckets.
+                # Oversized gradients bypass the contiguous buffer. Producer tracking
+                # below covers them too.
                 self.extra_large_param_to_reduce[comm_dtype] = param
             else:
                 # keeping the gradients contiguous to prevent memory fragmentation, and avoid flattening
-                if self._offload_gradient_safety_enabled and bucket.index in bucket.reuse_events:
+                if self._gradient_stream_safety_enabled() and bucket.index in bucket.reuse_events:
                     # Every producer must wait, not only the first writer to this buffer.
                     get_accelerator().current_stream().wait_event(bucket.reuse_events[bucket.index])
                 new_grad_tensor = bucket.buffer[bucket.index].narrow(0, bucket.elements, param.numel())
@@ -1578,10 +1583,10 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 grad_reduc.data = new_grad_tensor.data.view_as(grad_reduc) if (
                     not self.zenflow or grad_reduc.dim() == 1) else new_grad_tensor.data.view_as(
                         grad_reduc.transpose(0, 1))
-                # Record the stream this copy ran on so average_tensor can wait on
-                # every producer of the bucket, not just the current stream (#8061).
-                if self.overlap_comm and not get_accelerator().resolves_data_dependency():
-                    bucket.copy_streams.add(get_accelerator().current_stream())
+            # Record the stream that produced this gradient so average_tensor can wait on
+            # every producer of the bucket, not just the current stream (#8061).
+            if self.overlap_comm and not get_accelerator().resolves_data_dependency():
+                bucket.copy_streams.add(get_accelerator().current_stream())
 
         self._record_bucket_producer(bucket)
         bucket.elements += param.numel()
@@ -1620,9 +1625,9 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
             dist.all_reduce(tensor_to_allreduce, group=self.dp_process_group)
 
-            if self.gradient_predivide_factor != dp_world_size:
-                tensor_to_allreduce.mul_(self.gradient_predivide_factor /
-                                         (dp_world_size / float(self.sequence_parallel_size)))
+            averaging_size = dp_world_size / float(self.sequence_parallel_size)
+            if self.gradient_predivide_factor != averaging_size:
+                tensor_to_allreduce.mul_(self.gradient_predivide_factor / averaging_size)
         else:
             tensor_to_allreduce.div_(dp_world_size / float(self.sequence_parallel_size))
             dist.all_reduce(tensor_to_allreduce, group=self.dp_process_group)
@@ -1709,7 +1714,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
     def average_tensor(self, tensor: torch.Tensor, communication_data_type: torch.dtype):
         # Imported here because importing Muon compiles its kernels, which slows down import deepspeed.
         from deepspeed.runtime.zero.muon.muon_optimizer import MuonWithAuxAdam
-        if self._offload_gradient_safety_enabled:
+        if self._gradient_stream_safety_enabled():
             stream = self.reduction_stream if self.overlap_comm else get_accelerator().current_stream()
             for event in self.ipg_buckets[communication_data_type].ready_events.values():
                 stream.wait_event(event)
@@ -2292,6 +2297,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         self.grads_in_partition_offset += param.numel()
 
     def reduce_ipg_grads(self, comm_dtype=None):
+        stream = self.reduction_stream if self.overlap_comm else get_accelerator().current_stream()
         dtypes = sort_dtypes(self.ipg_buckets.keys())
         if comm_dtype is not None:
             dtypes = [comm_dtype]
@@ -2322,6 +2328,11 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 else:
                     self.average_tensor(bucket.buffer[bucket.index].narrow(0, 0, bucket.elements), comm_dtype)
             else:
+                # The fallback reads the gradients themselves, which a non-owner frees right after this flush.
+                for event in bucket.ready_events.values():
+                    stream.wait_event(event)
+                for grad in bucket.grads:
+                    self._record_gradient_stream(grad, stream)
                 if any(self._use_compact_grad_partition_buffer(group_idx) for group_idx, _, _ in bucket.params):
                     self._buffered_reduce_fallback_preserving_fp32(bucket.grads,
                                                                    bucket.params,
@@ -2329,16 +2340,6 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                                                                    elements_per_buffer=bucket.elements)
                 else:
                     self.buffered_reduce_fallback(None, bucket.grads, comm_dtype, elements_per_buffer=bucket.elements)
-
-        if self.overlap_comm:
-            stream = self.reduction_stream
-        elif self.cpu_offload:
-            # TODO: copy_grad_stream is disabled because of race with reduce. This hurts perf and should be fixed.
-            #            get_accelerator().synchronize()
-            #            stream = self.copy_grad_stream
-            stream = get_accelerator().current_stream()
-        else:
-            stream = get_accelerator().current_stream()
 
         with get_accelerator().stream(stream):
             for comm_dtype in dtypes:
@@ -2367,7 +2368,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                         if self.contiguous_gradients and self.is_param_in_current_partition[param_id]:
                             self.copy_grads_in_partition(param, group_idx)
                 # Empty and oversized reductions do not consume the contiguous buffer.
-                if (self._offload_gradient_safety_enabled and 0 < bucket.elements <= self.reduce_bucket_size
+                if (self._gradient_stream_safety_enabled() and 0 < bucket.elements <= self.reduce_bucket_size
                         and not get_accelerator().resolves_data_dependency()):
                     event = get_accelerator().Event()
                     event.record(stream)
@@ -3402,6 +3403,13 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                                             dtype=self._gradient_reduction_buffer_dtype(),
                                             device=get_accelerator().current_device_name())
                         bucket.buffer.append(buf_1)
+
+                if self._gradient_stream_safety_enabled() and not get_accelerator().resolves_data_dependency():
+                    # The allocator may reuse a block that still has work queued on this stream: order first writes.
+                    allocated = get_accelerator().Event()
+                    allocated.record(get_accelerator().current_stream())
+                    for bucket in self.ipg_buckets.values():
+                        bucket.reuse_events = dict.fromkeys(range(len(bucket.buffer)), allocated)
 
             self.ready_for_gradients = True
 

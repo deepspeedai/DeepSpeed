@@ -4,6 +4,7 @@
 // DeepSpeed Team
 
 #include "cpu_adam.h"
+#include <pybind11/pybind11.h>
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
 {
