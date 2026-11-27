@@ -142,6 +142,96 @@ class TestPartitionWithoutFreeingData(DistributedTest):
         assert l.weight.numel() == 0, "partition() should free param.data by default"
 
 
+class TestNestingInitWithHpZ(DistributedTest):
+    world_size = [1, 2]
+
+    @pytest.mark.parametrize("hpz_size", [2, 4])
+    def test(self, hpz_size):
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 1,
+            "zero_optimization": {
+                "stage": 3,
+                "zero_hpz_partition_size": hpz_size,
+            },
+        }
+
+        with deepspeed.zero.Init(config_dict_or_path=config_dict):
+            with deepspeed.zero.Init(config_dict_or_path=config_dict):
+                model = torch.nn.Linear(4, 4)
+
+        assert hasattr(model.weight, "ds_id")
+        assert model.weight.ds_zero_param_process_group is not None
+        assert dist.get_world_size(group=model.weight.ds_zero_param_process_group) == min(
+            hpz_size, dist.get_world_size())
+
+
+class TestNestingInitWithHpZSubgroups(DistributedTest):
+    world_size = 4
+    non_daemonic_procs = True
+
+    @pytest.mark.parametrize("layout", ["aligned", "crossed", "partial"])
+    @pytest.mark.parametrize("group_arg", ["data_parallel_group", "sequence_data_parallel_group"])
+    def test_membership(self, layout, group_arg):
+        if layout == "aligned":
+            rank_groups = [[0, 1], [2, 3]]
+        elif layout == "crossed":
+            rank_groups = [[0, 2], [1, 3]]
+        else:
+            # Only rank 2 sees a crossing HPZ group in the first DP group.
+            rank_groups = [[0, 1, 2], [3]]
+
+        for ranks in rank_groups:
+            group = dist.new_group(ranks)
+            if dist.get_rank() in ranks:
+                dp_group = group
+
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 1,
+            "zero_optimization": {
+                "stage": 3,
+                "zero_hpz_partition_size": 2
+            },
+        }
+
+        model = torch.nn.Linear(4, 4, bias=False)
+        with deepspeed.zero.Init(config_dict_or_path=config_dict):
+            if layout != "aligned":
+                with pytest.raises(RuntimeError, match="outside.*data parallel group"):
+                    with deepspeed.zero.Init(module=model, config_dict_or_path=config_dict, **{group_arg: dp_group}):
+                        pass
+                return
+
+            with deepspeed.zero.Init(module=model, config_dict_or_path=config_dict, **{group_arg: dp_group}):
+                pass
+
+        expected = float(dist.get_global_rank(dp_group, 0) + 1)
+        with deepspeed.zero.GatheredParameters(model.weight, modifier_rank=0):
+            with torch.no_grad():
+                model.weight.fill_(expected)
+        with deepspeed.zero.GatheredParameters(model.weight):
+            assert torch.all(model.weight == expected)
+
+    def test_incompatible_size(self):
+        outer_config = {
+            "train_micro_batch_size_per_gpu": 1,
+            "zero_optimization": {
+                "stage": 3,
+                "zero_hpz_partition_size": 2
+            },
+        }
+        inner_config = {
+            "train_micro_batch_size_per_gpu": 1,
+            "zero_optimization": {
+                "stage": 3,
+                "zero_hpz_partition_size": 4
+            },
+        }
+        with deepspeed.zero.Init(config_dict_or_path=outer_config):
+            with pytest.raises(RuntimeError, match="different size"):
+                with deepspeed.zero.Init(config_dict_or_path=inner_config):
+                    pass
+
+
 class TestGatheredParametersAllRanksErrorOnModification(DistributedTest):
     world_size = 2
 
