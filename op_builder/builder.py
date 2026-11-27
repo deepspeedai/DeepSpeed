@@ -852,6 +852,8 @@ class CUDAOpBuilder(OpBuilder):
         # PyTorch's build to read, so the caller's value is put back afterwards.
         torch_arch_list_present = "TORCH_CUDA_ARCH_LIST" in os.environ
         torch_arch_list = os.environ.get("TORCH_CUDA_ARCH_LIST")
+        rocm_arch_list_present = "PYTORCH_ROCM_ARCH" in os.environ
+        rocm_arch_list = os.environ.get("PYTORCH_ROCM_ARCH")
         normalized_arch_list = torch_arch_list.strip() if torch_arch_list is not None else None
         self._jit_arch_list = normalized_arch_list or None
         saved_jit_mode = self.jit_mode
@@ -863,6 +865,10 @@ class CUDAOpBuilder(OpBuilder):
                 os.environ["TORCH_CUDA_ARCH_LIST"] = torch_arch_list
             else:
                 os.environ.pop("TORCH_CUDA_ARCH_LIST", None)
+            if rocm_arch_list_present:
+                os.environ["PYTORCH_ROCM_ARCH"] = rocm_arch_list
+            else:
+                os.environ.pop("PYTORCH_ROCM_ARCH", None)
             self._jit_arch_list = None
             self.jit_mode = saved_jit_mode
 
