@@ -22,6 +22,7 @@ from deepspeed.checkpoint.affine import AFFINE_MAP_FORMAT_VERSION, contiguous_sp
 from deepspeed.checkpoint.constants import (AFFINE_MAP, AFFINE_MAP_PARAMS, AFFINE_MAP_VERSION,
                                             PARAMETER_WITH_ROW_PARALLELISM_PATTERNS, TP_REPLICATED_PARAMETER_PATTERNS)
 from deepspeed.checkpoint.ds_to_universal import main as convert_to_universal
+from deepspeed.checkpoint.universal_checkpoint import _shape_flat_universal_state
 from deepspeed.pipe import PipelineModule
 from deepspeed.runtime.pipe.topology import PipeModelDataParallelTopology
 from deepspeed.runtime.zero.utils import ZeRORuntimeException
@@ -492,6 +493,21 @@ class TestUniversalCheckpointAcrossZeROStagesRejects(DistributedTest):
         target = self._build(target_stage, hidden_dim, one_group=True, load_universal=True)
         with pytest.raises(ZeRORuntimeException, match="only one of the Adam moments"):
             target.load_checkpoint(tmpdir, tag=universal_tag)
+
+    def test_tp_sharded_target_rejects_bare_source(self, source_stage, target_stage):
+        """A ds_to_universal conversion from ZeRO-3 writes one bare flat tensor per parameter, without a
+        tensor-parallel layout. A tensor-parallel target shard is smaller than it, so the load must
+        reject the mismatch rather than slice a full tensor into a shard. Only the (3, 2) direction
+        can reach the guard, since a ZeRO-1/2 source already records per-rank shards."""
+        if source_stage != 3:
+            return
+        full = torch.arange(8)
+        shard = torch.nn.Parameter(torch.zeros(4))
+        with pytest.raises(ValueError, match=re.escape("only without tensor parallelism")):
+            _shape_flat_universal_state(shard, full, "moment.pt")
+        # A non-parallel target takes the whole tensor.
+        whole = torch.nn.Parameter(torch.zeros(8))
+        assert torch.equal(_shape_flat_universal_state(whole, full, "moment.pt"), full)
 
 
 @pytest.mark.parametrize("source_stage,target_stage", [(3, 1), (3, 2), (1, 3), (2, 3)])
