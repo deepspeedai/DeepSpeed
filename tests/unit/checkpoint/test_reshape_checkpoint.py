@@ -9,9 +9,12 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from deepspeed.checkpoint import DeepSpeedCheckpoint, ZeROCheckpoint, get_model_3d_descriptor, model_3d_desc
-from deepspeed.checkpoint.constants import (AUTOEP_LAYERS_KEY, CHECKPOINT_PARALLEL_DIMS, CHECKPOINT_PP_DEGREE,
-                                            CHECKPOINT_TP_DEGREE, PARAM_SHAPES, UNIVERSAL_CHECKPOINT_INFO)
+from deepspeed.checkpoint import (DeepSpeedCheckpoint, ZeROCheckpoint, get_model_3d_descriptor, merge_state,
+                                  model_3d_desc)
+from deepspeed.checkpoint.constants import (AUTOEP_LAYERS_KEY, BASE_OPTIMIZER_STATE, CHECKPOINT_PARALLEL_DIMS,
+                                            CHECKPOINT_PP_DEGREE, CHECKPOINT_TP_DEGREE, GROUP_PADDINGS,
+                                            OPTIMIZER_STATE_DICT, PARAM_SHAPES, PARTITION_COUNT,
+                                            UNIVERSAL_CHECKPOINT_INFO)
 from deepspeed.checkpoint.ds_to_universal import _aggregate_autoep_zero12_metadata
 from deepspeed.runtime.engine import _checkpoint_parallel_metadata
 
@@ -122,3 +125,49 @@ def test_checkpoint_writer_discovery_and_consumers_load_model_files_once(tmpdir,
     assert checkpoint.get_checkpoint_info(UNIVERSAL_CHECKPOINT_INFO) == {"source": "writer"}
     assert (checkpoint.pp_degree, checkpoint.tp_degree, checkpoint.dp_degree) == (2, 1, 2)
     assert model_loads == checkpoint.mp_rank_files
+
+
+def _write_zero12_optim_checkpoint(tmpdir, dp_degree):
+    """Write a dp_degree-way ZeRO 1/2 checkpoint holding a real torch optimizer state_dict."""
+    torch.save({PARAM_SHAPES: [{}], "ds_config": {}}, os.path.join(str(tmpdir), "mp_rank_00_model_states.pt"))
+    for dp_rank in range(dp_degree):
+        param = torch.nn.Parameter(torch.ones(8))
+        optimizer = torch.optim.AdamW([param], lr=1e-3)
+        param.grad = torch.ones(8)
+        optimizer.step()
+        state = {
+            OPTIMIZER_STATE_DICT: {
+                BASE_OPTIMIZER_STATE: optimizer.state_dict(),
+                GROUP_PADDINGS: [0],
+                PARTITION_COUNT: [dp_degree],
+            }
+        }
+        torch.save(state, os.path.join(str(tmpdir), f"bf16_zero_pp_rank_{dp_rank}_mp_rank_00_optim_states.pt"))
+
+
+def test_reshape_merges_zero12_optimizer_state_with_scalar_step(tmpdir):
+    _write_zero12_optim_checkpoint(tmpdir, dp_degree=2)
+    checkpoint = ZeROCheckpoint(str(tmpdir))
+    checkpoint.reshape(model_3d_desc(pp_degree=1, tp_degree=1, dp_degree=1))
+
+    merged = checkpoint.get_state_for_rank(0, 0, 0)[OPTIMIZER_STATE_DICT][BASE_OPTIMIZER_STATE]["state"][0]
+
+    assert merged["exp_avg"].numel() == 16
+    assert merged["step"].dim() == 0
+
+
+def test_merge_state_keeps_keys_missing_from_the_second_dict():
+    dict_a = {"exp_avg": torch.ones(4), "rank_0_only": torch.ones(2)}
+    dict_b = {"exp_avg": torch.ones(4)}
+
+    merged = merge_state(dict_a, dict_b)
+
+    assert list(merged) == ["exp_avg", "rank_0_only"]
+    assert merged["exp_avg"].numel() == 8
+
+
+def test_merge_state_reports_the_full_key_path_on_mismatch(capsys):
+    with pytest.raises(ValueError, match="Cannot merge lists of different lengths"):
+        merge_state({"opt": {"groups": [1, 2]}}, {"opt": {"groups": [1]}})
+
+    assert "opt.groups" in capsys.readouterr().out
