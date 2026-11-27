@@ -34,10 +34,9 @@ class tensor_fragment:
         self.lp_fragment.data.copy_(self.hp_fragment.data)
 
     def get_optim_state_fragment(self, key):
-        if key in self.optim_fragment:
+        if self.optim_fragment is not None and key in self.optim_fragment:
             return self.optim_fragment[key]
-        else:
-            raise ValueError(f'{key} not found in optimizer state fragment')
+        raise ValueError(f'{key} not found in optimizer state fragment')
 
     def set_optim_state_fragment(self, flat_hp_partition, optim_fragment):
         self.optim_fragment = {
@@ -84,8 +83,42 @@ def map_to_flat_opt_states(flat_hp_tensor, lp_tensors, optim_state, opt_keys):
         optim_state[hp_param][key] = buffer
 
 
+def _count_fragment_owners(owns_fragment, fragment_ready, group, device):
+    # Every rank has to see the same counts before the data collective.
+    if not owns_fragment:
+        fragment_ready = False
+    status = torch.tensor([1.0 if owns_fragment else 0.0, 1.0 if fragment_ready else 0.0],
+                          dtype=torch.float32,
+                          device=device)
+    dist.all_reduce(status, group=group)
+    return int(status[0]), int(status[1])
+
+
+def _optim_state_ready(mapping, optim_state_key):
+    if mapping is None or mapping.optim_fragment is None:
+        return False
+    return optim_state_key in mapping.optim_fragment
+
+
+def _grad_fragment_ready(mapping):
+    if mapping is None:
+        return False
+    if mapping.use_offload:
+        gradient_dict = mapping.offload_gradient_dict
+    else:
+        gradient_dict = mapping.gradient_dict
+    return gradient_dict.get(mapping.param_group_index) is not None
+
+
 def get_full_hp_param(self, optim_state_key=None):
     reduce_buffer = torch.zeros_like(self, dtype=torch.float32).flatten()
+    if optim_state_key is not None:
+        owns_fragment = self._hp_mapping is not None
+        ready = _optim_state_ready(self._hp_mapping, optim_state_key)
+        owners, ready_count = _count_fragment_owners(owns_fragment, ready, self._dp_group, reduce_buffer.device)
+        if owners > 0 and ready_count != owners:
+            raise ValueError(f'{optim_state_key} not found in optimizer state fragment')
+
     if self._hp_mapping is not None:
         lp_frag_address = self._hp_mapping.lp_fragment_address
         reduce_fragment = torch.narrow(reduce_buffer, 0, lp_frag_address.start, lp_frag_address.numel)
@@ -105,6 +138,12 @@ def set_full_hp_param(self, value, optim_state_key=None):
 
 def get_full_hp_grad(self):
     reduce_buffer = torch.zeros_like(self, dtype=torch.float32).flatten()
+    owns_fragment = self._hp_mapping is not None
+    ready = _grad_fragment_ready(self._hp_mapping)
+    owners, ready_count = _count_fragment_owners(owns_fragment, ready, self._dp_group, reduce_buffer.device)
+    if owners > 0 and ready_count != owners:
+        raise ValueError("Gradients are only available immediately after backward and before engine step")
+
     if self._hp_mapping is not None:
         lp_grad_fragment = self._hp_mapping.get_lp_grad_fragment(self._index_in_param_group)
         hp_grad_fragment = lp_grad_fragment.to(torch.float32).flatten()
