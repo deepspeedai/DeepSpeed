@@ -213,6 +213,7 @@ def main():
         local_rank = dist_rank % num_local_procs
         current_env["RANK"] = str(dist_rank)
         current_env["LOCAL_RANK"] = str(local_rank)
+        current_env["LOCAL_WORLD_SIZE"] = str(num_local_procs)
 
         # spawn the processes
         cmd = []
