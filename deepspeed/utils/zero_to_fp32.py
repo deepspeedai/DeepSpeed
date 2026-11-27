@@ -23,6 +23,7 @@ import os
 import re
 import gc
 import json
+from bisect import bisect_left, bisect_right
 import numpy as np
 from tqdm import tqdm
 from collections import OrderedDict
@@ -36,7 +37,6 @@ from deepspeed.checkpoint.constants import (DS_VERSION, OPTIMIZER_STATE_DICT, SI
                                             FROZEN_PARAM_SHAPES, FROZEN_PARAM_FRAGMENTS, AUTOEP_LAYERS_KEY,
                                             AUTOEP_LAYERS_KEY_LEGACY, AUTOEP_ZERO3_EXPERT_STATE_FORMAT_KEY,
                                             AUTOEP_ZERO3_PARTITIONED_EXPERT_STATE_FORMAT, PARAM_ALIGNMENT_PADDINGS)
-
 
 @dataclass
 class zero_model_state:
@@ -483,17 +483,12 @@ class GatheredTensor:
         world_size = len(self.flat_groups)
         pad_flat_param_chunks = []
 
+        start_group_id = bisect_right(self.flat_groups_offset, self.offset) - 1
+        end_group_id = bisect_left(self.flat_groups_offset, end_idx) - 1 if end_idx > self.offset else start_group_id
+
         for rank_i in range(world_size):
             # for each rank, we need to collect weights from related group/groups
             flat_groups_at_rank_i = self.flat_groups[rank_i]
-            start_group_id = None
-            end_group_id = None
-            for group_id in range(len(self.flat_groups_offset)):
-                if self.flat_groups_offset[group_id] <= self.offset < self.flat_groups_offset[group_id + 1]:
-                    start_group_id = group_id
-                if self.flat_groups_offset[group_id] < end_idx <= self.flat_groups_offset[group_id + 1]:
-                    end_group_id = group_id
-                    break
             # collect weights from related group/groups
             for group_id in range(start_group_id, end_group_id + 1):
                 flat_tensor = flat_groups_at_rank_i[group_id]

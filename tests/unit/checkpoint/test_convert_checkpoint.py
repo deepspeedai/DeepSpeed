@@ -18,7 +18,8 @@ from deepspeed.accelerator import get_accelerator
 import deepspeed.utils.zero_to_fp32 as zero_to_fp32
 import deepspeed.utils.zero_to_torch as zero_to_torch
 from deepspeed.utils.zero_to_fp32 import (convert_zero_checkpoint_to_fp32_state_dict,
-                                          convert_zero_checkpoint_to_state_dict, to_torch_tensor)
+                                          convert_zero_checkpoint_to_state_dict, to_torch_tensor,
+                                          GatheredTensor)
 from deepspeed.utils.zero_to_torch import main as zero_to_torch_main
 from unit.common import DistributedTest
 
@@ -38,6 +39,20 @@ def test_output_dtype_conversion_preserves_shared_tensors():
     with pytest.raises(ValueError, match="Unsupported output dtype"):
         to_torch_tensor(state_dict, dtype="int8")
 
+
+
+def test_gathered_tensor_contiguous_multiple_groups():
+    ranks, groups = 4, 3
+    flat = [[torch.full((10,), float(r * 10 + g), dtype=torch.float32) for g in range(groups)] for r in range(ranks)]
+    offsets = [0, 10, 20, 30]
+    gt = GatheredTensor(flat, offsets, offset=12, partitioned_numel=5, shape=torch.Size([20]))
+    res = gt.contiguous()
+    assert res.shape == (20,)
+    assert res.dtype == torch.float32
+    # Each rank contributes elements from group 1 (indices 12-17 within offset range 10-20 -> local indices 2..7)
+    for r in range(ranks):
+        expected_val = float(r * 10 + 1)
+        assert torch.all(res[r * 5:(r + 1) * 5] == expected_val)
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("return_empty_tensor", [False, True])
