@@ -100,10 +100,8 @@ def _assert_ulp_close(actual, expected, *, max_ulp, min_frac_within_1, label, at
     stats = _ulp_stats(actual, expected)
     message = (f"{label} ULP stats: max={stats['max']}, median={stats['median']}, "
                f"frac_within_1={stats['frac_within_1']}, atol={atol}")
-    max_outside_atol = stats["max"]
-    if atol:
-        outside_atol = (actual.float() - expected.float()).abs() > atol
-        max_outside_atol = _ulp_stats(actual[outside_atol], expected[outside_atol])["max"]
+    outside_atol = (actual.float() - expected.float()).abs() > atol
+    max_outside_atol = _ulp_stats(actual[outside_atol], expected[outside_atol])["max"]
     assert max_outside_atol <= max_ulp, message
     assert stats["frac_within_1"] >= min_frac_within_1, message
 
@@ -126,19 +124,21 @@ def _check_fused_rms_norm_matches_hf_forward_and_backward(dtype, shape):
     fused_out.backward(upstream)
 
     _assert_ulp_close(fused_out, eager_out, max_ulp=2, min_frac_within_1=0.99, label="forward")
-    # A narrow row's two FP32 dx terms can nearly cancel, making a tiny absolute error many low-precision ULPs.
-    dx_atol = 1e-7 if shape[-1] <= 128 else 0.0
+    # A row's two FP32 dx terms can nearly cancel, making a tiny absolute error many low-precision ULPs.
+    dx_atol = 1e-7
     _assert_ulp_close(fused_hidden.grad,
                       eager_hidden.grad,
                       max_ulp=8,
                       min_frac_within_1=0.95,
                       label="dx",
                       atol=dx_atol)
-    # Eager rounds each row's product before summing the weight gradient, so a column whose products nearly cancel
-    # can be many ULPs off; wide rows have many such columns, so allow one rounding step of a typical value there.
+    # The kernels round the same products as eager, but their FP32 row statistics can differ in the last bits, so a
+    # normalized value can round to its neighbor. That moves its product by up to two rounding steps, which is many
+    # ULPs of a column whose products nearly cancel.
     dgamma_atol = 0.0
-    if shape[-1] > 2048:
-        dgamma_atol = torch.finfo(dtype).eps * eager_weight.grad.float().abs().mean().item()
+    if shape[0] > 0:
+        normalized = _hf_rms_norm(hidden, torch.ones_like(weight), 1e-6).float()
+        dgamma_atol = 2 * torch.finfo(dtype).eps * (upstream.float() * normalized).abs().amax(0)
     _assert_ulp_close(fused_weight.grad,
                       eager_weight.grad,
                       max_ulp=8,

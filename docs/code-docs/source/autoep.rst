@@ -657,12 +657,11 @@ program and combine the input- and weight-gradient reads in backward. Small
 inputs cap the row tile at the next power of two of their row count, so a
 single row does not instantiate a full 4096-element tile. Larger inputs keep
 the existing tile size. Wider norms retain the one-row kernels. The numerical
-tests do not require bitwise equality with eager. For narrow input gradients
-they allow at most 8 ULPs or an absolute error of 1e-7 per element, and for
-weight gradients of rows wider than 2048 at most 8 ULPs or one rounding step of
-a typical weight gradient, since near-zero results can have large ULP distances
-after cancellation. At least 95% must still be within one ULP; the other
-thresholds are unchanged.
+tests do not require bitwise equality with eager. For input gradients they
+allow at most 8 ULPs or an absolute error of 1e-7 per element, and for weight
+gradients at most 8 ULPs or two rounding steps of the column's largest product,
+since near-zero results can have large ULP distances after cancellation. At
+least 95% must still be within one ULP.
 At width one, the pre-gamma input derivative in exact arithmetic is
 ``eps / (x**2 + eps)**(3/2)``, which is nonzero when ``eps > 0``. With a
 very small epsilon and large ``abs(x)``, low-precision rounding can hide this
