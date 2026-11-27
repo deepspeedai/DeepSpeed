@@ -53,6 +53,7 @@ from deepspeed.moe.ep_repack import repack_expert_weights
 from deepspeed.moe.ep_router import TokenChoiceTopKRouter
 from deepspeed.moe.routing_replay import RoutingReplay
 from deepspeed.compile.config import CompileConfig
+from deepspeed.runtime.zero.config import DeepSpeedZeroConfig
 from deepspeed.runtime.config import DeepSpeedConfig
 from deepspeed.runtime.engine import DeepSpeedEngine
 from deepspeed.runtime.compiler import compile_autoep_non_moe_regions, is_compiling
@@ -1447,6 +1448,7 @@ class TestAutoEPRegionalCompile:
         nn.Module.__init__(engine)
         engine.module = model
         engine._config = SimpleNamespace(
+            zero_config=DeepSpeedZeroConfig(),
             compile_config=CompileConfig(autoep_non_moe=True, deepcompile=condition == "deepcompile"),
             expert_parallel_config=SimpleNamespace(comm_backend="deepep" if condition == "deepep" else "comm"),
         )
@@ -1478,6 +1480,7 @@ class TestAutoEPRegionalCompile:
         nn.Module.__init__(engine)
         engine.module = model
         engine._config = SimpleNamespace(
+            zero_config=DeepSpeedZeroConfig(),
             compile_config=CompileConfig(autoep_non_moe=True),
             expert_parallel_config=SimpleNamespace(comm_backend="comm"),
         )
