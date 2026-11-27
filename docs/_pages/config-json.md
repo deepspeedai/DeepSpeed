@@ -432,6 +432,7 @@ Enabling and configuring ZeRO memory optimizations
     "zero_hpz_partition_size": 1,
     "zero_quantized_weights": [true|false],
     "zero_quantized_gradients": [true|false],
+    "zero_quantized_nontrainable_weights": [true|false],
     "log_trace_cache_warnings": [true|false],
     }
 ```
@@ -584,7 +585,7 @@ Most users can leave `sub_group_size` at its default value when not using NVMe o
 
 | Description                                                                                                                         | Default |
 | ----------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| Number of ranks in hiearchical partitioning ZeRO (hpZ) secondary tensor group of ZeRO++, default is 1 meaning no hpZ, ideal is number of ranks (gpus) per node. | `1`   |
+| Number of ranks in hierarchical partitioning ZeRO (hpZ) secondary tensor group of ZeRO++, default is 1 meaning no hpZ, ideal is number of ranks (gpus) per node. | `1`   |
 
 ***zero_quantized_weights***: [boolean]
 
@@ -597,6 +598,12 @@ Most users can leave `sub_group_size` at its default value when not using NVMe o
 | Description                                                                                                                         | Default |
 | ----------------------------------------------------------------------------------------------------------------------------------- | ------- |
 |Boolean indicating whether to enable communication efficient quantized gradients of ZeRO++. | `False`   |
+
+***zero_quantized_nontrainable_weights***: [boolean]
+
+| Description                                                                                                                         | Default |
+| ----------------------------------------------------------------------------------------------------------------------------------- | ------- |
+|Boolean indicating whether to keep the frozen (non-trainable) weights of a ZeRO-3 model in quantized storage. Requires an fp16 model. | `False`   |
 
 <i>**log_trace_cache_warnings**</i>: [boolean]
 
