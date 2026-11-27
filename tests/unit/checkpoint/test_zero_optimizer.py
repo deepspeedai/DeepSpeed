@@ -419,9 +419,31 @@ class TestZeROMissingCheckpointFiles(DistributedTest):
                 model.load_checkpoint(class_tmpdir, tag="ws1")
         else:
             # Rank 1 has no file of its own. It used to fail with a bare AssertionError (#3377),
-            # so pin that the error names the saved and current world sizes.
-            with pytest.raises(FileNotFoundError, match="1 data-parallel rank.*world size is 2"):
+            # so pin that the error points to the conversion tool.
+            with pytest.raises(FileNotFoundError, match="ds_to_universal"):
                 model.load_checkpoint(class_tmpdir, tag="ws1")
+
+    @pytest.mark.parametrize("missing_rank, expected", [(0, "incomplete: restore the missing file"),
+                                                        (1, "Otherwise the checkpoint is incomplete")])
+    def test_zero3_checkpoint_missing_rank_file(self, tmpdir, missing_rank, expected):
+        model = SimpleModel(hidden_dim=10)
+        model, _, _, _ = deepspeed.initialize(config=self._config(3), model=model, model_parameters=model.parameters())
+        model.save_checkpoint(tmpdir, tag="saved")
+        dist.barrier()
+        if dist.get_rank() == missing_rank:
+            # Only this rank loads, so the other one is not left waiting in a collective.
+            # Rank 0 missing while rank 1 has a file can only mean a lost file; rank 1 missing
+            # looks the same as a checkpoint saved on one rank.
+            os.remove(os.path.join(tmpdir, "saved", f"zero_pp_rank_{missing_rank}_mp_rank_00_model_states.pt"))
+            with pytest.raises(FileNotFoundError, match=expected):
+                model.load_checkpoint(tmpdir, tag="saved")
+
+    def test_load_empty_tag_dir(self, tmpdir):
+        model = SimpleModel(hidden_dim=10)
+        model, _, _, _ = deepspeed.initialize(config=self._config(1), model=model, model_parameters=model.parameters())
+        os.makedirs(os.path.join(tmpdir, "empty"), exist_ok=True)
+        with pytest.raises(FileNotFoundError, match="mp_rank_00_model_states.pt"):
+            model.load_checkpoint(tmpdir, tag="empty")
 
     @pytest.mark.parametrize("zero_stage", [1, 3])
     def test_load_missing_tag(self, tmpdir, zero_stage):
