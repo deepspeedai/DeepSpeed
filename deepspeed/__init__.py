@@ -23,11 +23,6 @@ from packaging import version as pkg_version
 
 
 def _has_triton():
-    # Triton supports AMD GPUs (ROCm 6.2+, https://github.com/triton-lang/triton#compatibility), and PyTorch ships it
-    # for ROCm as pytorch-triton-rocm. HAS_TRITON is still False on ROCm on purpose: it turns on DeepSpeed's Triton
-    # inference kernels, and keeping them off there avoids having to validate all of those inference ops on ROCm.
-    if hasattr(torch.version, 'hip') and torch.version.hip is not None:
-        return False
     from .ops.triton_ops._triton import is_triton_available
     return is_triton_available()
 
