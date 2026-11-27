@@ -9,11 +9,14 @@ AutoTP model overwrote the first one's metadata (#8231). AutoTPMeta is per-model
 tests hold that line.
 """
 
+import pytest
 import torch
 from types import SimpleNamespace
 
 from unit.common import DistributedTest
+from unit.simple_model import SimpleModel
 
+import deepspeed
 import deepspeed.comm as dist
 from deepspeed.utils import groups
 from deepspeed.module_inject.auto_tp import AutoTP
@@ -103,3 +106,116 @@ class TestAutoTPMultipleModels(DistributedTest):
         assert layer.tp_meta.num_kv_heads == 3
         assert list(layer._partition_sizes) == [128, 64]
         assert layer.weight.shape[0] == [128, 64][dist.get_rank()]
+
+
+class WorldMPU:
+    """An mpu with no tensor parallelism: data parallel over every rank."""
+
+    def __init__(self):
+        # new_group is collective, so every rank creates every single-rank group.
+        singles = [dist.new_group(ranks=[rank]) for rank in range(dist.get_world_size())]
+        self.model_parallel_group = singles[dist.get_rank()]
+
+    def get_model_parallel_rank(self):
+        return 0
+
+    def get_model_parallel_world_size(self):
+        return 1
+
+    def get_model_parallel_group(self):
+        return self.model_parallel_group
+
+    def get_data_parallel_rank(self):
+        return dist.get_rank()
+
+    def get_data_parallel_world_size(self):
+        return dist.get_world_size()
+
+    def get_data_parallel_group(self):
+        return dist.get_world_group()
+
+
+def build_engine(tp_size, mpu=None, mesh_param=None, optimizer=None):
+    config = {"train_micro_batch_size_per_gpu": 1, "gradient_clipping": 0.0}
+    if tp_size > 1:
+        # Nothing is sharded; the test is about which groups the engine runs on.
+        config["tensor_parallel"] = {
+            "autotp_size": tp_size,
+            "partition_config": {
+                "use_default_specs": False,
+                "layer_specs": [{
+                    "patterns": [".*\\.weight$"],
+                    "partition_type": "skip",
+                }],
+            },
+        }
+    model = SimpleModel(hidden_dim=8)
+    engine, _, _, _ = deepspeed.initialize(model=model,
+                                           model_parameters=model.parameters(),
+                                           optimizer=optimizer,
+                                           config=config,
+                                           mpu=mpu,
+                                           mesh_param=mesh_param)
+    return engine
+
+
+class TestAutoTPEnginesShareProcessGroups(DistributedTest):
+    """The TP/DP groups are process-wide (#9081): a second engine must use the first engine's layout or fail."""
+    world_size = 4
+    reuse_dist_env = False
+
+    def test_same_tp_size_reuses_the_groups(self):
+        build_engine(tp_size=2)
+        second = build_engine(tp_size=2)
+        assert second.mpu.get_tensor_model_parallel_world_size() == 2
+        assert second.dp_world_size == 2
+
+    @pytest.mark.parametrize("second_tp_size", [1, 4])
+    def test_different_tp_size_raises(self, second_tp_size):
+        # Before the check, a TP4 engine silently ran on the first engine's TP2 groups, and a TP1 engine took
+        # their data parallel group and then failed deep inside initialize.
+        build_engine(tp_size=2)
+        with pytest.raises(RuntimeError, match="9081"):
+            build_engine(tp_size=second_tp_size)
+
+    @pytest.mark.parametrize("second_tp_size", [1, 2, 4])
+    def test_mesh_engine_after_autotp_raises(self, second_tp_size):
+        # A rejected engine must not replace the mesh used by the first engine. Even with the same TP size,
+        # publishing a DP4 mesh would move the first engine's data parallel getters off its DP2 groups.
+        first = build_engine(tp_size=2, optimizer=lambda params: torch.optim.SGD(params, lr=0.1))
+        mesh_device = groups.mesh_device
+        reference = SimpleModel(hidden_dim=8).to(first.device)
+        reference.load_state_dict(first.module.state_dict())
+        reference_optimizer = torch.optim.SGD(reference.parameters(), lr=0.1)
+
+        with pytest.raises(RuntimeError, match="9081"):
+            build_engine(tp_size=second_tp_size, mesh_param=(dist.get_world_size(), 1))
+
+        assert groups.mesh_device is mesh_device
+        inputs = torch.ones(1, 8, device=first.device)
+        labels = torch.zeros(1, dtype=torch.long, device=first.device)
+        expected_loss = reference(inputs, labels)
+        expected_loss.backward()
+        reference_optimizer.step()
+        loss = first(inputs, labels)
+        torch.testing.assert_close(loss, expected_loss)
+        first.backward(loss)
+        first.step()
+        for actual, expected in zip(first.module.parameters(), reference.parameters()):
+            torch.testing.assert_close(actual, expected)
+
+    @pytest.mark.parametrize("bring_own_mesh", [False, True])
+    def test_autotp_engine_after_mesh_raises(self, bring_own_mesh):
+        # The data parallel getters read groups.mesh_device first, so this engine would run on the mesh's
+        # data parallel group, which spans ranks that hold different TP shards.
+        build_engine(tp_size=1, mesh_param=(dist.get_world_size(), 1))
+        with pytest.raises(RuntimeError, match="mesh.*9081"):
+            build_engine(tp_size=2, mesh_param=(dist.get_world_size(), 1) if bring_own_mesh else None)
+
+    def test_engine_without_mpu_inherits_a_later_explicit_mpu(self):
+        # An explicit mpu replaces groups.mpu, so a third engine without one inherits that layout, not the
+        # cached AutoTP groups of the first engine.
+        build_engine(tp_size=2)
+        build_engine(tp_size=1, mpu=WorldMPU())
+        third = build_engine(tp_size=1)
+        assert third.dp_world_size == dist.get_world_size()

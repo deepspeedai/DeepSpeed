@@ -5,6 +5,7 @@
 
 from copy import deepcopy
 import gc
+from types import SimpleNamespace
 import math
 import weakref
 from collections import namedtuple
@@ -27,7 +28,7 @@ import deepspeed
 from deepspeed.runtime.engine import DeepSpeedEngine
 from deepspeed.runtime.bf16_optimizer import BF16_Optimizer
 from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
-from deepspeed.runtime.zero.stage_1_and_2 import split_half_float_double
+from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer, split_half_float_double
 from deepspeed.utils.zero_to_fp32 import load_state_dict_from_zero_checkpoint
 from deepspeed.runtime.zero.utils import ZeRORuntimeException
 from deepspeed.accelerator import get_accelerator
@@ -54,6 +55,22 @@ class TestSplitHalfFloatDouble:
         for bucket, grad in zip(buckets, dense_grads):
             assert len(bucket) == 1
             assert bucket[0] is grad
+
+
+@pytest.mark.parametrize("postscale_gradients,gradient_predivide_factor", [(False, 1.0), (True, 1.0), (True, 2.0)])
+class TestZeroPredivideWithSequenceParallel(DistributedTest):
+    world_size = 2
+
+    def test(self, postscale_gradients, gradient_predivide_factor):
+        # Both ranks form one sequence-parallel group, so the gradient is averaged over 2 / 2 = 1 rank.
+        optimizer = SimpleNamespace(dp_process_group=dist.get_world_group(),
+                                    gradient_average=True,
+                                    postscale_gradients=postscale_gradients,
+                                    gradient_predivide_factor=gradient_predivide_factor,
+                                    sequence_parallel_size=2)
+        grad = torch.full((4, ), float(dist.get_rank() + 1), device=get_accelerator().current_device_name())
+        DeepSpeedZeroOptimizer.gradient_reduction_w_predivide(optimizer, grad, grad.dtype)
+        torch.testing.assert_close(grad, torch.full_like(grad, 3.0))
 
 
 @pytest.mark.parametrize("zero_stage", [0, 1, 2])
@@ -106,6 +123,114 @@ class TestGradientAllreduceOp(DistributedTest):
         expected = -inputs * expected_scale
         torch.testing.assert_close(actual, expected)
         engine.destroy()
+
+
+@pytest.mark.parametrize("contiguous_gradients", [True, False])
+@pytest.mark.parametrize("gradient_predivide_factor", [1.0, 2.0, 4.0])
+class TestZero3GradientPredivide(DistributedTest):
+    world_size = 2
+
+    def test(self, contiguous_gradients, gradient_predivide_factor):
+
+        class LinearLoss(Module):
+
+            def __init__(self):
+                super().__init__()
+                self.weight = Parameter(torch.zeros(2))
+
+            def forward(self, inputs):
+                return (self.weight * inputs).sum()
+
+        model = LinearLoss()
+        optimizer = torch.optim.SGD(model.parameters(), lr=1.0)
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 1,
+            "gradient_clipping": 0.0,
+            "zero_allow_untested_optimizer": True,
+            "gradient_predivide_factor": gradient_predivide_factor,
+            "zero_optimization": {
+                "stage": 3,
+                "reduce_scatter": False,
+                "contiguous_gradients": contiguous_gradients,
+            },
+        }
+        engine, _, _, _ = deepspeed.initialize(model=model, optimizer=optimizer, config=config_dict)
+
+        inputs = torch.tensor([1.0, 2.0], device=engine.device)
+        engine.backward(engine(inputs))
+        engine.step()
+
+        # Every rank sees the same inputs, so the averaged gradient is `inputs` whatever the predivide factor.
+        actual = safe_get_full_fp32_param(engine.module.weight).detach().cpu()
+        torch.testing.assert_close(actual, -inputs.cpu())
+        engine.destroy()
+
+
+@pytest.mark.parametrize(
+    "reduce_scatter,contiguous_gradients,reduce_bucket_size",
+    [
+        (False, True, 500),
+        (False, False, 500),
+        (True, True, 500),
+        (False, True, 16),
+    ],
+)
+class TestZero3SequenceParallelGradientScale(DistributedTest):
+    world_size = 2
+
+    def test(self, reduce_scatter, contiguous_gradients, reduce_bucket_size):
+        import deepspeed.runtime.sequence_parallel.parallel_state_sp as sp_mpu
+        from deepspeed.utils import groups
+
+        class TwoLayerLoss(Module):
+
+            def __init__(self):
+                super().__init__()
+                self.small = Parameter(torch.zeros(4))
+                self.large = Parameter(torch.zeros(64))
+
+            def forward(self, scale):
+                return (self.small.sum() + self.large.sum()) * scale
+
+        sp_mpu.initialize_sequence_parallel(sequence_parallel_size=self.world_size)
+        try:
+            model = TwoLayerLoss()
+            optimizer = torch.optim.SGD(model.parameters(), lr=1.0)
+            config_dict = {
+                "train_micro_batch_size_per_gpu": 1,
+                "gradient_clipping": 0.0,
+                "zero_allow_untested_optimizer": True,
+                "zero_optimization": {
+                    "stage": 3,
+                    "reduce_scatter": reduce_scatter,
+                    "contiguous_gradients": contiguous_gradients,
+                    "reduce_bucket_size": reduce_bucket_size,
+                },
+            }
+            engine, _, _, _ = deepspeed.initialize(
+                model=model,
+                optimizer=optimizer,
+                config=config_dict,
+                mpu=sp_mpu,
+            )
+
+            # Each sequence-parallel rank contributes 1 / sp_size of the full-sequence loss.
+            local_loss = engine(torch.tensor(1.0 / self.world_size, device=engine.device))
+            engine.backward(local_loss)
+
+            grad_small = safe_get_full_grad(engine.module.small).detach().cpu()
+            grad_large = safe_get_full_grad(engine.module.large).detach().cpu()
+            torch.testing.assert_close(grad_small, torch.ones_like(grad_small))
+            torch.testing.assert_close(grad_large, torch.ones_like(grad_large))
+
+            engine.step()
+            param_small = safe_get_full_fp32_param(engine.module.small).detach().cpu()
+            param_large = safe_get_full_fp32_param(engine.module.large).detach().cpu()
+            torch.testing.assert_close(param_small, -torch.ones_like(param_small))
+            torch.testing.assert_close(param_large, -torch.ones_like(param_large))
+            engine.destroy()
+        finally:
+            groups.mpu = None
 
 
 @pytest.mark.parametrize(
@@ -1921,6 +2046,18 @@ class TestZeroOffloadOptim(DistributedTest):
                 model, _, _, _ = deepspeed.initialize(model=model, optimizer=optimizer, config=config_dict)
         else:
             model, _, _, _ = deepspeed.initialize(model=model, optimizer=optimizer, config=config_dict)
+
+
+def test_zero3_failed_master_copy_preserves_original_error(monkeypatch):
+    from deepspeed.runtime.zero.stage3 import DeepSpeedZeroOptimizer_Stage3
+
+    # Under memory pressure, creating a completion event can itself fail and hide the original copy error.
+    def unavailable_event(self):
+        raise MemoryError("cannot allocate completion event")
+
+    monkeypatch.setattr(type(get_accelerator()), "Event", unavailable_event)
+    with pytest.raises(RuntimeError):
+        DeepSpeedZeroOptimizer_Stage3._copy_pinned_master_to_device(None, torch.empty(2), torch.ones(3))
 
 
 @pytest.mark.skipif(not get_accelerator().is_bf16_supported(), reason="bf16 is not supported on this accelerator")
