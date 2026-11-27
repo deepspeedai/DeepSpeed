@@ -9,6 +9,7 @@ import math
 import os
 import time
 from dataclasses import replace
+from unittest import mock
 
 import pytest
 import torch
@@ -274,6 +275,39 @@ class TestB2Schedule(DistributedTest):
         # Otherwise this batch would not exercise both the in-place and the staged path.
         assert any(r.direct for r in every) and any(not r.direct for r in every)
 
+    def test_schedule_stages_a_round_that_starts_in_a_registered_window(self):
+        """A buffer in a window the transfer was not told about is registered NCCL memory.
+
+        NCCL then leaves a message that ends in it undefined, so the executor stages it through the
+        arena. The schedule must report that arena, or a caller sizing its memory from it is wrong.
+        Without the ``window_registered`` input this batch reported the round in place, with no arena.
+        """
+        source = contiguous_split_map((8, 8), [4, 4], 0)
+        target = contiguous_split_map((8, 8), [4, 4], 0)
+        plan = plan_transfer(target, source)
+        endpoints = TransferEndpoints(source={0: 0, 1: 1}, target={0: 1, 1: 0})
+        # A budget wide enough for one round per peer; this test is about the in-place call, not packing.
+        budget = StagingBudget(bytes_per_peer=1 << 20)
+        staged = schedule_transfers([plan], endpoints, budget, 4)
+        # Every region is packed in place on both sides, so without the input every round is direct
+        # and no arena is allocated: the batch this test would be checking.
+        for process in staged.values():
+            assert process.send_arena_elements == {} and process.receive_arena_elements == {}
+            assert all(r.direct for r in process.sends.values() for r in r)
+            assert all(r.direct for r in process.receives.values() for r in r)
+        # Rank 0's source is in a window the transfer was not told about, so rank 0 stages its send
+        # through its arena; no other side of the batch knows or cares, so every other round stays in
+        # place and no other arena is allocated.
+        registered = schedule_transfers([plan], endpoints, budget, 4, window_registered={0: {(0, True, 0)}})
+        send, receive = registered[0].sends, registered[0].receives
+        assert not send[1][0].direct and send == {1: send[1]}
+        assert receive[1][0].direct
+        assert registered[0].send_arena_elements == {1: send[1][0].elements}
+        assert registered[0].receive_arena_elements == {}
+        for side in (registered[1].sends, registered[1].receives):
+            assert all(r.direct for r in side.values() for r in r)
+        assert registered[1].send_arena_elements == {} and registered[1].receive_arena_elements == {}
+
 
 def _refill(requests, offset):
     """Shift every source by ``offset`` in place, keeping its storage."""
@@ -495,6 +529,42 @@ class TestB2Prepared(DistributedTest):
         for targets, target_map, full in other_checks:
             _assert_matches(targets, target_map, full + 1000.0)
 
+    @pytest.mark.parametrize('failure', [AssertionError('no'), OSError('io')])
+    def test_a_copier_that_fails_on_one_process_refuses_everywhere(self, failure):
+        """A copier is caller code, and its errors are not the executor's to sort by kind.
+
+        A refusal keyed on which kind the caller raises would let one kind escape a lone process
+        while its peers wait, so every kind must reach the same collective refusal: this asserts
+        that all ranks see the collective outcome, and that rank 0's error kind never leaks.
+        """
+        _join_transfer_group()
+        rank = dist.get_rank()
+        source, target = _row_to_column(self.world_size)
+        full = _full(16, 16, torch.float32)
+        endpoints = TransferEndpoints(source={loc: loc
+                                              for loc in source.shard_shapes},
+                                      target={loc: loc
+                                              for loc in target.shard_shapes})
+        plan = plan_transfer(target, source)
+        requests = [
+            TransferRequest(
+                str(index), plan, {
+                    location: source.extract(full, location).contiguous()
+                    for location, process in endpoints.source.items() if process == rank
+                }, _targets(target, endpoints, torch.float32)) for index in range(4)
+        ]
+
+        def copier(pairs):
+            if rank == 0:
+                raise failure
+            return sequential_copies(list(pairs))
+
+        with pytest.raises(AffineTransferExecutionError, match='rejected the transfer batch'):
+            prepare_transfers(requests, endpoints, torch.float32, StagingBudget(1 << 20), copier=copier)
+        for request in requests:
+            for buffer in request.target_buffers.values():
+                assert torch.isnan(buffer).all().item()
+
 
 def _window_batch(window, placement, dtype):
     """A row-to-column batch whose sources, targets, both or neither are carved from ``window``."""
@@ -646,6 +716,37 @@ class TestWindowTransfer(DistributedTest):
             call([request], endpoints, dtype, window=window)
         assert 'a source and a target overlap' in str(refused.value.__cause__)
         assert torch.equal(shard, before), 'a refused batch must not write'
+
+    @pytest.mark.parametrize('failure', [AssertionError('no'), RuntimeError('peer map failed')])
+    def test_a_one_shot_refuses_whole_before_data_moves_when_a_map_fails_on_one_rank(self, failure):
+        """A one-shot's map into a peer's window can fail on one process after the agreement.
+
+        That must refuse every process before a message or write begins, as the prepare path does
+        for the same failure; a map built lazily in the move would let the other ranks write, and an
+        error kind not caught by name would escape one process while its peers wait.
+        """
+        if get_accelerator().device_name() not in ('cuda', 'xpu'):
+            pytest.skip('symmetric memory needs a CUDA or XPU device')
+        _join_transfer_group()
+        rank = dist.get_rank()
+        dtype = torch.bfloat16
+        window = TransferWindow(1 << 20)
+        endpoints, request, _, _, _ = _window_batch(window, 'both_pull', dtype)
+        # Both sides lie in the window, so the move makes no messages at all: with maps built lazily in
+        # the move, one process failing alone would leave its peers at the final barrier while it
+        # raised, and a map failure not in the refusal whitelist would escape it for the same reason.
+        real_peer = TransferWindow.peer
+
+        def peer(self, process, dtype):
+            if rank == 0:
+                raise failure
+            return real_peer(self, process, dtype)
+
+        with mock.patch.object(TransferWindow, 'peer', side_effect=peer):
+            with pytest.raises(AffineTransferExecutionError, match='rejected the transfer batch'):
+                execute_transfers([request], endpoints, dtype, StagingBudget(), window=window)
+        for buffer in request.target_buffers.values():
+            assert buffer.isnan().all(), 'a refused batch must not write'
 
 
 class TestB2DisjointEndpoints(DistributedTest):
