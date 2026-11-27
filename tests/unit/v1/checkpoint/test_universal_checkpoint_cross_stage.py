@@ -307,12 +307,20 @@ class _ScaledModel(SimpleModel):
         return super().forward(x * self.scale, y)
 
 
-def _save_as_universal(engine, tmpdir):
-    """Save ``engine`` and convert the checkpoint, returning the universal checkpoint's tag."""
-    engine.save_checkpoint(tmpdir, tag=CP_TAG, client_state={UNIVERSAL_CHECKPOINT_INFO: {}})
+class _ScalarFirstModel(_ScaledModel):
+    """Like _ScaledModel, but the caller keeps the scalar alone in its own group and places that group first. A lone
+    1-element parameter padded by the ZeRO-1/2 sub-group split leaves at least one rank without a fragment of that
+    group (hence no local optimizer state for it there). Putting it in group 0 makes such a rank's torch state dict be
+    keyed {1, 2, ...} with group 0 absent, which is the layout that previously tripped
+    ``ds_to_universal.extract_zero_shards`` (indexed by ``range(len(state_groups))``)."""
+
+
+def _save_and_convert(engine, tmpdir, tag):
+    """Save ``engine`` under ``tag`` and convert the checkpoint, returning the universal checkpoint's tag."""
+    engine.save_checkpoint(tmpdir, tag=tag, client_state={UNIVERSAL_CHECKPOINT_INFO: {}})
     engine.destroy()
 
-    cp_dir = os.path.join(tmpdir, CP_TAG)
+    cp_dir = os.path.join(tmpdir, tag)
     dist.barrier()
     if dist.get_rank() == 0:
         convert_to_universal(
@@ -324,7 +332,12 @@ def _save_as_universal(engine, tmpdir):
                             strict=True,
                             inject_missing_state=False))
     dist.barrier()
-    return f"{CP_TAG}_universal"
+    return f"{tag}_universal"
+
+
+def _save_as_universal(engine, tmpdir):
+    """Save ``engine`` and convert the checkpoint, returning the universal checkpoint's tag."""
+    return _save_and_convert(engine, tmpdir, CP_TAG)
 
 
 @pytest.mark.parametrize("source_stage,target_stage", [(1, 3), (2, 3), (3, 1), (3, 2)])
@@ -529,3 +542,59 @@ class TestUniversalCheckpointCrossStageScalarOwnGroup(DistributedTest):
         for buf in owned:
             assert int(optimizer.state[buf]["step"]) == steps_before_save + 1, buf
         target.destroy()
+
+
+@pytest.mark.parametrize("target_stage", [1, 2])
+class TestUniversalCheckpointCrossStageScalarReConvert(DistributedTest):
+    """A checkpoint saved right after a cross-stage load into ZeRO-1/2 must still convert. With the scalar alone in
+    group 0, a rank that holds no fragment of that group saves no optimizer state for it, so its state dict omits
+    group 0's id; ``extract_zero_shards`` must iterate the ids that were actually saved, not a positional range that
+    KeyError's on the absent id."""
+
+    world_size = 2
+
+    def test_convert_after_cross_stage_load(self, tmpdir, target_stage):
+        hidden_dim = 10
+        steps_before_save = 2
+
+        def build(stage, load_universal):
+            ds_config = {"train_batch_size": 2, "zero_optimization": {"stage": stage, "sub_group_size": 100}}
+            if load_universal:
+                ds_config["checkpoint"] = {"load_universal": True}
+            model = _ScalarFirstModel(hidden_dim, nlayers=2)
+            # The scalar keeps its own group and leads the list: a rank without its fragment has group 0 absent from
+            # its saved state.
+            param_groups = [{
+                "params": [model.scale]
+            }] + [{
+                "params": list(layer.parameters())
+            } for layer in model.linears]
+            engine, _, _, _ = deepspeed.initialize(config=ds_config,
+                                                   model=model,
+                                                   optimizer=torch.optim.Adam(param_groups))
+            return engine
+
+        source = build(3, load_universal=False)
+        _train(source, hidden_dim, steps_before_save)
+        universal_tag = _save_as_universal(source, tmpdir)
+
+        target = build(target_stage, load_universal=True)
+        target.load_checkpoint(tmpdir, tag=universal_tag)
+
+        # Save immediately after the load, before any optimizer step, and convert. This is the moment that used to
+        # raise KeyError on the group whose fragment some rank does not hold.
+        reconverted_tag = _save_and_convert(target, tmpdir, "afterload")
+
+        # The re-converted checkpoint must load and carry the source step on every rank-owned group.
+        checker = build(target_stage, load_universal=True)
+        checker.load_checkpoint(tmpdir, tag=reconverted_tag)
+        optimizer = checker.optimizer.optimizer
+        owned = {buf for buf, state in optimizer.state.items() if "exp_avg" in state}
+        assert owned
+        for buf, state in optimizer.state.items():
+            if buf in owned:
+                assert int(state["step"]) == steps_before_save, buf
+        _train(checker, hidden_dim, 1)
+        for buf in owned:
+            assert int(optimizer.state[buf]["step"]) == steps_before_save + 1, buf
+        checker.destroy()

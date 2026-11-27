@@ -139,13 +139,20 @@ def extract_zero_shards(dir, ds_checkpoint, indices_3D):
     universal_checkpoint_info = ds_checkpoint.get_checkpoint_info(UNIVERSAL_CHECKPOINT_INFO)
     pipeline_replicated_params = universal_checkpoint_info.get(PIPELINE_REPLICATED_PARAMETER_PATTERNS, [])
 
-    # dict
+    # dict of this rank's optimizer state, keyed by the saved group (param) id
     state_groups = optim_sd[BASE_OPTIMIZER_STATE]["state"]
-    # list
+    # list indexed by group id
     fp32_groups = optim_sd[SINGLE_PARTITION_OF_FP32_GROUPS]
-    param_groups_cnt = len(state_groups)
 
-    for param_group_id in range(param_groups_cnt):
+    # A rank that owns no fragment of a group -- e.g. the wider of several DP ranks for a
+    # group whose parameter is one element -- holds no optimizer state for it, so the saved
+    # state omits that group id. The ids are the saved group ids, not 0..len-1, because the
+    # missing one may be among them. Iterate only the ids this rank actually saved; every
+    # fragment is still written, since each rank extracts exactly the groups it owns.
+    for param_group_id in sorted(state_groups):
+        # Guard against a corrupt checkpoint listing a state id with no matching group layout.
+        assert param_group_id < len(fp32_groups), (
+            f"State group id {param_group_id} has no {len(fp32_groups)}-entry optimizer layout")
 
         flat_state = dict(
             exp_avg=state_groups[param_group_id]["exp_avg"],
