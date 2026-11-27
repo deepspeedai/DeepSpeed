@@ -10,6 +10,7 @@ from typing import List, Tuple
 import pytest
 import torch
 
+import deepspeed
 from deepspeed.accelerator import get_accelerator
 from deepspeed.inference.v2.inference_utils import DtypeEnum
 from deepspeed.inference.v2.kernels.ragged_ops import (
@@ -20,10 +21,13 @@ from deepspeed.inference.v2.kernels.ragged_ops import (
     LinearBlockedKVCopy,
 )
 from deepspeed.inference.v2.ragged import split_kv
-from deepspeed.ops.op_builder import RaggedUtilsBuilder
+from deepspeed.ops.op_builder import RaggedOpsBuilder, RaggedUtilsBuilder
 
 from .ragged_testing_utils import build_batch_and_manager
 from ....v2.inference_test_utils import allclose
+
+if not deepspeed.ops.__compatible_ops__[RaggedOpsBuilder.NAME]:
+    pytest.skip("Ragged device ops are not available on this system", allow_module_level=True)
 
 try:
     from flash_attn.flash_attn_interface import flash_attn_varlen_func

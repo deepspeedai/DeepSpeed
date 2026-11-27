@@ -222,7 +222,8 @@ class TestAutoTPEnginesWithDifferentLayouts(DistributedTest):
 
     @pytest.mark.parametrize("second_tp_size", [1, 2, 4])
     def test_mesh_engine_after_autotp_raises(self, second_tp_size):
-        # A rejected engine must not replace the mesh used by the first engine.
+        # A rejected engine must not replace the mesh used by the first engine. Even with the same TP size,
+        # publishing a DP4 mesh would move the first engine's data parallel getters off its DP2 groups.
         first = build_engine(tp_size=2, optimizer=lambda params: torch.optim.SGD(params, lr=0.1))
         mesh_device = groups.mesh_device
         reference = SimpleModel(hidden_dim=8).to(first.device)
@@ -245,12 +246,13 @@ class TestAutoTPEnginesWithDifferentLayouts(DistributedTest):
         for actual, expected in zip(first.module.parameters(), reference.parameters()):
             torch.testing.assert_close(actual, expected)
 
-    def test_autotp_engine_after_mesh_raises(self):
+    @pytest.mark.parametrize("bring_own_mesh", [False, True])
+    def test_autotp_engine_after_mesh_raises(self, bring_own_mesh):
         # The data parallel getters read groups.mesh_device first, so this engine would run on the mesh's
         # data parallel group, which spans ranks that hold different TP shards.
         build_engine(tp_size=1, mesh_param=(dist.get_world_size(), 1))
         with pytest.raises(RuntimeError, match="mesh.*9081"):
-            build_engine(tp_size=2)
+            build_engine(tp_size=2, mesh_param=(dist.get_world_size(), 1) if bring_own_mesh else None)
 
     def test_moe_engine_with_its_own_groups_raises(self):
         # Expert groups are still built from the process-wide groups, which describe the TP2 engine.

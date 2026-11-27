@@ -75,6 +75,21 @@ model's ``generation_config``, as ``generate()`` does. Other
 ``generation_config`` settings are not applied on the graph path. Continuous
 batching, with or without graph capture, picks tokens the same way.
 
+Every path ends a response at the tokenizer's ``eos_token_id`` or at any id in
+the model's ``generation_config.eos_token_id``.
+
+The captured graph and its static cache are reused by later ``generate()``
+calls with the same batch size, prompt width plus ``max_new_tokens``, device,
+dtype, parameter layout, training mode and autocast setting. The prompt is still
+prefilled eagerly on every call, so one graph serves all prompt widths with the
+same total length. In-place weight updates, such as an optimizer step, are
+replayed without recapturing. The graph and cache stay allocated between
+rollouts until the shape changes or ``rollout.shutdown()`` releases them. When
+segment kernels are installed on the model, by this rollout's ``use_segki=True``
+or by another rollout over the same model, ``sync_weights()`` and
+``refresh_weights()`` also release them, because the injected kernels cache
+tensors derived from the weights.
+
 Shared Prompt Prefill
 ---------------------
 
@@ -89,6 +104,47 @@ one token. It cannot be combined with CUDA graph capture,
 ``release_inference_cache``, or continuous batching
 (``SamplingConfig.continuous_batch_size``). Sampling still happens independently
 for every response branch after the shared prompt forward.
+
+Segment-Based Kernel Injection (experimental)
+---------------------------------------------
+
+``HybridEngineRolloutConfig(use_segki=True)`` accelerates greedy decode by
+injecting native CUDA kernels into comm-free segments of the model at rollout
+construction. Segments are detected structurally, by attribute names, so any
+HF family whose gated MLP uses ``gate_proj``/``up_proj``/``down_proj`` with a
+SiLU activation (LLaMA, Qwen, Mistral, DeepSeek, ...) or whose GatedDeltaNet
+block uses the ``in_proj_{qkv,z,b,a}`` set is picked up without per-model code.
+GELU-gated variants (e.g. Gemma) and other unsupported architectures pass
+through silently. The option is disabled by default and
+combines with ``use_graph_capture=True`` for the fastest path.
+
+Scope and semantics
+~~~~~~~~~~~~~~~~~~
+
+- **Throughput numbers** count executed decode steps (all rows step together);
+  tokens produced after a row's EOS are padded, so valid-token rates can be
+  lower at early EOS. Graph warm-up + capture (~1–1.5 s on a 4B model) runs
+  on the first ``generate()`` call for a decode shape and is excluded from
+  decode-rate measurements.
+- **Graph reuse**: later calls with the same decode shape replay the captured
+  graph. ``sync_weights()`` / ``refresh_weights()`` drop the derived weight
+  caches and release the graph, so the next call recaptures with the trained
+  weights. Updating weights without calling either of them is not supported
+  while segment kernels are installed on the model.
+- **Packed (varlen) sequences**: the GDN conv/scan wrappers forward the
+  packed-sequence boundary markers (``seq_idx`` / ``cu_seqlens``) exactly as
+  the native forward does; packed *training* (gradients through the packed
+  path) is not exercised by the test suite and not guaranteed.
+
+Injected replacements read the original weight ``Parameter`` objects directly
+with exact backward, so training and generation share one forward path: no
+weight copies and no inject/eject switching between rollout and training
+steps.
+
+Segment injection requires a CUDA accelerator and currently targets
+single-GPU (batch-size 1 gets a fully fused decode step inside the captured
+graph; larger batches keep batched argmax in Python). Fused projections are
+never applied to layers carrying tensor-parallel collectives.
 
 Continuous batching (experimental)
 -----------------------------------

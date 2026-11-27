@@ -23,11 +23,14 @@ from deepspeed.accelerator import get_accelerator
 from deepspeed.ops.transformer.inference.op_binding.workspace import WorkspaceOp
 from deepspeed.runtime.hybrid_engine import DeepSpeedHybridEngine
 from deepspeed.runtime.rollout.base import RolloutRequest, SamplingConfig
+from deepspeed.runtime.zero.linear import _get_autocast_dtype, _is_autocast_enabled
 from deepspeed.runtime.rollout.hybrid_engine_rollout import (
     GlobalWorkRemaining,
     HybridEngineRollout,
     HybridEngineRolloutConfig,
     _GlobalEosStoppingCriteria,
+    _full_vocabulary_logits,
+    _disable_autocast_weight_cache,
 )
 from deepspeed.utils.static_cache import DeepSpeedStaticCache
 from unit.common import DistributedTest
@@ -45,6 +48,195 @@ def _make_tokenizer():
     tok.pad_token_id = 0
     tok.eos_token_id = 2
     return tok
+
+
+def test_graph_signature_supports_legacy_autocast_getters(monkeypatch):
+
+    def legacy_enabled():
+        return True
+
+    monkeypatch.setattr(torch, "is_autocast_enabled", legacy_enabled)
+    monkeypatch.setattr(torch, "is_autocast_cuda_enabled", lambda: True, raising=False)
+    monkeypatch.delattr(torch, "get_autocast_dtype")
+    monkeypatch.setattr(torch, "get_autocast_gpu_dtype", lambda: torch.bfloat16, raising=False)
+
+    assert _is_autocast_enabled("cuda")
+    assert _get_autocast_dtype("cuda") is torch.bfloat16
+
+
+def test_disable_autocast_weight_cache_restores_previous_setting(monkeypatch):
+    state = [True]
+    monkeypatch.setattr(torch, "is_autocast_cache_enabled", lambda: state[0], raising=False)
+    monkeypatch.setattr(torch,
+                        "set_autocast_cache_enabled",
+                        lambda enabled: state.__setitem__(0, enabled),
+                        raising=False)
+
+    with _disable_autocast_weight_cache():
+        assert state[0] is False
+    assert state[0] is True
+
+
+def test_graph_signature_tracks_inference_mode_attention_and_segki_backend(monkeypatch):
+    from deepspeed.module_inject import segment_ki
+    # segki_refresh below advances the process-wide generation; keep it from leaking into other tests.
+    monkeypatch.setattr(segment_ki, "_BACKEND_GENERATION", segment_ki._BACKEND_GENERATION)
+    module = torch.nn.Linear(2, 2)
+    module.config = PretrainedConfig()
+    module.config._attn_implementation = "sdpa"
+    rollout = HybridEngineRollout(SimpleNamespace(module=module), _make_tokenizer())
+    rollout.use_segki = True
+    device = torch.device("cpu")
+
+    def signature():
+        return rollout._graph_signature(module, 1, 8, device, torch.float32)
+
+    base = signature()
+    with torch.inference_mode():
+        assert signature() != base
+    module.config._attn_implementation = "eager"
+    assert signature() != base
+    module.config._attn_implementation = "sdpa"
+    assert signature() == base
+
+    # Refreshing another model empties the backend's process-wide GLU cache, which this model's graph may read.
+    other = torch.nn.Linear(2, 2)
+    other._ki_dual_op = SimpleNamespace(clear_glu_cat_cache=lambda: None)
+    from deepspeed.module_inject.segment_ki import segki_refresh
+    segki_refresh(other)
+    assert signature() != base
+
+
+def test_rollout_without_segki_refreshes_kernels_another_rollout_installed(monkeypatch):
+    from deepspeed.module_inject import segment_ki
+    monkeypatch.setattr(segment_ki, "_BACKEND_GENERATION", segment_ki._BACKEND_GENERATION)
+    model = torch.nn.Sequential(torch.nn.Linear(2, 2))
+    model.config = PretrainedConfig()
+    rollout = HybridEngineRollout(SimpleNamespace(module=model), _make_tokenizer())
+    assert not rollout.use_segki
+    device = torch.device("cpu")
+
+    def signature():
+        return rollout._graph_signature(model, 1, 8, device, torch.float32)
+
+    # Without injected kernels the graphs read only the parameters, so an in-place sync keeps them.
+    rollout._static_graph_state = kept = object()
+    rollout._continuous_graph_state = kept_continuous = object()
+    rollout.refresh_weights()
+    assert rollout._static_graph_state is kept
+    assert rollout._continuous_graph_state is kept_continuous
+    assert not hasattr(model, "_ki_refresh_generation")
+
+    # Another rollout over the same model installs segment kernels, which cache tensors derived from the weights.
+    linear = model[0]
+    linear._ki_attn_op = object()
+    linear._ki_attn_cat_w = (linear.weight, linear.weight.detach().clone())
+    before = signature()
+    rollout.refresh_weights()
+    assert rollout._static_graph_state is None
+    assert rollout._continuous_graph_state is None
+    assert not hasattr(linear, "_ki_attn_cat_w")
+    # A refresh through either rollout invalidates graphs that replay the injected kernels.
+    assert signature() != before
+
+
+@pytest.mark.parametrize("autotp_size", [2, lambda: 2])
+def test_capture_groups_accept_autotp_size_attribute_or_method(autotp_size, monkeypatch):
+    from deepspeed.utils import groups
+    tp_group = object()
+    monkeypatch.setattr(groups, "get_tensor_model_parallel_group", lambda: tp_group)
+    rollout = HybridEngineRollout.__new__(HybridEngineRollout)
+    rollout.engine = SimpleNamespace(autotp_size=autotp_size)
+    assert rollout._capture_groups() == [tp_group]
+
+
+def test_recapture_is_agreed_over_the_hybrid_engine_inference_tp_group(monkeypatch):
+    engine = DeepSpeedHybridEngine.__new__(DeepSpeedHybridEngine)
+    engine.mp_group = object()
+    # inference_tp_size > 1 without AutoTP: only the hybrid engine's own group shards the decode forward.
+    engine.autotp_size = lambda: 1
+    rollout = HybridEngineRollout.__new__(HybridEngineRollout)
+    rollout.engine = engine
+    reduced = []
+
+    def all_reduce(tensor, op=None, group=None):
+        reduced.append(group)
+        tensor.fill_(1)
+
+    monkeypatch.setattr(dist, "get_world_size", lambda group=None: 2)
+    monkeypatch.setattr(dist, "all_reduce", all_reduce)
+    # A peer's signature changed, so this rank captures with it even though its own did not.
+    assert rollout._group_needs_capture(False, None)
+    assert reduced == [engine.mp_group]
+
+
+def test_recapture_is_agreed_over_the_segki_lm_head_tp_group(monkeypatch):
+    model = torch.nn.Module()
+    model.lm_head = torch.nn.Linear(2, 4, bias=False)
+    # segKI's lm_head all-gathers over the model's tensor-parallel group, which AutoTP did not create here.
+    model.lm_head._ki_tp_group = object()
+    rollout = HybridEngineRollout.__new__(HybridEngineRollout)
+    rollout.engine = SimpleNamespace(autotp_size=1)
+    reduced = []
+
+    def all_reduce(tensor, op=None, group=None):
+        reduced.append(group)
+        tensor.fill_(1)
+
+    monkeypatch.setattr(dist, "all_reduce", all_reduce)
+    assert rollout._group_needs_capture(False, model)
+    assert reduced == [model.lm_head._ki_tp_group]
+
+
+@pytest.mark.parametrize("fails_here", [True, False])
+def test_capture_failure_on_any_rank_fails_capture_on_every_rank(fails_here, monkeypatch):
+    from deepspeed.runtime.rollout import hybrid_engine_rollout
+    from deepspeed.utils import groups
+    capturing = False
+
+    @contextmanager
+    def capture_to_graph(_graph):
+        nonlocal capturing
+        capturing = True
+        yield
+        capturing = False
+
+    class DecodeModule(torch.nn.Module):
+
+        def forward(self, input_ids, **_kwargs):
+            if capturing and fails_here:
+                raise ValueError("capture failed on this rank")
+            return SimpleNamespace(logits=torch.zeros((input_ids.shape[0], 1, 8)))
+
+    accelerator = MagicMock()
+    accelerator.current_device_name.return_value = "cpu"
+    accelerator.stream.side_effect = lambda _stream: nullcontext()
+    accelerator.capture_to_graph.side_effect = capture_to_graph
+    monkeypatch.setattr(hybrid_engine_rollout, "get_accelerator", lambda: accelerator)
+    tp_group = object()
+    monkeypatch.setattr(groups, "get_tensor_model_parallel_group", lambda: tp_group)
+    reduced = []
+
+    def all_reduce(tensor, op=None, group=None):
+        reduced.append(group)
+        # The peer's capture failed when this rank's did not.
+        tensor.fill_(1)
+
+    monkeypatch.setattr(dist, "all_reduce", all_reduce)
+    rollout = HybridEngineRollout.__new__(HybridEngineRollout)
+    rollout.engine = SimpleNamespace(autotp_size=2)
+    module = DecodeModule()
+
+    def capture():
+        return rollout._capture_continuous_graph(module, MagicMock(), torch.zeros((2, 1), dtype=torch.long),
+                                                 torch.zeros((2, 6)), torch.zeros(2, dtype=torch.long),
+                                                 torch.tensor([5]), torch.zeros((2, 1), dtype=torch.long))
+
+    # Every rank meets its peers before raising, so none keeps a graph whose replay waits on the failed rank.
+    expected = (ValueError, "capture failed on this rank") if fails_here else (RuntimeError, "peer rank")
+    with pytest.raises(expected[0], match=expected[1]):
+        rollout._capture_on_all_ranks(module, capture)
+    assert reduced == [tp_group]
 
 
 def _make_request():
@@ -410,6 +602,27 @@ def test_continuous_graph_state_survives_in_place_weight_updates():
     assert capture.call_count == 6
 
 
+@pytest.mark.parametrize("layer_types, sliding_window, expect_deepspeed_cache", [
+    (None, None, True),
+    (["full_attention", "full_attention"], None, True),
+    (None, 4, False),
+    (["full_attention", "sliding_attention"], 4, False),
+    (["full_attention", "linear_attention"], None, False),
+])
+def test_prefill_cache_keeps_hf_static_cache_unless_full_attention_only(layer_types, sliding_window,
+                                                                        expect_deepspeed_cache):
+    # DeepSpeedStaticCache models every layer as full attention. Prefilling a sliding-window model into it
+    # would silently attend outside the window, and hybrid models bind their GDN slots to the HF cache.
+    from transformers import LlamaConfig, StaticCache
+
+    config = LlamaConfig(hidden_size=8, num_hidden_layers=2, num_attention_heads=2, num_key_value_heads=1)
+    config.layer_types = layer_types
+    config.sliding_window = sliding_window
+    cache = HybridEngineRollout._create_prefill_cache(StaticCache, config, 1, 4, torch.device("cpu"), torch.float32)
+
+    assert isinstance(cache, DeepSpeedStaticCache) == expect_deepspeed_cache
+
+
 def test_static_cache_constructor_supports_max_batch_keyword():
 
     class MaxBatchStaticCache:
@@ -638,6 +851,29 @@ def test_continuous_prefill_requests_last_logits_only():
 
     assert output.input_ids[:, 3:].tolist() == [[8, 13], [9, 14]]
     assert model.prefill_logits_to_keep == [1]
+
+
+def _forward_with_logits_to_keep(input_ids, logits_to_keep=0):
+    pass
+
+
+def _forward_with_num_logits_to_keep(input_ids, num_logits_to_keep=0):
+    pass
+
+
+def _forward_without_logits_to_keep(input_ids):
+    pass
+
+
+@pytest.mark.parametrize("forward, argument", [
+    (_forward_with_logits_to_keep, "logits_to_keep"),
+    (_forward_with_num_logits_to_keep, "num_logits_to_keep"),
+    (_forward_without_logits_to_keep, None),
+])
+def test_last_logits_kwargs_follow_the_transformers_argument_name(forward, argument):
+    # Transformers 4.45-4.48 call the argument num_logits_to_keep.
+    expected = {} if argument is None else {argument: 1}
+    assert HybridEngineRollout._last_logits_kwargs(SimpleNamespace(forward=forward)) == expected
 
 
 def test_aligned_continuous_generation_supports_mixed_effective_prompt_lengths():
@@ -1115,15 +1351,162 @@ def test_zero3_rendezvous_uses_optimizer_dp_group(monkeypatch):
     assert rendezvous.process_group is process_group
 
 
-def test_non_zero3_generation_uses_native_eos():
+def test_full_vocabulary_logits_gathers_only_vocabulary_parallel_heads_and_restores_them():
+    head = torch.nn.Linear(2, 2)
+    head.is_vocab_parallel_lm_head = True
+    head.gather_output = False
+    column_parallel = torch.nn.Linear(2, 2)
+    column_parallel.gather_output = False
+    module = torch.nn.Sequential(column_parallel, head)
+
+    with _full_vocabulary_logits(module):
+        assert head.gather_output is True
+        assert column_parallel.gather_output is False
+    assert head.gather_output is False
+
+    with pytest.raises(RuntimeError):
+        with _full_vocabulary_logits(module):
+            raise RuntimeError("generation failed")
+    # Training must get rank-local logits back even when generation fails.
+    assert head.gather_output is False
+
+
+def test_generate_decodes_with_full_vocabulary_logits():
+    engine = _make_engine()
+    engine.zero_optimization_partition_weights.return_value = False
+    head = SimpleNamespace(is_vocab_parallel_lm_head=True, gather_output=False)
+    engine.module.modules.return_value = [head]
+    gathered = []
+
+    def generate(*args, **kwargs):
+        gathered.append(head.gather_output)
+        return torch.tensor([[0, 1, 2, 5, 6], [0, 3, 4, 7, 8]])
+
+    engine.module.generate.side_effect = generate
+    HybridEngineRollout(engine, _make_tokenizer()).generate(_make_request(), _make_sampling())
+
+    assert gathered == [True]
+    assert head.gather_output is False
+
+
+def test_full_vocabulary_logits_accepts_a_head_without_gather_output():
+    from deepspeed.runtime.rollout.hybrid_engine_rollout import _full_vocabulary_logits
+
+    head = SimpleNamespace(is_vocab_parallel_lm_head=True)
+    with _full_vocabulary_logits(SimpleNamespace(modules=lambda: [head])):
+        assert head.gather_output is True
+    assert head.gather_output is False
+
+
+def _patch_random_state_sync(monkeypatch, events, src_rank=3):
+    """Have the broadcast copy a source-rank state into the tensor, and record the state the rank then sets."""
+    group = object()
+    source_state = torch.arange(8, dtype=torch.uint8)
+    accelerator = get_accelerator()
+
+    def broadcast(tensor, src, group=None):
+        events.append(("broadcast", src, group))
+        tensor.copy_(source_state.to(tensor.device))
+
+    def set_rng_state(state, *args, **kwargs):
+        events.append(("set_rng_state", state.clone()))
+
+    monkeypatch.setattr("deepspeed.runtime.rollout.hybrid_engine_rollout.dist.broadcast", broadcast)
+    monkeypatch.setattr(accelerator, "get_rng_state", lambda *args, **kwargs: torch.zeros(8, dtype=torch.uint8))
+    monkeypatch.setattr(accelerator, "set_rng_state", set_rng_state)
+    monkeypatch.setattr("deepspeed.utils.groups.get_tensor_model_parallel_src_rank", lambda: src_rank)
+    monkeypatch.setattr("deepspeed.utils.groups.get_tensor_model_parallel_group", lambda: group)
+    return group, source_state
+
+
+@pytest.mark.parametrize("autotp_size", [2, 1])
+def test_generate_shares_the_random_state_across_the_autotp_group(autotp_size, monkeypatch):
+    engine = _make_engine()
+    engine.zero_optimization_partition_weights.return_value = False
+    engine.autotp_size.return_value = autotp_size
+    events = []
+
+    def generate(*args, **kwargs):
+        events.append(("generate", ))
+        return torch.tensor([[0, 1, 2, 5, 6], [0, 3, 4, 7, 8]])
+
+    engine.module.generate.side_effect = generate
+    group, source_state = _patch_random_state_sync(monkeypatch, events)
+
+    HybridEngineRollout(engine, _make_tokenizer()).generate(_make_request(), _make_sampling())
+
+    if autotp_size == 1:
+        assert events == [("generate", )]
+        return
+    # The rank adopts the source rank's state before it samples anything.
+    assert [event[0] for event in events] == ["broadcast", "set_rng_state", "generate"]
+    assert events[0][1:] == (3, group)
+    assert torch.equal(events[1][1].cpu(), source_state)
+
+
+def test_generate_shares_the_random_state_when_the_engine_is_wrapped(monkeypatch):
     engine = _make_engine()
     engine.zero_optimization_partition_weights.return_value = False
     engine.module.generate.return_value = torch.tensor([[0, 1, 2, 5, 6], [0, 3, 4, 7, 8]])
+    # A wrapper that exposes the module but not autotp_size(), as tests/integration/zero3_arena_e2e.py does.
+    wrapper = SimpleNamespace(module=engine.module)
+    events = []
+    _patch_random_state_sync(monkeypatch, events)
+    monkeypatch.setattr("deepspeed.runtime.rollout.hybrid_engine_rollout.dist.is_initialized", lambda: True)
+    monkeypatch.setattr("deepspeed.utils.groups.get_tensor_model_parallel_world_size", lambda: 2)
+
+    HybridEngineRollout(wrapper, _make_tokenizer()).generate(_make_request(), _make_sampling())
+
+    assert [event[0] for event in events] == ["broadcast", "set_rng_state"]
+
+
+def test_tp_input_check_treats_deepspeed_static_cache_as_a_cache():
+    from deepspeed.runtime.utils import compare_tensors_in_structures
+
+    # Each rank builds its own cache, so the check must not compare the objects themselves.
+    first, second = (DeepSpeedStaticCache(_cache_config(), max_cache_len=4) for _ in range(2))
+
+    assert compare_tensors_in_structures([torch.ones(2), first], [torch.ones(2), second])
+    assert compare_tensors_in_structures({"past_key_values": first}, {"past_key_values": second})
+
+
+@pytest.mark.parametrize("tokenizer_eos, config_eos, expected", [
+    (2, None, [2]),
+    (2, 7, [2, 7]),
+    (2, [7, 2, 9], [2, 7, 9]),
+    (None, [7, 9], [7, 9]),
+    (None, None, []),
+    (-1, [7], [7]),
+])
+def test_eos_token_ids_merge_tokenizer_and_generation_config(tokenizer_eos, config_eos, expected):
+    module = SimpleNamespace(generation_config=SimpleNamespace(eos_token_id=config_eos))
+    rollout = HybridEngineRollout(SimpleNamespace(module=module),
+                                  SimpleNamespace(pad_token_id=0, eos_token_id=tokenizer_eos))
+
+    assert rollout._eos_token_ids() == expected
+
+
+def test_continuous_rows_end_on_a_generation_config_eos_id():
+    module = SimpleNamespace(generation_config=SimpleNamespace(eos_token_id=[2, 7]))
+    rollout = HybridEngineRollout(SimpleNamespace(module=module), SimpleNamespace(pad_token_id=0, eos_token_id=2))
+
+    assert rollout._is_eos(torch.tensor([[7]]))
+    assert not rollout._is_eos(torch.tensor([[5]]))
+
+
+def test_non_zero3_generation_stops_on_every_eos_id():
+    engine = _make_engine()
+    engine.zero_optimization_partition_weights.return_value = False
+    engine.module.generation_config = SimpleNamespace(eos_token_id=[2, 7])
+    engine.module.generate.return_value = torch.tensor([[0, 1, 2, 7, 6], [0, 3, 4, 5, 8]])
     rollout = HybridEngineRollout(engine, _make_tokenizer())
 
-    rollout.generate(_make_request(), _make_sampling())
+    output = rollout.generate(_make_request(), _make_sampling())
 
-    assert engine.module.generate.call_args.kwargs["eos_token_id"] == 2
+    # generate() takes the list in place of generation_config.eos_token_id, so the tokenizer's id alone would drop 7.
+    assert engine.module.generate.call_args.kwargs["eos_token_id"] == [2, 7]
+    # A row ends at its first id of either kind, and everything after it is padding.
+    assert output.attention_mask[:, 3:].tolist() == [[1, 0], [1, 1]]
     assert engine.module.generate.call_args.kwargs["stopping_criteria"] is None
     # Non-ZeRO-3 generation must keep the Transformers default.
     assert engine.module.generate.call_args.kwargs["synced_gpus"] is None
@@ -1610,12 +1993,107 @@ def test_engine_pairs_shared_prefill_cache_tensors():
     workspace.repeat_kv_cache.assert_called_once_with(2, 2)
 
 
-# -- sync_weights is no-op ---------------------------------------------
+# -- sync_weights invalidates derived caches ---------------------------
 
 
-def test_sync_weights_is_noop():
-    rollout = HybridEngineRollout(_make_engine(), _make_tokenizer())
-    assert rollout.sync_weights(step=0) is None
+def test_sync_weights_drops_derived_caches():
+    # refresh_weights resolves the module through engine.module; the mock
+    # engine only has to expose it. A fake derived cache on the module
+    # must vanish after the training-step hook fires.
+    engine = _make_engine()
+    # a real module, not the mock's auto-attribute: segki_refresh walks
+    # .modules() and delattr must actually remove
+    engine.module = torch.nn.Identity()
+    engine.module._ki_tp_cat_w = object()  # a derived-weight cache stand-in
+    rollout = HybridEngineRollout(engine, _make_tokenizer())
+    rollout.use_segki = True
+    rollout.sync_weights(step=0)
+    assert not hasattr(engine.module, "_ki_tp_cat_w")
+
+
+def test_sync_weights_continuous_graph_safe():
+    """Continuous graph + weight sync must not replay freed derived tensors.
+
+    The retained continuous graph captures the derived tensors' addresses
+    (GLU concat cache, attention cat weights); a refresh that drops them
+    while the graph survives leaves replays reading freed memory. The
+    graph must be released across a sync (interim contract) until refresh
+    refills derived tensors in place."""
+    pytest.importorskip("transformers")
+    from deepspeed.accelerator import get_accelerator
+    if get_accelerator().device_name() == "cpu":
+        pytest.skip("segKI injection needs an accelerator")
+
+    model = _make_small_qwen()
+    device = next(model.parameters()).device
+
+    def make_rollout():
+        return HybridEngineRollout(SimpleNamespace(module=model), SimpleNamespace(pad_token_id=0, eos_token_id=None),
+                                   HybridEngineRolloutConfig(use_segki=True, use_graph_capture=True))
+
+    prompt = torch.randint(3, 28, (2, 8), device=device)
+    sampling = SamplingConfig(max_new_tokens=8, temperature=0, continuous_batch_size=2)
+
+    rollout = make_rollout()
+    rollout.generate(RolloutRequest(prompt, torch.ones_like(prompt)), sampling)  # capture
+    rollout.generate(RolloutRequest(prompt, torch.ones_like(prompt)), sampling)  # reuse -> retained
+    # the hazard only exists when the graph actually survives across calls
+    assert rollout._continuous_graph_state is not None, "expected the continuous graph to be retained"
+
+    with torch.no_grad():
+        for p in model.parameters():
+            p.mul_(3.0)
+    rollout.sync_weights(step=0)
+    # interim contract: the sync must release the retained graph. It captures
+    # the derived tensors' addresses wherever they exist (TP>1 cat weights,
+    # Ampere/Hopper GLU concat cache, GDN gates); refresh drops those tensors,
+    # so a surviving graph would replay freed memory. On configs without any
+    # derived tensor the replay would stay correct by luck -- pin the release
+    # so every config is safe by construction.
+    assert rollout._continuous_graph_state is None, "sync must release the retained continuous graph"
+    synced = rollout.generate(RolloutRequest(prompt, torch.ones_like(prompt)), sampling)
+
+    fresh = make_rollout().generate(RolloutRequest(prompt, torch.ones_like(prompt)), sampling)
+    assert torch.equal(synced.input_ids, fresh.input_ids), \
+        "post-sync continuous generate must match a fresh injection"
+
+
+def test_sync_weights_generate_matches_fresh_injection():
+    """Rollout-path weight sync: inject -> generate -> in-place write ->
+    sync_weights -> generate must equal a fresh injection of the same
+    weights (derived caches rebuilt, live reads see the new values)."""
+    pytest.importorskip("transformers")
+    from deepspeed.accelerator import get_accelerator
+    from transformers import AutoModelForCausalLM
+    if get_accelerator().device_name() == "cpu":
+        pytest.skip("segKI injection needs an accelerator")
+
+    torch.manual_seed(0)
+    device = torch.device(get_accelerator().device_name())
+    try:
+        model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen3.5-0.8B-Base", dtype=torch.bfloat16).to(device).eval()
+    except Exception as e:
+        pytest.skip(f"model unavailable: {e}")
+
+    def make_rollout():
+        return HybridEngineRollout(SimpleNamespace(module=model), SimpleNamespace(pad_token_id=0, eos_token_id=None),
+                                   HybridEngineRolloutConfig(use_segki=True, use_graph_capture=False))
+
+    prompt = torch.randint(3, 1500, (2, 16), device=device)
+    sampling = SamplingConfig(max_new_tokens=8, temperature=0)
+
+    rollout = make_rollout()
+    rollout.generate(RolloutRequest(prompt, torch.ones_like(prompt)), sampling)  # build caches
+
+    # in-place weight write, the arena/reshard contract
+    with torch.no_grad():
+        for p in model.parameters():
+            p.add_(0.01)
+    rollout.sync_weights(step=0)
+    synced = rollout.generate(RolloutRequest(prompt, torch.ones_like(prompt)), sampling)
+
+    fresh = make_rollout().generate(RolloutRequest(prompt, torch.ones_like(prompt)), sampling)
+    assert torch.equal(synced.input_ids, fresh.input_ids), "post-sync generate must match a fresh injection"
 
 
 # -- generate dispatches correctly -------------------------------------

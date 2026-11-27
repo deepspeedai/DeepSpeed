@@ -60,8 +60,11 @@ autocast_custom_fwd, autocast_custom_bwd = _get_autocast_decorators()
 def _is_autocast_enabled(device_type):
     try:
         return torch.is_autocast_enabled(device_type)
-    except TypeError:
-        legacy_getter = getattr(torch, f'is_autocast_{device_type}_enabled', None)
+    except (AttributeError, TypeError):
+        legacy_names = (("is_autocast_cuda_enabled", "is_autocast_gpu_enabled") if device_type == "cuda" else
+                        (f"is_autocast_{device_type}_enabled", ))
+        legacy_getter = next(
+            (getattr(torch, name, None) for name in legacy_names if getattr(torch, name, None) is not None), None)
         if legacy_getter is not None:
             return legacy_getter()
         return torch.is_autocast_enabled()
@@ -70,8 +73,11 @@ def _is_autocast_enabled(device_type):
 def _get_autocast_dtype(device_type):
     try:
         return torch.get_autocast_dtype(device_type)
-    except TypeError:
-        legacy_getter = getattr(torch, f'get_autocast_{device_type}_dtype', None)
+    except (AttributeError, TypeError):
+        legacy_names = (("get_autocast_gpu_dtype", "get_autocast_cuda_dtype") if device_type == "cuda" else
+                        (f"get_autocast_{device_type}_dtype", ))
+        legacy_getter = next(
+            (getattr(torch, name, None) for name in legacy_names if getattr(torch, name, None) is not None), None)
         if legacy_getter is not None:
             return legacy_getter()
         return None
