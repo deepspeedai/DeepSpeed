@@ -4683,12 +4683,13 @@ class DeepSpeedEngine(Module):
         if load_module_only and self.zero_nvme_offload_optimizer() and custom_load_fn is not None:
             raise ZeRORuntimeException("NVMe module-only checkpoint load does not support custom_load_fn")
 
-        # Fail with a clear message before the prologue below repartitions anything.
-        self._check_ckpt_files_exist(load_dir, tag)
-
         if self._optimizer_has_ckpt_event_prologue():
             # Prepare for checkpoint load by ensuring all parameters are partitioned
             self.optimizer.checkpoint_event_prologue()
+
+        # Check after the prologue: some prologues are collective, and a rank that raised
+        # before them would leave the other ranks waiting.
+        self._check_ckpt_files_exist(load_dir, tag)
 
         load_path, client_states = self._load_checkpoint(load_dir,
                                                          tag,
