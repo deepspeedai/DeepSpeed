@@ -250,7 +250,7 @@ def _merge_zero_shards(param_base_path, state, tp_degree, slice_shapes=None):
             empty_tp_indices.append((tp_index, len(slices)))
             continue
 
-        pattern = re.compile(f"{prefix_path}\\.([0-9]+)")
+        pattern = re.compile(f"{re.escape(prefix_path)}\\.([0-9]+)")
         dp_indices = set()
         for p in paths:
             m = pattern.match(p)
@@ -1366,17 +1366,34 @@ def main(args):
         if not args.keep_temp_folder:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
+        # Reconstruct frozen parameters from fragments for ZeRO-3
+        frozen_sd = {}
+        first_ms = torch.load(model_files[0], map_location=torch.device('cpu'), weights_only=False)
+        frozen_shapes = first_ms.get('frozen_param_shapes') or {}
+        if frozen_shapes:
+            all_model_states = [torch.load(mf, map_location=torch.device('cpu'), weights_only=False) for mf in model_files]
+            for name, shape in frozen_shapes.items():
+                unpartitioned_numel = shape.numel()
+                param_frags = tuple(ms['frozen_param_fragments'][name] for ms in all_model_states if 'frozen_param_fragments' in ms and name in ms['frozen_param_fragments'])
+                if len(param_frags) == len(model_files):
+                    frozen_sd[name] = torch.cat(param_frags, 0).narrow(0, 0, unpartitioned_numel).view(shape)
+
         # Copy *model_states files into output folder, filtering out expert files
         for f in glob.glob(os.path.join(args.input_folder, '*model_states.pt')):
             if _is_expert_model_state_file(f):
                 continue
-            if has_zero3_partitioned_autoep:
+            if has_zero3_partitioned_autoep or frozen_sd:
                 model_state = torch.load(f, map_location=torch.device('cpu'), weights_only=False)
-                autoep_metadata = _get_autoep_metadata(model_state)
-                if UNIVERSAL_CHECKPOINT_INFO not in model_state:
-                    model_state[UNIVERSAL_CHECKPOINT_INFO] = {}
-                model_state[UNIVERSAL_CHECKPOINT_INFO][EXPERT_PARAMETER_PATTERNS] = [r'.*\.experts\.w[123]$']
-                model_state[UNIVERSAL_CHECKPOINT_INFO][AUTOEP_LAYERS_KEY] = autoep_metadata
+                if has_zero3_partitioned_autoep:
+                    autoep_metadata = _get_autoep_metadata(model_state)
+                    if UNIVERSAL_CHECKPOINT_INFO not in model_state:
+                        model_state[UNIVERSAL_CHECKPOINT_INFO] = {}
+                    model_state[UNIVERSAL_CHECKPOINT_INFO][EXPERT_PARAMETER_PATTERNS] = [r'.*\.experts\.w[123]$']
+                    model_state[UNIVERSAL_CHECKPOINT_INFO][AUTOEP_LAYERS_KEY] = autoep_metadata
+                if frozen_sd:
+                    if 'module' not in model_state:
+                        model_state['module'] = {}
+                    model_state['module'].update(frozen_sd)
                 torch.save(model_state, os.path.join(args.output_folder, os.path.basename(f)))
             else:
                 shutil.copy2(f, args.output_folder)
