@@ -113,6 +113,10 @@ class QuantizedWf6Af16Linear(DSLinearBase):
         if config.input_dtype != torch.float16:
             return False
 
+        out_channels = config.out_channels * 2 if is_gated(config.activation) else config.out_channels
+        if out_channels % 256 != 0 or config.in_channels % 64 != 0:
+            return False
+
         if is_gated(config.activation):
             try:
                 _ = CUDAGatedActivation(config.out_channels, config.output_dtype, config.activation)

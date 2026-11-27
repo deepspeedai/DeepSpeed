@@ -111,9 +111,6 @@ def _fp6_quantized_linear_helper(tokens: int,
     else:
         bias = None
 
-    # quantize and dequantize output
-    ref_quant_dequant_output = quant_dequant_implementation(hidden_states, weight, bias, act_fn)
-
     linear_config = DSLinearConfig(max_tokens=2048,
                                    in_channels=in_channels,
                                    out_channels=out_channels,
@@ -121,20 +118,24 @@ def _fp6_quantized_linear_helper(tokens: int,
                                    input_dtype=dtype,
                                    output_dtype=dtype)
     bundle = ConfigBundle(name='quantized_wf6af16_linear', config=linear_config)
-    fp6_linear_module = DSLinearRegistry.instantiate_config(bundle)
-    weight_fp6 = fp6_linear_module.transform_param(weight.clone().cpu()).to(get_accelerator().current_device_name())
 
     if expect_failure:
         with pytest.raises(ValueError) as excinfo:
-            ds_output = fp6_linear_module(hidden_states, weight_fp6, bias)
-        assert "The out and in channel should be multiple of 256 and 64 respectively." in str(excinfo.value)
-    else:
-        ds_output = fp6_linear_module(hidden_states, weight_fp6, bias)
-        # The current FP6 kernel uses FP16 Tensor Core.
-        tolerances = (3e-2, 2e-3)  # tolerances for fp16
+            DSLinearRegistry.instantiate_config(bundle)
+        assert "is not supported by" in str(excinfo.value)
+        return
 
-        # Check DeepSpeed implementation
-        assert allclose(ds_output, ref_quant_dequant_output, tolerances=tolerances)
+    # quantize and dequantize output
+    ref_quant_dequant_output = quant_dequant_implementation(hidden_states, weight, bias, act_fn)
+
+    fp6_linear_module = DSLinearRegistry.instantiate_config(bundle)
+    weight_fp6 = fp6_linear_module.transform_param(weight.clone().cpu()).to(get_accelerator().current_device_name())
+    ds_output = fp6_linear_module(hidden_states, weight_fp6, bias)
+    # The current FP6 kernel uses FP16 Tensor Core.
+    tolerances = (3e-2, 2e-3)  # tolerances for fp16
+
+    # Check DeepSpeed implementation
+    assert allclose(ds_output, ref_quant_dequant_output, tolerances=tolerances)
 
 
 all_acts = [
@@ -169,7 +170,7 @@ def test_fp6_quantized_linear_act_fn(tokens: int, in_channels: int, out_channels
 # Other shapes, not supported by FP6 kernels. Will raise ValueError.
 @pytest.mark.inference_v2_ops
 @pytest.mark.parametrize("tokens", all_tokens)
-@pytest.mark.parametrize("in_channels, out_channels", [(4608, 1728)])
+@pytest.mark.parametrize("in_channels, out_channels", [(4608, 1728), (3420, 5120), (5120, 3424)])
 @pytest.mark.parametrize("act_fn", all_acts)
 @pytest.mark.parametrize("use_bias", [True, False])
 def test_fp6_quantized_linear_act_fn_fail(tokens: int, in_channels: int, out_channels: int, act_fn: ActivationType,
