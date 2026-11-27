@@ -12,8 +12,6 @@ import torch
 
 from deepspeed.ops.triton_ops._triton import _TRITON_AVAILABLE, triton, tl
 
-_IS_ROCM_PYTORCH = getattr(torch.version, "hip", None) is not None
-
 SUPPORTED_ROW_DTYPES = (torch.bfloat16, torch.float16, torch.float32)
 SUPPORTED_ROW_WEIGHTING_DTYPES = (torch.bfloat16, torch.float16)
 
@@ -224,7 +222,7 @@ if _TRITON_AVAILABLE:
 
 def is_available() -> bool:
     """Whether this build can run the fused weighted restore at all."""
-    return _TRITON_AVAILABLE and not _IS_ROCM_PYTORCH
+    return _TRITON_AVAILABLE
 
 
 def assert_supported(rows: torch.Tensor, *, score_apply: str) -> None:
@@ -232,9 +230,6 @@ def assert_supported(rows: torch.Tensor, *, score_apply: str) -> None:
     if not _TRITON_AVAILABLE:
         raise RuntimeError('combine_impl="fused_weighted_sum" needs Triton, which is not installed in this '
                            "environment. Install Triton, or leave combine_impl unset.")
-    if _IS_ROCM_PYTORCH:
-        raise RuntimeError('combine_impl="fused_weighted_sum" is not yet supported on ROCm. Leave combine_impl '
-                           "unset to run here.")
     if rows.device.type != "cuda":
         raise RuntimeError('combine_impl="fused_weighted_sum" runs CUDA kernels but this layer is on device '
                            f'"{rows.device.type}". Leave combine_impl unset to run here.')
@@ -350,18 +345,12 @@ def assert_row_weighting_supported(rows: torch.Tensor, weights: torch.Tensor) ->
     if not _TRITON_AVAILABLE:
         raise RuntimeError('row_weighting_impl="fused" needs Triton, which is not installed in this environment. '
                            'Install Triton, or set row_weighting_impl="eager".')
-    if _IS_ROCM_PYTORCH:
-        raise RuntimeError('row_weighting_impl="fused" is not yet supported on ROCm. Set '
-                           'row_weighting_impl="eager" to run here.')
     if rows.device.type != "cuda":
         raise RuntimeError('row_weighting_impl="fused" runs CUDA kernels but rows are on device '
                            f'"{rows.device.type}". Set row_weighting_impl="eager" to run here.')
     if weights.device != rows.device:
         raise RuntimeError('row_weighting_impl="fused" requires rows and weights on the same CUDA device, got '
                            f"rows on {rows.device} and weights on {weights.device}.")
-    if rows.dim() != 2:
-        raise RuntimeError('row_weighting_impl="fused" requires rows with shape [N, H], got '
-                           f"{tuple(rows.shape)}. Set row_weighting_impl=\"eager\" for unsupported shapes.")
     expected_weight_shape = (rows.shape[0], 1)
     if tuple(weights.shape) != expected_weight_shape:
         raise RuntimeError('row_weighting_impl="fused" requires weights with shape [N, 1] matching rows, got '
@@ -372,12 +361,6 @@ def assert_row_weighting_supported(rows: torch.Tensor, weights: torch.Tensor) ->
     if weights.dtype != torch.float32:
         raise RuntimeError('row_weighting_impl="fused" requires float32 weights, got '
                            f"{weights.dtype}. Set row_weighting_impl=\"eager\" for unsupported weights.")
-    if not rows.is_contiguous():
-        raise RuntimeError('row_weighting_impl="fused" requires contiguous rows. Set row_weighting_impl="eager" '
-                           "for non-contiguous row layouts.")
-    if not weights.is_contiguous():
-        raise RuntimeError('row_weighting_impl="fused" requires contiguous weights. Set row_weighting_impl="eager" '
-                           "for non-contiguous weight layouts.")
 
 
 class _FusedRowWeighting(torch.autograd.Function):
@@ -459,13 +442,13 @@ class _RecordedFusedRowWeighting(_FusedRowWeighting):
 def fused_row_weighting(rows: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
     """Apply ``weights`` to ``rows`` as ``(rows.float() * weights).to(rows.dtype)``."""
     assert_row_weighting_supported(rows, weights)
-    return _FusedRowWeighting.apply(rows, weights)
+    return _FusedRowWeighting.apply(rows.contiguous(), weights)
 
 
 def recorded_fused_row_weighting(rows: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
     """:func:`fused_row_weighting` for a result nobody reads: the same backward, an uninitialized result."""
     assert_row_weighting_supported(rows, weights)
-    return _RecordedFusedRowWeighting.apply(rows, weights)
+    return _RecordedFusedRowWeighting.apply(rows.contiguous(), weights)
 
 
 def fused_weighted_restore(

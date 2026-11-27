@@ -23,8 +23,6 @@ import torch
 from deepspeed.ops.triton_ops._triton import _TRITON_AVAILABLE, triton, tl
 from deepspeed.utils.torch import required_torch_version
 
-_IS_ROCM_PYTORCH = getattr(torch.version, "hip", None) is not None
-BACKENDS = ("auto", "triton", "torch")
 _TRITON_BLOCK = 4096
 
 if _TRITON_AVAILABLE:
@@ -65,22 +63,6 @@ if _TRITON_AVAILABLE:
             grad = tl.exp(values - log_sum_exp) * scale
             grad = tl.where(offsets == target, grad - scale, grad)
             tl.store(grad_ptr + row * grad_row_stride + offsets, grad.to(grad_ptr.dtype.element_ty), mask=mask)
-
-
-def triton_backend_available() -> bool:
-    return _TRITON_AVAILABLE and not _IS_ROCM_PYTORCH
-
-
-def _resolve_backend(backend: str, logits: torch.Tensor) -> str:
-    if backend not in BACKENDS:
-        raise ValueError(f"Unsupported chunked cross-entropy backend {backend!r}; expected one of {BACKENDS}")
-    on_cuda = logits.device.type == "cuda"
-    if backend == "auto":
-        return "triton" if on_cuda and triton_backend_available() else "torch"
-    if backend == "triton" and not (on_cuda and triton_backend_available()):
-        raise RuntimeError("The Triton chunked cross-entropy backend needs CUDA logits and Triton; use "
-                           'backend="torch" to run elsewhere')
-    return backend
 
 
 # Rows are processed in blocks of about this many FP32 elements, so a block's temporaries stay near
@@ -199,16 +181,14 @@ def chunked_cross_entropy(logits: torch.Tensor,
                           target: torch.Tensor,
                           ignore_index: int = -100,
                           reduction: str = "mean",
-                          block_rows: int | None = None,
-                          backend: str = "auto") -> torch.Tensor:
+                          block_rows: int | None = None) -> torch.Tensor:
     """``torch.nn.functional.cross_entropy(logits.float(), target, ...)`` without FP32 ``[rows, vocab]`` tensors.
 
     ``logits`` is ``[rows, vocab]`` and ``target`` is ``[rows]`` with dtype ``torch.long``; targets are
     not converted from other dtypes. As with ``cross_entropy``, "mean"
-    divides by the number of non-ignored rows, so it is NaN when every row is ignored. ``backend``
-    "auto" uses Triton for CUDA logits when it is available and PyTorch otherwise; naming a backend
-    that cannot run raises instead of substituting the other. ``block_rows`` must be a positive
-    integer or ``None`` and controls the PyTorch backend only.
+    divides by the number of non-ignored rows, so it is NaN when every row is ignored. CUDA logits use
+    the Triton kernels when Triton is available; other logits use the PyTorch backend. ``block_rows``
+    must be a positive integer or ``None`` and controls the PyTorch backend only.
     """
     block_rows = _validate_block_rows(block_rows)
     if logits.dim() != 2 or target.shape != logits.shape[:1]:
@@ -230,7 +210,7 @@ def chunked_cross_entropy(logits: torch.Tensor,
         torch._assert_async(targets_in_range, f"Target is out of range for vocabulary size {logits.shape[-1]}")
     else:
         torch._assert_async(targets_in_range)
-    if _resolve_backend(backend, logits) == "triton":
+    if logits.device.type == "cuda" and _TRITON_AVAILABLE:
         loss = _TritonCrossEntropy.apply(logits, target, ignore_index)
     else:
         if block_rows is None:
@@ -244,13 +224,13 @@ def chunked_cross_entropy(logits: torch.Tensor,
 
 
 class ChunkedCausalLMLoss:
-    """Drop-in for Hugging Face's ``ForCausalLMLoss`` with the same shifting, ignoring and normalization."""
+    """Drop-in for Hugging Face's ``ForCausalLMLoss`` with the same shifting, ignoring and normalization.
 
-    def __init__(self, block_rows: int | None = None, backend: str = "auto"):
-        if backend not in BACKENDS:
-            raise ValueError(f"Unsupported chunked cross-entropy backend {backend!r}; expected one of {BACKENDS}")
+    CUDA logits run the Triton kernels when Triton is available; other logits run the PyTorch backend.
+    """
+
+    def __init__(self, block_rows: int | None = None):
         self.block_rows = _validate_block_rows(block_rows)
-        self.backend = backend
 
     def __call__(self,
                  logits,
@@ -271,8 +251,7 @@ class ChunkedCausalLMLoss:
                                      targets,
                                      ignore_index=ignore_index,
                                      reduction=reduction,
-                                     block_rows=self.block_rows,
-                                     backend=self.backend)
+                                     block_rows=self.block_rows)
         if reduction == "sum":
             if torch.is_tensor(num_items_in_batch):
                 num_items_in_batch = num_items_in_batch.to(loss.device)
@@ -280,7 +259,7 @@ class ChunkedCausalLMLoss:
         return loss
 
 
-def install_chunked_causal_lm_loss(model, block_rows: int | None = None, backend: str = "auto") -> ChunkedCausalLMLoss:
+def install_chunked_causal_lm_loss(model, block_rows: int | None = None) -> ChunkedCausalLMLoss:
     """Make a Hugging Face causal LM compute its training loss with :class:`ChunkedCausalLMLoss`.
 
     Only models whose ``loss_function`` is the stock ``ForCausalLMLoss`` are accepted, since this
@@ -291,7 +270,7 @@ def install_chunked_causal_lm_loss(model, block_rows: int | None = None, backend
     if getattr(model, "loss_function", None) is not ForCausalLMLoss:
         raise ValueError("install_chunked_causal_lm_loss only replaces the stock Hugging Face ForCausalLMLoss, "
                          f"but this model's loss_function is {getattr(model, 'loss_function', None)!r}")
-    loss_function = ChunkedCausalLMLoss(block_rows=block_rows, backend=backend)
+    loss_function = ChunkedCausalLMLoss(block_rows=block_rows)
     try:
         model.loss_function = loss_function
     except (AttributeError, TypeError) as error:

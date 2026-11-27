@@ -530,10 +530,9 @@ it:
 
 - ``comm_backend`` is not ``"deepep"`` or ``autoep_size=1``, because the call
   sites exist only inside the DeepEP route;
-- Triton is unavailable, the device is not CUDA, or the build is ROCm;
+- Triton is unavailable or the device is not a CUDA or ROCm GPU;
 - rows are not bfloat16 or float16;
-- weights are not FP32 ``[N, 1]`` tensors on the same CUDA device;
-- rows or weights are not contiguous, or rows are not shaped ``[N, H]``.
+- weights are not FP32 ``[N, 1]`` tensors on the same CUDA device.
 
 The operator also accepts FP16 rows, but the current DeepEP dispatch supports
 BF16 rows only. Correct backward replay through DeepEP additionally requires
@@ -667,7 +666,7 @@ order between Transformers releases. The installer therefore replaces only
 instances of the classes in ``SUPPORTED_RMS_NORM_CLASSES``: the RMSNorm
 classes of Llama, Mistral, Mixtral, Phi-3, Qwen2, Qwen2-MoE, Qwen3, Qwen3-MoE,
 DeepSeek-V2 and DeepSeek-V3. A module is replaced only if it still runs its
-class's own ``forward`` and is at most 2048 wide, so subclasses, modules whose
+class's own ``forward`` and is at most 32768 wide, so subclasses, modules whose
 ``forward`` was already patched or wrapped (by another kernel installer or by
 an earlier call) and wider norms are left alone. Replaced modules keep their
 own weight Parameter and ``variance_epsilon``. The return value is the number
@@ -690,11 +689,11 @@ program and combine the input- and weight-gradient reads in backward. Small
 inputs cap the row tile at the next power of two of their row count, so a
 single row does not instantiate a full 4096-element tile. Larger inputs keep
 the existing tile size. Wider norms retain the one-row kernels. The numerical
-tests do not require bitwise equality with eager. For narrow input gradients
-they allow at most 8 ULPs or an absolute error of 1e-7 per element, since
-near-zero gradients can have large ULP distances after cancellation. At least
-95% must still be within one ULP; forward, weight-gradient and wide-path
-thresholds are unchanged.
+tests do not require bitwise equality with eager. For input gradients they
+allow at most 8 ULPs or an absolute error of 1e-7 per element, and for weight
+gradients at most 8 ULPs or two rounding steps of the column's largest product,
+since near-zero results can have large ULP distances after cancellation. At
+least 95% must still be within one ULP.
 At width one, the pre-gamma input derivative in exact arithmetic is
 ``eps / (x**2 + eps)**(3/2)``, which is nonzero when ``eps > 0``. With a
 very small epsilon and large ``abs(x)``, low-precision rounding can hide this
@@ -709,14 +708,13 @@ not promise a speedup on every supported device or shape.
 
 Requirements and limits:
 
-- The kernels need CUDA with Triton. On ROCm or without Triton, replaced
-  modules run eager.
+- The kernels need Triton on a CUDA or ROCm GPU; otherwise replaced modules
+  run eager.
 - bfloat16 or float16, with the input and the weight in the same dtype. Other
   inputs run eager, including float32 weights under autocast.
-- Norms wider than 2048 are not replaced. That covers the hidden size and head
-  dimension of Qwen3-30B-A3B; in models with a wider hidden size, such as
-  Qwen3-235B-A22B (4096), only the narrower norms, such as the 128-wide query
-  and key norms, are replaced.
+- Norms wider than 32768 are not replaced. That covers the hidden size and
+  head dimension of models such as Qwen3-235B-A22B (4096) and DeepSeek-V3
+  (7168).
 - Any leading shape. Non-contiguous inputs and weights are copied before the
   kernels run. The output and the input gradient the kernels produce are
   contiguous, whereas eager RMSNorm follows the strides of its input and of
@@ -824,7 +822,7 @@ applies the kernel directly and raises on unsupported inputs instead.
 
 Requirements and limits:
 
-- The kernel needs CUDA with Triton. On ROCm or without Triton, the replaced
+- The kernel needs Triton on a CUDA or ROCm GPU; otherwise the replaced
   function runs eager.
 - All four tensors must be on one device. Launches use that device's current
   stream even if another device is current, and restore the caller's current
@@ -905,12 +903,10 @@ which is where AutoEP training memory peaks.
 ``install_chunked_causal_lm_loss`` replaces that loss with one that computes
 the same FP32 cross entropy without them: forward keeps only the logits it was
 given plus one FP32 value per token, and backward recomputes the softmax and
-writes the gradient directly in the logits' dtype. On CUDA a Triton kernel does
-each pass in a single read of the logits (``backend="triton"``); the PyTorch
-backend (``backend="torch"``) does the same arithmetic in blocks of rows and
-runs anywhere. The default ``"auto"`` picks Triton when it can run; naming a
-backend that cannot run raises. The
-loss, the label shifting, ``ignore_index`` and ``num_items_in_batch``
+writes the gradient directly in the logits' dtype. For CUDA logits, when Triton
+is available, a Triton kernel does each pass in a single read of the logits;
+otherwise a PyTorch implementation does the same arithmetic in blocks of rows.
+The loss, the label shifting, ``ignore_index`` and ``num_items_in_batch``
 normalization follow ``ForCausalLMLoss``; gradients may differ from it by one
 BF16/FP16 rounding step where the FP32 evaluation order lands on a rounding
 boundary. It has no second derivative: backward with ``create_graph=True``
@@ -919,7 +915,7 @@ the stock ``ForCausalLMLoss``:
 
 .. code-block:: python
 
-    from deepspeed.runtime.chunked_cross_entropy import install_chunked_causal_lm_loss
+    from deepspeed.ops.triton_ops.chunked_cross_entropy import install_chunked_causal_lm_loss
 
     install_chunked_causal_lm_loss(model)
     engine, optimizer, _, _ = deepspeed.initialize(model=model, config=ds_config)

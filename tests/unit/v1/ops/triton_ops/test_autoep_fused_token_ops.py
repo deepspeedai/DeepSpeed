@@ -231,9 +231,6 @@ def test_fused_row_weighting_guards_name_unsupported_inputs():
     weights = torch.randn(8, 1, device=device, dtype=torch.float32)
     fused_ops.assert_row_weighting_supported(rows, weights)
 
-    with pytest.raises(RuntimeError, match="contiguous rows"):
-        fused_ops.assert_row_weighting_supported(rows.t(), torch.randn(16, 1, device=device, dtype=torch.float32))
-
     with pytest.raises(RuntimeError, match=r"shape \[N, 1\]"):
         fused_ops.assert_row_weighting_supported(rows, torch.randn(8, device=device, dtype=torch.float32))
 

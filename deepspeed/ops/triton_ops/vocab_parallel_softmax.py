@@ -4,7 +4,7 @@
 
 Each kernel handles one row of a ``[..., local_vocab]`` logits shard and loops over the local
 vocabulary in blocks, so no ``[rows, local_vocab]`` fp32 temporary is materialized. The kernels
-only see the local shard; ``deepspeed.sequence.vocab_parallel_ops`` owns the all-reduces and the
+only see the local shard; ``deepspeed.ops.triton_ops.vocab_parallel_ops`` owns the all-reduces and the
 autograd functions, and keeps an eager fallback with the same semantics.
 
 Rows are the flattened leading dimensions and are addressed in place (see ``row_layout``), so a

@@ -7,11 +7,11 @@ import torch
 import torch.nn.functional as F
 
 import deepspeed.comm as dist
-import deepspeed.sequence.vocab_parallel_ops as vocab_parallel_ops
+import deepspeed.ops.triton_ops.vocab_parallel_ops as vocab_parallel_ops
 from deepspeed.accelerator import get_accelerator
 from deepspeed.module_inject.tp_shard import AutoTPMeta, get_shard_size_list
-from deepspeed.sequence.vocab_parallel_ops import (vocab_parallel_entropy, vocab_parallel_jsd, vocab_parallel_kl_div,
-                                                   vocab_parallel_logprobs)
+from deepspeed.ops.triton_ops.vocab_parallel_ops import (vocab_parallel_entropy, vocab_parallel_jsd,
+                                                         vocab_parallel_kl_div, vocab_parallel_logprobs)
 from unit.common import DistributedTest
 
 
@@ -515,7 +515,7 @@ def test_validates_inputs():
 
 
 def _triton_device():
-    from deepspeed.sequence.vocab_parallel_ops import _use_triton
+    from deepspeed.ops.triton_ops.vocab_parallel_ops import _use_triton
     device = torch.device(get_accelerator().current_device_name())
     if not _use_triton(torch.empty(0, device=device)):
         pytest.skip("the Triton kernels are not used on this device")

@@ -18,10 +18,10 @@ tensor-parallel group and same vocabulary range on every rank.
 A row whose logits are all ``-inf`` has no defined distribution: entropy, KL and JSD return NaN for
 it, but its logits get zero gradient so that callers can mask such rows (e.g. padding) out.
 
-For log-probability, entropy and KL, when Triton supports the logits' device, the per-row work
-runs in fused Triton kernels
-(``deepspeed.ops.triton_ops.vocab_parallel_softmax``); otherwise, or with
-``deepspeed.HAS_TRITON = False``, the same math runs eagerly in bounded row chunks.
+For log-probability, entropy and KL, when Triton is available and the logits are on a CUDA or ROCm
+GPU, the per-row work runs in fused Triton kernels
+(``deepspeed.ops.triton_ops.vocab_parallel_softmax``); otherwise the same math runs eagerly in
+bounded row chunks.
 JSD also has fused Triton forward/backward kernels, with bounded eager row chunks as fallback.
 """
 
@@ -30,10 +30,10 @@ import math
 import torch
 from torch.autograd.function import once_differentiable
 
-import deepspeed
 import deepspeed.comm as dist
-from deepspeed.accelerator import get_accelerator
 from deepspeed.comm import pg_utils
+from deepspeed.ops.triton_ops import vocab_parallel_softmax
+from deepspeed.ops.triton_ops._triton import is_triton_available
 from deepspeed.sequence.cross_entropy import _resolve_vocab_metadata
 
 # Elementwise work is done on row chunks of at most this many logits so that fp32 temporaries
@@ -44,22 +44,20 @@ _CHUNK_NUMEL = 1 << 24
 def _use_triton(*logits):
     # Eager row chunks run about a dozen separate memory-bound kernels per chunk; the Triton
     # kernels read each logit once per pass.
-    accelerator = get_accelerator()
-    return deepspeed.HAS_TRITON and accelerator.is_triton_supported() and accelerator.on_accelerator(logits[0])
+    return is_triton_available() and logits[0].device.type == "cuda"
+
+
+def _use_jsd_triton(student, teacher):
+    # Unlike the other ops, JSD's kernels are also validated on Intel XPUs.
+    return is_triton_available() and student.device.type in ("cuda", "xpu")
 
 
 def _triton_rows(logits):
     # The kernels read rows in place when they need at most two strides: a contiguous tensor, or a
     # slice along the sequence such as logits[:, :-1]. Any other layout is copied first.
-    if _triton_kernels().row_layout(logits) is None:
+    if vocab_parallel_softmax.row_layout(logits) is None:
         return logits.contiguous()
     return logits
-
-
-def _triton_kernels():
-    # Imported on first use because importing triton is slow.
-    from deepspeed.ops.triton_ops import vocab_parallel_softmax
-    return vocab_parallel_softmax
 
 
 def _row_chunks(logits_2d):
@@ -104,9 +102,8 @@ def _softmax_stats(logits_2d_list, tp_group):
 def _triton_softmax_stats(logits_2d_list, tp_group, local_stats=None):
     # Each shard's sum-exp is taken against its own max in the same read, then rescaled to the
     # global max, so this still needs only one MAX and one SUM all-reduce.
-    kernels = _triton_kernels()
     if local_stats is None:
-        local_stats = [kernels.local_softmax_stats(logits) for logits in logits_2d_list]
+        local_stats = [vocab_parallel_softmax.local_softmax_stats(logits) for logits in logits_2d_list]
     local_max = torch.stack([stats[0] for stats in local_stats])
     local_sum = torch.stack([stats[1] for stats in local_stats])
     global_max = local_max.clone()
@@ -129,7 +126,7 @@ def _triton_entropy(logits, tp_group):
     # One read gives each shard's max m, sum-exp S and W = sum_j exp(z_j - m) * (z_j - m). Once both
     # sums are re-centred on the global max, H = log S - W / S, so the softmax statistics and the
     # entropy share one MAX and one SUM all-reduce.
-    stats = _triton_kernels().entropy_stats(logits)
+    stats = vocab_parallel_softmax.entropy_stats(logits)
     local_max = stats[0]
     global_max = local_max.clone()
     if pg_utils.is_parallel(tp_group):
@@ -148,7 +145,7 @@ def _triton_kl_div(a_logits, b_logits, tp_group):
     # KL(A || B) = E_A[(z_A - m_A) - (z_B - m_B)] - log S_A + log S_B, from one read of both shards.
     # The support-mismatch flag shares the MAX all-reduce with the maxima, and both sum-exps share
     # the SUM all-reduce with the weighted log-ratio.
-    stats = _triton_kernels().kl_stats(a_logits, b_logits)
+    stats = vocab_parallel_softmax.kl_stats(a_logits, b_logits)
     local_a_max, local_b_max = stats[0], stats[1]
     maxima = stats[:3].clone()
     if pg_utils.is_parallel(tp_group):
@@ -243,9 +240,9 @@ class _VocabParallelLogProbs(torch.autograd.Function):
         zero_grad_row = ~valid_index.any(dim=-1, keepdim=True) | _undefined_rows(global_max)
 
         if _use_triton(vocab_parallel_logits):
-            grad_logits = _triton_kernels().logprobs_backward(_triton_rows(vocab_parallel_logits), global_max,
-                                                              log_sum_exp, grad_sum, zero_grad_row, local_index,
-                                                              index_grad)
+            grad_logits = vocab_parallel_softmax.logprobs_backward(_triton_rows(vocab_parallel_logits), global_max,
+                                                                   log_sum_exp, grad_sum, zero_grad_row, local_index,
+                                                                   index_grad)
             return grad_logits.view_as(vocab_parallel_logits), None, None, None, None
 
         logits = _flatten(vocab_parallel_logits)
@@ -285,8 +282,8 @@ class _VocabParallelEntropy(torch.autograd.Function):
         vocab_parallel_logits, global_max, log_sum_exp, entropy = ctx.saved_tensors
         grad_output = grad_output.reshape(-1, 1).float()
         if _use_triton(vocab_parallel_logits):
-            grad_logits = _triton_kernels().entropy_backward(_triton_rows(vocab_parallel_logits), global_max,
-                                                             log_sum_exp, entropy, grad_output.contiguous())
+            grad_logits = vocab_parallel_softmax.entropy_backward(_triton_rows(vocab_parallel_logits), global_max,
+                                                                  log_sum_exp, entropy, grad_output.contiguous())
             return grad_logits.view_as(vocab_parallel_logits), None
 
         logits = _flatten(vocab_parallel_logits)
@@ -348,9 +345,9 @@ class _VocabParallelKLDiv(torch.autograd.Function):
             a_logits, b_logits = _order_kl_arguments(_triton_rows(student_logits), _triton_rows(teacher_logits),
                                                      ctx.reverse)
             need_a_grad, need_b_grad = _order_kl_arguments(need_student_grad, need_teacher_grad, ctx.reverse)
-            a_grad, b_grad = _triton_kernels().kl_backward(a_logits, b_logits, global_max[a],
-                                                           log_sum_exp[a], global_max[b], log_sum_exp[b], kl,
-                                                           grad_output.contiguous(), need_a_grad, need_b_grad)
+            a_grad, b_grad = vocab_parallel_softmax.kl_backward(a_logits, b_logits, global_max[a], log_sum_exp[a],
+                                                                global_max[b], log_sum_exp[b], kl,
+                                                                grad_output.contiguous(), need_a_grad, need_b_grad)
             # Swapping (A, B) back gives (student, teacher) in either direction.
             grad_student, grad_teacher = _order_kl_arguments(a_grad, b_grad, ctx.reverse)
             if grad_student is not None:
@@ -395,18 +392,6 @@ def _jsd_log_ratios(student, teacher, global_max, log_sum_exp, beta):
     return student_log_probs, teacher_log_probs, student_log_probs - mixture, teacher_log_probs - mixture
 
 
-def _use_jsd_triton(student, teacher):
-    if _use_triton(student, teacher):
-        return True
-    # XPU's global capability flag is still disabled. Enable only this validated op
-    # when the installed Triton actually includes an active Intel backend.
-    if not deepspeed.HAS_TRITON or student.device.type != "xpu":
-        return False
-    from triton.backends import backends
-    intel = backends.get("intel")
-    return intel is not None and intel.driver.is_active()
-
-
 class _VocabParallelJSD(torch.autograd.Function):
 
     @staticmethod
@@ -414,9 +399,9 @@ class _VocabParallelJSD(torch.autograd.Function):
         ctx.use_triton = _use_jsd_triton(student_logits, teacher_logits)
         if ctx.use_triton:
             student, teacher = _triton_rows(student_logits), _triton_rows(teacher_logits)
-            local_stats = _triton_kernels().jsd_softmax_stats(student, teacher)
+            local_stats = vocab_parallel_softmax.jsd_softmax_stats(student, teacher)
             global_max, log_sum_exp = _triton_softmax_stats([student, teacher], tp_group, local_stats)
-            kl_to_mixture = _triton_kernels().jsd_forward(student, teacher, global_max, log_sum_exp, beta)
+            kl_to_mixture = vocab_parallel_softmax.jsd_forward(student, teacher, global_max, log_sum_exp, beta)
         else:
             student, teacher = _flatten(student_logits), _flatten(teacher_logits)
             global_max, log_sum_exp = _softmax_stats([student, teacher], tp_group)
@@ -440,11 +425,9 @@ class _VocabParallelJSD(torch.autograd.Function):
     def backward(ctx, grad_output):
         student_logits, teacher_logits, global_max, log_sum_exp, kl_to_mixture = ctx.saved_tensors
         if ctx.use_triton:
-            grad_student, grad_teacher = _triton_kernels().jsd_backward(_triton_rows(student_logits),
-                                                                        _triton_rows(teacher_logits), global_max,
-                                                                        log_sum_exp, kl_to_mixture,
-                                                                        grad_output.reshape(-1).float().contiguous(),
-                                                                        ctx.beta, *ctx.needs_input_grad[:2])
+            grad_student, grad_teacher = vocab_parallel_softmax.jsd_backward(
+                _triton_rows(student_logits), _triton_rows(teacher_logits), global_max, log_sum_exp, kl_to_mixture,
+                grad_output.reshape(-1).float().contiguous(), ctx.beta, *ctx.needs_input_grad[:2])
             return grad_student, grad_teacher, None, None
         student, teacher = _flatten(student_logits), _flatten(teacher_logits)
         grad_student = torch.empty_like(student) if ctx.needs_input_grad[0] else None

@@ -10,8 +10,6 @@ from torch.autograd.function import once_differentiable
 from deepspeed.ops.triton_ops._triton import _TRITON_AVAILABLE, triton, tl
 from deepspeed.utils import logger
 
-_IS_ROCM_PYTORCH = getattr(torch.version, "hip", None) is not None
-
 SUPPORTED_DTYPES = (torch.bfloat16, torch.float16)
 # Classes whose forward is confirmed to compute ``weight * normalized.to(input_dtype)`` with FP32 statistics, the
 # expression the kernels reproduce. Hugging Face classes with the same name suffix and attributes, such as
@@ -28,7 +26,7 @@ SUPPORTED_RMS_NORM_CLASSES = (
     "transformers.models.qwen3.modeling_qwen3.Qwen3RMSNorm",
     "transformers.models.qwen3_moe.modeling_qwen3_moe.Qwen3MoeRMSNorm",
 )
-_MAX_FORWARD_BLOCK = 2048
+_MAX_FORWARD_BLOCK = 32768
 _DWEIGHT_BLOCK_M = 16
 _DWEIGHT_BLOCK_N = 256
 # Norms at most this wide, such as the 128-wide query and key norms, give each program several rows: one row per
@@ -206,48 +204,40 @@ if _TRITON_AVAILABLE:
 
 def is_available() -> bool:
     """Whether this build can run the fused RMSNorm kernels."""
-    return _TRITON_AVAILABLE and not _IS_ROCM_PYTORCH
+    return _TRITON_AVAILABLE
 
 
-def _assert_supported_device_and_dtype(tensor: torch.Tensor, *, name: str) -> None:
+def assert_supported(hidden: torch.Tensor, weight: torch.Tensor) -> None:
+    """Reject unsupported inputs before the fused path runs."""
     if not _TRITON_AVAILABLE:
         raise RuntimeError(f"fused RMSNorm needs Triton, which is not installed in this environment.")
-    if _IS_ROCM_PYTORCH:
-        raise RuntimeError("fused RMSNorm is not yet supported on ROCm.")
-    if tensor.dtype not in SUPPORTED_DTYPES:
+    if hidden.dtype not in SUPPORTED_DTYPES:
         raise RuntimeError(
-            f"fused RMSNorm supports bfloat16 and float16 tensors, but {name} has dtype {tensor.dtype}.")
-    if tensor.device.type != "cuda":
-        raise RuntimeError(f'fused RMSNorm runs CUDA kernels but {name} is on device "{tensor.device.type}".')
-
-
-def assert_supported(hidden: torch.Tensor, weight: torch.Tensor, eps: float) -> None:
-    """Reject unsupported inputs before the fused path runs."""
-    _assert_supported_device_and_dtype(hidden, name="hidden")
-    _assert_supported_device_and_dtype(weight, name="weight")
+            f"fused RMSNorm supports bfloat16 and float16 tensors, but hidden has dtype {hidden.dtype}.")
+    if hidden.device.type != "cuda":
+        raise RuntimeError(f'fused RMSNorm runs CUDA kernels but hidden is on device "{hidden.device.type}".')
     if hidden.device != weight.device:
         raise RuntimeError(
             f"fused RMSNorm needs hidden and weight on the same device, got {hidden.device} and {weight.device}.")
     if hidden.dtype != weight.dtype:
         raise RuntimeError(
             f"fused RMSNorm needs hidden and weight to have the same dtype, got {hidden.dtype} and {weight.dtype}.")
-    if hidden.dim() == 0:
-        raise RuntimeError("fused RMSNorm needs at least one normalized dimension.")
-    if weight.dim() != 1:
-        raise RuntimeError(f"fused RMSNorm needs a 1-D weight Parameter, got shape {tuple(weight.shape)}.")
     if hidden.shape[-1] != weight.numel():
         raise RuntimeError(f"fused RMSNorm expected hidden last dimension {weight.numel()}, got {hidden.shape[-1]}.")
-    if hidden.shape[-1] < 1:
-        raise RuntimeError("fused RMSNorm needs a non-empty normalized dimension.")
     if hidden.shape[-1] > _MAX_FORWARD_BLOCK:
         raise RuntimeError(
             f"fused RMSNorm supports normalized dimensions up to {_MAX_FORWARD_BLOCK}, got {hidden.shape[-1]}.")
-    if not isinstance(eps, float):
-        raise RuntimeError(f"fused RMSNorm needs a float epsilon, got {type(eps).__name__}.")
 
 
 def _block_n(n_cols: int) -> int:
     return max(16, triton.next_power_of_2(n_cols))
+
+
+def _num_warps(n_cols: int) -> int:
+    # The row kernels hold a whole row in one program, so wider rows are spread over more threads.
+    if n_cols <= 2048:
+        return 4
+    return 8
 
 
 def _narrow_block_m(n_rows: int, n_cols: int):
@@ -292,6 +282,7 @@ class _FusedRMSNorm(torch.autograd.Function):
                 n_cols,
                 eps,
                 BLOCK_N=_block_n(n_cols),
+                num_warps=_num_warps(n_cols),
             )
         return out
 
@@ -334,6 +325,7 @@ class _FusedRMSNorm(torch.autograd.Function):
             grad_hidden,
             n_cols,
             BLOCK_N=_block_n(n_cols),
+            num_warps=_num_warps(n_cols),
         )
 
         dweight_block_n = min(_DWEIGHT_BLOCK_N, _block_n(n_cols))
@@ -361,7 +353,7 @@ def fused_rms_norm(hidden: torch.Tensor, weight: torch.Tensor, eps: float) -> to
     rounded once to the input dtype, and the module weight is multiplied after
     that rounding. ``hidden`` and ``weight`` must be bfloat16 or float16 CUDA
     tensors of the same dtype, and the normalized (last) dimension must be at
-    most 2048.
+    most 32768.
 
     The kernels read hidden rows and the weight as dense arrays, so
     non-contiguous tensors of either kind are copied explicitly before they
@@ -373,7 +365,7 @@ def fused_rms_norm(hidden: torch.Tensor, weight: torch.Tensor, eps: float) -> to
     Unsupported inputs raise. Modules installed by ``replace_rms_norm`` run
     their eager forward for such inputs instead.
     """
-    assert_supported(hidden, weight, eps)
+    assert_supported(hidden, weight)
     return _run_kernels(hidden, weight, eps)
 
 
@@ -416,7 +408,7 @@ def _runs_supported_rms_norm_forward(module: torch.nn.Module) -> bool:
 
 def _fused_module_forward(self, hidden_states, eager_forward):
     try:
-        assert_supported(hidden_states, self.weight, self.variance_epsilon)
+        assert_supported(hidden_states, self.weight)
     except RuntimeError as unsupported:
         # The class's own forward is the eager computation the kernels stand in for, so the result is exactly eager's.
         logger.warning_once(f"{unsupported} Running eager {type(self).__name__} instead.")
@@ -441,7 +433,7 @@ def replace_rms_norm(module: torch.nn.Module) -> int:
 
     A module is replaced if its exact class is listed in
     ``SUPPORTED_RMS_NORM_CLASSES``, it still runs that class's own forward, and
-    it is at most 2048 wide. Subclasses, modules whose forward was patched or
+    it is at most 32768 wide. Subclasses, modules whose forward was patched or
     wrapped, by another installer or by an earlier call, and wider modules are
     left untouched. Replaced modules keep their own weight Parameter and
     ``variance_epsilon``.
@@ -474,6 +466,6 @@ def replace_rms_norm(module: torch.nn.Module) -> int:
         setattr(child, _FUSED_INSTANCE_ATTRIBUTE, _FUSED_INSTANCE_OPT_IN)
         count += 1
     if count and not is_available():
-        logger.warning(f"fused RMSNorm replaced {count} modules, but its kernels need Triton on CUDA, not ROCm, "
-                       f"so those modules will run their eager forward.")
+        logger.warning(f"fused RMSNorm replaced {count} modules, but its kernels need Triton, which is not "
+                       f"available, so those modules will run their eager forward.")
     return count
