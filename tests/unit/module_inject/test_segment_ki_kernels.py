@@ -385,6 +385,55 @@ class TestInjectionInvariants:
             assert w.grad is not None, f"weight {i} got no gradient"
 
 
+class TestSegkiRefreshDispatcher:
+    """segki_refresh is a pure dispatcher over the refresh_weights opbuilder
+    contract (segki_design.md §2.4): it collects every injected opbuilder
+    handle and calls refresh_weights() on each — once per distinct handle,
+    skipping handles that do not implement the method (stateless backend).
+    It must never name a backend-internal hook."""
+
+    @staticmethod
+    def _model_with_ops(*ops):
+        root = torch.nn.Sequential(*(torch.nn.Linear(2, 2) for _ in ops))
+        for module, op in zip(root, ops):
+            module._ki_gdn_op = op
+        return root
+
+    def test_calls_refresh_weights_on_every_distinct_handle(self):
+        from deepspeed.module_inject.segment_ki import segki_refresh
+
+        refreshed = []
+
+        class _Op:
+
+            def refresh_weights(self):
+                refreshed.append(self)
+
+        op_a, op_b = _Op(), _Op()
+        # two carriers share op_a (same handle injected on several modules),
+        # one carries op_b — op_a must be called exactly once
+        model = self._model_with_ops(op_a, op_a, op_b)
+        segki_refresh(model)
+        assert refreshed == [op_a, op_b]
+
+    def test_stateless_handle_is_skipped(self):
+        from deepspeed.module_inject.segment_ki import segki_refresh
+
+        class _StatelessOp:
+            pass
+
+        model = self._model_with_ops(_StatelessOp(), _StatelessOp())
+        segki_refresh(model)  # must not raise: no refresh_weights, nothing to refresh
+
+    def test_drops_python_side_caches(self):
+        from deepspeed.module_inject.segment_ki import segki_refresh
+
+        model = torch.nn.Sequential(torch.nn.Linear(2, 2))
+        model[0]._ki_tp_cat_w = torch.zeros(1)
+        segki_refresh(model)
+        assert not hasattr(model[0], "_ki_tp_cat_w")
+
+
 class TestLmHeadSplitsOverTheTensorParallelGroup(DistributedTest):
     """The vocab-parallel lm_head splits over the ranks that share hidden states."""
     world_size = 2

@@ -101,7 +101,7 @@ def test_graph_signature_tracks_inference_mode_attention_and_segki_backend(monke
 
     # Refreshing another model empties the backend's process-wide GLU cache, which this model's graph may read.
     other = torch.nn.Linear(2, 2)
-    other._ki_dual_op = SimpleNamespace(clear_glu_cat_cache=lambda: None)
+    other._ki_dual_op = SimpleNamespace(refresh_weights=lambda: None)
     from deepspeed.module_inject.segment_ki import segki_refresh
     segki_refresh(other)
     assert signature() != base
