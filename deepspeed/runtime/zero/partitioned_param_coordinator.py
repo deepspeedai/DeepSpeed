@@ -470,8 +470,8 @@ class PartitionedParameterCoordinator:
 
             # kick off all gather for params in the next few submodules (prefetch)
             if self.__prefetch_bucket_sz > 0:
-                max_params_to_prefetch = min(self.__max_n_available_params - self.__n_available_params,
-                                             self.__prefetch_bucket_sz)
+                live_param_headroom = self.__max_n_available_params - self.__n_available_params
+                max_params_to_prefetch = min(live_param_headroom, self.__prefetch_bucket_sz)
                 params_to_prefetch = set()
                 numel_prefetching = 0
                 while self.__param_queue and numel_prefetching < max_params_to_prefetch:
@@ -486,6 +486,11 @@ class PartitionedParameterCoordinator:
                     if param_in_trace.param in params_to_prefetch:
                         # Avoid duplicates
                         do_prefetch = False
+
+                    # Leave the parameter queued so its next use can still fetch it on demand.
+                    if do_prefetch and numel_prefetching + param_in_trace.param.ds_numel > live_param_headroom:
+                        self.__param_queue.appendleft(param_in_trace)
+                        break
 
                     self.__most_recent_step_id_param_fetched_for[param_in_trace.param] = \
                         max(self.__most_recent_step_id_param_fetched_for[param_in_trace.param],
