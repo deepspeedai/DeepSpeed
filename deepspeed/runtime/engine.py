@@ -1350,7 +1350,7 @@ class DeepSpeedEngine(Module):
         try:
             last_submission = self.__dict__.pop("_submitted_checkpoint", None)
             if last_submission is not None and self.checkpoint_engine.get_commit_info() is last_submission:
-                self._commit_decoupled_checkpoint(wait_for_all_ranks=True)
+                self._commit_decoupled_checkpoint()
         finally:
             self._release_resources()
 
@@ -5264,7 +5264,7 @@ class DeepSpeedEngine(Module):
 
         return True
 
-    def _commit_decoupled_checkpoint(self, *, wait_for_all_ranks=False):
+    def _commit_decoupled_checkpoint(self):
         assert self.checkpoint_engine.is_decoupled(), \
             f'{self.checkpoint_engine} is not a Decoupled Checkpoint Engine'
 
@@ -5272,12 +5272,22 @@ class DeepSpeedEngine(Module):
         if commit_info is None:
             return
 
-        self.checkpoint_engine.commit(commit_info)
-        if wait_for_all_ranks:
-            dist.barrier()
+        error = None
+        try:
+            self.checkpoint_engine.commit(commit_info)
+        except Exception as exc:
+            error = exc
 
-        # Every rank must finish writing its files for the tag before `latest` points at it.
-        dist.barrier()
+        # All writers must finish before the first checkpoint is measured or latest is published.
+        failed_rank = torch.tensor(self.global_rank if error is not None else -1,
+                                   dtype=torch.int32,
+                                   device=self.device)
+        dist.all_reduce(failed_rank, op=dist.ReduceOp.MAX)
+        rank = failed_rank.item()
+        if rank >= 0:
+            raise RuntimeError(f"Checkpoint {commit_info.tag} commit failed on rank {rank}") from error
+
+        self.checkpoint_engine.post_commit(commit_info)
         if self.global_rank == 0 and commit_info.save_latest:
             self._write_latest_tag(commit_info.save_dir, commit_info.tag)
 
@@ -6050,7 +6060,10 @@ class DeepSpeedEngine(Module):
             logger.info(f"Saving model weights to {path}, tag: {tag}")
             self.checkpoint_engine.save(state_dict, path)
 
-        self.checkpoint_engine.commit(commit_info)
+        if self.checkpoint_engine.is_decoupled():
+            self._commit_decoupled_checkpoint()
+        else:
+            self.checkpoint_engine.commit(commit_info)
 
         return True
 

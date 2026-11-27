@@ -32,6 +32,9 @@ class DataStatesCheckpointEngine(CheckpointEngine):
         self.commit_info = info
         return None
 
+    def get_commit_info(self):
+        return self.commit_info
+
     def save(self, state_dict, path: str):
         return self.ckpt_engine.save(state_dict, path)
 
@@ -42,15 +45,19 @@ class DataStatesCheckpointEngine(CheckpointEngine):
         if info is None:
             return
         assert info == self.commit_info
-        self.ckpt_engine.wait(persist=True)
         self.commit_info = None
+        try:
+            self.ckpt_engine.wait(persist=True)
+        except SystemExit as exc:
+            # DataStates exits the process when a persistence worker fails.
+            raise RuntimeError(f"DataStates failed to persist checkpoint {info.tag}") from exc
         return True
 
     def cleanup(self):
-        self.commit(self.commit_info)
-        if self.ckpt_engine:
-            self.ckpt_engine.wait(persist=True)
-            del self.ckpt_engine
+        try:
+            self.commit(self.commit_info)
+        finally:
+            self.ckpt_engine = None
 
     def is_decoupled(self):
         return True
