@@ -8,6 +8,7 @@ Provides:
   - :class:`RolloutRequest`, :class:`RolloutBatch`, :class:`SamplingConfig` — dataclasses
   - :class:`ResponseTokenBatch` — response-only causal training targets
   - :class:`HybridEngineRollout` — concrete implementation using DeepSpeed hybrid engine
+  - :class:`AutoTPRollout` — rollout with an AutoTP tensor-parallel copy of the model
   - :func:`build_rollout` — factory that selects the engine from config
 """
 
@@ -19,9 +20,11 @@ from deepspeed.runtime.rollout.base import (
     SamplingConfig,
 )
 from deepspeed.runtime.rollout.hybrid_engine_rollout import HybridEngineRollout
+from deepspeed.runtime.rollout.autotp_rollout import AutoTPRollout
 from deepspeed.runtime.rollout.opsd import JSDLossOutput, ResponseTokenBatch, generalized_jsd_loss
 
 __all__ = [
+    "AutoTPRollout",
     "HybridEngineRollout",
     "JSDLossOutput",
     "RolloutBatch",
@@ -40,7 +43,7 @@ def build_rollout(rollout_cfg, student_engine=None, tokenizer=None, **kwargs):
 
     Args:
         rollout_cfg: :class:`RolloutConfig` (or any object with an ``engine``
-            attribute set to ``"hybrid_engine"``).
+            attribute set to ``"hybrid_engine"`` or ``"autotp"``).
         student_engine: DeepSpeed engine wrapping the student model.
         tokenizer: HuggingFace tokenizer.
     """
@@ -49,5 +52,9 @@ def build_rollout(rollout_cfg, student_engine=None, tokenizer=None, **kwargs):
         if student_engine is None or tokenizer is None:
             raise ValueError("hybrid_engine rollout needs both student_engine and tokenizer")
         return HybridEngineRollout(engine=student_engine, tokenizer=tokenizer, cfg=rollout_cfg)
+    if engine_name == "autotp":
+        if student_engine is None or tokenizer is None:
+            raise ValueError("autotp rollout needs both student_engine and tokenizer")
+        return AutoTPRollout(engine=student_engine, tokenizer=tokenizer, cfg=rollout_cfg)
 
-    raise ValueError(f"Unknown rollout engine {engine_name!r}; choose from 'hybrid_engine'")
+    raise ValueError(f"Unknown rollout engine {engine_name!r}; choose from 'hybrid_engine', 'autotp'")
