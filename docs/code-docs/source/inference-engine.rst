@@ -361,6 +361,52 @@ does not advance the cache or synchronize a device tensor to the host.
 This is a targeted query-offset compatibility fix, not a guarantee of support
 for every Transformers 5.20 cache API.
 
+Paged KV cache (experimental)
+-----------------------------
+
+``HybridEngineRolloutConfig(use_paged_cache=True)`` replaces the dense per-row KV
+row with a block pool plus one block table per row: pages are the unit of
+allocation and the blocked-attention kernel reads each row through its table, so
+no dense attention mask is built and capacity is not sized worst-case. The cache
+needs an engine-owned decode loop -- continuous batching
+(``SamplingConfig.continuous_batch_size``), the continuous-graph path, or the
+single-batch graph path (``use_graph_capture=True``) -- plus a Qwen3 model, a
+CUDA device with compute capability 8.0 or newer, and fp16/bf16 K/V (the
+blocked-attention kernel has no fp32 path, so an fp32 model is rejected at cache
+construction). Generating without one of those loops is refused instead of
+silently running dense, because HuggingFace's ``generate()`` owns its decode loop
+and never advances the paged write positions. The cache is rejected together with
+``align_decode_fronts``, ``adaptive_prefill`` and ``enable_cache_trimming``.
+
+``enable_paged_prefill=True`` writes prompts straight into pages on the
+continuous-batching paths, one request at a time, with the left padding dropped
+and the row starting at column zero. When it is off, and always on the
+single-batch graph path, prompts prefill through the dense staging cache and are
+copied into the pages afterwards. ``enable_prefix_reuse=True`` hashes complete
+prompt blocks in a chain and claims matching blocks from an earlier prompt
+instead of recomputing them; blocks are ref-counted and released when the last
+row that references them retires. Prefix reuse needs the paged prefill path and
+is disabled for the captured decode, whose block table is fixed at capture.
+
+``benchmarks/rollout/bench_paged_attention.py`` compares the dense, paged and
+paged + FlashInfer split-KV configurations on every generation path that can
+drive the paged cache, and checks that their greedy token streams match.
+
+``use_flashinfer_prefill=True`` routes single-row prompt prefill through
+FlashInfer's paged prefill wrapper, and ``use_flashinfer_decode=True`` routes
+one-token decode through FlashInfer's tensor-core split-KV paged kernel. Both
+require the ``flashinfer`` package and are opt-in; the default kernels are
+DeepSpeed's blocked-attention kernels. ``get_last_continuous_stats()`` reports
+``paged_block_size``, ``blocks_in_use``, ``block_utilization``,
+``prefix_reuse_blocks`` and ``prefix_reuse_tokens`` for the paged path.
+
+The paged cache is scoped to dense attention models. Hybrid models with
+linear-attention (GDN) layers are rejected by continuous batching before the
+cache is built, because those layers keep per-row conv/recurrent state that no
+cache on this path pools yet; they keep working on the non-continuous
+generation paths. Supporting them needs a per-row GDN state pool in the static
+cache plus a hybrid paged cache that holds that state beside the block table.
+
 OPSD response-token utilities
 -----------------------------
 

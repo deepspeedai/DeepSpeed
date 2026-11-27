@@ -21,6 +21,14 @@ class RaggedOpsBuilder(CUDAOpBuilder):
     def absolute_name(self):
         return f'deepspeed.inference.v2.kernels.ragged_ops.{self.NAME}'
 
+    def nvcc_args(self):
+        args = super().nvcc_args()
+        # The blocked-attention headers come from the deepspeed-kernels package, whose CCCL
+        # may be newer than the local toolkit; the parity check is a version-string compare
+        # and rejects that combination. Harmless when compiler and headers do match.
+        args.append('-DCCCL_DISABLE_CTK_COMPATIBILITY_CHECK')
+        return args
+
     def get_prefix(self):
         ds_path = self.deepspeed_src_path("deepspeed")
         return "deepspeed" if os.path.isdir(ds_path) else ".."
