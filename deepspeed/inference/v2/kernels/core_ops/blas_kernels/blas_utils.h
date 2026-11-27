@@ -75,7 +75,13 @@ rocblas_datatype get_datatype(BlasType type)
 #else
 cublasOperation_t get_trans_op(bool do_trans) { return (do_trans) ? CUBLAS_OP_T : CUBLAS_OP_N; }
 
-cublasDataType_t get_datatype(BlasType type)
+#if defined(__HIP_PLATFORM_AMD__) && defined(HIPBLAS_V2)
+using blasDataType_t = cudaDataType_t;
+#else
+using blasDataType_t = cublasDataType_t;
+#endif
+
+blasDataType_t get_datatype(BlasType type)
 {
     switch (type) {
 #ifdef __HIP_PLATFORM_AMD__
@@ -142,7 +148,7 @@ int blas_gemm_ex(void* C,
     cublasOperation_t transa_op = get_trans_op(transa);
     cublasOperation_t transb_op = get_trans_op(transb);
 
-    cublasDataType_t abc_type = get_datatype(type);
+    blasDataType_t abc_type = get_datatype(type);
     cublasStatus_t status = cublasGemmEx(BlasContext::getInstance().get_handle(),
                                          transa_op,
                                          transb_op,
@@ -247,7 +253,7 @@ int blas_strided_batched_gemm(void* C,
     cublasOperation_t transa_op = get_trans_op(transa);
     cublasOperation_t transb_op = get_trans_op(transb);
 
-    cublasDataType_t abc_type = get_datatype(type);
+    blasDataType_t abc_type = get_datatype(type);
 
     cublasStatus_t status = cublasGemmStridedBatchedEx(BlasContext::getInstance().get_handle(),
                                                        transa_op,
