@@ -491,6 +491,25 @@ class TestStreamedScoringTP(DistributedTest):
             torch.testing.assert_close(actual[0], existing_lp, atol=atol, rtol=rtol)
             torch.testing.assert_close(actual[1], existing_entropy, atol=atol, rtol=rtol)
 
+    def test_mask_dtype_mismatch_fails_on_all_peers(self):
+        # Only rank 1 holds a non-boolean mask. Its local check must be reduced across the group
+        # before any rank raises, or that rank would enter the vocabulary-metadata collective and the
+        # peers would wait for the process-group timeout instead of failing.
+        hidden, weight, bias, targets, mask = _inputs(get_accelerator().current_device_name())
+        rank = dist.get_rank()
+        if rank == 1:
+            mask = mask.to(torch.float32)
+        start, end = (0, 7) if rank == 0 else (7, 19)
+        with pytest.raises(ValueError, match="position_mask must be boolean|a tensor-parallel peer"):
+            vocab_parallel_linear_logprobs(hidden,
+                                           weight[start:end],
+                                           targets,
+                                           bias=bias[start:end],
+                                           position_mask=mask,
+                                           tp_group=dist.get_world_group(),
+                                           vocab_start_index=start,
+                                           vocab_end_index=end)
+
     def test_mask_mismatch_fails_on_all_peers(self):
         hidden, weight, bias, targets, mask = _inputs(get_accelerator().current_device_name())
         rank = dist.get_rank()

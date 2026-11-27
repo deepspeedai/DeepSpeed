@@ -106,9 +106,12 @@ class _VocabParallelLinearLogProbs(torch.autograd.Function):
                 if grad_logprobs is not None:
                     g = grad_logprobs[rows].float()
                     grad.sub_(p * g.unsqueeze(-1))
+                    # Fixed-shape scatter: clamped columns with zero updates keep rows whose target lies
+                    # in another vocabulary block out of this tile without a data-dependent index, so the
+                    # block never synchronizes with the host.
                     in_block = (ids >= col) & (ids < end)
-                    block_rows = in_block.nonzero().squeeze(-1)
-                    grad[block_rows, ids[in_block] - col] += g[in_block]
+                    columns = (ids - col).clamp(0, end - col - 1).unsqueeze(-1)
+                    grad.scatter_add_(1, columns, torch.where(in_block, g, 0.0).unsqueeze(-1))
                 if grad_entropy is not None:
                     terms = torch.where(p > 0, p * (log_p + entropy[rows].unsqueeze(-1)), 0.0)
                     grad.sub_(terms * grad_entropy[rows].float().unsqueeze(-1))
@@ -132,6 +135,43 @@ class _VocabParallelLinearLogProbs(torch.autograd.Function):
         if need_bias:
             grad_bias = grad_bias.to(bias.dtype)
         return grad_hidden, grad_weight, grad_bias, None, None, None, None, None, None, None, None
+
+
+def _rank_local_scoring_error(hidden, weight, bias, target, position_mask, vocab_start_index, vocab_end_index,
+                              temperature, chunk_size, vocab_chunk_size):
+    """Return ``(error class, message)`` for checks that one process settles alone.
+
+    None of these failures can be fixed by a tensor-parallel peer, so in a parallel group the
+    caller must reduce the failure flag before any rank raises: a peer that passed would
+    otherwise enter the first collective and wait for the process-group timeout instead of
+    failing with a clear error.
+    """
+    if hidden.ndim < 2 or hidden.shape[:-1] != target.shape:
+        return ValueError, "hidden and target must have matching non-hidden dimensions"
+    if weight.ndim != 2 or weight.shape[1] != hidden.shape[-1]:
+        return ValueError, "weight must have shape [local_vocab, hidden]"
+    if bias is not None and bias.shape != weight.shape[:1]:
+        return ValueError, "bias must have shape [local_vocab]"
+    if (vocab_start_index is None) != (vocab_end_index is None):
+        return ValueError, "vocab_start_index and vocab_end_index must be provided together"
+    if not math.isfinite(temperature) or temperature <= 0:
+        return ValueError, "temperature must be finite and positive"
+    if any(not isinstance(size, int) or isinstance(size, bool) or size <= 0
+           for size in (chunk_size, vocab_chunk_size)):
+        return ValueError, "chunk_size and vocab_chunk_size must be positive integers"
+    if target.dtype not in (torch.int32, torch.int64):
+        return TypeError, "target must contain integer vocabulary IDs"
+    if position_mask is not None and (position_mask.shape != target.shape or position_mask.dtype != torch.bool):
+        return ValueError, "position_mask must be boolean and have the same shape as target"
+    tensors = [hidden, weight, target]
+    tensors.extend(tensor for tensor in (bias, position_mask) if tensor is not None)
+    if any(tensor.device != hidden.device for tensor in tensors):
+        return ValueError, "all scoring inputs must be on the same device"
+    if any(not tensor.is_floating_point() for tensor in (hidden, weight) + (() if bias is None else (bias, ))):
+        return TypeError, "hidden, weight and bias must be floating point"
+    if any(hasattr(tensor, "ds_id") for tensor in (weight, bias) if tensor is not None):
+        return ValueError, "streamed scoring requires resident head parameters; ZeRO-3 is not supported"
+    return None
 
 
 def vocab_parallel_linear_logprobs(hidden,
@@ -170,31 +210,19 @@ def vocab_parallel_linear_logprobs(hidden,
     ``chunk_size`` bounds projected token rows, ``vocab_chunk_size`` bounds local vocabulary
     columns, and backward recomputes these tiles. Only first-order derivatives are supported.
     """
-    if hidden.ndim < 2 or hidden.shape[:-1] != target.shape:
-        raise ValueError("hidden and target must have matching non-hidden dimensions")
-    if weight.ndim != 2 or weight.shape[1] != hidden.shape[-1]:
-        raise ValueError("weight must have shape [local_vocab, hidden]")
-    if bias is not None and bias.shape != weight.shape[:1]:
-        raise ValueError("bias must have shape [local_vocab]")
-    if (vocab_start_index is None) != (vocab_end_index is None):
-        raise ValueError("vocab_start_index and vocab_end_index must be provided together")
-    if not math.isfinite(temperature) or temperature <= 0:
-        raise ValueError("temperature must be finite and positive")
-    if any(not isinstance(size, int) or isinstance(size, bool) or size <= 0
-           for size in (chunk_size, vocab_chunk_size)):
-        raise ValueError("chunk_size and vocab_chunk_size must be positive integers")
-    if target.dtype not in (torch.int32, torch.int64):
-        raise TypeError("target must contain integer vocabulary IDs")
-    if position_mask is not None and (position_mask.shape != target.shape or position_mask.dtype != torch.bool):
-        raise ValueError("position_mask must be boolean and have the same shape as target")
-    tensors = [hidden, weight, target]
-    tensors.extend(tensor for tensor in (bias, position_mask) if tensor is not None)
-    if any(tensor.device != hidden.device for tensor in tensors):
-        raise ValueError("all scoring inputs must be on the same device")
-    if any(not tensor.is_floating_point() for tensor in (hidden, weight) + (() if bias is None else (bias, ))):
-        raise TypeError("hidden, weight and bias must be floating point")
-    if any(hasattr(tensor, "ds_id") for tensor in (weight, bias) if tensor is not None):
-        raise ValueError("streamed scoring requires resident head parameters; ZeRO-3 is not supported")
+    tp_parallel = pg_utils.is_parallel(tp_group)
+    local_error = _rank_local_scoring_error(hidden, weight, bias, target, position_mask, vocab_start_index,
+                                            vocab_end_index, temperature, chunk_size, vocab_chunk_size)
+    if tp_parallel:
+        invalid = torch.tensor(local_error is not None, dtype=torch.long, device=hidden.device)
+        dist.all_reduce(invalid, op=dist.ReduceOp.MAX, group=tp_group)
+        if invalid.item():
+            # The failing rank raises its own specific error; peers name the failure only
+            # generically, as their inputs passed every local check.
+            error = local_error or (ValueError, "a tensor-parallel peer provided invalid scoring inputs")
+            raise error[0](error[1])
+    elif local_error is not None:
+        raise local_error[0](local_error[1])
 
     start, _, vocab_size = _resolve_vocab_metadata(weight.shape[0],
                                                    vocab_start_index,
@@ -209,7 +237,7 @@ def vocab_parallel_linear_logprobs(hidden,
     valid = target != ignore_index
     if position_mask is not None:
         valid = valid & position_mask.reshape(-1)
-    tp_parallel = pg_utils.is_parallel(tp_group)
+    valid = valid.reshape(-1)
     if tp_parallel:
         # Check lengths before comparing per-position IDs, so a mismatched mask fails on every
         # peer rather than leaving one rank waiting in a projection-chunk collective.
@@ -239,8 +267,10 @@ def vocab_parallel_linear_logprobs(hidden,
             raise ValueError(f"target is out of range for vocabulary size {vocab_size}")
 
     indices = valid.nonzero().squeeze(-1)
-    hidden = hidden.reshape(target.numel(), hidden.shape[-1]).index_select(0, indices)
-    target = target.index_select(0, indices)
+    # Select along the original leading dimensions: flattening and indexing first would copy every hidden
+    # state, including the masked positions, before the selection.
+    hidden = hidden[valid.view(shape)]
+    target = target[valid]
     compute_dtype = _autocast_dtype(hidden.device.type) or torch.promote_types(hidden.dtype, weight.dtype)
     with torch.autocast(hidden.device.type, enabled=False):
         logprobs, entropy = _VocabParallelLinearLogProbs.apply(hidden, weight, bias, target, tp_group, start,
