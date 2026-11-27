@@ -40,7 +40,7 @@ class FastCheckpointEngine(CheckpointEngine):
         self._writer.release_writer()
 
     def load(self, path: str, map_location=None):
-        sd = torch.load(path, map_location=map_location)
+        sd = torch.load(path, map_location=map_location, weights_only=False)
         return sd
 
     def commit(self, info: CheckpointCommitInfo):
