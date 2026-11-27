@@ -280,6 +280,28 @@ class ws4_model_checkpoint_zeropp(DistributedFixture):
         ds_model.save_checkpoint(class_tmpdir)
 
 
+class ws1_zero3_model_checkpoint(DistributedFixture):
+    world_size = 1
+
+    def run(self, class_tmpdir):
+        config_dict = {
+            "train_batch_size": 2,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "torch_adam": True
+                }
+            },
+            "zero_optimization": {
+                "stage": 3
+            }
+        }
+        hidden_dim = 10
+        model = SimpleModel(hidden_dim)
+        model, _, _, _ = deepspeed.initialize(config=config_dict, model=model, model_parameters=model.parameters())
+        model.save_checkpoint(class_tmpdir, tag="ws1")
+
+
 @pytest.mark.parametrize("elastic_save", [True, False])
 @pytest.mark.parametrize("elastic_load", [True, False])
 @pytest.mark.parametrize("load_optim", [True, False])
@@ -369,6 +391,47 @@ class TestZeROElasticCheckpoint(DistributedTest):
                 model.load_checkpoint(class_tmpdir, load_optimizer_states=load_optim)
         else:
             model.load_checkpoint(class_tmpdir, load_optimizer_states=load_optim)
+
+
+class TestZeROMissingCheckpointFiles(DistributedTest):
+    world_size = 2
+
+    def _config(self, zero_stage):
+        return {
+            "train_batch_size": 2,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "torch_adam": True
+                }
+            },
+            "zero_optimization": {
+                "stage": zero_stage
+            }
+        }
+
+    def test_zero3_checkpoint_from_smaller_world_size(self, ws1_zero3_model_checkpoint, class_tmpdir):
+        model = SimpleModel(hidden_dim=10)
+        model, _, _, _ = deepspeed.initialize(config=self._config(3), model=model, model_parameters=model.parameters())
+        if dist.get_rank() == 0:
+            # Rank 0 finds its file and reaches the existing world size check.
+            with pytest.raises(deepspeed.runtime.zero.utils.ZeRORuntimeException):
+                model.load_checkpoint(class_tmpdir, tag="ws1")
+        else:
+            # Rank 1 has no file of its own. It used to fail with a bare AssertionError (#3377),
+            # so pin that the error names the saved and current world sizes.
+            with pytest.raises(FileNotFoundError, match="1 data-parallel rank.*world size is 2"):
+                model.load_checkpoint(class_tmpdir, tag="ws1")
+
+    @pytest.mark.parametrize("zero_stage", [1, 3])
+    def test_load_missing_tag(self, tmpdir, zero_stage):
+        model = SimpleModel(hidden_dim=10)
+        model, _, _, _ = deepspeed.initialize(config=self._config(zero_stage),
+                                              model=model,
+                                              model_parameters=model.parameters())
+        model.save_checkpoint(tmpdir, tag="saved")
+        with pytest.raises(FileNotFoundError, match="does not exist"):
+            model.load_checkpoint(tmpdir, tag="not_saved")
 
 
 class TestZeROSaveLoadEdgeCase(DistributedTest):

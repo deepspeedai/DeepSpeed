@@ -4600,6 +4600,32 @@ class DeepSpeedEngine(Module):
         ckpt_files.sort()
         return ckpt_files
 
+    def _check_ckpt_files_exist(self, load_dir, tag):
+        if self._get_all_ckpt_names(load_dir, tag):
+            return
+
+        tag_dir = os.path.join(load_dir, str(tag))
+        if not os.path.isdir(tag_dir):
+            raise FileNotFoundError(f"Checkpoint directory {tag_dir} does not exist")
+
+        pp_placeholder = "0" if self.load_universal_checkpoint() else None
+        expected = os.path.basename(self._get_ckpt_name(load_dir, tag, pp_placeholder=pp_placeholder))
+        message = f"Checkpoint directory {tag_dir} has no model states file {expected} for this rank."
+
+        if self.zero_optimization_partition_weights():
+            # ZeRO-3 writes one model states file per data-parallel rank, so ranks beyond
+            # the saved world size find nothing to load.
+            import glob
+            all_dp_ranks = self._get_ckpt_name(load_dir, tag, pp_placeholder="*")
+            saved_dp_world_size = len(glob.glob(all_dp_ranks))
+            message += f" It has ZeRO-3 model states for {saved_dp_world_size} data-parallel rank(s)"
+            message += f" and the current data-parallel world size is {self.seq_dp_world_size}."
+            if saved_dp_world_size not in (0, self.seq_dp_world_size):
+                message += " To load it with a different world size, convert the checkpoint with " \
+                    "ds_to_universal.py and load it with checkpoint.load_universal=true."
+
+        raise FileNotFoundError(message)
+
     def load_checkpoint(self,
                         load_dir,
                         tag=None,
@@ -4656,6 +4682,9 @@ class DeepSpeedEngine(Module):
 
         if load_module_only and self.zero_nvme_offload_optimizer() and custom_load_fn is not None:
             raise ZeRORuntimeException("NVMe module-only checkpoint load does not support custom_load_fn")
+
+        # Fail with a clear message before the prologue below repartitions anything.
+        self._check_ckpt_files_exist(load_dir, tag)
 
         if self._optimizer_has_ckpt_event_prologue():
             # Prepare for checkpoint load by ensuring all parameters are partitioned
