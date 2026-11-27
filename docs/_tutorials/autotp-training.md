@@ -9,6 +9,7 @@ This tutorial covers **Automatic Tensor Parallelism** for combining tensor paral
 - [Introduction](#introduction)
 - [Quick Start](#quick-start)
 - [HuggingFace tp_plan Support](#huggingface-tp_plan-support)
+- [Sequence Sharding](#sequence-sharding)
 - [Vocabulary-parallel LM Loss](#vocabulary-parallel-lm-loss)
 - [Custom Layer Specifications](#custom-layer-specifications)
 - [Limitations](#limitations)
@@ -161,6 +162,79 @@ row-parallel head all-reduces the complete vocabulary logits; for tied models,
 If you need to override the model's built-in `tp_plan`, provide a
 `partition_config` in the DeepSpeed config -- it takes precedence.
 
+
+## Sequence Sharding
+
+By default every TP rank runs the norms, residual adds and other token-wise ops of a
+decoder layer on the whole sequence and keeps their activations at full size, and
+each column-parallel linear all-reduces its own input gradient in backward. With
+`sequence_sharding`, the hidden states between the attention and MLP blocks are
+split along the sequence over the TP ranks, 1/tp of the tokens each:
+
+```json
+"tensor_parallel": {
+    "autotp_size": 4,
+    "sequence_sharding": true
+}
+```
+
+Each block all-gathers its input before its column-parallel linears, and its
+row-parallel linear reduce-scatters its output instead of all-reducing it. In
+backward, one reduce-scatter per block sums the input gradients of all its
+column-parallel linears. The gradients of replicated parameters inside the decoder
+layers (norm weights, row-parallel biases) are summed over the TP group, since each
+rank now sees part of the sequence. This is the scheme Megatron-LM calls sequence
+parallelism; it is unrelated to DeepSpeed's Ulysses sequence parallelism
+(`sequence_parallel_size`), and the two are not combined.
+
+`sequence_sharding_overlap` (default `true`) runs the column-parallel linears that
+read a block input in one autograd node, saves only this rank's part of the input
+for backward, and overlaps the backward reduce-scatter with the weight-gradient
+GEMMs. ZeRO-3 partitioned weights use the plain path, and so do weights with
+tensor hooks (such as the sum of GPTBigCode's shared key/value rows), whose hooks
+PyTorch would skip under non-reentrant activation checkpointing. The TP ranks agree
+on the path at the start of each forward pass that follows a backward, so a hook
+registered on one rank only moves every rank to the plain path.
+
+Requirements, checked at `deepspeed.initialize()`:
+
+- Every tensor-parallel linear inside the decoder layers belongs to a block (the
+  parent module of a row-parallel linear), the blocks are inside one numbered layer
+  list (such as `model.layers`), and every decoder layer has at least one block.
+- A block is neither a whole decoder layer nor inside another block: the
+  row-parallel linears sit inside the attention and MLP modules, not directly in the
+  decoder layer (as OPT's `fc2` does), because the decoder layer adds the residual to
+  the block output.
+- The sequence length is divisible by `autotp_size` (checked in the forward pass).
+- `output_hidden_states` is not requested (checked in the forward pass): the
+  decoder layers' outputs hold only this rank's part of the sequence.
+- No column-parallel layer gathers its output, and the DeepCompile `autotp` pass is
+  not used.
+- No AutoEP MoE layer is inside the decoder layers: AutoEP + AutoTP folding expects
+  every TP rank to hold the whole sequence.
+- No other routed MoE layer (a module with `experts` and a `gate` or `router`) is
+  inside the decoder layers: the TP ranks hold different tokens, so they could call
+  different experts, and a gradient sum or block gather that runs on some ranks only
+  would hang.
+
+The modules of a decoder layer outside its blocks (an MLP left unsharded, for
+example) run on this rank's part of the sequence, so they must act on each token
+alone, and they must use every one of their parameters on every rank whatever the
+tokens are: a replicated parameter's gradient is summed over the TP group, and a
+rank whose tokens skip the parameter would not join that sum. Shard every attention
+module: an unsharded attention would attend over the wrong tokens. These two
+conditions are not checked.
+
+At ZeRO stages 0, 1 and 2 the gradient sum of a replicated parameter runs in a
+tensor hook. PyTorch skips that hook when a custom autograd function, such as a
+fused norm kernel, saves the parameter inside non-reentrant activation
+checkpointing (the Hugging Face `gradient_checkpointing_enable()` default); the
+backward pass then raises an error instead of training on a partial gradient.
+ZeRO-3 sums these gradients after accumulation and is not affected.
+
+The hidden states are gathered again after the last decoder layer, so the final
+norm, output layer and loss see the whole sequence. Combine with
+`vocab_parallel_lm_head` (below) to keep the output layer and loss sharded as well.
 
 ## Vocabulary-parallel LM Loss
 

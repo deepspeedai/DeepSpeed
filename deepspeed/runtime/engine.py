@@ -1161,6 +1161,22 @@ class DeepSpeedEngine(Module):
 
             if attach_uc_metadata:
                 setattr(model, UNIVERSAL_CHECKPOINT_INFO, collect_autotp_universal_checkpoint_info(model))
+            if tp_config.sequence_sharding:
+                # The DeepCompile pass hands the linears' collectives to the compiler only in engine.compile(), after
+                # apply_autotp_sequence_sharding has looked for it, so it is refused here.
+                if self.is_deepcompile_enabled() and self.compile_autotp():
+                    raise NotImplementedError(
+                        "AutoTP sequence sharding does not support the DeepCompile 'autotp' pass")
+                from deepspeed.module_inject.autotp_sequence_sharding import apply_autotp_sequence_sharding
+                frozen = apply_autotp_sequence_sharding(model,
+                                                        tp_config.tensor_parallel.tp_group,
+                                                        overlap=tp_config.sequence_sharding_overlap,
+                                                        zero_stage=self.zero_optimization_stage())
+                # Like AutoTP's own frozen replicated parameters, these get no gradient sum: reject unfreezing them.
+                listed = getattr(self, "_autotp_frozen_replicated_params", [])
+                listed_ids = {id(param) for _, param in listed}
+                unlisted = [(name, param) for name, param in frozen if id(param) not in listed_ids]
+                self._autotp_frozen_replicated_params = listed + unlisted
             setattr(model, "ds_autotp_parsed", True)
 
         if partition_config is not None:
