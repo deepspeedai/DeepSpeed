@@ -384,6 +384,206 @@ class TestInjectionInvariants:
         for i, w in enumerate(ws):
             assert w.grad is not None, f"weight {i} got no gradient"
 
+    def test_install_decode_attention_rejects_dense_attention_and_accepts_gated(self):
+        """Only exact attention classes in SUPPORTED_ATTENTION with valid gated
+        q/k-norm configurations are patched. Unknown classes and dense attention
+        (q_out == o_in, e.g. Qwen3) are rejected without modification."""
+        pytest.importorskip("transformers.models.qwen3_5.modeling_qwen3_5")
+        from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5Attention
+        from deepspeed.module_inject.segment_ki import install_decode_attention, SUPPORTED_ATTENTION
+
+        class DummyKernelOp:
+
+            def decode_attn(self, *args, **kwargs):
+                pass
+
+        class DummyAttentionLayer(Qwen3_5Attention):
+
+            def __init__(self, num_heads, head_dim, is_gated=False):
+                torch.nn.Module.__init__(self)
+                self.head_dim = head_dim
+                self.layer_idx = 0
+                q_mult = 2 if is_gated else 1
+                self.q_proj = torch.nn.Linear(num_heads * head_dim, q_mult * num_heads * head_dim, bias=False)
+                self.k_proj = torch.nn.Linear(num_heads * head_dim, num_heads * head_dim, bias=False)
+                self.v_proj = torch.nn.Linear(num_heads * head_dim, num_heads * head_dim, bias=False)
+                self.o_proj = torch.nn.Linear(num_heads * head_dim, num_heads * head_dim, bias=False)
+                self.q_norm = torch.nn.LayerNorm(head_dim)
+                self.k_norm = torch.nn.LayerNorm(head_dim)
+
+        class UnknownGatedAttentionLayer(torch.nn.Module):
+            """Unknown class with identical 2x-wide gated shape."""
+
+            def __init__(self, num_heads, head_dim):
+                super().__init__()
+                self.head_dim = head_dim
+                self.layer_idx = 0
+                self.q_proj = torch.nn.Linear(num_heads * head_dim, 2 * num_heads * head_dim, bias=False)
+                self.k_proj = torch.nn.Linear(num_heads * head_dim, num_heads * head_dim, bias=False)
+                self.v_proj = torch.nn.Linear(num_heads * head_dim, num_heads * head_dim, bias=False)
+                self.o_proj = torch.nn.Linear(num_heads * head_dim, num_heads * head_dim, bias=False)
+                self.q_norm = torch.nn.LayerNorm(head_dim)
+                self.k_norm = torch.nn.LayerNorm(head_dim)
+
+        write_pos = torch.zeros(1, dtype=torch.int32)
+
+        # Register DummyAttentionLayer in SUPPORTED_ATTENTION for testing validator behavior
+        orig_supported = dict(SUPPORTED_ATTENTION)
+        try:
+            SUPPORTED_ATTENTION[DummyAttentionLayer] = SUPPORTED_ATTENTION[Qwen3_5Attention]
+
+            # 1. Unknown class: rejected because it is not in SUPPORTED_ATTENTION
+            unknown_model = torch.nn.Sequential(UnknownGatedAttentionLayer(16, 128))
+            res_unknown = install_decode_attention(unknown_model, write_pos, DummyKernelOp())
+            assert res_unknown == 0
+
+            # 2. Supported class with dense shapes (q_out = 2048, o_in = 2048): rejected by validator
+            dense_model = torch.nn.Sequential(DummyAttentionLayer(16, 128, is_gated=False))
+            res_dense = install_decode_attention(dense_model, write_pos, DummyKernelOp())
+            assert res_dense == 0
+
+            # 3. Supported class with valid gated shapes (q_out = 4096, o_in = 2048): accepted
+            gated_model = torch.nn.Sequential(DummyAttentionLayer(16, 128, is_gated=True))
+            res_gated = install_decode_attention(gated_model, write_pos, DummyKernelOp())
+            assert res_gated == 1
+        finally:
+            SUPPORTED_ATTENTION.clear()
+            SUPPORTED_ATTENTION.update(orig_supported)
+
+    def test_install_decode_attention_qwen3_5_moe(self):
+        """Register Qwen3_5MoeAttention in SUPPORTED_ATTENTION and verify that:
+        1. Linear attention layers (non-full-attention) are excluded by the validator.
+        2. Compatible full_attention layers are patched and execute decode_attn.
+        3. Fused decode output matches the native forward output."""
+        pytest.importorskip("transformers.models.qwen3_5_moe.modeling_qwen3_5_moe")
+        import copy
+        from transformers.models.qwen3_5_moe.configuration_qwen3_5_moe import Qwen3_5MoeTextConfig
+        from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (
+            Qwen3_5MoeAttention,
+            Qwen3_5MoeTextRotaryEmbedding,
+        )
+        from deepspeed.module_inject.segment_ki import (
+            install_decode_attention,
+            SUPPORTED_ATTENTION,
+            _validate_qwen3_5_decode_attention,
+        )
+        from deepspeed.module_inject.kernel_reference import decode_attn as ref_decode_attn
+
+        assert Qwen3_5MoeAttention in SUPPORTED_ATTENTION
+
+        cfg = Qwen3_5MoeTextConfig(
+            hidden_size=256,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            head_dim=64,
+            layer_types=["linear_attention", "full_attention"],
+            num_hidden_layers=2,
+        )
+
+        torch.manual_seed(42)
+        linear_layer = Qwen3_5MoeAttention(cfg, layer_idx=0).bfloat16()
+        full_layer = Qwen3_5MoeAttention(cfg, layer_idx=1).bfloat16()
+
+        # 1. Validator checks
+        assert not _validate_qwen3_5_decode_attention(linear_layer), "linear_attention must be rejected"
+        assert _validate_qwen3_5_decode_attention(full_layer), "full_attention must be accepted"
+
+        # 2. Installer checks
+        class RecordingDecodeAttnOp:
+
+            def __init__(self):
+                self.called = False
+
+            def decode_attn(self,
+                            q,
+                            k,
+                            v,
+                            pos,
+                            out,
+                            nq,
+                            nkv,
+                            hd,
+                            maxlen,
+                            q_norm_w=None,
+                            cos_t=None,
+                            sin_t=None,
+                            gate=None,
+                            eps=1e-6,
+                            rope_dim=None,
+                            **kwargs):
+                self.called = True
+                ref_pos = int(pos[0]) if pos.dim() > 0 else int(pos)
+                q_cur = q.float()
+                if q_norm_w is not None:
+                    variance = q_cur.pow(2).mean(-1, keepdim=True)
+                    q_cur = q_cur * torch.rsqrt(variance + eps) * q_norm_w
+                    if cos_t is not None and sin_t is not None:
+                        cos = cos_t[ref_pos:ref_pos + 1, :rope_dim].unsqueeze(1)
+                        sin = sin_t[ref_pos:ref_pos + 1, :rope_dim].unsqueeze(1)
+                        q_rot = q_cur[..., :rope_dim]
+                        q_pass = q_cur[..., rope_dim:]
+                        q_rot_half = torch.cat([-q_rot[..., rope_dim // 2:], q_rot[..., :rope_dim // 2]], dim=-1)
+                        q_rot = (q_rot * cos) + (q_rot_half * sin)
+                        q_cur = torch.cat([q_rot, q_pass], dim=-1)
+                attn_out = ref_decode_attn(q_cur, k.float(), v.float(), ref_pos)
+                if gate is not None:
+                    attn_out = attn_out * torch.sigmoid(gate.float())
+                out.copy_(attn_out.to(out.dtype))
+
+        model = torch.nn.Sequential(linear_layer, full_layer)
+        write_pos = torch.zeros(1, dtype=torch.int32)
+        op = RecordingDecodeAttnOp()
+
+        rotary = Qwen3_5MoeTextRotaryEmbedding(config=cfg)
+        pos_all = torch.arange(1024).unsqueeze(0)
+        dummy_x = torch.zeros(1, 1024, 256)
+        cos_all, sin_all = rotary(dummy_x, position_ids=pos_all)
+        cos_table = cos_all[0]
+        sin_table = sin_all[0]
+
+        ref_full_layer = copy.deepcopy(full_layer)
+        patched = install_decode_attention(model, write_pos, op, cos_table=cos_table, sin_table=sin_table)
+        assert patched == 1
+        assert getattr(linear_layer, "_ki_orig_attn_forward", None) is None
+        assert getattr(full_layer, "_ki_orig_attn_forward", None) is not None
+
+        # 3. Execution equivalence test
+        full_layer._ki_k_norm_w = None  # test standard cache update path
+
+        class SimpleCache:
+
+            def __init__(self, write_pos):
+                self._write_position = write_pos
+                self.k = None
+                self.v = None
+
+            def update(self, key_states, value_states, layer_idx, **kwargs):
+                if self.k is None:
+                    self.k = key_states
+                    self.v = value_states
+                else:
+                    self.k = torch.cat([self.k, key_states], dim=2)
+                    self.v = torch.cat([self.v, value_states], dim=2)
+                return self.k, self.v
+
+        hidden_states = torch.randn(1, 1, 256, dtype=torch.bfloat16)
+        cos_step, sin_step = rotary(hidden_states, position_ids=torch.zeros(1, 1, dtype=torch.long))
+
+        cache_patched = SimpleCache(write_pos)
+        cache_native = SimpleCache(write_pos)
+
+        out_patched, _ = full_layer(hidden_states,
+                                    position_embeddings=(cos_step, sin_step),
+                                    attention_mask=None,
+                                    past_key_values=cache_patched)
+        out_native, _ = ref_full_layer(hidden_states,
+                                       position_embeddings=(cos_step, sin_step),
+                                       attention_mask=None,
+                                       past_key_values=cache_native)
+
+        assert op.called, "decode_attn must be invoked by patched layer"
+        torch.testing.assert_close(out_patched.float(), out_native.float(), atol=1e-2, rtol=1e-2)
+
 
 class TestLmHeadSplitsOverTheTensorParallelGroup(DistributedTest):
     """The vocab-parallel lm_head splits over the ranks that share hidden states."""
