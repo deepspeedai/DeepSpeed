@@ -449,8 +449,8 @@ class OneCycle(object):
         cycle_momentum (bool): If ``True``, momentum is cycled inversely
             to learning rate between 'cycle_min_mom' and 'cycle_max_mom'.
             Default: True
-        cycle_min_mom (float or list): Initial momentum which is the
-            lower boundary in the cycle for each parameter group.
+        cycle_min_mom (float or list): Lower momentum boundary in the cycle
+            for each parameter group.
             Default: 0.8
         cycle_max_mom (float or list): Upper momentum boundaries in the cycle
             for each parameter group. Functionally,
@@ -573,7 +573,7 @@ class OneCycle(object):
         self.max_moms = [(mom, 0.99) for mom in _format_param(optimizer, cycle_max_mom, 'cycle_max_mom')]
 
         if last_batch_iteration == -1:
-            for momentum, group in zip(self.min_moms, optimizer.param_groups):
+            for momentum, group in zip(self.max_moms, optimizer.param_groups):
                 group['betas'] = momentum
 
         if math.isclose(self.decay_mom_rate, 0):
