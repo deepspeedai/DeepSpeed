@@ -636,12 +636,18 @@ class InsertPostInitMethodToModuleSubClasses(object):
             # A parent's constructor may replace or add a child's parameter after the child was
             # partitioned, so _post_init_method never sees it. Mark it to take the Init dtype when it is
             # converted later, like every parameter _post_init_method converts.
-            def remember_init_dtype(module, name, param):
-                if param is not None and not is_zero_param(param) and param.is_floating_point():
-                    param._ds_zero_init_dtype = target_fp_dtype
+            # The registration hook needs torch >= 2.5; without it we cannot mark such parameters and
+            # they keep the pre-hook behavior instead of crashing every Init(dtype=...) entry.
+            register_hook = getattr(torch.nn.modules.module, "register_module_parameter_registration_hook", None)
+            if register_hook is not None:
 
-            self._replacement_hook = torch.nn.modules.module.register_module_parameter_registration_hook(
-                remember_init_dtype)
+                def remember_init_dtype(module, name, param):
+                    if param is not None and not is_zero_param(param) and param.is_floating_point():
+                        param._ds_zero_init_dtype = target_fp_dtype
+
+                self._replacement_hook = register_hook(remember_init_dtype)
+            else:
+                self._replacement_hook = None
         else:
             target_fp_dtype = None
         if DeepSpeedTensorOverride.device in self.tensor_overrides:
@@ -677,7 +683,7 @@ class InsertPostInitMethodToModuleSubClasses(object):
                                                              target_device=target_device)
 
     def _remove_tensor_creation_wrappers(self):
-        if DeepSpeedTensorOverride.dtype in self.tensor_overrides:
+        if DeepSpeedTensorOverride.dtype in self.tensor_overrides and self._replacement_hook is not None:
             self._replacement_hook.remove()
         torch.Tensor.__new__ = torch.Tensor.__old_new__
         torch.tensor = _orig_torch_tensor
@@ -1010,7 +1016,11 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                 effect. Defaults to ``True``.
             dtype (``dtype``, optional): Can be used to change the data type of the parameters.
                 Floating-point tensor constructors without an explicit ``dtype`` use this type.
-                Supported options are ``torch.half`` and ``torch.float``. Defaults to ``None``
+                Supported options are ``torch.half``, ``torch.float16``, ``torch.float`` and
+                ``torch.bfloat16``. A parameter the context marked before conversion (for example one a
+                parent constructor added to an already-partitioned child) is converted to the marked Init
+                dtype, even when a later conversion passes a different explicit ``dtype``.
+                Defaults to ``None``
             mpu (``object``, optional): A model parallelism unit object that implements get_{model,data}_parallel_{rank,group,world_size}.
             zero_param_parallel_group(``object``, optional): Parallel (comm) group for dual partitioning of ZeRO params.
             zero_quantized_weights (bool, optional): If ``True``, turn on quantized weights in all gather weights. Default is ``False``

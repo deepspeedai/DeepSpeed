@@ -211,6 +211,8 @@ class TestSerialContext(DistributedTest):
             assert y.dtype == torch.long
 
     def test_explicit_tensor_dtype_is_preserved(self):
+        if not get_accelerator().is_bf16_supported():
+            pytest.skip("bf16 is not supported")
         setup_serial_env()
 
         with deepspeed.zero.Init(dtype=torch.bfloat16):
@@ -226,7 +228,9 @@ class TestSerialContext(DistributedTest):
         assert default_tensor_dtype.dtype == torch.bfloat16
         assert default_dtype.dtype == torch.bfloat16
 
-    def test_explicit_fp32_param_trains(self):
+    def test_fp32_ctor_param_trains_under_bf16_config(self):
+        if not get_accelerator().is_bf16_supported():
+            pytest.skip("bf16 is not supported")
         setup_serial_env()
 
         class ExplicitFp32Param(torch.nn.Module):
@@ -239,10 +243,27 @@ class TestSerialContext(DistributedTest):
             def forward(self, x):
                 return (self.linear(x) * self.scale).pow(2).mean()
 
-        with deepspeed.zero.Init(config_dict_or_path=config):
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 1,
+            "bf16": {
+                "enabled": True
+            },
+            "zero_optimization": {
+                "stage": 3
+            },
+            "zero_allow_untested_optimizer": True,
+            "gradient_clipping": 0,
+        }
+        with deepspeed.zero.Init(config_dict_or_path=config_dict):
             model = ExplicitFp32Param()
 
-        engine, _, _, _ = deepspeed.initialize(config=config, model=model, model_parameters=model.parameters())
+        # The param was created fp32 by the constructor; the context's ZeRO-3 partition
+        # flattens it to the Init dtype. Assert the stored partition dtype, not the view.
+        assert model.scale.ds_tensor.dtype == torch.bfloat16
+        assert model.linear.weight.ds_tensor.dtype == torch.bfloat16
+
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.5)
+        engine, _, _, _ = deepspeed.initialize(config=config_dict, model=model, optimizer=optimizer)
         x = torch.randn(1, 4, device=engine.device, dtype=model.linear.weight.dtype)
         loss = engine(x)
         engine.backward(loss)
