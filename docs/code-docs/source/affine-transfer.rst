@@ -34,6 +34,87 @@ The budget applies to each peer direction, not total device memory. Weights must
 remain frozen during transfer; optimizer migration and live AutoEP swaps are outside
 this API. Maintenance contact: ``@0z5a``.
 
+Repeated transfers
+------------------
+
+A weight sync moves the same batch every step. ``prepare_transfers`` does
+everything ``execute_transfers`` does before data moves -- validation, the
+schedule agreement, the staging arenas and a view of every region each round
+packs, unpacks or copies locally -- once, and returns a handle whose ``run`` only
+moves data::
+
+    from deepspeed.checkpoint.affine_transfer_executor import prepare_transfers
+
+    prepared = prepare_transfers(build_requests(), endpoints, dtype, budget)
+    for step in steps:
+        ...  # update the source buffers in place
+        prepared.run(build_requests())
+
+Here ``build_requests`` stands for building the requests from the live state,
+for example with fresh ``zero_param_storage_shard`` views.
+``prepare_transfers`` is collective and refuses a batch exactly as
+``execute_transfers`` does; ``execute_transfers`` runs the same preflight but
+builds each round's views only when it reaches that round, and keeps none of
+them. The handle keeps the buffers it was prepared with and its arenas stay
+allocated, so buffers must stay where they are and every process must run the
+handle the same number of times. By default ``run`` checks both before any data
+moves, with one small all-gather: if a buffer moved or changed shape on any
+process, or the processes are not running the same handle for the same time,
+every process raises and the batch has to be prepared again. Aliases between
+buffers are decided at prepare as well, including which local copies are dropped
+because source and target are the same memory, as a relay band held as a view
+of its own destination is; a moved buffer is refused rather than run on that
+decision.
+
+``run(requests)`` checks the requests it is given; ``run()`` checks the tensors
+the handle holds, which catches a buffer re-pointed in place (``.data = ...``)
+but not a view taken before its storage moved. ``zero_param_storage_shard``
+returns such a view, and ZeRO-3 ``reload_states`` re-points the partition behind
+it, so a handle over these views needs the rebuilt requests to notice the move.
+The handle also keeps every buffer it holds allocated: drop it before
+``offload_states`` if the partitions' memory should be freed, and prepare the
+batch again after ``reload_states``. ``run(check=False)`` skips the all-gather,
+so every process must pass the same ``check``.
+
+Each round packs and unpacks many small strided regions, one ``copy_`` per
+region by default. ``prepare_transfers(..., copier=fused_copies)`` from
+``deepspeed.checkpoint.affine_transfer_copy`` instead builds, at prepare time, a
+table of every region a copy list touches and moves the whole list with one
+Triton launch per alignment class. It applies to CUDA and XPU tensors whose
+elements are 1, 2, 4 or 8 bytes when Triton is available and otherwise falls
+back to ``copy_``; the copies are
+bitwise, so the result matches the default copier exactly. Building the table
+compiles the kernel once, which makes prepare slower, so it pays off only for
+handles that run many times.
+
+Symmetric-memory windows
+------------------------
+
+Processes whose devices can address each other's memory (one node over PCIe,
+NVLink or Xe Link) can skip staging altogether. A ``TransferWindow`` is a
+symmetric-memory pool, created collectively once; shards carved from it with
+``window.tensor(shape, dtype)`` are published to the group by
+``prepare_transfers``. An operation between two processes whose source or
+target lies in a window is then copied in place by one of them -- the target
+pulls, or the source pushes; ``direction`` decides when both lie in a window --
+with no message, arena or budget. Everything else runs as before::
+
+    from deepspeed.checkpoint.affine_transfer_executor import TransferWindow
+
+    window = TransferWindow(nbytes, group=group, direction='pull')
+    prepared = prepare_transfers(requests, endpoints, dtype, budget, group, window=window)
+
+Every process must pass the same window. Windows that disagree are refused, but
+a window passed on some processes and not on others, or a window that fails to
+build on one process, leaves the others waiting rather than refusing. The
+handle keeps a view of each
+region it copies, peer memory included. A run with window copies anywhere in
+the group ends with a group barrier, so no peer touches a window shard while
+another copies it, and ``TransferStats.mapped_bytes`` reports what this process
+copied. ``schedule_transfers`` cannot see buffers, so pass the window's
+locations per plan as ``window_locations`` to leave those operations out of the
+rounds it reports.
+
 Planning a sync with replica policies
 -------------------------------------
 
@@ -134,8 +215,9 @@ Pass the plans in request order, since that order fixes how chunks are packed
 into rounds. Each ``ProcessSchedule`` lists, per peer and direction, the rounds
 with their element and chunk counts and whether the round is sent or received in
 place, the staging arena each peer direction allocates, the local copies, and the
-round count that ``TransferStats.rounds`` reports. ``execute_transfers`` builds
-its rounds and arenas from the same computation, so the two cannot drift apart.
+round count that ``TransferStats.rounds`` reports. ``execute_transfers`` and
+``prepare_transfers`` build their rounds and arenas from the same computation,
+so the two cannot drift apart.
 The schedule follows the current transport described above and changes with it.
 
 Analyzing a plan
