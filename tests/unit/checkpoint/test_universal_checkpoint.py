@@ -355,3 +355,85 @@ class TestUniversalCheckpointFusedTorchAdamW(DistributedTest):
         for state in optimizer_states:
             assert state["step"].item() == steps_before_save + steps_after_load
         engine.destroy()
+
+
+@pytest.mark.parametrize("zero_stage", [1, 2, 3])
+class TestUniversalCheckpointFrozenParamsAndBuffers(DistributedTest):
+    world_size = 1
+
+    def test_resume_frozen_params_and_buffers(self, tmpdir, zero_stage):
+        def make_model(seed):
+            torch.manual_seed(seed)
+            m = torch.nn.Sequential(
+                torch.nn.Linear(16, 32),
+                torch.nn.BatchNorm1d(32),
+                torch.nn.GELU(),
+                torch.nn.Linear(32, 32),
+                torch.nn.GELU(),
+                torch.nn.Linear(32, 4),
+            )
+            m[3].requires_grad_(False)
+            return m
+
+        ds_config = {
+            "train_batch_size": 4,
+            "zero_optimization": {
+                "stage": zero_stage
+            },
+            "optimizer": {
+                "type": "AdamW",
+                "params": {
+                    "lr": 1e-2,
+                    "torch_adam": True
+                }
+            },
+        }
+
+        model = make_model(seed=0)
+        engine, _, _, _ = deepspeed.initialize(
+            config=ds_config,
+            model=model,
+            model_parameters=[p for p in model.parameters() if p.requires_grad],
+        )
+        for s in range(2):
+            x = torch.randn(4, 16, generator=torch.Generator().manual_seed(s)) + 3
+            loss = engine(x).pow(2).mean()
+            engine.backward(loss)
+            engine.step()
+
+        saved_sd = {k: v.detach().float().clone() for k, v in engine.module.state_dict().items()}
+        engine.save_checkpoint(tmpdir, tag=CP_TAG, client_state={UNIVERSAL_CHECKPOINT_INFO: {}})
+        engine.destroy()
+
+        cp_dir = os.path.join(tmpdir, CP_TAG)
+        univ_cp_dir = f"{cp_dir}_universal"
+        convert_to_universal(
+            SimpleNamespace(
+                input_folder=cp_dir,
+                output_folder=univ_cp_dir,
+                num_extract_workers=1,
+                num_merge_workers=1,
+                keep_temp_folder=False,
+                strict=True,
+                inject_missing_state=False,
+            ))
+
+        ds_config["checkpoint"] = {"load_universal": True}
+        new_model = make_model(seed=123)
+        engine, _, _, _ = deepspeed.initialize(
+            config=ds_config,
+            model=new_model,
+            model_parameters=[p for p in new_model.parameters() if p.requires_grad],
+        )
+        engine.load_checkpoint(tmpdir, tag=f"{CP_TAG}_universal")
+
+        import deepspeed as ds
+        with ds.zero.GatheredParameters(list(engine.module.parameters()), enabled=zero_stage == 3):
+            loaded_sd = {k: v.detach().float().clone() for k, v in engine.module.state_dict().items()}
+
+        for k, v in saved_sd.items():
+            assert torch.allclose(loaded_sd[k], v, atol=1e-5), (
+                f"Mismatch for {k}: max diff = {(loaded_sd[k] - v).abs().max().item()}"
+            )
+        engine.destroy()
+

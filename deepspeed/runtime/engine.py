@@ -4716,11 +4716,13 @@ class DeepSpeedEngine(Module):
         return load_path, client_states
 
     def _load_universal_checkpoint_buffers(self, checkpoint):
-        """Restore the module's persistent buffers in a universal checkpoint load.
+        """Restore the module's persistent buffers and non-trainable (frozen) parameters
+        in a universal checkpoint load.
 
         A universal load takes the parameters from zero/, cut for this run's layout, and does not apply the saved
-        module state. Persistent buffers (an MoE router's e_score_correction_bias, an AutoEP expert_bias) are only in
-        that module state. Buffers are not partitioned, so the source rank's copy is the whole buffer.
+        module state. Persistent buffers (an MoE router's e_score_correction_bias, an AutoEP expert_bias) and
+        frozen parameters are only in that module state. Buffers and frozen parameters are not partitioned by
+        the ZeRO optimizer, so the source rank's copy is the whole tensor.
         """
         saved = checkpoint.get('module') or {}
         live_buffers = dict(self.module.named_buffers())
@@ -4738,6 +4740,28 @@ class DeepSpeedEngine(Module):
         if missing:
             logger.warning(f"Universal checkpoint has no saved value for the persistent buffers {missing}; "
                            "they keep their initial values")
+
+        # Restore frozen (non-trainable) parameters
+        frozen_params_to_gather = []
+        frozen_params_to_restore = []
+        for name, param in self.module.named_parameters():
+            if not param.requires_grad and name in saved:
+                frozen_params_to_restore.append((name, param))
+                if hasattr(param, 'ds_id'):
+                    frozen_params_to_gather.append(param)
+
+        with deepspeed.zero.GatheredParameters(frozen_params_to_gather,
+                                               modifier_rank=0,
+                                               enabled=len(frozen_params_to_gather) > 0):
+            for name, param in frozen_params_to_restore:
+                saved_param = saved[name]
+                if saved_param.shape != param.shape:
+                    logger.warning(
+                        f"Universal checkpoint frozen parameter {name!r} has shape {tuple(saved_param.shape)}, but "
+                        f"the model's parameter has shape {tuple(param.shape)}; skipping restoration")
+                    continue
+                with torch.no_grad():
+                    param.copy_(saved_param.to(device=param.device, dtype=param.dtype))
 
     @staticmethod
     def _uses_autoep_zero3_partitioned_experts(autoep_layers):
