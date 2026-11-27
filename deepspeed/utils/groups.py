@@ -969,6 +969,15 @@ def _get_expert_model_parallel_world_size():
     return expert_tensor_parallel_world_size
 
 
+def _validate_hpz_optimizer_topology(group_size, dp_group):
+    world_size = dist.get_world_size()
+    if not 1 < group_size < world_size or world_size % group_size:
+        raise ValueError("zero_hpz_optimizer_sharding requires two or more equal hpZ groups with at least two "
+                         "ranks each (zero_hpz_partition_size must divide the world size).")
+    if dist.get_world_size(dp_group) != world_size or dist.get_rank(dp_group) != dist.get_rank():
+        raise ValueError("zero_hpz_optimizer_sharding requires full-world data parallelism in global rank order.")
+
+
 def _create_zero_param_parallel_group(group_size):
     """
         Create parameter partitioning group within ZeRO data parallel groups.

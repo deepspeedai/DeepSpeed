@@ -82,6 +82,7 @@ def test_scaled_global_norm_does_not_turn_cpu_offload_sentinel_into_one():
 
 def test_stage3_rejects_invalid_group_norm_before_optimizer_step():
     optimizer = object.__new__(DeepSpeedZeroOptimizer_Stage3)
+    optimizer.zero_hpz_optimizer_sharding = False
     optimizer._pre_step = lambda: None
     optimizer._partition_all_parameters = lambda: None
     optimizer.overflow = False

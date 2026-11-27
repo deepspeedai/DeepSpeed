@@ -430,6 +430,7 @@ Enabling and configuring ZeRO memory optimizations
     "round_robin_gradients": [true|false],
     "parameter_alignment": [true|false],
     "zero_hpz_partition_size": 1,
+    "zero_hpz_optimizer_sharding": [true|false],
     "zero_quantized_weights": [true|false],
     "zero_quantized_gradients": [true|false],
     "log_trace_cache_warnings": [true|false],
@@ -585,6 +586,12 @@ Most users can leave `sub_group_size` at its default value when not using NVMe o
 | Description                                                                                                                         | Default |
 | ----------------------------------------------------------------------------------------------------------------------------------- | ------- |
 | Number of ranks in hiearchical partitioning ZeRO (hpZ) secondary tensor group of ZeRO++, default is 1 meaning no hpZ, ideal is number of ranks (gpus) per node. | `1`   |
+
+***zero_hpz_optimizer_sharding***: [boolean]
+
+| Description | Default |
+| ----------- | ------- |
+| Shard the FP32 master weights and Adam state across each hpZ subgroup. Ranks at the same position in different subgroups hold identical shards after a completed optimizer step. Requires ZeRO-3 and a `zero_hpz_partition_size` greater than one that divides the data-parallel world size and leaves at least two subgroups. See [Recover Adam state from an hpZ peer](https://deepspeed.readthedocs.io/en/latest/zero3.html#recover-adam-state-from-an-hpz-peer). | `False` |
 
 ***zero_quantized_weights***: [boolean]
 

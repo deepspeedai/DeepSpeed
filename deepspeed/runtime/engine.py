@@ -605,6 +605,8 @@ class DeepSpeedEngine(Module):
         self._do_args_sanity_check(args)
         self._configure_with_arguments(args, mpu)
         self.pipeline_parallelism = isinstance(model, PipelineModule)
+        if self._config.zero_config.zero_hpz_optimizer_sharding:
+            self._validate_hpz_optimizer_sharding(optimizer)
         self._do_sanity_check()
         if self.log_level() is not None:
             set_log_level_from_string(self.log_level())
@@ -2348,6 +2350,20 @@ class DeepSpeedEngine(Module):
         if not is_zero_init_model:
             self._broadcast_model()
 
+    def _validate_hpz_optimizer_sharding(self, optimizer):
+        feature = "zero_hpz_optimizer_sharding"
+        autoep = self._config.expert_parallel_config
+        if self.mpu is not None or self.mesh_device is not None or self.pipeline_parallelism or self.autotp_size() > 1 \
+                or (autoep is not None and autoep.enabled):
+            raise ValueError(f"{feature} supports only dense, full-world data parallelism.")
+        if optimizer is None and not self.optimizer_name():
+            raise ValueError(f"{feature} requires an Adam optimizer.")
+        if self.load_universal_checkpoint():
+            raise ValueError(f"{feature} does not support Universal Checkpoint loading.")
+        if self.torch_autocast_enabled() and self.torch_autocast_dtype() == torch.float16:
+            raise ValueError(f"{feature} does not support torch autocast with an FP16 GradScaler.")
+        groups._validate_hpz_optimizer_topology(self.zero_hpz_partition_size(), dist.get_world_group())
+
     def _validate_zero3_moe_compatibility(self):
         if not self.has_moe_layers:
             return
@@ -2499,6 +2515,8 @@ class DeepSpeedEngine(Module):
                     msg = f'You are using ZeRO-Offload with a client provided optimizer ({type(basic_optimizer)}) which in most cases will yield poor performance. Please either use deepspeed.ops.adam.DeepSpeedCPUAdam or set an optimizer in your ds-config (https://www.deepspeed.ai/docs/config-json/#optimizer-parameters). If you really want to use a custom optimizer w. ZeRO-Offload and understand the performance impacts you can also set <"zero_force_ds_cpu_optimizer": false> in your configuration file.'
                     raise ZeRORuntimeException(msg)
 
+        if self._config.zero_config.zero_hpz_optimizer_sharding and self.has_moe_layers:
+            raise ValueError("zero_hpz_optimizer_sharding does not support MoE.")
         reflow_engine.reject_optimizer_without_reflow(self, basic_optimizer)
         basic_optimizer.param_groups[:] = [pg for pg in basic_optimizer.param_groups if len(pg["params"]) != 0]
         log_dist("Removing param_group that has no 'params' in the basic Optimizer", ranks=[0])
@@ -2957,6 +2975,7 @@ class DeepSpeedEngine(Module):
                     bf16_master_weights_and_gradients=self.bf16_master_weights_and_gradients(),
                     bf16_optimizer_states=self.bf16_optimizer_states(),
                     zero_hpz_partition_size=self.zero_hpz_partition_size(),
+                    zero_hpz_optimizer_sharding=self._config.zero_config.zero_hpz_optimizer_sharding,
                     zero_quantized_weights=self.zero_quantized_weights(),
                     zero_quantized_nontrainable_weights=self.zero_quantized_nontrainable_weights(),
                     zero_module_granularity_threshold=self.zero_module_granularity_threshold(),
@@ -4521,6 +4540,7 @@ class DeepSpeedEngine(Module):
                 name = self.param_names[param]
                 if hasattr(param, 'ds_id'):
                     param.ds_tensor.data.copy_(saved_frozen_params[name].data)
+                    param.ds_secondary_tensor = None
                 else:
                     param.data.copy_(saved_frozen_params[name].data)
 
@@ -6160,6 +6180,9 @@ class DeepSpeedEngine(Module):
         callable parents of AutoEP layers while keeping routing, token movement,
         expert compute, and collectives eager. Otherwise, compile the full module.
         """
+        if self._config.zero_config.zero_hpz_optimizer_sharding:
+            raise NotImplementedError("zero_hpz_optimizer_sharding does not support DeepSpeed compilation.")
+
         # Avoid graph breaks
         deepspeed.utils.nvtx.enable_nvtx = False
 

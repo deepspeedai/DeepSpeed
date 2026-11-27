@@ -10,6 +10,7 @@ import torch
 
 from deepspeed.compile import backend as backend_mod
 from deepspeed.compile.config import CompileConfig
+from deepspeed.runtime.zero.config import DeepSpeedZeroConfig
 import deepspeed.compile.patch_fake_tensor as patch_fake_tensor_mod
 from deepspeed.compile.init_z3 import _allow_dynamo_dynamic_parameter_shapes_for_z3, _resolve_expected_grad_dtype
 from deepspeed.compile.patch_fake_tensor import _resolve_zero3_guarded_value, patch_fake_tensor
@@ -420,7 +421,7 @@ def test_backend_setup_failure_after_native_init_cleans_once(monkeypatch):
 def test_module_compile_failure_cleans_native_state_once_before_destroy(monkeypatch):
     engine = object.__new__(DeepSpeedEngine)
     torch.nn.Module.__init__(engine)
-    engine._config = SimpleNamespace(compile_config=CompileConfig(deepcompile=True))
+    engine._config = SimpleNamespace(compile_config=CompileConfig(deepcompile=True), zero_config=DeepSpeedZeroConfig())
     engine._is_compiled = False
     engine._deepcompile_active = False
     engine._deepcompile_native_initialized = False
