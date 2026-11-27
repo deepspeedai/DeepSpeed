@@ -32,9 +32,23 @@ def link_hp_params(lp_param_list,
 
 
 def lazy_init_hp_params_optimizer_state(lp_param_list, flat_hp_partition, optimizer_state):
+    """Link the optimizer state of one parameter group into its param fragments.
+
+    Optimizers create their state lazily on the first update, and ZeRO-1/2
+    updates parameter groups one at a time, so a caller may reach this before a
+    group has any state to link.
+
+    Returns:
+        bool: ``True`` if the optimizer already has state for this partition and
+        the fragments were linked, ``False`` if the group has not been updated yet.
+    """
+    # optimizer.state is a defaultdict, so use get() rather than indexing: indexing
+    # would materialize an empty entry for a group that has not been stepped.
+    group_optimizer_state = optimizer_state.get(flat_hp_partition, {})
     for lp in lp_param_list:
         if lp._hp_mapping is not None:
-            lp._hp_mapping.set_optim_state_fragment(flat_hp_partition, optimizer_state[flat_hp_partition])
+            lp._hp_mapping.set_optim_state_fragment(flat_hp_partition, group_optimizer_state)
+    return bool(group_optimizer_state)
 
 
 def _init_lp_to_hp_mapping(lp_param_list,
