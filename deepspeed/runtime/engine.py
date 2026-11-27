@@ -580,6 +580,7 @@ class DeepSpeedEngine(Module):
         self._global_grad_norm = None
         self.use_ds_comm = False  # False --> Use torch.dist, True --> Use ds.comm backend.
         self.checkpoint_engine = None
+        self._warned_existing_checkpoint_tags = set()
         self.optimizer = None
         self.basic_optimizer = None
         self.lr_scheduler = None
@@ -5149,6 +5150,23 @@ class DeepSpeedEngine(Module):
             elif not valid:
                 logger.warning(msg)
 
+    def _warn_if_checkpoint_tag_exists(self, save_dir, tag):
+        tag_dir = os.path.join(save_dir, tag)
+        if tag_dir in self._warned_existing_checkpoint_tags:
+            return
+        try:
+            existing = os.listdir(tag_dir)
+        except OSError:
+            return
+        if existing:
+            # Warn once per tag directory, so intentional re-saves under a fixed tag do not log on every save.
+            self._warned_existing_checkpoint_tags.add(tag_dir)
+            logger.warning(f"save_checkpoint: '{tag_dir}' already contains {len(existing)} entries; this save "
+                           "overwrites them in place, one rank at a time. If the job crashes during the save, the "
+                           f"tag '{tag}' can be left with files from two different saves, which load_checkpoint "
+                           "does not detect. To keep the existing checkpoint intact, save to a new save_dir or "
+                           "under a tag that is not already in use.")
+
     def save_checkpoint(self, save_dir, tag=None, client_state={}, save_latest=True, exclude_frozen_parameters=False):
         """Save training checkpoint
 
@@ -5177,16 +5195,19 @@ class DeepSpeedEngine(Module):
         # This is to make sure the checkpoint names are created without collision
         # There seems to be issue creating them in parallel
 
-        # Ensure save_dir directory exists
-        if rank == 0:
-            self.checkpoint_engine.makedirs(save_dir, exist_ok=True)
-        dist.barrier()
-
         if tag is None:
             tag = f"global_step{self.global_steps}"
 
         # Ensure tag is a string
         tag = str(tag)
+
+        # Ensure save_dir directory exists
+        if rank == 0:
+            self.checkpoint_engine.makedirs(save_dir, exist_ok=True)
+            # Check before the barrier, so no rank has written into the tag directory yet.
+            self._warn_if_checkpoint_tag_exists(save_dir, tag)
+        dist.barrier()
+
         commit_info = CheckpointCommitInfo(tag=tag, save_dir=save_dir, save_latest=save_latest)
 
         self.checkpoint_engine.create(commit_info)
