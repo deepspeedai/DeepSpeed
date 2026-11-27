@@ -26,6 +26,8 @@ The meeting is hosted on Zoom and can be joined [here](https://zoom-lfx.platform
 
 ## Latest News
 
+* [2026/11] [Cross-Layer Energy Analysis of Multimodal Training on Grace Hopper Superchips](https://arxiv.org/pdf/2605.01938), presented at SC 2026 in Chicago
+
 * [2026/10] [PyTorch Conference Keynote Talk on DeepSpeed](https://docs.google.com/presentation/d/15VUQolpQKdXsNUbrOvITtwtrAZiqbRtCCB1qpEZr6ds/edit?slide=id.p1#slide=id.p1)
 
 * [2026/10] [PyTorch Conference Technical Talk on DeepSpeed](https://docs.google.com/presentation/d/1ppLgczlTeFBpn_E26ByF8O3sVOaG-yc-/edit?slide=id.p1#slide=id.p1)
