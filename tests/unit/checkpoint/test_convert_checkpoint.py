@@ -267,3 +267,127 @@ class TestCheckpointConvertBuffers(DistributedTest):
             torch.testing.assert_close(restored(inputs.cpu()), reference(inputs.cpu()), rtol=0, atol=0)
         dist.barrier()
         engine.destroy()
+
+
+class ModelWithFrozenParams(nn.Module):
+
+    def __init__(self):
+        super().__init__()
+        self.frozen = nn.Linear(4, 4)
+        self.frozen.requires_grad_(False)
+        self.trainable = nn.Linear(4, 4)
+        self.register_buffer("scale", torch.tensor(0.5))
+
+    def forward(self, inputs):
+        return (self.trainable(self.frozen(inputs)) * self.scale).sum()
+
+
+class TestCheckpointConvertFrozenParams(DistributedTest):
+    world_size = 1
+
+    @pytest.mark.parametrize("zero_stage", [1, 2])
+    def test_frozen_params_are_recovered(self, tmp_path, zero_stage):
+        config = {
+            "train_micro_batch_size_per_gpu": 1,
+            "zero_allow_untested_optimizer": True,
+            "zero_optimization": {
+                "stage": zero_stage
+            },
+        }
+        model = ModelWithFrozenParams()
+        engine, _, _, _ = deepspeed.initialize(model=model,
+                                               optimizer=torch.optim.SGD(
+                                                   [p for p in model.parameters() if p.requires_grad], lr=0.01),
+                                               config=config)
+        inputs = torch.ones(1, 4, device=get_accelerator().device_name(engine.local_rank))
+        engine.backward(engine(inputs))
+        engine.step()
+        expected = {name: value.detach().cpu().float() for name, value in engine.module.state_dict().items()}
+        checkpoint_dir = tmp_path / "checkpoint"
+        engine.save_checkpoint(checkpoint_dir, tag="step1")
+
+        if dist.get_rank() == 0:
+            state_dict = zero_to_fp32.get_fp32_state_dict_from_zero_checkpoint(checkpoint_dir)
+            assert set(state_dict) == set(expected)
+            for name, value in expected.items():
+                torch.testing.assert_close(state_dict[name], value, rtol=0, atol=0)
+
+            state_dict = zero_to_fp32.get_fp32_state_dict_from_zero_checkpoint(checkpoint_dir,
+                                                                               exclude_frozen_parameters=True)
+            assert set(state_dict) == {n for n in expected if not n.startswith("frozen.")}
+        dist.barrier()
+        engine.destroy()
+
+
+def test_zero3_extra_module_tensor_is_not_treated_as_frozen_param(tmp_path):
+    # A ZeRO-3 model state without frozen metadata may still hold a non-buffer tensor in its module
+    # state (for example one emitted by a custom state_dict). It must not be read as a frozen fragment.
+    shape = torch.Size([2, 3])
+    weight = torch.arange(6.0).view(shape)
+    checkpoint_dir = tmp_path / "step1"
+    checkpoint_dir.mkdir()
+    torch.save(
+        {
+            "module": {
+                "weight": torch.empty(0),
+                "extra_state": torch.ones(2, 3)
+            },
+            "buffer_names": [],
+            "param_shapes": [{
+                "weight": shape
+            }],
+            "shared_params": {},
+            "frozen_param_shapes": None,
+            "frozen_param_fragments": None,
+            "ds_version": "0.0.0",
+        }, checkpoint_dir / "zero_pp_rank_0_mp_rank_00_model_states.pt")
+    torch.save(
+        {"optimizer_state_dict": {
+            "zero_stage": 3,
+            "partition_count": 1,
+            "fp32_flat_groups": [weight.flatten()],
+        }}, checkpoint_dir / "zero_pp_rank_0_mp_rank_00_optim_states.pt")
+
+    state_dict = zero_to_fp32.get_fp32_state_dict_from_zero_checkpoint(tmp_path, tag="step1")
+
+    assert set(state_dict) == {"weight"}
+    torch.testing.assert_close(state_dict["weight"], weight, rtol=0, atol=0)
+
+
+def test_zero1_zero_element_frozen_param_is_recovered(tmp_path):
+    # A frozen parameter with no elements is stored whole in the module state like any other frozen
+    # parameter, and strict load_state_dict() needs its key back.
+    shape = torch.Size([2, 3])
+    weight = torch.arange(6.0).view(shape)
+    empty = torch.empty(0, 4)
+    checkpoint_dir = tmp_path / "step1"
+    checkpoint_dir.mkdir()
+    torch.save(
+        {
+            "module": {
+                "weight": weight,
+                "empty": empty
+            },
+            "buffer_names": [],
+            "param_shapes": [{
+                "weight": shape
+            }],
+            "shared_params": {},
+            "frozen_param_shapes": None,
+            "frozen_param_fragments": None,
+            "ds_version": "0.0.0",
+        }, checkpoint_dir / "mp_rank_00_model_states.pt")
+    torch.save(
+        {
+            "optimizer_state_dict": {
+                "zero_stage": 1,
+                "partition_count": 1,
+                "single_partition_of_fp32_groups": [weight.flatten()],
+            }
+        }, checkpoint_dir / "zero_pp_rank_0_mp_rank_00_optim_states.pt")
+
+    state_dict = zero_to_fp32.get_fp32_state_dict_from_zero_checkpoint(tmp_path, tag="step1")
+
+    assert set(state_dict) == {"weight", "empty"}
+    assert state_dict["empty"].shape == empty.shape
+    torch.testing.assert_close(state_dict["weight"], weight, rtol=0, atol=0)
