@@ -454,7 +454,7 @@ class ZenFlowZeroOptimizer(DeepSpeedZeroOptimizer):
 
         with get_accelerator().stream(stream):
             if not self.reduce_scatter:
-                self.gradient_reduction_w_predivide(tensor)
+                self.gradient_reduction_w_predivide(tensor, communication_data_type)
                 return
 
             # Accumulate destination ranks and bucket offsets for each gradient slice.
