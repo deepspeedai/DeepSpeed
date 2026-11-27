@@ -190,6 +190,8 @@ void launch_rms_norm(T* norm_output,
                      int elems_per_row,
                      cudaStream_t stream)
 {
+    if (rows == 0) { return; }
+
     // 8 for __half, 4 for float
     constexpr int T_per_load = rms::granularity / sizeof(T);
     constexpr int maxThreads = 256;
