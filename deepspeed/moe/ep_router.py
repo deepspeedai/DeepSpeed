@@ -22,6 +22,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from deepspeed.moe.ep_count import count_tokens_per_expert
+from deepspeed.moe.routing_replay import RoutingReplay
 
 
 class TokenChoiceTopKRouter(nn.Module):
@@ -62,6 +63,21 @@ class TokenChoiceTopKRouter(nn.Module):
         group_score_func: str = "top2_sum",
     ):
         super().__init__()
+        if not isinstance(top_k, int) or isinstance(top_k, bool) or top_k < 1:
+            raise ValueError(f"top_k must be a positive integer, got {top_k!r}")
+        if top_k > num_experts:
+            raise ValueError(f"top_k ({top_k}) must not exceed num_experts ({num_experts})")
+        if num_expert_groups is not None:
+            if num_expert_groups < 1 or num_experts % num_expert_groups != 0:
+                raise ValueError(f"num_expert_groups ({num_expert_groups}) must divide num_experts ({num_experts})")
+            if num_limited_groups is None or not 1 <= num_limited_groups <= num_expert_groups:
+                raise ValueError("num_limited_groups must be between 1 and num_expert_groups")
+            candidates = (num_experts // num_expert_groups) * num_limited_groups
+            if top_k > candidates:
+                raise ValueError(f"top_k ({top_k}) exceeds the {candidates} experts available in the selected "
+                                 f"{num_limited_groups} group(s)")
+        elif num_limited_groups is not None:
+            raise ValueError("num_limited_groups requires num_expert_groups")
         self.gate = nn.Linear(dim, num_experts, bias=gate_bias)
         self.num_experts = num_experts
         self.num_expert_groups = num_expert_groups
@@ -71,9 +87,36 @@ class TokenChoiceTopKRouter(nn.Module):
         self.route_norm = route_norm
         self.route_scale = route_scale
         self.group_score_func = group_score_func
+        self._routing_replay = None
+        self._routing_replay_layer = None
         # Trainable expert score correction bias (e.g. DeepSeek-V3/Moonlight noaux_tc).
         # Separate from the dynamic load-balancing expert_bias passed in forward().
         self.e_score_correction_bias = None
+
+    def set_routing_replay(self, replay: RoutingReplay | None, layer_name: str | None = None) -> None:
+        """Attach per-model route replay state to this router."""
+        if replay is not None and not isinstance(replay, RoutingReplay):
+            raise TypeError("replay must be a RoutingReplay instance or None")
+        if replay is not None and not layer_name:
+            raise ValueError("layer_name is required when routing replay is enabled")
+        self._routing_replay = replay
+        self._routing_replay_layer = layer_name
+
+    def _apply_routing_replay(self, selected_experts: torch.Tensor) -> torch.Tensor:
+        if self._routing_replay is None or not self._routing_replay.is_recording:
+            return selected_experts
+        self._routing_replay.apply(self._routing_replay_layer, selected_experts)
+        return selected_experts
+
+    def _replay_routes(self, tokens: int, device: torch.device) -> torch.Tensor:
+        assert self._routing_replay is not None
+        return self._routing_replay.next_routes(
+            self._routing_replay_layer,
+            tokens,
+            self.top_k,
+            device,
+            num_experts=self.num_experts,
+        )
 
     # ------------------------------------------------------------------
     # Node-limited (group-limited) routing
@@ -163,18 +206,27 @@ class TokenChoiceTopKRouter(nn.Module):
         else:
             raise NotImplementedError(f"Unknown score function: {self.score_func}")
 
-        scores_for_choice = (scores if expert_bias is None else scores + expert_bias)
+        if self._routing_replay is not None and self._routing_replay.is_replaying:
+            # The route IDs are already known.  Avoid recomputing top-k (and
+            # group selection) while still gathering scores from the current gate.
+            selected_experts_indices = self._replay_routes(scores.shape[0], scores.device)
+        else:
+            # Expert IDs are discrete. Keep selection out of autograd so that
+            # checkpoint recording and replay save the same tensors.
+            with torch.no_grad():
+                scores_for_choice = (scores if expert_bias is None else scores + expert_bias)
 
-        # Apply pre-trained score correction bias (e.g. DeepSeek-V3 noaux_tc routing)
-        if self.e_score_correction_bias is not None:
-            scores_for_choice = scores_for_choice + self.e_score_correction_bias.unsqueeze(0)
+                # Apply pre-trained score correction bias (e.g. DeepSeek-V3 noaux_tc routing)
+                if self.e_score_correction_bias is not None:
+                    scores_for_choice = scores_for_choice + self.e_score_correction_bias.unsqueeze(0)
 
-        # Apply node-limited routing if configured
-        if self.num_expert_groups is not None:
-            scores_for_choice = self._get_node_limited_routing_scores(scores_for_choice)
+                # Apply node-limited routing if configured
+                if self.num_expert_groups is not None:
+                    scores_for_choice = self._get_node_limited_routing_scores(scores_for_choice)
 
-        # Select top-k experts per token
-        _, selected_experts_indices = torch.topk(scores_for_choice, k=self.top_k, dim=-1, sorted=False)
+                # Select top-k experts per token
+                _, selected_experts_indices = torch.topk(scores_for_choice, k=self.top_k, dim=-1, sorted=False)
+            selected_experts_indices = self._apply_routing_replay(selected_experts_indices)
 
         # Gather original (unbiased) scores for selected experts
         top_scores = scores.gather(dim=1, index=selected_experts_indices)
