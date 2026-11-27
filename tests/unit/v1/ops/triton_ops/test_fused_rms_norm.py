@@ -592,7 +592,7 @@ class TestFusedRMSNormCUDA(DistributedTest):
             (0, 2048),
             (7, 128),
             (5, 2048),
-            # Wider rows run with more warps: 8 above 2048 and 16 above 16384, up to the widest supported row.
+            # Rows wider than 2048 run with 8 warps: the first such width and the widest supported row.
             (5, 2049),
             (3, 32768),
             # First width beyond the narrow cutoff: it must retain the wide-path accuracy contract.

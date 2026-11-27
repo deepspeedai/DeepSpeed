@@ -237,9 +237,7 @@ def _num_warps(n_cols: int) -> int:
     # The row kernels hold a whole row in one program, so wider rows are spread over more threads.
     if n_cols <= 2048:
         return 4
-    if n_cols <= 16384:
-        return 8
-    return 16
+    return 8
 
 
 def _narrow_block_m(n_rows: int, n_cols: int):
