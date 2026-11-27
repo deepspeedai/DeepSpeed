@@ -726,6 +726,10 @@ class DeepSpeedConfig(object):
                 raise ValueError("Reflow requires FP32 master weights and optimizer states; "
                                  "low-precision master weights and optimizer states are not supported.")
 
+        if self.bfloat16_config.enabled and self.bfloat16_config.stochastic_round_params and (
+                self.float16_config.fp16_master_weights_and_grads
+                or self.bfloat16_config.bf16_master_weights_and_grads):
+            raise ValueError("bf16.stochastic_round_params requires fp32 master weights")
         if self.float16_config.fp16_master_weights_and_grads:
             assert self.zero_enabled and self.zero_optimization_stage in (
                 ZeroStageEnum.optimizer_states, ZeroStageEnum.gradients,

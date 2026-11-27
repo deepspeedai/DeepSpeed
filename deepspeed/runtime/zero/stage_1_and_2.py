@@ -21,6 +21,7 @@ from deepspeed.runtime.zero.offload_states import (offload_optimizer_states, rel
                                                    unpin_offloaded_optimizer_states)
 from deepspeed.runtime.base_optimizer import ZeROOptimizer
 from deepspeed.runtime.fp16.loss_scaler import CreateLossScaler
+from deepspeed.runtime.stochastic_rounding import StochasticRoundingCopy
 from deepspeed.runtime.torch_autocast import get_autocast_dtype, get_all_comm_dtypes, is_autocast_initialized, sort_dtypes
 from deepspeed.runtime.utils import (empty_cache, see_memory_usage, has_inf_or_nan, inf, is_model_parallel_parameter,
                                      align_dense_tensors, all_gather_dp_groups, mask_nan_or_inf_with_val_inplace,
@@ -206,7 +207,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                  elastic_checkpoint=False,
                  check_grad_overflow=True,
                  compute_grad_norm=True,
-                 retain_gpu_grad_partition_until_step=False):
+                 retain_gpu_grad_partition_until_step=False,
+                 bf16_stochastic_round_params=False):
 
         super().__init__()
 
@@ -248,6 +250,9 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
         self.elastic_checkpoint = elastic_checkpoint
         self.parameter_alignment = parameter_alignment
+        self._copy_to_bit16 = torch.Tensor.copy_
+        if bf16_stochastic_round_params:
+            self._copy_to_bit16 = StochasticRoundingCopy(dist.get_rank(group=dp_process_group))
         self.check_grad_overflow = check_grad_overflow
         self.compute_grad_norm = compute_grad_norm
         self.param_names = param_names
@@ -562,9 +567,9 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             weights_partition = self.parallel_partitioned_bit16_groups[i][partition_id].detach().clone().to(
                 device=self.device, dtype=self.master_weights_and_grads_dtype)
 
-            if self.cpu_offload:
-                if self.cpu_offload_pin_memory:
-                    weights_partition = get_accelerator().pin_memory(weights_partition)
+            if self.cpu_offload_pin_memory:
+                weights_partition = get_accelerator().pin_memory(weights_partition)
+            if self.cpu_offload and not bf16_stochastic_round_params:
                 temp_dtype = self.parallel_partitioned_bit16_groups[i][partition_id].dtype
                 temp_buffer_bit16 = torch.full(weights_partition.shape,
                                                fill_value=0.0,
@@ -3218,9 +3223,13 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 #    bit16_partitions[partition_id].data.copy_(fp32_partition.data)
                 bit16_partitions = self.parallel_partitioned_bit16_groups[i]
                 fp32_partition = self.single_partition_of_fp32_groups[i]
-                bit16_partition_buffer = self.param_buffer_of_bit16_for_cpu_offload_groups[i]
-                bit16_partition_buffer.data.copy_(fp32_partition.data)
-                bit16_partitions[partition_id].data.copy_(bit16_partition_buffer.data, non_blocking=True)
+                if self.param_buffer_of_bit16_for_cpu_offload_groups:
+                    bit16_partition_buffer = self.param_buffer_of_bit16_for_cpu_offload_groups[i]
+                    bit16_partition_buffer.data.copy_(fp32_partition.data)
+                    bit16_partitions[partition_id].data.copy_(bit16_partition_buffer.data, non_blocking=True)
+                else:
+                    # No staging buffer: stochastic rounding runs on the accelerator, as the host draws serially.
+                    self._copy_to_bit16(bit16_partitions[partition_id].data, fp32_partition.data)
                 self._release_preflattened_grad_buffers(i)
                 self.averaged_gradients[i] = None
 
@@ -3269,7 +3278,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 del single_grad_partition
                 bit16_partitions = self.parallel_partitioned_bit16_groups[i]
                 fp32_partition = self.single_partition_of_fp32_groups[i]
-                bit16_partitions[partition_id].data.copy_(fp32_partition.data)
+                self._copy_to_bit16(bit16_partitions[partition_id].data, fp32_partition.data)
                 self.timers(OPTIMIZER_STEP_TIMER).stop()
 
         see_memory_usage('After optimizer before all-gather')
@@ -3300,7 +3309,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         for i, (bit16_partitions, fp32_partition) in enumerate(
                 zip(self.parallel_partitioned_bit16_groups, self.single_partition_of_fp32_groups)):
             partition_id = dist.get_rank(group=self.real_dp_process_group[i])
-            bit16_partitions[partition_id].data.copy_(fp32_partition.data)
+            self._copy_to_bit16(bit16_partitions[partition_id].data, fp32_partition.data)
 
         all_gather_dp_groups(groups_flat=self.bit16_groups_flat,
                              partitioned_param_groups=self.parallel_partitioned_bit16_groups,

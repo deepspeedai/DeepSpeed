@@ -70,6 +70,13 @@ class DeepSpeedBF16Config(DeepSpeedConfigModel):
     Keep optimizer states in bf16 (only valid when bf16_master_weights_and_grads is enabled).
     """
 
+    stochastic_round_params: bool = False
+    """
+    Stochastically round fp32 master weights into the bf16 parameters after each optimizer step and universal-checkpoint
+    load. The expected result equals the master within the finite bf16 range. Supported by ZeRO stages 1 and 2 and
+    BF16_Optimizer with fp32 master weights and without tensor parallelism.
+    """
+
 
 #########################################
 # FP16 support

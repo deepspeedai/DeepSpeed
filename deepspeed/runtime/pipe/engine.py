@@ -1216,6 +1216,9 @@ class PipelineEngine(DeepSpeedEngine):
 
         self._force_grad_boundary = True
         self._take_model_step(lr_kwargs)
+        if self.module.tied_comms and self.bf16_stochastic_round_params():
+            # The same tied weight can occupy different offsets in each stage's rounding stream.
+            self.module._synchronize_tied_weights()
         self._force_grad_boundary = False
 
         if self.global_rank == 0 and self.monitor.enabled:

@@ -1799,6 +1799,9 @@ class DeepSpeedEngine(Module):
     def bf16_optimizer_states(self):
         return self._config.bfloat16_config.bf16_optimizer_states
 
+    def bf16_stochastic_round_params(self):
+        return self.bfloat16_enabled() and self._config.bfloat16_config.stochastic_round_params
+
     def torch_autocast_enabled(self) -> bool:
         return self._config.torch_autocast_enabled
 
@@ -2513,6 +2516,18 @@ class DeepSpeedEngine(Module):
 
         optimizer_wrapper = self._do_optimizer_sanity_check(basic_optimizer)
 
+        if self.bf16_stochastic_round_params():
+            from deepspeed.runtime.sequence_parallel import parallel_state_sp
+            from deepspeed.utils.bwc import bwc_tensor_model_parallel_world_size
+
+            # Ulysses aliases its sequence group to the legacy model-parallel group.
+            if self.mpu is not parallel_state_sp and bwc_tensor_model_parallel_world_size(self.mpu) > 1:
+                raise ValueError("bf16.stochastic_round_params cannot preserve replicated tensor-parallel weights")
+            if optimizer_wrapper != BFLOAT16 and not (optimizer_wrapper == ZERO_OPTIMIZATION
+                                                      and self.zero_optimization_stage() <= ZeroStageEnum.gradients
+                                                      and not self.zenflow):
+                raise ValueError("bf16.stochastic_round_params supports BF16_Optimizer and ordinary ZeRO stages 1/2")
+
         if optimizer_wrapper == ZERO_OPTIMIZATION:
             self.optimizer = self._configure_zero_optimizer(basic_optimizer)
         elif optimizer_wrapper in [FP16, DDP_BFLOAT16]:
@@ -2866,6 +2881,7 @@ class DeepSpeedEngine(Module):
                 fp16_master_weights_and_gradients=self.fp16_master_weights_and_gradients(),
                 bf16_master_weights_and_gradients=self.bf16_master_weights_and_gradients(),
                 bf16_optimizer_states=self.bf16_optimizer_states(),
+                bf16_stochastic_round_params=self.bf16_stochastic_round_params(),
                 gradient_accumulation_dtype=gradient_accumulation_dtype,
                 communication_data_type=self.communication_data_type,
                 elastic_checkpoint=self.zero_elastic_checkpoint(),
@@ -4710,6 +4726,8 @@ class DeepSpeedEngine(Module):
 
         if load_zero_checkpoint and universal and not zero3:
             self.optimizer.update_lp_params()
+            if self.pipeline_parallelism and self.bf16_stochastic_round_params():
+                self.module._synchronize_tied_weights()
             if load_module_only:
                 self.optimizer.refresh_fp32_params()
 

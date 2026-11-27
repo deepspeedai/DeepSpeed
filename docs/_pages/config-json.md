@@ -360,6 +360,12 @@ Example of <i>**scheduler**</i>
 | ----------- | ------- |
 | Keep optimizer states in bf16 as well. Requires `bf16_master_weights_and_grads=true`. Offload is optional: without `offload_optimizer` the bf16 states stay on the GPU; with `offload_optimizer` (`DeepSpeedCPUAdam`) they are offloaded to CPU memory in bf16. The offloaded state (bf16 master weights plus the two bf16 Adam moments) is then ~6 bytes/param, versus ~10 bytes/param when the moments are kept in fp32. | `false` |
 
+<i>**bf16:stochastic_round_params**</i>: [boolean]
+
+| Description | Default |
+| ----------- | ------- |
+| Stochastically round fp32 masters into bf16 parameters after each optimizer step and universal-checkpoint refresh. For finite masters in the bf16 range, each fresh draw chooses adjacent bf16 values with the master as its expected value. Values outside this range can round to infinity. Supports ordinary ZeRO stages 1 and 2 (including CPU optimizer offload) and `BF16_Optimizer` with fp32 masters. Tensor parallelism is unsupported because replicas can occupy different partition offsets. Each data-parallel owner rounds its partition before the existing all-gather. Pipeline stages broadcast their tied weights after rounding. CPU offload transfers four bytes per bf16 parameter to the accelerator. The torch seed and data-parallel rank seed a dedicated generator. Restarting with the same seed replays its stream from the beginning. | `false` |
+
 **Support matrix (bf16 master weights/gradients)**
 
 | ZeRO stage | bf16_optimizer_states=False | bf16_optimizer_states=True |
