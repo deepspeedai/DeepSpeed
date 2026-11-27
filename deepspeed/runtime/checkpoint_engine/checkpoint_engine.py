@@ -44,6 +44,10 @@ class CheckpointEngine(ABC):
         # to tell checkpoint services if all files are ready.
         ...
 
+    def post_commit(self, info: CheckpointCommitInfo):
+        """Called after every rank has committed a decoupled checkpoint."""
+        pass
+
     def is_data_parallel_writer(self, dp_rank):
         return dp_rank == 0
 

@@ -167,6 +167,7 @@ class DecoupledCheckpointEngine(CheckpointEngine):
             raise ValueError(f"[{ENGINE_NAME}] Checkpoint commit info mismatch: "
                              f"expected {self.commit_info}, got {info}")
 
+        self.commit_info = None
         if self.ckpt_process is not None:
             # Check process health before waiting
             if not self._check_process_alive():
@@ -177,10 +178,10 @@ class DecoupledCheckpointEngine(CheckpointEngine):
             self._wait_for_event_with_timeout()
             self.save_event.clear()
 
-        self.commit_info = None
+        return True
 
+    def post_commit(self, info: CheckpointCommitInfo):
         if self.checkpoint_size.gb_size() is None:
-            dist.barrier()
             post_size = get_checkpoint_folder_size(info.save_dir, info.tag, self.local_rank)
             self.checkpoint_size.set_post_size(post_size)
 
@@ -190,8 +191,6 @@ class DecoupledCheckpointEngine(CheckpointEngine):
             print(
                 f'{self.name} self.global_rank={self.global_rank} created checkpoint of {round(self.checkpoint_size.gb_size(), 2)} GB'
             )
-
-        return True
 
     def get_commit_info(self):
         return self.commit_info
@@ -213,7 +212,8 @@ class DecoupledCheckpointEngine(CheckpointEngine):
 
         if self.ckpt_process is not None:
             try:
-                self.save_queue.put((None, DecoupledEvent.EXIT_EVENT))
+                if self.ckpt_process.is_alive():
+                    self.save_queue.put((None, DecoupledEvent.EXIT_EVENT))
             except Exception:
                 pass  # Queue may be broken if process died
 
