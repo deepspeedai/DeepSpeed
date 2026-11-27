@@ -425,7 +425,10 @@ class ZeROOptimizer(DeepSpeedOptimizer):
                 # would leave an incomplete state entry the optimizer cannot consume at the next step.
                 if global_step is None:
                     from deepspeed.checkpoint.universal_checkpoint import load_universal_optimizer_step
-                    global_step = load_universal_optimizer_step(optim_sd, checkpoint_dir, [])
+                    # A rank reaching this branch owns this group's fragment, so pass its params to let the
+                    # helper read this group's step.pt. Only the first group's names are read (global_step is cached).
+                    global_step = load_universal_optimizer_step(optim_sd, checkpoint_dir,
+                                                                [self.param_names[lp] for lp in lp_groups[i]])
                 step_to_restore = global_step
             else:
                 step_to_restore = None

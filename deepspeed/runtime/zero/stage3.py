@@ -4144,8 +4144,13 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         # The restored group settings decide where step belongs, so place it after them.
         for sub_group_id, fp32_param in enumerate(self.fp32_partitioned_groups_flat):
+            # A sub-group without a stored step was already popped from the state, and indexing would
+            # re-create the empty entry it replaced, so look the state up instead.
+            state = self.optimizer.state.get(fp32_param)
+            if state is None:
+                continue
             param_group = self.optimizer.param_groups[self.sub_group_to_group_id[sub_group_id]]
-            place_restored_optimizer_step(self.optimizer.state[fp32_param], fp32_param, param_group)
+            place_restored_optimizer_step(state, fp32_param, param_group)
 
         if self.swap_optimizer:
             # Purge the swapped optimizer state, it was initialized to the freshly created model and not the checkpoint

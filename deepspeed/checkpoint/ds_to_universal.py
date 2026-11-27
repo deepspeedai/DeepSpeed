@@ -151,8 +151,9 @@ def extract_zero_shards(dir, ds_checkpoint, indices_3D):
     # fragment is still written, since each rank extracts exactly the groups it owns.
     for param_group_id in sorted(state_groups):
         # Guard against a corrupt checkpoint listing a state id with no matching group layout.
-        assert param_group_id < len(fp32_groups), (
-            f"State group id {param_group_id} has no {len(fp32_groups)}-entry optimizer layout")
+        if param_group_id >= len(fp32_groups):
+            raise ValueError(
+                f"State group id {param_group_id} has no {len(fp32_groups)}-entry optimizer layout under {dir}")
 
         flat_state = dict(
             exp_avg=state_groups[param_group_id]["exp_avg"],
