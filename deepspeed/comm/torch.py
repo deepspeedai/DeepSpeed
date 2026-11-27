@@ -671,6 +671,79 @@ class TorchBackend(Backend):
         from torch.distributed._symmetric_memory import enable_symm_mem_for_group
         return enable_symm_mem_for_group(group_name)
 
+    def symm_mem_rendezvous(self, numel, dtype, group=None, backend=None):
+        """Allocate ``numel`` elements every member of ``group`` can address, and exchange handles.
+
+        ``backend`` selects torch's symmetric-memory backend, which is process-wide and fixed by the first
+        allocation in the process.
+        """
+        if not required_torch_version(min_version=2.5):
+            raise RuntimeError(f"Torch version must be 2.5 or higher to use symmetric memory. "
+                               f"Current version: {torch.__version__}")
+        import torch.distributed._symmetric_memory as symm_mem
+        if not (hasattr(symm_mem, 'empty') and hasattr(symm_mem, 'rendezvous')):
+            raise RuntimeError(f"symmetric memory allocation is not available in torch {torch.__version__}")
+        device = get_accelerator().current_device_name()
+        if backend is not None:
+            if backend == 'NCCL' and not hasattr(symm_mem, 'put_signal'):
+                raise RuntimeError(f"NCCL symmetric-memory puts need a newer torch. "
+                                   f"Current version: {torch.__version__}")
+            if symm_mem.get_backend(device) != backend:
+                symm_mem.set_backend(backend)
+        group = group if group is not None else torch.distributed.group.WORLD
+        buffer = symm_mem.empty(numel, dtype=dtype, device=device)
+        return buffer, symm_mem.rendezvous(buffer, group.group_name)
+
+    def symm_mem_handle_at(self, buffer, byte_offset, nbytes, group=None):
+        """A handle for ``nbytes`` at ``byte_offset`` of a rendezvoused ``buffer``, made by this process alone.
+
+        A put lands at its handle's offset in the peer's buffer. Handles are cached by storage address, so a
+        view would get the buffer's own handle at offset 0; a storage that starts at the offset gets its own.
+        """
+        import torch.distributed._symmetric_memory as symm_mem
+        group = group if group is not None else torch.distributed.group.WORLD
+        storage = torch._C._construct_storage_from_data_pointer(buffer.data_ptr() + byte_offset, buffer.device, nbytes)
+        region = torch.empty(0, dtype=torch.uint8, device=buffer.device).set_(storage, 0, (nbytes, ))
+        return symm_mem.rendezvous(region, group.group_name)
+
+    def symm_mem_put_signals(self, puts, group=None):
+        """For each ``(source, handle, peer)``, write ``source``, which lies in a rendezvoused buffer, to
+        ``peer`` at ``handle``'s offset, then raise one signal at ``peer``; ordered on the current stream.
+
+        The puts are issued as one NCCL group, so NCCL drives them to all peers at once instead of one
+        after another.
+        """
+        import torch.distributed._symmetric_memory as symm_mem
+        group = group if group is not None else torch.distributed.group.WORLD
+        nccl = group._get_backend(torch.device(get_accelerator().current_device_name()))
+        nccl._group_start()
+        try:
+            for source, handle, peer in puts:
+                symm_mem.put_signal(source, handle, peer)
+        finally:
+            nccl._group_end()
+
+    def symm_mem_wait_signal(self, handle, peer):
+        """Hold the current stream until one signal from ``peer`` arrives, and consume it."""
+        import torch.distributed._symmetric_memory as symm_mem
+        symm_mem.wait_signal(handle, peer)
+
+    def symm_mem_mapped_peers(self, handle):
+        """The group ranks, this process included, whose buffer of ``handle`` this process has mapped."""
+        return [peer for peer, address in enumerate(handle.buffer_ptrs) if address]
+
+    def symm_mem_peer_tensor(self, handle, peer, numel, dtype):
+        """``peer``'s symmetric buffer as a tensor on this process's device."""
+        device = torch.device(get_accelerator().current_device_name())
+        if device.type == 'cuda':
+            return handle.get_buffer(peer, (numel, ), dtype)
+        # Other backends return a view without a device index, so rebuild it from the mapped address.
+        address = handle.buffer_ptrs[peer]
+        address = address - (1 << 64) if address >= 1 << 63 else address
+        nbytes = numel * torch.empty((), dtype=dtype).element_size()
+        storage = torch._C._construct_storage_from_data_pointer(address, device, nbytes)
+        return torch.empty(0, dtype=dtype, device=device).set_(storage, 0, (numel, ))
+
 
 # This will become a light-weight wrapper around torch.distributed functions
 # TODO: create some example to show how this wrapper can help profile communication

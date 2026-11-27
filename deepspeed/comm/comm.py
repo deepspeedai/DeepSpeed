@@ -835,6 +835,52 @@ def enable_symm_mem_for_group(group_name: str):
         raise RuntimeError(f"Backend {cdb.name} does not support symmetric memory initialization")
 
 
+def symm_mem_rendezvous(numel: int, dtype, group=None, backend=None):
+    global cdb
+    assert cdb is not None and cdb.is_initialized(
+    ), 'DeepSpeed backend not set, please initialize it using init_process_group()'
+    if not hasattr(cdb, 'symm_mem_rendezvous'):
+        raise RuntimeError(f"Backend {cdb.name} does not support symmetric memory")
+    if backend is None:
+        return cdb.symm_mem_rendezvous(numel, dtype, group)
+    return cdb.symm_mem_rendezvous(numel, dtype, group, backend)
+
+
+def symm_mem_handle_at(buffer, byte_offset: int, nbytes: int, group=None):
+    global cdb
+    if not hasattr(cdb, 'symm_mem_handle_at'):
+        raise RuntimeError(f"Backend {cdb.name} does not support symmetric-memory puts")
+    return cdb.symm_mem_handle_at(buffer, byte_offset, nbytes, group)
+
+
+def symm_mem_put_signals(puts, group=None):
+    global cdb
+    if not hasattr(cdb, 'symm_mem_put_signals'):
+        raise RuntimeError(f"Backend {cdb.name} does not support symmetric-memory puts")
+    return cdb.symm_mem_put_signals(puts, group)
+
+
+def symm_mem_wait_signal(handle, peer: int):
+    global cdb
+    if not hasattr(cdb, 'symm_mem_wait_signal'):
+        raise RuntimeError(f"Backend {cdb.name} does not support symmetric-memory puts")
+    return cdb.symm_mem_wait_signal(handle, peer)
+
+
+def symm_mem_mapped_peers(handle):
+    global cdb
+    if not hasattr(cdb, 'symm_mem_mapped_peers'):
+        raise RuntimeError(f"Backend {cdb.name} does not support symmetric memory")
+    return cdb.symm_mem_mapped_peers(handle)
+
+
+def symm_mem_peer_tensor(handle, peer: int, numel: int, dtype):
+    global cdb
+    if not hasattr(cdb, 'symm_mem_peer_tensor'):
+        raise RuntimeError(f"Backend {cdb.name} does not support symmetric memory")
+    return cdb.symm_mem_peer_tensor(handle, peer, numel, dtype)
+
+
 # Main DeepSpeed Comms. public API.
 def init_distributed(dist_backend: Optional[str] = None,
                      auto_mpi_discovery: bool = True,

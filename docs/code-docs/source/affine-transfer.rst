@@ -34,6 +34,128 @@ The budget applies to each peer direction, not total device memory. Weights must
 remain frozen during transfer; optimizer migration and live AutoEP swaps are outside
 this API. Maintenance contact: ``@0z5a``.
 
+Repeated transfers
+------------------
+
+A weight sync moves the same batch every step. ``prepare_transfers`` does
+everything ``execute_transfers`` does before data moves -- validation, the
+schedule agreement, the staging arenas and a view of every region each round
+packs, unpacks or copies locally -- once, and returns a handle whose ``run`` only
+moves data::
+
+    from deepspeed.checkpoint.affine_transfer_executor import prepare_transfers
+
+    prepared = prepare_transfers(build_requests(), endpoints, dtype, budget)
+    for step in steps:
+        ...  # update the source buffers in place
+        prepared.run(build_requests())
+
+Here ``build_requests`` stands for building the requests from the live state,
+for example with fresh ``zero_param_storage_shard`` views.
+``prepare_transfers`` is collective and refuses a batch exactly as
+``execute_transfers`` does; ``execute_transfers`` runs the same preflight but
+builds each round's views only when it reaches that round, and keeps none of
+them. The handle keeps the buffers it was prepared with and its arenas stay
+allocated, so buffers must stay where they are and every process must run the
+handle the same number of times. By default ``run`` checks both before any data
+moves, with one small all-gather: if a buffer moved or changed shape on any
+process, or the processes are not running the same handle for the same time,
+every process raises and the batch has to be prepared again. Aliases between
+buffers are decided at prepare as well, including which local copies are dropped
+because source and target are the same memory, as a relay band held as a view
+of its own destination is; a moved buffer is refused rather than run on that
+decision.
+
+``run(requests)`` checks the requests it is given; ``run()`` checks the tensors
+the handle holds, which catches a buffer re-pointed in place (``.data = ...``)
+but not a view taken before its storage moved. ``zero_param_storage_shard``
+returns such a view, and ZeRO-3 ``reload_states`` re-points the partition behind
+it, so a handle over these views needs the rebuilt requests to notice the move.
+The handle also keeps every buffer it holds allocated: drop it before
+``offload_states`` if the partitions' memory should be freed, and prepare the
+batch again after ``reload_states``. ``run(check=False)`` skips the all-gather,
+so every process must pass the same ``check``.
+
+Each round packs and unpacks many small strided regions, one ``copy_`` per
+region by default. ``prepare_transfers(..., copier=fused_copies)`` from
+``deepspeed.checkpoint.affine_transfer_copy`` instead builds, at prepare time, a
+table of every region a copy list touches and moves the whole list with one
+Triton launch per alignment class. It applies to CUDA and XPU tensors whose
+elements are 1, 2, 4 or 8 bytes when Triton is available and otherwise falls
+back to ``copy_``; the copies are
+bitwise, so the result matches the default copier exactly. Building the table
+compiles the kernel once, which makes prepare slower, so it pays off only for
+handles that run many times.
+
+Symmetric-memory windows
+------------------------
+
+Processes whose devices can address each other's memory (one node over PCIe,
+NVLink or Xe Link) can skip staging altogether. A ``TransferWindow`` is a
+symmetric-memory pool, created collectively once; shards carved from it with
+``window.tensor(shape, dtype)`` are published to the group by
+``prepare_transfers``. An operation between two processes whose source or
+target lies in a window is then copied in place by one of them -- the target
+pulls, or the source pushes; ``direction`` decides when both lie in a window --
+with no message, arena or budget. Everything else runs as before::
+
+    from deepspeed.checkpoint.affine_transfer_executor import TransferWindow
+
+    window = TransferWindow(nbytes, group=group, direction='pull')
+    prepared = prepare_transfers(requests, endpoints, dtype, budget, group, window=window)
+
+Every process must pass the same window. Windows that disagree are refused, but
+a window passed on some processes and not on others, or a window that fails to
+build on one process, leaves the others waiting rather than refusing. The
+handle keeps a view of each
+region it copies, peer memory included. A run with window copies anywhere in
+the group ends with a group barrier, so no peer touches a window shard while
+another copies it, and ``TransferStats.mapped_bytes`` reports what this process
+copied. ``schedule_transfers`` cannot see buffers, so pass the window's
+locations per plan as ``window_locations`` to leave those operations out of the
+rounds it reports.
+
+A window whose group spans hosts needs CUDA; it is registered with torch's NCCL
+symmetric-memory backend, which is process-wide, so create it before any other
+symmetric memory in the process. NCCL then reports which windows each process
+has mapped: processes that map each other -- on one host, or on hosts that
+share an NVLink domain -- still copy in place, and the window's ``hosts`` names
+the first process of each such domain. Operations between domains are staged.
+With ``TransferWindow(..., puts=True)``, an operation between domains whose
+source and target are both packed regions of window shards is instead a
+one-sided NCCL put from the source. Chunks adjacent on both sides are coalesced
+into one put, all of a process's puts are issued as one NCCL group so they
+proceed to every peer at once, and the target waits for one signal per put
+before the closing barrier. On two 8-GPU
+H20 hosts over RoCE, every process sending 256 MiB to its one peer on the other
+host took about 12 ms put against 15.3 ms staged, and as 2048 parameters of
+128 KiB 13.7-14.2 ms against 24.7 ms; sending the same 256 MiB spread over all
+eight peers there took 15.4-15.8 ms put against 13.3 ms staged, which is why
+puts are opt-in. Issuing the puts one by one instead of as a group made that
+last case 35 ms. Below 128 MiB per peer, staging one large parameter was
+faster (2.0 ms against 2.8 ms at 32 MiB), since a run with puts pays the group
+barriers that a staged run does not. ``puts='auto'`` therefore puts only from
+a process whose operations between domains all go to one peer and carry at
+least ``TransferWindow.AUTO_PUT_BYTES`` (256 MiB) or
+``TransferWindow.AUTO_PUT_PARAMETERS`` (64) parameters, and stages everything
+else; every process decides from the whole batch, so they agree. A put cannot
+be rolled back: an error after one is issued may leave its target partly
+written, and NCCL treats it as fatal to the communicator.
+
+Operations between domains that are not direct puts -- typically a strided
+region such as rows sent to a column split -- can also skip the staged rounds
+with ``TransferWindow(..., puts=True, pack_bytes=N)``. Every window then keeps
+an ``N``-byte reserve after its shard at the same offset. Each pair of
+processes on different domains gets one slot in both reserves while they fit:
+the sender packs all its operations to that peer into its slot, puts the slot
+in one piece into the receiver's slot, and the receiver unpacks it after the
+signal. Pairs that do not fit are staged. On the same H20 hosts, sending rows
+to columns of 128 MiB per process took 4.0 ms packed against 4.9-5.2 ms
+staged, and 512 MiB 15.3 ms against 15.6-16.4 ms, where putting only the
+packed pieces and staging the rest took 18.6 ms. Pass the window's ``hosts``,
+``puts`` and ``pack_bytes`` to ``schedule_transfers`` as ``window_hosts``,
+``window_puts`` and ``window_pack_bytes``.
+
 Planning a sync with replica policies
 -------------------------------------
 
@@ -134,8 +256,9 @@ Pass the plans in request order, since that order fixes how chunks are packed
 into rounds. Each ``ProcessSchedule`` lists, per peer and direction, the rounds
 with their element and chunk counts and whether the round is sent or received in
 place, the staging arena each peer direction allocates, the local copies, and the
-round count that ``TransferStats.rounds`` reports. ``execute_transfers`` builds
-its rounds and arenas from the same computation, so the two cannot drift apart.
+round count that ``TransferStats.rounds`` reports. ``execute_transfers`` and
+``prepare_transfers`` build their rounds and arenas from the same computation,
+so the two cannot drift apart.
 The schedule follows the current transport described above and changes with it.
 
 Analyzing a plan
@@ -259,40 +382,3 @@ process holds up to ``(2 + max(widths)) * max(sizes)`` bytes, 2.25 GiB with the
 default width at 8 processes per node and 256 MiB, so pass shorter
 ``sizes`` or smaller fan widths on large jobs. The numbers describe the
 transport used for the measurement (torch point-to-point) on that topology.
-
-Choosing between plans
-----------------------
-
-Plans that move the same data can differ in time by more than 5x, for example
-when a node's copy crosses the network once and is then exchanged over NVLink
-instead of being sent to every rank. ``affine_transfer_cost`` prices each way
-of running a move from its schedule and keeps the cheapest::
-
-    from deepspeed.checkpoint.affine_transfer_cost import (TransferCostModel, TransferStage,
-                                                           cheapest, node_route)
-
-    model = TransferCostModel(node_route(node_of_process, intra_node=('device_pair', )),
-                              {'network_send': 68.4e9, 'network_receive': 23.4e9,
-                               'device_pair': 52.1e9})
-    choice = cheapest({'direct': [TransferStage(plans, endpoints, element_size)],
-                       'relay': [TransferStage(fetch_plans, fetch_endpoints, element_size),
-                                 TransferStage(spread_plans, node_endpoints, element_size)]},
-                      model)
-
-Each candidate is a list of stages, one ``execute_transfers`` call each, run one
-after another. Within a call, each round costs its most loaded resource's bytes
-over that resource's capacity, plus ``seconds_per_round``. The host's copy
-launches, ``seconds_per_region`` for each staged or local region, overlap the
-bytes rather than adding to them, so the larger of the two counts, and each call
-adds ``seconds_per_call``. ``node_route`` sends a message between nodes through
-the sender's ``network_send`` and the receiver's ``network_receive``, and within
-a node through ``device_send`` and ``device_receive`` (each GPU's own link, as on
-NVSwitch) or ``device_pair`` (NVLink between two GPUs); any callable that names
-a message's resources can replace it. ``choice.name`` is the cheapest candidate
-and ``choice.seconds`` holds every estimate. A tie goes to the name that sorts
-first.
-
-The capacities and costs are calibrated for each machine, transport
-configuration and executor. Every rank must build the same model and the same
-candidates, so that every rank chooses the same plan. A plan's one-time
-preparation, and overlap between two stages, are not priced yet.
