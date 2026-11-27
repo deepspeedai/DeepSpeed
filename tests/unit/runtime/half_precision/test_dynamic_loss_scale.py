@@ -3,6 +3,8 @@
 
 # DeepSpeed Team
 
+import logging
+
 import torch
 import deepspeed
 from deepspeed.accelerator import get_accelerator
@@ -15,6 +17,8 @@ from deepspeed.runtime.fp16.fused_optimizer import FP16_Optimizer
 from deepspeed.runtime.fp16.loss_scaler import LossScaleConfig, LossScaleProfile
 from deepspeed.runtime.fp16.unfused_optimizer import FP16_UnfusedOptimizer
 from deepspeed.runtime.precision_config import DeepSpeedFP16Config
+from deepspeed.utils import logger
+import deepspeed.comm as dist
 
 
 def run_model_step(model, gradient_list):
@@ -377,3 +381,47 @@ class TestZeroStage0Hysteresis(DistributedTest):
         restored_optim.load_state_dict(optim.state_dict())
         run_model_step(restored_model, [float('inf')])
         assert restored_optim.loss_scale_config.cur_scale == 2**7
+
+
+class _RecordCollector(logging.Handler):
+
+    def __init__(self):
+        super().__init__()
+        self.messages = []
+
+    def emit(self, record):
+        self.messages.append(record.getMessage())
+
+
+@pytest.mark.parametrize("optimizer_class", [FP16_Optimizer, FP16_UnfusedOptimizer])
+@pytest.mark.parametrize("dynamic", [True, False])
+class TestLossScaleLoggingRanks(DistributedTest):
+    world_size = 2
+
+    def test_overflow_is_logged_on_rank_zero_only(self, optimizer_class, dynamic):
+        # Every rank sees the same overflow, so logging it everywhere floods multi-node runs
+        # with one copy of each message per rank.
+        profile = LossScaleProfile.FUSED if optimizer_class is FP16_Optimizer else LossScaleProfile.UNFUSED
+        fp16 = DeepSpeedFP16Config(enabled=True, loss_scale=0 if dynamic else 128, initial_scale_power=8)
+        loss_scale_config = LossScaleConfig(low_precision_dtype=torch.float16,
+                                            dynamic_loss_scale=dynamic,
+                                            static_loss_scale=fp16.loss_scale,
+                                            dynamic_loss_args=fp16.dynamic_loss_scale_args(),
+                                            profile=profile)
+        param = torch.nn.Parameter(torch.zeros(4, dtype=torch.float16))
+        optimizer = optimizer_class(torch.optim.SGD([param], lr=0.1), loss_scale_config=loss_scale_config)
+
+        collector = _RecordCollector()
+        previous_level = logger.level
+        logger.setLevel(logging.INFO)
+        logger.addHandler(collector)
+        try:
+            optimizer._update_scale(True)
+        finally:
+            logger.removeHandler(collector)
+            logger.setLevel(previous_level)
+
+        if dist.get_rank() == 0:
+            assert any("overflow" in message for message in collector.messages)
+        else:
+            assert collector.messages == []

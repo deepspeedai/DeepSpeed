@@ -4,6 +4,7 @@
 # DeepSpeed Team
 
 import copy
+import os
 
 import torch
 import torch.nn as nn
@@ -196,3 +197,20 @@ class TestPipeModuleCheckpointInterval(DistributedTest):
 
         assert engine.module.activation_checkpoint_func is ds_checkpointing.non_reentrant_checkpoint
         assert not engine._reentrant_activation_checkpointing()
+
+
+class TestPipeModuleCheckpointShardOrder(DistributedTest):
+    world_size = 1
+
+    def test_layer_shards_are_ordered_by_numeric_model_rank(self, mixed_param_model, tmp_path):
+        # rank_repr zero-pads to two digits, so ranks >= 100 are three digits wide. The loader hands
+        # shard i to model-parallel rank i, so a lexicographic order would give rank 11 the model_100 shard.
+        ranks = [0, 1, 9, 10, 11, 99, 100, 101]
+        for rank in ranks:
+            (tmp_path / f"layer_00-model_{rank:02d}-model_states.pt").touch()
+
+        model = PipelineModule(layers=copy.deepcopy(mixed_param_model), num_stages=1)
+        shards = model.ckpt_layer_path_list(str(tmp_path), 0)
+
+        assert [os.path.basename(p)
+                for p in shards] == [f"layer_00-model_{rank:02d}-model_states.pt" for rank in ranks]
