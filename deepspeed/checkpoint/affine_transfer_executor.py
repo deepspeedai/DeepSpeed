@@ -975,8 +975,8 @@ def _agree(requests: Sequence[TransferRequest],
                 # copies whose destination or source lies in it.
                 if mapped_copies:
                     mapped_copy = copier(mapped_copies)
-    except (ValueError, TypeError, KeyError, AttributeError, RuntimeError, OverflowError, MemoryError) as caught:
-        # A copier build failure arrives here as an AffineTransferExecutionError from _safe_copier.
+    except Exception as caught:
+        # Any preflight, peer-map or copier build failure must join the collective refusal.
         error = caught
         rejected = 1
         recv_arenas, send_arenas, rounds = {}, {}, []
@@ -1196,7 +1196,7 @@ class PreparedTransfer:
         if self._released and not moved:
             try:
                 self._restage()
-            except (ValueError, TypeError, RuntimeError, MemoryError) as caught:
+            except Exception as caught:
                 if not check:
                     raise AffineTransferExecutionError(f'could not rebuild the staging: {caught}') from caught
                 failed = 1

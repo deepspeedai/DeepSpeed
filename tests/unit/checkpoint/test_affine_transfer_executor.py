@@ -565,6 +565,22 @@ class TestB2Prepared(DistributedTest):
             for buffer in request.target_buffers.values():
                 assert torch.isnan(buffer).all().item()
 
+        fail_restage = False
+
+        def restage_copier(pairs):
+            if fail_restage and rank == 0:
+                raise failure
+            return sequential_copies(list(pairs))
+
+        prepared = prepare_transfers(requests, endpoints, torch.float32, StagingBudget(64), copier=restage_copier)
+        prepared.release_staging()
+        fail_restage = True
+        with pytest.raises(AffineTransferExecutionError, match='could not rebuild the released staging'):
+            prepared.run()
+        for request in requests:
+            for buffer in request.target_buffers.values():
+                assert torch.isnan(buffer).all().item()
+
 
 def _window_batch(window, placement, dtype):
     """A row-to-column batch whose sources, targets, both or neither are carved from ``window``."""
