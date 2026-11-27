@@ -498,7 +498,7 @@ it:
 
 - ``comm_backend`` is not ``"deepep"`` or ``autoep_size=1``, because the call
   sites exist only inside the DeepEP route;
-- Triton is unavailable, the device is not CUDA, or the build is ROCm;
+- Triton is unavailable or the device is not a CUDA or ROCm GPU;
 - rows are not bfloat16 or float16;
 - weights are not FP32 ``[N, 1]`` tensors on the same CUDA device.
 
@@ -677,8 +677,8 @@ not promise a speedup on every supported device or shape.
 
 Requirements and limits:
 
-- The kernels need CUDA with Triton. On ROCm or without Triton, replaced
-  modules run eager.
+- The kernels need Triton on a CUDA or ROCm GPU; otherwise replaced modules
+  run eager.
 - bfloat16 or float16, with the input and the weight in the same dtype. Other
   inputs run eager, including float32 weights under autocast.
 - Norms wider than 32768 are not replaced. That covers the hidden size and
@@ -791,7 +791,7 @@ applies the kernel directly and raises on unsupported inputs instead.
 
 Requirements and limits:
 
-- The kernel needs CUDA with Triton. On ROCm or without Triton, the replaced
+- The kernel needs Triton on a CUDA or ROCm GPU; otherwise the replaced
   function runs eager.
 - All four tensors must be on one device. Launches use that device's current
   stream even if another device is current, and restore the caller's current
