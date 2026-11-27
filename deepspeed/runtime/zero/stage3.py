@@ -3214,7 +3214,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             if is_invalid_grad_norm(scaled_global_grad_norm):
                 self.overflow = True
 
-        if self._loss_scale_update_and_overflow_cleanup():
+        if self.overflow:
+            self._loss_scale_update_and_overflow_cleanup()
             if self.swap_optimizer:
                 self.optimizer_swapper.log_timers()
             return
@@ -3265,6 +3266,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         self.timers(OPTIMIZER_STEP_TIMER).stop()
 
+        # All subgroups must use the scale from this step's backward.
+        self._update_scale(self.overflow)
         self._post_step(timer_names)
 
         # warn user about caching allocator flushes

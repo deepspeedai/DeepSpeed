@@ -164,7 +164,6 @@ class FP16_UnfusedOptimizer(DeepSpeedOptimizer):
         self._global_grad_norm = get_global_norm(norm_list=norm_groups)
         if is_invalid_grad_norm(self._global_grad_norm):
             return self._skip_invalid_grad_norm()
-        self._update_scale(False)
         combined_scale = self.unscale_and_clip_grads(self._global_grad_norm, apply_scale=False)
         self.optimizer.step(grads=grads_groups, output_params=self.fp16_groups, scale=combined_scale)
 
@@ -177,6 +176,7 @@ class FP16_UnfusedOptimizer(DeepSpeedOptimizer):
                 #copy data from fp32 to fp16
                 fp16_param.data.copy_(fp32_param.data)
 
+        self._update_scale(self.overflow)
         return self.overflow
 
     def set_lr(self, lr):
@@ -224,7 +224,6 @@ class FP16_UnfusedOptimizer(DeepSpeedOptimizer):
         self._global_grad_norm = get_global_norm(norm_list=norm_groups)
         if is_invalid_grad_norm(self._global_grad_norm):
             return self._skip_invalid_grad_norm()
-        self._update_scale(False)
         self.unscale_and_clip_grads(self._global_grad_norm)
 
         self.optimizer.step()
@@ -238,6 +237,8 @@ class FP16_UnfusedOptimizer(DeepSpeedOptimizer):
                 #copy data from fp32 to fp16
                 fp16_param.data.copy_(fp32_param.data)
 
+        # The current gradients must be unscaled before the scale can grow.
+        self._update_scale(self.overflow)
         return self.overflow
 
     def unscale_and_clip_grads(self, total_norm, apply_scale=True):

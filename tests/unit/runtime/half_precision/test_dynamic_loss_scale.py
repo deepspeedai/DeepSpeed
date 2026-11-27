@@ -25,6 +25,46 @@ def run_model_step(model, gradient_list):
         model.step()
 
 
+class TestLossScaleGrowthUpdate(DistributedTest):
+    world_size = 1
+
+    @pytest.mark.parametrize("optimizer_type", [FP16_Optimizer, FP16_UnfusedOptimizer, 1, 2, 3])
+    def test_parameter_updates(self, optimizer_type):
+        if not get_accelerator().is_fp16_supported():
+            pytest.skip("fp16 is not supported")
+
+        model = torch.nn.Linear(1, 1, bias=False).to(get_accelerator().current_device_name(), dtype=torch.float16)
+        with torch.no_grad():
+            model.weight.fill_(4.0)
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.25)
+        if isinstance(optimizer_type, int):
+            config = dict(train_micro_batch_size_per_gpu=1,
+                          gradient_clipping=0.0,
+                          zero_allow_untested_optimizer=True,
+                          zero_optimization=dict(stage=optimizer_type),
+                          fp16=dict(enabled=True, initial_scale_power=3, loss_scale_window=2))
+            model, optimizer, _, _ = deepspeed.initialize(model=model, optimizer=optimizer, config=config)
+            runner = model
+        else:
+            optimizer = optimizer_type(optimizer,
+                                       dynamic_loss_scale=True,
+                                       dynamic_loss_args=dict(init_scale=8, scale_window=2, min_scale=1))
+            runner = optimizer
+
+        inputs = torch.full((1, 1), 2.0, device=get_accelerator().current_device_name(), dtype=torch.float16)
+        # The third step grows the scale from 8 to 16; every update must remain 0.5.
+        for step, expected_scale in enumerate([8, 8, 16], start=1):
+            runner.zero_grad()
+            runner.backward(model(inputs).sum())
+            runner.step()
+            assert optimizer.loss_scale == expected_scale
+            with deepspeed.zero.GatheredParameters(model.parameters()):
+                assert next(model.parameters()).item() == pytest.approx(4.0 - 0.5 * step, abs=1e-3)
+
+        if isinstance(optimizer_type, int):
+            model.destroy()
+
+
 class TestFused(DistributedTest):
     world_size = 1
 
