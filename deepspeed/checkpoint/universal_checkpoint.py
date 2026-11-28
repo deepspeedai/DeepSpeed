@@ -10,6 +10,7 @@ import types
 from typing import List, Tuple, Union
 from dataclasses import dataclass
 from .affine import ParamAffineMap, SCALE_POWER_BY_STATE
+from .utils import load_mmap
 from .constants import (FP32_WEIGHT_KEY, PARAM, VOCAB_TENSOR, CAT_DIM, PARAM_N_SUB_PARAMS, SUB_PARAM_SHAPE,
                         EP_IS_EXPERT_PARAM, EP_NUM_EXPERTS, DS_AUTOEP_UC_META, DS_AUTOTP_UC_META,
                         AUTOEP_EXPERT_PLACEMENT, AUTOEP_PARAM_EP_RANK, AUTOEP_PARAM_LOCAL_EXPERTS,
@@ -259,7 +260,7 @@ def load_hp_checkpoint_state(self, folder, tp_rank, tp_world_size, ep_rank=0, ep
     step = None
     for key, file in hp_keys.items():
         ckpt_file = os.path.join(folder, file)
-        ckpt_dict = torch.load(ckpt_file, weights_only=False)
+        ckpt_dict = load_mmap(ckpt_file, weights_only=False)
 
         if key == "step":
             step = ckpt_dict

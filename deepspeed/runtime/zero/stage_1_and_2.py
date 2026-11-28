@@ -3105,9 +3105,6 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             self.optimizer.step()
         self.optimizer.param_groups = original_param_groups
 
-        # We need to link optimizer state after the first step() call
-        self._lazy_init_hp_params_optimizer_state()
-
     def _muon_staging_momentum(self, flatten_copy, param_group_idx):
         """The buffer `muon_update` writes this step's momentum into.
 
@@ -3271,6 +3268,9 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 fp32_partition = self.single_partition_of_fp32_groups[i]
                 bit16_partitions[partition_id].data.copy_(fp32_partition.data)
                 self.timers(OPTIMIZER_STEP_TIMER).stop()
+
+        # Link the optimizer state once every group has stepped: a group's state exists only after its first step.
+        self._lazy_init_hp_params_optimizer_state()
 
         see_memory_usage('After optimizer before all-gather')
         if self.cpu_offload:
@@ -3935,6 +3935,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
         if load_optimizer_states:
             self._link_all_hp_params()
+            self._relink_hp_params_optimizer_state()
 
     def _clear_hp_buffer_references(self):
         """

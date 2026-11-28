@@ -427,12 +427,23 @@ def _remap_client_optimizer_after_module_replacement(optimizer, model, replaceme
 def _checkpoint_parallel_metadata(mpu):
     from deepspeed.utils.bwc import bwc_pipeline_parallel_world_size, bwc_tensor_model_parallel_world_size
 
+    # A Ulysses sequence-parallel mpu reports its sequence-parallel group through the model-parallel
+    # accessors, but its ranks hold full parameter replicas.
+    if hasattr(mpu, 'initialize_sequence_parallel'):
+        mpu = None
     return {
         CHECKPOINT_PARALLEL_DIMS: {
             CHECKPOINT_PP_DEGREE: bwc_pipeline_parallel_world_size(mpu),
             CHECKPOINT_TP_DEGREE: bwc_tensor_model_parallel_world_size(mpu),
         }
     }
+
+
+def _default_universal_checkpoint_info(parallel_dims):
+    """Universal-checkpoint info for checkpoints whose parameters need no TP or PP merge patterns."""
+    if parallel_dims[CHECKPOINT_PP_DEGREE] != 1 or parallel_dims[CHECKPOINT_TP_DEGREE] != 1:
+        return None
+    return {UNIVERSAL_CHECKPOINT_VERSION_KEY: UNIVERSAL_CHECKPOINT_VERSION_VALUE}
 
 
 class _EngineBackwardGraphState:
@@ -4827,7 +4838,12 @@ class DeepSpeedEngine(Module):
         from deepspeed.runtime.state_dict_factory import SDLoaderFactory
 
         ckpt_list = self._get_all_ckpt_names(load_dir, tag)
-        sd_loader = SDLoaderFactory.get_sd_loader(ckpt_list, checkpoint_engine=self.checkpoint_engine)
+        checkpoint_engine = self.checkpoint_engine
+        if self.load_universal_checkpoint() and type(checkpoint_engine) is TorchCheckpointEngine:
+            # Universal restore takes the weights from zero/ and reads only metadata from the model-states file,
+            # which every rank would otherwise unpickle in full, twice.
+            checkpoint_engine = TorchCheckpointEngine(mmap=True)
+        sd_loader = SDLoaderFactory.get_sd_loader(ckpt_list, checkpoint_engine=checkpoint_engine)
 
         is_pipe_parallel = isinstance(self.module, PipelineModule)
 
@@ -5690,6 +5706,8 @@ class DeepSpeedEngine(Module):
 
         state = self._common_checkpoint_state(module, zero_optimizer_state, save_frozen_param)
         autotp_uc_info = getattr(self.module, UNIVERSAL_CHECKPOINT_INFO, None)
+        if autotp_uc_info is None and zero_optimizer_state:
+            autotp_uc_info = _default_universal_checkpoint_info(state[CHECKPOINT_PARALLEL_DIMS])
         if autotp_uc_info is not None:
             state[UNIVERSAL_CHECKPOINT_INFO] = autotp_uc_info
         if CHECKPOINT_PARALLEL_DIMS in client_state:

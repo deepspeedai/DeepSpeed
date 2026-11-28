@@ -11,7 +11,8 @@ import argparse
 import glob
 import itertools
 import math
-from concurrent.futures import ProcessPoolExecutor
+import mmap
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 import os
 import re
 import shutil
@@ -19,6 +20,7 @@ import torch
 import tqdm
 
 from deepspeed.checkpoint import DeepSpeedCheckpoint
+from deepspeed.checkpoint.utils import load_mmap
 from deepspeed.checkpoint import (
     OPTIMIZER_STATE_DICT,
     ZERO_STAGE,
@@ -65,6 +67,14 @@ from deepspeed.checkpoint.autoep_zero3_metadata import (
 )
 from deepspeed.checkpoint.affine import ParamAffineMap, AFFINE_MAP_FORMAT_VERSION, SCALE_POWER_BY_STATE
 from deepspeed.checkpoint.autoep_affine import autoep_metadata_to_affine_map, validate_autoep_placement_descriptor
+
+# Copying a file with parallel direct I/O only pays off for large files, e.g. the model-states file.
+COPY_WORKERS = 8
+PARALLEL_COPY_MIN_BYTES = 1 << 30
+COPY_CHUNK_BYTES = 8 << 20
+DIRECT_IO_ALIGN = 4096
+# Linux ioctl that makes a file share the blocks of another, copy-on-write (XFS, Btrfs).
+FICLONE = 0x40049409
 
 
 def parse_arguments():
@@ -129,6 +139,76 @@ def _save_checkpoint(file_path, chkpt_sd):
     torch.save(chkpt_sd, file_path)
 
 
+def _clone_file(src, dst):
+    """Make ``dst`` share the blocks of ``src``; False where the file system cannot."""
+    try:
+        import fcntl
+        with open(src, 'rb') as fin, open(dst, 'wb') as fout:
+            fcntl.ioctl(fout.fileno(), FICLONE, fin.fileno())
+        return True
+    except (ImportError, OSError):
+        return False
+
+
+def _direct_copy(src, dst, size, num_workers):
+    """Copy ``src`` to ``dst`` with O_DIRECT, ``num_workers`` threads each taking every ``num_workers``-th chunk.
+
+    Buffered writes into one file serialize on its inode lock in XFS, so a single file takes buffered writes at a
+    fraction of the bandwidth of striped NVMe storage; direct writes within the file size do not serialize.
+    """
+    aligned = size // DIRECT_IO_ALIGN * DIRECT_IO_ALIGN
+    num_chunks = math.ceil(aligned / COPY_CHUNK_BYTES)
+    with open(dst, 'wb') as fout:
+        os.ftruncate(fout.fileno(), size)
+
+    def copy_chunks(first):
+        # An anonymous mapping is page aligned, as O_DIRECT requires of its buffers.
+        buf = memoryview(mmap.mmap(-1, COPY_CHUNK_BYTES))
+        fin = os.open(src, os.O_RDONLY | os.O_DIRECT)
+        try:
+            fout = os.open(dst, os.O_WRONLY | os.O_DIRECT)
+            try:
+                for chunk in range(first, num_chunks, num_workers):
+                    offset = chunk * COPY_CHUNK_BYTES
+                    view = buf[:min(COPY_CHUNK_BYTES, aligned - offset)]
+                    if os.preadv(fin, [view], offset) != len(view) or os.pwritev(fout, [view], offset) != len(view):
+                        raise OSError(f'short direct I/O copying {src} at byte {offset}')
+            finally:
+                os.close(fout)
+        finally:
+            os.close(fin)
+
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        copies = [executor.submit(copy_chunks, first) for first in range(num_workers)]
+        for copy in copies:
+            copy.result()
+    if size > aligned:
+        with open(src, 'rb') as fin, open(dst, 'r+b') as fout:
+            fin.seek(aligned)
+            fout.seek(aligned)
+            fout.write(fin.read())
+
+
+def _copy_file(src, dst_dir, num_workers=COPY_WORKERS):
+    """Copy ``src`` into ``dst_dir``: a large file as a reflink where the file system supports it, else with
+    ``num_workers`` threads of direct I/O."""
+    dst = os.path.join(dst_dir, os.path.basename(src))
+    size = os.path.getsize(src)
+    if size >= PARALLEL_COPY_MIN_BYTES:
+        if _clone_file(src, dst):
+            shutil.copystat(src, dst)
+            return
+        if num_workers > 1 and hasattr(os, 'O_DIRECT') and hasattr(os, 'preadv'):
+            try:
+                _direct_copy(src, dst, size, num_workers)
+                shutil.copystat(src, dst)
+                return
+            except OSError:
+                # Some file systems do not support direct I/O.
+                pass
+    shutil.copy2(src, dst_dir)
+
+
 def extract_zero_shards(dir, ds_checkpoint, indices_3D):
     pp_index, tp_index, dp_index = indices_3D
     sd = ds_checkpoint.get_zero_checkpoint_state(pp_index=pp_index, tp_index=tp_index, dp_index=dp_index)
@@ -178,7 +258,7 @@ def extract_zero_shards_stage3(optim_files_grid,
     tp_index, dp_index = indices
     exclude_param_names = exclude_param_names or set()
     optim_file = optim_files_grid[tp_index][dp_index]
-    state_dict = torch.load(optim_file, map_location='cpu', weights_only=False)
+    state_dict = load_mmap(optim_file, map_location='cpu', weights_only=False)
     optim_sd = state_dict[OPTIMIZER_STATE_DICT]
     partition_groups = optim_sd.get('ds_zero_partition_groups') or []
 
@@ -260,7 +340,7 @@ def _merge_zero_shards(param_base_path, state, tp_degree, slice_shapes=None):
                 raise ValueError(f"Cannot parse dp_rank from {p}")
 
         paths = [f"{prefix_path}.{dp_index_to_str(dp_index)}" for dp_index in sorted(list(dp_indices))]
-        shards = [torch.load(p, weights_only=False) for p in paths]
+        shards = [load_mmap(p, weights_only=False) for p in paths]
 
         if state == "step":
             assert all(v == shards[0] for v in shards), "All shards must have the same step value"
@@ -700,7 +780,7 @@ def _autoep_expert_param_names_by_rank(model_files):
     metadata_by_rank = {}
     for model_file in model_files:
         rank = _zero3_tp_dp_ranks_from_file(model_file)
-        model_state = torch.load(model_file, map_location=torch.device('cpu'), weights_only=False)
+        model_state = load_mmap(model_file, map_location=torch.device('cpu'), weights_only=False)
         autoep_metadata = _get_autoep_metadata(model_state)
         if autoep_metadata is not None:
             metadata_by_rank[rank] = autoep_metadata
@@ -816,7 +896,7 @@ def _rebuild_zero3_autoep_rank_tensors(ep_tensors, affine_map_or_placement, logi
 def _consolidate_zero3_autoep_expert_states(output_dir, model_files, optim_files):
     model_rank_map, optim_rank_map = _validate_zero3_model_optim_rank_sets(model_files, optim_files)
     model_states_by_rank = {
-        rank: torch.load(model_file, map_location=torch.device('cpu'), weights_only=False)
+        rank: load_mmap(model_file, map_location=torch.device('cpu'), weights_only=False)
         for rank, model_file in model_rank_map.items()
     }
     metadata_by_rank = {
@@ -846,7 +926,7 @@ def _consolidate_zero3_autoep_expert_states(output_dir, model_files, optim_files
         if not _uses_zero3_partitioned_autoep_metadata(autoep_metadata):
             continue
 
-        optim_state = torch.load(optim_file, map_location=torch.device('cpu'), weights_only=False)
+        optim_state = load_mmap(optim_file, map_location=torch.device('cpu'), weights_only=False)
 
         expert_info = _autoep_expert_param_info(autoep_metadata)
         param_shapes = model_state[PARAM_SHAPES]
@@ -959,7 +1039,7 @@ def _consolidate_zero3_autoep_expert_states(output_dir, model_files, optim_files
                 raise RuntimeError(f"Inconsistent AutoEP expert fragment shapes for {param_name}/{state_key} "
                                    f"EP rank {ep_rank}")
             fragment_paths = [path for _, path, _ in fragments]
-            full_flat = torch.cat([torch.load(path, weights_only=True) for path in fragment_paths],
+            full_flat = torch.cat([load_mmap(path, weights_only=True) for path in fragment_paths],
                                   dim=0)[:_shape_numel(shape)]
             ep_tensors[ep_rank] = full_flat.view(shape)
             # Each fragment is read only once. Removing it now means the disk never holds every fragment and
@@ -980,14 +1060,14 @@ def _consolidate_zero3_autoep_expert_states(output_dir, model_files, optim_files
 
 
 def _parse_model_states_stage3(files):
-    return torch.load(files[0], map_location=torch.device('cpu'), weights_only=False)[PARAM_SHAPES]
+    return load_mmap(files[0], map_location=torch.device('cpu'), weights_only=False)[PARAM_SHAPES]
 
 
 def _load_universal_checkpoint_info_stage3(model_files):
     # The UNIVERSAL_CHECKPOINT_INFO schema (TP merge patterns, etc.) is identical on
     # every rank, so loading it from any model_states file is sufficient. It is only
     # populated under AutoTP, which is exactly the case that needs the TP-aware merge.
-    model_state = torch.load(model_files[0], map_location=torch.device('cpu'), weights_only=False)
+    model_state = load_mmap(model_files[0], map_location=torch.device('cpu'), weights_only=False)
     return model_state.get(UNIVERSAL_CHECKPOINT_INFO) or {}
 
 
@@ -1030,7 +1110,7 @@ def _save_optimizer_state(args, ds_checkpoint):
 
 
 def _save_optimizer_state_stage3(args, optim_files):
-    sd = torch.load(optim_files[0], map_location=torch.device('cpu'), weights_only=False)
+    sd = load_mmap(optim_files[0], map_location=torch.device('cpu'), weights_only=False)
     output_sd = sd[OPTIMIZER_STATE_DICT]
     output_sd[PARAM_GROUPS] = output_sd[OPTIMIZER_STATE_DICT][PARAM_GROUPS]
     zero_output_folder = os.path.join(args.output_folder, "zero")
@@ -1066,7 +1146,7 @@ def _get_zero3_model_state_files(checkpoint_dir):
 
 def _raise_if_stage3_autoep_universal_conversion(model_files):
     for model_file in model_files:
-        model_state = torch.load(model_file, map_location=torch.device('cpu'), weights_only=False)
+        model_state = load_mmap(model_file, map_location=torch.device('cpu'), weights_only=False)
         autoep_metadata = model_state.get(AUTOEP_LAYERS_KEY)
         if autoep_metadata is None:
             autoep_metadata = model_state.get(AUTOEP_LAYERS_KEY_LEGACY)
@@ -1086,7 +1166,7 @@ def _get_checkpoint_files(checkpoint_dir, glob_pattern):
 
 
 def _get_zero_stage(optim_files):
-    state_dict = torch.load(optim_files[0], map_location=torch.device('cpu'), weights_only=False)
+    state_dict = load_mmap(optim_files[0], map_location=torch.device('cpu'), weights_only=False)
     optimizer_state = state_dict[OPTIMIZER_STATE_DICT]
     zero_stage = optimizer_state.get(ZERO_STAGE, 1)
     return zero_stage
@@ -1227,7 +1307,7 @@ def main(args):
         # received a gradient. Universal restore still needs their model values.
         zero_output_folder = os.path.join(args.output_folder, "zero")
         for model_file in ds_checkpoint.mp_rank_files:
-            model_state = torch.load(model_file, map_location="cpu", weights_only=False)
+            model_state = load_mmap(model_file, map_location="cpu", weights_only=False)
             module_state = model_state.get("module")
             if module_state is None:
                 # Pipeline checkpoints store model weights in separate layer files.
@@ -1278,7 +1358,7 @@ def main(args):
         for f in ds_checkpoint.mp_rank_files:
             if autoep_metadata is not None:
                 # Load -> update with AutoEP metadata -> save
-                mp_sd = torch.load(f, map_location=torch.device('cpu'), weights_only=False)
+                mp_sd = load_mmap(f, map_location=torch.device('cpu'), weights_only=False)
                 if UNIVERSAL_CHECKPOINT_INFO not in mp_sd:
                     mp_sd[UNIVERSAL_CHECKPOINT_INFO] = {}
                 mp_sd[UNIVERSAL_CHECKPOINT_INFO][EXPERT_PARAMETER_PATTERNS] = [r'\.experts\.w[123]$']
@@ -1286,7 +1366,7 @@ def main(args):
                 out_path = os.path.join(args.output_folder, os.path.basename(f))
                 torch.save(mp_sd, out_path)
             else:
-                shutil.copy2(f, args.output_folder)
+                _copy_file(f, args.output_folder)
 
     else:
         # Stage 3 path
@@ -1371,7 +1451,7 @@ def main(args):
             if _is_expert_model_state_file(f):
                 continue
             if has_zero3_partitioned_autoep:
-                model_state = torch.load(f, map_location=torch.device('cpu'), weights_only=False)
+                model_state = load_mmap(f, map_location=torch.device('cpu'), weights_only=False)
                 autoep_metadata = _get_autoep_metadata(model_state)
                 if UNIVERSAL_CHECKPOINT_INFO not in model_state:
                     model_state[UNIVERSAL_CHECKPOINT_INFO] = {}
@@ -1379,7 +1459,7 @@ def main(args):
                 model_state[UNIVERSAL_CHECKPOINT_INFO][AUTOEP_LAYERS_KEY] = autoep_metadata
                 torch.save(model_state, os.path.join(args.output_folder, os.path.basename(f)))
             else:
-                shutil.copy2(f, args.output_folder)
+                _copy_file(f, args.output_folder)
 
     # Update latest to output folder
     checkpoint_root_folder, step_folder = os.path.split(args.output_folder)

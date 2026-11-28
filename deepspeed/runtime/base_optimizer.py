@@ -33,6 +33,19 @@ def _get_universal_checkpoint_ep_info() -> tuple[int, int]:
         return 0, 1
 
 
+def _universal_checkpoint_tp_info(mpu) -> tuple[int, int]:
+    if mpu is None:
+        logger.warning("MPU is not provided, setting tp size to 1 in checkpoint loading.")
+        return 0, 1
+    # A Ulysses sequence-parallel mpu reports its sequence-parallel group through the model-parallel
+    # accessors, but its ranks hold full parameter replicas.
+    if hasattr(mpu, 'initialize_sequence_parallel'):
+        return 0, 1
+    tp_world_size = mpu.get_slice_parallel_world_size() if hasattr(mpu, "get_slice_parallel_world_size") \
+        else mpu.get_tensor_model_parallel_world_size()
+    return bwc_tensor_model_parallel_rank(mpu=mpu), tp_world_size
+
+
 def place_restored_optimizer_step(state: dict, param: torch.Tensor, param_group: dict) -> None:
     """Give a restored ``step`` the placement torch.optim expects for its param group.
 
@@ -349,13 +362,7 @@ class ZeROOptimizer(DeepSpeedOptimizer):
                                                      load_optimizer_states: bool = True) -> None:
         checkpoint_dir = os.path.join(checkpoint_dir, "zero")
 
-        tp_rank = bwc_tensor_model_parallel_rank(mpu=self.mpu)
-        if self.mpu is None:
-            logger.warning("MPU is not provided, setting tp size to 1 in checkpoint loading.")
-            tp_world_size = 1
-        else:
-            tp_world_size = self.mpu.get_slice_parallel_world_size() if hasattr(self.mpu, "get_slice_parallel_world_size") \
-                else self.mpu.get_tensor_model_parallel_world_size()
+        tp_rank, tp_world_size = _universal_checkpoint_tp_info(self.mpu)
 
         ep_rank, ep_size = _get_universal_checkpoint_ep_info()
         lp_groups = getattr(self, lp_groups_name)

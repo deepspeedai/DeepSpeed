@@ -73,6 +73,21 @@ class model_3d_desc(object):
         return len(err_msg) == 0, err_msg
 
 
+def checkpoint_parallel_dimensions(model_state):
+    """Return the parallel dimensions recorded in a model-state dict.
+
+    Ulysses sequence-parallel engines hold full parameter replicas and save a single model-parallel rank
+    (``mp_world_size == 1``), but older DeepSpeed releases recorded their sequence-parallel size as ``tp_degree``.
+    """
+    dimensions = model_state.get(CHECKPOINT_PARALLEL_DIMS)
+    if not isinstance(dimensions, dict) or model_state.get('mp_world_size') != 1:
+        return dimensions
+    tp_degree = dimensions.get(CHECKPOINT_TP_DEGREE)
+    if dimensions.get(CHECKPOINT_PP_DEGREE) == 1 and isinstance(tp_degree, int) and tp_degree > 1:
+        return {**dimensions, CHECKPOINT_TP_DEGREE: 1}
+    return dimensions
+
+
 def get_model_3d_descriptor_from_metadata(file_list, zero_file_list, model_state_metadata):
     """Derive checkpoint topology without loading checkpoint contents."""
     model_file_list = [model_file for model_file, _ in model_state_metadata]
@@ -132,7 +147,7 @@ def get_model_3d_descriptor(dir):
     for model_file in model_file_list:
         model_state = torch.load(model_file, map_location='cpu', weights_only=False)
         model_state_metadata.append((model_file, {
-            CHECKPOINT_PARALLEL_DIMS: model_state.get(CHECKPOINT_PARALLEL_DIMS)
+            CHECKPOINT_PARALLEL_DIMS: checkpoint_parallel_dimensions(model_state)
         }))
         del model_state
     return get_model_3d_descriptor_from_metadata(file_list, zero_file_list, model_state_metadata)

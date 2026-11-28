@@ -281,6 +281,102 @@ class TestTensorFragmentGet(DistributedTest):
         run_fragmented_model(model, config_dict, hidden_dim, torch.bfloat16, validate_after_bwd, validate_after_step)
 
 
+class TestZeroOptimizerStateAfterCheckpointLoad(DistributedTest):
+    world_size = 2
+
+    @pytest.mark.parametrize('zero_stage', [1, 2])
+    @pytest.mark.parametrize('step_before_load', [False, True])
+    def test_full_optimizer_state_matches_the_saved_state(self, tmpdir, zero_stage, step_before_load):
+        hidden_dim = 8
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 1,
+            "steps_per_print": 1,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 1e-3
+                }
+            },
+            "zero_optimization": {
+                "stage": zero_stage,
+            }
+        }
+        if get_accelerator().is_bf16_supported():
+            config_dict["bf16"] = {"enabled": True}
+        dtype = torch.bfloat16 if get_accelerator().is_bf16_supported() else torch.float32
+
+        def make_engine():
+            model = SimpleModel(hidden_dim)
+            engine, _, _, _ = deepspeed.initialize(model=model,
+                                                   model_parameters=model.parameters(),
+                                                   config=config_dict)
+            return engine
+
+        def train(engine):
+            for x, y in random_dataloader(engine,
+                                          total_samples=2,
+                                          hidden_dim=hidden_dim,
+                                          device=engine.device,
+                                          dtype=dtype):
+                engine.backward(engine(x, y))
+                engine.step()
+
+        engine = make_engine()
+        train(engine)
+        saved = {
+            name: {
+                key: safe_get_full_optimizer_state(param, key).clone()
+                for key in (FIRST_ORDER_KEY, SECOND_ORDER_KEY)
+            }
+            for name, param in engine.module.named_parameters()
+        }
+        engine.save_checkpoint(str(tmpdir))
+
+        engine = make_engine()
+        if step_before_load:
+            train(engine)
+        engine.load_checkpoint(str(tmpdir))
+        for name, param in engine.module.named_parameters():
+            for key, expected in saved[name].items():
+                assert torch.equal(safe_get_full_optimizer_state(param, key), expected), (name, key)
+
+
+class TestZeroOptimizerStateWithParamGroups(DistributedTest):
+    world_size = 2
+
+    @pytest.mark.parametrize('zero_stage', [1, 2])
+    def test_every_groups_state_is_linked_after_the_first_step(self, zero_stage):
+        hidden_dim = 8
+        config_dict = {"train_micro_batch_size_per_gpu": 1, "zero_optimization": {"stage": zero_stage}}
+        if get_accelerator().is_bf16_supported():
+            config_dict["bf16"] = {"enabled": True}
+        dtype = torch.bfloat16 if get_accelerator().is_bf16_supported() else torch.float32
+        model = SimpleModel(hidden_dim)
+        weights = [p for n, p in model.named_parameters() if n.endswith("weight")]
+        biases = [p for n, p in model.named_parameters() if n.endswith("bias")]
+        optimizer = torch.optim.AdamW([{"params": weights}, {"params": biases, "weight_decay": 0.0}], lr=1e-3)
+        engine, _, _, _ = deepspeed.initialize(model=model, optimizer=optimizer, config=config_dict)
+        for x, y in random_dataloader(engine,
+                                      total_samples=1,
+                                      hidden_dim=hidden_dim,
+                                      device=engine.device,
+                                      dtype=dtype):
+            engine.backward(engine(x, y))
+            engine.step()
+
+        states = {
+            (name, key): safe_get_full_optimizer_state(param, key).clone()
+            for name, param in engine.module.named_parameters()
+            for key in (FIRST_ORDER_KEY, SECOND_ORDER_KEY)
+        }
+        assert all(states[(name, SECOND_ORDER_KEY)].any() for name, _ in engine.module.named_parameters())
+        engine.optimizer._hp_optimizer_states_linked = False
+        engine.optimizer._lazy_init_hp_params_optimizer_state()
+        for (name, key), state in states.items():
+            param = dict(engine.module.named_parameters())[name]
+            assert torch.equal(safe_get_full_optimizer_state(param, key), state), (name, key)
+
+
 class TestZeroBf16Fp32GradAccum(DistributedTest):
     world_size = 2
 

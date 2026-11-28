@@ -8,7 +8,7 @@ import re
 from typing import Dict
 import torch
 
-from .reshape_3d_utils import model_3d_desc, get_model_3d_descriptor_from_metadata
+from .reshape_3d_utils import model_3d_desc, checkpoint_parallel_dimensions, get_model_3d_descriptor_from_metadata
 from .reshape_utils import (basic_folder_validation, merge_state, partition_data, get_files, get_files_with_prefix,
                             get_zero_files)
 
@@ -16,6 +16,7 @@ from .constants import (MODEL_FILE_PREFIX, LAYER_FILE_PREFIX)
 
 from .reshape_meg_2d import reshape_meg_2d_parallel, meg_2d_parallel_map
 from .zero_checkpoint import ZeROCheckpoint
+from .utils import load_mmap
 from .constants import *
 
 EMBEDDING_LAYER_INDEX = 0
@@ -122,7 +123,7 @@ class DeepSpeedCheckpoint(object):
 
     @staticmethod
     def _lightweight_parallel_dimensions(model_state):
-        dimensions = model_state.get(CHECKPOINT_PARALLEL_DIMS)
+        dimensions = checkpoint_parallel_dimensions(model_state)
         if dimensions is None or not isinstance(dimensions, dict):
             return dimensions if dimensions is None else type(dimensions).__name__
         return {key: dimensions.get(key) for key in (CHECKPOINT_PP_DEGREE, CHECKPOINT_TP_DEGREE)}
@@ -133,7 +134,7 @@ class DeepSpeedCheckpoint(object):
         global_state = {}
         known_global_keys = (ARGS_KEY, CHECKPOINT_INFO_KEY, UNIVERSAL_CHECKPOINT_INFO)
         for file_index, model_file in enumerate(self.mp_rank_files):
-            model_state = torch.load(model_file, map_location=torch.device('cpu'), weights_only=False)
+            model_state = load_mmap(model_file, map_location=torch.device('cpu'), weights_only=False)
             metadata_by_file.append((model_file, {
                 CHECKPOINT_PARALLEL_DIMS: self._lightweight_parallel_dimensions(model_state),
                 PARAM_SHAPES: self._lightweight_param_shapes(model_state),
@@ -196,7 +197,7 @@ class DeepSpeedCheckpoint(object):
 
     def get_iteration(self):
         if ITERATION_KEY not in self.global_state:
-            sd = torch.load(self.mp_rank_files[0], map_location=torch.device('cpu'), weights_only=False)
+            sd = load_mmap(self.mp_rank_files[0], map_location=torch.device('cpu'), weights_only=False)
             self.global_state[ITERATION_KEY] = sd.get(ITERATION_KEY, 0)
 
         return self.global_state[ITERATION_KEY]
@@ -204,7 +205,7 @@ class DeepSpeedCheckpoint(object):
     def get_embedding_state(self, tp_index: int) -> Dict:
         assert tp_index in self.tp_to_embedding_map.keys()
         sd_list = [
-            torch.load(fname, map_location=torch.device('cpu'), weights_only=False)
+            load_mmap(fname, map_location=torch.device('cpu'), weights_only=False)
             for fname in self.tp_to_embedding_map[tp_index]
         ]
         sd = self._merge_state_dicts(sd_list)
@@ -216,7 +217,7 @@ class DeepSpeedCheckpoint(object):
 
     def _get_checkpoint_value(self, key):
         if key not in self.global_state:
-            sd = torch.load(self.mp_rank_files[0], map_location=torch.device('cpu'), weights_only=False)
+            sd = load_mmap(self.mp_rank_files[0], map_location=torch.device('cpu'), weights_only=False)
             self.global_state[key] = sd.get(key, None)
 
         return self.global_state[key]
@@ -231,7 +232,7 @@ class DeepSpeedCheckpoint(object):
         assert tp_index < self.tp_degree
         assert pp_index < self.pp_degree
         fname_list = self.get_2d_parallel_files(tp_index=tp_index, pp_index=pp_index)
-        sd_list = [torch.load(fname, map_location=torch.device('cpu'), weights_only=False) for fname in fname_list]
+        sd_list = [load_mmap(fname, map_location=torch.device('cpu'), weights_only=False) for fname in fname_list]
 
         merged_sd = None
         for sd in sd_list:
@@ -247,7 +248,7 @@ class DeepSpeedCheckpoint(object):
         assert pp_index < self.pp_degree
         t_list = []
         for fname_list in self.transformer_file_map[(tp_index, pp_index)]:
-            sd_list = [torch.load(fname, map_location=torch.device('cpu'), weights_only=False) for fname in fname_list]
+            sd_list = [load_mmap(fname, map_location=torch.device('cpu'), weights_only=False) for fname in fname_list]
             sd = self._merge_state_dicts(sd_list)
             t_list.append(sd)
         return t_list
@@ -258,7 +259,7 @@ class DeepSpeedCheckpoint(object):
 
     def get_final_norm_state(self, tp_index: int) -> Dict:
         assert tp_index in self.tp_to_final_norm_map.keys()
-        sd = torch.load(self.tp_to_final_norm_map[tp_index][0], map_location=torch.device('cpu'), weights_only=False)
+        sd = load_mmap(self.tp_to_final_norm_map[tp_index][0], map_location=torch.device('cpu'), weights_only=False)
         return sd
 
     def get_final_norm_files(self, tp_index: int) -> list:
