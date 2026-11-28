@@ -45,6 +45,7 @@ from deepspeed.checkpoint.constants import (
     EP_IS_EXPERT_PARAM,
     EP_NUM_EXPERTS,
     OPTIMIZER_STATE_DICT,
+    PARAM_GROUPS,
     FP32_FLAT_GROUPS,
     PARAM,
     PARTITION_COUNT,
@@ -4121,6 +4122,33 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         else:
             self.load_module_checkpoint_state_from_checkpoint_dir_stage3(checkpoint_folder, True)
 
+    def _sub_groups_without_saved_moments(self, checkpoint_dir):
+        """The sub-groups whose parameters have no saved Adam moments.
+
+        ZeRO-1/2 creates Adam state on the first step, so ds_to_universal writes only fp32.pt for a checkpoint
+        saved before it. A sub-group with moments for some parameters but not others cannot be restored.
+        """
+        missing = set()
+        for sub_group_id, fp16_group in enumerate(self.fp16_groups):
+            saved = []
+            for param in fp16_group:
+                if param not in self.param_names:
+                    continue
+                param_dir = os.path.join(checkpoint_dir, self.param_names[param])
+                has_exp_avg = os.path.isfile(os.path.join(param_dir, "exp_avg.pt"))
+                has_exp_avg_sq = os.path.isfile(os.path.join(param_dir, "exp_avg_sq.pt"))
+                if has_exp_avg != has_exp_avg_sq:
+                    # Only a missing pair means "never stepped"; half a pair is a damaged checkpoint.
+                    raise ZeRORuntimeException(
+                        f"{param_dir} has only one of the Adam moments exp_avg.pt and exp_avg_sq.pt")
+                saved.append(has_exp_avg)
+            if saved and not any(saved):
+                missing.add(sub_group_id)
+            elif not all(saved):
+                raise ZeRORuntimeException(f"The universal checkpoint in {checkpoint_dir} has Adam moments for only "
+                                           f"some parameters of optimizer sub-group {sub_group_id}.")
+        return missing
+
     def load_hp_checkpoint_state_from_checkpoint_dir_stage3(self, checkpoint_dir):
         """ Load optimizer and model states from the checkpoint directory. """
         checkpoint_dir = os.path.join(checkpoint_dir, "zero")
@@ -4132,10 +4160,23 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         self._load_global_state_stage3(optim_sd)
 
         # Generally the step of each optimizer file should be the same, we can obtain from any parameter.
-        state_step = optim_sd[OPTIMIZER_STATE_DICT]['state'][0]['step']
+        from deepspeed.checkpoint.universal_checkpoint import load_universal_optimizer_step
+        # The source advanced each optimizer group's step independently, so each target sub-group must be restored to
+        # its own group's step, not one shared step broadcast to all. The mapping is keyed by fp32 sub-group
+        # index (ZeRO-3 source) or by parameter name (ZeRO-1/2 source).
+        source_steps = load_universal_optimizer_step(optim_sd, checkpoint_dir, self.param_names.values())
+        sub_groups_without_moments = self._sub_groups_without_saved_moments(checkpoint_dir)
         for key in ["fp32", "exp_avg", "exp_avg_sq"]:
             for sub_group_id, fp16_group in enumerate(self.fp16_groups):
                 fp32_param = self.fp32_partitioned_groups_flat[sub_group_id]
+                if sub_group_id in sub_groups_without_moments:
+                    if key == "fp32":
+                        # The source never stepped this group, so it starts without Adam state, as when fresh.
+                        self.optimizer.state.pop(fp32_param, None)
+                    else:
+                        continue
+                if key == "fp32" and sub_group_id not in sub_groups_without_moments:
+                    self._seed_sub_group_step(fp32_param, sub_group_id, source_steps)
                 key_tensor = torch.zeros_like(fp32_param)
                 offset = 0
                 for param in fp16_group:
@@ -4149,14 +4190,18 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                     offset += key_layer_state_partition.numel()
                 if key == "fp32":
                     self.fp32_partitioned_groups_flat[sub_group_id].data.copy_(key_tensor)
-                    self.optimizer.state[fp32_param]['step'] = state_step
                 else:
                     self.optimizer.state[fp32_param][key] = key_tensor
         self._move_state_to_backup_optimizer()
 
-        for param_group in self.optimizer.param_groups:
-            # Generally, the hyperparameters of each parameter should be the same, we can obtain from any parameter.
-            for key, value in optim_sd[OPTIMIZER_STATE_DICT]["param_groups"][0].items():
+        # A ZeRO-1/2 source has no OPTIMIZER_STATE_DICT, only the top-level PARAM_GROUPS. Both list the
+        # optimizer's own parameter groups in order, as self.optimizer.param_groups does.
+        saved_param_groups = optim_sd.get(PARAM_GROUPS) or optim_sd[OPTIMIZER_STATE_DICT][PARAM_GROUPS]
+        if len(saved_param_groups) != len(self.optimizer.param_groups):
+            raise ValueError(f"The universal checkpoint in {checkpoint_dir} has {len(saved_param_groups)} optimizer "
+                             f"parameter groups, but this optimizer has {len(self.optimizer.param_groups)}.")
+        for param_group, saved_param_group in zip(self.optimizer.param_groups, saved_param_groups):
+            for key, value in saved_param_group.items():
                 if key == 'params':
                     param_group['params'] = []
                 else:
@@ -4164,8 +4209,13 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         # The restored group settings decide where step belongs, so place it after them.
         for sub_group_id, fp32_param in enumerate(self.fp32_partitioned_groups_flat):
+            # A sub-group without a stored step was already popped from the state, and indexing would
+            # re-create the empty entry it replaced, so look the state up instead.
+            state = self.optimizer.state.get(fp32_param)
+            if state is None:
+                continue
             param_group = self.optimizer.param_groups[self.sub_group_to_group_id[sub_group_id]]
-            place_restored_optimizer_step(self.optimizer.state[fp32_param], fp32_param, param_group)
+            place_restored_optimizer_step(state, fp32_param, param_group)
 
         if self.swap_optimizer:
             # Purge the swapped optimizer state, it was initialized to the freshly created model and not the checkpoint
@@ -4233,6 +4283,25 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
             for partitioned_param, q in zip(self.fp16_partitioned_groups[sub_group_id], updated_params):
                 partitioned_param.data = q.data
+
+    def _seed_sub_group_step(self, fp32_param, sub_group_id, source_steps):
+        """Give this sub-group a private copy of the step the source's matching group was last advanced to.
+
+        ``source_steps`` is keyed by fp32 sub-group index for a ZeRO-3 source and by parameter name for a
+        ZeRO-1/2 source; an entry is absent when the group was never stepped, in which
+        case the sub-group stays without a step, as when fresh.
+        """
+        if sub_group_id in source_steps:
+            step = source_steps[sub_group_id]
+        else:
+            step = None
+            for param in self.fp16_groups[sub_group_id]:
+                step = source_steps.get(self.param_names[param])
+                if step is not None:
+                    break
+        if step is not None:
+            # Each sub-group's optimizer advances its step in place, so give it its own copy.
+            self.optimizer.state[fp32_param]['step'] = step.clone() if torch.is_tensor(step) else step
 
     def _load_global_state_stage3(self, sd):
         self.loss_scaler = sd.get(LOSS_SCALER, self.loss_scaler)

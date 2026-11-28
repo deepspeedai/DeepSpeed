@@ -14,7 +14,7 @@ from .constants import (FP32_WEIGHT_KEY, PARAM, VOCAB_TENSOR, CAT_DIM, PARAM_N_S
                         EP_IS_EXPERT_PARAM, EP_NUM_EXPERTS, DS_AUTOEP_UC_META, DS_AUTOTP_UC_META,
                         AUTOEP_EXPERT_PLACEMENT, AUTOEP_PARAM_EP_RANK, AUTOEP_PARAM_LOCAL_EXPERTS,
                         AUTOEP_PARAM_LOGICAL_SHAPE, AUTOEP_PLACEMENT_EXPERTS, AUTOEP_PLACEMENT_RANK,
-                        AUTOEP_PLACEMENT_RANKS, UNIVERSAL_CHECKPOINT_VERSION_KEY)
+                        AUTOEP_PLACEMENT_RANKS, UNIVERSAL_CHECKPOINT_VERSION_KEY, OPTIMIZER_STATE_DICT)
 from .autoep_affine import autoep_metadata_to_affine_map, extract_autoep_rank_tensor
 
 
@@ -233,6 +233,47 @@ def _resolve_autotp_partition(current_param, ckpt_dict, full_hp_param, tp_rank, 
     return slice_tensor.flatten()
 
 
+def _shape_flat_universal_state(param, tensor, ckpt_file):
+    """Give a state that ds_to_universal wrote as a bare flat tensor (a ZeRO-3 source) the parameter's shape.
+
+    Such a file records no tensor-parallel layout, so it can only fill a parameter that holds the whole tensor.
+    """
+    if tensor.numel() != param.numel():
+        raise ValueError(f"{ckpt_file} holds a flat tensor of {tensor.numel()} elements with no tensor-parallel "
+                         f"layout, but the parameter loading it has shape {tuple(param.shape)}. A universal "
+                         "checkpoint converted from ZeRO-3 can be loaded into ZeRO-1/2 only without tensor "
+                         "parallelism.")
+    return tensor.view(param.shape)
+
+
+def load_universal_optimizer_step(optim_sd, checkpoint_dir, param_names):
+    """The optimizer step each parameter was saved at, whichever ZeRO stage it came from.
+
+    The optimizer advances one counter per parameter group, and a multi-task model can train its groups for
+    different numbers of steps, so restoring one shared step to every group would move some to the wrong
+    counter. Each caller therefore takes the step for the group it owns, looked up from this mapping.
+
+    A ZeRO-3 source keeps the step in the global optimizer state, indexed by its fp32 sub-group; a ZeRO-1/2
+    source writes a step.pt next to each parameter's states, so the steps are keyed by parameter name.
+
+    Returns a mapping; an entry is absent for a group the source never stepped.
+    """
+    state = optim_sd.get(OPTIMIZER_STATE_DICT, {}).get('state')
+    if state:
+        steps = {}
+        for sub_group_id, entry in state.items():
+            step = entry.get('step')
+            if step is not None:
+                steps[sub_group_id] = step
+        return steps
+    steps = {}
+    for name in param_names:
+        path = os.path.join(checkpoint_dir, name, 'step.pt')
+        if os.path.isfile(path):
+            steps[name] = torch.load(path, weights_only=False)
+    return steps
+
+
 def load_hp_checkpoint_state(self, folder, tp_rank, tp_world_size, ep_rank=0, ep_size=1, load_optimizer_states=True):
     hp_mapping = self._hp_mapping
     if load_optimizer_states:
@@ -265,6 +306,8 @@ def load_hp_checkpoint_state(self, folder, tp_rank, tp_world_size, ep_rank=0, ep
             step = ckpt_dict
             continue
 
+        if torch.is_tensor(ckpt_dict):
+            ckpt_dict = {PARAM: _shape_flat_universal_state(self, ckpt_dict, ckpt_file)}
         full_hp_param = ckpt_dict[PARAM]
 
         # EP-aware slicing for expert parameters saved in universal format.
@@ -368,6 +411,9 @@ def load_hp_checkpoint_state(self, folder, tp_rank, tp_world_size, ep_rank=0, ep
                 sub_params = full_hp_param.chunk(n_sub_params, dim=chunk_dim)
                 sub_params_tp_slice = [p.chunk(tp_world_size, dim=chunk_dim)[tp_rank] for p in sub_params]
                 tp_hp_slice = torch.cat(sub_params_tp_slice, dim=chunk_dim)
+            elif tp_world_size == 1:
+                # chunk rejects a 0-D tensor, such as a scalar parameter.
+                tp_hp_slice = full_hp_param
             else:
                 # this performs the opposite of cat when merging TP slices
                 tp_hp_slice = full_hp_param.chunk(tp_world_size, chunk_dim)[tp_rank]

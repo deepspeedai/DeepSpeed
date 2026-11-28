@@ -20,6 +20,7 @@ import tqdm
 
 from deepspeed.checkpoint import DeepSpeedCheckpoint
 from deepspeed.checkpoint import (
+    DS_VERSION,
     OPTIMIZER_STATE_DICT,
     ZERO_STAGE,
     BASE_OPTIMIZER_STATE,
@@ -138,13 +139,21 @@ def extract_zero_shards(dir, ds_checkpoint, indices_3D):
     universal_checkpoint_info = ds_checkpoint.get_checkpoint_info(UNIVERSAL_CHECKPOINT_INFO)
     pipeline_replicated_params = universal_checkpoint_info.get(PIPELINE_REPLICATED_PARAMETER_PATTERNS, [])
 
-    # dict
+    # dict of this rank's optimizer state, keyed by the saved group (param) id
     state_groups = optim_sd[BASE_OPTIMIZER_STATE]["state"]
-    # list
+    # list indexed by group id
     fp32_groups = optim_sd[SINGLE_PARTITION_OF_FP32_GROUPS]
-    param_groups_cnt = len(state_groups)
 
-    for param_group_id in range(param_groups_cnt):
+    # A rank that owns no fragment of a group -- e.g. the wider of several DP ranks for a
+    # group whose parameter is one element -- holds no optimizer state for it, so the saved
+    # state omits that group id. The ids are the saved group ids, not 0..len-1, because the
+    # missing one may be among them. Iterate only the ids this rank actually saved; every
+    # fragment is still written, since each rank extracts exactly the groups it owns.
+    for param_group_id in sorted(state_groups):
+        # Guard against a corrupt checkpoint listing a state id with no matching group layout.
+        if param_group_id >= len(fp32_groups):
+            raise ValueError(
+                f"State group id {param_group_id} has no {len(fp32_groups)}-entry optimizer layout under {dir}")
 
         flat_state = dict(
             exp_avg=state_groups[param_group_id]["exp_avg"],
@@ -490,7 +499,11 @@ def merge_tp_slices(uc_info, dir, slice_dir, tp_degree, name_and_shapes):
                 # below, so there is no optimizer tensor to merge here.
                 continue
             cat_dim = 1 if get_matched_pattern(parameters_with_row_parallelism, name) else 0
-            param = torch.cat(slices, dim=cat_dim)
+            if len(slices) == 1:
+                # cat rejects a 0-D tensor, such as a scalar parameter.
+                param = slices[0]
+            else:
+                param = torch.cat(slices, dim=cat_dim)
             ckpt_dict[CAT_DIM] = cat_dim
 
         if get_matched_pattern(vocabulary_parameters, name):
@@ -1033,6 +1046,9 @@ def _save_optimizer_state_stage3(args, optim_files):
     sd = torch.load(optim_files[0], map_location=torch.device('cpu'), weights_only=False)
     output_sd = sd[OPTIMIZER_STATE_DICT]
     output_sd[PARAM_GROUPS] = output_sd[OPTIMIZER_STATE_DICT][PARAM_GROUPS]
+    # ZeRO-3 keeps the version beside its optimizer state rather than in it; ZeRO-1/2 targets require it.
+    if sd.get(DS_VERSION):
+        output_sd[DS_VERSION] = sd[DS_VERSION]
     zero_output_folder = os.path.join(args.output_folder, "zero")
     output_file_path = os.path.join(zero_output_folder, "optimizer_state.pt")
     _save_checkpoint(output_file_path, output_sd)
