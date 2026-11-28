@@ -29,6 +29,18 @@ def test_pdsh_runner(runner_info):
     assert env['PDSH_RCMD_TYPE'] == 'ssh'
 
 
+def test_pdsh_runner_binds_cores(runner_info):
+    # pdsh runs deepspeed.launcher.launch on every node, and that is where ranks get bound
+    # to cores, so the binding flags have to reach it just as they do for a local launch.
+    env, resource_pool, world_info, _ = runner_info
+    args = parse_args(['--bind_cores_to_rank', '--bind_core_list', '0-7', 'test_launcher.py'])
+    runner = mnrunner.PDSHRunner(args, world_info)
+    cmd, _, _ = runner.get_cmd(env, resource_pool)
+    launch_args = cmd[:cmd.index('test_launcher.py')]
+    assert '--bind_cores_to_rank' in launch_args
+    assert '--bind_core_list=0-7' in launch_args
+
+
 def test_openmpi_runner(runner_info):
     env, resource_pool, world_info, args = runner_info
     runner = mnrunner.OpenMPIRunner(args, world_info, resource_pool)
